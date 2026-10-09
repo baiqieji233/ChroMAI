@@ -1,0 +1,83 @@
+const { chromium } = require('playwright-core');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const path = require('node:path');
+const projectRoot = path.resolve(__dirname, '../..');
+process.chdir(projectRoot);
+fs.mkdirSync('.scratch', {recursive: true});
+
+(async () => {
+  const browser = await chromium.launch({ headless: true, channel: 'msedge' });
+  const page = await browser.newPage({ viewport: { width: 1440, height: 1100 }, deviceScaleFactor: 2 });
+  const errors = []; page.on('pageerror', error => errors.push(error.message));
+  await page.goto(process.env.CURVE_QA_URL || 'http://127.0.0.1:7860');
+  await page.locator('#generationModeTab').click();
+  await page.locator('#audioPath').fill(path.join(projectRoot, 'examples/training_zip_demo/raw_dataset/song_001/track.wav'));
+  await page.locator('#audioPath').dispatchEvent('input');
+  await page.evaluate(() => {
+    setWorkspaceMode('intensity');
+    showIntensityProfile({ schema: 'maichart-intensity-curve-v1', audio_sha256: 'a'.repeat(64), duration_sec: 120,
+      points: Array.from({ length: 601 }, (_, index) => ({ time_sec: index / 5, intensity: 0.4 + 0.05 * Math.sin(index / 8) })),
+      spectrogram: { kind: 'log_mel_db', times: [0, 30, 60, 90, 120], frequencies_hz: [0, 1000, 10000], values: [[0, 0, 0, 0, 0], [60, 60, 60, 60, 60], [255, 255, 255, 255, 255]] } });
+  });
+  await page.locator('#intensityZoom').fill('16');
+  await page.locator('#intensityZoom').dispatchEvent('input');
+  const initialViewport = await page.evaluate(() => ({ start: intensityView.start, end: intensityView.end }));
+  assert.ok(Math.abs(initialViewport.end - initialViewport.start - 7.5) < 1e-6);
+  await page.locator('#intensityPan').fill('300');
+  await page.locator('#intensityPan').dispatchEvent('input');
+  assert.ok(Math.abs(await page.evaluate(() => intensityView.start) - 33.75) < 1e-6);
+  await page.locator('#intensityCurveCanvas').scrollIntoViewIfNeeded();
+  const box = await page.locator('#intensityCurveCanvas').boundingBox();
+  const h = Math.max(320, Math.round(box.width * 0.38)), ph = h - 58;
+  const xAt = sec => box.x + 48 + (sec - 33.75) / 7.5 * (box.width - 66);
+  const yAt = value => box.y + 22 + (1 - value) * ph;
+  await page.locator('#intensityEditMode').selectOption('select');
+  await page.mouse.move(xAt(35), yAt(0.7)); await page.mouse.down();
+  await page.mouse.move(xAt(37), yAt(0.15), { steps: 8 }); await page.mouse.up();
+  const selected = await page.evaluate(() => [...intensityView.selected]);
+  assert.ok(selected.length >= 9, JSON.stringify(selected));
+  const before = await page.evaluate(() => intensityCurveState.profile.points.map(point => ({ ...point })));
+  const chosen = before[selected[Math.floor(selected.length / 2)]];
+  await page.mouse.move(xAt(chosen.time_sec), yAt(chosen.intensity)); await page.mouse.down();
+  await page.mouse.move(xAt(chosen.time_sec), yAt(chosen.intensity) - ph * 0.1, { steps: 8 }); await page.mouse.up();
+  const after = await page.evaluate(() => intensityCurveState.profile.points);
+  before.forEach((point, index) => {
+    assert.equal(after[index].time_sec, point.time_sec);
+    if (selected.includes(index)) assert.ok(Math.abs(after[index].intensity - point.intensity - 0.1) < 0.001);
+    else assert.equal(after[index].intensity, point.intensity);
+  });
+  await page.locator('#intensitySelectionDown').click();
+  assert.ok(Math.abs(await page.evaluate(index => intensityCurveState.profile.points[index].intensity, selected[0]) - before[selected[0]].intensity - 0.05) < 0.001);
+  await page.locator('#intensitySelectionValue').fill('1'); await page.locator('#intensitySelectionSet').click();
+  await page.locator('#intensitySelectionUp').click();
+  assert.equal(await page.evaluate(index => intensityCurveState.profile.points[index].intensity, selected[0]), 1);
+  await page.locator('#intensityUndoButton').click();
+  await page.locator('#intensitySelectVisible').click();
+  await page.locator('#intensityFitSelection').click();
+  assert.ok(await page.evaluate(() => intensityView.selected.size) > selected.length);
+  await page.locator('#intensityClearSelection').click();
+  assert.equal(await page.evaluate(() => intensityView.selected.size), 0);
+  await page.locator('#intensityEditMode').selectOption('edit');
+  const seek = await page.evaluate(() => {
+    const canvas = document.querySelector('#intensityCurveCanvas'), rect = canvas.getBoundingClientRect();
+    const geo = curveCanvasGeometry(canvas, intensityCurveState.profile);
+    return { x: rect.x + geo.pad.left + geo.plotWidth * 0.7, y: rect.y + geo.pad.top + geo.plotHeight * 0.05, second: geo.start + geo.span * 0.7 };
+  });
+  await page.mouse.click(seek.x, seek.y);
+  assert.ok(Math.abs(await page.evaluate(() => document.querySelector('#intensityAudio').currentTime) - seek.second) < 0.1);
+  await page.mouse.move(seek.x, seek.y); await page.keyboard.down('Control'); await page.mouse.wheel(0, -100); await page.keyboard.up('Control');
+  const zoomed = await page.evaluate(() => intensityCurveState.profile.duration_sec / (intensityView.end - intensityView.start));
+  assert.ok(zoomed > 10);
+  await page.screenshot({ path: path.join(projectRoot, '.scratch/intensity_zoom_selection_qa.png'), fullPage: true });
+  await page.locator('#intensityFitAll').click();
+  assert.equal(await page.evaluate(() => intensityView.start), 0);
+  assert.equal(await page.evaluate(() => intensityView.end), null);
+  await page.setViewportSize({ width: 800, height: 1000 });
+  await page.locator('#intensityZoomIn').click();
+  assert.ok(await page.evaluate(() => intensityView.end - intensityView.start) < 120);
+  assert.deepEqual(errors, []);
+  const result = { passed: true, points: before.length, selected: selected.length, dpr: 2, errors };
+  fs.writeFileSync(path.join(projectRoot, '.scratch/intensity_zoom_selection_qa_result.json'), JSON.stringify(result, null, 2));
+  console.log(JSON.stringify(result)); await browser.close();
+})().catch(error => { console.error(error); process.exit(1); });

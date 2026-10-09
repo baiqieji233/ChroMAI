@@ -1,0 +1,11 @@
+__pycache__/
+.venv/
+node_modules/
+.scratch/
+cache/
+backups/
+*.py[cod]
+.pytest_cache/
+webui_workspace/
+checkpoints/
+generated/

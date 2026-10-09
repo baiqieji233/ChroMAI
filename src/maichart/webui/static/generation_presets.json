@@ -1,0 +1,3033 @@
+{
+  "schema": "maichart-level-presets-v1",
+  "source": {
+    "manifest": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\pretrain_manifest.json",
+    "sha256": "64d4340aef16f5b21324fbabda9113c32ec48d0a73a5491ae09f24a92408ffc9",
+    "charts": 1858,
+    "skipped": 14,
+    "label_counts": {
+      "display_plus": 41,
+      "display_integer": 30,
+      "decimal": 1787
+    },
+    "duration_source": "audio_header",
+    "chart_duration_fallback": 0,
+    "skip_reasons": {
+      "Invalid event document: unsupported_token@4: unsupported note syntax; unsupported_token@190: unsupported note syntax": 1,
+      "Unsupported syntax at beat 85: 4/5?-8b[8:1]": 1,
+      "Invalid event document: unsupported_token@135: unsupported note syntax": 1,
+      "Invalid event document: duplicate_button_head@240: Touch C has 5 heads at beat 240.": 1,
+      "Invalid event document: invalid_tempo_map@?: Duplicate tempo-change beats are ambiguous.": 1,
+      "Unsupported syntax at beat 200: 2bq8q6<2[4:9]/6$b": 1,
+      "Unsupported syntax at beat 154: /2?-6b[60.667#24:1]": 1,
+      "Invalid event document: unsupported_token@443: unsupported note syntax": 1,
+      "Unsupported syntax at beat 3457/8: 3!pp5<1p4[32:224]": 1,
+      "Invalid event document: unsupported_token@455/2: unsupported note syntax; unsupported_token@455/2: unsupported note syntax": 1,
+      "Invalid event document: unsupported_token@585/2: unsupported note syntax; unsupported_token@294: unsupported note syntax; unsupported_token@591/2: unsupported note syntax ...": 1,
+      "Invalid event document: unsupported_token@240: unsupported note syntax; unsupported_token@240: unsupported note syntax": 1,
+      "Unsupported syntax at beat 343/2: 1bqq8[2:1]/1?pp2[2:1]": 1,
+      "Unsupported syntax at beat 76: 3?<6[12:1]*<6[12:1]": 1
+    },
+    "skipped_examples": [
+      {
+        "song_id": "Ayakashi set 14 Another 〜 夜が降りてくる [bbe5aedb-e4e8-4042-9f53-bfc94f04e014]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: unsupported_token@4: unsupported note syntax; unsupported_token@190: unsupported note syntax"
+      },
+      {
+        "song_id": "HELP!! [341be2ff-4dc9-4cc5-aeca-2c81c9109478]",
+        "difficulty_index": 5,
+        "reason": "Unsupported syntax at beat 85: 4/5?-8b[8:1]"
+      },
+      {
+        "song_id": "IZAYOI [ba082d47-e297-4615-bba2-36aab31f2f71]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: unsupported_token@135: unsupported note syntax"
+      },
+      {
+        "song_id": "Jazzor C Version [3e7d997e-c612-4008-a8f1-0a969261bb4b]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: duplicate_button_head@240: Touch C has 5 heads at beat 240."
+      },
+      {
+        "song_id": "556",
+        "difficulty_index": 4,
+        "reason": "Invalid event document: invalid_tempo_map@?: Duplicate tempo-change beats are ambiguous."
+      },
+      {
+        "song_id": "Nightfall [c08ea1f4-a02c-40f7-9ba5-d6eac96156dd]",
+        "difficulty_index": 5,
+        "reason": "Unsupported syntax at beat 200: 2bq8q6<2[4:9]/6$b"
+      },
+      {
+        "song_id": "Widow's kiss [42b71f37-fbe3-4c8c-baf0-40bb2bb3d9ac]",
+        "difficulty_index": 5,
+        "reason": "Unsupported syntax at beat 154: /2?-6b[60.667#24:1]"
+      },
+      {
+        "song_id": "WISH～君を待てなくて～ [191f22ad-0a74-4cec-a709-50d27d1e19fa]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: unsupported_token@443: unsupported note syntax"
+      },
+      {
+        "song_id": "Ωκεανος [036404e1-82a9-4ff1-87c1-8ac088b5e79a]",
+        "difficulty_index": 5,
+        "reason": "Unsupported syntax at beat 3457/8: 3!pp5<1p4[32:224]"
+      },
+      {
+        "song_id": "ヒビカセ [45e52287-a6e3-4318-b0fe-1f2a6a310d78]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: unsupported_token@455/2: unsupported note syntax; unsupported_token@455/2: unsupported note syntax"
+      },
+      {
+        "song_id": "再現.leaper [c556f54c-160c-4316-a0c9-0f3e09c8a5c4]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: unsupported_token@585/2: unsupported note syntax; unsupported_token@294: unsupported note syntax; unsupported_token@591/2: unsupported note syntax ..."
+      },
+      {
+        "song_id": "忘れものセンターにまたね！ [234c1d8b-e9b1-414c-ad4f-7ee7ffd2623a]",
+        "difficulty_index": 5,
+        "reason": "Invalid event document: unsupported_token@240: unsupported note syntax; unsupported_token@240: unsupported note syntax"
+      },
+      {
+        "song_id": "斑咲花",
+        "difficulty_index": 5,
+        "reason": "Unsupported syntax at beat 343/2: 1bqq8[2:1]/1?pp2[2:1]"
+      },
+      {
+        "song_id": "既知の恥 [00e6a310-8e34-4291-b7b1-8f9ca9007f1a]",
+        "difficulty_index": 5,
+        "reason": "Unsupported syntax at beat 76: 3?<6[12:1]*<6[12:1]"
+      }
+    ]
+  },
+  "method": {
+    "level_grid": "12.0–15.0 by 0.1",
+    "statistic": "Gaussian weighted median",
+    "bandwidth": "0.15, expanded to at most 0.45 when effective support <45",
+    "amount_trend": "weighted isotonic fit for note_density and peak only",
+    "label_weight": {
+      "decimal": 1.0,
+      "display_integer": 0.35,
+      "display_plus": 0.35
+    },
+    "label_limit": "Decimal labels are provided chart metadata, not independently verified official constants",
+    "melody_following": "0.9 retained; no audio onset measurement in this calibration"
+  },
+  "levels": [
+    {
+      "level": 12.0,
+      "radar": {
+        "note_density": 0.240477,
+        "peak": 0.25,
+        "sweep": 0.082985,
+        "slide_tricky": 0.07554,
+        "slide_sequence": 0.038116,
+        "jack": 0.218868,
+        "chord": 0.325112
+      },
+      "style": {
+        "tap_bias": 0.713523,
+        "slide_bias": 0.108392,
+        "hold_bias": 0.111675,
+        "touch_bias": 0.047706,
+        "chord_bias": 0.325112,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.028037,
+        "directionality": 0.046512
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.193359,
+          "p90": 0.282452
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.40625
+        },
+        "sweep": {
+          "p10": 0.044967,
+          "p90": 0.147783
+        },
+        "slide_tricky": {
+          "p10": 0.019704,
+          "p90": 0.175
+        },
+        "slide_sequence": {
+          "p10": 0.00865,
+          "p90": 0.106101
+        },
+        "jack": {
+          "p10": 0.131466,
+          "p90": 0.275591
+        },
+        "chord": {
+          "p10": 0.185644,
+          "p90": 0.42394
+        },
+        "tap_bias": {
+          "p10": 0.596059,
+          "p90": 0.815878
+        },
+        "slide_bias": {
+          "p10": 0.056285,
+          "p90": 0.20202
+        },
+        "hold_bias": {
+          "p10": 0.046281,
+          "p90": 0.188889
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.119626
+        },
+        "chord_bias": {
+          "p10": 0.185644,
+          "p90": 0.42394
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.133333
+        },
+        "directionality": {
+          "p10": 0.009346,
+          "p90": 0.149606
+        }
+      },
+      "support": 86.81,
+      "raw_count": 58,
+      "exact_count": 58,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "10411",
+        "11617",
+        "11640"
+      ]
+    },
+    {
+      "level": 12.1,
+      "radar": {
+        "note_density": 0.242326,
+        "peak": 0.25,
+        "sweep": 0.083183,
+        "slide_tricky": 0.079646,
+        "slide_sequence": 0.035656,
+        "jack": 0.213523,
+        "chord": 0.325112
+      },
+      "style": {
+        "tap_bias": 0.718563,
+        "slide_bias": 0.107914,
+        "hold_bias": 0.105603,
+        "touch_bias": 0.04717,
+        "chord_bias": 0.325112,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.026667,
+        "directionality": 0.042254
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.199985,
+          "p90": 0.284592
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.40625
+        },
+        "sweep": {
+          "p10": 0.042683,
+          "p90": 0.147783
+        },
+        "slide_tricky": {
+          "p10": 0.019704,
+          "p90": 0.175
+        },
+        "slide_sequence": {
+          "p10": 0.00865,
+          "p90": 0.106101
+        },
+        "jack": {
+          "p10": 0.131466,
+          "p90": 0.282313
+        },
+        "chord": {
+          "p10": 0.168478,
+          "p90": 0.432099
+        },
+        "tap_bias": {
+          "p10": 0.601613,
+          "p90": 0.815878
+        },
+        "slide_bias": {
+          "p10": 0.056106,
+          "p90": 0.20202
+        },
+        "hold_bias": {
+          "p10": 0.046225,
+          "p90": 0.18543
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.119626
+        },
+        "chord_bias": {
+          "p10": 0.168478,
+          "p90": 0.432099
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.133333
+        },
+        "directionality": {
+          "p10": 0.009346,
+          "p90": 0.149606
+        }
+      },
+      "support": 110.01,
+      "raw_count": 10,
+      "exact_count": 10,
+      "bandwidth": 0.15,
+      "fallback": true,
+      "examples": [
+        "11629",
+        "11489",
+        "830"
+      ]
+    },
+    {
+      "level": 12.2,
+      "radar": {
+        "note_density": 0.244674,
+        "peak": 0.28125,
+        "sweep": 0.083183,
+        "slide_tricky": 0.08055,
+        "slide_sequence": 0.035256,
+        "jack": 0.211573,
+        "chord": 0.316258
+      },
+      "style": {
+        "tap_bias": 0.727477,
+        "slide_bias": 0.10609,
+        "hold_bias": 0.102041,
+        "touch_bias": 0.045763,
+        "chord_bias": 0.316258,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.027027,
+        "directionality": 0.041096
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.19709,
+          "p90": 0.290525
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.40625
+        },
+        "sweep": {
+          "p10": 0.041003,
+          "p90": 0.155126
+        },
+        "slide_tricky": {
+          "p10": 0.020649,
+          "p90": 0.168803
+        },
+        "slide_sequence": {
+          "p10": 0.008203,
+          "p90": 0.10935
+        },
+        "jack": {
+          "p10": 0.125,
+          "p90": 0.282313
+        },
+        "chord": {
+          "p10": 0.168478,
+          "p90": 0.442211
+        },
+        "tap_bias": {
+          "p10": 0.604962,
+          "p90": 0.81592
+        },
+        "slide_bias": {
+          "p10": 0.056106,
+          "p90": 0.205128
+        },
+        "hold_bias": {
+          "p10": 0.044481,
+          "p90": 0.17734
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.116751
+        },
+        "chord_bias": {
+          "p10": 0.168478,
+          "p90": 0.442211
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.1125
+        },
+        "directionality": {
+          "p10": 0.009174,
+          "p90": 0.142857
+        }
+      },
+      "support": 143.63,
+      "raw_count": 23,
+      "exact_count": 23,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11628",
+        "11891",
+        "11906"
+      ]
+    },
+    {
+      "level": 12.3,
+      "radar": {
+        "note_density": 0.247792,
+        "peak": 0.28125,
+        "sweep": 0.085316,
+        "slide_tricky": 0.081784,
+        "slide_sequence": 0.041033,
+        "jack": 0.198686,
+        "chord": 0.314229
+      },
+      "style": {
+        "tap_bias": 0.730061,
+        "slide_bias": 0.106426,
+        "hold_bias": 0.093972,
+        "touch_bias": 0.040964,
+        "chord_bias": 0.314229,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.03125,
+        "directionality": 0.043062
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.195114,
+          "p90": 0.292217
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.40625
+        },
+        "sweep": {
+          "p10": 0.042259,
+          "p90": 0.166799
+        },
+        "slide_tricky": {
+          "p10": 0.028,
+          "p90": 0.175
+        },
+        "slide_sequence": {
+          "p10": 0.008695,
+          "p90": 0.12012
+        },
+        "jack": {
+          "p10": 0.115152,
+          "p90": 0.288245
+        },
+        "chord": {
+          "p10": 0.177305,
+          "p90": 0.464646
+        },
+        "tap_bias": {
+          "p10": 0.604962,
+          "p90": 0.817471
+        },
+        "slide_bias": {
+          "p10": 0.059022,
+          "p90": 0.21988
+        },
+        "hold_bias": {
+          "p10": 0.04386,
+          "p90": 0.170861
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.119048
+        },
+        "chord_bias": {
+          "p10": 0.177305,
+          "p90": 0.464646
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.111111
+        },
+        "directionality": {
+          "p10": 0.009346,
+          "p90": 0.141176
+        }
+      },
+      "support": 187.13,
+      "raw_count": 6,
+      "exact_count": 6,
+      "bandwidth": 0.15,
+      "fallback": true,
+      "examples": [
+        "823",
+        "840",
+        "741"
+      ]
+    },
+    {
+      "level": 12.4,
+      "radar": {
+        "note_density": 0.25,
+        "peak": 0.28125,
+        "sweep": 0.088336,
+        "slide_tricky": 0.086587,
+        "slide_sequence": 0.046591,
+        "jack": 0.19,
+        "chord": 0.314031
+      },
+      "style": {
+        "tap_bias": 0.729393,
+        "slide_bias": 0.112832,
+        "hold_bias": 0.093074,
+        "touch_bias": 0.038095,
+        "chord_bias": 0.314031,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.031579,
+        "directionality": 0.046512
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.195114,
+          "p90": 0.298523
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.40625
+        },
+        "sweep": {
+          "p10": 0.045492,
+          "p90": 0.185185
+        },
+        "slide_tricky": {
+          "p10": 0.03252,
+          "p90": 0.185417
+        },
+        "slide_sequence": {
+          "p10": 0.010213,
+          "p90": 0.124705
+        },
+        "jack": {
+          "p10": 0.107965,
+          "p90": 0.288245
+        },
+        "chord": {
+          "p10": 0.179894,
+          "p90": 0.464646
+        },
+        "tap_bias": {
+          "p10": 0.604167,
+          "p90": 0.817471
+        },
+        "slide_bias": {
+          "p10": 0.061789,
+          "p90": 0.225434
+        },
+        "hold_bias": {
+          "p10": 0.042755,
+          "p90": 0.170599
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.119048
+        },
+        "chord_bias": {
+          "p10": 0.179894,
+          "p90": 0.464646
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.111111
+        },
+        "directionality": {
+          "p10": 0.010101,
+          "p90": 0.140845
+        }
+      },
+      "support": 220.67,
+      "raw_count": 28,
+      "exact_count": 28,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11924",
+        "11936",
+        "11938"
+      ]
+    },
+    {
+      "level": 12.5,
+      "radar": {
+        "note_density": 0.252556,
+        "peak": 0.3125,
+        "sweep": 0.093541,
+        "slide_tricky": 0.091483,
+        "slide_sequence": 0.050682,
+        "jack": 0.185804,
+        "chord": 0.309896
+      },
+      "style": {
+        "tap_bias": 0.725455,
+        "slide_bias": 0.119048,
+        "hold_bias": 0.093074,
+        "touch_bias": 0.037433,
+        "chord_bias": 0.309896,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.031746,
+        "directionality": 0.048387
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.196183,
+          "p90": 0.30082
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.4375
+        },
+        "sweep": {
+          "p10": 0.047258,
+          "p90": 0.186719
+        },
+        "slide_tricky": {
+          "p10": 0.032951,
+          "p90": 0.189139
+        },
+        "slide_sequence": {
+          "p10": 0.01427,
+          "p90": 0.12854
+        },
+        "jack": {
+          "p10": 0.106952,
+          "p90": 0.28734
+        },
+        "chord": {
+          "p10": 0.181141,
+          "p90": 0.449339
+        },
+        "tap_bias": {
+          "p10": 0.588723,
+          "p90": 0.816372
+        },
+        "slide_bias": {
+          "p10": 0.063492,
+          "p90": 0.228188
+        },
+        "hold_bias": {
+          "p10": 0.042276,
+          "p90": 0.170599
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.124654
+        },
+        "chord_bias": {
+          "p10": 0.181141,
+          "p90": 0.449339
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.112676
+        },
+        "directionality": {
+          "p10": 0.010309,
+          "p90": 0.140845
+        }
+      },
+      "support": 283.46,
+      "raw_count": 87,
+      "exact_count": 87,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11537",
+        "11625",
+        "11648"
+      ]
+    },
+    {
+      "level": 12.6,
+      "radar": {
+        "note_density": 0.2577,
+        "peak": 0.3125,
+        "sweep": 0.096241,
+        "slide_tricky": 0.095361,
+        "slide_sequence": 0.051704,
+        "jack": 0.183983,
+        "chord": 0.309896
+      },
+      "style": {
+        "tap_bias": 0.719237,
+        "slide_bias": 0.12311,
+        "hold_bias": 0.092742,
+        "touch_bias": 0.040996,
+        "chord_bias": 0.309896,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.031579,
+        "directionality": 0.049645
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.202199,
+          "p90": 0.306931
+        },
+        "peak": {
+          "p10": 0.1875,
+          "p90": 0.4375
+        },
+        "sweep": {
+          "p10": 0.049048,
+          "p90": 0.186783
+        },
+        "slide_tricky": {
+          "p10": 0.035511,
+          "p90": 0.189189
+        },
+        "slide_sequence": {
+          "p10": 0.015917,
+          "p90": 0.12854
+        },
+        "jack": {
+          "p10": 0.108987,
+          "p90": 0.286682
+        },
+        "chord": {
+          "p10": 0.181818,
+          "p90": 0.442177
+        },
+        "tap_bias": {
+          "p10": 0.586047,
+          "p90": 0.812689
+        },
+        "slide_bias": {
+          "p10": 0.064516,
+          "p90": 0.231203
+        },
+        "hold_bias": {
+          "p10": 0.041847,
+          "p90": 0.169102
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.127451
+        },
+        "chord_bias": {
+          "p10": 0.181818,
+          "p90": 0.442177
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.115942
+        },
+        "directionality": {
+          "p10": 0.009174,
+          "p90": 0.144509
+        }
+      },
+      "support": 382.12,
+      "raw_count": 46,
+      "exact_count": 46,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11636",
+        "11643",
+        "11694"
+      ]
+    },
+    {
+      "level": 12.7,
+      "radar": {
+        "note_density": 0.263201,
+        "peak": 0.3125,
+        "sweep": 0.096556,
+        "slide_tricky": 0.098266,
+        "slide_sequence": 0.052125,
+        "jack": 0.186589,
+        "chord": 0.309896
+      },
+      "style": {
+        "tap_bias": 0.714953,
+        "slide_bias": 0.126036,
+        "hold_bias": 0.092453,
+        "touch_bias": 0.044,
+        "chord_bias": 0.309896,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.031579,
+        "directionality": 0.047619
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.205581,
+          "p90": 0.310558
+        },
+        "peak": {
+          "p10": 0.21875,
+          "p90": 0.4375
+        },
+        "sweep": {
+          "p10": 0.051399,
+          "p90": 0.185358
+        },
+        "slide_tricky": {
+          "p10": 0.03913,
+          "p90": 0.188312
+        },
+        "slide_sequence": {
+          "p10": 0.016644,
+          "p90": 0.124506
+        },
+        "jack": {
+          "p10": 0.112132,
+          "p90": 0.28734
+        },
+        "chord": {
+          "p10": 0.187251,
+          "p90": 0.4375
+        },
+        "tap_bias": {
+          "p10": 0.585878,
+          "p90": 0.8125
+        },
+        "slide_bias": {
+          "p10": 0.066667,
+          "p90": 0.230655
+        },
+        "hold_bias": {
+          "p10": 0.040625,
+          "p90": 0.164835
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.135922
+        },
+        "chord_bias": {
+          "p10": 0.187251,
+          "p90": 0.4375
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.114943
+        },
+        "directionality": {
+          "p10": 0.007874,
+          "p90": 0.147059
+        }
+      },
+      "support": 438.69,
+      "raw_count": 90,
+      "exact_count": 89,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "10535",
+        "1103",
+        "11655"
+      ]
+    },
+    {
+      "level": 12.8,
+      "radar": {
+        "note_density": 0.268266,
+        "peak": 0.3125,
+        "sweep": 0.097735,
+        "slide_tricky": 0.100147,
+        "slide_sequence": 0.052702,
+        "jack": 0.1893,
+        "chord": 0.308489
+      },
+      "style": {
+        "tap_bias": 0.715385,
+        "slide_bias": 0.127517,
+        "hold_bias": 0.089905,
+        "touch_bias": 0.045302,
+        "chord_bias": 0.308489,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.03125,
+        "directionality": 0.045455
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.210936,
+          "p90": 0.315601
+        },
+        "peak": {
+          "p10": 0.21875,
+          "p90": 0.46875
+        },
+        "sweep": {
+          "p10": 0.051399,
+          "p90": 0.182844
+        },
+        "slide_tricky": {
+          "p10": 0.041276,
+          "p90": 0.184919
+        },
+        "slide_sequence": {
+          "p10": 0.01689,
+          "p90": 0.119081
+        },
+        "jack": {
+          "p10": 0.115987,
+          "p90": 0.290016
+        },
+        "chord": {
+          "p10": 0.194861,
+          "p90": 0.4375
+        },
+        "tap_bias": {
+          "p10": 0.585878,
+          "p90": 0.812689
+        },
+        "slide_bias": {
+          "p10": 0.066841,
+          "p90": 0.2275
+        },
+        "hold_bias": {
+          "p10": 0.039761,
+          "p90": 0.160665
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.140924
+        },
+        "chord_bias": {
+          "p10": 0.194861,
+          "p90": 0.4375
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.111111
+        },
+        "directionality": {
+          "p10": 0.007092,
+          "p90": 0.149123
+        }
+      },
+      "support": 456.99,
+      "raw_count": 124,
+      "exact_count": 124,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "10185",
+        "11578",
+        "11580"
+      ]
+    },
+    {
+      "level": 12.9,
+      "radar": {
+        "note_density": 0.271952,
+        "peak": 0.3125,
+        "sweep": 0.101868,
+        "slide_tricky": 0.101868,
+        "slide_sequence": 0.054398,
+        "jack": 0.19187,
+        "chord": 0.305623
+      },
+      "style": {
+        "tap_bias": 0.718254,
+        "slide_bias": 0.130208,
+        "hold_bias": 0.086897,
+        "touch_bias": 0.046125,
+        "chord_bias": 0.305623,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.030769,
+        "directionality": 0.044025
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.215787,
+          "p90": 0.321326
+        },
+        "peak": {
+          "p10": 0.21875,
+          "p90": 0.46875
+        },
+        "sweep": {
+          "p10": 0.0514,
+          "p90": 0.180391
+        },
+        "slide_tricky": {
+          "p10": 0.043564,
+          "p90": 0.182232
+        },
+        "slide_sequence": {
+          "p10": 0.017905,
+          "p90": 0.117026
+        },
+        "jack": {
+          "p10": 0.117764,
+          "p90": 0.290511
+        },
+        "chord": {
+          "p10": 0.196023,
+          "p90": 0.4375
+        },
+        "tap_bias": {
+          "p10": 0.586817,
+          "p90": 0.816964
+        },
+        "slide_bias": {
+          "p10": 0.067548,
+          "p90": 0.226837
+        },
+        "hold_bias": {
+          "p10": 0.038462,
+          "p90": 0.145617
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.144056
+        },
+        "chord_bias": {
+          "p10": 0.196023,
+          "p90": 0.4375
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.102804
+        },
+        "directionality": {
+          "p10": 0.006897,
+          "p90": 0.147059
+        }
+      },
+      "support": 471.02,
+      "raw_count": 99,
+      "exact_count": 99,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11619",
+        "11632",
+        "11647"
+      ]
+    },
+    {
+      "level": 13.0,
+      "radar": {
+        "note_density": 0.279316,
+        "peak": 0.3125,
+        "sweep": 0.105745,
+        "slide_tricky": 0.109907,
+        "slide_sequence": 0.058776,
+        "jack": 0.193727,
+        "chord": 0.299652
+      },
+      "style": {
+        "tap_bias": 0.71644,
+        "slide_bias": 0.137517,
+        "hold_bias": 0.083203,
+        "touch_bias": 0.047315,
+        "chord_bias": 0.299652,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.030534,
+        "directionality": 0.043478
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.221324,
+          "p90": 0.327525
+        },
+        "peak": {
+          "p10": 0.21875,
+          "p90": 0.46875
+        },
+        "sweep": {
+          "p10": 0.053163,
+          "p90": 0.179089
+        },
+        "slide_tricky": {
+          "p10": 0.045171,
+          "p90": 0.182232
+        },
+        "slide_sequence": {
+          "p10": 0.019611,
+          "p90": 0.119644
+        },
+        "jack": {
+          "p10": 0.115987,
+          "p90": 0.289898
+        },
+        "chord": {
+          "p10": 0.196672,
+          "p90": 0.435345
+        },
+        "tap_bias": {
+          "p10": 0.590133,
+          "p90": 0.812689
+        },
+        "slide_bias": {
+          "p10": 0.069444,
+          "p90": 0.226378
+        },
+        "hold_bias": {
+          "p10": 0.037956,
+          "p90": 0.138408
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.144056
+        },
+        "chord_bias": {
+          "p10": 0.196672,
+          "p90": 0.435345
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.101266
+        },
+        "directionality": {
+          "p10": 0.007092,
+          "p90": 0.144509
+        }
+      },
+      "support": 492.63,
+      "raw_count": 92,
+      "exact_count": 84,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "BANG! [8a888f1c-689c-48b7-b54e-ed4dff861ebd]",
+        "11661",
+        "11665"
+      ]
+    },
+    {
+      "level": 13.1,
+      "radar": {
+        "note_density": 0.283915,
+        "peak": 0.34375,
+        "sweep": 0.110964,
+        "slide_tricky": 0.116242,
+        "slide_sequence": 0.06539,
+        "jack": 0.193727,
+        "chord": 0.297872
+      },
+      "style": {
+        "tap_bias": 0.713656,
+        "slide_bias": 0.143654,
+        "hold_bias": 0.078544,
+        "touch_bias": 0.045075,
+        "chord_bias": 0.297872,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.030303,
+        "directionality": 0.042553
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.225878,
+          "p90": 0.330794
+        },
+        "peak": {
+          "p10": 0.21875,
+          "p90": 0.46875
+        },
+        "sweep": {
+          "p10": 0.057579,
+          "p90": 0.182174
+        },
+        "slide_tricky": {
+          "p10": 0.046512,
+          "p90": 0.184557
+        },
+        "slide_sequence": {
+          "p10": 0.022458,
+          "p90": 0.133211
+        },
+        "jack": {
+          "p10": 0.113846,
+          "p90": 0.287066
+        },
+        "chord": {
+          "p10": 0.195822,
+          "p90": 0.427441
+        },
+        "tap_bias": {
+          "p10": 0.595029,
+          "p90": 0.808824
+        },
+        "slide_bias": {
+          "p10": 0.075419,
+          "p90": 0.22779
+        },
+        "hold_bias": {
+          "p10": 0.036918,
+          "p90": 0.131852
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.139565
+        },
+        "chord_bias": {
+          "p10": 0.195822,
+          "p90": 0.427441
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.101266
+        },
+        "directionality": {
+          "p10": 0.007752,
+          "p90": 0.142857
+        }
+      },
+      "support": 500.44,
+      "raw_count": 40,
+      "exact_count": 40,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11597",
+        "11650",
+        "11670"
+      ]
+    },
+    {
+      "level": 13.2,
+      "radar": {
+        "note_density": 0.287233,
+        "peak": 0.34375,
+        "sweep": 0.119401,
+        "slide_tricky": 0.121417,
+        "slide_sequence": 0.069042,
+        "jack": 0.191933,
+        "chord": 0.297872
+      },
+      "style": {
+        "tap_bias": 0.709852,
+        "slide_bias": 0.15,
+        "hold_bias": 0.075342,
+        "touch_bias": 0.041367,
+        "chord_bias": 0.297872,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.029851,
+        "directionality": 0.040359
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.229934,
+          "p90": 0.336895
+        },
+        "peak": {
+          "p10": 0.21875,
+          "p90": 0.5
+        },
+        "sweep": {
+          "p10": 0.063092,
+          "p90": 0.185378
+        },
+        "slide_tricky": {
+          "p10": 0.047736,
+          "p90": 0.190779
+        },
+        "slide_sequence": {
+          "p10": 0.028185,
+          "p90": 0.141182
+        },
+        "jack": {
+          "p10": 0.109012,
+          "p90": 0.285081
+        },
+        "chord": {
+          "p10": 0.190476,
+          "p90": 0.413483
+        },
+        "tap_bias": {
+          "p10": 0.596694,
+          "p90": 0.808709
+        },
+        "slide_bias": {
+          "p10": 0.081395,
+          "p90": 0.23507
+        },
+        "hold_bias": {
+          "p10": 0.033149,
+          "p90": 0.129909
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.135785
+        },
+        "chord_bias": {
+          "p10": 0.190476,
+          "p90": 0.413483
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.102804
+        },
+        "directionality": {
+          "p10": 0.008197,
+          "p90": 0.142857
+        }
+      },
+      "support": 468.07,
+      "raw_count": 117,
+      "exact_count": 117,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11567",
+        "11609",
+        "11622"
+      ]
+    },
+    {
+      "level": 13.3,
+      "radar": {
+        "note_density": 0.292322,
+        "peak": 0.34375,
+        "sweep": 0.121275,
+        "slide_tricky": 0.125693,
+        "slide_sequence": 0.071819,
+        "jack": 0.1888,
+        "chord": 0.296029
+      },
+      "style": {
+        "tap_bias": 0.711649,
+        "slide_bias": 0.152838,
+        "hold_bias": 0.074792,
+        "touch_bias": 0.033512,
+        "chord_bias": 0.296029,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.029851,
+        "directionality": 0.040359
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.233427,
+          "p90": 0.343889
+        },
+        "peak": {
+          "p10": 0.25,
+          "p90": 0.53125
+        },
+        "sweep": {
+          "p10": 0.068423,
+          "p90": 0.185378
+        },
+        "slide_tricky": {
+          "p10": 0.050633,
+          "p90": 0.194296
+        },
+        "slide_sequence": {
+          "p10": 0.030122,
+          "p90": 0.143311
+        },
+        "jack": {
+          "p10": 0.108738,
+          "p90": 0.283019
+        },
+        "chord": {
+          "p10": 0.184615,
+          "p90": 0.40678
+        },
+        "tap_bias": {
+          "p10": 0.598,
+          "p90": 0.815013
+        },
+        "slide_bias": {
+          "p10": 0.085791,
+          "p90": 0.237452
+        },
+        "hold_bias": {
+          "p10": 0.030568,
+          "p90": 0.128623
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.130435
+        },
+        "chord_bias": {
+          "p10": 0.184615,
+          "p90": 0.40678
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.103896
+        },
+        "directionality": {
+          "p10": 0.008264,
+          "p90": 0.140625
+        }
+      },
+      "support": 454.67,
+      "raw_count": 107,
+      "exact_count": 107,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "10242",
+        "11654",
+        "11680"
+      ]
+    },
+    {
+      "level": 13.4,
+      "radar": {
+        "note_density": 0.298148,
+        "peak": 0.375,
+        "sweep": 0.120514,
+        "slide_tricky": 0.126214,
+        "slide_sequence": 0.071819,
+        "jack": 0.187801,
+        "chord": 0.290828
+      },
+      "style": {
+        "tap_bias": 0.715805,
+        "slide_bias": 0.150585,
+        "hold_bias": 0.074,
+        "touch_bias": 0.033386,
+        "chord_bias": 0.290828,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.028571,
+        "directionality": 0.042105
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.23783,
+          "p90": 0.354936
+        },
+        "peak": {
+          "p10": 0.25,
+          "p90": 0.5625
+        },
+        "sweep": {
+          "p10": 0.06705,
+          "p90": 0.182722
+        },
+        "slide_tricky": {
+          "p10": 0.05168,
+          "p90": 0.193777
+        },
+        "slide_sequence": {
+          "p10": 0.030122,
+          "p90": 0.141762
+        },
+        "jack": {
+          "p10": 0.106036,
+          "p90": 0.280914
+        },
+        "chord": {
+          "p10": 0.182432,
+          "p90": 0.404018
+        },
+        "tap_bias": {
+          "p10": 0.599673,
+          "p90": 0.824234
+        },
+        "slide_bias": {
+          "p10": 0.08418,
+          "p90": 0.23507
+        },
+        "hold_bias": {
+          "p10": 0.029112,
+          "p90": 0.126963
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.132898
+        },
+        "chord_bias": {
+          "p10": 0.182432,
+          "p90": 0.404018
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.11215
+        },
+        "directionality": {
+          "p10": 0.008264,
+          "p90": 0.142857
+        }
+      },
+      "support": 464.13,
+      "raw_count": 107,
+      "exact_count": 107,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11608",
+        "11623",
+        "11630"
+      ]
+    },
+    {
+      "level": 13.5,
+      "radar": {
+        "note_density": 0.307548,
+        "peak": 0.375,
+        "sweep": 0.116018,
+        "slide_tricky": 0.123955,
+        "slide_sequence": 0.070016,
+        "jack": 0.18742,
+        "chord": 0.285115
+      },
+      "style": {
+        "tap_bias": 0.719272,
+        "slide_bias": 0.144175,
+        "hold_bias": 0.073132,
+        "touch_bias": 0.041411,
+        "chord_bias": 0.285115,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.027397,
+        "directionality": 0.044025
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.247006,
+          "p90": 0.369444
+        },
+        "peak": {
+          "p10": 0.25,
+          "p90": 0.625
+        },
+        "sweep": {
+          "p10": 0.063394,
+          "p90": 0.178675
+        },
+        "slide_tricky": {
+          "p10": 0.054811,
+          "p90": 0.190779
+        },
+        "slide_sequence": {
+          "p10": 0.029408,
+          "p90": 0.134576
+        },
+        "jack": {
+          "p10": 0.103693,
+          "p90": 0.274966
+        },
+        "chord": {
+          "p10": 0.177734,
+          "p90": 0.392157
+        },
+        "tap_bias": {
+          "p10": 0.599673,
+          "p90": 0.827177
+        },
+        "slide_bias": {
+          "p10": 0.080893,
+          "p90": 0.226502
+        },
+        "hold_bias": {
+          "p10": 0.027954,
+          "p90": 0.128623
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.137681
+        },
+        "chord_bias": {
+          "p10": 0.177734,
+          "p90": 0.392157
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.113636
+        },
+        "directionality": {
+          "p10": 0.008197,
+          "p90": 0.142857
+        }
+      },
+      "support": 509.2,
+      "raw_count": 51,
+      "exact_count": 51,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11613",
+        "11615",
+        "11653"
+      ]
+    },
+    {
+      "level": 13.6,
+      "radar": {
+        "note_density": 0.320348,
+        "peak": 0.40625,
+        "sweep": 0.110277,
+        "slide_tricky": 0.118644,
+        "slide_sequence": 0.0686,
+        "jack": 0.185695,
+        "chord": 0.273585
+      },
+      "style": {
+        "tap_bias": 0.721622,
+        "slide_bias": 0.139163,
+        "hold_bias": 0.072,
+        "touch_bias": 0.04878,
+        "chord_bias": 0.273585,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.025641,
+        "directionality": 0.045802
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.260855,
+          "p90": 0.375619
+        },
+        "peak": {
+          "p10": 0.28125,
+          "p90": 0.65625
+        },
+        "sweep": {
+          "p10": 0.061389,
+          "p90": 0.174346
+        },
+        "slide_tricky": {
+          "p10": 0.057052,
+          "p90": 0.188277
+        },
+        "slide_sequence": {
+          "p10": 0.028425,
+          "p90": 0.131035
+        },
+        "jack": {
+          "p10": 0.102321,
+          "p90": 0.27013
+        },
+        "chord": {
+          "p10": 0.170418,
+          "p90": 0.383978
+        },
+        "tap_bias": {
+          "p10": 0.585147,
+          "p90": 0.827273
+        },
+        "slide_bias": {
+          "p10": 0.078859,
+          "p90": 0.222576
+        },
+        "hold_bias": {
+          "p10": 0.027484,
+          "p90": 0.129371
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.152682
+        },
+        "chord_bias": {
+          "p10": 0.170418,
+          "p90": 0.383978
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.103896
+        },
+        "directionality": {
+          "p10": 0.007752,
+          "p90": 0.137778
+        }
+      },
+      "support": 525.6,
+      "raw_count": 53,
+      "exact_count": 53,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11645",
+        "11656",
+        "11669"
+      ]
+    },
+    {
+      "level": 13.7,
+      "radar": {
+        "note_density": 0.328913,
+        "peak": 0.4375,
+        "sweep": 0.106781,
+        "slide_tricky": 0.113043,
+        "slide_sequence": 0.067602,
+        "jack": 0.180693,
+        "chord": 0.267071
+      },
+      "style": {
+        "tap_bias": 0.721907,
+        "slide_bias": 0.134307,
+        "hold_bias": 0.070909,
+        "touch_bias": 0.053302,
+        "chord_bias": 0.267071,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.022222,
+        "directionality": 0.047619
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.271612,
+          "p90": 0.385399
+        },
+        "peak": {
+          "p10": 0.3125,
+          "p90": 0.65625
+        },
+        "sweep": {
+          "p10": 0.060536,
+          "p90": 0.173748
+        },
+        "slide_tricky": {
+          "p10": 0.058309,
+          "p90": 0.18507
+        },
+        "slide_sequence": {
+          "p10": 0.028304,
+          "p90": 0.129464
+        },
+        "jack": {
+          "p10": 0.103693,
+          "p90": 0.266827
+        },
+        "chord": {
+          "p10": 0.163855,
+          "p90": 0.372685
+        },
+        "tap_bias": {
+          "p10": 0.580175,
+          "p90": 0.827922
+        },
+        "slide_bias": {
+          "p10": 0.077449,
+          "p90": 0.219844
+        },
+        "hold_bias": {
+          "p10": 0.027375,
+          "p90": 0.129176
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.154696
+        },
+        "chord_bias": {
+          "p10": 0.163855,
+          "p90": 0.372685
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.098901
+        },
+        "directionality": {
+          "p10": 0.007752,
+          "p90": 0.133333
+        }
+      },
+      "support": 499.91,
+      "raw_count": 164,
+      "exact_count": 128,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "! [ccdd5f1f-6923-42a1-aacd-60c814b6b905]",
+        "Tricky Treat!!!",
+        "Approve Please,Genie! [2f6982f5-ec11-4014-b4ee-e8d724ba068f]"
+      ]
+    },
+    {
+      "level": 13.8,
+      "radar": {
+        "note_density": 0.337708,
+        "peak": 0.4375,
+        "sweep": 0.102693,
+        "slide_tricky": 0.10838,
+        "slide_sequence": 0.066355,
+        "jack": 0.17608,
+        "chord": 0.256757
+      },
+      "style": {
+        "tap_bias": 0.722905,
+        "slide_bias": 0.130793,
+        "hold_bias": 0.070199,
+        "touch_bias": 0.054286,
+        "chord_bias": 0.256757,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.02,
+        "directionality": 0.047619
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.277315,
+          "p90": 0.40143
+        },
+        "peak": {
+          "p10": 0.3125,
+          "p90": 0.6875
+        },
+        "sweep": {
+          "p10": 0.059911,
+          "p90": 0.169591
+        },
+        "slide_tricky": {
+          "p10": 0.058176,
+          "p90": 0.18117
+        },
+        "slide_sequence": {
+          "p10": 0.027047,
+          "p90": 0.128606
+        },
+        "jack": {
+          "p10": 0.104938,
+          "p90": 0.265795
+        },
+        "chord": {
+          "p10": 0.160121,
+          "p90": 0.361301
+        },
+        "tap_bias": {
+          "p10": 0.587607,
+          "p90": 0.831041
+        },
+        "slide_bias": {
+          "p10": 0.07578,
+          "p90": 0.216995
+        },
+        "hold_bias": {
+          "p10": 0.026362,
+          "p90": 0.129176
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.153846
+        },
+        "chord_bias": {
+          "p10": 0.160121,
+          "p90": 0.361301
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.096154
+        },
+        "directionality": {
+          "p10": 0.009231,
+          "p90": 0.131429
+        }
+      },
+      "support": 482.48,
+      "raw_count": 129,
+      "exact_count": 129,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11617",
+        "11620",
+        "11633"
+      ]
+    },
+    {
+      "level": 13.9,
+      "radar": {
+        "note_density": 0.348432,
+        "peak": 0.46875,
+        "sweep": 0.098308,
+        "slide_tricky": 0.105128,
+        "slide_sequence": 0.064244,
+        "jack": 0.171589,
+        "chord": 0.248164
+      },
+      "style": {
+        "tap_bias": 0.725524,
+        "slide_bias": 0.125535,
+        "hold_bias": 0.070439,
+        "touch_bias": 0.053302,
+        "chord_bias": 0.248164,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.016393,
+        "directionality": 0.045198
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.286079,
+          "p90": 0.409414
+        },
+        "peak": {
+          "p10": 0.34375,
+          "p90": 0.6875
+        },
+        "sweep": {
+          "p10": 0.057279,
+          "p90": 0.166932
+        },
+        "slide_tricky": {
+          "p10": 0.058008,
+          "p90": 0.178144
+        },
+        "slide_sequence": {
+          "p10": 0.02571,
+          "p90": 0.120627
+        },
+        "jack": {
+          "p10": 0.104689,
+          "p90": 0.259486
+        },
+        "chord": {
+          "p10": 0.150667,
+          "p90": 0.355412
+        },
+        "tap_bias": {
+          "p10": 0.6,
+          "p90": 0.835381
+        },
+        "slide_bias": {
+          "p10": 0.072195,
+          "p90": 0.207152
+        },
+        "hold_bias": {
+          "p10": 0.026163,
+          "p90": 0.129176
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.14518
+        },
+        "chord_bias": {
+          "p10": 0.150667,
+          "p90": 0.355412
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.09434
+        },
+        "directionality": {
+          "p10": 0.009709,
+          "p90": 0.129825
+        }
+      },
+      "support": 445.6,
+      "raw_count": 95,
+      "exact_count": 95,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11535",
+        "11536",
+        "11629"
+      ]
+    },
+    {
+      "level": 14.0,
+      "radar": {
+        "note_density": 0.360084,
+        "peak": 0.5,
+        "sweep": 0.0964,
+        "slide_tricky": 0.1,
+        "slide_sequence": 0.060383,
+        "jack": 0.168636,
+        "chord": 0.242259
+      },
+      "style": {
+        "tap_bias": 0.736364,
+        "slide_bias": 0.11936,
+        "hold_bias": 0.072202,
+        "touch_bias": 0.051916,
+        "chord_bias": 0.242259,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.0125,
+        "directionality": 0.042735
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.299937,
+          "p90": 0.421096
+        },
+        "peak": {
+          "p10": 0.34375,
+          "p90": 0.75
+        },
+        "sweep": {
+          "p10": 0.05407,
+          "p90": 0.15952
+        },
+        "slide_tricky": {
+          "p10": 0.0576,
+          "p90": 0.171141
+        },
+        "slide_sequence": {
+          "p10": 0.023643,
+          "p90": 0.11738
+        },
+        "jack": {
+          "p10": 0.103077,
+          "p90": 0.249664
+        },
+        "chord": {
+          "p10": 0.147493,
+          "p90": 0.343307
+        },
+        "tap_bias": {
+          "p10": 0.615714,
+          "p90": 0.84106
+        },
+        "slide_bias": {
+          "p10": 0.069357,
+          "p90": 0.203747
+        },
+        "hold_bias": {
+          "p10": 0.025926,
+          "p90": 0.128788
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.138387
+        },
+        "chord_bias": {
+          "p10": 0.147493,
+          "p90": 0.343307
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.09
+        },
+        "directionality": {
+          "p10": 0.009709,
+          "p90": 0.128788
+        }
+      },
+      "support": 383.52,
+      "raw_count": 67,
+      "exact_count": 45,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "Angel's Salad [e28b4266-eec1-42b7-870f-fac825311321]",
+        "11534",
+        "11610"
+      ]
+    },
+    {
+      "level": 14.1,
+      "radar": {
+        "note_density": 0.372976,
+        "peak": 0.53125,
+        "sweep": 0.093173,
+        "slide_tricky": 0.097242,
+        "slide_sequence": 0.058456,
+        "jack": 0.168636,
+        "chord": 0.235145
+      },
+      "style": {
+        "tap_bias": 0.741745,
+        "slide_bias": 0.114703,
+        "hold_bias": 0.074799,
+        "touch_bias": 0.051557,
+        "chord_bias": 0.235145,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.011236,
+        "directionality": 0.041026
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.313563,
+          "p90": 0.434993
+        },
+        "peak": {
+          "p10": 0.375,
+          "p90": 0.75
+        },
+        "sweep": {
+          "p10": 0.05023,
+          "p90": 0.153785
+        },
+        "slide_tricky": {
+          "p10": 0.057357,
+          "p90": 0.161151
+        },
+        "slide_sequence": {
+          "p10": 0.023629,
+          "p90": 0.1149
+        },
+        "jack": {
+          "p10": 0.101365,
+          "p90": 0.24
+        },
+        "chord": {
+          "p10": 0.148415,
+          "p90": 0.331512
+        },
+        "tap_bias": {
+          "p10": 0.637333,
+          "p90": 0.844575
+        },
+        "slide_bias": {
+          "p10": 0.063591,
+          "p90": 0.199253
+        },
+        "hold_bias": {
+          "p10": 0.027397,
+          "p90": 0.128
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.130802
+        },
+        "chord_bias": {
+          "p10": 0.148415,
+          "p90": 0.331512
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.086022
+        },
+        "directionality": {
+          "p10": 0.009464,
+          "p90": 0.128788
+        }
+      },
+      "support": 305.44,
+      "raw_count": 32,
+      "exact_count": 32,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11892",
+        "11906",
+        "11924"
+      ]
+    },
+    {
+      "level": 14.2,
+      "radar": {
+        "note_density": 0.382237,
+        "peak": 0.59375,
+        "sweep": 0.092343,
+        "slide_tricky": 0.0962,
+        "slide_sequence": 0.057144,
+        "jack": 0.171589,
+        "chord": 0.232598
+      },
+      "style": {
+        "tap_bias": 0.744819,
+        "slide_bias": 0.11358,
+        "hold_bias": 0.076525,
+        "touch_bias": 0.052186,
+        "chord_bias": 0.232598,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.010989,
+        "directionality": 0.040293
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.320901,
+          "p90": 0.445627
+        },
+        "peak": {
+          "p10": 0.40625,
+          "p90": 0.75
+        },
+        "sweep": {
+          "p10": 0.048792,
+          "p90": 0.150552
+        },
+        "slide_tricky": {
+          "p10": 0.055198,
+          "p90": 0.156134
+        },
+        "slide_sequence": {
+          "p10": 0.025207,
+          "p90": 0.113898
+        },
+        "jack": {
+          "p10": 0.101111,
+          "p90": 0.238347
+        },
+        "chord": {
+          "p10": 0.153533,
+          "p90": 0.321027
+        },
+        "tap_bias": {
+          "p10": 0.649864,
+          "p90": 0.844864
+        },
+        "slide_bias": {
+          "p10": 0.061979,
+          "p90": 0.188586
+        },
+        "hold_bias": {
+          "p10": 0.030392,
+          "p90": 0.127251
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.126685
+        },
+        "chord_bias": {
+          "p10": 0.153533,
+          "p90": 0.321027
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.072917
+        },
+        "directionality": {
+          "p10": 0.008197,
+          "p90": 0.128788
+        }
+      },
+      "support": 230.45,
+      "raw_count": 31,
+      "exact_count": 31,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11627",
+        "11675",
+        "11725"
+      ]
+    },
+    {
+      "level": 14.3,
+      "radar": {
+        "note_density": 0.393444,
+        "peak": 0.59375,
+        "sweep": 0.091978,
+        "slide_tricky": 0.093484,
+        "slide_sequence": 0.056515,
+        "jack": 0.168568,
+        "chord": 0.227273
+      },
+      "style": {
+        "tap_bias": 0.751068,
+        "slide_bias": 0.112038,
+        "hold_bias": 0.076453,
+        "touch_bias": 0.052402,
+        "chord_bias": 0.227273,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.01087,
+        "directionality": 0.037783
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.328367,
+          "p90": 0.455858
+        },
+        "peak": {
+          "p10": 0.40625,
+          "p90": 0.75
+        },
+        "sweep": {
+          "p10": 0.047591,
+          "p90": 0.138299
+        },
+        "slide_tricky": {
+          "p10": 0.052156,
+          "p90": 0.147679
+        },
+        "slide_sequence": {
+          "p10": 0.025256,
+          "p90": 0.100746
+        },
+        "jack": {
+          "p10": 0.101111,
+          "p90": 0.238347
+        },
+        "chord": {
+          "p10": 0.153533,
+          "p90": 0.321027
+        },
+        "tap_bias": {
+          "p10": 0.66115,
+          "p90": 0.841916
+        },
+        "slide_bias": {
+          "p10": 0.05871,
+          "p90": 0.177022
+        },
+        "hold_bias": {
+          "p10": 0.031729,
+          "p90": 0.123384
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.125691
+        },
+        "chord_bias": {
+          "p10": 0.153533,
+          "p90": 0.321027
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.056818
+        },
+        "directionality": {
+          "p10": 0.007194,
+          "p90": 0.126531
+        }
+      },
+      "support": 190.05,
+      "raw_count": 41,
+      "exact_count": 41,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "1103",
+        "11611",
+        "11624"
+      ]
+    },
+    {
+      "level": 14.4,
+      "radar": {
+        "note_density": 0.407369,
+        "peak": 0.59375,
+        "sweep": 0.087525,
+        "slide_tricky": 0.091892,
+        "slide_sequence": 0.054088,
+        "jack": 0.162824,
+        "chord": 0.211722
+      },
+      "style": {
+        "tap_bias": 0.753947,
+        "slide_bias": 0.108005,
+        "hold_bias": 0.073563,
+        "touch_bias": 0.055034,
+        "chord_bias": 0.211722,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.01087,
+        "directionality": 0.039024
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.33707,
+          "p90": 0.463531
+        },
+        "peak": {
+          "p10": 0.4375,
+          "p90": 0.78125
+        },
+        "sweep": {
+          "p10": 0.044628,
+          "p90": 0.136764
+        },
+        "slide_tricky": {
+          "p10": 0.05,
+          "p90": 0.14104
+        },
+        "slide_sequence": {
+          "p10": 0.023207,
+          "p90": 0.099089
+        },
+        "jack": {
+          "p10": 0.100686,
+          "p90": 0.230284
+        },
+        "chord": {
+          "p10": 0.149163,
+          "p90": 0.319865
+        },
+        "tap_bias": {
+          "p10": 0.667969,
+          "p90": 0.844864
+        },
+        "slide_bias": {
+          "p10": 0.05813,
+          "p90": 0.165389
+        },
+        "hold_bias": {
+          "p10": 0.03298,
+          "p90": 0.119728
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.127438
+        },
+        "chord_bias": {
+          "p10": 0.149163,
+          "p90": 0.319865
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.050633
+        },
+        "directionality": {
+          "p10": 0.006928,
+          "p90": 0.122699
+        }
+      },
+      "support": 175.19,
+      "raw_count": 35,
+      "exact_count": 35,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11578",
+        "11618",
+        "11625"
+      ]
+    },
+    {
+      "level": 14.5,
+      "radar": {
+        "note_density": 0.417108,
+        "peak": 0.625,
+        "sweep": 0.084899,
+        "slide_tricky": 0.087831,
+        "slide_sequence": 0.052879,
+        "jack": 0.154858,
+        "chord": 0.206154
+      },
+      "style": {
+        "tap_bias": 0.755779,
+        "slide_bias": 0.103632,
+        "hold_bias": 0.070922,
+        "touch_bias": 0.055432,
+        "chord_bias": 0.206154,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.010309,
+        "directionality": 0.041026
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.344043,
+          "p90": 0.473265
+        },
+        "peak": {
+          "p10": 0.46875,
+          "p90": 0.8125
+        },
+        "sweep": {
+          "p10": 0.044084,
+          "p90": 0.134537
+        },
+        "slide_tricky": {
+          "p10": 0.043248,
+          "p90": 0.1408
+        },
+        "slide_sequence": {
+          "p10": 0.022445,
+          "p90": 0.098103
+        },
+        "jack": {
+          "p10": 0.100529,
+          "p90": 0.220238
+        },
+        "chord": {
+          "p10": 0.141204,
+          "p90": 0.318493
+        },
+        "tap_bias": {
+          "p10": 0.67343,
+          "p90": 0.845842
+        },
+        "slide_bias": {
+          "p10": 0.055749,
+          "p90": 0.163793
+        },
+        "hold_bias": {
+          "p10": 0.033199,
+          "p90": 0.119483
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.12951
+        },
+        "chord_bias": {
+          "p10": 0.141204,
+          "p90": 0.318493
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.047244
+        },
+        "directionality": {
+          "p10": 0.006173,
+          "p90": 0.12761
+        }
+      },
+      "support": 164.17,
+      "raw_count": 34,
+      "exact_count": 34,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "10411",
+        "11677",
+        "11684"
+      ]
+    },
+    {
+      "level": 14.6,
+      "radar": {
+        "note_density": 0.42358,
+        "peak": 0.625,
+        "sweep": 0.08106,
+        "slide_tricky": 0.0866,
+        "slide_sequence": 0.049124,
+        "jack": 0.152977,
+        "chord": 0.202663
+      },
+      "style": {
+        "tap_bias": 0.762857,
+        "slide_bias": 0.097802,
+        "hold_bias": 0.070199,
+        "touch_bias": 0.057386,
+        "chord_bias": 0.202663,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.009709,
+        "directionality": 0.043956
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.352395,
+          "p90": 0.4776
+        },
+        "peak": {
+          "p10": 0.46875,
+          "p90": 0.84375
+        },
+        "sweep": {
+          "p10": 0.043079,
+          "p90": 0.13329
+        },
+        "slide_tricky": {
+          "p10": 0.04298,
+          "p90": 0.137848
+        },
+        "slide_sequence": {
+          "p10": 0.018228,
+          "p90": 0.090928
+        },
+        "jack": {
+          "p10": 0.10031,
+          "p90": 0.215935
+        },
+        "chord": {
+          "p10": 0.135041,
+          "p90": 0.311518
+        },
+        "tap_bias": {
+          "p10": 0.685897,
+          "p90": 0.85
+        },
+        "slide_bias": {
+          "p10": 0.054722,
+          "p90": 0.152809
+        },
+        "hold_bias": {
+          "p10": 0.033636,
+          "p90": 0.116959
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.12951
+        },
+        "chord_bias": {
+          "p10": 0.135041,
+          "p90": 0.311518
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.044444
+        },
+        "directionality": {
+          "p10": 0.006289,
+          "p90": 0.128028
+        }
+      },
+      "support": 149.16,
+      "raw_count": 26,
+      "exact_count": 26,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11646",
+        "11673",
+        "11686"
+      ]
+    },
+    {
+      "level": 14.7,
+      "radar": {
+        "note_density": 0.43009,
+        "peak": 0.65625,
+        "sweep": 0.078633,
+        "slide_tricky": 0.084762,
+        "slide_sequence": 0.047197,
+        "jack": 0.153766,
+        "chord": 0.203274
+      },
+      "style": {
+        "tap_bias": 0.7666,
+        "slide_bias": 0.095663,
+        "hold_bias": 0.06938,
+        "touch_bias": 0.055432,
+        "chord_bias": 0.203274,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.008696,
+        "directionality": 0.045093
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.364581,
+          "p90": 0.482246
+        },
+        "peak": {
+          "p10": 0.5,
+          "p90": 0.875
+        },
+        "sweep": {
+          "p10": 0.043079,
+          "p90": 0.1297
+        },
+        "slide_tricky": {
+          "p10": 0.04298,
+          "p90": 0.136515
+        },
+        "slide_sequence": {
+          "p10": 0.019306,
+          "p90": 0.090928
+        },
+        "jack": {
+          "p10": 0.096537,
+          "p90": 0.217096
+        },
+        "chord": {
+          "p10": 0.135041,
+          "p90": 0.292287
+        },
+        "tap_bias": {
+          "p10": 0.687163,
+          "p90": 0.853346
+        },
+        "slide_bias": {
+          "p10": 0.050143,
+          "p90": 0.150769
+        },
+        "hold_bias": {
+          "p10": 0.033199,
+          "p90": 0.113402
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.125926
+        },
+        "chord_bias": {
+          "p10": 0.135041,
+          "p90": 0.292287
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.038961
+        },
+        "directionality": {
+          "p10": 0.006579,
+          "p90": 0.128028
+        }
+      },
+      "support": 125.49,
+      "raw_count": 26,
+      "exact_count": 22,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11619",
+        "11661",
+        "11663"
+      ]
+    },
+    {
+      "level": 14.8,
+      "radar": {
+        "note_density": 0.435213,
+        "peak": 0.6875,
+        "sweep": 0.078633,
+        "slide_tricky": 0.084762,
+        "slide_sequence": 0.047197,
+        "jack": 0.156652,
+        "chord": 0.208092
+      },
+      "style": {
+        "tap_bias": 0.775442,
+        "slide_bias": 0.094104,
+        "hold_bias": 0.06938,
+        "touch_bias": 0.0518,
+        "chord_bias": 0.208092,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.008264,
+        "directionality": 0.046875
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.374625,
+          "p90": 0.492366
+        },
+        "peak": {
+          "p10": 0.5,
+          "p90": 0.90625
+        },
+        "sweep": {
+          "p10": 0.043096,
+          "p90": 0.129302
+        },
+        "slide_tricky": {
+          "p10": 0.047028,
+          "p90": 0.130097
+        },
+        "slide_sequence": {
+          "p10": 0.019707,
+          "p90": 0.090928
+        },
+        "jack": {
+          "p10": 0.093288,
+          "p90": 0.217096
+        },
+        "chord": {
+          "p10": 0.141204,
+          "p90": 0.282189
+        },
+        "tap_bias": {
+          "p10": 0.692866,
+          "p90": 0.864444
+        },
+        "slide_bias": {
+          "p10": 0.054217,
+          "p90": 0.149515
+        },
+        "hold_bias": {
+          "p10": 0.031111,
+          "p90": 0.108216
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.122288
+        },
+        "chord_bias": {
+          "p10": 0.141204,
+          "p90": 0.282189
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.03871
+        },
+        "directionality": {
+          "p10": 0.007812,
+          "p90": 0.113772
+        }
+      },
+      "support": 95.48,
+      "raw_count": 24,
+      "exact_count": 24,
+      "bandwidth": 0.15,
+      "fallback": false,
+      "examples": [
+        "11537",
+        "11685",
+        "11884"
+      ]
+    },
+    {
+      "level": 14.9,
+      "radar": {
+        "note_density": 0.444084,
+        "peak": 0.71875,
+        "sweep": 0.077544,
+        "slide_tricky": 0.084958,
+        "slide_sequence": 0.047666,
+        "jack": 0.158307,
+        "chord": 0.212857
+      },
+      "style": {
+        "tap_bias": 0.777899,
+        "slide_bias": 0.092292,
+        "hold_bias": 0.070769,
+        "touch_bias": 0.047476,
+        "chord_bias": 0.212857,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.00813,
+        "directionality": 0.0501
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.380585,
+          "p90": 0.499766
+        },
+        "peak": {
+          "p10": 0.53125,
+          "p90": 0.9375
+        },
+        "sweep": {
+          "p10": 0.045226,
+          "p90": 0.123728
+        },
+        "slide_tricky": {
+          "p10": 0.048373,
+          "p90": 0.129977
+        },
+        "slide_sequence": {
+          "p10": 0.019707,
+          "p90": 0.088724
+        },
+        "jack": {
+          "p10": 0.092412,
+          "p90": 0.217096
+        },
+        "chord": {
+          "p10": 0.133508,
+          "p90": 0.282189
+        },
+        "tap_bias": {
+          "p10": 0.692866,
+          "p90": 0.871406
+        },
+        "slide_bias": {
+          "p10": 0.056689,
+          "p90": 0.144284
+        },
+        "hold_bias": {
+          "p10": 0.030303,
+          "p90": 0.108108
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.116226
+        },
+        "chord_bias": {
+          "p10": 0.133508,
+          "p90": 0.282189
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.03871
+        },
+        "directionality": {
+          "p10": 0.013807,
+          "p90": 0.108966
+        }
+      },
+      "support": 68.6,
+      "raw_count": 13,
+      "exact_count": 13,
+      "bandwidth": 0.15,
+      "fallback": true,
+      "examples": [
+        "11612",
+        "11662",
+        "11898"
+      ]
+    },
+    {
+      "level": 15.0,
+      "radar": {
+        "note_density": 0.457881,
+        "peak": 0.75,
+        "sweep": 0.075604,
+        "slide_tricky": 0.084958,
+        "slide_sequence": 0.047666,
+        "jack": 0.158307,
+        "chord": 0.212857
+      },
+      "style": {
+        "tap_bias": 0.778462,
+        "slide_bias": 0.089478,
+        "hold_bias": 0.071494,
+        "touch_bias": 0.047476,
+        "chord_bias": 0.212857,
+        "melody_following": 0.9,
+        "pattern_reuse": 0.0,
+        "directionality": 0.0501
+      },
+      "controls": {
+        "note_density": {
+          "p10": 0.380585,
+          "p90": 0.505535
+        },
+        "peak": {
+          "p10": 0.53125,
+          "p90": 0.96875
+        },
+        "sweep": {
+          "p10": 0.045993,
+          "p90": 0.111185
+        },
+        "slide_tricky": {
+          "p10": 0.048375,
+          "p90": 0.124837
+        },
+        "slide_sequence": {
+          "p10": 0.023141,
+          "p90": 0.088724
+        },
+        "jack": {
+          "p10": 0.091727,
+          "p90": 0.210332
+        },
+        "chord": {
+          "p10": 0.133508,
+          "p90": 0.282189
+        },
+        "tap_bias": {
+          "p10": 0.708995,
+          "p90": 0.871406
+        },
+        "slide_bias": {
+          "p10": 0.056689,
+          "p90": 0.139344
+        },
+        "hold_bias": {
+          "p10": 0.026506,
+          "p90": 0.108901
+        },
+        "touch_bias": {
+          "p10": 0.0,
+          "p90": 0.100677
+        },
+        "chord_bias": {
+          "p10": 0.133508,
+          "p90": 0.282189
+        },
+        "melody_following": {
+          "p10": 0.9,
+          "p90": 0.9
+        },
+        "pattern_reuse": {
+          "p10": 0.0,
+          "p90": 0.038961
+        },
+        "directionality": {
+          "p10": 0.014433,
+          "p90": 0.108966
+        }
+      },
+      "support": 46.7,
+      "raw_count": 3,
+      "exact_count": 3,
+      "bandwidth": 0.15,
+      "fallback": true,
+      "examples": [
+        "11663",
+        "834",
+        "11820"
+      ]
+    }
+  ]
+}

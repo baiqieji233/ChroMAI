@@ -1,0 +1,23 @@
+{
+  "level": 13.5,
+  "difficulty": 5,
+  "radar": {
+    "note_density": {"target": 0.72, "tolerance": 0.1, "weight": 1.0},
+    "peak": {"target": 0.78, "tolerance": 0.08, "weight": 1.0},
+    "sweep": {"target": 0.55, "tolerance": 0.15, "weight": 0.8},
+    "slide_tricky": {"target": 0.62, "tolerance": 0.15, "weight": 0.8},
+    "slide_sequence": {"target": 0.68, "tolerance": 0.15, "weight": 0.8},
+    "jack": {"target": 0.35, "tolerance": 0.15, "weight": 0.5},
+    "chord": {"target": 0.6, "tolerance": 0.15, "weight": 0.8}
+  },
+  "style": {
+    "tap_bias": 0.55,
+    "slide_bias": 0.72,
+    "hold_bias": 0.28,
+    "touch_bias": 0.22,
+    "chord_bias": 0.58,
+    "melody_following": 0.85,
+    "pattern_reuse": 0.72,
+    "directionality": 0.68
+  }
+}
