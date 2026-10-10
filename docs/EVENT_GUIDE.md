@@ -1,12 +1,12 @@
-# event_v1 事件模型指南
+# event_ctx_v1 事件模型指南
 
-`event_v1` 是当前 WebUI 的默认训练与生成主路径。它把谱面作为按拍组织的事件序列处理，和旧的 fixed-frame generator 不是同一个模型族。两者不能共享 checkpoint，也不能把旧模型权重直接解释为 event 模型。
+`event_ctx_v1` 是当前 WebUI 的默认训练与生成主路径。它在基础 `event_v1` 事件序列上加入跨窗口上下文，和旧的 fixed-frame generator 不是同一个模型族。两者不能共享 checkpoint，也不能把旧模型权重直接解释为 event 模型。
 
 ## 先确认边界
 
 - checkpoint schema 必须是 `maichart-event-generator-checkpoint-v1` 才能走 event 生成 CLI。
 - 旧 `generator_last.pt`、旧 `maichart-conditioned-generator-checkpoint-v2` 或纯权重文件只走 `maichart.generation.cli`；它们是旧固定帧基线，不会被自动升级成 event 模型。
-- 旧 checkpoint 不能用于 event 的 `resume` 或 `finetune`。要使用 event 主路径，必须重新准备 event manifest 并从头训练 `event_v1`。
+- 旧 checkpoint 不能用于 event 的 `resume` 或 `finetune`。要使用当前主路径，必须重新准备 event manifest 并从头训练 `event_ctx_v1`。
 - 一百余张谱面适合验证预处理、训练、保存、加载、生成流程和小样本实验，不足以证明泛化、难度控制或生成质量。
 - 生成结果即使能被解析器读取，也不等于音乐对齐、难度达标、手感可玩或质量合格。必须查看 `quality.json`，再进行人工检查和试玩。
 
@@ -30,7 +30,7 @@ python -m maichart.training.prepare_events RAW_ROOT `
   "schema": "maichart-training-manifest-v1",
   "preprocessing": {
     "target_schema": "event_v1",
-    "feature_profile": "event_audio_v1",
+    "feature_profile": "event_audio_v2_rhythm",
     "sample_rate": 22050
   }
 }
@@ -50,6 +50,7 @@ WebUI 的模型族选择决定预处理入口：
 
 | 模型族 | WebUI 预处理命令 | 需要 fixed-frame / alignment |
 | --- | --- | --- |
+| `event_ctx_v1` | `maichart.training.prepare_events` | 不需要 |
 | `event_v1` | `maichart.training.prepare_events` | 不需要 |
 | `legacy_frame_v2` | `maichart.cli preprocess build` | 旧路径按原合同需要 |
 

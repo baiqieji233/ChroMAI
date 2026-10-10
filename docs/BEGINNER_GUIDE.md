@@ -3,7 +3,8 @@
 这份手册面向第一次使用训练程序的人。你只需要会复制文件、打开
 PowerShell，并能看懂基本的 Simai 谱面；不需要先学会 Python 编程。
 
-本项目是研究型基线，当前 WebUI 默认使用 `event_v1` 事件模型。它可以尝试把
+本项目是研究型基线，当前 WebUI 默认使用 `event_ctx_v1` 跨窗口事件模型和
+`event_audio_v2_rhythm` 音频特征。它可以尝试把
 音频转换为一张可解析的 Simai 谱面，并提供条件控制，但不是官方谱面编辑器，
 也不能保证生成结果一定好玩。每张谱面都必须查看质量诊断、解析、人工检查和试玩。
 旧 fixed-frame 模型属于显式对照路径，不会自动转换成 event 模型。
@@ -17,7 +18,7 @@ PowerShell，并能看懂基本的 Simai 谱面；不需要先学会 Python 编�
 
 ## 一、先认识几个名词
 
-- **项目目录**：本手册假定项目放在 `E:\simai_transformer`。
+- **项目目录**：以下命令都应在本项目根目录执行；路径可以是任意盘符。
 - **原始训练集**：每首歌的 `maidata.txt` 和对应音频组成的目录。
 - **预处理**：event 路径读取 Simai 和音频，生成 event manifest；旧基线才生成 frame labels 和对齐报告。
 - **manifest**：预处理产生的 JSON 清单，训练程序通过它找到所有缓存。
@@ -31,7 +32,7 @@ PowerShell，并能看懂基本的 Simai 谱面；不需要先学会 Python 编�
 在 Windows 开始菜单搜索 **PowerShell** 并打开。每次输入命令后按 Enter。
 
 ```powershell
-cd E:\simai_transformer
+cd <项目目录>
 ```
 
 ### 2. 确认 Python
@@ -46,11 +47,12 @@ Python，并在安装器中勾选把 Python 加入 PATH。
 ### 3. 安装项目和可选依赖
 
 ```powershell
-py -m pip install -e ".[dev,audio,training]"
+START_WEBUI.bat --no-browser --port 7860
 ```
 
-这一步可能需要几分钟。它会安装测试工具、音频分析库和训练需要的 PyTorch
-等依赖。若网络中断，重新执行同一条命令即可。
+首次启动会在项目目录创建独立 `.venv`，并安装测试工具、音频分析库和训练需要的
+PyTorch 等依赖。若网络中断，重新执行同一条命令即可。安装完成后可用
+`START_WEBUI.bat --check` 只检查环境而不启动服务。
 
 检查 PyTorch 是否能看到显卡：
 
@@ -67,7 +69,7 @@ CPU 运行，但音频分析和训练会慢很多；不要在 WebUI 中强制选
 在项目目录的 PowerShell 中启动：
 
 ```powershell
-maichart-gui --host 127.0.0.1 --port 7860
+START_WEBUI.bat --no-browser --port 7860
 ```
 
 看到服务启动提示后，在浏览器打开：
@@ -83,7 +85,7 @@ http://127.0.0.1:7860/
 如果提示 7860 已被占用，可以换端口：
 
 ```powershell
-maichart-gui --host 127.0.0.1 --port 7861
+START_WEBUI.bat --no-browser --port 7861
 ```
 
 然后打开 `http://127.0.0.1:7861/`。
@@ -184,11 +186,11 @@ frame labels 在内存中推导 Radar/Style，再把你在生成界面输入的�
 
 ### 2. 设置预处理参数
 
-event_v1 第一次建议使用：
+第一次建议使用：
 
 ```text
-模型族           event_v1
-event profile    event_audio_v1
+模型族           event_ctx_v1
+event profile    event_audio_v2_rhythm
 采样率           22050
 预处理样本上限   1 或 2
 ```
@@ -218,7 +220,7 @@ event_manifest.json
 - event 会显示 `event QC 可用`，但最终训练仍由 `train_events` 重新读取 source 并 QC；旧 fixed-frame 的 `usable_for_training=false` 不会单独阻断 event；
 - 音频状态，例如 `ok`、`missing`、`failed` 或 `dependency_missing`；
 - 主要过滤原因，例如解析错误、音频不可读或对齐失败；
-- event 预处理时记录的 `target_schema=event_v1`、`feature_profile=event_audio_v1` 和 sample rate。
+- event 预处理时记录的 `target_schema=event_ctx_v1`、`feature_profile=event_audio_v2_rhythm` 和 sample rate。
 
 如果显示“尚未生成训练清单”，说明还没有完成第 2 步，点击 **2. 预处理训练集**。
 如果显示“正在预处理”，继续等待右侧完成即可。如果显示失败或中断，查看日志，
@@ -299,7 +301,7 @@ py -m maichart.training.train_events `
 
 ## 八、用训练好的模型生成谱面
 
-当前 WebUI 默认是 `event_v1`，event 音频 profile 是 `event_audio_v1`，只接受
+当前 WebUI 默认是 `event_ctx_v1`，event 音频 profile 是 `event_audio_v2_rhythm`，只接受
 `maichart-event-generator-checkpoint-v1`。生成区的 **条件强度 guidance scale** 是软约束
 倍率：保持 1 为默认；1--2 更强调目标；2--3 仅用于实验。它不能保证目标等级或
 Radar/Style 严格达到要求。旧 checkpoint 不要上传到 event 训练或生成区；WebUI

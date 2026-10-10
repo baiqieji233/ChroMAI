@@ -34,4 +34,4 @@ START_WEBUI.bat --check
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-可选浏览器脚本安装与运行见 [浏览器验证说明](../tools/browser_qa/README.md)。历史记录与保留/排除范围见 [精简副本说明](PORTABLE_COPY.md)。
+历史记录与保留/排除范围见 [精简副本说明](PORTABLE_COPY.md)。
