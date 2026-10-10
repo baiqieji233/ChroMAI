@@ -57,6 +57,7 @@ coverage.xml
 *~
 
 # Local credentials and machine-specific settings
+/.webui-python
 .env
 .env.*
 !.env.example
