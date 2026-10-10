@@ -36,6 +36,46 @@ _CATALOG_LOCK = threading.RLock()
 _CATALOGS: dict[str, tuple[int, int, list[CatalogChart], dict[str, tuple[int, int]]]] = {}
 
 
+class _AnnotationLookup:
+    """Prefilter candidates, preserving the existing validator and record order."""
+    def __init__(self, records: list[dict[str, Any]]) -> None:
+        self.records = list(records)
+        self.ids: dict[str, set[int]] = {}
+        self.sources: dict[tuple[Path, int], set[int]] = {}
+        for index, record in enumerate(self.records):
+            self._register(index, record)
+
+    def _register(self, index: int, record: dict[str, Any]) -> None:
+        record_id = record.get("chart_id")
+        if isinstance(record_id, str):
+            self.ids.setdefault(record_id, set()).add(index)
+        if record.get("source_path") and record.get("difficulty_index") is not None:
+            try:
+                key = (Path(record["source_path"]).resolve(), int(record["difficulty_index"]))
+                self.sources.setdefault(key, set()).add(index)
+            except (OSError, ValueError, TypeError):
+                pass
+
+    def update(self, record: dict[str, Any]) -> None:
+        indices = self.ids.get(record.get("chart_id"))
+        if indices:
+            for index in list(indices):
+                self.records[index] = record
+                self._register(index, record)
+        else:
+            index = len(self.records)
+            self.records.append(record)
+            self._register(index, record)
+
+    def find(self, row: CatalogChart, active: dict[str, dict[str, Any]] | None = None) -> dict[str, Any] | None:
+        indices = self.ids.get(row.chart_id, set()) | self.ids.get(row.legacy_chart_id, set())
+        indices |= self.sources.get((Path(row.source_path).resolve(), int(row.difficulty_index)), set())
+        candidates = [self.records[index] for index in sorted(indices)]
+        if active is not None:
+            candidates = [record for record in candidates if active.get(record.get("chart_id")) is record]
+        return find_annotation(row, candidates)
+
+
 def _catalog(manifest: Path) -> list[CatalogChart]:
     """Reuse parsed catalog rows while cheaply noticing edited chart files."""
     key = str(manifest.resolve())
@@ -74,6 +114,8 @@ class QualityAPI:
     def post(self, endpoint: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         if endpoint == "/api/quality/catalog":
             return self.catalog(payload)
+        if endpoint == "/api/quality/selection":
+            return self.selection(payload)
         if endpoint == "/api/quality/save":
             return self.save(payload)
         if endpoint == "/api/quality/detail":
@@ -125,7 +167,8 @@ class QualityAPI:
             raise ValueError("sort_order 必须是 asc 或 desc")
         records = load_annotations(manifest)["records"]
         all_rows = _catalog(manifest)
-        annotation_by_id = {row.chart_id: find_annotation(row, records) for row in all_rows}
+        lookup = _AnnotationLookup(records)
+        annotation_by_id = {row.chart_id: lookup.find(row) for row in all_rows}
         catalog_values = [row.to_dict(annotation_by_id[row.chart_id]) for row in all_rows]
         rows = []
         for value in catalog_values:
@@ -144,10 +187,18 @@ class QualityAPI:
         return HTTPStatus.OK, {
             "schema": "maichart-quality-annotations-v1", "manifest": str(manifest), "annotation_path": str(annotation_path(manifest)),
             "page": page, "pages": pages, "page_size": page_size, "total": total,
+            "folder_total": len({row.chart_id for row in all_rows}),
             "sort_by": sort_by, "sort_order": sort_order,
             "items": rows[start:start + page_size],
             "rows": rows[start:start + page_size], "summary": summary,
         }
+
+    def selection(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Return every chart identity in this source, without page/filter caps."""
+        manifest = _required_manifest(payload)
+        chart_ids = list(dict.fromkeys(row.chart_id for row in _catalog(manifest)))
+        return HTTPStatus.OK, {"manifest": str(manifest), "chart_ids": chart_ids,
+                               "total": len(chart_ids), "scope": "current_dataset"}
 
     def save(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         manifest = _required_manifest(payload)
@@ -169,15 +220,17 @@ class QualityAPI:
             raise ValueError("存在不属于当前 manifest 的 chart_id")
         current = load_annotations(manifest)["records"]
         by_record = {item.get("chart_id"): item for item in current}
+        lookup = _AnnotationLookup(list(by_record.values()))
+        audio_hashes: dict[str, str] = {}
         for chart_id in chart_ids:
             row = by_id[chart_id]
             duration = chart_duration(row.source_path, row.difficulty_index)
-            previous = find_annotation(row, by_record.values()) or {}
+            previous = lookup.find(row, by_record) or {}
             # If this is an old or differently namespaced id, replace it with
             # the current identity on save instead of leaving duplicate rows.
-            for old_id, old_record in list(by_record.items()):
-                if previous and old_record is previous and old_id != chart_id:
-                    by_record.pop(old_id, None)
+            old_id = previous.get("chart_id")
+            if previous and old_id != chart_id and by_record.get(old_id) is previous:
+                by_record.pop(old_id, None)
             regions = payload.get("regions", previous.get("regions", []))
             # Validate against exact chart duration before writing anything.
             record = validate_record({**previous, "chart_id": chart_id,
@@ -194,7 +247,9 @@ class QualityAPI:
             if row.audio_path and Path(row.audio_path).is_file():
                 # Hash only explicitly selected charts; catalog browsing stays
                 # cheap even for a large corpus of long audio files.
-                record["audio_sha256"] = audio_sha256(row.audio_path)
+                if row.audio_path not in audio_hashes:
+                    audio_hashes[row.audio_path] = audio_sha256(row.audio_path)
+                record["audio_sha256"] = audio_hashes[row.audio_path]
             corrected = payload.get("corrected_path")
             if label != "negative" and "corrected_path" not in payload:
                 record.pop("corrected_path", None)
@@ -234,9 +289,10 @@ class QualityAPI:
                 record["corrected_difficulty"] = corrected_index
                 record["corrected_sha256"] = chart_sha256(corrected_path, corrected_index)
             by_record[chart_id] = record
+            lookup.update(record)
         output = save_annotations(manifest, by_record.values())
         current_rows = _catalog(manifest)
-        values = [row.to_dict(find_annotation(row, list(by_record.values()))) for row in current_rows]
+        values = [row.to_dict(lookup.find(row, by_record)) for row in current_rows]
         summary = self._summary(values, list(by_record.values()))
         return HTTPStatus.OK, {"saved": len(chart_ids), "annotation_path": str(output),
                                "records": list(by_record.values()), "summary": summary}
@@ -270,7 +326,8 @@ class QualityAPI:
         manifest = _required_manifest(payload)
         records = load_annotations(manifest)["records"]
         rows = _catalog(manifest)
-        annotations = {item.chart_id: find_annotation(item, records) for item in rows}
+        lookup = _AnnotationLookup(records)
+        annotations = {item.chart_id: lookup.find(item) for item in rows}
         def dist(values: list[Any]) -> dict[str, int]:
             return dict(sorted(Counter(str(value or "") for value in values).items()))
         type_counts: Counter[str] = Counter()

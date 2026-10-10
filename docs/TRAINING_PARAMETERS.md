@@ -57,7 +57,7 @@ batch_size × (d_model / 256)² × (num_layers / 8) ≤ 12     # 序列长度 76
 | segment_beats | **16**（从 64 下调，见 §3.7） | 单窗口 token 需求下降后预算才够，空白问题从结构上消失 |
 | dropout | 0.1 | 过拟合时升到 0.15 |
 | weight_decay | 0.01 | 过拟合时升到 0.02–0.05 |
-| condition_dropout | 0.15 | 供 CFG 使用，不要动 |
+| condition_dropout | 事件 fresh 默认 0 | 条件随机丢弃；resume / finetune 继承所选 checkpoint，旧模型可能为 0.15；与模型 dropout、context_dropout 独立 |
 | 全曲记忆帧数 | 256（默认） | 想更强结构感知可加到 512，代价是训练变慢 |
 | save_every | 2–3 | 抽卡时多留中间档 |
 | 音频缓存上限 | 4 GB（≈1300 首） | 见 §3.6 |
@@ -110,7 +110,7 @@ batch_size × (d_model / 256)² × (num_layers / 8) ≤ 12     # 序列长度 76
 
 | 参数 | 默认 | 作用与影响 |
 |---|---|---|
-| `condition_dropout` | 0.15 | 训练时随机丢弃条件向量，使模型同时学到无条件分布，供生成期 CFG 使用。 |
+| `condition_dropout` | 事件 fresh 默认 0 | 额外随机丢弃目标派生控制，供 CFG 使用；已有模型按条件合同继承，可能为 0.15。此项对应 `condition_params.dropout` / `--condition-dropout`，与模型内部 `dropout`、上下文 `context_dropout` 独立。 |
 | 难度/等级条件 | 由 manifest 决定 | 训练时用谱面**作者标注的 BPM**与等级，与检测器无关。 |
 
 ### 2.5 运行环境

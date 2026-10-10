@@ -913,6 +913,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             training_mode = "finetune"
         if training_mode not in {"fresh", "resume", "finetune"}:
             raise ValueError("训练方式只能是：fresh（从头）、resume（断点继续）或 finetune（已有模型加强训练）")
+        condition_params = _event_condition_parameters(payload) if _is_event_family(model_family) else None
         try:
             learning_rate = float(payload.get("lr", 0.00002 if training_mode == "finetune" else 0.0002))
         except (TypeError, ValueError) as exc:
@@ -931,6 +932,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             )
             if inspection["errors"]:
                 raise ValueError("checkpoint 不兼容：\n- " + "\n- ".join(inspection["errors"]))
+            if condition_params is not None:
+                _check_event_condition_parameters(condition_params, inspection.get("data_contract", {}).get("condition_params"))
             stored_planner = inspection.get("model_config", {}).get("planner_profile", "legacy_v1")
             if planner_profile != "auto" and planner_profile != stored_planner:
                 raise ValueError("改变音乐结构规划器需要 fresh 重新训练；原 checkpoint 可使用 auto 或其原规划器继续训练。")
@@ -968,7 +971,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "--num-layers", str(int(payload.get("num_layers", 4))),
                 "--dim-feedforward", str(int(payload.get("dim_feedforward", 1024))),
                 "--dropout", str(payload.get("dropout", 0.1)),
-                "--condition-dropout", str(payload.get("condition_dropout", 0.0)),
+                "--condition-dropout", str(condition_params["dropout"]),
                 "--plan-loss-weight", str(max(0.0, float(payload.get("plan_loss_weight", 0.1)))),
                 "--planner-profile", planner_profile,
                 "--plan-teacher-mix", str(teacher_mix),
@@ -982,7 +985,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                  "--max-difficulty-index", str(max(1, min(6, int(payload.get("max_difficulty_index", 6))))),
                  "--min-level", str(float(payload.get("min_level", 12.0))),
                  "--max-level", str(float(payload.get("max_level", 15.0))),
-                 "--condition-default", str(min(1.0, max(0.0, float(payload.get("condition_default", 0.5))))),
+                 "--condition-default", str(condition_params["default"]),
 
                 "--grad-accumulation", str(max(1, int(payload.get("grad_accumulation", 1)))),
                 "--device", str(payload.get("device", "auto")),
@@ -992,7 +995,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "--audio-cache-gb", str(float(payload.get("audio_cache_gb", 4.0))),
                 "--prewarm-workers", str(payload.get("prewarm_workers", "auto")),
                 "--seed", str(seed),
-                "--condition-mask-prob", str(min(1.0, max(0.0, float(payload.get("condition_mask_prob", 0.5))))),
+                "--condition-mask-prob", str(condition_params["mask_prob"]),
             ]
             if quality_path is not None:
                 args.extend(["--quality-annotations", str(quality_path)])
@@ -1733,6 +1736,37 @@ def _event_difficulty_usable(song: dict[str, Any], difficulty: dict[str, Any]) -
     return bool(
         song.get("maidata_path") and song.get("audio_path")
     ) or bool(difficulty.get("maidata_path") or difficulty.get("source_path"))
+
+
+def _event_condition_parameters(payload: dict[str, Any]) -> dict[str, Any]:
+    controls = {"mask_prob": ("condition_mask_prob", "条件随机遮罩", 0.5),
+                "dropout": ("condition_dropout", "条件随机丢弃（CFG 锚）", 0.0),
+                "default": ("condition_default", "被遮罩控制默认值", 0.5)}
+    values: dict[str, Any] = {"null_embedding": True, "null_policy": "masked_condition_controls"}
+    for key, (field, label, fallback) in controls.items():
+        try:
+            value = float(payload.get(field, fallback))
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label}（{field}）必须是 0–1 的有限数字") from exc
+        if not math.isfinite(value) or not 0 <= value <= 1:
+            raise ValueError(f"{label}（{field}）必须是 0–1 的有限数字")
+        values[key] = value
+    return values
+
+
+def _check_event_condition_parameters(current: dict[str, Any], stored: Any) -> None:
+    if not isinstance(stored, dict):
+        return  # Older incomplete contracts remain guarded by the trainer.
+    labels = {"dropout": "条件随机丢弃（CFG 锚，condition_dropout）",
+              "mask_prob": "条件随机遮罩（condition_mask_prob）",
+              "default": "被遮罩控制默认值（condition_default）"}
+    differences = [f"{labels.get(key, key)}：checkpoint={stored.get(key)!r}，本次={current.get(key)!r}"
+                   for key in sorted(stored.keys() | current.keys()) if stored.get(key) != current.get(key)]
+    if differences:
+        raise ValueError("条件合同不兼容：\n- " + "\n- ".join(differences)
+                         + "\n请点击‘检查 checkpoint’回填原模型参数，或将上述控件设为 checkpoint 的值。"
+                         "模型内部 dropout、上下文随机丢弃 context_dropout 与条件随机丢弃是三个独立参数；"
+                         "resume 和 finetune 都需要保持当前条件合同。")
 
 
 def _is_event_family(family: str | None) -> bool:

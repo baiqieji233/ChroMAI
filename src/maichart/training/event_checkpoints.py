@@ -88,6 +88,14 @@ def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, m
                 # stays strict so optimizer state never crosses regimes.
                 before, after = None, None
             if before != after:
+                if key == "condition_params":
+                    raise ValueError(
+                        f"事件模型数据合同 condition_params 不兼容：已有={contract.get(key)!r}，当前={current.get(key)!r}。"
+                        "其中 dropout 对应‘条件随机丢弃（CFG 锚）/ --condition-dropout’，"
+                        "与模型内部 --dropout、上下文 --context-dropout 独立。"
+                        "resume 和 finetune 都须继承这份 checkpoint 的条件合同；"
+                        "请检查并回填 condition_mask_prob、condition_dropout 与 condition_default。"
+                    )
                 raise ValueError(
                     f"事件模型数据合同 {key} 不兼容：已有={contract.get(key)!r}，当前={current.get(key)!r}。"
                     "更改 Slide/Touch 采样倍率或迁移旧采样策略请用 finetune（--init-checkpoint）；"

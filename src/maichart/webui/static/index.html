@@ -264,11 +264,11 @@
             <input id="overlapBeats" type="number" min="0" max="64" value="0">
             <small>默认 0（窗口首尾相接）。设为 8 时窗口按 8 拍步进，整首歌被重叠扫描；重叠部分以<strong>先写的窗口为准</strong>，因为它正是后一个窗口的上下文。窗口数会成倍增加，训练与生成都变慢。</small>
           </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文随机丢弃
+          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文随机丢弃（context_dropout）
             <input id="contextDropout" type="number" min="0" max="1" step="0.05" value="0.15">
             <small><strong>只作用于"前置上下文块"这一个输入</strong>：训练时按概率把某窗口的前置音符整体去掉（窗口几何不变），
             防止模型学会"直接抄上一段"（文献实测会导致重复段落），并让它学会处理歌曲开头那种无上下文的窗口。
-            <strong>与「条件随机丢弃（CFG 锚）」「dropout」互不相干</strong>——三者各自独立、各自默认 0.15/0.15/0.1。
+            <strong>与「条件随机丢弃（condition_dropout）」「模型内部 Dropout（dropout）」互不相干。</strong>当前 fresh 默认分别为上下文 0.15、条件 0、模型内部 0.1；已有模型以所选 checkpoint 的记录为准。
             验证集侧固定为 0（保证验证 loss 可比较）。</small>
           </label>
           <label class="field">训练随机种子
@@ -309,12 +309,11 @@
             本项目的推荐档位是 <strong>8 层</strong>（配 d_model 256–320）；4 层用于快速试跑，
             16 层以上在 5.5M token/轮的语料上收益递减。改它等于换模型结构，旧 checkpoint 不再兼容。</small>
           </label>
-          <label class="field">dropout
+          <label class="field">模型内部 Dropout（dropout）
             <input id="dropout" type="number" min="0" max="1" step="0.01" value="0.1">
             <small><strong>影响训练结果。</strong>训练时随机丢弃一部分激活，抑制死记硬背。
-            full 训练集下每参数每轮约见 <strong>0.34 个 token</strong>（5.5M ÷ 16M），属于"够用但不宽裕"，
-            起始 <strong>0.1</strong> 即可；只有验证 loss 比训练 loss 明显更早抬头（过拟合）时才提到 0.15–0.2，
-            调到 &gt;0.3 会让模型学不动。</small>
+            fresh 默认 0.1。resume / finetune 的模型结构来自 checkpoint，点击“检查 checkpoint”会显示原模型值。
+            此项对应 <code>model_config.dropout</code>，与条件随机丢弃 <code>condition_dropout</code>、上下文随机丢弃 <code>context_dropout</code> 独立。</small>
           </label>
           <label class="field" data-training-family="event_v1 legacy_frame_v2">前馈层宽度 FFN
             <input id="dimFeedforward" type="number" min="16" step="16" value="1024">
@@ -372,11 +371,12 @@
             <input id="touchOversample" type="number" min="1" step="1" value="1">
             <small><strong>默认 1，填 1 表示关闭过采样但仍保留真实 Touch。</strong>对含 Touch 或 TouchHold 的窗口生效；即使同时含 Slide，也优先使用 Touch 倍率。建议先用 1 抑制 Touch 先验。普通 resume 必须与 checkpoint 合同一致；finetune 可用新倍率迁移权重。</small>
           </label>
-          <label class="field" data-training-family="event_v1 legacy_frame_v2">条件随机丢弃（CFG 锚）
+          <label class="field" data-training-family="event_v1 legacy_frame_v2">条件随机丢弃（CFG 锚，condition_dropout）
             <input id="conditionDropout" type="number" min="0" max="1" step="0.01" value="0">
             <small><strong>与「跨窗口：上下文随机丢弃」是两个互相独立的机制。</strong>当前事件训练默认关闭此额外 dropout；缺省 style 由
             <code>condition_mask_prob=0.5</code> 和显式 <code>null embedding</code> 处理，只遮罩 target-derived controls，保留 level。
-            如需为 CFG 训练额外无条件分支，可显式设置大于 0 的值，并重新 fresh 训练。</small>
+            resume / finetune 必须继承所选 checkpoint 的值；旧模型可能记录为 0.15，点击“检查 checkpoint”会回填。此项对应日志的 <code>condition_params.dropout</code> 和 CLI 的 <code>--condition-dropout</code>，不能用模型内部 dropout 或 context_dropout 代替。
+            如需改变当前条件训练策略，应使用 fresh。</small>
           </label>
         </div>
 
@@ -518,14 +518,18 @@
           <button id="qualityRefreshButton" class="secondary-button" type="button">刷新素材</button>
         </div>
         <div class="quality-bulkbar">
+          <button id="qualitySelectFolderButton" class="secondary-button" type="button">全选当前文件夹（跨页）</button>
+          <button id="qualityClearSelectionButton" class="secondary-button" type="button" disabled>取消全部选择</button>
           <span>已选 <strong id="qualitySelectedCount">0</strong> 项</span>
           <select id="qualityBulkLabel"><option value="excellent">优秀（2）</option><option value="normal">普通（1）</option><option value="reduced">减权（0.25）</option><option value="excluded">排除（0）</option><option value="negative">反例（0）</option></select>
           <label>权重 <input id="qualityBulkWeight" type="number" min="0" max="4" step="0.05" value="2"></label>
           <input id="qualityBulkReason" type="text" placeholder="这批标注的理由（可选）">
           <button id="qualitySaveSelectedButton" class="primary-button" type="button">保存选中标注</button>
         </div>
+        <p id="qualitySelectionStatus" class="muted">文件夹全选包含当前数据集清单中的全部谱面，跨越所有分页，搜索和标签筛选不会缩小范围。选择后再点击“保存选中标注”。</p>
+        <p class="muted">单条手动调整过的权重会跨页保留并优先使用；其余选中谱面使用上方的批量权重。</p>
         <div id="qualitySummary" class="quality-summary-box">尚未加载当前 manifest。</div>
-        <div class="quality-table-wrap"><table class="quality-table"><thead><tr><th><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"></th><th>歌曲 / 难度</th><th>谱师</th><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
+        <div class="quality-table-wrap"><table class="quality-table"><thead><tr><th><label><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"> 本页</label></th><th>歌曲 / 难度</th><th>谱师</th><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
         <div class="quality-pagination"><button id="qualityPrevButton" class="small-button" type="button">上一页</button><span id="qualityPageStatus">第 0 页</span><label class="page-jump">跳到 <input id="qualityPageInput" type="number" min="1" step="1" value="1" aria-label="页码"><button id="qualityPageJumpButton" class="small-button" type="button">跳转</button></label><button id="qualityNextButton" class="small-button" type="button">下一页</button></div>
         <section id="qualityDetail" class="quality-detail" hidden>
           <div class="section-heading"><div><span class="step">DETAIL</span><h3 id="qualityDetailTitle">谱面详情</h3></div><button id="qualityCloseDetailButton" class="small-button" type="button">关闭</button></div>

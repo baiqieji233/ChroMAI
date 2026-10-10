@@ -77,7 +77,7 @@ let checkpointInspection = { key: "", data: null };
 let generationInspection = { path: "", data: null };
 let generationDefaults = {};
 let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false };
-const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, query: "", label: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
+const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
 // Dataset selection is intentionally separate from qualityState: selected
 // sources feed training, while activeDataset is the source currently being
 // browsed/annotated. This prevents a merged training manifest from hiding the
@@ -1194,8 +1194,10 @@ async function openDataset(item) {
   qualityState.catalogRequest += 1;
   qualityState.detailRequest += 1;
   qualityState.items = []; qualityState.page = 1; qualityState.pages = 1; qualityState.total = 0;
+  qualityState.folderTotal = 0; qualityState.selectionRequest += 1; qualityState.selectionLoading = false; qualityState.saving = false; qualityState.editedWeights.clear();
   qualityState.selected.clear(); qualityState.detail = null; qualityState.regions = []; qualityState.correctedPath = "";
   qualityState.annotationPath = ""; qualityState.annotationManifest = ""; qualityState.summary = null;
+  renderQualityCatalog();
   if (element("#qualityDetail")) element("#qualityDetail").hidden = true;
   if (element("#qualityDetailAudio")) { element("#qualityDetailAudio").removeAttribute("src"); element("#qualityDetailAudio").load(); }
   if (element("#qualityCorrectedPath")) element("#qualityCorrectedPath").textContent = "";
@@ -1226,9 +1228,11 @@ function selectDataset(data) {
   const select = element("#datasetSelect");
   if (select) select.value = data.path;
   qualityState.items = []; qualityState.page = 1; qualityState.total = 0;
+  qualityState.folderTotal = 0; qualityState.selectionRequest += 1; qualityState.selectionLoading = false; qualityState.saving = false; qualityState.editedWeights.clear();
   qualityState.annotationPath = ""; qualityState.annotationManifest = "";
   qualityState.summary = null; qualityState.selected.clear(); qualityState.detail = null;
   qualityState.regions = []; qualityState.correctedPath = "";
+  renderQualityCatalog();
   if (element("#qualityCorrectedPath")) element("#qualityCorrectedPath").textContent = "";
   invalidateDatasetStatus(selectedTrainingManifests().length
     ? "当前预处理目录已切换；本次训练仍使用‘训练素材’的勾选来源。"
@@ -1465,6 +1469,9 @@ function renderCheckpointInspection(data) {
     `模型族：${data.model_family_label || data.model_family || "未知"}`,
     `schema：${data.schema || "未记录"}`,
     data.epoch !== undefined ? `保存 epoch：${data.epoch}` : "保存 epoch：未记录",
+    data.model_config?.dropout !== undefined ? `模型内部 Dropout（dropout）：${data.model_config.dropout}` : "",
+    data.data_contract?.condition_params?.dropout !== undefined ? `条件随机丢弃（condition_dropout）：${data.data_contract.condition_params.dropout}；当前控件：${valueOrDefault("#conditionDropout", "未显示")}` : "",
+    data.data_contract?.family_params?.context_dropout !== undefined ? `上下文随机丢弃（context_dropout）：${data.data_contract.family_params.context_dropout}` : "",
     `模型结构：${JSON.stringify(data.model_config || {})}`,
     `数据合同：${JSON.stringify(data.data_contract || {})}`,
     data.model_config?.input_dim !== undefined ? `事件输入维度：${data.model_config.input_dim}` : "",
@@ -1478,7 +1485,9 @@ function renderCheckpointInspection(data) {
     box.hidden = false;
     box.textContent = details;
   }
-  setCheckpointStatus(state + (data.warnings?.length ? `；警告 ${data.warnings.length} 条` : ""), valid ? "good" : "warn");
+  const conditionHint = valid && data.data_contract?.condition_params?.dropout !== undefined
+    ? `；条件随机丢弃（condition_dropout）=${data.data_contract.condition_params.dropout}` : "";
+  setCheckpointStatus(state + conditionHint + (data.warnings?.length ? `；警告 ${data.warnings.length} 条` : ""), valid ? "good" : "warn");
 }
 
 async function inspectCheckpoint() {
@@ -1720,16 +1729,18 @@ function renderQualitySummary() {
 function qualityRowHtml(item) {
   const id = escapeHtml(item.chart_id || item.id || "");
   const label = item.label || item.record?.label || "";
-  const weight = Number(item.weight ?? item.record?.weight ?? QUALITY_DEFAULT_WEIGHTS[label] ?? 1);
+  const rowId = String(item.chart_id || item.id || "");
+  const weight = Number(qualityState.editedWeights.get(rowId) ?? item.weight ?? item.record?.weight ?? QUALITY_DEFAULT_WEIGHTS[label] ?? 1);
   const title = item.maidata_title || item.title || item.song_title || item.song_id || "未知歌曲";
   const folder = item.folder_name || item.folder || item.song_folder || item.song_id || "";
   const source = item.source_dataset_name || item.dataset_name || item.source_dataset || "";
   const difficulty = item.level !== undefined ? `${item.level} · ${item.difficulty_index ?? ""}` : (item.difficulty_index ?? "");
   const selectedId = String(item.chart_id || item.id || "");
-  return `<tr data-chart-id="${id}"><td><input class="quality-row-select" type="checkbox" data-chart-id="${id}" ${qualityState.selected.has(selectedId) ? "checked" : ""}></td>`
+  const disabled = qualityState.selectionLoading || qualityState.saving ? "disabled" : "";
+  return `<tr data-chart-id="${id}"><td><input class="quality-row-select" type="checkbox" data-chart-id="${id}" ${qualityState.selected.has(selectedId) ? "checked" : ""} ${disabled}></td>`
     + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}</td>`
     + `<td>${escapeHtml(item.designer || item.chart_designer || "未标注")}</td><td><span class="quality-label ${escapeHtml(label)}">${escapeHtml(qualityLabelText(label))}</span></td>`
-    + `<td><input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}"></td>`
+    + `<td><input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}" ${disabled}></td>`
     + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">查看</button></td></tr>`;
 }
 
@@ -1741,10 +1752,52 @@ function renderQualityCatalog() {
   if (element("#qualityPageInput")) element("#qualityPageInput").value = String(qualityState.page);
   if (element("#qualityPrevButton")) element("#qualityPrevButton").disabled = qualityState.page <= 1;
   if (element("#qualityNextButton")) element("#qualityNextButton").disabled = qualityState.page >= pageCount;
+  updateQualitySelectionControls();
+}
+
+function updateQualitySelectionControls() {
+  const busy = qualityState.selectionLoading || qualityState.saving;
   if (element("#qualitySelectedCount")) element("#qualitySelectedCount").textContent = qualityState.selected.size;
   const selectAll = element("#qualitySelectAll");
   const selectedOnPage = qualityState.items.filter((item) => qualityState.selected.has(String(item.chart_id || item.id))).length;
-  if (selectAll) { selectAll.checked = qualityState.items.length > 0 && selectedOnPage === qualityState.items.length; selectAll.indeterminate = selectedOnPage > 0 && selectedOnPage < qualityState.items.length; }
+  if (selectAll) { selectAll.checked = qualityState.items.length > 0 && selectedOnPage === qualityState.items.length; selectAll.indeterminate = selectedOnPage > 0 && selectedOnPage < qualityState.items.length; selectAll.disabled = busy; }
+  if (element("#qualitySelectFolderButton")) element("#qualitySelectFolderButton").disabled = busy || !qualityState.folderTotal;
+  if (element("#qualityClearSelectionButton")) element("#qualityClearSelectionButton").disabled = qualityState.saving || !qualityState.selected.size && !qualityState.selectionLoading;
+  if (element("#qualitySaveSelectedButton")) element("#qualitySaveSelectedButton").disabled = busy || !qualityState.selected.size;
+  const status = element("#qualitySelectionStatus");
+  if (status) status.textContent = qualityState.selectionLoading ? "正在读取当前文件夹的全部谱面…"
+    : qualityState.saving ? `正在保存 ${qualityState.selected.size} 张谱面的标注…`
+    : `已选 ${qualityState.selected.size} 张 / 当前文件夹共 ${qualityState.folderTotal} 张。文件夹全选跨越所有分页，包含搜索和标签筛选隐藏的条目；选择后再保存标注。`;
+}
+
+function clearQualitySelection() {
+  qualityState.selectionRequest += 1;
+  qualityState.selectionLoading = false;
+  qualityState.selected.clear();
+  renderQualityCatalog();
+}
+
+async function selectQualityFolder() {
+  const manifest = qualityManifest();
+  if (!manifest) throw new Error("请先打开一个已预处理的数据集目录。");
+  const request = ++qualityState.selectionRequest;
+  qualityState.selectionLoading = true;
+  renderQualityCatalog();
+  try {
+    let data;
+    try { data = await api("/api/quality/selection", { manifest }); }
+    catch (error) {
+      if (/404|Not found/i.test(String(error.message))) throw new Error("当前后端尚未加载跨页全选，请重启 WebUI 服务后再试。");
+      throw error;
+    }
+    if (request !== qualityState.selectionRequest || manifest !== qualityManifest()) return;
+    if (!Array.isArray(data.chart_ids)) throw new Error("后端没有返回完整谱面列表，请重启 WebUI 服务。");
+    qualityState.selected = new Set(data.chart_ids.map(String));
+    qualityState.folderTotal = Number(data.total || qualityState.selected.size);
+    for (const id of qualityState.editedWeights.keys()) if (!qualityState.selected.has(id)) qualityState.editedWeights.delete(id);
+  } finally {
+    if (request === qualityState.selectionRequest) { qualityState.selectionLoading = false; renderQualityCatalog(); }
+  }
 }
 
 async function loadQualityCatalog(resetPage = false) {
@@ -1762,6 +1815,7 @@ async function loadQualityCatalog(resetPage = false) {
   qualityState.pageSize = Math.max(1, Number(data.page_size ?? qualityState.pageSize) || qualityState.pageSize);
   qualityState.pages = Math.max(1, Number(data.pages ?? Math.ceil(Number(data.total || 0) / qualityState.pageSize)) || 1);
   qualityState.total = Number(data.total || 0);
+  qualityState.folderTotal = Number(data.folder_total ?? data.total ?? 0);
   qualityState.annotationPath = data.annotation_path || qualityState.annotationPath || "";
   qualityState.annotationManifest = manifest;
   qualityState.summary = data.summary || null;
@@ -1798,24 +1852,34 @@ async function openQualityDetail(chartId) {
 }
 
 async function saveQualitySelection() {
+  if (qualityState.selectionLoading || qualityState.saving) throw new Error("请等待当前选择或保存操作完成。");
+  const manifest = qualityManifest();
+  const request = qualityState.selectionRequest;
   const chartIds = [...qualityState.selected]; if (!chartIds.length) throw new Error("请先选择谱面。");
   const label = valueOrDefault("#qualityBulkLabel", "normal");
   const bulkWeight = Math.max(0, Math.min(4, numberOrDefault("#qualityBulkWeight", QUALITY_DEFAULT_WEIGHTS[label] ?? 1)));
   const groups = new Map();
   chartIds.forEach((id) => {
     const item = qualityState.items.find((candidate) => String(candidate.chart_id || candidate.id) === String(id));
-    const weight = Math.max(0, Math.min(4, item?._weightEdited ? Number(item.weight) : bulkWeight));
+    const weight = Math.max(0, Math.min(4, qualityState.editedWeights.get(id) ?? (item?._weightEdited ? Number(item.weight) : bulkWeight)));
     const key = String(weight); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(id);
   });
-  let data = {};
-  for (const [weight, ids] of groups) {
-    data = await api("/api/quality/save", { manifest: qualityManifest(), chart_ids: ids, label, weight: Number(weight), reason: valueOrDefault("#qualityBulkReason", "").trim() });
+  const reason = valueOrDefault("#qualityBulkReason", "").trim();
+  qualityState.saving = true; renderQualityCatalog();
+  try {
+    let data = {};
+    for (const [weight, ids] of groups) {
+      data = await api("/api/quality/save", { manifest, chart_ids: ids, label, weight: Number(weight), reason });
+    }
+    if (request !== qualityState.selectionRequest || manifest !== qualityManifest()) return;
+    qualityState.annotationPath = data.annotation_path || qualityState.annotationPath;
+    qualityState.annotationManifest = manifest;
+    qualityState.summary = data.summary || qualityState.summary;
+    qualityState.selected.clear(); qualityState.editedWeights.clear();
+    renderQualitySummary(); await loadQualityCatalog(false);
+  } finally {
+    if (request === qualityState.selectionRequest) { qualityState.saving = false; renderQualityCatalog(); }
   }
-  qualityState.annotationPath = data.annotation_path || qualityState.annotationPath;
-  qualityState.annotationManifest = qualityManifest();
-  qualityState.summary = data.summary || qualityState.summary;
-  qualityState.selected.clear();
-  renderQualitySummary(); await loadQualityCatalog(false);
 }
 
 function collectQualityRegions() {
@@ -2615,6 +2679,8 @@ on("#qualitySortBy", "change", () => loadQualityCatalog(true));
 on("#qualitySortDirection", "change", () => loadQualityCatalog(true));
 on("#qualityPageSize", "change", (event) => { qualityState.pageSize = Math.max(1, Number(event.target.value) || 25); loadQualityCatalog(true); });
 on("#qualitySaveSelectedButton", "click", saveQualitySelection);
+on("#qualitySelectFolderButton", "click", selectQualityFolder);
+on("#qualityClearSelectionButton", "click", clearQualitySelection);
 on("#qualityPrevButton", "click", async () => { if (qualityState.page > 1) { qualityState.page -= 1; await loadQualityCatalog(false); } });
 on("#qualityNextButton", "click", async () => { if (qualityState.page < (qualityState.pages || Math.ceil(qualityState.total / qualityState.pageSize))) { qualityState.page += 1; await loadQualityCatalog(false); } });
 on("#qualityPageJumpButton", "click", async () => {
@@ -2632,9 +2698,9 @@ on("#qualitySaveCorrectionButton", "click", saveQualityCorrection);
 on("#qualityBulkLabel", "change", (event) => { const weight = element("#qualityBulkWeight"); if (weight) weight.value = QUALITY_DEFAULT_WEIGHTS[event.target.value] ?? 1; });
 document.addEventListener("change", (event) => {
   const row = event.target.closest?.(".quality-row-select");
-  if (row) { const id = row.dataset.chartId; if (row.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); if (element("#qualitySelectedCount")) element("#qualitySelectedCount").textContent = qualityState.selected.size; }
+  if (row) { const id = row.dataset.chartId; if (row.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); updateQualitySelectionControls(); }
   const weight = event.target.closest?.(".quality-weight");
-  if (weight) { const item = qualityState.items.find((candidate) => String(candidate.chart_id || candidate.id) === String(weight.dataset.chartId)); if (item) { item.weight = Math.max(0, Math.min(4, Number(weight.value))); item._weightEdited = true; } }
+  if (weight) { const item = qualityState.items.find((candidate) => String(candidate.chart_id || candidate.id) === String(weight.dataset.chartId)); if (item) { item.weight = Math.max(0, Math.min(4, Number(weight.value))); item._weightEdited = true; qualityState.editedWeights.set(String(weight.dataset.chartId), item.weight); } }
 }, true);
 document.addEventListener("click", (event) => {
   const preprocessButton = event.target.closest?.(".dataset-card-preprocess");

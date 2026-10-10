@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 from maichart.webui.quality_api import QualityAPI
-from maichart.training.quality_annotations import chart_id, chart_sha256, load_annotations, save_annotations
+from maichart.training.quality_annotations import chart_id, chart_sha256, iter_catalog, load_annotations, save_annotations
 
 
 def test_quality_api_catalog_save_detail_preview(tmp_path):
@@ -106,6 +106,49 @@ def test_quality_catalog_namespaces_same_named_dataset_paths(tmp_path):
     assert rows[0]["source_dataset"] == rows[1]["source_dataset"] == "同名精选集"
     assert rows[0]["chart_id"] != rows[1]["chart_id"]
     assert rows[0]["source_dataset_id"] != rows[1]["source_dataset_id"]
+
+
+def test_quality_catalog_designer_uses_slot_then_global_then_manifest_fallback(tmp_path):
+    song = tmp_path / "song"
+    song.mkdir()
+    source = song / "maidata.txt"
+    source.write_text(
+        "&title=Fallbacks\n&wholebpm=120\n&des=Global Designer\n"
+        "&lv_1=10\n&inote_1=(120){4}1,\n"
+        "&lv_2=11\n&des_2=Slot Designer\n&inote_2=(120){4}2,\n"
+        "&lv_3=12\n&des_3=   \n&inote_3=(120){4}3,\n"
+        "&lv_4=13\n&inote_4=(120){4}4,\n",
+        encoding="utf-8",
+    )
+    manifest = tmp_path / "training_manifest.json"
+    manifest.write_text(json.dumps({
+        "schema": "maichart-training-manifest-v1", "source_root": ".", "songs": [{
+            "song_id": "fallbacks", "maidata_path": "song/maidata.txt", "difficulties": [
+                {"index": 1, "level": "10", "designer": "Manifest One"},
+                {"index": 2, "level": "11", "designer": "Manifest Two"},
+                {"index": 3, "level": "12", "designer": "Manifest Three"},
+                {"index": 4, "level": "13", "designer": "Manifest Four"},
+            ],
+        }],
+    }), encoding="utf-8")
+
+    rows = {row.difficulty_index: row for row in iter_catalog(manifest)}
+    assert rows[1].designer == "Global Designer"
+    assert rows[2].designer == "Slot Designer"
+    assert rows[3].designer == "Global Designer"
+    assert rows[4].designer == "Global Designer"
+
+    # With no global or slot metadata, the existing manifest fallback remains.
+    source.write_text(source.read_text(encoding="utf-8").replace("&des=Global Designer\n", ""), encoding="utf-8")
+    rows = {row.difficulty_index: row for row in iter_catalog(manifest)}
+    assert rows[1].designer == "Manifest One"
+    assert rows[2].designer == "Slot Designer"
+    assert rows[3].designer == "Manifest Three"
+    assert rows[4].designer == "Manifest Four"
+
+    # Global display metadata must not alter chart identity/hash semantics.
+    source.write_text(source.read_text(encoding="utf-8").replace("&title=Fallbacks\n", "&title=Fallbacks\n&des=Changed Global\n"), encoding="utf-8")
+    assert chart_sha256(source, 1) == rows[1].chart_sha256
 
 
 def test_quality_save_migrates_old_namespaced_record_without_duplicates(tmp_path):

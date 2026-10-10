@@ -298,8 +298,9 @@ def iter_catalog(manifest_path: str | Path) -> list[CatalogChart]:
             parsed_difficulty = next((item for item in parsed_chart.difficulties if item.index == index), None)
             parsed_level = _clean_text(getattr(parsed_difficulty, "level", None)) if parsed_difficulty else None
             parsed_designer = _clean_text(getattr(parsed_difficulty, "designer", None)) if parsed_difficulty else None
+            global_designer = _clean_text(getattr(parsed_chart, "fields", {}).get("des"))
             level = parsed_level or _clean_text(difficulty.get("level", difficulty.get("level_raw")))
-            designer = parsed_designer or _clean_text(difficulty.get("designer"))
+            designer = parsed_designer or global_designer or _clean_text(difficulty.get("designer"))
             source_key = _clean_text(song.get("source_path_key")) or _relative_source_key(maidata, source_root)
             rows.append(CatalogChart(
                 # Include the relative source path in the namespace.  This

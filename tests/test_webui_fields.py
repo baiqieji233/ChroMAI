@@ -48,7 +48,8 @@ def test_training_filter_controls_and_workspace_tabs_exist():
     assert 'condition_dropout: Number(valueOrDefault("#conditionDropout", 0))' in APP_JS
     assert "manifest: datasetPaths().manifest" in APP_JS
     server = (ROOT / "src/maichart/webui/server.py").read_text(encoding="utf-8")
-    assert 'payload.get("condition_dropout", 0.0)' in server
+    from maichart.webui.server import _event_condition_parameters
+    assert _event_condition_parameters({})["dropout"] == 0.0
     assert '"--plan-loss-weight"' in server
     assert '"--max-steps"' in server and '"--validation-max-steps"' in server
 
