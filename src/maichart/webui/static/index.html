@@ -898,6 +898,22 @@
             <small>仅在启用检测且修复模式不是 none 时使用。0 表示关闭重试。</small>
           </label>
 
+          <h3 data-generation-family="event_v1">运行时参考检查（可选）</h3>
+          <p data-generation-family="event_v1" class="help-text">可调用本机 MiaCode 参考程序生成报告，或在参考检查失败时拒绝候选。它不是实际机台播放器，也不是官方判定器；旧 checkpoint 默认不受影响。</p>
+          <label class="field" data-generation-family="event_v1">参考检查模式
+            <select id="runtimeReferenceMode"><option value="off" selected>关闭</option><option value="report">生成报告（不拒绝）</option><option value="reject">失败时拒绝候选</option></select>
+            <small>report 只记录参考结果；reject 会在参考程序报告失败时拒绝该候选。需要填写可执行文件路径。</small>
+          </label>
+          <label class="field span-2" data-generation-family="event_v1">参考程序可执行文件
+            <input id="runtimeReferenceExecutable" type="text" placeholder="例如 C:\\tools\\MiaCode.exe">
+            <small>路径只传给后端执行；请确认该程序可在当前机器上无交互运行。</small>
+          </label>
+          <label class="field" data-generation-family="event_v1">参考检查超时（秒）
+            <input id="runtimeReferenceTimeoutSec" type="number" min="1" max="300" step="1" value="30">
+            <small>每个候选的最大运行时间，默认 30 秒。</small>
+          </label>
+          <p id="runtimeReferenceStatus" data-generation-family="event_v1" class="inline-status" hidden></p>
+
           <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Presence threshold
             <input id="presenceThreshold" type="number" min="0" max="1" step="0.01" value="0.45">
           </label>

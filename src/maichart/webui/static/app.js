@@ -92,6 +92,7 @@ const GENERATION_PARAM_FIELDS = [
   "guidanceScale", "presenceThreshold", "buttonThreshold",
   "fineNoteStrength", "localOnsetBiasStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
   "conflictRepairMode", "conflictRetries",
+  "runtimeReferenceMode", "runtimeReferenceExecutable", "runtimeReferenceTimeoutSec",
 ];
 
 let activeTaskId = null;
@@ -600,6 +601,17 @@ function updateGenerationCapabilityControls() {
   });
   const retries = element("#conflictRetries");
   if (retries) retries.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") !== "none");
+  const referenceMode = valueOrDefault("#runtimeReferenceMode", "off");
+  const referenceExecutable = valueOrDefault("#runtimeReferenceExecutable", "").trim();
+  const referenceStatus = element("#runtimeReferenceStatus");
+  if (referenceStatus) {
+    const requested = referenceMode !== "off";
+    referenceStatus.hidden = !requested;
+    referenceStatus.className = `inline-status ${requested && referenceExecutable ? "success" : "warning"}`;
+    referenceStatus.textContent = !requested ? "" : referenceExecutable
+      ? `已填写运行时参考请求：${referenceMode === "reject" ? "失败时拒绝候选" : "仅报告"}；后端会检查可执行文件并在 ${Number(valueOrDefault("#runtimeReferenceTimeoutSec", 30)) || 30} 秒后超时。`
+      : "已选择运行时参考模式，但尚未填写可执行文件路径；提交生成前请补充路径。";
+  }
 }
 
 // A field marked for one family applies to its descendants too: the
@@ -854,6 +866,9 @@ function generationPayload() {
     conflict_repair_mode: valueOrDefault("#conflictRepairMode", "none"),
     conflict_retries: Number(valueOrDefault("#conflictRetries", 0)),
     detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
+    runtime_reference_mode: valueOrDefault("#runtimeReferenceMode", "off"),
+    runtime_reference_executable: valueOrDefault("#runtimeReferenceExecutable", "").trim() || null,
+    runtime_reference_timeout_sec: Number(valueOrDefault("#runtimeReferenceTimeoutSec", 30)),
     fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
     local_onset_bias_strength: element("#localOnsetBiasStrength")?.disabled
       ? 0 : Number(valueOrDefault("#localOnsetBiasStrength", 0)),
