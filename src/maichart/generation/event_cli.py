@@ -39,7 +39,7 @@ from maichart.generation.music_plan import (
     MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
 )
 from maichart.generation.model_compatibility import (
-    detect_model_family, get_generation_config_for_model, validate_args_for_model
+    checkpoint_capabilities, detect_model_family, get_generation_config_for_model, validate_args_for_model
 )
 from maichart.generation.post_process import (
     PostProcessConfig, detect_chart_conflicts, process_chart_points,
@@ -442,7 +442,8 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
             sample, seed, guidance_scale=1.0, top_p: float = 0.0, repetition_penalty: float = 1.0,
             repetition_window: int = 128, atom_catalog=None, allow_truncated=False,
             prefix_ids: list[int] | None = None, position_offset: Fraction = Fraction(0), condition_default: float = 0.5,
-            plan_override=None, plan_controls=None, plan_audio_mask=None, density_feedback=None):
+            plan_override=None, plan_controls=None, plan_audio_mask=None, density_feedback=None,
+            position_end: Fraction | None = None):
     """Sample one window, optionally seeded with a lead-in context block.
 
     ``prefix_ids`` is the cross-window family's ``<ctx> ... <ctx_end>`` block.
@@ -583,6 +584,13 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
                 unconditioned = unconditional[:, -1, :].squeeze(0)
                 logits = unconditioned + float(guidance_scale) * (logits - unconditioned)
             allowed = _allowed_ids(vocabulary, state, chars, last_beat, note_text, note_grammar)
+            if state == "position" and position_end is not None:
+                # Context-family vocabulary spans lead-in + target. Particularly
+                # at the song's first window, frequent AT:16+ tokens must not be
+                # generated and then silently discarded by the merge.
+                allowed = [idx for idx in allowed
+                           if not vocabulary.id_to_token[idx].startswith("AT:")
+                           or position_offset <= Fraction(vocabulary.id_to_token[idx][3:]) < position_end]
             if not allowed:
                 raise ValueError(f"decoder reached an invalid grammar state: state={state!r}, chars={chars}")
             masked = torch.full_like(logits, float("-inf"))
@@ -609,6 +617,9 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
             token = vocabulary.id_to_token[token_id]
             if state == "position":
                 if token == EVENT_EOS:
+                    if position_end is not None and not any(vocabulary.id_to_token[i].startswith("AT:") for i in allowed):
+                        finished = True
+                        break
                     # Empty-window guard: a model can answer <eos> immediately
                     # for a window whose audio or lead-in looks quiet, which is
                     # exactly where the measured blank windows came from.  A
@@ -1282,6 +1293,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
                     atom_catalog=atom_catalog, prefix_ids=prefix_ids, position_offset=offset, condition_default=condition_default,
+                    position_end=offset + end - start,
                     **planner_kwargs,
                 )
                 closed = True
@@ -1308,6 +1320,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     repetition_window=repetition_window,
                     atom_catalog=atom_catalog, allow_truncated=True, prefix_ids=prefix_ids,
                     position_offset=offset, condition_default=condition_default,
+                    position_end=offset + end - start,
                     **planner_kwargs,
                 )
                 closed = False
@@ -1422,13 +1435,10 @@ def _context_prefix(vocabulary: EventVocabulary, windows: list[_DecodedWindow], 
 
     from maichart.generation.event_ctx import lead_in_events, prefix_token_ids
 
-    points: list[EventPoint] = []
-    for window in windows:
-        for beat, text in zip(window.sequence.beats, window.sequence.note_texts):
-            absolute = Fraction(beat) + window.start_beat
-            if absolute < window.start_beat or absolute >= window.end_beat:
-                continue
-            points.append(EventPoint(absolute, text))
+    # Match final merge ownership: an overlap belongs to the earlier window.
+    # Duplicate AT positions otherwise make prefix encoding fail and drop all
+    # context exactly at the seam where it is needed.
+    points = _merge_windows(windows, overlap_beats=1)
     if not points:
         return _empty_prefix(vocabulary)
     events = lead_in_events(points, start, context_beats)
@@ -1823,6 +1833,9 @@ def main(argv=None) -> int:
     try:
         device = _device(args.device)
         model, vocabulary, checkpoint = load_event_model(args.checkpoint, device)
+        capabilities = checkpoint_capabilities(checkpoint)
+        if capabilities["errors"]:
+            raise ValueError("checkpoint capability contract invalid: " + "; ".join(capabilities["errors"]))
         # 检测模型类型和兼容性
         model_family = detect_model_family(checkpoint)
         is_valid, warnings = validate_args_for_model(model_family, args, checkpoint=checkpoint)
@@ -2096,7 +2109,8 @@ def main(argv=None) -> int:
                     target_ir.write_text(json.dumps({"schema": "maichart-event-chart-v1",
                         "points": [p.to_dict() for p in points],
                         "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
-                        "first": args.first, "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
+                        "first": args.first, "end_beat": str(duration_beats),
+                        "audio_duration_sec": audio.duration_sec, "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
                     target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
                     print("candidate rejected by static playability references", flush=True)
                     failures += 1
@@ -2161,6 +2175,10 @@ def main(argv=None) -> int:
                 "repetition_window": int(args.repetition_window),
                 "guidance_scale": float(args.guidance_scale),
                 "model_family": str((checkpoint.get("data_contract", {}) or {}).get("target_schema") or "event_v1"),
+                "planner_profile": str(getattr(model, "planner_profile", "legacy_v1")),
+                "fine_note_strength_requested": float(args.fine_note_strength),
+                "fine_note_strength_effective": float(generation_config.get("fine_note_strength", 0.5)),
+                "fine_note_control": "relative_window_log_odds_v1",
             }
             quality["generation_status"] = "success" if not note_warnings else "success_with_warnings"
             quality["windows_decoded"] = len(decoded)
@@ -2201,12 +2219,14 @@ def main(argv=None) -> int:
                 target.with_suffix(".original.chart.json").write_text(json.dumps({
                     "schema": "maichart-event-chart-v1", "points": [p.to_dict() for p in original_points],
                     "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
-                    "first": args.first}, ensure_ascii=False, indent=2), encoding="utf-8")
+                    "first": args.first, "end_beat": str(duration_beats),
+                    "audio_duration_sec": audio.duration_sec}, ensure_ascii=False, indent=2), encoding="utf-8")
                 target.with_suffix(".repaired.txt").write_text(text, encoding="utf-8")
             target.write_text(text, encoding="utf-8")
             target_ir.write_text(json.dumps({"schema": "maichart-event-chart-v1", "points": [point.to_dict() for point in points],
                                              "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
-                                             "first": args.first,
+                                             "first": args.first, "end_beat": str(duration_beats),
+                                             "audio_duration_sec": audio.duration_sec,
                                              "chart_ir": json.loads(__import__("maichart.serialization", fromlist=["chart_to_json"]).chart_to_json(chart)),
                                              "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
             target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
