@@ -2,7 +2,38 @@
 
 更新：2026-10-11。训练和评估仍在运行，本文件只记录已核实的迁移与当前证据，不代表谱面质量验收完成。
 
+## 当前有效运行：服务退出后的恢复
+
+2026-10-11 00:50 核对时，原 7863 服务、训练进程和控制器均已退出，日志停在 00:40:27 的第 8 轮中途；退出原因未从这些日志中确定。最后完整保存的是第 7 轮，不能把未保存的第 8 轮当成已完成。
+
+已重新启动 7863，并在 00:54:50 通过 WebUI `/api/train` 恢复：
+
+- 当前训练任务：`94c977ca7b46`
+- 起点：`checkpoints/music_structure_v3_full_stage1/event_epoch_007.pt`
+- 追加 8 轮，目标第 15 轮；优化器、scheduler、AMP scaler 保留，`reset_optimizer=false`
+- 已保存 global step 为 9106；validation mask schedule 保持 `fixed_seed_0_v1`
+- 当前训练日志：`webui_workspace/logs/20261011_005450_train_94c977ca7b46.log`
+- 当前队列配置：`.scratch/full_v3_stage1/pipeline_config_recovered.json`
+- 当前持久状态：`.scratch/full_v3_stage1/pipeline_state_recovered.json`
+- 当前队列报告：`.scratch/full_v3_stage1/PIPELINE_REPORT_RECOVERED.md`
+
+原 v2 队列尚未提交任何后续任务，已连同配置/报告备份到 `.scratch/full_v3_stage1/recovery_20261011`。新的队列只观察当前训练，完成后仍执行既定 5 轮 finetune 和 70 次生成，不重复启动已运行的训练。请求、响应和预检也在该恢复目录中。00:58:29 实际日志记录 `optimizer_attempted=48 optimizer_successful=48`，确认已执行第 8 轮参数更新。
+
+第 7 轮历史指标：训练 token loss `0.746608`、验证 token loss `0.783475`、fine-rhythm MAE `0.1881`；1301 次更新尝试中成功 1300 次，AMP 跳过 1 次。一次跳步不等于整轮失败；新计数如实保留该区别。
+
+## 曲线模型身份误报修复
+
+用户最新曲线 `2e5af81afe6b_automatic.json` 绑定的模型路径、文件大小和实际修改时间仍一致，因此此前仅解释为 `event_last.pt` 被覆盖并不完整。真实原因之一是 Python 纳秒时间戳 `1791649885336194900` 经 JavaScript Number/JSON 往返变成 `1791649885336194800`，原字典严格比较误判为换模型。
+
+提交 `4e9ad5f` 已用 checkpoint SHA-256 与大小校验新曲线，并把纳秒值保存为字符串；旧曲线仅兼容同一个时间戳的浮点往返误差，实际改换/覆盖 checkpoint 仍拒绝。曲线预测期间文件变化也会中止。49 项定向测试通过。
+
+恢复的 7863 服务已加载修复；真实旧曲线经 JavaScript 序列化发送后通过模型身份检查，同时故意改变 `first` 仍被后续条件/节拍校验拒绝，未提交生成任务。证据：`recovery_20261011/curve_identity_verified.json`。其它已运行的 WebUI 进程未被重启，未必已加载这项 Python 修复；可直接使用当前 7863。
+
+训练时 `event_last.pt` / `event_best.pt` 会继续被后续轮次更新。若需要边训练边编辑模型曲线，应选定 `event_epoch_NNN.pt` 并用它重新生成曲线，避免真实的权重变化令编辑中的曲线失效。这与是否使用最新模型架构是两个不同问题。
+
 ## 续训迁移
+
+以下保留首次从第 4 轮续训的历史记录；当前运行以本文件最上方的恢复信息为准。
 
 原始 full 训练任务 `d32a25d95f70` 在第 4 轮完整保存 `event_epoch_004.pt` 后被停止。停止前的第 4 轮指标为训练 token loss `0.900950`、验证 token loss `0.953507`、token accuracy `0.6899`、fine-rhythm MAE `0.1689`。没有使用未完成的第 5 轮状态。
 
