@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
 import re
 import sys
@@ -100,12 +101,19 @@ def load_config(path: Path) -> tuple[dict[str, Any], Path]:
     state_path = _resolve(config["state_path"], path.parent)
     if state_path == pipeline_path:
         raise ValueError("state_path must not alias pipeline_state.")
+    if state_path == path:
+        raise ValueError("state_path must not alias the diagnostics config file.")
     protected_paths = {pipeline_path, state_path, path}
+    state_input_paths = set()
     for job in config["jobs"]:
         if isinstance(job, dict):
             for key in ("checkpoint", "manifest"):
                 if job.get(key):
-                    protected_paths.add(_resolve(job[key], path.parent))
+                    input_path = _resolve(job[key], path.parent)
+                    protected_paths.add(input_path)
+                    state_input_paths.add(input_path)
+    if state_path in state_input_paths:
+        raise ValueError("state_path must not alias a configured checkpoint or manifest.")
     names = set()
     for index, job in enumerate(config["jobs"]):
         if not isinstance(job, dict):
@@ -135,8 +143,8 @@ def load_config(path: Path) -> tuple[dict[str, Any], Path]:
         if limit < 1 or batch_size not in {2, 4}:
             raise ValueError(f"jobs[{index}] requires limit >= 1 and batch_size 2 or 4.")
     poll_seconds = float(config.get("poll_seconds", 10))
-    if poll_seconds < 0:
-        raise ValueError("poll_seconds must be nonnegative.")
+    if not math.isfinite(poll_seconds) or poll_seconds < 0:
+        raise ValueError("poll_seconds must be finite and nonnegative.")
     config["poll_seconds"] = poll_seconds
     return config, path.parent
 

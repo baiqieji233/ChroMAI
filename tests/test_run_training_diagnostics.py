@@ -181,6 +181,43 @@ def test_state_path_cannot_alias_pipeline_state(tmp_path):
         load_config(config_path)
 
 
+@pytest.mark.parametrize("alias", ["config", "checkpoint", "manifest"])
+def test_state_path_cannot_alias_configured_input(tmp_path, alias):
+    config_path, checkpoint = _write_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    values = {"config": str(config_path), "checkpoint": str(checkpoint),
+              "manifest": data["jobs"][0]["manifest"]}
+    data["state_path"] = values[alias]
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="state_path must not alias"):
+        load_config(config_path)
+
+
+def test_output_is_checked_against_later_jobs_inputs(tmp_path):
+    config_path, checkpoint = _write_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    later_manifest = tmp_path / "second_manifest.json"
+    data["jobs"][0]["output"] = str(later_manifest)
+    data["jobs"].append({
+        "training_job_name": "train-second", "checkpoint": str(checkpoint),
+        "kind": "event_tokens", "manifest": str(later_manifest), "cache_dir": "cache",
+        "output": "diagnostics/second.json",
+    })
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="output aliases a protected"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize("poll_seconds", [float("nan"), float("inf"), -float("inf")])
+def test_poll_interval_must_be_finite(tmp_path, poll_seconds):
+    config_path, _ = _write_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["poll_seconds"] = poll_seconds
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="finite and nonnegative"):
+        load_config(config_path)
+
+
 @pytest.mark.parametrize("pipeline_status", ["failed", "cancelled", "dependency_failed", "completed_with_errors"])
 @pytest.mark.parametrize("job_present", [True, False])
 def test_terminal_upstream_status_fails_pending_or_absent_selected_job(
