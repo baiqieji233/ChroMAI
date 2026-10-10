@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import time
@@ -34,6 +35,7 @@ from maichart.generation.event_audio import (
     compress_event_audio,
     extract_event_audio,
     legacy_feature_view,
+    _time_to_beat, _normalize_tempo_map,
 )
 from maichart.generation.music_plan import (
     MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
@@ -45,6 +47,7 @@ from maichart.generation.post_process import (
     PostProcessConfig, detect_chart_conflicts, process_chart_points,
 )
 from maichart.generation.event_compile import compile_event_points
+from maichart.generation.timeline import normalize_tempo_map, serialize_tempo_map, tempo_map_fingerprint, beat_at_audio_end
 from maichart.generation.event_model import (
     EVENT_BOS,
     EVENT_END,
@@ -1224,7 +1227,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             continue
         segment_audio = audio_segment_tensor(
             audio, begin_sec, end_sec, song_duration=song_duration, bpm=bpm,
-            start_beat=begin_beat, first=first, tempo_changes=tempo_changes,
+            start_beat=_time_to_beat(float(begin_sec) - first, _normalize_tempo_map(tempo_changes, bpm)),
+            first=first, tempo_changes=tempo_changes,
         )
         expected_dim = _expected_input_dim(model)
         if expected_dim is not None:
@@ -1644,6 +1648,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--level", type=float, default=GENERATION_DEFAULTS["level"],
                         help=f"Target difficulty (corpus median {GENERATION_DEFAULTS['level']}).")
     parser.add_argument("--bpm", type=float)
+    parser.add_argument("--tempo-map", help="Explicit tempo-map JSON file; takes priority over --bpm and automatic tempo.")
     parser.add_argument("--first", type=float, default=0.0)
     parser.add_argument("--tempo-mode", choices=("auto", "constant"),
                         default=GENERATION_SAMPLING_DEFAULTS["tempo_mode"],
@@ -1867,7 +1872,8 @@ def main(argv=None) -> int:
                 raise ValueError("intensity curve must include audio_sha256 to prevent applying it to another song")
             print(f"intensity_curve={args.intensity_curve} schema={intensity_curve.get('schema')} "
                   f"audio_sha256={actual_hash[:12]} duration={audio.duration_sec:.3f}s", flush=True)
-        detected_bpm = float(args.bpm or audio.tempo_bpm)
+        explicit_tempo = normalize_tempo_map(json.loads(Path(args.tempo_map).read_text(encoding="utf-8-sig"))) if args.tempo_map else None
+        detected_bpm = float(explicit_tempo[0].bpm if explicit_tempo else args.bpm or audio.tempo_bpm)
         if detected_bpm <= 0:
             raise ValueError("BPM could not be estimated. Provide --bpm.")
         # The tracker reports tempogram lag bins such as 3000/22, and in Simai
@@ -1876,8 +1882,11 @@ def main(argv=None) -> int:
         # every note in the song, so an explicit --bpm is used verbatim while a
         # detected estimate is snapped to a musical value.
         bpm = detected_bpm if args.bpm is not None else _musical_bpm(detected_bpm)
-        tempo_changes = _tempo_map(args.tempo_mode, audio, bpm, snap=args.bpm is None)
+        tempo_changes = explicit_tempo or _tempo_map(args.tempo_mode, audio, bpm, snap=args.bpm is None)
         bpm = float(tempo_changes[0].bpm)
+        if intensity_curve is not None and str(intensity_curve.get("method", "")).startswith("learned_music_structure_"):
+            if intensity_curve.get("tempo_map_sha256") != tempo_map_fingerprint(explicit_tempo):
+                raise ValueError("Learned intensity curve was created with another explicit tempo map; regenerate it")
         condition = GenerationCondition(level=args.level, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
         condition_source = "corpus_defaults"
         profile_values = None
@@ -1934,13 +1943,25 @@ def main(argv=None) -> int:
         expected_dim = _expected_input_dim(model)
         if expected_dim is not None:
             global_audio = _fit_feature_dim(global_audio, expected_dim, where="global_memory")
-        duration_seconds = max(0.0, float(audio.duration_sec - args.first))
-        duration_beats = _duration_beats(duration_seconds, bpm)
+        duration_beats = beat_at_audio_end(audio.duration_sec, tempo_changes, args.first)
         segment_beats = int(checkpoint.get("data_contract", {}).get("segment_beats") or 16)
         overlap_beats = int(checkpoint.get("data_contract", {}).get("family_params", {}).get("overlap_beats", args.overlap_beats) or 0)
         windows = _segment_windows(duration_beats, segment_beats, overlap_beats=overlap_beats)
         if not windows:
             raise ValueError("Audio duration is too short to place any chart beat.")
+        def source_identity(path):
+            source = Path(path)
+            if not source.is_file():
+                return {"path": str(source.resolve()), "sha256": None}
+            stat = source.stat()
+            digest = hashlib.sha256()
+            with source.open("rb") as stream:
+                for block in iter(lambda: stream.read(1024 * 1024), b""):
+                    digest.update(block)
+            return {"path": str(source.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                    "sha256": digest.hexdigest()}
+        audio_identity = source_identity(args.audio)
+        checkpoint_identity = source_identity(args.checkpoint)
     except Exception as exc:
         _write_failure_report(output, quality_path, exc)
         print(f"generation_status=failed error={exc}", flush=True)
@@ -2042,6 +2063,12 @@ def main(argv=None) -> int:
             quality = assess_event_chart(points, tempo_changes, first=args.first,
                                          duration_sec=max(float(audio.duration_sec - args.first), 1e-3),
                                          target_condition=condition)
+            quality["audio_sha256"] = audio_identity["sha256"]
+            quality["checkpoint_identity"] = checkpoint_identity
+            quality["audio_duration_sec"] = audio.duration_sec
+            quality["timing_inputs"] = {"explicit_tempo_map": serialize_tempo_map(explicit_tempo) if explicit_tempo else None,
+                                        "tempo_map_sha256": tempo_map_fingerprint(explicit_tempo),
+                                        "first": args.first, "tempo_mode": args.tempo_mode}
             if previous is not None:
                 quality["previous_output_backup"] = str(previous)
             if intensity_curve is not None:
@@ -2110,7 +2137,7 @@ def main(argv=None) -> int:
                         "points": [p.to_dict() for p in points],
                         "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
                         "first": args.first, "end_beat": str(duration_beats),
-                        "audio_duration_sec": audio.duration_sec, "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
+                        "audio_duration_sec": audio.duration_sec, "audio_sha256": audio_identity["sha256"], "checkpoint_identity": checkpoint_identity, "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
                     target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
                     print("candidate rejected by static playability references", flush=True)
                     failures += 1
@@ -2223,13 +2250,15 @@ def main(argv=None) -> int:
                     "schema": "maichart-event-chart-v1", "points": [p.to_dict() for p in original_points],
                     "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
                     "first": args.first, "end_beat": str(duration_beats),
-                    "audio_duration_sec": audio.duration_sec}, ensure_ascii=False, indent=2), encoding="utf-8")
+                    "audio_duration_sec": audio.duration_sec, "audio_sha256": audio_identity["sha256"], "checkpoint_identity": checkpoint_identity}, ensure_ascii=False, indent=2), encoding="utf-8")
                 target.with_suffix(".repaired.txt").write_text(text, encoding="utf-8")
             target.write_text(text, encoding="utf-8")
             target_ir.write_text(json.dumps({"schema": "maichart-event-chart-v1", "points": [point.to_dict() for point in points],
                                              "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
                                              "first": args.first, "end_beat": str(duration_beats),
                                              "audio_duration_sec": audio.duration_sec,
+                                             "audio_sha256": audio_identity["sha256"], "checkpoint_identity": checkpoint_identity,
+                                             "title": args.title, "difficulty": condition.difficulty, "level": str(condition.level),
                                              "chart_ir": json.loads(__import__("maichart.serialization", fromlist=["chart_to_json"]).chart_to_json(chart)),
                                              "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
             target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
