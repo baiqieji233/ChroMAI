@@ -2,19 +2,29 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.run_staged_rhythm_validation import StateFileLock, StateLockError, run_config
+from tools.run_staged_rhythm_validation import (
+    StateFileLock,
+    StateLockError,
+    StagedRhythmValidation,
+    _load_config,
+    _generation_output_paths,
+    run_config,
+)
 
 
 class FakeClient:
-    def __init__(self, *, gets=None, posts=None):
+    def __init__(self, *, gets=None, posts=None, on_post=None):
         self.gets = {key: list(value) if isinstance(value, list) else [value]
                      for key, value in (gets or {}).items()}
         self.posts = list(posts or [])
         self.get_calls = []
         self.post_calls = []
         self.timeouts = []
+        self.on_post = on_post
 
     def request(self, method, url, *, payload, timeout):
         self.timeouts.append(timeout)
@@ -27,13 +37,16 @@ class FakeClient:
                 raise item
             return item
         self.post_calls.append((url, payload))
+        if self.on_post is not None:
+            self.on_post(payload)
         item = self.posts.pop(0)
         if isinstance(item, BaseException):
             raise item
         return item
 
 
-def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_timeout_sec=20):
+def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_timeout_sec=20,
+            reference_dir=None):
     config = {
         "base_url": "http://127.0.0.1:7862",
         "initial_task_id": "train-001",
@@ -45,6 +58,8 @@ def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_
         "poll_seconds": poll_seconds,
         "http_timeout_sec": http_timeout_sec,
     }
+    if reference_dir is not None:
+        config["reference_dir"] = str(reference_dir)
     path = tmp_path / "controller_config.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config), encoding="utf-8")
@@ -84,7 +99,8 @@ def test_initial_training_is_observed_then_jobs_run_once_and_evaluate(tmp_path):
     state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
     assert state["status"] == "completed_with_errors"
     assert [job["status"] for job in state["jobs"]] == ["failed", "completed"]
-    assert state["evaluation"]["status"] == "completed"
+    assert state["evaluation"]["status"] == "partial"
+    assert state["evaluation"]["artifact_completeness"]["unverifiable_count"] == 2
     assert state["evaluation"]["human_review"] == "pending"
     assert (tmp_path / "evaluation.json").is_file()
     markdown = (tmp_path / "controller_report.md").read_text(encoding="utf-8")
@@ -136,7 +152,7 @@ def test_reconciled_task_id_can_resume_without_resubmission(tmp_path):
     state_path.write_text(json.dumps(state), encoding="utf-8")
     client.gets["reconciled-generation-id"] = [_task("completed")]
 
-    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 0
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
     assert len(client.post_calls) == 1
     assert client.get_calls[-1] == "reconciled-generation-id"
 
@@ -242,6 +258,182 @@ def test_partial_evaluation_is_nonzero_and_keeps_error_details(tmp_path):
     assert state["evaluation"]["evaluated_count"] == 1
     assert state["evaluation"]["error_count"] == 1
     assert state["status"] == "completed_with_errors"
+
+
+def test_successful_generation_with_only_stale_outputs_is_incomplete(tmp_path):
+    output = tmp_path / "generated" / "v3_full" / "song_00.txt"
+    chart = output.with_suffix(".chart.json")
+    output.parent.mkdir(parents=True)
+    output.write_text("stale chart text", encoding="utf-8")
+    chart.write_text(json.dumps({
+        "schema": "maichart-event-chart-v1",
+        "points": [{"beat": "0", "note_text": "1"}, {"beat": "1", "note_text": "2"},
+                   {"beat": "2", "note_text": "3"}, {"beat": "3", "note_text": "4"},
+                   {"beat": "4", "note_text": ""}],
+        "tempo_changes": [{"beat": "0", "bpm": 120}], "first": 0.0,
+        "end_beat": "4", "audio_duration_sec": 2.0,
+    }), encoding="utf-8")
+    (output.with_suffix(".quality.json")).write_text("{}", encoding="utf-8")
+    config_path = _config(tmp_path, jobs=[{
+        "name": "generate", "endpoint": "/api/generate",
+        "payload": {"output": str(output)}, "continue_on_failure": True,
+    }], evaluation_paths=[str(output.parent)])
+    client = FakeClient(
+        gets={"train-001": _task("completed"),
+              "gen-1": _task("completed", result={
+                  "model_family": "event_ctx_v1",
+                  "paths": [str(output), str(chart), str(output.with_suffix(".quality.json"))],
+              })},
+        posts=[{"task_id": "gen-1"}],
+    )
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    completeness = state["evaluation"]["artifact_completeness"]
+    assert completeness["expected_count"] == 3
+    assert completeness["produced_count"] == 0
+    assert completeness["missing_count"] == 3
+    assert set(completeness["stale_paths"]) == {
+        str(output.resolve()), str(chart.resolve()), str(output.with_suffix(".quality.json").resolve()),
+    }
+    assert state["evaluation"]["status"] == "partial"
+    assert state["evaluation"]["evaluated_count"] == 0
+    metrics = json.loads((tmp_path / "evaluation.json").read_text(encoding="utf-8"))
+    assert metrics["charts"] == []
+    assert metrics["artifact_completeness"]["produced_count"] == 0
+
+
+def test_expected_candidate_artifact_names_match_webui(tmp_path):
+    output = tmp_path / "song.txt"
+    artifacts = _generation_output_paths({
+        "payload": {"output": str(output), "candidates": 2}
+    })
+
+    assert [Path(item["path"]).name for item in artifacts if item["kind"] == "text"] == [
+        "song_candidate_001.txt", "song_candidate_002.txt",
+    ]
+    assert [Path(item["path"]).name for item in artifacts if item["kind"] == "chart_json"] == [
+        "song.chart_candidate_001.json", "song.chart_candidate_002.json",
+    ]
+
+
+def test_default_generation_records_returned_paths_as_unverifiable(tmp_path):
+    output = tmp_path / "generated" / "server-task_maidata.txt"
+    chart = output.with_suffix(".chart.json")
+    output.parent.mkdir(parents=True)
+    output.write_text("new chart", encoding="utf-8")
+    chart.write_text(json.dumps({
+        "schema": "maichart-event-chart-v1",
+        "points": [{"beat": "0", "note_text": "1"}, {"beat": "1", "note_text": "2"},
+                   {"beat": "2", "note_text": "3"}, {"beat": "3", "note_text": "4"},
+                   {"beat": "4", "note_text": ""}],
+        "tempo_changes": [{"beat": "0", "bpm": 120}], "first": 0.0,
+        "end_beat": "4", "audio_duration_sec": 2.0,
+    }), encoding="utf-8")
+    config_path = _config(tmp_path, jobs=[{
+        "name": "generate", "endpoint": "/api/generate", "payload": {},
+    }])
+    client = FakeClient(
+        gets={"train-001": _task("completed"),
+              "gen-1": _task("completed", result={
+                  "model_family": "event_ctx_v1", "paths": [str(output), str(chart)],
+              })},
+        posts=[{"task_id": "gen-1"}],
+    )
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    completeness = state["evaluation"]["artifact_completeness"]
+    assert completeness["expected_count"] == 0
+    assert completeness["produced_count"] == 2
+    assert completeness["unverifiable_count"] == 1
+    assert state["evaluation"]["evaluated_count"] == 1
+    assert state["evaluation"]["status"] == "partial"
+
+
+def test_completed_task_restores_result_from_last_snapshot_on_resume(tmp_path):
+    output = tmp_path / "generated" / "server-task_maidata.txt"
+    chart = output.with_suffix(".chart.json")
+    quality = output.with_suffix(".quality.json")
+    output.parent.mkdir(parents=True)
+    output.write_text("new chart", encoding="utf-8")
+    chart.write_text(json.dumps({
+        "schema": "maichart-event-chart-v1",
+        "points": [{"beat": "0", "note_text": "1"}, {"beat": "1", "note_text": "2"},
+                   {"beat": "2", "note_text": "3"}, {"beat": "3", "note_text": "4"},
+                   {"beat": "4", "note_text": ""}],
+        "tempo_changes": [{"beat": "0", "bpm": 120}], "first": 0.0,
+        "end_beat": "4", "audio_duration_sec": 2.0,
+    }), encoding="utf-8")
+    quality.write_text("{}", encoding="utf-8")
+    config_path = _config(tmp_path, jobs=[{
+        "name": "generate", "endpoint": "/api/generate", "payload": {},
+    }], evaluation_paths=[str(output.parent)])
+    config, config_dir = _load_config(config_path)
+    controller = StagedRhythmValidation(config, config_dir)
+    controller.state["initial"]["status"] = "completed"
+    controller.state["jobs"][0].update({
+        "status": "completed", "task_id": "gen-1",
+        "last_snapshot": {"result": {
+            "model_family": "event_ctx_v1", "paths": [str(output), str(chart), str(quality)],
+        }},
+    })
+    controller.state["status"] = "controller_interrupted"
+    controller._persist()
+
+    assert run_config(config_path, client=FakeClient(), sleep_fn=lambda _: None) == 2
+
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    assert state["jobs"][0]["task_result"]["model_family"] == "event_ctx_v1"
+    assert state["evaluation"]["artifact_completeness"]["produced_count"] == 3
+    assert state["evaluation"]["artifact_completeness"]["unverifiable_count"] == 1
+
+
+@pytest.mark.parametrize("reference_case", ["missing", "incompatible"])
+def test_missing_or_incompatible_reference_pair_makes_generation_evaluation_partial(tmp_path, reference_case):
+    output = tmp_path / "generated" / "arm-a" / "song.txt"
+    reference_root = tmp_path / "references"
+    reference_root.mkdir()
+    chart_data = {
+        "schema": "maichart-event-chart-v1",
+        "points": [{"beat": "0", "note_text": "1"}, {"beat": "1", "note_text": "2"},
+                   {"beat": "2", "note_text": "3"}, {"beat": "3", "note_text": "4"},
+                   {"beat": "4", "note_text": ""}],
+        "tempo_changes": [{"beat": "0", "bpm": 120}], "first": 0.0,
+        "end_beat": "4", "audio_duration_sec": 2.0,
+        "audio_sha256": "a" * 64,
+    }
+    if reference_case == "incompatible":
+        reference_chart = reference_root / "arm-a" / "song.chart.json"
+        reference_chart.parent.mkdir(parents=True)
+        reference_chart.write_text(json.dumps({**chart_data, "audio_sha256": "b" * 64}), encoding="utf-8")
+
+    def write_generated(_payload):
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text("new chart", encoding="utf-8")
+        output.with_suffix(".chart.json").write_text(json.dumps(chart_data), encoding="utf-8")
+        output.with_suffix(".quality.json").write_text("{}", encoding="utf-8")
+
+    config_path = _config(tmp_path, jobs=[{
+        "name": "generate", "endpoint": "/api/generate",
+        "payload": {"output": str(output)},
+    }], evaluation_paths=[str(output.parent.parent)], reference_dir=reference_root)
+    client = FakeClient(
+        gets={"train-001": _task("completed"),
+              "gen-1": _task("completed", result={"model_family": "event_ctx_v1"})},
+        posts=[{"task_id": "gen-1"}], on_post=write_generated,
+    )
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    assert state["evaluation"]["evaluated_count"] == 1
+    assert state["evaluation"]["artifact_completeness"]["produced_count"] == 3
+    assert state["evaluation"]["artifact_completeness"]["missing_count"] == 0
+    assert state["evaluation"]["reference_pairing"][reference_case] == 1
+    assert state["evaluation"]["status"] == "partial"
 
 
 def test_state_lock_rejects_a_second_controller(tmp_path):

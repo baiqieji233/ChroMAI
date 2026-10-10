@@ -172,6 +172,41 @@ def test_reference_pairing_accepts_relative_directories(tmp_path, monkeypatch):
     assert report["reference_pairing"]["reference_dir"] == str(tmp_path / "references")
 
 
+def test_explicit_chart_paths_keep_arm_relative_reference_pairing(tmp_path):
+    generated_root = tmp_path / "generated"
+    reference_root = tmp_path / "references"
+    outputs = []
+    for arm, audio_hash in (("v3_full", "a" * 64), ("v3_finetune", "b" * 64)):
+        payload = _event_chart(first=0.0)
+        payload["audio_sha256"] = audio_hash
+        outputs.append(_write_chart(generated_root / arm / "song_00.chart.json", payload))
+        _write_chart(reference_root / arm / "song_00.chart.json", payload)
+
+    report = evaluate_paths(outputs, reference_dir=reference_root, pairing_root=generated_root)
+
+    assert report["reference_pairing"]["matched"] == 2
+    assert report["reference_pairing"]["verified_matched"] == 2
+    assert [chart["reference_pair"]["reference_path"] for chart in report["charts"]] == [
+        str((reference_root / "v3_finetune" / "song_00.chart.json").resolve()),
+        str((reference_root / "v3_full" / "song_00.chart.json").resolve()),
+    ]
+
+
+def test_candidate_chart_files_are_discovered_and_paired(tmp_path):
+    generated_root = tmp_path / "generated"
+    reference_root = tmp_path / "references"
+    _write_chart(generated_root / "v3_full" / "song.chart_candidate_001.json")
+    _write_chart(reference_root / "v3_full" / "song.chart_candidate_001.json")
+
+    report = evaluate_paths([generated_root], reference_dir=reference_root)
+
+    assert report["input_count"] == 1
+    assert report["reference_pairing"]["matched"] == 1
+    assert report["charts"][0]["reference_pair"]["reference_path"] == str(
+        (reference_root / "v3_full" / "song.chart_candidate_001.json").resolve()
+    )
+
+
 def test_reference_hash_mismatch_is_incompatible_and_shadow_files_are_skipped(tmp_path):
     generated_dir = tmp_path / "generation"
     reference_dir = tmp_path / "reference"

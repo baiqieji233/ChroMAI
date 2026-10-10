@@ -170,6 +170,41 @@ def _terminal_status(status: str) -> str | None:
     return None
 
 
+def _candidate_path(path: Path, index: int, count: int) -> Path:
+    if count == 1:
+        return path
+    return path.with_name(f"{path.stem}_candidate_{index + 1:03d}{path.suffix}")
+
+
+def _file_fingerprint(path: Path) -> dict[str, int] | None:
+    try:
+        stat = path.stat()
+    except OSError:
+        return None
+    if not path.is_file():
+        return None
+    return {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+
+
+def _generation_output_paths(job_config: dict[str, Any]) -> list[dict[str, str]] | None:
+    payload = job_config.get("payload") or {}
+    output = payload.get("output")
+    if not output:
+        return None
+    output_path = _resolve_path(str(output), Path(__file__).resolve().parents[1])
+    try:
+        count = max(1, int(payload.get("candidates", 1)))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    artifacts: list[dict[str, str]] = []
+    for index in range(count):
+        text_path = _candidate_path(output_path, index, count)
+        artifacts.append({"kind": "text", "path": str(text_path)})
+        artifacts.append({"kind": "chart_json", "path": str(_candidate_path(output_path.with_suffix(".chart.json"), index, count))})
+        artifacts.append({"kind": "quality_json", "path": str(text_path.with_suffix(".quality.json"))})
+    return artifacts
+
+
 class StagedRhythmValidation:
     def __init__(
         self,
@@ -286,6 +321,24 @@ class StagedRhythmValidation:
                          f"`{event.get('to')}`. {event.get('message', '')}")
         evaluation = self.state.get("evaluation") or {}
         lines.extend(["", "## Evaluation", "", f"- Status: `{evaluation.get('status')}`"])
+        completeness = evaluation.get("artifact_completeness") or {}
+        if completeness:
+            lines.append(
+                f"- Generation artifacts: expected {completeness.get('expected_count', 0)}; "
+                f"produced {completeness.get('produced_count', 0)}; "
+                f"missing {completeness.get('missing_count', 0)}; "
+                f"unverifiable {completeness.get('unverifiable_count', 0)}"
+            )
+            for path in completeness.get("missing_paths", [])[:10]:
+                lines.append(f"- Missing generation artifact: `{path}`")
+            for path in completeness.get("stale_paths", [])[:10]:
+                lines.append(f"- Existing artifact was not produced by this task: `{path}`")
+        pairing = evaluation.get("reference_pairing") or {}
+        if pairing.get("status") == "requested":
+            lines.append(
+                f"- Reference pairs: matched {pairing.get('matched', 0)}; "
+                f"missing {pairing.get('missing', 0)}; incompatible {pairing.get('incompatible', 0)}"
+            )
         if evaluation.get("report_path"):
             lines.append(f"- JSON report: `{evaluation['report_path']}`")
         if evaluation.get("evaluated_count") is not None:
@@ -365,6 +418,12 @@ class StagedRhythmValidation:
             self.state["status"] = "submit_uncertain"
             self._persist(markdown=True)
             return False
+        expected = (_generation_output_paths(job_config)
+                    if self._is_generation_job(job_config) else None)
+        if expected is not None:
+            job_state["artifact_baseline"] = {
+                item["path"]: _file_fingerprint(Path(item["path"])) for item in expected
+            }
         self._transition(job_state, "submitting", "POST will be sent once; submission is persisted before network I/O.")
         try:
             response = self._request("POST", self._url(str(job_config["endpoint"])), job_config["payload"])
@@ -403,35 +462,161 @@ class StagedRhythmValidation:
             endpoint = endpoint.split("?")[0]
         return endpoint == "/api/train" or str(job_config.get("kind", "")).lower() == "training"
 
+    @staticmethod
+    def _is_generation_job(job_config: dict[str, Any]) -> bool:
+        endpoint = str(job_config.get("endpoint", "")).rstrip("/")
+        if endpoint.startswith(("http://", "https://")):
+            endpoint = urllib.parse.urlparse(endpoint).path.rstrip("/")
+        else:
+            endpoint = endpoint.split("?")[0]
+        return endpoint == "/api/generate" or str(job_config.get("kind", "")).lower() == "generation"
+
+    def _artifact_completeness(self) -> dict[str, Any]:
+        expected_count = produced_count = missing_count = unverifiable_count = 0
+        missing_paths: list[str] = []
+        stale_paths: list[str] = []
+        produced_chart_paths: list[Path] = []
+        job_reports = []
+        for job_config, job_state in zip(self.config["jobs"], self.state["jobs"]):
+            if not self._is_generation_job(job_config):
+                continue
+            status = job_state.get("status")
+            task_result = job_state.get("task_result") or {}
+            model_family = str(task_result.get("model_family") or
+                               (job_config.get("payload") or {}).get("model_family") or "")
+            explicit = _generation_output_paths(job_config)
+            job_expected = 0
+            job_produced = 0
+            job_missing: list[str] = []
+            job_unverifiable = 0
+            job_stale: list[str] = []
+            job_charts: list[str] = []
+            if explicit is None:
+                if status == "completed":
+                    result_paths = [str(value) for value in (task_result.get("paths") or [])
+                                    if Path(str(value)).is_file()]
+                    chart_paths = [value for value in result_paths
+                                   if ".chart" in Path(str(value)).name
+                                   and str(value).endswith(".json")
+                                   and ".original." not in str(value)]
+                    text_paths = [value for value in result_paths
+                                  if str(value).endswith(".txt") and ".original." not in str(value)
+                                  and ".repaired." not in str(value)]
+                    quality_paths = ([value for value in result_paths
+                                      if str(value).endswith(".quality.json")]
+                                     if model_family in {"event_v1", "event_ctx_v1"} else [])
+                    job_produced = len(set(text_paths + chart_paths + quality_paths))
+                    job_charts = chart_paths
+                else:
+                    chart_paths = []
+                job_unverifiable = 1
+            else:
+                required = [item for item in explicit
+                            if item["kind"] != "quality_json"
+                            or model_family in {"event_v1", "event_ctx_v1"}]
+                job_expected = len(required)
+                baseline = job_state.get("artifact_baseline")
+                for item in required:
+                    path = Path(item["path"])
+                    current = _file_fingerprint(path)
+                    before = baseline.get(item["path"]) if isinstance(baseline, dict) else None
+                    verified = (status == "completed" and isinstance(baseline, dict)
+                                and item["path"] in baseline and current is not None
+                                and current != before)
+                    if verified:
+                        job_produced += 1
+                        if item["kind"] == "chart_json":
+                            job_charts.append(item["path"])
+                    else:
+                        job_missing.append(item["path"])
+                        if current is not None:
+                            job_stale.append(item["path"])
+                        if not isinstance(baseline, dict) or item["path"] not in baseline:
+                            job_unverifiable += 1
+            expected_count += job_expected
+            produced_count += job_produced
+            missing_count += max(0, job_expected - job_produced)
+            unverifiable_count += job_unverifiable
+            missing_paths.extend(job_missing)
+            stale_paths.extend(job_stale)
+            produced_chart_paths.extend(Path(path) for path in job_charts)
+            job_reports.append({
+                "name": job_config.get("name"), "status": status,
+                "expected_count": job_expected, "produced_count": job_produced,
+                "missing_count": max(0, job_expected - job_produced),
+                "unverifiable_count": job_unverifiable,
+                "missing_paths": job_missing, "stale_paths": job_stale,
+            })
+        return {
+            "expected_count": expected_count, "produced_count": produced_count,
+            "missing_count": missing_count, "unverifiable_count": unverifiable_count,
+            "missing_paths": missing_paths, "stale_paths": stale_paths,
+            "produced_chart_paths": [str(path) for path in dict.fromkeys(produced_chart_paths)],
+            "jobs": job_reports,
+        }
+
     def _evaluation(self) -> None:
         self.state["current_stage"] = "evaluation"
         evaluation = self.state["evaluation"]
-        if not self.evaluation_paths:
+        completeness = self._artifact_completeness()
+        has_generation_jobs = any(self._is_generation_job(job) for job in self.config["jobs"])
+        evaluation_inputs = ([Path(path) for path in completeness["produced_chart_paths"]]
+                            if has_generation_jobs else self.evaluation_paths)
+        if not has_generation_jobs and not evaluation_inputs:
             evaluation.update({"status": "not_requested", "human_review": "pending"})
             self._persist(markdown=True)
             return
         try:
-            from tools.run_rhythm_evaluation import evaluate_paths
+            if evaluation_inputs:
+                from tools.run_rhythm_evaluation import evaluate_paths
 
-            payload = evaluate_paths(self.evaluation_paths,
-                                     reference_dir=(_resolve_path(self.config["reference_dir"], self.config_dir)
-                                                    if self.config.get("reference_dir") else None))
+                pairing_root = None
+                produced = [path.resolve() for path in evaluation_inputs]
+                if self.config.get("reference_dir"):
+                    for configured_root in self.evaluation_paths:
+                        if configured_root.is_dir() and all(
+                            path.is_relative_to(configured_root.resolve()) for path in produced
+                        ):
+                            pairing_root = configured_root
+                            break
+                payload = evaluate_paths(evaluation_inputs,
+                                         reference_dir=(_resolve_path(self.config["reference_dir"], self.config_dir)
+                                                        if self.config.get("reference_dir") else None),
+                                         pairing_root=pairing_root)
+            else:
+                payload = {"schema": "maichart-rhythm-evaluation-v1",
+                           "metric_policy": "descriptive metrics only; no aggregate quality score",
+                           "input_count": 0, "evaluated_count": 0, "error_count": 0,
+                           "reference_pairing": {"status": "not_requested", "matched": 0, "missing": 0},
+                           "charts": [], "errors": []}
             report_path = _resolve_path(
                 self.config.get("evaluation_report_path", self.report_path.with_suffix(".evaluation.json")),
                 self.config_dir,
             )
+            payload["artifact_completeness"] = completeness
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
             evaluated_count = int(payload.get("evaluated_count", 0))
             error_count = int(payload.get("error_count", 0))
-            eval_status = ("completed" if evaluated_count > 0 and error_count == 0 else
-                           "partial" if evaluated_count > 0 and error_count > 0 else "failed")
+            pairing = payload.get("reference_pairing") or {}
+            pairing_incomplete = (pairing.get("status") == "requested"
+                                  and (int(pairing.get("missing", 0)) > 0
+                                       or int(pairing.get("incompatible", 0)) > 0))
+            incomplete = (completeness["missing_count"] > 0
+                          or completeness["unverifiable_count"] > 0
+                          or pairing_incomplete)
+            eval_status = ("partial" if incomplete or (evaluated_count > 0 and error_count > 0) else
+                           "completed" if evaluated_count > 0 and error_count == 0 else "failed")
             evaluation.update({"status": eval_status, "report_path": str(report_path),
                                "evaluated_count": evaluated_count, "error_count": error_count,
                                "error_details": list(payload.get("errors", [])),
+                               "reference_pairing": pairing,
+                               "artifact_completeness": completeness,
                                "human_review": "pending"})
         except Exception as exc:
-            evaluation.update({"status": "failed", "error": str(exc), "human_review": "pending"})
+            evaluation.update({"status": "partial" if completeness["missing_count"] or completeness["unverifiable_count"] else "failed",
+                               "error": str(exc), "artifact_completeness": completeness,
+                               "human_review": "pending"})
         self._persist(markdown=True)
 
     def run(self) -> int:
@@ -466,6 +651,8 @@ class StagedRhythmValidation:
                     return code or 3
                 self._transition(initial, "completed", "Initial training task completed successfully.")
             for index, (job_config, job_state) in enumerate(zip(self.config["jobs"], self.state["jobs"])):
+                if not job_state.get("task_result"):
+                    job_state["task_result"] = job_state.get("last_snapshot", {}).get("result") or {}
                 if job_state["status"] in {"completed", "failed", "cancelled"}:
                     if job_state["status"] == "failed" and not job_config.get("continue_on_failure", False):
                         self.state["status"] = "failed"
@@ -488,6 +675,7 @@ class StagedRhythmValidation:
                 if job_state["status"] != "completed":
                     self._transition(job_state, "observing", "Polling the returned task ID.")
                     terminal, code = self._observe(job_state)
+                    job_state["task_result"] = job_state.get("last_snapshot", {}).get("result") or {}
                     if terminal != "completed":
                         job_state["error"] = job_state.get("last_snapshot", {}).get("error") or job_state.get("error")
                         if terminal in {"failed", "cancelled"}:

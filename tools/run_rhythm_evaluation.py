@@ -6,6 +6,7 @@ import argparse
 import hashlib
 import json
 import math
+import re
 import sys
 from collections import Counter, defaultdict
 from fractions import Fraction
@@ -24,6 +25,11 @@ from maichart.training.music_plan_targets import fine_note_ratio
 
 
 SUPPORTED_SUFFIXES = (".chart.json", ".chart_ir.json", ".ir.json")
+SUPPORTED_CANDIDATE_SUFFIX = re.compile(r"\.(?:chart|chart_ir|ir)_candidate_\d{3}\.json$", re.IGNORECASE)
+
+
+def _is_supported_chart_path(path: Path) -> bool:
+    return path.name.endswith(SUPPORTED_SUFFIXES) or bool(SUPPORTED_CANDIDATE_SUFFIX.search(path.name))
 
 
 def _decode_embedded_event(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -278,7 +284,7 @@ def _discover(inputs: list[Path]) -> tuple[list[Path], Path | None]:
     for path in inputs:
         if path.is_dir():
             files.extend(candidate for candidate in path.rglob("*.json")
-                         if candidate.name.endswith(SUPPORTED_SUFFIXES) and not _is_shadow(candidate))
+                         if _is_supported_chart_path(candidate) and not _is_shadow(candidate))
         elif path.is_file():
             files.append(path.resolve())
         else:
@@ -360,10 +366,15 @@ def _pair_metrics(generated: dict[str, Any], reference: dict[str, Any]) -> dict[
     }
 
 
-def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> dict[str, Any]:
+def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None,
+                   pairing_root: Path | None = None) -> dict[str, Any]:
     paths, input_root = _discover(inputs)
     if not paths:
         raise ValueError("No supported chart JSON files found.")
+    if pairing_root is not None:
+        pairing_root = pairing_root.expanduser().resolve()
+        if not pairing_root.is_dir():
+            raise FileNotFoundError(pairing_root)
     reference_files: dict[str, Path] = {}
     if reference_dir is not None:
         reference_dir = reference_dir.expanduser().resolve()
@@ -371,7 +382,7 @@ def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> 
             raise FileNotFoundError(reference_dir)
         reference_files = {
             path.relative_to(reference_dir.resolve()).as_posix(): path.resolve()
-            for path in reference_dir.rglob("*.json") if path.name.endswith(SUPPORTED_SUFFIXES) and not _is_shadow(path)
+            for path in reference_dir.rglob("*.json") if _is_supported_chart_path(path) and not _is_shadow(path)
         }
     rows = []
     errors = []
@@ -379,8 +390,9 @@ def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> 
         try:
             row = _metric_row(path)
             if reference_dir is not None:
-                if input_root is not None:
-                    relative = path.relative_to(input_root).as_posix()
+                active_root = pairing_root or input_root
+                if active_root is not None:
+                    relative = path.relative_to(active_root).as_posix()
                 else:
                     relative = path.name
                 reference_path = reference_files.get(relative)
