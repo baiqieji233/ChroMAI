@@ -2355,7 +2355,10 @@ def main(argv=None) -> int:
             playability_warning = args.enable_conflict_detection and (
                 conflict_result.coverage.get("status") == "partial"
                 or bool(conflict_result.remaining_conflicts))
-            quality["generation_status"] = "success_with_warnings" if note_warnings or playability_warning else "success"
+            runtime_warning = (quality.get("runtime_reference", {}).get("status") == "failed")
+            quality["generation_status"] = (
+                "success_with_warnings" if note_warnings or playability_warning or runtime_warning else "success"
+            )
             quality["windows_decoded"] = len(decoded)
             quality["windows_closed"] = sum(1 for window in decoded if window.closed)
             quality["coverage_beats"] = str(points[-1].beat if points else Fraction(0))
