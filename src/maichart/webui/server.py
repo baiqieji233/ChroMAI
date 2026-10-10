@@ -28,7 +28,7 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from maichart.generation.conditions import CONDITION_KEYS, GENERATION_DEFAULTS, GENERATION_SAMPLING_DEFAULTS
-from maichart.generation.music_plan import is_music_structure
+from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE, is_music_structure
 from maichart.generation.model_compatibility import checkpoint_capabilities
 from maichart.generation.timeline import serialize_tempo_map, tempo_map_fingerprint
 from maichart.generation.model import AUDIO_FEATURE_KEYS
@@ -78,6 +78,7 @@ EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 EVENT_MODEL_FAMILY = "event_v1"
 EVENT_CTX_MODEL_FAMILY = "event_ctx_v1"
 EVENT_FAMILIES = frozenset({EVENT_MODEL_FAMILY, EVENT_CTX_MODEL_FAMILY})
+ONSET_PROFILES = frozenset({"auto", "none", "chart_onsets_v1"})
 LEGACY_MODEL_FAMILY = "legacy_frame_v2"
 for _directory in (UPLOAD_ROOT, DATASET_ROOT, CONDITION_ROOT, GENERATED_ROOT):
     _directory.mkdir(parents=True, exist_ok=True)
@@ -183,6 +184,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "fine_rhythm_oversample": True,
                                               "quality_training_capability": True,
+                                              "local_onset_training": True,
                                               "event_learning_rate_control": True,
                                               "multi_dataset_training": True},
                     "intensity_curve_capability": True,
@@ -514,6 +516,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
         fine_note_strength = float(payload.get("fine_note_strength", 0.5))
         if not math.isfinite(fine_note_strength) or not 0.0 <= fine_note_strength <= 1.0:
             raise ValueError("细碎音符强度必须是 0–1 之间的有限值")
+        local_onset_bias_strength = float(payload.get("local_onset_bias_strength", 0.0))
+        if not math.isfinite(local_onset_bias_strength) or not 0.0 <= local_onset_bias_strength <= 1.0:
+            raise ValueError("局部采音对齐指导强度必须是 0–1 之间的有限值")
+        local_onset_guidance = (_is_event_family(model_family)
+                                and bool(capabilities.get("local_onset_guidance", False)))
+        if local_onset_bias_strength > 0 and not local_onset_guidance:
+            raise ValueError(
+                "当前 checkpoint 未训练可用的局部采音对齐辅助头；请检查 checkpoint 能力，"
+                "并使用训练过 chart_onsets_v1 的 event checkpoint。"
+            )
         conflict_enabled = bool(payload.get("conflict_detection_enabled", False))
         conflict_repair_mode = str(payload.get("conflict_repair_mode", "none"))
         conflict_retries = int(payload.get("conflict_retries", 0))
@@ -590,6 +602,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 warning = "当前 checkpoint 未训练 music_structure_v3 fine_rhythm；细碎音符控制已忽略。"
                 task.result.setdefault("warnings", []).append(warning)
                 print(f"warning: {warning}", flush=True)
+            if local_onset_guidance:
+                args.extend(["--local-onset-bias-strength", str(local_onset_bias_strength)])
+                task.result["local_onset_bias_strength"] = local_onset_bias_strength
             if curve_path is not None:
                 args.extend(["--intensity-curve", str(curve_path),
                              "--intensity-curve-strength", str(curve_strength),
@@ -1013,6 +1028,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("反面偏好训练需要已训练 checkpoint；先 fresh 做质量加权，再选择 finetune 启用修正版配对。")
         training_checkpoint = payload.get("training_checkpoint") or payload.get("checkpoint")
         training_start_epoch = 0
+        inspection = None
         if training_mode != "fresh":
             if not training_checkpoint:
                 raise ValueError("当前训练方式需要选择 checkpoint 文件或填写完整路径")
@@ -1031,6 +1047,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 raise ValueError("改变音乐结构规划器需要 fresh 重新训练；原 checkpoint 可使用 auto 或其原规划器继续训练。")
         else:
             training_checkpoint_path = None
+        onset_profile, onset_loss_weight, onset_weight_override = _resolve_onset_training_options(
+            payload, model_family=model_family, training_mode=training_mode, inspection=inspection)
+        if model_family in EVENT_FAMILIES and onset_profile == "chart_onsets_v1":
+            stored_planner = ((inspection or {}).get("model_config") or {}).get("planner_profile")
+            effective_planner = (stored_planner if planner_profile == "auto" and training_mode != "fresh"
+                                 else MUSIC_STRUCTURE_V3_PROFILE if planner_profile == "auto"
+                                 else planner_profile)
+            if effective_planner != MUSIC_STRUCTURE_V3_PROFILE:
+                raise ValueError("chart_onsets_v1 需要 music_structure_v3 planner；请将训练 profile 设为 v3 或使用兼容 checkpoint。")
         task = _create_task("train")
         if dataset_selection is not None:
             task.result["dataset_selection"] = dataset_selection
@@ -1044,6 +1069,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                             "epoch_target": epoch_target,
                             "epoch_semantics": ("additional_from_checkpoint" if training_mode == "resume"
                                                  else "stage_total")})
+        if onset_profile is not None:
+            task.result.update({"onset_profile": onset_profile, "onset_loss_weight": onset_loss_weight})
+            if onset_weight_override:
+                task.result.setdefault("warnings", []).append(
+                    "resume 已使用 checkpoint 保存的 onset_loss_weight，忽略本次请求值。")
         if _is_event_family(model_family):
             try:
                 cuda_memory_budget_gb = float(payload.get("cuda_memory_budget_gb", 0.0))
@@ -1073,6 +1103,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "--plan-loss-weight", str(max(0.0, float(payload.get("plan_loss_weight", 0.1)))),
                 "--planner-profile", planner_profile,
                 "--plan-teacher-mix", str(teacher_mix),
+                "--onset-profile", onset_profile,
+                "--onset-loss-weight", str(onset_loss_weight),
                 "--weight-decay", str(payload.get("weight_decay", 0.01)),
                 # max_tokens is both the position grid and the padded length of
                 # every batch, so it belongs to the training contract rather
@@ -1864,6 +1896,54 @@ def _event_condition_parameters(payload: dict[str, Any]) -> dict[str, Any]:
     return values
 
 
+def _resolve_onset_training_options(
+    payload: dict[str, Any], *, model_family: str, training_mode: str,
+    inspection: dict[str, Any] | None,
+) -> tuple[str | None, float | None, bool]:
+    has_options = "onset_profile" in payload or "onset_loss_weight" in payload
+    if not _is_event_family(model_family):
+        if has_options:
+            raise ValueError("局部采音对齐训练选项只支持 event_v1 / event_ctx_v1")
+        return None, None, False
+
+    profile = str(payload.get("onset_profile", "auto")).strip().lower()
+    if profile not in ONSET_PROFILES:
+        raise ValueError("onset_profile 只能是 auto、none 或 chart_onsets_v1")
+    try:
+        requested_weight = float(payload.get("onset_loss_weight", 0.2))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("onset_loss_weight 必须是非负有限数值") from exc
+    if not math.isfinite(requested_weight) or requested_weight < 0:
+        raise ValueError("onset_loss_weight 必须是非负有限数值")
+
+    weight_overridden = False
+    if training_mode == "resume":
+        inspection = inspection or {}
+        contract = inspection.get("data_contract") or {}
+        stored_params = contract.get("onset_params") or {}
+        model_config = inspection.get("model_config") or {}
+        training = inspection.get("onset_training") or {}
+        stored_profile = (stored_params.get("profile") or model_config.get("onset_profile") or "none")
+        if stored_profile not in {"none", "chart_onsets_v1"}:
+            raise ValueError(f"checkpoint 保存了不支持的 onset_profile：{stored_profile!r}")
+        stored_weight = stored_params.get("loss_weight", training.get("loss_weight", 0.2))
+        try:
+            stored_weight = float(stored_weight)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("checkpoint 的 onset_loss_weight 无效，不能 resume") from exc
+        if not math.isfinite(stored_weight) or stored_weight < 0:
+            raise ValueError("checkpoint 的 onset_loss_weight 无效，不能 resume")
+        if profile != "auto" and profile != stored_profile:
+            raise ValueError(
+                "resume 不能改变 checkpoint 的 onset_profile；要启用或关闭 onset head，请使用 finetune。"
+            )
+        profile = stored_profile
+        weight_overridden = not math.isclose(requested_weight, stored_weight, rel_tol=0.0, abs_tol=1e-12)
+        requested_weight = stored_weight
+
+    return profile, requested_weight, weight_overridden
+
+
 def _check_event_condition_parameters(current: dict[str, Any], stored: Any) -> None:
     if not isinstance(stored, dict):
         return  # Older incomplete contracts remain guarded by the trainer.
@@ -1902,12 +1982,16 @@ def _generation_capabilities(model_family: str, payload: dict[str, Any]) -> dict
     detected = checkpoint_capabilities(payload)
     if detected["model_family"] != model_family:
         return {"conflict_detection": False, "conflict_repair": False,
-                "rhythm_bias": False, "fine_note_strength": False}
+                "rhythm_bias": False, "fine_note_strength": False,
+                "local_onset_guidance": False}
     return {
         "conflict_detection": bool(detected["conflict_detection"]),
         "conflict_repair": bool(detected["conflict_repair"]),
         "rhythm_bias": False,
         "fine_note_strength": bool(detected["fine_note_strength"] and not detected["errors"]),
+        "local_onset_guidance": bool(_is_event_family(model_family)
+                                      and detected.get("local_onset_guidance", False)
+                                      and not detected["errors"]),
     }
 
 
@@ -1935,6 +2019,7 @@ def _checkpoint_inspection(
             "can_init": False,
             "model_config": {},
             "data_contract": {},
+            "onset_training": {},
             "warnings": [],
             "errors": [str(exc)],
         }
@@ -2046,6 +2131,7 @@ def _checkpoint_inspection(
         "global_step": payload.get("global_step", 0),
         "model_config": checkpoint_model_config(payload),
         "data_contract": checkpoint_contract(payload),
+        "onset_training": payload.get("onset_training") or {},
         "warnings": warnings,
         "errors": errors,
         "mode": mode,

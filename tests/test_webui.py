@@ -272,6 +272,170 @@ def test_event_train_does_not_reject_old_fixed_frame_usable_flag(webui_api, monk
     assert "--segment-beats" in calls[0]
     assert "--cuda-memory-budget-gb" in calls[0]
     assert calls[0][calls[0].index("--cuda-memory-budget-gb") + 1] == "0.0"
+    assert calls[0][calls[0].index("--onset-profile") + 1] == "auto"
+    assert calls[0][calls[0].index("--onset-loss-weight") + 1] == "0.2"
+
+
+def test_resume_rejects_onset_structure_change_and_legacy_rejects_onset_options():
+    with pytest.raises(ValueError, match="只能是 auto、none 或 chart_onsets_v1"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "chart_onsets_v2"}, model_family=webui.EVENT_MODEL_FAMILY,
+            training_mode="fresh", inspection=None)
+    with pytest.raises(ValueError, match="只支持 event_v1"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "none"}, model_family=webui.LEGACY_MODEL_FAMILY,
+            training_mode="fresh", inspection=None)
+    with pytest.raises(ValueError, match="不能改变 checkpoint 的 onset_profile"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "none", "onset_loss_weight": 0.2},
+            model_family=webui.EVENT_MODEL_FAMILY, training_mode="resume",
+            inspection={"model_config": {"onset_profile": "chart_onsets_v1"},
+                        "data_contract": {"onset_params": {"profile": "chart_onsets_v1", "loss_weight": 0.2}}})
+
+
+def test_status_advertises_chart_onset_training_capability(webui_api):
+    status, data = webui_api("/api/status")
+    assert status == 200
+    assert data["training_capabilities"]["local_onset_training"] is True
+
+
+def test_checkpoint_inspection_exposes_local_onset_generation_capability(webui_api, monkeypatch, tmp_path):
+    checkpoint = tmp_path / "trained-onset.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(webui, "_load_checkpoint_payload", lambda _path: {
+        "schema": "maichart-event-generator-checkpoint-v1",
+        "model_state_dict": {"weight": object()},
+        "model_config": {"planner_profile": "music_structure_v3", "onset_profile": "chart_onsets_v1"},
+        "data_contract": {"target_schema": "event_v1", "onset_params": {
+            "profile": "chart_onsets_v1", "loss_weight": 0.2,
+        }},
+        "onset_training": {"profile": "chart_onsets_v1", "trained": True, "optimizer_steps": 8},
+    })
+    monkeypatch.setattr(webui, "checkpoint_capabilities", lambda _payload: {
+        "model_family": webui.EVENT_MODEL_FAMILY, "errors": [],
+        "conflict_detection": True, "conflict_repair": True,
+        "fine_note_strength": True, "local_onset_guidance": True,
+    })
+
+    status, inspected = webui_api("/api/checkpoint/inspect", {
+        "checkpoint_path": str(checkpoint), "mode": "generate",
+    })
+
+    assert status == 200
+    assert inspected["generation_capabilities"]["local_onset_guidance"] is True
+    assert inspected["onset_training"]["trained"] is True
+
+
+def test_resume_rejects_onset_structure_change_and_legacy_rejects_onset_options():
+    with pytest.raises(ValueError, match="只能是 auto、none 或 chart_onsets_v1"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "chart_onsets_v2"}, model_family=webui.EVENT_MODEL_FAMILY,
+            training_mode="fresh", inspection=None)
+    with pytest.raises(ValueError, match="只支持 event_v1"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "none"}, model_family=webui.LEGACY_MODEL_FAMILY,
+            training_mode="fresh", inspection=None)
+    with pytest.raises(ValueError, match="不能改变 checkpoint 的 onset_profile"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "none", "onset_loss_weight": 0.2},
+            model_family=webui.EVENT_MODEL_FAMILY, training_mode="resume",
+            inspection={"model_config": {"onset_profile": "chart_onsets_v1"},
+                        "data_contract": {"onset_params": {"profile": "chart_onsets_v1", "loss_weight": 0.2}}})
+
+
+def test_status_advertises_chart_onset_training_capability(webui_api):
+    status, data = webui_api("/api/status")
+    assert status == 200
+    assert data["training_capabilities"]["local_onset_training"] is True
+
+
+def test_resume_rejects_onset_structure_change_and_legacy_rejects_onset_options():
+    with pytest.raises(ValueError, match="只能是 auto、none 或 chart_onsets_v1"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "chart_onsets_v2"}, model_family=webui.EVENT_MODEL_FAMILY,
+            training_mode="fresh", inspection=None)
+    with pytest.raises(ValueError, match="只支持 event_v1"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "none"}, model_family=webui.LEGACY_MODEL_FAMILY,
+            training_mode="fresh", inspection=None)
+    with pytest.raises(ValueError, match="不能改变 checkpoint 的 onset_profile"):
+        webui._resolve_onset_training_options(
+            {"onset_profile": "none", "onset_loss_weight": 0.2},
+            model_family=webui.EVENT_MODEL_FAMILY, training_mode="resume",
+            inspection={"model_config": {"onset_profile": "chart_onsets_v1"},
+                        "data_contract": {"onset_params": {"profile": "chart_onsets_v1", "loss_weight": 0.2}}})
+
+
+def test_status_advertises_chart_onset_training_capability(webui_api):
+    status, data = webui_api("/api/status")
+    assert status == 200
+    assert data["training_capabilities"]["local_onset_training"] is True
+
+
+def test_event_finetune_can_add_chart_onset_profile_without_ui_reverting(webui_api, monkeypatch, tmp_path):
+    checkpoint = tmp_path / "model.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema": "maichart-training-manifest-v1", "source_root": str(tmp_path),
+        "preprocessing": {"target_schema": "event_v1", "feature_profile": "event_audio_v2_rhythm"},
+        "songs": [],
+    }), encoding="utf-8")
+    monkeypatch.setattr(webui, "_checkpoint_inspection", lambda *a, **kw: {
+        "errors": [], "model_config": {"planner_profile": "music_structure_v3", "onset_profile": "none"},
+        "data_contract": {"onset_params": {"profile": "none", "loss_weight": 0.2}},
+    })
+    calls = []
+    monkeypatch.setattr(webui, "_run_subprocess_task", lambda task, args, **kwargs: calls.append(args))
+
+    status, data = webui_api("/api/train", {
+        "model_family": "event_v1", "manifest": str(manifest), "raw_root": str(tmp_path),
+        "cache_dir": str(tmp_path / "cache"), "checkpoint_dir": str(tmp_path / "finetune"),
+        "training_mode": "finetune", "training_checkpoint": str(checkpoint),
+        "onset_profile": "chart_onsets_v1", "onset_loss_weight": 0.35,
+    })
+
+    assert status == 200, data
+    args = calls[0]
+    assert args[args.index("--onset-profile") + 1] == "chart_onsets_v1"
+    assert args[args.index("--onset-loss-weight") + 1] == "0.35"
+
+
+def test_event_resume_inherits_saved_onset_profile_and_weight(webui_api, monkeypatch, tmp_path):
+    checkpoint = tmp_path / "event_last.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(json.dumps({
+        "schema": "maichart-training-manifest-v1", "source_root": str(tmp_path),
+        "preprocessing": {"target_schema": "event_v1", "feature_profile": "event_audio_v2_rhythm"},
+        "songs": [],
+    }), encoding="utf-8")
+    onset_params = {"profile": "chart_onsets_v1", "loss_weight": 0.35,
+                    "sigma_sec": 0.04, "target_version": "chart_onsets_v1",
+                    "local_pooling_policy": "per_sample_v2"}
+    monkeypatch.setattr(webui, "_checkpoint_inspection", lambda *a, **kw: {
+        "errors": [], "epoch": 4,
+        "model_config": {"planner_profile": "music_structure_v3", "onset_profile": "chart_onsets_v1"},
+        "data_contract": {"onset_params": onset_params},
+        "onset_training": {"profile": "chart_onsets_v1", "trained": True, "optimizer_steps": 3},
+    })
+    calls = []
+    monkeypatch.setattr(webui, "_run_subprocess_task", lambda task, args, **kwargs: calls.append(args))
+
+    status, data = webui_api("/api/train", {
+        "model_family": "event_v1", "manifest": str(manifest), "raw_root": str(tmp_path),
+        "cache_dir": str(tmp_path / "cache"), "checkpoint_dir": str(tmp_path / "resume"),
+        "training_mode": "resume", "training_checkpoint": str(checkpoint), "epochs": 1,
+        "onset_profile": "auto", "onset_loss_weight": 0.2,
+    })
+
+    assert status == 200, data
+    args = calls[0]
+    assert args[args.index("--onset-profile") + 1] == "chart_onsets_v1"
+    assert args[args.index("--onset-loss-weight") + 1] == "0.35"
+    task = webui.TASKS[data["task_id"]]
+    assert task.result["onset_profile"] == "chart_onsets_v1"
+    assert task.result["onset_loss_weight"] == 0.35
 
 
 def test_event_train_forwards_difficulty_and_audio_contract(webui_api, monkeypatch, tmp_path):
@@ -452,6 +616,51 @@ def test_generation_layout_comes_from_the_checkpoint(webui_api, monkeypatch, tmp
     task = webui.TASKS[started["task_id"]]
     assert task.result["context_layout"]["context_beats"] == 8
     assert task.result["context_layout_warnings"], "the mismatch must be reported"
+
+
+def test_local_onset_generation_is_capability_gated_and_forwarded(webui_api, monkeypatch, tmp_path):
+    checkpoint = tmp_path / "onset.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    audio = tmp_path / "song.wav"
+    audio.write_bytes(b"audio")
+    monkeypatch.setattr(webui, "_load_checkpoint_payload", lambda path: {
+        "schema": "maichart-event-generator-checkpoint-v1",
+        "model_state_dict": {"weight": object()},
+        "model_config": {"d_model": 32, "onset_profile": "chart_onsets_v1"},
+        "data_contract": {"target_schema": "event_v1"},
+        "onset_training": {"profile": "chart_onsets_v1", "trained": True, "optimizer_steps": 8},
+    })
+    capability_state = {"local_onset_guidance": False}
+    monkeypatch.setattr(webui, "checkpoint_capabilities", lambda _payload: {
+        "model_family": webui.EVENT_MODEL_FAMILY, "errors": [],
+        "conflict_detection": True, "conflict_repair": True,
+        "fine_note_strength": True, "local_onset_guidance": capability_state["local_onset_guidance"],
+    })
+    calls = []
+
+    def fake_run(task, args, *, expected_epoch, result_paths):
+        calls.append(args)
+        task.status = "completed"
+
+    monkeypatch.setattr(webui, "_run_subprocess_task", fake_run)
+    base = {"checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "out.txt")}
+    status, zero = webui_api("/api/generate", {**base, "local_onset_bias_strength": 0})
+    assert status == 200, zero
+    assert "--local-onset-bias-strength" not in calls[-1]
+
+    status, rejected = webui_api("/api/generate", {**base, "local_onset_bias_strength": 0.4})
+    assert status == 400
+    assert "未训练可用" in rejected["error"]
+    assert len(calls) == 1
+
+    capability_state["local_onset_guidance"] = True
+    status, started = webui_api("/api/generate", {
+        **base, "fine_note_strength": 0.8, "local_onset_bias_strength": 0.45,
+    })
+    assert status == 200, started
+    assert calls[-1][calls[-1].index("--local-onset-bias-strength") + 1] == "0.45"
+    assert calls[-1][calls[-1].index("--fine-note-strength") + 1] == "0.8"
+    assert webui.TASKS[started["task_id"]].result["local_onset_bias_strength"] == 0.45
 
 
 def test_checkpoint_family_detection_uses_the_contract(webui_api, monkeypatch, tmp_path):

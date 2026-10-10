@@ -90,7 +90,7 @@ const GENERATION_PARAM_FIELDS = [
   "tailDamping", "tailDampingWindows", "tailDampingStrength", // 收尾衰减
   "audioBoundsTrim", "audioBoundsLead", "silenceThreshold", "silenceWindowShare", // 音频边界
   "guidanceScale", "presenceThreshold", "buttonThreshold",
-  "fineNoteStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
+  "fineNoteStrength", "localOnsetBiasStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
   "conflictRepairMode", "conflictRetries",
 ];
 
@@ -577,6 +577,18 @@ function updateGenerationCapabilityControls() {
   });
   const fineValue = element("#fineNoteStrengthValue");
   if (fineValue && fine) fineValue.textContent = Number(fine.value).toFixed(2);
+  const onset = element("#localOnsetBiasStrength");
+  if (onset) onset.disabled = !(checked && caps.local_onset_guidance === true);
+  const onsetValue = element("#localOnsetBiasStrengthValue");
+  if (onsetValue && onset) onsetValue.textContent = Number(onset.value).toFixed(2);
+  const onsetStatus = element("#localOnsetGuidanceStatus");
+  if (onsetStatus) {
+    onsetStatus.textContent = !checked
+      ? "检查当前生成 checkpoint 后确认能力。"
+      : caps.local_onset_guidance === true
+        ? "当前 checkpoint 已训练局部起音辅助头；0 关闭，建议先试 0.3–0.6。"
+        : "当前 checkpoint 不支持此指导；使用 chart_onsets_v1 训练并完成能力检查后可用。";
+  }
   const conflictEnabled = checked && caps.conflict_detection === true
     && checkedOrDefault("#conflictDetectionEnabled", false);
   ["#detectHardConflicts", "#detectSoftConflicts", "#conflictRepairMode"].forEach((selector) => {
@@ -754,6 +766,10 @@ function trainingPayload(options = {}) {
     preference_max_pairs: Number(valueOrDefault("#preferenceMaxPairs", 32)),
     planner_profile: valueOrDefault("#plannerProfile", "auto"),
     plan_teacher_mix: Number(valueOrDefault("#planTeacherMix", 0.5)),
+    ...(currentModelFamily() === "legacy_frame_v2" ? {} : {
+      onset_profile: valueOrDefault("#onsetProfile", "auto"),
+      onset_loss_weight: Number(valueOrDefault("#onsetLossWeight", 0.2)),
+    }),
   };
 }
 
@@ -836,6 +852,7 @@ function generationPayload() {
     conflict_retries: Number(valueOrDefault("#conflictRetries", 0)),
     detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
     fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
+    local_onset_bias_strength: Number(valueOrDefault("#localOnsetBiasStrength", 0)),
   };
 }
 
@@ -936,6 +953,11 @@ function updateDatasetButtons() {
 function updateTrainingControls() {
   updateFamilyFields();
   updateDatasetButtons();
+  const resume = currentTrainingMode() === "resume";
+  ["#onsetProfile", "#onsetLossWeight"].forEach((selector) => {
+    const target = element(selector);
+    if (target) target.disabled = resume;
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -1548,6 +1570,14 @@ function applyCheckpointModelConfig(data) {
   if (conditionParams.dropout !== undefined && element("#conditionDropout")) {
     element("#conditionDropout").value = String(conditionParams.dropout);
   }
+  if (currentTrainingMode() === "resume") {
+    const onsetParams = contract.onset_params || {};
+    const onsetTraining = data.onset_training || {};
+    const onsetProfile = onsetParams.profile || model.onset_profile || "none";
+    const onsetWeight = onsetParams.loss_weight ?? onsetTraining.loss_weight ?? 0.2;
+    if (element("#onsetProfile")) element("#onsetProfile").value = onsetProfile;
+    if (element("#onsetLossWeight")) element("#onsetLossWeight").value = String(onsetWeight);
+  }
   // A normal resume must reproduce the checkpoint's sampling contract. Older
   // checkpoints only recorded the combined slide/touch multiplier; interpret
   // that value as the legacy Touch multiplier. Finetune intentionally keeps
@@ -1586,7 +1616,7 @@ function renderCheckpointInspection(data) {
   const state = valid ? `checkpoint 可用；${capability}` : "checkpoint 不可用于当前模式";
   const caps = data.generation_capabilities || {};
   const capabilityLine = Object.keys(caps).length
-    ? `生成能力：静态冲突检测 ${caps.conflict_detection ? "可用" : "不可用"}，细碎音符调制 ${caps.fine_note_strength ? "可用" : "不可用"}`
+    ? `生成能力：静态冲突检测 ${caps.conflict_detection ? "可用" : "不可用"}，细碎音符调制 ${caps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐 ${caps.local_onset_guidance === true ? "可用" : "不可用"}`
     : "";
   const details = [
     capabilityLine,
@@ -1597,6 +1627,10 @@ function renderCheckpointInspection(data) {
     data.model_config?.dropout !== undefined ? `模型内部 Dropout（dropout）：${data.model_config.dropout}` : "",
     data.data_contract?.condition_params?.dropout !== undefined ? `条件随机丢弃（condition_dropout）：${data.data_contract.condition_params.dropout}；当前控件：${valueOrDefault("#conditionDropout", "未显示")}` : "",
     data.data_contract?.family_params?.context_dropout !== undefined ? `上下文随机丢弃（context_dropout）：${data.data_contract.family_params.context_dropout}` : "",
+    data.data_contract?.onset_params?.profile !== undefined
+      ? `采音辅助合同：${data.data_contract.onset_params.profile}，loss weight=${data.data_contract.onset_params.loss_weight ?? "未记录"}` : "",
+    data.onset_training?.trained !== undefined
+      ? `采音辅助训练：${data.onset_training.trained ? "已训练" : "未训练"}` : "",
     `模型结构：${JSON.stringify(data.model_config || {})}`,
     `数据合同：${JSON.stringify(data.data_contract || {})}`,
     data.model_config?.input_dim !== undefined ? `事件输入维度：${data.model_config.input_dim}` : "",
@@ -1657,7 +1691,7 @@ async function inspectGenerationCheckpoint() {
   const family = data.model_family_label || data.model_family || "未知";
   const genCaps = data.generation_capabilities || {};
   const capSuffix = Object.keys(genCaps).length
-    ? `；静态冲突检测${genCaps.conflict_detection ? "可用" : "不可用"}，细碎音符调制${genCaps.fine_note_strength ? "可用" : "不可用"}`
+    ? `；静态冲突检测${genCaps.conflict_detection ? "可用" : "不可用"}，细碎音符调制${genCaps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐${genCaps.local_onset_guidance === true ? "可用" : "不可用"}`
     : "";
   setGenerationStatus(`模型族：${family}；schema：${data.schema || "未记录"}；生成入口：${data.generation_cli || "自动"}${capSuffix}`,
     data.valid ? "good" : "warn");
@@ -1683,9 +1717,9 @@ async function inspectGenerationCheckpoint() {
       ? ""
       : genCaps.conflict_detection
         ? (genCaps.fine_note_strength
-            ? "该 checkpoint 支持静态冲突参考检测与细碎音符柔性调制。"
-            : "该 checkpoint 支持静态冲突参考检测；细碎音符调制需要 music_structure_v3。")
-        : "非事件模型（或未知），不提供冲突检测。";
+            ? `该 checkpoint 支持静态冲突参考检测与细碎音符柔性调制；${genCaps.local_onset_guidance === true ? "也支持局部采音对齐指导。" : "局部采音对齐指导需要训练过 chart_onsets_v1 的 checkpoint。"}`
+            : `该 checkpoint 支持静态冲突参考检测；细碎音符调制需要 music_structure_v3。${genCaps.local_onset_guidance === true ? "局部采音对齐指导可用。" : "局部采音对齐指导需要训练过 chart_onsets_v1 的 checkpoint。"}`)
+        : "非事件模型（或未知），不提供冲突检测或局部采音对齐指导。";
   }
   updateGenerationCapabilityControls();
   const notice = element("#generationCheckpointNotice");
@@ -1811,6 +1845,10 @@ async function startTrain(options = {}) {
     const status = await api("/api/status");
     if (status.training_capabilities?.event_learning_rate_control !== true) {
       throw new Error("当前后端尚未加载事件模型学习率修复，请重启 WebUI 服务后再训练。");
+    }
+    if (payload.onset_profile === "chart_onsets_v1"
+        && status.training_capabilities?.local_onset_training !== true) {
+      throw new Error("当前后端未加载 chart_onsets_v1 训练支持；auto / none 仍可使用，启用新 profile 请先加载新服务。");
     }
   }
   if (payload.model_family === "event_ctx_v1") {
@@ -2561,6 +2599,13 @@ async function startGenerate() {
   const payload = generationPayload();
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
+  if (payload.local_onset_bias_strength > 0) {
+    const caps = generationInspection.path === payload.checkpoint && generationInspection.data?.valid === true
+      ? generationInspection.data.generation_capabilities || {} : {};
+    if (caps.local_onset_guidance !== true) {
+      throw new Error("请先检查 checkpoint；当前模型没有已训练的局部采音对齐辅助头，不能开启非零指导。");
+    }
+  }
   if (payload.intensity_curve_enabled) {
     if (!payload.intensity_curve) throw new Error("已启用谱面张力曲线，但当前歌曲还没有生成并保存曲线");
     if (intensityCurveState.path !== payload.audio) throw new Error("音频路径已变化，请为当前歌曲重新生成强度曲线");
@@ -2801,6 +2846,18 @@ if (intensityCurveState.profile) {
     if (target.id === "learningRate") target.dataset.touched = "1";
     if (target.id === "fineNoteStrength") {
       const output = element("#fineNoteStrengthValue");
+      if (output) output.textContent = Number(target.value).toFixed(2);
+    }
+    if (target.id === "localOnsetBiasStrength") {
+      const output = element("#localOnsetBiasStrengthValue");
+      if (output) output.textContent = Number(target.value).toFixed(2);
+    }
+    if (target.id === "localOnsetBiasStrength") {
+      const output = element("#localOnsetBiasStrengthValue");
+      if (output) output.textContent = Number(target.value).toFixed(2);
+    }
+    if (target.id === "localOnsetBiasStrength") {
+      const output = element("#localOnsetBiasStrengthValue");
       if (output) output.textContent = Number(target.value).toFixed(2);
     }
     updateGenerationCapabilityControls();

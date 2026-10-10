@@ -92,6 +92,12 @@ batch_size × (d_model / 256)² × (num_layers / 8) ≤ 12     # 序列长度 76
 | `dim_feedforward` | 1024 | 前馈层宽度，惯例取 4×`d_model`。 |
 | `dropout` | 0.1 | 训练期随机丢弃。防过拟合的第一道闸；数据少→升到 0.15–0.2。 |
 
+### 可选局部采音辅助头
+
+`onset_profile=chart_onsets_v1` 为 event_v1 / event_ctx_v1 增加局部帧级起音预测头，以谱面标注的 note 起音时刻为辅助目标；`onset_loss_weight` 默认 0.2，控制它相对事件 token 损失的占比。`auto` 从 checkpoint 继承保存的 profile，无 checkpoint 的 fresh 保持关闭；`none` 保留原模型结构。`finetune` 可显式选择 `chart_onsets_v1` 给兼容的旧 v3 checkpoint 加头；`resume` 会沿用已保存 profile 和 loss weight，不能切换。
+
+生成端的 `local_onset_bias_strength` 是独立的 0–1 控件，默认 0 关闭。仅训练过该头的 checkpoint 支持非零值；0.3–0.6 可作为温和起点，用它把局部事件落点引向模型预测的采音位置。它不要求每个音乐峰都增加音符，也不指定三连音等类别，且不替代强度曲线或密度限制。
+
 ### 2.3 优化
 
 | 参数 | 默认 | 作用与影响 |
