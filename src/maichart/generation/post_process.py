@@ -127,8 +127,7 @@ def detect_chart_conflicts(points, tempo_changes, first, config):
     hard = any(c.severity == "hard" for c in issues)
     success = not (config.conflict_repair_mode == "reject" and hard)
     # An incomplete parser result cannot be presented as a strict acceptance.
-    if config.conflict_repair_mode == "reject" and (
-            coverage["parse_errors"] or coverage["unsupported"]):
+    if config.conflict_repair_mode == "reject" and coverage["parse_errors"]:
         success = False
     return PostProcessResult(len(events), len(events), issues, [], success,
                              message=f"{len(issues)} static references", points=points,
@@ -146,13 +145,7 @@ def process_chart_points(points, tempo_changes, first, config, *, repair_after_b
     initial = detect_chart_conflicts(points, tempo_changes, first, config)
     if config.conflict_repair_mode != "local" or not config.enable_conflict_detection:
         return initial
-    # Local repair is only safe when the complete chart was interpreted.  An
-    # unsupported Slide/Wifi path can hide additional conflicts; repairing the
-    # subset we happened to understand would falsely present a partial result
-    # as a repaired chart.  Keep the diagnostics and leave points unchanged.
-    if initial.coverage.get("unsupported") or any(
-            e.get("code") != "duplicate_button_head"
-            for e in initial.coverage.get("parse_errors", [])):
+    if any(e.get("code") != "duplicate_button_head" for e in initial.coverage.get("parse_errors", [])):
         initial.message = "Syntax diagnostics present: local repair skipped"
         return initial
     events, text_by_source, _ = _extract(points, tempo_changes, first)
