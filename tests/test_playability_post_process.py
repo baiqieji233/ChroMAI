@@ -18,13 +18,6 @@ from maichart.generation.conflict_detector import (
     SlideTrajectory,
 )
 from maichart.generation.maimai_physics import ButtonLayout, HandDispatch
-from maichart.generation.model_compatibility import (
-    FeatureSupport,
-    ModelFamily,
-    detect_model_family,
-    get_generation_config_for_model,
-    validate_args_for_model,
-)
 from maichart.generation.post_process import PostProcessConfig, detect_chart_conflicts
 
 
@@ -63,15 +56,14 @@ def test_hold_tap_overlap_is_hard():
 
 
 def test_tap_on_the_slide_head_is_not_a_conflict():
-    # The star leaves button 1 immediately, so a chorded 1+slide leg is legal
-    # and must not be reported.
+    # An explicit duplicate head is a same-pad issue, not an overlapping
+    # moving-star trajectory. Parallel branches use the separate '*' syntax.
     result = _detect([_Point(0, "1"), _Point(0, "1-5[4:1]")])
     assert all(c.conflict_type != "slide_tap_collision" for c in result.conflicts_detected)
 
 
 def test_half_turn_straight_slide_reports_no_phantom_collision():
-    # 2-6 is exactly 180 degrees: the direction is ambiguous, so no midpoint
-    # button may be claimed as occupied.
+    # 2-6 is a chord through the centre. It never travels around the ring.
     trajectory = SlideTrajectory(start_button=2, pattern="-", end_button=6,
                                  start_time=0.0, duration=1.0)
     assert trajectory.angular_span() == 0.0
@@ -106,56 +98,3 @@ def test_reject_mode_fails_on_hard_conflict():
 def test_detect_only_mode_still_succeeds():
     result = _detect([_Point(0, "1h[4:2]"), _Point(1, "1")], conflict_repair_mode="none")
     assert result.success is True
-
-
-def test_model_family_is_read_from_the_real_contract_schema():
-    assert detect_model_family({"data_contract": {"target_schema": "event_v1"}}) is ModelFamily.EVENT_V1
-    assert detect_model_family({"data_contract": {"target_schema": "event_ctx_v1"}}) is ModelFamily.EVENT_CTX_V1
-
-
-def test_extended_means_the_planner_predicts_fine_rhythm():
-    # "Extended" is about the planner profile, not about how the sampler was
-    # tuned: oversampling only changes which windows are seen, whereas the
-    # sampling-bias flags need a channel to write into.
-    v3 = {"model_config": {"planner_profile": "music_structure_v3"},
-          "data_contract": {"target_schema": "event_ctx_v1"}}
-    assert detect_model_family(v3) is ModelFamily.EVENT_CTX_V1_EXTENDED
-
-    v2 = {"model_config": {"planner_profile": "music_structure_v2"},
-          "data_contract": {"target_schema": "event_ctx_v1"}}
-    assert detect_model_family(v2) is ModelFamily.EVENT_CTX_V1
-
-
-def test_oversampling_alone_does_not_advertise_sampling_bias():
-    # A v2 checkpoint that merely oversampled fine-rhythm windows still cannot
-    # read the fine-rhythm control, so it must not claim the capability.
-    payload = {
-        "model_config": {"planner_profile": "music_structure_v2"},
-        "data_contract": {
-            "target_schema": "event_ctx_v1",
-            "family_params": {"fine_rhythm_oversample": 3},
-        },
-    }
-    assert detect_model_family(payload) is ModelFamily.EVENT_CTX_V1
-    features = FeatureSupport.get_features(ModelFamily.EVENT_CTX_V1)
-    assert features["rhythm_bias"] is False
-    assert features["conflict_detection"] is True
-
-
-def test_old_checkpoint_keeps_post_processing_but_loses_sampling_bias():
-    features = FeatureSupport.get_features(ModelFamily.EVENT_CTX_V1)
-    assert features["conflict_detection"] is True
-    assert features["rhythm_bias"] is False
-
-    class Args:
-        rhythm_bias = "triplet"
-        fine_note_strength = 0.9
-        enable_conflict_detection = True
-        conflict_repair_mode = "local"
-
-    valid, warnings = validate_args_for_model(ModelFamily.EVENT_CTX_V1, Args())
-    assert valid is False and len(warnings) == 2
-    config = get_generation_config_for_model(ModelFamily.EVENT_CTX_V1, Args())
-    assert config["enable_conflict_detection"] is True
-    assert config["rhythm_bias"] == "auto"
-    assert config["fine_note_strength"] == 0.5

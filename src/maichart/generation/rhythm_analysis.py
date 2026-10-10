@@ -1,7 +1,7 @@
 """细粒度节奏特征提取模块。
 
-用于检测和量化复杂节奏模式（三连音、附点、多声部），
-引导模型学习更积极的细碎音符采样。
+独立的起音统计诊断；这些启发式分数不进入模型输入或规划器监督。
+只有 onset 时间与强度无法识别独立声部，多声部字段因此返回 None。
 
 这个模块不拼入模型输入（避免改变112维contract），
 而是作为分析工具和数据标注辅助。
@@ -27,8 +27,8 @@ class RhythmAnalysis(NamedTuple):
     fine_note_ratio: float       # [0, 1]，细碎音符占比
     
     # 多声部信息
-    polyphony_score: float       # 声部独立性 [0, 1]
-    num_voices: int              # 估计的声部数量
+    polyphony_score: float | None
+    num_voices: int | None
 
 
 def analyze_window_rhythm(
@@ -55,8 +55,8 @@ def analyze_window_rhythm(
             rhythm_entropy=0.0,
             dominant_rhythm="sparse",
             fine_note_ratio=0.0,
-            polyphony_score=0.0,
-            num_voices=1,
+            polyphony_score=None,
+            num_voices=None,
         )
     
     onsets = np.asarray(onsets, dtype=np.float32)
@@ -92,7 +92,7 @@ def analyze_window_rhythm(
         rhythm_entropy=float(np.clip(rhythm_entropy / 4.0, 0, 1)),  # 归一化到[0,1]
         dominant_rhythm=dominant,
         fine_note_ratio=float(np.clip(fine_ratio, 0, 1)),
-        polyphony_score=float(np.clip(polyphony, 0, 1)),
+        polyphony_score=polyphony,
         num_voices=num_voices,
     )
 
@@ -187,7 +187,7 @@ def _compute_syncopation(
         strong_avg = np.mean(strong_strength)
         weak_avg = np.mean(weak_strength)
         if strong_avg > 0:
-            syncopation = weak_avg / strong_avg
+            syncopation = max(0.0, (weak_avg - strong_avg) / (weak_avg + strong_avg))
         else:
             syncopation = 0.0
     else:
@@ -250,28 +250,9 @@ def _compute_fine_note_ratio(
     return 0.0
 
 
-def _estimate_polyphony(
-    onsets: np.ndarray, 
-    onset_strength: np.ndarray
-) -> tuple[float, int]:
-    """估计多声部复杂度（简化版）。
-    
-    原理：基于onset密度和强度分布估计。
-    """
-    if len(onsets) < 2:
-        return 0.0, 1
-    
-    intervals = np.diff(onsets)
-    onset_density = len(onsets) / (onsets[-1] - onsets[0]) if onsets[-1] > onsets[0] else 0
-    
-    # 粗略估计：高密度+多层级强度 → 多声部
-    strength_std = float(np.std(onset_strength))
-    polyphony_score = min(1.0, onset_density * 2.0 + strength_std)
-    
-    # 估计声部数量（1-3）
-    num_voices = 1 + int(polyphony_score / 0.4)
-    
-    return float(polyphony_score), num_voices
+def _estimate_polyphony(onsets: np.ndarray, onset_strength: np.ndarray) -> tuple[None, None]:
+    """Unmeasured: onset density does not identify musical voice count."""
+    return None, None
 
 
 def _grid_alignment_score(

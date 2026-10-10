@@ -34,7 +34,7 @@ def _normalize_resume_sampling(params: dict[str, Any] | None, *, side: str) -> d
         number = float(raw_multiplier)
     except (TypeError, ValueError, OverflowError) as exc:
         raise ValueError(f"Checkpoint {side} has an invalid fine-rhythm sampling multiplier; use finetune.") from exc
-    if isinstance(raw_multiplier, bool) or not math.isfinite(number) or not number.is_integer():
+    if isinstance(raw_multiplier, bool) or not math.isfinite(number) or not number.is_integer() or number < 1:
         raise ValueError(f"Checkpoint {side} has an invalid fine-rhythm sampling multiplier; use finetune.")
     fine_multiplier = int(number)
     if fine_multiplier <= 1:

@@ -1,3 +1,5 @@
+> 2026-10-10 校正：本文件含历史规划/历史测量。Slide、Touch 机制及完成度请以 [STAGE_BC_REPORT.md](STAGE_BC_REPORT.md) 和 [MAIMAI_MECHANICS_RESEARCH.md](MAIMAI_MECHANICS_RESEARCH.md) 为准；旧勾选不表示已完成训练/实机验收。
+
 # P1 改动说明：模型类型识别、可玩性后处理与细碎节奏过采样
 
 > 日期：2026-10-10

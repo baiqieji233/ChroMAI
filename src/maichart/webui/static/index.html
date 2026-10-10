@@ -244,7 +244,7 @@
               <option value="legacy_v1">legacy_v1（兼容旧 checkpoint）</option>
             </select>
             <small>auto 在 fresh 训练中使用最新的 music_structure_v3 planner，续训沿用 checkpoint 自己的 profile。
-            v3 比 v2 多一个「细碎节奏（fine_rhythm）」连续通道：窗口内相邻起音间隔小于四分之一拍的占比。
+            v3 比 v2 多一个「细碎节奏（fine_rhythm）」连续通道：窗口内相邻起音间隔不超过 33/128 拍的占比。
             生成页的细碎音符调制只柔性调整此通道，不指定三连音或附点等节奏类别；v2 及更早的 checkpoint 不支持此调制。
             换 profile 必须重新训练：旧 checkpoint 的结构不能通过 resume 或 finetune 切换。</small>
           </label>
@@ -326,14 +326,14 @@
                     <label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏窗口过采样（fine_rhythm_oversample）
             <input id="fineRhythmOversample" type="number" min="1" step="1" value="1">
             <small><strong>默认 1（关闭）。</strong>把「细碎节奏窗口」额外复制这么多次，再叠加在 Slide/Touch 策略之上（倍率相乘，不是相加）。
-            判定标准：窗口内相邻起音间隔小于 <strong>四分之一拍</strong>的占比达到 fine_rhythm_ratio_threshold（默认 0.25）。
+            判定标准：窗口内相邻起音间隔不超过 <strong>33/128 拍</strong>（约四分之一拍）的占比达到 fine_rhythm_ratio_threshold（默认 0.25）。
             它针对的正是模型目前容易被压平成四分/八分的位置：12 分与 24 分交替、16 分附点、密集鼓点与快速钢琴。
             设 2–3 会略微改变数据分布；真正决定采音的是训练目标，过采样只是让模型多看到这些写法。属于采样合同，<strong>改变它必须用 finetune，不能用 resume</strong>。</small>
           </label>
           <label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏判定阈值（fine_rhythm_ratio_threshold）
             <input id="fineRhythmRatioThreshold" type="number" min="0" max="1" step="0.05" value="0.25">
-            <small><strong>默认 0.25：四分之一起音间隔落在四分之一拍以内。</strong>
-            调高（如 0.4）只对真正极密的段落过采样，样本更少更精准；调低（如 0.15）覆盖面更广，但可能把普通八分段也纳入。
+            <small><strong>默认 0.25：四分之一起音间隔不超过约四分之一拍。</strong>
+            调高（如 0.4）只对真正极密的段落过采样，样本更少更精准；调低（如 0.15）覆盖面更广，也会纳入只有少量短间隔的段落；纯八分间隔不会命中。
             与上面的倍率一起构成细碎节奏采样合同。</small>
           </label>
 <label class="field" data-training-family="event_v1 legacy_frame_v2">前馈层宽度 FFN
@@ -719,7 +719,7 @@
           这是目标倍率，实际音符数仍由模型决定；soft 不会在生成后按倍率删音符。
         </div>
         <div class="form-grid compact-grid">
-          <div class="field" data-generation-family="event_v1">
+          <div class="field span-4 fine-note-control" data-generation-family="event_v1">
             <label for="fineNoteStrength">细碎音符倾向</label>
             <input id="fineNoteStrength" type="range" min="0" max="1" step="0.05" value="0.5" disabled>
             <output id="fineNoteStrengthValue" for="fineNoteStrength">0.50</output>

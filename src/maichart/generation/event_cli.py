@@ -2180,7 +2180,10 @@ def main(argv=None) -> int:
                 "fine_note_strength_effective": float(generation_config.get("fine_note_strength", 0.5)),
                 "fine_note_control": "relative_window_log_odds_v1",
             }
-            quality["generation_status"] = "success" if not note_warnings else "success_with_warnings"
+            playability_warning = args.enable_conflict_detection and (
+                conflict_result.coverage.get("status") == "partial"
+                or bool(conflict_result.remaining_conflicts))
+            quality["generation_status"] = "success_with_warnings" if note_warnings or playability_warning else "success"
             quality["windows_decoded"] = len(decoded)
             quality["windows_closed"] = sum(1 for window in decoded if window.closed)
             quality["coverage_beats"] = str(points[-1].beat if points else Fraction(0))
