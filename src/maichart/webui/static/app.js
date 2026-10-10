@@ -578,7 +578,10 @@ function updateGenerationCapabilityControls() {
   const fineValue = element("#fineNoteStrengthValue");
   if (fineValue && fine) fineValue.textContent = Number(fine.value).toFixed(2);
   const onset = element("#localOnsetBiasStrength");
-  if (onset) onset.disabled = !(checked && caps.local_onset_guidance === true);
+  if (onset) {
+    onset.disabled = !(checked && caps.local_onset_guidance === true);
+    if (checked && caps.local_onset_guidance !== true) onset.value = "0";
+  }
   const onsetValue = element("#localOnsetBiasStrengthValue");
   if (onsetValue && onset) onsetValue.textContent = Number(onset.value).toFixed(2);
   const onsetStatus = element("#localOnsetGuidanceStatus");
@@ -852,7 +855,8 @@ function generationPayload() {
     conflict_retries: Number(valueOrDefault("#conflictRetries", 0)),
     detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
     fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
-    local_onset_bias_strength: Number(valueOrDefault("#localOnsetBiasStrength", 0)),
+    local_onset_bias_strength: element("#localOnsetBiasStrength")?.disabled
+      ? 0 : Number(valueOrDefault("#localOnsetBiasStrength", 0)),
   };
 }
 
@@ -2846,14 +2850,6 @@ if (intensityCurveState.profile) {
     if (target.id === "learningRate") target.dataset.touched = "1";
     if (target.id === "fineNoteStrength") {
       const output = element("#fineNoteStrengthValue");
-      if (output) output.textContent = Number(target.value).toFixed(2);
-    }
-    if (target.id === "localOnsetBiasStrength") {
-      const output = element("#localOnsetBiasStrengthValue");
-      if (output) output.textContent = Number(target.value).toFixed(2);
-    }
-    if (target.id === "localOnsetBiasStrength") {
-      const output = element("#localOnsetBiasStrengthValue");
       if (output) output.textContent = Number(target.value).toFixed(2);
     }
     if (target.id === "localOnsetBiasStrength") {

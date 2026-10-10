@@ -27,6 +27,7 @@ from maichart.generation.event_audio import (  # noqa: E402
     ACOUSTIC_DIM, CONTEXT_KEYS, GLOBAL_MEMORY_FRAMES, INPUT_DIM, RHYTHM_CONTEXT_KEYS,
 )
 from maichart.generation.event_ctx import TARGET_SCHEMA  # noqa: E402
+from maichart.generation.event_cli import apply_contract_condition_guard  # noqa: E402
 from maichart.generation.event_model import EVENT_END, EventVocabulary  # noqa: E402
 from maichart.generation.music_plan import continuous_keys, is_music_structure, plan_values  # noqa: E402
 from maichart.training.event_checkpoints import (  # noqa: E402
@@ -238,7 +239,7 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
             "segment_beats", "max_tokens", "vocabulary_signature", "condition_keys",
         ) if key in contract
     }}
-    compare_event_contract(stored_for_guard, current, mode="finetune")
+    compare_event_contract(stored_for_guard, current, mode="init")
     for key in ("context_beats", "audio_margin_beats", "context_tokens", "overlap_beats"):
         actual = getattr(dataset, key)
         expected = family.get(key)
@@ -282,6 +283,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 level=level, difficulty=difficulty,
                 radar=defaults, style=defaults,
             )
+            requested_condition = condition.to_dict()
+            condition, condition_note = apply_contract_condition_guard(
+                condition, checkpoint["data_contract"].get("condition_params", {}), default_level=level)
             conditions.append(condition.to_vector())
             metadata.append({
                 "dataset_index": index,
@@ -290,9 +294,9 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "audio_path": str(ref.audio_path),
                 "difficulty_index": difficulty,
                 "level": level,
-                "condition": {"level": level, "difficulty": difficulty,
-                              "radar": {k: defaults[k] for k in RADAR_KEYS},
-                              "style": {k: defaults[k] for k in STYLE_KEYS}},
+                "requested_condition": requested_condition,
+                "condition": condition.to_dict(),
+                "condition_guard_note": condition_note,
                 "start_beat": str(start),
                 "end_beat": str(end),
                 "tempo_changes": [{"beat": str(change.beat), "bpm": float(change.bpm)}

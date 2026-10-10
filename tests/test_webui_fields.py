@@ -144,7 +144,9 @@ def test_local_onset_training_and_generation_controls_are_real_and_gated():
     assert 'data-training-family="event_v1 event_ctx_v1"' in label_block("onsetProfile")
     assert 'onset_profile: valueOrDefault("#onsetProfile", "auto")' in APP_JS
     assert 'onset_loss_weight: Number(valueOrDefault("#onsetLossWeight", 0.2))' in APP_JS
-    assert 'local_onset_bias_strength: Number(valueOrDefault("#localOnsetBiasStrength", 0))' in APP_JS
+    # Actual disabled/enabled serialization is exercised by the Node behavior
+    # test; keep this markup test independent from the expression spelling.
+    assert 'local_onset_bias_strength:' in APP_JS
     assert 'caps.local_onset_guidance === true' in APP_JS
     assert 'training_capabilities?.local_onset_training !== true' in APP_JS
     assert 'local_onset_guidance' in (ROOT / "src/maichart/webui/server.py").read_text(encoding="utf-8")

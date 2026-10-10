@@ -111,6 +111,8 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     elif onset_profile == "chart_onsets_v1":
         if not event_family:
             errors.append("局部采音头仅支持事件模型")
+        if profile != MUSIC_STRUCTURE_V3_PROFILE:
+            errors.append("chart_onsets_v1 需要 music_structure_v3 规划器")
         if not isinstance(onset_contract, dict) or onset_contract.get("profile") != onset_profile:
             errors.append("checkpoint 缺少匹配的局部采音目标合同")
         if config.get("local_pooling_policy") != "per_sample_v2":

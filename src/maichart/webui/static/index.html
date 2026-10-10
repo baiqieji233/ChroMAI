@@ -256,13 +256,13 @@
             <select id="onsetProfile">
               <option value="auto" selected>自动（继承 checkpoint；从头训练时关闭）</option>
               <option value="none">关闭辅助头</option>
-              <option value="chart_onsets_v1">训练 chart_onsets_v1</option>
+              <option value="chart_onsets_v1">启用局部采音头（chart_onsets_v1）</option>
             </select>
-            <small>chart_onsets_v1 增加局部帧级辅助头，学习谱面起音相对音频的位置。finetune 可为旧 checkpoint 加头；resume 会锁定并继承已保存 profile。</small>
+            <small>chart_onsets_v1 学习谱面起音相对音频的位置。finetune 可为 music_structure_v3 checkpoint 新增此头；resume 锁定并继承已保存设置。已有此头的模型继续训练时应保留；生成时可将指导强度设为 0。</small>
           </label>
           <label class="field" data-training-family="event_v1 event_ctx_v1">局部采音辅助损失权重
             <input id="onsetLossWeight" type="number" min="0" step="0.01" value="0.2">
-            <small>辅助头损失在训练总损失中的比例，默认 0.2；resume 自动使用 checkpoint 保存值。</small>
+            <small>辅助头损失在训练总损失中的比例，默认 0.2，启用时须大于 0；关闭时忽略。resume 自动使用 checkpoint 保存值。</small>
           </label>
           <label class="field" data-training-family="legacy_frame_v2" hidden>旧基线 segment frames
             <input id="segmentFrames" type="number" min="32" value="512">
@@ -751,7 +751,7 @@
             <input id="localOnsetBiasStrength" type="range" min="0" max="1" step="0.05" value="0" disabled>
             <output id="localOnsetBiasStrengthValue" for="localOnsetBiasStrength">0.00</output>
             <small id="localOnsetGuidanceStatus">检查当前生成 checkpoint 后确认能力。</small>
-            <small>0 关闭；可先试温和的 0.3–0.6，让局部起音更贴近标注落点。不会强制每个音乐峰都加音符或指定三连音；它不替代强度曲线或密度限制。旧模型及未训练此辅助头的 checkpoint 不支持。</small>
+            <small>0 关闭；可先试温和的 0.3–0.6，增强局部音乐节拍对落点的指导。不会强制每个音乐峰都加音符或指定三连音；它不替代强度曲线或密度限制。旧模型及未训练此辅助头的 checkpoint 不支持。</small>
           </div>
           <label class="field">随机种子
             <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
