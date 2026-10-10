@@ -51,6 +51,7 @@
         </div>
 
         <h3 class="group-title">A. 训练集与输出位置<span class="group-note">决定“用哪份数据、训练结果写到哪里”</span></h3>
+        <div id="trainingDatasetSelection" class="inline-status">单数据集模式：使用下方当前训练清单。</div>
         <div class="form-grid">
           <label class="field span-4">模型族 / Model family
             <select id="modelFamily">
@@ -70,7 +71,8 @@
           </label>
           <label class="field span-4">原始训练集目录
             <textarea id="rawRoot" class="path-input" rows="2" placeholder="上传 ZIP 后自动填写，或粘贴本机文件夹路径"></textarea>
-            <small>程序会递归寻找歌曲目录（含 maidata.txt 的文件夹）；每次上传 ZIP 会自动切换到独立目录。</small>
+            <small>程序会递归寻找歌曲目录（含 maidata.txt 的文件夹）；每次上传 ZIP 会自动切换到独立目录。预处理一次针对当前目录；多份已预处理数据请在“训练素材”页勾选后合并。</small>
+            <button id="registerDatasetButton" class="secondary-button" type="button">登记当前目录到训练素材</button>
           </label>
           <label class="field span-4">缓存目录
             <textarea id="cacheDir" class="path-input" rows="2">cache</textarea>
@@ -490,10 +492,25 @@
       </section>
 
       <section class="panel quality-panel">
-        <div class="section-heading"><div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">当前训练 manifest 的可视化标注</span></div>
-        <p class="param-intro">在这里搜索和标注当前训练 manifest 中的谱面。批量标签只在点击保存后生效；复杂、高难度或个人不喜欢不等于自动判坏，请用理由说明。验证集不参与加权，无需额外制作 gold manifest。质量权重会与 Slide/Touch 窗口过采样共同作用；需要调整权重时使用 finetune，不要用 resume。</p>
+        <div class="section-heading"><div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">浏览与标注素材，独立选择训练来源</span></div>
+        <p class="param-intro">勾选本次训练要使用的数据集，再点进某个数据集浏览谱面。训练使用全部勾选的来源；质量标注保存在当前打开的原数据集。</p>
+        <section id="datasetCardsPanel" class="dataset-workspace" aria-labelledby="datasetWorkspaceTitle">
+          <div class="section-heading"><div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
+          <p class="muted">勾选表示加入下一次训练；点击卡片进入该数据集的谱面目录。可以同时勾选多份，例如“full训练集 + 优质自制谱精选”。</p>
+          <div id="datasetWorkspaceStatus" class="inline-status">正在读取数据集目录...</div>
+          <div id="datasetCards" class="dataset-cards"></div>
+          <div class="dataset-workspace-actions"><button id="datasetComposeButton" class="primary-button" type="button">应用勾选的数据集</button><button id="datasetImportButton" class="secondary-button" type="button">导入新数据集</button><span id="datasetSelectionSummary" class="muted">尚未选择数据集</span></div>
+          <p class="muted">多选按可训练窗口混合，并非每个数据集各占相同比例。复制到不同目录的相同谱面会增加其学习份额；可信标杆也可用质量权重加强学习。</p>
+          <div id="datasetCompositionSummary" class="inline-status" hidden></div>
+        </section>
+        <section id="datasetCatalogPanel" hidden>
+        <div class="section-heading"><div><span class="step">CATALOG</span><h3 id="datasetCatalogTitle">数据集谱面目录</h3></div><button id="datasetBackButton" class="secondary-button" type="button">返回数据集列表</button></div>
+        <p class="param-intro">下面是当前打开数据集的目录。搜索会匹配歌曲标题、文件夹名、谱师和难度；排序不会改变训练权重，只改变浏览顺序。质量标注仍需点击保存，验证集不参与加权。</p>
         <div class="quality-toolbar">
-          <input id="qualitySearch" type="search" placeholder="搜索歌曲、谱师、难度">
+          <input id="qualitySearch" type="search" placeholder="搜索歌曲标题、文件夹、谱师、难度">
+          <select id="qualitySortBy" aria-label="目录排序字段"><option value="level">按难度</option><option value="title">按歌曲标题</option><option value="folder">按文件夹名</option><option value="designer">按谱师</option></select>
+          <select id="qualitySortDirection" aria-label="目录排序方向"><option value="asc">升序</option><option value="desc">降序</option></select>
+          <select id="qualityPageSize" aria-label="每页数量"><option value="25">每页 25</option><option value="50">每页 50</option><option value="100">每页 100</option></select>
           <select id="qualityLabelFilter"><option value="">全部标签</option><option value="excellent">优秀</option><option value="normal">普通</option><option value="reduced">减权</option><option value="excluded">排除</option><option value="negative">反例</option></select>
           <button id="qualityRefreshButton" class="secondary-button" type="button">刷新素材</button>
         </div>
@@ -506,13 +523,14 @@
         </div>
         <div id="qualitySummary" class="quality-summary-box">尚未加载当前 manifest。</div>
         <div class="quality-table-wrap"><table class="quality-table"><thead><tr><th><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"></th><th>歌曲 / 难度</th><th>谱师</th><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
-        <div class="quality-pagination"><button id="qualityPrevButton" class="small-button" type="button">上一页</button><span id="qualityPageStatus">第 0 页</span><button id="qualityNextButton" class="small-button" type="button">下一页</button></div>
+        <div class="quality-pagination"><button id="qualityPrevButton" class="small-button" type="button">上一页</button><span id="qualityPageStatus">第 0 页</span><label class="page-jump">跳到 <input id="qualityPageInput" type="number" min="1" step="1" value="1" aria-label="页码"><button id="qualityPageJumpButton" class="small-button" type="button">跳转</button></label><button id="qualityNextButton" class="small-button" type="button">下一页</button></div>
         <section id="qualityDetail" class="quality-detail" hidden>
           <div class="section-heading"><div><span class="step">DETAIL</span><h3 id="qualityDetailTitle">谱面详情</h3></div><button id="qualityCloseDetailButton" class="small-button" type="button">关闭</button></div>
           <audio id="qualityDetailAudio" controls preload="metadata"></audio>
           <details><summary>只读 maidata / inote 预览</summary><pre id="qualityDetailPreview" class="quality-preview"></pre></details>
           <div class="quality-regions"><h4>局部标注（绝对秒）</h4><div id="qualityRegionsList"></div><button id="qualityAddRegionButton" class="secondary-button" type="button">新增片段</button><button id="qualitySaveRegionsButton" class="primary-button" type="button">保存片段标注</button></div>
           <div class="quality-correction"><h4>修正版反例配对（可选）</h4><p class="muted">上传修正版 maidata 后选择对应难度槽；仅同音频与目标的修正版才会成为偏好训练候选。</p><input id="qualityCorrectedFile" type="file" accept=".txt,.maidata"><select id="qualityCorrectedDifficulty"><option value="">选择修正版难度槽</option><option value="1">Basic</option><option value="2">Advanced</option><option value="3">Expert</option><option value="4">Master</option><option value="5">Re:Master</option><option value="6">宴会场</option></select><span id="qualityCorrectedPath" class="muted"></span><button id="qualitySaveCorrectionButton" class="secondary-button" type="button">保存修正版配对</button></div>
+        </section>
         </section>
       </section>
 

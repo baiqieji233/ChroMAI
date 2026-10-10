@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 
 from maichart.webui.quality_api import QualityAPI
+from maichart.training.quality_annotations import chart_id, chart_sha256, load_annotations, save_annotations
 
 
 def test_quality_api_catalog_save_detail_preview(tmp_path):
@@ -39,3 +40,107 @@ def test_quality_api_catalog_save_detail_preview(tmp_path):
     with pytest.raises(ValueError, match="first/audio_first"):
         api.save({"manifest": str(manifest), "chart_ids": [chart_id],
                   "label": "negative", "corrected_path": str(corrected), "corrected_difficulty": 5})
+
+
+def test_quality_catalog_uses_maidata_title_and_stable_sorting(tmp_path):
+    rows = [
+        ("z-folder", "Z manifest title", "A maidata title", "14", "Designer Z"),
+        ("a-folder", "A manifest title", "B maidata title", "12+", "Designer A"),
+        ("m-folder", "M manifest title", "C maidata title", "13.4", "Designer M"),
+    ]
+    songs = []
+    for folder, manifest_title, maidata_title, level, designer in rows:
+        song = tmp_path / folder
+        song.mkdir()
+        (song / "maidata.txt").write_text(
+            f"&title={maidata_title}\n&wholebpm=120\n&lv_5={level}\n&des_5={designer}\n"
+            "&inote_5=(120){4}1,2,3,4,\n", encoding="utf-8")
+        songs.append({"song_id": folder, "title": manifest_title,
+                      "maidata_path": f"{folder}/maidata.txt",
+                      "difficulties": [{"index": 5, "level": level, "designer": designer}]})
+    manifest = tmp_path / "training_manifest.json"
+    manifest.write_text(json.dumps({"schema": "maichart-training-manifest-v1", "source_root": ".",
+                                    "source_dataset": "精选谱面", "songs": songs}), encoding="utf-8")
+    api = QualityAPI()
+
+    status, data = api.catalog({"manifest": str(manifest), "sort_by": "level", "sort_order": "asc", "page_size": 2})
+    assert status == 200
+    assert data["pages"] == 2 and data["page"] == 1
+    assert [row["title"] for row in data["rows"]] == ["B maidata title", "C maidata title"]
+    assert all(row["source_dataset"] == "精选谱面" for row in data["rows"])
+    assert data["rows"][0]["folder_name"] == "a-folder"
+
+    status, data = api.catalog({"manifest": str(manifest), "sort_by": "title", "sort_order": "desc",
+                                "page": 99, "page_size": 2})
+    assert status == 200 and data["page"] == 2
+    assert [row["title"] for row in data["rows"]] == ["A maidata title"]
+
+    status, data = api.catalog({"manifest": str(manifest), "sort_by": "designer", "sort_order": "asc", "page_size": 10})
+    assert [row["designer"] for row in data["rows"]] == ["Designer A", "Designer M", "Designer Z"]
+
+
+def test_quality_catalog_namespaces_same_named_dataset_paths(tmp_path):
+    manifests = []
+    for root_name in ("source_a", "source_b"):
+        dataset = tmp_path / root_name / "同名精选集"
+        dataset.mkdir(parents=True)
+        (dataset / "song" ).mkdir()
+        (dataset / "song" / "maidata.txt").write_text(
+            "&title=Same Song\n&wholebpm=120\n&lv_5=13\n&inote_5=(120){4}1,2,3,4,\n",
+            encoding="utf-8",
+        )
+        manifest = dataset / "training_manifest.json"
+        manifest.write_text(json.dumps({"schema": "maichart-training-manifest-v1", "source_root": ".",
+                                        "source_dataset": "同名精选集", "songs": [{
+                                            "song_id": "same-song", "maidata_path": "song/maidata.txt",
+                                            "difficulties": [{"index": 5, "level": "13"}],
+                                        }]}), encoding="utf-8")
+        manifests.append(manifest)
+
+    api = QualityAPI()
+    rows = []
+    for manifest in manifests:
+        status, data = api.catalog({"manifest": str(manifest), "page_size": 10})
+        assert status == 200 and len(data["rows"]) == 1
+        rows.append(data["rows"][0])
+    assert rows[0]["source_dataset"] == rows[1]["source_dataset"] == "同名精选集"
+    assert rows[0]["chart_id"] != rows[1]["chart_id"]
+    assert rows[0]["source_dataset_id"] != rows[1]["source_dataset_id"]
+
+
+def test_quality_save_migrates_old_namespaced_record_without_duplicates(tmp_path):
+    song = tmp_path / "dataset" / "song"
+    song.mkdir(parents=True)
+    source = song / "maidata.txt"
+    source.write_text("&title=Migration\n&wholebpm=120\n&lv_5=13\n&inote_5=(120){4}1,2,3,4,\n", encoding="utf-8")
+    manifest = song.parent / "training_manifest.json"
+    manifest.write_text(json.dumps({"schema": "maichart-training-manifest-v1", "source_root": ".",
+                                    "source_dataset": "精选集", "songs": [{
+                                        "song_id": "migration-song", "maidata_path": "song/maidata.txt",
+                                        "difficulties": [{"index": 5, "level": "13"}],
+                                    }]}), encoding="utf-8")
+    source_hash = chart_sha256(source, 5)
+    # This is the namespace format used before the source-path-aware identity.
+    old_id = chart_id("migration-song", 5, source_hash, None, "精选集")
+    save_annotations(manifest, [{"chart_id": old_id, "song_id": "migration-song", "difficulty_index": 5,
+                                 "source_path": str(source.resolve()), "chart_sha256": source_hash,
+                                 "source_dataset": "精选集", "label": "excellent", "weight": 2.0,
+                                 "reason": "保留这个理由", "regions": [{"start_sec": 0, "end_sec": 1,
+                                                                       "label": "重点", "reason": "保留片段", "weight": 1.5}]}])
+    api = QualityAPI()
+    status, catalog = api.catalog({"manifest": str(manifest), "page_size": 10})
+    assert status == 200
+    current_id = catalog["rows"][0]["chart_id"]
+    assert current_id != old_id
+    status, result = api.save({"manifest": str(manifest), "chart_ids": [current_id],
+                               "label": "reduced", "weight": 0.25, "reason": "更新后的理由"})
+    assert status == 200 and result["saved"] == 1
+    records = load_annotations(manifest)["records"]
+    assert len(records) == 1
+    assert records[0]["chart_id"] == current_id
+    assert records[0]["label"] == "reduced"
+    assert records[0]["weight"] == pytest.approx(0.25)
+    assert records[0]["source_dataset"] == "精选集"
+    assert records[0]["source_dataset_id"] == catalog["rows"][0]["source_dataset_id"]
+    assert records[0]["folder_name"] == "song"
+    assert records[0]["maidata_title"] == "Migration"

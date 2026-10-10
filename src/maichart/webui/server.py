@@ -37,6 +37,8 @@ from maichart.training.checkpoints import (
     load_checkpoint,
 )
 from maichart.training.frame_label_codec import DEFAULT_NOTE_TYPES
+from maichart.training.dataset_catalog import assert_no_validation_overlap
+from maichart.webui.dataset_api import DatasetAPI
 from maichart.webui.quality_api import (
     QualityAPI,
     quality_audio,
@@ -179,7 +181,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "workspace": str(WEBUI_ROOT),
                     "project_root": str(PROJECT_ROOT),
                     "training_capabilities": {"independent_touch_oversample": True,
-                                              "quality_training_capability": True},
+                                              "quality_training_capability": True,
+                                              "multi_dataset_training": True},
                     "intensity_curve_capability": True,
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
@@ -220,6 +223,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return self._start_intensity_analysis(self._json_body())
             if parsed.path.startswith("/api/quality/"):
                 status, result = _QUALITY_API.post(parsed.path, self._json_body())
+                return self._json_response(result, HTTPStatus(status))
+            if parsed.path.startswith("/api/datasets/"):
+                status, result = _dataset_api().post(parsed.path, self._json_body())
                 return self._json_response(result, HTTPStatus(status))
             if parsed.path == "/api/preprocess":
                 return self._start_preprocess(self._json_body())
@@ -793,7 +799,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("当前可运行的音频特征方案是 basic_v1；rhythm_v2 还未接入预处理，请先使用 basic_v1。")
         raw_root = _required_path(payload.get("raw_root"), "raw dataset root", must_exist=True)
         cache_dir = _resolve_path(payload.get("cache_dir") or str(PROJECT_ROOT / "cache"))
-        output = _resolve_path(payload.get("manifest") or str(PROJECT_ROOT / "manifests" / "training_manifest.json"))
+        output = _resolve_path(payload.get("manifest") or str(raw_root / "training_manifest.json"))
+        if output.is_file():
+            _read_training_manifest(output, raw_root)
         existing_task = _find_preprocess_task(output)
         if existing_task is not None and existing_task.status in {"queued", "running"}:
             raise ValueError("这个训练集正在预处理，请等待当前任务完成，不需要再次点击预处理")
@@ -814,6 +822,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _start_train(self, payload: dict[str, Any]) -> None:
+        payload, dataset_selection = _prepare_training_sources(payload)
         model_family = _requested_model_family(payload)
         if model_family == LEGACY_MODEL_FAMILY and str(payload.get("feature_profile", "basic_v1")) != "basic_v1":
             raise ValueError("当前可运行的音频特征方案是 basic_v1；请先使用 basic_v1 训练。")
@@ -889,6 +898,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             _read_training_manifest(validation_manifest)
             if validation_manifest == manifest:
                 raise ValueError("训练和验证 manifest 不能是同一个文件；请先按歌曲划分数据集")
+            assert_no_validation_overlap(manifest, validation_manifest)
         training_mode = str(payload.get("training_mode", "fresh")).strip().lower()
         if training_mode in {"from_scratch", "scratch", "new"}:
             training_mode = "fresh"
@@ -916,6 +926,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         else:
             training_checkpoint_path = None
         task = _create_task("train")
+        if dataset_selection is not None:
+            task.result["dataset_selection"] = dataset_selection
+            task.result["manifest"] = str(manifest)
         epochs = max(1, int(payload.get("epochs", 20)))
         seed, seed_randomized = _resolve_seed(payload)
         task.result.update({"seed": seed, "seed_randomized": seed_randomized})
@@ -1094,6 +1107,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _inspect_checkpoint(self, payload: dict[str, Any]) -> None:
+        payload, dataset_selection = _prepare_training_sources(payload)
         checkpoint_path = _required_path(
             payload.get("checkpoint_path") or payload.get("checkpoint"),
             "checkpoint",
@@ -1116,9 +1130,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
             checkpoint_path, mode=mode, manifest=manifest,
             model_family=None if mode == "generate" else _requested_model_family(payload),
         )
+        if dataset_selection is not None:
+            inspection["dataset_selection"] = dataset_selection
+            inspection["manifest"] = payload["manifest"]
         self._json_response(inspection)
 
     def _inspect_manifest(self, payload: dict[str, Any]) -> None:
+        payload, dataset_selection = _prepare_training_sources(payload)
         model_family = _requested_model_family(payload)
         manifest_value = payload.get("manifest")
         if not manifest_value:
@@ -1177,6 +1195,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response(
             {
                 "manifest": str(manifest_path),
+                "dataset_selection": dataset_selection,
                 "schema": data.get("schema"),
                 "ready": True,
                 "state": "prepared",
@@ -1657,6 +1676,38 @@ def _read_training_manifest(manifest_path: Path, raw_root: Any = None) -> dict[s
     return data
 
 
+def _dataset_api() -> DatasetAPI:
+    # Resolve roots at call time, including isolated test/QA workspaces.
+    return DatasetAPI(project_root=PROJECT_ROOT, dataset_root=DATASET_ROOT, workspace_root=WEBUI_ROOT)
+
+
+def _prepare_training_sources(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    """Use the same selected sources for inspection and actual training."""
+    manifests = payload.get("manifests")
+    if manifests is None or manifests == []:
+        return payload, None
+    if not isinstance(manifests, list) or any(not isinstance(value, str) or not value.strip() for value in manifests):
+        raise ValueError("训练数据集列表必须是非空路径组成的列表")
+    manifests = list(dict.fromkeys(str(_resolve_path(value)) for value in manifests))
+    if payload.get("auto_preprocess") and len(manifests) > 1:
+        raise ValueError("联合训练前请分别预处理选中的数据集，然后点击‘开始训练’；一键预处理只处理当前单个数据集。")
+    if payload.get("auto_preprocess") and len(manifests) == 1:
+        if _resolve_path(str(payload.get("manifest") or "")) != Path(manifests[0]):
+            raise ValueError("一键预处理的当前目录与勾选的数据集不一致，请先切换到这份数据集。")
+        return payload, None
+    for value in manifests:
+        pending = _manifest_pending_status(Path(value))
+        if pending is not None:
+            raise ValueError(pending["message"] + f" 数据集：{Path(value).parent.name}")
+    prepared = _dataset_api().prepare(manifests, model_family=_requested_model_family(payload))
+    result = dict(payload)
+    result.update({"manifest": prepared["manifest"], "raw_root": prepared.get("raw_root") or "",
+                   "cache_dir": prepared["cache_dir"], "auto_preprocess": False})
+    if result.get("quality_enabled") or result.get("preference_enabled"):
+        result["quality_annotations"] = prepared.get("quality_annotations") or prepared.get("annotation_path")
+    return result, prepared
+
+
 def _event_difficulty_usable(song: dict[str, Any], difficulty: dict[str, Any]) -> bool:
     """Use event-preprocessor QC fields without trusting fixed-frame flags."""
 
@@ -1758,7 +1809,7 @@ def _checkpoint_inspection(
             )
         # Frame division is not part of the event model's training contract.
         preprocessing = (manifest or {}).get("preprocessing") or {}
-        for key in ("sample_rate", "feature_profile"):
+        for key in ("sample_rate", "feature_profile", "hop_length"):
             if key in preprocessing and key in stored_contract and preprocessing[key] != stored_contract[key]:
                 init_errors.append(f"数据合同 {key} 不兼容：checkpoint={stored_contract[key]}，当前={preprocessing[key]}")
         resume_errors = list(init_errors)
@@ -1898,43 +1949,8 @@ def _looks_like_dataset(root: Path) -> bool:
 
 
 def _uploaded_datasets() -> list[dict[str, Any]]:
-    """List extraction roots, including uploads from before UI state saving.
-
-    A folder dropped straight into ``datasets/`` (no upload id) is listed as well:
-    otherwise the only way to use it is to paste its path by hand, which is not
-    obvious and made a correctly placed corpus look invisible.
-    """
-
-    roots = [
-        root for root in DATASET_ROOT.glob("*/*")
-        if root.is_dir() and re.fullmatch(r"[a-f0-9]{8}", root.name)
-    ]
-    known = set(roots)
-    for child in DATASET_ROOT.glob("*"):
-        if child in known or not child.is_dir():
-            continue
-        # Skip the parent of an upload (``<12hex>_<name>/<8hex>/``): the real
-        # dataset is the inner folder, already listed above.  Listing the parent
-        # as well would offer the same corpus twice, with a manifest path that
-        # does not exist.
-        if any(sub.is_dir() and re.fullmatch(r"[a-f0-9]{8}", sub.name) for sub in child.glob("*")):
-            continue
-        if _looks_like_dataset(child):
-            roots.append(child)
-    roots.sort(key=lambda root: (root.stat().st_ctime_ns, str(root)), reverse=True)
-    entries = []
-    for root in roots:
-        uploaded = bool(re.fullmatch(r"[a-f0-9]{8}", root.name))
-        entries.append({
-            "path": str(root.resolve()),
-            "cache_dir": str((root / "cache").resolve()),
-            "manifest": str((root / "training_manifest.json").resolve()),
-            "name": (re.sub(r"^[a-f0-9]{12}_", "", root.parent.name) + ".zip") if uploaded
-                    else f"{root.name}（手动放置）",
-            "upload_id": root.name if uploaded else "",
-            "prepared": (root / "training_manifest.json").is_file(),
-        })
-    return entries
+    """Expose the same discovered and registered library in every UI entry."""
+    return _dataset_api().catalog({})[1]["datasets"]
 
 
 def _resolve_path(value: str | os.PathLike[str]) -> Path:

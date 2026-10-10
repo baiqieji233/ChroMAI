@@ -1,0 +1,578 @@
+"""Merge compatible preprocessing manifests for one generator run."""
+
+from __future__ import annotations
+
+import argparse
+import copy
+import hashlib
+import json
+import os
+import tempfile
+import threading
+from pathlib import Path
+from typing import Any
+
+
+SCHEMA = "maichart-training-manifest-v1"
+PATH_KEYS = ("maidata_path", "audio_path", "convert_report_path")
+_COMPOSE_LOCK = threading.RLock()
+
+
+def _write_json(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.stem + "_", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as output:
+            json.dump(payload, output, ensure_ascii=False, indent=2)
+        os.replace(temporary, path)
+    finally:
+        if Path(temporary).exists():
+            Path(temporary).unlink()
+
+
+def _source_root(manifest: Path, data: dict[str, Any]) -> Path:
+    value = str(data.get("source_root") or ".")
+    if value.startswith("<"):
+        return manifest.parent
+    path = Path(value)
+    return (path if path.is_absolute() else manifest.parent / path).resolve()
+
+
+def _source_asset(value: Any, manifest: Path, data: dict[str, Any]) -> Path:
+    path = Path(str(value))
+    if path.is_absolute():
+        return path.resolve()
+    bases = (manifest.parent, _source_root(manifest, data), manifest.parent.parent)
+    return next(((base / path).resolve() for base in bases if (base / path).exists()), (bases[0] / path).resolve())
+
+
+def manifest_dataset_id(manifest_path: str | Path, payload: dict[str, Any] | None = None) -> str:
+    """Return an internal source identity, separate from its display name."""
+    data = payload or {}
+    for key in ("dataset_id", "source_dataset"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            value = value.get("id") or value.get("key")
+        elif key == "source_dataset":
+            value = None
+        value = str(value or "").strip()
+        if value:
+            return value
+    manifest = Path(manifest_path).resolve()
+    return "ds-" + hashlib.sha1(str(_source_root(manifest, data)).casefold().encode("utf-8")).hexdigest()[:12]
+
+
+def manifest_dataset_name(manifest_path: str | Path, payload: dict[str, Any] | None = None) -> str:
+    data = payload or {}
+    for key in ("dataset_name", "source_dataset", "name"):
+        value = data.get(key)
+        if isinstance(value, dict):
+            value = value.get("name") or value.get("label")
+        value = str(value or "").strip()
+        if value:
+            return value
+    manifest = Path(manifest_path).resolve()
+    root = _source_root(manifest, data)
+    return root.name or manifest.stem
+
+
+def _quality_annotation_path(manifest: Path) -> Path:
+    return manifest.with_name("quality_annotations.json")
+
+
+def _namespaced_chart_id(song_id: str, difficulty_index: int, chart_hash: str,
+                         audio_hash: Any, namespace: str) -> str:
+    payload = f"{namespace}\0{song_id}\0{int(difficulty_index)}\0{chart_hash}\0{audio_hash or ''}"
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def merge_training_manifests(
+    manifest_paths: list[str | Path],
+    output_path: str | Path,
+    *,
+    dataset_ids: list[str] | None = None,
+    dataset_names: list[str] | None = None,
+    merge_annotations: bool = True,
+) -> dict[str, Any]:
+    """Merge compatible manifests for one training run.
+
+    Paths in the resulting manifest are absolute, while every song keeps
+    ``source_dataset``, ``source_manifest``, ``original_song_id`` and
+    ``source_path_key``.  The latter is important: quality annotations made
+    against an individual source manifest continue to resolve after the
+    merged manifest is moved elsewhere.  Duplicate ``maidata + difficulty``
+    entries are ignored deterministically; this handles the common case where
+    a curated set is a subset of the full corpus without silently doubling a
+    chart's training weight.
+    """
+
+    if not manifest_paths:
+        raise ValueError("At least one training manifest is required.")
+    loaded = []
+    for position, raw_path in enumerate(manifest_paths):
+        path = Path(raw_path).resolve()
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if payload.get("schema") != SCHEMA:
+            raise ValueError(f"{path} is not a {SCHEMA}.")
+        source_id = (dataset_ids[position].strip() if dataset_ids and position < len(dataset_ids)
+                     and dataset_ids[position].strip() else manifest_dataset_id(path, payload))
+        source_name = (dataset_names[position].strip() if dataset_names and position < len(dataset_names)
+                       and dataset_names[position].strip() else manifest_dataset_name(path, payload))
+        loaded.append((path, payload, source_id, source_name))
+
+    # If two selected manifests use the same explicit id, retain a stable
+    # namespace for both.  The suffix depends on the canonical manifest path,
+    # never on selection order.
+    id_counts: dict[str, int] = {}
+    for _, _, source_id, _ in loaded:
+        id_counts[source_id] = id_counts.get(source_id, 0) + 1
+    normalized_loaded = []
+    for path, payload, source_id, source_name in loaded:
+        if id_counts[source_id] > 1:
+            source_id = f"{source_id}-{hashlib.sha1(str(path).encode('utf-8')).hexdigest()[:8]}"
+        normalized_loaded.append((path, payload, source_id, source_name))
+    loaded = sorted(normalized_loaded, key=lambda item: str(item[0]).casefold())
+
+    contracts = [_contract(payload, manifest_path) for manifest_path, payload, _, _ in loaded]
+    reference = contracts[0]
+    for path, contract in zip((item[0] for item in loaded), contracts):
+        differences = [
+            f"{key}: {reference[key]!r} != {contract[key]!r}"
+            for key in reference
+            if reference[key] != contract[key]
+            and (key in {"target_schema", "feature_profile"}
+                 or reference[key] is not None and contract[key] is not None)
+        ]
+        if differences:
+            raise ValueError(
+                f"Cannot merge {path}: preprocessing contracts differ ({'; '.join(differences)}). "
+                "请使用相同模型族、采样率和音频特征重新预处理这些数据集。"
+            )
+
+    output = Path(output_path).resolve()
+    songs: list[dict[str, Any]] = []
+    seen_charts: set[tuple[str, int]] = set()
+    annotation_records: list[dict[str, Any]] = []
+    source_entries: list[dict[str, Any]] = []
+    warnings: list[dict[str, Any]] = []
+    owners: dict[tuple[str, int], dict[str, Any]] = {}
+    duplicate_count = 0
+    multi_source = len(loaded) > 1
+    for manifest_path, payload, source_id, source_name in loaded:
+        source_root_path = _source_root(manifest_path, payload)
+        source_entries.append({
+            "dataset_id": source_id, "name": source_name,
+            "manifest": str(manifest_path), "source_root": str(source_root_path),
+            "song_count": 0, "difficulty_count": 0,
+        })
+        if merge_annotations:
+            annotation_file = _quality_annotation_path(manifest_path)
+            if annotation_file.is_file():
+                try:
+                    annotation_payload = json.loads(annotation_file.read_text(encoding="utf-8-sig"))
+                    if annotation_payload.get("schema") != "maichart-quality-annotations-v1":
+                        raise ValueError(f"质量标注 schema 无效：{annotation_file}")
+                    for record in annotation_payload.get("records", []):
+                        if isinstance(record, dict):
+                            copied_record = copy.deepcopy(record)
+                            # Older hand-created annotation files sometimes
+                            # stored source_path relative to their manifest.
+                            copied_record["_annotation_manifest"] = str(manifest_path)
+                            for key in ("source_path", "audio_path", "corrected_path"):
+                                if copied_record.get(key):
+                                    copied_record[key] = str(_source_asset(copied_record[key], manifest_path, payload))
+                            annotation_records.append(copied_record)
+                except (OSError, json.JSONDecodeError) as exc:
+                    raise ValueError(f"无法读取质量标注 {annotation_file}：{exc}") from exc
+        for song in payload.get("songs", []):
+            copied = copy.deepcopy(song)
+            original_song_id = str(copied.get("song_id") or "unknown")
+            copied["original_song_id"] = original_song_id
+            copied["source_dataset"] = {"id": source_id, "name": source_name}
+            copied["source_manifest"] = str(manifest_path)
+            copied["song_id"] = f"{source_id}::{original_song_id}" if multi_source else original_song_id
+            _absolutize_song_paths(copied, manifest_path, payload)
+            maidata_path = Path(str(copied.get("maidata_path") or "")).resolve()
+            try:
+                source_key = maidata_path.relative_to(source_root_path).as_posix()
+            except ValueError:
+                source_key = maidata_path.as_posix()
+            copied["source_path_key"] = source_key
+            kept_difficulties = []
+            for difficulty in copied.get("difficulties", []):
+                if not isinstance(difficulty, dict):
+                    continue
+                raw_index = difficulty.get("difficulty_index", difficulty.get("index"))
+                try:
+                    index = int(raw_index)
+                except (TypeError, ValueError):
+                    index = -1
+                chart_key = (str(maidata_path), index)
+                if chart_key in seen_charts:
+                    duplicate_count += 1
+                    if owners[chart_key].get("audio_path") != copied.get("audio_path"):
+                        raise ValueError(f"同一原谱槽位指向不同音频：{maidata_path}:{index}，请统一数据源")
+                    warnings.append({"reason": "duplicate_source_chart", "source_path": str(maidata_path),
+                                     "difficulty_index": index, "source_manifest": str(manifest_path)})
+                    continue
+                seen_charts.add(chart_key)
+                owners[chart_key] = copied
+                kept_difficulties.append(difficulty)
+                source_entries[-1]["difficulty_count"] += 1
+            if kept_difficulties:
+                copied["difficulties"] = kept_difficulties
+                songs.append(copied)
+                source_entries[-1]["song_count"] += 1
+
+    # Annotation records refer to source song ids.  Resolve their source by
+    # absolute path, namespace ids exactly as quality catalog does, and reject
+    # contradictory labels for a duplicate source chart instead of silently
+    # choosing whichever manifest happened to be listed first.
+    from maichart.training.quality_annotations import chart_sha256
+    seen_annotation_keys: dict[tuple[str, int], dict[str, Any]] = {}
+    accepted_records = []
+    training_fields = ("label", "weight", "regions", "chart_sha256", "audio_sha256",
+                       "corrected_path", "corrected_difficulty", "corrected_sha256")
+    for record in annotation_records:
+        record.pop("_annotation_manifest", None)
+        try:
+            index = int(record.get("difficulty_index"))
+        except (TypeError, ValueError):
+            warnings.append({"reason": "annotation_missing_difficulty", "chart_id": record.get("chart_id")})
+            continue
+        record_path = Path(str(record.get("source_path", ""))).resolve()
+        key = (str(record_path), index)
+        owner = owners.get(key)
+        # A sidecar may also annotate charts outside this selected split.
+        if owner is None:
+            continue
+        try:
+            valid_hash = chart_sha256(record_path, index)
+        except (OSError, ValueError, UnicodeError):
+            valid_hash = None
+        if not valid_hash or record.get("chart_sha256") != valid_hash:
+            warnings.append({"reason": "stale_quality_annotation", "source_path": str(record_path), "difficulty_index": index})
+            continue
+        if record.get("audio_path") and record["audio_path"] != owner.get("audio_path"):
+            warnings.append({"reason": "quality_audio_changed", "source_path": str(record_path), "difficulty_index": index})
+            continue
+        prior = seen_annotation_keys.get(key)
+        if prior is not None:
+            if any(prior.get(field) != record.get(field) for field in training_fields):
+                raise ValueError(f"同一谱面存在冲突质量标注（标签、区域或修正版不同）：{record_path}:{index}")
+            continue
+        seen_annotation_keys[key] = dict(record)
+        record.update({"original_song_id": owner["original_song_id"], "song_id": owner["song_id"],
+                       "source_dataset": owner["source_dataset"], "source_path": str(record_path),
+                       "source_manifest": owner["source_manifest"]})
+        namespace = f"{owner['source_dataset']['id']}\0{owner['source_path_key']}"
+        record["chart_id"] = _namespaced_chart_id(owner["song_id"], index, valid_hash, None, namespace)
+        accepted_records.append(record)
+    annotation_records = accepted_records
+
+    merged = {
+        "schema": SCHEMA,
+        # All source paths are absolute after composition.  Keeping the output
+        # directory as source_root makes older path resolvers harmless instead
+        # of pointing them at a literal ``<merged>`` folder.
+        "source_root": str(output.parent),
+        "cache_dir": str(output.parent),
+        "song_count": len(songs),
+        "difficulty_count": sum(len(song.get("difficulties", [])) for song in songs),
+        "usable_difficulty_count": sum(
+            1
+            for song in songs
+            for difficulty in song.get("difficulties", [])
+            if difficulty.get("event_usable_for_training", difficulty.get("usable_for_training"))
+        ),
+        "preprocessing": {**(loaded[0][1].get("preprocessing") or {}), **{
+            key: reference[key]
+            for key in reference
+            if reference[key] is not None
+        }},
+        "merged_from": [str(path) for path, _, _, _ in loaded],
+        "datasets": source_entries,
+        "songs": songs,
+        "summary": {
+            "merged_manifest_count": len(loaded),
+            "song_count": len(songs),
+            "difficulty_count": sum(len(song.get("difficulties", [])) for song in songs),
+            "usable_difficulty_count": sum(
+                1
+                for song in songs
+                for difficulty in song.get("difficulties", [])
+                if difficulty.get("event_usable_for_training", difficulty.get("usable_for_training"))
+            ),
+            "duplicate_source_charts": duplicate_count,
+            "quality_records": len(annotation_records),
+            "stale_quality_annotations": sum(item["reason"] in {"stale_quality_annotation", "quality_audio_changed"} for item in warnings),
+        },
+        "warnings": warnings,
+        "errors": [],
+    }
+    merged["manifest"] = str(output)
+    merged["raw_root"] = str(output.parent)
+    merged["raw_roots"] = [entry["source_root"] for entry in source_entries]
+    # Reuse the largest source's content-addressed cache when available.
+    primary = max(loaded, key=lambda item: len(item[1].get("songs", [])))
+    primary_cache = _source_asset(primary[1].get("cache_dir") or "cache", primary[0], primary[1])
+    merged["cache_dir"] = str(primary_cache if primary_cache.is_dir() else output.parent / "cache")
+    if merge_annotations:
+        annotation_output = _quality_annotation_path(output)
+        _write_json(annotation_output, {
+            "schema": "maichart-quality-annotations-v1",
+            "manifest": str(output), "records": annotation_records,
+            "merged_from": [str(path) for path, _, _, _ in loaded],
+        })
+        merged["quality_annotations"] = str(annotation_output)
+    _write_json(output, merged)
+    return merged
+
+
+def compose_datasets(
+    manifests: list[str | Path],
+    output_root: str | Path,
+    model_family: str | None = None,
+    *,
+    dataset_ids: list[str] | None = None,
+    dataset_names: list[str] | None = None,
+) -> dict[str, Any]:
+    """Prepare a stable source selection without changing a single source."""
+    if not manifests:
+        raise ValueError("至少需要一份训练 manifest")
+    manifests = list(dict.fromkeys(str(Path(value).resolve()) for value in manifests))
+    for value in manifests:
+        path = Path(value)
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        target = _contract(payload, path).get("target_schema")
+        if model_family in {"event_v1", "event_ctx_v1"} and target != "event_v1":
+            raise ValueError(f"{path.parent.name} 不是事件模型预处理清单，请选择当前模型族重新预处理")
+        if model_family == "legacy_frame_v2" and target == "event_v1":
+            raise ValueError("事件模型清单不能用于旧固定帧模型，请重新预处理")
+    if len(manifests) == 1:
+        # Selecting one prepared dataset must not rewrite song ids, paths, or
+        # checkpoint contracts.  The trainer can consume its original file
+        # directly; composition is only needed when sources are combined.
+        manifest = Path(manifests[0]).resolve()
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        if payload.get("schema") != SCHEMA:
+            raise ValueError(f"{manifest} is not a {SCHEMA}.")
+        source_root = payload.get("source_root") or manifest.parent
+        source_root_path = Path(str(source_root))
+        if not source_root_path.is_absolute():
+            source_root_path = (manifest.parent / source_root_path).resolve()
+        cache_value = payload.get("cache_dir") or str(manifest.parent / "cache")
+        cache_path = Path(str(cache_value))
+        if not cache_path.is_absolute():
+            cache_path = (manifest.parent / cache_path).resolve()
+        return {
+            "manifest": str(manifest), "raw_root": str(source_root_path), "raw_roots": [str(source_root_path)],
+            "source_root": str(source_root_path), "cache_dir": str(cache_path),
+            "quality_annotations": str(_quality_annotation_path(manifest)),
+            "datasets": catalog_datasets([manifest]),
+            "summary": payload.get("summary") or {
+                "merged_manifest_count": 1, "song_count": payload.get("song_count", len(payload.get("songs", []))),
+                "difficulty_count": payload.get("difficulty_count", 0),
+                "usable_difficulty_count": payload.get("usable_difficulty_count", 0),
+            },
+            "warnings": [],
+        }
+    target = Path(output_root).resolve()
+    if target.suffix.lower() != ".json":
+        identity = hashlib.sha256()
+        for value in sorted(manifests, key=str.casefold):
+            identity.update(value.casefold().encode("utf-8"))
+            identity.update(Path(value).read_bytes())
+            annotation = _quality_annotation_path(Path(value))
+            if annotation.is_file():
+                identity.update(annotation.read_bytes())
+        # A saved label change creates a new snapshot, so checking or preparing
+        # another run cannot overwrite a running trainer's annotation file.
+        target = target / f"composed_{identity.hexdigest()[:16]}" / "training_manifest.json"
+    with _COMPOSE_LOCK:
+        return merge_training_manifests(
+            manifests, target, dataset_ids=dataset_ids, dataset_names=dataset_names,
+            merge_annotations=True,
+        )
+
+
+def catalog_datasets(manifests: list[str | Path]) -> list[dict[str, Any]]:
+    """Return compact dataset cards for the WebUI selection page."""
+    cards: list[dict[str, Any]] = []
+    for raw_path in manifests:
+        path = Path(raw_path).resolve()
+        payload = json.loads(path.read_text(encoding="utf-8-sig"))
+        if payload.get("schema") != SCHEMA:
+            raise ValueError(f"{path} is not a {SCHEMA}.")
+        source_root = payload.get("source_root")
+        root = Path(str(source_root)) if source_root else path.parent
+        if not root.is_absolute():
+            root = (path.parent / root).resolve()
+        songs = [item for item in payload.get("songs", []) if isinstance(item, dict)]
+        difficulties = [difficulty for song in songs for difficulty in song.get("difficulties", [])
+                        if isinstance(difficulty, dict)]
+        usable = [item for item in difficulties if item.get("usable_for_training") or item.get("event_usable_for_training")]
+        dataset_id = manifest_dataset_id(path, payload)
+        annotation = _quality_annotation_path(path)
+        cards.append({
+            "dataset_id": dataset_id,
+            "name": manifest_dataset_name(path, payload),
+            "manifest": str(path),
+            "source_root": str(root),
+            "song_count": len(songs),
+            "difficulty_count": len(difficulties),
+            "usable_difficulty_count": len(usable),
+            "annotation_path": str(annotation),
+            "annotation_exists": annotation.is_file(),
+            "prepared": path.is_file(),
+            "preprocessing": payload.get("preprocessing") or {},
+            "merged": bool(payload.get("merged_from")),
+        })
+    return cards
+
+
+def _manifest_chart_sources(manifest_path: str | Path) -> dict[tuple[str, int], dict[str, Any]]:
+    """Collect resolved maidata/audio identities for overlap checks."""
+    manifest_file = Path(manifest_path).resolve()
+    payload = json.loads(manifest_file.read_text(encoding="utf-8"))
+    def resolve(value: Any) -> str | None:
+        if not value:
+            return None
+        return str(_source_asset(value, manifest_file, payload))
+
+    result: dict[tuple[str, int], dict[str, Any]] = {}
+    for song in payload.get("songs", []):
+        maidata = resolve(song.get("maidata_path"))
+        audio = resolve(song.get("audio_path"))
+        for difficulty in song.get("difficulties", []):
+            try:
+                index = int(difficulty.get("difficulty_index", difficulty.get("index")))
+            except (TypeError, ValueError):
+                continue
+            if maidata:
+                result[(maidata, index)] = {"song_id": song.get("song_id"), "difficulty_index": index,
+                                            "maidata_path": maidata, "audio_path": audio}
+    return result
+
+
+def validation_overlap(train_manifest: str | Path, validation_manifest: str | Path) -> list[dict[str, Any]]:
+    """Return chart/audio identities present in both manifests."""
+    train = _manifest_chart_sources(train_manifest)
+    validation = _manifest_chart_sources(validation_manifest)
+    overlaps: list[dict[str, Any]] = []
+    for key in sorted(set(train) & set(validation)):
+        overlaps.append({"train": train[key], "validation": validation[key], "reason": "same_maidata_difficulty"})
+    train_audio = {value["audio_path"] for value in train.values() if value.get("audio_path")}
+    for value in validation.values():
+        if (value.get("audio_path") in train_audio and value.get("audio_path")) or any(
+            key[0] == value.get("maidata_path") for key in train
+        ):
+            if not any(item["validation"] == value for item in overlaps):
+                overlaps.append({"train": {"audio_path": value["audio_path"]}, "validation": value,
+                                 "reason": "same_audio"})
+    return overlaps
+
+
+def assert_no_validation_overlap(train_manifest: str | Path, validation_manifest: str | Path) -> None:
+    """Raise a clear error when training and validation share source content."""
+    overlaps = validation_overlap(train_manifest, validation_manifest)
+    if overlaps:
+        first = overlaps[0]
+        raise ValueError(
+            "训练和验证集存在歌曲或谱面重叠："
+            f"{first.get('reason')} {first.get('validation', {}).get('song_id', '')}。"
+            "请按歌曲划分验证集，避免验证指标失真。"
+        )
+
+
+def _contract(payload: dict[str, Any], manifest_path: Path) -> dict[str, Any]:
+    metadata = payload.get("preprocessing") if isinstance(payload.get("preprocessing"), dict) else {}
+    first_audio = _first_cache_payload(payload, manifest_path, "audio_features_path")
+    first_labels = _first_cache_payload(payload, manifest_path, "frame_labels_path")
+    target = metadata.get("target_schema")
+    if target == "event_ctx_v1":
+        target = "event_v1"
+    if target is None and (metadata.get("feature_profile") == "basic_v1" or first_labels):
+        target = "frame_v2"
+    return {
+        "target_schema": target,
+        "feature_profile": metadata.get("feature_profile"),
+        "hop_length": metadata.get("hop_length"),
+        "feature_rate_hz": metadata.get("feature_rate_hz"),
+        "division": metadata.get("division") or _value(first_audio, "division") or _frame_division(first_labels),
+        "sample_rate": metadata.get("sample_rate") or _value(first_audio, "sample_rate"),
+        "audio_features_schema": metadata.get("audio_features_schema") or _value(first_audio, "schema"),
+        "frame_labels_schema": metadata.get("frame_labels_schema") or _value(first_labels, "schema"),
+        "audio_feature_keys": tuple(metadata.get("audio_feature_keys", ())),
+    }
+
+
+def _first_cache_payload(payload: dict[str, Any], manifest_path: Path, key: str) -> dict[str, Any]:
+    for song in payload.get("songs", []):
+        audio = song.get("audio") if isinstance(song.get("audio"), dict) else {}
+        raw_path = audio.get(key) or song.get(key)
+        if not raw_path:
+            for difficulty in song.get("difficulties", []):
+                raw_path = difficulty.get(key)
+                if raw_path:
+                    break
+        if raw_path:
+            path = _source_asset(raw_path, manifest_path, payload)
+            if path.is_file():
+                try:
+                    value = json.loads(path.read_text(encoding="utf-8"))
+                    return value if isinstance(value, dict) else {}
+                except (OSError, json.JSONDecodeError):
+                    return {}
+    return {}
+
+
+def _value(payload: dict[str, Any], key: str) -> Any:
+    return payload.get(key) if isinstance(payload, dict) else None
+
+
+def _frame_division(payload: dict[str, Any]) -> int | None:
+    frame_grid = payload.get("frame_grid") if isinstance(payload, dict) else None
+    value = frame_grid.get("division") if isinstance(frame_grid, dict) else None
+    return int(value) if value is not None else None
+
+
+def _absolutize_song_paths(song: dict[str, Any], manifest: Path, payload: dict[str, Any]) -> None:
+    for key in (*PATH_KEYS, "audio_features_path", "chart_ir_path", "frame_labels_path", "alignment_report_path"):
+        if song.get(key):
+            song[key] = str(_source_asset(song[key], manifest, payload))
+    audio = song.get("audio")
+    if isinstance(audio, dict):
+        for key in ("path", "audio_features_path"):
+            if audio.get(key):
+                audio[key] = str(_source_asset(audio[key], manifest, payload))
+    for difficulty in song.get("difficulties", []):
+        if not isinstance(difficulty, dict):
+            continue
+        for key in ("chart_ir_path", "frame_labels_path", "alignment_report_path", "source_path", "maidata_path", "audio_path"):
+            if difficulty.get(key):
+                difficulty[key] = str(_source_asset(difficulty[key], manifest, payload))
+
+
+def _absolute(value: str | Path, base: Path) -> Path:
+    path = Path(value)
+    return path if path.is_absolute() else (base / path).resolve()
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("manifests", nargs="+", help="compatible training manifest JSON files")
+    parser.add_argument("-o", "--output", required=True, help="merged manifest output path")
+    args = parser.parse_args(argv)
+    result = merge_training_manifests(args.manifests, args.output)
+    print(
+        f"merged={len(result['merged_from'])} songs={result['song_count']} "
+        f"difficulties={result['difficulty_count']} usable={result['usable_difficulty_count']}"
+    )
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+
+

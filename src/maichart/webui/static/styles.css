@@ -206,6 +206,19 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .quality-training-grid .quality-summary-inline { grid-column: span 2; display: flex; align-items: center; gap: 12px; justify-content: space-between; min-height: 42px; }
 .quality-training-grid .quality-summary-inline strong { color: var(--teal); font-size: 12px; }
 .quality-toolbar, .quality-bulkbar, .quality-pagination { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 0; }
+.dataset-workspace { margin: 14px 0 18px; padding: 14px; border: 1px solid #b9d6d1; border-radius: 6px; background: #f8fcfb; }
+.dataset-cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 10px; }
+.dataset-card { min-width: 0; padding: 11px 12px; border: 1px solid var(--line); border-radius: 6px; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.03); }
+.dataset-card.active { border-color: var(--teal); box-shadow: 0 0 0 2px rgba(22,125,124,.12); }
+.dataset-card-check { display: block; color: var(--muted); font-size: 11px; margin-bottom: 6px; }
+.dataset-card-open { display: block; width: 100%; padding: 0; border: 0; background: transparent; color: var(--teal); text-align: left; cursor: pointer; font: inherit; }
+.dataset-card-meta, .dataset-card-path { margin-top: 5px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.dataset-card-path { opacity: .8; }
+.dataset-workspace-actions { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 12px; }
+.dataset-empty { padding: 12px; border: 1px dashed var(--line); border-radius: 5px; }
+.dataset-row-folder { color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
+.page-jump { display: inline-flex; align-items: center; gap: 5px; }
+.page-jump input { width: 58px; padding: 5px; border: 1px solid var(--line); border-radius: 4px; }
 .quality-toolbar input[type=search] { flex: 1 1 240px; min-width: 160px; border: 1px solid var(--line); border-radius: 5px; padding: 9px 10px; }
 .quality-toolbar select, .quality-bulkbar select, .quality-bulkbar input, .quality-correction select { border: 1px solid var(--line); border-radius: 5px; background: #fff; padding: 8px; }
 .quality-bulkbar { padding: 10px; border: 1px dashed var(--line); border-radius: 5px; background: #fbfbf8; }

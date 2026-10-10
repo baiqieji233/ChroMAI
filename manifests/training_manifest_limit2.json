@@ -1,0 +1,42 @@
+{
+  "schema": "maichart-training-manifest-v1",
+  "song_count": 2,
+  "difficulty_count": 2,
+  "usable_difficulty_count": 2,
+  "songs": [
+    {
+      "song_id": "fixture_song_001",
+      "title": "Fixture One",
+      "audio": {
+        "audio_features_path": "../cache/audio_features/fixture_song_001.audio_features.json"
+      },
+      "difficulties": [
+        {
+          "difficulty_index": 4,
+          "level": 12.0,
+          "usable_for_training": true,
+          "frame_labels_path": "../cache/frame_labels/fixture_song_001/difficulty_4.frame_labels.json",
+          "alignment_report_path": "../cache/alignment_reports/fixture_song_001/difficulty_4.alignment_report.json",
+          "chart_ir_path": "../cache/chart_ir/fixture_song_001/difficulty_4.chart_ir.json"
+        }
+      ]
+    },
+    {
+      "song_id": "fixture_song_002",
+      "title": "Fixture Two",
+      "audio": {
+        "audio_features_path": "../cache/audio_features/fixture_song_002.audio_features.json"
+      },
+      "difficulties": [
+        {
+          "difficulty_index": 5,
+          "level": 13.0,
+          "usable_for_training": true,
+          "frame_labels_path": "../cache/frame_labels/fixture_song_002/difficulty_5.frame_labels.json",
+          "alignment_report_path": "../cache/alignment_reports/fixture_song_002/difficulty_5.alignment_report.json",
+          "chart_ir_path": "../cache/chart_ir/fixture_song_002/difficulty_5.chart_ir.json"
+        }
+      ]
+    }
+  ]
+}

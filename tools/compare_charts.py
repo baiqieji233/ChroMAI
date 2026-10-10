@@ -207,7 +207,7 @@ def print_table(rows: list[dict]) -> None:
 
 
 def gold_reference() -> list[dict]:
-    probe = Path(__file__).resolve().parents[1] / ".scratch" / "bpmfix" / "gold_probe"
+    probe = Path(r"E:\simai_transformer\.scratch\bpmfix\gold_probe")
     manifest = probe / "gold_val_manifest.json"
     if not manifest.is_file():
         return []

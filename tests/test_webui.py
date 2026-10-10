@@ -84,6 +84,7 @@ def test_find_preprocess_task_by_manifest_path(monkeypatch, tmp_path):
 @pytest.fixture
 def webui_api(monkeypatch, tmp_path):
     monkeypatch.setattr(webui, "TASKS", {})
+    monkeypatch.setattr(webui, "WEBUI_ROOT", tmp_path / "workspace")
     for name in ("UPLOAD_ROOT", "DATASET_ROOT"):
         directory = tmp_path / name.lower()
         directory.mkdir()

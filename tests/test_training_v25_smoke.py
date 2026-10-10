@@ -11,24 +11,12 @@ from maichart.training.collate import collate_v25
 from maichart.training.dataset_v25 import MaichartV25Dataset
 from maichart.training.losses_v25 import compute_v25_losses
 from maichart.training.train_v25 import main as train_main
-from maichart.preprocess import build_training_manifest, save_training_manifest
 
 
-@pytest.fixture
-def demo_manifest(tmp_path):
-    pytest.importorskip("librosa")
-    raw = Path(__file__).resolve().parents[1] / "examples" / "training_zip_demo" / "raw_dataset"
-    manifest_path = tmp_path / "training_manifest.json"
-    cache_dir = tmp_path / "cache"
-    manifest = build_training_manifest(raw, cache_dir=cache_dir, output_path=manifest_path, limit=2)
-    save_training_manifest(manifest, manifest_path)
-    return manifest_path, cache_dir
-
-
-def test_v25_dataset_collate_forward_loss_backward_smoke(tmp_path, demo_manifest) -> None:
+def test_v25_dataset_collate_forward_loss_backward_smoke(tmp_path) -> None:
     dataset = MaichartV25Dataset(
-        demo_manifest[0],
-        cache_dir=demo_manifest[1],
+        Path("manifests") / "training_manifest_limit2.json",
+        cache_dir="cache",
     )
     sample = dataset[0]
 
@@ -71,14 +59,14 @@ def test_v25_dataset_collate_forward_loss_backward_smoke(tmp_path, demo_manifest
     )
 
 
-def test_v25_overfit_one_sample_train_entrypoint_starts(tmp_path, demo_manifest) -> None:
+def test_v25_overfit_one_sample_train_entrypoint_starts(tmp_path) -> None:
     checkpoint_dir = tmp_path / "checkpoints"
     assert train_main(
         [
             "--manifest",
-            str(demo_manifest[0]),
+            str(Path("manifests") / "training_manifest_limit2.json"),
             "--cache-dir",
-            str(demo_manifest[1]),
+            "cache",
             "--epochs",
             "1",
             "--batch-size",

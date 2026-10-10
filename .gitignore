@@ -1,11 +1,75 @@
+# Python environments and generated packaging files
 __pycache__/
-.venv/
-node_modules/
-.scratch/
-cache/
-backups/
 *.py[cod]
+.venv/
+venv/
+env/
+.Python
+*.egg-info/
+*.egg
+.eggs/
+/build/
+/dist/
+
+# Test, coverage, and tool caches
 .pytest_cache/
-webui_workspace/
-checkpoints/
-generated/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+node_modules/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+
+# Local training data, model weights, caches, and generation outputs
+# This workspace contains uploads, datasets, quality annotations, run plans,
+# logs, intensity curves, and generated charts; recreate/import them locally.
+/webui_workspace/
+/checkpoints/
+/cache/
+/manifests/*
+!/manifests/training_manifest_limit2.json
+/generated/
+/outputs/
+/examples/training_zip_demo/cache/
+/examples/training_zip_demo/checkpoints/
+/examples/training_zip_demo/generated_*
+/examples/training_zip_demo/training_manifest.json
+/examples/training_zip_demo/merged_manifest.json
+/examples/training_zip_demo/splits/
+*.pt
+*.pth
+*.ckpt
+*.safetensors
+
+# Experiments, backups, and temporary files
+/.scratch/
+/backups/
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+*.swp
+*.swo
+*~
+
+# Local credentials and machine-specific settings
+.env
+.env.*
+!.env.example
+!.env.sample
+!.env.template
+.vscode/
+.idea/
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Keep src/, tests/, tools/, docs/, configs/, and examples/ under version
+# control, including examples/maimai_training_demo.zip. Do not ignore all ZIP,
+# JSON, TXT, or audio files globally: small examples and fixtures need them.

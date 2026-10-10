@@ -119,8 +119,17 @@ def audio_sha256(path: str | Path, *, chunk_size: int = 1024 * 1024) -> str:
     return digest.hexdigest()
 
 
-def chart_id(song_id: str, difficulty_index: int, chart_hash: str, audio_hash: str | None = None) -> str:
-    payload = f"{song_id}\0{int(difficulty_index)}\0{chart_hash}\0{audio_hash or ''}"
+def chart_id(song_id: str, difficulty_index: int, chart_hash: str,
+             audio_hash: str | None = None, source_dataset: str | None = None) -> str:
+    """Build a stable chart identity, optionally namespaced by dataset.
+
+    The optional namespace lets a combined training selection contain two
+    manifests with the same song id and chart bytes without making their UI
+    rows or annotations collide.  Omitting it preserves the original v1 id
+    contract for callers that do not have dataset metadata.
+    """
+    namespace = str(source_dataset or "").strip()
+    payload = f"{namespace}\0{song_id}\0{int(difficulty_index)}\0{chart_hash}\0{audio_hash or ''}" if namespace else f"{song_id}\0{int(difficulty_index)}\0{chart_hash}\0{audio_hash or ''}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
@@ -229,9 +238,17 @@ class CatalogChart:
     chart_sha256: str
     audio_sha256: str | None = None
     type_counts: dict[str, int] | None = None
+    source_dataset: str | None = None
+    source_dataset_id: str | None = None
+    folder_name: str | None = None
+    maidata_title: str | None = None
+    legacy_chart_id: str | None = None
 
     def to_dict(self, annotation: dict[str, Any] | None = None) -> dict[str, Any]:
         value = self.__dict__.copy()
+        # Kept internally only for reading annotations created before dataset
+        # namespacing was introduced.
+        value.pop("legacy_chart_id", None)
         value["annotation"] = annotation
         value["label"] = annotation.get("label", "normal") if annotation else "normal"
         value["weight"] = annotation.get("weight", 1.0) if annotation else 1.0
@@ -243,6 +260,7 @@ def iter_catalog(manifest_path: str | Path) -> list[CatalogChart]:
     manifest_file = Path(manifest_path).resolve()
     data = json.loads(manifest_file.read_text(encoding="utf-8"))
     source_root = _source_root(manifest_file, data)
+    manifest_dataset, manifest_dataset_id = _manifest_dataset_metadata(manifest_file, data)
     rows: list[CatalogChart] = []
     parsed_sources: dict[Path, Any] = {}
     for song in data.get("songs", []):
@@ -271,30 +289,136 @@ def iter_catalog(manifest_path: str | Path) -> list[CatalogChart]:
             a_hash = None
             # Audio hashing is lazy: only reuse a hash already persisted in a
             # record; catalog browsing never reads large audio files.
+            song_id = str(song.get("song_id", "unknown"))
+            source_dataset, source_dataset_id = _dataset_metadata(song.get("source_dataset"), manifest_dataset, manifest_dataset_id)
+            legacy_id = chart_id(song_id, index, c_hash, a_hash)
+            maidata_title = _clean_text(getattr(parsed_chart, "title", None))
+            manifest_title = _clean_text(song.get("title"))
+            display_title = maidata_title or manifest_title
+            parsed_difficulty = next((item for item in parsed_chart.difficulties if item.index == index), None)
+            parsed_level = _clean_text(getattr(parsed_difficulty, "level", None)) if parsed_difficulty else None
+            parsed_designer = _clean_text(getattr(parsed_difficulty, "designer", None)) if parsed_difficulty else None
+            level = parsed_level or _clean_text(difficulty.get("level", difficulty.get("level_raw")))
+            designer = parsed_designer or _clean_text(difficulty.get("designer"))
+            source_key = _clean_text(song.get("source_path_key")) or _relative_source_key(maidata, source_root)
             rows.append(CatalogChart(
-                chart_id=chart_id(str(song.get("song_id", "unknown")), index, c_hash, a_hash),
-                song_id=str(song.get("song_id", "unknown")), difficulty_index=index,
+                # Include the relative source path in the namespace.  This
+                # prevents duplicate song ids and identical chart bytes from
+                # two folders in the same dataset from sharing annotations.
+                chart_id=chart_id(song_id, index, c_hash, a_hash,
+                                  f"{source_dataset_id}\0{source_key}"),
+                song_id=song_id, difficulty_index=index,
                 source_path=str(maidata), audio_path=str(audio) if audio else None,
-                title=song.get("title"), artist=song.get("artist"), level=difficulty.get("level", difficulty.get("level_raw")),
-                designer=difficulty.get("designer"), chart_sha256=c_hash, audio_sha256=a_hash,
+                title=display_title, artist=song.get("artist"), level=level,
+                designer=designer, chart_sha256=c_hash, audio_sha256=a_hash,
                 type_counts=dict(difficulty.get("type_counts") or {}),
+                source_dataset=source_dataset, source_dataset_id=source_dataset_id,
+                folder_name=maidata.parent.name,
+                maidata_title=maidata_title, legacy_chart_id=legacy_id,
             ))
     return rows
 
 
 def find_annotation(row: CatalogChart, records: Iterable[dict[str, Any]], *, verify_audio: bool = False) -> dict[str, Any] | None:
     for record in records:
-        if record.get("chart_id") == row.chart_id and record.get("chart_sha256") == row.chart_sha256:
-            if record.get("audio_path") and row.audio_path and Path(record["audio_path"]).resolve() != Path(row.audio_path).resolve():
-                continue
-            if verify_audio and record.get("audio_sha256") and row.audio_path:
-                try:
-                    if record["audio_sha256"] != audio_sha256(row.audio_path):
-                        continue
-                except OSError:
+        record_id = record.get("chart_id")
+        if record.get("chart_sha256") != row.chart_sha256:
+            continue
+        id_match = record_id in {row.chart_id, row.legacy_chart_id}
+        path_match = False
+        if record.get("source_path") and record.get("difficulty_index") is not None:
+            try:
+                path_match = (Path(record["source_path"]).resolve() == Path(row.source_path).resolve()
+                              and int(record["difficulty_index"]) == int(row.difficulty_index))
+            except (TypeError, ValueError, OSError):
+                path_match = False
+        if not id_match and not path_match:
+            continue
+        # A legacy id has no dataset namespace.  Only migrate it when its
+        # stored source path identifies the same chart; otherwise two copied
+        # charts with equal bytes could inherit one another's label.
+        if record_id == row.legacy_chart_id and record.get("source_path"):
+            try:
+                if Path(record["source_path"]).resolve() != Path(row.source_path).resolve():
                     continue
-            return record
+            except (TypeError, OSError):
+                continue
+        if record.get("audio_path") and row.audio_path and Path(record["audio_path"]).resolve() != Path(row.audio_path).resolve():
+            continue
+        if verify_audio and record.get("audio_sha256") and row.audio_path:
+            try:
+                if record["audio_sha256"] != audio_sha256(row.audio_path):
+                    continue
+            except OSError:
+                continue
+        return record
     return None
+
+
+def _clean_text(value: Any) -> str | None:
+    text = str(value).strip() if value is not None else ""
+    return text or None
+
+
+def _dataset_value(value: Any) -> str | None:
+    if isinstance(value, dict):
+        value = value.get("name") or value.get("id") or value.get("label")
+    return _clean_text(value)
+
+
+def _dataset_metadata(value: Any, fallback_name: str, fallback_id: str) -> tuple[str, str]:
+    """Split dataset display name from its optional collision-resistant id."""
+    if isinstance(value, dict):
+        display = _clean_text(value.get("name") or value.get("label") or value.get("id")) or fallback_name
+        identity = _clean_text(value.get("id") or value.get("key") or value.get("name")) or fallback_id
+        return display, identity
+    text = _clean_text(value)
+    return (text or fallback_name, fallback_id)
+
+
+def _relative_source_key(path: Path, root: Path) -> str:
+    try:
+        return path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        return path.resolve().as_posix()
+
+
+def _manifest_dataset_name(manifest_file: Path, data: dict[str, Any]) -> str:
+    """Return a human-readable and identity-stable dataset namespace."""
+    for key in ("source_dataset", "dataset_name", "dataset_id"):
+        value = data.get(key)
+        value = _dataset_value(value)
+        if value:
+            return value
+    return manifest_file.parent.name or manifest_file.stem
+
+
+def _manifest_dataset_metadata(manifest_file: Path, data: dict[str, Any]) -> tuple[str, str]:
+    fallback_name = manifest_file.parent.name or manifest_file.stem
+    fallback_id = _fallback_dataset_id(manifest_file, data)
+    for key in ("source_dataset", "dataset_name", "dataset_id"):
+        if key in data:
+            value = data.get(key)
+            # dataset_id is explicitly an identity, while source_dataset and
+            # dataset_name are ordinarily display labels unless represented as
+            # an object with an id/key.
+            if key == "dataset_id" and not isinstance(value, dict):
+                explicit = _clean_text(value)
+                if explicit:
+                    return explicit, explicit
+            return _dataset_metadata(value, fallback_name, fallback_id)
+    return fallback_name, fallback_id
+
+
+def _fallback_dataset_id(manifest_file: Path, data: dict[str, Any]) -> str:
+    """Namespace unnamed manifests by their resolved source location.
+
+    The folder name remains a display label, while this digest prevents two
+    same-named dataset folders from sharing chart identities.
+    """
+    source_root = _source_root(manifest_file, data)
+    identity = f"{manifest_file.resolve()}\0{source_root.resolve()}"
+    return "path-" + hashlib.sha256(identity.encode("utf-8")).hexdigest()[:20]
 
 
 def resolve_annotation(record: dict[str, Any] | None, source_path: str | Path, chart: Any,

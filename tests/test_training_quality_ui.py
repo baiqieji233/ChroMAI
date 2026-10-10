@@ -69,3 +69,36 @@ def test_quality_workspace_has_paging_search_and_region_controls():
     assert "music_structure_v2" in INDEX and "fresh" in INDEX
     assert '"music_structure_v2"' in APP
 
+
+def test_training_materials_support_multiple_sources_and_catalog_navigation():
+    for field in (
+        "datasetCards",
+        "datasetComposeButton",
+        "datasetWorkspaceRefreshButton",
+        "registerDatasetButton",
+        "datasetBackButton",
+        "datasetCatalogPanel",
+        "qualitySortBy",
+        "qualitySortDirection",
+        "qualityPageInput",
+        "qualityPageJumpButton",
+    ):
+        assert f'id="{field}"' in INDEX
+    assert "selectedTrainingManifests" in APP
+    assert "manifests:" in APP
+    assert "/api/datasets/catalog" in APP
+    assert "/api/datasets/compose" in APP
+    assert "sort_by" in APP and "sort_order" in APP
+    assert "maidata_title" in APP and "folder_name" in APP
+    assert "dataset-workspace" in CSS and "dataset-card" in CSS
+    assert "assertTrainingSelection" in APP
+    assert "manifests: selectedTrainingManifests()" in APP
+
+
+def test_browsing_dataset_does_not_require_replacing_training_manifest():
+    start = APP.index("async function openDataset")
+    end = APP.index("function selectDataset", start)
+    body = APP[start:end]
+    assert "selectDataset(item)" not in body
+    assert "activePath" in body and "loadQualityCatalog" in body
+

@@ -109,23 +109,43 @@ class QualityAPI:
             page_size = min(500, max(1, int(payload.get("page_size", 50))))
         except (TypeError, ValueError) as exc:
             raise ValueError("page/page_size 必须是整数") from exc
+        sort_by = str(payload.get("sort_by", "title") or "title").strip().casefold()
+        sort_aliases = {"level": "level", "难度": "level", "title": "title", "标题": "title",
+                        "designer": "designer", "谱师": "designer", "folder": "folder", "文件夹": "folder",
+                        "song_id": "song_id", "song": "song_id", "歌曲id": "song_id"}
+        sort_by = sort_aliases.get(sort_by, sort_by)
+        if sort_by not in {"level", "title", "designer", "folder", "song_id"}:
+            raise ValueError("sort_by 必须是 level/title/designer/folder/song_id")
+        sort_order = str(payload.get("sort_order", payload.get("order", "asc")) or "asc").strip().casefold()
+        if sort_order in {"升序", "ascending"}:
+            sort_order = "asc"
+        elif sort_order in {"降序", "descending"}:
+            sort_order = "desc"
+        if sort_order not in {"asc", "desc"}:
+            raise ValueError("sort_order 必须是 asc 或 desc")
         records = load_annotations(manifest)["records"]
         all_rows = _catalog(manifest)
         annotation_by_id = {row.chart_id: find_annotation(row, records) for row in all_rows}
         catalog_values = [row.to_dict(annotation_by_id[row.chart_id]) for row in all_rows]
         rows = []
         for value in catalog_values:
-            haystack = " ".join(str(value.get(key, "")) for key in ("song_id", "title", "artist", "level", "designer", "source_path")).casefold()
+            haystack = " ".join(str(value.get(key, "")) for key in ("song_id", "title", "maidata_title", "artist", "level", "designer", "folder_name", "source_dataset", "source_path")).casefold()
             if query and query not in haystack:
                 continue
             if label_filter and value["label"] != label_filter:
                 continue
             rows.append(value)
+        _sort_catalog_rows(rows, sort_by, sort_order == "desc")
+        total = len(rows)
+        pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, pages)
         start = (page - 1) * page_size
         summary = self._summary(catalog_values, records)
         return HTTPStatus.OK, {
             "schema": "maichart-quality-annotations-v1", "manifest": str(manifest), "annotation_path": str(annotation_path(manifest)),
-            "page": page, "page_size": page_size, "total": len(rows), "items": rows[start:start + page_size],
+            "page": page, "pages": pages, "page_size": page_size, "total": total,
+            "sort_by": sort_by, "sort_order": sort_order,
+            "items": rows[start:start + page_size],
             "rows": rows[start:start + page_size], "summary": summary,
         }
 
@@ -152,7 +172,12 @@ class QualityAPI:
         for chart_id in chart_ids:
             row = by_id[chart_id]
             duration = chart_duration(row.source_path, row.difficulty_index)
-            previous = by_record.get(chart_id, {})
+            previous = find_annotation(row, by_record.values()) or {}
+            # If this is an old or differently namespaced id, replace it with
+            # the current identity on save instead of leaving duplicate rows.
+            for old_id, old_record in list(by_record.items()):
+                if previous and old_record is previous and old_id != chart_id:
+                    by_record.pop(old_id, None)
             regions = payload.get("regions", previous.get("regions", []))
             # Validate against exact chart duration before writing anything.
             record = validate_record({**previous, "chart_id": chart_id,
@@ -162,6 +187,9 @@ class QualityAPI:
                 record["regions"] = _validate_regions(regions, duration)
             record.update({"song_id": row.song_id, "difficulty_index": row.difficulty_index, "source_path": row.source_path,
                            "audio_path": row.audio_path, "chart_sha256": row.chart_sha256,
+                           "source_dataset": row.source_dataset,
+                           "source_dataset_id": row.source_dataset_id, "folder_name": row.folder_name,
+                           "maidata_title": row.maidata_title,
                            "reason": str(payload.get("reason", previous.get("reason", "")))})
             if row.audio_path and Path(row.audio_path).is_file():
                 # Hash only explicitly selected charts; catalog browsing stays
@@ -320,6 +348,40 @@ def _first(value: Any) -> str:
 
 def _content_type(path: Path) -> str:
     return {".mp3": "audio/mpeg", ".wav": "audio/wav", ".ogg": "audio/ogg", ".flac": "audio/flac"}.get(path.suffix.lower(), "application/octet-stream")
+
+
+def _sort_catalog_rows(rows: list[dict[str, Any]], sort_by: str, descending: bool) -> None:
+    """Sort in-place with deterministic ascending tie breakers.
+
+    Sorting ties first and the requested field second keeps pagination stable
+    when several charts share a title/level while still making the selected
+    field descend without reversing the tie order.
+    """
+    def text(value: Any) -> tuple[int, str]:
+        normalized = str(value or "").strip().casefold()
+        return (1 if not normalized else 0, normalized)
+
+    def level(value: Any) -> tuple[int, float, str]:
+        raw = str(value or "").strip().casefold()
+        if not raw:
+            return (1, float("inf"), "")
+        # Maimai labels may be decimal levels or values such as 14+.
+        number = raw.rstrip("+").strip()
+        try:
+            return (0, float(number), raw)
+        except ValueError:
+            return (0, float("inf"), raw)
+
+    def selected(row: dict[str, Any]) -> Any:
+        return level(row.get("level")) if sort_by == "level" else text(row.get(sort_by if sort_by != "folder" else "folder_name"))
+
+    def tie(row: dict[str, Any]) -> tuple[Any, ...]:
+        return (text(row.get("title")), text(row.get("folder_name")), text(row.get("song_id")),
+                int(row.get("difficulty_index", 0) or 0), text(row.get("designer")), text(row.get("source_path")),
+                text(row.get("chart_id")))
+
+    rows.sort(key=tie)
+    rows.sort(key=selected, reverse=descending)
 
 
 def _parse_range(value: str | None, size: int) -> tuple[int, int, HTTPStatus]:
