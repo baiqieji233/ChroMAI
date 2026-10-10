@@ -10,14 +10,16 @@ The global frame metrics include soft-target BCE and Brier score, the binary pos
 
 The optional `--shuffle-acoustic` arm reuses `evaluate_event_tokens.shuffle_acoustic_frames`: it permutes local acoustic and rhythm rows while retaining timing-context columns, global memory, and conditions. This tests local audio-time alignment sensitivity. It does not prove audio autonomy because global memory and target-derived labels remain.
 
+The optional `--time-only` arm zeroes local and global acoustic/audio-derived rhythm feature columns while retaining pure time/beat-clock columns. It tests whether the chart clock and learned priors alone can predict chart-authored onset targets. Zeroing is an out-of-distribution intervention; results do not prove causality or estimate deployment performance. The arm is reported separately as `time_only_metrics`; `--shuffle-acoustic` remains independent and may be combined with it.
+
 Example:
 
 ```powershell
 python tools/evaluate_onset_alignment.py `
   --checkpoint .scratch/full_v3_stage1/onset_integration/checkpoint/event_last.pt `
   --manifest .scratch/full_v3_stage1/validation_manifest.json `
-  --cache-dir cache/events --limit 16 --batch-size 2 --shuffle-acoustic `
-  --output .scratch/full_v3_stage1/onset_integration/frame_evaluation.json
+  --cache-dir cache/events --limit 16 --batch-size 2 --shuffle-acoustic --time-only `
+  --output .scratch/full_v3_stage1/onset_integration/frame_evaluation_time_only.json
 ```
 
 The report records checkpoint epoch and global step. Frame agreement measures correspondence with chart-author onset choices, not acoustic ground truth, free-running generation quality, or playability. This tool does not attempt exact-event peak matching because pooled bins do not preserve an explicit frame-center map for arbitrary adaptive-pooling ratios.

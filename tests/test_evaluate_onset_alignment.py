@@ -1,10 +1,16 @@
 import numpy as np
 from pathlib import Path
 import sys
+import torch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "tools"))
 
-from evaluate_onset_alignment import score_frame_predictions, weighted_average_precision
+from evaluate_onset_alignment import (
+    score_frame_predictions,
+    time_only_audio_features,
+    weighted_average_precision,
+)
+from maichart.generation.event_audio import ACOUSTIC_DIM, CONTEXT_KEYS, INPUT_DIM, RHYTHM_CONTEXT_KEYS
 
 
 def test_frame_metrics_exclude_margin_padding_and_zero_quality_bins():
@@ -54,3 +60,21 @@ def test_zero_quality_slice_returns_null_metrics_and_zero_counts():
     assert result["soft_bce"] is None
     assert result["average_precision"] is None
     assert result["thresholds"]["0.3"]["predicted_positive_frame_bins"] == 0
+
+
+def test_time_only_intervention_zeros_local_and_global_content_but_keeps_clocks():
+    local = torch.arange(2 * 5 * INPUT_DIM, dtype=torch.float32).reshape(2, 5, INPUT_DIM)
+    global_audio = torch.arange(2 * 3 * INPUT_DIM, dtype=torch.float32).reshape(2, 3, INPUT_DIM) + 1
+    local_before = local.clone()
+    global_before = global_audio.clone()
+    zero_end = ACOUSTIC_DIM + len(RHYTHM_CONTEXT_KEYS)
+
+    local_time_only, global_time_only = time_only_audio_features(local, global_audio)
+
+    assert local_time_only[..., :zero_end].eq(0).all()
+    assert global_time_only[..., :zero_end].eq(0).all()
+    assert torch.equal(local_time_only[..., zero_end:], local_before[..., zero_end:])
+    assert torch.equal(global_time_only[..., zero_end:], global_before[..., zero_end:])
+    assert local_time_only.shape[-1] == len(CONTEXT_KEYS) + zero_end == INPUT_DIM
+    assert torch.equal(local, local_before)
+    assert torch.equal(global_audio, global_before)

@@ -53,6 +53,10 @@
 
 联测 checkpoint 只有 3 次起音头更新，16 窗评估 AP `0.249`，正例比例 `0.247`；打乱局部音频后 AP `0.243`。尚无明确局部对齐优势。该结果只验证链路和指标，不支持任何质量改善结论。
 
+同一 checkpoint、相同 16 个验证窗补做 `time_only` 诊断：保留 10 列纯时钟特征，同时将 local/global 的 98 列声学特征和 4 列 audio-derived rhythm 置零。真实输入 AP `0.24919`、Brier `0.18787`；shuffle-acoustic AP `0.24268`；time-only AP `0.24321`、Brier `0.18767`。time-only 的 Brier 略好于真实输入，且两个模型 arm 都远差于同评估窗 oracle 常数 Brier `0.12038`。这组 16 窗、3 optimizer-step、小 checkpoint 的结果没有显示可靠的局部音频内容优势；zeroing 是分布外干预，只用于暴露时钟先验可能性，不是因果估计或部署对照。
+
+报告：`.scratch/full_v3_stage1/onset_integration/frame_evaluation_time_only.json`。原 `frame_evaluation.json` 保留不变。
+
 工程产物：`.scratch/full_v3_stage1/onset_integration/`。相关数据、池化、训练损失、旧模型兼容、生成软指导及 WebUI 定向测试已通过；各提交记录具体范围，没有将测试数量当成音乐质量指标。
 
 ## 正式实验与继续条件

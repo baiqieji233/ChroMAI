@@ -23,7 +23,10 @@ from evaluate_event_tokens import shuffle_acoustic_frames  # noqa: E402
 from maichart.generation.conditions import (  # noqa: E402
     GENERATION_DEFAULTS, RADAR_KEYS, STYLE_KEYS, GenerationCondition,
 )
-from maichart.generation.event_audio import FEATURE_RATE_HZ, GLOBAL_MEMORY_FRAMES, INPUT_DIM  # noqa: E402
+from maichart.generation.event_audio import (  # noqa: E402
+    ACOUSTIC_DIM, CONTEXT_KEYS, FEATURE_RATE_HZ, GLOBAL_MEMORY_FRAMES, INPUT_DIM,
+    RHYTHM_CONTEXT_KEYS,
+)
 from maichart.generation.event_cli import apply_contract_condition_guard  # noqa: E402
 from maichart.generation.event_ctx import TARGET_SCHEMA  # noqa: E402
 from maichart.event_timing import seconds_at_beat  # noqa: E402
@@ -37,6 +40,24 @@ from maichart.training.train_events import pool_onset_targets  # noqa: E402
 
 
 THRESHOLDS = (0.3, 0.5, 0.7)
+
+
+def time_only_audio_features(local_audio: torch.Tensor, global_audio: torch.Tensor):
+    """Return cloned tracks with acoustics and derived rhythm zeroed, clocks kept."""
+    if local_audio.ndim != 3 or global_audio.ndim != 3:
+        raise ValueError("local and global audio must have shape [B, T, F]")
+    if local_audio.size(0) != global_audio.size(0):
+        raise ValueError("local and global audio batch sizes differ")
+    if local_audio.size(-1) != INPUT_DIM or global_audio.size(-1) != INPUT_DIM:
+        raise ValueError(f"time-only intervention expects {INPUT_DIM} event-audio columns")
+    clock_offset = ACOUSTIC_DIM + len(RHYTHM_CONTEXT_KEYS)
+    if clock_offset + len(CONTEXT_KEYS) != INPUT_DIM:
+        raise RuntimeError("event-audio clock feature layout has changed")
+    local = local_audio.clone()
+    global_ = global_audio.clone()
+    local[..., :clock_offset] = 0
+    global_[..., :clock_offset] = 0
+    return local, global_
 
 
 def weighted_average_precision(scores, labels, weights) -> float | None:
@@ -273,6 +294,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     quality_frames: list[np.ndarray] = []
     valid_frames: list[np.ndarray] = []
     shuffled_frames: list[np.ndarray] = []
+    time_only_frames: list[np.ndarray] = []
     windows: list[dict[str, Any]] = []
 
     for batch_start in range(0, len(indices), args.batch_size):
@@ -282,11 +304,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         conditions, metadata = _conditions(checkpoint, dataset, selected)
         condition_null = torch.zeros(len(selected), dtype=torch.bool)
         with torch.inference_mode():
-            def predict(local_audio: torch.Tensor) -> torch.Tensor:
+            def predict(local_audio: torch.Tensor, global_audio: torch.Tensor | None = None) -> torch.Tensor:
                 memory, _ = model.encode_audio(
                     local_audio, conditions,
                     audio_padding_mask=batch["audio_padding_mask"],
-                    global_audio=batch["global_audio"], condition_null=condition_null,
+                    global_audio=batch["global_audio"] if global_audio is None else global_audio,
+                    condition_null=condition_null,
                     plan_audio_mask=batch["plan_audio_mask"],
                 )
                 return torch.sigmoid(model.local_onset_logits(memory).float())
@@ -298,6 +321,12 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 shuffled_probabilities = predict(shuffled)
             else:
                 shuffled_probabilities = None
+            if args.time_only:
+                local_clock, global_clock = time_only_audio_features(
+                    batch["audio"], batch["global_audio"])
+                time_only_probabilities = predict(local_clock, global_clock)
+            else:
+                time_only_probabilities = None
         target, quality, valid = pool_onset_targets(batch, model)
         if probabilities.shape != target.shape:
             raise RuntimeError(f"onset head/target pooling mismatch: {tuple(probabilities.shape)} != {tuple(target.shape)}")
@@ -316,6 +345,10 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 p_shuffled = shuffled_probabilities[local].cpu().numpy()
                 row["shuffle_acoustic_metrics"] = score_frame_predictions(p_shuffled, y, q, v)
                 shuffled_frames.append(p_shuffled)
+            if time_only_probabilities is not None:
+                p_time_only = time_only_probabilities[local].cpu().numpy()
+                row["time_only_metrics"] = score_frame_predictions(p_time_only, y, q, v)
+                time_only_frames.append(p_time_only)
             windows.append(row)
 
     all_metrics = score_frame_predictions(
@@ -325,6 +358,11 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     if args.shuffle_acoustic:
         shuffle_metrics = score_frame_predictions(
             np.concatenate(shuffled_frames), np.concatenate(target_frames),
+            np.concatenate(quality_frames), np.concatenate(valid_frames))
+    time_only_metrics = None
+    if args.time_only:
+        time_only_metrics = score_frame_predictions(
+            np.concatenate(time_only_frames), np.concatenate(target_frames),
             np.concatenate(quality_frames), np.concatenate(valid_frames))
     return {
         "schema": "local_chart_onset_alignment_v1",
@@ -358,15 +396,24 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "method": "evaluate_event_tokens.shuffle_acoustic_frames per window; shuffles local acoustic/rhythm rows while retaining time-context columns, global audio and conditions",
                 "interpretation": "alignment ablation only; not proof of audio autonomy because chart targets, conditions and global memory remain",
             } if args.shuffle_acoustic else None),
+            "time_only": ({
+                "enabled": True,
+                "method": (f"zero local/global feature columns [0:{ACOUSTIC_DIM + len(RHYTHM_CONTEXT_KEYS)}] "
+                           f"(acoustic plus audio-derived rhythm); preserve pure clock columns "
+                           f"[{ACOUSTIC_DIM + len(RHYTHM_CONTEXT_KEYS)}:{INPUT_DIM}]"),
+                "interpretation": "out-of-distribution diagnostic intervention; tests whether chart-clock features alone support chart-onset prediction, but does not prove causality or deployment performance",
+            } if args.time_only else None),
             "limitations": [
                 "Frame metrics measure agreement with author-selected chart starts, not acoustic ground truth or playability.",
                 "The constant sample-mean Brier baseline is an oracle over this evaluation slice.",
                 "No peak-to-exact-event timing tolerance is reported; the head is evaluated on its pooled frame grid.",
                 "Shuffle-acoustic results retain global memory and chart-derived target labels; they do not establish audio-only behavior.",
+                "Time-only zeroing is an out-of-distribution intervention; it is not a causal estimate or a deployable baseline.",
             ],
         },
         "metrics": all_metrics,
         "shuffle_acoustic_metrics": shuffle_metrics,
+        "time_only_metrics": time_only_metrics,
         "windows": windows,
     }
 
@@ -381,6 +428,8 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--batch-size", type=int, default=4)
     parser.add_argument("--seed", type=int, default=1729)
     parser.add_argument("--shuffle-acoustic", action="store_true")
+    parser.add_argument("--time-only", action="store_true",
+                        help="Zero local/global acoustic and audio-derived rhythm features while retaining clock columns (OOD diagnostic).")
     parser.add_argument("--output", type=Path)
     return parser
 
@@ -398,7 +447,8 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps({"checkpoint_epoch": result["checkpoint_epoch"],
                           "windows_evaluated": result["evaluation"]["windows_evaluated"],
                           "metrics": result["metrics"],
-                          "shuffle_acoustic_metrics": result["shuffle_acoustic_metrics"]}, ensure_ascii=False))
+                          "shuffle_acoustic_metrics": result["shuffle_acoustic_metrics"],
+                          "time_only_metrics": result["time_only_metrics"]}, ensure_ascii=False))
     return 0
 
 
