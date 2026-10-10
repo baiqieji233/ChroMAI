@@ -381,10 +381,14 @@ class StagedRhythmValidation:
             )
         if evaluation.get("report_path"):
             lines.append(f"- JSON report: `{evaluation['report_path']}`")
+        if evaluation.get("review_report_path"):
+            lines.append(f"- Markdown review: `{evaluation['review_report_path']}`")
         if evaluation.get("evaluated_count") is not None:
             lines.append(f"- Evaluated charts: {evaluation['evaluated_count']}; errors: {evaluation.get('error_count', 0)}")
         if evaluation.get("error"):
             lines.append(f"- Evaluation error: {evaluation['error']}")
+        if evaluation.get("review_error"):
+            lines.append(f"- Review rendering error: {evaluation['review_error']}")
         for error in evaluation.get("error_details", [])[:10]:
             lines.append(f"- Evaluation error: `{error.get('path', '')}`: {error.get('error', error)}")
         lines.extend(["- Human review: pending", "- No pass/fail playability conclusion was produced.", ""])
@@ -722,6 +726,16 @@ class StagedRhythmValidation:
             payload["artifact_completeness"] = completeness
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+            review_path = report_path.with_suffix(".md")
+            review_error = None
+            try:
+                from tools.render_rhythm_review import render_files
+
+                render_files([report_path], review_path)
+            except Exception as exc:
+                # Keep the machine-readable evaluation even when the optional
+                # human-review artifact cannot be rendered.
+                review_error = str(exc)
             evaluated_count = int(payload.get("evaluated_count", 0))
             error_count = int(payload.get("error_count", 0))
             pairing = payload.get("reference_pairing") or {}
@@ -731,14 +745,18 @@ class StagedRhythmValidation:
             incomplete = (completeness["missing_count"] > 0
                           or completeness["unverifiable_count"] > 0
                           or pairing_incomplete)
-            eval_status = ("partial" if incomplete or (evaluated_count > 0 and error_count > 0) else
+            eval_status = ("partial" if incomplete or (evaluated_count > 0 and error_count > 0)
+                           or review_error else
                            "completed" if evaluated_count > 0 and error_count == 0 else "failed")
             evaluation.update({"status": eval_status, "report_path": str(report_path),
+                               "review_report_path": str(review_path),
                                "evaluated_count": evaluated_count, "error_count": error_count,
                                "error_details": list(payload.get("errors", [])),
                                "reference_pairing": pairing,
                                "artifact_completeness": completeness,
                                "human_review": "pending"})
+            if review_error:
+                evaluation["review_error"] = review_error
         except Exception as exc:
             evaluation.update({"status": "partial" if completeness["missing_count"] or completeness["unverifiable_count"] else "failed",
                                "error": str(exc), "artifact_completeness": completeness,

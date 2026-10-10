@@ -122,7 +122,10 @@ def test_initial_training_is_observed_then_jobs_run_once_and_evaluate(tmp_path):
     assert state["evaluation"]["artifact_completeness"]["unverifiable_count"] == 2
     assert state["evaluation"]["human_review"] == "pending"
     assert (tmp_path / "evaluation.json").is_file()
+    assert state["evaluation"]["review_report_path"] == str((tmp_path / "evaluation.md").resolve())
+    assert (tmp_path / "evaluation.md").is_file()
     markdown = (tmp_path / "controller_report.md").read_text(encoding="utf-8")
+    assert "Markdown review:" in markdown
     assert "Human review: pending" in markdown
     assert "No pass/fail playability conclusion" in markdown
 
@@ -276,7 +279,37 @@ def test_partial_evaluation_is_nonzero_and_keeps_error_details(tmp_path):
     assert state["evaluation"]["status"] == "partial"
     assert state["evaluation"]["evaluated_count"] == 1
     assert state["evaluation"]["error_count"] == 1
+    assert (tmp_path / "evaluation.md").is_file()
     assert state["status"] == "completed_with_errors"
+
+
+def test_review_renderer_failure_keeps_json_and_marks_evaluation_partial(tmp_path, monkeypatch):
+    chart = tmp_path / "good.chart.json"
+    chart.write_text(json.dumps({
+        "schema": "maichart-event-chart-v1",
+        "points": [{"beat": "0", "note_text": "1"}, {"beat": "1", "note_text": "2"},
+                   {"beat": "2", "note_text": "3"}, {"beat": "3", "note_text": "4"},
+                   {"beat": "4", "note_text": ""}],
+        "tempo_changes": [{"beat": "0", "bpm": 120}], "first": 0.0,
+        "end_beat": "4", "audio_duration_sec": 2.0,
+    }), encoding="utf-8")
+
+    def fail_renderer(*args, **kwargs):
+        raise RuntimeError("renderer unavailable")
+
+    monkeypatch.setattr("tools.render_rhythm_review.render_files", fail_renderer)
+    config_path = _config(tmp_path, evaluation_paths=[str(chart)])
+    client = FakeClient(gets={"train-001": _task("completed")})
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    evaluation = state["evaluation"]
+    assert evaluation["status"] == "partial"
+    assert evaluation["review_report_path"] == str((tmp_path / "evaluation.md").resolve())
+    assert evaluation["review_error"] == "renderer unavailable"
+    assert (tmp_path / "evaluation.json").is_file()
+    assert json.loads((tmp_path / "evaluation.json").read_text(encoding="utf-8"))["evaluated_count"] == 1
+    assert "Review rendering error: renderer unavailable" in (tmp_path / "controller_report.md").read_text(encoding="utf-8")
 
 
 def test_successful_generation_with_only_stale_outputs_is_incomplete(tmp_path):
