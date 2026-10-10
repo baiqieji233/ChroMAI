@@ -53,6 +53,7 @@ def test_arm_summary_is_equal_chart_weighted_and_does_not_zero_fill_missing():
               ]}
     markdown = render_reports([(report_path, report)])
     assert "arm A" in markdown
+    assert "Artifact completeness: not reported" in markdown
     assert "| 曲数 | 平均note数 | 平均起点数 | 细碎ratio | 最长连续空白秒 |" in markdown
     assert "50.000% (2/2)" in markdown
     assert "200 (2/2)" in markdown
@@ -108,3 +109,42 @@ def test_missing_spatial_run_is_explicitly_not_a_qualifying_segment():
     report = {"charts": [_chart(r"root\generated\arm\song.json", fine=0.1, notes=2, empty=0)]}
     markdown = render_reports([(Path("report.json"), report)])
     assert "无符合条件片段" in markdown
+
+
+def test_boundary_zero_without_audio_check_is_not_rendered_as_measured_zero():
+    chart = _chart(r"root\generated\arm\song.json", fine=0.1, notes=2, empty=0)
+    chart["boundaries"]["audio_end_check_available"] = False
+    chart["boundaries"]["notes_at_or_after_audio_end"] = 0
+    markdown = render_reports([(Path("report.json"), {"charts": [chart]})])
+    assert "0 (1/1) / 未测量 (0/1) / 0 (1/1)" in markdown
+
+
+def test_disabled_static_check_does_not_render_zero_hard_counts():
+    chart = _chart(r"root\generated\arm\song.json", fine=0.1, notes=2, empty=0)
+    chart["playability_evidence"] = {"status": "disabled", "verified": False,
+                                     "counts": {"hard": 0, "conflicts": 0, "remaining_hard": 0}}
+    markdown = render_reports([(Path("report.json"), {"charts": [chart]})])
+    assert "disabled" in markdown
+    assert "| disabled | 未测量 | 未测量 | 未测量 | False |" in markdown
+
+
+def test_filename_only_reference_f1_is_labeled_unverified_in_review():
+    chart = _chart(r"root\generated\arm\song.json", fine=0.1, notes=2, empty=0, f1=0.4)
+    chart["reference_pair"]["identity_status"] = "filename_only_unverified"
+    markdown = render_reports([(Path("report.json"), {"charts": [chart]})])
+    assert "filename_only_unverified" in markdown
+    assert "SHA-256 verified | 0/1" in markdown
+    assert "Unverified/filename-only | 1/1" in markdown
+
+
+def test_recorded_artifact_completeness_overrides_equal_evaluation_counts():
+    report = {
+        "input_count": 1, "evaluated_count": 1, "error_count": 0,
+        "artifact_completeness": {
+            "expected_count": 6, "produced_count": 3, "missing_count": 3,
+            "unverifiable_count": 0,
+        },
+        "charts": [_chart(r"root\generated\arm\song.json", fine=0.1, notes=2, empty=0)],
+    }
+    markdown = render_reports([(Path("report.json"), report)])
+    assert "Artifact completeness: partial: expected=6, produced=3, missing=3, unverifiable=0" in markdown

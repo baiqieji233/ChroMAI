@@ -66,6 +66,44 @@ def _chart_number(chart: dict[str, Any], *path: str) -> float | None:
     return _finite_number(_get(chart, *path))
 
 
+def _audio_after_count(chart: dict[str, Any]) -> float | None:
+    """Only expose audio-end counts when evaluator had a real duration."""
+    if _get(chart, "boundaries", "audio_end_check_available") is not True:
+        return None
+    return _chart_number(chart, "boundaries", "notes_at_or_after_audio_end")
+
+
+def _playability_count(chart: dict[str, Any], key: str) -> float | None:
+    status = _get(chart, "playability_evidence", "status")
+    if status in (None, "unavailable", "disabled"):
+        return None
+    return _chart_number(chart, "playability_evidence", "counts", key)
+
+
+def _artifact_completeness(report: dict[str, Any]) -> str:
+    value = report.get("artifact_completeness")
+    if not isinstance(value, dict):
+        value = _get(report, "evaluation", "artifact_completeness")
+    if not isinstance(value, dict):
+        return "not reported; generation artifact completeness is unverified"
+    expected = _finite_number(value.get("expected_count"))
+    produced = _finite_number(value.get("produced_count"))
+    missing = _finite_number(value.get("missing_count"))
+    unverifiable = _finite_number(value.get("unverifiable_count"))
+    if None in (expected, produced, missing, unverifiable):
+        return "incomplete completeness fields; status unverified"
+    if expected == produced == missing == unverifiable == 0:
+        return "not applicable; no expected generation artifacts"
+    if missing > 0 or unverifiable > 0 or produced < expected:
+        status = "partial"
+    elif produced == expected:
+        status = "complete"
+    else:
+        status = "inconsistent counts"
+    return (f"{status}: expected={_number(expected)}, produced={_number(produced)}, "
+            f"missing={_number(missing)}, unverifiable={_number(unverifiable)}")
+
+
 def _macro(values: list[float | None], total_charts: int, *, percent: bool = False) -> str:
     measured = [value for value in values if value is not None and math.isfinite(value)]
     if not measured:
@@ -112,7 +150,7 @@ def _arm_summary(arm: str, charts: list[dict[str, Any]]) -> list[str]:
              f"{_macro(fine_ratio, count, percent=True)} | "
              f"{_macro([_chart_number(c, 'structure', 'longest_blank_run_sec') for c in charts], count)} | "
              f"{_macro([_chart_number(c, 'boundaries', 'notes_before_audio_start') for c in charts], count)} / "
-             f"{_macro([_chart_number(c, 'boundaries', 'notes_at_or_after_audio_end') for c in charts], count)} / "
+             f"{_macro([_audio_after_count(c) for c in charts], count)} / "
              f"{_macro([_chart_number(c, 'boundaries', 'notes_at_or_after_declared_end_beat') for c in charts], count)} |",
              "", "| 间隔 | 平均起点间隔数 | 平均占比 |", "|---|---:|---:|"]
     for gap, label in GAPS:
@@ -136,19 +174,23 @@ def _arm_summary(arm: str, charts: list[dict[str, Any]]) -> list[str]:
     for status, n in sorted(statuses.items()):
         selected = [c for c in charts if str(_get(c, "playability_evidence", "status") or "unavailable") == status]
         lines.append(f"| {_escape(status)} | {n} | "
-                     f"{_macro([_chart_number(c, 'playability_evidence', 'counts', 'conflicts') for c in selected], n)} | "
-                     f"{_macro([_chart_number(c, 'playability_evidence', 'counts', 'remaining_hard') for c in selected], n)} |")
-    paired = [c for c in charts if _finite_number(_get(c, "reference_pair", "onset_alignment", "f1")) is not None]
-    lines.extend(["", "| 参考 onset 配对 | 配对曲数 | 平均precision | 平均recall | 平均F1 |",
+                     f"{_macro([_playability_count(c, 'conflicts') for c in selected], n)} | "
+                     f"{_macro([_playability_count(c, 'remaining_hard') for c in selected], n)} |")
+    measured_pairs = [c for c in charts
+                      if _finite_number(_get(c, "reference_pair", "onset_alignment", "f1")) is not None]
+    verified_pairs = [c for c in measured_pairs
+                      if _get(c, "reference_pair", "identity_status") == "audio_sha256_match"]
+    filename_pairs = [c for c in measured_pairs if c not in verified_pairs]
+    lines.extend(["", "| 参考 onset 宏平均 | 曲数 | 平均precision | 平均recall | 平均F1 |",
                   "|---|---:|---:|---:|---:|"])
-    if paired:
-        lines.append(f"| 有参考指标 | {len(paired)}/{count} | "
-                     f"{_macro([_chart_number(c, 'reference_pair', 'onset_alignment', 'precision') for c in paired], len(paired), percent=True)} | "
-                     f"{_macro([_chart_number(c, 'reference_pair', 'onset_alignment', 'recall') for c in paired], len(paired), percent=True)} | "
-                     f"{_macro([_chart_number(c, 'reference_pair', 'onset_alignment', 'f1') for c in paired], len(paired), percent=True)} |")
-    else:
-        lines.append(f"| 未测量 | 0/{count} | {NOT_MEASURED} | {NOT_MEASURED} | {NOT_MEASURED} |")
+    for label, group in (("SHA-256 verified", verified_pairs),
+                         ("Unverified/filename-only", filename_pairs)):
+        lines.append(f"| {label} | {len(group)}/{count} | "
+                     f"{_macro([_chart_number(c, 'reference_pair', 'onset_alignment', 'precision') for c in group], count, percent=True)} | "
+                     f"{_macro([_chart_number(c, 'reference_pair', 'onset_alignment', 'recall') for c in group], count, percent=True)} | "
+                     f"{_macro([_chart_number(c, 'reference_pair', 'onset_alignment', 'f1') for c in group], count, percent=True)} |")
     lines.append("参考配对可信度计数：" + (", ".join(f"{_escape(k)}={v}" for k, v in sorted(identity_statuses.items())) or NOT_MEASURED) + "。")
+    lines.append(f"SHA-256 verified参考指标曲数：{len(verified_pairs)}/{count}；未将其他配对身份计入该行。")
     return lines
 
 
@@ -191,7 +233,7 @@ def _chart_section(entry: dict[str, Any]) -> list[str]:
              f"{_number(onset.get('fine_note_ratio'), percent=True)} | "
              f"{_number(_get(chart, 'structure', 'longest_blank_run_sec'))} | "
              f"{_number(boundaries.get('notes_before_audio_start'))} / "
-             f"{_number(boundaries.get('notes_at_or_after_audio_end'))} / "
+             f"{_number(_audio_after_count(chart))} / "
              f"{_number(boundaries.get('notes_at_or_after_declared_end_beat'))} |", "",
              "| 起点gap | count | 占比 |", "|---|---:|---:|"]
     total_gaps = _finite_number(onset.get("gap_sample_count"))
@@ -207,7 +249,7 @@ def _chart_section(entry: dict[str, Any]) -> list[str]:
                   "", "| 静态状态 | conflicts | hard | remaining_hard | verified |",
                   "|---|---:|---:|---:|---|",
                   f"| {_escape(playability.get('status') or 'unavailable')} | "
-                  f"{_number(counts.get('conflicts'))} | {_number(counts.get('hard'))} | {_number(counts.get('remaining_hard'))} | "
+                  f"{_number(_playability_count(chart, 'conflicts'))} | {_number(_playability_count(chart, 'hard'))} | {_number(_playability_count(chart, 'remaining_hard'))} | "
                   f"{_escape(playability.get('verified') if 'verified' in playability else NOT_MEASURED)} |",
                   "", "| 参考配对状态 | identity | precision | recall | F1 |",
                   "|---|---|---:|---:|---:|"])
@@ -254,9 +296,11 @@ def render_reports(inputs: list[tuple[Path, dict[str, Any]]]) -> str:
              "静态判定区报告不是实机可玩性认证。参考P/R/F1仅适用于当前配对，配对身份状态单独展示。", "",
              f"输入报告：{len(inputs)}；曲目记录：{len(charts)}；错误记录：{len(report_errors)}。", ""]
     for report_path, report in inputs:
+        completeness = _artifact_completeness(report)
         lines.append(f"- `{_escape(report_path)}`：schema={_escape(report.get('schema'))}, "
                      f"input={_number(report.get('input_count'))}, evaluated={_number(report.get('evaluated_count'))}, "
                      f"errors={_number(report.get('error_count'))}。")
+        lines.append(f"  Artifact completeness: {completeness}.")
     if report_errors:
         lines.extend(["", "## 未完成记录", "", "| 输入报告 | 错误 |", "|---|---|"])
         for path, error in report_errors:
