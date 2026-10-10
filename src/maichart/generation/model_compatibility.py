@@ -102,6 +102,39 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
         errors.append("checkpoint 中记录的 planner plan_dim 相互矛盾")
 
     event_family = family in EVENT_FAMILIES
+    onset_profile = str(config.get("onset_profile", "none"))
+    onset_contract = contract.get("onset_params") or {}
+    onset_training = checkpoint_data.get("onset_training") or {}
+    onset_trained = False
+    if onset_profile not in {"none", "chart_onsets_v1"}:
+        errors.append(f"未知 onset_profile: {onset_profile!r}")
+    elif onset_profile == "chart_onsets_v1":
+        if not event_family:
+            errors.append("局部采音头仅支持事件模型")
+        if not isinstance(onset_contract, dict) or onset_contract.get("profile") != onset_profile:
+            errors.append("checkpoint 缺少匹配的局部采音目标合同")
+        if config.get("local_pooling_policy") != "per_sample_v2":
+            errors.append("局部采音头需要 per_sample_v2 音频池化")
+        try:
+            width = int(config.get("d_model") or 0)
+        except (TypeError, ValueError):
+            width = 0
+            errors.append("局部采音头 d_model 不是有效整数")
+        hidden = max(1, width // 2)
+        expected_onset_shapes = {"onset_head.0.weight": (hidden, width), "onset_head.0.bias": (hidden,),
+                                 "onset_head.2.weight": (1, hidden), "onset_head.2.bias": (1,)}
+        for key, shape in expected_onset_shapes.items():
+            weight = state.get(key) if hasattr(state, "get") else None
+            if weight is None or tuple(getattr(weight, "shape", ())) != shape:
+                errors.append(f"局部采音头缺少有效权重: {key}")
+        if isinstance(onset_training, dict) and isinstance(onset_contract, dict):
+            try:
+                onset_trained = (onset_training.get("profile") == onset_profile
+                                 and onset_training.get("trained") is True
+                                 and int(onset_training.get("optimizer_steps", 0)) > 0
+                                 and float(onset_contract.get("loss_weight", 0)) > 0)
+            except (TypeError, ValueError):
+                errors.append("局部采音训练记录无效")
     usable_event_family = event_family
     v3_valid = (event_family and profile == MUSIC_STRUCTURE_V3_PROFILE and expected is not None
                 and bool(dimensions)
@@ -115,6 +148,8 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
         "conflict_detection": usable_event_family,
         "conflict_repair": usable_event_family,
         "fine_note_strength": bool(v3_valid),
+        "onset_profile": onset_profile,
+        "local_onset_guidance": bool(event_family and onset_trained and not errors),
         "rhythm_bias": False,
     }
 
@@ -139,6 +174,7 @@ class FeatureSupport:
             "post_process": event_family,
             "rhythm_bias": False,
             "fine_note_strength": False,
+            "local_onset_guidance": False,
         }
 
 
@@ -166,12 +202,18 @@ def get_generation_config_for_model(model_family: ModelFamily, args,
         "model_family": model_family,
         "rhythm_bias": "auto",
         "fine_note_strength": 0.5,
+        "local_onset_bias_strength": 0.0,
         "enable_conflict_detection": False,
     }
     capabilities = checkpoint_capabilities(checkpoint) if checkpoint is not None else None
     if (hasattr(args, "fine_note_strength") and capabilities is not None
             and capabilities["fine_note_strength"]):
         config["fine_note_strength"] = args.fine_note_strength
+    onset_strength = float(getattr(args, "local_onset_bias_strength", 0.0))
+    if onset_strength:
+        if capabilities is None or not capabilities["local_onset_guidance"]:
+            raise ValueError("局部采音对齐指导需要包含已训练采音头的 checkpoint；旧模型请使用强度 0")
+        config["local_onset_bias_strength"] = onset_strength
     for key in ("enable_conflict_detection", "detect_hard_conflicts", "detect_soft_conflicts",
                 "conflict_repair_mode", "conflict_retries"):
         if hasattr(args, key):

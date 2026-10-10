@@ -505,7 +505,7 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
             repetition_window: int = 128, atom_catalog=None, allow_truncated=False,
             prefix_ids: list[int] | None = None, position_offset: Fraction = Fraction(0), condition_default: float = 0.5,
             plan_override=None, plan_controls=None, plan_audio_mask=None, density_feedback=None,
-            position_end: Fraction | None = None):
+            position_end: Fraction | None = None, onset_context: dict | None = None):
     """Sample one window, optionally seeded with a lead-in context block.
 
     ``prefix_ids`` is the cross-window family's ``<ctx> ... <ctx_end>`` block.
@@ -582,6 +582,10 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
             condition_null=torch.zeros((audio.size(0),), dtype=torch.bool, device=device),
             **({"plan_audio_mask": plan_audio_mask} if plan_audio_mask is not None else {}),
         )
+        onset_guidance = None
+        onset_logits = None
+        if onset_context is not None and onset_context.get("strength", 0) > 0:
+            onset_logits = model.local_onset_logits(memory)[0]
         if hasattr(model, "append_plan_memory"):
             try:
                 planner_kwargs = {}
@@ -606,6 +610,9 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
                 condition_null=torch.ones((audio.size(0),), dtype=torch.bool, device=device),
                 **({"plan_audio_mask": plan_audio_mask} if plan_audio_mask is not None else {}),
             )
+            if onset_logits is not None:
+                null_onsets = model.local_onset_logits(unconditional_memory)[0]
+                onset_logits = null_onsets + float(guidance_scale) * (onset_logits - null_onsets)
             if hasattr(model, "append_plan_memory"):
                 try:
                     planner_kwargs = {}
@@ -620,6 +627,10 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
                         unconditional_memory, unconditional_audio_mask)
             else:
                 unconditional_audio_mask = audio_mask
+        if onset_logits is not None:
+            from maichart.generation.onset_guidance import LocalOnsetGuidance
+            onset_guidance = LocalOnsetGuidance.from_predictions(
+                onset_logits, vocabulary=vocabulary, **onset_context)
         caches: list = []
         if first_step > 0:
             caches = warm_up(caches, memory, condition)
@@ -669,10 +680,14 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
                 penalized = _apply_repetition_penalty(
                     masked, ids[-int(repetition_window):], repetition_penalty, vocabulary)
                 scaled = penalized / max(float(temperature), 0.05)
+                if onset_guidance is not None:
+                    scaled = onset_guidance.shape_logits(scaled, state=state)
                 filtered = _apply_top_p(scaled, top_p)
                 probabilities = torch.softmax(filtered, dim=-1)
                 token_id = int(torch.multinomial(probabilities, 1).item())
             else:
+                if onset_guidance is not None:
+                    masked = onset_guidance.shape_logits(masked, state=state)
                 token_id = int(masked.argmax().item())
             ids.append(token_id)
             decoder_input = torch.tensor([[token_id]], dtype=torch.long, device=device)
@@ -1114,6 +1129,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     audio_bounds_lead: float = 0.5, silence_threshold: float = 0.15,
                     silence_window_share: float = 0.05, condition_default: float = 0.5,
                     fine_note_strength: float = 0.5,
+                    local_onset_bias_strength: float = 0.0,
                     post_process_config: PostProcessConfig | None = None) -> list[_DecodedWindow]:
     """Generate the whole song one training window at a time.
 
@@ -1322,6 +1338,14 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             if curve_controls is not None:
                 plan_controls = {**(plan_controls or {}), **curve_controls}
         planner_kwargs = {"plan_controls": plan_controls} if plan_controls is not None else {}
+        if local_onset_bias_strength > 0:
+            from maichart.generation.event_audio import segment_frame_times
+            planner_kwargs["onset_context"] = {
+                "frame_times": segment_frame_times(begin_sec, end_sec),
+                "start_beat": start, "position_offset": offset,
+                "tempo_changes": tempo_changes, "first": first,
+                "strength": local_onset_bias_strength,
+            }
         feedback = None
         if intensity_curve is not None and ((curve_strength > 0 and intensity_curve_mode in {"follow", "hard"})
                                             or intensity_curve.get("rest_regions")):
@@ -1719,6 +1743,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "change desynchronises every later note. It also matches the "
                              "corpus: only 11.6%% (231/1991) of the charts change tempo at all.")
     parser.add_argument("--guidance-scale", type=float, default=GENERATION_SAMPLING_DEFAULTS["guidance_scale"])
+    parser.add_argument("--local-onset-bias-strength", type=float, default=0.0,
+                        help="Soft AT-position guidance from a trained chart-onset head, 0..1; 0 disables. "
+                             "Requires an onset-enabled checkpoint. Existing rest/density masks still apply.")
     parser.add_argument("--candidates", type=int, default=GENERATION_SAMPLING_DEFAULTS["candidates"])
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--temperature", type=float, default=GENERATION_SAMPLING_DEFAULTS["temperature"],
@@ -1875,6 +1902,8 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if not math.isfinite(args.fine_note_strength) or not 0 <= args.fine_note_strength <= 1:
         raise ValueError("fine-note-strength must be finite in 0..1")
+    if not math.isfinite(args.local_onset_bias_strength) or not 0 <= args.local_onset_bias_strength <= 1:
+        raise ValueError("local-onset-bias-strength must be finite in 0..1")
     if args.rhythm_bias != "auto":
         raise ValueError("rhythm-bias rhythm classes are not implemented; use auto with fine-note-strength")
     post_process_config = PostProcessConfig(
@@ -2072,6 +2101,7 @@ def main(argv=None) -> int:
                 silence_window_share=args.silence_window_share,
                 condition_default=float(contract_params.get("default", 0.5)),
                 fine_note_strength=float(generation_config.get("fine_note_strength", 0.5)),
+                local_onset_bias_strength=float(generation_config.get("local_onset_bias_strength", 0.0)),
                 post_process_config=post_process_config if args.enable_conflict_detection else None,
             )
             points = _merge_windows(decoded, overlap_beats=overlap_beats)
@@ -2260,6 +2290,8 @@ def main(argv=None) -> int:
                 "planner_profile": str(getattr(model, "planner_profile", "legacy_v1")),
                 "fine_note_strength_requested": float(args.fine_note_strength),
                 "fine_note_strength_effective": float(generation_config.get("fine_note_strength", 0.5)),
+                "local_onset_bias_strength": float(generation_config.get("local_onset_bias_strength", 0.0)),
+                "onset_guidance_policy": "bounded_position_logprob_mass_v1",
                 "fine_note_control": "relative_window_log_odds_v1",
             }
             playability_warning = args.enable_conflict_detection and (
