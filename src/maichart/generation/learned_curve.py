@@ -12,7 +12,7 @@ from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAU
 from maichart.generation.event_audio import extract_event_audio, audio_segment_tensor, compress_event_audio
 from maichart.generation.music_intensity import generate_intensity_profile, validate_intensity_profile
 from maichart.training.event_checkpoints import load_event_model
-from maichart.generation.music_plan import is_music_structure
+from maichart.generation.music_plan import CONTINUOUS_COUNT, continuous_keys, is_music_structure
 
 
 def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
@@ -29,7 +29,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
 
     device = torch.device(device)
     model, _, checkpoint = load_event_model(checkpoint_path, device)
-    if not is_music_structure(str(getattr(model.config, "planner_profile", "legacy_v1"))):
+    planner_profile = str(getattr(model.config, "planner_profile", "legacy_v1"))
+    if not is_music_structure(planner_profile):
         raise ValueError("模型预测曲线需要 music_structure_v2/v3 规划器；请重新训练新模型，或选择音频参考曲线。")
     profile = generate_intensity_profile(audio_path, resolution_sec=resolution_sec,
                                          local_context_sec=local_context_sec)
@@ -56,7 +57,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
                                int(contract.get("segment_beats", 16)),
                                overlap_beats=int(layout.get("overlap_beats", 0)))
     centers, values, descriptors = [], [], []
-    names = ("count", "density", "chord", "slide", "last", "touch", "hold", "intensity")
+    names = continuous_keys(planner_profile)
+    continuous_count = CONTINUOUS_COUNT[planner_profile]
     with torch.inference_mode():
         for start, end in windows:
             low = max(0.0, float(seconds_at_beat(start, tempo, first)))
@@ -79,10 +81,10 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
                                                  plan_audio_mask=core_mask,
                                                  condition_null=torch.tensor([False], device=device))
             _, _, logits = model.append_plan_memory(memory, padding)
-            plan = logits[0, :8].sigmoid().cpu().tolist()
-            configs = logits[0, 8:12].softmax(-1).cpu().tolist()
+            plan = logits[0, :continuous_count].sigmoid().cpu().tolist()
+            configs = logits[0, continuous_count:continuous_count + 4].softmax(-1).cpu().tolist()
             centers.append((low + high) * 0.5)
-            values.append(plan[7])
+            values.append(plan[names.index("intensity")])
             descriptors.append({"start_sec": low, "end_sec": high,
                                 **dict(zip(names, plan)), "configuration_probabilities": configs})
     if not centers:
@@ -99,7 +101,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
     profile["points"] = [{"time_sec": float(time), "intensity": float(value)}
                           for time, value in zip(times, predicted)]
     profile.pop("components", None)
-    profile["method"] = "learned_music_structure_v2"
+    profile["method"] = ("learned_music_structure_v3" if planner_profile == "music_structure_v3"
+                          else "learned_music_structure_v2")
     profile["planner_windows"] = descriptors
     profile["checkpoint"] = str(Path(checkpoint_path).resolve())
     checkpoint_stat = Path(checkpoint_path).stat()

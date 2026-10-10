@@ -28,9 +28,8 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from maichart.generation.conditions import CONDITION_KEYS, GENERATION_DEFAULTS, GENERATION_SAMPLING_DEFAULTS
-from maichart.generation.music_plan import (
-    MUSIC_STRUCTURE_PROFILES, MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
-)
+from maichart.generation.music_plan import is_music_structure
+from maichart.generation.model_compatibility import checkpoint_capabilities
 from maichart.generation.model import AUDIO_FEATURE_KEYS
 from maichart.training.checkpoints import (
     checkpoint_contract,
@@ -79,13 +78,6 @@ EVENT_MODEL_FAMILY = "event_v1"
 EVENT_CTX_MODEL_FAMILY = "event_ctx_v1"
 EVENT_FAMILIES = frozenset({EVENT_MODEL_FAMILY, EVENT_CTX_MODEL_FAMILY})
 LEGACY_MODEL_FAMILY = "legacy_frame_v2"
-KNOWN_LEGACY_CHECKPOINT_SCHEMAS = {
-    None,
-    "legacy-state-dict",
-    "maichart-conditioned-generator-v1",
-    "maichart-conditioned-generator-checkpoint-v2",
-}
-
 for _directory in (UPLOAD_ROOT, DATASET_ROOT, CONDITION_ROOT, GENERATED_ROOT):
     _directory.mkdir(parents=True, exist_ok=True)
 
@@ -290,7 +282,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint_path = (_required_path(payload["checkpoint"], "曲线规划 checkpoint", must_exist=True)
                            if source != "audio" and payload.get("checkpoint") else None)
         if source == "model" and checkpoint_path is None:
-            raise ValueError("模型预测曲线需要选择 music_structure_v2 checkpoint")
+            raise ValueError("模型预测曲线需要选择 music_structure_v2/v3 checkpoint")
         resolution = float(payload.get("resolution_sec", 2.0))
         context = float(payload.get("local_context_sec", 12.0))
         if not math.isfinite(resolution) or not 0.5 <= resolution <= 16:
@@ -414,11 +406,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint = _required_path(payload.get("checkpoint"), "checkpoint", must_exist=True)
         checkpoint_payload = _load_checkpoint_payload(checkpoint)
         model_family = _checkpoint_model_family(checkpoint_payload)
+        capabilities = checkpoint_capabilities(checkpoint_payload)
         if model_family == "unknown":
             raise ValueError(
                 f"不支持的 checkpoint schema: {checkpoint_payload.get('schema')!r}。"
                 f"只接受 {EVENT_CHECKPOINT_SCHEMA} 或已知旧固定帧 checkpoint。"
             )
+        if capabilities["errors"]:
+            raise ValueError("checkpoint capability contract invalid: " + "; ".join(capabilities["errors"]))
         audio_features = payload.get("audio_features")
         audio = payload.get("audio")
         if audio_features and model_family == LEGACY_MODEL_FAMILY:
@@ -439,7 +434,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             curve = validate_intensity_profile(payload.get("intensity_curve"))
             if curve.get("audio_sha256") != audio_sha256(audio_path):
                 raise ValueError("张力曲线与当前音频不匹配：更换歌曲后请重新生成曲线")
-            if curve.get("method") == "learned_music_structure_v2" and curve.get("checkpoint"):
+            if curve.get("method") in {"learned_music_structure_v2", "learned_music_structure_v3"} and curve.get("checkpoint"):
                 curve_checkpoint = _resolve_path(curve["checkpoint"])
                 current_stat = checkpoint.stat()
                 identity = {"size": current_stat.st_size, "mtime_ns": current_stat.st_mtime_ns}
@@ -466,6 +461,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 raise ValueError("强度跟随模式只能是 auto、model、multifeature 或 loudness")
         curve_strength = float(payload.get("intensity_curve_strength", 0.65))
         curve_mode = str(payload.get("intensity_curve_mode", "follow"))
+        fine_note_strength = float(payload.get("fine_note_strength", 0.5))
+        if not math.isfinite(fine_note_strength) or not 0.0 <= fine_note_strength <= 1.0:
+            raise ValueError("细碎音符强度必须是 0–1 之间的有限值")
+        conflict_enabled = bool(payload.get("conflict_detection_enabled", False))
+        conflict_repair_mode = str(payload.get("conflict_repair_mode", "none"))
+        conflict_retries = int(payload.get("conflict_retries", 0))
+        if conflict_repair_mode not in {"none", "local", "reject"}:
+            raise ValueError("冲突处理方式只能是 none、local 或 reject")
+        if not 0 <= conflict_retries <= 5:
+            raise ValueError("冲突重试次数必须是 0–5")
         if not math.isfinite(curve_strength) or not 0.0 <= curve_strength <= 1.0:
             raise ValueError("曲线控制力度必须在 0–1 之间")
         if curve_mode not in {"follow", "hard", "soft", "strict"}:
@@ -527,6 +532,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                                        GENERATION_SAMPLING_DEFAULTS["repetition_window"])),
                 "--max-tokens", str(max(1, int(payload.get("max_tokens", GENERATION_SAMPLING_DEFAULTS["max_tokens"])))),
             ]
+            if capabilities["fine_note_strength"]:
+                args.extend(["--fine-note-strength", str(fine_note_strength)])
+                task.result["fine_note_strength"] = fine_note_strength
+            elif fine_note_strength != 0.5:
+                warning = "当前 checkpoint 未训练 music_structure_v3 fine_rhythm；细碎音符控制已忽略。"
+                task.result.setdefault("warnings", []).append(warning)
+                print(f"warning: {warning}", flush=True)
             if curve_path is not None:
                 args.extend(["--intensity-curve", str(curve_path),
                              "--intensity-curve-strength", str(curve_strength),
@@ -572,20 +584,22 @@ class WebUIHandler(BaseHTTPRequestHandler):
             ])
             if payload.get("sample", GENERATION_SAMPLING_DEFAULTS["sample"]):
                 args.append("--sample")
-            # Playability post-process flags.  The CLI accepts them for every
-            # event checkpoint; the model-family gate lives in
-            # generation/model_compatibility.py, which reports a warning and
-            # skips the feature when the loaded checkpoint predates it.
-            if payload.get("conflict_detection_enabled", False):
+            # Static playability diagnostics are available to every event
+            # checkpoint; the fine-rhythm control is gated by v3 capability.
+            if conflict_enabled:
                 args.append("--enable-conflict-detection")
                 if payload.get("detect_hard_conflicts", True):
                     args.append("--detect-hard-conflicts")
+                else:
+                    args.append("--no-detect-hard-conflicts")
                 if payload.get("detect_soft_conflicts", False):
                     args.append("--detect-soft-conflicts")
-                args.extend(["--conflict-repair-mode",
-                             str(payload.get("conflict_repair_mode", "none"))])
+                args.extend(["--conflict-repair-mode", conflict_repair_mode])
+                if conflict_repair_mode != "none" and conflict_retries:
+                    args.extend(["--conflict-retries", str(conflict_retries)])
                 task.result["conflict_detection_enabled"] = True
-                task.result["conflict_repair_mode"] = str(payload.get("conflict_repair_mode", "none"))
+                task.result["conflict_repair_mode"] = conflict_repair_mode
+                task.result["conflict_retries"] = conflict_retries if conflict_repair_mode != "none" else 0
             if model_family == EVENT_CTX_MODEL_FAMILY:
                 # The window layout is part of the data contract, so the
                 # checkpoint is authoritative: the UI fields are only a copy, and
@@ -909,7 +923,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         teacher_mix = float(payload.get("plan_teacher_mix", 0.5))
         if planner_profile not in {"auto", "legacy_v1", "music_structure_v2",
                                    "music_structure_v3"}:
-            raise ValueError("规划器模式只能是 auto、legacy_v1 或 music_structure_v2")
+            raise ValueError("规划器模式只能是 auto、legacy_v1、music_structure_v2 或 music_structure_v3")
         if not math.isfinite(teacher_mix) or not 0.0 <= teacher_mix <= 1.0:
             raise ValueError("规划目标混合比例必须在 0–1 之间")
         validation_manifest = None
@@ -1455,7 +1469,12 @@ def _generation_result_paths(output: Path, output_ir: Path, count: int, model_fa
         candidate = _candidate_path(output, index, count)
         paths.extend([candidate, _candidate_path(output_ir, index, count)])
         if _is_event_family(model_family):
-            paths.append(candidate.with_suffix(".quality.json"))
+            paths.extend([
+                candidate.with_suffix(".quality.json"),
+                candidate.with_name(candidate.stem + ".original.txt"),
+                candidate.with_name(candidate.stem + ".original.chart.json"),
+                candidate.with_name(candidate.stem + ".repaired.txt"),
+            ])
     return paths
 
 
@@ -1812,40 +1831,21 @@ def _load_checkpoint_payload(path: Path) -> dict[str, Any]:
 
 
 def _generation_capabilities(model_family: str, payload: dict[str, Any]) -> dict[str, bool]:
-    """What this checkpoint can actually do at generation time.
-
-    `conflict_detection` and friends are post-processing features: they run on
-    the compiled chart and therefore work for every event family.  The sampling
-    biases (`rhythm_bias`, `fine_note_strength`) only mean something for a
-    checkpoint whose contract records the fine-rhythm training target.
-    """
-
-    event_family = model_family in EVENT_FAMILIES
-    # Sampling bias flows through the planner's fine_rhythm channel, so it is
-    # available exactly when the checkpoint's planner profile predicts it.
-    profile = (payload.get("model_config", {}) or {}).get("planner_profile")
-    if profile is None:
-        profile = ((payload.get("data_contract", {}) or {}).get("planner_params") or {}).get("profile")
-    trained_fine = str(profile or "") == MUSIC_STRUCTURE_V3_PROFILE
+    """Expose schema-level tools and gate planner controls on a valid contract."""
+    detected = checkpoint_capabilities(payload)
+    if detected["model_family"] != model_family:
+        return {"conflict_detection": False, "conflict_repair": False,
+                "rhythm_bias": False, "fine_note_strength": False}
     return {
-        "conflict_detection": event_family,
-        "conflict_repair": event_family,
-        "rhythm_bias": trained_fine,
-        "fine_note_strength": trained_fine,
+        "conflict_detection": bool(detected["conflict_detection"]),
+        "conflict_repair": bool(detected["conflict_repair"]),
+        "rhythm_bias": False,
+        "fine_note_strength": bool(detected["fine_note_strength"] and not detected["errors"]),
     }
 
 
 def _checkpoint_model_family(payload: dict[str, Any]) -> str:
-    schema = payload.get("schema")
-    if schema == EVENT_CHECKPOINT_SCHEMA:
-        # Both event families share the checkpoint schema; only the contract
-        # says which window layout the weights were trained with.
-        if payload.get("data_contract", {}).get("target_schema") == EVENT_CTX_MODEL_FAMILY:
-            return EVENT_CTX_MODEL_FAMILY
-        return EVENT_MODEL_FAMILY
-    if schema in KNOWN_LEGACY_CHECKPOINT_SCHEMAS or payload.get("legacy"):
-        return LEGACY_MODEL_FAMILY
-    return "unknown"
+    return str(checkpoint_capabilities(payload)["model_family"])
 
 
 def _checkpoint_inspection(
@@ -1873,6 +1873,7 @@ def _checkpoint_inspection(
         }
 
     detected_family = _checkpoint_model_family(payload)
+    capabilities = checkpoint_capabilities(payload)
     if detected_family == "unknown":
         init_errors = [
             f"无法确认 checkpoint schema {payload.get('schema')!r}；拒绝把未知模型当作旧固定帧或 event_v1。"
@@ -1888,13 +1889,17 @@ def _checkpoint_inspection(
         stored_contract = checkpoint_contract(payload)
         if not stored_contract:
             init_warnings.append("event checkpoint 未记录 data_contract；音频与事件词表兼容性需由 event CLI 再检查")
-        if stored_contract.get("target_schema") not in {None, EVENT_MODEL_FAMILY, EVENT_CTX_MODEL_FAMILY}:
+        init_errors.extend(capabilities["errors"])
+        if stored_contract.get("target_schema") not in {
+            None, EVENT_MODEL_FAMILY, EVENT_CTX_MODEL_FAMILY,
+            "maichart-event-v1", "maichart-event-ctx-v1",
+        }:
             init_errors.append(
                 f"event checkpoint 的 target_schema 是 {stored_contract.get('target_schema')!r}，"
                 "不属于任何事件模型族，拒绝作为事件模型加载"
             )
         if (detected_family == EVENT_CTX_MODEL_FAMILY
-                and stored_contract.get("target_schema") != EVENT_CTX_MODEL_FAMILY):
+                and capabilities["model_family"] != EVENT_CTX_MODEL_FAMILY):
             init_errors.append("跨窗口 checkpoint 的 data_contract 缺少 target_schema=event_ctx_v1")
         if detected_family == EVENT_CTX_MODEL_FAMILY:
             init_warnings.append(
@@ -1955,6 +1960,7 @@ def _checkpoint_inspection(
         # decoding), while the sampling-bias flags need a checkpoint trained on
         # the fine-rhythm target.
         "generation_capabilities": _generation_capabilities(detected_family, payload),
+        "capability_errors": capabilities["errors"],
         "model_family_label": (
             "event_ctx_v1 跨窗口事件模型" if detected_family == EVENT_CTX_MODEL_FAMILY
             else "event_v1 事件模型" if detected_family == EVENT_MODEL_FAMILY

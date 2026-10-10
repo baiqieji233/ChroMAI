@@ -245,7 +245,7 @@
             </select>
             <small>auto 在 fresh 训练中使用最新的 music_structure_v3 planner，续训沿用 checkpoint 自己的 profile。
             v3 比 v2 多一个「细碎节奏（fine_rhythm）」连续通道：窗口内相邻起音间隔小于四分之一拍的占比。
-            有这个通道之后，「细碎音符强度」与「节奏倾向」才能真正改变采音；v2 及更早的 checkpoint 没有这一维，参数会被忽略。
+            生成页的细碎音符调制只柔性调整此通道，不指定三连音或附点等节奏类别；v2 及更早的 checkpoint 不支持此调制。
             换 profile 必须重新训练：旧 checkpoint 的结构不能通过 resume 或 finetune 切换。</small>
           </label>
           <label class="field" data-training-family="event_v1 event_ctx_v1">Planner teacher mix
@@ -719,6 +719,17 @@
           这是目标倍率，实际音符数仍由模型决定；soft 不会在生成后按倍率删音符。
         </div>
         <div class="form-grid compact-grid">
+          <div class="field" data-generation-family="event_v1">
+            <label for="fineNoteStrength">细碎音符倾向</label>
+            <input id="fineNoteStrength" type="range" min="0" max="1" step="0.05" value="0.5" disabled>
+            <output id="fineNoteStrengthValue" for="fineNoteStrength">0.50</output>
+            <div class="button-row fine-note-presets">
+              <button class="small-button" type="button" data-fine-note-value="0.25" disabled>偏主音 0.25</button>
+              <button class="small-button" type="button" data-fine-note-value="0.5" disabled>跟随段落 0.5</button>
+              <button class="small-button" type="button" data-fine-note-value="0.75" disabled>偏细碎 0.75</button>
+            </div>
+            <small>仅适用于已检查且训练了 music_structure_v3 fine_rhythm 的 checkpoint。0 偏主音，0.5 跟随每窗口预测，1 偏细碎音型；这是柔性调制，不会锁定三连音、附点或某种节奏类别。可与局部曲线和键盘/星星等配置偏好叠加：曲线控制局部负荷，偏好影响配置类别。</small>
+          </div>
           <label class="field">随机种子
             <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
             <small><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed，抽到好谱面后照着填回来即可重现。</small>
@@ -766,13 +777,13 @@
           <label class="field" data-generation-family="event_v1">强度跟随（逐窗口）
             <input id="intensityFollow" type="checkbox" checked>
             <small><strong>控制额外的自动强度参考，默认开。</strong>多维音乐张力 / 仅响度模式会逐窗口缩放「整体密度」与「峰值密度」，不改 Style。
-            新 music_structure_v2 的 auto / model 模式直接使用模型学得的局部规划，不再额外乘音频倍率；取消此开关也不会关闭模型内部 planner。
+            新 music_structure_v2/v3 的 auto / model 模式直接使用模型学得的局部规划，不再额外乘音频倍率；取消此开关也不会关闭模型内部 planner。
             人工曲线启用且指导强度大于 0 时，自动跟随与结尾衰减被曲线覆盖。音频参考不是情绪识别，模型参考也不是官方定数预测。</small>
           </label>
           <label class="field" data-generation-family="event_v1">强度跟随模式
             <select id="intensityMode"><option value="auto" selected>自动（新模型 planner / 旧模型音频）</option><option value="model">模型 planner</option><option value="multifeature">多维音乐张力</option><option value="loudness">仅响度（兼容旧后端）</option></select>
-            <small>auto：music_structure_v2 使用学得的局部音符量、配置与负荷，旧模型使用多维音频参考。
-            model：只支持 music_structure_v2；multifeature：用节奏、频谱、和声变化与响度估计相对张力；loudness：只比较相对响度，无法表达编配或谱师意图。
+            <small>auto：music_structure_v2/v3 使用学得的局部音符量、配置与负荷，旧模型使用多维音频参考。
+            model：只支持 music_structure_v2/v3；multifeature：用节奏、频谱、和声变化与响度估计相对张力；loudness：只比较相对响度，无法表达编配或谱师意图。
             在 model 模式中，跟随幅度不限制模型自然预测的起伏；需要明确控制时，请生成并编辑曲线。</small>
           </label>
           <label class="field" data-generation-family="event_v1">强度曲线指导强度
@@ -830,23 +841,27 @@
           </label>
 
           <!-- ========== 可玩性与冲突检测（新增）========== -->
-          <h3 data-generation-family="event_v1">可玩性约束（实验性）</h3>
+          <h3 data-generation-family="event_v1">冲突参考与可选修复（实验性）</h3>
           <p data-generation-family="event_v1" class="help-text">
-            基于舞萌DX物理机制的后处理检测。<strong>仅支持 event_ctx_v1_extended 模型</strong>。
-            旧模型会自动跳过这些参数。
+            使用静态判定区与时间窗口作参考，不是完整机台判定模拟，也不证明谱面可玩。部分 Slide 轨迹未覆盖；这些情况只报告覆盖缺口。
           </p>
 
           <label class="field" data-generation-family="event_v1">
             <input id="conflictDetectionEnabled" type="checkbox">
             启用冲突检测
-            <small>检测硬冲突（Hold-Tap重叠、Slide星星碰撞）和软冲突（手部跳跃过大）。</small>
+            <small>默认关闭。开启后可分别选择确定冲突与人体工学参考项。</small>
+          </label>
+
+          <label class="field" data-generation-family="event_v1">
+            <input id="detectHardConflicts" type="checkbox" checked>
+            检测硬冲突
+            <small>标记同判定区同拍重复起音，以及 Hold 持续区间内再次起音。同刻相邻 Touch 可能联动判定，相关项会降为软参考。可以单独关闭。</small>
           </label>
 
           <label class="field" data-generation-family="event_v1">
             <input id="detectSoftConflicts" type="checkbox">
-            检测软冲突（人体工学）
-            <small>标记「可能难以演奏」的配置：六十分音级别的跨半圆跳跃、持续的快速左右手交替。
-            默认关闭，因为这些判定比硬冲突宽松得多。</small>
+            检测软参考项
+            <small>只提示同刻三个以上独立按键的双手分配复核，不判定人体无理。确定冲突检测另会附带已覆盖 Slide 轨迹的提前触发参考和 Touch 覆盖提示；这些参考不做完整判定区状态模拟。</small>
           </label>
 
           <label class="field" data-generation-family="event_v1">修复模式
@@ -855,21 +870,12 @@
               <option value="local">局部修复</option>
               <option value="reject">拒绝生成</option>
             </select>
-            <small>仅检测=生成报告；局部修复=移除冲突音符；拒绝=遇硬冲突中止。</small>
+            <small>none 仅报告；local 保留原谱，只删除检测明确冲突的原子；reject 在存在确定冲突时拒绝该结果。</small>
           </label>
-
-
-
           <label class="field" data-generation-family="event_v1">
-            <input id="slideStarPrecision" type="checkbox" checked>
-            Slide星星精确轨迹
-            <small>计算星星逐帧位置（更精确）。</small>
-          </label>
-
-          <label class="field" data-generation-family="event_v1">
-            <input id="touchOverlapDetection" type="checkbox" checked>
-            Touch重叠检测
-            <small>检测Touch A区与按键1的冲突。</small>
+            冲突重试次数
+            <input id="conflictRetries" type="number" min="0" max="5" step="1" value="0">
+            <small>仅在启用检测且修复模式不是 none 时使用。0 表示关闭重试。</small>
           </label>
 
           <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Presence threshold
@@ -897,7 +903,7 @@
           </label>
           <label class="field span-4">输出文件路径
             <textarea id="outputPath" class="path-input" rows="2">webui_workspace/generated/maidata.txt</textarea>
-            <small>任务完成后显示 maidata、ChartIR 和 event 质量报告的实际路径；项目外文件请在本机打开。</small>
+            <small>任务完成后显示实际生成文件与质量报告路径；局部修复时还会列出原谱和修正版，项目外文件请在本机打开。</small>
           </label>
           <label class="field span-4" data-generation-family="legacy_frame_v2" hidden>旧基线 Tempo map JSON（可选）
             <small>只有需要手动覆盖自动检测时才填写；beat 是谱面 beat，不是秒数。</small>
@@ -966,7 +972,7 @@
         </div>
         <label class="field">自动曲线来源
           <select id="intensityCurveSource"><option value="auto" selected>自动（新模型优先 planner）</option><option value="audio">音频多维参考</option><option value="model">模型 planner</option></select>
-          <small>auto 在 music_structure_v2 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
+          <small>auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
           audio 只依赖歌曲的音频特征。更换 checkpoint、等级、风格、BPM 或 first 后，模型来源曲线需要重新生成。</small>
         </label>
         <div class="button-row">

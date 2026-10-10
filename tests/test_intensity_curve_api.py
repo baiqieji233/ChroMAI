@@ -237,13 +237,56 @@ def test_curve_controls_reject_invalid_inputs_before_task(api, monkeypatch, tmp_
     assert not calls and not webui.TASKS
 
 
-def test_learned_curve_cannot_be_reused_after_checkpoint_changes(api, monkeypatch, tmp_path):
+@pytest.mark.parametrize("method", ["learned_music_structure_v2", "learned_music_structure_v3"])
+def test_learned_curve_cannot_be_reused_after_checkpoint_changes(api, monkeypatch, tmp_path, method):
     audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
     curve = profile(audio)
-    curve.update({"method": "learned_music_structure_v2", "checkpoint": payload["checkpoint"],
+    curve.update({"method": method, "checkpoint": payload["checkpoint"],
                   "checkpoint_identity": {"size": 1, "mtime_ns": 0}})
     code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
                                           "intensity_curve": curve})
     assert code == 400
     assert "模型已变化" in result["error"]
+    assert not calls and not webui.TASKS
+
+
+def test_v3_strength_and_static_conflict_controls_reach_cli(api, monkeypatch, tmp_path):
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    monkeypatch.setattr(webui, "_load_checkpoint_payload", lambda *a: {
+        "schema": webui.EVENT_CHECKPOINT_SCHEMA,
+        "model_state_dict": {"weight": object()},
+        "model_config": {"d_model": 32, "planner_profile": "music_structure_v3", "plan_dim": 13},
+        "data_contract": {"target_schema": "event_ctx_v1",
+                           "planner_params": {"profile": "music_structure_v3", "plan_dim": 13}},
+    })
+    code, started, _ = api("/api/generate", {**payload, "fine_note_strength": 0.8,
+        "conflict_detection_enabled": True, "detect_hard_conflicts": False,
+        "detect_soft_conflicts": True, "conflict_repair_mode": "local", "conflict_retries": 2})
+    assert code == 200, started
+    args = calls[0]
+    assert args[args.index("--fine-note-strength") + 1] == "0.8"
+    assert "--enable-conflict-detection" in args
+    assert "--no-detect-hard-conflicts" in args
+    assert "--detect-soft-conflicts" in args
+    assert args[args.index("--conflict-repair-mode") + 1] == "local"
+    assert args[args.index("--conflict-retries") + 1] == "2"
+
+
+@pytest.mark.parametrize("value", [-0.1, 1.1, float("nan")])
+def test_invalid_fine_note_strength_fails_before_generation_task(api, monkeypatch, tmp_path, value):
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    code, result, _ = api("/api/generate", {**payload, "fine_note_strength": value})
+    assert code == 400
+    assert "细碎音符强度" in result["error"]
+    assert not calls and not webui.TASKS
+
+
+@pytest.mark.parametrize("retries", [-1, 6])
+def test_conflict_retries_outside_supported_range_fail_before_task(api, monkeypatch, tmp_path, retries):
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    code, result, _ = api("/api/generate", {**payload, "conflict_detection_enabled": True,
+                                              "conflict_repair_mode": "local",
+                                              "conflict_retries": retries})
+    assert code == 400
+    assert "冲突重试次数" in result["error"]
     assert not calls and not webui.TASKS

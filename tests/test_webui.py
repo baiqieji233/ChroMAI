@@ -646,6 +646,24 @@ def test_event_generation_selects_event_cli_and_quality_sidecar(webui_api, monke
     assert task.result["quality_reports"][0]["diagnostics"]["syntax_ok"] is True
 
 
+def test_event_generation_result_collection_includes_only_present_repair_artifacts(tmp_path):
+    output = tmp_path / "chart.txt"
+    paths = webui._generation_result_paths(
+        output, output.with_suffix(".chart.json"), 1, webui.EVENT_MODEL_FAMILY,
+    )
+    originals = [path for path in paths if ".original." in path.name or ".repaired." in path.name]
+    assert {path.name for path in originals} == {
+        "chart.original.txt", "chart.original.chart.json", "chart.repaired.txt",
+    }
+    originals[0].write_text("original", encoding="utf-8")
+    originals[2].write_text("repaired", encoding="utf-8")
+    task = TaskState(task_id="repair-artifacts", kind="generate")
+    webui._collect_task_results(task, paths)
+    assert "chart.original.txt" in task.result["files"]
+    assert "chart.repaired.txt" in task.result["files"]
+    assert "chart.original.chart.json" not in task.result["files"]
+
+
 def test_gold_scan_reports_the_folder_contents(webui_api, tmp_path):
     """The panel previews a gold folder before anything is written."""
 

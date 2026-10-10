@@ -1,219 +1,179 @@
-"""模型类型识别和兼容性处理。
-
-识别checkpoint中的模型类型，并自动使用对应的生成方式。
-支持event_v1、event_ctx_v1及其扩展版本。
-"""
+"""Checkpoint family and generation capability detection."""
 
 from __future__ import annotations
 
 from enum import Enum
+from typing import Any
 
-from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE
-from typing import Literal
+from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM
+
+
+EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
+EVENT_FAMILIES = {"event_v1", "event_ctx_v1"}
+LEGACY_CHECKPOINT_SCHEMAS = {
+    "legacy-state-dict",
+    "maichart-conditioned-generator-v1",
+    "maichart-conditioned-generator-checkpoint-v2",
+}
+EVENT_TARGET_ALIASES = {
+    "event_v1": "event_v1", "maichart-event-v1": "event_v1",
+    "event_ctx_v1": "event_ctx_v1", "maichart-event-ctx-v1": "event_ctx_v1",
+}
+LEGACY_MODEL_CONFIG_KEYS = {
+    "input_dim", "condition_dim", "num_note_types", "d_model", "nhead",
+    "num_layers", "dim_feedforward", "dropout", "max_len", "positional_encoding",
+}
+LEGACY_STATE_KEYS = {
+    "input_projection.weight", "condition_projection.0.weight",
+    "encoder.layers.0.self_attn.in_proj_weight", "final_norm.weight",
+    "note_presence_head.weight", "button_head.weight", "type_head.weight", "density_head.weight",
+}
 
 
 class ModelFamily(Enum):
-    """模型族类型。"""
     EVENT_V1 = "event_v1"
     EVENT_CTX_V1 = "event_ctx_v1"
-    EVENT_CTX_V1_EXTENDED = "event_ctx_v1_extended"  # 新增：支持节奏倾向和冲突检测
+    LEGACY_FRAME_V2 = "legacy_frame_v2"
+    # Deprecated compatibility alias. Capability is determined from checkpoint
+    # contents, never from a separate "extended" family label.
+    EVENT_CTX_V1_EXTENDED = "event_ctx_v1"
+
+
+def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
+    """Derive generation capabilities from the checkpoint's declared schema."""
+    contract = checkpoint_data.get("data_contract") or {}
+    if not isinstance(contract, dict):
+        contract = {}
+    target_schema = contract.get("target_schema") or checkpoint_data.get("target_schema")
+    schema = checkpoint_data.get("schema")
+    errors: list[str] = []
+
+    config = checkpoint_data.get("model_config") or {}
+    if not isinstance(config, dict):
+        config = {}
+        errors.append("model_config 不是对象")
+    state = checkpoint_data.get("model_state_dict") or {}
+    state_keys = set(state.keys()) if hasattr(state, "keys") else set()
+    known_schema_less_legacy = (
+        schema is None and (target_schema is None or target_schema == "legacy_frame_v2")
+        and LEGACY_MODEL_CONFIG_KEYS <= set(config)
+        and LEGACY_STATE_KEYS <= state_keys
+    )
+    if (isinstance(target_schema, str) and target_schema in EVENT_TARGET_ALIASES
+            and (schema is None or schema == EVENT_CHECKPOINT_SCHEMA)):
+        family = EVENT_TARGET_ALIASES[target_schema]
+    elif (isinstance(schema, str) and schema in LEGACY_CHECKPOINT_SCHEMAS) or (
+        checkpoint_data.get("checkpoint_kind") == "legacy_weights" or checkpoint_data.get("legacy")
+    ) or known_schema_less_legacy:
+        family = "legacy_frame_v2"
+    else:
+        family = "unknown"
+        errors.append(f"无法确认 checkpoint schema/family: schema={schema!r}, target_schema={target_schema!r}")
+
+    planner = contract.get("planner_params") or {}
+    if not isinstance(planner, dict):
+        planner = {}
+        errors.append("planner_params 不是对象")
+    config_profile = config.get("planner_profile")
+    contract_profile = planner.get("profile")
+    if config_profile and contract_profile and config_profile != contract_profile:
+        errors.append("checkpoint model_config 与 data_contract 的 planner_profile 不一致")
+    profile = config_profile or contract_profile or "legacy_v1"
+    if str(profile) not in PLAN_DIM:
+        errors.append(f"未知 planner_profile: {profile!r}")
+
+    dimensions = []
+    for name, value in (("model_config.plan_dim", config.get("plan_dim")),
+                        ("planner_params.plan_dim", planner.get("plan_dim"))):
+        if value is not None:
+            try:
+                dimensions.append((name, int(value)))
+            except (TypeError, ValueError):
+                errors.append(f"{name} 不是有效整数")
+    head = state.get("plan_head.2.weight") if hasattr(state, "get") else None
+    if head is not None and getattr(head, "ndim", 0) == 2:
+        dimensions.append(("plan_head.2.weight", int(head.shape[0])))
+    expected = PLAN_DIM.get(str(profile))
+    allowed_dimensions = {6, 9} if profile == "legacy_v1" else ({expected} if expected is not None else set())
+    if allowed_dimensions:
+        errors.extend(f"{name}={value} 与 planner_profile={profile} 允许的 plan_dim={sorted(allowed_dimensions)} 矛盾"
+                      for name, value in dimensions if value not in allowed_dimensions)
+    if len({value for _, value in dimensions}) > 1:
+        errors.append("checkpoint 中记录的 planner plan_dim 相互矛盾")
+
+    event_family = family in EVENT_FAMILIES
+    usable_event_family = event_family
+    v3_valid = (event_family and profile == MUSIC_STRUCTURE_V3_PROFILE and expected is not None
+                and bool(dimensions)
+                and (not dimensions or all(value == expected for _, value in dimensions))
+                and not errors)
+    return {
+        "model_family": family,
+        "planner_profile": str(profile),
+        "valid": not errors,
+        "errors": errors,
+        "conflict_detection": usable_event_family,
+        "conflict_repair": usable_event_family,
+        "fine_note_strength": bool(v3_valid),
+        "rhythm_bias": False,
+    }
+
+
+def detect_model_family(checkpoint_data: dict[str, Any]) -> ModelFamily:
+    """Return the event family; refuse unknown or legacy checkpoints."""
+    family = checkpoint_capabilities(checkpoint_data)["model_family"]
+    try:
+        return ModelFamily(family)
+    except ValueError as exc:
+        raise ValueError(f"无法确认事件模型族: {family}") from exc
 
 
 class FeatureSupport:
-    """模型特性支持情况。"""
-    # The capability groups are independent because they live at different
-    # stages:
-    #   * conflict detection / repair / post_process run *after* decoding on the
-    #     compiled chart. They depend only on note geometry, so every event
-    #     checkpoint gets them and no retraining is required.
-    #   * rhythm_bias / fine_note_strength steer *sampling* through the planner's
-    #     fine_rhythm channel. They are honoured only by a checkpoint trained with
-    #     music_structure_v3 (the first profile that predicts that channel);
-    #     otherwise the flag is reported and ignored rather than silently pushing
-    #     an out-of-distribution note into a planner that cannot read it.
-    _POST_PROCESS = {
-        "conflict_detection": True,
-        "conflict_repair": True,
-        "post_process": True,
-    }
-    _NO_SAMPLING_BIAS = {
-        "rhythm_bias": False,
-        "fine_note_strength": False,
-    }
-    _SAMPLING_BIAS = {
-        "rhythm_bias": True,
-        "fine_note_strength": True,
-    }
-
-    # event_v1: base generation (no cross-window context).
-    EVENT_V1_FEATURES = {**_NO_SAMPLING_BIAS, **_POST_PROCESS}
-    # event_ctx_v1: cross-window context.
-    EVENT_CTX_V1_FEATURES = {**_NO_SAMPLING_BIAS, **_POST_PROCESS}
-    # event_ctx_v1_extended: trained on the fine-rhythm target, so the sampling
-    # bias flags take effect as well.
-    EVENT_CTX_V1_EXTENDED_FEATURES = {**_SAMPLING_BIAS, **_POST_PROCESS}
-
+    """Compatibility API for callers that only know an event family."""
     @staticmethod
     def get_features(model_family: ModelFamily) -> dict[str, bool]:
-        """获取模型的特性支持情况。"""
-        if model_family == ModelFamily.EVENT_V1:
-            return FeatureSupport.EVENT_V1_FEATURES.copy()
-        elif model_family == ModelFamily.EVENT_CTX_V1:
-            return FeatureSupport.EVENT_CTX_V1_FEATURES.copy()
-        elif model_family == ModelFamily.EVENT_CTX_V1_EXTENDED:
-            return FeatureSupport.EVENT_CTX_V1_EXTENDED_FEATURES.copy()
-        else:
-            # 默认：无新特性
-            return FeatureSupport.EVENT_V1_FEATURES.copy()
+        event_family = model_family in {ModelFamily.EVENT_V1, ModelFamily.EVENT_CTX_V1}
+        return {
+            "conflict_detection": event_family,
+            "conflict_repair": event_family,
+            "post_process": event_family,
+            "rhythm_bias": False,
+            "fine_note_strength": False,
+        }
 
 
-def detect_model_family(checkpoint_data: dict) -> ModelFamily:
-    """从checkpoint数据检测模型族。"""
-    contract = checkpoint_data.get("data_contract", {}) or {}
-    target_schema = contract.get("target_schema") or checkpoint_data.get("target_schema")
-
-    # The trainer writes the bare family name into data_contract.target_schema
-    # (see generation/event_ctx.TARGET_SCHEMA); older envelopes used a
-    # schema-style string, so both spellings are accepted.
-    if target_schema in ("event_ctx_v1", "maichart-event-ctx-v1"):
-        # "Extended" means the planner was trained to predict the fine-rhythm
-        # channel, which is what makes the sampling-bias flags meaningful.  That
-        # is a property of the planner profile, so read it from the model config
-        # (authoritative for the head width) and fall back to the contract.
-        profile = (checkpoint_data.get("model_config") or {}).get("planner_profile")
-        if profile is None:
-            profile = (contract.get("planner_params") or {}).get("profile")
-        extended = bool(
-            contract.get("rhythm_features_v1")
-            or checkpoint_data.get("supports_rhythm_features")
-            or str(profile or "") == MUSIC_STRUCTURE_V3_PROFILE
-        )
-        return ModelFamily.EVENT_CTX_V1_EXTENDED if extended else ModelFamily.EVENT_CTX_V1
-
-    if target_schema in ("event_v1", "maichart-event-v1"):
-        return ModelFamily.EVENT_V1
-
-    checkpoint_type = checkpoint_data.get("checkpoint_type")
-    if checkpoint_type == "event_ctx":
-        if checkpoint_data.get("supports_rhythm_features"):
-            return ModelFamily.EVENT_CTX_V1_EXTENDED
-        return ModelFamily.EVENT_CTX_V1
-
-    return ModelFamily.EVENT_V1
-
-
-def validate_args_for_model(model_family: ModelFamily, args) -> tuple[bool, list[str]]:
-    """验证CLI参数对于当前模型的有效性。
-    
-    返回：(是否有效, 警告信息列表)
-    """
+def validate_args_for_model(model_family: ModelFamily, args,
+                            checkpoint: dict[str, Any] | None = None) -> tuple[bool, list[str]]:
     features = FeatureSupport.get_features(model_family)
+    if checkpoint is not None:
+        capabilities = checkpoint_capabilities(checkpoint)
+        features.update({key: bool(capabilities[key]) for key in features if key in capabilities})
     warnings = []
-    
-    # 检查不支持的参数
-    if hasattr(args, "rhythm_bias") and args.rhythm_bias != "auto" and not features["rhythm_bias"]:
-        warnings.append(
-            f"当前模型({model_family.value})不支持--rhythm-bias参数，将被忽略"
-        )
-    
-    if hasattr(args, "fine_note_strength") and args.fine_note_strength != 0.5 and not features["fine_note_strength"]:
-        warnings.append(
-            f"当前模型({model_family.value})不支持--fine-note-strength参数，将被忽略"
-        )
-    
-    if hasattr(args, "enable_conflict_detection") and args.enable_conflict_detection and not features["conflict_detection"]:
-        warnings.append(
-            f"当前模型({model_family.value})不支持冲突检测，--enable-conflict-detection将被忽略"
-        )
-    
-    return len(warnings) == 0, warnings
+    if hasattr(args, "rhythm_bias") and args.rhythm_bias != "auto":
+        warnings.append("--rhythm-bias 已不受支持；请使用自动节奏跟随")
+    if (hasattr(args, "fine_note_strength") and args.fine_note_strength != 0.5
+            and not features["fine_note_strength"]):
+        warnings.append(f"当前模型({model_family.value})不支持--fine-note-strength参数，将被忽略")
+    if (hasattr(args, "enable_conflict_detection") and args.enable_conflict_detection
+            and not features["conflict_detection"]):
+        warnings.append(f"当前模型({model_family.value})不支持冲突检测")
+    return not warnings, warnings
 
 
-def get_generation_config_for_model(
-    model_family: ModelFamily,
-    args
-) -> dict:
-    """为模型生成合适的配置字典。
-    
-    根据模型类型，决定哪些参数应该被使用。
-    """
+def get_generation_config_for_model(model_family: ModelFamily, args,
+                                    checkpoint: dict[str, Any] | None = None) -> dict[str, Any]:
     config = {
         "model_family": model_family,
         "rhythm_bias": "auto",
         "fine_note_strength": 0.5,
         "enable_conflict_detection": False,
     }
-    
-    features = FeatureSupport.get_features(model_family)
-    
-    # 只有支持的参数才会被应用
-    if features["rhythm_bias"] and hasattr(args, "rhythm_bias"):
-        config["rhythm_bias"] = args.rhythm_bias
-    
-    if features["fine_note_strength"] and hasattr(args, "fine_note_strength"):
+    capabilities = checkpoint_capabilities(checkpoint) if checkpoint is not None else None
+    if (hasattr(args, "fine_note_strength") and capabilities is not None
+            and capabilities["fine_note_strength"]):
         config["fine_note_strength"] = args.fine_note_strength
-    
-    if features["conflict_detection"] and hasattr(args, "enable_conflict_detection"):
-        config["enable_conflict_detection"] = args.enable_conflict_detection
-        
-        if hasattr(args, "detect_hard_conflicts"):
-            config["detect_hard_conflicts"] = args.detect_hard_conflicts
-        
-        if hasattr(args, "detect_soft_conflicts"):
-            config["detect_soft_conflicts"] = args.detect_soft_conflicts
-        
-        if hasattr(args, "conflict_repair_mode"):
-            config["conflict_repair_mode"] = args.conflict_repair_mode
-    
+    for key in ("enable_conflict_detection", "detect_hard_conflicts", "detect_soft_conflicts",
+                "conflict_repair_mode", "conflict_retries"):
+        if hasattr(args, key):
+            config[key] = getattr(args, key)
     return config
-
-
-def mark_checkpoint_as_extended(checkpoint_data: dict) -> dict:
-    """标记checkpoint为扩展版本（支持新特性）。
-    
-    用于在first-time使用后处理的checkpoint。
-    """
-    if "data_contract" not in checkpoint_data:
-        checkpoint_data["data_contract"] = {}
-    
-    checkpoint_data["data_contract"]["rhythm_features_v1"] = True
-    checkpoint_data["supports_rhythm_features"] = True
-    
-    return checkpoint_data
-
-
-if __name__ == "__main__":
-    print("=== 模型兼容性测试 ===\n")
-    
-    # 测试1: event_v1
-    checkpoint_v1 = {
-        "data_contract": {
-            "target_schema": "maichart-event-v1"
-        }
-    }
-    family = detect_model_family(checkpoint_v1)
-    print(f"检测到模型: {family.value}")
-    print(f"特性支持: {FeatureSupport.get_features(family)}\n")
-    
-    # 测试2: event_ctx_v1
-    checkpoint_ctx = {
-        "data_contract": {
-            "target_schema": "maichart-event-ctx-v1"
-        }
-    }
-    family = detect_model_family(checkpoint_ctx)
-    print(f"检测到模型: {family.value}")
-    print(f"特性支持: {FeatureSupport.get_features(family)}\n")
-    
-    # 测试3: event_ctx_v1_extended
-    checkpoint_extended = {
-        "data_contract": {
-            "target_schema": "maichart-event-ctx-v1",
-            "rhythm_features_v1": True
-        }
-    }
-    family = detect_model_family(checkpoint_extended)
-    print(f"检测到模型: {family.value}")
-    print(f"特性支持: {FeatureSupport.get_features(family)}\n")
-    
-    print("兼容性测试完成")

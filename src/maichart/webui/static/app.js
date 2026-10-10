@@ -18,7 +18,7 @@ const radarKeys = [
 const styleKeys = [
   ["tap_bias", "Tap 倾向", "Tap 在整体谱面中的使用倾向；数值越高越偏向普通按键和较少特殊 note。语料中位等级带 0.59–0.83，中位 0.720。", "0.720"],
   ["slide_bias", "Slide 倾向", "Slide 类型在整体谱面中的使用倾向；建议与 Radar 的 sweep、slide_tricky、slide_sequence 同方向设置。语料中位等级带 0.07–0.23，中位 0.140。", "0.140"],
-  ["hold_bias", "Hold 倾向", "Hold 长条在整体谱面中的使用倾向；新 music_structure_v2 planner 有 Hold 比例预测，旧 planner 没有独立 Hold 控制。此滑条始终是软条件，不是强制配额。语料中位等级带 0.03–0.14，中位 0.077。", "0.077"],
+  ["hold_bias", "Hold 倾向", "Hold 长条在整体谱面中的使用倾向；music_structure_v2/v3 planner 有 Hold 比例预测，旧 planner 没有独立 Hold 控制。此滑条始终是软条件，不是强制配额。语料中位等级带 0.03–0.14，中位 0.077。", "0.077"],
   ["touch_bias", "Touch 倾向", "Touch / Touch Hold 在整体谱面中的使用倾向；高值不保证每个窗口都出现 Touch。语料中位等级带 0.00–0.14，中位 0.039。", "0.039"],
   ["chord_bias", "和弦倾向", "和弦在整体谱面中的表现倾向；它和 Radar 的 chord 是一对，建议同时提高或降低。语料中位等级带 0.16–0.41，中位 0.280。", "0.280"],
   ["melody_following", "节奏贴合（非旋律，melody_following）", "后端条件名为 melody_following。当前项目主要把它解释为跟随节奏/起音结构，不等于直接识别人声旋律，也不等于响度。训练侧实测中位约 0.895。", "0.900"],
@@ -62,6 +62,8 @@ const GENERATION_PARAM_FIELDS = [
   "tailDamping", "tailDampingWindows", "tailDampingStrength", // 收尾衰减
   "audioBoundsTrim", "audioBoundsLead", "silenceThreshold", "silenceWindowShare", // 音频边界
   "guidanceScale", "presenceThreshold", "buttonThreshold",
+  "fineNoteStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
+  "conflictRepairMode", "conflictRetries",
 ];
 
 let activeTaskId = null;
@@ -284,6 +286,7 @@ function resetGenerationDefaults() {
     if (mirror) mirror.value = target.value;
   });
   if (levelPresetProfile) applyConditionPreset();
+  updateGenerationCapabilityControls();
   saveSettings();
   const status = element("#resetGenerationStatus");
   if (status) status.textContent = "已恢复生成面板默认值；训练参数未改动。";
@@ -531,7 +534,29 @@ function currentModelFamily() {
 }
 
 function currentGenerationFamily() {
-  return generationInspection.data?.model_family || "event_v1";
+  return generationInspection.data?.model_family || "unknown";
+}
+
+function updateGenerationCapabilityControls() {
+  const data = generationInspection.data;
+  const caps = data?.generation_capabilities || {};
+  const checked = generationInspection.path === valueOrDefault("#checkpointPath", "").trim()
+    && data?.valid === true;
+  const fine = element("#fineNoteStrength");
+  if (fine) fine.disabled = !(checked && caps.fine_note_strength === true);
+  document.querySelectorAll("[data-fine-note-value]").forEach((button) => {
+    button.disabled = !fine || fine.disabled;
+  });
+  const fineValue = element("#fineNoteStrengthValue");
+  if (fineValue && fine) fineValue.textContent = Number(fine.value).toFixed(2);
+  const conflictEnabled = checked && caps.conflict_detection === true
+    && checkedOrDefault("#conflictDetectionEnabled", false);
+  ["#detectHardConflicts", "#detectSoftConflicts", "#conflictRepairMode"].forEach((selector) => {
+    const target = element(selector);
+    if (target) target.disabled = !conflictEnabled;
+  });
+  const retries = element("#conflictRetries");
+  if (retries) retries.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") !== "none");
 }
 
 // A field marked for one family applies to its descendants too: the
@@ -550,13 +575,14 @@ function updateFamilyFields() {
   document.querySelectorAll("[data-generation-family]").forEach((target) => {
     target.hidden = !familyFieldVisible(target.dataset.generationFamily, currentGenerationFamily());
   });
+  updateGenerationCapabilityControls();
   const family = currentModelFamily();
   const familyHelp = element("#modelFamilyHelp");
   if (familyHelp) {
     familyHelp.textContent = family === "event_v1"
-      ? "事件模型使用 112 维 event_audio_v2_rhythm 和显式 null embedding；Planner profile 选择 music_structure_v2 时使用 12D 音乐结构规划器，选择 legacy_v1 才是旧 planner。"
+      ? "事件模型使用 112 维 event_audio_v2_rhythm 和显式 null embedding；Planner profile 选择 music_structure_v2/v3 时使用音乐结构规划器，选择 legacy_v1 才是旧 planner。"
       : family === "event_ctx_v1"
-        ? "跨窗口事件模型：使用 112 维 event_audio_v2_rhythm 和显式 null embedding；每个窗口额外看到「前面已写的音符」和「前后的音乐」。Planner profile 选择 music_structure_v2 时学习局部音乐结构；checkpoint 与 event_v1 互不通用，必须单独训练。"
+        ? "跨窗口事件模型：使用 112 维 event_audio_v2_rhythm 和显式 null embedding；每个窗口额外看到「前面已写的音符」和「前后的音乐」。Planner profile 选择 music_structure_v2/v3 时学习局部音乐结构；checkpoint 与 event_v1 互不通用，必须单独训练。"
         : "旧固定帧基线，仅用于对照；不具备 event 模型的表示能力。";
   }
   const dirHelp = element("#checkpointDirHelp");
@@ -774,11 +800,14 @@ function generationPayload() {
     tempo_map: parseTempoMap(),
     // Playability constraints (added 2026-10-10).  Server-side these become
     // the --enable-conflict-detection / --conflict-repair-mode flags, and they
-    // only take effect for a checkpoint whose contract advertises the extended
-    // family; older checkpoints silently ignore them.
+    // These are static post-process options. The server validates their ranges
+    // and records that unsupported checkpoint capabilities are not advertised.
     conflict_detection_enabled: checkedOrDefault("#conflictDetectionEnabled", false),
+    detect_hard_conflicts: checkedOrDefault("#detectHardConflicts", true),
     conflict_repair_mode: valueOrDefault("#conflictRepairMode", "none"),
+    conflict_retries: Number(valueOrDefault("#conflictRetries", 0)),
     detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
+    fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
   };
 }
 
@@ -956,7 +985,28 @@ function renderGenerationResult(task) {
     } else if (payload) {
       const warnings = payload.note_warning_count ?? 0;
       const verdict = payload.generation_status || (payload.syntax_valid ? "success" : "failed");
-      status.textContent = `生成状态：${verdict}；音符级警告 ${warnings} 条。${task.result?.quality_notice || ""}`;
+      const playability = payload.playability;
+      let playabilityText = "";
+      if (playability && typeof playability === "object") {
+        const statusLabel = playability.status === "disabled" ? "未启用"
+          : playability.status === "partial" ? "部分静态检测"
+            : playability.status === "static_only" ? "静态参考检测"
+              : String(playability.status || "未知");
+        const hardCount = Array.isArray(playability.remaining_hard) ? playability.remaining_hard.length
+          : Number(playability.remaining_hard || 0);
+        const repairCount = Array.isArray(playability.repairs) ? playability.repairs.length
+          : Number(playability.repairs || 0);
+        const coverage = playability.coverage || {};
+        const unsupported = Array.isArray(coverage.unsupported) ? coverage.unsupported.length
+          : Number(coverage.unsupported || 0);
+        const parseErrors = Array.isArray(coverage.parse_errors) ? coverage.parse_errors.length
+          : Number(coverage.parse_errors || 0);
+        playabilityText = `冲突参考：${statusLabel}；未解决硬冲突 ${hardCount}；删除修复 ${repairCount}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
+        if (["static_only", "partial"].includes(playability.status)) {
+          playabilityText += "检测范围不完整，不能据此认定谱面可玩。";
+        }
+      }
+      status.textContent = `生成状态：${verdict}；音符级警告 ${warnings} 条。${playabilityText} ${task.result?.quality_notice || ""}`;
     } else {
       status.textContent = `质量报告不可读：${report.error || "未知原因"}`;
     }
@@ -1485,8 +1535,7 @@ function renderCheckpointInspection(data) {
   const state = valid ? `checkpoint 可用；${capability}` : "checkpoint 不可用于当前模式";
   const caps = data.generation_capabilities || {};
   const capabilityLine = Object.keys(caps).length
-    ? `生成能力：冲突检测 ${caps.conflict_detection ? "✓" : "✗"}，采音倾向 ${caps.rhythm_bias ? "✓" : "✗"}`
-      + (caps.rhythm_bias ? "" : "（该 checkpoint 未在细碎节奏目标上训练，倾向参数会被忽略）")
+    ? `生成能力：静态冲突检测 ${caps.conflict_detection ? "可用" : "不可用"}，细碎音符调制 ${caps.fine_note_strength ? "可用" : "不可用"}`
     : "";
   const details = [
     capabilityLine,
@@ -1557,7 +1606,7 @@ async function inspectGenerationCheckpoint() {
   const family = data.model_family_label || data.model_family || "未知";
   const genCaps = data.generation_capabilities || {};
   const capSuffix = Object.keys(genCaps).length
-    ? `；可用后处理：冲突检测${genCaps.conflict_detection ? "✓" : "✗"}，采音倾向${genCaps.rhythm_bias ? "✓" : "✗"}`
+    ? `；静态冲突检测${genCaps.conflict_detection ? "可用" : "不可用"}，细碎音符调制${genCaps.fine_note_strength ? "可用" : "不可用"}`
     : "";
   setGenerationStatus(`模型族：${family}；schema：${data.schema || "未记录"}；生成入口：${data.generation_cli || "自动"}${capSuffix}`,
     data.valid ? "good" : "warn");
@@ -1568,8 +1617,12 @@ async function inspectGenerationCheckpoint() {
       ? "模型检查未通过，请先处理检查结果，再选择强度模式。"
       : currentGenerationFamily() === "legacy_frame_v2"
         ? "当前为旧固定帧模型；本页事件模型的强度曲线与 planner 控制不适用。"
+        : !data.valid
+          ? "checkpoint 合同检查未通过，请先查看检查结果。"
         : profile === "music_structure_v2" || profile === "music_structure_v3"
-          ? "当前为 music_structure_v2/v3：auto / model 使用学得的局部规划，强度跟随幅度不限制其自然起伏。要明确调整局部强弱，请生成、编辑并保存曲线。v3 额外支持「细碎音符强度」对采音的柔性控制。"
+          ? profile === "music_structure_v3" && genCaps.fine_note_strength
+            ? "当前为 music_structure_v3：auto / model 使用学得的局部规划；可启用细碎音符柔性调制。曲线控制局部强弱，不指定节奏类别。"
+            : "当前为 music_structure_v2：auto / model 使用学得的局部规划；曲线控制局部强弱，不指定节奏类别。"
           : "当前为 legacy_v1：auto 使用多维音频参考，model 不支持；密度和风格是软条件，模型响应可能较弱。";
   }
   const capabilityBox = element("#generationCapabilityNotice");
@@ -1578,11 +1631,12 @@ async function inspectGenerationCheckpoint() {
     capabilityBox.textContent = !data.valid
       ? ""
       : genCaps.conflict_detection
-        ? (genCaps.rhythm_bias
-            ? "该 checkpoint 支持冲突检测与采音倾向。"
-            : "该 checkpoint 支持冲突检测（后处理，无需重训）；但未在细碎节奏目标上训练，「节奏倾向 / 细碎音符强度」将被忽略。")
+        ? (genCaps.fine_note_strength
+            ? "该 checkpoint 支持静态冲突参考检测与细碎音符柔性调制。"
+            : "该 checkpoint 支持静态冲突参考检测；细碎音符调制需要 music_structure_v3。")
         : "非事件模型（或未知），不提供冲突检测。";
   }
+  updateGenerationCapabilityControls();
   const notice = element("#generationCheckpointNotice");
   if (notice && data.warnings?.length) notice.textContent = formatList(data.warnings);
   return data;
@@ -2684,6 +2738,11 @@ if (intensityCurveState.profile) {
     const target = event.target;
     if (!target || !target.id || target.type === "file") return;
     if (target.id === "learningRate") target.dataset.touched = "1";
+    if (target.id === "fineNoteStrength") {
+      const output = element("#fineNoteStrengthValue");
+      if (output) output.textContent = Number(target.value).toFixed(2);
+    }
+    updateGenerationCapabilityControls();
     saveSettings();
   }, true);
 });
@@ -2834,13 +2893,25 @@ on("#checkpointFile", "change", async (event) => {
   const data = await upload("checkpoint", event.target.files[0], "#checkpointPath", "#checkpointUploadStatus");
   if (data) {
     generationInspection = { path: "", data: null };
+    updateFamilyFields();
     if (element("#generationPlannerStatus")) element("#generationPlannerStatus").textContent = "checkpoint 已更换，请重新检查 planner 类型。";
     setGenerationStatus("已上传 checkpoint；点击『检查生成 checkpoint 类型』确认模型族。", "warn");
   }
 });
 on("#checkpointPath", "input", () => {
   generationInspection = { path: "", data: null };
+  updateFamilyFields();
   if (element("#generationPlannerStatus")) element("#generationPlannerStatus").textContent = "checkpoint 路径已修改，请重新检查 planner 类型。";
+});
+document.querySelectorAll("[data-fine-note-value]").forEach((button) => {
+  button.addEventListener("click", () => {
+    const target = element("#fineNoteStrength");
+    if (!target || target.disabled) return;
+    target.value = button.dataset.fineNoteValue;
+    const output = element("#fineNoteStrengthValue");
+    if (output) output.textContent = Number(target.value).toFixed(2);
+    saveSettings();
+  });
 });
 on("#generationInspectButton", "click", inspectGenerationCheckpoint);
 on("#openIntensityCurveButton", "click", () => { setIntensitySong(intensityAudioPath()); setWorkspaceMode("intensity"); drawIntensityCurve(); restoreIntensityBackdrop(); });
