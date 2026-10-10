@@ -524,6 +524,16 @@ class EventConditionedTransformer(nn.Module):
                     current = plan_values(raw_plan_pred, profile=self.planner_profile)[:, index]
                     adjusted[:, index] = torch.lerp(current, desired, strength[:, 0]).clamp(1e-5, 1 - 1e-5).logit()
                 plan_pred = adjusted
+                # Fine-note preference is relative to THIS window's prediction.
+                # 0.5 is neutral; endpoints shift odds by at most exp(+/-2),
+                # retaining musical variation and avoiding a fixed song-wide
+                # fine-note quota. Curve __strength affects other controls only.
+                if "fine_rhythm" in names and "__fine_rhythm_bias" in plan_controls:
+                    bias = float(plan_controls["__fine_rhythm_bias"])
+                    if not math.isfinite(bias) or not 0.0 <= bias <= 1.0:
+                        raise ValueError("fine-note-strength must be finite in 0..1")
+                    channel = names.index("fine_rhythm")
+                    plan_pred[:, channel] = raw_plan_pred[:, channel] + 4.0 * (bias - 0.5)
         else:
             plan_pred = plan_override.to(device=memory.device, dtype=memory.dtype)
             if plan_pred.ndim == 1:

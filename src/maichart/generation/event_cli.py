@@ -35,7 +35,6 @@ from maichart.generation.event_audio import (
     extract_event_audio,
     legacy_feature_view,
 )
-from maichart.generation.generation_integration import integrate_generation_config
 from maichart.generation.music_plan import (
     MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
 )
@@ -43,7 +42,7 @@ from maichart.generation.model_compatibility import (
     detect_model_family, get_generation_config_for_model, validate_args_for_model
 )
 from maichart.generation.post_process import (
-    PostProcessConfig, detect_chart_conflicts, run_post_process,
+    PostProcessConfig, detect_chart_conflicts, process_chart_points,
 )
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.event_model import (
@@ -713,6 +712,8 @@ class _DecodedWindow:
     end_beat: Fraction
     closed: bool
     intensity_curve: dict | None = None
+    playability: dict | None = None
+    original_sequence: EventSequence | None = None
 
 
 def _effective_curve_profile(profile: dict, *, strength: float, mode: str,
@@ -1039,7 +1040,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     tail_damping_strength: float = 0.6, audio_bounds_trim: bool = False,
                     audio_bounds_lead: float = 0.5, silence_threshold: float = 0.15,
                     silence_window_share: float = 0.05, condition_default: float = 0.5,
-                    fine_note_strength: float = 0.5) -> list[_DecodedWindow]:
+                    fine_note_strength: float = 0.5,
+                    post_process_config: PostProcessConfig | None = None) -> list[_DecodedWindow]:
     """Generate the whole song one training window at a time.
 
     This mirrors ``EventDataset.__getitem__`` exactly: each window samples the
@@ -1232,7 +1234,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
         # planner was trained to predict the fine-rhythm channel.  For any other
         # profile the flag is inert and the model-family check already warned.
         if active_profile == MUSIC_STRUCTURE_V3_PROFILE and fine_note_strength != 0.5:
-            plan_controls = {"fine_rhythm": float(fine_note_strength)}
+            plan_controls = {"__fine_rhythm_bias": float(fine_note_strength)}
         if intensity_curve is not None and curve_strength > 0.0:
             core_duration = max(0.0, float(seconds_at_beat(end, tempo_changes, first)
                                            - seconds_at_beat(start, tempo_changes, first)))
@@ -1267,68 +1269,77 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             sample_times = begin_sec + torch.arange(segment_audio.size(0)) / FEATURE_RATE_HZ
             planner_kwargs["plan_audio_mask"] = ((sample_times < core_low) | (sample_times >= core_high)).to(device).unsqueeze(0)
         window_started = time.perf_counter()
-        try:
-            sequence = _decode(
-                model, vocabulary, segment_audio, global_audio, window_vector, device,
-                max_tokens=window_budget, temperature=temperature,
-                sample=sample, seed=seed + index, guidance_scale=guidance_scale,
-                top_p=top_p, repetition_penalty=repetition_penalty,
-                repetition_window=repetition_window,
-                atom_catalog=atom_catalog, prefix_ids=prefix_ids, position_offset=offset, condition_default=condition_default,
-                **planner_kwargs,
-            )
-            closed = True
-        except ValueError as exc:
-            # Only an exhausted budget is recoverable: the window ran out of room
-            # instead of reaching a grammar dead end.  A real grammar error must
-            # still surface, so it is re-raised.
-            #
-            # The salvage decode repeats the window with truncation allowed.  It
-            # now runs against a budget sized to real charts, so a window that
-            # exhausts it is rare; previously this retry repeated a 2048-step
-            # decode on top of the 2048-step failure.
-            message = str(exc)
-            if "before emitting <eos>" not in message and "exceeds max_tokens" not in message:
-                raise
+        def decode_attempt(attempt):
+            nonlocal feedback
             if feedback is not None:
                 feedback = make_feedback()
                 planner_kwargs["density_feedback"] = feedback
-            sequence = _decode(
-                model, vocabulary, segment_audio, global_audio, window_vector, device,
-                max_tokens=window_budget, temperature=temperature,
-                sample=sample, seed=seed + index, guidance_scale=guidance_scale,
-                top_p=top_p, repetition_penalty=repetition_penalty,
-                repetition_window=repetition_window,
-                atom_catalog=atom_catalog, allow_truncated=True, prefix_ids=prefix_ids,
-                position_offset=offset, condition_default=condition_default,
-                **planner_kwargs,
-            )
-            closed = False
-        curve_stats = None
-        if intensity_curve is not None and curve_strength > 0.0:
-            sequence, curve_stats = _curve_filter_sequence(
-                sequence, start_beat=start, tempo_changes=tempo_changes, first=first,
-                curve_profile=intensity_curve,
-                base_density=float(condition.radar.get("note_density", 0.5)),
-                window_start_sec=max(0.0, float(seconds_at_beat(start, tempo_changes, first))),
-                window_end_sec=min(float(song_duration), max(0.0, float(seconds_at_beat(end, tempo_changes, first)))),
-                audio=audio, apply_guard=intensity_curve_mode == "strict")
-            curve_stats["factor"] = intensity[index]
-        sequence, rest_removed = _rest_filter_sequence(sequence, start_beat=start, tempo_changes=tempo_changes,
-                                                        first=first, profile=intensity_curve)
-        if feedback is not None or rest_removed:
-            curve_stats = curve_stats or {}
-            curve_stats["density_feedback"] = dict(feedback.stats) if feedback is not None else {}
-            curve_stats["rest_removed_cells"] = rest_removed
-        # Stay inside the audible span: the silent lead-in and the trailing
-        # silence must not receive notes, and trimming before the sequence is
-        # stored keeps the next window's `<ctx>` lead-in consistent with it.
-        removed = 0
-        if span is not None:
-            trimmed = _trim_sequence(sequence, start, tempo_changes=tempo_changes, first=first,
-                                     low_sec=span[0], high_sec=span[1])
-            removed = len(sequence.beats) - len(trimmed.beats)
-            sequence = trimmed
+            try:
+                sequence = _decode(
+                    model, vocabulary, segment_audio, global_audio, window_vector, device,
+                    max_tokens=window_budget, temperature=temperature,
+                    sample=sample, seed=seed + index + attempt * 1000003, guidance_scale=guidance_scale,
+                    top_p=top_p, repetition_penalty=repetition_penalty,
+                    repetition_window=repetition_window,
+                    atom_catalog=atom_catalog, prefix_ids=prefix_ids, position_offset=offset, condition_default=condition_default,
+                    **planner_kwargs,
+                )
+                closed = True
+            except ValueError as exc:
+                # Only an exhausted budget is recoverable: the window ran out of room
+                # instead of reaching a grammar dead end.  A real grammar error must
+                # still surface, so it is re-raised.
+                #
+                # The salvage decode repeats the window with truncation allowed.  It
+                # now runs against a budget sized to real charts, so a window that
+                # exhausts it is rare; previously this retry repeated a 2048-step
+                # decode on top of the 2048-step failure.
+                message = str(exc)
+                if "before emitting <eos>" not in message and "exceeds max_tokens" not in message:
+                    raise
+                if feedback is not None:
+                    feedback = make_feedback()
+                    planner_kwargs["density_feedback"] = feedback
+                sequence = _decode(
+                    model, vocabulary, segment_audio, global_audio, window_vector, device,
+                    max_tokens=window_budget, temperature=temperature,
+                    sample=sample, seed=seed + index + attempt * 1000003, guidance_scale=guidance_scale,
+                    top_p=top_p, repetition_penalty=repetition_penalty,
+                    repetition_window=repetition_window,
+                    atom_catalog=atom_catalog, allow_truncated=True, prefix_ids=prefix_ids,
+                    position_offset=offset, condition_default=condition_default,
+                    **planner_kwargs,
+                )
+                closed = False
+            curve_stats = None
+            if intensity_curve is not None and curve_strength > 0.0:
+                sequence, curve_stats = _curve_filter_sequence(
+                    sequence, start_beat=start, tempo_changes=tempo_changes, first=first,
+                    curve_profile=intensity_curve,
+                    base_density=float(condition.radar.get("note_density", 0.5)),
+                    window_start_sec=max(0.0, float(seconds_at_beat(start, tempo_changes, first))),
+                    window_end_sec=min(float(song_duration), max(0.0, float(seconds_at_beat(end, tempo_changes, first)))),
+                    audio=audio, apply_guard=intensity_curve_mode == "strict")
+                curve_stats["factor"] = intensity[index]
+            sequence, rest_removed = _rest_filter_sequence(sequence, start_beat=start, tempo_changes=tempo_changes,
+                                                            first=first, profile=intensity_curve)
+            if feedback is not None or rest_removed:
+                curve_stats = curve_stats or {}
+                curve_stats["density_feedback"] = dict(feedback.stats) if feedback is not None else {}
+                curve_stats["rest_removed_cells"] = rest_removed
+            # Stay inside the audible span: the silent lead-in and the trailing
+            # silence must not receive notes, and trimming before the sequence is
+            # stored keeps the next window's `<ctx>` lead-in consistent with it.
+            removed = 0
+            if span is not None:
+                trimmed = _trim_sequence(sequence, start, tempo_changes=tempo_changes, first=first,
+                                         low_sec=span[0], high_sec=span[1])
+                removed = len(sequence.beats) - len(trimmed.beats)
+                sequence = trimmed
+            return sequence, closed, curve_stats, removed
+        sequence, closed, curve_stats, removed, playability, original_sequence = _select_playable_window(
+            decode_attempt, results, start=start, end=end, tempo_changes=tempo_changes,
+            first=first, config=post_process_config, seed=seed + index)
         if feedback is not None:
             absolute_points = [EventPoint(start + beat, text) for beat, text in zip(sequence.beats, sequence.note_texts)]
             parsed_cells = parse_event_notes(absolute_points, tempo_changes, first)
@@ -1338,7 +1349,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             feedback_cells.extend({"time_sec": float(point.time_sec), "heads": len(point.notes)}
                                   for point in parsed_cells.points if point.notes and float(point.time_sec) >= previous_high - 1e-8)
         results.append(_DecodedWindow(sequence=sequence, start_beat=start, end_beat=end,
-                                      closed=closed, intensity_curve=curve_stats))
+                                      closed=closed, intensity_curve=curve_stats,
+                                      playability=playability, original_sequence=original_sequence))
         # Per-window progress.  Generation is one forward pass per token, so a
         # long silence here previously looked like a hang; reporting each window
         # as it closes makes the remaining work visible.  The intensity factor
@@ -1357,6 +1369,46 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             flush=True,
         )
     return results
+
+
+def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes, first, config, seed):
+    """Retry only a conflicting new window, preserving all preceding context.
+
+    Every attempt passes the same density/rest/audio-boundary filters. A later
+    window sees the chosen/repaired result. No optional policy means one decode.
+    """
+    if config is None or not config.enable_conflict_detection:
+        sequence, closed, curve_stats, removed = decode_attempt(0)
+        return sequence, closed, curve_stats, removed, None, None
+    attempts = 1 + (config.conflict_retries if config and config.enable_conflict_detection
+                    and config.conflict_repair_mode != "none" else 0)
+    floor = max(start, prior[-1].end_beat) if prior else start
+    best = None
+    history = []
+    for attempt in range(attempts):
+        sequence, closed, curve_stats, removed = decode_attempt(attempt)
+        trial = _DecodedWindow(sequence, start, end, closed, curve_stats)
+        merged = _merge_windows([*prior, trial], overlap_beats=1)
+        result = detect_chart_conflicts(merged, tempo_changes, first, config) if config else None
+        hard = [issue for issue in result.conflicts_detected if issue.severity == "hard"
+                and any(note.beat >= floor for note in issue.notes)] if result else []
+        history.append({"attempt": attempt, "seed": seed + attempt * 1000003, "hard": len(hard)})
+        if best is None or len(hard) < best[0]:
+            best = (len(hard), sequence, closed, curve_stats, removed, merged, result)
+        if not hard:
+            break
+    _, sequence, closed, curve_stats, removed, merged, result = best
+    original = sequence
+    report = result.to_dict() if result is not None else None
+    if config and config.enable_conflict_detection and config.conflict_repair_mode == "local":
+        repaired = process_chart_points(merged, tempo_changes, first, config, repair_after_beat=floor)
+        sequence = EventSequence([p.beat - start for p in repaired.points if floor <= p.beat < end],
+                                 [p.note_text for p in repaired.points if floor <= p.beat < end])
+        report = repaired.to_dict()
+    if report is not None:
+        report["attempts"] = history
+        report["scope"] = "previous_context_and_current_window"
+    return sequence, closed, curve_stats, removed, report, original
 
 
 def _context_prefix(vocabulary: EventVocabulary, windows: list[_DecodedWindow], start: Fraction,
@@ -1714,14 +1766,14 @@ def build_parser() -> argparse.ArgumentParser:
     # Rhythm bias and playability constraints (from GOAL_COMPLEX_RHYTHM_PLAYABILITY_FINAL.md)
     parser.add_argument("--rhythm-bias", choices=("auto", "uniform", "triplet", "dotted", "mixed"),
                         default="auto",
-                        help="Rhythm sampling bias: auto (follow music), uniform (even beats), "
-                             "triplet (3-tuplet tendency), dotted (dotted rhythm), mixed (complex).")
+                        help="Deprecated rhythm-class switch. Only auto is implemented; "
+                             "use fine-note-strength for relative per-window preference.")
     parser.add_argument("--fine-note-strength", type=float, default=0.5,
-                        help="Fine rhythm sampling strength [0-1]: 0=conservative (4th/8th only), "
-                             "0.5=balanced, 1.0=aggressive (12th/16th/24th). Default 0.5.")
+                        help="Relative fine-rhythm planner preference: 0 reduces, 0.5 follows each "
+                             "window prediction, 1 increases. v3 only; no forced subdivision.")
     parser.add_argument("--enable-conflict-detection", action="store_true",
                         help="Enable playability conflict detection (hold-tap overlap, slide-tap collision, etc).")
-    parser.add_argument("--detect-hard-conflicts", action="store_true", default=True,
+    parser.add_argument("--detect-hard-conflicts", action=argparse.BooleanOptionalAction, default=True,
                         help="Detect hard conflicts (game judgment system conflicts). Default True.")
     parser.add_argument("--detect-soft-conflicts", action="store_true",
                         help="Detect soft conflicts (ergonomic issues, large jumps). Default False.")
@@ -1729,6 +1781,8 @@ def build_parser() -> argparse.ArgumentParser:
                         default="none",
                         help="Conflict repair mode: none (detect only), local (remove conflicting notes), "
                              "reject (abort on hard conflicts). Default none.")
+    parser.add_argument("--conflict-retries", type=int, default=0,
+                        help="Optional conflicting-window retries, 0 disables, maximum 5.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--title", default="Generated maimai chart")
     parser.add_argument("--artist", default="")
@@ -1745,6 +1799,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if not math.isfinite(args.fine_note_strength) or not 0 <= args.fine_note_strength <= 1:
+        raise ValueError("fine-note-strength must be finite in 0..1")
+    if args.rhythm_bias != "auto":
+        raise ValueError("rhythm-bias rhythm classes are not implemented; use auto with fine-note-strength")
+    post_process_config = PostProcessConfig(
+        enable_conflict_detection=args.enable_conflict_detection,
+        detect_hard_conflicts=args.detect_hard_conflicts,
+        detect_soft_conflicts=args.detect_soft_conflicts,
+        conflict_repair_mode=args.conflict_repair_mode,
+        conflict_retries=args.conflict_retries,
+    )
     if int(args.candidates) < 1:
         raise SystemExit("candidates must be positive.")
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
@@ -1760,13 +1825,13 @@ def main(argv=None) -> int:
         model, vocabulary, checkpoint = load_event_model(args.checkpoint, device)
         # 检测模型类型和兼容性
         model_family = detect_model_family(checkpoint)
-        is_valid, warnings = validate_args_for_model(model_family, args)
+        is_valid, warnings = validate_args_for_model(model_family, args, checkpoint=checkpoint)
         if warnings:
             for warning in warnings:
                 print(f"warning: {warning}", flush=True)
         
         # 获取该模型支持的生成配置
-        generation_config = get_generation_config_for_model(model_family, args)
+        generation_config = get_generation_config_for_model(model_family, args, checkpoint=checkpoint)
         print(f"model_family={model_family.value}", flush=True)
         # The position embedding table is sized by the training contract, so the
         # checkpoint - not this run's flags - is the hard ceiling on how many
@@ -1873,6 +1938,19 @@ def main(argv=None) -> int:
         target = _candidate_path(output, candidate, args.candidates)
         target_ir = _candidate_path(output_ir, candidate, args.candidates)
         target_quality = _candidate_path(quality_path, candidate, args.candidates)
+        # A rejected candidate must never leave a previous successful chart at
+        # its advertised output path. Preserve prior artifacts under history.
+        previous = None
+        artifacts = [target, target_ir, target_quality, target.with_suffix(".original.txt"),
+                     target.with_suffix(".original.chart.json"), target.with_suffix(".repaired.txt")]
+        for artifact in dict.fromkeys(artifacts):
+            if artifact.exists():
+                if artifact.resolve() in {Path(args.audio).resolve(), Path(args.checkpoint).resolve()}:
+                    raise ValueError("Output must not overwrite the source audio or checkpoint")
+                if previous is None:
+                    previous = target.parent / ".history" / f"{target.stem}-{time.time_ns()}"
+                    previous.mkdir(parents=True)
+                artifact.replace(previous / artifact.name)
         quality = None
         candidate_seed = args.seed + candidate * 1000
         sample = args.sample or args.candidates > 1
@@ -1904,7 +1982,8 @@ def main(argv=None) -> int:
                 silence_threshold=args.silence_threshold,
                 silence_window_share=args.silence_window_share,
                 condition_default=float(contract_params.get("default", 0.5)),
-                fine_note_strength=float(getattr(args, "fine_note_strength", 0.5)),
+                fine_note_strength=float(generation_config.get("fine_note_strength", 0.5)),
+                post_process_config=post_process_config if args.enable_conflict_detection else None,
             )
             points = _merge_windows(decoded, overlap_beats=overlap_beats)
             # File-time is an unconditional hard boundary.  Audible-span
@@ -1935,9 +2014,23 @@ def main(argv=None) -> int:
                 for region in intensity_curve.get("rest_regions", []))
             if not points and not intentional_rest_only:
                 raise ValueError("Generation produced no notes for any window inside the audible span.")
+            original_points = points
+            if args.conflict_repair_mode == "local":
+                original_windows = [_DecodedWindow(w.original_sequence or w.sequence,
+                                    w.start_beat, w.end_beat, w.closed) for w in decoded]
+                original_points = _filter_points_to_file_span(
+                    _merge_windows(original_windows, overlap_beats=overlap_beats),
+                    tempo_changes=tempo_changes, first=args.first, duration_sec=audio.duration_sec)
+                if args.audio_bounds_trim:
+                    original_points = _filter_points_to_audio_span(original_points,
+                        tempo_changes=tempo_changes, first=args.first, span=audible_span)
+            conflict_result = process_chart_points(points, tempo_changes, args.first, post_process_config)
+            points = conflict_result.points
             quality = assess_event_chart(points, tempo_changes, first=args.first,
                                          duration_sec=max(float(audio.duration_sec - args.first), 1e-3),
                                          target_condition=condition)
+            if previous is not None:
+                quality["previous_output_backup"] = str(previous)
             if intensity_curve is not None:
                 curve_windows = []
                 for item in decoded:
@@ -1984,19 +2077,30 @@ def main(argv=None) -> int:
             # one tail_step after the last note.  Padding to the audio-derived
             # duration emitted hundreds of empty {1} cells and forced pathological
             # divisions such as {3528} from the fractional remainder.
-            # Playability post-processing is deferred until the chart is
-            # compiled: the detector works on parsed notes (real button indices,
-            # hold durations, slide trajectories), not on raw event tokens.
-            post_process_config = None
-            if generation_config.get("enable_conflict_detection", False):
-                post_process_config = PostProcessConfig(
-                    enable_conflict_detection=True,
-                    detect_hard_conflicts=generation_config.get("detect_hard_conflicts", True),
-                    detect_soft_conflicts=generation_config.get("detect_soft_conflicts", False),
-                    conflict_repair_mode=generation_config.get("conflict_repair_mode", "none"),
-                )
-                quality["post_process_requested"] = True
-                quality["post_process_config"] = post_process_config.to_dict()
+            if args.enable_conflict_detection:
+                quality["playability"] = conflict_result.to_dict()
+                quality["playability"]["scope"] = "complete_merged_song"
+                quality["playability"]["windows"] = [
+                    {"start_beat": str(w.start_beat), "end_beat": str(w.end_beat),
+                     **(w.playability or {})} for w in decoded]
+                quality["playability"]["repairs"] = [
+                    repair for w in decoded for repair in (w.playability or {}).get("repairs", [])
+                ] + conflict_result.repairs_applied
+                # Preserve original diagnostics as well as the final recheck.
+                before_repair = detect_chart_conflicts(original_points, tempo_changes, args.first,
+                                                       post_process_config)
+                quality["playability"]["original_details"] = [
+                    c.to_dict() for c in before_repair.conflicts_detected]
+                if not conflict_result.success:
+                    quality["generation_status"] = "rejected_by_playability"
+                    target_ir.write_text(json.dumps({"schema": "maichart-event-chart-v1",
+                        "points": [p.to_dict() for p in points],
+                        "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
+                        "first": args.first, "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
+                    target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
+                    print("candidate rejected by static playability references", flush=True)
+                    failures += 1
+                    continue
             try:
                 text, chart = compile_event_points(
                     points, tempo_changes=tempo_changes, bpm=bpm, first=args.first,
@@ -2058,35 +2162,6 @@ def main(argv=None) -> int:
                 "guidance_scale": float(args.guidance_scale),
                 "model_family": str((checkpoint.get("data_contract", {}) or {}).get("target_schema") or "event_v1"),
             }
-            # Playability conflict detection (opt-in).  Runs on the compiled
-            # event chart so the checks see real button geometry; hard hits make
-            # the candidate fail when the caller asked for reject mode.
-            if post_process_config is not None:
-                conflict_result = detect_chart_conflicts(
-                    points, tempo_changes, args.first, post_process_config)
-                quality["playability"] = {
-                    "notes": conflict_result.original_notes_count,
-                    "conflicts": len(conflict_result.conflicts_detected),
-                    "hard": len([c for c in conflict_result.conflicts_detected
-                                  if c.severity == "hard"]),
-                    "message": conflict_result.message,
-                    "mode": post_process_config.conflict_repair_mode,
-                    "details": [
-                        {"type": c.conflict_type, "severity": c.severity,
-                         "time": round(float(c.time), 3), "message": c.message}
-                        for c in conflict_result.conflicts_detected[:50]
-                    ],
-                }
-                print(f"playability_conflicts={quality['playability']['conflicts']} "
-                      f"hard={quality['playability']['hard']} "
-                      f"mode={post_process_config.conflict_repair_mode}", flush=True)
-                if not conflict_result.success:
-                    quality["generation_status"] = "rejected_by_playability"
-                    target_quality.write_text(
-                        json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
-                    print("candidate rejected: hard playability conflict and mode=reject", flush=True)
-                    failures += 1
-                    continue
             quality["generation_status"] = "success" if not note_warnings else "success_with_warnings"
             quality["windows_decoded"] = len(decoded)
             quality["windows_closed"] = sum(1 for window in decoded if window.closed)
@@ -2117,8 +2192,21 @@ def main(argv=None) -> int:
             else:
                 quality["timeline"] = timeline_series(
                     points, audio, tempo_changes, args.first, duration_sec=audio.duration_sec)
+            if [p.to_dict() for p in original_points] != [p.to_dict() for p in points]:
+                original_text, _ = compile_event_points(original_points, tempo_changes=tempo_changes,
+                    bpm=bpm, first=args.first, title=args.title, artist=args.artist,
+                    level=args.chart_level or str(condition.level), designer=args.designer,
+                    difficulty=condition.difficulty, strict_notes=False)
+                target.with_suffix(".original.txt").write_text(original_text, encoding="utf-8")
+                target.with_suffix(".original.chart.json").write_text(json.dumps({
+                    "schema": "maichart-event-chart-v1", "points": [p.to_dict() for p in original_points],
+                    "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
+                    "first": args.first}, ensure_ascii=False, indent=2), encoding="utf-8")
+                target.with_suffix(".repaired.txt").write_text(text, encoding="utf-8")
             target.write_text(text, encoding="utf-8")
             target_ir.write_text(json.dumps({"schema": "maichart-event-chart-v1", "points": [point.to_dict() for point in points],
+                                             "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
+                                             "first": args.first,
                                              "chart_ir": json.loads(__import__("maichart.serialization", fromlist=["chart_to_json"]).chart_to_json(chart)),
                                              "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
             target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")

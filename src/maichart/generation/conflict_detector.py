@@ -1,431 +1,263 @@
-"""舞萌谱面冲突检测器。
+"""Conservative static playability references with explicit coverage.
 
-检测舞萌DX谱面中的无理配置，基于真实游戏判定机制。
+A geometric star overlap alone is NOT proof of an impossible Perfect. Slide
+reference footprints do not reproduce the cabinet's ordered-area state machine.
+Only same-pad press conflicts supported by the static rules are repairable.
 """
-
 from __future__ import annotations
 
-from dataclasses import dataclass
+import math
+from collections import defaultdict
+from dataclasses import dataclass, field
 from fractions import Fraction
-from typing import Literal
+from functools import lru_cache
 
-from maichart.generation.maimai_physics import ButtonLayout, HandDispatch
+from maichart.generation.judgment_system import (
+    PADS, PAD_RADII, OVERLAP_SECONDS, TAP_AVAILABLE_SECONDS, RELEASE_SECONDS,
+    pad_center, pad_name, pads_at, touch_groups, touch_group_threshold,
+)
+from maichart.generation.maimai_physics import ButtonLayout
 
 
 @dataclass
 class SlideTrajectory:
-    """Slide星星轨迹模型。
-    
-    星星在slide持续期间从起始按键连续移动到目标按键。
-    """
-    
     start_button: int
     pattern: str
     end_button: int
-    start_time: float  # 秒
-    duration: float    # 秒
-    
+    start_time: float  # trace start, AFTER head wait
+    duration: float
+    source_id: tuple[int, int] = (-1, -1)
+
+    @property
+    def supported(self) -> bool:
+        return self.pattern in {"-", "<", ">", "^"} and self.duration > 0
+
     def angular_span(self) -> float:
-        """Signed sweep in degrees for the pattern, or 0 when unknown.
+        if self.pattern == "-":
+            return 0.0  # a chord through the board, never a ring arc
+        cw = (self.end_button - self.start_button) % 8 * 45.0
+        if self.pattern == "^":
+            return -cw if cw <= 180 else 360 - cw
+        clockwise = (self.pattern == ">") == (self.start_button in {1, 2, 7, 8})
+        return -(cw or 360) if clockwise else ((360 - cw) or 360)
 
-        ``-`` is the direct route and may be the long way round for a
-        half-turn; ``<``/``>`` are the explicit counter-clockwise / clockwise
-        arcs, so their sign is fixed.  A 180-degree ``-`` is genuinely
-        ambiguous (both routes are equally long), and returning 0 lets callers
-        tell "no sweep" from "half turn".
-        """
-
-        start = ButtonLayout.button_angle(self.start_button)
-        end = ButtonLayout.button_angle(self.end_button)
-        ccw = (end - start) % 360.0
-        cw = ccw - 360.0
-        if self.pattern == "<":
-            return ccw
-        if self.pattern == ">":
-            return cw
-        if abs(abs(ccw) - 180.0) < 1e-6:
-            return 0.0
-        return ccw if abs(ccw) <= abs(cw) else cw
+    def position_at(self, time: float) -> tuple[float, float] | None:
+        if not self.supported or not self.start_time <= time <= self.start_time + self.duration:
+            return None
+        progress = (time - self.start_time) / self.duration
+        a, b = pad_center(self.start_button), pad_center(self.end_button)
+        if self.pattern == "-":
+            return a[0] + progress * (b[0] - a[0]), a[1] + progress * (b[1] - a[1])
+        angle = math.radians(ButtonLayout.button_angle(self.start_button) + progress * self.angular_span())
+        return math.cos(angle), math.sin(angle)
 
     def star_position_at(self, time: float) -> int | None:
-        """返回time时刻星星所在的按键位置。
-        
-        简化模型：
-        - 直线slide (-)：按角度线性插值
-        - 弧线slide (<, >, ^)：按弧长线性插值
-        - 复杂轨迹：分段近似
-        
-        返回None表示星星不在任何按键上（轨迹中间）。
-        只有在星星非常接近按键时才返回按键编号。
-        """
-        if time < self.start_time or time > self.start_time + self.duration:
+        """Legacy visual helper, not an input-collision rule."""
+        position = self.position_at(time)
+        if position is None:
             return None
-        
-        # 起点和终点时刻
-        if abs(time - self.start_time) < 0.01:
-            return self.start_button
-        if abs(time - (self.start_time + self.duration)) < 0.01:
-            return self.end_button
-        
-        progress = (time - self.start_time) / self.duration
-        
-        # 直线或弧线slide：线性插值角度
-        if self.pattern in ("-", "<", ">", "^"):
-            start_ang = ButtonLayout.button_angle(self.start_button)
-            span = self.angular_span()
-            if span == 0.0 and self.start_button != self.end_button:
-                # A half-turn without a direction: the star crosses the middle
-                # of the board whichever way it goes, so no button can be said
-                # to be "occupied" with confidence.  Reporting None is the
-                # conservative choice and avoids flagging the three buttons the
-                # straight route happens to pass; a real conflict there would
-                # need the authored path geometry, not a straight-line guess.
-                return None
-            current_ang = (start_ang + progress * span) % 360
+        return next((int(p[1]) for p in pads_at(*position) if p.startswith("A")), None)
 
-            # Only treat the star as sitting on a button when it is close to it.
-            # A star's judgement disc is much smaller than the 45-degree button
-            # pitch, so a wide tolerance invents collisions at the midpoint of
-            # every slide.  Six degrees is about a seventh of the pitch.
-            min_dist = float('inf')
-            closest_btn = None
-            for btn in range(1, 9):
-                btn_ang = ButtonLayout.button_angle(btn)
-                ang_diff = min(abs(current_ang - btn_ang),
-                               360 - abs(current_ang - btn_ang))
-                if ang_diff < min_dist:
-                    min_dist = ang_diff
-                    closest_btn = btn
-            if min_dist < 6.0:
-                return closest_btn
-            return None
-        
-        # 复杂轨迹：简化处理，只考虑起点和终点
-        if progress < 0.2:
-            return self.start_button
-        elif progress > 0.8:
-            return self.end_button
-        else:
-            return None
+    def pad_intervals(self) -> list[tuple[str, float, float]]:
+        return [(pad, self.start_time + low * self.duration, self.start_time + high * self.duration)
+                for pad, low, high in _reference_intervals(self.start_button, self.pattern, self.end_button)] if self.supported else []
+
+    def _raw_pad_intervals(self) -> list[tuple[str, float, float]]:
+        """Reference sensor coverage along the trace.
+
+        Lines use exact circle/segment intersections. Arcs are sampled at
+        1/720 of the duration; their results are warning-only references.
+        """
+        if not self.supported:
+            return []
+        result = []
+        if self.pattern == "-":
+            a, b = pad_center(self.start_button), pad_center(self.end_button)
+            dx, dy = b[0] - a[0], b[1] - a[1]
+            aa = dx * dx + dy * dy
+            if aa < 1e-12:
+                return []
+            for pad in PADS:
+                cx, cy = pad_center(pad)
+                x, y = a[0] - cx, a[1] - cy
+                bb, cc = 2 * (x * dx + y * dy), x*x + y*y - PAD_RADII[pad[0]]**2
+                discriminant = bb*bb - 4*aa*cc
+                if discriminant < 0:
+                    continue
+                low = max(0.0, (-bb - math.sqrt(discriminant)) / (2*aa))
+                high = min(1.0, (-bb + math.sqrt(discriminant)) / (2*aa))
+                if low <= high:
+                    result.append((pad, self.start_time + low*self.duration,
+                                   self.start_time + high*self.duration))
+            return sorted(result, key=lambda x: x[1])
+        active = {}
+        for step in range(721):
+            time = self.start_time + step*self.duration/720
+            covered = set(pads_at(*self.position_at(time)))
+            for pad in list(active):
+                if pad not in covered:
+                    result.append((pad, active.pop(pad), time))
+            for pad in covered:
+                active.setdefault(pad, time)
+        result.extend((pad, low, self.start_time + self.duration) for pad, low in active.items())
+        return sorted(result, key=lambda x: x[1])
+
+
+@lru_cache(maxsize=2048)
+def _reference_intervals(start, pattern, end):
+    return tuple(SlideTrajectory(start, pattern, end, 0.0, 1.0)._raw_pad_intervals())
 
 
 @dataclass
 class NoteEvent:
-    """单个note事件。"""
-    note_type: Literal["tap", "hold", "slide", "touch"]
-    button: int | str  # 按键1-8 或 touch区域A-E
-    time: float  # 起音时间（秒）
-    duration: float = 0.0  # hold/slide持续时间
+    note_type: str
+    button: int | str
+    time: float
+    duration: float = 0.0
     slide_trajectory: SlideTrajectory | None = None
-    raw: str = ""  # 原始note文本（用于报告）
+    raw: str = ""
+    source_id: tuple[int, int] = (-1, -1)
+    beat: Fraction = Fraction(0)
+    protected: bool = False
+    trajectories: list[SlideTrajectory] = field(default_factory=list)
+
+    @property
+    def pad(self) -> str:
+        return pad_name(self.button)
 
 
 @dataclass
 class ConflictReport:
-    """冲突检测报告。"""
     has_conflict: bool
     conflict_type: str
     time: float
     notes: list[NoteEvent]
-    severity: Literal["hard", "soft"]
+    severity: str
     message: str
+    repair_target: tuple[int, int] | None = None
+    evidence: str = "static_reference"
+
+    def to_dict(self) -> dict:
+        return {"type": self.conflict_type, "severity": self.severity,
+                "time": self.time, "message": self.message, "evidence": self.evidence,
+                "sources": [{"point_index": n.source_id[0], "note_index": n.source_id[1],
+                             "beat": str(n.beat), "time_sec": n.time, "raw": n.raw,
+                             "pad": n.pad} for n in self.notes],
+                "repair_target": list(self.repair_target) if self.repair_target is not None else None}
 
 
 class ConflictDetector:
-    """检测舞萌谱面中的无理配置。
-    
-    检测内容：
-    - 硬冲突：游戏判定系统无法处理的配置
-    - 软冲突：人体工学上困难但非绝对不可能的配置
-    
-    设计原则（根据用户要求）：
-    - 所有检测均为可选，可通过参数启用/禁用
-    - 不过度检测：Touch多押是合理的
-    - 基于真实游戏判定机制，而非过度拟合人体工学
-    """
-    
-    def __init__(
-        self,
-        enable_hard_conflicts: bool = True,
-        enable_soft_conflicts: bool = False,
-        max_simultaneous_buttons: int = 4,
-        min_tap_interval: float = 0.05,  # 50ms最小间隔
-        # A jump is only "hard on the hands" when it is both long and fast.
-        # 2.0 is the full diameter of the ring (the 1-5 / 3-7 diagonal), so the
-        # reach rule fires on genuine opposite-side flips rather than on the
-        # ordinary 135-degree movement of 16th notes at ~180 BPM, which a
-        # competent player reads without trouble.
-        max_jump_distance: float = 2.0,  # 最大跳跃距离
-        min_jump_time: float = 0.10,     # 大跳跃最小时间
-    ):
-        """
-        参数：
-        - enable_hard_conflicts: 启用硬冲突检测（推荐启用）
-        - enable_soft_conflicts: 启用软冲突检测（人体工学）
-        - max_simultaneous_buttons: 最大同时按键数
-        - min_tap_interval: 最小tap间隔（秒）
-        - max_jump_distance: 触发软冲突的跳跃距离
-        - min_jump_time: 大跳跃的最小允许时间
-        """
-        self.enable_hard = enable_hard_conflicts
-        self.enable_soft = enable_soft_conflicts
-        self.max_simultaneous = max_simultaneous_buttons
-        self.min_interval = min_tap_interval
-        self.max_jump_distance = max_jump_distance
-        self.min_jump_time = min_jump_time
-    
+    def __init__(self, enable_hard_conflicts=True, enable_soft_conflicts=False, **_legacy):
+        self.enable_hard = bool(enable_hard_conflicts)
+        self.enable_soft = bool(enable_soft_conflicts)
+
     def detect_conflicts(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测notes中的所有冲突。"""
-        conflicts = []
-        
+        result = []
         if self.enable_hard:
-            conflicts.extend(self._detect_hold_tap_overlap(notes))
-            conflicts.extend(self._detect_slide_tap_collision(notes))
-            conflicts.extend(self._detect_touch_button_overlap(notes))
-        
+            result.extend(self._overlaps(notes))
+            # These warnings are part of judgement checks, not hand ergonomics.
+            result.extend(self._slide_references(notes))
         if self.enable_soft:
-            conflicts.extend(self._detect_excessive_jumps(notes))
-            conflicts.extend(self._detect_hand_dispatch_conflict(notes))
-            conflicts.extend(self._detect_rapid_alternation(notes))
-        
-        return conflicts
-    
-    def _detect_hold_tap_overlap(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测Hold与Tap在同一按键的时间重叠。
-        
-        规则：Hold A [t1, t2] 期间，Tap A 出现在 t ∈ (t1, t2) → 硬冲突
-        """
-        conflicts = []
-        
-        holds = [n for n in notes if n.note_type == "hold"]
-        taps = [n for n in notes if n.note_type == "tap"]
-        
-        for hold in holds:
-            if not isinstance(hold.button, int):
-                continue
-            hold_end = hold.time + hold.duration
-            
-            for tap in taps:
-                if not isinstance(tap.button, int):
-                    continue
-                
-                if hold.button == tap.button:
-                    # 检查tap是否在hold持续期间（不包括边界）
-                    if hold.time < tap.time < hold_end - 0.01:  # 10ms容差
-                        conflicts.append(ConflictReport(
-                            has_conflict=True,
-                            conflict_type="hold_tap_overlap",
-                            time=tap.time,
-                            notes=[hold, tap],
-                            severity="hard",
-                            message=f"Hold {hold.button} [{hold.time:.2f}s-{hold_end:.2f}s] 与 Tap {tap.button} [{tap.time:.2f}s] 判定冲突"
-                        ))
-        
-        return conflicts
-    
-    def _detect_slide_tap_collision(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测Slide星星与Tap的位置冲突。
-        
-        规则：Tap时刻星星恰好在该按键上 → 硬冲突
-        """
-        conflicts = []
-        
-        slides = [n for n in notes if n.note_type == "slide" and n.slide_trajectory]
-        taps = [n for n in notes if n.note_type == "tap" and isinstance(n.button, int)]
-        
-        for slide in slides:
-            traj = slide.slide_trajectory
-            if not traj:
-                continue
-            
-            for tap in taps:
-                # A tap chorded with the slide head is legal: the star leaves
-                # the head button at the same instant, so the player presses the
-                # slide leg and the tap together.  Only a tap *after* the head,
-                # while the star still sits on that button, is a conflict.
-                if tap.time <= traj.start_time + 1e-6:
-                    continue
-                # 计算tap时刻星星的位置
-                star_btn = traj.star_position_at(tap.time)
-                
-                # 只有星星恰好在tap按键上时才冲突
-                if star_btn == tap.button:
-                    conflicts.append(ConflictReport(
-                        has_conflict=True,
-                        conflict_type="slide_tap_collision",
-                        time=tap.time,
-                        notes=[slide, tap],
-                        severity="hard",
-                        message=f"Slide {traj.start_button}{traj.pattern}{traj.end_button} 星星在 {tap.time:.2f}s 位于按键 {star_btn}，与 Tap {tap.button} 冲突"
-                    ))
-        
-        return conflicts
-    
-    def _detect_touch_button_overlap(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测Touch与Button的判定冲突。
-        
-        根据用户注释：
-        - Touch多押是合理的，不检测
-        - 只检测：Touch A区与1号按键的时间重叠（判定混淆）
-        """
-        conflicts = []
-        
-        touches = [n for n in notes if n.note_type == "touch"]
-        buttons = [n for n in notes if n.note_type in ("tap", "hold") and isinstance(n.button, int)]
-        
-        # 只检查Touch A区与1号按键的严重冲突
-        for touch in touches:
-            if touch.button != "A":
-                continue
-            
-            touch_end = touch.time + touch.duration if touch.duration > 0 else touch.time + 0.1
-            
-            for btn_note in buttons:
-                if btn_note.button == 1:  # A区主要影响1号按键
-                    # 时间窗口重叠检测
-                    btn_end = btn_note.time + btn_note.duration if btn_note.duration > 0 else btn_note.time
-                    
-                    # 检查时间重叠
-                    if not (btn_end < touch.time or touch_end < btn_note.time):
-                        conflicts.append(ConflictReport(
-                            has_conflict=True,
-                            conflict_type="touch_button_overlap",
-                            time=btn_note.time,
-                            notes=[touch, btn_note],
-                            severity="hard",
-                            message=f"Touch A区 [{touch.time:.2f}s] 与 按键1的 {btn_note.note_type} [{btn_note.time:.2f}s] 判定可能冲突"
-                        ))
-        
-        return conflicts
-    
-    def _detect_excessive_jumps(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测过大的按键跳跃（软冲突）。
-        
-        规则：短时间内大跨度跳跃可能超出人类反应速度
-        """
-        conflicts = []
-        
-        taps = sorted(
-            [n for n in notes if n.note_type == "tap" and isinstance(n.button, int)], 
-            key=lambda n: n.time
-        )
-        
-        for i in range(len(taps) - 1):
-            t1, t2 = taps[i], taps[i + 1]
-            time_diff = t2.time - t1.time
-            # A zero or near-zero gap is a chord, not a jump: two buttons
-            # pressed at the same instant are one gesture per hand, and the
-            # distance between them is a reach, which ``HandDispatch`` covers.
-            # Without this the detector flags every legitimate chord.
-            if time_diff < 1e-3:
-                continue
-            distance = ButtonLayout.physical_distance(t1.button, t2.button)
-            
-            # 短时间内大跨度跳跃
-            if time_diff < self.min_jump_time and distance > self.max_jump_distance:
-                conflicts.append(ConflictReport(
-                    has_conflict=True,
-                    conflict_type="excessive_jump",
-                    time=t2.time,
-                    notes=[t1, t2],
-                    severity="soft",
-                    message=f"按键 {t1.button}→{t2.button} 在 {time_diff*1000:.0f}ms 内跳跃，物理距离 {distance:.2f} 过大"
-                ))
-        
-        return conflicts
-    
-    def _detect_hand_dispatch_conflict(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测双手调度冲突（软冲突）。
-        
-        规则：同一时刻的多押可能超出单手范围
-        """
-        conflicts = []
-        
-        # 按时间分组
-        time_groups: dict[float, list[NoteEvent]] = {}
+            groups = defaultdict(list)
+            for note in notes:
+                if isinstance(note.button, int):
+                    groups[note.time].append(note)
+            for stamp, group in groups.items():
+                if len({n.pad for n in group}) > 2:
+                    result.append(ConflictReport(
+                        True, "hand_assignment_review", stamp, group, "soft",
+                        "同时有三个以上独立按键，需要结合持续动作检查双手分配；此项不自动拒绝。",
+                        evidence="hand_assignment_unverified"))
+        return result
+
+    def _overlaps(self, notes):
+        by_pad = defaultdict(list)
         for note in notes:
-            if note.note_type in ("tap", "hold") and isinstance(note.button, int):
-                t_key = round(note.time, 3)  # 3ms容差
-                if t_key not in time_groups:
-                    time_groups[t_key] = []
-                time_groups[t_key].append(note)
-        
-        for t, group in time_groups.items():
-            if len(group) > 1:
-                buttons = [n.button for n in group if isinstance(n.button, int)]
-                if len(buttons) > 1 and not HandDispatch.can_reach_simultaneous(buttons, allow_cross=False):
-                    conflicts.append(ConflictReport(
-                        has_conflict=True,
-                        conflict_type="hand_dispatch_conflict",
-                        time=t,
-                        notes=group,
-                        severity="soft",
-                        message=f"{len(buttons)}押配置 {buttons} 在 {t:.2f}s 可能超出双手范围"
-                    ))
-        
-        return conflicts
-    
-    def _detect_rapid_alternation(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """Detect sustained hand alternation that is faster than the corpus.
+            by_pad[note.pad].append(note)
+        result = []
+        for pad, group in by_pad.items():
+            group.sort(key=lambda n: n.time)
+            for i, a in enumerate(group):
+                a_end = a.time + (max(0, a.duration) if a.note_type in {"hold", "touch_hold"} else 0)
+                for b in group[i+1:]:
+                    if b.time > a_end + OVERLAP_SECONDS:
+                        break
+                    gap = b.time - a.time
+                    hold = a.note_type in {"hold", "touch_hold"} and a.duration > 0
+                    inside = hold and a.time + OVERLAP_SECONDS < b.time < a_end - OVERLAP_SECONDS
+                    exact = abs(gap) <= 1e-9
+                    if not (inside or exact or abs(b.time - a_end) <= OVERLAP_SECONDS):
+                        continue
+                    # Release at the intended hold tail is a legal re-articulation.
+                    if hold and abs(b.time - a_end) <= 1e-9 and not exact:
+                        continue
+                    kind = "hold_tap_overlap" if inside else "same_pad_overlap"
+                    hard = (inside or exact) and not (a.protected or b.protected)
+                    target = b
+                    if b.note_type == "slide":
+                        target = a if a.note_type == "tap" else b
+                    repairable = hard and target.note_type in {"tap", "touch"}
+                    result.append(ConflictReport(
+                        True, kind, b.time, [a, b], "hard" if hard else "soft",
+                        f"{pad} 上的 {a.raw or a.note_type} 与 {b.raw or b.note_type} 存在按下区间重叠。",
+                        target.source_id if repairable else None))
+        # Connected simultaneous Touch groups can satisfy remaining children.
+        simultaneous = defaultdict(list)
+        for n in notes:
+            if n.note_type == "touch":
+                simultaneous[n.time].append(n)
+        for group in simultaneous.values():
+            for indexes in touch_groups([n.pad for n in group]):
+                if len(indexes) <= 1:
+                    continue
+                children = [group[i] for i in indexes]
+                affected = {id(n) for issue in result if issue.severity == "hard"
+                            for n in issue.notes if any(n is c for c in children)}
+                if len(children) - len(affected) >= touch_group_threshold(len(children)):
+                    for issue in result:
+                        if any(any(n is c for c in children) for n in issue.notes):
+                            issue.severity, issue.repair_target = "soft", None
+                            issue.message += " 同刻相邻 Touch 组可能联动判定，保留人工检查。"
+        return result
 
-        A left-right-left trill is ordinary charting: at 180 BPM an eighth-note
-        trill alternates every 167 ms and a sixteenth-note one every 83 ms, and
-        both are played comfortably.  What is actually worth flagging is a
-        *sustained* run -- at least five alternating taps whose average gap is
-        under 100 ms (roughly 16th notes above 180 BPM) -- because that is where
-        players start losing the pattern rather than reading it.
-        """
-
-        conflicts = []
-        taps = sorted(
-            [n for n in notes if n.note_type == "tap" and isinstance(n.button, int)],
-            key=lambda n: n.time,
-        )
-        run: list[NoteEvent] = []
-        for note in taps:
-            if run and HandDispatch.primary_hand(note.button) == HandDispatch.primary_hand(run[-1].button):
-                run = []
-            run.append(note)
-            if len(run) < 5:
-                continue
-            span = run[-1].time - run[0].time
-            if span > 0 and (span / (len(run) - 1)) < 0.10:
-                conflicts.append(ConflictReport(
-                    has_conflict=True,
-                    conflict_type="rapid_alternation",
-                    time=run[0].time,
-                    notes=list(run),
-                    severity="soft",
-                    message=(f"连续{len(run)}个左右手交替在{span*1000:.0f}ms内完成"
-                             f"（平均{span/(len(run)-1)*1000:.0f}ms/个），可能难以稳定读取"),
-                ))
-                run = []
-        return conflicts
-
-
-if __name__ == "__main__":
-    # 简单测试
-    print("=== 冲突检测器测试 ===")
-    
-    detector = ConflictDetector(enable_hard_conflicts=True, enable_soft_conflicts=True)
-    
-    # 测试1: Hold-Tap冲突
-    notes = [
-        NoteEvent("hold", 1, 1.0, 2.0),
-        NoteEvent("tap", 1, 1.5),
-    ]
-    conflicts = detector.detect_conflicts(notes)
-    print(f"\n测试1 (Hold-Tap冲突): {len(conflicts)} 个冲突")
-    for c in conflicts:
-        print(f"  - {c.conflict_type}: {c.message}")
-    
-    # 测试2: 正常配置
-    notes = [
-        NoteEvent("tap", 1, 1.0),
-        NoteEvent("tap", 2, 1.2),
-        NoteEvent("tap", 3, 1.4),
-    ]
-    conflicts = detector.detect_conflicts(notes)
-    print(f"\n测试2 (正常序列): {len(conflicts)} 个冲突")
-    
-    print("\n测试完成")
+    def _slide_references(self, notes):
+        result = []
+        for slide in notes:
+            traces = slide.trajectories or ([slide.slide_trajectory] if slide.slide_trajectory else [])
+            for trace in traces:
+                if not trace.supported:
+                    continue
+                intervals = trace.pad_intervals()
+                seen = set()
+                for other in notes:
+                    if other is slide or other.source_id == slide.source_id and other.source_id != (-1, -1):
+                        continue
+                    if not isinstance(other.button, int):
+                        continue
+                    for pad, enter, leave in intervals:
+                        # Earlier trace input may auto-trigger a later Tap. Exact
+                        # simultaneous contact can be intentional and is not hard.
+                        delta = other.time - enter
+                        if pad != other.pad or not 1/180 < delta <= TAP_AVAILABLE_SECONDS:
+                            continue
+                        key = id(other)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        result.append(ConflictReport(
+                            True, "slide_pad_early_input", other.time, [slide, other], "soft",
+                            f"Slide 参考轨迹进入 {pad} 比该音符早 {delta*1000:.1f}ms；需检查提前判定。",
+                            evidence="reference_footprint_not_runtime_judgement"))
+                touches = [n for n in notes if n.note_type in {"touch", "touch_hold"}
+                           and n.time <= trace.start_time + trace.duration
+                           and n.time + max(n.duration, RELEASE_SECONDS) >= trace.start_time]
+                if touches and intervals:
+                    covered = {n.pad for n in touches}
+                    required = {pad for pad, _, _ in intervals}
+                    if required and required <= covered:
+                        result.append(ConflictReport(
+                            True, "touch_covers_slide_reference", trace.start_time,
+                            [slide, *touches], "soft",
+                            "Touch 同时覆盖了此 Slide 的全部参考判定区，需核对各区触发顺序与提前完成。",
+                            evidence="ordered_area_runtime_not_simulated"))
+        return result

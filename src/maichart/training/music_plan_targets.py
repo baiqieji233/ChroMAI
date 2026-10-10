@@ -16,20 +16,11 @@ from maichart.generation.music_plan import (
 )
 
 
-# "Fine" means a gap at or under a quarter beat, plus a half-step of slack.
-#
-# The definition has to be usable by two consumers at once.  A strict `< 1/4`
-# boundary excludes a plain 16th-note run, which is the very thing a charter
-# writes when the music is made of fast piano or drum figuration -- and measured
-# over 120 real Master/Re:Master charts, that strict reading puts only 4.2% of
-# 16-beat windows at or above the 0.25 share, with a mean of 0.059.  A target
-# that is 0.06 almost everywhere carries no signal: the planner would learn to
-# predict its mean and nothing else.
-#
-# `1/128` is half of the finest gap the charts actually use (1/64 beat, i.e.
-# 1/16 of a 16th note), so it absorbs the quantization of a 5:3 or 7:4 tuplet
-# without reaching into the next grid step.  With it, 34.2% of windows clear
-# 0.25 and the mean rises to 0.228 -- the channel now varies over the corpus.
+# Versioned v3 training target: gaps at most 33/128 beat. Keep this definition
+# stable for existing v3 checkpoints. The 1/128 tolerance is a heuristic, not
+# evidence of a minimum chart grid or a physical timing limit. This scalar
+# measures short gaps; it does not classify all 12th-note/syncopated rhythms or
+# identify independent musical voices. The report tool also exposes raw grids.
 FINE_RHYTHM_QUARTER_BEAT = Fraction(1, 4)
 FINE_RHYTHM_TOLERANCE = Fraction(1, 128)
 FINE_RHYTHM_GAP_CEILING = FINE_RHYTHM_QUARTER_BEAT + FINE_RHYTHM_TOLERANCE

@@ -1,350 +1,189 @@
-"""生成后处理：冲突检测和修复集成。
-
-这个模块在event_ctx_cli或webui的生成流程后调用，
-对生成的谱面进行冲突检测和可选修复。
-"""
-
+"""Inspect and optionally repair the exact full-song event stream before export."""
 from __future__ import annotations
 
 import json
-from dataclasses import asdict, dataclass
+import math
+from dataclasses import dataclass, field, asdict
+from fractions import Fraction
 from pathlib import Path
-from typing import Any
 
-from maichart.generation.conflict_detector import ConflictDetector, NoteEvent, ConflictReport
-from maichart.generation.conflict_repair import ConflictRepairer
+from maichart.event_timing import EventPoint, seconds_at_beat
+from maichart.generation.conflict_detector import ConflictDetector, ConflictReport, NoteEvent, SlideTrajectory
+from maichart.generation.event_quality import parse_event_notes
+from maichart.generation.judgment_system import REFERENCE_VERSION
+from maichart.notes import BASIC_COMPACT_CHORD_RE
 
 
 @dataclass
 class PostProcessConfig:
-    """生成后处理配置。"""
-    
-    enable_conflict_detection: bool = True
+    enable_conflict_detection: bool = False
     detect_hard_conflicts: bool = True
     detect_soft_conflicts: bool = False
-    conflict_repair_mode: str = "none"  # none/local/reject
-    
-    # 冲突检测参数
-    max_simultaneous_buttons: int = 4
-    min_tap_interval: float = 0.05
-    # Match conflict_detector.ConflictDetector: 2.0 is the ring diameter, so
-    # only genuine opposite-side flips are reported.
-    max_jump_distance: float = 2.0
-    min_jump_time: float = 0.10
-    
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典。"""
+    conflict_repair_mode: str = "none"
+    conflict_retries: int = 0
+
+    def __post_init__(self):
+        if self.conflict_repair_mode not in {"none", "local", "reject"}:
+            raise ValueError("conflict-repair-mode must be none, local or reject")
+        if isinstance(self.conflict_retries, bool) or not isinstance(self.conflict_retries, int) or not 0 <= self.conflict_retries <= 5:
+            raise ValueError("conflict-retries must be an integer in 0..5")
+        if not self.enable_conflict_detection and (self.conflict_repair_mode != "none" or self.conflict_retries):
+            raise ValueError("Enable conflict detection before requesting repair/retries")
+        if self.conflict_repair_mode == "none" and self.conflict_retries:
+            raise ValueError("Detect-only mode does not regenerate; set retries to 0")
+
+    def to_dict(self):
         return asdict(self)
 
 
 @dataclass
 class PostProcessResult:
-    """生成后处理结果。"""
-    
     original_notes_count: int
     processed_notes_count: int
     conflicts_detected: list[ConflictReport]
-    repairs_applied: list[str]
+    repairs_applied: list[dict]
     success: bool
     message: str = ""
-    
-    def to_dict(self) -> dict[str, Any]:
-        """转换为字典（用于JSON序列化）。"""
-        return {
-            "original_notes_count": self.original_notes_count,
-            "processed_notes_count": self.processed_notes_count,
-            "conflicts_detected": len(self.conflicts_detected),
-            "repairs_applied": len(self.repairs_applied),
-            "success": self.success,
-            "message": self.message,
-        }
+    points: list[EventPoint] = field(default_factory=list)
+    coverage: dict = field(default_factory=dict)
+    remaining_conflicts: list[ConflictReport] = field(default_factory=list)
+
+    def to_dict(self):
+        return {"schema": "maichart-playability-static-v2", "reference": REFERENCE_VERSION,
+                "status": self.coverage.get("status", "disabled"),
+                "notes": self.processed_notes_count, "original_notes": self.original_notes_count,
+                "conflicts": len(self.conflicts_detected),
+                "hard": sum(c.severity == "hard" for c in self.conflicts_detected),
+                "details": [c.to_dict() for c in self.conflicts_detected],
+                "remaining_hard": sum(c.severity == "hard" for c in self.remaining_conflicts),
+                "repairs": self.repairs_applied, "success": self.success,
+                "coverage": self.coverage, "message": self.message}
 
 
-def extract_notes_from_chart(notes_dict: dict) -> list[NoteEvent]:
-    """从chart note字典中提取NoteEvent列表。
-    
-    参数：notes_dict是由parser生成的note字典，形式为：
-    {beat_position: [ParsedNote, ...], ...}
-    """
-    events = []
-    
-    for beat, note_list in sorted(notes_dict.items()):
-        beat_float = float(beat)
-        
-        for note in note_list:
-            # 确定note类型
-            if note.hold_end is not None:
-                note_type = "hold"
-                duration = float(note.hold_end) - beat_float
-            elif note.slide_pattern:
-                note_type = "slide"
-                # 简化：使用default 1s，实际应从note.segments读取
-                duration = 1.0
-            elif note.is_touch_hold:
-                note_type = "touch"
-                duration = float(note.hold_end) - beat_float if note.hold_end else 0.0
-            elif note.is_touch:
-                note_type = "touch"
-                duration = 0.0
-            else:
-                note_type = "tap"
-                duration = 0.0
-            
-            # 获取按键（Touch的button是字符串A-E）
-            button = str(note.position) if note.position else (note.touch_zone or "1")
-            
-            events.append(NoteEvent(
-                note_type=note_type,
-                button=button,
-                time=beat_float,
-                duration=duration,
-                raw=str(note)
-            ))
-    
-    return events
+def _note_text(note):
+    # A compact chord gives every child the same raw text. Rebuilding a changed
+    # cell must not resurrect deleted children or expand every child twice.
+    if note.note_type == "tap" and BASIC_COMPACT_CHORD_RE.fullmatch(note.raw):
+        suffix = ("b" if note.is_break else "") + ("x" if note.modifiers.get("ex") else "")
+        return str(note.position) + suffix
+    return note.raw
 
 
-def detect_chart_conflicts(
-    points,
-    tempo_changes,
-    first: float,
-    config: "PostProcessConfig",
-) -> PostProcessResult:
-    """Run the playability checks against compiled event points.
-
-    The detector needs real note geometry (button indices, hold durations and
-    slide trajectories), so it runs on the parsed event chart rather than on the
-    raw token stream.  `points` is the same list handed to
-    `compile_event_points`; every note is converted to an absolute onset in
-    seconds using the chart tempo map.
-    """
-
-    from fractions import Fraction
-
-    from maichart.generation.conflict_detector import (
-        ConflictDetector, NoteEvent, SlideTrajectory,
-    )
-    from maichart.generation.event_quality import parse_event_notes
-
+def _extract(points, tempo_changes, first):
     parsed = parse_event_notes(points, tempo_changes, first)
-    events: list[NoteEvent] = []
+    events, serializable, unsupported = [], {}, list(parsed.unsupported)
     for point in parsed.points:
-        onset = float(point.time_sec or 0.0)
-        for note in point.notes:
-            note_type = getattr(note, "note_type", "tap") or "tap"
-            position = getattr(note, "position", 1)
-            duration = float(getattr(note, "duration_sec", 0.0) or 0.0)
-            if note_type in ("tap", "break"):
-                note_type = "tap"
-            if note_type in ("touch", "touch_hold"):
-                # Touch positions look like "C", "A4" or "B7"; the leading
-                # letter is the judgement zone used by the overlap rule.
-                zone = str(position)[:1] if position else "A"
-                events.append(NoteEvent(
-                    note_type="touch", button=zone, time=onset, duration=duration,
-                    raw=str(getattr(note, "raw", "")),
-                ))
-                continue
-            if not isinstance(position, int):
-                continue
-            trajectory = None
-            pattern = getattr(note, "slide_pattern", None)
-            if note_type == "slide" and pattern:
-                end_position = getattr(note, "end_position", None)
-                if isinstance(end_position, int):
-                    trajectory = SlideTrajectory(
-                        start_button=position, pattern=str(pattern),
-                        end_button=end_position, start_time=onset,
-                        duration=max(duration, 1e-3),
-                    )
-            events.append(NoteEvent(
-                note_type=("slide" if note_type == "slide" else note_type),
-                button=position, time=onset, duration=duration,
-                slide_trajectory=trajectory,
-                raw=str(getattr(note, "raw", "")),
-            ))
-
-    detector = ConflictDetector(
-        enable_hard_conflicts=config.detect_hard_conflicts,
-        enable_soft_conflicts=config.detect_soft_conflicts,
-        min_tap_interval=config.min_tap_interval,
-        max_jump_distance=config.max_jump_distance,
-        min_jump_time=config.min_jump_time,
-    )
-    conflicts = detector.detect_conflicts(events)
-    hard = [c for c in conflicts if c.severity == "hard"]
-    return PostProcessResult(
-        original_notes_count=len(events),
-        processed_notes_count=len(events),
-        conflicts_detected=conflicts,
-        repairs_applied=[],
-        success=not (config.conflict_repair_mode == "reject" and hard),
-        message=(f"{len(conflicts)} conflicts ({len(hard)} hard)" if conflicts
-                 else "no conflicts"),
-    )
+        for i, note in enumerate(point.notes):
+            source_id = (point.timing_index, i)
+            serializable[source_id] = _note_text(note)
+            event = NoteEvent(note.note_type, note.position, float(note.time_sec),
+                              float(note.duration_sec or 0), raw=note.raw,
+                              source_id=source_id, beat=Fraction(note.beat),
+                              protected=bool(note.modifiers.get("ex")))
+            if note.note_type == "slide":
+                event.duration = 0.0  # head is a press; trace is a separate action
+                for segment in note.slide_segments:
+                    duration = segment.get("duration")
+                    parts = segment.get("path_parts") or []
+                    if duration is None or parts:
+                        unsupported.append({"source": list(source_id), "raw": note.raw,
+                                            "reason": "compound_slide_path_not_simulated"})
+                        continue
+                    if duration.kind == "timing_pair":
+                        delay, length = duration.values
+                        begin = event.time + float(delay)
+                    else:
+                        # Default Simai head wait is one beat, not zero.
+                        trace_beat = event.beat + 1
+                        begin = float(seconds_at_beat(trace_beat, tempo_changes, first))
+                        if duration.kind == "grid_fraction":
+                            length = float(seconds_at_beat(trace_beat + duration.beats, tempo_changes, first)) - begin
+                        else:
+                            length = float(duration.seconds or 0)
+                    end = segment.get("end_position")
+                    pattern = segment.get("pattern")
+                    if not isinstance(end, int) or not math.isfinite(length) or length <= 0 or pattern not in {"-", "<", ">", "^"}:
+                        unsupported.append({"source": list(source_id), "raw": note.raw,
+                                            "reason": "slide_path_or_duration_not_simulated"})
+                        continue
+                    event.trajectories.append(SlideTrajectory(int(note.position), pattern, end,
+                                                              begin, length, source_id))
+            events.append(event)
+    coverage = {"status": "partial" if unsupported or parsed.fatal_errors else "static_only",
+                "unsupported": unsupported, "parse_errors": parsed.fatal_errors,
+                "reference_paths": sum(len(e.trajectories) for e in events),
+                "limitations": ["静态判定区参考不等同于实机 Perfect 可行性证明。",
+                                "复杂 Slide/Wifi/连续转折的有序判定区状态机尚未完整模拟；不自动删除此类配置。",
+                                "人体可达性未用玩家动作验证；Touch 多押不按音符个数判无理。"]}
+    return events, serializable, coverage
 
 
-def run_post_process(
-    notes_dict: dict,
-    config: PostProcessConfig | None = None,
-    verbose: bool = True
-) -> PostProcessResult:
-    """对生成的谱面运行后处理。
-    
-    参数：
-    - notes_dict: 由event_model生成的note字典
-    - config: 后处理配置
-    - verbose: 打印详细信息
-    
-    返回：PostProcessResult
-    """
-    if config is None:
-        config = PostProcessConfig()
-    
-    original_count = sum(len(v) for v in notes_dict.values())
-    
+def detect_chart_conflicts(points, tempo_changes, first, config):
+    points = list(points)
     if not config.enable_conflict_detection:
-        if verbose:
-            print(f"跳过冲突检测（disabled）")
-        return PostProcessResult(
-            original_notes_count=original_count,
-            processed_notes_count=original_count,
-            conflicts_detected=[],
-            repairs_applied=[],
-            success=True
-        )
-    
-    try:
-        # 提取note事件
-        events = extract_notes_from_chart(notes_dict)
-        
-        if verbose:
-            print(f"冲突检测: {len(events)} 个note")
-        
-        # 检测冲突
-        detector = ConflictDetector(
-            enable_hard_conflicts=config.detect_hard_conflicts,
-            enable_soft_conflicts=config.detect_soft_conflicts,
-            max_simultaneous_buttons=config.max_simultaneous_buttons,
-            min_tap_interval=config.min_tap_interval,
-            max_jump_distance=config.max_jump_distance,
-            min_jump_time=config.min_jump_time
-        )
-        
-        conflicts = detector.detect_conflicts(events)
-        
-        if verbose and conflicts:
-            print(f"检测到 {len(conflicts)} 个冲突:")
-            hard_count = sum(1 for c in conflicts if c.severity == "hard")
-            soft_count = sum(1 for c in conflicts if c.severity == "soft")
-            if hard_count > 0:
-                print(f"  硬冲突: {hard_count}")
-            if soft_count > 0:
-                print(f"  软冲突: {soft_count}")
-        
-        # 修复冲突
-        repairer = ConflictRepairer(repair_mode=config.conflict_repair_mode)
-        
-        try:
-            repaired_events, repair_logs = repairer.repair(events, conflicts)
-            repairs_count = len(repair_logs)
-            
-            if verbose and repairs_count > 0:
-                print(f"应用修复: {repairs_count} 项")
-                for log in repair_logs[:5]:  # 只打印前5项
-                    print(f"  - {log}")
-                if repairs_count > 5:
-                    print(f"  ... 及其他 {repairs_count - 5} 项")
-            
-            # 将修复后的events转换回notes_dict
-            # 简化：只返回原始数据（因为删除note会破坏beat对应关系）
-            # 实际应该重新构建beat->notes映射
-            processed_count = len(repaired_events)
-            
-            return PostProcessResult(
-                original_notes_count=original_count,
-                processed_notes_count=processed_count,
-                conflicts_detected=conflicts,
-                repairs_applied=repair_logs,
-                success=config.conflict_repair_mode != "reject" or len([c for c in conflicts if c.severity == "hard"]) == 0,
-                message=f"处理完成: {original_count} -> {processed_count} notes"
-            )
-        
-        except ValueError as e:
-            # reject模式抛出的异常
-            if verbose:
-                print(f"修复失败（reject模式）: {str(e)[:100]}")
-            
-            return PostProcessResult(
-                original_notes_count=original_count,
-                processed_notes_count=0,
-                conflicts_detected=conflicts,
-                repairs_applied=[],
-                success=False,
-                message=f"拒绝生成: {str(e)[:200]}"
-            )
-    
-    except Exception as e:
-        if verbose:
-            print(f"后处理错误: {e}")
-        
-        return PostProcessResult(
-            original_notes_count=original_count,
-            processed_notes_count=0,
-            conflicts_detected=[],
-            repairs_applied=[],
-            success=False,
-            message=f"错误: {str(e)}"
-        )
+        return PostProcessResult(0, 0, [], [], True, points=points, coverage={"status": "disabled"})
+    events, _, coverage = _extract(points, tempo_changes, first)
+    issues = ConflictDetector(config.detect_hard_conflicts, config.detect_soft_conflicts).detect_conflicts(events)
+    hard = any(c.severity == "hard" for c in issues)
+    success = not (config.conflict_repair_mode == "reject" and hard)
+    # An incomplete parser result cannot be presented as a strict acceptance.
+    if config.conflict_repair_mode == "reject" and coverage["parse_errors"]:
+        success = False
+    return PostProcessResult(len(events), len(events), issues, [], success,
+                             message=f"{len(issues)} static references", points=points,
+                             coverage=coverage, remaining_conflicts=issues)
 
 
-def save_post_process_report(
-    result: PostProcessResult,
-    output_path: str | Path
-) -> None:
-    """保存后处理报告。"""
-    output_path = Path(output_path)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    report = {
-        "timestamp": __import__("datetime").datetime.now().isoformat(),
-        "result": result.to_dict(),
-        "conflicts": [
-            {
-                "type": c.conflict_type,
-                "severity": c.severity,
-                "time": c.time,
-                "message": c.message
-            }
-            for c in result.conflicts_detected
-        ]
-    }
-    
-    with open(output_path, "w", encoding="utf-8") as f:
-        json.dump(report, f, ensure_ascii=False, indent=2)
+def process_chart_points(points, tempo_changes, first, config, *, repair_after_beat=None):
+    """Return repaired EventPoints; never change the caller's list in place.
+
+    Repair only standalone tap/touch children whose exact source is known.
+    Mixed chords retain all unaffected children and their raw modifiers.
+    repair_after_beat protects already committed generation context.
+    """
+    points = list(points)
+    initial = detect_chart_conflicts(points, tempo_changes, first, config)
+    if config.conflict_repair_mode != "local" or not config.enable_conflict_detection:
+        return initial
+    if any(e.get("code") != "duplicate_button_head" for e in initial.coverage.get("parse_errors", [])):
+        initial.message = "Syntax diagnostics present: local repair skipped"
+        return initial
+    events, text_by_source, _ = _extract(points, tempo_changes, first)
+    by_source = {e.source_id: e for e in events}
+    removed = {}
+    for issue in initial.conflicts_detected:
+        target = issue.repair_target
+        if issue.severity != "hard" or target not in by_source:
+            continue
+        event = by_source[target]
+        if repair_after_beat is not None and event.beat < repair_after_beat:
+            continue
+        removed[target] = {"point_index": target[0], "note_index": target[1],
+                           "beat": str(event.beat), "time_sec": event.time,
+                           "raw": text_by_source[target], "reason": issue.conflict_type}
+    changed = {index for index, _ in removed}
+    repaired = []
+    for index, point in enumerate(points):
+        if index not in changed:
+            repaired.append(point)
+            continue
+        texts = [text for key, text in text_by_source.items() if key[0] == index and key not in removed]
+        if texts:
+            repaired.append(EventPoint(point.beat, "/".join(texts)))
+    final = detect_chart_conflicts(repaired, tempo_changes, first, config)
+    initial.points = repaired
+    initial.repairs_applied = list(removed.values())
+    initial.processed_notes_count = final.processed_notes_count
+    initial.remaining_conflicts = final.conflicts_detected
+    initial.message = f"Removed {len(removed)} conflicting press children; rechecked full chart"
+    return initial
 
 
-if __name__ == "__main__":
-    print("=== 生成后处理测试 ===")
-    
-    # 模拟note字典
-    from fractions import Fraction
-    notes_dict = {
-        Fraction(0): [],  # 空窗口
-        Fraction(1): [],  # 单个note示例会在实际使用中填充
-    }
-    
-    # 运行后处理
-    config = PostProcessConfig(
-        enable_conflict_detection=True,
-        detect_hard_conflicts=True,
-        conflict_repair_mode="none"
-    )
-    
-    result = run_post_process(notes_dict, config, verbose=True)
-    
-    print(f"\n结果: {result.success}")
-    print(f"原始note: {result.original_notes_count}")
-    print(f"处理后: {result.processed_notes_count}")
-    print(f"冲突: {len(result.conflicts_detected)}")
-    print(f"修复: {len(result.repairs_applied)}")
+def save_post_process_report(result, output_path):
+    Path(output_path).write_text(json.dumps(result.to_dict(), ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def run_post_process(points, config=None, verbose=True, *, tempo_changes=None, first=0.0):
+    if tempo_changes is None:
+        raise ValueError("Post-processing requires exact EventPoints and a tempo map")
+    return process_chart_points(points, tempo_changes, first, config or PostProcessConfig())

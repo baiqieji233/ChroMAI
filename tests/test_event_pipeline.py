@@ -213,7 +213,7 @@ def test_cli_writes_explicit_failure_report_and_no_fake_chart(tmp_path, monkeypa
         120.0,
     )
     vocabulary = EventVocabulary.from_event_charts([], segment_beats=4)
-    monkeypatch.setattr(event_cli, "load_event_model", lambda path, device: (object(), vocabulary, {"epoch": 2}))
+    monkeypatch.setattr(event_cli, "load_event_model", lambda path, device: (object(), vocabulary, {"epoch": 2, "schema": "maichart-event-generator-checkpoint-v1", "data_contract": {"target_schema": "event_v1"}}))
     monkeypatch.setattr(event_cli, "extract_event_audio", lambda path, sample_rate: audio)
     monkeypatch.setattr(event_cli, "_decode", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("synthetic decoder failure")))
     output = tmp_path / "generated" / "maidata.txt"
@@ -242,7 +242,7 @@ def test_cli_success_path_writes_chart_ir_and_quality_report(tmp_path, monkeypat
     )
     vocabulary = EventVocabulary.from_event_charts([], segment_beats=4)
     sequence = EventSequence([Fraction(0)], ["4-6[8:1]"])
-    monkeypatch.setattr(event_cli, "load_event_model", lambda path, device: (object(), vocabulary, {"epoch": 2}))
+    monkeypatch.setattr(event_cli, "load_event_model", lambda path, device: (object(), vocabulary, {"epoch": 2, "schema": "maichart-event-generator-checkpoint-v1", "data_contract": {"target_schema": "event_v1"}}))
     monkeypatch.setattr(event_cli, "extract_event_audio", lambda path, sample_rate: audio)
     monkeypatch.setattr(event_cli, "_decode", lambda *args, **kwargs: sequence)
     output = tmp_path / "generated" / "maidata.txt"
