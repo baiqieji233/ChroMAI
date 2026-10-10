@@ -257,6 +257,15 @@ def _chart_section(entry: dict[str, Any]) -> list[str]:
                  f"{_number(alignment.get('precision'), percent=True)} | "
                  f"{_number(alignment.get('recall'), percent=True)} | "
                  f"{_number(alignment.get('f1'), percent=True)} |")
+    tolerances = reference.get("onset_alignment_by_tolerance")
+    if isinstance(tolerances, dict):
+        lines.extend(["", "| 起音匹配容差 | precision | recall | F1 |", "|---|---:|---:|---:|"])
+        for tolerance, measured in tolerances.items():
+            lines.append(f"| {_escape(tolerance)} | "
+                         f"{_number(_get(measured, 'precision'), percent=True)} | "
+                         f"{_number(_get(measured, 'recall'), percent=True)} | "
+                         f"{_number(_get(measured, 'f1'), percent=True)} |")
+        lines.append("50 ms 在快速细分中可能匹配到相邻拍位；紧容差用于检查这种影响，均不是实机判定窗。")
     spatial = onset.get("spatial_repetition") or {}
     lines.extend(["", "试听定位（秒）", "", "| 类型 | 起止时间与片段摘要 |", "|---|---|"])
     for label, key in (("顺圈", "clockwise_adjacent"),

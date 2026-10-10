@@ -477,6 +477,14 @@ def _pair_metrics(generated: dict[str, Any], reference: dict[str, Any]) -> dict[
             and reference["timing"]["audio_duration_sec"] is not None else None
         ),
         "onset_alignment": _onset_alignment(generated, reference),
+        # A broad 50 ms window can match a neighbouring subdivision in fast
+        # passages. Preserve the historical metric, and expose tighter clocks
+        # so an apparent gain cannot hide a one-subdivision shift.
+        "onset_alignment_by_tolerance": {
+            f"{milliseconds}ms": _onset_alignment(
+                generated, reference, tolerance_sec=milliseconds / 1000.0)
+            for milliseconds in (20, 35, 50)
+        },
     }
 
 

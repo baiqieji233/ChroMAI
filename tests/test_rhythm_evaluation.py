@@ -9,6 +9,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from tools.run_rhythm_evaluation import build_fixed_panel, evaluate_paths
 
 
+def test_tighter_alignment_exposes_shifted_fast_subdivisions(tmp_path):
+    reference = _event_chart(first=0.0)
+    reference["tempo_changes"] = [{"beat": "0", "bpm": 120}]
+    reference["points"] = [{"beat": beat, "note_text": str(index + 1)}
+                           for index, beat in enumerate(("0", "1/8", "1/4"))]
+    generated = {**reference, "first": 0.04}
+    _write_chart(tmp_path / "reference/song.chart.json", reference)
+    _write_chart(tmp_path / "generated/song.chart.json", generated)
+    report = evaluate_paths([tmp_path / "generated"], reference_dir=tmp_path / "reference")
+    alignment = report["charts"][0]["reference_pair"]["onset_alignment_by_tolerance"]
+    assert alignment["20ms"]["matched_onsets"] == 0
+    assert alignment["35ms"]["matched_onsets"] == 2
+    assert alignment["50ms"]["matched_onsets"] == 3
+
+
 def _event_chart(*, first=-0.25, duration=4.5):
     event = {
         "points": [
@@ -223,6 +238,7 @@ def test_reference_metrics_are_only_emitted_for_exact_filename_pairs(tmp_path):
     assert pair["spatial_repetition"]["generated"] == pair["spatial_repetition"]["reference"]
     assert pair["spatial_repetition"]["generated"]["single_tap_onset_count"] > 0
     assert pair["onset_alignment"]["matched_onsets"] == 5
+    assert pair["onset_alignment_by_tolerance"]["50ms"] == pair["onset_alignment"]
     assert "reference intent may be incomplete" in pair["onset_alignment"]["interpretation"]
 
     empty_reference = tmp_path / "empty-reference"

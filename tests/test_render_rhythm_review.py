@@ -148,3 +148,15 @@ def test_recorded_artifact_completeness_overrides_equal_evaluation_counts():
     }
     markdown = render_reports([(Path("report.json"), report)])
     assert "Artifact completeness: partial: expected=6, produced=3, missing=3, unverifiable=0" in markdown
+
+
+def test_timing_tolerances_are_reported_separately_from_playability():
+    chart = _chart(r"root\generated\arm\song.json", fine=0.1, notes=3, f1=1)
+    chart["reference_pair"]["onset_alignment_by_tolerance"] = {
+        "20ms": {"precision": 0., "recall": 0., "f1": 0.},
+        "50ms": {"precision": 1., "recall": 1., "f1": 1.},
+    }
+    markdown = render_reports([(Path("report.json"), {"charts": [chart]})])
+    assert "| 20ms | 0.000% | 0.000% | 0.000% |" in markdown
+    assert "| 50ms | 100.000% | 100.000% | 100.000% |" in markdown
+    assert "均不是实机判定窗" in markdown
