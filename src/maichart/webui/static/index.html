@@ -617,16 +617,20 @@
             <small>
               <strong>影响生成结果。</strong><code>constant</code> 全曲用一个 BPM，最安全；
               <code>auto</code> 会额外采用自动检测到的变速点——检测本身可能偏（例如把同一速度听成 3:2），
-              一旦某个变速点判错，<strong>它之后的所有音符都会错位</strong>。仅在确认歌曲确实变速时使用。
+              一旦某个变速点判错，<strong>它之后的所有音符都会错位</strong>。仅在确认歌曲确实变速时使用。手动 tempo map 优先于此选项。
             </small>
           </label>
           <label class="field">BPM（可选）
             <input id="bpm" type="number" min="1" step="0.01" placeholder="留空则自动估计">
-            <small id="bpmHelp">留空即使用自动估计的 BPM；填写则完全采用你给的值。auto 会额外采用高置信度的变速点，建议仅在确认歌曲确实变速时使用。</small>
+            <small id="bpmHelp">未填写 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外采用检测到的变速点。填写 tempo map 后，其 beat 0 BPM 优先。</small>
           </label>
           <label class="field">首拍偏移 / 秒
             <input id="first" type="number" step="0.001" value="0">
             <small>音频中 chart beat 0 对应的秒数；不确定时保持 0。</small>
+          </label>
+          <label class="field span-2" data-generation-family="event_v1 legacy_frame_v2">手动 tempo map JSON（可选）
+            <textarea id="tempoMap" class="code-input" rows="4" spellcheck="false" placeholder='[{"beat":"0","bpm":180},{"beat":"32","bpm":150}]'></textarea>
+            <small>输入从 beat 0 开始、拍位严格递增的变速点。填写后覆盖 BPM 与 tempo mode；留空继续使用 BPM/tempo mode 和自动检测。beat 是谱面拍，不是秒数。此设置同时用于强度曲线预测和生成。</small>
           </label>
           <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线节拍网格 division
             <input id="division" type="number" min="1" value="16">
@@ -904,10 +908,6 @@
           <label class="field span-4">输出文件路径
             <textarea id="outputPath" class="path-input" rows="2">webui_workspace/generated/maidata.txt</textarea>
             <small>任务完成后显示实际生成文件与质量报告路径；局部修复时还会列出原谱和修正版，项目外文件请在本机打开。</small>
-          </label>
-          <label class="field span-4" data-generation-family="legacy_frame_v2" hidden>旧基线 Tempo map JSON（可选）
-            <small>只有需要手动覆盖自动检测时才填写；beat 是谱面 beat，不是秒数。</small>
-            <textarea id="tempoMap" class="code-input" rows="8" spellcheck="false" placeholder='[{"beat":"0","bpm":180},{"beat":"32","bpm":150}]'></textarea>
           </label>
         </div>
 

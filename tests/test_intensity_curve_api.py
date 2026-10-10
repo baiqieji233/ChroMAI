@@ -213,6 +213,7 @@ def test_learned_curve_analysis_uses_generation_condition_and_timing(api, monkey
     code, started, _ = api("/api/intensity/analyze", {
         **payload, "curve_source": "model", "condition": {"level": 14},
         "bpm": 150, "first": 1.2, "tempo_mode": "constant",
+        "tempo_map": [{"beat": "0", "bpm": 120}, {"beat": "32", "bpm": 150}],
     })
     assert code == 200, started
     deadline = time.monotonic() + 4
@@ -223,9 +224,52 @@ def test_learned_curve_analysis_uses_generation_condition_and_timing(api, monkey
         time.sleep(0.02)
     assert result["status"] == "completed", result
     assert result["result"]["curve_source"] == "model"
+    assert result["result"]["intensity_profile"]["bpm_input"] == 150
+    assert result["result"]["intensity_profile"]["explicit_tempo_map"] == [
+        {"beat": "0", "bpm": 120.0}, {"beat": "32", "bpm": 150.0},
+    ]
+    assert result["result"]["intensity_profile"]["tempo_map_sha256"]
     assert received["condition"]["level"] == 14
     assert received["bpm"] == 150 and received["first"] == 1.2
+    assert received["tempo_map"] == [{"beat": "0", "bpm": 120.0},
+                                     {"beat": "32", "bpm": 150.0}]
     assert received["device"] == "cpu"
+
+
+def test_explicit_tempo_map_is_normalized_and_forwarded_to_event_cli(api, monkeypatch, tmp_path):
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    tempo_map = [{"beat": 0, "bpm": 120}, {"beat": 32, "bpm": 150}]
+    code, started, _ = api("/api/generate", {**payload, "tempo_map": tempo_map})
+    assert code == 200, started
+    args = calls[0]
+    tempo_path = args[args.index("--tempo-map") + 1]
+    with open(tempo_path, encoding="utf-8") as handle:
+        assert json.load(handle) == [{"beat": "0", "bpm": 120.0},
+                                     {"beat": "32", "bpm": 150.0}]
+
+
+def test_learned_curve_explicit_tempo_map_mismatch_is_rejected(api, monkeypatch, tmp_path):
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    curve = {**profile(audio), "method": "learned_music_structure_v2",
+             "checkpoint": payload["checkpoint"], "checkpoint_identity": {"size": 1, "mtime_ns": 0},
+             "tempo_map_sha256": "different-map"}
+    code, result, _ = api("/api/generate", {
+        **payload, "tempo_map": [{"beat": 0, "bpm": 120}],
+        "intensity_curve_enabled": True, "intensity_curve": curve,
+    })
+    assert code == 400
+    assert "tempo map 已变化" in result["error"]
+    assert not calls and not webui.TASKS
+
+
+def test_invalid_explicit_tempo_map_fails_before_task(api, monkeypatch, tmp_path):
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    bad_maps = [[], [{"beat": 1, "bpm": 120}],
+                [{"beat": 0, "bpm": 120}, {"beat": 0, "bpm": 150}]]
+    for tempo_map in bad_maps:
+        code, _, _ = api("/api/generate", {**payload, "tempo_map": tempo_map})
+        assert code == 400
+        assert not calls and not webui.TASKS
 
 
 @pytest.mark.parametrize("bad", [{"intensity_curve_strength": -1},

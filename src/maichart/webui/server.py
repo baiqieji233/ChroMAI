@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from maichart.generation.conditions import CONDITION_KEYS, GENERATION_DEFAULTS, GENERATION_SAMPLING_DEFAULTS
 from maichart.generation.music_plan import is_music_structure
 from maichart.generation.model_compatibility import checkpoint_capabilities
+from maichart.generation.timeline import serialize_tempo_map, tempo_map_fingerprint
 from maichart.generation.model import AUDIO_FEATURE_KEYS
 from maichart.training.checkpoints import (
     checkpoint_contract,
@@ -285,10 +286,23 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("模型预测曲线需要选择 music_structure_v2/v3 checkpoint")
         resolution = float(payload.get("resolution_sec", 2.0))
         context = float(payload.get("local_context_sec", 12.0))
+        first = float(payload.get("first", 0.0))
+        tempo_mode = str(payload.get("tempo_mode", "constant")).strip().lower()
+        explicit_tempo_map = (serialize_tempo_map(payload["tempo_map"])
+                              if payload.get("tempo_map") is not None else None)
+        tempo_map_hash = tempo_map_fingerprint(explicit_tempo_map)
         if not math.isfinite(resolution) or not 0.5 <= resolution <= 16:
             raise ValueError("曲线时间间隔必须在 0.5–16 秒之间")
         if not math.isfinite(context) or not 2 <= context <= 120:
             raise ValueError("局部比较范围必须在 2–120 秒之间")
+        if not math.isfinite(first):
+            raise ValueError("首拍偏移必须是有限值")
+        if tempo_mode not in {"auto", "constant"}:
+            raise ValueError("tempo-mode 只能是 auto 或 constant")
+        if payload.get("bpm") not in {None, ""}:
+            supplied_bpm = float(payload["bpm"])
+            if not math.isfinite(supplied_bpm) or supplied_bpm <= 0:
+                raise ValueError("BPM 必须是正的有限值")
         task = _create_task("intensity")
         task.result["audio"] = str(audio)
         task.result["audio_preview_url"] = f"/api/intensity/audio?id={task.task_id}"
@@ -311,11 +325,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     profile = generate_learned_profile(
                         audio, checkpoint_path, resolution_sec=resolution, local_context_sec=context,
                         condition=payload.get("condition"), bpm=payload.get("bpm"),
-                        first=float(payload.get("first", 0.0)), tempo_mode=payload.get("tempo_mode", "constant"),
+                        first=first, tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
                         device="cpu")
                 else:
                     profile = generate_intensity_profile(audio, resolution_sec=resolution,
                                                          local_context_sec=context)
+                profile["explicit_tempo_map"] = explicit_tempo_map
+                profile["tempo_map_sha256"] = tempo_map_hash
+                profile["tempo_mode"] = tempo_mode
+                profile["first"] = first
+                profile["bpm_input"] = (float(payload["bpm"])
+                                        if payload.get("bpm") not in {None, ""} else None)
+                if selected_source != "model":
+                    profile["bpm"] = (float(explicit_tempo_map[0]["bpm"]) if explicit_tempo_map
+                                       else float(payload["bpm"]) if payload.get("bpm") not in {None, ""}
+                                       else None)
                 INTENSITY_ROOT.mkdir(parents=True, exist_ok=True)
                 output = INTENSITY_ROOT / f"{task.task_id}_automatic.json"
                 output.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
@@ -414,6 +438,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             )
         if capabilities["errors"]:
             raise ValueError("checkpoint capability contract invalid: " + "; ".join(capabilities["errors"]))
+        explicit_tempo_map = (serialize_tempo_map(payload["tempo_map"])
+                              if payload.get("tempo_map") is not None else None)
+        tempo_map_hash = tempo_map_fingerprint(explicit_tempo_map)
         audio_features = payload.get("audio_features")
         audio = payload.get("audio")
         if audio_features and model_family == LEGACY_MODEL_FAMILY:
@@ -435,6 +462,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if curve.get("audio_sha256") != audio_sha256(audio_path):
                 raise ValueError("张力曲线与当前音频不匹配：更换歌曲后请重新生成曲线")
             if curve.get("method") in {"learned_music_structure_v2", "learned_music_structure_v3"} and curve.get("checkpoint"):
+                if curve.get("tempo_map_sha256") != tempo_map_hash:
+                    raise ValueError("曲线预测使用的 tempo map 已变化，请用当前节拍设置重新生成曲线")
                 curve_checkpoint = _resolve_path(curve["checkpoint"])
                 current_stat = checkpoint.stat()
                 identity = {"size": current_stat.st_size, "mtime_ns": current_stat.st_mtime_ns}
@@ -449,8 +478,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     default_level=current_condition.level)
                 if (curve.get("condition") != current_condition.to_dict()
                         or float(curve.get("first", 0)) != float(payload.get("first", 0))
-                        or curve.get("tempo_mode", "constant") != payload.get("tempo_mode", "constant")
-                        or (payload.get("bpm") is not None and float(curve.get("bpm")) != float(payload["bpm"]))):
+                        or (tempo_map_hash is None
+                            and curve.get("tempo_mode", "constant") != payload.get("tempo_mode", "constant"))
+                        or (tempo_map_hash is None and (
+                            curve.get("bpm_input") != (float(payload["bpm"])
+                                if payload.get("bpm") not in {None, ""} else None)
+                            if "bpm_input" in curve else
+                            payload.get("bpm") not in {None, ""}
+                            and float(curve.get("bpm")) != float(payload["bpm"])))):
                     raise ValueError("曲线预测所用等级、风格或节拍设置已变化，请重新生成曲线后继续编辑")
         tempo_mode = str(payload.get("tempo_mode", "constant")).strip().lower()
         intensity_mode = str(payload.get("intensity_mode", GENERATION_SAMPLING_DEFAULTS["intensity_mode"]))
@@ -488,7 +523,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             curve_path = INTENSITY_ROOT / f"{task.task_id}_edited.json"
             stored_curve = {key: curve[key] for key in
                             ("schema", "audio_sha256", "duration_sec", "points", "method", "edited",
-                             "checkpoint", "checkpoint_identity", "condition", "bpm", "first", "tempo_mode", "rest_regions")
+                             "checkpoint", "checkpoint_identity", "condition", "bpm", "bpm_input", "first", "tempo_mode",
+                             "rest_regions", "tempo_changes", "explicit_tempo_map", "tempo_map_sha256")
                             if key in curve}
             curve_path.write_text(json.dumps(stored_curve, ensure_ascii=False), encoding="utf-8")
             task.result["intensity_curve_path"] = str(curve_path)
@@ -543,6 +579,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 args.extend(["--intensity-curve", str(curve_path),
                              "--intensity-curve-strength", str(curve_strength),
                              "--intensity-curve-mode", curve_mode])
+            if explicit_tempo_map is not None:
+                tempo_path = CONDITION_ROOT / f"{task.task_id}_tempo.json"
+                tempo_path.write_text(json.dumps(explicit_tempo_map, ensure_ascii=False, indent=2), encoding="utf-8")
+                args.extend(["--tempo-map", str(tempo_path)])
             # Intensity following: the condition vector is song-level, so this is
             # what tells each window how loud the music actually is.  Passed
             # explicitly in both directions so the log always states the mode.
@@ -667,9 +707,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             ]
             if payload.get("bpm") not in {None, ""}:
                 args.extend(["--bpm", str(payload["bpm"])])
-            if payload.get("tempo_map"):
+            if explicit_tempo_map is not None:
                 tempo_path = CONDITION_ROOT / f"{task.task_id}_tempo.json"
-                tempo_path.write_text(json.dumps(payload["tempo_map"], ensure_ascii=False, indent=2), encoding="utf-8")
+                tempo_path.write_text(json.dumps(explicit_tempo_map, ensure_ascii=False, indent=2), encoding="utf-8")
                 args.extend(["--tempo-map", str(tempo_path)])
             if audio_features_path is not None:
                 args.extend(["--audio-features", str(audio_features_path)])

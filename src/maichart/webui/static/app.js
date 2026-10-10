@@ -595,7 +595,7 @@ function updateFamilyFields() {
   if (bpmHelp) {
     bpmHelp.textContent = currentGenerationFamily() === "legacy_frame_v2"
       ? "旧基线：留空自动分析；填写则覆盖为单一 BPM，tempo map 可进一步覆盖。"
-      : "留空即使用自动估计的 BPM；填写则完全采用你给的值。auto 会额外采用高置信度的变速点，建议仅在确认歌曲变速时使用。";
+      : "未填 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外使用高置信度变速点。填写 tempo map 后，其 beat 0 BPM 与变速点优先。";
   }
 }
 
@@ -825,6 +825,17 @@ function intensityCurvePayload() {
     rest_regions: normalizeRestRegions(profile.rest_regions, Number(profile.duration_sec || 0)),
     method: profile.method || "music-tension-proxy-v1",
     edited: profile.edited === true,
+    ...(profile.checkpoint ? { checkpoint: profile.checkpoint } : {}),
+    ...(profile.checkpoint_identity ? { checkpoint_identity: profile.checkpoint_identity } : {}),
+    ...(profile.condition ? { condition: profile.condition } : {}),
+    ...(profile.level !== undefined ? { level: profile.level } : {}),
+    ...(profile.bpm !== undefined ? { bpm: profile.bpm } : {}),
+    ...(profile.bpm_input !== undefined ? { bpm_input: profile.bpm_input } : {}),
+    ...(profile.first !== undefined ? { first: profile.first } : {}),
+    ...(profile.tempo_mode ? { tempo_mode: profile.tempo_mode } : {}),
+    ...(profile.tempo_changes ? { tempo_changes: profile.tempo_changes } : {}),
+    ...(profile.explicit_tempo_map ? { explicit_tempo_map: profile.explicit_tempo_map } : {}),
+    ...(profile.tempo_map_sha256 ? { tempo_map_sha256: profile.tempo_map_sha256 } : {}),
   };
 }
 
@@ -2417,6 +2428,7 @@ async function generateIntensityCurve() {
     checkpoint: generation.checkpoint || null,
     condition: generation.condition, bpm: generation.bpm,
     first: generation.first, tempo_mode: generation.tempo_mode,
+    tempo_map: generation.tempo_map,
   });
   if (intensityCurveState.timer) clearTimeout(intensityCurveState.timer);
   intensityCurveState.taskId = data.task_id; await pollIntensityTask(data.task_id, audio);
@@ -2481,6 +2493,15 @@ function invalidateIntensityForAudio() {
     const audio = element("#intensityAudio"); if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
     saveIntensityCurveState(); setIntensityStatus("音频已变化，旧曲线已失效，请重新生成。", "warn");
   } else setIntensitySong(path);
+}
+
+function invalidateLearnedCurveForTiming() {
+  const profile = intensityCurveState.profile;
+  if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
+  intensityCurveState.saved = false;
+  saveIntensityCurveState();
+  updateIntensityButtons();
+  setIntensityStatus("节拍设置已变化，模型来源曲线需要重新生成。", "warn");
 }
 
 async function restoreIntensityBackdrop() {
@@ -2888,6 +2909,11 @@ on("#datasetZip", "change", async (event) => {
 // Generation panel
 on("#audioFile", "change", async (event) => { const data = await upload("audio", event.target.files[0], "#audioPath", "#audioUploadStatus"); invalidateIntensityForAudio(); return data; });
 on("#audioPath", "input", invalidateIntensityForAudio);
+on("#tempoMap", "input", invalidateLearnedCurveForTiming);
+on("#tempoMap", "change", invalidateLearnedCurveForTiming);
+["#bpm", "#first", "#tempoMode"].forEach((selector) => {
+  on(selector, "change", invalidateLearnedCurveForTiming);
+});
 on("#featureFile", "change", (event) => upload("audio_features", event.target.files[0], "#featurePath", "#featureUploadStatus"));
 on("#checkpointFile", "change", async (event) => {
   const data = await upload("checkpoint", event.target.files[0], "#checkpointPath", "#checkpointUploadStatus");

@@ -9,23 +9,32 @@ import torch
 
 from maichart.event_timing import seconds_at_beat
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
-from maichart.generation.event_audio import extract_event_audio, audio_segment_tensor, compress_event_audio
+from maichart.generation.event_audio import (
+    extract_event_audio, audio_segment_tensor, compress_event_audio,
+    _normalize_tempo_map, _time_to_beat,
+)
 from maichart.generation.music_intensity import generate_intensity_profile, validate_intensity_profile
 from maichart.training.event_checkpoints import load_event_model
 from maichart.generation.music_plan import CONTINUOUS_COUNT, continuous_keys, is_music_structure
+from maichart.generation.timeline import (
+    beat_at_audio_end,
+    normalize_tempo_map,
+    serialize_tempo_map,
+    tempo_map_fingerprint,
+)
 
 
 def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
                              local_context_sec=12.0, condition=None, bpm=None,
-                             first=0.0, tempo_mode="constant", device="cpu"):
+                             first=0.0, tempo_mode="constant", tempo_map=None, device="cpu"):
     """Predict authored local workload rather than treating energy as difficulty.
 
     Prediction resolution is the checkpoint's training window. Interpolation
     only places those predictions on the editor's time axis; it does not imply
     finer model supervision.
     """
-    from maichart.generation.event_cli import (_tempo_map, _musical_bpm, _duration_beats,
-                                              _segment_windows, apply_contract_condition_guard)
+    from maichart.generation.event_cli import (_tempo_map, _musical_bpm, _segment_windows,
+                                              apply_contract_condition_guard)
 
     device = torch.device(device)
     model, _, checkpoint = load_event_model(checkpoint_path, device)
@@ -38,12 +47,16 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
     audio = extract_event_audio(audio_path, cache_dir=Path(checkpoint_path).resolve().parent / "curve_audio_cache",
                                 sample_rate=int(contract.get("sample_rate", 22050)),
                                 hop_length=int(contract.get("hop_length", 441)))
-    bpm = float(bpm) if bpm is not None else _musical_bpm(float(audio.tempo_bpm))
+    bpm_input = float(bpm) if bpm is not None else None
+    bpm = bpm_input if bpm_input is not None else _musical_bpm(float(audio.tempo_bpm))
     if not np.isfinite(bpm) or bpm <= 0:
         raise ValueError("模型预测曲线需要有效 BPM")
     if not np.isfinite(float(first)):
         raise ValueError("first must be finite")
-    tempo = _tempo_map(tempo_mode, audio, bpm, snap=False)
+    explicit_tempo_map = serialize_tempo_map(tempo_map) if tempo_map is not None else None
+    tempo = (normalize_tempo_map(explicit_tempo_map) if explicit_tempo_map is not None
+             else _tempo_map(tempo_mode, audio, bpm, snap=bpm_input is None))
+    bpm = float(tempo[0].bpm)
     condition = (GenerationCondition.from_dict(condition) if isinstance(condition, dict) else condition)
     if condition is None:
         condition = GenerationCondition(level=13.3, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
@@ -53,7 +66,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
                                         first=first, tempo_changes=tempo,
                                         frames=model.config.global_audio_tokens).unsqueeze(0).to(device)
     layout = contract.get("family_params") or {}
-    windows = _segment_windows(_duration_beats(max(0.0, audio.duration_sec - first), bpm),
+    windows = _segment_windows(beat_at_audio_end(audio.duration_sec, tempo, first),
                                int(contract.get("segment_beats", 16)),
                                overlap_beats=int(layout.get("overlap_beats", 0)))
     centers, values, descriptors = [], [], []
@@ -68,12 +81,13 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
             margin = Fraction(int(layout.get("audio_margin_beats", 0)))
             begin = max(Fraction(0), start - margin)
             finish = end + margin
-            x = audio_segment_tensor(audio, max(0.0, float(seconds_at_beat(begin, tempo, first))),
-                                      min(float(audio.duration_sec), float(seconds_at_beat(finish, tempo, first))),
-                                      song_duration=audio.duration_sec, bpm=bpm, start_beat=begin,
+            begin_sec = max(0.0, float(seconds_at_beat(begin, tempo, first)))
+            finish_sec = min(float(audio.duration_sec), float(seconds_at_beat(finish, tempo, first)))
+            start_beat = _time_to_beat(begin_sec - float(first), _normalize_tempo_map(tempo, bpm))
+            x = audio_segment_tensor(audio, begin_sec, finish_sec,
+                                      song_duration=audio.duration_sec, bpm=bpm, start_beat=start_beat,
                                       first=first, tempo_changes=tempo).unsqueeze(0).to(device)
             from maichart.generation.event_audio import FEATURE_RATE_HZ
-            begin_sec = max(0.0, float(seconds_at_beat(begin, tempo, first)))
             sample_times = begin_sec + torch.arange(x.size(1), device=device) / FEATURE_RATE_HZ
             core_mask = ((sample_times < low) | (sample_times >= high)).unsqueeze(0)
             memory, padding = model.encode_audio(x, condition.to_vector(device=device).unsqueeze(0),
@@ -111,8 +125,12 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
     profile["condition"] = condition.to_dict()
     profile["level"] = condition.level
     profile["bpm"] = bpm
+    profile["bpm_input"] = bpm_input
     profile["first"] = float(first)
     profile["tempo_mode"] = tempo_mode
+    profile["tempo_changes"] = serialize_tempo_map(tempo)
+    profile["explicit_tempo_map"] = explicit_tempo_map
+    profile["tempo_map_sha256"] = tempo_map_fingerprint(explicit_tempo_map)
     profile["limitations"] = [
         "0.5 is the chart's learned average workload, not a difficulty rating or emotion label.",
         "The trained window determines prediction resolution; editor interpolation adds no supervision.",
