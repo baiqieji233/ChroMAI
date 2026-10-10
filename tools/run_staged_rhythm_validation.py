@@ -8,6 +8,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import sys
 import time
 import urllib.error
@@ -25,7 +26,7 @@ if __package__ in (None, ""):
 SUCCESS_STATUSES = {"complete", "completed", "success", "succeeded", "finished", "done"}
 FAILURE_STATUSES = {"failed", "error", "failure"}
 CANCELLED_STATUSES = {"cancelled", "canceled"}
-NONRESUMABLE_FINAL = {"completed", "completed_with_errors", "failed", "cancelled"}
+NONRESUMABLE_FINAL = {"completed", "completed_with_errors", "failed", "cancelled", "dependency_failed"}
 
 
 class HTTPResponseError(RuntimeError):
@@ -145,6 +146,12 @@ def _load_config(path: Path) -> tuple[dict[str, Any], Path]:
     for key in ("base_url", "initial_task_id", "jobs", "state_path", "report_path", "evaluation_paths"):
         if key not in config:
             raise ValueError(f"Controller config is missing {key!r}.")
+    dependency_path = config.get("depends_on_state")
+    dependency_digest = config.get("depends_on_config_sha256")
+    if bool(dependency_path) != bool(dependency_digest):
+        raise ValueError("depends_on_state and depends_on_config_sha256 must be provided together.")
+    if dependency_digest is not None and not re.fullmatch(r"[0-9a-fA-F]{64}", str(dependency_digest)):
+        raise ValueError("depends_on_config_sha256 must be a 64-character SHA-256 hex digest.")
     if not isinstance(config["jobs"], list) or not isinstance(config["evaluation_paths"], list):
         raise ValueError("jobs and evaluation_paths must be JSON arrays.")
     for index, job in enumerate(config["jobs"]):
@@ -230,6 +237,13 @@ class StagedRhythmValidation:
         self.http_timeout = min(20.0, max(0.1, requested_timeout))
         self.poll_seconds = min(30.0, max(0.0, requested_poll))
         self.state_path = _resolve_path(config["state_path"], config_dir)
+        self.dependency_path = (_resolve_path(config["depends_on_state"], config_dir)
+                                if config.get("depends_on_state") else None)
+        self.dependency_digest = (str(config["depends_on_config_sha256"]).lower()
+                                  if config.get("depends_on_config_sha256") else None)
+        if (self.dependency_path is not None
+                and os.path.normcase(str(self.dependency_path)) == os.path.normcase(str(self.state_path))):
+            raise ValueError("depends_on_state must not resolve to this controller's own state_path.")
         self.report_path = _resolve_path(config["report_path"], config_dir)
         self.evaluation_paths = [_resolve_path(item, config_dir) for item in config["evaluation_paths"]]
         self.config_digest = hashlib.sha256(_canonical_json(config).encode("utf-8")).hexdigest()
@@ -243,10 +257,20 @@ class StagedRhythmValidation:
                     "Config differs from the saved run state. Keep the original job queue; edit the state only "
                     "to attach a task_id after resolving a submit_uncertain job."
                 )
-            if state.get("initial", {}).get("task_id") != str(self.config["initial_task_id"]):
+            expected_initial_id = (str(self.config["initial_task_id"])
+                                   if self.config["initial_task_id"] is not None else None)
+            if state.get("initial", {}).get("task_id") != expected_initial_id:
                 raise ValueError("Saved initial task_id differs from config; refusing to observe another task.")
             if len(state.get("jobs", [])) != len(self.config["jobs"]):
                 raise ValueError("Saved job count differs from config.")
+            if self.dependency_path is not None and not isinstance(state.get("dependency"), dict):
+                # A controller from before dependency support may have written
+                # a matching config digest while ignoring these optional keys.
+                state["dependency"] = {
+                    "path": str(self.dependency_path),
+                    "expected_config_sha256": self.dependency_digest,
+                    "status": "pending",
+                }
             state["human_review"] = "pending"
             state.setdefault("evaluation", {})["human_review"] = "pending"
             return state
@@ -257,8 +281,9 @@ class StagedRhythmValidation:
             "status": "queued",
             "initial": {
                 "name": "initial_training",
-                "task_id": str(self.config["initial_task_id"]),
-                "status": "pending",
+                "task_id": (str(self.config["initial_task_id"])
+                            if self.config["initial_task_id"] is not None else None),
+                "status": ("pending" if self.config["initial_task_id"] is not None else "not_requested"),
                 "consecutive_observation_failures": 0,
             },
             "jobs": [
@@ -267,15 +292,22 @@ class StagedRhythmValidation:
                  "result": None, "error": None}
                 for job in self.config["jobs"]
             ],
-            "current_stage": "initial_training",
+            "current_stage": ("dependency" if self.dependency_path is not None else
+                              "jobs" if self.config["initial_task_id"] is None else "initial_training"),
             "events": [],
             "evaluation": {"status": "pending", "path_count": len(self.evaluation_paths)},
+            "dependency": ({"path": str(self.dependency_path),
+                            "expected_config_sha256": self.dependency_digest,
+                            "status": "pending"} if self.dependency_path is not None else None),
             "human_review": "pending",
             "created_at": self.now_fn(),
             "updated_at": self.now_fn(),
         }
         self.state = state
-        self._transition(state, "queued", "Controller initialized; initial task will be observed by its saved ID.")
+        initial_message = ("Controller initialized; the configured initial task will be observed by its saved ID."
+                          if self.config["initial_task_id"] is not None
+                          else "Controller initialized with no external initial task.")
+        self._transition(state, "queued", initial_message)
         return state
 
     def _persist(self, *, markdown: bool = False) -> None:
@@ -304,7 +336,7 @@ class StagedRhythmValidation:
             f"- Status: `{self.state.get('status')}`",
             f"- Updated: `{self.state.get('updated_at')}`",
             f"- Base URL: `{self.base_url}`",
-            f"- Initial training task: `{self.state['initial']['task_id']}` ({self.state['initial']['status']})",
+            f"- Initial training task: `{self.state['initial']['task_id'] if self.state['initial'].get('task_id') is not None else 'not requested'}` ({self.state['initial']['status']})",
             "- Human review: pending",
             "",
             "## Jobs",
@@ -319,6 +351,14 @@ class StagedRhythmValidation:
         for event in self.state.get("events", []):
             lines.append(f"- `{event['at']}` `{event.get('stage')}`: `{event.get('from')}` -> "
                          f"`{event.get('to')}`. {event.get('message', '')}")
+        dependency = self.state.get("dependency") or {}
+        if dependency:
+            lines.extend(["", "## Dependency", "",
+                          f"- Status: `{dependency.get('status')}`",
+                          f"- State path: `{dependency.get('path')}`",
+                          f"- Observed controller status: `{dependency.get('observed_status', 'unavailable')}`"])
+            if dependency.get("error"):
+                lines.append(f"- Dependency error: {dependency['error']}")
         evaluation = self.state.get("evaluation") or {}
         lines.extend(["", "## Evaluation", "", f"- Status: `{evaluation.get('status')}`"])
         completeness = evaluation.get("artifact_completeness") or {}
@@ -471,6 +511,92 @@ class StagedRhythmValidation:
             endpoint = endpoint.split("?")[0]
         return endpoint == "/api/generate" or str(job_config.get("kind", "")).lower() == "generation"
 
+    def _wait_for_dependency(self) -> bool:
+        if self.dependency_path is None:
+            return True
+        dependency = self.state.get("dependency")
+        if not isinstance(dependency, dict):
+            dependency = {"path": str(self.dependency_path),
+                          "expected_config_sha256": self.dependency_digest,
+                          "status": "pending"}
+            self.state["dependency"] = dependency
+        self.state["status"] = "waiting_for_dependency"
+        self.state["current_stage"] = "dependency"
+        dependency.setdefault("name", "dependency")
+        self._persist(markdown=True)
+        while True:
+            try:
+                snapshot = json.loads(self.dependency_path.read_text(encoding="utf-8"))
+                if not isinstance(snapshot, dict):
+                    raise ValueError("dependency state root is not an object")
+            except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
+                dependency.update({"status": "waiting", "observed_status": "unavailable",
+                                   "error": str(exc), "last_observed_at": self.now_fn()})
+                self.state["status"] = "waiting_for_dependency"
+                self.state["current_stage"] = "dependency"
+                self._persist(markdown=True)
+                self.sleep_fn(self.poll_seconds)
+                continue
+
+            observed_digest = snapshot.get("config_sha256")
+            dependency.update({"observed_config_sha256": observed_digest,
+                               "observed_status": snapshot.get("status", "unknown"),
+                               "observed_updated_at": snapshot.get("updated_at"),
+                               "last_state": snapshot, "last_observed_at": self.now_fn()})
+            dependency.pop("error", None)
+            if observed_digest != self.dependency_digest:
+                return self._fail_dependency(
+                    dependency,
+                    f"config digest mismatch: expected {self.dependency_digest}, observed {observed_digest!r}")
+
+            observed_status = str(snapshot.get("status", "unknown")).strip().lower()
+            if observed_status in {"failed", "cancelled", "canceled", "completed_with_errors", "dependency_failed"}:
+                return self._fail_dependency(
+                    dependency, f"upstream controller ended with status {observed_status!r}")
+
+            if observed_status == "completed":
+                initial = snapshot.get("initial")
+                jobs = snapshot.get("jobs")
+                evaluation = snapshot.get("evaluation")
+                initial_status = initial.get("status") if isinstance(initial, dict) else None
+                initial_complete = initial_status in {"completed", "not_requested"}
+                all_jobs_completed = (isinstance(jobs, list)
+                                      and all(isinstance(job, dict) and job.get("status") == "completed"
+                                              for job in jobs))
+                evaluation_status = evaluation.get("status") if isinstance(evaluation, dict) else None
+                evaluation_complete = evaluation_status in {"completed", "not_requested"}
+                if initial_complete and all_jobs_completed and evaluation_complete:
+                    dependency["error"] = None
+                    self._transition(dependency, "completed", "Upstream controller and all jobs/evaluation completed.")
+                    self.state["status"] = "running"
+                    self.state["current_stage"] = (
+                        "initial_training" if self.config["initial_task_id"] is not None else "jobs")
+                    self._persist(markdown=True)
+                    return True
+                dependency.update({"status": "waiting", "reason": "upstream completion snapshot is incomplete",
+                                   "initial_status": initial_status,
+                                   "evaluation_status": evaluation_status,
+                                   "job_statuses": [job.get("status") if isinstance(job, dict) else None
+                                                    for job in jobs] if isinstance(jobs, list) else None})
+            else:
+                dependency.update({"status": "waiting", "reason": "upstream controller is not terminal"})
+
+            self.state["status"] = "waiting_for_dependency"
+            self.state["current_stage"] = "dependency"
+            self._persist(markdown=True)
+            self.sleep_fn(self.poll_seconds)
+
+    def _fail_dependency(self, dependency: dict[str, Any], reason: str) -> bool:
+        dependency.update({"status": "failed", "error": reason})
+        self.state["status"] = "dependency_failed"
+        self.state["current_stage"] = "dependency"
+        self.state["events"].append({
+            "at": self.now_fn(), "stage": "dependency", "from": "waiting_for_dependency",
+            "to": "dependency_failed", "message": reason,
+        })
+        self._persist(markdown=True)
+        return False
+
     def _artifact_completeness(self) -> dict[str, Any]:
         expected_count = produced_count = missing_count = unverifiable_count = 0
         missing_paths: list[str] = []
@@ -620,8 +746,17 @@ class StagedRhythmValidation:
         self._persist(markdown=True)
 
     def run(self) -> int:
+        if self.state["status"] == "dependency_failed":
+            return 2
         if self.state["status"] in NONRESUMABLE_FINAL:
-            return {"completed": 0, "completed_with_errors": 2}.get(self.state["status"], 1)
+            dependency = self.state.get("dependency") or {}
+            dependency_already_satisfied = (
+                self.dependency_path is None
+                or (dependency.get("status") == "completed"
+                    and dependency.get("expected_config_sha256") == self.dependency_digest)
+            )
+            if dependency_already_satisfied:
+                return {"completed": 0, "completed_with_errors": 2}.get(self.state["status"], 1)
         if self.state["status"] in {"submit_uncertain", "observation_unavailable"}:
             # An operator may attach the discovered task ID in state.json after reconciliation.
             current_name = self.state.get("current_stage")
@@ -638,8 +773,10 @@ class StagedRhythmValidation:
                 stage["status"] = "submitted"
             self._persist(markdown=True)
         try:
+            if self.dependency_path is not None and not self._wait_for_dependency():
+                return 2
             initial = self.state["initial"]
-            if initial.get("status") != "completed":
+            if initial.get("status") not in {"completed", "not_requested"}:
                 self.state["current_stage"] = "initial_training"
                 self.state["current_job_index"] = -1
                 initial.setdefault("name", "initial_training")

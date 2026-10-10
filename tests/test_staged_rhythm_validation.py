@@ -1,3 +1,4 @@
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -10,6 +11,7 @@ from tools.run_staged_rhythm_validation import (
     StateFileLock,
     StateLockError,
     StagedRhythmValidation,
+    _canonical_json,
     _load_config,
     _generation_output_paths,
     run_config,
@@ -46,10 +48,11 @@ class FakeClient:
 
 
 def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_timeout_sec=20,
-            reference_dir=None):
+            reference_dir=None, initial_task_id="train-001", depends_on_state=None,
+            depends_on_config_sha256=None):
     config = {
         "base_url": "http://127.0.0.1:7862",
-        "initial_task_id": "train-001",
+        "initial_task_id": initial_task_id,
         "jobs": jobs or [],
         "state_path": "controller_state.json",
         "report_path": "controller_report.md",
@@ -58,6 +61,9 @@ def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_
         "poll_seconds": poll_seconds,
         "http_timeout_sec": http_timeout_sec,
     }
+    if depends_on_state is not None:
+        config["depends_on_state"] = str(depends_on_state)
+        config["depends_on_config_sha256"] = depends_on_config_sha256
     if reference_dir is not None:
         config["reference_dir"] = str(reference_dir)
     path = tmp_path / "controller_config.json"
@@ -68,6 +74,19 @@ def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_
 
 def _task(status, **extra):
     return {"task_id": "remote", "status": status, **extra}
+
+
+def _write_dependency(path, digest, *, status, initial_status="completed",
+                      job_status="completed", evaluation_status="completed"):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({
+        "config_sha256": digest,
+        "status": status,
+        "updated_at": "test-time",
+        "initial": {"task_id": None, "status": initial_status},
+        "jobs": [{"name": "upstream-job", "status": job_status}],
+        "evaluation": {"status": evaluation_status},
+    }), encoding="utf-8")
 
 
 def test_initial_training_is_observed_then_jobs_run_once_and_evaluate(tmp_path):
@@ -457,3 +476,204 @@ def test_state_lock_is_released_after_exception(tmp_path):
 
     with StateFileLock(state_path):
         pass
+
+
+def test_dependency_waits_for_full_completion_and_null_initial_skips_get(tmp_path):
+    dependency_path = tmp_path / "upstream_state.json"
+    digest = "a" * 64
+    _write_dependency(dependency_path, digest, status="running")
+    config_path = _config(
+        tmp_path / "child", initial_task_id=None,
+        jobs=[{"name": "onset_finetune", "endpoint": "/api/train", "payload": {}}],
+        depends_on_state=dependency_path, depends_on_config_sha256=digest)
+    child_state_path = tmp_path / "child" / "controller_state.json"
+    wait_snapshots = []
+    wait_count = 0
+
+    def sleep_and_advance(_seconds):
+        nonlocal wait_count
+        child_state = json.loads(child_state_path.read_text(encoding="utf-8"))
+        wait_snapshots.append((child_state["status"], child_state["current_stage"],
+                               child_state["dependency"]["observed_status"]))
+        if wait_count == 0:
+            _write_dependency(dependency_path, digest, status="completed",
+                              initial_status="running", job_status="completed",
+                              evaluation_status="completed")
+        else:
+            _write_dependency(dependency_path, digest, status="completed")
+        wait_count += 1
+
+    def assert_dependency_complete(_payload):
+        upstream = json.loads(dependency_path.read_text(encoding="utf-8"))
+        assert upstream["status"] == "completed"
+        assert upstream["jobs"][0]["status"] == "completed"
+        assert upstream["evaluation"]["status"] == "completed"
+
+    client = FakeClient(gets={"onset-task": _task("completed")},
+                        posts=[{"task_id": "onset-task"}], on_post=assert_dependency_complete)
+
+    assert run_config(config_path, client=client, sleep_fn=sleep_and_advance) == 0
+    assert wait_snapshots == [
+        ("waiting_for_dependency", "dependency", "running"),
+        ("waiting_for_dependency", "dependency", "completed"),
+    ]
+    assert client.post_calls and client.get_calls == ["onset-task"]
+    state = json.loads(child_state_path.read_text(encoding="utf-8"))
+    assert state["initial"] == {
+        "name": "initial_training", "task_id": None, "status": "not_requested",
+        "consecutive_observation_failures": 0,
+    }
+    assert state["dependency"]["status"] == "completed"
+
+
+def test_dependency_wait_survives_interrupt_and_resumes_without_resubmission(tmp_path):
+    dependency_path = tmp_path / "upstream_state.json"
+    digest = "b" * 64
+    _write_dependency(dependency_path, digest, status="controller_interrupted")
+    config_path = _config(
+        tmp_path / "child", initial_task_id=None,
+        jobs=[{"name": "onset_finetune", "endpoint": "/api/train", "payload": {}}],
+        depends_on_state=dependency_path, depends_on_config_sha256=digest)
+    child_state_path = tmp_path / "child" / "controller_state.json"
+    captured = []
+
+    def interrupt_after_persist(_seconds):
+        state = json.loads(child_state_path.read_text(encoding="utf-8"))
+        captured.append((state["status"], state["current_stage"], state["dependency"]["observed_status"]))
+        raise KeyboardInterrupt
+
+    client = FakeClient(gets={"onset-task": _task("completed")}, posts=[{"task_id": "onset-task"}])
+    assert run_config(config_path, client=client, sleep_fn=interrupt_after_persist) == 130
+    assert captured == [("waiting_for_dependency", "dependency", "controller_interrupted")]
+    assert client.post_calls == [] and client.get_calls == []
+
+    _write_dependency(dependency_path, digest, status="completed")
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 0
+    assert len(client.post_calls) == 1
+    assert client.get_calls == ["onset-task"]
+
+
+def test_dependency_wait_is_migrated_when_old_child_state_lacks_dependency_record(tmp_path):
+    dependency_path = tmp_path / "upstream_state.json"
+    digest = "9" * 64
+    _write_dependency(dependency_path, digest, status="running")
+    config_path = _config(
+        tmp_path / "child", initial_task_id="legacy-observed-task",
+        jobs=[{"name": "next", "endpoint": "/api/train", "payload": {}}],
+        depends_on_state=dependency_path, depends_on_config_sha256=digest)
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    state_path = config_path.parent / config_data["state_path"]
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({
+        "config_sha256": hashlib.sha256(_canonical_json(config_data).encode("utf-8")).hexdigest(),
+        "status": "controller_interrupted",
+        "initial": {"task_id": "legacy-observed-task", "status": "completed"},
+        "jobs": [{"name": "next", "endpoint": "/api/train", "status": "pending", "task_id": None}],
+        "events": [],
+    }), encoding="utf-8")
+    client = FakeClient()
+
+    def stop_after_dependency_read(_seconds):
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["dependency"]["status"] == "waiting"
+        raise KeyboardInterrupt
+
+    assert run_config(config_path, client=client, sleep_fn=stop_after_dependency_read) == 130
+    assert client.post_calls == []
+
+
+def test_dependency_gate_runs_before_trusting_old_final_child_state(tmp_path):
+    dependency_path = tmp_path / "upstream_state.json"
+    digest = "8" * 64
+    _write_dependency(dependency_path, digest, status="running")
+    config_path = _config(
+        tmp_path / "child", initial_task_id=None, jobs=[],
+        depends_on_state=dependency_path, depends_on_config_sha256=digest)
+    config_data = json.loads(config_path.read_text(encoding="utf-8"))
+    state_path = config_path.parent / config_data["state_path"]
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    state_path.write_text(json.dumps({
+        "config_sha256": hashlib.sha256(_canonical_json(config_data).encode("utf-8")).hexdigest(),
+        "status": "completed",
+        "initial": {"task_id": None, "status": "not_requested"},
+        "jobs": [], "events": [],
+        "evaluation": {"status": "not_requested"},
+    }), encoding="utf-8")
+    client = FakeClient()
+
+    def stop_after_dependency_read(_seconds):
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["status"] == "waiting_for_dependency"
+        assert state["current_stage"] == "dependency"
+        raise KeyboardInterrupt
+
+    assert run_config(config_path, client=client, sleep_fn=stop_after_dependency_read) == 130
+    assert client.post_calls == [] and client.get_calls == []
+
+
+@pytest.mark.parametrize(
+    ("dependency_status", "observed_digest", "reason"),
+    [("failed", "c" * 64, "upstream controller ended"),
+     ("cancelled", "c" * 64, "upstream controller ended"),
+     ("completed_with_errors", "c" * 64, "upstream controller ended"),
+     ("completed", "d" * 64, "config digest mismatch")],
+)
+def test_dependency_failure_or_digest_mismatch_never_submits(
+        tmp_path, dependency_status, observed_digest, reason):
+    dependency_path = tmp_path / "upstream_state.json"
+    expected_digest = "c" * 64
+    _write_dependency(dependency_path, observed_digest, status=dependency_status)
+    config_path = _config(
+        tmp_path / "child", initial_task_id=None,
+        jobs=[{"name": "onset_finetune", "endpoint": "/api/train", "payload": {}}],
+        depends_on_state=dependency_path, depends_on_config_sha256=expected_digest)
+    client = FakeClient()
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+    assert client.post_calls == [] and client.get_calls == []
+    state = json.loads((tmp_path / "child" / "controller_state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "dependency_failed"
+    assert reason in state["dependency"]["error"]
+
+
+def test_dependency_transient_state_reads_and_nonterminal_statuses_keep_waiting(tmp_path):
+    dependency_path = tmp_path / "upstream_state.json"
+    digest = "e" * 64
+    dependency_path.write_text("{", encoding="utf-8")
+    config_path = _config(
+        tmp_path / "child", initial_task_id=None,
+        jobs=[{"name": "onset_finetune", "endpoint": "/api/train", "payload": {}}],
+        depends_on_state=dependency_path, depends_on_config_sha256=digest)
+    child_state_path = tmp_path / "child" / "controller_state.json"
+    observed = []
+    updates = ["controller_interrupted", "observation_unavailable", "completed"]
+
+    def update_after_wait(_seconds):
+        child_state = json.loads(child_state_path.read_text(encoding="utf-8"))
+        observed.append((child_state["status"], child_state["current_stage"],
+                         child_state["dependency"]["observed_status"]))
+        next_status = updates.pop(0)
+        _write_dependency(dependency_path, digest, status=next_status)
+
+    client = FakeClient(gets={"task-next": _task("completed")}, posts=[{"task_id": "task-next"}])
+    assert run_config(config_path, client=client, sleep_fn=update_after_wait) == 0
+    assert observed == [
+        ("waiting_for_dependency", "dependency", "unavailable"),
+        ("waiting_for_dependency", "dependency", "controller_interrupted"),
+        ("waiting_for_dependency", "dependency", "observation_unavailable"),
+    ]
+    assert client.get_calls == ["task-next"]
+    state = json.loads(child_state_path.read_text(encoding="utf-8"))
+    assert state["dependency"]["last_state"]["status"] == "completed"
+
+
+def test_dependency_cannot_point_at_own_state_path(tmp_path):
+    digest = "f" * 64
+    config_path = _config(
+        tmp_path, initial_task_id=None, jobs=[],
+        depends_on_state=tmp_path / "controller_state.json",
+        depends_on_config_sha256=digest)
+    config, config_dir = _load_config(config_path)
+
+    with pytest.raises(ValueError, match="own state_path"):
+        StagedRhythmValidation(config, config_dir, client=FakeClient())
