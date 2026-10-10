@@ -46,6 +46,7 @@ def _config(tmp_path, *, jobs=None, evaluation_paths=None, poll_seconds=0, http_
         "http_timeout_sec": http_timeout_sec,
     }
     path = tmp_path / "controller_config.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config), encoding="utf-8")
     return path
 
@@ -76,15 +77,15 @@ def test_initial_training_is_observed_then_jobs_run_once_and_evaluate(tmp_path):
         posts=[{"task_id": "gen-a"}, {"task_id": "gen-b"}],
     )
 
-    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 0
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
 
     assert len(client.post_calls) == 2
     assert client.get_calls == ["train-001", "gen-a", "gen-b"]
     state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
-    assert state["status"] == "completed"
+    assert state["status"] == "completed_with_errors"
     assert [job["status"] for job in state["jobs"]] == ["failed", "completed"]
     assert state["evaluation"]["status"] == "completed"
-    assert state["evaluation"]["human_review"] is None
+    assert state["evaluation"]["human_review"] == "pending"
     assert (tmp_path / "evaluation.json").is_file()
     markdown = (tmp_path / "controller_report.md").read_text(encoding="utf-8")
     assert "Human review: pending" in markdown
@@ -175,3 +176,69 @@ def test_poll_and_http_timeouts_are_capped(tmp_path):
     assert run_config(config_path, client=client, sleep_fn=sleeps.append) == 0
     assert client.timeouts == [20.0, 20.0]
     assert sleeps == [30.0]
+
+
+def test_all_generation_failures_return_completed_with_errors(tmp_path):
+    config_path = _config(tmp_path, jobs=[
+        {"name": "gen-a", "endpoint": "/api/generate", "payload": {}, "continue_on_failure": True},
+        {"name": "gen-b", "endpoint": "/api/generate", "payload": {}, "continue_on_failure": True},
+    ])
+    client = FakeClient(
+        gets={"train-001": _task("completed"), "gen-a": _task("failed", error="bad A"),
+              "gen-b": _task("failed", error="bad B")},
+        posts=[{"task_id": "gen-a"}, {"task_id": "gen-b"}],
+    )
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "completed_with_errors"
+    assert [job["status"] for job in state["jobs"]] == ["failed", "failed"]
+    assert [job["error"] for job in state["jobs"]] == ["bad A", "bad B"]
+    assert state["human_review"] == "pending"
+
+
+def test_evaluation_exception_and_zero_results_with_errors_are_not_green(tmp_path):
+    missing_config = _config(tmp_path / "exception", evaluation_paths=[str(tmp_path / "absent")])
+    missing_client = FakeClient(gets={"train-001": _task("completed")})
+
+    assert run_config(missing_config, client=missing_client, sleep_fn=lambda _: None) == 2
+    missing_state = json.loads((tmp_path / "exception" / "controller_state.json").read_text(encoding="utf-8"))
+    assert missing_state["status"] == "completed_with_errors"
+    assert missing_state["evaluation"]["status"] == "failed"
+    assert missing_state["evaluation"]["error"]
+    assert missing_state["human_review"] == "pending"
+
+    bad_chart = tmp_path / "bad.chart.json"
+    bad_chart.write_text("{}", encoding="utf-8")
+    bad_config = _config(tmp_path / "zero-results", evaluation_paths=[str(bad_chart)])
+    bad_client = FakeClient(gets={"train-001": _task("completed")})
+    assert run_config(bad_config, client=bad_client, sleep_fn=lambda _: None) == 2
+    bad_state = json.loads((tmp_path / "zero-results" / "controller_state.json").read_text(encoding="utf-8"))
+    assert bad_state["evaluation"]["status"] == "failed"
+    assert bad_state["evaluation"]["evaluated_count"] == 0
+    assert bad_state["evaluation"]["error_count"] == 1
+    assert bad_state["evaluation"]["error_details"]
+
+
+def test_partial_evaluation_is_nonzero_and_keeps_error_details(tmp_path):
+    chart_dir = tmp_path / "charts"
+    chart_dir.mkdir()
+    good = chart_dir / "good.chart.json"
+    good.write_text(json.dumps({
+        "schema": "maichart-event-chart-v1",
+        "points": [{"beat": "0", "note_text": "1"}, {"beat": "1", "note_text": "2"},
+                   {"beat": "2", "note_text": "3"}, {"beat": "3", "note_text": "4"},
+                   {"beat": "4", "note_text": ""}],
+        "tempo_changes": [{"beat": "0", "bpm": 120}], "first": 0.0,
+        "end_beat": "4", "audio_duration_sec": 2.0,
+    }), encoding="utf-8")
+    (chart_dir / "bad.chart.json").write_text("{}", encoding="utf-8")
+    config_path = _config(tmp_path, evaluation_paths=[str(chart_dir)])
+    client = FakeClient(gets={"train-001": _task("completed")})
+
+    assert run_config(config_path, client=client, sleep_fn=lambda _: None) == 2
+    state = json.loads((tmp_path / "controller_state.json").read_text(encoding="utf-8"))
+    assert state["evaluation"]["status"] == "partial"
+    assert state["evaluation"]["evaluated_count"] == 1
+    assert state["evaluation"]["error_count"] == 1
+    assert state["status"] == "completed_with_errors"

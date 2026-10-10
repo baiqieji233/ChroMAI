@@ -23,7 +23,7 @@ if __package__ in (None, ""):
 SUCCESS_STATUSES = {"complete", "completed", "success", "succeeded", "finished", "done"}
 FAILURE_STATUSES = {"failed", "error", "failure"}
 CANCELLED_STATUSES = {"cancelled", "canceled"}
-NONRESUMABLE_FINAL = {"completed", "failed", "cancelled"}
+NONRESUMABLE_FINAL = {"completed", "completed_with_errors", "failed", "cancelled"}
 
 
 class HTTPResponseError(RuntimeError):
@@ -141,6 +141,8 @@ class StagedRhythmValidation:
                 raise ValueError("Saved initial task_id differs from config; refusing to observe another task.")
             if len(state.get("jobs", [])) != len(self.config["jobs"]):
                 raise ValueError("Saved job count differs from config.")
+            state["human_review"] = "pending"
+            state.setdefault("evaluation", {})["human_review"] = "pending"
             return state
         state = {
             "schema": "maichart-staged-rhythm-validation-state-v1",
@@ -162,7 +164,7 @@ class StagedRhythmValidation:
             "current_stage": "initial_training",
             "events": [],
             "evaluation": {"status": "pending", "path_count": len(self.evaluation_paths)},
-            "human_review": None,
+            "human_review": "pending",
             "created_at": self.now_fn(),
             "updated_at": self.now_fn(),
         }
@@ -215,6 +217,12 @@ class StagedRhythmValidation:
         lines.extend(["", "## Evaluation", "", f"- Status: `{evaluation.get('status')}`"])
         if evaluation.get("report_path"):
             lines.append(f"- JSON report: `{evaluation['report_path']}`")
+        if evaluation.get("evaluated_count") is not None:
+            lines.append(f"- Evaluated charts: {evaluation['evaluated_count']}; errors: {evaluation.get('error_count', 0)}")
+        if evaluation.get("error"):
+            lines.append(f"- Evaluation error: {evaluation['error']}")
+        for error in evaluation.get("error_details", [])[:10]:
+            lines.append(f"- Evaluation error: `{error.get('path', '')}`: {error.get('error', error)}")
         lines.extend(["- Human review: pending", "- No pass/fail playability conclusion was produced.", ""])
         self.report_path.parent.mkdir(parents=True, exist_ok=True)
         self.report_path.write_text("\n".join(lines), encoding="utf-8")
@@ -328,7 +336,7 @@ class StagedRhythmValidation:
         self.state["current_stage"] = "evaluation"
         evaluation = self.state["evaluation"]
         if not self.evaluation_paths:
-            evaluation.update({"status": "not_requested", "human_review": None})
+            evaluation.update({"status": "not_requested", "human_review": "pending"})
             self._persist(markdown=True)
             return
         try:
@@ -343,16 +351,21 @@ class StagedRhythmValidation:
             )
             report_path.parent.mkdir(parents=True, exist_ok=True)
             report_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
-            evaluation.update({"status": "completed", "report_path": str(report_path),
-                               "evaluated_count": payload["evaluated_count"],
-                               "error_count": payload["error_count"], "human_review": None})
+            evaluated_count = int(payload.get("evaluated_count", 0))
+            error_count = int(payload.get("error_count", 0))
+            eval_status = ("completed" if evaluated_count > 0 and error_count == 0 else
+                           "partial" if evaluated_count > 0 and error_count > 0 else "failed")
+            evaluation.update({"status": eval_status, "report_path": str(report_path),
+                               "evaluated_count": evaluated_count, "error_count": error_count,
+                               "error_details": list(payload.get("errors", [])),
+                               "human_review": "pending"})
         except Exception as exc:
-            evaluation.update({"status": "failed", "error": str(exc), "human_review": None})
+            evaluation.update({"status": "failed", "error": str(exc), "human_review": "pending"})
         self._persist(markdown=True)
 
     def run(self) -> int:
         if self.state["status"] in NONRESUMABLE_FINAL:
-            return 0 if self.state["status"] == "completed" else 1
+            return {"completed": 0, "completed_with_errors": 2}.get(self.state["status"], 1)
         if self.state["status"] in {"submit_uncertain", "observation_unavailable"}:
             # An operator may attach the discovered task ID in state.json after reconciliation.
             current_name = self.state.get("current_stage")
@@ -415,12 +428,22 @@ class StagedRhythmValidation:
                             return code
                         return 3
                     self._transition(job_state, "completed", "Job task completed successfully.")
-            self.state["status"] = "completed"
+            self.state["status"] = "evaluating"
+            self.state["current_stage"] = "evaluation"
             self._persist(markdown=True)
             self._evaluation()
-            self.state["status"] = "completed"
+            failed_jobs = [job for job in self.state["jobs"]
+                           if job.get("status") in {"failed", "cancelled"}]
+            evaluation_failed = self.state["evaluation"].get("status") in {"failed", "partial"}
+            final_status = "completed_with_errors" if failed_jobs or evaluation_failed else "completed"
+            self.state["events"].append({
+                "at": self.now_fn(), "stage": "final", "from": "evaluating", "to": final_status,
+                "message": (f"continued_failed_jobs={len(failed_jobs)}; "
+                           f"evaluation_status={self.state['evaluation'].get('status')}"),
+            })
+            self.state["status"] = final_status
             self._persist(markdown=True)
-            return 0
+            return 2 if final_status == "completed_with_errors" else 0
         except KeyboardInterrupt:
             self.state["status"] = "controller_interrupted"
             self.state["events"].append({
