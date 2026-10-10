@@ -25,6 +25,28 @@ class SlideTrajectory:
     start_time: float  # 秒
     duration: float    # 秒
     
+    def angular_span(self) -> float:
+        """Signed sweep in degrees for the pattern, or 0 when unknown.
+
+        ``-`` is the direct route and may be the long way round for a
+        half-turn; ``<``/``>`` are the explicit counter-clockwise / clockwise
+        arcs, so their sign is fixed.  A 180-degree ``-`` is genuinely
+        ambiguous (both routes are equally long), and returning 0 lets callers
+        tell "no sweep" from "half turn".
+        """
+
+        start = ButtonLayout.button_angle(self.start_button)
+        end = ButtonLayout.button_angle(self.end_button)
+        ccw = (end - start) % 360.0
+        cw = ccw - 360.0
+        if self.pattern == "<":
+            return ccw
+        if self.pattern == ">":
+            return cw
+        if abs(abs(ccw) - 180.0) < 1e-6:
+            return 0.0
+        return ccw if abs(ccw) <= abs(cw) else cw
+
     def star_position_at(self, time: float) -> int | None:
         """返回time时刻星星所在的按键位置。
         
@@ -50,38 +72,31 @@ class SlideTrajectory:
         # 直线或弧线slide：线性插值角度
         if self.pattern in ("-", "<", ">", "^"):
             start_ang = ButtonLayout.button_angle(self.start_button)
-            end_ang = ButtonLayout.button_angle(self.end_button)
-            
-            # 选择最短或指定方向的路径
-            if self.pattern == "<":
-                # 逆时针
-                diff = (end_ang - start_ang) % 360
-            elif self.pattern == ">":
-                # 顺时针
-                diff = -((start_ang - end_ang) % 360)
-            else:
-                # 最短路径
-                diff = end_ang - start_ang
-                if diff > 180:
-                    diff -= 360
-                elif diff < -180:
-                    diff += 360
-            
-            current_ang = (start_ang + progress * diff) % 360
-            
-            # 找最接近的按键
+            span = self.angular_span()
+            if span == 0.0 and self.start_button != self.end_button:
+                # A half-turn without a direction: the star crosses the middle
+                # of the board whichever way it goes, so no button can be said
+                # to be "occupied" with confidence.  Reporting None is the
+                # conservative choice and avoids flagging the three buttons the
+                # straight route happens to pass; a real conflict there would
+                # need the authored path geometry, not a straight-line guess.
+                return None
+            current_ang = (start_ang + progress * span) % 360
+
+            # Only treat the star as sitting on a button when it is close to it.
+            # A star's judgement disc is much smaller than the 45-degree button
+            # pitch, so a wide tolerance invents collisions at the midpoint of
+            # every slide.  Six degrees is about a seventh of the pitch.
             min_dist = float('inf')
             closest_btn = None
             for btn in range(1, 9):
                 btn_ang = ButtonLayout.button_angle(btn)
-                ang_diff = min(abs(current_ang - btn_ang), 
-                              360 - abs(current_ang - btn_ang))
+                ang_diff = min(abs(current_ang - btn_ang),
+                               360 - abs(current_ang - btn_ang))
                 if ang_diff < min_dist:
                     min_dist = ang_diff
                     closest_btn = btn
-            
-            # 只有在非常接近时才算"在按键上"（15度容差）
-            if min_dist < 15:
+            if min_dist < 6.0:
                 return closest_btn
             return None
         
@@ -135,8 +150,13 @@ class ConflictDetector:
         enable_soft_conflicts: bool = False,
         max_simultaneous_buttons: int = 4,
         min_tap_interval: float = 0.05,  # 50ms最小间隔
-        max_jump_distance: float = 1.8,  # 最大跳跃距离
-        min_jump_time: float = 0.12,     # 大跳跃最小时间
+        # A jump is only "hard on the hands" when it is both long and fast.
+        # 2.0 is the full diameter of the ring (the 1-5 / 3-7 diagonal), so the
+        # reach rule fires on genuine opposite-side flips rather than on the
+        # ordinary 135-degree movement of 16th notes at ~180 BPM, which a
+        # competent player reads without trouble.
+        max_jump_distance: float = 2.0,  # 最大跳跃距离
+        min_jump_time: float = 0.10,     # 大跳跃最小时间
     ):
         """
         参数：
@@ -287,6 +307,12 @@ class ConflictDetector:
         for i in range(len(taps) - 1):
             t1, t2 = taps[i], taps[i + 1]
             time_diff = t2.time - t1.time
+            # A zero or near-zero gap is a chord, not a jump: two buttons
+            # pressed at the same instant are one gesture per hand, and the
+            # distance between them is a reach, which ``HandDispatch`` covers.
+            # Without this the detector flags every legitimate chord.
+            if time_diff < 1e-3:
+                continue
             distance = ButtonLayout.physical_distance(t1.button, t2.button)
             
             # 短时间内大跨度跳跃
@@ -334,39 +360,40 @@ class ConflictDetector:
         return conflicts
     
     def _detect_rapid_alternation(self, notes: list[NoteEvent]) -> list[ConflictReport]:
-        """检测快速手部交替（软冲突）。
-        
-        规则：左右手快速交替可能导致失误
+        """Detect sustained hand alternation that is faster than the corpus.
+
+        A left-right-left trill is ordinary charting: at 180 BPM an eighth-note
+        trill alternates every 167 ms and a sixteenth-note one every 83 ms, and
+        both are played comfortably.  What is actually worth flagging is a
+        *sustained* run -- at least five alternating taps whose average gap is
+        under 100 ms (roughly 16th notes above 180 BPM) -- because that is where
+        players start losing the pattern rather than reading it.
         """
+
         conflicts = []
-        
         taps = sorted(
             [n for n in notes if n.note_type == "tap" and isinstance(n.button, int)],
-            key=lambda n: n.time
+            key=lambda n: n.time,
         )
-        
-        # 检测连续3个以上快速交替
-        for i in range(len(taps) - 2):
-            t1, t2, t3 = taps[i], taps[i + 1], taps[i + 2]
-            
-            h1 = HandDispatch.primary_hand(t1.button)
-            h2 = HandDispatch.primary_hand(t2.button)
-            h3 = HandDispatch.primary_hand(t3.button)
-            
-            # 左-右-左 或 右-左-右 模式
-            if h1 != h2 and h2 != h3 and h1 == h3:
-                time_span = t3.time - t1.time
-                # 如果3个音在很短时间内交替
-                if time_span < 0.3:
-                    conflicts.append(ConflictReport(
-                        has_conflict=True,
-                        conflict_type="rapid_alternation",
-                        time=t2.time,
-                        notes=[t1, t2, t3],
-                        severity="soft",
-                        message=f"快速手部交替 {h1}-{h2}-{h3} 在 {time_span*1000:.0f}ms 内可能导致失误"
-                    ))
-        
+        run: list[NoteEvent] = []
+        for note in taps:
+            if run and HandDispatch.primary_hand(note.button) == HandDispatch.primary_hand(run[-1].button):
+                run = []
+            run.append(note)
+            if len(run) < 5:
+                continue
+            span = run[-1].time - run[0].time
+            if span > 0 and (span / (len(run) - 1)) < 0.10:
+                conflicts.append(ConflictReport(
+                    has_conflict=True,
+                    conflict_type="rapid_alternation",
+                    time=run[0].time,
+                    notes=list(run),
+                    severity="soft",
+                    message=(f"连续{len(run)}个左右手交替在{span*1000:.0f}ms内完成"
+                             f"（平均{span/(len(run)-1)*1000:.0f}ms/个），可能难以稳定读取"),
+                ))
+                run = []
         return conflicts
 
 

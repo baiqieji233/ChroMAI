@@ -46,7 +46,12 @@ from maichart.generation.event_model import EventSequence
 from maichart.generation.event_quality import parse_event_notes
 from maichart.training.event_dataset import EventDataset
 
-OVERSAMPLE_POLICY = "independent_note_types_touch_priority_v1"
+OVERSAMPLE_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
+# A window whose fine-note ratio (notes shorter than a quarter beat) exceeds this
+# share is copied fine_rhythm_oversample times.  It targets the passages where the
+# model currently falls back to quarter/eighth notes: 12th-16th-24th alternations,
+# dotted sixteenths and dense drum/piano figuration.
+FINE_RHYTHM_RATIO_THRESHOLD = 0.25
 
 
 class EventCtxDataset(EventDataset):
@@ -76,6 +81,11 @@ class EventCtxDataset(EventDataset):
         if int(touch_oversample) < 1:
             raise ValueError("touch_oversample must be at least 1 (1 disables oversampling).")
         self.touch_oversample = int(touch_oversample)
+        if int(kwargs.get("fine_rhythm_oversample", 1)) < 1:
+            raise ValueError("fine_rhythm_oversample must be at least 1 (1 disables it).")
+        self.fine_rhythm_oversample = int(kwargs.get("fine_rhythm_oversample", 1))
+        self.fine_rhythm_ratio_threshold = float(
+            kwargs.get("fine_rhythm_ratio_threshold", FINE_RHYTHM_RATIO_THRESHOLD))
         self.sampling_windows = Counter()
         self.sampling_segments = Counter()
         self.context_beats = int(context_beats)
@@ -200,6 +210,12 @@ class EventCtxDataset(EventDataset):
                 # slide must not quietly oversample touch via those windows.
                 # The multipliers are never added or multiplied together.
                 copies = self.touch_oversample if has_touch else self.slide_oversample if has_slide else 1
+                fine_ratio = self._fine_note_ratio(window_points, start, end)
+                fine_multiplier = (self.fine_rhythm_oversample
+                                   if fine_ratio >= self.fine_rhythm_ratio_threshold else 1)
+                copies *= fine_multiplier
+                if fine_multiplier > 1:
+                    category = category + "+fine"
                 self.sampling_windows[category] += 1
                 self.sampling_segments[category] += copies
                 for _ in range(copies):
@@ -213,6 +229,24 @@ class EventCtxDataset(EventDataset):
                     self.segment_quality_token_weights.append(token_weights)
                     self.segment_quality_loss_starts.append(len(prefix))
 
+    def _fine_note_ratio(self, window_points, start: Fraction, end: Fraction) -> float:
+        """Share of onsets separated by less than a quarter beat.
+
+        Beat-normalized, so a 12th-note run at slow tempo still counts as fine
+        the same way it does at fast tempo: the mask is about grid subdivision,
+        not about notes-per-second.  A window with fewer than two distinct
+        onsets has no interval to measure and reports 0.
+        """
+
+        beats = sorted({Fraction(point.beat) for point in window_points})
+        if len(beats) < 2:
+            return 0.0
+        gaps = [b - a for a, b in zip(beats, beats[1:]) if b > a]
+        if not gaps:
+            return 0.0
+        fine = sum(1 for gap in gaps if gap < Fraction(1, 4))
+        return fine / len(gaps)
+
     def _print_context_summary(self) -> None:
         with_lead_in = sum(1 for item in self.segments if item[4] and item[5] > 2)
         lead_in_tokens = sum(item[5] for item in self.segments)
@@ -223,6 +257,7 @@ class EventCtxDataset(EventDataset):
             f"overlap_beats={self.overlap_beats} stride={self.stride_beats} "
             f"segments_with_lead_in={with_lead_in} avg_prefix_tokens={average:.1f} "
             f"slide_oversample={self.slide_oversample} touch_oversample={self.touch_oversample} "
+            f"fine_rhythm_oversample={self.fine_rhythm_oversample} "
             f"oversample_policy={OVERSAMPLE_POLICY} windows={dict(self.sampling_windows)} "
             f"weighted_windows={dict(self.sampling_segments)}",
             flush=True,
@@ -318,6 +353,8 @@ class EventCtxDataset(EventDataset):
             "segments_with_lead_in": sum(1 for item in self.segments if item[5] > 2),
             "slide_oversample": self.slide_oversample,
             "touch_oversample": self.touch_oversample,
+            "fine_rhythm_oversample": self.fine_rhythm_oversample,
+            "fine_rhythm_ratio_threshold": self.fine_rhythm_ratio_threshold,
             "oversample_policy": OVERSAMPLE_POLICY,
             "sampling_windows": dict(self.sampling_windows),
             "sampling_segments": dict(self.sampling_segments),
@@ -338,5 +375,7 @@ class EventCtxDataset(EventDataset):
             # boundary would silently mix two training regimes.
             "slide_oversample": self.slide_oversample,
             "touch_oversample": self.touch_oversample,
+            "fine_rhythm_oversample": self.fine_rhythm_oversample,
+            "fine_rhythm_ratio_threshold": self.fine_rhythm_ratio_threshold,
             "oversample_policy": OVERSAMPLE_POLICY,
         }

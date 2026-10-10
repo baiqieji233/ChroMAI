@@ -50,6 +50,8 @@ def family_dataset_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "context_dropout": float(args.context_dropout),
         "slide_oversample": int(getattr(args, "slide_oversample", 1)),
         "touch_oversample": int(getattr(args, "touch_oversample", 1)),
+        "fine_rhythm_oversample": int(getattr(args, "fine_rhythm_oversample", 1)),
+        "fine_rhythm_ratio_threshold": float(getattr(args, "fine_rhythm_ratio_threshold", 0.25)),
     }
 
 

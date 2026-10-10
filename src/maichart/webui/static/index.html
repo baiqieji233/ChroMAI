@@ -315,7 +315,20 @@
             fresh 默认 0.1。resume / finetune 的模型结构来自 checkpoint，点击“检查 checkpoint”会显示原模型值。
             此项对应 <code>model_config.dropout</code>，与条件随机丢弃 <code>condition_dropout</code>、上下文随机丢弃 <code>context_dropout</code> 独立。</small>
           </label>
-          <label class="field" data-training-family="event_v1 legacy_frame_v2">前馈层宽度 FFN
+                    <label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏窗口过采样（fine_rhythm_oversample）
+            <input id="fineRhythmOversample" type="number" min="1" step="1" value="1">
+            <small><strong>默认 1（关闭）。</strong>把「细碎节奏窗口」额外复制这么多次，再叠加在 Slide/Touch 策略之上（倍率相乘，不是相加）。
+            判定标准：窗口内相邻起音间隔小于 <strong>四分之一拍</strong>的占比达到 fine_rhythm_ratio_threshold（默认 0.25）。
+            它针对的正是模型目前容易被压平成四分/八分的位置：12 分与 24 分交替、16 分附点、密集鼓点与快速钢琴。
+            设 2–3 会略微改变数据分布；真正决定采音的是训练目标，过采样只是让模型多看到这些写法。属于采样合同，<strong>改变它必须用 finetune，不能用 resume</strong>。</small>
+          </label>
+          <label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏判定阈值（fine_rhythm_ratio_threshold）
+            <input id="fineRhythmRatioThreshold" type="number" min="0" max="1" step="0.05" value="0.25">
+            <small><strong>默认 0.25：四分之一起音间隔落在四分之一拍以内。</strong>
+            调高（如 0.4）只对真正极密的段落过采样，样本更少更精准；调低（如 0.15）覆盖面更广，但可能把普通八分段也纳入。
+            与上面的倍率一起构成细碎节奏采样合同。</small>
+          </label>
+<label class="field" data-training-family="event_v1 legacy_frame_v2">前馈层宽度 FFN
             <input id="dimFeedforward" type="number" min="16" step="16" value="1024">
             <small><strong>影响模型容量。</strong>每层里"注意力 → 前馈"两段中前馈段的隐藏宽度，是参数量的第二大来源
             （仅次于 d_model）。经验值是 <strong>4 × d_model</strong>：d_model 256 → 1024，320 → 1280，384 → 1536。
@@ -572,6 +585,7 @@
             <button id="generationInspectButton" class="secondary-button" type="button">检查生成 checkpoint 类型</button>
             <p id="generationCheckpointStatus" class="inline-status">尚未检查。默认显示 event 参数；选择旧 checkpoint 后才显示旧基线参数。</p>
             <p id="generationPlannerStatus" class="inline-status">点击检查后，这里会显示已选模型的 planner 类型与强度参数适用范围。</p>
+            <p class="notice" id="generationCapabilityNotice" hidden></p>
             <p class="notice" id="generationCheckpointNotice">
               提示：训练目录里 <code>event_best.pt</code> 可能来自一次较短的运行。<strong>选文件前请核对保存 epoch</strong>——
               若目录里存在轮数更多的 <code>event_epoch_NNN.pt</code>，通常应当用它而不是 best。<br>
@@ -806,6 +820,50 @@
             <small>某窗口"可听帧占比"低于该值 → 该窗口直接输出空窗、不跑解码。<strong>0.05 = 只有不足 5% 的帧有声音才跳过</strong>；
             调高（如 0.3）会更激进地留白，调 0 表示只要有一帧有声就照常解码。</small>
           </label>
+
+          <!-- ========== 可玩性与冲突检测（新增）========== -->
+          <h3 data-generation-family="event_v1">可玩性约束（实验性）</h3>
+          <p data-generation-family="event_v1" class="help-text">
+            基于舞萌DX物理机制的后处理检测。<strong>仅支持 event_ctx_v1_extended 模型</strong>。
+            旧模型会自动跳过这些参数。
+          </p>
+
+          <label class="field" data-generation-family="event_v1">
+            <input id="conflictDetectionEnabled" type="checkbox">
+            启用冲突检测
+            <small>检测硬冲突（Hold-Tap重叠、Slide星星碰撞）和软冲突（手部跳跃过大）。</small>
+          </label>
+
+          <label class="field" data-generation-family="event_v1">
+            <input id="detectSoftConflicts" type="checkbox">
+            检测软冲突（人体工学）
+            <small>标记「可能难以演奏」的配置：六十分音级别的跨半圆跳跃、持续的快速左右手交替。
+            默认关闭，因为这些判定比硬冲突宽松得多。</small>
+          </label>
+
+          <label class="field" data-generation-family="event_v1">修复模式
+            <select id="conflictRepairMode">
+              <option value="none">仅检测</option>
+              <option value="local">局部修复</option>
+              <option value="reject">拒绝生成</option>
+            </select>
+            <small>仅检测=生成报告；局部修复=移除冲突音符；拒绝=遇硬冲突中止。</small>
+          </label>
+
+
+
+          <label class="field" data-generation-family="event_v1">
+            <input id="slideStarPrecision" type="checkbox" checked>
+            Slide星星精确轨迹
+            <small>计算星星逐帧位置（更精确）。</small>
+          </label>
+
+          <label class="field" data-generation-family="event_v1">
+            <input id="touchOverlapDetection" type="checkbox" checked>
+            Touch重叠检测
+            <small>检测Touch A区与按键1的冲突。</small>
+          </label>
+
           <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Presence threshold
             <input id="presenceThreshold" type="number" min="0" max="1" step="0.01" value="0.45">
           </label>

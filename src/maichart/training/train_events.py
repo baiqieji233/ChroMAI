@@ -160,6 +160,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "(cross-window family only). Default 1 keeps their natural frequency. "
                              "This value takes priority in mixed slide/touch windows; factors never "
                              "multiply. Change sampling via --init-checkpoint, not --resume.")
+    parser.add_argument("--fine-rhythm-oversample", type=int, default=1,
+                        help="Repeat windows whose fine-note ratio (onsets closer than a quarter beat) "
+                             "reaches --fine-rhythm-ratio-threshold this many times, on top of the "
+                             "slide/touch policy (factors multiply). Targets the passages the model "
+                             "currently flattens into quarter/eighth notes: triplet/dotted runs, "
+                             "sixteenth clusters, dense drum and piano figuration. "
+                             "Change sampling via --init-checkpoint/finetune, not --resume.")
+    parser.add_argument("--fine-rhythm-ratio-threshold", type=float, default=0.25,
+                        help="Fine-note share at which a window starts counting as fine-rhythm "
+                             "(default 0.25: a quarter of the onsets sit inside a quarter beat).")
     parser.add_argument("--context-dropout", type=float, default=DEFAULT_CONTEXT_DROPOUT,
                         help="Probability of training a window with an empty lead-in (cross-window family "
                              "only).  A fixed, always-present context teaches the model to copy it; "
@@ -723,7 +733,8 @@ def main(argv=None) -> int:
     validation_family["context_dropout"] = 0.0
     # Evaluate the source distribution, rather than duplicating the very note
     # types the training sampler promotes. These counts are logged separately.
-    for sampling_key in ("slide_oversample", "touch_oversample"):
+    for sampling_key in ("slide_oversample", "touch_oversample",
+                    "fine_rhythm_oversample", "fine_rhythm_ratio_threshold"):
         if sampling_key in validation_family:
             validation_family[sampling_key] = 1
     validation = DATASET_CLASS(args.validation_manifest, cache_dir=args.cache_dir, segment_beats=args.segment_beats,
@@ -801,7 +812,8 @@ def main(argv=None) -> int:
         new_family = contract.get("family_params", {})
         sampling_changes = {
             key: {"source": old_family.get(key), "current": new_family.get(key)}
-            for key in ("slide_oversample", "touch_oversample", "oversample_policy")
+            for key in ("slide_oversample", "touch_oversample", "oversample_policy",
+                        "fine_rhythm_oversample", "fine_rhythm_ratio_threshold")
             if old_family.get(key) != new_family.get(key)
         }
         training_origin = {

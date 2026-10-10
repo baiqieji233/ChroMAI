@@ -181,6 +181,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "workspace": str(WEBUI_ROOT),
                     "project_root": str(PROJECT_ROOT),
                     "training_capabilities": {"independent_touch_oversample": True,
+                                              "fine_rhythm_oversample": True,
                                               "quality_training_capability": True,
                                               "event_learning_rate_control": True,
                                               "multi_dataset_training": True},
@@ -567,6 +568,20 @@ class WebUIHandler(BaseHTTPRequestHandler):
             ])
             if payload.get("sample", GENERATION_SAMPLING_DEFAULTS["sample"]):
                 args.append("--sample")
+            # Playability post-process flags.  The CLI accepts them for every
+            # event checkpoint; the model-family gate lives in
+            # generation/model_compatibility.py, which reports a warning and
+            # skips the feature when the loaded checkpoint predates it.
+            if payload.get("conflict_detection_enabled", False):
+                args.append("--enable-conflict-detection")
+                if payload.get("detect_hard_conflicts", True):
+                    args.append("--detect-hard-conflicts")
+                if payload.get("detect_soft_conflicts", False):
+                    args.append("--detect-soft-conflicts")
+                args.extend(["--conflict-repair-mode",
+                             str(payload.get("conflict_repair_mode", "none"))])
+                task.result["conflict_detection_enabled"] = True
+                task.result["conflict_repair_mode"] = str(payload.get("conflict_repair_mode", "none"))
             if model_family == EVENT_CTX_MODEL_FAMILY:
                 # The window layout is part of the data contract, so the
                 # checkpoint is authoritative: the UI fields are only a copy, and
@@ -1019,6 +1034,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     str(max(1, int(payload.get("slide_oversample", 2)))),
                     "--touch-oversample",
                     str(max(1, int(payload.get("touch_oversample", 1)))),
+                    "--fine-rhythm-oversample",
+                    str(max(1, int(payload.get("fine_rhythm_oversample", 1)))),
+                    "--fine-rhythm-ratio-threshold",
+                    str(min(1.0, max(0.0, float(payload.get("fine_rhythm_ratio_threshold", 0.25))))),
                 ])
             if payload.get("no_amp"):
                 args.append("--no-amp")
@@ -1787,6 +1806,26 @@ def _load_checkpoint_payload(path: Path) -> dict[str, Any]:
     return load_checkpoint(path, map_location="cpu")
 
 
+def _generation_capabilities(model_family: str, payload: dict[str, Any]) -> dict[str, bool]:
+    """What this checkpoint can actually do at generation time.
+
+    `conflict_detection` and friends are post-processing features: they run on
+    the compiled chart and therefore work for every event family.  The sampling
+    biases (`rhythm_bias`, `fine_note_strength`) only mean something for a
+    checkpoint whose contract records the fine-rhythm training target.
+    """
+
+    event_family = model_family in EVENT_FAMILIES
+    params = (payload.get("data_contract", {}) or {}).get("family_params") or {}
+    trained_fine = bool(params) and int(params.get("fine_rhythm_oversample", 1)) > 1
+    return {
+        "conflict_detection": event_family,
+        "conflict_repair": event_family,
+        "rhythm_bias": trained_fine,
+        "fine_note_strength": trained_fine,
+    }
+
+
 def _checkpoint_model_family(payload: dict[str, Any]) -> str:
     schema = payload.get("schema")
     if schema == EVENT_CHECKPOINT_SCHEMA:
@@ -1864,7 +1903,9 @@ def _checkpoint_inspection(
             family_params = stored_contract.get("family_params") or {}
             if ("slide_oversample" in family_params and
                     ("touch_oversample" not in family_params or
-                     family_params.get("oversample_policy") != "independent_note_types_touch_priority_v1")):
+                     family_params.get("oversample_policy") not in
+                     {"independent_note_types_touch_priority_v1",
+                      "independent_note_types_touch_priority_fine_rhythm_v2"})):
                 resume_errors.append(
                     "checkpoint 使用旧的 Slide/Touch 合并采样合同，不能普通 resume；请改用 finetune 迁移权重并设置新的 Slide/Touch 倍率。"
                 )
@@ -1900,6 +1941,11 @@ def _checkpoint_inspection(
             else checkpoint_kind(payload)
         ),
         "model_family": detected_family,
+        # Capability report consumed by the generation panel.  Playability
+        # post-processing rides on top of any event checkpoint (it runs after
+        # decoding), while the sampling-bias flags need a checkpoint trained on
+        # the fine-rhythm target.
+        "generation_capabilities": _generation_capabilities(detected_family, payload),
         "model_family_label": (
             "event_ctx_v1 跨窗口事件模型" if detected_family == EVENT_CTX_MODEL_FAMILY
             else "event_v1 事件模型" if detected_family == EVENT_MODEL_FAMILY

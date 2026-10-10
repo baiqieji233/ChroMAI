@@ -19,34 +19,37 @@ class ModelFamily(Enum):
 
 class FeatureSupport:
     """模型特性支持情况。"""
-    
-    # event_v1: 基础生成
-    EVENT_V1_FEATURES = {
-        "rhythm_bias": False,
-        "fine_note_strength": False,
-        "conflict_detection": False,
-        "conflict_repair": False,
-        "post_process": False,
-    }
-    
-    # event_ctx_v1: 跨窗口上下文
-    EVENT_CTX_V1_FEATURES = {
-        "rhythm_bias": False,
-        "fine_note_strength": False,
-        "conflict_detection": False,
-        "conflict_repair": False,
-        "post_process": False,
-    }
-    
-    # event_ctx_v1_extended: 支持新特性（无需重训，通过后处理）
-    EVENT_CTX_V1_EXTENDED_FEATURES = {
-        "rhythm_bias": True,  # 通过条件参数应用
-        "fine_note_strength": True,
+    # The capability groups are independent because they live at different
+    # stages:
+    #   * conflict detection / repair / post_process run *after* decoding on the
+    #     compiled chart. They depend only on note geometry, so every event
+    #     checkpoint gets them and no retraining is required.
+    #   * rhythm_bias / fine_note_strength steer *sampling*. They are honoured
+    #     only by a checkpoint whose contract advertises that it was trained with
+    #     the fine-rhythm target; otherwise the flag is reported and ignored
+    #     rather than silently changing an out-of-distribution prompt.
+    _POST_PROCESS = {
         "conflict_detection": True,
         "conflict_repair": True,
         "post_process": True,
     }
-    
+    _NO_SAMPLING_BIAS = {
+        "rhythm_bias": False,
+        "fine_note_strength": False,
+    }
+    _SAMPLING_BIAS = {
+        "rhythm_bias": True,
+        "fine_note_strength": True,
+    }
+
+    # event_v1: base generation (no cross-window context).
+    EVENT_V1_FEATURES = {**_NO_SAMPLING_BIAS, **_POST_PROCESS}
+    # event_ctx_v1: cross-window context.
+    EVENT_CTX_V1_FEATURES = {**_NO_SAMPLING_BIAS, **_POST_PROCESS}
+    # event_ctx_v1_extended: trained on the fine-rhythm target, so the sampling
+    # bias flags take effect as well.
+    EVENT_CTX_V1_EXTENDED_FEATURES = {**_SAMPLING_BIAS, **_POST_PROCESS}
+
     @staticmethod
     def get_features(model_family: ModelFamily) -> dict[str, bool]:
         """获取模型的特性支持情况。"""
@@ -63,28 +66,30 @@ class FeatureSupport:
 
 def detect_model_family(checkpoint_data: dict) -> ModelFamily:
     """从checkpoint数据检测模型族。"""
-    
-    # 检查target_schema（优先）
-    target_schema = checkpoint_data.get("data_contract", {}).get("target_schema")
-    
-    if target_schema == "maichart-event-ctx-v1":
-        # 检查是否标记为扩展版本
-        if checkpoint_data.get("data_contract", {}).get("rhythm_features_v1"):
-            return ModelFamily.EVENT_CTX_V1_EXTENDED
-        else:
-            return ModelFamily.EVENT_CTX_V1
-    
-    elif target_schema == "maichart-event-v1":
+    contract = checkpoint_data.get("data_contract", {}) or {}
+    target_schema = contract.get("target_schema") or checkpoint_data.get("target_schema")
+
+    # The trainer writes the bare family name into data_contract.target_schema
+    # (see generation/event_ctx.TARGET_SCHEMA); older envelopes used a
+    # schema-style string, so both spellings are accepted.
+    if target_schema in ("event_ctx_v1", "maichart-event-ctx-v1"):
+        params = contract.get("family_params") or {}
+        extended = bool(
+            contract.get("rhythm_features_v1")
+            or checkpoint_data.get("supports_rhythm_features")
+            or int(params.get("fine_rhythm_oversample", 1)) > 1
+        )
+        return ModelFamily.EVENT_CTX_V1_EXTENDED if extended else ModelFamily.EVENT_CTX_V1
+
+    if target_schema in ("event_v1", "maichart-event-v1"):
         return ModelFamily.EVENT_V1
-    
-    # 备选：检查checkpoint中的其他标记
+
     checkpoint_type = checkpoint_data.get("checkpoint_type")
     if checkpoint_type == "event_ctx":
         if checkpoint_data.get("supports_rhythm_features"):
             return ModelFamily.EVENT_CTX_V1_EXTENDED
         return ModelFamily.EVENT_CTX_V1
-    
-    # 默认
+
     return ModelFamily.EVENT_V1
 
 

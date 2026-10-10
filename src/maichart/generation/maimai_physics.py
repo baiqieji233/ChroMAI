@@ -108,8 +108,12 @@ class HandDispatch:
             # 检查同手按键是否过度分散
             for hand_btns in [left_btns, right_btns]:
                 if len(hand_btns) == 2:
+                    # Three button pitches (135 degrees) is an ordinary
+                    # two-finger chord reach -- 4+7 and 3+6 are all over the
+                    # corpus.  Only a four-pitch stretch (180 degrees, i.e.
+                    # opposite sides of the ring) is genuinely awkward.
                     span = ButtonLayout.angular_distance(hand_btns[0], hand_btns[1])
-                    if span > 90 and not allow_cross:
+                    if span > 135.0 + 1e-6 and not allow_cross:
                         return False
             return True
         

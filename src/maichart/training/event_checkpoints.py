@@ -17,7 +17,10 @@ EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 # either side carries them, and ignored otherwise so older checkpoints keep
 # working.
 OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params")
-SAMPLING_CONTRACT_KEYS = frozenset({"slide_oversample", "touch_oversample", "oversample_policy"})
+SAMPLING_CONTRACT_KEYS = frozenset({
+    "slide_oversample", "touch_oversample", "oversample_policy",
+    "fine_rhythm_oversample", "fine_rhythm_ratio_threshold",
+})
 
 
 def vocabulary_signature(vocabulary: EventVocabulary) -> str:

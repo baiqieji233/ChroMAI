@@ -39,7 +39,9 @@ from maichart.generation.generation_integration import integrate_generation_conf
 from maichart.generation.model_compatibility import (
     detect_model_family, get_generation_config_for_model, validate_args_for_model
 )
-from maichart.generation.post_process import run_post_process, PostProcessConfig
+from maichart.generation.post_process import (
+    PostProcessConfig, detect_chart_conflicts, run_post_process,
+)
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.event_model import (
     EVENT_BOS,
@@ -1965,27 +1967,19 @@ def main(argv=None) -> int:
             # one tail_step after the last note.  Padding to the audio-derived
             # duration emitted hundreds of empty {1} cells and forced pathological
             # divisions such as {3528} from the fractional remainder.
-            # 后处理：冲突检测和修复（仅在支持的模型上）
-            post_process_result = None
+            # Playability post-processing is deferred until the chart is
+            # compiled: the detector works on parsed notes (real button indices,
+            # hold durations, slide trajectories), not on raw event tokens.
+            post_process_config = None
             if generation_config.get("enable_conflict_detection", False):
-                try:
-                    from maichart.notes import parse_timing_points_notes
-                    # 简化：将points转换为note字典进行检测
-                    # 实际应该从chart中提取，但这里我们在compile之前
-                    # 所以跳过实际检测，只记录意图
-                    post_process_config = PostProcessConfig(
-                        enable_conflict_detection=generation_config.get("enable_conflict_detection", False),
-                        detect_hard_conflicts=generation_config.get("detect_hard_conflicts", True),
-                        detect_soft_conflicts=generation_config.get("detect_soft_conflicts", False),
-                        conflict_repair_mode=generation_config.get("conflict_repair_mode", "none"),
-                    )
-                    # 注意：实际冲突检测需要在compile后对chart进行
-                    # 这里先标记配置，后续可以扩展
-                    quality["post_process_enabled"] = True
-                    quality["post_process_config"] = post_process_config.to_dict()
-                except Exception as e:
-                    print(f"warning: 后处理配置失败: {e}", flush=True)
-            
+                post_process_config = PostProcessConfig(
+                    enable_conflict_detection=True,
+                    detect_hard_conflicts=generation_config.get("detect_hard_conflicts", True),
+                    detect_soft_conflicts=generation_config.get("detect_soft_conflicts", False),
+                    conflict_repair_mode=generation_config.get("conflict_repair_mode", "none"),
+                )
+                quality["post_process_requested"] = True
+                quality["post_process_config"] = post_process_config.to_dict()
             try:
                 text, chart = compile_event_points(
                     points, tempo_changes=tempo_changes, bpm=bpm, first=args.first,
@@ -2047,6 +2041,35 @@ def main(argv=None) -> int:
                 "guidance_scale": float(args.guidance_scale),
                 "model_family": str((checkpoint.get("data_contract", {}) or {}).get("target_schema") or "event_v1"),
             }
+            # Playability conflict detection (opt-in).  Runs on the compiled
+            # event chart so the checks see real button geometry; hard hits make
+            # the candidate fail when the caller asked for reject mode.
+            if post_process_config is not None:
+                conflict_result = detect_chart_conflicts(
+                    points, tempo_changes, args.first, post_process_config)
+                quality["playability"] = {
+                    "notes": conflict_result.original_notes_count,
+                    "conflicts": len(conflict_result.conflicts_detected),
+                    "hard": len([c for c in conflict_result.conflicts_detected
+                                  if c.severity == "hard"]),
+                    "message": conflict_result.message,
+                    "mode": post_process_config.conflict_repair_mode,
+                    "details": [
+                        {"type": c.conflict_type, "severity": c.severity,
+                         "time": round(float(c.time), 3), "message": c.message}
+                        for c in conflict_result.conflicts_detected[:50]
+                    ],
+                }
+                print(f"playability_conflicts={quality['playability']['conflicts']} "
+                      f"hard={quality['playability']['hard']} "
+                      f"mode={post_process_config.conflict_repair_mode}", flush=True)
+                if not conflict_result.success:
+                    quality["generation_status"] = "rejected_by_playability"
+                    target_quality.write_text(
+                        json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
+                    print("candidate rejected: hard playability conflict and mode=reject", flush=True)
+                    failures += 1
+                    continue
             quality["generation_status"] = "success" if not note_warnings else "success_with_warnings"
             quality["windows_decoded"] = len(decoded)
             quality["windows_closed"] = sum(1 for window in decoded if window.closed)

@@ -677,6 +677,8 @@ function trainingPayload(options = {}) {
     condition_mask_prob: Number(valueOrDefault("#conditionMaskProb", 0.5)),
     slide_oversample: Number(valueOrDefault("#slideOversample", 2)),
     touch_oversample: Number(valueOrDefault("#touchOversample", 1)),
+    fine_rhythm_oversample: Number(valueOrDefault("#fineRhythmOversample", 1)),
+    fine_rhythm_ratio_threshold: Number(valueOrDefault("#fineRhythmRatioThreshold", 0.25)),
     ...contextPayload(),
     include_unusable: checkedOrDefault("#includeUnusable", false),
     training_mode: mode,
@@ -768,6 +770,13 @@ function generationPayload() {
     designer: valueOrDefault("#designer", "AI"),
     gold_stats_path: valueOrDefault("#goldStatsPath", "").trim() || null,
     tempo_map: parseTempoMap(),
+    // Playability constraints (added 2026-10-10).  Server-side these become
+    // the --enable-conflict-detection / --conflict-repair-mode flags, and they
+    // only take effect for a checkpoint whose contract advertises the extended
+    // family; older checkpoints silently ignore them.
+    conflict_detection_enabled: checkedOrDefault("#conflictDetectionEnabled", false),
+    conflict_repair_mode: valueOrDefault("#conflictRepairMode", "none"),
+    detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
   };
 }
 
@@ -1449,6 +1458,14 @@ function applyCheckpointModelConfig(data) {
     if (touch !== undefined && element("#touchOversample")) {
       element("#touchOversample").value = String(touch);
     }
+    const fine = familyParams.fine_rhythm_oversample ?? 1;
+    if (element("#fineRhythmOversample")) {
+      element("#fineRhythmOversample").value = String(fine);
+    }
+    const threshold = familyParams.fine_rhythm_ratio_threshold ?? 0.25;
+    if (element("#fineRhythmRatioThreshold")) {
+      element("#fineRhythmRatioThreshold").value = String(threshold);
+    }
   }
   const profile = contract.feature_profile;
   if ((profile === "basic_v1" || profile === "rhythm_v2" || profile === "event_audio_v2_rhythm") && element("#featureProfile")) {
@@ -1464,7 +1481,13 @@ function renderCheckpointInspection(data) {
     ? `可断点继续：${data.can_resume ? "是" : "否"}`
     : `可加载权重：${data.can_init ? "是" : "否"}`;
   const state = valid ? `checkpoint 可用；${capability}` : "checkpoint 不可用于当前模式";
+  const caps = data.generation_capabilities || {};
+  const capabilityLine = Object.keys(caps).length
+    ? `生成能力：冲突检测 ${caps.conflict_detection ? "✓" : "✗"}，采音倾向 ${caps.rhythm_bias ? "✓" : "✗"}`
+      + (caps.rhythm_bias ? "" : "（该 checkpoint 未在细碎节奏目标上训练，倾向参数会被忽略）")
+    : "";
   const details = [
+    capabilityLine,
     `状态：${state}`,
     `模型族：${data.model_family_label || data.model_family || "未知"}`,
     `schema：${data.schema || "未记录"}`,
@@ -1530,7 +1553,11 @@ async function inspectGenerationCheckpoint() {
   generationInspection = { path: checkpointPath, data };
   updateFamilyFields();
   const family = data.model_family_label || data.model_family || "未知";
-  setGenerationStatus(`模型族：${family}；schema：${data.schema || "未记录"}；生成入口：${data.generation_cli || "自动"}`,
+  const genCaps = data.generation_capabilities || {};
+  const capSuffix = Object.keys(genCaps).length
+    ? `；可用后处理：冲突检测${genCaps.conflict_detection ? "✓" : "✗"}，采音倾向${genCaps.rhythm_bias ? "✓" : "✗"}`
+    : "";
+  setGenerationStatus(`模型族：${family}；schema：${data.schema || "未记录"}；生成入口：${data.generation_cli || "自动"}${capSuffix}`,
     data.valid ? "good" : "warn");
   const plannerStatus = element("#generationPlannerStatus");
   if (plannerStatus) {
@@ -1542,6 +1569,17 @@ async function inspectGenerationCheckpoint() {
         : profile === "music_structure_v2"
           ? "当前为 music_structure_v2：auto / model 使用学得的局部规划，强度跟随幅度不限制其自然起伏。要明确调整局部强弱，请生成、编辑并保存曲线。"
           : "当前为 legacy_v1：auto 使用多维音频参考，model 不支持；密度和风格是软条件，模型响应可能较弱。";
+  }
+  const capabilityBox = element("#generationCapabilityNotice");
+  if (capabilityBox) {
+    capabilityBox.hidden = false;
+    capabilityBox.textContent = !data.valid
+      ? ""
+      : genCaps.conflict_detection
+        ? (genCaps.rhythm_bias
+            ? "该 checkpoint 支持冲突检测与采音倾向。"
+            : "该 checkpoint 支持冲突检测（后处理，无需重训）；但未在细碎节奏目标上训练，「节奏倾向 / 细碎音符强度」将被忽略。")
+        : "非事件模型（或未知），不提供冲突检测。";
   }
   const notice = element("#generationCheckpointNotice");
   if (notice && data.warnings?.length) notice.textContent = formatList(data.warnings);

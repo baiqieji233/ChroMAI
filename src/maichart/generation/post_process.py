@@ -13,7 +13,6 @@ from typing import Any
 
 from maichart.generation.conflict_detector import ConflictDetector, NoteEvent, ConflictReport
 from maichart.generation.conflict_repair import ConflictRepairer
-from maichart.notes import ParsedNote
 
 
 @dataclass
@@ -28,8 +27,10 @@ class PostProcessConfig:
     # 冲突检测参数
     max_simultaneous_buttons: int = 4
     min_tap_interval: float = 0.05
-    max_jump_distance: float = 1.8
-    min_jump_time: float = 0.12
+    # Match conflict_detector.ConflictDetector: 2.0 is the ring diameter, so
+    # only genuine opposite-side flips are reported.
+    max_jump_distance: float = 2.0
+    min_jump_time: float = 0.10
     
     def to_dict(self) -> dict[str, Any]:
         """转换为字典。"""
@@ -101,6 +102,86 @@ def extract_notes_from_chart(notes_dict: dict) -> list[NoteEvent]:
             ))
     
     return events
+
+
+def detect_chart_conflicts(
+    points,
+    tempo_changes,
+    first: float,
+    config: "PostProcessConfig",
+) -> PostProcessResult:
+    """Run the playability checks against compiled event points.
+
+    The detector needs real note geometry (button indices, hold durations and
+    slide trajectories), so it runs on the parsed event chart rather than on the
+    raw token stream.  `points` is the same list handed to
+    `compile_event_points`; every note is converted to an absolute onset in
+    seconds using the chart tempo map.
+    """
+
+    from fractions import Fraction
+
+    from maichart.generation.conflict_detector import (
+        ConflictDetector, NoteEvent, SlideTrajectory,
+    )
+    from maichart.generation.event_quality import parse_event_notes
+
+    parsed = parse_event_notes(points, tempo_changes, first)
+    events: list[NoteEvent] = []
+    for point in parsed.points:
+        onset = float(point.time_sec or 0.0)
+        for note in point.notes:
+            note_type = getattr(note, "note_type", "tap") or "tap"
+            position = getattr(note, "position", 1)
+            duration = float(getattr(note, "duration_sec", 0.0) or 0.0)
+            if note_type in ("tap", "break"):
+                note_type = "tap"
+            if note_type in ("touch", "touch_hold"):
+                # Touch positions look like "C", "A4" or "B7"; the leading
+                # letter is the judgement zone used by the overlap rule.
+                zone = str(position)[:1] if position else "A"
+                events.append(NoteEvent(
+                    note_type="touch", button=zone, time=onset, duration=duration,
+                    raw=str(getattr(note, "raw", "")),
+                ))
+                continue
+            if not isinstance(position, int):
+                continue
+            trajectory = None
+            pattern = getattr(note, "slide_pattern", None)
+            if note_type == "slide" and pattern:
+                end_position = getattr(note, "end_position", None)
+                if isinstance(end_position, int):
+                    trajectory = SlideTrajectory(
+                        start_button=position, pattern=str(pattern),
+                        end_button=end_position, start_time=onset,
+                        duration=max(duration, 1e-3),
+                    )
+            events.append(NoteEvent(
+                note_type=("slide" if note_type == "slide" else note_type),
+                button=position, time=onset, duration=duration,
+                slide_trajectory=trajectory,
+                raw=str(getattr(note, "raw", "")),
+            ))
+
+    detector = ConflictDetector(
+        enable_hard_conflicts=config.detect_hard_conflicts,
+        enable_soft_conflicts=config.detect_soft_conflicts,
+        min_tap_interval=config.min_tap_interval,
+        max_jump_distance=config.max_jump_distance,
+        min_jump_time=config.min_jump_time,
+    )
+    conflicts = detector.detect_conflicts(events)
+    hard = [c for c in conflicts if c.severity == "hard"]
+    return PostProcessResult(
+        original_notes_count=len(events),
+        processed_notes_count=len(events),
+        conflicts_detected=conflicts,
+        repairs_applied=[],
+        success=not (config.conflict_repair_mode == "reject" and hard),
+        message=(f"{len(conflicts)} conflicts ({len(hard)} hard)" if conflicts
+                 else "no conflicts"),
+    )
 
 
 def run_post_process(
