@@ -239,6 +239,12 @@ class ConflictDetector:
                 continue
             
             for tap in taps:
+                # A tap chorded with the slide head is legal: the star leaves
+                # the head button at the same instant, so the player presses the
+                # slide leg and the tap together.  Only a tap *after* the head,
+                # while the star still sits on that button, is a conflict.
+                if tap.time <= traj.start_time + 1e-6:
+                    continue
                 # 计算tap时刻星星的位置
                 star_btn = traj.star_position_at(tap.time)
                 

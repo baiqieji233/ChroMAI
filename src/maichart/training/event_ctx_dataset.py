@@ -75,17 +75,19 @@ class EventCtxDataset(EventDataset):
             raise ValueError("context_tokens must be positive (it is the lead-in budget).")
         if not 0.0 <= float(context_dropout) <= 1.0:
             raise ValueError("context_dropout must be within [0, 1].")
-        if int(kwargs.get("slide_oversample", 1)) < 1:
+        # The sampling knobs are family-level settings consumed here; they must
+        # not reach ``EventDataset.__init__``, which has no notion of them.
+        self.slide_oversample = int(kwargs.pop("slide_oversample", 1))
+        if self.slide_oversample < 1:
             raise ValueError("slide_oversample must be at least 1.")
-        self.slide_oversample = int(kwargs.get("slide_oversample", 1))
         if int(touch_oversample) < 1:
             raise ValueError("touch_oversample must be at least 1 (1 disables oversampling).")
         self.touch_oversample = int(touch_oversample)
-        if int(kwargs.get("fine_rhythm_oversample", 1)) < 1:
+        self.fine_rhythm_oversample = int(kwargs.pop("fine_rhythm_oversample", 1))
+        if self.fine_rhythm_oversample < 1:
             raise ValueError("fine_rhythm_oversample must be at least 1 (1 disables it).")
-        self.fine_rhythm_oversample = int(kwargs.get("fine_rhythm_oversample", 1))
         self.fine_rhythm_ratio_threshold = float(
-            kwargs.get("fine_rhythm_ratio_threshold", FINE_RHYTHM_RATIO_THRESHOLD))
+            kwargs.pop("fine_rhythm_ratio_threshold", FINE_RHYTHM_RATIO_THRESHOLD))
         self.sampling_windows = Counter()
         self.sampling_segments = Counter()
         self.context_beats = int(context_beats)

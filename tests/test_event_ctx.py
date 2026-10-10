@@ -309,11 +309,18 @@ def test_family_params_are_recorded_for_resume_checks(manifest, fake_audio):
     assert contextual.family_params() == {
         "context_beats": 4, "audio_margin_beats": 2, "context_tokens": 96,
         "overlap_beats": 4, "context_dropout": 0.15, "slide_oversample": 1,
-        "touch_oversample": 1, "oversample_policy": "independent_note_types_touch_priority_v1",
+        "touch_oversample": 1, "fine_rhythm_oversample": 1,
+        "fine_rhythm_ratio_threshold": 0.25,
+        "oversample_policy": "independent_note_types_touch_priority_fine_rhythm_v2",
     }
     boosted = _ctx_dataset(manifest, context_beats=4, audio_margin_beats=2,
                            context_tokens=96, overlap_beats=4, slide_oversample=3)
     assert boosted.family_params()["slide_oversample"] == 3
+    fine = _ctx_dataset(manifest, context_beats=4, audio_margin_beats=2,
+                        context_tokens=96, overlap_beats=4, fine_rhythm_oversample=4,
+                        fine_rhythm_ratio_threshold=0.5)
+    assert fine.family_params()["fine_rhythm_oversample"] == 4
+    assert fine.family_params()["fine_rhythm_ratio_threshold"] == 0.5
     assert not hasattr(plain, "family_params")
 
 
