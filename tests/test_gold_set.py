@@ -13,6 +13,7 @@ Two things matter and both were broken before by accident:
 import json
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from maichart.training.gold_set import (
