@@ -1,5 +1,33 @@
 "use strict";
 
+function trainingEpochStatus(task) {
+  if (!task || task.kind !== "train") return null;
+  const result = task.result || {};
+  const target = Number(result.epoch_target);
+  const hasTarget = Number.isFinite(target) && target > 0;
+  const start = Number(result.epoch_start || 0);
+  const current = Number(result.last_epoch ?? start);
+  if (hasTarget) {
+    const semantics = result.epoch_semantics === "additional_from_checkpoint"
+      ? `resume：从 epoch ${start} 追加 ${result.epochs_requested || Math.max(0, target - start)} 轮`
+      : `本阶段共 ${result.epochs_requested || target} 轮`;
+    return {
+      knownTarget: true,
+      progress: task.status === "completed" ? 1 : Math.max(0, Math.min(1, current / target)),
+      text: `训练进度：已完成 epoch ${current} / ${target}；${semantics}`,
+    };
+  }
+  if (["queued", "running"].includes(task.status) || result.last_epoch !== undefined) {
+    const last = result.last_epoch !== undefined ? `已完成 epoch ${current}；` : "";
+    return {
+      knownTarget: false,
+      progress: null,
+      text: `训练进度：${last}目标未知，请查看任务日志。`,
+    };
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Condition sliders.  Each entry is [key, label, help, default]; the help text
 // cites where the default came from, and the defaults are the corpus medians
@@ -944,23 +972,20 @@ function renderTask(task) {
   const message = element("#taskMessage");
   const epoch = element("#taskEpoch");
   const logs = element("#taskLogs");
+  const epochStatus = trainingEpochStatus(task);
   if (kind) kind.textContent = `${TASK_KIND_LABEL[task.kind] || task.kind} · ${task.task_id}`;
   if (status) status.textContent = task.status;
-  if (progress) progress.style.width = `${Math.round((task.progress || 0) * 100)}%`;
+  if (progress) {
+    const unknownTrainingTarget = task.kind === "train" && !epochStatus?.knownTarget;
+    if (progress.parentElement) progress.parentElement.hidden = unknownTrainingTarget;
+    const amount = task.kind === "train" && epochStatus?.knownTarget
+      ? epochStatus.progress : task.progress || 0;
+    progress.style.width = `${Math.round(amount * 100)}%`;
+  }
   if (message) message.textContent = task.error || task.message || "";
   if (epoch) {
-    const result = task.result || {};
-    const hasEpoch = task.kind === "train" && (result.last_epoch !== undefined || result.epoch_target !== undefined);
-    epoch.hidden = !hasEpoch;
-    if (hasEpoch) {
-      const start = Number(result.epoch_start || 0);
-      const current = Number(result.last_epoch ?? start);
-      const target = Number(result.epoch_target || 0);
-      const semantics = result.epoch_semantics === "additional_from_checkpoint"
-        ? `resume：从 epoch ${start} 追加 ${result.epochs_requested || Math.max(0, target - start)} 轮`
-        : `本阶段共 ${result.epochs_requested || target} 轮`;
-      epoch.textContent = `训练进度：epoch ${current}${target ? ` / ${target}` : ""}；${semantics}`;
-    }
+    epoch.hidden = !epochStatus;
+    if (epochStatus) epoch.textContent = epochStatus.text;
   }
   if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
 
