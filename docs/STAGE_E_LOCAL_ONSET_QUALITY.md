@@ -144,4 +144,6 @@
 
 运行时参考检查已经接入 CLI、后端和 WebUI，默认仍为 `off`。重启空闲 7864 后，用 report 模式完成了真实 API 任务 `2277105c0d3c`；生成质量报告的 `runtime_reference.status=completed`、解析无错误、MiaCode 诊断 0、静态参考 1。旧服务实例没有被假定已经加载新代码，7864 的实际重启和任务日志验证了传参链路。
 
+第 5 轮微调完成后，正式 CPU 诊断 `finetune_formal_diagnostics.json` 已保存 epoch 5：token accuracy `0.7403`，局部声学打乱后 `0.7382`；1/4 gap `0.7313`、1/6 gap `0.7701`。同歌同 seed 的 epoch 2/5 完整生成对照也完成：epoch 2 为 757 notes、20 ms 起音 F1 `0.5485`、MiaCode runtime diagnostics 8；epoch 5 为 886 notes、F1 `0.5678`、runtime diagnostics 28。两者都不能单独判优，epoch 5 的起音匹配更高但参考运行时问题也更多；详见 `quality_probe_finetune_epoch2_vs5/`。
+
 继续依据实际证据调整：若新头只学固定拍栅格，应先改善音频时序学习；若准确落音但配置单调，应针对完整配置及历史依赖；若密度或留白恶化，应先收紧软指导和预算之间的相互影响。不能用更高细碎比例或更低报警数掩盖这些问题。
