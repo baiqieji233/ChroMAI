@@ -234,11 +234,19 @@
           </label>
           <label class="field" data-training-family="event_v1">Planner 辅助损失权重
             <input id="planLossWeight" type="number" min="0" max="1" step="0.01" value="0.1">
-            <small>事件 token CE 之外的窗口规划辅助损失权重。music_structure_v2 输出 8 个连续规划量和 4 个配置类别；建议 0.1–0.15。</small>
+            <small>事件 token CE 之外的窗口规划辅助损失权重。music_structure_v2 输出 8 个连续规划量和 4 个配置类别，v3 输出 9 个；建议 0.1–0.15。</small>
           </label>
           <label class="field" data-training-family="event_v1 event_ctx_v1">Planner profile
-            <select id="plannerProfile"><option value="auto" selected>自动（新训练用 music_structure_v2）</option><option value="music_structure_v2">music_structure_v2（12D）</option><option value="legacy_v1">legacy_v1（兼容旧 checkpoint）</option></select>
-            <small>auto 在 fresh 训练中使用新音乐结构 planner，续训沿用 checkpoint。旧 checkpoint 的结构不能通过 resume 或 finetune 切换为 music_structure_v2；新规划器需要 fresh 重训。</small>
+            <select id="plannerProfile">
+              <option value="auto" selected>自动（新训练用 music_structure_v3）</option>
+              <option value="music_structure_v3">music_structure_v3（13D，含细碎节奏通道）</option>
+              <option value="music_structure_v2">music_structure_v2（12D，无细碎节奏通道）</option>
+              <option value="legacy_v1">legacy_v1（兼容旧 checkpoint）</option>
+            </select>
+            <small>auto 在 fresh 训练中使用最新的 music_structure_v3 planner，续训沿用 checkpoint 自己的 profile。
+            v3 比 v2 多一个「细碎节奏（fine_rhythm）」连续通道：窗口内相邻起音间隔小于四分之一拍的占比。
+            有这个通道之后，「细碎音符强度」与「节奏倾向」才能真正改变采音；v2 及更早的 checkpoint 没有这一维，参数会被忽略。
+            换 profile 必须重新训练：旧 checkpoint 的结构不能通过 resume 或 finetune 切换。</small>
           </label>
           <label class="field" data-training-family="event_v1 event_ctx_v1">Planner teacher mix
             <input id="planTeacherMix" type="number" min="0" max="1" step="0.05" value="0.5">

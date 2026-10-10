@@ -17,8 +17,9 @@ from torch import nn
 
 from maichart.generation.conditions import CONDITION_KEYS
 from maichart.generation.music_plan import (
-    CONTINUOUS_KEYS, LEGACY_PROFILE, MUSIC_STRUCTURE_PROFILE, PLAN_DIM,
-    plan_values, target_to_logits, validate_profile,
+    CONTINUOUS_COUNT, LEGACY_PROFILE, MUSIC_STRUCTURE_PROFILE, PLAN_DIM,
+    continuous_keys, is_music_structure, plan_values, target_to_logits,
+    validate_profile,
 )
 
 EVENT_PAD = "<pad>"
@@ -228,9 +229,10 @@ class EventTransformerConfig:
 
     def __post_init__(self) -> None:
         validate_profile(self.planner_profile)
-        if self.planner_profile == MUSIC_STRUCTURE_PROFILE:
-            if self.plan_dim != PLAN_DIM[MUSIC_STRUCTURE_PROFILE]:
-                self.plan_dim = PLAN_DIM[MUSIC_STRUCTURE_PROFILE]
+        if is_music_structure(self.planner_profile):
+            # The head width is determined by the profile, never by a caller's
+            # number: a mismatch would shift every configuration logit.
+            self.plan_dim = PLAN_DIM[self.planner_profile]
         elif self.plan_dim not in {6, PLAN_DIM[LEGACY_PROFILE]}:
             raise ValueError("legacy_v1 requires plan_dim=6 or 9")
 
@@ -388,11 +390,12 @@ class EventConditionedTransformer(nn.Module):
         self.norm = nn.LayerNorm(self.config.d_model)
         self.output = nn.Linear(self.config.d_model, self.config.vocab_size)
         self.planner_profile = validate_profile(self.config.planner_profile)
-        planner_input = self.config.d_model * 3 if self.planner_profile == MUSIC_STRUCTURE_PROFILE else self.config.d_model
+        planner_input = (self.config.d_model * 3 if is_music_structure(self.planner_profile)
+                         else self.config.d_model)
         self.plan_pool_projection = (nn.Sequential(
             nn.Linear(planner_input, self.config.d_model), nn.GELU(),
             nn.Linear(self.config.d_model, self.config.d_model)
-        ) if self.planner_profile == MUSIC_STRUCTURE_PROFILE else nn.Identity())
+        ) if is_music_structure(self.planner_profile) else nn.Identity())
         self.plan_head = nn.Sequential(
             nn.Linear(self.config.d_model, self.config.d_model // 2),
             nn.GELU(),
@@ -473,7 +476,7 @@ class EventConditionedTransformer(nn.Module):
             return memory, audio_padding_mask, plan_pred
         if plan_override is None:
             layout = getattr(memory, "_planner_layout", None)
-            if self.planner_profile == MUSIC_STRUCTURE_PROFILE and layout is not None:
+            if is_music_structure(self.planner_profile) and layout is not None:
                 local_len, global_len, condition_len = (int(value) for value in layout)
                 regions = (memory[:, :local_len],
                            memory[:, local_len:local_len + global_len],
@@ -503,7 +506,7 @@ class EventConditionedTransformer(nn.Module):
                 # Replace only explicitly requested channels in probability
                 # space, preserving the four configuration logits predicted by
                 # the checkpoint.  This keeps the 9-D planner contract intact.
-                names = CONTINUOUS_KEYS if self.planner_profile == MUSIC_STRUCTURE_PROFILE else CONTINUOUS_KEYS[:5]
+                names = continuous_keys(self.planner_profile)
                 adjusted = plan_pred.clone()
                 for index, name in enumerate(names):
                     if name not in plan_controls or index >= adjusted.size(1):
@@ -546,10 +549,10 @@ class EventConditionedTransformer(nn.Module):
             predicted_values = plan_values(plan_pred, profile=self.planner_profile)
             target_values = plan_values(target_logits, profile=self.planner_profile)
             mixed_values = torch.lerp(predicted_values, target_values, mix)
-            if self.planner_profile == MUSIC_STRUCTURE_PROFILE:
-                plan_hidden_input = mixed_values
-            else:
-                plan_hidden_input = mixed_values
+            # Both structure profiles consume probability-space values; the
+            # legacy path historically received the same tensor, so one branch
+            # suffices and is kept explicit for the contract comment.
+            plan_hidden_input = mixed_values
         else:
             plan_hidden_input = plan_values(plan_pred, profile=self.planner_profile)
         plan_hidden = self.plan_condition(plan_hidden_input).unsqueeze(1)
@@ -559,7 +562,8 @@ class EventConditionedTransformer(nn.Module):
             audio_padding_mask = torch.cat([audio_padding_mask, plan_mask], dim=1)
         # v2 exposes raw logits for auxiliary supervision; legacy callers relied
         # on receiving the controlled tensor and retain that behavior.
-        return memory, audio_padding_mask, (raw_plan if self.planner_profile == MUSIC_STRUCTURE_PROFILE else plan_pred)
+        return memory, audio_padding_mask, (
+            raw_plan if is_music_structure(self.planner_profile) else plan_pred)
 
     def encode_audio(
         self,

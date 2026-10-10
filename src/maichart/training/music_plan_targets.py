@@ -10,6 +10,52 @@ import torch
 
 from maichart.event_timing import seconds_at_beat
 from maichart.generation.event_quality import parse_event_notes
+from maichart.generation.music_plan import (
+    MUSIC_STRUCTURE_PROFILE, MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
+    validate_profile,
+)
+
+
+# "Fine" means a gap at or under a quarter beat, plus a half-step of slack.
+#
+# The definition has to be usable by two consumers at once.  A strict `< 1/4`
+# boundary excludes a plain 16th-note run, which is the very thing a charter
+# writes when the music is made of fast piano or drum figuration -- and measured
+# over 120 real Master/Re:Master charts, that strict reading puts only 4.2% of
+# 16-beat windows at or above the 0.25 share, with a mean of 0.059.  A target
+# that is 0.06 almost everywhere carries no signal: the planner would learn to
+# predict its mean and nothing else.
+#
+# `1/128` is half of the finest gap the charts actually use (1/64 beat, i.e.
+# 1/16 of a 16th note), so it absorbs the quantization of a 5:3 or 7:4 tuplet
+# without reaching into the next grid step.  With it, 34.2% of windows clear
+# 0.25 and the mean rises to 0.228 -- the channel now varies over the corpus.
+FINE_RHYTHM_QUARTER_BEAT = Fraction(1, 4)
+FINE_RHYTHM_TOLERANCE = Fraction(1, 128)
+FINE_RHYTHM_GAP_CEILING = FINE_RHYTHM_QUARTER_BEAT + FINE_RHYTHM_TOLERANCE
+
+
+def fine_note_ratio(beats) -> float:
+    """Share of adjacent onsets separated by a quarter beat or less.
+
+    Beat-normalized on purpose: the mask is about *grid subdivision*, not about
+    notes per second, so a 24th-note run counts the same at 90 BPM and at 200
+    BPM, and a 16th-note run now counts as fine whereas an 8th-note run does not.
+    ``event_ctx_dataset._fine_note_ratio`` delegates here, because one
+    implementation must both pick the oversampled windows and define what the
+    planner is asked to predict; two copies would drift and the disagreement
+    would look like a modelling failure.
+
+    Fewer than two distinct onsets have no interval to measure and report 0.
+    """
+
+    unique = sorted({Fraction(beat) for beat in beats})
+    if len(unique) < 2:
+        return 0.0
+    gaps = [b - a for a, b in zip(unique, unique[1:]) if b > a]
+    if not gaps:
+        return 0.0
+    return sum(1 for gap in gaps if gap <= FINE_RHYTHM_GAP_CEILING) / len(gaps)
 
 
 def _statistics(notes, duration: float, span: float, start: Fraction) -> tuple[list[float], float]:
@@ -39,7 +85,12 @@ def _statistics(notes, duration: float, span: float, start: Fraction) -> tuple[l
 class MusicPlanTargets:
     """Parse a chart once and derive exact-time local targets on demand."""
 
-    def __init__(self, chart):
+    def __init__(self, chart, profile: str = MUSIC_STRUCTURE_PROFILE):
+        validate_profile(profile)
+        if not is_music_structure(profile):
+            raise ValueError("MusicPlanTargets requires a structure planner profile.")
+        self.profile = profile
+        self.fine_rhythm_enabled = profile == MUSIC_STRUCTURE_V3_PROFILE
         self.chart = chart
         parsed = parse_event_notes(chart.points, chart.tempo_changes, first=chart.first)
         if not parsed.syntax_valid:
@@ -70,4 +121,7 @@ class MusicPlanTargets:
         # Continuous ratios retain the minority actions; this category is the
         # dominant local configuration, with deterministic ties.
         config = max(classes, key=lambda key: (classes[key], key)) if classes else 0
-        return torch.tensor(values + [intensity, config / 3.0], dtype=torch.float32)
+        continuous = values + [intensity]
+        if self.fine_rhythm_enabled:
+            continuous.append(fine_note_ratio(note.beat for note in notes))
+        return torch.tensor(continuous + [config / 3.0], dtype=torch.float32)

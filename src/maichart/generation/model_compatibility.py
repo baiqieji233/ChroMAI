@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 from enum import Enum
+
+from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE
 from typing import Literal
 
 
@@ -24,10 +26,11 @@ class FeatureSupport:
     #   * conflict detection / repair / post_process run *after* decoding on the
     #     compiled chart. They depend only on note geometry, so every event
     #     checkpoint gets them and no retraining is required.
-    #   * rhythm_bias / fine_note_strength steer *sampling*. They are honoured
-    #     only by a checkpoint whose contract advertises that it was trained with
-    #     the fine-rhythm target; otherwise the flag is reported and ignored
-    #     rather than silently changing an out-of-distribution prompt.
+    #   * rhythm_bias / fine_note_strength steer *sampling* through the planner's
+    #     fine_rhythm channel. They are honoured only by a checkpoint trained with
+    #     music_structure_v3 (the first profile that predicts that channel);
+    #     otherwise the flag is reported and ignored rather than silently pushing
+    #     an out-of-distribution note into a planner that cannot read it.
     _POST_PROCESS = {
         "conflict_detection": True,
         "conflict_repair": True,
@@ -73,11 +76,17 @@ def detect_model_family(checkpoint_data: dict) -> ModelFamily:
     # (see generation/event_ctx.TARGET_SCHEMA); older envelopes used a
     # schema-style string, so both spellings are accepted.
     if target_schema in ("event_ctx_v1", "maichart-event-ctx-v1"):
-        params = contract.get("family_params") or {}
+        # "Extended" means the planner was trained to predict the fine-rhythm
+        # channel, which is what makes the sampling-bias flags meaningful.  That
+        # is a property of the planner profile, so read it from the model config
+        # (authoritative for the head width) and fall back to the contract.
+        profile = (checkpoint_data.get("model_config") or {}).get("planner_profile")
+        if profile is None:
+            profile = (contract.get("planner_params") or {}).get("profile")
         extended = bool(
             contract.get("rhythm_features_v1")
             or checkpoint_data.get("supports_rhythm_features")
-            or int(params.get("fine_rhythm_oversample", 1)) > 1
+            or str(profile or "") == MUSIC_STRUCTURE_V3_PROFILE
         )
         return ModelFamily.EVENT_CTX_V1_EXTENDED if extended else ModelFamily.EVENT_CTX_V1
 

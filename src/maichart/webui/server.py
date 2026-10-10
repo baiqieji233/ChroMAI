@@ -28,6 +28,9 @@ from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
 from maichart.generation.conditions import CONDITION_KEYS, GENERATION_DEFAULTS, GENERATION_SAMPLING_DEFAULTS
+from maichart.generation.music_plan import (
+    MUSIC_STRUCTURE_PROFILES, MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
+)
 from maichart.generation.model import AUDIO_FEATURE_KEYS
 from maichart.training.checkpoints import (
     checkpoint_contract,
@@ -309,7 +312,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if selected_source == "auto":
                     profile_name = (_load_checkpoint_payload(checkpoint_path).get("model_config", {}).get("planner_profile")
                                     if checkpoint_path else None)
-                    selected_source = "model" if profile_name == "music_structure_v2" else "audio"
+                    selected_source = ("model" if is_music_structure(str(profile_name or ""))
+                                       else "audio")
                 if selected_source == "model":
                     from maichart.generation.learned_curve import generate_learned_profile
                     profile = generate_learned_profile(
@@ -903,7 +907,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint_dir = _resolve_path(payload.get("checkpoint_dir") or str(PROJECT_ROOT / "checkpoints" / model_family))
         planner_profile = str(payload.get("planner_profile", "auto"))
         teacher_mix = float(payload.get("plan_teacher_mix", 0.5))
-        if planner_profile not in {"auto", "legacy_v1", "music_structure_v2"}:
+        if planner_profile not in {"auto", "legacy_v1", "music_structure_v2",
+                                   "music_structure_v3"}:
             raise ValueError("规划器模式只能是 auto、legacy_v1 或 music_structure_v2")
         if not math.isfinite(teacher_mix) or not 0.0 <= teacher_mix <= 1.0:
             raise ValueError("规划目标混合比例必须在 0–1 之间")
@@ -1816,8 +1821,12 @@ def _generation_capabilities(model_family: str, payload: dict[str, Any]) -> dict
     """
 
     event_family = model_family in EVENT_FAMILIES
-    params = (payload.get("data_contract", {}) or {}).get("family_params") or {}
-    trained_fine = bool(params) and int(params.get("fine_rhythm_oversample", 1)) > 1
+    # Sampling bias flows through the planner's fine_rhythm channel, so it is
+    # available exactly when the checkpoint's planner profile predicts it.
+    profile = (payload.get("model_config", {}) or {}).get("planner_profile")
+    if profile is None:
+        profile = ((payload.get("data_contract", {}) or {}).get("planner_params") or {}).get("profile")
+    trained_fine = str(profile or "") == MUSIC_STRUCTURE_V3_PROFILE
     return {
         "conflict_detection": event_family,
         "conflict_repair": event_family,

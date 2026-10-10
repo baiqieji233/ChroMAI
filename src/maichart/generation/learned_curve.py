@@ -12,6 +12,7 @@ from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAU
 from maichart.generation.event_audio import extract_event_audio, audio_segment_tensor, compress_event_audio
 from maichart.generation.music_intensity import generate_intensity_profile, validate_intensity_profile
 from maichart.training.event_checkpoints import load_event_model
+from maichart.generation.music_plan import is_music_structure
 
 
 def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
@@ -28,8 +29,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
 
     device = torch.device(device)
     model, _, checkpoint = load_event_model(checkpoint_path, device)
-    if getattr(model.config, "planner_profile", "legacy_v1") != "music_structure_v2":
-        raise ValueError("模型预测曲线需要 music_structure_v2 规划器；请重新训练新模型，或选择音频参考曲线。")
+    if not is_music_structure(str(getattr(model.config, "planner_profile", "legacy_v1"))):
+        raise ValueError("模型预测曲线需要 music_structure_v2/v3 规划器；请重新训练新模型，或选择音频参考曲线。")
     profile = generate_intensity_profile(audio_path, resolution_sec=resolution_sec,
                                          local_context_sec=local_context_sec)
     contract = checkpoint["data_contract"]

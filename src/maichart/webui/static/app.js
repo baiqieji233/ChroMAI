@@ -638,7 +638,9 @@ function preprocessPayload() {
 // Shared by "开始训练" and the one-click button, so both send the same settings.
 function trainingPayload(options = {}) {
   const mode = currentTrainingMode();
-  // planner_profile values: "auto", "music_structure_v2", "legacy_v1".
+  // planner_profile values: "auto", "music_structure_v3", "music_structure_v2",
+  // "legacy_v1".  The generation panel only reads it to describe the checkpoint
+  // it inspected; training chooses the profile.
   return {
     ...trainingSourcePaths(options),
     manifests: selectedTrainingManifests(),
@@ -1566,8 +1568,8 @@ async function inspectGenerationCheckpoint() {
       ? "模型检查未通过，请先处理检查结果，再选择强度模式。"
       : currentGenerationFamily() === "legacy_frame_v2"
         ? "当前为旧固定帧模型；本页事件模型的强度曲线与 planner 控制不适用。"
-        : profile === "music_structure_v2"
-          ? "当前为 music_structure_v2：auto / model 使用学得的局部规划，强度跟随幅度不限制其自然起伏。要明确调整局部强弱，请生成、编辑并保存曲线。"
+        : profile === "music_structure_v2" || profile === "music_structure_v3"
+          ? "当前为 music_structure_v2/v3：auto / model 使用学得的局部规划，强度跟随幅度不限制其自然起伏。要明确调整局部强弱，请生成、编辑并保存曲线。v3 额外支持「细碎音符强度」对采音的柔性控制。"
           : "当前为 legacy_v1：auto 使用多维音频参考，model 不支持；密度和风格是软条件，模型响应可能较弱。";
   }
   const capabilityBox = element("#generationCapabilityNotice");

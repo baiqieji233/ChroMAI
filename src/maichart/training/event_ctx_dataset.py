@@ -234,20 +234,15 @@ class EventCtxDataset(EventDataset):
     def _fine_note_ratio(self, window_points, start: Fraction, end: Fraction) -> float:
         """Share of onsets separated by less than a quarter beat.
 
-        Beat-normalized, so a 12th-note run at slow tempo still counts as fine
-        the same way it does at fast tempo: the mask is about grid subdivision,
-        not about notes-per-second.  A window with fewer than two distinct
-        onsets has no interval to measure and reports 0.
+        Delegates to ``music_plan_targets.fine_note_ratio`` so the windows that
+        get oversampled and the value the planner is asked to predict are
+        computed by one implementation; two copies would eventually disagree and
+        the mismatch would look like a modelling failure.
         """
 
-        beats = sorted({Fraction(point.beat) for point in window_points})
-        if len(beats) < 2:
-            return 0.0
-        gaps = [b - a for a, b in zip(beats, beats[1:]) if b > a]
-        if not gaps:
-            return 0.0
-        fine = sum(1 for gap in gaps if gap < Fraction(1, 4))
-        return fine / len(gaps)
+        from maichart.training.music_plan_targets import fine_note_ratio
+
+        return fine_note_ratio(point.beat for point in window_points)
 
     def _print_context_summary(self) -> None:
         with_lead_in = sum(1 for item in self.segments if item[4] and item[5] > 2)

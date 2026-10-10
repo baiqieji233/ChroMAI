@@ -111,11 +111,35 @@ def test_detect_only_mode_still_succeeds():
 def test_model_family_is_read_from_the_real_contract_schema():
     assert detect_model_family({"data_contract": {"target_schema": "event_v1"}}) is ModelFamily.EVENT_V1
     assert detect_model_family({"data_contract": {"target_schema": "event_ctx_v1"}}) is ModelFamily.EVENT_CTX_V1
-    extended = {"data_contract": {
-        "target_schema": "event_ctx_v1",
-        "family_params": {"fine_rhythm_oversample": 3},
-    }}
-    assert detect_model_family(extended) is ModelFamily.EVENT_CTX_V1_EXTENDED
+
+
+def test_extended_means_the_planner_predicts_fine_rhythm():
+    # "Extended" is about the planner profile, not about how the sampler was
+    # tuned: oversampling only changes which windows are seen, whereas the
+    # sampling-bias flags need a channel to write into.
+    v3 = {"model_config": {"planner_profile": "music_structure_v3"},
+          "data_contract": {"target_schema": "event_ctx_v1"}}
+    assert detect_model_family(v3) is ModelFamily.EVENT_CTX_V1_EXTENDED
+
+    v2 = {"model_config": {"planner_profile": "music_structure_v2"},
+          "data_contract": {"target_schema": "event_ctx_v1"}}
+    assert detect_model_family(v2) is ModelFamily.EVENT_CTX_V1
+
+
+def test_oversampling_alone_does_not_advertise_sampling_bias():
+    # A v2 checkpoint that merely oversampled fine-rhythm windows still cannot
+    # read the fine-rhythm control, so it must not claim the capability.
+    payload = {
+        "model_config": {"planner_profile": "music_structure_v2"},
+        "data_contract": {
+            "target_schema": "event_ctx_v1",
+            "family_params": {"fine_rhythm_oversample": 3},
+        },
+    }
+    assert detect_model_family(payload) is ModelFamily.EVENT_CTX_V1
+    features = FeatureSupport.get_features(ModelFamily.EVENT_CTX_V1)
+    assert features["rhythm_bias"] is False
+    assert features["conflict_detection"] is True
 
 
 def test_old_checkpoint_keeps_post_processing_but_loses_sampling_bias():

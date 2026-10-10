@@ -29,6 +29,7 @@ from maichart.generation.event_audio import (
 )
 from maichart.generation.event_model import EventSequence, EventVocabulary, NOTE_CHARACTERS
 from maichart.generation.event_quality import condition_from_events, parse_event_notes
+from maichart.generation.music_plan import is_music_structure, validate_profile
 
 
 def resolve_path(value: str, base: Path) -> Path:
@@ -117,8 +118,7 @@ class EventDataset(Dataset):
             raise ValueError("segment_beats must be positive and max_tokens at least 4.")
         self.manifest_path = Path(manifest_path).resolve()
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
-        if planner_profile not in {"legacy_v1", "music_structure_v2"}:
-            raise ValueError("unknown planner profile")
+        validate_profile(planner_profile)
         self.planner_profile = planner_profile
         self._music_plan_targets: dict[int, Any] = {}
         self.quality_annotations_path = str(Path(quality_annotations).resolve()) if quality_annotations else ""
@@ -703,11 +703,12 @@ class EventDataset(Dataset):
         # Ignoring an author's bad passage is not a request for a sparse chart.
         # Keep the real target; partially annotated windows are masked out of
         # planner supervision because its target describes the entire window.
-        if self.planner_profile == "music_structure_v2":
+        if is_music_structure(self.planner_profile):
             from maichart.training.music_plan_targets import MusicPlanTargets
 
             if sample_index not in self._music_plan_targets:
-                self._music_plan_targets[sample_index] = MusicPlanTargets(ref.chart)
+                self._music_plan_targets[sample_index] = MusicPlanTargets(
+                    ref.chart, profile=self.planner_profile)
             return self._music_plan_targets[sample_index].window(start, end)
         return self._window_plan(ref, start, end)
 
@@ -749,7 +750,7 @@ class EventDataset(Dataset):
     def _window_condition(self, sample_index: int, ref: EventSample, audio: Any,
                           start: Fraction, condition: torch.Tensor | None = None) -> torch.Tensor:
         condition = (self._masked_condition(sample_index) if condition is None else condition).clone()
-        if self.planner_profile == "music_structure_v2":
+        if is_music_structure(self.planner_profile):
             # A planner learns authored local workload from music. Multiplying
             # the global density (including numeric null values) by RMS creates
             # a conflicting instruction and exposes a fake condition state.

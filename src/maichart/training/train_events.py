@@ -26,6 +26,10 @@ from maichart.generation.event_ctx import (
     DEFAULT_CONTEXT_TOKENS,
 )
 from maichart.generation.event_model import EventConditionedTransformer, EventTransformerConfig, EventVocabulary
+from maichart.generation.music_plan import (
+    CONTINUOUS_COUNT, MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM, continuous_keys,
+    is_music_structure,
+)
 from maichart.training.event_checkpoints import EVENT_CHECKPOINT_SCHEMA, atomic_save_checkpoint, compare_event_contract, load_event_checkpoint, vocabulary_signature
 from maichart.training.event_dataset import EventDataset, collate_events
 
@@ -64,8 +68,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-accumulation", type=int, default=4)
     parser.add_argument("--plan-loss-weight", type=float, default=0.1,
                          help="Weight of the window-level planner auxiliary loss.")
-    parser.add_argument("--planner-profile", choices=("auto", "legacy_v1", "music_structure_v2"),
-                        default="auto", help="Auto: structure v2 for a new model, checkpoint profile for continued training.")
+    parser.add_argument("--planner-profile",
+                        choices=("auto", "legacy_v1", "music_structure_v2",
+                                 "music_structure_v3"),
+                        default="auto",
+                        help="Auto: the newest structure profile (v3) for a fresh model, the "
+                             "checkpoint's own profile for continued training. v3 adds the "
+                             "fine-rhythm channel on top of v2.")
     parser.add_argument("--plan-teacher-mix", type=float, default=0.5,
                         help="Probability-space mix of authored plan targets during structure-v2 training.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
@@ -295,7 +304,12 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             condition_null = condition_null.clone()
             condition_null[mask] = True
         with torch.set_grad_enabled(train), torch.autocast(device_type=device.type, dtype=torch.float16, enabled=bool(train and scaler and scaler.is_enabled())):
-            structure_v2 = getattr(model.config, "planner_profile", "legacy_v1") == "music_structure_v2"
+            active_profile = getattr(model.config, "planner_profile", "legacy_v1")
+            structure_v2 = is_music_structure(active_profile)
+            # The continuous count and the target width both follow the profile.
+            # Hardcoding 8 here would silently drop the fine-rhythm channel and
+            # then read the configuration index from the wrong column under v3.
+            continuous = CONTINUOUS_COUNT[active_profile]
             planner_kwargs = {}
             if train and structure_v2 and plan_teacher_mix:
                 plan_weights = batch.get("quality_plan_weights", torch.ones(condition.size(0), device=device))
@@ -316,7 +330,6 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             loss = _quality_weighted_mean(
                 raw_loss, token_weights, quality_token_normalizer, valid=valid)
             plan_target = batch["plan_target"]
-            continuous = 8 if structure_v2 else 5
             plan_per_window = F.mse_loss(torch.sigmoid(plan_pred[:, :continuous]), plan_target[:, :continuous], reduction="none").mean(dim=-1)
             config_target = torch.clamp((plan_target[:, continuous] * 3.0).round().long(), 0, 3)
             config_per_window = (F.cross_entropy(plan_pred[:, continuous:continuous + 4], config_target, reduction="none")
@@ -398,7 +411,7 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     if gpu_events and timing:
         torch.cuda.synchronize()
         gpu_seconds = sum(start.elapsed_time(end) for start, end in gpu_events) / 1000.0
-    plan_names = ("count", "density", "chord", "slide", "last", "touch", "hold", "intensity")
+    plan_names = continuous_keys(getattr(model.config, "planner_profile", "legacy_v1"))
     plan_errors = (planner_error_total.cpu().tolist() if planner_error_total is not None else [])
     plan_count = int(planner_window_total.item()) if planner_window_total is not None else 0
     return {"loss": total_loss / max(total_tokens, 1),
@@ -672,7 +685,11 @@ def main(argv=None) -> int:
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     checkpoint = load_event_checkpoint(args.resume or args.init_checkpoint) if args.resume or args.init_checkpoint else None
     stored_planner = checkpoint.get("model_config", {}).get("planner_profile", "legacy_v1") if checkpoint else None
-    planner_profile = (stored_planner or "music_structure_v2") if args.planner_profile == "auto" else args.planner_profile
+    # A fresh run with ``auto`` takes the newest structure profile. Continued
+    # training must keep the checkpoint's profile: the planner head width and
+    # the meaning of every channel depend on it, so switching is a fresh run.
+    planner_profile = ((stored_planner or MUSIC_STRUCTURE_V3_PROFILE)
+                       if args.planner_profile == "auto" else args.planner_profile)
     if checkpoint and planner_profile != stored_planner:
         raise ValueError("音乐结构规划器的训练目标和模型头已改变；请选择 fresh 重新训练，原 checkpoint 可继续用其原规划器。")
     vocabulary = EventVocabulary.from_dict(checkpoint["vocabulary"]) if checkpoint else None
@@ -733,8 +750,9 @@ def main(argv=None) -> int:
     validation_family["context_dropout"] = 0.0
     # Evaluate the source distribution, rather than duplicating the very note
     # types the training sampler promotes. These counts are logged separately.
+    # The threshold is not a multiplier, so it is left alone.
     for sampling_key in ("slide_oversample", "touch_oversample",
-                    "fine_rhythm_oversample", "fine_rhythm_ratio_threshold"):
+                         "fine_rhythm_oversample"):
         if sampling_key in validation_family:
             validation_family[sampling_key] = 1
     validation = DATASET_CLASS(args.validation_manifest, cache_dir=args.cache_dir, segment_beats=args.segment_beats,
@@ -790,10 +808,15 @@ def main(argv=None) -> int:
                                     "default": float(args.condition_default),
                                     "null_embedding": True,
                                     "null_policy": "masked_condition_controls"}
-    if planner_profile == "music_structure_v2":
-        contract["planner_params"] = {"profile": planner_profile, "plan_dim": 12,
-                                      "teacher_mix": args.plan_teacher_mix,
-                                      "target": "chart_authored_local_workload_v2"}
+    if is_music_structure(planner_profile):
+        contract["planner_params"] = {
+            "profile": planner_profile,
+            "plan_dim": PLAN_DIM[planner_profile],
+            "teacher_mix": args.plan_teacher_mix,
+            "target": ("chart_authored_local_workload_v3_fine_rhythm"
+                       if planner_profile == MUSIC_STRUCTURE_V3_PROFILE
+                       else "chart_authored_local_workload_v2"),
+        }
     if quality_payload is not None:
         contract["quality_params"] = {
             "schema": quality_payload.get("schema"),
@@ -829,7 +852,7 @@ def main(argv=None) -> int:
         num_layers=args.num_layers, dim_feedforward=args.dim_feedforward, dropout=args.dropout,
         max_tokens=args.max_tokens, max_audio_tokens=args.max_audio_tokens,
         global_audio_tokens=args.global_frames, planner_profile=planner_profile,
-        plan_dim=12 if planner_profile == "music_structure_v2" else 9)
+        plan_dim=PLAN_DIM[planner_profile])
     device = device_for(args.device)
     model = EventConditionedTransformer(config).to(device)
     model.position_ids = torch.tensor([index for index, token in enumerate(vocabulary.tokens) if token.startswith("AT:")], device=device)
@@ -966,7 +989,7 @@ def main(argv=None) -> int:
               f"seconds={train_seconds:.1f} ms_per_batch={per_batch_ms:.1f} batches={metrics['batches']} "
               f"data_s={metrics.get('data_seconds', 0.0):.1f} gpu_s={metrics.get('gpu_seconds', 0.0):.1f}",
               flush=True)
-        if planner_profile == "music_structure_v2":
+        if is_music_structure(planner_profile):
             planner_metrics = (val_metrics or metrics).get("planner_mae", {})
             print("planner_epoch=" + str(epoch) + " source=" + ("validation" if val_metrics else "training")
                   + " " + " ".join(f"{key}_mae={value:.4f}" for key, value in planner_metrics.items()), flush=True)

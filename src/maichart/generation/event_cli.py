@@ -36,6 +36,9 @@ from maichart.generation.event_audio import (
     legacy_feature_view,
 )
 from maichart.generation.generation_integration import integrate_generation_config
+from maichart.generation.music_plan import (
+    MUSIC_STRUCTURE_V3_PROFILE, is_music_structure,
+)
 from maichart.generation.model_compatibility import (
     detect_model_family, get_generation_config_for_model, validate_args_for_model
 )
@@ -1035,7 +1038,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     tail_damping: bool = False, tail_damping_windows: int = 4,
                     tail_damping_strength: float = 0.6, audio_bounds_trim: bool = False,
                     audio_bounds_lead: float = 0.5, silence_threshold: float = 0.15,
-                    silence_window_share: float = 0.05, condition_default: float = 0.5) -> list[_DecodedWindow]:
+                    silence_window_share: float = 0.05, condition_default: float = 0.5,
+                    fine_note_strength: float = 0.5) -> list[_DecodedWindow]:
     """Generate the whole song one training window at a time.
 
     This mirrors ``EventDataset.__getitem__`` exactly: each window samples the
@@ -1098,12 +1102,15 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             resolved_mode = intensity_mode
             if resolved_mode == "auto":
                 profile = str(getattr(model, "planner_profile", ""))
-                resolved_mode = "model" if profile == "music_structure_v2" else "multifeature"
+                resolved_mode = "model" if is_music_structure(profile) else "multifeature"
             if resolved_mode == "model":
-                if str(getattr(model, "planner_profile", "legacy_v1")) != "music_structure_v2":
-                    raise ValueError("intensity-mode=model requires a music_structure_v2 checkpoint")
+                active_profile = str(getattr(model, "planner_profile", "legacy_v1"))
+                if not is_music_structure(active_profile):
+                    raise ValueError(
+                        "intensity-mode=model requires a music_structure_v2/v3 checkpoint")
                 resolved_mode = None
-                print("intensity_reference=model_music_structure_v2 (authored local workload learned from audio)", flush=True)
+                print("intensity_reference=model_" + active_profile
+                      + " (authored local workload learned from audio)", flush=True)
             else:
                 print(f"intensity_reference={resolved_mode}", flush=True)
             kwargs = dict(audio=audio, windows=windows, tempo_changes=tempo_changes,
@@ -1212,14 +1219,20 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
         # Apply this window's density intention alongside its local audio.
         window_condition = condition
         window_vector = base_vector
-        structure_v2_manual = (intensity_curve is not None and curve_strength > 0
-                               and str(getattr(model, "planner_profile", "legacy_v1")) == "music_structure_v2")
-        if intensity[index] != 1.0 and not structure_v2_manual:
+        active_profile = str(getattr(model, "planner_profile", "legacy_v1"))
+        structure_manual = (intensity_curve is not None and curve_strength > 0
+                            and is_music_structure(active_profile))
+        if intensity[index] != 1.0 and not structure_manual:
             from maichart.generation.conditions import scale_intensity
 
             window_condition = scale_intensity(condition, intensity[index])
             window_vector = window_condition.to_vector()
         plan_controls = None
+        # Fine-rhythm bias is a planner control, so it needs a checkpoint whose
+        # planner was trained to predict the fine-rhythm channel.  For any other
+        # profile the flag is inert and the model-family check already warned.
+        if active_profile == MUSIC_STRUCTURE_V3_PROFILE and fine_note_strength != 0.5:
+            plan_controls = {"fine_rhythm": float(fine_note_strength)}
         if intensity_curve is not None and curve_strength > 0.0:
             core_duration = max(0.0, float(seconds_at_beat(end, tempo_changes, first)
                                            - seconds_at_beat(start, tempo_changes, first)))
@@ -1228,8 +1241,10 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             control_factor = 2.0 * curve_api.curve_window_values(
                 control_curve, float(seconds_at_beat(start, tempo_changes, first)),
                 float(seconds_at_beat(end, tempo_changes, first)))
-            plan_controls = _curve_plan_controls(model, condition, control_factor, core_duration,
+            curve_controls = _curve_plan_controls(model, condition, control_factor, core_duration,
                                                  strength=curve_strength)
+            if curve_controls is not None:
+                plan_controls = {**(plan_controls or {}), **curve_controls}
         planner_kwargs = {"plan_controls": plan_controls} if plan_controls is not None else {}
         feedback = None
         if intensity_curve is not None and ((curve_strength > 0 and intensity_curve_mode in {"follow", "hard"})
@@ -1245,7 +1260,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                                      if results else None))
             feedback = make_feedback()
             planner_kwargs["density_feedback"] = feedback
-        if str(getattr(model, "planner_profile", "legacy_v1")) == "music_structure_v2":
+        if is_music_structure(active_profile):
             from maichart.generation.event_audio import FEATURE_RATE_HZ
             core_low = float(seconds_at_beat(start, tempo_changes, first))
             core_high = float(seconds_at_beat(end, tempo_changes, first))
@@ -1887,7 +1902,9 @@ def main(argv=None) -> int:
                 audio_bounds_trim=args.audio_bounds_trim,
                 audio_bounds_lead=args.audio_bounds_lead,
                 silence_threshold=args.silence_threshold,
-                silence_window_share=args.silence_window_share, condition_default=float(contract_params.get("default", 0.5)),
+                silence_window_share=args.silence_window_share,
+                condition_default=float(contract_params.get("default", 0.5)),
+                fine_note_strength=float(getattr(args, "fine_note_strength", 0.5)),
             )
             points = _merge_windows(decoded, overlap_beats=overlap_beats)
             # File-time is an unconditional hard boundary.  Audible-span

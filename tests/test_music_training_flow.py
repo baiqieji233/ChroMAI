@@ -58,8 +58,10 @@ def test_structure_training_quality_preference_resume_and_finetune(tmp_path, mon
         positive = [arg for arg in common if arg != "--preference-enabled"]
         assert train_events.main(positive + ["--checkpoint-dir", str(output)]) == 0
         fresh = torch.load(output / "event_last.pt", map_location="cpu", weights_only=False)
-        assert fresh["model_config"]["plan_dim"] == 12
-        assert fresh["model_config"]["planner_profile"] == "music_structure_v2"
+        # A fresh run with --planner-profile auto takes the newest structure
+        # profile (v3: 9 continuous channels + 4 configuration logits).
+        assert fresh["model_config"]["planner_profile"] == "music_structure_v3"
+        assert fresh["model_config"]["plan_dim"] == 13
         assert fresh["data_contract"]["planner_params"]["teacher_mix"] == 0.5
         preference_dir = tmp_path / "preference"
         assert train_events.main(common + ["--init-checkpoint", str(output / "event_last.pt"),
