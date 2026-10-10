@@ -122,6 +122,23 @@ def test_unknown_path_is_explicitly_partial_not_passed():
     assert result.coverage["unsupported"]
 
 
+def test_reject_mode_fails_on_unsupported_partial_path():
+    result = detect_chart_conflicts(
+        [P(F(0), "1p5[4:1]")], TEMPO, 0, config("reject"))
+    assert result.success is False
+    assert result.coverage["status"] == "partial"
+    assert result.coverage["unsupported"]
+
+
+def test_local_repair_skips_unsupported_partial_path():
+    points = [P(F(0), "1p5[4:1]"), P(F(1), "1h[4:2]"), P(F(2), "1")]
+    result = process_chart_points(points, TEMPO, 0, config("local"))
+    assert result.points == points
+    assert result.repairs_applied == []
+    assert result.coverage["status"] == "partial"
+    assert result.coverage["unsupported"]
+
+
 def test_same_star_branches_count_one_head_but_explicit_duplicate_is_reported():
     branch = detect_chart_conflicts([P(F(0), "1-5[4:1]*-4[4:1]")], TEMPO, 0, config())
     assert not any(c.severity == "hard" for c in branch.conflicts_detected)
