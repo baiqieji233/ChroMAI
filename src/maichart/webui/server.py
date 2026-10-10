@@ -542,6 +542,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("冲突处理方式只能是 none、local 或 reject")
         if not 0 <= conflict_retries <= 5:
             raise ValueError("冲突重试次数必须是 0–5")
+        runtime_reference_mode = str(payload.get("runtime_reference_mode", "off")).strip().lower()
+        runtime_reference_executable = str(payload.get("runtime_reference_executable") or "").strip()
+        runtime_reference_timeout_sec = float(payload.get("runtime_reference_timeout_sec", 30.0))
+        if runtime_reference_mode not in {"off", "report", "reject"}:
+            raise ValueError("运行时参考检查模式只能是 off、report 或 reject")
+        if not math.isfinite(runtime_reference_timeout_sec) or not 0 < runtime_reference_timeout_sec <= 60:
+            raise ValueError("运行时参考检查超时必须在 0–60 秒之间")
+        if runtime_reference_mode != "off":
+            if not runtime_reference_executable:
+                raise ValueError("启用运行时参考检查时必须填写可执行文件路径")
+            if not _resolve_path(runtime_reference_executable).is_file():
+                raise ValueError(f"运行时参考可执行文件不存在：{runtime_reference_executable}")
         if not math.isfinite(curve_strength) or not 0.0 <= curve_strength <= 1.0:
             raise ValueError("曲线控制力度必须在 0–1 之间")
         if curve_mode not in {"follow", "hard", "soft", "strict"}:
@@ -550,6 +562,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task.result.update({"model_family": model_family, "checkpoint_schema": checkpoint_payload.get("schema")})
         seed, seed_randomized = _resolve_seed(payload)
         task.result.update({"seed": seed, "seed_randomized": seed_randomized})
+        task.result.update({"runtime_reference_mode": runtime_reference_mode,
+                            "runtime_reference_executable": runtime_reference_executable or None,
+                            "runtime_reference_timeout_sec": runtime_reference_timeout_sec})
         condition = payload.get("condition") or {"level": float(payload.get("level", GENERATION_DEFAULTS["level"]))}
         condition_path = CONDITION_ROOT / f"{task.task_id}.json"
         condition_path.write_text(json.dumps(condition, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -604,6 +619,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                                        GENERATION_SAMPLING_DEFAULTS["repetition_window"])),
                 "--max-tokens", str(max(1, int(payload.get("max_tokens", GENERATION_SAMPLING_DEFAULTS["max_tokens"])))),
             ]
+            if runtime_reference_mode != "off":
+                args.extend(["--runtime-reference-mode", runtime_reference_mode,
+                             "--runtime-reference-executable", runtime_reference_executable,
+                             "--runtime-reference-timeout-sec", str(runtime_reference_timeout_sec)])
             if capabilities["fine_note_strength"]:
                 args.extend(["--fine-note-strength", str(fine_note_strength)])
                 task.result["fine_note_strength"] = fine_note_strength
