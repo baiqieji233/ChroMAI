@@ -41,8 +41,8 @@ cd <项目目录>
 py --version
 ```
 
-建议使用 Python 3.10 或更高版本。若系统提示找不到 `py`，需要先安装
-Python，并在安装器中勾选把 Python 加入 PATH。
+建议使用 Python 3.11；脚本支持 Python 3.10–3.13。若系统提示找不到 `py`，需要先安装
+受支持的 Python，并在安装器中勾选把 Python 加入 PATH。
 
 ### 3. 安装项目和可选依赖
 
@@ -50,7 +50,7 @@ Python，并在安装器中勾选把 Python 加入 PATH。
 START_WEBUI.bat --no-browser --port 7860
 ```
 
-首次启动会优先复用项目 `.venv` 或本机 `D:\maimai_ai\venv`，没有可用环境时才在项目目录创建独立 `.venv`，并安装测试工具、音频分析库和训练需要的 PyTorch 等依赖。若网络中断，重新执行同一条命令即可。安装完成后可用
+首次启动会优先复用项目 `.venv`，没有可用环境时通过 Windows `py` 启动器寻找受支持的 Python，在项目目录创建独立 `.venv`，并安装测试工具、音频分析库和训练需要的 PyTorch 等依赖。若网络中断，重新执行同一条命令即可。安装完成后可用
 `START_WEBUI.bat --check` 只检查环境而不启动服务。
 
 检查 PyTorch 是否能看到显卡：

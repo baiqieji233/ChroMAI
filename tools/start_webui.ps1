@@ -67,6 +67,28 @@ function Test-SupportedPython($Info) {
     return ($null -ne $Info -and $Info.Version -ge $SupportedPythonMin -and $Info.Version -lt $SupportedPythonMax)
 }
 
+function Get-AvailableBackupPath([string] $Path) {
+    $candidate = "$Path.invalid"
+    $suffix = 1
+    while (Test-Path -LiteralPath $candidate) {
+        $candidate = "$Path.invalid-$suffix"
+        $suffix++
+    }
+    return $candidate
+}
+
+function Find-PythonFromLauncher($Launcher, [string] $VersionTag) {
+    # Both syntaxes are supported by installed Windows Python launchers:
+    # the classic launcher accepts -V:3.11 and the newer manager also accepts -3.11.
+    foreach ($launcherArgs in @(@("-V:$VersionTag"), @("-$VersionTag"))) {
+        $candidateInfo = Get-PythonInfo $Launcher.Source $launcherArgs
+        if (Test-SupportedPython $candidateInfo) {
+            return $candidateInfo
+        }
+    }
+    return $null
+}
+
 $overridePython = $env:MAICHART_PYTHON
 $overrideSource = "MAICHART_PYTHON"
 $pythonConfig = Join-Path $ProjectRoot ".webui-python"
@@ -88,43 +110,28 @@ if ($overridePython) {
     }
 } else {
     $configuredVenv = [bool]$env:MAICHART_VENV
-    $venvRoots = @()
-    if ($configuredVenv) {
-        $venvRoots += $env:MAICHART_VENV
-    } else {
-        $venvRoots += Join-Path $ProjectRoot ".venv"
-        # The documented local setup keeps dependencies on D: to avoid filling the project drive.
-        $venvRoots += "D:\maimai_ai\venv"
-    }
-    foreach ($candidateRoot in $venvRoots) {
-        $candidateRoot = [string]$candidateRoot
-        if (-not [System.IO.Path]::IsPathRooted($candidateRoot)) {
-            $candidateRoot = Join-Path $ProjectRoot $candidateRoot
-        }
-        $candidatePath = Join-Path $candidateRoot "Scripts\python.exe"
-        if (-not (Test-Path -LiteralPath $candidatePath)) { continue }
-        $candidateInfo = Get-PythonInfo $candidatePath
-        if (Test-SupportedPython $candidateInfo) {
-            $Python = $candidatePath
-            $venvRoot = $candidateRoot
-            break
-        }
-        Write-Warning "Ignoring incompatible Python environment '$candidateRoot'. Python 3.10-3.13 is required."
-    }
-    if (-not $venvRoot) {
-        $venvRoot = Join-Path $ProjectRoot ".venv"
+    $venvRoot = if ($configuredVenv) { $env:MAICHART_VENV } else { Join-Path $ProjectRoot ".venv" }
+    if (-not [System.IO.Path]::IsPathRooted($venvRoot)) {
+        $venvRoot = Join-Path $ProjectRoot $venvRoot
     }
     $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+    $existingVenvInfo = $null
+    if (Test-Path -LiteralPath $venvPython) {
+        $existingVenvInfo = Get-PythonInfo $venvPython
+        if (Test-SupportedPython $existingVenvInfo) {
+            $Python = $venvPython
+        } else {
+            Write-Warning "Ignoring incompatible Python environment '$venvRoot'. Python 3.10-3.13 is required."
+        }
+    }
 
     $bootstrapPython = $null
     if (-not $Python) {
         $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
         if ($pyLauncher) {
             foreach ($versionTag in "3.11", "3.12", "3.13", "3.10") {
-                # The current Windows Python install manager uses -V:3.11;
-                # this also works with the classic py launcher.
-                $candidateInfo = Get-PythonInfo $pyLauncher.Source @("-V:$versionTag")
-                if (Test-SupportedPython $candidateInfo) {
+                $candidateInfo = Find-PythonFromLauncher $pyLauncher $versionTag
+                if ($candidateInfo) {
                     $bootstrapPython = $candidateInfo.Path
                     break
                 }
@@ -145,7 +152,18 @@ if ($overridePython) {
             $Python = $bootstrapPython
         } else {
             if (Test-Path -LiteralPath $venvRoot) {
-                Fail "Existing environment '$venvRoot' is incompatible. Set MAICHART_VENV to a new directory or MAICHART_PYTHON to an existing Python 3.10-3.13 environment."
+                if (-not $configuredVenv) {
+                    $versionLabel = if ($existingVenvInfo) { $existingVenvInfo.Version } else { "incomplete" }
+                    $backupVenv = Get-AvailableBackupPath $venvRoot
+                    $backupVenv = "$backupVenv-$versionLabel"
+                    if (Test-Path -LiteralPath $backupVenv) {
+                        $backupVenv = Get-AvailableBackupPath "$venvRoot.invalid-$versionLabel"
+                    }
+                    Write-Warning "Moving the incompatible project environment to '$backupVenv'."
+                    Move-Item -LiteralPath $venvRoot -Destination $backupVenv
+                } else {
+                    Fail "Existing environment '$venvRoot' is incompatible. Set MAICHART_VENV to a new directory or MAICHART_PYTHON to an existing Python 3.10-3.13 environment."
+                }
             }
             Write-Host "Creating virtual environment: $venvRoot"
             & $bootstrapPython -m venv $venvRoot
