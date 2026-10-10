@@ -25,7 +25,9 @@ from maichart.generation.event_ctx import (
     DEFAULT_CONTEXT_DROPOUT,
     DEFAULT_CONTEXT_TOKENS,
 )
-from maichart.generation.event_model import EventConditionedTransformer, EventTransformerConfig, EventVocabulary
+from maichart.generation.event_model import (
+    EventConditionedTransformer, EventTransformerConfig, EventVocabulary, pool_local_tracks,
+)
 from maichart.generation.music_plan import (
     CONTINUOUS_COUNT, MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM, continuous_keys,
     is_music_structure,
@@ -78,6 +80,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--grad-accumulation", type=int, default=4)
     parser.add_argument("--plan-loss-weight", type=float, default=0.1,
                          help="Weight of the window-level planner auxiliary loss.")
+    parser.add_argument("--onset-profile", choices=("auto", "none", "chart_onsets_v1"),
+                        default="auto",
+                        help="Optional local chart-onset auxiliary head; auto inherits the checkpoint or disables it for a fresh run.")
+    parser.add_argument("--onset-loss-weight", type=float, default=0.2,
+                        help="Weight of the local chart-onset auxiliary loss when --onset-profile is enabled.")
     parser.add_argument("--planner-profile",
                         choices=("auto", "legacy_v1", "music_structure_v2",
                                  "music_structure_v3"),
@@ -251,6 +258,62 @@ def _quality_weighted_mean(values: torch.Tensor, weights: torch.Tensor,
     return total / denominator / max(float(normalizer), 1e-8)
 
 
+def pool_onset_targets(batch: dict[str, torch.Tensor], model: EventConditionedTransformer):
+    """Align chart-onset labels and weights with the model's local memory bins."""
+    required = ("onset_target", "onset_weight", "onset_valid")
+    missing = [key for key in required if key not in batch]
+    if missing:
+        raise ValueError(f"onset training requires batch fields {missing}.")
+    target = batch["onset_target"].float()
+    weight = batch["onset_weight"].float()
+    valid = batch["onset_valid"].float().clamp(0.0, 1.0)
+    if target.shape != weight.shape or target.shape != valid.shape:
+        raise ValueError("onset target, weight and valid tensors must have matching [B, T] shapes.")
+    tracks = torch.stack((target * weight * valid, weight * valid, valid), dim=-1)
+    pooled, padding = pool_local_tracks(
+        tracks, batch.get("audio_padding_mask"), model.config.max_audio_tokens,
+        model.config.local_pooling_policy)
+    numerator, weighted_coverage, core_coverage = pooled.unbind(dim=-1)
+    pooled_target = numerator / weighted_coverage.clamp_min(1e-8)
+    pooled_quality = weighted_coverage / core_coverage.clamp_min(1e-8)
+    effective_valid = core_coverage * (~padding).to(core_coverage.dtype)
+    effective_valid = torch.where(core_coverage > 0, effective_valid, torch.zeros_like(effective_valid))
+    pooled_target = torch.where(weighted_coverage > 0, pooled_target, torch.zeros_like(pooled_target))
+    pooled_quality = torch.where(core_coverage > 0, pooled_quality, torch.zeros_like(pooled_quality))
+    return pooled_target.clamp(0.0, 1.0), pooled_quality.clamp_min(0.0), effective_valid
+
+
+def local_onset_objective(logits: torch.Tensor, target: torch.Tensor, quality: torch.Tensor,
+                          valid: torch.Tensor, normalizer: float = 1.0):
+    """Return weighted BCE and auditable frame-level quality metrics."""
+    if logits.shape != target.shape or logits.shape != quality.shape or logits.shape != valid.shape:
+        raise ValueError("onset logits and pooled target tensors must have matching [B, T] shapes.")
+    logits = logits.float()
+    target = target.float()
+    quality = quality.float()
+    valid = valid.float()
+    bce = F.binary_cross_entropy_with_logits(logits, target, reduction="none")
+    probabilities = torch.sigmoid(logits)
+    weighted_valid = quality * valid
+    frame_count = valid.sum()
+    denom = frame_count.clamp_min(1.0) * max(float(normalizer), 1e-8)
+    loss = (bce * weighted_valid).sum() / denom
+    brier_sum = ((probabilities - target).square() * weighted_valid).sum()
+    predicted = probabilities >= 0.5
+    actual = target >= 0.5
+    tp = (predicted & actual).to(logits.dtype) * weighted_valid
+    fp = (predicted & ~actual).to(logits.dtype) * weighted_valid
+    fn = (~predicted & actual).to(logits.dtype) * weighted_valid
+    stats = {
+        "bce_sum": (bce * weighted_valid).sum().detach(),
+        "brier_sum": brier_sum.detach(),
+        "weighted_frames": weighted_valid.sum().detach(),
+        "valid_frames": frame_count.detach(),
+        "tp": tp.sum().detach(), "fp": fp.sum().detach(), "fn": fn.sum().detach(),
+    }
+    return loss, stats
+
+
 def _reset_dataset_condition_rng(loader: Any, seed: int) -> bool:
     """Reset the validation dataset RNG before its prefetch iterator starts."""
     current = loader
@@ -302,6 +365,7 @@ def _global_step_metadata(checkpoint: dict[str, Any] | None, *, resume: bool) ->
 
 def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulation=1,
               condition_dropout=0.0, condition_default=0.5, plan_loss_weight=0.1, max_steps=0,
+              onset_loss_weight: float = 0.2,
               vram_budget_bytes: int = 0, vram_flush_batches: int = 100,
               quality_token_normalizer: float = 1.0, quality_plan_normalizer: float = 1.0,
               plan_teacher_mix: float = 0.0, validation_condition_seed: int = VALIDATION_CONDITION_SEED,
@@ -331,6 +395,13 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     objective_window_total = 0
     optimizer_steps_attempted = 0
     optimizer_steps_successful = 0
+    onset_optimizer_steps_successful = 0
+    onset_group_active = False
+    onset_bce_sum_total = None
+    onset_brier_sum_total = None
+    onset_weighted_frames_total = None
+    onset_valid_frames_total = None
+    onset_tp_total = onset_fp_total = onset_fn_total = None
     token_total = None
     correct_total = None
     position_total = None
@@ -362,6 +433,14 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             _close_loader_iterator(iterator)
             raise
         data_seconds += time.perf_counter() - data_begin
+        onset_profile = getattr(getattr(model, "config", None), "onset_profile", "none")
+        onset_enabled = onset_profile == "chart_onsets_v1"
+        onset_batch_active = False
+        if train and onset_enabled and onset_loss_weight > 0:
+            if "onset_weight" not in batch or "onset_valid" not in batch:
+                raise ValueError("chart_onsets_v1 training requires onset_weight and onset_valid batch fields.")
+            onset_batch_active = bool(((batch["onset_weight"] > 0) & (batch["onset_valid"] > 0)).any())
+        onset_group_active = onset_group_active or onset_batch_active
         start_event = end_event = None
         if timing:
             start_event = torch.cuda.Event(enable_timing=True)
@@ -396,8 +475,11 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
                            audio_padding_mask=batch["audio_padding_mask"], decoder_padding_mask=batch["decoder_padding_mask"],
                            global_audio=batch["global_audio"], condition_null=condition_null,
                            plan_audio_mask=batch.get("plan_audio_mask"),
-                           return_plan=True, **planner_kwargs)
-            logits, plan_pred = output
+                           return_plan=True, return_onset=onset_enabled, **planner_kwargs)
+            if onset_enabled:
+                logits, plan_pred, onset_logits = output
+            else:
+                logits, plan_pred = output
             valid = ~batch["decoder_padding_mask"] & batch["loss_mask"]
             raw_loss = F.cross_entropy(logits.transpose(1, 2), batch["target"], reduction="none")
             token_weights = batch.get("quality_token_weights")
@@ -420,6 +502,13 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             weighted_config = _quality_weighted_mean(
                 config_per_window, sample_weights, quality_plan_normalizer)
             loss = loss + float(plan_loss_weight) * (weighted_plan + 0.25 * weighted_config)
+            if onset_enabled:
+                onset_target, onset_quality, onset_valid = pool_onset_targets(batch, model)
+                onset_loss, onset_stats = local_onset_objective(
+                    onset_logits, onset_target, onset_quality, onset_valid,
+                    normalizer=quality_plan_normalizer)
+                if train and onset_loss_weight > 0 and onset_batch_active:
+                    loss = loss + float(onset_loss_weight) * onset_loss
         if not torch.isfinite(loss):
             raise RuntimeError("Non-finite event loss; no successful checkpoint will be saved.")
         if train:
@@ -434,6 +523,9 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
                 _result, successful_steps = _run_and_count_optimizer_steps(
                     optimizer, lambda: scaler.step(optimizer))
                 optimizer_steps_successful += successful_steps
+                if onset_group_active:
+                    onset_optimizer_steps_successful += successful_steps
+                onset_group_active = False
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
         batch_windows = int(condition.size(0))
@@ -447,6 +539,17 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
         configuration_loss_total = (configuration_batch if configuration_loss_total is None
                                     else configuration_loss_total + configuration_batch)
         objective_window_total += batch_windows
+        if onset_enabled:
+            def add_onset_total(name, value):
+                current = value.detach().double()
+                return current if name is None else name + current
+            onset_bce_sum_total = add_onset_total(onset_bce_sum_total, onset_stats["bce_sum"])
+            onset_brier_sum_total = add_onset_total(onset_brier_sum_total, onset_stats["brier_sum"])
+            onset_weighted_frames_total = add_onset_total(onset_weighted_frames_total, onset_stats["weighted_frames"])
+            onset_valid_frames_total = add_onset_total(onset_valid_frames_total, onset_stats["valid_frames"])
+            onset_tp_total = add_onset_total(onset_tp_total, onset_stats["tp"])
+            onset_fp_total = add_onset_total(onset_fp_total, onset_stats["fp"])
+            onset_fn_total = add_onset_total(onset_fn_total, onset_stats["fn"])
         config_predictions = plan_pred[:, continuous:continuous + 4].argmax(dim=-1)
         config_correct = ((config_predictions == config_target) & (sample_weights > 0)).sum()
         configuration_correct_total = (config_correct if configuration_correct_total is None
@@ -529,10 +632,17 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     plan_names = continuous_keys(getattr(model.config, "planner_profile", "legacy_v1"))
     plan_errors = (planner_error_total.cpu().tolist() if planner_error_total is not None else [])
     plan_count = int(planner_window_total.item()) if planner_window_total is not None else 0
+    onset_weighted_frames = (float(onset_weighted_frames_total.item())
+                             if onset_weighted_frames_total is not None else 0.0)
+    onset_valid_frames = (float(onset_valid_frames_total.item())
+                          if onset_valid_frames_total is not None else 0.0)
+    onset_tp = float(onset_tp_total.item()) if onset_tp_total is not None else 0.0
+    onset_fp = float(onset_fp_total.item()) if onset_fp_total is not None else 0.0
+    onset_fn = float(onset_fn_total.item()) if onset_fn_total is not None else 0.0
     amp_scale_end = (float(scaler.get_scale()) if train and scaler is not None
                      and scaler.is_enabled() else None)
     token_loss = total_loss / max(total_tokens, 1)
-    return {"loss": total_loss / max(total_tokens, 1),
+    result = {"loss": total_loss / max(total_tokens, 1),
             "token_loss": token_loss,
             "objective_loss": objective_loss,
             "planner_loss": planner_loss,
@@ -554,6 +664,19 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             "position_accuracy": position_correct / max(position_count, 1), "tokens": total_tokens,
             "batches": batches, "data_seconds": round(data_seconds, 3),
             "gpu_seconds": round(gpu_seconds, 3), "vram_freed_gib": round(vram_freed, 2)}
+    if getattr(getattr(model, "config", None), "onset_profile", "none") == "chart_onsets_v1":
+        result.update({
+            "onset_bce": (float(onset_bce_sum_total.item()) / max(onset_valid_frames, 1.0)
+                          if onset_bce_sum_total is not None else 0.0),
+            "onset_brier": (float(onset_brier_sum_total.item()) / max(onset_weighted_frames, 1.0)
+                            if onset_brier_sum_total is not None else 0.0),
+            "onset_precision_at_0_5": onset_tp / max(onset_tp + onset_fp, 1.0),
+            "onset_recall_at_0_5": onset_tp / max(onset_tp + onset_fn, 1.0),
+            "onset_weighted_frames": onset_weighted_frames,
+            "onset_valid_frames": onset_valid_frames,
+            "onset_optimizer_steps_successful": onset_optimizer_steps_successful,
+        })
+    return result
 
 
 class PrefetchLoader:
@@ -824,6 +947,8 @@ def main(argv=None) -> int:
         raise ValueError("preference weight must be 0..1, beta positive and max pairs positive.")
     if not math.isfinite(args.plan_teacher_mix) or not 0.0 <= args.plan_teacher_mix <= 1.0:
         raise ValueError("plan-teacher-mix must be a finite value in 0..1")
+    if not math.isfinite(args.onset_loss_weight) or args.onset_loss_weight < 0.0:
+        raise ValueError("onset-loss-weight must be finite and nonnegative.")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     checkpoint = load_event_checkpoint(args.resume or args.init_checkpoint) if args.resume or args.init_checkpoint else None
     stored_planner = checkpoint.get("model_config", {}).get("planner_profile", "legacy_v1") if checkpoint else None
@@ -834,6 +959,16 @@ def main(argv=None) -> int:
                        if args.planner_profile == "auto" else args.planner_profile)
     if checkpoint and planner_profile != stored_planner:
         raise ValueError("音乐结构规划器的训练目标和模型头已改变；请选择 fresh 重新训练，原 checkpoint 可继续用其原规划器。")
+    stored_onset_profile = str(checkpoint.get("model_config", {}).get("onset_profile", "none")) if checkpoint else "none"
+    onset_profile = stored_onset_profile if args.onset_profile == "auto" else args.onset_profile
+    if args.init_checkpoint and stored_onset_profile == "chart_onsets_v1" and onset_profile == "none":
+        raise ValueError("finetune cannot disable a checkpoint's chart_onsets_v1 head; use --onset-profile auto or chart_onsets_v1.")
+    if onset_profile == "chart_onsets_v1" and planner_profile != MUSIC_STRUCTURE_V3_PROFILE:
+        raise ValueError("chart_onsets_v1 currently requires planner_profile=music_structure_v3.")
+    if onset_profile == "chart_onsets_v1" and args.onset_loss_weight <= 0.0:
+        raise ValueError("chart_onsets_v1 finetuning requires a positive --onset-loss-weight so the head remains capability-verified.")
+    stored_pooling = str(checkpoint.get("model_config", {}).get("local_pooling_policy", "legacy_uniform")) if checkpoint else "legacy_uniform"
+    local_pooling_policy = ("per_sample_v2" if onset_profile == "chart_onsets_v1" else stored_pooling)
     vocabulary = EventVocabulary.from_dict(checkpoint["vocabulary"]) if checkpoint else None
     quality_payload = None
     quality_normalizers = {"token": 1.0, "planner": 1.0, "positive_windows": 0.0}
@@ -848,6 +983,7 @@ def main(argv=None) -> int:
     family = dataset_kwargs(args)
     shared = {"condition_mask_prob": args.condition_mask_prob,
               "condition_default": args.condition_default,
+              "onset_profile": onset_profile,
               "min_difficulty_index": args.min_difficulty_index,
               "max_difficulty_index": args.max_difficulty_index,
               "min_level": args.min_level, "max_level": args.max_level}
@@ -959,6 +1095,14 @@ def main(argv=None) -> int:
                        if planner_profile == MUSIC_STRUCTURE_V3_PROFILE
                        else "chart_authored_local_workload_v2"),
         }
+    if onset_profile == "chart_onsets_v1":
+        contract["onset_params"] = {
+            "profile": onset_profile,
+            "target_version": "chart_onsets_v1",
+            "sigma_sec": 0.02,
+            "loss_weight": float(args.onset_loss_weight),
+            "local_pooling_policy": local_pooling_policy,
+        }
     if quality_payload is not None:
         contract["quality_params"] = {
             "schema": quality_payload.get("schema"),
@@ -986,20 +1130,30 @@ def main(argv=None) -> int:
             "source_epoch": checkpoint.get("epoch"),
             "source_global_step": checkpoint.get("global_step"),
             "optimizer_reset": True, "sampling_changes": sampling_changes,
+            "onset_changes": {"source": checkpoint.get("data_contract", {}).get("onset_params"),
+                              "current": contract.get("onset_params")},
         }
         print(f"init_checkpoint={args.init_checkpoint} mode=finetune source_epoch={checkpoint.get('epoch')} "
               f"optimizer_reset=true sampling_changes={json.dumps(sampling_changes)}", flush=True)
-    config = EventTransformerConfig(**checkpoint["model_config"]) if checkpoint else EventTransformerConfig(
-        input_dim=INPUT_DIM, vocab_size=len(vocabulary), d_model=args.d_model, nhead=args.nhead,
-        num_layers=args.num_layers, dim_feedforward=args.dim_feedforward, dropout=args.dropout,
-        max_tokens=args.max_tokens, max_audio_tokens=args.max_audio_tokens,
-        global_audio_tokens=args.global_frames, planner_profile=planner_profile,
-        plan_dim=PLAN_DIM[planner_profile])
+    config_values = dict(checkpoint["model_config"]) if checkpoint else {
+        "input_dim": INPUT_DIM, "vocab_size": len(vocabulary), "d_model": args.d_model,
+        "nhead": args.nhead, "num_layers": args.num_layers,
+        "dim_feedforward": args.dim_feedforward, "dropout": args.dropout,
+        "max_tokens": args.max_tokens, "max_audio_tokens": args.max_audio_tokens,
+        "global_audio_tokens": args.global_frames, "planner_profile": planner_profile,
+        "plan_dim": PLAN_DIM[planner_profile],
+    }
+    config_values["onset_profile"] = onset_profile
+    config_values["local_pooling_policy"] = local_pooling_policy
+    config = EventTransformerConfig(**config_values)
     device = device_for(args.device)
     model = EventConditionedTransformer(config).to(device)
     model.position_ids = torch.tensor([index for index, token in enumerate(vocabulary.tokens) if token.startswith("AT:")], device=device)
     if checkpoint:
-        compatibility = model.load_weights_compatible(checkpoint["model_state_dict"])
+        allow_missing_onset = bool(args.init_checkpoint and onset_profile == "chart_onsets_v1"
+                                   and stored_onset_profile == "none")
+        compatibility = model.load_weights_compatible(
+            checkpoint["model_state_dict"], allow_missing_onset_head=allow_missing_onset)
         # A finetune/init run should learn the current planner even when the
         # source checkpoint predates planner injection; generation of that old
         # checkpoint remains planner-disabled in load_event_model().
@@ -1011,6 +1165,11 @@ def main(argv=None) -> int:
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=4)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and not args.no_amp)
     start_epoch, global_step, best, stale = 0, 0, float("inf"), 0
+    onset_optimizer_steps = 0
+    saved_onset_training = checkpoint.get("onset_training", {}) if checkpoint else {}
+    if (onset_profile == "chart_onsets_v1" and saved_onset_training.get("profile") == onset_profile
+            and saved_onset_training.get("trained")):
+        onset_optimizer_steps = int(saved_onset_training.get("optimizer_steps", 0))
     global_step_semantics, global_step_legacy_before_resume = _global_step_metadata(
         checkpoint, resume=bool(args.resume))
     saved_validation_schedule = checkpoint.get("validation_mask_schedule") if args.resume else None
@@ -1089,6 +1248,7 @@ def main(argv=None) -> int:
         metrics = run_epoch(model, loader, device, optimizer=optimizer, scaler=scaler,
                             accumulation=args.grad_accumulation, condition_dropout=args.condition_dropout,
                             condition_default=args.condition_default, plan_loss_weight=args.plan_loss_weight,
+                            onset_loss_weight=args.onset_loss_weight,
                             max_steps=args.max_steps,
                             vram_budget_bytes=budget_bytes, vram_flush_batches=args.cuda_cache_flush_batches,
                             quality_token_normalizer=quality_normalizers["token"],
@@ -1115,6 +1275,7 @@ def main(argv=None) -> int:
         train_seconds = time.perf_counter() - epoch_start
         validation_start = time.perf_counter()
         val_metrics = run_epoch(model, val_loader, device, plan_loss_weight=args.plan_loss_weight,
+                                onset_loss_weight=args.onset_loss_weight,
                                 max_steps=args.validation_max_steps, vram_budget_bytes=budget_bytes,
                                 vram_flush_batches=args.cuda_cache_flush_batches,
                                 validation_condition_seed=VALIDATION_CONDITION_SEED,
@@ -1128,6 +1289,7 @@ def main(argv=None) -> int:
         if lr_reduced:
             stale = 0
         global_step += metrics["optimizer_steps_successful"] + preference_optimizer_steps_successful
+        onset_optimizer_steps += int(metrics.get("onset_optimizer_steps_successful", 0))
         improved = score < best
         if improved: best, stale = score, 0
         else: stale += 1
@@ -1167,6 +1329,14 @@ def main(argv=None) -> int:
             planner_metrics = (val_metrics or metrics).get("planner_mae", {})
             print("planner_epoch=" + str(epoch) + " source=" + ("validation" if val_metrics else "training")
                   + " " + " ".join(f"{key}_mae={value:.4f}" for key, value in planner_metrics.items()), flush=True)
+        if onset_profile == "chart_onsets_v1":
+            onset_metrics = val_metrics or metrics
+            print(f"onset_epoch={epoch:03d} source={('validation' if val_metrics else 'training')} "
+                  f"bce={onset_metrics.get('onset_bce', 0.0):.6f} "
+                  f"brier={onset_metrics.get('onset_brier', 0.0):.6f} "
+                  f"precision@0.5={onset_metrics.get('onset_precision_at_0_5', 0.0):.4f} "
+                  f"recall@0.5={onset_metrics.get('onset_recall_at_0_5', 0.0):.4f} "
+                  f"valid_frames={onset_metrics.get('onset_valid_frames', 0.0):.0f}", flush=True)
         if args.quality_annotations:
             print(f"quality_epoch={epoch:03d} weighted_token_loss={metrics['quality_weighted_token_loss']:.6f} "
                   f"weighted_tokens={metrics['quality_weighted_tokens']:.0f} "
@@ -1188,12 +1358,15 @@ def main(argv=None) -> int:
         record["cuda_memory"] = {**memory, "budget_gib": round(budget_bytes / 1024 ** 3, 2),
                                  "freed_gib": freed}
         with (checkpoint_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle: handle.write(json.dumps(record) + "\n")
+        onset_trained = onset_profile == "chart_onsets_v1" and onset_optimizer_steps > 0
         payload = {"schema": EVENT_CHECKPOINT_SCHEMA, "checkpoint_kind": "training_checkpoint", "epoch": epoch, "global_step": global_step,
                    "global_step_semantics": global_step_semantics,
                    "global_step_legacy_before_resume": global_step_legacy_before_resume,
                    "best_metric": best, "stale_epochs": stale, "metrics": record,
                    "model_config": config.to_dict(), "data_contract": contract, "vocabulary": vocabulary.to_dict(), "atom_catalog": catalog,
                    "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
+                   "onset_training": {"profile": onset_profile, "trained": bool(onset_trained),
+                                      "optimizer_steps": int(onset_optimizer_steps)},
                    "training_origin": training_origin,
                    "amp_scaler_state_dict": scaler.state_dict(), "args": vars(args),
                    "validation_mask_schedule": VALIDATION_MASK_SCHEDULE if validation else None,

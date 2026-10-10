@@ -226,6 +226,8 @@ class EventTransformerConfig:
     # Five continuous window controls plus four configuration-class logits.
     plan_dim: int = 9
     planner_profile: str = LEGACY_PROFILE
+    onset_profile: str = "none"
+    local_pooling_policy: str = "legacy_uniform"
 
     def __post_init__(self) -> None:
         validate_profile(self.planner_profile)
@@ -235,10 +237,76 @@ class EventTransformerConfig:
             self.plan_dim = PLAN_DIM[self.planner_profile]
         elif self.plan_dim not in {6, PLAN_DIM[LEGACY_PROFILE]}:
             raise ValueError("legacy_v1 requires plan_dim=6 or 9")
+        if self.onset_profile not in {"none", "chart_onsets_v1"}:
+            raise ValueError("onset_profile must be 'none' or 'chart_onsets_v1'.")
+        if self.local_pooling_policy not in {"legacy_uniform", "per_sample_v2"}:
+            raise ValueError("local_pooling_policy must be 'legacy_uniform' or 'per_sample_v2'.")
+        if self.onset_profile == "chart_onsets_v1" and self.local_pooling_policy != "per_sample_v2":
+            raise ValueError("chart_onsets_v1 requires local_pooling_policy='per_sample_v2'.")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
+
+def pool_local_tracks(
+    tracks: torch.Tensor,
+    padding_mask: torch.Tensor | None,
+    max_audio_tokens: int,
+    policy: str = "legacy_uniform",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Pool local audio or aligned frame tracks and return their padding mask.
+
+    ``legacy_uniform`` preserves the historical batch-level behavior: if the
+    padded batch length exceeds the cap, every sample's valid frames are pooled
+    or expanded to exactly ``max_audio_tokens``. ``per_sample_v2`` only pools
+    samples that individually exceed the cap, so shorter samples keep their
+    original frame grid when batched beside a longer song window.
+    """
+    if tracks.ndim != 3:
+        raise ValueError("tracks must have shape [B, T, C].")
+    if max_audio_tokens <= 0:
+        raise ValueError("max_audio_tokens must be positive.")
+    if policy not in {"legacy_uniform", "per_sample_v2"}:
+        raise ValueError("unknown local pooling policy.")
+    batch, length, _ = tracks.shape
+    if padding_mask is None:
+        padding_mask = torch.zeros((batch, length), dtype=torch.bool, device=tracks.device)
+    elif padding_mask.shape != (batch, length) or padding_mask.dtype != torch.bool:
+        raise ValueError("padding_mask must be bool with shape [B, T].")
+    else:
+        padding_mask = padding_mask.to(device=tracks.device)
+
+    if policy == "legacy_uniform":
+        if length <= max_audio_tokens:
+            return tracks, padding_mask
+        pooled = []
+        for index in range(batch):
+            valid = tracks[index][~padding_mask[index]]
+            if valid.size(0) == 0:
+                raise ValueError("each sample must contain at least one valid local frame.")
+            pooled.append(torch.nn.functional.adaptive_avg_pool1d(
+                valid.transpose(0, 1).unsqueeze(0), max_audio_tokens)[0].transpose(0, 1))
+        result = torch.stack(pooled)
+        return result, torch.zeros((batch, max_audio_tokens), dtype=torch.bool, device=tracks.device)
+
+    pooled_samples = []
+    lengths = []
+    for index in range(batch):
+        valid = tracks[index][~padding_mask[index]]
+        if valid.size(0) == 0:
+            raise ValueError("each sample must contain at least one valid local frame.")
+        if valid.size(0) > max_audio_tokens:
+            valid = torch.nn.functional.adaptive_avg_pool1d(
+                valid.transpose(0, 1).unsqueeze(0), max_audio_tokens)[0].transpose(0, 1)
+        pooled_samples.append(valid)
+        lengths.append(valid.size(0))
+    output_length = max(lengths)
+    result = tracks.new_zeros((batch, output_length, tracks.size(-1)))
+    result_mask = torch.ones((batch, output_length), dtype=torch.bool, device=tracks.device)
+    for index, valid in enumerate(pooled_samples):
+        result[index, :valid.size(0)] = valid
+        result_mask[index, :valid.size(0)] = False
+    return result, result_mask
 
 def _cached_decoder_layer(
     layer: nn.TransformerDecoderLayer,
@@ -402,9 +470,15 @@ class EventConditionedTransformer(nn.Module):
             nn.Linear(self.config.d_model // 2, self.config.plan_dim),
         )
         self.plan_condition = nn.Linear(self.config.plan_dim, self.config.d_model)
+        self.onset_head = (nn.Sequential(
+            nn.Linear(self.config.d_model, self.config.d_model // 2),
+            nn.GELU(),
+            nn.Linear(self.config.d_model // 2, 1),
+        ) if self.config.onset_profile == "chart_onsets_v1" else None)
         self.planner_enabled = True
 
-    def load_weights_compatible(self, state_dict: Mapping[str, torch.Tensor]) -> dict[str, Any]:
+    def load_weights_compatible(self, state_dict: Mapping[str, torch.Tensor], *,
+                                allow_missing_onset_head: bool = False) -> dict[str, Any]:
         """Load weights, accepting a checkpoint from before the condition token.
 
         The condition-token architecture moved the condition from a per-frame
@@ -447,6 +521,18 @@ class EventConditionedTransformer(nn.Module):
         tolerated = planner_keys | {"condition_null_embedding"}
         if not has_condition_token:
             tolerated.add("condition_type_embedding")
+        onset_keys = {"onset_head.0.weight", "onset_head.0.bias",
+                      "onset_head.2.weight", "onset_head.2.bias"}
+        onset_present = {key for key in onset_keys if present(key)}
+        if self.config.onset_profile == "chart_onsets_v1":
+            if onset_present and onset_present != onset_keys:
+                raise ValueError("checkpoint has an incomplete local onset head.")
+            if not onset_present:
+                if not allow_missing_onset_head:
+                    raise ValueError("checkpoint enables chart_onsets_v1 but has no trained local onset head.")
+                tolerated.update(onset_keys)
+        elif onset_present:
+            raise ValueError("checkpoint contains a local onset head but onset_profile is disabled.")
         missing = [key for key in result.missing_keys if key not in tolerated]
         unexpected = list(result.unexpected_keys)
         if missing or unexpected:
@@ -456,7 +542,19 @@ class EventConditionedTransformer(nn.Module):
                 "请确认该 checkpoint 来自同一次训练；结构不同的模型必须重新训练。"
             )
         return {"condition_fusion": self.config.condition_fusion, "legacy": not has_condition_token,
-                "planner": has_planner}
+                "planner": has_planner, "onset_head": onset_present == onset_keys}
+
+    def local_onset_logits(self, memory: torch.Tensor) -> torch.Tensor:
+        """Predict chart-onset logits from the local encoder-memory region."""
+        if self.onset_head is None:
+            raise ValueError("local onset prediction requires onset_profile='chart_onsets_v1'.")
+        layout = getattr(memory, "_planner_layout", None)
+        if not layout:
+            raise ValueError("encoded memory is missing its local/global layout.")
+        local_len = int(layout[0])
+        if local_len <= 0 or local_len > memory.size(1):
+            raise ValueError("encoded memory has an invalid local region length.")
+        return self.onset_head(memory[:, :local_len]).squeeze(-1)
 
     def append_plan_memory(
         self,
@@ -592,27 +690,29 @@ class EventConditionedTransformer(nn.Module):
             if plan_audio_mask.shape != audio.shape[:2] or plan_audio_mask.dtype != torch.bool:
                 raise ValueError("plan_audio_mask must be bool with shape [B, local_audio_tokens].")
             plan_audio_mask = plan_audio_mask.to(device=audio.device)
+        original_length = audio.size(1)
+        original_padding_mask = audio_padding_mask
         planner_core_mask = plan_audio_mask
-        if audio.size(1) > self.config.max_audio_tokens:
-            # Pool real frames per sample, never include padding in pooling.
-            pooled = []
-            pooled_core = []
-            for index in range(audio.size(0)):
-                valid_selector = (torch.ones(audio.size(1), dtype=torch.bool, device=audio.device)
-                                  if audio_padding_mask is None else ~audio_padding_mask[index])
-                valid = audio[index][valid_selector]
-                pooled.append(torch.nn.functional.adaptive_avg_pool1d(valid.T.unsqueeze(0), self.config.max_audio_tokens)[0].T)
-                if planner_core_mask is not None:
-                    core = planner_core_mask[index][valid_selector].to(audio.dtype)
-                    pooled_core.append(torch.nn.functional.adaptive_avg_pool1d(
-                        core.reshape(1, 1, -1), self.config.max_audio_tokens
-                    ).reshape(-1) > 0.5)
-            audio = torch.stack(pooled)
-            if pooled_core:
-                planner_core_mask = torch.stack(pooled_core)
+        if planner_core_mask is not None:
+            tracks = torch.cat([audio, planner_core_mask.to(audio.dtype).unsqueeze(-1)], dim=-1)
+        else:
+            tracks = audio
+        tracks, pooled_padding_mask = pool_local_tracks(
+            tracks, audio_padding_mask, self.config.max_audio_tokens,
+            self.config.local_pooling_policy)
+        if planner_core_mask is not None:
+            audio = tracks[:, :, :self.config.input_dim]
+            planner_core_mask = tracks[:, :, self.config.input_dim] > 0.5
+        else:
+            audio = tracks
+        if (self.config.local_pooling_policy == "legacy_uniform"
+                and original_length > self.config.max_audio_tokens):
+            # Preserve the old path, which treated all pooled bins as valid.
             audio_padding_mask = None
-        elif planner_core_mask is not None:
-            planner_core_mask = planner_core_mask.to(device=audio.device)
+        elif original_padding_mask is None:
+            audio_padding_mask = None
+        else:
+            audio_padding_mask = pooled_padding_mask
         hidden = self.audio_projection(audio)
         positions = torch.arange(hidden.size(1), device=audio.device)
         hidden = hidden + self.audio_position_embedding(positions).unsqueeze(0)
@@ -680,11 +780,13 @@ class EventConditionedTransformer(nn.Module):
         plan_target: torch.Tensor | None = None,
         plan_teacher_mix: float | torch.Tensor = 0.0,
         plan_audio_mask: torch.Tensor | None = None,
-         return_plan: bool = False,
-    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+        return_plan: bool = False,
+        return_onset: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         memory, audio_padding_mask = self.encode_audio(
             audio, condition, audio_padding_mask, global_audio, condition_null,
             plan_audio_mask=plan_audio_mask)
+        onset_logits = self.local_onset_logits(memory) if return_onset else None
         # Feed the predicted window plan back into the event decoder. The plan
         # is computed from encoder memory, so this remains causal with respect
         # to the target tokens while making density/configuration intent useful
@@ -694,6 +796,8 @@ class EventConditionedTransformer(nn.Module):
             plan_controls=plan_controls, plan_target=plan_target,
             plan_teacher_mix=plan_teacher_mix)
         logits = self.decode_memory(memory, decoder_input, condition, audio_padding_mask, decoder_padding_mask)
+        if return_onset:
+            return logits, plan_pred, onset_logits
         if not return_plan:
             return logits
         return logits, plan_pred

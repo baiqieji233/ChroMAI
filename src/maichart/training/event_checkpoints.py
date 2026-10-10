@@ -17,10 +17,11 @@ EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 # Contract keys that only exist for some families.  They are compared when
 # either side carries them, and ignored otherwise so older checkpoints keep
 # working.
-OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params")
-SAMPLING_CONTRACT_KEYS = frozenset({
+OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params", "onset_params")
+INIT_MIGRATABLE_FAMILY_KEYS = frozenset({
     "slide_oversample", "touch_oversample", "oversample_policy",
     "fine_rhythm_oversample", "fine_rhythm_ratio_threshold", "fine_rhythm_stats_version",
+    "onset_profile",
 })
 LEGACY_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_v1"
 CURRENT_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
@@ -73,6 +74,43 @@ def load_event_checkpoint(path: str | Path, *, device: str | torch.device = "cpu
         raise ValueError("Checkpoint vocabulary/config size mismatch.")
     if payload.get("data_contract", {}).get("vocabulary_signature") != vocabulary_signature(vocabulary):
         raise ValueError("Checkpoint vocabulary signature mismatch.")
+    onset_profile = str(config.get("onset_profile", "none"))
+    if onset_profile not in {"none", "chart_onsets_v1"}:
+        raise ValueError(f"Unknown checkpoint onset_profile {onset_profile!r}.")
+    state = payload.get("model_state_dict", {})
+    onset_keys = {"onset_head.0.weight", "onset_head.0.bias", "onset_head.2.weight", "onset_head.2.bias"}
+    present = {key for key in onset_keys if key in state or any(str(name).endswith("." + key) for name in state)}
+    if onset_profile == "chart_onsets_v1":
+        if present != onset_keys:
+            raise ValueError("Checkpoint enables chart_onsets_v1 but its onset head weights are incomplete or missing.")
+        contract = payload.get("data_contract", {}).get("onset_params")
+        if not isinstance(contract, dict):
+            raise ValueError("Checkpoint enables chart_onsets_v1 but has no onset_params data contract.")
+        if contract.get("profile") != onset_profile or contract.get("target_version") != onset_profile:
+            raise ValueError("Checkpoint onset target profile and target version disagree.")
+        if contract.get("local_pooling_policy") != config.get("local_pooling_policy", "legacy_uniform"):
+            raise ValueError("Checkpoint onset pooling policy disagrees with model_config.")
+        try:
+            sigma = float(contract.get("sigma_sec"))
+            loss_weight = float(contract.get("loss_weight"))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Checkpoint onset sigma/loss weight is invalid.") from exc
+        if not math.isfinite(sigma) or not math.isclose(sigma, 0.02, rel_tol=0.0, abs_tol=1e-9):
+            raise ValueError("Checkpoint chart_onsets_v1 requires sigma_sec=0.02.")
+        if not math.isfinite(loss_weight) or loss_weight < 0.0:
+            raise ValueError("Checkpoint onset loss weight must be finite and nonnegative.")
+        training = payload.get("onset_training")
+        if (not isinstance(training, dict) or training.get("profile") != onset_profile
+                or not isinstance(training.get("trained"), bool)):
+            raise ValueError("Checkpoint onset_training metadata is missing or inconsistent.")
+        try:
+            steps = int(training.get("optimizer_steps", -1))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("Checkpoint onset optimizer step count is invalid.") from exc
+        if steps < 0 or training["trained"] != (steps > 0):
+            raise ValueError("Checkpoint onset trained status disagrees with optimizer step count.")
+    elif present:
+        raise ValueError("Checkpoint contains onset head weights while onset_profile is disabled.")
     return payload
 
 
@@ -110,9 +148,9 @@ def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, m
                 # optimizer, so it may explicitly migrate a legacy OR sampler
                 # or change either multiplier. All non-sampling keys stay strict.
                 before = {name: value for name, value in (before or {}).items()
-                          if name not in SAMPLING_CONTRACT_KEYS}
+                          if name not in INIT_MIGRATABLE_FAMILY_KEYS}
                 after = {name: value for name, value in (after or {}).items()
-                         if name not in SAMPLING_CONTRACT_KEYS}
+                         if name not in INIT_MIGRATABLE_FAMILY_KEYS}
             elif key == "family_params" and mode == "resume":
                 before = _normalize_resume_sampling(before, side="checkpoint")
                 after = _normalize_resume_sampling(after, side="current run")
@@ -120,6 +158,10 @@ def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, m
                 # A finetune is the supported way to change chart quality
                 # labels or add corrected preference pairs. Ordinary resume
                 # stays strict so optimizer state never crosses regimes.
+                before, after = None, None
+            if key == "onset_params" and mode in {"init", "finetune"}:
+                # Explicit initialization may add or retune this auxiliary
+                # objective; resume remains strict to preserve optimizer semantics.
                 before, after = None, None
             if before != after:
                 if key == "condition_params":
