@@ -4,7 +4,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from tools.run_staged_rhythm_validation import run_config
+from tools.run_staged_rhythm_validation import StateFileLock, StateLockError, run_config
 
 
 class FakeClient:
@@ -242,3 +242,26 @@ def test_partial_evaluation_is_nonzero_and_keeps_error_details(tmp_path):
     assert state["evaluation"]["evaluated_count"] == 1
     assert state["evaluation"]["error_count"] == 1
     assert state["status"] == "completed_with_errors"
+
+
+def test_state_lock_rejects_a_second_controller(tmp_path):
+    state_path = tmp_path / "controller_state.json"
+    with StateFileLock(state_path):
+        assert (tmp_path / "controller_state.json.lock").is_file()
+        try:
+            with StateFileLock(state_path):
+                raise AssertionError("second lock acquisition should fail")
+        except StateLockError as exc:
+            assert "already locked" in str(exc)
+
+
+def test_state_lock_is_released_after_exception(tmp_path):
+    state_path = tmp_path / "controller_state.json"
+    try:
+        with StateFileLock(state_path):
+            raise RuntimeError("test failure")
+    except RuntimeError as exc:
+        assert str(exc) == "test failure"
+
+    with StateFileLock(state_path):
+        pass

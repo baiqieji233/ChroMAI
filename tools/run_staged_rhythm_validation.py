@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import math
+import os
 import sys
 import time
 import urllib.error
@@ -31,6 +33,75 @@ class HTTPResponseError(RuntimeError):
         super().__init__(f"HTTP {code}: {body[:1000]}")
         self.code = int(code)
         self.body = body
+
+
+class StateLockError(RuntimeError):
+    pass
+
+
+class StateFileLock:
+    """Nonblocking process lock; lock-file presence alone has no meaning."""
+
+    def __init__(self, state_path: Path) -> None:
+        self.path = state_path.with_name(state_path.name + ".lock")
+        self.handle = None
+        self._windows_locked = False
+
+    def __enter__(self):
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.handle = self.path.open("a+b")
+        try:
+            if os.name == "nt":
+                import msvcrt
+
+                self.handle.seek(0, os.SEEK_END)
+                if self.handle.tell() == 0:
+                    self.handle.write(b"\0")
+                    self.handle.flush()
+                self.handle.seek(0)
+                try:
+                    msvcrt.locking(self.handle.fileno(), msvcrt.LK_NBLCK, 1)
+                except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.EAGAIN, errno.EDEADLK, 13, 36}:
+                        raise StateLockError(
+                            f"Controller state is already locked: {self.path}; do not start another runner for this state."
+                        ) from exc
+                    raise
+                self._windows_locked = True
+            else:
+                import fcntl
+
+                try:
+                    fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                except OSError as exc:
+                    if exc.errno in {errno.EACCES, errno.EAGAIN}:
+                        raise StateLockError(
+                            f"Controller state is already locked: {self.path}; do not start another runner for this state."
+                        ) from exc
+                    raise
+            return self
+        except BaseException:
+            self.handle.close()
+            self.handle = None
+            raise
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        if self.handle is None:
+            return False
+        try:
+            if os.name == "nt" and self._windows_locked:
+                import msvcrt
+
+                self.handle.seek(0)
+                msvcrt.locking(self.handle.fileno(), msvcrt.LK_UNLCK, 1)
+            elif os.name != "nt":
+                import fcntl
+
+                fcntl.flock(self.handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            self.handle.close()
+            self.handle = None
+        return False
 
 
 class HTTPJsonClient:
@@ -463,9 +534,11 @@ def run_config(
     now_fn: Callable[[], str] = _timestamp,
 ) -> int:
     config, config_dir = _load_config(Path(config_path))
-    controller = StagedRhythmValidation(config, config_dir, client=client,
-                                        sleep_fn=sleep_fn, now_fn=now_fn)
-    return controller.run()
+    state_path = _resolve_path(config["state_path"], config_dir)
+    with StateFileLock(state_path):
+        controller = StagedRhythmValidation(config, config_dir, client=client,
+                                            sleep_fn=sleep_fn, now_fn=now_fn)
+        return controller.run()
 
 
 def main(argv: list[str] | None = None) -> int:
