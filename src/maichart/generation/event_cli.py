@@ -1595,8 +1595,47 @@ def apply_contract_condition_guard(condition: GenerationCondition, contract_para
     names = ", ".join(sorted(non_default)[:4])
     print(f"condition_profile_ignored mask_prob=1.0 keeps only `level`; "
           f"dropped {names} (values the checkpoint never trained on)", flush=True)
-    neutral = GenerationCondition(level=float(condition.level) or default_level)
+    neutral = GenerationCondition(
+        level=float(condition.level) or default_level, difficulty=condition.difficulty,
+        radar={key: default for key in condition.radar},
+        style={key: default for key in condition.style})
     return neutral, "neutralised"
+
+
+def resolve_generation_condition(*, level, condition_file=None, condition_profile=None,
+                                 contract_params=None):
+    """Overlay only explicit fields on generation defaults, then apply the contract.
+
+    A level-only file is a partial request: omitted controls must keep their
+    calibrated baseline rather than becoming GenerationCondition's numeric null.
+    """
+    condition = GenerationCondition(level=level, radar=GENERATION_DEFAULTS,
+                                    style=GENERATION_DEFAULTS)
+    source = "corpus_defaults"
+    if condition_profile:
+        from maichart.training.condition_profile import condition_from_profile, load_profile
+
+        condition = condition_from_profile(load_profile(condition_profile), level=level)
+        source = f"condition_profile={condition_profile}"
+    if condition_file:
+        raw = json.loads(Path(condition_file).read_text(encoding="utf-8-sig"))
+        if not isinstance(raw, dict):
+            raise ValueError("condition file must contain a JSON object")
+        explicit = GenerationCondition.from_dict(raw)
+        condition = GenerationCondition(
+            level=explicit.level if "level" in raw else condition.level,
+            difficulty=explicit.difficulty if "difficulty" in raw else condition.difficulty,
+            radar={**condition.radar, **{key: explicit.radar[key]
+                   for key in (raw.get("radar") or {}) if key in explicit.radar}},
+            style={**condition.style, **{key: explicit.style[key]
+                   for key in (raw.get("style") or {}) if key in explicit.style}},
+        )
+        source += "+condition_file"
+    condition, note = apply_contract_condition_guard(
+        condition, contract_params, default_level=condition.level)
+    if note:
+        source += "+contract_mask_1.0"
+    return condition, source
 
 
 def _merge_windows(windows: list[_DecodedWindow], *, overlap_beats: int = 0) -> list[EventPoint]:
@@ -1973,41 +2012,10 @@ def main(argv=None) -> int:
         if intensity_curve is not None and str(intensity_curve.get("method", "")).startswith("learned_music_structure_"):
             if intensity_curve.get("tempo_map_sha256") != tempo_map_fingerprint(explicit_tempo):
                 raise ValueError("Learned intensity curve was created with another explicit tempo map; regenerate it")
-        condition = GenerationCondition(level=args.level, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
-        condition_source = "corpus_defaults"
-        profile_values = None
-        if args.condition_profile:
-            # The corpus medians are what the model actually saw during training.
-            # Load this base even when the WebUI also supplies a small condition
-            # file containing only level; otherwise GenerationCondition fills all
-            # omitted controls with 0.5 and silently defeats the profile.
-            from maichart.training.condition_profile import condition_from_profile, load_profile
-
-            condition = condition_from_profile(load_profile(args.condition_profile), level=args.level)
-            profile_values = condition
-            condition_source = f"condition_profile={args.condition_profile}"
-        if args.condition_file:
-            explicit = GenerationCondition.from_json(args.condition_file)
-            if profile_values is None:
-                condition = explicit
-                condition_source = "condition_file"
-            else:
-                raw = json.loads(Path(args.condition_file).read_text(encoding="utf-8"))
-                condition = GenerationCondition(
-                    level=explicit.level,
-                    difficulty=explicit.difficulty,
-                    radar={**profile_values.radar, **dict(raw.get("radar") or {})},
-                    style={**profile_values.style, **dict(raw.get("style") or {})},
-                )
-                condition_source = f"condition_profile={args.condition_profile}+condition_file"
-        # Contract-faithful condition guarding must be the final transformation.
-        # Otherwise a profile loaded after this block can reintroduce controls that
-        # a mask_prob=1.0 checkpoint was never trained to read.
         contract_params = (checkpoint.get("data_contract", {}) or {}).get("condition_params") or {}
-        condition, guard_note = apply_contract_condition_guard(
-            condition, contract_params, default_level=condition.level)
-        if guard_note:
-            condition_source = f"{condition_source}+contract_mask_1.0"
+        condition, condition_source = resolve_generation_condition(
+            level=args.level, condition_file=args.condition_file,
+            condition_profile=args.condition_profile, contract_params=contract_params)
         print(f"condition_source={condition_source} level={condition.level:.2f} "
               f"radar={{{', '.join(f'{k}={v:.3f}' for k, v in condition.radar.items())}}} "
               f"style={{{', '.join(f'{k}={v:.3f}' for k, v in condition.style.items())}}}", flush=True)
