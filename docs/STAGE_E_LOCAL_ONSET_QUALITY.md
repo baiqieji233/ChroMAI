@@ -77,4 +77,6 @@
 
 后续起音队列控制器已启动，状态为 `waiting_for_dependency`，确认提交任务数为 0。持久状态为 `.scratch/full_v3_stage1/onset_pipeline_state.json`；阶段记录为 `ONSET_PIPELINE_REPORT.md`。
 
+另做了相同 Ether Strike、相同 seed `20261919`、相同生成参数的 epoch 7/14 对照：epoch 14 为 827 notes、639 起音、细碎比例 `0.1897`、参考起音 F1 `0.5457`；epoch 7 为 942 notes、760 起音、细碎比例 `0.4071`、F1 `0.5486`。这只是单曲单 seed，但显示追加训练让该条件下的输出更保守，F1 没有实质改善。epoch 14 产物和状态在 `.scratch/full_v3_stage1/quality_probe_epoch14/`。
+
 继续依据实际证据调整：若新头只学固定拍栅格，应先改善音频时序学习；若准确落音但配置单调，应针对完整配置及历史依赖；若密度或留白恶化，应先收紧软指导和预算之间的相互影响。不能用更高细碎比例或更低报警数掩盖这些问题。
