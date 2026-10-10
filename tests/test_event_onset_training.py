@@ -123,6 +123,19 @@ def test_run_epoch_trains_aux_head_and_counts_only_auxiliary_updates():
     assert all(torch.equal(frozen[key], value) for key, value in model.onset_head.state_dict().items())
 
 
+def test_validation_objective_includes_onset_loss_without_creating_gradients():
+    torch.manual_seed(9)
+    model = _tiny_model()
+    batch = _training_batch()
+    with_aux = run_epoch(model, _OneBatch(batch), torch.device("cpu"), onset_loss_weight=0.2)
+    without_aux = run_epoch(model, _OneBatch(batch), torch.device("cpu"), onset_loss_weight=0.0)
+
+    assert with_aux["loss"] == without_aux["loss"]
+    assert abs((with_aux["objective_loss"] - without_aux["objective_loss"])
+               - 0.2 * with_aux["onset_bce"]) < 1e-6
+    assert all(parameter.grad is None for parameter in model.parameters())
+
+
 def test_checkpoint_with_enabled_profile_must_contain_head_and_metadata(tmp_path):
     model = _tiny_model()
     vocab = EventVocabulary.from_event_charts([], segment_beats=4)

@@ -436,10 +436,12 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
         onset_profile = getattr(getattr(model, "config", None), "onset_profile", "none")
         onset_enabled = onset_profile == "chart_onsets_v1"
         onset_batch_active = False
-        if train and onset_enabled and onset_loss_weight > 0:
+        onset_supervision_active = False
+        if onset_enabled:
             if "onset_weight" not in batch or "onset_valid" not in batch:
-                raise ValueError("chart_onsets_v1 training requires onset_weight and onset_valid batch fields.")
-            onset_batch_active = bool(((batch["onset_weight"] > 0) & (batch["onset_valid"] > 0)).any())
+                raise ValueError("chart_onsets_v1 evaluation requires onset_weight and onset_valid batch fields.")
+            onset_supervision_active = bool(((batch["onset_weight"] > 0) & (batch["onset_valid"] > 0)).any())
+            onset_batch_active = train and onset_loss_weight > 0 and onset_supervision_active
         onset_group_active = onset_group_active or onset_batch_active
         start_event = end_event = None
         if timing:
@@ -507,7 +509,7 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
                 onset_loss, onset_stats = local_onset_objective(
                     onset_logits, onset_target, onset_quality, onset_valid,
                     normalizer=quality_plan_normalizer)
-                if train and onset_loss_weight > 0 and onset_batch_active:
+                if onset_loss_weight > 0 and onset_supervision_active:
                     loss = loss + float(onset_loss_weight) * onset_loss
         if not torch.isfinite(loss):
             raise RuntimeError("Non-finite event loss; no successful checkpoint will be saved.")
