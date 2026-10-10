@@ -272,6 +272,7 @@ def _metric_row(path: Path) -> dict[str, Any]:
 
 
 def _discover(inputs: list[Path]) -> tuple[list[Path], Path | None]:
+    inputs = [path.expanduser().resolve() for path in inputs]
     files: list[Path] = []
     roots = [path.resolve() for path in inputs if path.is_dir()]
     for path in inputs:
@@ -365,6 +366,7 @@ def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> 
         raise ValueError("No supported chart JSON files found.")
     reference_files: dict[str, Path] = {}
     if reference_dir is not None:
+        reference_dir = reference_dir.expanduser().resolve()
         if not reference_dir.is_dir():
             raise FileNotFoundError(reference_dir)
         reference_files = {

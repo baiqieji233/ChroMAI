@@ -158,6 +158,20 @@ def test_reference_metrics_are_only_emitted_for_exact_filename_pairs(tmp_path):
     }
 
 
+def test_reference_pairing_accepts_relative_directories(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    payload = _event_chart(first=0.0)
+    payload["audio_sha256"] = "a" * 64
+    _write_chart(Path("generated") / "song.chart.json", payload)
+    _write_chart(Path("references") / "song.chart.json", payload)
+
+    report = evaluate_paths([Path("generated")], reference_dir=Path("references"))
+
+    assert report["error_count"] == 0
+    assert report["reference_pairing"]["verified_matched"] == 1
+    assert report["reference_pairing"]["reference_dir"] == str(tmp_path / "references")
+
+
 def test_reference_hash_mismatch_is_incompatible_and_shadow_files_are_skipped(tmp_path):
     generated_dir = tmp_path / "generation"
     reference_dir = tmp_path / "reference"
