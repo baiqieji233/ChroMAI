@@ -1,240 +1,427 @@
-# simai_transformer · 舞萌 DX 谱面生成模型
+# maimai-ai-chart
 
-这是一个以音乐音频为输入、以 Simai / Maidata 谱面为输出的训练与生成项目。模型学习已有谱面在不同音乐段落中的节奏、音符配置和负荷变化，再结合目标等级、风格偏好与人工编辑的曲线，生成可以继续检查、修改和试玩的谱面草稿。
+`maimai-ai-chart` is a Python foundation for parsing Maidata/Simai-like maimai
+fan charts into a raw-preserving `ChartIR`, validating that IR, computing stats,
+and exporting original-like Maidata when raw source text is available.
 
-当前推荐路线是 **`event_ctx_v1` 跨窗口事件 Transformer + `music_structure_v2` 音乐结构规划器**。项目同时保留基础事件模型和旧固定帧模型，用于兼容与对照。
+V1 is deliberately scoped to parser, IR, stats, validation, CLI, tests, docs,
+and a raw-preserving exporter. V2 starts with a dataset manifest, ChartIR cache
+builder, frame-label builder, basic audio feature extractor, and chart-audio
+alignment report. V2.4 adds a rule-based rhythm skeleton baseline. V2.5 data
+preprocessing adds dataset QC, reusable caches, a training manifest, and
+leakage-safe train/val/test splits. V0.2 adds a conditioned frame Transformer,
+Simai generation CLI, and a localhost WebUI for preprocessing, training, and
+generation. The WebUI is a research control surface; it does not run a
+gameplay harness or candidate ranking.
 
-本目录是精简的可部署副本，包含源码、WebUI、文档、测试、工具和小型演示素材。**不包含训练好的模型、正式训练集、缓存或历史生成结果**。已有模型可以在生成页导入；没有模型时，需要先准备数据并训练。
+## V1 Supports
 
-## 项目思路
+- Maidata metadata parsing for `&title`, `&artist`, `&wholebpm`, `&first`,
+  `&lv_N`, `&des_N`, and raw multi-line `&inote_N` blocks.
+- Timing tokenization for comma-delimited timing points, `{N}` grids, `(BPM)`
+  directives, and `E`.
+- Button taps, break taps, holds, touch taps, touch holds, slides, break slide
+  heads, and chained slides.
+- Slide semantics as predefined trajectory references, not arbitrary geometry.
+- Unified hold/slide duration parsing for `[8:1]`, `[4:3]`, `[352:49]`,
+  `[#0.8057]`, `[0.6383##2.0455]`, and `[1:0]`.
+- Unknown token preservation with timing index, beat, tick, seconds, raw token,
+  raw timing point, and reason.
+- ChartIR JSON round-trip for supported V1 fields.
+- Stats for note counts, parser coverage, duration kinds, and slide patterns.
+- Validation warnings by default and strict validation errors for unknown tokens.
+- A raw-preserving exporter for `parse original maidata -> ChartIR -> export
+  original-like maidata`.
 
-一张 maimai 谱面不仅包含“在哪个时间敲一下”，还包含按钮位置、同时动作、Hold、Slide、Touch、配置衔接和段落起伏。相同音符数量也可能因为路径、连打或手部移动而具有不同难度。
+## V1 Does Not Support
 
-本项目把这些问题分成三个层次处理：
+- Advanced audio analysis, drum transcription, vocal separation, or chart/audio
+  alignment reports.
+- AI generation, neural network training, model inference, or batch dataset
+  tensor processing.
+- GUI editing.
+- The v0.2 localhost WebUI is documented in [docs/webui.md](docs/webui.md).
+- Full normalized export from arbitrary generated ChartIR.
+- Free-form slide geometry generation.
+- Complete Maidata/Simai syntax coverage beyond the V1 parser surface.
 
-1. **理解音乐与全曲背景。** 同时读取当前片段、前后音乐和全曲摘要，提供节奏与结构参考。
-2. **规划这一段的写法。** 先预测局部音符量、配置比例和相对负荷，再让事件解码器生成具体配置。
-3. **允许谱师调整意图。** 全曲等级与风格设置给出整体方向，强度曲线与休止区间控制局部起伏；最终结果由人工检查和试玩确认。
+## Install
 
-其中“强度”是谱面负荷与密度意图，不等于音频响度。音乐在编配、节奏或和声上发生变化时，即使响度没有明显变化，谱面也可能需要收束或加强。模型规划与可编辑曲线用于表达这种差异。
+```bash
+pip install -e ".[dev]"
+```
 
-## 技术路线
+Audio feature extraction is optional:
+
+```bash
+pip install -e ".[audio]"
+```
+
+Run tests:
+
+```bash
+python -m pytest -q
+```
+
+## CLI
+
+Parse raw metadata:
+
+```bash
+maichart parse path/to/maidata.txt -o raw-metadata.json
+```
+
+Inspect one difficulty:
+
+```bash
+maichart parse path/to/maidata.txt --difficulty 5 --timing -o timing.json
+maichart parse path/to/maidata.txt --difficulty 5 --notes -o notes.json
+maichart parse path/to/maidata.txt --difficulty 5 --ir -o chart-ir.json
+```
+
+Stats and validation:
+
+```bash
+maichart stats path/to/maidata.txt --difficulty 5
+maichart validate path/to/maidata.txt --difficulty 5
+maichart validate path/to/maidata.txt --difficulty 5 --strict
+```
+
+Export ChartIR JSON back to Maidata-like text:
+
+```bash
+maichart export path/to/chart-ir.json -o maidata.txt
+```
+
+Build a V2 dataset manifest and ChartIR cache:
+
+```bash
+maichart dataset build sample_runs -o sample_runs/v2_dataset_manifest.json --cache-dir sample_runs/v2_chart_ir_cache
+maichart dataset build sample_runs -o sample_runs/v2_dataset_manifest.json --cache-dir sample_runs/v2_chart_ir_cache --force
+```
+
+Build V2.1 frame labels from ChartIR:
+
+```bash
+maichart labels build sample_runs/v2_chart_ir_cache/maichart_513/difficulty_5.chart_ir.json -o sample_runs/v2_frame_labels/maichart_513/difficulty_5.frame_labels.json --division 16
+maichart dataset labels sample_runs/v2_dataset_manifest.json --out-dir sample_runs/v2_frame_labels --division 16
+```
+
+Build V2.2 audio features:
+
+```bash
+maichart audio analyze sample_runs/maichart_513/track.mp3 -o sample_runs/maichart_513/audio_features.json --sample-rate 22050
+maichart dataset audio-features sample_runs/v2_dataset_manifest.json --out-dir sample_runs/v2_audio_features --sample-rate 22050 --division 16
+```
+
+Build V2.3 chart-audio alignment reports:
+
+```bash
+maichart align sample_runs/v2_chart_ir_cache/maichart_513/difficulty_5.chart_ir.json sample_runs/v2_frame_labels/maichart_513/difficulty_5.frame_labels.json sample_runs/v2_audio_features/maichart_513.audio_features.json -o sample_runs/v2_alignment_reports/maichart_513/difficulty_5.alignment_report.json
+maichart dataset align sample_runs/v2_dataset_manifest.json --out-dir sample_runs/v2_alignment_reports --onset-tolerance-ms 50
+```
+
+Build V2.4 rhythm profiles and skeletons:
+
+```bash
+maichart rhythm profile sample_runs/v2_dataset_manifest.json -o sample_runs/v2_rhythm_profile.json
+maichart rhythm generate sample_runs/v2_audio_features/maichart_513.audio_features.json --level 12.0 --profile sample_runs/v2_rhythm_profile.json -o sample_runs/v2_rhythm_skeleton_513.json
+maichart rhythm evaluate sample_runs/v2_rhythm_skeleton_513.json sample_runs/v2_frame_labels/maichart_513/difficulty_5.frame_labels.json -o sample_runs/v2_rhythm_eval_513.json
+maichart dataset rhythm sample_runs/v2_dataset_manifest.json --out-dir sample_runs/v2_rhythm_skeletons --profile sample_runs/v2_rhythm_profile.json --level-source difficulty
+```
+
+Build V2.5 preprocessing manifests and splits:
+
+```bash
+maichart preprocess scan raw_chart_data/output -o manifests/raw_manifest.json
+maichart preprocess build raw_chart_data/output --cache-dir cache -o manifests/training_manifest.json --division 16 --limit 100
+maichart preprocess split manifests/training_manifest.json --out-dir manifests/splits --seed 42 --split-by-song
+```
+
+`parse`, `stats`, `validate`, and `dataset build` accept `--encoding`. If
+omitted, the reader tries common encodings: `utf-8-sig`, `utf-8`, `shift_jis`,
+`cp932`, and `gbk`.
+
+## V2 Dataset Manifest
+
+The dataset builder recursively scans for `maidata.txt`, infers `song_id` from
+the parent directory, records sibling `track.mp3`, `track.wav`, and `bg.png`
+files when present, and keeps going if audio is missing or one chart fails to
+parse. Successfully parsed difficulties are cached as ChartIR JSON under:
 
 ```text
-训练：原始音频 + 原始 Simai 谱面
-      ↓ 精确事件解析、时序对齐、数据检查
-      ↓ 音频特征、全曲摘要、目标谱面条件与局部规划目标
-      ↓ 规划器监督 + 事件序列监督 + 可选质量权重 / 配对偏好
-      → 保存 checkpoint 与数据合同
-
-生成：目标音频 + checkpoint + 等级 / Radar / Style
-      ↓ 音频编码与音乐结构规划
-      ↓ 跨窗口上下文 + 语法约束的事件解码
-      ↓ 可选人工曲线、密度反馈与休止约束
-      ↓ 窗口合并、时间边界检查、Simai 编译与回读验证
-      → maidata.txt + 事件 / ChartIR JSON + 质量报告
+<cache-dir>/<song_id>/difficulty_<index>.chart_ir.json
 ```
 
-### 音频与时序
+The manifest schema is `maichart-dataset-manifest-v1`. It includes
+`source_root`, `cache_dir`, `song_count`, `difficulty_count`, `songs`, and
+non-fatal `errors`. Each difficulty records stats, parser coverage, unknown
+token count, validation issue counts, duration kind counts, and slide pattern
+counts. CLI-generated paths are relative to the manifest output directory when
+possible.
 
-事件模型使用 `event_audio_v2_rhythm` 特征方案，共 112 维，包括 log-mel 频谱、色度、起音、响度、频谱变化、歌曲相对结构信息，以及拍内节奏和时间位置特征。局部音频提供当前音乐细节；全曲压缩摘要提供段落在整首歌中的背景。
+See [docs/dataset_manifest.md](docs/dataset_manifest.md) for the full field
+shape and path conventions. This V2 step only prepares ChartIR caches and a
+manifest; audio feature extraction is the next separate phase.
 
-BPM、tempo map 与 `first` 决定音频绝对时间和谱面拍位之间的对应关系。谱面事件以分数拍位保存，编译时选择合适的 Simai 细分，保留精确时序。自动 BPM 是估计值，已知准确 BPM 时应明确填写。
+## V2.1 Frame Labels
 
-### 规划器与事件解码
+The frame-label builder converts one ChartIR difficulty into fixed beat-grid
+labels for later ML data preparation. The default `division=16` means 16 frames
+per 4/4 measure. With `TICKS_PER_BEAT = 1920`, each frame is `480` ticks, or
+one quarter beat.
 
-`music_structure_v2` 分别读取局部音乐、全曲背景与外部条件，预测音符数量、密度、和弦 / Slide / Touch / Hold 比例、最后起音位置、相对负荷和主要配置类别。监督来自原谱统计，避免直接把响度当作应该生成多少音符的答案。
+The frame-label schema is `maichart-frame-labels-v1`. Each frame stores
+`frame_index`, `beat`, `tick`, estimated `time_sec`, and counts/lists for taps,
+breaks, hold starts, hold activity, slide starts, slide activity, touches,
+touch holds, note types, positions, slide patterns, and duration kinds. Dataset
+batch mode adds `frame_labels_path` to each manifest difficulty without
+removing existing fields.
 
-解码器按“拍位 → 完整配置文本 → 配置结束”的形式逐步生成事件，支持 Tap、Break、Hold、Slide、Touch 等已实现的 Simai 语法。语法约束限制可选 token，编译器再将事件还原为 `maidata.txt`，并检查解析后的事件、节拍和元数据是否一致。
+See [docs/frame_labels.md](docs/frame_labels.md) for the full field shape and
+grid rules. Frame labels do not contain audio features; V2.2 will add audio
+feature extraction as a separate module.
 
-跨窗口模型额外读取前面已经生成的谱面，以及当前窗口前后的音频，使后续片段能够延续之前的节奏与配置。前置谱面上下文用于条件输入，训练损失只针对当前窗口目标。
+## V2.2 Audio Features
 
-### 条件、等级与风格
+The audio feature extractor is optional and requires:
 
-训练条件由目标等级和原谱派生的 Radar / Style 统计组成。等级从 `maidata.txt` 的 `&lv_N` 读取；`13+` 等显示标签按项目规则映射为数字，不能从中恢复精确官方定数。
-
-WebUI 提供 **12.0–15.0 的连续等级基准**：每个 0.1 档有对应的 Radar / Style，其他小数可插值。基准由已有真实谱面统计校准；键盘、星星、技巧、和弦、Hold、Touch、移动等偏好可以叠加，再调整偏好力度。
-
-| 控制 | 主要用途 |
-| --- | --- |
-| 目标等级 | 选择训练标签与对应的常规密度、配置基准 |
-| Radar | 表达整体密度、峰值、连打、和弦及 Slide 相关统计目标 |
-| Style | 表达音符类型比例、配置复用与方向等写法偏向 |
-| 强度曲线 | 指定局部段落的相对密度 / 负荷意图 |
-| 休止区间 | 明确禁止某个绝对时间范围内的新音符起点 |
-
-预设帮助条件保持协调，不是官方定数计算器。风格变化即使保留密度，也可能改变实际难度；“技巧”等偏好是现有统计条件的代理，不是完整的手部动作标签。
-
-### 缺省条件与质量学习
-
-训练中的“条件遮罩概率”默认 0.5：按概率遮罩由目标谱面统计得到的 Radar / Style，保留等级，并传入显式 null 标记。模型有可学习的 null embedding，用来区分缺省条件与明确条件。这个机制不会删除训练目标里的音符。
-
-“条件随机丢弃（CFG 锚）”是另一个训练选项，事件路径默认 0；它也不同于“跨窗口：上下文随机丢弃”。更改这些设置要遵守 checkpoint 的数据合同。
-
-质量管理通过 WebUI 的“训练素材”页完成：可以给优秀谱面加权、给问题谱面减权或排除，也可以保存局部质量标注。标记反例但没有修正版时，主要作用是减少学习该内容；提供同曲兼容修正版后，才能进行配对偏好训练，让模型学习哪个版本更值得采用。用户无需手写 manifest 或质量标注 JSON。
-
-## 快速启动
-
-推荐安装 **64 位 Python 3.11**，然后双击根目录的 **`START_WEBUI.bat`**。
-
-首次启动会创建本项目的 `.venv`，安装音频、训练和测试依赖；随后启动本机 WebUI 并打开浏览器。脚本从 7860 开始寻找空闲端口，实际地址以启动窗口显示为准。以后启动复用已安装环境。
-
-脚本自动选择 CPU 或 NVIDIA CUDA 依赖，CUDA 安装配置采用原项目验证过的 PyTorch 2.7.0 + CUDA 12.8。CPU 可运行界面和模型，但训练与生成速度通常更慢。启动本身不会自动训练。
-
-在项目目录的 CMD 中也可以执行：
-
-```bat
-START_WEBUI.bat --check
-START_WEBUI.bat --cpu
-START_WEBUI.bat --cuda
-START_WEBUI.bat --port 7870
-START_WEBUI.bat --no-browser
+```bash
+pip install -e ".[audio]"
 ```
 
-`--check` 只检查现有依赖与源码路径，不安装、不启动服务。关闭启动窗口或按 `Ctrl+C` 会停止服务；训练或生成期间请保持该窗口运行。
+It writes `maichart-audio-features-v1` JSON containing audio metadata, duration,
+estimated tempo, beat times, onset times, onset strength, RMS, harmonic RMS,
+percussive RMS, spectral centroid, spectral bandwidth, zero crossing rate, and
+fixed-hop `feature_frames`. Dataset batch mode adds `audio_features_path`,
+`audio_features_status`, and an `audio_feature_summary` to the manifest.
 
-安装细节、重新安装和指定 Python 路径见 [Windows 一键启动说明](docs/WINDOWS_QUICKSTART.md)。
+See [docs/audio_features.md](docs/audio_features.md) for the schema and batch
+behavior. This stage only extracts basic features; V2.3 will build the
+chart-audio alignment report.
 
-## 使用流程
+## V2.3 Alignment Report
 
-### 1. 准备训练数据
+The alignment report compares frame labels with audio features. It measures
+nearest-onset deltas, onset hit rates at 25/50/100 ms, by-note-type alignment
+for taps, breaks, hold starts, slide starts, and touches, plus density curves
+per second, per 4 beats, and per 16 beats. Dataset batch mode adds
+`alignment_report_path`, `alignment_status`, and `alignment_summary` to the
+manifest.
 
-每首歌曲使用独立目录，至少包含原始谱面与对应音频：
+See [docs/alignment_report.md](docs/alignment_report.md) for the full schema.
+This stage is analysis only; V2.4 can use these reports to design a rule
+baseline rhythm generator.
+
+## V2.4 Rhythm Skeleton
+
+The rule-based rhythm skeleton generator selects candidate note times from
+audio features and assigns broad event types: `tap`, `break`, `hold_start`,
+`slide_start`, and `touch`. It does not generate positions, slide patterns,
+hold durations, full ChartIR, or Maidata.
+
+`maichart rhythm profile` derives level-band density and event-type targets
+from frame labels and alignment reports. `maichart rhythm generate` scores
+audio frames with onset strength, percussive RMS, RMS, and beat proximity, then
+selects a density-limited set of frames. `maichart rhythm evaluate` compares the
+baseline with human frame labels using precision, recall, F1, note-count error,
+density error, and event distribution difference.
+
+See [docs/rhythm_skeleton.md](docs/rhythm_skeleton.md) for schemas and
+limitations. V2.5 can use these outputs as a baseline for a supervised rhythm
+model.
+
+## V2.5 Data Preprocessing
+
+The preprocessing pipeline is the model-data gate for collected raw samples:
 
 ```text
-dataset/
-├─ song_001/
-│  ├─ maidata.txt
-│  └─ track.mp3
-└─ song_002/
-   ├─ maidata.txt
-   └─ track.wav
+raw samples -> QC -> ChartIR cache -> frame labels -> audio features -> alignment reports -> training_manifest.json -> train/val/test split
 ```
 
-`maidata.txt` 中的 `&lv_N` 与 `&inote_N` 应对应同一难度槽。音频文件也可使用项目支持的其他格式。不要只留下预处理结果而丢失原始谱面与音频，事件训练仍会读取原始文件。
+Raw samples usually contain `convert_report.json`, `maidata.txt`, and
+`track.mp3`/`track.wav`/`track.ogg`. `convert_report.status` is not treated as
+the source of truth for dataset usability: a conversion can report `failed`
+because files already existed, while the sample is still usable if `maidata`
+and audio are present and readable. The manifests keep `conversion_status`,
+`dataset_usable`, and per-difficulty `usable_for_training` separate.
 
-本副本提供 `examples/maimai_training_demo.zip` 和对应原始示例目录，可先测试上传、预处理和训练流程。示例是两首合成音频，不适合评估实际音乐生成质量。
-
-### 2. 预处理与训练
-
-在 WebUI 的训练页：
-
-1. 选择 **`event_ctx_v1` 跨窗口事件模型**。
-2. 上传数据集 ZIP 或填写原始目录，执行“预处理训练集”，再“检查训练集状态”。
-3. 新训练选择 **从头训练（fresh）**；Planner profile 选择 `auto` 或 `music_structure_v2`。
-4. 设置输出目录、难度槽和等级范围，再根据设备调整 batch size、梯度累积与显存预算。
-5. 先用有限训练步数确认启动、缓存和保存流程，再进行完整训练。用固定歌曲比较不同 epoch 的生成效果。
-
-若显存允许，可参考当前路线采用的规模：320 隐藏维度、8 层、8 头、1280 前馈维度；训练窗口 16 拍、前置上下文 16 拍、前后音频余量 8 拍、上下文预算 320、总 token 上限 1024。这是一组可调整的参考，不保证适合所有设备或数据。
-
-Touch 窗口过采样建议先保留自然频率 1，Slide 默认 2。含 Touch 的混合窗口使用 Touch 倍率，两个倍率不相乘。增采样改变实际学习分布，不能把它当作单纯的训练加速开关。
-
-验证 manifest 可以留空，训练不强制要求 gold。需要可靠评估时，应按歌曲划分独立验证集；“训练素材”的质量权重与 gold 验收是不同功能，验证数据不参与训练加权。
-
-| 训练方式 | 使用场景 |
-| --- | --- |
-| fresh | 从头训练，包括建立新的规划器结构 |
-| resume | 延续同一训练合同与优化器状态 |
-| finetune | 加载兼容权重开展新阶段，例如调整采样或质量标注 |
-
-更改模型族、词表、音频方案或窗口布局时，不能随意继续旧模型。新规划器不能通过普通 resume / finetune 从旧规划器切换。checkpoint 检查会提示具体不兼容项。
-
-### 3. 生成谱面
-
-在生成页：
-
-1. 导入 checkpoint，点击“检查生成 checkpoint 类型”，确认模型族和训练布局。
-2. 导入目标音频，填写已知 BPM 与正确的 `first`；明确歌曲确实变速时再使用自动变速参考。
-3. 选择目标等级，勾选所需偏好并调整力度；高级微调区可进一步修改 Radar / Style。
-4. 需要控制段落起伏时，生成并编辑强度曲线，保存后返回生成页。
-5. 先保持默认采样组合；比较参数时固定模型、歌曲、BPM、曲线和随机种子。
-6. 生成后检查谱面、质量报告与边界，再在支持 Simai 的工具中人工编辑和试玩。
-
-跨窗口生成使用 checkpoint 保存的上下文布局。温度、Top-p 和重复惩罚影响采样，token 上限影响可输出的长度预算；它们不是直接的难度旋钮。
-
-### 4. 编辑局部曲线与休止
-
-强度曲线页有频谱背景、绝对时间轴、试听、缩放和多点框选。曲线来源可以是模型预测或音频参考；修改 checkpoint、等级、风格、BPM 或 `first` 后，应重新生成模型来源曲线。
-
-曲线值 **0.5 表示基准意图**，低于它请求减弱，高于它请求加强。生成页的“强度曲线指导强度”决定控制力度，“强度跟随幅度”限制倍率变化范围；因此普通曲线值 0 在柔性模式下仍可能保留非零目标。
-
-| 强度曲线模式 | 行为 |
-| --- | --- |
-| follow（柔性跟随） | 默认推荐；规划指导加生成时的短段密度反馈，允许一定偏差 |
-| hard（严苛跟随） | 短段密度额度用完后停止该段新起音，后段继续生成 |
-| soft（兼容：仅规划） | 保留旧版规划指导，用于对照 |
-| strict（兼容：生成后上限） | 保留旧版整配置密度后过滤，用于对照 |
-
-明确需要休息时，**框选两个或更多控制点，再点击“标记此段休止”**。框选会自动填写最早与最晚点的时间，也可手动修改时间。图上显示斜纹红区、边界与休止标签，下方列出时间范围并立即更新计数。点击时间标签可放大查看；支持取消、撤销、保存和刷新恢复。
-
-休止区为 `[开始秒, 结束秒)`：禁止范围内的新起点，之前开始的 Hold / Slide 可以跨越。休止在曲线指导强度为 0 时仍有效；关闭“启用谱面张力曲线”才停用整个编辑曲线及其休止区。修改完成后点击“保存并返回生成页”。
-
-### 5. 用质量标注继续提升模型
-
-先完成常规数据训练，再进入“训练素材”页标记可靠的优秀谱面与明显问题谱面，保存标注。调整数据权重、Slide / Touch 倍率等学习分布时，使用兼容模型的 finetune，并选择新的输出目录，保留原模型作为对照。
-
-配对反例训练需要已有 checkpoint 和同曲修正版。仅有“这张谱不好”的标签无法告诉模型应该如何改写。具体操作见 [质量标注与音乐结构规划](docs/QUALITY_AND_MUSIC_STRUCTURE_V2.md)。
-
-## 输出与质量边界
-
-事件生成通常输出：
-
-- **`maidata.txt`**：可供 Simai 工具读取的谱面文档。
-- **`*.chart.json`**：精确事件、ChartIR 与诊断信息。
-- **`*.quality.json`**：语法、结构、密度、曲线响应、边界与控制统计等报告。
-
-loss 降低、token accuracy 提升、语法验证通过，都不能单独证明模型已经学会音乐与谱面设计。实际评估应检查段落密度是否合理、配置是否长期重复、是否出现非预期空白、歌曲前后是否越界，以及空间动作与持续音符是否可玩。
-
-曲线密度控制限制的是音符起点数量，不能保证所有低密度段都简单，也不能保证生成的官方定数正确。自动曲线是模型或音频统计提供的起点，不是唯一正确的谱师意图。
-
-## 目录与开发入口
+`maichart preprocess build` writes:
 
 ```text
-simai_transformer/
-├─ START_WEBUI.bat              一键部署与启动
-├─ pyproject.toml               Python 包、依赖和 CLI 配置
-├─ src/maichart/
-│  ├─ generation/               音频、事件模型、规划、解码与编译
-│  ├─ training/                 数据集、训练、checkpoint 与质量学习
-│  └─ webui/                    本地 API 与前端界面
-├─ configs/                    示例生成条件
-├─ examples/                   小型原始数据和演示 ZIP
-├─ tests/                      自动化测试与测试素材
-├─ tools/                      数据、谱面对比和性能工具
-│  └─ browser_qa/               可选浏览器工作流检查
-└─ docs/                       使用、设计与历史实验说明
+cache/chart_ir/<song_id>/difficulty_<index>.chart_ir.json
+cache/frame_labels/<song_id>/difficulty_<index>.frame_labels.json
+cache/audio_features/<song_id>.audio_features.json
+cache/alignment_reports/<song_id>/difficulty_<index>.alignment_report.json
 ```
 
-`webui_workspace`、`checkpoints`、缓存与 `.venv` 等目录在实际使用时创建，不属于精简副本的初始内容。
+Training filters reject missing charts, `level=?`, too-low note count,
+validation errors, parser coverage below 1.0, unknown tokens, unreadable audio,
+and failed frame/audio cache generation. Easy/basic/advanced charts are kept
+when valid but receive lower `training_weight`. Splits default to
+`--split-by-song` so difficulties from the same song cannot leak across train,
+validation, and test.
 
-已有开发环境也可以手动安装与启动：
+See [docs/data_preprocessing.md](docs/data_preprocessing.md) for schemas,
+filter rules, cache behavior, and CLI examples.
 
-```bat
-python -m pip install -e ".[dev,audio,training]"
-python -m maichart.webui.server --host 127.0.0.1 --port 7860
+## Conditional Generator v0.2 and event_v1
+
+The repository now includes an `event_v1` event model as the default WebUI
+training and generation path, plus the older fixed-frame Transformer as an
+explicit baseline. Install all runtime extras with:
+
+```powershell
+py -m pip install -e ".[dev,audio,training]"
+maichart-gui --host 127.0.0.1 --port 7860
 ```
 
-GPU 安装优先使用 BAT 中已配置的路径。使用多份项目时，应激活本目录环境并在本目录运行，避免调用另一个目录安装的同名命令。
+The default event preprocessing command is:
 
-一键部署后运行测试：
-
-```bat
-.venv\Scripts\python.exe -m pytest -q
+```powershell
+py -m maichart.training.prepare_events RAW_ROOT `
+  --cache-dir PATH -o MANIFEST --sample-rate 22050
 ```
 
-完整测试需要 Node.js 检查前端 JavaScript；浏览器工作流另需 `playwright-core` 与 Microsoft Edge，安装方法见 [浏览器检查说明](tools/browser_qa/README.md)。
+It keeps the public `maichart-training-manifest-v1` schema but records
+`preprocessing.target_schema=event_v1` and
+`preprocessing.feature_profile=event_audio_v1`. Event preprocessing keeps
+`song.maidata_path` and `song.audio_path`, and does not require fixed-frame
+division, frame labels, or alignment caches. `train_events` re-reads the exact
+source paths from the manifest and runs its own parser/QC; an old
+fixed-frame `usable_for_training=false` flag is not an event rejection rule.
 
-精简复制时在 D 盘源码下完成的验证为 **721 项通过、12 项跳过**，四组浏览器检查通过。依赖未附带的真实数据的测试可跳过；这些数字是该次验证记录，不是生成质量或可玩性评分。
+The event training and generation contracts are documented in
+[docs/EVENT_GUIDE.md](docs/EVENT_GUIDE.md). Event checkpoints use the schema
+`maichart-event-generator-checkpoint-v1` and are saved as `event_last.pt`,
+`event_best.pt`, and `event_epoch_NNN.pt`. The WebUI inspects this schema before
+choosing `maichart.generation.event_cli`; old checkpoints remain on
+`maichart.generation.cli` and are visibly labeled as the non-default baseline.
+Old checkpoints must be retrained for event_v1; cross-schema resume or
+finetune is rejected.
 
-## 延伸阅读
+The WebUI accepts an audio file, a training ZIP, and Radar/Style generation
+controls. Event generation uses audio directly and reports a sidecar
+`quality.json`. A missing report, or syntax validation alone, is not evidence
+that a chart is usable. One hundred-plus charts are suitable for pipeline and
+small-sample tests, not proof of generalization, difficulty control, or chart
+quality. When BPM is left empty on the event path, `tempo-mode=auto` is used;
+`constant` requires an explicit BPM.
 
-- [Windows 一键部署与启动](docs/WINDOWS_QUICKSTART.md)
-- [精简副本包含与排除内容](docs/PORTABLE_COPY.md)
-- [质量标注、反例与音乐结构规划器](docs/QUALITY_AND_MUSIC_STRUCTURE_V2.md)
-- [连续等级基准与叠加偏好](docs/CONTINUOUS_LEVEL_AND_PREFERENCES.md)
-- [曲线密度反馈与休止区间](docs/CURVE_DENSITY_FEEDBACK.md)
-- [Touch / Slide 采样与后续训练](docs/TOUCH_SAMPLING_CONTINUATION.md)
-- [事件谱面的使用与合同](docs/EVENT_GUIDE.md)
-- [WebUI 详细说明](docs/webui.md)
+For a complete smoke-test dataset, use
+`examples/maimai_training_demo.zip`. Its layout and preparation commands are
+documented in `examples/training_zip_demo/README.md`.
 
-部分早期文档记录旧默认模型、旧特征方案、E 盘路径和历史训练结果。当前主路线、界面入口和一键启动以本 README 及对应功能文档为准；历史路径指向的检查点与运行产物未随精简副本复制。
+The old generator remains a research baseline: it predicts fixed-grid
+presence, button masks, and broad note types, while the compiler currently
+uses fixed hold/slide realizations. Candidates, gameplay harness checks, and
+infeasible-target repair remain manual or disabled. See
+[docs/generation_v02.md](docs/generation_v02.md) and
+[docs/webui.md](docs/webui.md).
+
+## ChartIR
+
+`ChartIR` is the source of truth after parsing. It stores metadata, difficulty
+metadata, timing events, notes, unknown tokens, duration expressions, slide
+segments, and raw source text. See [docs/ir_schema.md](docs/ir_schema.md).
+
+Unknown tokens are intentional V1 data, not parser garbage. The rule is:
+parsing can fail for a token, but raw content must not be silently dropped.
+
+## Slide Model
+
+Slides are represented as references to known maimai trajectory patterns:
+
+```text
+start position + predefined trajectory pattern + path arguments + duration
+```
+
+They are not arbitrary free curves. Future generators must select from a slide
+trajectory catalog. If visual path sampling is needed, samples should come from
+a predefined trajectory table, not model-generated geometry.
+
+The V1 catalog includes `-`, `<`, `>`, `p`, `q`, `pp`, `qq`, `s`, `z`, `v`,
+`V`, and `w`. See [docs/slide_model.md](docs/slide_model.md).
+
+## Duration Model
+
+Holds and slides use the same duration parser. Raw duration text is preserved
+alongside parsed kind, beats, seconds, ticks, and pair values when available.
+Non-integer tick durations are preserved with `ticks = null`. See
+[docs/duration_model.md](docs/duration_model.md).
+
+## Raw-Preserving Exporter
+
+The V1 exporter is a raw-preserving exporter. It is intended for:
+
+```text
+parse original maidata -> preserve raw -> export original-like maidata
+```
+
+When `ChartIR.raw` contains the original `&inote_N=` block, the exporter emits
+that raw block. If raw text is missing, the fallback renderer can emit simple
+tap, hold, and slide tokens for inspection, but it is not a complete normalized
+Maidata generator and should not be treated as one.
+
+## Regression Samples
+
+Local sample runs live under `sample_runs/` when available. The V1 regression
+check covers the core known sample IDs:
+
+```text
+417 513 786 799 803 812 820 825 833 834 432 471 496 773 777 835
+```
+
+New-note regression samples, including charts with touch and touch-hold note
+elements, are:
+
+```text
+11821 11898 11956 11051 11106 11152 11184 11206 11222 11228 11448 11451 11818 11820
+```
+
+Missing samples should be skipped, not treated as failures. Regression reports
+belong under `sample_runs/` or `reports/` and should include pipeline failures,
+validation errors, unknown token counts, parser coverage, duration kind
+distribution, and slide pattern distribution.
+
+Latest local V1 regression results:
+
+- Core samples: `16` samples, `64` difficulties, `0` pipeline failures,
+  `0` validation errors, `0` unknown tokens, minimum parse coverage `1.0`.
+- New-note samples: `14` samples, `56` difficulties, `0` pipeline failures,
+  `0` validation errors, `0` unknown tokens, minimum parse coverage `1.0`.
+  Parsed note distribution was `tap=23573`, `hold=2417`, `slide=2377`,
+  `touch=2749`, and `touch_hold=91`.
+- Combined `all` sample set: `30` samples, `120` difficulties, `0` pipeline
+  failures, `0` validation errors, `0` unknown tokens, minimum parse coverage
+  `1.0`.
+
+Run the checks:
+
+```bash
+python scripts/v1_regression.py --sample-set core -o sample_runs/v1_regression_report.json
+python scripts/v1_regression.py --sample-set new-notes -o sample_runs/v1_new_note_regression_report.json
+python scripts/v1_regression.py --sample-set all -o sample_runs/v1_all_regression_report.json
+```
+
+See [docs/regression_samples.md](docs/regression_samples.md) for the report
+fields and current sample-set definitions.
+
+## Roadmap
+
+V1 freeze target:
+
+- Keep parser, ChartIR, stats, validation, CLI, tests, docs, and raw-preserving
+  exporter stable.
+- Preserve unknown syntax and raw source text.
+- Avoid expanding into V2 features during V1 stabilization.
+
+V2/V3 candidates:
+
+- Broader Maidata/Simai syntax coverage.
+- A normalized exporter with explicit limits and tests.
+- A complete slide trajectory catalog with visual sampling tables.
+- Supervised rhythm modeling based on V2 audio features, labels, alignment
+  reports, and rule skeletons.
+- Event-level decoding with learned hold durations, slide paths, and motif
+  memory is the next major generation upgrade.
