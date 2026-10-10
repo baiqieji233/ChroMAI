@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -19,8 +20,35 @@ EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params")
 SAMPLING_CONTRACT_KEYS = frozenset({
     "slide_oversample", "touch_oversample", "oversample_policy",
-    "fine_rhythm_oversample", "fine_rhythm_ratio_threshold",
+    "fine_rhythm_oversample", "fine_rhythm_ratio_threshold", "fine_rhythm_stats_version",
 })
+LEGACY_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_v1"
+CURRENT_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
+
+
+def _normalize_resume_sampling(params: dict[str, Any] | None, *, side: str) -> dict[str, Any]:
+    """Canonicalize only known, distribution-equivalent sampling contracts."""
+    normalized = dict(params or {})
+    raw_multiplier = normalized.get("fine_rhythm_oversample", 1)
+    try:
+        number = float(raw_multiplier)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"Checkpoint {side} has an invalid fine-rhythm sampling multiplier; use finetune.") from exc
+    if isinstance(raw_multiplier, bool) or not math.isfinite(number) or not number.is_integer():
+        raise ValueError(f"Checkpoint {side} has an invalid fine-rhythm sampling multiplier; use finetune.")
+    fine_multiplier = int(number)
+    if fine_multiplier <= 1:
+        for key in ("fine_rhythm_oversample", "fine_rhythm_ratio_threshold", "fine_rhythm_stats_version"):
+            normalized.pop(key, None)
+    elif not normalized.get("fine_rhythm_stats_version"):
+        raise ValueError(
+            f"Checkpoint {side} uses fine-rhythm oversampling without a statistics version; "
+            "its sampling distribution cannot be proven equivalent. Use finetune (--init-checkpoint)."
+        )
+    policy = normalized.get("oversample_policy")
+    if policy == LEGACY_TOUCH_PRIORITY_POLICY:
+        normalized["oversample_policy"] = CURRENT_TOUCH_PRIORITY_POLICY
+    return normalized
 
 
 def vocabulary_signature(vocabulary: EventVocabulary) -> str:
@@ -85,6 +113,9 @@ def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, m
                           if name not in SAMPLING_CONTRACT_KEYS}
                 after = {name: value for name, value in (after or {}).items()
                          if name not in SAMPLING_CONTRACT_KEYS}
+            elif key == "family_params" and mode == "resume":
+                before = _normalize_resume_sampling(before, side="checkpoint")
+                after = _normalize_resume_sampling(after, side="current run")
             if key == "quality_params" and mode in {"init", "finetune"}:
                 # A finetune is the supported way to change chart quality
                 # labels or add corrected preference pairs. Ordinary resume

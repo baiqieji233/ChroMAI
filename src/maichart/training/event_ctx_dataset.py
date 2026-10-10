@@ -47,11 +47,24 @@ from maichart.generation.event_quality import parse_event_notes
 from maichart.training.event_dataset import EventDataset
 
 OVERSAMPLE_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
-# A window whose fine-note ratio (notes shorter than a quarter beat) exceeds this
+# A window whose shared fine-note ratio reaches this
 # share is copied fine_rhythm_oversample times.  It targets the passages where the
 # model currently falls back to quarter/eighth notes: 12th-16th-24th alternations,
 # dotted sixteenths and dense drum/piano figuration.
 FINE_RHYTHM_RATIO_THRESHOLD = 0.25
+FINE_RHYTHM_STATS_VERSION = "fine_note_ratio_quarter_plus_1_128_v1"
+
+
+def _positive_integer(value: Any, name: str) -> int:
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be an integer at least 1.")
+    try:
+        number = float(value)
+    except (TypeError, ValueError, OverflowError) as exc:
+        raise ValueError(f"{name} must be an integer at least 1.") from exc
+    if not math.isfinite(number) or not number.is_integer() or number < 1:
+        raise ValueError(f"{name} must be an integer at least 1.")
+    return int(number)
 
 
 class EventCtxDataset(EventDataset):
@@ -83,11 +96,17 @@ class EventCtxDataset(EventDataset):
         if int(touch_oversample) < 1:
             raise ValueError("touch_oversample must be at least 1 (1 disables oversampling).")
         self.touch_oversample = int(touch_oversample)
-        self.fine_rhythm_oversample = int(kwargs.pop("fine_rhythm_oversample", 1))
-        if self.fine_rhythm_oversample < 1:
-            raise ValueError("fine_rhythm_oversample must be at least 1 (1 disables it).")
-        self.fine_rhythm_ratio_threshold = float(
-            kwargs.pop("fine_rhythm_ratio_threshold", FINE_RHYTHM_RATIO_THRESHOLD))
+        self.fine_rhythm_oversample = _positive_integer(
+            kwargs.pop("fine_rhythm_oversample", 1), "fine_rhythm_oversample")
+        try:
+            self.fine_rhythm_ratio_threshold = float(
+                kwargs.pop("fine_rhythm_ratio_threshold", FINE_RHYTHM_RATIO_THRESHOLD))
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise ValueError("fine_rhythm_ratio_threshold must be finite and in (0, 1].") from exc
+        if not math.isfinite(self.fine_rhythm_ratio_threshold) or not (
+            0.0 < self.fine_rhythm_ratio_threshold <= 1.0
+        ):
+            raise ValueError("fine_rhythm_ratio_threshold must be finite and in (0, 1].")
         self.sampling_windows = Counter()
         self.sampling_segments = Counter()
         self.context_beats = int(context_beats)
@@ -216,7 +235,7 @@ class EventCtxDataset(EventDataset):
                 fine_multiplier = (self.fine_rhythm_oversample
                                    if fine_ratio >= self.fine_rhythm_ratio_threshold else 1)
                 copies *= fine_multiplier
-                if fine_multiplier > 1:
+                if fine_ratio >= self.fine_rhythm_ratio_threshold:
                     category = category + "+fine"
                 self.sampling_windows[category] += 1
                 self.sampling_segments[category] += copies
@@ -232,7 +251,7 @@ class EventCtxDataset(EventDataset):
                     self.segment_quality_loss_starts.append(len(prefix))
 
     def _fine_note_ratio(self, window_points, start: Fraction, end: Fraction) -> float:
-        """Share of onsets separated by less than a quarter beat.
+        """Share of adjacent onsets inside the shared fine-rhythm boundary.
 
         Delegates to ``music_plan_targets.fine_note_ratio`` so the windows that
         get oversampled and the value the planner is asked to predict are
@@ -255,6 +274,8 @@ class EventCtxDataset(EventDataset):
             f"segments_with_lead_in={with_lead_in} avg_prefix_tokens={average:.1f} "
             f"slide_oversample={self.slide_oversample} touch_oversample={self.touch_oversample} "
             f"fine_rhythm_oversample={self.fine_rhythm_oversample} "
+            f"fine_rhythm_stats_version={self.family_params().get('fine_rhythm_stats_version', 'disabled')} "
+            "mixed_windows_use_touch_multiplier=true "
             f"oversample_policy={OVERSAMPLE_POLICY} windows={dict(self.sampling_windows)} "
             f"weighted_windows={dict(self.sampling_segments)}",
             flush=True,
@@ -352,6 +373,8 @@ class EventCtxDataset(EventDataset):
             "touch_oversample": self.touch_oversample,
             "fine_rhythm_oversample": self.fine_rhythm_oversample,
             "fine_rhythm_ratio_threshold": self.fine_rhythm_ratio_threshold,
+            "fine_rhythm_stats_version": (FINE_RHYTHM_STATS_VERSION
+                                           if self.fine_rhythm_oversample > 1 else None),
             "oversample_policy": OVERSAMPLE_POLICY,
             "sampling_windows": dict(self.sampling_windows),
             "sampling_segments": dict(self.sampling_segments),
@@ -361,7 +384,7 @@ class EventCtxDataset(EventDataset):
     def family_params(self) -> dict[str, Any]:
         """Values that must match for a resume to be meaningful."""
 
-        return {
+        params = {
             "context_beats": self.context_beats,
             "audio_margin_beats": self.audio_margin_beats,
             "context_tokens": self.context_tokens,
@@ -376,3 +399,6 @@ class EventCtxDataset(EventDataset):
             "fine_rhythm_ratio_threshold": self.fine_rhythm_ratio_threshold,
             "oversample_policy": OVERSAMPLE_POLICY,
         }
+        if self.fine_rhythm_oversample > 1:
+            params["fine_rhythm_stats_version"] = FINE_RHYTHM_STATS_VERSION
+        return params

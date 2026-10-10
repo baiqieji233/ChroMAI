@@ -11,7 +11,11 @@ from collections import Counter
 import pytest
 
 from maichart.training.event_checkpoints import compare_event_contract
-from maichart.training.event_ctx_dataset import EventCtxDataset, OVERSAMPLE_POLICY
+from maichart.training.event_ctx_dataset import (
+    EventCtxDataset,
+    FINE_RHYTHM_STATS_VERSION,
+    OVERSAMPLE_POLICY,
+)
 
 
 @pytest.fixture
@@ -82,6 +86,53 @@ def test_sampling_multipliers_cannot_remove_windows(sampling_manifest, keyword):
         EventCtxDataset(sampling_manifest, eager_audio=False, **{keyword: 0})
 
 
+@pytest.mark.parametrize("value", [0, 1.5, float("nan"), float("inf"), True])
+def test_fine_rhythm_multiplier_must_be_a_finite_positive_integer(sampling_manifest, value):
+    with pytest.raises(ValueError, match="fine_rhythm_oversample"):
+        EventCtxDataset(sampling_manifest, eager_audio=False,
+                        fine_rhythm_oversample=value)
+
+
+@pytest.mark.parametrize("value", [0, -0.1, 1.01, float("nan"), float("inf")])
+def test_fine_rhythm_threshold_must_be_finite_and_in_unit_interval(sampling_manifest, value):
+    with pytest.raises(ValueError, match="fine_rhythm_ratio_threshold"):
+        EventCtxDataset(sampling_manifest, eager_audio=False,
+                        fine_rhythm_ratio_threshold=value)
+
+
+def test_training_kwargs_do_not_truncate_invalid_fine_multiplier():
+    from argparse import Namespace
+
+    from maichart.training.train_event_ctx import family_dataset_kwargs
+
+    args = Namespace(
+        context_beats=16, audio_margin_beats=8, context_tokens=320,
+        overlap_beats=0, context_dropout=0.15, slide_oversample=1,
+        touch_oversample=1, fine_rhythm_oversample=1.5,
+        fine_rhythm_ratio_threshold=0.25,
+    )
+    assert family_dataset_kwargs(args)["fine_rhythm_oversample"] == 1.5
+
+
+def test_fine_windows_are_classified_even_when_oversampling_is_disabled(sampling_manifest):
+    chart = sampling_manifest.parent / "plain" / "maidata.txt"
+    chart.write_text(chart.read_text(encoding="utf-8").replace("{4}", "{16}"), encoding="utf-8")
+    dataset = make_dataset(sampling_manifest)
+
+    assert dataset.sampling_windows["plain+fine"] == 1
+    assert dataset.sampling_segments["plain+fine"] == 1
+    assert "fine_rhythm_stats_version" not in dataset.family_params()
+
+    boosted = EventCtxDataset(
+        sampling_manifest, cache_dir=sampling_manifest.parent / "cache",
+        eager_audio=False, segment_beats=4, max_tokens=128,
+        context_beats=0, context_tokens=16, context_dropout=0,
+        fine_rhythm_oversample=3,
+    )
+    assert boosted.sampling_segments["plain+fine"] == 3
+    assert boosted.family_params()["fine_rhythm_stats_version"] == FINE_RHYTHM_STATS_VERSION
+
+
 def old_checkpoint():
     return {"optimizer_state_dict": {"state": {}}, "data_contract": {
         "target_schema": "event_ctx_v1", "dataset_signature": "same",
@@ -117,6 +168,48 @@ def test_new_sampler_can_resume_only_with_matching_settings():
     altered["family_params"]["touch_oversample"] = 2
     with pytest.raises(ValueError, match="family_params"):
         compare_event_contract(stored, altered, mode="resume")
+
+
+@pytest.mark.parametrize("policy", [
+    "independent_note_types_touch_priority_v1",
+    OVERSAMPLE_POLICY,
+])
+def test_legacy_touch_priority_and_fine_disabled_contracts_resume(policy):
+    stored = old_checkpoint()
+    family = corrected_contract(stored)["family_params"]
+    family["oversample_policy"] = policy
+    family.update(fine_rhythm_oversample=1, fine_rhythm_ratio_threshold=0.25)
+    stored["data_contract"]["family_params"] = family
+
+    current = copy.deepcopy(stored["data_contract"])
+    current["family_params"].update(
+        oversample_policy=OVERSAMPLE_POLICY,
+        fine_rhythm_ratio_threshold=0.9,
+    )
+    compare_event_contract(stored, current, mode="resume")
+
+
+def test_fine_oversampling_requires_matching_version_and_threshold():
+    stored = old_checkpoint()
+    family = corrected_contract(stored)["family_params"]
+    family.update(
+        fine_rhythm_oversample=3,
+        fine_rhythm_ratio_threshold=0.25,
+        fine_rhythm_stats_version=FINE_RHYTHM_STATS_VERSION,
+    )
+    stored["data_contract"]["family_params"] = family
+    current = copy.deepcopy(stored["data_contract"])
+    compare_event_contract(stored, current, mode="resume")
+
+    without_version = copy.deepcopy(stored)
+    without_version["data_contract"]["family_params"].pop("fine_rhythm_stats_version")
+    with pytest.raises(ValueError, match="statistics version.*finetune"):
+        compare_event_contract(without_version, current, mode="resume")
+
+    changed_threshold = copy.deepcopy(current)
+    changed_threshold["family_params"]["fine_rhythm_ratio_threshold"] = 0.5
+    with pytest.raises(ValueError, match="family_params"):
+        compare_event_contract(stored, changed_threshold, mode="resume")
 
 
 @pytest.mark.parametrize("key,value", [

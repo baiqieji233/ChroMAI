@@ -28,6 +28,11 @@ Usage is identical to ``train_events``, with four extra flags::
 Checkpoints from this family carry ``target_schema = event_ctx_v1`` and a
 different vocabulary signature, so they can never be mixed with ``event_v1``
 weights in either direction.
+
+Touch oversampling takes priority in mixed Touch/Slide windows, so its multiplier
+also changes how often those mixed windows appear. Fine-rhythm oversampling is
+versioned separately; multiplier 1 records fine windows for audit without
+changing their sampling distribution.
 """
 
 from __future__ import annotations
@@ -50,7 +55,7 @@ def family_dataset_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "context_dropout": float(args.context_dropout),
         "slide_oversample": int(getattr(args, "slide_oversample", 1)),
         "touch_oversample": int(getattr(args, "touch_oversample", 1)),
-        "fine_rhythm_oversample": int(getattr(args, "fine_rhythm_oversample", 1)),
+        "fine_rhythm_oversample": getattr(args, "fine_rhythm_oversample", 1),
         "fine_rhythm_ratio_threshold": float(getattr(args, "fine_rhythm_ratio_threshold", 0.25)),
     }
 
