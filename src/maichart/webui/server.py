@@ -469,10 +469,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if curve.get("tempo_map_sha256") != tempo_map_hash:
                     raise ValueError("曲线预测使用的 tempo map 已变化，请用当前节拍设置重新生成曲线")
                 curve_checkpoint = _resolve_path(curve["checkpoint"])
-                current_stat = checkpoint.stat()
-                identity = {"size": current_stat.st_size, "mtime_ns": current_stat.st_mtime_ns}
-                if curve_checkpoint != checkpoint or curve.get("checkpoint_identity") != identity:
-                    raise ValueError("曲线预测所用模型已变化，请用当前 checkpoint 重新生成曲线")
+                if curve_checkpoint != checkpoint:
+                    raise ValueError("曲线预测使用了另一个 checkpoint 路径，请重新生成曲线")
+                from maichart.generation.event_cli import _file_identity
+                identity = _file_identity(checkpoint)
+                saved_identity = curve.get("checkpoint_identity")
+                if not isinstance(saved_identity, dict):
+                    raise ValueError("曲线缺少可验证的 checkpoint 身份信息，请重新生成曲线")
+                saved_hash = saved_identity.get("sha256")
+                same_size = saved_identity.get("size") == identity["size"]
+                same_hash = isinstance(saved_hash, str) and saved_hash == identity["sha256"]
+                old_browser_mtime_match = (
+                    saved_hash is None and isinstance(saved_identity.get("mtime_ns"), (int, float))
+                    and float(saved_identity["mtime_ns"]) == float(identity["mtime_ns"]))
+                if not same_size or not (same_hash or old_browser_mtime_match):
+                    raise ValueError("曲线预测所用 checkpoint 文件已被覆盖或身份不匹配，请用当前 checkpoint 重新生成曲线")
                 from maichart.generation.conditions import GenerationCondition
                 from maichart.generation.event_cli import apply_contract_condition_guard
                 current_condition = GenerationCondition.from_dict(payload.get("condition") or {

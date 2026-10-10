@@ -290,8 +290,47 @@ def test_learned_curve_cannot_be_reused_after_checkpoint_changes(api, monkeypatc
     code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
                                           "intensity_curve": curve})
     assert code == 400
-    assert "模型已变化" in result["error"]
+    assert "覆盖或身份不匹配" in result["error"]
     assert not calls and not webui.TASKS
+
+
+def test_learned_curve_accepts_browser_rounded_legacy_mtime(api, monkeypatch, tmp_path):
+    from maichart.generation.event_cli import _file_identity
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    identity = _file_identity(payload["checkpoint"])
+    old_identity = {"size": identity["size"], "mtime_ns": float(identity["mtime_ns"])}
+    old_identity = json.loads(json.dumps(old_identity))
+    curve = {**profile(audio), "method": "learned_music_structure_v3",
+             "checkpoint": payload["checkpoint"], "checkpoint_identity": old_identity,
+             "condition": {"level": 14, "difficulty": 5,
+                           "radar": {"note_density": 0.3, "peak": 0.5, "sweep": 0.1,
+                                     "slide_tricky": 0.1, "slide_sequence": 0.1, "jack": 0.1,
+                                     "chord": 0.3},
+                           "style": {"tap_bias": 0.7, "slide_bias": 0.1, "hold_bias": 0.1,
+                                     "touch_bias": 0.05, "chord_bias": 0.3, "melody_following": 0.8,
+                                     "pattern_reuse": 0.1, "directionality": 0.1}},
+             "first": 0, "tempo_map_sha256": None, "tempo_mode": "constant", "bpm_input": None}
+    code, _, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
+                                        "intensity_curve": curve, "condition": curve["condition"]})
+    assert code == 200
+    assert "--intensity-curve" in calls[0]
+
+
+def test_learned_curve_same_size_checkpoint_replacement_is_rejected(api, monkeypatch, tmp_path):
+    from maichart.generation.event_cli import _file_identity
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    identity = _file_identity(payload["checkpoint"])
+    curve = {**profile(audio), "method": "learned_music_structure_v3",
+             "checkpoint": payload["checkpoint"],
+             "checkpoint_identity": {"size": identity["size"], "mtime_ns": str(identity["mtime_ns"]),
+                                     "sha256": identity["sha256"]}}
+    with open(payload["checkpoint"], "wb") as handle:
+        handle.write(b"X" * identity["size"])
+    code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
+                                            "intensity_curve": curve})
+    assert code == 400
+    assert "覆盖或身份不匹配" in result["error"]
+    assert not calls
 
 
 def test_v3_strength_and_static_conflict_controls_reach_cli(api, monkeypatch, tmp_path):

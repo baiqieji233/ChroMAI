@@ -973,6 +973,7 @@
         <label class="field">自动曲线来源
           <select id="intensityCurveSource"><option value="auto" selected>自动（新模型优先 planner）</option><option value="audio">音频多维参考</option><option value="model">模型 planner</option></select>
           <small>auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
+          checkpoint 身份指具体权重文件和训练 epoch，不代表模型架构。训练中的 event_last.pt 会持续覆盖，建议选择固定的 event_epoch_NNN.pt 生成曲线。
           audio 只依赖歌曲的音频特征。更换 checkpoint、等级、风格、BPM 或 first 后，模型来源曲线需要重新生成。</small>
         </label>
         <div class="button-row">

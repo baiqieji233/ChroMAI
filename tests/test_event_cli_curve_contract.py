@@ -43,6 +43,35 @@ def test_standalone_curve_contract_accepts_matching_context(tmp_path):
     )
 
 
+def test_standalone_curve_contract_accepts_old_browser_rounded_mtime(tmp_path):
+    checkpoint, condition, curve = _curve(tmp_path)
+    curve["checkpoint_identity"]["mtime_ns"] = float(curve["checkpoint_identity"]["mtime_ns"])
+    validate_learned_curve_contract(
+        curve,
+        checkpoint_path=checkpoint,
+        checkpoint_identity={"path": str(checkpoint), "size": checkpoint.stat().st_size,
+                             "mtime_ns": checkpoint.stat().st_mtime_ns,
+                             "sha256": "new-curves-also-record-a-hash"},
+        condition=condition,
+        first=0.25,
+        tempo_map=None,
+        tempo_mode="constant",
+        bpm_input=None,
+    )
+
+
+def test_standalone_curve_contract_rejects_same_size_replacement(tmp_path):
+    checkpoint, condition, curve = _curve(tmp_path)
+    curve["checkpoint_identity"]["sha256"] = "original-content"
+    checkpoint_identity = {"size": checkpoint.stat().st_size,
+                           "mtime_ns": checkpoint.stat().st_mtime_ns,
+                           "sha256": "replacement-content"}
+    with pytest.raises(ValueError, match="identity changed"):
+        validate_learned_curve_contract(
+            curve, checkpoint_path=checkpoint, checkpoint_identity=checkpoint_identity,
+            condition=condition, first=0.25, tempo_map=None, tempo_mode="constant", bpm_input=None)
+
+
 @pytest.mark.parametrize("field,value", [
     ("first", 0.0),
     ("condition", GenerationCondition(level=14.0, radar=GENERATION_DEFAULTS,

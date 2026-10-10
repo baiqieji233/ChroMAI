@@ -121,10 +121,22 @@ def validate_learned_curve_contract(curve: dict, *, checkpoint_path: str | Path,
     if not str(curve.get("method", "")).startswith("learned_music_structure_"):
         return
     curve_checkpoint = curve.get("checkpoint")
-    if curve_checkpoint and Path(str(curve_checkpoint)).resolve() != Path(checkpoint_path).resolve():
+    if not curve_checkpoint:
+        raise ValueError("Learned intensity curve has no checkpoint path; regenerate it")
+    if Path(str(curve_checkpoint)).resolve() != Path(checkpoint_path).resolve():
         raise ValueError("Learned intensity curve was created with another checkpoint; regenerate it")
-    expected_identity = {key: checkpoint_identity.get(key) for key in ("size", "mtime_ns")}
-    if curve.get("checkpoint_identity") != expected_identity:
+    curve_identity = curve.get("checkpoint_identity")
+    if not isinstance(curve_identity, dict) or "size" not in curve_identity or "mtime_ns" not in curve_identity:
+        raise ValueError("Learned intensity curve has unsupported checkpoint identity; regenerate it")
+    same_size = curve_identity.get("size") == checkpoint_identity.get("size")
+    curve_hash = curve_identity.get("sha256")
+    current_hash = checkpoint_identity.get("sha256")
+    same_hash = isinstance(curve_hash, str) and isinstance(current_hash, str) and curve_hash == current_hash
+    # Old curves passed mtime_ns through JavaScript Number, which rounds this
+    # ~1.8e18 value. Accept only its exact IEEE-754 round trip.
+    old_browser_mtime_match = (curve_hash is None and isinstance(curve_identity.get("mtime_ns"), (int, float))
+                               and float(curve_identity["mtime_ns"]) == float(checkpoint_identity.get("mtime_ns")))
+    if not same_size or not (same_hash or old_browser_mtime_match):
         raise ValueError("Learned intensity curve checkpoint identity changed; regenerate it")
     try:
         if curve.get("condition") != condition.to_dict():

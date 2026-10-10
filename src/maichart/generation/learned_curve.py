@@ -33,10 +33,11 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
     only places those predictions on the editor's time axis; it does not imply
     finer model supervision.
     """
-    from maichart.generation.event_cli import (_tempo_map, _musical_bpm, _segment_windows,
+    from maichart.generation.event_cli import (_file_identity, _tempo_map, _musical_bpm, _segment_windows,
                                               apply_contract_condition_guard)
 
     device = torch.device(device)
+    identity_before = _file_identity(checkpoint_path)
     model, _, checkpoint = load_event_model(checkpoint_path, device)
     planner_profile = str(getattr(model.config, "planner_profile", "legacy_v1"))
     if not is_music_structure(planner_profile):
@@ -118,10 +119,13 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
     profile["method"] = ("learned_music_structure_v3" if planner_profile == "music_structure_v3"
                           else "learned_music_structure_v2")
     profile["planner_windows"] = descriptors
+    identity_after = _file_identity(checkpoint_path)
+    if identity_before != identity_after:
+        raise ValueError("曲线预测期间 checkpoint 文件发生变化，请选择固定 epoch checkpoint 后重新生成")
     profile["checkpoint"] = str(Path(checkpoint_path).resolve())
-    checkpoint_stat = Path(checkpoint_path).stat()
-    profile["checkpoint_identity"] = {"size": checkpoint_stat.st_size,
-                                       "mtime_ns": checkpoint_stat.st_mtime_ns}
+    profile["checkpoint_identity"] = {"size": identity_after["size"],
+                                       "mtime_ns": str(identity_after["mtime_ns"]),
+                                       "sha256": identity_after["sha256"]}
     profile["condition"] = condition.to_dict()
     profile["level"] = condition.level
     profile["bpm"] = bpm
