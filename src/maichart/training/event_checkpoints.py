@@ -18,6 +18,8 @@ EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 # either side carries them, and ignored otherwise so older checkpoints keep
 # working.
 OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params", "onset_params")
+LEGACY_CONDITION_TARGET_VERSION = "legacy_unshifted_v1"
+CURRENT_CONDITION_TARGET_VERSION = "chart_audio_clock_v2"
 INIT_MIGRATABLE_FAMILY_KEYS = frozenset({
     "slide_oversample", "touch_oversample", "oversample_policy",
     "fine_rhythm_oversample", "fine_rhythm_ratio_threshold", "fine_rhythm_stats_version",
@@ -74,6 +76,10 @@ def load_event_checkpoint(path: str | Path, *, device: str | torch.device = "cpu
         raise ValueError("Checkpoint vocabulary/config size mismatch.")
     if payload.get("data_contract", {}).get("vocabulary_signature") != vocabulary_signature(vocabulary):
         raise ValueError("Checkpoint vocabulary signature mismatch.")
+    condition_target_version = payload.get("data_contract", {}).get(
+        "condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
+    if condition_target_version not in {LEGACY_CONDITION_TARGET_VERSION, CURRENT_CONDITION_TARGET_VERSION}:
+        raise ValueError(f"Unknown condition_target_version {condition_target_version!r}.")
     onset_profile = str(config.get("onset_profile", "none"))
     if onset_profile not in {"none", "chart_onsets_v1"}:
         raise ValueError(f"Unknown checkpoint onset_profile {onset_profile!r}.")
@@ -132,6 +138,20 @@ def load_event_model(path: str | Path, device: torch.device):
 
 def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, mode: str) -> None:
     contract = stored.get("data_contract", {})
+    stored_condition_version = contract.get("condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
+    current_condition_version = current.get("condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
+    if stored_condition_version != current_condition_version:
+        allowed_migration = (
+            mode in {"init", "finetune"}
+            and stored_condition_version == LEGACY_CONDITION_TARGET_VERSION
+            and current_condition_version == CURRENT_CONDITION_TARGET_VERSION
+        )
+        if not allowed_migration:
+            raise ValueError(
+                "事件模型数据合同 condition_target_version 不兼容："
+                f"已有={stored_condition_version!r}，当前={current_condition_version!r}。"
+                "仅允许通过 finetune 从 legacy_unshifted_v1 迁移到 chart_audio_clock_v2；resume 必须继承原版本。"
+            )
     keys = ("target_schema", "feature_profile", "input_dim", "sample_rate", "hop_length", "segment_beats", "max_tokens", "vocabulary_signature", "condition_keys")
     for key in keys:
         if contract.get(key) != current.get(key):

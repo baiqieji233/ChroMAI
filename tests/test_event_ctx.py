@@ -96,6 +96,30 @@ def test_dataset_signature_tracks_difficulty_filter(manifest, fake_audio):
     }
 
 
+def test_condition_target_version_is_opt_in_for_direct_dataset_and_changes_signature(
+        manifest, fake_audio, monkeypatch):
+    captured = []
+    original = event_dataset_module.condition_from_events
+
+    def capture(*args, **kwargs):
+        captured.append(kwargs.copy())
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(event_dataset_module, "condition_from_events", capture)
+    legacy = EventDataset(manifest[0], cache_dir=manifest[1], segment_beats=16,
+                          max_tokens=512, eager_audio=False)
+    current = EventDataset(manifest[0], cache_dir=manifest[1], segment_beats=16,
+                           max_tokens=512, eager_audio=False,
+                           condition_target_version="chart_audio_clock_v2")
+    assert legacy.signature != current.signature
+    assert legacy.condition_target_version == "legacy_unshifted_v1"
+    legacy._ensure_condition(0, legacy.samples[0], _fake_audio(None))
+    current.samples[0].chart.first = 0.25
+    current._ensure_condition(0, current.samples[0], _fake_audio(None))
+    assert "audio_first" not in captured[0]
+    assert captured[1]["audio_first"] == pytest.approx(0.25)
+
+
 def test_window_condition_uses_matching_audio_intensity_factor(manifest, fake_audio, monkeypatch):
     from maichart.generation import intensity
 

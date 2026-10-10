@@ -108,6 +108,7 @@ def evaluate(checkpoints, manifest, cache_dir, output, limit=64, *,
             raise ValueError("This tool requires a trained structure planner")
         names = continuous_keys(profile)
         signature = {k: contract.get(k) for k in ("target_schema", "segment_beats", "max_tokens", "family_params", "vocabulary_signature")}
+        signature["condition_target_version"] = contract.get("condition_target_version", "legacy_unshifted_v1")
         signature["planner_profile"] = profile
         if dataset is None:
             cls = EventCtxDataset if contract["target_schema"] == "event_ctx_v1" else EventDataset
@@ -119,6 +120,7 @@ def evaluate(checkpoints, manifest, cache_dir, output, limit=64, *,
                 dataset = cls(manifest, cache_dir=cache_dir, segment_beats=contract["segment_beats"],
                               max_tokens=contract["max_tokens"], vocabulary=vocabulary, planner_profile=profile,
                               eager_audio=False, condition_mask_prob=0,
+                              condition_target_version=signature["condition_target_version"],
                               global_frames=model.config.global_audio_tokens, **kwargs)
             dataset_contract = signature
             selected = np.linspace(0, len(dataset)-1, min(limit, len(dataset)), dtype=int).tolist()

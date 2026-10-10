@@ -202,6 +202,7 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
         hop_length=int(contract["hop_length"]),
         eager_audio=False,
         global_frames=int(config.get("global_audio_tokens", GLOBAL_MEMORY_FRAMES)),
+        condition_target_version=contract.get("condition_target_version", "legacy_unshifted_v1"),
         condition_mask_prob=0.0,
         condition_default=float((contract.get("condition_params") or {}).get("default", 0.5)),
         condition_seed=0,
@@ -230,6 +231,7 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
         "vocabulary_signature": vocabulary_signature(dataset.vocabulary),
         "dataset_signature": dataset.signature,
         "condition_keys": list(CONDITION_KEYS),
+        "condition_target_version": contract.get("condition_target_version", "legacy_unshifted_v1"),
     }
     # Match the same strict structural guard used by training, while checking
     # inference-time window geometry explicitly below.
@@ -237,6 +239,7 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
         key: contract[key] for key in (
             "target_schema", "feature_profile", "input_dim", "sample_rate", "hop_length",
             "segment_beats", "max_tokens", "vocabulary_signature", "condition_keys",
+            "condition_target_version",
         ) if key in contract
     }}
     compare_event_contract(stored_for_guard, current, mode="init")

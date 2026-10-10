@@ -32,7 +32,11 @@ from maichart.generation.music_plan import (
     CONTINUOUS_COUNT, MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM, continuous_keys,
     is_music_structure,
 )
-from maichart.training.event_checkpoints import EVENT_CHECKPOINT_SCHEMA, atomic_save_checkpoint, compare_event_contract, load_event_checkpoint, vocabulary_signature
+from maichart.training.event_checkpoints import (CURRENT_CONDITION_TARGET_VERSION,
+                                                EVENT_CHECKPOINT_SCHEMA,
+                                                LEGACY_CONDITION_TARGET_VERSION,
+                                                atomic_save_checkpoint, compare_event_contract,
+                                                load_event_checkpoint, vocabulary_signature)
 from maichart.training.event_dataset import EventDataset, collate_events
 
 VALIDATION_CONDITION_SEED = 0
@@ -953,6 +957,11 @@ def main(argv=None) -> int:
         raise ValueError("onset-loss-weight must be finite and nonnegative.")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     checkpoint = load_event_checkpoint(args.resume or args.init_checkpoint) if args.resume or args.init_checkpoint else None
+    if args.resume:
+        condition_target_version = checkpoint.get("data_contract", {}).get(
+            "condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
+    else:
+        condition_target_version = CURRENT_CONDITION_TARGET_VERSION
     stored_planner = checkpoint.get("model_config", {}).get("planner_profile", "legacy_v1") if checkpoint else None
     # A fresh run with ``auto`` takes the newest structure profile. Continued
     # training must keep the checkpoint's profile: the planner head width and
@@ -985,6 +994,7 @@ def main(argv=None) -> int:
     family = dataset_kwargs(args)
     shared = {"condition_mask_prob": args.condition_mask_prob,
               "condition_default": args.condition_default,
+              "condition_target_version": condition_target_version,
               "onset_profile": onset_profile,
               "min_difficulty_index": args.min_difficulty_index,
               "max_difficulty_index": args.max_difficulty_index,
@@ -1072,6 +1082,7 @@ def main(argv=None) -> int:
                 "sample_rate": dataset.sample_rate, "hop_length": dataset.hop_length, "segment_beats": args.segment_beats,
                 "max_tokens": args.max_tokens, "vocabulary_signature": vocabulary_signature(vocabulary),
                 "dataset_signature": dataset.signature, "condition_keys": list(CONDITION_KEYS),
+                "condition_target_version": condition_target_version,
                 "max_audio_tokens": args.max_audio_tokens,
                 "difficulty_filter": {"min_index": args.min_difficulty_index,
                                       "max_index": args.max_difficulty_index,
@@ -1132,11 +1143,19 @@ def main(argv=None) -> int:
             "source_epoch": checkpoint.get("epoch"),
             "source_global_step": checkpoint.get("global_step"),
             "optimizer_reset": True, "sampling_changes": sampling_changes,
+            "condition_target_version": condition_target_version,
+            "condition_target_change": {
+                "source": checkpoint.get("data_contract", {}).get(
+                    "condition_target_version", LEGACY_CONDITION_TARGET_VERSION),
+                "current": condition_target_version,
+            },
             "onset_changes": {"source": checkpoint.get("data_contract", {}).get("onset_params"),
                               "current": contract.get("onset_params")},
         }
         print(f"init_checkpoint={args.init_checkpoint} mode=finetune source_epoch={checkpoint.get('epoch')} "
               f"optimizer_reset=true sampling_changes={json.dumps(sampling_changes)}", flush=True)
+    elif checkpoint is None:
+        training_origin = {"mode": "fresh", "condition_target_version": condition_target_version}
     config_values = dict(checkpoint["model_config"]) if checkpoint else {
         "input_dim": INPUT_DIM, "vocab_size": len(vocabulary), "d_model": args.d_model,
         "nhead": args.nhead, "num_layers": args.num_layers,

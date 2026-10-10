@@ -46,6 +46,9 @@ def resolve_path(value: str, base: Path) -> Path:
 # roughly 1300 songs, which covers the current corpus without approaching the
 # machine's RAM ceiling.
 DEFAULT_AUDIO_CACHE_BYTES = 4 * 1024 ** 3
+LEGACY_CONDITION_TARGET_VERSION = "legacy_unshifted_v1"
+CURRENT_CONDITION_TARGET_VERSION = "chart_audio_clock_v2"
+CONDITION_TARGET_VERSIONS = {LEGACY_CONDITION_TARGET_VERSION, CURRENT_CONDITION_TARGET_VERSION}
 
 
 @dataclass
@@ -109,6 +112,7 @@ class EventDataset(Dataset):
         eager_audio: bool = True, audio_cache_bytes: int | None = DEFAULT_AUDIO_CACHE_BYTES,
         global_frames: int = GLOBAL_MEMORY_FRAMES,
         condition_mask_prob: float = 0.5, condition_default: float = 0.5,
+        condition_target_version: str = LEGACY_CONDITION_TARGET_VERSION,
         condition_seed: int = 0,
         slide_oversample: int = 1,
         min_difficulty_index: int = 4, max_difficulty_index: int = 6,
@@ -169,6 +173,9 @@ class EventDataset(Dataset):
         # behaviour, where the condition leaked the answer's statistics.
         self.condition_mask_prob = max(0.0, min(1.0, float(condition_mask_prob)))
         self.condition_default = float(condition_default)
+        if condition_target_version not in CONDITION_TARGET_VERSIONS:
+            raise ValueError(f"Unknown condition_target_version {condition_target_version!r}.")
+        self.condition_target_version = str(condition_target_version)
         self.min_difficulty_index = int(min_difficulty_index)
         self.max_difficulty_index = int(max_difficulty_index)
         self.min_level = float(min_level)
@@ -627,6 +634,8 @@ class EventDataset(Dataset):
         condition = condition_from_events(
             ref.chart.points, ref.chart.tempo_changes, level=ref.level,
             duration_sec=audio.duration_sec, audio=audio,
+            **({"audio_first": ref.chart.audio_first}
+               if self.condition_target_version == CURRENT_CONDITION_TARGET_VERSION else {}),
         )
         self.conditions[sample_index] = condition.to_vector()
         # The full-song memory starts at audio time 0, which is not necessarily
@@ -854,6 +863,8 @@ class EventDataset(Dataset):
             "condition_mask_prob": self.condition_mask_prob,
             "condition_default": self.condition_default,
         }
+        if self.condition_target_version != LEGACY_CONDITION_TARGET_VERSION:
+            payload["condition_target_version"] = self.condition_target_version
         if self.quality_annotations is not None:
             payload["quality_annotations_fingerprint"] = self.quality_annotation_fingerprint
         if self.planner_profile != "legacy_v1":
@@ -871,7 +882,8 @@ class EventDataset(Dataset):
                 "style_in_dataset": False, "frame_division_used": False,
                 "difficulty_filter": {"min_index": self.min_difficulty_index,
                                       "max_index": self.max_difficulty_index,
-                                      "min_level": self.min_level, "max_level": self.max_level}}
+                                      "min_level": self.min_level, "max_level": self.max_level},
+                "condition_target_version": self.condition_target_version}
 
 
 def collate_events(batch: list[dict[str, Any]], *, pad_id: int = 0) -> dict[str, Any]:

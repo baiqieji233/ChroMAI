@@ -187,6 +187,18 @@ def test_event_audio_feature_matrix_can_supply_labeled_onset_proxy():
     assert proxy.metadata["melody_following"]["feature_source"] == "EventAudio.features[onset]"
 
 
+def test_explicit_audio_first_overrides_missing_event_audio_clock_field():
+    points_at_zero_and_half = points("1", "2")
+    audio = {"times": [2.0, 2.5], "features": [[0.0] * 103, [0.0] * 103]}
+    aligned = condition_from_events(points_at_zero_and_half, TEMPO, level=13,
+                                    duration_sec=2, audio=audio, audio_first=2.0)
+    legacy = condition_from_events(points_at_zero_and_half, TEMPO, level=13,
+                                   duration_sec=2, audio=audio)
+    assert aligned.style["melody_following"] == 1.0
+    assert aligned.metadata["melody_following"]["first"] == 2.0
+    assert legacy.style["melody_following"] == 0.0
+
+
 @pytest.mark.parametrize("events, expected", [([], "degenerate"),
                                               (points("1", "1", "1"), "degenerate"),
                                               (points("1", "2", "3", "4"), "needs_review"),

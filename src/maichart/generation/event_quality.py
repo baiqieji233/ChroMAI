@@ -387,13 +387,13 @@ def _statistics(parsed: EventNoteParse, duration: float) -> dict[str, Any]:
     }
 
 
-def _audio_proxy(parsed: EventNoteParse, audio: Any) -> tuple[float, dict[str, Any]]:
+def _audio_proxy(parsed: EventNoteParse, audio: Any, *, first: float | None = None) -> tuple[float, dict[str, Any]]:
     metadata = {"kind": "unavailable", "available": False, "true_melody_measurement": False,
                 "reason": "No audio supplied; melody_following is explicitly 0."}
     if audio is None:
         return 0.0, metadata
     # Accept precomputed AudioFeatureSet or JSON features, not raw waveforms.
-    offset = float(_value(audio, "first", 0.0))
+    offset = float(_value(audio, "first", 0.0) if first is None else first)
     onset_times = []
     for onset in _value(audio, "onsets", []) or []:
         value = onset if isinstance(onset, (int, float)) else _value(onset, "time_sec")
@@ -471,13 +471,15 @@ def _condition(stats: dict[str, Any], *, level: float, melody: float = 0.0,
 
 def condition_from_events(
     points: Iterable[Any], tempo_changes: Iterable[Any], *, level: float,
-    duration_sec: float, audio: Any = None,
+    duration_sec: float, audio: Any = None, audio_first: float | None = None,
 ) -> GenerationCondition:
     """Compute training controls dynamically from exact events.
 
     ``duration_sec`` is the chart/song interval length, not last-note time.
     ``audio`` optionally accepts precomputed onset features; its optional
     ``first`` field aligns chart-relative beats with absolute audio seconds.
+    ``audio_first`` explicitly overrides that field when the feature object
+    has no chart-clock metadata (as with cached ``EventAudio``).
     The returned GenerationCondition subclass carries JSON-safe ``metadata``.
     Invalid tokens, duplicate heads, or durations raise EventNoteError.
     """
@@ -487,7 +489,7 @@ def condition_from_events(
     parsed = parse_event_notes(points, tempo_changes)
     if not parsed.syntax_valid:
         raise EventNoteError(parsed)
-    melody, metadata = _audio_proxy(parsed, audio)
+    melody, metadata = _audio_proxy(parsed, audio, first=audio_first)
     return _condition(_statistics(parsed, duration), level=level,
                       melody=melody, melody_metadata=metadata)
 

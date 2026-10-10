@@ -232,6 +232,21 @@ def test_finetune_sampling_exception_does_not_relax_condition_contract():
         compare_event_contract(stored, current, mode="init")
 
 
+def test_condition_target_version_has_one_explicit_init_migration():
+    stored = old_checkpoint()
+    current = copy.deepcopy(stored["data_contract"])
+    current["condition_target_version"] = "chart_audio_clock_v2"
+    compare_event_contract(stored, current, mode="init")
+    with pytest.raises(ValueError, match="condition_target_version"):
+        compare_event_contract(stored, current, mode="resume")
+
+    newer = {"data_contract": {**current}}
+    legacy = copy.deepcopy(stored["data_contract"])
+    for mode in ("init", "resume"):
+        with pytest.raises(ValueError, match="condition_target_version"):
+            compare_event_contract(newer, legacy, mode=mode)
+
+
 def test_training_entrypoint_keeps_old_weights_and_resets_optimization(
     sampling_manifest, tmp_path, monkeypatch
 ):
@@ -270,6 +285,7 @@ def test_training_entrypoint_keeps_old_weights_and_resets_optimization(
         assert train_events.main(common + ["--checkpoint-dir", str(source_dir)]) == 0
         source = load_event_checkpoint(source_dir / "event_last.pt")
         # Reproduce pre-split metadata without modifying any workspace model.
+        source["data_contract"].pop("condition_target_version")
         source["data_contract"]["family_params"].pop("touch_oversample")
         source["data_contract"]["family_params"].pop("oversample_policy")
         source["epoch"] = 11
@@ -321,6 +337,10 @@ def test_training_entrypoint_keeps_old_weights_and_resets_optimization(
         assert saved["epoch"] == 1
         assert saved["training_origin"]["source_epoch"] == 11
         assert saved["training_origin"]["optimizer_reset"] is True
+        assert saved["data_contract"]["condition_target_version"] == "chart_audio_clock_v2"
+        assert saved["training_origin"]["condition_target_change"] == {
+            "source": "legacy_unshifted_v1", "current": "chart_audio_clock_v2",
+        }
         family = saved["data_contract"]["family_params"]
         assert family["touch_oversample"] == 1
         assert family["slide_oversample"] == 2
