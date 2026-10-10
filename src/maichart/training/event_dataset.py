@@ -26,10 +26,14 @@ from maichart.generation.event_audio import (
     event_audio_cache_path,
     extract_event_audio,
     load_event_audio,
+    segment_frame_times,
 )
 from maichart.generation.event_model import EventSequence, EventVocabulary, NOTE_CHARACTERS
 from maichart.generation.event_quality import condition_from_events, parse_event_notes
 from maichart.generation.music_plan import is_music_structure, validate_profile
+from maichart.training.onset_targets import (
+    build_onset_targets, onset_times, quality_onset_params, validate_onset_profile,
+)
 
 
 def resolve_path(value: str, base: Path) -> Path:
@@ -113,6 +117,7 @@ class EventDataset(Dataset):
         audio_cache_label: str = "dataset",
         quality_annotations: str | Path | None = None,
         planner_profile: str = "legacy_v1",
+        onset_profile: str = "none",
     ) -> None:
         if segment_beats <= 0 or max_tokens < 4:
             raise ValueError("segment_beats must be positive and max_tokens at least 4.")
@@ -120,6 +125,8 @@ class EventDataset(Dataset):
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
         validate_profile(planner_profile)
         self.planner_profile = planner_profile
+        self.onset_profile = validate_onset_profile(onset_profile)
+        self._onset_times_by_sample: dict[int, list[float]] = {}
         self._music_plan_targets: dict[int, Any] = {}
         self.quality_annotations_path = str(Path(quality_annotations).resolve()) if quality_annotations else ""
         self.quality_annotations = None
@@ -392,6 +399,24 @@ class EventDataset(Dataset):
             if float(region["start_sec"]) <= when < float(region["end_sec"]):
                 factor *= float(region.get("weight", 1.0))
         return max(0.0, min(4.0, base * factor))
+
+    def _quality_onset_params(self, sample_index: int) -> tuple[float, list[dict[str, Any]]]:
+        return quality_onset_params(self.quality_records_by_sample.get(int(sample_index)))
+
+    def _onset_labels(self, sample_index: int, ref: EventSample, sample_times,
+                      core_start_sec: float, core_end_sec: float, audio_duration_sec: float):
+        if sample_index not in self._onset_times_by_sample:
+            self._onset_times_by_sample[sample_index] = onset_times(ref.chart)
+        base_weight, regions = self._quality_onset_params(sample_index)
+        return build_onset_targets(
+            ref.chart, sample_times,
+            core_start_sec=core_start_sec,
+            core_end_sec=core_end_sec,
+            audio_duration_sec=audio_duration_sec,
+            quality_base_weight=base_weight,
+            quality_regions=regions,
+            onset_seconds=self._onset_times_by_sample[sample_index],
+        )
 
     def _quality_weights_for_window(self, sample_index: int, start: Fraction, end: Fraction,
                                     points: list[Any], *, target_length: int,
@@ -795,7 +820,7 @@ class EventDataset(Dataset):
         condition, condition_null = self._condition_with_null_flag(sample_index)
         quality_weight = float(self.segment_quality_weights[index])
         quality_tokens = self.quality_token_vector(index, len(token_ids) - 1)
-        return {"audio": x, "global_audio": self.global_audio[sample_index],
+        item = {"audio": x, "global_audio": self.global_audio[sample_index],
                 "condition": self._window_condition(sample_index, ref, audio, start, condition),
                 "condition_null": torch.tensor(condition_null, dtype=torch.bool),
                 "plan_target": self._quality_window_plan(sample_index, ref, start, end),
@@ -805,6 +830,13 @@ class EventDataset(Dataset):
                 "quality_token_weights": quality_tokens,
                 "decoder_input": tokens[:-1], "target": tokens[1:],
                 "meta": {"song_id": ref.song_id, "start_beat": str(start), "end_beat": str(end)}}
+        if self.onset_profile != "none":
+            sample_times = segment_frame_times(begin_sec, end_sec)
+            if sample_times.size != x.size(0):
+                raise RuntimeError("onset frame-time grid does not match audio segment frames")
+            item["onset_target"], item["onset_weight"], item["onset_valid"] = self._onset_labels(
+                sample_index, ref, sample_times, float(begin_sec), float(end_sec), float(audio.duration_sec))
+        return item
 
     @property
     def signature(self) -> str:
@@ -826,6 +858,8 @@ class EventDataset(Dataset):
             payload["quality_annotations_fingerprint"] = self.quality_annotation_fingerprint
         if self.planner_profile != "legacy_v1":
             payload["planner_profile"] = self.planner_profile
+        if self.onset_profile != "none":
+            payload["onset_profile"] = self.onset_profile
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def audit(self) -> dict[str, Any]:
@@ -833,6 +867,7 @@ class EventDataset(Dataset):
                 "samples": len(self.samples), "segments": len(self), "vocab_size": len(self.vocabulary),
                 "signature": self.signature, "skipped": self.skipped,
                 "target_schema": "event_v1", "segment_beats": self.segment_beats,
+                "onset_profile": self.onset_profile,
                 "style_in_dataset": False, "frame_division_used": False,
                 "difficulty_filter": {"min_index": self.min_difficulty_index,
                                       "max_index": self.max_difficulty_index,
@@ -874,7 +909,7 @@ def collate_events(batch: list[dict[str, Any]], *, pad_id: int = 0) -> dict[str,
         if item.get("quality_token_weights") is not None:
             item_weights = item["quality_token_weights"]
             quality_token_weights[index, :min(t_len, item_weights.numel())] = item_weights[:t_len]
-    return {"audio": audio, "audio_padding_mask": audio_mask, "decoder_input": decoder, "target": target,
+    result = {"audio": audio, "audio_padding_mask": audio_mask, "decoder_input": decoder, "target": target,
             "decoder_padding_mask": token_mask, "loss_mask": loss_mask,
             "plan_audio_mask": plan_audio_mask,
             "quality_token_weights": quality_token_weights,
@@ -884,3 +919,15 @@ def collate_events(batch: list[dict[str, Any]], *, pad_id: int = 0) -> dict[str,
             "quality_sample_weights": torch.stack([item.get("quality_sample_weight", torch.tensor(1.0)).float() for item in batch]),
             "quality_plan_weights": torch.stack([item.get("quality_plan_weight", item.get("quality_sample_weight", torch.tensor(1.0))).float() for item in batch]),
              "plan_target": torch.stack([item["plan_target"] for item in batch])}
+    if any("onset_target" in item for item in batch):
+        for key in ("onset_target", "onset_weight", "onset_valid"):
+            values = torch.zeros((len(batch), max_audio), dtype=torch.float32)
+            for index, item in enumerate(batch):
+                if key not in item:
+                    continue
+                source = item[key].to(dtype=torch.float32).flatten()
+                if source.numel() != item["audio"].size(0):
+                    raise ValueError(f"{key} length must match the unpadded audio frames")
+                values[index, :source.numel()] = source
+            result[key] = values
+    return result

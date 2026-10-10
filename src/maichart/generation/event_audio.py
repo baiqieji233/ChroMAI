@@ -1108,13 +1108,22 @@ def _time_to_beat(audio_offset: float, entries: Sequence[TempoEntry]) -> float:
 
 
 def _sample_audio(audio: EventAudio, start: float, end: float) -> tuple[np.ndarray, np.ndarray]:
-    if end <= start:
-        times = np.asarray([start], dtype=np.float32)
-    else:
-        count = max(1, int(math.ceil((end - start) * FEATURE_RATE_HZ - 1e-8)))
-        times = (start + np.arange(count, dtype=np.float32) / FEATURE_RATE_HZ).astype(np.float32)
+    times = segment_frame_times(start, end)
     features = _resample_rows(audio.features, audio.times, times)
     return times, features
+
+
+def segment_frame_times(start_sec: float, end_sec: float) -> np.ndarray:
+    """Return the exact frame timestamps used by ``audio_segment_tensor``.
+
+    Segment sampling is relative to its requested start, including negative
+    starts. For a degenerate interval the feature path emits one frame at start.
+    """
+    start, end = float(start_sec), float(end_sec)
+    if end <= start:
+        return np.asarray([start], dtype=np.float32)
+    count = max(1, int(math.ceil((end - start) * FEATURE_RATE_HZ - 1e-8)))
+    return (start + np.arange(count, dtype=np.float32) / FEATURE_RATE_HZ).astype(np.float32)
 
 
 def _atomic_write_text(path: Path, content: str) -> None:
@@ -1187,6 +1196,7 @@ __all__ = [
     "save_event_audio",
     "save_event_audio_json",
     "save_event_audio_npz",
+    "segment_frame_times",
 ]
 
 

@@ -29,6 +29,7 @@ from maichart.generation.event_audio import (
     _normalize_tempo_map,
     _time_to_beat,
     audio_segment_tensor,
+    segment_frame_times,
 )
 from maichart.generation.event_ctx import (
     CTX_SPECIALS,
@@ -340,7 +341,7 @@ class EventCtxDataset(EventDataset):
         targets = tokens[1:]
         mask = torch.tensor(loss_mask_after(prefix_len, targets.numel()), dtype=torch.bool)
         condition, condition_null = self._condition_with_null_flag(sample_index)
-        return {
+        item = {
             "audio": x, "global_audio": self.global_audio[sample_index],
             "condition": self._window_condition(sample_index, ref, audio, start, condition),
             "condition_null": torch.tensor(condition_null, dtype=torch.bool),
@@ -356,12 +357,23 @@ class EventCtxDataset(EventDataset):
                      "beat_offset_denominator": int(offset.denominator),
                      "beat_offset_numerator": int(offset.numerator)},
         }
+        if self.onset_profile != "none":
+            frame_end_sec = finish_sec
+            if audio.duration_sec:
+                frame_end_sec = min(frame_end_sec, float(audio.duration_sec))
+            sample_times = segment_frame_times(begin_sec, frame_end_sec)
+            if sample_times.size != x.size(0):
+                raise RuntimeError("onset frame-time grid does not match audio segment frames")
+            item["onset_target"], item["onset_weight"], item["onset_valid"] = self._onset_labels(
+                sample_index, ref, sample_times, core_begin, core_end, float(audio.duration_sec))
+        return item
 
     def audit(self) -> dict[str, Any]:
         payload = super().audit()
         payload.update({
             "target_schema": TARGET_SCHEMA,
             "family": TARGET_SCHEMA,
+            "onset_profile": self.onset_profile,
             "context_beats": self.context_beats,
             "audio_margin_beats": self.audio_margin_beats,
             "context_tokens": self.context_tokens,
@@ -401,4 +413,6 @@ class EventCtxDataset(EventDataset):
         }
         if self.fine_rhythm_oversample > 1:
             params["fine_rhythm_stats_version"] = FINE_RHYTHM_STATS_VERSION
+        if self.onset_profile != "none":
+            params["onset_profile"] = self.onset_profile
         return params
