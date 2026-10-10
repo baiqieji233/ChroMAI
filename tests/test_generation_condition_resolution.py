@@ -55,3 +55,19 @@ def test_non_object_request_fails_explicitly(tmp_path):
     request = write_json(tmp_path, "request.json", [])
     with pytest.raises(ValueError, match="JSON object"):
         resolve_generation_condition(level=13, condition_file=request)
+
+
+def test_unmeasured_profile_zero_falls_back_but_explicit_zero_is_kept(tmp_path):
+    profile = write_json(tmp_path, "profile.json", {
+        "schema": "maichart-condition-profile-v1",
+        "controls": {"melody_following": {"median": 0}, "note_density": {"median": .31}},
+    })
+    request = write_json(tmp_path, "request.json", {"level": 13.9})
+    condition, _ = resolve_generation_condition(level=13, condition_file=request, condition_profile=profile)
+    assert condition.style["melody_following"] == .9
+    assert condition.radar["note_density"] == .31
+    request.write_text(json.dumps({"style": {"melody_following": 0}}), encoding="utf-8")
+    condition, _ = resolve_generation_condition(level=13.9, condition_file=request, condition_profile=profile)
+    assert condition.style["melody_following"] == 0
+    assert condition.level == 13.9
+    assert condition.radar["note_density"] == .31
