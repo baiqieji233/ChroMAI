@@ -1694,8 +1694,8 @@ def _filter_points_to_file_span(points: list[EventPoint], *, tempo_changes, firs
     high = float(duration_sec)
     kept = []
     for point in points:
-        # seconds_at_beat accepts only nonnegative beats.  A negative chart
-        # pickup maps before `first` and is outside the file by definition.
+        # Generated event positions use a nonnegative chart-beat domain.
+        # The file-clock check below separately handles negative audio offsets.
         if Fraction(point.beat) < 0:
             continue
         when = float(seconds_at_beat(point.beat, tempo_changes, first))
