@@ -99,6 +99,53 @@ def _musical_bpm(value: float) -> float:
     return math.floor(detected * 2.0 + 0.5) / 2.0
 
 
+def _file_identity(path: str | Path) -> dict[str, object]:
+    source = Path(path)
+    if not source.is_file():
+        return {"path": str(source.resolve()), "sha256": None}
+    stat = source.stat()
+    digest = hashlib.sha256()
+    with source.open("rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return {"path": str(source.resolve()), "size": stat.st_size,
+            "mtime_ns": stat.st_mtime_ns, "sha256": digest.hexdigest()}
+
+
+def validate_learned_curve_contract(curve: dict, *, checkpoint_path: str | Path,
+                                    checkpoint_identity: dict[str, object],
+                                    condition: GenerationCondition, first: float,
+                                    tempo_map: list[EventTempo] | None,
+                                    tempo_mode: str, bpm_input: float | None) -> None:
+    """Reject a learned curve made for another generation context."""
+    if not str(curve.get("method", "")).startswith("learned_music_structure_"):
+        return
+    curve_checkpoint = curve.get("checkpoint")
+    if curve_checkpoint and Path(str(curve_checkpoint)).resolve() != Path(checkpoint_path).resolve():
+        raise ValueError("Learned intensity curve was created with another checkpoint; regenerate it")
+    expected_identity = {key: checkpoint_identity.get(key) for key in ("size", "mtime_ns")}
+    if curve.get("checkpoint_identity") != expected_identity:
+        raise ValueError("Learned intensity curve checkpoint identity changed; regenerate it")
+    try:
+        if curve.get("condition") != condition.to_dict():
+            raise ValueError("Learned intensity curve condition differs from generation condition; regenerate it")
+        if float(curve.get("first", 0.0)) != float(first):
+            raise ValueError("Learned intensity curve uses another first/audio offset; regenerate it")
+    except (TypeError, ValueError) as exc:
+        if "regenerate it" in str(exc):
+            raise
+        raise ValueError("Learned intensity curve has invalid condition/first metadata; regenerate it") from exc
+    explicit_hash = tempo_map_fingerprint(serialize_tempo_map(tempo_map) if tempo_map is not None else None)
+    if curve.get("tempo_map_sha256") != explicit_hash:
+        raise ValueError("Learned intensity curve was created with another explicit tempo map; regenerate it")
+    if explicit_hash is None:
+        if str(curve.get("tempo_mode", "constant")) != str(tempo_mode):
+            raise ValueError("Learned intensity curve uses another tempo mode; regenerate it")
+        curve_bpm_input = curve.get("bpm_input")
+        if curve_bpm_input != bpm_input:
+            raise ValueError("Learned intensity curve uses another BPM input; regenerate it")
+
+
 def _tempo_map(tempo_mode: str, audio, bpm: float, *, snap: bool = True) -> list[EventTempo]:
     """Build the chart tempo map for the requested mode.
 
@@ -1949,19 +1996,15 @@ def main(argv=None) -> int:
         windows = _segment_windows(duration_beats, segment_beats, overlap_beats=overlap_beats)
         if not windows:
             raise ValueError("Audio duration is too short to place any chart beat.")
-        def source_identity(path):
-            source = Path(path)
-            if not source.is_file():
-                return {"path": str(source.resolve()), "sha256": None}
-            stat = source.stat()
-            digest = hashlib.sha256()
-            with source.open("rb") as stream:
-                for block in iter(lambda: stream.read(1024 * 1024), b""):
-                    digest.update(block)
-            return {"path": str(source.resolve()), "size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
-                    "sha256": digest.hexdigest()}
-        audio_identity = source_identity(args.audio)
-        checkpoint_identity = source_identity(args.checkpoint)
+        audio_identity = _file_identity(args.audio)
+        checkpoint_identity = _file_identity(args.checkpoint)
+        if intensity_curve is not None:
+            validate_learned_curve_contract(
+                intensity_curve, checkpoint_path=args.checkpoint,
+                checkpoint_identity=checkpoint_identity, condition=condition,
+                first=args.first, tempo_map=explicit_tempo,
+                tempo_mode=args.tempo_mode, bpm_input=args.bpm,
+            )
     except Exception as exc:
         _write_failure_report(output, quality_path, exc)
         print(f"generation_status=failed error={exc}", flush=True)
