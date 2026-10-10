@@ -1,6 +1,6 @@
 # 阶段 E：从“生成更多音符”转向“选择合适的落音位置”
 
-更新：2026-10-11 04:35。阶段 D 的 full 基线已完成 15 轮，5 轮增采样微调已保存第 4 轮并进入最后一轮。局部采音分支已依据新证据修改、尚未开始训练。工程联测已经完成，正式质量对照尚未完成，不能把小样本 checkpoint 作为可用成品。
+更新：2026-10-11 06:50。阶段 D 的 full 基线已完成 15 轮，5 轮增采样微调和 70 份完整生成均已完成。局部采音分支已开始 3 轮训练（任务 `4d16b78f880f`），正式质量对照仍在继续，不能把小样本 checkpoint 作为可用成品。
 
 ## 目标与判断依据
 
@@ -73,13 +73,13 @@
 2. 在前一队列所有任务及产物检查完成后，从不可变的 **full 基线 epoch 7** 独立启动 3 轮完整训练集起音头微调：LR `2e-5`、起音损失权重 `0.2`、细碎/Slide/Touch 采样倍率均为 **1**。这是提交任何新头训练前完成的调整，原因见下方实际对照。
 3. 同一不可变 epoch 3 checkpoint，以指导强度 0 / 0.3 / 0.6 对上述 10 首歌做 30 次完整生成。比较音符密度、起音 P/R、各间隔比例、类型、空白段、空间重复及静态冲突。起音头另做同窗音频打乱诊断。
 
-主队列：`.scratch/full_v3_stage1/pipeline_config_recovered.json`；后续当前有效配置：`.scratch/full_v3_stage1/onset_pipeline_config_v2.json`。原 `onset_pipeline_state.json` 已明确标记 `superseded`，其配置/状态/报告备份在 `onset_revision_before_submission/`，当时提交任务数为 0。后续队列绑定主队列配置摘要，网络或状态观察失败不等于训练已经停止，不能据此重复提交任务。
+主队列：`.scratch/full_v3_stage1/pipeline_config_recovered.json`，已完成 71 个任务（5轮微调 + 70份生成）及评估；后续当前有效配置：`.scratch/full_v3_stage1/onset_pipeline_config_v2.json`。原 `onset_pipeline_state.json` 已明确标记 `superseded`，其配置/状态/报告备份在 `onset_revision_before_submission/`，当时提交任务数为 0。后续队列绑定主队列配置摘要，网络或状态观察失败不等于训练已经停止，不能据此重复提交任务。
 
 同一模型的 0 / 0.3 / 0.6 对照用于判断指导力度；它与前阶段模型的比较还混入额外训练因素，不能把全部变化归功于指导。留出集合是开发验证集，已经用于调参，不是新的盲测集。起音头也不补全复杂 Slide/Wifi 的运行时判定或人体动作模型。
 
 此外，新头微调同时改用 `per_sample_v2` 池化。旧策略在批内任一窗口超过长度上限时，会把短窗口也扩展到上限；新策略仅压缩实际超长窗口。该修复使训练和单窗生成的时间网格一致，但也是跨阶段比较中的额外变化因素。起音头还可能借助显式拍相位学习常见拍位先验，因此正式诊断须同时考察音频扰动与仅保留时钟输入的结果。
 
-后续起音队列控制器已启动，状态为 `waiting_for_dependency`，确认提交任务数为 0。当前持久状态为 `.scratch/full_v3_stage1/onset_pipeline_state_v2.json`；阶段记录为 `ONSET_PIPELINE_REPORT_V2.md`。
+后续起音队列控制器已通过主队列完整状态门控，当前训练任务为 `4d16b78f880f`，状态 running。当前持久状态为 `.scratch/full_v3_stage1/onset_pipeline_state_v2.json`；阶段记录为 `ONSET_PIPELINE_REPORT_V2.md`。起音头完成后，30份强度 0/0.3/0.6 对照才会提交。
 
 另做了相同 Ether Strike、相同 seed `20261919`、相同生成参数的 epoch 7/14 对照：epoch 14 为 827 notes、639 起音、细碎比例 `0.1897`、参考起音 F1 `0.5457`；epoch 7 为 942 notes、760 起音、细碎比例 `0.4071`、F1 `0.5486`。这只是单曲单 seed，但显示追加训练让该条件下的输出更保守，F1 没有实质改善。epoch 14 产物和状态在 `.scratch/full_v3_stage1/quality_probe_epoch14/`。
 
