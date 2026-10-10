@@ -31,10 +31,13 @@ def _write_config(tmp_path, *, kind="event_tokens", pipeline_digest=DIGEST):
     return path, checkpoint
 
 
-def _pipeline(path, *, config_digest=DIGEST, status="completed", include_checkpoint=True):
+def _pipeline(path, *, config_digest=DIGEST, status="completed", include_checkpoint=True,
+              pipeline_status=None):
     result = {"paths": [str(path.parent / "event_epoch_015.pt")] if include_checkpoint else []}
     pipeline = {
         "config_sha256": config_digest,
+        "status": pipeline_status or ("running" if status == "running" else
+                                      "failed" if status in {"failed", "cancelled"} else "completed"),
         "jobs": [{
             "name": "train-main", "status": status,
             "last_snapshot": {"status": status, "result": result,
@@ -62,7 +65,8 @@ def test_uncompleted_training_waits_without_reading_checkpoint(tmp_path, monkeyp
 def test_completed_training_runs_cpu_shuffle_evaluator_once_and_records_identity(tmp_path, monkeypatch):
     config, checkpoint = _write_config(tmp_path)
     checkpoint.write_bytes(b"immutable checkpoint")
-    _pipeline(config)
+    # An unrelated generation failure must not block a completed training job.
+    _pipeline(config, pipeline_status="completed_with_errors")
     observed = []
 
     def evaluate(args):
@@ -151,6 +155,48 @@ def test_state_identity_mismatch_prevents_resume_with_different_config(tmp_path)
     config.write_text(json.dumps(data), encoding="utf-8")
     with pytest.raises(ValueError, match="different diagnostics config"):
         run_config(config, sleep_fn=lambda _: None, max_polls=1)
+
+
+@pytest.mark.parametrize("alias", ["pipeline", "state", "checkpoint", "manifest", "config"])
+def test_output_alias_of_protected_path_is_rejected(tmp_path, alias):
+    config_path, checkpoint = _write_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    values = {
+        "pipeline": data["pipeline_state"], "state": data["state_path"],
+        "checkpoint": data["jobs"][0]["checkpoint"], "manifest": data["jobs"][0]["manifest"],
+        "config": str(config_path),
+    }
+    data["jobs"][0]["output"] = values[alias]
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="output aliases a protected"):
+        load_config(config_path)
+
+
+def test_state_path_cannot_alias_pipeline_state(tmp_path):
+    config_path, _ = _write_config(tmp_path)
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    data["state_path"] = data["pipeline_state"]
+    config_path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(ValueError, match="state_path must not alias pipeline_state"):
+        load_config(config_path)
+
+
+@pytest.mark.parametrize("pipeline_status", ["failed", "cancelled", "dependency_failed", "completed_with_errors"])
+@pytest.mark.parametrize("job_present", [True, False])
+def test_terminal_upstream_status_fails_pending_or_absent_selected_job(
+        tmp_path, pipeline_status, job_present, monkeypatch):
+    config_path, checkpoint = _write_config(tmp_path)
+    jobs = [{"name": "train-main", "status": "pending"}] if job_present else []
+    pipeline = {"config_sha256": DIGEST, "status": pipeline_status, "jobs": jobs}
+    (tmp_path / "pipeline_state.json").write_text(json.dumps(pipeline), encoding="utf-8")
+    monkeypatch.setattr("tools.evaluate_event_tokens.evaluate",
+                        lambda args: pytest.fail("pending training must not evaluate"))
+
+    assert run_config(config_path, sleep_fn=lambda _: None, max_polls=1) == 2
+    state = json.loads((tmp_path / "diagnostics_state.json").read_text(encoding="utf-8"))
+    assert state["status"] == "failed"
+    assert pipeline_status in state["jobs"][0]["error"]
+    assert not checkpoint.exists()
 
 
 def test_resume_skips_completed_diagnostic_and_retries_only_failed_one(tmp_path, monkeypatch):

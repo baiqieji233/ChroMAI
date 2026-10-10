@@ -96,6 +96,16 @@ def load_config(path: Path) -> tuple[dict[str, Any], Path]:
         raise ValueError("config_sha256 must be a 64-character SHA-256 hex digest.")
     if not isinstance(config["jobs"], list) or not config["jobs"]:
         raise ValueError("jobs must be a non-empty JSON array.")
+    pipeline_path = _resolve(config["pipeline_state"], path.parent)
+    state_path = _resolve(config["state_path"], path.parent)
+    if state_path == pipeline_path:
+        raise ValueError("state_path must not alias pipeline_state.")
+    protected_paths = {pipeline_path, state_path, path}
+    for job in config["jobs"]:
+        if isinstance(job, dict):
+            for key in ("checkpoint", "manifest"):
+                if job.get(key):
+                    protected_paths.add(_resolve(job[key], path.parent))
     names = set()
     for index, job in enumerate(config["jobs"]):
         if not isinstance(job, dict):
@@ -111,6 +121,15 @@ def load_config(path: Path) -> tuple[dict[str, Any], Path]:
         names.add(name)
         if not re.fullmatch(r"event_epoch_\d{3}\.pt", Path(job["checkpoint"]).name):
             raise ValueError(f"jobs[{index}].checkpoint must be an immutable event_epoch_NNN.pt file.")
+        checkpoint_path = _resolve(job["checkpoint"], path.parent)
+        manifest_path = _resolve(job["manifest"], path.parent)
+        output_path = _resolve(job["output"], path.parent)
+        protected_paths.update({checkpoint_path, manifest_path})
+        for previous in config["jobs"][:index]:
+            protected_paths.add(_resolve(previous["output"], path.parent))
+        if output_path in protected_paths:
+            raise ValueError(f"jobs[{index}].output aliases a protected input or state path: {output_path}")
+        protected_paths.add(output_path)
         limit = int(job.get("limit", 128))
         batch_size = int(job.get("batch_size", 4))
         if limit < 1 or batch_size not in {2, 4}:
@@ -204,18 +223,30 @@ class TrainingDiagnostics:
     def _ready_training_jobs(self, snapshot: dict[str, Any]) -> tuple[dict[str, dict[str, Any]], str | None]:
         observed_jobs = {str(job.get("name")): job for job in snapshot.get("jobs", [])
                          if isinstance(job, dict)}
+        upstream_status = str(snapshot.get("status") or "").lower()
+        upstream_failed = upstream_status in {
+            "failed", "cancelled", "dependency_failed", "completed_with_errors",
+        }
         ready = {}
         for item in self.state["jobs"]:
             if item["status"] == "completed":
                 continue
             source = observed_jobs.get(item["training_job_name"])
             if source is None or source.get("status") in {None, "pending", "submitting", "submitted", "observing"}:
+                if upstream_failed:
+                    item.update({"status": "failed", "error":
+                                 f"Upstream pipeline ended as {upstream_status} before the selected training job completed."})
+                    return {}, "failed"
                 return {}, "waiting"
             status = str(source.get("status"))
             if status in {"failed", "cancelled"}:
                 item.update({"status": "failed", "error": f"Training job {status}: {source.get('error') or self._task_status(source) or status}"})
                 return {}, "failed"
             if status != "completed" or self._task_status(source) not in {None, "completed"}:
+                if upstream_failed:
+                    item.update({"status": "failed", "error":
+                                 f"Upstream pipeline ended as {upstream_status} before the selected training job completed."})
+                    return {}, "failed"
                 return {}, "waiting"
             ready[item["training_job_name"]] = source
         return ready, None
