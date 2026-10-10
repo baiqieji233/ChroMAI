@@ -9,9 +9,11 @@ generation must supply numbers in the same range the model saw.  The UI used to
 send only ``level`` and let every other control default to 0.5 -- while the real
 corpus medians are 0.00-0.30 for most controls.
 
-Measured on this project's corpus (60 charts): 14 of 16 controls differ from
-0.5 by more than 0.15, the worst being ``melody_following`` (0.000),
-``pattern_reuse`` (0.010), ``touch_bias`` (0.066) and ``chord`` (0.267).  Feeding
+This project's profile shows most chart-derived controls differ from 0.5.
+``melody_following`` is audio-derived and is not measured
+by this chart-only pass; its stored zero is a placeholder, not a corpus median.
+Other low medians include ``pattern_reuse`` (0.010), ``touch_bias`` (0.066) and
+``chord`` (0.267). Feeding
 0.5 asks the model for a far more chordy, far more touchy chart than anything it
 was trained on, and the decoder then holds that one style for hundreds of beats.
 
@@ -23,12 +25,15 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import statistics
 import sys
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-from maichart.generation.conditions import CONDITION_KEYS, GenerationCondition, RADAR_KEYS, STYLE_KEYS
+from maichart.generation.conditions import (
+    CONDITION_KEYS, GENERATION_DEFAULTS, GenerationCondition, RADAR_KEYS, STYLE_KEYS,
+)
 
 PROFILE_SCHEMA = "maichart-condition-profile-v1"
 PROFILE_NAME = "condition_profile.json"
@@ -132,6 +137,17 @@ def measure_condition_profile(
         "charts": len(vectors),
         "skipped": len(skipped),
         "skipped_examples": skipped[:10],
+        "control_measurements": {
+            key: {
+                "measured": key != "melody_following",
+                "source": ("chart_statistics" if key != "melody_following"
+                           else "audio_onset_alignment_proxy"),
+                **({} if key != "melody_following" else {
+                    "reason": ("This chart-only profile pass supplies no audio; the stored zero "
+                              "is a placeholder, not a measured value.")}),
+            }
+            for key in CONDITION_KEYS if key != "level"
+        },
         "level": {
             "min": min(levels), "median": statistics.median(levels), "max": max(levels),
         },
@@ -140,19 +156,37 @@ def measure_condition_profile(
 
 
 def profile_default_vector(profile: dict[str, Any]) -> list[float]:
-    """The condition vector a generator should assume when the user gives none."""
+    """Build generation defaults, replacing absent or unmeasured profile values."""
 
     controls = profile.get("controls", {})
-    values = [0.5]  # level is replaced by the caller
+    measurements = profile.get("control_measurements")
+    values = [float(GENERATION_DEFAULTS["level"])]
     for key in RADAR_KEYS + STYLE_KEYS:
         entry = controls.get(key)
-        values.append(float(entry["median"]) if entry else 0.5)
+        measurement = measurements.get(key) if isinstance(measurements, dict) else None
+        explicitly_unmeasured = (isinstance(measurement, dict)
+                                 and measurement.get("measured") is False)
+        raw_median = entry.get("median") if isinstance(entry, dict) else None
+        try:
+            median = float(raw_median)
+        except (TypeError, ValueError, OverflowError):
+            median = math.nan
+        # Older v1 profiles have no measurement metadata. Their zero melody
+        # value came from condition_from_events(..., audio=None), not audio data.
+        legacy_unmeasured_melody = (
+            key == "melody_following" and measurement is None
+            and math.isfinite(median) and median == 0.0
+        )
+        if explicitly_unmeasured or legacy_unmeasured_melody or not math.isfinite(median):
+            median = float(GENERATION_DEFAULTS[key])
+        values.append(median)
     return values
 
 
 def condition_from_profile(profile: dict[str, Any], *, level: float | None = None) -> GenerationCondition:
     vector = profile_default_vector(profile)
-    resolved = float(level) if level is not None else float(profile.get("level", {}).get("median") or 13.0)
+    resolved = (float(level) if level is not None
+                else float(profile.get("level", {}).get("median") or GENERATION_DEFAULTS["level"]))
     radar = {key: vector[1 + index] for index, key in enumerate(RADAR_KEYS)}
     style = {key: vector[1 + len(RADAR_KEYS) + index] for index, key in enumerate(STYLE_KEYS)}
     return GenerationCondition(level=resolved, radar=radar, style=style)

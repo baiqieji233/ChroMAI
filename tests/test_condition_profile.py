@@ -58,6 +58,9 @@ def test_profile_measures_the_corpus_and_differs_from_the_old_default(tmp_path):
     assert profile["charts"] == 2
     assert profile["skipped"] == 0
     assert set(profile["controls"]) == set(CONDITION_KEYS) - {"level"}
+    assert profile["control_measurements"]["melody_following"]["measured"] is False
+    assert profile["control_measurements"]["melody_following"]["source"] == "audio_onset_alignment_proxy"
+    assert "no audio" in profile["control_measurements"]["melody_following"]["reason"].lower()
     for key in RADAR_KEYS + STYLE_KEYS:
         entry = profile["controls"][key]
         assert entry["p10"] <= entry["median"] <= entry["p90"]
@@ -71,6 +74,7 @@ def test_profile_measures_the_corpus_and_differs_from_the_old_default(tmp_path):
     condition = condition_from_profile(profile, level=13.5)
     assert condition.level == 13.5
     assert condition.radar["chord"] == pytest.approx(profile["controls"]["chord"]["median"])
+    assert condition.style["melody_following"] == pytest.approx(0.9)
     assert set(condition.style) == set(STYLE_KEYS)
     # The old behaviour, for contrast.
     legacy = GenerationCondition(level=13.5)
@@ -90,7 +94,9 @@ def test_profile_file_round_trip_and_validation(tmp_path):
     target = default_profile_path(manifest)
     assert target.name == PROFILE_NAME
     target.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
-    assert load_profile(target)["charts"] == profile["charts"]
+    loaded = load_profile(target)
+    assert loaded["charts"] == profile["charts"]
+    assert loaded["control_measurements"] == profile["control_measurements"]
 
     broken = tmp_path / "broken.json"
     broken.write_text('{"schema": "something-else"}', encoding="utf-8")
@@ -103,3 +109,24 @@ def test_profile_reports_when_nothing_is_measurable(tmp_path):
     empty.write_text(json.dumps({"schema": "maichart-training-manifest-v1", "songs": []}), encoding="utf-8")
     with pytest.raises(ValueError, match="没有可测量的谱面"):
         measure_condition_profile(empty)
+
+
+def test_legacy_zero_melody_placeholder_falls_back_but_explicit_measured_zero_survives():
+    legacy = {"controls": {
+        "melody_following": {"median": 0.0},
+        "note_density": {"median": 0.41},
+    }}
+    restored = condition_from_profile(legacy, level=13.0)
+    assert restored.style["melody_following"] == pytest.approx(0.9)
+    assert restored.radar["note_density"] == pytest.approx(0.41)
+
+    measured_zero = {"controls": {"melody_following": {"median": 0.0}},
+                     "control_measurements": {"melody_following": {"measured": True}}}
+    measured = condition_from_profile(measured_zero, level=13.0)
+    assert measured.style["melody_following"] == 0.0
+
+
+def test_absent_profile_controls_use_generation_defaults_not_half():
+    condition = condition_from_profile({"controls": {}}, level=13.0)
+    assert condition.radar["note_density"] == pytest.approx(0.305)
+    assert condition.style["melody_following"] == pytest.approx(0.9)
