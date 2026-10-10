@@ -7,7 +7,11 @@ python tools/run_rhythm_evaluation.py webui_workspace/generated/baseline webui_w
   --output .scratch/rhythm_evaluation.json
 ```
 
-The report separates event type counts/ratios, notes per second and one-second type counts, blank measures and longest blank run, repeated event signatures/motifs, duplicate heads, and notes before/after audio or declared chart end. Missing duration/end metadata stays marked unavailable. `--reference-dir` only pairs exact relative filenames; unmatched charts remain explicitly missing. It does not select a nearest reference or award more notes a better result.
+The report separates event type counts/ratios, notes per second and one-second type counts, blank measures and longest blank run, repeated event signatures/motifs, duplicate heads, and notes before/after audio or declared chart end. Rhythm details use sorted, distinct onset beats: `fine_note_ratio` keeps the training target definition (gaps at most 33/128 beat), while the exact rational gap histogram and 1/3-, 1/4-, and 1/6-beat counts make other subdivisions visible. `short_gap_share` is a separate descriptive share for gaps at most 1/2 beat. Repeated onset type patterns ignore button identity.
+
+Audio duration is trusted from `audio_duration_sec` or top-level `duration_sec`. The legacy `quality.duration_sec` fallback is accepted only when `audio_first` is exactly zero; with a nonzero first timestamp it stays unavailable because that legacy field may describe chart span rather than file duration. `--reference-dir` pairs exact relative filenames. If both charts contain `audio_sha256`, a mismatch is marked incompatible and no deltas are reported; equal hashes are verified. Missing hashes retain the legacy matched count under `matched_unverified` with `filename_only_unverified` identity status. Per-second density deltas and onset alignment describe agreement with that one reference only; they do not establish complete chart intent. Onset alignment counts distinct onset times within 50 ms and reports precision, recall, and F1.
+
+Directory discovery skips `.history` trees and `*.original.chart.json` shadows. Stored static playability diagnostics and coverage are copied into the report with `verified: false`; they are evidence from the chart JSON, not an independent or complete playability check. Checkpoint identity fields are retained as provenance and do not establish audio pairing. Missing duration/end metadata stays marked unavailable. The evaluator does not select a nearest reference or award more notes a better result.
 
 ## Existing Artifacts
 

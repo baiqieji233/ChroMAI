@@ -50,7 +50,7 @@ def _decode_embedded_event(payload: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _duration(payload: dict[str, Any]) -> tuple[float | None, str | None]:
+def _duration(payload: dict[str, Any], *, audio_first: float) -> tuple[float | None, str | None]:
     quality = payload.get("quality") if isinstance(payload.get("quality"), dict) else {}
     for key, source in (("audio_duration_sec", "payload.audio_duration_sec"),
                         ("duration_sec", "payload.duration_sec")):
@@ -60,11 +60,61 @@ def _duration(payload: dict[str, Any]) -> tuple[float | None, str | None]:
             if math.isfinite(duration) and duration > 0:
                 return duration, source
     value = quality.get("duration_sec")
-    if value is not None:
+    if value is not None and audio_first == 0.0:
         duration = float(value)
         if math.isfinite(duration) and duration > 0:
-            return duration, "embedded_quality.duration_sec"
+            return duration, "embedded_quality.duration_sec_legacy_first_zero"
     return None, None
+
+
+def _onset_rhythm(notes) -> dict[str, Any]:
+    onsets: dict[Fraction, list[str]] = defaultdict(list)
+    for note in notes:
+        onsets[Fraction(note.beat)].append(note.note_type)
+    beats = sorted(onsets)
+    gaps = [right - left for left, right in zip(beats, beats[1:]) if right > left]
+    gap_counts = Counter(gaps)
+    patterns = [tuple(sorted(onsets[beat])) for beat in beats]
+    repeated_pattern = {"cycles": 1 if patterns else 0, "onset_window_length": 0, "pattern": []}
+    for start in range(len(patterns)):
+        for width in range(1, min(8, (len(patterns) - start) // 2) + 1):
+            cycles = 1
+            while (start + (cycles + 1) * width <= len(patterns)
+                   and patterns[start:start + width] == patterns[start + cycles * width:start + (cycles + 1) * width]):
+                cycles += 1
+            if cycles > repeated_pattern["cycles"] or (
+                    cycles == repeated_pattern["cycles"] and cycles > 1 and width > repeated_pattern["onset_window_length"]):
+                repeated_pattern = {
+                    "cycles": cycles,
+                    "onset_window_length": width,
+                    "pattern": [list(types) for types in patterns[start:start + width]],
+                }
+    named_gaps = {"12th": Fraction(1, 3), "16th": Fraction(1, 4), "24th": Fraction(1, 6)}
+    return {
+        "distinct_onset_count": len(beats),
+        "fine_note_ratio": fine_note_ratio(beats),
+        "short_gap_share": sum(gap <= Fraction(1, 2) for gap in gaps) / len(gaps) if gaps else 0.0,
+        "gap_sample_count": len(gaps),
+        "gap_histogram_beats": {str(gap): gap_counts[gap] for gap in sorted(gap_counts)},
+        "named_subdivision_gap_counts": {name: gap_counts.get(gap, 0) for name, gap in named_gaps.items()},
+        "max_repeated_onset_type_pattern": repeated_pattern,
+    }
+
+
+def _playability_evidence(quality_payload: dict[str, Any]) -> dict[str, Any]:
+    stored = quality_payload.get("playability")
+    if not isinstance(stored, dict):
+        return {"status": "unavailable", "verified": False}
+    coverage = stored.get("coverage") if isinstance(stored.get("coverage"), dict) else {}
+    return {
+        "status": stored.get("status", coverage.get("status", "unknown")),
+        "verified": False,
+        "scope": stored.get("scope"),
+        "coverage": coverage,
+        "counts": {key: stored.get(key) for key in
+                   ("notes", "original_notes", "conflicts", "hard", "remaining_hard") if key in stored},
+        "repair_count": len(stored.get("repairs", [])) if isinstance(stored.get("repairs"), list) else None,
+    }
 
 
 def _metric_row(path: Path) -> dict[str, Any]:
@@ -103,7 +153,7 @@ def _metric_row(path: Path) -> dict[str, Any]:
                              and payload.get("first") is not None)
     audio_first = float(payload["first"]) if top_level_audio_first else chart.audio_first
     parsed = parse_event_notes(chart.points, chart.tempo_changes, first=audio_first)
-    duration, duration_source = _duration(payload)
+    duration, duration_source = _duration(payload, audio_first=audio_first)
     quality = assess_event_chart(
         chart.points,
         chart.tempo_changes,
@@ -141,6 +191,7 @@ def _metric_row(path: Path) -> dict[str, Any]:
             "types": {key: counts[key] for key in ("tap", "hold", "slide", "touch", "touch_hold")},
         })
     playable_span_rows = [row for row in second_rows if row["second"] >= 0]
+    rhythm = _onset_rhythm(notes)
     quality_types = quality.get("type_ratios") or {}
     counts = quality.get("counts") or {}
     metadata = (payload.get("chart_ir", {}).get("metadata", {})
@@ -149,6 +200,9 @@ def _metric_row(path: Path) -> dict[str, Any]:
         "title": chart.title or metadata.get("title") or path.stem,
         "difficulty_index": chart.difficulty,
         "level": chart.level or None,
+        "audio_sha256": payload.get("audio_sha256") or event_data.get("audio_sha256"),
+        "checkpoint_identity": payload.get("checkpoint_identity") or quality_payload.get("checkpoint_identity"),
+        "checkpoint_sha256": payload.get("checkpoint_sha256") or quality_payload.get("checkpoint_sha256"),
     }
     return {
         "path": str(path.resolve()),
@@ -182,6 +236,7 @@ def _metric_row(path: Path) -> dict[str, Any]:
             "chord_ratio": quality.get("chord_ratio"),
             "button_entropy": (quality.get("entropy") or {}).get("buttons"),
             "slide_path_count": counts.get("slide_branches"),
+            "onset_rhythm": rhythm,
         },
         "structure": {
             "measure_count": structure["measures"],
@@ -208,8 +263,10 @@ def _metric_row(path: Path) -> dict[str, Any]:
             "empty_seconds_within_audio": (sum(row["note_count"] == 0 for row in playable_span_rows)
                                              if duration is not None else None),
         },
+        "playability_evidence": _playability_evidence(quality_payload),
         "interpretation": "descriptive only; note count is not a quality score and playable quality is unverified",
         "_density_counts": [row["note_count"] for row in playable_span_rows],
+        "_onset_seconds": sorted({float(note.time_sec) for note in notes}),
     }
 
 
@@ -219,7 +276,7 @@ def _discover(inputs: list[Path]) -> tuple[list[Path], Path | None]:
     for path in inputs:
         if path.is_dir():
             files.extend(candidate for candidate in path.rglob("*.json")
-                         if candidate.name.endswith(SUPPORTED_SUFFIXES))
+                         if candidate.name.endswith(SUPPORTED_SUFFIXES) and not _is_shadow(candidate))
         elif path.is_file():
             files.append(path.resolve())
         else:
@@ -228,7 +285,38 @@ def _discover(inputs: list[Path]) -> tuple[list[Path], Path | None]:
     return unique, roots[0] if len(roots) == 1 else None
 
 
+def _is_shadow(path: Path) -> bool:
+    return any(part.casefold() == ".history" for part in path.parts) or path.name.casefold().endswith(".original.chart.json")
+
+
+def _onset_alignment(generated: dict[str, Any], reference: dict[str, Any], *, tolerance_sec: float = 0.05) -> dict[str, Any]:
+    left = sorted(generated["_onset_seconds"])
+    right = sorted(reference["_onset_seconds"])
+    i = j = matched = 0
+    while i < len(left) and j < len(right):
+        delta = left[i] - right[j]
+        if abs(delta) <= tolerance_sec:
+            matched += 1
+            i += 1
+            j += 1
+        elif delta < 0:
+            i += 1
+        else:
+            j += 1
+    precision = matched / len(left) if left else 0.0
+    recall = matched / len(right) if right else 0.0
+    return {"tolerance_sec": tolerance_sec, "generated_onsets": len(left), "reference_onsets": len(right),
+            "matched_onsets": matched, "precision": precision, "recall": recall,
+            "f1": 2 * precision * recall / (precision + recall) if precision + recall else 0.0,
+            "interpretation": "onset agreement with this reference only; reference intent may be incomplete"}
+
+
 def _pair_metrics(generated: dict[str, Any], reference: dict[str, Any]) -> dict[str, Any]:
+    generated_hash = generated["identity"].get("audio_sha256")
+    reference_hash = reference["identity"].get("audio_sha256")
+    if generated_hash and reference_hash and generated_hash != reference_hash:
+        return {"status": "incompatible", "identity_status": "audio_sha256_mismatch",
+                "reference_path": reference["path"]}
     scalar_pairs = {
         "blank_fraction": (generated["structure"]["blank_fraction"], reference["structure"]["blank_fraction"]),
         "coverage_ratio": (generated["structure"]["coverage_ratio"], reference["structure"]["coverage_ratio"]),
@@ -252,7 +340,8 @@ def _pair_metrics(generated: dict[str, Any], reference: dict[str, Any]) -> dict[
     left_counts, right_counts = generated["_density_counts"], reference["_density_counts"]
     shared = min(len(left_counts), len(right_counts))
     return {
-        "status": "matched",
+        "status": "matched" if generated_hash and reference_hash else "matched_unverified",
+        "identity_status": "audio_sha256_match" if generated_hash and reference_hash else "filename_only_unverified",
         "reference_path": reference["path"],
         "paired_metric_deltas": deltas,
         "per_second_density_mae": (
@@ -265,6 +354,7 @@ def _pair_metrics(generated: dict[str, Any], reference: dict[str, Any]) -> dict[
             if generated["timing"]["audio_duration_sec"] is not None
             and reference["timing"]["audio_duration_sec"] is not None else None
         ),
+        "onset_alignment": _onset_alignment(generated, reference),
     }
 
 
@@ -278,7 +368,7 @@ def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> 
             raise FileNotFoundError(reference_dir)
         reference_files = {
             path.relative_to(reference_dir.resolve()).as_posix(): path.resolve()
-            for path in reference_dir.rglob("*.json") if path.name.endswith(SUPPORTED_SUFFIXES)
+            for path in reference_dir.rglob("*.json") if path.name.endswith(SUPPORTED_SUFFIXES) and not _is_shadow(path)
         }
     rows = []
     errors = []
@@ -297,15 +387,19 @@ def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> 
                     reference = _metric_row(reference_path)
                     row["reference_pair"] = _pair_metrics(row, reference)
             row.pop("_density_counts", None)
+            row.pop("_onset_seconds", None)
             rows.append(row)
         except (OSError, ValueError, TypeError, json.JSONDecodeError, ZeroDivisionError) as exc:
             errors.append({"path": str(path.resolve()), "error": str(exc)})
     if reference_dir is not None:
-        paired = sum(row.get("reference_pair", {}).get("status") == "matched" for row in rows)
+        paired = sum(row.get("reference_pair", {}).get("status") in {"matched", "matched_unverified"} for row in rows)
         missing = sum(row.get("reference_pair", {}).get("status") == "missing" for row in rows)
+        incompatible = sum(row.get("reference_pair", {}).get("status") == "incompatible" for row in rows)
+        verified = sum(row.get("reference_pair", {}).get("status") == "matched" for row in rows)
         pairing = {"status": "requested", "reference_dir": str(reference_dir.resolve()),
-                   "matched": paired, "missing": missing,
-                   "method": "exact relative filename; no nearest-chart or title-only pairing"}
+                   "matched": paired, "verified_matched": verified, "missing": missing,
+                   "incompatible": incompatible,
+                   "method": "exact relative filename; audio SHA-256 verified when both files provide it; otherwise filename-only and unverified"}
     else:
         pairing = {"status": "not_requested", "matched": 0, "missing": 0}
     return {

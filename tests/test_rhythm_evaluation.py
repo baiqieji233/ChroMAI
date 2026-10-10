@@ -51,12 +51,47 @@ def test_evaluation_uses_tempo_map_offset_and_reports_boundaries(tmp_path):
         {"beat": "4", "bpm": 60.0},
     ]
     assert chart["boundaries"]["notes_before_audio_start"] == 1
-    assert chart["boundaries"]["notes_at_or_after_audio_end"] == 1
+    assert chart["timing"]["audio_duration_sec"] is None
+    assert chart["timing"]["duration_source"] is None
+    assert chart["boundaries"]["notes_at_or_after_audio_end"] is None
     assert chart["per_second"]["windows"][0]["second"] == -1
     assert chart["per_second"]["windows"][0]["note_count"] == 1
     assert chart["distribution"]["note_count"] == 6
     assert chart["structure"]["repeated_event_signature_run"] == 2
     assert "aggregate quality score" in report["metric_policy"]
+
+
+def test_evaluation_reports_fine_gaps_as_distinct_onset_samples(tmp_path):
+    beats = ["0"]
+    current = 0
+    for index in range(128):
+        current += 1 if index < 33 else 4
+        beats.append(str(current / 4))
+    payload = _event_chart(first=0.0)
+    payload["points"] = [{"beat": beat, "note_text": "1"} for beat in beats]
+    chart = evaluate_paths([_write_chart(tmp_path / "fine.chart.json", payload)])
+    rhythm = chart["charts"][0]["distribution"]["onset_rhythm"]
+
+    assert rhythm["fine_note_ratio"] == 33 / 128
+    assert rhythm["gap_sample_count"] == 128
+    assert rhythm["gap_histogram_beats"] == {"1/4": 33, "1": 95}
+    assert rhythm["named_subdivision_gap_counts"] == {"12th": 0, "16th": 33, "24th": 0}
+    assert rhythm["max_repeated_onset_type_pattern"] == {
+        "cycles": 129, "onset_window_length": 1, "pattern": [["tap"]],
+    }
+
+
+def test_repeated_onset_type_pattern_tracks_multi_onset_cycles(tmp_path):
+    payload = _event_chart(first=0.0)
+    payload["points"] = [
+        {"beat": str(beat), "note_text": note_text}
+        for beat, note_text in enumerate(("1", "2h[4:1]", "1", "2h[4:1]"))
+    ]
+    rhythm = evaluate_paths([_write_chart(tmp_path / "types.chart.json", payload)])["charts"][0]["distribution"]["onset_rhythm"]
+
+    assert rhythm["max_repeated_onset_type_pattern"] == {
+        "cycles": 2, "onset_window_length": 2, "pattern": [["tap"], ["hold"]],
+    }
 
 
 def test_chartir_with_maidata_source_uses_real_chart_tempo_and_audio_first(tmp_path):
@@ -106,9 +141,12 @@ def test_reference_metrics_are_only_emitted_for_exact_filename_pairs(tmp_path):
 
     pair = report["charts"][0]["reference_pair"]
     assert report["reference_pairing"]["matched"] == 1
-    assert pair["status"] == "matched"
+    assert pair["status"] == "matched_unverified"
+    assert pair["identity_status"] == "filename_only_unverified"
     assert pair["per_second_density_mae"] == 0.0
     assert pair["paired_metric_deltas"]["blank_fraction"] == 0.0
+    assert pair["onset_alignment"]["matched_onsets"] == 5
+    assert "reference intent may be incomplete" in pair["onset_alignment"]["interpretation"]
 
     empty_reference = tmp_path / "empty-reference"
     empty_reference.mkdir()
@@ -117,6 +155,47 @@ def test_reference_metrics_are_only_emitted_for_exact_filename_pairs(tmp_path):
     assert unmatched["reference_pairing"]["missing"] == 1
     assert unmatched["charts"][0]["reference_pair"] == {
         "status": "missing", "key": "song.chart.json",
+    }
+
+
+def test_reference_hash_mismatch_is_incompatible_and_shadow_files_are_skipped(tmp_path):
+    generated_dir = tmp_path / "generation"
+    reference_dir = tmp_path / "reference"
+    generated_payload = _event_chart(first=0.0)
+    generated_payload["audio_sha256"] = "a" * 64
+    reference_payload = _event_chart(first=0.0)
+    reference_payload["audio_sha256"] = "b" * 64
+    _write_chart(generated_dir / "song.chart.json", generated_payload)
+    _write_chart(reference_dir / "song.chart.json", reference_payload)
+    _write_chart(generated_dir / ".history" / "old" / "song.chart.json")
+    _write_chart(generated_dir / "song.original.chart.json")
+
+    report = evaluate_paths([generated_dir], reference_dir=reference_dir)
+
+    assert report["input_count"] == 1
+    assert report["reference_pairing"]["incompatible"] == 1
+    assert report["reference_pairing"]["matched"] == 0
+    assert report["charts"][0]["reference_pair"] == {
+        "status": "incompatible",
+        "identity_status": "audio_sha256_mismatch",
+        "reference_path": str((reference_dir / "song.chart.json").resolve()),
+    }
+
+
+def test_stored_playability_evidence_is_exported_as_unverified(tmp_path):
+    payload = _event_chart(first=0.0)
+    payload["quality"]["playability"] = {
+        "status": "partial", "notes": 12, "conflicts": 3, "hard": 1,
+        "remaining_hard": 1, "repairs": [],
+        "coverage": {"status": "partial", "unsupported": ["slide"]},
+    }
+    row = evaluate_paths([_write_chart(tmp_path / "playability.chart.json", payload)])["charts"][0]
+
+    assert row["playability_evidence"] == {
+        "status": "partial", "verified": False, "scope": None,
+        "coverage": {"status": "partial", "unsupported": ["slide"]},
+        "counts": {"notes": 12, "conflicts": 3, "hard": 1, "remaining_hard": 1},
+        "repair_count": 0,
     }
 
 
