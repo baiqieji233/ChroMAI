@@ -142,6 +142,31 @@ def test_joint_auto_preprocess_does_not_prepare_only_one_source(webui_api, tmp_p
     assert not webui.TASKS
 
 
+@pytest.mark.parametrize("endpoint", ["/api/preprocess", "/api/train"])
+def test_joint_manifest_cannot_be_overwritten_by_preprocessing(webui_api, monkeypatch, tmp_path, endpoint):
+    monkeypatch.setattr(webui, "WEBUI_ROOT", tmp_path / "workspace")
+    from maichart.training.dataset_catalog import compose_datasets
+    a, b = make_source(tmp_path / "a", "A"), make_source(tmp_path / "b", "B")
+    result = compose_datasets([a, b], tmp_path / "combined", "event_ctx_v1")
+    manifest = Path(result["manifest"])
+    before = manifest.read_bytes()
+    status, response = webui_api(endpoint, {"manifest": str(manifest), "raw_root": result["raw_root"],
+                               "auto_preprocess": True, "model_family": "event_ctx_v1"})
+    assert status == 400, response
+    assert "联合训练清单" in response["error"]
+    assert manifest.read_bytes() == before
+    assert not webui.TASKS
+
+
+@pytest.mark.parametrize("invalid_lr", [0, -1, "nan", "inf", "invalid", 2])
+def test_invalid_learning_rate_is_rejected_before_training(webui_api, tmp_path, invalid_lr):
+    source = make_source(tmp_path / "a", "A")
+    status, response = webui_api("/api/train", {"manifest": str(source), "lr": invalid_lr})
+    assert status == 400
+    assert "学习率" in response["error"]
+    assert not webui.TASKS
+
+
 def test_single_auto_preprocess_can_rebuild_previous_family_manifest(tmp_path):
     source = make_source(tmp_path / "raw", "Raw")
     data = json.loads(source.read_text(encoding="utf-8"))

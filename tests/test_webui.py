@@ -294,14 +294,14 @@ def test_event_train_forwards_difficulty_and_audio_contract(webui_api, monkeypat
         "cache_dir": str(tmp_path / "cache"), "checkpoint_dir": str(tmp_path / "checkpoints"),
         "epochs": 1, "min_difficulty_index": 2, "max_difficulty_index": 5,
         "min_level": 1, "max_level": 13.5, "max_audio_tokens": 1024,
-        "condition_default": 0.37, "cuda_memory_budget_gb": 8.5,
+        "condition_default": 0.37, "cuda_memory_budget_gb": 8.5, "lr": 0.000017,
     })
     assert status == 200, data
     args = calls[0]
     for flag, value in (("--min-difficulty-index", "2"), ("--max-difficulty-index", "5"),
                         ("--min-level", "1.0"), ("--max-level", "13.5"),
                         ("--max-audio-tokens", "1024"), ("--condition-default", "0.37"),
-                        ("--cuda-memory-budget-gb", "8.5")):
+                        ("--cuda-memory-budget-gb", "8.5"), ("--lr", "1.7e-05")):
         assert flag in args
         assert args[args.index(flag) + 1] == value
 
@@ -347,6 +347,10 @@ def test_event_train_forwards_saved_quality_and_preference_settings(webui_api, m
     assert "--preference-enabled" in args
     assert args[args.index("--preference-weight") + 1] == "0.12"
     assert args[args.index("--preference-max-pairs") + 1] == "17"
+    assert args[args.index("--lr") + 1] == "2e-05"
+    from maichart.training.train_events import build_parser
+    parsed = build_parser().parse_args(args[2:])
+    assert parsed.lr == 0.00002
 
 
 def test_event_ctx_family_routes_training_and_generation(webui_api, monkeypatch, tmp_path):

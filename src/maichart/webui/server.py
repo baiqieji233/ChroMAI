@@ -182,6 +182,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "project_root": str(PROJECT_ROOT),
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "quality_training_capability": True,
+                                              "event_learning_rate_control": True,
                                               "multi_dataset_training": True},
                     "intensity_curve_capability": True,
                     "music_structure_capability": True,
@@ -801,7 +802,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         cache_dir = _resolve_path(payload.get("cache_dir") or str(PROJECT_ROOT / "cache"))
         output = _resolve_path(payload.get("manifest") or str(raw_root / "training_manifest.json"))
         if output.is_file():
-            _read_training_manifest(output, raw_root)
+            existing = _read_training_manifest(output, raw_root)
+            if existing.get("merged_from"):
+                raise ValueError("联合训练清单不能作为预处理输出；请在‘当前预处理数据集’中选择一个原始数据集")
         existing_task = _find_preprocess_task(output)
         if existing_task is not None and existing_task.status in {"queued", "running"}:
             raise ValueError("这个训练集正在预处理，请等待当前任务完成，不需要再次点击预处理")
@@ -849,6 +852,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             data = _read_training_manifest(manifest, payload.get("raw_root"))
         else:
             data = {"songs": []}
+        if auto_preprocess and data.get("merged_from"):
+            raise ValueError("联合训练清单不能重新预处理；请分别预处理原始数据集，再使用‘开始训练’")
         if not _is_event_family(model_family) and not payload.get("include_unusable") and not any(
             difficulty.get("usable_for_training")
             for song in data.get("songs", [])
@@ -908,6 +913,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             training_mode = "finetune"
         if training_mode not in {"fresh", "resume", "finetune"}:
             raise ValueError("训练方式只能是：fresh（从头）、resume（断点继续）或 finetune（已有模型加强训练）")
+        try:
+            learning_rate = float(payload.get("lr", 0.00002 if training_mode == "finetune" else 0.0002))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("学习率必须是大于 0、且不超过 1 的有限数值") from exc
+        if not math.isfinite(learning_rate) or not 0 < learning_rate <= 1:
+            raise ValueError("学习率必须是大于 0、且不超过 1 的有限数值")
         if preference_enabled and training_mode == "fresh":
             raise ValueError("反面偏好训练需要已训练 checkpoint；先 fresh 做质量加权，再选择 finetune 启用修正版配对。")
         training_checkpoint = payload.get("training_checkpoint") or payload.get("checkpoint")
@@ -947,6 +958,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                        else "maichart.training.train_events"),
                 "--manifest", str(manifest), "--cache-dir", str(cache_dir),
                 "--checkpoint-dir", str(checkpoint_dir), "--epochs", str(epochs),
+                "--lr", str(learning_rate),
                 "--max-steps", str(max(0, int(payload.get("max_steps", 0)))),
                 "--validation-max-steps", str(max(0, int(payload.get("validation_max_steps", 0)))),
                 "--batch-size", str(max(1, int(payload.get("batch_size", 2)))),
@@ -1028,7 +1040,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             "--segment-frames", str(max(1, int(payload.get("segment_frames", 512)))),
             "--max-len", str(max(1, int(payload.get("max_len", 4096)))),
             "--grad-accumulation", str(max(1, int(payload.get("grad_accumulation", 1)))),
-            "--lr", str(payload.get("lr", 0.0002)),
+            "--lr", str(learning_rate),
             "--weight-decay", str(payload.get("weight_decay", 0.01)),
             "--d-model", str(int(payload.get("d_model", 256))),
             "--nhead", str(int(payload.get("nhead", 4))),

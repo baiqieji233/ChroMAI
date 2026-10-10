@@ -20,7 +20,7 @@ body[data-workspace="training"] .generation-panel, body[data-workspace="training
 body[data-workspace="quality"] .training-panel, body[data-workspace="quality"] .training-mode-panel, body[data-workspace="quality"] .generation-panel, body[data-workspace="quality"] .intensity-panel { display: none; }
 body[data-workspace="training"] .intensity-panel, body[data-workspace="generation"] .intensity-panel { display: none; }
 body[data-workspace="intensity"] .training-panel, body[data-workspace="intensity"] .training-mode-panel,
-body[data-workspace="intensity"] .generation-panel { display: none; }
+body[data-workspace="intensity"] .generation-panel, body[data-workspace="intensity"] .quality-panel { display: none; }
 body { margin: 0; background: var(--paper); color: var(--ink); font: 14px/1.5 system-ui, -apple-system, "Microsoft YaHei", sans-serif; }
 button, input, select, textarea { font: inherit; }
 button { cursor: pointer; }

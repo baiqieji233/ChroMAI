@@ -50,8 +50,11 @@
           <span class="muted">先预处理 → 再检查 → 最后训练</span>
         </div>
 
-        <h3 class="group-title">A. 训练集与输出位置<span class="group-note">决定“用哪份数据、训练结果写到哪里”</span></h3>
+        <h3 class="group-title">A. 训练来源、素材导入与输出位置</h3>
         <div id="trainingDatasetSelection" class="inline-status">单数据集模式：使用下方当前训练清单。</div>
+        <div id="effectiveTrainingManifest" class="inline-status">检查所选来源后显示实际训练清单。</div>
+        <div class="button-row"><button id="chooseTrainingDatasetsButton" class="secondary-button" type="button">选择本次训练来源</button></div>
+        <p class="param-intro">在“训练素材”勾选本次要训练的数据集，可只选一份精选集，也可混合多份。下方目录控件用于导入和预处理，切换它们不会取消已有训练勾选。</p>
         <div class="form-grid">
           <label class="field span-4">模型族 / Model family
             <select id="modelFamily">
@@ -61,26 +64,26 @@
             </select>
             <small id="modelFamilyHelp">事件模型当前使用 112 维 <code>event_audio_v2_rhythm</code>（包含拍内节奏特征）、窗口 planner 和显式 null embedding；不需要 frame division。旧 checkpoint 不能跨 schema 续训或微调。<strong>event_ctx_v1</strong> 在 event_v1 的基础上，让每个窗口额外看到「前面已写的音符」与「前后的音乐」，用来消除窗口接缝处的突兀——词表与 checkpoint 都与 event_v1 不通用，必须单独训练。</small>
           </label>
-          <label class="field span-2">重新选择已上传的训练集
+          <label class="field span-2">当前预处理数据集
             <select id="datasetSelect"><option value="">正在读取上传记录...</option></select>
-            <small>上传记录保存在本机；刷新页面后可直接选择，无需重复上传。编号用来区分同名 ZIP。</small>
+            <small>只切换下面的原始目录、缓存和预处理输出；已有训练勾选保持不变。训练来源请点击“选择本次训练来源”。</small>
           </label>
           <label class="field span-2">上传训练集 ZIP
             <input id="datasetZip" type="file" accept=".zip">
             <small id="datasetUploadStatus">1. 上传只解压 ZIP。完成后点击“2. 预处理训练集”生成训练清单。</small>
           </label>
-          <label class="field span-4">原始训练集目录
+          <label class="field span-4">当前预处理原始目录
             <textarea id="rawRoot" class="path-input" rows="2" placeholder="上传 ZIP 后自动填写，或粘贴本机文件夹路径"></textarea>
             <small>程序会递归寻找歌曲目录（含 maidata.txt 的文件夹）；每次上传 ZIP 会自动切换到独立目录。预处理一次针对当前目录；多份已预处理数据请在“训练素材”页勾选后合并。</small>
             <button id="registerDatasetButton" class="secondary-button" type="button">登记当前目录到训练素材</button>
           </label>
-          <label class="field span-4">缓存目录
+          <label class="field span-4">当前预处理缓存目录
             <textarea id="cacheDir" class="path-input" rows="2">cache</textarea>
             <small>保存音频特征缓存；上传新 ZIP 后会自动换用新目录。换目录等于全部重新分析音频，不会影响已训好的模型。</small>
           </label>
-          <label class="field span-4">训练 manifest（预处理输出，训练输入）
+          <label class="field span-4">当前预处理输出清单（manifest）
             <textarea id="manifestPath" class="path-input" rows="2">manifests/training_manifest.json</textarea>
-            <small>这是预处理要写出的清单，也是训练要读的清单。event_v1 的清单里记录了目标 schema 与特征方案，训练时会按它校验，不匹配会直接拒绝。</small>
+            <small>当前目录预处理写入这里。已勾选训练来源时，训练会自动准备对应清单，联合清单不会覆盖这里。未使用素材勾选的兼容单集流程，仍直接读取这里的清单。</small>
           </label>
           <label class="field span-4" data-training-family="event_v1">验证 manifest 路径（可选，但强烈建议）
             <textarea id="validationManifestPath" class="path-input" rows="2" placeholder="例如 manifests/splits/val.json"></textarea>
@@ -450,10 +453,10 @@
         <div id="goldSummary" class="gold-summary" hidden></div>
 
         <div class="button-row">
-          <button id="preprocessButton" class="secondary-button">2. 预处理训练集</button>
-          <button id="inspectManifestButton" class="secondary-button">3. 检查训练集状态</button>
+          <button id="preprocessButton" class="secondary-button">2. 预处理当前目录</button>
+          <button id="inspectManifestButton" class="secondary-button">3. 检查所选训练来源</button>
           <button id="trainButton" class="primary-button">4. 开始训练</button>
-          <button id="autoPipelineButton" class="primary-button" title="先按当前设置预处理训练集，再自动接着开始训练；两步在同一个后台任务里完成，刷新页面也不会中断">一键：预处理 + 开始训练</button>
+          <button id="autoPipelineButton" class="primary-button" title="仅用于当前单来源；多个训练来源请分别预处理，再点击开始训练">一键：预处理 + 开始训练</button>
           <button id="resetSettingsButton" class="secondary-button" title="清空浏览器里保存的【全部】设置（训练参数 + 数据集路径 + 生成参数）并恢复出厂默认值；只想重置生成参数请用生成面板里的「恢复生成默认值」">清除全部保存（含训练参数）</button>
         </div>
         <p class="param-intro" style="margin-top:8px">
