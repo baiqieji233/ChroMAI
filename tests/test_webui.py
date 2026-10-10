@@ -664,6 +664,46 @@ def test_event_generation_result_collection_includes_only_present_repair_artifac
     assert "chart.original.chart.json" not in task.result["files"]
 
 
+def test_resume_epoch_progress_uses_checkpoint_epoch_plus_requested_epochs(webui_api, monkeypatch, tmp_path):
+    manifest = tmp_path / "training_manifest.json"
+    manifest.write_text(json.dumps({
+        "schema": "maichart-training-manifest-v1",
+        "source_root": str(tmp_path), "cache_dir": str(tmp_path / "cache"),
+        "preprocessing": {"target_schema": "event_v1", "feature_profile": "event_audio_v2_rhythm"},
+        "songs": [], "summary": {}, "warnings": [], "errors": [],
+    }), encoding="utf-8")
+    checkpoint = tmp_path / "event_last.pt"
+    checkpoint.write_bytes(b"checkpoint")
+    monkeypatch.setattr(webui, "_checkpoint_inspection", lambda *args, **kwargs: {
+        "errors": [], "warnings": [], "epoch": 4, "model_config": {"planner_profile": "legacy_v1"},
+        "data_contract": {"target_schema": "event_v1", "condition_params": {
+            "mask_prob": 0.5, "dropout": 0.0, "default": 0.5,
+            "null_embedding": True, "null_policy": "masked_condition_controls",
+        }},
+    })
+    calls = []
+
+    def fake_run(task, args, *, expected_epoch, result_paths):
+        calls.append((args, expected_epoch))
+        task.status = "completed"
+
+    monkeypatch.setattr(webui, "_run_subprocess_task", fake_run)
+    status, started = webui_api("/api/train", {
+        "model_family": "event_v1", "manifest": str(manifest), "raw_root": str(tmp_path),
+        "cache_dir": str(tmp_path / "cache"), "checkpoint_dir": str(tmp_path / "checkpoints"),
+        "training_mode": "resume", "training_checkpoint": str(checkpoint), "epochs": 3,
+    })
+    assert status == 200, started
+    args, expected_epoch = calls[0]
+    assert expected_epoch == 7
+    assert "--resume" in args
+    task = webui.TASKS[started["task_id"]]
+    assert task.result["epoch_start"] == 4
+    assert task.result["epochs_requested"] == 3
+    assert task.result["epoch_target"] == 7
+    assert task.result["epoch_semantics"] == "additional_from_checkpoint"
+
+
 def test_gold_scan_reports_the_folder_contents(webui_api, tmp_path):
     """The panel previews a gold folder before anything is written."""
 

@@ -942,11 +942,26 @@ function renderTask(task) {
   const status = element("#taskStatus");
   const progress = element("#progressBar");
   const message = element("#taskMessage");
+  const epoch = element("#taskEpoch");
   const logs = element("#taskLogs");
   if (kind) kind.textContent = `${TASK_KIND_LABEL[task.kind] || task.kind} · ${task.task_id}`;
   if (status) status.textContent = task.status;
   if (progress) progress.style.width = `${Math.round((task.progress || 0) * 100)}%`;
   if (message) message.textContent = task.error || task.message || "";
+  if (epoch) {
+    const result = task.result || {};
+    const hasEpoch = task.kind === "train" && (result.last_epoch !== undefined || result.epoch_target !== undefined);
+    epoch.hidden = !hasEpoch;
+    if (hasEpoch) {
+      const start = Number(result.epoch_start || 0);
+      const current = Number(result.last_epoch ?? start);
+      const target = Number(result.epoch_target || 0);
+      const semantics = result.epoch_semantics === "additional_from_checkpoint"
+        ? `resume：从 epoch ${start} 追加 ${result.epochs_requested || Math.max(0, target - start)} 轮`
+        : `本阶段共 ${result.epochs_requested || target} 轮`;
+      epoch.textContent = `训练进度：epoch ${current}${target ? ` / ${target}` : ""}；${semantics}`;
+    }
+  }
   if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
 
   const cancel = element("#cancelButton");

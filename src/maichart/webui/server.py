@@ -115,7 +115,11 @@ class TaskState:
             self.message = line[-240:]
             epoch_match = re.search(r"epoch=(\d+)", line)
             if epoch_match:
-                self.result["last_epoch"] = int(epoch_match.group(1))
+                current_epoch = int(epoch_match.group(1))
+                self.result["last_epoch"] = current_epoch
+                target_epoch = self.result.get("epoch_target")
+                if target_epoch:
+                    self.result["epoch_progress"] = min(1.0, current_epoch / int(target_epoch))
             self.logs.append(f"[{stamp}] {line}")
             # The in-memory ring drops old lines; the file keeps them all.
             self.logs = self.logs[-300:]
@@ -997,6 +1001,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if preference_enabled and training_mode == "fresh":
             raise ValueError("反面偏好训练需要已训练 checkpoint；先 fresh 做质量加权，再选择 finetune 启用修正版配对。")
         training_checkpoint = payload.get("training_checkpoint") or payload.get("checkpoint")
+        training_start_epoch = 0
         if training_mode != "fresh":
             if not training_checkpoint:
                 raise ValueError("当前训练方式需要选择 checkpoint 文件或填写完整路径")
@@ -1006,6 +1011,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             )
             if inspection["errors"]:
                 raise ValueError("checkpoint 不兼容：\n- " + "\n- ".join(inspection["errors"]))
+            if training_mode == "resume":
+                training_start_epoch = max(0, int(inspection.get("epoch") or 0))
             if condition_params is not None:
                 _check_event_condition_parameters(condition_params, inspection.get("data_contract", {}).get("condition_params"))
             stored_planner = inspection.get("model_config", {}).get("planner_profile", "legacy_v1")
@@ -1018,8 +1025,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
             task.result["dataset_selection"] = dataset_selection
             task.result["manifest"] = str(manifest)
         epochs = max(1, int(payload.get("epochs", 20)))
+        epoch_target = training_start_epoch + epochs
         seed, seed_randomized = _resolve_seed(payload)
-        task.result.update({"seed": seed, "seed_randomized": seed_randomized})
+        task.result.update({"seed": seed, "seed_randomized": seed_randomized,
+                            "epoch_start": training_start_epoch,
+                            "epochs_requested": epochs,
+                            "epoch_target": epoch_target,
+                            "epoch_semantics": ("additional_from_checkpoint" if training_mode == "resume"
+                                                 else "stage_total")})
         if _is_event_family(model_family):
             try:
                 cuda_memory_budget_gb = float(payload.get("cuda_memory_budget_gb", 0.0))
@@ -1109,7 +1122,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
             result_paths = [checkpoint_dir / "event_last.pt", checkpoint_dir / "event_best.pt"]
             task.result.update({"model_family": model_family, "checkpoint_dir": str(checkpoint_dir)})
             self._dispatch_training(
-                task, args, result_paths=result_paths, epochs=epochs, auto_preprocess=auto_preprocess,
+                task, args, result_paths=result_paths, epochs=epochs, epoch_target=epoch_target,
+                auto_preprocess=auto_preprocess,
                 payload=payload, model_family=model_family, manifest=manifest, cache_dir=cache_dir,
             )
             return
@@ -1146,11 +1160,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task.result.update({"model_family": model_family, "checkpoint_dir": str(checkpoint_dir)})
         self._dispatch_training(
             task, args, result_paths=[checkpoint_dir / "generator_last.pt"], epochs=epochs,
+            epoch_target=epoch_target,
             auto_preprocess=auto_preprocess, payload=payload, model_family=model_family,
             manifest=manifest, cache_dir=cache_dir,
         )
 
     def _dispatch_training(self, task, args: list[str], *, result_paths: list[Path], epochs: int,
+                           epoch_target: int,
                            auto_preprocess: bool, payload: dict[str, Any], model_family: str,
                            manifest: Path, cache_dir: Path) -> None:
         """Start training, optionally preceded by preprocessing in the same task.
@@ -1196,7 +1212,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             args = ["-m", "maichart.training.auto_pipeline", "--plan", str(plan_path)]
             # The manifest is produced by the first stage, so it is watched too.
             result_paths = [manifest, *result_paths]
-        _run_subprocess_task(task, args, expected_epoch=epochs, result_paths=result_paths)
+        _run_subprocess_task(task, args, expected_epoch=epoch_target, result_paths=result_paths)
         self._json_response({"task_id": task.task_id})
 
     def _inspect_checkpoint(self, payload: dict[str, Any]) -> None:
