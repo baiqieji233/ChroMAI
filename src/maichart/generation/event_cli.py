@@ -35,6 +35,8 @@ from maichart.generation.event_audio import (
     extract_event_audio,
     legacy_feature_view,
 )
+from maichart.generation.generation_integration import integrate_generation_config
+from maichart.generation.post_process import run_post_process, PostProcessConfig
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.event_model import (
     EVENT_BOS,
@@ -1689,7 +1691,25 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--overlap-beats", type=int, default=0,
                         help="Generate with overlapping windows of this overlap; the earlier window "
                              "keeps the shared beats (cross-window family).")
-    parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
+    # Rhythm bias and playability constraints (from GOAL_COMPLEX_RHYTHM_PLAYABILITY_FINAL.md)
+    parser.add_argument("--rhythm-bias", choices=("auto", "uniform", "triplet", "dotted", "mixed"),
+                        default="auto",
+                        help="Rhythm sampling bias: auto (follow music), uniform (even beats), "
+                             "triplet (3-tuplet tendency), dotted (dotted rhythm), mixed (complex).")
+    parser.add_argument("--fine-note-strength", type=float, default=0.5,
+                        help="Fine rhythm sampling strength [0-1]: 0=conservative (4th/8th only), "
+                             "0.5=balanced, 1.0=aggressive (12th/16th/24th). Default 0.5.")
+    parser.add_argument("--enable-conflict-detection", action="store_true",
+                        help="Enable playability conflict detection (hold-tap overlap, slide-tap collision, etc).")
+    parser.add_argument("--detect-hard-conflicts", action="store_true", default=True,
+                        help="Detect hard conflicts (game judgment system conflicts). Default True.")
+    parser.add_argument("--detect-soft-conflicts", action="store_true",
+                        help="Detect soft conflicts (ergonomic issues, large jumps). Default False.")
+    parser.add_argument("--conflict-repair-mode", choices=("none", "local", "reject"),
+                        default="none",
+                        help="Conflict repair mode: none (detect only), local (remove conflicting notes), "
+                             "reject (abort on hard conflicts). Default none.")
+        parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--title", default="Generated maimai chart")
     parser.add_argument("--artist", default="")
     parser.add_argument("--chart-level", default="")
@@ -2054,3 +2074,5 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
