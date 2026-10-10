@@ -46,6 +46,7 @@ from maichart.generation.model_compatibility import (
 from maichart.generation.post_process import (
     PostProcessConfig, detect_chart_conflicts, process_chart_points,
 )
+from maichart.generation.runtime_reference import run_reference
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.timeline import normalize_tempo_map, serialize_tempo_map, tempo_map_fingerprint, beat_at_audio_end
 from maichart.generation.event_model import (
@@ -1927,6 +1928,12 @@ def build_parser() -> argparse.ArgumentParser:
                              "reject (abort on hard conflicts). Default none.")
     parser.add_argument("--conflict-retries", type=int, default=0,
                         help="Optional conflicting-window retries, 0 disables, maximum 5.")
+    parser.add_argument("--runtime-reference-mode", choices=("off", "report", "reject"), default="off",
+                        help="Optional MiaCode runtime-reference sidecar; default off.")
+    parser.add_argument("--runtime-reference-executable", type=Path,
+                        help="Path to the user-provided miacode_muri_dump executable.")
+    parser.add_argument("--runtime-reference-timeout-sec", type=float, default=30.0,
+                        help="Per-candidate reference timeout in (0, 60] seconds.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--title", default="Generated maimai chart")
     parser.add_argument("--artist", default="")
@@ -1949,6 +1956,12 @@ def main(argv=None) -> int:
         raise ValueError("local-onset-bias-strength must be finite in 0..1")
     if args.rhythm_bias != "auto":
         raise ValueError("rhythm-bias rhythm classes are not implemented; use auto with fine-note-strength")
+    if args.runtime_reference_mode != "off" and not args.runtime_reference_executable:
+        raise ValueError("runtime-reference-executable is required when runtime-reference-mode is report or reject")
+    if not math.isfinite(float(args.runtime_reference_timeout_sec)) or not 0 < float(args.runtime_reference_timeout_sec) <= 60:
+        raise ValueError("runtime-reference-timeout-sec must be finite and in (0, 60].")
+    if args.runtime_reference_mode != "off" and not Path(args.runtime_reference_executable).expanduser().is_file():
+        raise ValueError(f"runtime reference executable does not exist: {args.runtime_reference_executable}")
     post_process_config = PostProcessConfig(
         enable_conflict_detection=args.enable_conflict_detection,
         detect_hard_conflicts=args.detect_hard_conflicts,
@@ -2272,6 +2285,39 @@ def main(argv=None) -> int:
                       f"error={compile_error}", flush=True)
                 failures += 1
                 continue
+            if args.runtime_reference_mode != "off":
+                runtime_reference = run_reference(
+                    args.runtime_reference_executable,
+                    text,
+                    difficulty=condition.difficulty,
+                    first=float(args.first),
+                    timeout_sec=float(args.runtime_reference_timeout_sec),
+                    mode=args.runtime_reference_mode,
+                )
+                quality["runtime_reference"] = runtime_reference
+                if runtime_reference["status"] in {"rejected", "failed"}:
+                    if args.runtime_reference_mode == "reject":
+                        quality["generation_status"] = (
+                            "rejected_by_runtime_reference"
+                            if runtime_reference["status"] == "rejected"
+                            else "runtime_reference_failed"
+                        )
+                        target_ir.write_text(json.dumps({
+                            "schema": "maichart-event-chart-v1",
+                            "points": [point.to_dict() for point in points],
+                            "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
+                            "first": args.first, "end_beat": str(duration_beats),
+                            "audio_duration_sec": audio.duration_sec,
+                            "audio_sha256": audio_identity["sha256"],
+                            "checkpoint_identity": checkpoint_identity, "quality": quality,
+                        }, ensure_ascii=False, indent=2), encoding="utf-8")
+                        target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
+                        print(f"candidate rejected by runtime reference: {runtime_reference['reject_reason']}", flush=True)
+                        failures += 1
+                        continue
+                    quality["generation_status"] = "success_with_warnings"
+                if runtime_reference["status"] == "rejected":
+                    quality["generation_status"] = "rejected_by_runtime_reference"
             # Report the note-level problems instead of discarding the chart.
             # A cell that strikes one button twice (or uses an unknown token) is a
             # real defect, but a handful of them among hundreds of good notes must
