@@ -4,15 +4,15 @@ WebUI 是本地运行的训练和生成界面。它不需要用户编写代码�
 
 多训练集管理入口是顶部的「训练素材」：勾选多个来源参与联合训练，进入单个来源查看标题、文件夹、谱师和质量标注；支持排序与输入页码跳转。新增素材后使用已有 checkpoint 做 finetune 的操作见 [多训练集管理与加强训练](MULTI_DATASET_TRAINING.md)。
 
-## 当前主路径：event_v1
+## 当前主路径：event_ctx_v1
 
-当前页面默认选择 `event_v1`，预处理按钮会运行：
+当前页面默认选择 `event_ctx_v1`，预处理按钮会运行：
 
 ```powershell
 python -m maichart.training.prepare_events RAW_ROOT --cache-dir PATH -o MANIFEST --sample-rate 22050
 ```
 
-event manifest 仍是 `maichart-training-manifest-v1`，但 `preprocessing` 必须记录 `target_schema=event_v1` 和 `feature_profile=event_audio_v1`。event 只需要 source 中的 `maidata.txt` 和音频，不需要 fixed-frame 的 frame division、frame labels 或 alignment reports。song 应保留 `maidata_path`、`audio_path`；event 训练会重新读取精确 source 并执行自己的 parser/QC，不会把旧 fixed-frame 的 `usable_for_training=false` 当作拒绝依据。
+event manifest 仍是 `maichart-training-manifest-v1`，`preprocessing` 记录 `target_schema=event_v1` 和 `feature_profile=event_audio_v2_rhythm`；选择 `event_ctx_v1` 时，模型族由训练与生成入口决定，manifest 合同保持兼容。event 只需要 source 中的 `maidata.txt` 和音频，不需要 fixed-frame 的 frame division、frame labels 或 alignment reports。song 应保留 `maidata_path`、`audio_path`；event 训练会重新读取精确 source 并执行自己的 parser/QC，不会把旧 fixed-frame 的 `usable_for_training=false` 当作拒绝依据。
 
 选择 **旧固定帧基线** 后，页面才使用原来的 `maichart.cli preprocess build`、`train_generator` 和 `generation.cli`。这是显式对照实验，不是 event 模型的兼容模式。旧 checkpoint 不能直接用于 event；请重新训练。
 
@@ -20,16 +20,18 @@ event manifest 仍是 `maichart-training-manifest-v1`，但 `preprocessing` 必�
 
 ## 安装与启动
 
-在项目目录打开 PowerShell，首次安装依赖：
+在项目目录打开 PowerShell，首次启动会自动安装依赖：
 
 ```powershell
-py -m pip install -e ".[dev,audio,training]"
+START_WEBUI.bat --no-browser --port 7860
 ```
+
+已有环境只检查不启动：`START_WEBUI.bat --check`。
 
 启动服务：
 
 ```powershell
-maichart-gui --host 127.0.0.1 --port 7860
+START_WEBUI.bat --no-browser --port 7860
 ```
 
 打开 `http://127.0.0.1:7860/`。服务只监听本机。训练、预处理或生成任务运行期间不要关闭启动服务的窗口。
@@ -38,8 +40,8 @@ maichart-gui --host 127.0.0.1 --port 7860
 
 你当前计划使用一百余张谱面进行可行性测试，建议先使用 event 主路径：
 
-- 模型族：`event_v1`；
-- event 音频特征方案：`event_audio_v1`；
+- 模型族：`event_ctx_v1`；
+- event 音频特征方案：`event_audio_v2_rhythm`；
 - 采样率：22050；
 - 训练方式：`fresh`；
 - batch size：1 或 2；
@@ -74,7 +76,7 @@ dataset.zip
 
 1. 上传 ZIP，等待“上传和解压”完成。
 2. 确认页面自动填写的原始目录、缓存目录和 manifest 路径属于这次上传。上传完成不代表已经生成 manifest。
-3. 保持模型族 `event_v1`，点击“预处理训练集”。event 路径会调用 `prepare_events`，不需要 division、frame labels 或 alignment 缓存。
+3. 保持模型族 `event_ctx_v1`，点击“预处理训练集”。event 路径会调用 `prepare_events`，不需要 division、frame labels 或 alignment 缓存。
 4. 等右侧任务完成后点击“检查训练集状态”。event 会显示 source 与自身 QC 诊断，最终训练仍会重新解析 source。
 5. 若结果显示处理错误，查看红色“处理错误”区域。格式异常的当前文档会被跳过，其余文档仍继续处理；修复后重新预处理即可。
 
@@ -144,10 +146,10 @@ event 检查内容包括 schema、模型结构、event target schema、音频 pr
 - `lr`：fresh 默认 `2e-4`，finetune 默认 `2e-5`，resume 页面固定 `2e-4`；
 - `save_every`：保存中间 checkpoint 的间隔；
 - `reset_optimizer`：finetune 默认 true；
-- `model_family`：默认 `event_v1`，旧基线必须显式选择 `legacy_frame_v2`；
+- `model_family`：默认 `event_ctx_v1`，旧基线必须显式选择 `legacy_frame_v2`；
 - `validation_manifest`：event 可选，训练与验证应按歌曲划分；
 - `segment_beats`：event 默认 `16`，不使用 `segment_frames`；
-- `feature_profile`：event 为 `event_audio_v1`，旧基线为 `basic_v1`；
+- `feature_profile`：event 为 `event_audio_v2_rhythm`，旧基线为 `basic_v1`；
 - `condition_dropout`：默认 `0.15`。
 
 后端应根据 `training_mode` 区分初始化、完整恢复和权重微调。前端不会把已有模型模式伪装成 fresh。
@@ -173,7 +175,7 @@ event 检查内容包括 schema、模型结构、event target schema、音频 pr
 | --- | --- |
 | `division` | 只属于旧 fixed-frame 基线；event 不使用 |
 | `sample_rate` | 保持一致；不同值建议单独实验 |
-| `feature_profile` | `event_audio_v1` 与旧 `basic_v1` 分开训练，不能直接混用 checkpoint |
+| `feature_profile` | `event_audio_v2_rhythm` 与旧 `basic_v1` 分开训练，不能直接混用 checkpoint |
 | cache 目录 | 可以不同，只要每个 manifest 指向自己的缓存 |
 | batch、epoch、学习率 | 属于训练配置，可以在不同实验中变化 |
 

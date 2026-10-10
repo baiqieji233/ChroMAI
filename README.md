@@ -201,17 +201,15 @@ simai_transformer/
 ├─ examples/                   小型原始数据和演示 ZIP
 ├─ tests/                      自动化测试与测试素材
 ├─ tools/                      数据、谱面对比和性能工具
-│  └─ browser_qa/               可选浏览器工作流检查
 └─ docs/                       使用、设计与历史实验说明
 ```
 
 `webui_workspace`、`checkpoints`、缓存与 `.venv` 等目录在实际使用时创建，不属于精简副本的初始内容。
 
-已有开发环境也可以手动安装与启动：
+首次启动会在项目目录创建 `.venv` 并安装依赖；已有环境可以先做检查：
 
 ```bat
-python -m pip install -e ".[dev,audio,training]"
-python -m maichart.webui.server --host 127.0.0.1 --port 7860
+START_WEBUI.bat --no-browser --port 7860
 ```
 
 GPU 安装优先使用 BAT 中已配置的路径。使用多份项目时，应激活本目录环境并在本目录运行，避免调用另一个目录安装的同名命令。
@@ -222,9 +220,9 @@ GPU 安装优先使用 BAT 中已配置的路径。使用多份项目时，应�
 .venv\Scripts\python.exe -m pytest -q
 ```
 
-完整测试需要 Node.js 检查前端 JavaScript；浏览器工作流另需 `playwright-core` 与 Microsoft Edge，安装方法见 [浏览器检查说明](tools/browser_qa/README.md)。
+完整测试以 Python 测试为基线；额外前端检查按对应测试文件的环境说明安装 Node.js。项目副本不依赖仓库外的浏览器检查目录。
 
-精简复制时在 D 盘源码下完成的验证为 **721 项通过、12 项跳过**，四组浏览器检查通过。依赖未附带的真实数据的测试可跳过；这些数字是该次验证记录，不是生成质量或可玩性评分。
+本次基线在 D 盘 Python 3.11 环境完成 **763 项通过、12 项跳过**。依赖未附带的真实数据的测试可跳过；这些数字是自动化回归记录，不是生成质量或可玩性评分。
 
 ## 延伸阅读
 

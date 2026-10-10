@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -11,13 +9,12 @@ from maichart.training.collate import collate_v25
 from maichart.training.dataset_v25 import MaichartV25Dataset
 from maichart.training.losses_v25 import compute_v25_losses
 from maichart.training.train_v25 import main as train_main
+from tests.v25_fixture import write_v25_fixture
 
 
 def test_v25_dataset_collate_forward_loss_backward_smoke(tmp_path) -> None:
-    dataset = MaichartV25Dataset(
-        Path("manifests") / "training_manifest_limit2.json",
-        cache_dir="cache",
-    )
+    manifest = write_v25_fixture(tmp_path)
+    dataset = MaichartV25Dataset(manifest, cache_dir=tmp_path / "cache")
     sample = dataset[0]
 
     assert sample["x"].ndim == 2
@@ -64,9 +61,9 @@ def test_v25_overfit_one_sample_train_entrypoint_starts(tmp_path) -> None:
     assert train_main(
         [
             "--manifest",
-            str(Path("manifests") / "training_manifest_limit2.json"),
+            str(write_v25_fixture(tmp_path)),
             "--cache-dir",
-            "cache",
+            str(tmp_path / "cache"),
             "--epochs",
             "1",
             "--batch-size",
