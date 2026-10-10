@@ -1,6 +1,7 @@
 """Independent curve analysis/playback and event generation API contracts."""
 
 import json
+from pathlib import Path
 import threading
 import time
 import urllib.error
@@ -229,11 +230,114 @@ def test_learned_curve_analysis_uses_generation_condition_and_timing(api, monkey
         {"beat": "0", "bpm": 120.0}, {"beat": "32", "bpm": 150.0},
     ]
     assert result["result"]["intensity_profile"]["tempo_map_sha256"]
-    assert received["condition"]["level"] == 14
+    assert received["condition"].level == 14
     assert received["bpm"] == 150 and received["first"] == 1.2
     assert received["tempo_map"] == [{"beat": "0", "bpm": 120.0},
                                      {"beat": "32", "bpm": 150.0}]
     assert received["device"] == "cpu"
+
+
+def test_learned_curve_analysis_resolves_sparse_condition_like_generation(api, monkeypatch, tmp_path):
+    from maichart.generation.conditions import GENERATION_DEFAULTS
+    from maichart.generation import learned_curve
+
+    audio, payload, _ = setup_event_run(monkeypatch, tmp_path)
+    manifest = tmp_path / "profiled" / "training_manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}", encoding="utf-8")
+    controls = {key: {"median": value} for key, value in GENERATION_DEFAULTS.items()
+                if key != "level"}
+    controls["melody_following"] = {"median": 0.0}
+    (manifest.parent / "condition_profile.json").write_text(json.dumps({
+        "schema": "maichart-condition-profile-v1",
+        "level": {"median": 13.3}, "controls": controls,
+    }), encoding="utf-8")
+    monkeypatch.setattr(webui, "_load_checkpoint_payload", lambda *a: {
+        "schema": webui.EVENT_CHECKPOINT_SCHEMA,
+        "model_state_dict": {"weight": object()}, "model_config": {"planner_profile": "music_structure_v3"},
+        "data_contract": {"target_schema": "event_ctx_v1",
+                           "condition_params": {"mask_prob": 0.0, "default": 0.5}},
+    })
+    received = {}
+    expected_profile = profile(audio)
+    expected_profile["method"] = "learned_music_structure_v3"
+
+    def generate(_audio, _checkpoint, **kwargs):
+        received.update(kwargs)
+        return expected_profile
+
+    monkeypatch.setattr(learned_curve, "generate_learned_profile", generate)
+    payload.update({"manifest": str(manifest), "condition": {"level": 14.0}, "level": 14.0})
+    code, started, _ = api("/api/intensity/analyze", {
+        **payload, "curve_source": "model", "condition": {"level": 14.0},
+    })
+    assert code == 200, started
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        _, result, _ = api("/api/task?id=" + started["task_id"])
+        if result["status"] not in {"queued", "running"}:
+            break
+        time.sleep(0.02)
+    assert result["status"] == "completed", result
+    assert received["condition"].level == 14.0
+    assert received["condition"].style["melody_following"] == pytest.approx(0.9)
+    assert received["condition"].radar["note_density"] == pytest.approx(
+        GENERATION_DEFAULTS["note_density"])
+
+
+def test_learned_curve_preflight_matches_cli_for_profile_plus_level_only_data(api, monkeypatch, tmp_path):
+    from maichart.generation.conditions import GENERATION_DEFAULTS
+    from maichart.generation.event_cli import _file_identity, resolve_generation_condition
+
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    manifest = tmp_path / "dataset" / "training_manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text("{}", encoding="utf-8")
+    controls = {key: {"median": value} for key, value in GENERATION_DEFAULTS.items()
+                if key != "level"}
+    controls["melody_following"] = {"median": 0.0}
+    profile_path = manifest.parent / "condition_profile.json"
+    profile_path.write_text(json.dumps({"schema": "maichart-condition-profile-v1",
+                                        "level": {"median": 13.3}, "controls": controls}),
+                            encoding="utf-8")
+    monkeypatch.setattr(webui, "_load_checkpoint_payload", lambda *a: {
+        "schema": webui.EVENT_CHECKPOINT_SCHEMA,
+        "model_state_dict": {"weight": object()}, "model_config": {"d_model": 32},
+        "data_contract": {"target_schema": "event_ctx_v1",
+                           "condition_params": {"mask_prob": 0.0, "default": 0.5}},
+    })
+    payload.update({"manifest": str(manifest), "condition": {"level": 14.0}, "level": 14.0})
+    effective, _ = resolve_generation_condition(
+        level=14.0, condition_profile=profile_path, condition_data=payload["condition"],
+        contract_params={"mask_prob": 0.0, "default": 0.5})
+    identity = _file_identity(payload["checkpoint"])
+    curve = {**profile(audio), "method": "learned_music_structure_v3",
+             "checkpoint": payload["checkpoint"],
+             "checkpoint_identity": {"size": identity["size"], "mtime_ns": identity["mtime_ns"],
+                                     "sha256": identity["sha256"]},
+             "condition": effective.to_dict(), "first": 0.0,
+             "tempo_map_sha256": None, "tempo_mode": "constant", "bpm_input": None}
+
+    code, started, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
+                                               "intensity_curve": curve})
+    assert code == 200, started
+    args = calls[0]
+    assert args[args.index("--condition-profile") + 1] == str(profile_path)
+    condition_file = Path(args[args.index("--condition-file") + 1])
+    assert json.loads(condition_file.read_text(encoding="utf-8")) == {"level": 14.0}
+    cli_effective, _ = resolve_generation_condition(
+        level=14.0, condition_profile=profile_path, condition_file=condition_file,
+        contract_params={"mask_prob": 0.0, "default": 0.5})
+    assert cli_effective.to_dict() == effective.to_dict()
+
+    wrong_curve = {**curve, "condition": {**effective.to_dict(),
+                    "style": {**effective.style, "melody_following": 0.2}}}
+    before_calls = len(calls)
+    code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
+                                              "intensity_curve": wrong_curve})
+    assert code == 400
+    assert "等级、风格或节拍设置已变化" in result["error"]
+    assert len(calls) == before_calls
 
 
 def test_explicit_tempo_map_is_normalized_and_forwarded_to_event_cli(api, monkeypatch, tmp_path):

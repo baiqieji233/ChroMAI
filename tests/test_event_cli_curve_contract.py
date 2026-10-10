@@ -3,7 +3,7 @@ import copy
 import pytest
 
 from maichart.generation.conditions import GENERATION_DEFAULTS, GenerationCondition
-from maichart.generation.event_cli import validate_learned_curve_contract
+from maichart.generation.event_cli import resolve_generation_condition, validate_learned_curve_contract
 from maichart.event_timing import EventTempo
 
 
@@ -117,3 +117,17 @@ def test_standalone_curve_contract_rejects_explicit_tempo_map_change(tmp_path):
             tempo_mode="constant",
             bpm_input=None,
         )
+
+
+def test_condition_resolver_accepts_memory_partial_data_and_explicit_zero():
+    condition, _ = resolve_generation_condition(
+        level=14, condition_data={"level": 14, "style": {"melody_following": 0.0}},
+        contract_params={"mask_prob": 0.0},
+    )
+    assert condition.level == 14
+    assert condition.style["melody_following"] == 0.0
+    assert condition.radar["note_density"] == GENERATION_DEFAULTS["note_density"]
+
+    with pytest.raises(ValueError, match="not both"):
+        resolve_generation_condition(level=14, condition_file="condition.json",
+                                     condition_data={"level": 14})

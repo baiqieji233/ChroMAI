@@ -1602,13 +1602,15 @@ def apply_contract_condition_guard(condition: GenerationCondition, contract_para
     return neutral, "neutralised"
 
 
-def resolve_generation_condition(*, level, condition_file=None, condition_profile=None,
-                                 contract_params=None):
+def resolve_generation_condition(*, level, condition_file=None, condition_data=None,
+                                 condition_profile=None, contract_params=None):
     """Overlay only explicit fields on generation defaults, then apply the contract.
 
     A level-only file is a partial request: omitted controls must keep their
     calibrated baseline rather than becoming GenerationCondition's numeric null.
     """
+    if condition_file is not None and condition_data is not None:
+        raise ValueError("provide condition_file or condition_data, not both")
     condition = GenerationCondition(level=level, radar=GENERATION_DEFAULTS,
                                     style=GENERATION_DEFAULTS)
     source = "corpus_defaults"
@@ -1617,8 +1619,9 @@ def resolve_generation_condition(*, level, condition_file=None, condition_profil
 
         condition = condition_from_profile(load_profile(condition_profile), level=level)
         source = f"condition_profile={condition_profile}"
-    if condition_file:
-        raw = json.loads(Path(condition_file).read_text(encoding="utf-8-sig"))
+    if condition_file is not None or condition_data is not None:
+        raw = (json.loads(Path(condition_file).read_text(encoding="utf-8-sig"))
+               if condition_file is not None else condition_data)
         if not isinstance(raw, dict):
             raise ValueError("condition file must contain a JSON object")
         explicit = GenerationCondition.from_dict(raw)

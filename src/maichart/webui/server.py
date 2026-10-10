@@ -328,11 +328,20 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                        else "audio")
                 if selected_source == "model":
                     from maichart.generation.learned_curve import generate_learned_profile
+                    from maichart.generation.event_cli import resolve_generation_condition
+                    checkpoint_payload = _load_checkpoint_payload(checkpoint_path)
+                    condition, condition_source = resolve_generation_condition(
+                        level=float(payload.get("level", GENERATION_DEFAULTS["level"])),
+                        condition_data=payload.get("condition"),
+                        condition_profile=_resolve_condition_profile(payload),
+                        contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
+                    )
                     profile = generate_learned_profile(
                         audio, checkpoint_path, resolution_sec=resolution, local_context_sec=context,
-                        condition=payload.get("condition"), bpm=payload.get("bpm"),
+                        condition=condition, bpm=payload.get("bpm"),
                         first=first, tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
                         device="cpu")
+                    task.result["condition_source"] = condition_source
                 else:
                     profile = generate_intensity_profile(audio, resolution_sec=resolution,
                                                          local_context_sec=context)
@@ -486,13 +495,13 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     and float(saved_identity["mtime_ns"]) == float(identity["mtime_ns"]))
                 if not same_size or not (same_hash or old_browser_mtime_match):
                     raise ValueError("曲线预测所用 checkpoint 文件已被覆盖或身份不匹配，请用当前 checkpoint 重新生成曲线")
-                from maichart.generation.conditions import GenerationCondition
-                from maichart.generation.event_cli import apply_contract_condition_guard
-                current_condition = GenerationCondition.from_dict(payload.get("condition") or {
-                    "level": float(payload.get("level", GENERATION_DEFAULTS["level"]))})
-                current_condition, _ = apply_contract_condition_guard(
-                    current_condition, checkpoint_payload.get("data_contract", {}).get("condition_params") or {},
-                    default_level=current_condition.level)
+                from maichart.generation.event_cli import resolve_generation_condition
+                current_condition, _ = resolve_generation_condition(
+                    level=float(payload.get("level", GENERATION_DEFAULTS["level"])),
+                    condition_data=payload.get("condition"),
+                    condition_profile=_resolve_condition_profile(payload),
+                    contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
+                )
                 if (curve.get("condition") != current_condition.to_dict()
                         or float(curve.get("first", 0)) != float(payload.get("first", 0))
                         or (tempo_map_hash is None
