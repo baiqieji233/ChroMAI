@@ -45,6 +45,53 @@ def test_touch_lane_is_not_discarded():
     assert result.conflicts_detected[0].notes[0].pad == "A4"
 
 
+def test_hold_head_overlap_uses_soft_six_tick_tolerance():
+    after_head = [P(F(0), "1h[4:2]"), P(F(1, 25), "1")]  # 20 ms after the hold head
+    assert not detect_chart_conflicts(after_head, TEMPO, 0, config()).conflicts_detected
+
+    enabled = detect_chart_conflicts(
+        after_head, TEMPO, 0, config(detect_soft_conflicts=True))
+    assert [(issue.conflict_type, issue.severity, issue.repair_target)
+            for issue in enabled.conflicts_detected] == [("hold_tap_overlap", "soft", None)]
+
+    before_head = [P(F(2), "1"), P(F(2) + F(1, 25), "1h[4:2]")]
+    before = detect_chart_conflicts(before_head, TEMPO, 0, config())
+    assert not before.conflicts_detected
+    before_enabled = detect_chart_conflicts(
+        before_head, TEMPO, 0, config(detect_soft_conflicts=True))
+    assert len(before_enabled.conflicts_detected) == 1
+    assert before_enabled.conflicts_detected[0].evidence == "static_hold_head_tolerance"
+    assert before_enabled.conflicts_detected[0].severity == "soft"
+
+    inside = [P(F(0), "1h[4:2]"), P(F(2, 25), "1")]  # 40 ms inside the hold
+    interior = detect_chart_conflicts(inside, TEMPO, 0, config())
+    assert len(interior.conflicts_detected) == 1
+    assert interior.conflicts_detected[0].severity == "hard"
+
+    same_beat = [P(F(0), "1h[4:2]/1")]
+    exact = detect_chart_conflicts(same_beat, TEMPO, 0, config())
+    assert any(issue.severity == "hard" for issue in exact.conflicts_detected)
+
+
+def test_hold_hold_near_head_is_soft_and_local_repair_ignores_it():
+    points = [P(F(0), "1h[4:2]"), P(F(1, 25), "1h[4:2]")]
+    result = detect_chart_conflicts(points, TEMPO, 0, config(detect_soft_conflicts=True))
+    assert len(result.conflicts_detected) == 1
+    assert result.conflicts_detected[0].conflict_type == "same_pad_overlap"
+    assert result.conflicts_detected[0].severity == "soft"
+
+    repaired = process_chart_points(points, TEMPO, 0, config("local", detect_soft_conflicts=True))
+    assert repaired.repairs_applied == []
+    assert repaired.points == points
+    assert all(issue.severity == "soft" for issue in repaired.remaining_conflicts)
+
+    interior = detect_chart_conflicts(
+        [P(F(0), "1h[4:2]"), P(F(2, 25), "1h[4:2]")], TEMPO, 0, config())
+    assert len(interior.conflicts_detected) == 1
+    assert interior.conflicts_detected[0].conflict_type == "same_pad_overlap"
+    assert interior.conflicts_detected[0].severity == "hard"
+
+
 def test_connected_touch_group_may_clear_conflicting_child():
     result = detect_chart_conflicts([P(F(0), "A1/B1/B2/C/1")], TEMPO, 0, config())
     assert result.conflicts_detected

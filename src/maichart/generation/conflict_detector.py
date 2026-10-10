@@ -186,12 +186,30 @@ class ConflictDetector:
                     hold = a.note_type in {"hold", "touch_hold"} and a.duration > 0
                     inside = hold and a.time + OVERLAP_SECONDS < b.time < a_end - OVERLAP_SECONDS
                     exact = abs(gap) <= 1e-9
+                    head_pair_types = {"tap", "touch", "hold", "touch_hold"}
+                    near_hold_head = (hold and 0 < gap <= OVERLAP_SECONDS
+                                      and b.note_type in head_pair_types)
+                    near_hold_start = (b.note_type in {"hold", "touch_hold"} and b.duration > 0
+                                       and 0 < gap <= OVERLAP_SECONDS and a.note_type in head_pair_types)
+                    if near_hold_head or near_hold_start:
+                        if self.enable_soft:
+                            kind = ("hold_tap_overlap"
+                                    if {a.note_type, b.note_type} & {"tap", "touch"}
+                                    else "same_pad_overlap")
+                            result.append(ConflictReport(
+                                True, kind, b.time, [a, b], "soft",
+                                f"{pad} 上的 {a.raw or a.note_type} 与 {b.raw or b.note_type} "
+                                "处于 Hold 起点的判定容差内，需人工检查。",
+                                evidence="static_hold_head_tolerance"))
+                        continue
                     if not (inside or exact or abs(b.time - a_end) <= OVERLAP_SECONDS):
                         continue
                     # Release at the intended hold tail is a legal re-articulation.
                     if hold and abs(b.time - a_end) <= 1e-9 and not exact:
                         continue
-                    kind = "hold_tap_overlap" if inside else "same_pad_overlap"
+                    kind = ("hold_tap_overlap"
+                            if inside and b.note_type in {"tap", "touch"}
+                            else "same_pad_overlap")
                     hard = (inside or exact) and not (a.protected or b.protected)
                     target = b
                     if b.note_type == "slide":
