@@ -135,6 +135,7 @@
               <option value="finetune">已有模型加强训练（finetune）</option>
             </select>
             <small id="trainingModeHelp">从随机初始化开始；不需要已有 checkpoint。</small>
+            <small data-training-family="event_v1 event_ctx_v1">从头训练 / finetune 会采用当前的节奏贴合标签时间轴，计入谱面音频偏移；resume 继承 checkpoint 的目标版本。旧模型若要采用这项修正，请用 finetune。迁移不会改变词表或生成架构。</small>
           </label>
           <label class="field span-4">已有模型 checkpoint（resume / finetune 使用，仅限同模型族）
             <input id="trainingCheckpointFile" type="file" accept=".pt,.pth">
@@ -187,21 +188,18 @@
           <label class="field">batch size
             <input id="batchSize" type="number" min="1" value="16">
             <small><strong>影响训练速度与显存。</strong>一次并行多少片段。批会按本批最长样本补齐，批越小每批峰值显存越低。
-            <strong>实测（12 GB 卡，本语料跨窗口最长 756 token）：b16 最坏形状峰值 3.91 GiB 安全；b32 最坏形状峰值 7.62 GiB，
-            单批需求就可能顶满显存并溢出到共享 GPU 内存（走 PCIe，实测 425 ms/批 vs 228 ms，且长程跑到 17.21 GiB 预留）。</strong>
-            所以默认 <strong>16</strong> 最稳；确认显存余量充足再上 32（每样本更快，但必须盯住日志的 <code>cuda_memory</code> 行）。
+            所需显存还取决于模型层数、宽度、音频长度和上下文，默认 16 不保证适合所有 checkpoint。当前 full v3 实验使用 batch 8、梯度累积 4；加大 batch 前先检查日志中的 <code>cuda_memory</code> 峰值和速度。
             训练已内置显存硬上限（默认 60% 设备显存）：宁可报 OOM 提示你降批，也不会静默溢出。</small>
           </label>
           <label class="field">梯度累积
             <input id="gradAccumulation" type="number" min="1" value="2">
-            <small><strong>等效批量 = batch × 累积。</strong>显存不足就缩小 batch、加大累积，等效批量与单步数学结果完全不变。
-            默认 2 与 batch 16 组成等效 32（实测各组合的每样本耗时：b32 = 11.97、b16 = 14.33、b8 = 17.95 ms/样本）。</small>
+            <small><strong>每次更新的样本量约为 batch × 累积。</strong>显存不足时可以缩小 batch、加大累积。默认 2 与 batch 16 约为每次 32 个样本；不同长度的 token 归一化、Dropout 和尾批会使它不完全等同于一次大 batch，速度也需要实际测量。</small>
           </label>
           <label class="field" data-training-family="event_v1">最大事件 tokens max_tokens
             <input id="trainMaxTokens" type="number" min="64" step="64" value="768">
             <small id="trainMaxTokensHelp" data-training-family="event_v1">
-              <strong>影响速度，也影响数据合同。</strong>每个训练片段被补齐到这个长度。实测本项目片段长度 p50=155、p99=269、最大 444，
-              填 2048 时<strong>约 93% 的注意力计算花在补齐出来的空白上</strong>。降到 768 可覆盖全部片段并大幅提速；改它会写入 checkpoint 数据合同，旧的同族 checkpoint 将不能 resume。
+              <strong>影响可纳入的片段长度，也影响数据合同。</strong>这是单个训练序列允许的最大 token 数，包含跨窗口引子和目标事件。
+              超过上限的训练片段会被排除，不能假定 768 能覆盖所有训练集。实际张量按批内最长样本补齐，不是每批都补到该上限；降低它可能提速，也可能丢掉复杂长配置。改它会写入 checkpoint 数据合同，旧的同族 checkpoint 将不能 resume。
             </small>
           </label>
           <label class="field" data-training-family="event_v1">segment beats
