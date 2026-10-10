@@ -1,6 +1,6 @@
 # 阶段 E：从“生成更多音符”转向“选择合适的落音位置”
 
-更新：2026-10-11 02:56。阶段 D 的 full 基线已完成 15 轮，并自动进入 5 轮微调；本阶段增加了可选的局部采音监督及独立评估。工程联测已经完成，正式质量对照尚未完成，不能把小样本 checkpoint 作为可用成品。
+更新：2026-10-11 03:10。阶段 D 的 full 基线已完成 15 轮，并自动进入 5 轮微调；本阶段增加了可选的局部采音监督及独立评估。工程联测已经完成，正式质量对照尚未完成，不能把小样本 checkpoint 作为可用成品。
 
 ## 目标与判断依据
 
@@ -46,6 +46,8 @@
 5. **补齐评估。** 起音头可在 CPU 独立评估 BCE、Brier、平均精度及固定阈值 P/R，并对照常数基线与局部音频打乱。生成评估增加空间重复与真实时间位置，队列核查产物是否确实由本次任务生成，避免旧文件或缺失输出被计作成功。
 
 完整接口与限制见 [LOCAL_ONSET_GUIDANCE.md](LOCAL_ONSET_GUIDANCE.md)、[ONSET_ALIGNMENT_EVALUATION.md](ONSET_ALIGNMENT_EVALUATION.md)。
+
+新增 [可读审阅报告工具](RHYTHM_REVIEW_REPORT.md)，可以把评估 JSON 整理成逐曲摘要，包含上述空间重复发生的具体秒数。三组 epoch 7 结果及 epoch 7/14 对照各已生成 `QUALITY_REVIEW.md`，位于各自的 `.scratch/full_v3_stage1/quality_probe_epoch7/` 与 `quality_probe_epoch14/` 目录。
 
 ## 已完成的工程验证
 
