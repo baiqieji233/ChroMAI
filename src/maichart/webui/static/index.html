@@ -780,12 +780,11 @@
           <label class="field" data-generation-family="event_v1">重复惩罚
             <input id="repetitionPenalty" type="number" min="1" max="2" step="0.05" value="1.05">
             <small><strong>默认 1.05 = 轻度开启。</strong>&gt;1 时，后端对最近重复窗口中出现过的<strong>非结构 token</strong>降低 logits；拍位 <code>AT:</code> 与控制 token 豁免。
-            这是 token 级采样惩罚，不识别整小节或音乐动机，也不能阻止长段同配置。数值 1 关闭；提高会更强地压制近期 token 重用，也可能压制合理重复。</small>
+            同一 token 出现一次或多次都只惩罚一次。例如 1–8 都已出现时，会一起受罚，并不专门压制转圈或两键交互。仅随机采样时生效，数值 1 关闭；提高也可能压制合理重复，不能替代完整配置的学习。</small>
           </label>
           <label class="field" data-generation-family="event_v1">重复窗口（token 数）
             <input id="repetitionWindow" type="number" min="8" step="8" value="56">
-            <small><strong>56 个 token 约覆盖一小节的典型文本长度</strong>（16 拍窗口实测约 218 token）。后端检查最近 N 个 token；调大将把更久之前出现的 token 纳入惩罚，
-            可能压制合法的连打或动机再现。它不是按拍/小节解析的结构约束。</small>
+            <small><strong>后端检查最近 N 个 token，包含跨窗口引子，默认 56。</strong>它没有固定的拍数或秒数：密度、和弦、Slide 等文本长度都会改变实际覆盖时长。调大将把更早出现的字符纳入惩罚，也可能压制合法连打或动机再现。</small>
           </label>
           <label class="field" data-generation-family="event_v1">最大事件 tokens
             <input id="maxTokens" type="number" min="1" value="768">

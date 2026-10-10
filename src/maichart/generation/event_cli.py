@@ -1752,26 +1752,24 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Sampling temperature. The panel, the server and this CLI all use "
                              f"{GENERATION_SAMPLING_DEFAULTS['temperature']}, so the same request produces the "
                              "same chart wherever it is launched from.")
-    # Sampling-shaping defaults are the measured ones, not no-ops: the corpus
-    # repeats itself very little (pattern_reuse median 0.028), so a mild penalty
-    # is in-distribution, and nucleus truncation keeps the tail from wandering
-    # off the grammar-legal but musically implausible tokens.
+    # Keep shared sampling defaults. Character reuse is not the same as a
+    # repeated musical configuration: these controls cannot detect circles,
+    # alternating buttons, or legitimate recurring musical motifs.
     parser.add_argument("--top-p", type=float, default=GENERATION_SAMPLING_DEFAULTS["top_p"],
                         help="Nucleus truncation for sampling: softmax the post-grammar-mask logits and "
                              "keep the smallest set of tokens whose cumulative probability reaches this "
                              "value; 0 or >=1 disables.")
     parser.add_argument("--repetition-penalty", type=float,
                         default=GENERATION_SAMPLING_DEFAULTS["repetition_penalty"],
-                        help="CTRL-style penalty on tokens repeated inside the window: positive logits "
-                             "divided, negative ones multiplied, sampling only; 1.0 disables. The default is "
-                             "mild because the corpus repeats little (pattern_reuse median 0.028) but real "
-                             "charts do restate a measure, which a stronger penalty would forbid.")
+                        help="CTRL-style penalty on non-control tokens seen inside the window: positive "
+                             "logits divided, negative ones multiplied, once per distinct token; "
+                             "sampling only, 1.0 disables. AT positions are exempt. This is a character "
+                             "reuse penalty, not a detector of repeated chart configurations.")
     parser.add_argument("--repetition-window", type=int,
                         default=GENERATION_SAMPLING_DEFAULTS["repetition_window"],
-                        help="How many generated tokens (context prefix included) to scan for repeats. "
-                             "One 4-beat measure is about 56 tokens (a 16-beat window is about 218 tokens), "
-                             "so the default covers measure-scale loops without punishing a restatement "
-                             "two measures later.")
+                        help="How many tokens (context prefix included) to scan for character reuse. "
+                             "This length has no fixed beat or time equivalent; note text length and "
+                             "density determine how much music it covers.")
     parser.add_argument("--sample", dest="sample", action="store_true",
                         default=GENERATION_SAMPLING_DEFAULTS["sample"],
                         help="Sample instead of argmax (default). Sampling is what the panel does; greedy "
