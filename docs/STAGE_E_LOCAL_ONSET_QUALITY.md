@@ -122,6 +122,20 @@
 
 模型曲线分析、生成请求预检与实际 CLI 也统一使用同一个条件解析器。48 项相关回归通过；空闲 7864 服务刷新后，真实精简 HTTP 请求完成曲线任务 `bba96b401976` 与生成任务 `6d7f36eaccb0`，两边的节奏贴合均为 0.9，错误定数的旧曲线请求被 HTTP 400 拒绝。证据为 `sparse_curve_http/verification.json` 及同目录曲线/谱面。7863 的训练进程未重启；常驻旧服务若使用这项新的曲线预检，应在训练结束后重启或改用 7864。
 
-04:06:54 第 3 轮微调保存：训练 loss `0.643008`，验证 loss `0.830302`，fine-rhythm MAE `0.2021`。第 2 轮验证 loss 为 `0.814548`；当前尚未优于起点 epoch 7，因此不将微调阶段的 `event_best.pt` 当作整个项目的最佳质量模型。阶段 best 与跨阶段最佳是不同概念。
+## MiaCode 运行时参考联测
+
+固定 MiaCode commit `6573efb611056bccd046dd17bc2f4cceda78bf88` 的 headless `miacode_muri_dump` 已在 `.scratch/muri_build` 独立构建成功（Qt 6.8.3 Core/Gui/Widgets、VS 18；未改用户安装或运行中的 GUI）。fixture 运行验证了 parse、runtime 和 static 三类输出。
+
+随后对同一首歌、同一条件修复后的三份 CPU 生成谱运行参考检测，报告为 `.scratch/full_v3_stage1/quality_probe_condition_fix/miacode_reference.json`：
+
+| 谱面 | MiaCode runtime diagnostics | static references | 说明 |
+|---|---:|---:|---|
+| full epoch 7 | 11（MultiTouch 8、SlideTooFast 2、TapOnSlide 1） | 6 | 参考模型发现了当前静态检测未覆盖的运行时规则 |
+| finetune epoch 1（修复条件） | 3（MultiTouch 1、Overlap 2） | 2 | 诊断数量较少，但音符量也明显减少 |
+| finetune epoch 1（旧条件 probe） | 3（MultiTouch 2、Overlap 1） | 2 | 仅用于记录旧条件实验，不能和修复条件混作同口径 |
+
+这些诊断来自谱面派生的 autoplay-like 动作模型，不接受真实玩家轨迹，也不是 SEGA 官方判定规范或实机 Perfect 证明。它们被保留为 `engine_reference_only=true`、`playable_verified=false` 的 sidecar，不接入自动 hard/reject/local repair。当前静态检测报告和 MiaCode 参考结果会并列供后续人工审阅；单纯减少 diagnostic 数不能作为质量提升结论。
+
+04:06:54 第 3 轮微调保存：训练 loss `0.643008`，验证 loss `0.830302`，fine-rhythm MAE `0.2021`。第 2 轮验证 loss 为 `0.814548`；当前尚未优于起点 epoch 7，因此不将微调阶段的 `event_best.pt` 当作整个项目的最佳质量模型。阶段 best 与跨阶段最佳是不同概念。第 4 轮仍在训练，不能提前使用其 checkpoint 做正式质量结论。
 
 继续依据实际证据调整：若新头只学固定拍栅格，应先改善音频时序学习；若准确落音但配置单调，应针对完整配置及历史依赖；若密度或留白恶化，应先收紧软指导和预算之间的相互影响。不能用更高细碎比例或更低报警数掩盖这些问题。
