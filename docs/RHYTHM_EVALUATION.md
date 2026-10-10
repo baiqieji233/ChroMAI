@@ -27,6 +27,19 @@ The existing `webui_workspace/v3_throughput/event_last.pt` is a one-epoch compos
 
 The reproducible 10-song panel is `.scratch/rhythm_eval_10song_panel.json`. It was selected from 1,858 readable event-usable charts (14 were invalid or empty) at difficulty indices 4–6 and levels 12–15. The entries preserve absolute maidata/audio paths. Selection bases use measured values: minimum and maximum note density, maximum hold/touch/slide/chord/fine ratio, then density quartiles. These are numeric selection rules, not human-written style labels. Use the same `audio_path` in every model run; do not use `gold_val_manifest.json` for this panel.
 
+For the stage1 heldout comparison, `.scratch/full_v3_stage1/heldout_panel.json` is selected only from `.scratch/full_v3_stage1/validation_manifest.json`. The panel builder reads each eligible audio file, caches its SHA-256 by path during that invocation, and drops repeated content hashes even when song IDs differ. It records each selected audio digest, the complete tempo map, `first`, `time_offset`, `audio_first`, and `end_beat`. The split report is checked against the exact validation-manifest bytes, and candidate hashes present in its training set are excluded. This protects stage1 fine-tune comparisons from train audio. The existing baselinev2 may already have seen the full source collection, so this panel does not establish a blind baselinev2 evaluation.
+
+Rebuild and re-audit the heldout panel with:
+
+```powershell
+python tools/run_rhythm_evaluation.py `
+  --panel-manifest ".scratch/full_v3_stage1/validation_manifest.json" `
+  --panel-split-report ".scratch/full_v3_stage1/split_report.json" `
+  --panel-output ".scratch/full_v3_stage1/heldout_panel.json" `
+  --output ".scratch/full_v3_stage1/heldout_panel_evaluation.json" `
+  --panel-size 10
+```
+
 | Song ID | Diff. | Selection basis | Notes/s | Hold | Touch | Slide | Chord | Fine |
 |---|---:|---|---:|---:|---:|---:|---:|---:|
 | 835 | 5 | Lowest density | 1.445 | 0.000 | 0.000 | 0.975 | 0.100 | 0.000 |

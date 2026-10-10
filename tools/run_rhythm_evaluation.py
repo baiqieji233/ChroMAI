@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import sys
@@ -414,7 +415,25 @@ def evaluate_paths(inputs: list[Path], *, reference_dir: Path | None = None) -> 
     }
 
 
-def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
+def _sha256_file(path: Path, cache: dict[Path, str]) -> str:
+    path = path.resolve()
+    if path not in cache:
+        digest = hashlib.sha256()
+        with path.open("rb") as stream:
+            while chunk := stream.read(1024 * 1024):
+                digest.update(chunk)
+        if path.stat().st_size == 0:
+            raise ValueError("audio file is empty")
+        cache[path] = digest.hexdigest()
+    return cache[path]
+
+
+def build_fixed_panel(
+    manifest_path: Path,
+    *,
+    size: int = 10,
+    split_report_path: Path | None = None,
+) -> dict[str, Any]:
     """Choose reproducible reference songs by measured chart traits, not labels."""
     manifest_path = manifest_path.resolve()
     manifest = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
@@ -422,8 +441,20 @@ def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
         raise ValueError("Panel source must be a training manifest with songs[].")
     if size < 1:
         raise ValueError("panel size must be positive")
+    forbidden_audio_hashes: set[str] = set()
+    split_report = None
+    if split_report_path is not None:
+        split_report_path = split_report_path.resolve()
+        split_report = json.loads(split_report_path.read_text(encoding="utf-8-sig"))
+        expected_manifest_hash = split_report.get("validation_manifest_sha256")
+        manifest_hash = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+        if expected_manifest_hash and manifest_hash != expected_manifest_hash:
+            raise ValueError("panel manifest does not match split report validation_manifest_sha256")
+        forbidden_audio_hashes = set(split_report.get("train_audio_hashes", []))
     candidates = []
     skipped: Counter[str] = Counter()
+    audio_hash_cache: dict[Path, str] = {}
+    seen_audio_hashes: set[str] = set()
     for song in manifest["songs"]:
         if not isinstance(song, dict):
             skipped["invalid_song"] += 1
@@ -460,6 +491,21 @@ def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
             except (OSError, ValueError, TypeError, ZeroDivisionError):
                 skipped["chart_invalid_or_empty"] += 1
                 continue
+            try:
+                audio_hash = _sha256_file(audio_path, audio_hash_cache)
+            except OSError:
+                skipped["audio_unreadable"] += 1
+                continue
+            except ValueError:
+                skipped["audio_invalid"] += 1
+                continue
+            if audio_hash in forbidden_audio_hashes:
+                skipped["training_audio_hash_excluded"] += 1
+                continue
+            if audio_hash in seen_audio_hashes:
+                skipped["duplicate_audio_content"] += 1
+                continue
+            seen_audio_hashes.add(audio_hash)
             total_duration = max(
                 float(seconds_at_beat(chart.end_beat, chart.tempo_changes, chart.audio_first)
                       - chart.audio_first),
@@ -473,6 +519,7 @@ def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
                 "level": level,
                 "maidata_path": str(source_path),
                 "audio_path": str(audio_path),
+                "audio_sha256": audio_hash,
                 "note_count": len(parsed.notes),
                 "note_density_per_sec": len(parsed.notes) / total_duration,
                 "hold_ratio": types.get("hold", 0.0) + types.get("touch_hold", 0.0),
@@ -480,6 +527,12 @@ def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
                 "slide_ratio": types.get("slide", 0.0),
                 "chord_ratio": quality.get("chord_ratio", 0.0),
                 "fine_note_ratio": fine_note_ratio(note.beat for note in parsed.notes),
+                "tempo_map": [{"beat": str(change.beat), "bpm": change.bpm}
+                              for change in chart.tempo_changes],
+                "first_sec": chart.first,
+                "time_offset_sec": chart.time_offset,
+                "audio_first_sec": chart.audio_first,
+                "end_beat": str(chart.end_beat),
             })
     if not candidates:
         raise ValueError("No readable event-usable charts matched difficulty 4..6 and level 12..15.")
@@ -527,6 +580,7 @@ def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
     return {
         "schema": "maichart-rhythm-evaluation-panel-v1",
         "source_manifest": str(manifest_path),
+        "split_report": str(split_report_path) if split_report_path is not None else None,
         "candidate_filter": {"event_usable_for_training": True, "difficulty_indices": [4, 5, 6],
                              "level_min": 12, "level_max": 15},
         "selection_policy": "distinct songs selected by measured density/type-ratio extrema and density quantiles; no subjective tags",
@@ -534,6 +588,14 @@ def build_fixed_panel(manifest_path: Path, *, size: int = 10) -> dict[str, Any]:
         "candidate_chart_count": len(candidates),
         "selected_song_count": len(selected),
         "skipped_counts": dict(sorted(skipped.items())),
+        "audio_hash_audit": {
+            "hash_algorithm": "sha256",
+            "distinct_candidate_audio_hashes": len(seen_audio_hashes),
+            "train_hashes_checked": len(forbidden_audio_hashes),
+            "excluded_training_audio_candidates": skipped.get("training_audio_hash_excluded", 0),
+            "selected_overlap_count": len({item["audio_sha256"] for item in selected} & forbidden_audio_hashes),
+            "status": "disjoint_from_training" if split_report is not None else "not_checked",
+        },
         "songs": selected,
     }
 
@@ -547,6 +609,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="also choose a fixed, measured-feature panel from an event training manifest")
     parser.add_argument("--panel-output", type=Path,
                         help="write the optional panel JSON here")
+    parser.add_argument("--panel-split-report", type=Path,
+                        help="verify the panel manifest against this split report and exclude training audio hashes")
     parser.add_argument("--panel-size", type=int, default=10,
                         help="number of distinct songs in the optional panel (default: 10)")
     parser.add_argument("-o", "--output", type=Path, help="JSON report path; defaults to stdout")
@@ -561,7 +625,9 @@ def main(argv: list[str] | None = None) -> int:
             "reference_pairing": {"status": "not_requested", "matched": 0, "missing": 0},
             "charts": [], "errors": [],
         })
-        panel = build_fixed_panel(args.panel_manifest, size=args.panel_size) if args.panel_manifest else None
+        panel = (build_fixed_panel(args.panel_manifest, size=args.panel_size,
+                                   split_report_path=args.panel_split_report)
+                 if args.panel_manifest else None)
     except (OSError, ValueError) as exc:
         parser.error(str(exc))
     if panel is not None:

@@ -228,3 +228,39 @@ def test_fixed_panel_uses_measured_traits_and_keeps_distinct_source_audio(tmp_pa
     assert {item["song_id"] for item in panel["songs"]} == {"sparse", "dense"}
     assert all(Path(item["audio_path"]).is_absolute() for item in panel["songs"])
     assert all("selection_basis" in item and "note_density_per_sec" in item for item in panel["songs"])
+    assert all(len(item["audio_sha256"]) == 64 for item in panel["songs"])
+    assert all(item["tempo_map"] and "audio_first_sec" in item for item in panel["songs"])
+
+
+def test_fixed_panel_deduplicates_audio_content_across_song_ids(tmp_path):
+    root = tmp_path / "dataset"
+    songs = []
+    for song_id, audio_bytes, pattern in (
+        ("primary", b"same audio", "1,2,3,4,E"),
+        ("alias", b"same audio", "1,,,2,,,3,,,4,E"),
+        ("distinct", b"other audio", "1,2,,,3,4,E"),
+    ):
+        folder = root / song_id
+        folder.mkdir(parents=True)
+        (folder / "maidata.txt").write_text(
+            f"&title={song_id}\n&wholebpm=120\n&lv_5=13\n&inote_5=(120){{4}}{pattern}\n",
+            encoding="utf-8",
+        )
+        (folder / "track.mp3").write_bytes(audio_bytes)
+        songs.append({
+            "song_id": song_id,
+            "maidata_path": f"{song_id}/maidata.txt",
+            "audio_path": f"{song_id}/track.mp3",
+            "difficulties": [{"difficulty_index": 5, "level_raw": "13",
+                              "event_usable_for_training": True}],
+        })
+    manifest = root / "validation_manifest.json"
+    manifest.write_text(json.dumps({"songs": songs, "source_root": str(root)}), encoding="utf-8")
+
+    panel = build_fixed_panel(manifest)
+
+    assert panel["candidate_chart_count"] == 2
+    assert panel["selected_song_count"] == 2
+    assert panel["skipped_counts"]["duplicate_audio_content"] == 1
+    assert len({item["audio_sha256"] for item in panel["songs"]}) == 2
+    assert len({item["song_id"] for item in panel["songs"]}) == 2
