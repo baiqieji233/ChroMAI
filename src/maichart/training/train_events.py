@@ -10,7 +10,7 @@ import threading
 import time
 from functools import partial
 from pathlib import Path
-from typing import Any, Sequence
+from typing import Any, Callable, Sequence
 
 import numpy as np
 import torch
@@ -32,6 +32,16 @@ from maichart.generation.music_plan import (
 )
 from maichart.training.event_checkpoints import EVENT_CHECKPOINT_SCHEMA, atomic_save_checkpoint, compare_event_contract, load_event_checkpoint, vocabulary_signature
 from maichart.training.event_dataset import EventDataset, collate_events
+
+VALIDATION_CONDITION_SEED = 0
+VALIDATION_MASK_SCHEDULE = "fixed_seed_0_v1"
+GLOBAL_STEP_SEMANTICS = "successful_optimizer_steps_v1"
+
+
+class _PrefetchFailure:
+    def __init__(self, error: BaseException):
+        self.error = error
+        self.traceback = error.__traceback__
 
 
 # Model family.  `event_v1` is the default; the cross-window family ships as
@@ -241,12 +251,65 @@ def _quality_weighted_mean(values: torch.Tensor, weights: torch.Tensor,
     return total / denominator / max(float(normalizer), 1e-8)
 
 
+def _reset_dataset_condition_rng(loader: Any, seed: int) -> bool:
+    """Reset the validation dataset RNG before its prefetch iterator starts."""
+    current = loader
+    visited: set[int] = set()
+    while current is not None and id(current) not in visited:
+        visited.add(id(current))
+        rng = getattr(current, "_condition_rng", None)
+        if rng is not None and hasattr(rng, "seed"):
+            rng.seed(int(seed))
+            return True
+        child = getattr(current, "dataset", None)
+        current = child if child is not None else getattr(current, "loader", None)
+    return False
+
+
+def _close_loader_iterator(iterator: Any) -> None:
+    close = getattr(iterator, "close", None)
+    if callable(close):
+        close()
+
+
+def _run_and_count_optimizer_steps(optimizer: torch.optim.Optimizer,
+                                   operation: Callable[[], Any]) -> tuple[Any, int]:
+    """Count only calls that actually reach optimizer.step(), including AMP skips."""
+    successful = 0
+
+    def on_step(_optimizer, _args, _kwargs):
+        nonlocal successful
+        successful += 1
+
+    handle = optimizer.register_step_post_hook(on_step)
+    try:
+        result = operation()
+    finally:
+        handle.remove()
+    return result, successful
+
+
+def _global_step_metadata(checkpoint: dict[str, Any] | None, *, resume: bool) -> tuple[str, int | None]:
+    if not resume or checkpoint is None:
+        return GLOBAL_STEP_SEMANTICS, None
+    saved = checkpoint.get("global_step_semantics")
+    if saved == GLOBAL_STEP_SEMANTICS:
+        return saved, None
+    if saved == "legacy_baseline_plus_successful_steps_v1":
+        return saved, int(checkpoint.get("global_step_legacy_before_resume", checkpoint["global_step"]))
+    return "legacy_baseline_plus_successful_steps_v1", int(checkpoint["global_step"])
+
+
 def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulation=1,
               condition_dropout=0.0, condition_default=0.5, plan_loss_weight=0.1, max_steps=0,
               vram_budget_bytes: int = 0, vram_flush_batches: int = 100,
               quality_token_normalizer: float = 1.0, quality_plan_normalizer: float = 1.0,
-              plan_teacher_mix: float = 0.0):
+              plan_teacher_mix: float = 0.0, validation_condition_seed: int = VALIDATION_CONDITION_SEED,
+              phase: str = "train", progress_interval_seconds: float = 60.0):
     train = optimizer is not None
+    validation_condition_rng_reset = False
+    if not train:
+        validation_condition_rng_reset = _reset_dataset_condition_rng(loader, validation_condition_seed)
     model.train(train)
     if train:
         optimizer.zero_grad(set_to_none=True)
@@ -260,11 +323,24 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     weighted_token_total = None
     planner_error_total = None
     planner_window_total = None
+    objective_loss_total = None
+    planner_loss_total = None
+    configuration_loss_total = None
+    configuration_correct_total = None
+    configuration_window_total = None
+    objective_window_total = 0
+    optimizer_steps_attempted = 0
+    optimizer_steps_successful = 0
     token_total = None
     correct_total = None
     position_total = None
     position_correct_total = None
     batches = 0
+    batch_limit = min(len(loader), max_steps) if max_steps else len(loader)
+    if not math.isfinite(float(progress_interval_seconds)) or progress_interval_seconds < 0:
+        raise ValueError("progress_interval_seconds must be finite and nonnegative.")
+    phase_started = time.monotonic()
+    last_progress = phase_started
     # Where did the epoch actually spend its time?  `data_seconds` is the loader
     # (CPU, and with num_workers=0 it does not overlap the GPU); `gpu_seconds`
     # comes from CUDA events recorded around each micro-batch, so the pair tells
@@ -276,14 +352,15 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     vram_freed = 0.0
     timing = device.type == "cuda"
     iterator = iter(loader)
-    for batch_index in range(len(loader)):
-        if max_steps and batch_index >= max_steps:
-            break
+    for batch_index in range(batch_limit):
         data_begin = time.perf_counter()
         try:
             batch = next(iterator)
         except StopIteration:
             break
+        except BaseException:
+            _close_loader_iterator(iterator)
+            raise
         data_seconds += time.perf_counter() - data_begin
         start_event = end_event = None
         if timing:
@@ -347,16 +424,36 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             raise RuntimeError("Non-finite event loss; no successful checkpoint will be saved.")
         if train:
             # Normalize the last incomplete accumulation group correctly.
-            batch_limit = min(len(loader), max_steps) if max_steps else len(loader)
             group_start = (batch_index // accumulation) * accumulation
             divisor = min(accumulation, batch_limit - group_start)
             scaler.scale(loss / divisor).backward()
             if (batch_index + 1) % accumulation == 0 or batch_index + 1 == batch_limit:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
+                optimizer_steps_attempted += 1
+                _result, successful_steps = _run_and_count_optimizer_steps(
+                    optimizer, lambda: scaler.step(optimizer))
+                optimizer_steps_successful += successful_steps
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
+        batch_windows = int(condition.size(0))
+        objective_batch = loss.detach().double() * batch_windows
+        planner_batch = weighted_plan.detach().double() * batch_windows
+        configuration_batch = weighted_config.detach().double() * batch_windows
+        objective_loss_total = (objective_batch if objective_loss_total is None
+                                else objective_loss_total + objective_batch)
+        planner_loss_total = (planner_batch if planner_loss_total is None
+                              else planner_loss_total + planner_batch)
+        configuration_loss_total = (configuration_batch if configuration_loss_total is None
+                                    else configuration_loss_total + configuration_batch)
+        objective_window_total += batch_windows
+        config_predictions = plan_pred[:, continuous:continuous + 4].argmax(dim=-1)
+        config_correct = ((config_predictions == config_target) & (sample_weights > 0)).sum()
+        configuration_correct_total = (config_correct if configuration_correct_total is None
+                                       else configuration_correct_total + config_correct)
+        config_window_count = (sample_weights > 0).sum()
+        configuration_window_total = (config_window_count if configuration_window_total is None
+                                      else configuration_window_total + config_window_count)
         batch_loss = raw_loss[valid].sum().detach().double()
         loss_total = batch_loss if loss_total is None else loss_total + batch_loss
         valid_count = valid.sum()
@@ -399,11 +496,29 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
         # grows monotonically until it spills into shared GPU memory.
         if vram_flush_batches and batch_index and batch_index % vram_flush_batches == 0:
             vram_freed += enforce_vram_budget(device, vram_budget_bytes, reset_peak=True)
+        now = time.monotonic()
+        if progress_interval_seconds > 0 and now - last_progress >= progress_interval_seconds:
+            print(f"epoch_progress phase={phase} batch={batches}/{batch_limit} "
+                  f"elapsed_seconds={now - phase_started:.1f} "
+                  f"optimizer_attempted={optimizer_steps_attempted} "
+                  f"optimizer_successful={optimizer_steps_successful}", flush=True)
+            last_progress = now
+    _close_loader_iterator(iterator)
     # One synchronisation for the whole epoch instead of four per micro-batch.
     total_loss = float(loss_total.item()) if loss_total is not None else 0.0
     total_weighted_loss = float(weighted_loss_total.item()) if weighted_loss_total is not None else 0.0
     total_weighted_tokens = float(weighted_token_total.item()) if weighted_token_total is not None else 0.0
     total_tokens = int(token_total.item()) if token_total is not None else 0
+    objective_loss = (float(objective_loss_total.item()) / max(objective_window_total, 1)
+                      if objective_loss_total is not None else 0.0)
+    planner_loss = (float(planner_loss_total.item()) / max(objective_window_total, 1)
+                    if planner_loss_total is not None else 0.0)
+    configuration_loss = (float(configuration_loss_total.item()) / max(objective_window_total, 1)
+                          if configuration_loss_total is not None else 0.0)
+    configuration_count = (int(configuration_window_total.item())
+                           if configuration_window_total is not None else 0)
+    configuration_correct = (int(configuration_correct_total.item())
+                              if configuration_correct_total is not None else 0)
     correct = int(correct_total.item()) if correct_total is not None else 0
     position_correct = int(position_correct_total.item()) if position_correct_total is not None else 0
     position_count = int(position_total.item()) if position_total is not None else 0
@@ -414,12 +529,27 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     plan_names = continuous_keys(getattr(model.config, "planner_profile", "legacy_v1"))
     plan_errors = (planner_error_total.cpu().tolist() if planner_error_total is not None else [])
     plan_count = int(planner_window_total.item()) if planner_window_total is not None else 0
+    amp_scale_end = (float(scaler.get_scale()) if train and scaler is not None
+                     and scaler.is_enabled() else None)
+    token_loss = total_loss / max(total_tokens, 1)
     return {"loss": total_loss / max(total_tokens, 1),
+            "token_loss": token_loss,
+            "objective_loss": objective_loss,
+            "planner_loss": planner_loss,
+            "configuration_loss": configuration_loss,
+            "configuration_accuracy": configuration_correct / max(configuration_count, 1),
             "quality_weighted_token_loss": total_weighted_loss / max(total_weighted_tokens, 1e-8),
             "quality_weighted_tokens": total_weighted_tokens,
             "planner_mae": {key: float(value) / max(plan_count, 1)
                             for key, value in zip(plan_names, plan_errors)},
             "planner_supervised_windows": plan_count,
+            "optimizer_steps_attempted": optimizer_steps_attempted,
+            "optimizer_steps_successful": optimizer_steps_successful,
+            "amp_skipped_steps": optimizer_steps_attempted - optimizer_steps_successful,
+            "amp_scale_end": amp_scale_end,
+            "validation_condition_rng_reset": validation_condition_rng_reset,
+            "validation_condition_seed": (int(validation_condition_seed) if not train else None),
+            "phase": phase,
             "token_accuracy": correct / max(total_tokens, 1),
             "position_accuracy": position_correct / max(position_count, 1), "tokens": total_tokens,
             "batches": batches, "data_seconds": round(data_seconds, 3),
@@ -462,11 +592,21 @@ class PrefetchLoader:
                             continue
                     if stop.is_set():
                         return
+            except BaseException as exc:
+                failure = _PrefetchFailure(exc)
+                while not stop.is_set():
+                    try:
+                        queue.put(failure, timeout=0.1)
+                        break
+                    except __import__("queue").Full:
+                        continue
             finally:
-                try:
-                    queue.put(sentinel, timeout=2.0)
-                except Exception:
-                    pass
+                while not stop.is_set():
+                    try:
+                        queue.put(sentinel, timeout=0.1)
+                        break
+                    except __import__("queue").Full:
+                        continue
 
         thread = threading.Thread(target=produce, name="maichart-prefetch", daemon=True)
         thread.start()
@@ -475,6 +615,8 @@ class PrefetchLoader:
                 item = queue.get()
                 if item is sentinel:
                     return
+                if isinstance(item, _PrefetchFailure):
+                    raise item.error.with_traceback(item.traceback)
                 yield item
         finally:
             stop.set()
@@ -869,6 +1011,18 @@ def main(argv=None) -> int:
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, factor=0.5, patience=4)
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and not args.no_amp)
     start_epoch, global_step, best, stale = 0, 0, float("inf"), 0
+    global_step_semantics, global_step_legacy_before_resume = _global_step_metadata(
+        checkpoint, resume=bool(args.resume))
+    saved_validation_schedule = checkpoint.get("validation_mask_schedule") if args.resume else None
+    validation_schedule_transition = (
+        "legacy_random_to_fixed_seed_0_v1"
+        if args.resume and saved_validation_schedule is None else VALIDATION_MASK_SCHEDULE
+    )
+    if validation_schedule_transition == "legacy_random_to_fixed_seed_0_v1":
+        print("validation_schedule_transition=legacy_random_to_fixed_seed_0_v1 "
+              "note=legacy epochs used fresh random masks; fixed seed has the same expected mask distribution "
+              "but one-epoch validation scores are not strictly comparable; best/scheduler state preserved",
+              flush=True)
     if args.resume:
         start_epoch, global_step = checkpoint["epoch"], checkpoint["global_step"]
         best = checkpoint.get("best_metric", best)
@@ -939,21 +1093,32 @@ def main(argv=None) -> int:
                             vram_budget_bytes=budget_bytes, vram_flush_batches=args.cuda_cache_flush_batches,
                             quality_token_normalizer=quality_normalizers["token"],
                             quality_plan_normalizer=quality_normalizers["planner"],
-                            plan_teacher_mix=args.plan_teacher_mix)
+                            plan_teacher_mix=args.plan_teacher_mix,
+                            phase="train")
         preference_metrics = {"pairs": 0.0, "loss": 0.0, "win_rate": 0.0}
+        preference_optimizer_steps_successful = 0
         if preference_pairs and args.preference_enabled:
             from maichart.training.event_preferences import run_preference_epoch
 
-            preference_metrics = run_preference_epoch(
-                model, preference_pairs, dataset, device, optimizer, scaler,
-                max_pairs=args.preference_max_pairs, beta=args.preference_beta,
-                weight=args.preference_weight, reference_scores=reference_scores, seed=args.seed + epoch,
+            preference_metrics, preference_optimizer_steps_successful = _run_and_count_optimizer_steps(
+                optimizer,
+                lambda: run_preference_epoch(
+                    model, preference_pairs, dataset, device, optimizer, scaler,
+                    max_pairs=args.preference_max_pairs, beta=args.preference_beta,
+                    weight=args.preference_weight, reference_scores=reference_scores, seed=args.seed + epoch,
+                ),
             )
+            preference_metrics["optimizer_steps_attempted"] = int(preference_metrics.get("pairs", 0.0))
+            preference_metrics["optimizer_steps_successful"] = preference_optimizer_steps_successful
+            preference_metrics["amp_skipped_steps"] = (
+                preference_metrics["optimizer_steps_attempted"] - preference_optimizer_steps_successful)
         train_seconds = time.perf_counter() - epoch_start
         validation_start = time.perf_counter()
         val_metrics = run_epoch(model, val_loader, device, plan_loss_weight=args.plan_loss_weight,
                                 max_steps=args.validation_max_steps, vram_budget_bytes=budget_bytes,
-                                vram_flush_batches=args.cuda_cache_flush_batches) if val_loader else None
+                                vram_flush_batches=args.cuda_cache_flush_batches,
+                                validation_condition_seed=VALIDATION_CONDITION_SEED,
+                                phase="validation") if val_loader else None
         validation_seconds = time.perf_counter() - validation_start
         score = (val_metrics or metrics)["loss"]
         previous_lr = optimizer.param_groups[0]["lr"]
@@ -962,8 +1127,7 @@ def main(argv=None) -> int:
         lr_reduced = current_lr < previous_lr
         if lr_reduced:
             stale = 0
-        global_step += math.ceil(metrics["batches"] / args.grad_accumulation)
-        global_step += int(preference_metrics.get("pairs", 0.0))
+        global_step += metrics["optimizer_steps_successful"] + preference_optimizer_steps_successful
         improved = score < best
         if improved: best, stale = score, 0
         else: stale += 1
@@ -971,7 +1135,12 @@ def main(argv=None) -> int:
         record = {"epoch": epoch, "wall_time": time.strftime("%Y-%m-%d %H:%M:%S"),
                   "train": metrics, "preference": preference_metrics,
                   "validation": val_metrics, "lr": optimizer.param_groups[0]["lr"],
+                  "global_step": global_step, "global_step_semantics": global_step_semantics,
+                  "global_step_legacy_before_resume": global_step_legacy_before_resume,
+                  "validation_mask_schedule": VALIDATION_MASK_SCHEDULE if validation else None,
+                  "validation_schedule_transition": validation_schedule_transition if validation else None,
                   "selection_metric": "validation_loss" if validation else "training_loss",
+                  "selection_metric_scope": "token_loss_only_compatibility",
                   "lr_reduced": bool(lr_reduced),
                   "train_seconds": round(train_seconds, 2),
                   "validation_seconds": round(validation_seconds, 2),
@@ -984,7 +1153,12 @@ def main(argv=None) -> int:
         # The per-batch time is the throughput readout, and data/gpu split says
         # whether the GPU is starved (data_seconds >> gpu_seconds) or stalled
         # (gpu_seconds ~= train_seconds with low utilisation).
-        print(f"epoch={epoch:03d} loss={metrics['loss']:.6f} token_accuracy={metrics['token_accuracy']:.4f} "
+        print(f"epoch={epoch:03d} loss={metrics['loss']:.6f} objective_loss={metrics['objective_loss']:.6f} "
+              f"planner_loss={metrics['planner_loss']:.6f} configuration_loss={metrics['configuration_loss']:.6f} "
+              f"config_accuracy={metrics['configuration_accuracy']:.4f} "
+              f"token_accuracy={metrics['token_accuracy']:.4f} "
+              f"optimizer_steps={metrics['optimizer_steps_successful']}/{metrics['optimizer_steps_attempted']} "
+              f"amp_skipped={metrics['amp_skipped_steps']} "
               f"val_loss={val_metrics['loss'] if val_metrics else 'unavailable'} "
               f"seconds={train_seconds:.1f} ms_per_batch={per_batch_ms:.1f} batches={metrics['batches']} "
               f"data_s={metrics.get('data_seconds', 0.0):.1f} gpu_s={metrics.get('gpu_seconds', 0.0):.1f}",
@@ -1015,11 +1189,14 @@ def main(argv=None) -> int:
                                  "freed_gib": freed}
         with (checkpoint_dir / "metrics.jsonl").open("a", encoding="utf-8") as handle: handle.write(json.dumps(record) + "\n")
         payload = {"schema": EVENT_CHECKPOINT_SCHEMA, "checkpoint_kind": "training_checkpoint", "epoch": epoch, "global_step": global_step,
+                   "global_step_semantics": global_step_semantics,
+                   "global_step_legacy_before_resume": global_step_legacy_before_resume,
                    "best_metric": best, "stale_epochs": stale, "metrics": record,
                    "model_config": config.to_dict(), "data_contract": contract, "vocabulary": vocabulary.to_dict(), "atom_catalog": catalog,
                    "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
                    "training_origin": training_origin,
                    "amp_scaler_state_dict": scaler.state_dict(), "args": vars(args),
+                   "validation_mask_schedule": VALIDATION_MASK_SCHEDULE if validation else None,
                    "preference_reference_scores": reference_scores if args.preference_enabled else {},
                    "rng_state": {"python": random.getstate(), "numpy": np.random.get_state(), "torch": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None}}
         atomic_save_checkpoint(payload, checkpoint_dir / "event_last.pt")
