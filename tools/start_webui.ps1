@@ -14,6 +14,8 @@ $NoBrowser = $false
 $NoInstall = $false
 $Reinstall = $false
 $Port = 7860
+$SupportedPythonMin = [version]"3.10"
+$SupportedPythonMax = [version]"3.14"
 
 function Fail([string] $Message) {
     Write-Error $Message
@@ -48,37 +50,118 @@ for ($index = 0; $index -lt $ScriptArgs.Count; $index++) {
 if ($Cpu -and $Cuda) { Fail "Choose only one of --cpu and --cuda." }
 if ($Reinstall) { $NoInstall = $false }
 
+function Get-PythonInfo([string] $Executable, [string[]] $PythonArgs = @()) {
+    try {
+        $output = @(& $Executable @PythonArgs -c "import sys; print('%d.%d' % sys.version_info[:2]); print(sys.executable)" 2>$null)
+        if ($LASTEXITCODE -ne 0 -or $output.Count -ne 2) { return $null }
+        return [pscustomobject]@{
+            Path = ([string]$output[1]).Trim()
+            Version = [version](([string]$output[0]).Trim())
+        }
+    } catch {
+        return $null
+    }
+}
+
+function Test-SupportedPython($Info) {
+    return ($null -ne $Info -and $Info.Version -ge $SupportedPythonMin -and $Info.Version -lt $SupportedPythonMax)
+}
+
 $overridePython = $env:MAICHART_PYTHON
+$overrideSource = "MAICHART_PYTHON"
+$pythonConfig = Join-Path $ProjectRoot ".webui-python"
+if (-not $overridePython -and (Test-Path -LiteralPath $pythonConfig)) {
+    $overridePython = ([string](Get-Content -LiteralPath $pythonConfig -Raw -Encoding UTF8)).Trim()
+    $overrideSource = ".webui-python"
+    if (-not $overridePython) { Fail ".webui-python is empty. Set it to the path of an existing Python 3.10-3.13 executable." }
+}
 if ($overridePython) {
+    if (-not [System.IO.Path]::IsPathRooted($overridePython)) {
+        $overridePython = Join-Path $ProjectRoot $overridePython
+    }
     $Python = (Resolve-Path -LiteralPath $overridePython -ErrorAction SilentlyContinue).Path
-    if (-not $Python) { Fail "MAICHART_PYTHON does not point to an existing Python executable: $overridePython" }
+    if (-not $Python) { Fail "$overrideSource does not point to an existing Python executable: $overridePython" }
+    $pythonInfo = Get-PythonInfo $Python
+    if (-not $pythonInfo) { Fail "Unable to run Python from ${overrideSource}: $Python" }
+    if (-not (Test-SupportedPython $pythonInfo)) {
+        Fail "$overrideSource must point to Python 3.10-3.13; found $($pythonInfo.Version)."
+    }
 } else {
-    $localPython = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
-    if (Test-Path -LiteralPath $localPython) {
-        $Python = $localPython
+    $configuredVenv = [bool]$env:MAICHART_VENV
+    $venvRoots = @()
+    if ($configuredVenv) {
+        $venvRoots += $env:MAICHART_VENV
     } else {
-        $candidate = Get-Command py -ErrorAction SilentlyContinue
-        if (-not $candidate) { $candidate = Get-Command python -ErrorAction SilentlyContinue }
-        if (-not $candidate) { Fail "Python 3.10-3.13 was not found. Install Python or set MAICHART_PYTHON." }
-        if ($CheckOnly) {
-            $Python = $candidate.Source
+        $venvRoots += Join-Path $ProjectRoot ".venv"
+        # The documented local setup keeps dependencies on D: to avoid filling the project drive.
+        $venvRoots += "D:\maimai_ai\venv"
+    }
+    foreach ($candidateRoot in $venvRoots) {
+        $candidateRoot = [string]$candidateRoot
+        if (-not [System.IO.Path]::IsPathRooted($candidateRoot)) {
+            $candidateRoot = Join-Path $ProjectRoot $candidateRoot
+        }
+        $candidatePath = Join-Path $candidateRoot "Scripts\python.exe"
+        if (-not (Test-Path -LiteralPath $candidatePath)) { continue }
+        $candidateInfo = Get-PythonInfo $candidatePath
+        if (Test-SupportedPython $candidateInfo) {
+            $Python = $candidatePath
+            $venvRoot = $candidateRoot
+            break
+        }
+        Write-Warning "Ignoring incompatible Python environment '$candidateRoot'. Python 3.10-3.13 is required."
+    }
+    if (-not $venvRoot) {
+        $venvRoot = Join-Path $ProjectRoot ".venv"
+    }
+    $venvPython = Join-Path $venvRoot "Scripts\python.exe"
+
+    $bootstrapPython = $null
+    if (-not $Python) {
+        $pyLauncher = Get-Command py -ErrorAction SilentlyContinue
+        if ($pyLauncher) {
+            foreach ($versionTag in "3.11", "3.12", "3.13", "3.10") {
+                # The current Windows Python install manager uses -V:3.11;
+                # this also works with the classic py launcher.
+                $candidateInfo = Get-PythonInfo $pyLauncher.Source @("-V:$versionTag")
+                if (Test-SupportedPython $candidateInfo) {
+                    $bootstrapPython = $candidateInfo.Path
+                    break
+                }
+            }
+        }
+        if (-not $bootstrapPython) {
+            $pythonCommand = Get-Command python -ErrorAction SilentlyContinue
+            if ($pythonCommand) {
+                $candidateInfo = Get-PythonInfo $pythonCommand.Source
+                if (Test-SupportedPython $candidateInfo) {
+                    $bootstrapPython = $candidateInfo.Path
+                }
+            }
+        }
+        if (-not $bootstrapPython) { Fail "Python 3.10-3.13 was not found. Install Python 3.11 or set MAICHART_PYTHON." }
+
+        if ($CheckOnly -or $NoInstall) {
+            $Python = $bootstrapPython
         } else {
-            Write-Host "Creating project virtual environment: $localPython"
-            & $candidate.Source -m venv (Join-Path $ProjectRoot ".venv")
-            if ($LASTEXITCODE -ne 0) { Fail "Failed to create the project virtual environment." }
-            $Python = $localPython
+            if (Test-Path -LiteralPath $venvRoot) {
+                Fail "Existing environment '$venvRoot' is incompatible. Set MAICHART_VENV to a new directory or MAICHART_PYTHON to an existing Python 3.10-3.13 environment."
+            }
+            Write-Host "Creating virtual environment: $venvRoot"
+            & $bootstrapPython -m venv $venvRoot
+            if ($LASTEXITCODE -ne 0) { Fail "Failed to create the virtual environment: $venvRoot" }
+            $Python = $venvPython
         }
     }
 }
 
 if (-not (Test-Path -LiteralPath $Python)) { Fail "Python executable not found: $Python" }
-$versionText = (& $Python -c "import sys; print(f'{sys.version_info.major}.{sys.version_info.minor}')").Trim()
-if ($LASTEXITCODE -ne 0) { Fail "Unable to run Python: $Python" }
-$version = [version]("$versionText.0")
-if ($version -lt [version]"3.10.0" -or $version -ge [version]"3.14.0") {
-    Fail "Python 3.10-3.13 is required; found $versionText."
+$pythonInfo = Get-PythonInfo $Python
+if (-not $pythonInfo) { Fail "Unable to run Python: $Python" }
+if (-not (Test-SupportedPython $pythonInfo)) {
+    Fail "Python 3.10-3.13 is required; found $($pythonInfo.Version)."
 }
-Write-Host "Python: $Python ($versionText)"
+Write-Host "Python: $Python ($($pythonInfo.Version))"
 
 function Test-PythonImports {
     & $Python -c "import torch, librosa, numpy, scipy, soundfile, pytest"

@@ -50,8 +50,7 @@ Python，并在安装器中勾选把 Python 加入 PATH。
 START_WEBUI.bat --no-browser --port 7860
 ```
 
-首次启动会在项目目录创建独立 `.venv`，并安装测试工具、音频分析库和训练需要的
-PyTorch 等依赖。若网络中断，重新执行同一条命令即可。安装完成后可用
+首次启动会优先复用项目 `.venv` 或本机 `D:\maimai_ai\venv`，没有可用环境时才在项目目录创建独立 `.venv`，并安装测试工具、音频分析库和训练需要的 PyTorch 等依赖。若网络中断，重新执行同一条命令即可。安装完成后可用
 `START_WEBUI.bat --check` 只检查环境而不启动服务。
 
 检查 PyTorch 是否能看到显卡：
