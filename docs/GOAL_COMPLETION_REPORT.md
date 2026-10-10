@@ -1,4 +1,6 @@
-# Goal达成总结报告
+> 历史报告，完成结论已失效。本页记录早期实现声明，不能用于当前验收；其中“完整可玩性约束”等表述被后续实测纠正。当前进度与证据见 [阶段 B/C](STAGE_BC_REPORT.md)、[判定机制研究](MAIMAI_MECHANICS_RESEARCH.md) 和 [阶段 E](STAGE_E_LOCAL_ONSET_QUALITY.md)。截至 2026-10-11，正式训练/完整生成对照及质量验收仍未完成。
+
+# Goal达成总结报告（历史记录）
 
 **Goal文档**: E:\simai_transformer\docs\GOAL_COMPLEX_RHYTHM_PLAYABILITY_FINAL.md  
 **开始时间**: 2026-10-10 17:30  

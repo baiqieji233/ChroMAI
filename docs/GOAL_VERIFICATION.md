@@ -1,4 +1,6 @@
-# Goal文档实施验证报告
+> 历史验证记录，不作为当前完成依据。旧文档的手部固定分配、三连音标签与完成勾选不代表实机可玩性或复杂采音已解决。实际机制与当前状态见 [阶段 B/C](STAGE_BC_REPORT.md)、[判定机制研究](MAIMAI_MECHANICS_RESEARCH.md) 和 [阶段 E](STAGE_E_LOCAL_ONSET_QUALITY.md)。
+
+# Goal文档实施验证报告（历史记录）
 
 **Goal文档**: E:\simai_transformer\docs\GOAL_COMPLEX_RHYTHM_PLAYABILITY_FINAL.md
 **验证日期**: 2026-10-10

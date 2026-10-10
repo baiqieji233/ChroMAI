@@ -122,6 +122,30 @@ def test_unknown_path_is_explicitly_partial_not_passed():
     assert result.coverage["unsupported"]
 
 
+def test_unsupported_slide_is_not_a_hard_conflict_or_automatic_rejection():
+    # reject applies to detected conflicts, not to legal note types outside
+    # the static trajectory simulator. Coverage still must remain partial.
+    points = [P(F(0), "1p5[4:1]")]
+    result = detect_chart_conflicts(points, TEMPO, 0, config("reject"))
+    assert result.success is True
+    assert result.coverage["status"] == "partial"
+    assert result.coverage["unsupported"]
+    assert not result.conflicts_detected
+    assert result.points == points
+
+
+def test_partial_coverage_does_not_hide_an_independent_confirmed_conflict():
+    points = [P(F(0), "1p5[4:1]"), P(F(4), "2h[4:2]"), P(F(5), "2/3")]
+    rejected = detect_chart_conflicts(points, TEMPO, 0, config("reject"))
+    assert rejected.success is False
+    repaired = process_chart_points(points, TEMPO, 0, config("local"))
+    assert repaired.coverage["status"] == "partial"
+    assert [(p.beat, p.note_text) for p in repaired.points] == [
+        (F(0), "1p5[4:1]"), (F(4), "2h[4:2]"), (F(5), "3")]
+    assert len(repaired.repairs_applied) == 1
+    assert not any(c.severity == "hard" for c in repaired.remaining_conflicts)
+
+
 def test_same_star_branches_count_one_head_but_explicit_duplicate_is_reported():
     branch = detect_chart_conflicts([P(F(0), "1-5[4:1]*-4[4:1]")], TEMPO, 0, config())
     assert not any(c.severity == "hard" for c in branch.conflicts_detected)
