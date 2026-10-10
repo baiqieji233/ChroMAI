@@ -23,7 +23,7 @@ from email.parser import BytesParser
 from email.policy import default as email_default
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Sequence
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -2016,7 +2016,7 @@ def _required_path(value: Any, label: str, *, must_exist: bool) -> Path:
 
 
 def _safe_filename(value: str) -> str:
-    name = Path(value or "upload.bin").name
+    name = PurePosixPath((value or "upload.bin").replace("\\", "/")).name
     name = re.sub(r"[^A-Za-z0-9_.()\-\u4e00-\u9fff ]+", "_", name).strip(" .")
     return name or "upload.bin"
 
