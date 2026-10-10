@@ -105,6 +105,116 @@ def _onset_rhythm(notes) -> dict[str, Any]:
         "gap_histogram_beats": {str(gap): gap_counts[gap] for gap in sorted(gap_counts)},
         "named_subdivision_gap_counts": {name: gap_counts.get(gap, 0) for name, gap in named_gaps.items()},
         "max_repeated_onset_type_pattern": repeated_pattern,
+        "spatial_repetition": _spatial_repetition(notes),
+    }
+
+
+def _spatial_run(events: list[dict[str, Any]], *, keys: list[int] | None = None,
+                 direction: str | None = None) -> dict[str, Any]:
+    beat_gaps = [right["beat"] - left["beat"] for left, right in zip(events, events[1:])]
+    sec_gaps = [float(right["sec"]) - float(left["sec"]) for left, right in zip(events, events[1:])]
+    result = {
+        "onset_count": len(events),
+        "start_beat": str(events[0]["beat"]),
+        "end_beat": str(events[-1]["beat"]),
+        "start_sec": float(events[0]["sec"]),
+        "end_sec": float(events[-1]["sec"]),
+        "gap_count": len(beat_gaps),
+        "gap_range_beats": ({"min": str(min(beat_gaps)), "max": str(max(beat_gaps))}
+                             if beat_gaps else None),
+        "gap_range_sec": ({"min": min(sec_gaps), "max": max(sec_gaps)} if sec_gaps else None),
+    }
+    if keys is not None:
+        result["keys"] = keys
+    if direction is not None:
+        result["direction"] = direction
+    return result
+
+
+def _spatial_repetition(notes) -> dict[str, Any]:
+    """Describe sustained single-tap key paths, with barriers at other events."""
+    by_beat: dict[Fraction, list[Any]] = defaultdict(list)
+    for note in notes:
+        by_beat[Fraction(note.beat)].append(note)
+    events = []
+    single_taps = break_taps = 0
+    for beat in sorted(by_beat):
+        cell = by_beat[beat]
+        note = cell[0] if len(cell) == 1 else None
+        key = (int(note.position) if note is not None and note.note_type == "tap"
+               and isinstance(note.position, int) and 1 <= note.position <= 8 else None)
+        if key is not None:
+            single_taps += 1
+            break_taps += bool(getattr(note, "is_break", False))
+        events.append({
+            "beat": beat,
+            "sec": float(note.time_sec) if note is not None and note.time_sec is not None else None,
+            "key": key,
+        })
+
+    best = {"clockwise": None, "counterclockwise": None}
+    current: list[dict[str, Any]] = []
+    current_direction = None
+
+    def finish_direction_run() -> None:
+        nonlocal current, current_direction
+        if current_direction is not None and len(current) >= 2:
+            existing = best[current_direction]
+            candidate = _spatial_run(current, keys=[event["key"] for event in current],
+                                     direction=current_direction)
+            if existing is None or candidate["onset_count"] > existing["onset_count"]:
+                best[current_direction] = candidate
+        current = []
+        current_direction = None
+
+    for left, right in zip(events, events[1:]):
+        gap = right["beat"] - left["beat"]
+        step = ((right["key"] - left["key"]) % 8
+                if left["key"] is not None and right["key"] is not None else None)
+        direction = "clockwise" if step == 1 else "counterclockwise" if step == 7 else None
+        if gap > 1 or direction is None:
+            finish_direction_run()
+            continue
+        if (current_direction == direction and current
+                and current[-1]["beat"] == left["beat"]):
+            current.append(right)
+        else:
+            finish_direction_run()
+            current = [left, right]
+            current_direction = direction
+    finish_direction_run()
+
+    best_alternation = None
+    for start in range(len(events) - 2):
+        first, second = events[start], events[start + 1]
+        if (first["key"] is None or second["key"] is None
+                or first["key"] == second["key"]
+                or second["beat"] - first["beat"] > 1):
+            continue
+        run = [first, second]
+        for index in range(start + 2, len(events)):
+            previous, event = run[-1], events[index]
+            expected = first["key"] if (len(run) % 2 == 0) else second["key"]
+            if (event["key"] != expected or event["beat"] - previous["beat"] > 1):
+                break
+            run.append(event)
+        if len(run) >= 3 and (best_alternation is None
+                              or len(run) > best_alternation["onset_count"]):
+            best_alternation = _spatial_run(run, keys=[first["key"], second["key"]])
+
+    return {
+        "single_tap_onset_count": single_taps,
+        "break_tap_onset_count": break_taps,
+        "break_taps_included": True,
+        "clockwise_adjacent": best["clockwise"],
+        "counterclockwise_adjacent": best["counterclockwise"],
+        "alternating_two_keys": best_alternation,
+        "policy": {
+            "direction_convention": "1->2->...->8->1 is clockwise; reverse is counterclockwise",
+            "eligible_onset": "exactly one parsed tap note at button 1..8; break taps are included",
+            "interruptions": "chords and any non-tap onset interrupt; a gap greater than 1 beat disconnects",
+            "alternation_minimum_onsets": 3,
+        },
     }
 
 
@@ -351,6 +461,10 @@ def _pair_metrics(generated: dict[str, Any], reference: dict[str, Any]) -> dict[
         "status": "matched" if generated_hash and reference_hash else "matched_unverified",
         "identity_status": "audio_sha256_match" if generated_hash and reference_hash else "filename_only_unverified",
         "reference_path": reference["path"],
+        "spatial_repetition": {
+            "generated": generated["distribution"]["onset_rhythm"]["spatial_repetition"],
+            "reference": reference["distribution"]["onset_rhythm"]["spatial_repetition"],
+        },
         "paired_metric_deltas": deltas,
         "per_second_density_mae": (
             sum(abs(left_counts[index] - right_counts[index]) for index in range(shared)) / shared

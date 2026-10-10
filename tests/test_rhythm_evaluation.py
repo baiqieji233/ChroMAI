@@ -2,6 +2,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from tools.run_rhythm_evaluation import build_fixed_panel, evaluate_paths
@@ -94,6 +96,79 @@ def test_repeated_onset_type_pattern_tracks_multi_onset_cycles(tmp_path):
     }
 
 
+def _spatial_payload(points, *, tempo=120):
+    payload = _event_chart(first=0.0)
+    payload["tempo_changes"] = [{"beat": "0", "bpm": tempo}]
+    payload["points"] = [
+        {"beat": str(beat), "note_text": text}
+        for beat, text in points
+    ]
+    payload["end_beat"] = str(max((beat for beat, _ in points), default=0) + 1)
+    return payload
+
+
+def _spatial_report(tmp_path, points):
+    payload = _spatial_payload(points)
+    row = evaluate_paths([_write_chart(tmp_path / "spatial.chart.json", payload)])[
+        "charts"][0]
+    return row["distribution"]["onset_rhythm"]["spatial_repetition"]
+
+
+def test_spatial_repeat_detects_clockwise_and_counterclockwise_wrap(tmp_path):
+    clockwise = _spatial_report(tmp_path / "cw", [(beat, str(key)) for beat, key in enumerate((1, 2, 3, 4))])
+    counterclockwise = _spatial_report(tmp_path / "ccw", [(beat, str(key)) for beat, key in enumerate((1, 8, 7, 6))])
+
+    assert clockwise["clockwise_adjacent"]["keys"] == [1, 2, 3, 4]
+    assert clockwise["counterclockwise_adjacent"] is None
+    assert counterclockwise["counterclockwise_adjacent"]["keys"] == [1, 8, 7, 6]
+    assert counterclockwise["clockwise_adjacent"] is None
+    for pattern in (clockwise["clockwise_adjacent"], counterclockwise["counterclockwise_adjacent"]):
+        assert pattern["onset_count"] == 4
+        assert pattern["start_beat"] == "0" and pattern["end_beat"] == "3"
+        assert pattern["start_sec"] == pytest.approx(0.0)
+        assert pattern["end_sec"] == pytest.approx(1.5)
+        assert pattern["gap_range_beats"] == {"min": "1", "max": "1"}
+        assert pattern["gap_range_sec"] == {"min": 0.5, "max": 0.5}
+
+
+def test_spatial_repeat_detects_two_distinct_key_alternation(tmp_path):
+    pattern = _spatial_report(
+        tmp_path,
+        [(beat, str(key)) for beat, key in enumerate((1, 2, 1, 2, 1))],
+    )["alternating_two_keys"]
+
+    assert pattern["keys"] == [1, 2]
+    assert pattern["onset_count"] == 5
+    assert pattern["start_beat"] == "0" and pattern["end_beat"] == "4"
+    assert pattern["gap_range_beats"] == {"min": "1", "max": "1"}
+
+
+@pytest.mark.parametrize("interrupt", ["2h[4:1]", "12", "A", "2-3[4:1]"])
+def test_other_note_type_or_chord_interrupts_single_tap_patterns(tmp_path, interrupt):
+    spatial = _spatial_report(
+        tmp_path,
+        [(0, "1"), (1, interrupt), (2, "1"), (3, "2"), (4, "1")],
+    )
+
+    assert spatial["clockwise_adjacent"]["onset_count"] == 2
+    assert spatial["clockwise_adjacent"]["start_beat"] == "2"
+    assert spatial["alternating_two_keys"]["onset_count"] == 3
+    assert spatial["alternating_two_keys"]["start_beat"] == "2"
+
+
+def test_spatial_repeat_breaks_when_gap_exceeds_one_beat_and_includes_break_taps(tmp_path):
+    spatial = _spatial_report(
+        tmp_path,
+        [(0, "1b"), (1, "2"), (2, "3"), (4, "4"), (5, "5")],
+    )
+
+    assert spatial["break_tap_onset_count"] == 1
+    assert spatial["clockwise_adjacent"]["keys"] == [1, 2, 3]
+    assert spatial["clockwise_adjacent"]["onset_count"] == 3
+    assert spatial["clockwise_adjacent"]["start_beat"] == "0"
+    assert spatial["clockwise_adjacent"]["end_beat"] == "2"
+
+
 def test_chartir_with_maidata_source_uses_real_chart_tempo_and_audio_first(tmp_path):
     source = (
         "&title=IR Source\n&wholebpm=120\n&first=0.25\n&lv_5=13\n"
@@ -145,6 +220,8 @@ def test_reference_metrics_are_only_emitted_for_exact_filename_pairs(tmp_path):
     assert pair["identity_status"] == "filename_only_unverified"
     assert pair["per_second_density_mae"] == 0.0
     assert pair["paired_metric_deltas"]["blank_fraction"] == 0.0
+    assert pair["spatial_repetition"]["generated"] == pair["spatial_repetition"]["reference"]
+    assert pair["spatial_repetition"]["generated"]["single_tap_onset_count"] > 0
     assert pair["onset_alignment"]["matched_onsets"] == 5
     assert "reference intent may be incomplete" in pair["onset_alignment"]["interpretation"]
 
