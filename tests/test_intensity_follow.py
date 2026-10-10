@@ -361,6 +361,19 @@ def test_file_span_filter_is_hard_even_without_audible_trim():
               EventPoint(Fraction(5), "3")]
     kept = _filter_points_to_file_span(points, tempo_changes=tempo, first=0.0, duration_sec=1.0)
     assert [p.note_text for p in kept] == ["2"]
+def test_file_gate_does_not_extend_twenty_milliseconds_past_either_end():
+    from fractions import Fraction
+    from maichart.event_timing import EventPoint, EventTempo
+    from maichart.generation.event_cli import _filter_points_to_file_span
+
+    tempo = [EventTempo(Fraction(0), 60.)]
+    # With first=-0.01, these heads are at -0.01, 0, .99, 1, 1.01 seconds.
+    points = [EventPoint(Fraction(beat), str(index + 1))
+              for index, beat in enumerate(("0", "1/100", "1", "101/100", "51/50"))]
+    kept = _filter_points_to_file_span(points, tempo_changes=tempo, first=-.01, duration_sec=1.)
+    assert [p.note_text for p in kept] == ["2", "3"]
+
+
 def test_server_forwards_the_audio_bounds_flags():
     source = (ROOT / "src/maichart/webui/server.py").read_text(encoding="utf-8")
     for needle in ('args.append("--audio-bounds-trim")', 'args.append("--no-audio-bounds-trim")',

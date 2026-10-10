@@ -1684,11 +1684,14 @@ def _filter_points_to_audio_span(points: list[EventPoint], *, tempo_changes, fir
 
 
 def _filter_points_to_file_span(points: list[EventPoint], *, tempo_changes, first: float,
-                                duration_sec: float, tolerance: float = 0.02) -> list[EventPoint]:
-    """Hard safety gate: no event may map outside the actual audio file."""
+                                duration_sec: float) -> list[EventPoint]:
+    """Keep note heads strictly in the half-open audio-file interval [0, end).
 
-    low = max(0.0, float(first)) - max(0.0, float(tolerance))
-    high = float(duration_sec) + max(0.0, float(tolerance))
+    Audible-span trimming has its own tolerance; it must not leak through this
+    unconditional file boundary, including a negative chart/audio offset.
+    """
+
+    high = float(duration_sec)
     kept = []
     for point in points:
         # seconds_at_beat accepts only nonnegative beats.  A negative chart
@@ -1696,7 +1699,7 @@ def _filter_points_to_file_span(points: list[EventPoint], *, tempo_changes, firs
         if Fraction(point.beat) < 0:
             continue
         when = float(seconds_at_beat(point.beat, tempo_changes, first))
-        if low <= when <= high:
+        if 0.0 <= when < high:
             kept.append(point)
     return kept
 
