@@ -1,6 +1,6 @@
 # 阶段 E：从“生成更多音符”转向“选择合适的落音位置”
 
-更新：2026-10-11 04:08。阶段 D 的 full 基线已完成 15 轮，5 轮增采样微调已保存第 3 轮并进入第 4 轮。局部采音分支已依据新证据修改、尚未开始训练。工程联测已经完成，正式质量对照尚未完成，不能把小样本 checkpoint 作为可用成品。
+更新：2026-10-11 04:35。阶段 D 的 full 基线已完成 15 轮，5 轮增采样微调已保存第 4 轮并进入最后一轮。局部采音分支已依据新证据修改、尚未开始训练。工程联测已经完成，正式质量对照尚未完成，不能把小样本 checkpoint 作为可用成品。
 
 ## 目标与判断依据
 
@@ -126,7 +126,7 @@
 
 固定 MiaCode commit `6573efb611056bccd046dd17bc2f4cceda78bf88` 的 headless `miacode_muri_dump` 已在 `.scratch/muri_build` 独立构建成功（Qt 6.8.3 Core/Gui/Widgets、VS 18；未改用户安装或运行中的 GUI）。fixture 运行验证了 parse、runtime 和 static 三类输出。
 
-随后对同一首歌、同一条件修复后的三份 CPU 生成谱运行参考检测，报告为 `.scratch/full_v3_stage1/quality_probe_condition_fix/miacode_reference.json`：
+随后对同一首歌的三份 CPU 生成谱运行参考检测（其中两份使用修复后的条件，一份为旧条件历史实验），报告为 `.scratch/full_v3_stage1/quality_probe_condition_fix/miacode_reference.json`：
 
 | 谱面 | MiaCode runtime diagnostics | static references | 说明 |
 |---|---:|---:|---|
@@ -136,6 +136,10 @@
 
 这些诊断来自谱面派生的 autoplay-like 动作模型，不接受真实玩家轨迹，也不是 SEGA 官方判定规范或实机 Perfect 证明。它们被保留为 `engine_reference_only=true`、`playable_verified=false` 的 sidecar，不接入自动 hard/reject/local repair。当前静态检测报告和 MiaCode 参考结果会并列供后续人工审阅；单纯减少 diagnostic 数不能作为质量提升结论。
 
-04:06:54 第 3 轮微调保存：训练 loss `0.643008`，验证 loss `0.830302`，fine-rhythm MAE `0.2021`。第 2 轮验证 loss 为 `0.814548`；当前尚未优于起点 epoch 7，因此不将微调阶段的 `event_best.pt` 当作整个项目的最佳质量模型。阶段 best 与跨阶段最佳是不同概念。第 4 轮仍在训练，不能提前使用其 checkpoint 做正式质量结论。
+又用相同参考程序检测了该歌曲原谱和 epoch 7 的三组历史参数实验。原谱 runtime/static 均为 **0**；中性生成 runtime **15**、细碎偏好 runtime **21**、升温生成 runtime **50**（其中 MultiTouch 42）。因此之前“升温后长转圈减少”确实不能推断为可玩性改善。四份输入均无解析错误或警告，报告为 `quality_probe_epoch7/miacode_reference.json`。不同工具对 Slide 头/路径和辅助头的计数语义不同，不将 MiaCode `note_count` 与本项目总 note 数直接混算。
+
+文件边界过滤另修正了 20 ms 容差泄漏：音符头现在严格位于 `[0, audio_duration)`；可听区间裁剪仍独立。定向边界/曲线回归 45 项通过。起音配对新增 20/35/50 ms 三档评估容差，避免快速细分的相邻拍位被宽容差掩盖；它们不是实机判定窗。修复条件后的基线/首轮微调，20 ms F1 为 `0.5295/0.5025`，与宽容差比较方向一致。证据 `quality_probe_condition_fix/evaluation_tight_timing.json`。参考驱动、节奏评估、审阅和边界组合回归 77 项通过。
+
+04:28:49 第 4 轮微调保存：训练 loss `0.623158`，验证 loss `0.944571`，成功更新 1985/1985。第 2 轮验证 loss `0.814548` 仍为当前微调阶段最佳；第 3 轮为 `0.830302`。这些均未优于起点 epoch 7，因此不将微调阶段的 `event_best.pt` 当作整个项目的最佳质量模型。阶段 best 与跨阶段最佳是不同概念。第 5 轮仍在训练，尚未开始 70 份正式生成。
 
 继续依据实际证据调整：若新头只学固定拍栅格，应先改善音频时序学习；若准确落音但配置单调，应针对完整配置及历史依赖；若密度或留白恶化，应先收紧软指导和预算之间的相互影响。不能用更高细碎比例或更低报警数掩盖这些问题。
