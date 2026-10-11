@@ -13,12 +13,19 @@
 #define MURI_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-MURI_EXPORT int maichart_muri_abi() { return 1; }
+// ABI2 adds the static TapOnSlide threshold as an explicit argument.  The
+// legacy ABI1 entry point remains readable for external diagnostics, while the
+// Python loader intentionally uses the versioned v2 library and symbol.
+MURI_EXPORT int maichart_muri_abi() { return 2; }
+MURI_EXPORT int maichart_muri_abi_v1() { return 1; }
 MURI_EXPORT void maichart_muri_free(void* ptr) { std::free(ptr); }
-MURI_EXPORT char* maichart_muri_analyze(const char* utf8, double firstSeconds) {
+static char* analyzeNative(const char* utf8, double firstSeconds, double tapOnSlideThresholdSeconds) {
   QByteArray output;
   try {
-    if (!utf8 || !qIsFinite(firstSeconds)) throw std::runtime_error("invalid input");
+    if (!utf8 || !qIsFinite(firstSeconds) || !qIsFinite(tapOnSlideThresholdSeconds)
+        || tapOnSlideThresholdSeconds < 0.150 || tapOnSlideThresholdSeconds > 0.250) {
+      throw std::runtime_error("invalid input or TapOnSlide threshold (150..250ms)");
+    }
     if (miacode::muri::detail::slideRuntimeRoot().isEmpty())
       throw std::runtime_error("missing Slide reference data");
     const QString chartText = QString::fromUtf8(utf8);
@@ -27,7 +34,8 @@ MURI_EXPORT char* maichart_muri_analyze(const char* utf8, double firstSeconds) {
     const SimaiNativeParseResult nativeResult = SimaiNativeParser::parseForTimeline(chartText);
     const QVector<TimelineNoteMarker> shiftedMarkers =
         shiftedNoteMarkers(nativeResult.noteMarkers, firstSeconds, NonFiniteHandling::PassThrough);
-    const MuriAnalysisReport report = MuriAnalyzer::analyze(shiftedMarkers);
+    const MuriAnalysisReport report = MuriAnalyzer::analyze(
+        shiftedMarkers, MuriRenderOptions{}, tapOnSlideThresholdSeconds);
     QJsonObject parseObject;
     parseObject.insert(QStringLiteral("ok"), nativeResult.ok);
     parseObject.insert(QStringLiteral("error_count"), nativeResult.errors.size());
@@ -74,7 +82,7 @@ MURI_EXPORT char* maichart_muri_analyze(const char* utf8, double firstSeconds) {
     const TimelineChartCounts chartCounts = countTimelineChartNotes(shiftedMarkers);
     const QVector<MuriStaticReference> staticReferences = miacode::muri::buildStaticMuriReferences(
         shiftedMarkers,
-        static_cast<double>(miacode::muri::kStaticTapOnSlideThresholdDefaultMs) / 1000.0);
+        tapOnSlideThresholdSeconds);
     QJsonObject staticReferenceCountsByKind;
     for (const MuriStaticReference& record : staticReferences) {
         const QString kind = muriKindKey(record.kind);
@@ -135,6 +143,7 @@ MURI_EXPORT char* maichart_muri_analyze(const char* utf8, double firstSeconds) {
     root.insert(QStringLiteral("source"), sourceDescription);
     root.insert(QStringLiteral("difficulty"), difficultyName);
     root.insert(QStringLiteral("first"), firstSeconds);
+    root.insert(QStringLiteral("tap_on_slide_threshold_ms"), tapOnSlideThresholdSeconds * 1000.0);
     root.insert(QStringLiteral("parse"), parseObject);
     root.insert(QStringLiteral("summary"), summaryObject);
     root.insert(QStringLiteral("diagnostics"), diagnosticsArray);
@@ -155,4 +164,16 @@ MURI_EXPORT char* maichart_muri_analyze(const char* utf8, double firstSeconds) {
   char* result = static_cast<char*>(std::malloc(output.size()+1));
   if (result) std::memcpy(result, output.constData(), output.size()+1);
   return result;
+}
+
+MURI_EXPORT char* maichart_muri_analyze_v2(const char* utf8, double firstSeconds,
+                                           double tapOnSlideThresholdSeconds) {
+  return analyzeNative(utf8, firstSeconds, tapOnSlideThresholdSeconds);
+}
+
+// Kept for consumers that can still load the old symbol.  It uses the pinned
+// historical default and does not participate in the v2 Python loader.
+MURI_EXPORT char* maichart_muri_analyze(const char* utf8, double firstSeconds) {
+  return analyzeNative(utf8, firstSeconds,
+                       static_cast<double>(miacode::muri::kStaticTapOnSlideThresholdDefaultMs) / 1000.0);
 }

@@ -9,6 +9,12 @@ from maichart.generation.conflict_detector import ConflictReport
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.miacode_native import analyze_inote, REFERENCE_COMMIT
 from maichart.generation.event_quality import parse_event_notes
+from maichart.generation.playability_policy import (
+    apply_issue_policy,
+    ignored_issue_record,
+    validate_kind_modes,
+    validate_tap_on_slide_threshold_ms,
+)
 from maichart.maidata import parse_maidata_metadata
 from maichart.notes import BASIC_COMPACT_CHORD_RE
 
@@ -24,7 +30,7 @@ def _native_text(note):
 
 
 @lru_cache(maxsize=16)
-def _analyze_exact(point_keys, tempo_keys, first):
+def _analyze_exact(point_keys, tempo_keys, first, tap_on_slide_threshold_ms):
     points = [EventPoint(beat, text) for beat, text in point_keys]
     tempo = [EventTempo(beat, bpm) for beat, bpm in tempo_keys]
     parsed = parse_event_notes(points, tempo, first)
@@ -37,13 +43,20 @@ def _analyze_exact(point_keys, tempo_keys, first):
     # across sparse rhythm grids and variable tempo. Durations are untouched.
     timing = tokenize_event_timing(inote, tempo[0].bpm, first=first)
     cells = ["".join(cell.raw.split()) for cell in timing]
-    return analyze_inote(",\n".join(cells), first=first), timing, cells
+    return analyze_inote(
+        ",\n".join(cells),
+        first=first,
+        tap_on_slide_threshold_ms=tap_on_slide_threshold_ms,
+    ), timing, cells
 
 
 def detect_native_conflicts(points, tempo_changes, first, events, config):
+    threshold_ms = validate_tap_on_slide_threshold_ms(
+        getattr(config, "tap_on_slide_threshold_ms", 200.0))
+    kind_modes = validate_kind_modes(getattr(config, "conflict_kind_modes", None))
     raw, timing, cells = _analyze_exact(
         tuple((str(p.beat), p.note_text) for p in points),
-        tuple((str(t.beat), float(t.bpm)) for t in tempo_changes), float(first))
+        tuple((str(t.beat), float(t.bpm)) for t in tempo_changes), float(first), threshold_ms)
     by_beat = defaultdict(list)
     for event in events:
         by_beat[event.beat].append(event)
@@ -83,13 +96,17 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
             marker = ref.get(role) or {}
             if marker.get("marker_key"):
                 markers[marker["marker_key"]] = marker
-    issues, unmapped, seen = [], [], set()
+    issues, ignored, unmapped, seen = [], [], [], set()
     findings = [(d, "runtime") for d in raw.get("diagnostics", [])]
     findings += [({**ref, **ref.get("affected", {}),
                   "detail": f"MiaCode {ref['kind']} 判定区参考"}, "static") for ref in references]
+    # A static reference may carry the stronger Muri level even when the
+    # runtime diagnostic for the same marker was only a Warning.  Process
+    # stronger findings first so deduplication cannot hide that evidence.
+    findings.sort(key=lambda item: item[0].get("alert_level") != "Muri")
     for finding, stage in findings:
         hard = finding.get("alert_level") == "Muri"
-        if hard and not config.detect_hard_conflicts or not hard and not config.detect_soft_conflicts:
+        if hard and not getattr(config, "detect_hard_conflicts", True) or not hard and not getattr(config, "detect_soft_conflicts", False):
             continue
         key = finding.get("marker_key", "")
         kind = finding["kind"]
@@ -112,16 +129,44 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
         target = None
         if hard and affected is not None and not affected.protected and kind != "MultiTouch":
             target = affected.source_id
-        issues.append(ConflictReport(True, "miacode_" + kind,
+        issue = ConflictReport(True, "miacode_" + kind,
             float(finding.get("second", 0)), notes, "hard" if hard else "soft",
             finding.get("detail") or f"MiaCode {kind}", target,
-            evidence=f"miacode_{stage}:{REFERENCE_COMMIT}"))
+            evidence=f"miacode_{stage}:{REFERENCE_COMMIT}")
+        if apply_issue_policy(issue, kind_modes) is None:
+            ignored.append(ignored_issue_record(issue))
+        else:
+            issues.append(issue)
     represented = {event.source_id for marker in raw.get("markers", [])
                    if (event := locate(marker)) is not None}
     for event in events:
         if event.source_id not in represented:
             unmapped.append({"source": list(event.source_id), "raw": event.raw,
                              "reason": "native_parser_missing_note"})
+    sustained_by_source = {}
+    for marker in raw.get("markers", []):
+        marker_type = str(marker.get("type", "")).lower()
+        if marker_type not in {"hold", "touch_hold", "slide", "wifi"}:
+            continue
+        event = locate(marker)
+        if event is None:
+            continue
+        source = tuple(event.source_id)
+        start = float(marker.get("second", event.time))
+        end_value = marker.get("end_second")
+        try:
+            end = float(end_value) if end_value is not None else start
+        except (TypeError, ValueError):
+            end = start
+        current = sustained_by_source.get(source)
+        if current is None or end > current["end_sec"]:
+            sustained_by_source[source] = {
+                "source_id": list(source),
+                "note_type": marker_type,
+                "start_sec": start,
+                "trace_start_sec": marker.get("slide_trace_second"),
+                "end_sec": end,
+            }
     errors = list(raw.get("parse", {}).get("errors", []))
     if any(item.get("reason") == "native_parser_missing_note" for item in unmapped):
         errors.append({"message": "MiaCode 未完整解析输入音符，不能判为检测通过"})
@@ -132,6 +177,9 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
                 "in_process": True, "unsupported": unmapped, "parse_errors": errors,
                 "elapsed_sec": raw["elapsed_sec"], "engine_reference_only": True,
                 "playable_verified": False,
+                "ignored": ignored,
+                "tap_on_slide_threshold_ms": threshold_ms,
+                "sustained_actions": list(sustained_by_source.values()),
                 "limitations": ["使用 MiaCode 原生判定区、Slide/Wifi、Touch 联动与动作参考；仍不等同于实机玩家认证。"]}
     # Compact diagnostic evidence keeps window reports small; detailed runtime
     # marker states remain available through analyze_maidata for investigations.

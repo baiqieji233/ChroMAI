@@ -136,10 +136,12 @@ class ConflictReport:
     message: str
     repair_target: tuple[int, int] | None = None
     evidence: str = "static_reference"
+    action: str = "enforce"
 
     def to_dict(self) -> dict:
         return {"type": self.conflict_type, "severity": self.severity,
                 "time": self.time, "message": self.message, "evidence": self.evidence,
+                "action": self.action,
                 "sources": [{"point_index": n.source_id[0], "note_index": n.source_id[1],
                              "beat": str(n.beat), "time_sec": n.time, "raw": n.raw,
                              "pad": n.pad} for n in self.notes],
@@ -147,9 +149,12 @@ class ConflictReport:
 
 
 class ConflictDetector:
-    def __init__(self, enable_hard_conflicts=True, enable_soft_conflicts=False, **_legacy):
+    def __init__(self, enable_hard_conflicts=True, enable_soft_conflicts=False,
+                 conflict_kind_modes=None, **_legacy):
         self.enable_hard = bool(enable_hard_conflicts)
         self.enable_soft = bool(enable_soft_conflicts)
+        self.conflict_kind_modes = conflict_kind_modes
+        self.ignored: list[ConflictReport] = []
 
     def detect_conflicts(self, notes: list[NoteEvent]) -> list[ConflictReport]:
         result = []
@@ -168,7 +173,37 @@ class ConflictDetector:
                         True, "hand_assignment_review", stamp, group, "soft",
                         "同时有三个以上独立按键，需要结合持续动作检查双手分配；此项不自动拒绝。",
                         evidence="hand_assignment_unverified"))
-        return result
+        return self._apply_policy(result)
+
+    @staticmethod
+    def _policy_kind(issue: ConflictReport) -> str:
+        kind = issue.conflict_type
+        if kind.startswith("miacode_"):
+            return kind[len("miacode_"):]
+        if kind in {"same_pad_overlap", "hold_tap_overlap"}:
+            return "Overlap"
+        if kind in {"slide_pad_early_input", "touch_covers_slide_reference"}:
+            return "TapOnSlide"
+        if kind == "hand_assignment_review":
+            return "MultiTouch"
+        return kind
+
+    def _apply_policy(self, issues):
+        from maichart.generation.playability_policy import kind_mode
+
+        kept = []
+        self.ignored = []
+        for issue in issues:
+            action = kind_mode(self.conflict_kind_modes, self._policy_kind(issue))
+            issue.action = action
+            if action == "off":
+                issue.repair_target = None
+                self.ignored.append(issue)
+                continue
+            if action == "report":
+                issue.repair_target = None
+            kept.append(issue)
+        return kept
 
     def _overlaps(self, notes):
         by_pad = defaultdict(list)

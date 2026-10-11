@@ -55,26 +55,36 @@ def main():
         cmd.append("-DCMAKE_PREFIX_PATH=" + str(qt.resolve()))
     subprocess.run(cmd, check=True)
     subprocess.run([cmake, "--build", str(build), "--config", "Release", "--parallel", "4"], check=True)
-    name = "maichart_muri.dll" if sys.platform == "win32" else ("libmaichart_muri.dylib" if sys.platform == "darwin" else "libmaichart_muri.so")
-    library = next(build.rglob(name))
+    built_name = "maichart_muri.dll" if sys.platform == "win32" else ("libmaichart_muri.dylib" if sys.platform == "darwin" else "libmaichart_muri.so")
+    runtime_name = "maichart_muri_v2.dll" if sys.platform == "win32" else ("libmaichart_muri_v2.dylib" if sys.platform == "darwin" else "libmaichart_muri_v2.so")
+    library = next(build.rglob(built_name))
     runtime = cache / "runtime"
     runtime.mkdir(exist_ok=True)
-    shutil.copyfile(library, runtime / name)
+    # Version the packaged filename so a running ABI1 WebUI process never
+    # locks or silently reuses the newly-built ABI2 binary.
+    shutil.copyfile(library, runtime / runtime_name)
     if sys.platform == "win32":
         if qt is None:
             raise RuntimeError("Pass --qt or QT_ROOT to package the Qt Core/Gui runtime")
         for dll in ("Qt6Core.dll", "Qt6Gui.dll"):
-            shutil.copyfile(qt / "bin" / dll, runtime / dll)
+            source_dll = qt / "bin" / dll
+            target_dll = runtime / dll
+            # Existing WebUI processes may hold Qt DLLs open.  Reuse an
+            # identical verified copy so rebuilding the versioned judge does
+            # not fail merely because the legacy process is still running.
+            if target_dll.is_file() and hashlib.sha256(target_dll.read_bytes()).digest() == hashlib.sha256(source_dll.read_bytes()).digest():
+                continue
+            shutil.copyfile(source_dll, target_dll)
         # Retain Qt's license inventory with this local runtime, no editor assets.
         if (qt / "licenses").is_dir():
             shutil.copytree(qt / "licenses", runtime / "qt-licenses", dirs_exist_ok=True)
     files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
              for p in runtime.iterdir() if p.is_file() and p.suffix in {".dll", ".so", ".dylib"}}
-    (runtime / "build.json").write_text(json.dumps({"schema": "maichart-muri-native-v1",
-        "commit": provenance["commit"], "abi": 1, "files": files,
+    (runtime / "build.json").write_text(json.dumps({"schema": "maichart-muri-native-v2",
+        "commit": provenance["commit"], "abi": 2, "files": files,
         "slide_data_sha256": provenance["slide_data_sha256"],
         "bridge_sha256": hashlib.sha256((source / "bridge.cpp").read_bytes()).hexdigest()}, indent=2), encoding="utf-8")
-    print(f"Embedded MiaCode judge ready: {runtime / name}", flush=True)
+    print(f"Embedded MiaCode judge ready: {runtime / runtime_name}", flush=True)
 
 
 if __name__ == "__main__":

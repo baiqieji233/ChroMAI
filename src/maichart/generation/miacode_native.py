@@ -22,8 +22,8 @@ def runtime_directory() -> Path:
 
 
 def library_path() -> Path:
-    name = "maichart_muri.dll" if sys.platform == "win32" else (
-        "libmaichart_muri.dylib" if sys.platform == "darwin" else "libmaichart_muri.so")
+    name = "maichart_muri_v2.dll" if sys.platform == "win32" else (
+        "libmaichart_muri_v2.dylib" if sys.platform == "darwin" else "libmaichart_muri_v2.so")
     return runtime_directory() / name
 
 
@@ -34,8 +34,8 @@ def _library():
     if not path.is_file():
         raise RuntimeError("内嵌 MiaCode 检测库未部署；请运行 python tools/build_muri.py。无需安装或打开 MiaCode 编辑器。")
     provenance = json.loads((path.parent / "build.json").read_text(encoding="utf-8"))
-    if provenance.get("commit") != REFERENCE_COMMIT or provenance.get("abi") != 1:
-        raise RuntimeError("内嵌 MiaCode 检测库版本不匹配，请重新部署检测库")
+    if provenance.get("commit") != REFERENCE_COMMIT or provenance.get("abi") != 2:
+        raise RuntimeError("内嵌 MiaCode 检测库版本不匹配，请运行 python tools/build_muri.py")
     for name, expected in provenance["files"].items():
         if hashlib.sha256((path.parent / name).read_bytes()).hexdigest() != expected:
             raise RuntimeError(f"内嵌 MiaCode 检测库校验失败：{name}")
@@ -43,10 +43,10 @@ def _library():
         _dll_directory = os.add_dll_directory(str(path.parent))
     lib = ctypes.CDLL(str(path))
     lib.maichart_muri_abi.restype = ctypes.c_int
-    if lib.maichart_muri_abi() != 1:
-        raise RuntimeError("内嵌 MiaCode C ABI 不兼容")
-    lib.maichart_muri_analyze.argtypes = [ctypes.c_char_p, ctypes.c_double]
-    lib.maichart_muri_analyze.restype = ctypes.c_void_p
+    if lib.maichart_muri_abi() != 2:
+        raise RuntimeError("内嵌 MiaCode C ABI2 不兼容")
+    lib.maichart_muri_analyze_v2.argtypes = [ctypes.c_char_p, ctypes.c_double, ctypes.c_double]
+    lib.maichart_muri_analyze_v2.restype = ctypes.c_void_p
     lib.maichart_muri_free.argtypes = [ctypes.c_void_p]
     lib.maichart_muri_free.restype = None
     return lib
@@ -65,15 +65,20 @@ def engine_status() -> dict:
         return {"available": False, "engine": "miacode_native", "error": str(exc)}
 
 
-def analyze_inote(inote: str, *, first: float = 0.0) -> dict:
+def analyze_inote(inote: str, *, first: float = 0.0,
+                  tap_on_slide_threshold_ms: float = 200.0) -> dict:
+    from maichart.generation.playability_policy import validate_tap_on_slide_threshold_ms
+
     if not math.isfinite(first) or "\0" in inote:
         raise ValueError("Invalid MiaCode input/offset")
+    threshold = validate_tap_on_slide_threshold_ms(tap_on_slide_threshold_ms)
     started = time.perf_counter()
     # Upstream caches reference data and parser settings. Serialize native
     # calls so concurrent WebUI inspection cannot race those mutable caches.
     with _lock:
         lib = _library()
-        ptr = lib.maichart_muri_analyze(inote.encode("utf-8"), float(first))
+        ptr = lib.maichart_muri_analyze_v2(
+            inote.encode("utf-8"), float(first), threshold / 1000.0)
         if not ptr:
             raise RuntimeError("MiaCode native output allocation failed")
         try:
@@ -84,12 +89,14 @@ def analyze_inote(inote: str, *, first: float = 0.0) -> dict:
         raise RuntimeError("MiaCode native error: " + result["bridge_error"])
     result["engine"] = "miacode_native"
     result["reference_commit"] = REFERENCE_COMMIT
+    result["tap_on_slide_threshold_ms"] = threshold
     result["elapsed_sec"] = time.perf_counter() - started
     result["playable_verified"] = False
     return result
 
 
-def analyze_maidata(text: str, *, difficulty: int = 5, first: float | None = None) -> dict:
+def analyze_maidata(text: str, *, difficulty: int = 5, first: float | None = None,
+                    tap_on_slide_threshold_ms: float = 200.0) -> dict:
     from maichart.maidata import parse_maidata_metadata
 
     chart = parse_maidata_metadata(text)
@@ -101,4 +108,8 @@ def analyze_maidata(text: str, *, difficulty: int = 5, first: float | None = Non
     # the prefixed inote; generation uses explicit-tempo event serialization.
     if chart.wholebpm:
         inote = f"({float(chart.wholebpm):.12g})" + inote
-    return analyze_inote(inote, first=float(chart.first or 0) if first is None else first)
+    return analyze_inote(
+        inote,
+        first=float(chart.first or 0) if first is None else first,
+        tap_on_slide_threshold_ms=tap_on_slide_threshold_ms,
+    )
