@@ -31,6 +31,9 @@ def test_intensity_ui_uses_separate_analysis_poll_and_curve_payload():
     assert 'intensity_curve_mode: valueOrDefault("#intensityCurveMode", "follow")' in js
     assert "rest_regions" in js
     assert "normalizeRestRegions" in js
+    assert "invalidateLearnedCurveForCondition" in js
+    assert "等级、Radar 或 Style 已变化" in js
+    assert "normalizeGenerationLevel(previousLevel)" in js
     assert "density_feedback_capability" in js
     assert "follow / hard 密度反馈能力" in js
     # The large spectrogram is for the editor only and is deliberately omitted

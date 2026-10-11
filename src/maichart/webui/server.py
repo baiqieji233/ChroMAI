@@ -502,17 +502,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     condition_profile=_resolve_condition_profile(payload),
                     contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
                 )
-                if (curve.get("condition") != current_condition.to_dict()
-                        or float(curve.get("first", 0)) != float(payload.get("first", 0))
-                        or (tempo_map_hash is None
-                            and curve.get("tempo_mode", "constant") != payload.get("tempo_mode", "constant"))
-                        or (tempo_map_hash is None and (
-                            curve.get("bpm_input") != (float(payload["bpm"])
-                                if payload.get("bpm") not in {None, ""} else None)
-                            if "bpm_input" in curve else
-                            payload.get("bpm") not in {None, ""}
-                            and float(curve.get("bpm")) != float(payload["bpm"])))):
-                    raise ValueError("曲线预测所用等级、风格或节拍设置已变化，请重新生成曲线后继续编辑")
+                context_differences = _learned_curve_context_differences(
+                    curve, current_condition, payload, tempo_map_hash)
+                if context_differences:
+                    detail = "；".join(context_differences[:12])
+                    if len(context_differences) > 12:
+                        detail += f"；另有 {len(context_differences) - 12} 项"
+                    raise ValueError(
+                        "曲线预测所用等级、风格或节拍设置已变化，请重新生成曲线后继续编辑"
+                        f"（具体差异：{detail}）"
+                    )
         tempo_mode = str(payload.get("tempo_mode", "constant")).strip().lower()
         intensity_mode = str(payload.get("intensity_mode", GENERATION_SAMPLING_DEFAULTS["intensity_mode"]))
         if _is_event_family(model_family):
@@ -2255,6 +2254,82 @@ def _required_path(value: Any, label: str, *, must_exist: bool) -> Path:
     if must_exist and not path.exists():
         raise ValueError(f"{label} 不存在: {path}")
     return path
+
+
+def _curve_values_equal(left: Any, right: Any) -> bool:
+    """Compare curve metadata without rejecting harmless JSON float noise."""
+
+    if left is None or right is None:
+        return left is right
+    try:
+        return math.isclose(float(left), float(right), rel_tol=0.0, abs_tol=1e-6)
+    except (TypeError, ValueError):
+        return left == right
+
+
+def _curve_value_text(value: Any) -> str:
+    if value is None or value == "":
+        return "空"
+    if isinstance(value, float):
+        return f"{value:.6g}"
+    return str(value)
+
+
+def _curve_condition_differences(saved: Any, current: Any) -> list[str]:
+    """Return human-readable condition differences for a learned curve.
+
+    The old WebUI collapsed every mismatch into one generic message, which made
+    a valid saved curve look broken.  Keep the strict rejection but expose the
+    exact field that changed so the user can correct the generation panel.
+    """
+
+    if not isinstance(saved, dict):
+        return ["曲线缺少 condition 条件快照"]
+    if not isinstance(current, dict):
+        return ["当前生成条件无效"]
+    differences: list[str] = []
+    for key, label in (("level", "等级"), ("difficulty", "difficulty")):
+        if key in saved and key in current and not _curve_values_equal(saved[key], current[key]):
+            differences.append(f"{label} {_curve_value_text(saved[key])}→{_curve_value_text(current[key])}")
+        elif key not in saved:
+            differences.append(f"曲线缺少 {label} 元数据")
+    for section, label in (("radar", "Radar"), ("style", "Style")):
+        saved_values = saved.get(section)
+        current_values = current.get(section)
+        if not isinstance(saved_values, dict) or not isinstance(current_values, dict):
+            differences.append(f"{label} 条件快照缺失")
+            continue
+        for key in sorted(set(saved_values) | set(current_values)):
+            if key not in saved_values:
+                differences.append(f"{label}.{key} 曲线缺失")
+            elif key not in current_values:
+                differences.append(f"当前缺少 {label}.{key}")
+            elif not _curve_values_equal(saved_values[key], current_values[key]):
+                differences.append(
+                    f"{label}.{key} {_curve_value_text(saved_values[key])}→{_curve_value_text(current_values[key])}"
+                )
+    return differences
+
+
+def _learned_curve_context_differences(curve: dict[str, Any], current_condition: Any,
+                                       payload: dict[str, Any], tempo_map_hash: str | None) -> list[str]:
+    differences = _curve_condition_differences(curve.get("condition"), current_condition.to_dict())
+    if not _curve_values_equal(curve.get("first", 0), payload.get("first", 0)):
+        differences.append(f"first {_curve_value_text(curve.get('first', 0))}→{_curve_value_text(payload.get('first', 0))}")
+    if tempo_map_hash is None:
+        saved_mode = str(curve.get("tempo_mode", "constant"))
+        current_mode = str(payload.get("tempo_mode", "constant"))
+        if saved_mode != current_mode:
+            differences.append(f"节拍模式 {saved_mode}→{current_mode}")
+        current_bpm = payload.get("bpm")
+        current_bpm = None if current_bpm in {None, ""} else float(current_bpm)
+        if "bpm_input" in curve:
+            saved_bpm = curve.get("bpm_input")
+            if not _curve_values_equal(saved_bpm, current_bpm):
+                differences.append(f"BPM {_curve_value_text(saved_bpm)}→{_curve_value_text(current_bpm)}")
+        elif current_bpm is not None and not _curve_values_equal(curve.get("bpm"), current_bpm):
+            differences.append(f"BPM {_curve_value_text(curve.get('bpm'))}→{_curve_value_text(current_bpm)}")
+    return differences
 
 
 def _safe_filename(value: str) -> str:

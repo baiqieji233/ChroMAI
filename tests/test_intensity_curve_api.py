@@ -340,6 +340,46 @@ def test_learned_curve_preflight_matches_cli_for_profile_plus_level_only_data(ap
     assert len(calls) == before_calls
 
 
+def test_learned_curve_preflight_reports_exact_condition_and_timing_differences(api, monkeypatch, tmp_path):
+    """A saved curve can be valid while its generation context is stale.
+
+    The error must identify the changed fields; otherwise users cannot tell
+    whether to regenerate for a level, a style slider, or a tempo setting.
+    """
+
+    from maichart.generation.event_cli import _file_identity, resolve_generation_condition
+
+    audio, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    identity = _file_identity(payload["checkpoint"])
+    condition, _ = resolve_generation_condition(
+        level=13.3, condition_data=None, condition_profile=None, contract_params={})
+    curve = {**profile(audio), "method": "learned_music_structure_v3",
+             "checkpoint": payload["checkpoint"],
+             "checkpoint_identity": {"size": identity["size"], "mtime_ns": identity["mtime_ns"],
+                                      "sha256": identity["sha256"]},
+             "condition": condition.to_dict(), "first": 0.0,
+             "tempo_map_sha256": None, "tempo_mode": "auto", "bpm_input": None}
+    stale = {**curve, "condition": {**curve["condition"],
+                                     "level": 12.5,
+                                     "style": {**curve["condition"]["style"], "melody_following": 0.2}}}
+    code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
+                                              "intensity_curve": stale})
+    assert code == 400
+    assert "等级 12.5→13.3" in result["error"]
+    assert "Style.melody_following 0.2→0.9" in result["error"]
+    assert "节拍模式 auto→constant" in result["error"]
+    assert not calls
+
+    stale = {**curve, "bpm_input": 120.0}
+    code, result, _ = api("/api/generate", {**payload, "bpm": 150,
+                                              "intensity_curve_enabled": True,
+                                              "intensity_curve": stale})
+    assert code == 400
+    assert "节拍模式 auto→constant" in result["error"]
+    assert "BPM 120→150" in result["error"]
+    assert not calls
+
+
 def test_explicit_tempo_map_is_normalized_and_forwarded_to_event_cli(api, monkeypatch, tmp_path):
     _, payload, calls = setup_event_run(monkeypatch, tmp_path)
     tempo_map = [{"beat": 0, "bpm": 120}, {"beat": 32, "bpm": 150}]

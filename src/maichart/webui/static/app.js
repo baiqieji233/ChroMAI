@@ -269,6 +269,13 @@ function restoreSettings() {
     if (levelRange) levelRange.value = String(normalizedLevel);
     if (levelWasRepaired) {
       restoredSettingNotice = `检测到旧设置中的目标等级 ${previousLevel || "空值"} 超出当前支持范围 12.00–15.00，已恢复为 13.30；请重新生成强度曲线。`;
+      // A learned curve stores the level/style snapshot used by the planner.
+      // If the repair changes that snapshot, do not leave the old curve marked
+      // as ready: the next generation should require a fresh prediction.
+      if (String(intensityCurveState.profile?.method || "").startsWith("learned_music_structure_")) {
+        intensityCurveState.saved = false;
+        saveIntensityCurveState();
+      }
       // Canonicalize the saved copy as well, so a reload before any further
       // user input does not repeat the repair indefinitely.
       try {
@@ -340,6 +347,7 @@ function captureGenerationDefaults() {
 }
 
 function resetGenerationDefaults() {
+  invalidateLearnedCurveForCondition();
   Object.entries(generationDefaults).forEach(([id, value]) => {
     const target = document.getElementById(id);
     if (!target) return;
@@ -2635,6 +2643,15 @@ function invalidateLearnedCurveForTiming() {
   setIntensityStatus("节拍设置已变化，模型来源曲线需要重新生成。", "warn");
 }
 
+function invalidateLearnedCurveForCondition() {
+  const profile = intensityCurveState.profile;
+  if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
+  intensityCurveState.saved = false;
+  saveIntensityCurveState();
+  updateIntensityButtons();
+  setIntensityStatus("等级、Radar 或 Style 已变化，模型来源曲线需要重新生成。", "warn");
+}
+
 async function restoreIntensityBackdrop() {
   const profile = intensityCurveState.profile;
   if (!profile || profile.spectrogram || !profile.analysis_profile_path) return;
@@ -3162,20 +3179,21 @@ if (intensityCanvas) {
 window.addEventListener("resize", () => drawIntensityCurve());
 on("#applyConditionPreset", "click", async () => {
   if (!levelPresetProfile) await loadLevelPresetProfile();
-  if (levelPresetProfile) applyConditionPreset();
+  if (levelPresetProfile) { invalidateLearnedCurveForCondition(); applyConditionPreset(); }
 });
-on("#level", "change", () => { if (levelPresetProfile) applyConditionPreset(); });
-on("#levelRange", "input", event => { setConditionValue("level", Number(event.target.value)); if (levelPresetProfile) applyConditionPreset(); });
-on("#conditionPreferenceStrength", "input", () => { if (levelPresetProfile) applyConditionPreset(); else updateConditionRecipeDisplay(); });
+on("#level", "change", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); });
+on("#levelRange", "input", event => { invalidateLearnedCurveForCondition(); setConditionValue("level", Number(event.target.value)); if (levelPresetProfile) applyConditionPreset(); });
+on("#conditionPreferenceStrength", "input", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); else updateConditionRecipeDisplay(); });
 for (const definition of Object.values(preferenceDefinitions)) {
-  on(`#${definition.field}`, "change", () => { if (levelPresetProfile) applyConditionPreset(); else updateConditionRecipeDisplay(); });
+  on(`#${definition.field}`, "change", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); else updateConditionRecipeDisplay(); });
 }
 on("#clearConditionPreferences", "click", () => {
+  invalidateLearnedCurveForCondition();
   for (const definition of Object.values(preferenceDefinitions)) { const input = element(`#${definition.field}`); if (input) input.checked = false; }
   if (levelPresetProfile) applyConditionPreset(); else { updateConditionRecipeDisplay(); saveSettings(); }
 });
 for (const [key] of [...radarKeys, ...styleKeys]) {
-  const markManual = () => { lastConditionRecipe = null; conditionEditedBeforeProfile = true; updateConditionRecipeDisplay(); };
+  const markManual = () => { invalidateLearnedCurveForCondition(); lastConditionRecipe = null; conditionEditedBeforeProfile = true; updateConditionRecipeDisplay(); };
   on(`#${key}`, "input", markManual);
   document.querySelector(`[data-number-for="${key}"]`)?.addEventListener("input", markManual);
 }
