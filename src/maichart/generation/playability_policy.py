@@ -61,6 +61,11 @@ def action_for_issue(issue, modes) -> str:
     return kind_mode(modes, issue_kind(issue))
 
 
+def is_actionable(issue) -> bool:
+    """Whether an issue may trigger repair or rejection."""
+    return getattr(issue, "action", "enforce") == "enforce"
+
+
 def apply_issue_policy(issue, modes):
     """Apply one action and return the issue, or ``None`` for ``off``.
 
