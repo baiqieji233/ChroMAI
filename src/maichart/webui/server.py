@@ -544,6 +544,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         conflict_backtrack_windows = int(payload.get("conflict_backtrack_windows", 0))
         conflict_backtrack_budget = int(payload.get("conflict_backtrack_budget", 4))
         sustain_repair_mode = str(payload.get("sustain_repair_mode", "off"))
+        note_repair_mode = str(payload.get("note_repair_mode", "delete")).strip().lower()
+        if note_repair_mode not in {"delete", "edit", "edit_then_delete"}:
+            raise ValueError("单 note 修复方式只能是 delete、edit 或 edit_then_delete")
         if conflict_repair_mode not in {"none", "local", "reject"}:
             raise ValueError("冲突处理方式只能是 none、local 或 reject")
         if not 0 <= conflict_retries <= 5:
@@ -565,8 +568,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("选择局部修复或拒绝生成时，请同时启用无理检测")
         if conflict_repair_mode == "none":
             conflict_retries = 0
+        # Fine-grained note repair is meaningful only for local regeneration;
+        # reject/detect-only keep the legacy delete policy for compatibility.
+        effective_note_repair_mode = note_repair_mode if conflict_repair_mode == "local" else "delete"
         from maichart.generation.post_process import PostProcessConfig
-        PostProcessConfig(
+        post_config_kwargs = dict(
             enable_conflict_detection=conflict_enabled,
             conflict_repair_mode=conflict_repair_mode,
             conflict_retries=conflict_retries,
@@ -577,6 +583,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
             conflict_backtrack_budget=conflict_backtrack_budget,
             sustain_repair_mode=sustain_repair_mode,
         )
+        # Keep this bridge loadable while an older checkout is being upgraded;
+        # the current PostProcessConfig includes this field and validates it.
+        if "note_repair_mode" in PostProcessConfig.__dataclass_fields__:
+            post_config_kwargs["note_repair_mode"] = effective_note_repair_mode
+        PostProcessConfig(**post_config_kwargs)
         if not math.isfinite(curve_strength) or not 0.0 <= curve_strength <= 1.0:
             raise ValueError("曲线控制力度必须在 0–1 之间")
         if curve_mode not in {"follow", "hard", "soft", "strict"}:
@@ -718,7 +729,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                              "--tap-on-slide-threshold-ms", str(tap_on_slide_threshold_ms),
                              "--conflict-backtrack-windows", str(conflict_backtrack_windows),
                              "--conflict-backtrack-budget", str(conflict_backtrack_budget),
-                             "--sustain-repair-mode", sustain_repair_mode])
+                             "--sustain-repair-mode", sustain_repair_mode,
+                             "--note-repair-mode", effective_note_repair_mode])
                 task.result["conflict_detection_enabled"] = True
                 task.result["conflict_repair_mode"] = conflict_repair_mode
                 task.result["conflict_retries"] = conflict_retries if conflict_repair_mode != "none" else 0
@@ -727,6 +739,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 task.result["conflict_backtrack_windows"] = conflict_backtrack_windows
                 task.result["conflict_backtrack_budget"] = conflict_backtrack_budget
                 task.result["sustain_repair_mode"] = sustain_repair_mode
+                task.result["note_repair_mode"] = effective_note_repair_mode
             if model_family == EVENT_CTX_MODEL_FAMILY:
                 # The window layout is part of the data contract, so the
                 # checkpoint is authoritative: the UI fields are only a copy, and

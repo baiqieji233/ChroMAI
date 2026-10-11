@@ -105,7 +105,7 @@ const GENERATION_PARAM_FIELDS = [
   "fineNoteStrength", "localOnsetBiasStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
   "conflictRepairMode", "conflictRetries", "conflictPreset", "conflictMultiTouchMode", "conflictOverlapMode",
   "conflictTapOnSlideMode", "conflictSlideHeadTapMode", "conflictSlideTooFastMode", "tapOnSlideThresholdMs",
-  "conflictBacktrackWindows", "conflictBacktrackBudget", "sustainRepairMode",
+  "conflictBacktrackWindows", "conflictBacktrackBudget", "sustainRepairMode", "noteRepairMode",
 ];
 
 const CONFLICT_KIND_FIELDS = [
@@ -685,6 +685,8 @@ function updateGenerationCapabilityControls() {
     const target = element(selector);
     if (target) target.disabled = !conflictEnabled;
   });
+  const noteRepair = element("#noteRepairMode");
+  if (noteRepair) noteRepair.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") === "local");
   const retries = element("#conflictRetries");
   if (retries) retries.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") !== "none");
 
@@ -950,6 +952,8 @@ function generationPayload() {
     conflict_backtrack_windows: Number(valueOrDefault("#conflictBacktrackWindows", 0)),
     conflict_backtrack_budget: Number(valueOrDefault("#conflictBacktrackBudget", 4)),
     sustain_repair_mode: valueOrDefault("#sustainRepairMode", "off"),
+    note_repair_mode: valueOrDefault("#conflictRepairMode", "none") === "local"
+      ? valueOrDefault("#noteRepairMode", "edit_then_delete") : "delete",
     fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
     local_onset_bias_strength: element("#localOnsetBiasStrength")?.disabled
       ? 0 : Number(valueOrDefault("#localOnsetBiasStrength", 0)),
@@ -1170,8 +1174,10 @@ function renderGenerationResult(task) {
         const hardCount = Array.isArray(playability.remaining_hard) ? playability.remaining_hard.length
           : Number(playability.remaining_hard || 0);
         const actionableHard = Number(playability.remaining_actionable_hard ?? hardCount);
-        const repairCount = Array.isArray(playability.repairs) ? playability.repairs.length
-          : Number(playability.repairs || 0);
+        const repairs = Array.isArray(playability.repairs) ? playability.repairs : [];
+        const repairCount = repairs.length || Number(playability.repairs || 0);
+        const deleteRepairs = repairs.filter((item) => !item?.operation || item.operation === "delete").length;
+        const editRepairs = repairs.filter((item) => item?.operation && item.operation !== "delete").length;
         const details = Array.isArray(playability.remaining_details) ? playability.remaining_details
           : Array.isArray(playability.details) ? playability.details : [];
         const softCount = details.filter((item) => item?.severity === "soft").length;
@@ -1183,9 +1189,14 @@ function renderGenerationResult(task) {
           : Number(coverage.unsupported || 0);
         const parseErrors = Array.isArray(coverage.parse_errors) ? coverage.parse_errors.length
           : Number(coverage.parse_errors || 0);
-        const backtrackChanges = Number(playability.backtrack_modified ?? playability.backtrack_modifications ?? 0);
-        const sustainChanges = Number(playability.sustain_modified ?? playability.sustain_repairs ?? 0);
-        playabilityText = `冲突参考：${statusLabel}；物理 Muri ${hardCount}（可处理 ${actionableHard}）；软参考 ${softCount}；删除修复 ${repairCount}；回溯重试 ${retryCount}；回溯时值修改 ${backtrackChanges}；前置长音符修改 ${sustainChanges}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
+        const crossWindow = Array.isArray(playability.cross_window) ? playability.cross_window : [];
+        const acceptedCross = crossWindow.filter((item) => item?.status === "accepted");
+        const acceptedRewinds = acceptedCross.filter((item) => item?.operation === "regenerate_source_window").length;
+        const acceptedSustain = acceptedCross.filter((item) => ["shorten_hold", "slide_to_head_tap"].includes(item?.operation)).length;
+        const backtrackChanges = acceptedRewinds || Number(playability.backtrack_modified ?? playability.backtrack_modifications ?? 0);
+        const sustainChanges = acceptedSustain || Number(playability.sustain_modified ?? playability.sustain_repairs ?? 0);
+        const deletionCount = deleteRepairs || (repairCount && !editRepairs ? repairCount : 0);
+        playabilityText = `冲突参考：${statusLabel}；物理 Muri ${hardCount}（可处理 ${actionableHard}）；软参考 ${softCount}；删除修复 ${deletionCount}；微调修复 ${editRepairs}；窗口重试 ${retryCount}；已接受前置回溯 ${backtrackChanges}；已接受前置时值修复 ${sustainChanges}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
         if (softCount) playabilityText += "Warning 不直接删除，需要结合谱面与游玩复核。";
         if (["static_only", "partial"].includes(playability.status)) {
           playabilityText += "检测范围不完整，不能据此认定谱面可玩。";

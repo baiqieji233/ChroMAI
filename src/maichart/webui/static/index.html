@@ -954,6 +954,14 @@
             </select>
             <small>none 仅报告；local 先重试当前窗口，仍有 Muri 时尝试删除定位明确的音符，并再次检测，确认问题减少才保留修改；reject 在剩余 Muri 或解析失败时拒绝候选。局部修复不保证所有问题都能消除，日志会显示剩余数量。</small>
           </label>
+          <label class="field" data-generation-family="event_v1">单 note 修复策略
+            <select id="noteRepairMode">
+              <option value="delete">删除修复</option>
+              <option value="edit">仅微调</option>
+              <option value="edit_then_delete" selected>微调优先，失败后删除</option>
+            </select>
+            <small>仅在修复模式为 local 时生效。微调会在 MiaCode 复检确认后尝试保留起音、优先数量，并候选调整邻键、缩短 Hold 或把简单 Slide 终点改为星头 Tap；微调失败时按策略保留报告或继续删除。它不是训练模型的填空能力，也不会接受新增其他 Muri。</small>
+          </label>
           <label class="field" data-generation-family="event_v1">
             冲突重试次数
             <input id="conflictRetries" type="number" min="0" max="5" step="1" value="0">
