@@ -158,6 +158,8 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
             end = float(end_value) if end_value is not None else start
         except (TypeError, ValueError):
             end = start
+        if end < start:
+            end = start
         current = sustained_by_source.get(source)
         if current is None or end > current["end_sec"]:
             sustained_by_source[source] = {
