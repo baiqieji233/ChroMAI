@@ -1,5 +1,10 @@
 # MiaCode Reference Diagnostics
 
+Generation and WebUI now use the in-process native judge described in
+`MIACODE_NATIVE_PLAYABILITY.md`. The external wrapper below remains an offline
+developer comparison tool; it is not used by the generation pipeline and does
+not require the user to run MiaCode.exe.
+
 `tools/evaluate_miacode_reference.py` is an offline wrapper around a user-provided headless `miacode_muri_dump` executable. The executable is a Qt developer build with a headless CLI entry point; this tool invokes that CLI directly and makes no assumption that the MiaCode GUI can be automated or queried.
 
 The wrapper passes argument arrays to `subprocess.run` with `shell=False`, requests marker output, and runs each input separately. It records executable and maidata SHA-256 identities before/after use, the exact argv and exit code, raw stdout/stderr and decoded JSON, plus the `parse`, `errors`, `diagnostics`, `static_references`, `marker_states`, and `summary` fields. It preserves engine diagnostics as engine-reference data; it does not translate them into maichart hard conflicts, repair charts, or claim playability.
