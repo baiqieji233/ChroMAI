@@ -11,6 +11,13 @@ application, window, event loop, GPU context or subprocess. Qt Core and Gui
 provide data/geometry types only. Fonts, Qt Widgets, multimedia, BASS and FFmpeg
 are not linked or packaged.
 
+ABI3 permits a 0..250 ms static proximity window. CMake produces adapted copies
+of MuriStaticChecker.cpp and MuriSimpleNoteJudge.cpp with a zero lower clamp;
+zero removes only static TapOnSlide/SlideHeadTap proximity references. Runtime
+judgement findings remain. The pinned upstream files stay byte-identical.
+The built runtime is versioned as `maichart_muri_v3.dll` (platform equivalent
+elsewhere), preserving prior libraries held by an existing process.
+
 From the project root, run `python tools/build_muri.py --qt <Qt SDK root>`.
 The script also discovers the existing local SDK under `.scratch/muri_build`.
 Requires CMake, C++20 and Qt 6.8 development files. Local binaries and downloaded

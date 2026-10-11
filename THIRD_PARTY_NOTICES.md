@@ -27,6 +27,12 @@ under `native/miacode/upstream/src`, with a small local C ABI/JSON bridge. The
 upstream LICENSE, LICENSE_SCOPE and THIRD_PARTY_NOTICES are retained alongside
 the source; `UPSTREAM.json` pins every copied source hash.
 
+ABI3 additionally compiles two generated adaptation files with a zero lower
+bound for the configurable collision-reference neighbourhood. Zero disables
+static proximity references; the judge's physical tolerances remain unchanged.
+This local adaptation is recorded in the CMake source and build provenance;
+the vendored upstream files are not edited.
+
 `tools/build_muri.py` obtains the pinned Slide reference dataset for the local
 build and links Qt Core/Gui dynamically. The dataset and runtime binaries stay
 under ignored `.native/`; they are not relicensed as MIT or committed here.

@@ -56,12 +56,11 @@ def main():
     subprocess.run(cmd, check=True)
     subprocess.run([cmake, "--build", str(build), "--config", "Release", "--parallel", "4"], check=True)
     built_name = "maichart_muri.dll" if sys.platform == "win32" else ("libmaichart_muri.dylib" if sys.platform == "darwin" else "libmaichart_muri.so")
-    runtime_name = "maichart_muri_v2.dll" if sys.platform == "win32" else ("libmaichart_muri_v2.dylib" if sys.platform == "darwin" else "libmaichart_muri_v2.so")
+    runtime_name = "maichart_muri_v3.dll" if sys.platform == "win32" else ("libmaichart_muri_v3.dylib" if sys.platform == "darwin" else "libmaichart_muri_v3.so")
     library = next(build.rglob(built_name))
     runtime = cache / "runtime"
     runtime.mkdir(exist_ok=True)
-    # Version the packaged filename so a running ABI1 WebUI process never
-    # locks or silently reuses the newly-built ABI2 binary.
+    # A running older WebUI can retain its original judge while ABI3 is built.
     shutil.copyfile(library, runtime / runtime_name)
     if sys.platform == "win32":
         if qt is None:
@@ -80,10 +79,12 @@ def main():
             shutil.copytree(qt / "licenses", runtime / "qt-licenses", dirs_exist_ok=True)
     files = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
              for p in runtime.iterdir() if p.is_file() and p.suffix in {".dll", ".so", ".dylib"}}
-    (runtime / "build.json").write_text(json.dumps({"schema": "maichart-muri-native-v2",
-        "commit": provenance["commit"], "abi": 2, "files": files,
+    (runtime / "build.json").write_text(json.dumps({"schema": "maichart-muri-native-v3",
+        "commit": provenance["commit"], "abi": 3, "files": files,
         "slide_data_sha256": provenance["slide_data_sha256"],
-        "bridge_sha256": hashlib.sha256((source / "bridge.cpp").read_bytes()).hexdigest()}, indent=2), encoding="utf-8")
+        "bridge_sha256": hashlib.sha256((source / "bridge.cpp").read_bytes()).hexdigest(),
+        "adaptation": "generated zero-based static/runtime reference clamp; zero disables static proximity references",
+        "cmake_sha256": hashlib.sha256((source / "CMakeLists.txt").read_bytes()).hexdigest()}, indent=2), encoding="utf-8")
     print(f"Embedded MiaCode judge ready: {runtime / runtime_name}", flush=True)
 
 

@@ -96,7 +96,7 @@ def validate_tap_on_slide_threshold_ms(value) -> float:
         raise ValueError("tap_on_slide_threshold_ms must be a finite number") from exc
     if threshold != threshold or threshold in (float("inf"), float("-inf")):
         raise ValueError("tap_on_slide_threshold_ms must be finite")
-    if not 150.0 <= threshold <= 250.0:
-        raise ValueError("tap_on_slide_threshold_ms must be between 150 and 250")
+    if not 0.0 <= threshold <= 250.0:
+        raise ValueError("tap_on_slide_threshold_ms must be between 0 and 250")
     return threshold
 

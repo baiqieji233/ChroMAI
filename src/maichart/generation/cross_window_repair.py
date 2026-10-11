@@ -113,7 +113,8 @@ class CrossWindowRepair:
     def consider(self, result, trial, prior, index):
         cfg = self.config
         if (not cfg or not cfg.enable_conflict_detection or cfg.conflict_repair_mode != "local"
-                or self.pending is not None or not prior or self.used >= cfg.conflict_backtrack_budget
+                or self.pending is not None or not prior
+                or cfg.conflict_backtrack_budget >= 0 and self.used >= cfg.conflict_backtrack_budget
                 or cfg.conflict_backtrack_windows == 0 and cfg.sustain_repair_mode == "off"
                 or result.coverage.get("parse_errors")):
             return

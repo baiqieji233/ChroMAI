@@ -13,18 +13,17 @@
 #define MURI_EXPORT extern "C" __attribute__((visibility("default")))
 #endif
 
-// ABI2 adds the static TapOnSlide threshold as an explicit argument.  The
-// legacy ABI1 entry point remains readable for external diagnostics, while the
-// Python loader intentionally uses the versioned v2 library and symbol.
-MURI_EXPORT int maichart_muri_abi() { return 2; }
+// ABI3 permits zero-based static neighbourhoods. The versioned library avoids
+// reusing an ABI2 binary that would silently clamp the lower bound to 150 ms.
+MURI_EXPORT int maichart_muri_abi() { return 3; }
 MURI_EXPORT int maichart_muri_abi_v1() { return 1; }
 MURI_EXPORT void maichart_muri_free(void* ptr) { std::free(ptr); }
 static char* analyzeNative(const char* utf8, double firstSeconds, double tapOnSlideThresholdSeconds) {
   QByteArray output;
   try {
     if (!utf8 || !qIsFinite(firstSeconds) || !qIsFinite(tapOnSlideThresholdSeconds)
-        || tapOnSlideThresholdSeconds < 0.150 || tapOnSlideThresholdSeconds > 0.250) {
-      throw std::runtime_error("invalid input or TapOnSlide threshold (150..250ms)");
+        || tapOnSlideThresholdSeconds < 0.0 || tapOnSlideThresholdSeconds > 0.250) {
+      throw std::runtime_error("invalid input or TapOnSlide threshold (0..250ms)");
     }
     if (miacode::muri::detail::slideRuntimeRoot().isEmpty())
       throw std::runtime_error("missing Slide reference data");
@@ -166,7 +165,7 @@ static char* analyzeNative(const char* utf8, double firstSeconds, double tapOnSl
   return result;
 }
 
-MURI_EXPORT char* maichart_muri_analyze_v2(const char* utf8, double firstSeconds,
+MURI_EXPORT char* maichart_muri_analyze_v3(const char* utf8, double firstSeconds,
                                            double tapOnSlideThresholdSeconds) {
   return analyzeNative(utf8, firstSeconds, tapOnSlideThresholdSeconds);
 }

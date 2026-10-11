@@ -533,6 +533,22 @@ def test_generation_uses_embedded_judge_without_executable(api, monkeypatch, tmp
     assert "--runtime-reference-executable" not in args
 
 
+@pytest.mark.parametrize("budget", [-1, 1000])
+def test_zero_threshold_and_unbounded_budget_reach_cli(api, monkeypatch, tmp_path, budget):
+    from maichart.generation.event_cli import build_parser
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    code, response, _ = api("/api/generate", {**payload,"conflict_detection_enabled":True,
+        "conflict_repair_mode":"local","tap_on_slide_threshold_ms":0,
+        "conflict_backtrack_budget":budget})
+    assert code == 200, response
+    args = build_parser().parse_args(calls[0][2:])
+    assert args.tap_on_slide_threshold_ms == 0
+    assert args.conflict_backtrack_budget == budget
+    task = webui.TASKS[response["task_id"]]
+    assert task.result["tap_on_slide_threshold_ms"] == 0
+    assert task.result["conflict_backtrack_budget"] == budget
+
+
 def test_old_reference_settings_never_launch_editor(api, monkeypatch, tmp_path):
     _, payload, calls = setup_event_run(monkeypatch, tmp_path)
     code, response, _ = api("/api/generate", {**payload, "runtime_reference_mode": "reject",

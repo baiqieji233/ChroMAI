@@ -57,6 +57,26 @@ def test_real_slide_head_and_early_completion_are_muri_not_geometric_soft():
     assert repaired.coverage["in_process"]
 
 
+def test_zero_threshold_removes_static_proximity_without_hiding_runtime_muri():
+    chart = "(120){4}1-5[4:1],,{20},5,E"
+    regular = native.analyze_inote(chart, tap_on_slide_threshold_ms=200)
+    zero = native.analyze_inote(chart, tap_on_slide_threshold_ms=0)
+    assert any(d["kind"] == "TapOnSlide" for d in regular["static_references"])
+    assert not any(d["kind"] in {"TapOnSlide", "SlideHeadTap"} for d in zero["static_references"])
+    assert zero["tap_on_slide_threshold_ms"] == 0
+    actual = native.analyze_inote("(150){4}3>1[4:1],5<1[4:1],1>5[4:1],5<1[4:1],1,E",
+                                  tap_on_slide_threshold_ms=0)
+    assert any(d["kind"] == "TapOnSlide" and d["alert_level"] == "Muri" for d in actual["diagnostics"])
+
+
+def test_sub_150_threshold_is_not_clamped_by_native_core():
+    chart = "(120){4}1-5[4:1],,{20},5,E"
+    smaller = native.analyze_inote(chart, tap_on_slide_threshold_ms=100)
+    regular = native.analyze_inote(chart, tap_on_slide_threshold_ms=200)
+    assert smaller["tap_on_slide_threshold_ms"] == 100
+    assert len(smaller["static_references"]) < len(regular["static_references"])
+
+
 @pytest.mark.parametrize("text", ["1/5/C", "B1/B2/B3/B4/B5/B6/B7/B8/C", "1-5[4:1]*-4[4:1]"])
 def test_touch_groups_and_branch_heads_do_not_become_static_count_conflicts(text):
     result = detect_chart_conflicts([P(0, text)], TEMPO, 0, config())

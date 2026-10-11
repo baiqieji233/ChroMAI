@@ -22,8 +22,8 @@ def runtime_directory() -> Path:
 
 
 def library_path() -> Path:
-    name = "maichart_muri_v2.dll" if sys.platform == "win32" else (
-        "libmaichart_muri_v2.dylib" if sys.platform == "darwin" else "libmaichart_muri_v2.so")
+    name = "maichart_muri_v3.dll" if sys.platform == "win32" else (
+        "libmaichart_muri_v3.dylib" if sys.platform == "darwin" else "libmaichart_muri_v3.so")
     return runtime_directory() / name
 
 
@@ -34,7 +34,7 @@ def _library():
     if not path.is_file():
         raise RuntimeError("内嵌 MiaCode 检测库未部署；请运行 python tools/build_muri.py。无需安装或打开 MiaCode 编辑器。")
     provenance = json.loads((path.parent / "build.json").read_text(encoding="utf-8"))
-    if provenance.get("commit") != REFERENCE_COMMIT or provenance.get("abi") != 2:
+    if provenance.get("commit") != REFERENCE_COMMIT or provenance.get("abi") != 3:
         raise RuntimeError("内嵌 MiaCode 检测库版本不匹配，请运行 python tools/build_muri.py")
     for name, expected in provenance["files"].items():
         if hashlib.sha256((path.parent / name).read_bytes()).hexdigest() != expected:
@@ -43,10 +43,10 @@ def _library():
         _dll_directory = os.add_dll_directory(str(path.parent))
     lib = ctypes.CDLL(str(path))
     lib.maichart_muri_abi.restype = ctypes.c_int
-    if lib.maichart_muri_abi() != 2:
-        raise RuntimeError("内嵌 MiaCode C ABI2 不兼容")
-    lib.maichart_muri_analyze_v2.argtypes = [ctypes.c_char_p, ctypes.c_double, ctypes.c_double]
-    lib.maichart_muri_analyze_v2.restype = ctypes.c_void_p
+    if lib.maichart_muri_abi() != 3:
+        raise RuntimeError("内嵌 MiaCode C ABI3 不兼容")
+    lib.maichart_muri_analyze_v3.argtypes = [ctypes.c_char_p, ctypes.c_double, ctypes.c_double]
+    lib.maichart_muri_analyze_v3.restype = ctypes.c_void_p
     lib.maichart_muri_free.argtypes = [ctypes.c_void_p]
     lib.maichart_muri_free.restype = None
     return lib
@@ -55,7 +55,7 @@ def _library():
 def ensure_available() -> dict:
     with _lock:
         _library()
-    return {"engine": "miacode_native", "commit": REFERENCE_COMMIT, "in_process": True}
+    return {"engine": "miacode_native", "commit": REFERENCE_COMMIT, "in_process": True, "abi": 3}
 
 
 def engine_status() -> dict:
@@ -77,7 +77,7 @@ def analyze_inote(inote: str, *, first: float = 0.0,
     # calls so concurrent WebUI inspection cannot race those mutable caches.
     with _lock:
         lib = _library()
-        ptr = lib.maichart_muri_analyze_v2(
+        ptr = lib.maichart_muri_analyze_v3(
             inote.encode("utf-8"), float(first), threshold / 1000.0)
         if not ptr:
             raise RuntimeError("MiaCode native output allocation failed")

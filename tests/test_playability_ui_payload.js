@@ -113,3 +113,15 @@ test("note repair policy is local-only and preserves the three backend modes", (
   });
   assert.equal(fallback.note_repair_mode, "delete");
 });
+
+test("zero threshold and unlimited or large numeric budgets are forwarded", () => {
+  const controls = { ...controlsWithPreset("balanced"), "#tapOnSlideThresholdMs": "0",
+    "#conflictBacktrackUnlimited": true, "#conflictBacktrackBudget": "4" };
+  assert.equal(payloadFor(controls).tap_on_slide_threshold_ms, 0);
+  assert.equal(payloadFor(controls).conflict_backtrack_budget, -1);
+  controls["#conflictBacktrackUnlimited"] = false;
+  controls["#conflictBacktrackBudget"] = "1000";
+  assert.equal(payloadFor(controls).conflict_backtrack_budget, 1000);
+  controls["#conflictBacktrackBudget"] = "0";
+  assert.equal(payloadFor(controls).conflict_backtrack_budget, 0);
+});

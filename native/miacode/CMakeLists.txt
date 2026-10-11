@@ -11,6 +11,24 @@ endif()
 configure_file(slide_data.qrc.in slide_data.qrc @ONLY)
 file(GLOB muri_sources "${src}/tools/muri/*.cpp")
 list(FILTER muri_sources EXCLUDE REGEX "MuriDump.cpp$")
+# Keep vendored hashes intact; adapt only the two threshold clamps in generated
+# build sources. Runtime judgement tolerances and geometry are unchanged.
+foreach(unit MuriStaticChecker MuriSimpleNoteJudge)
+  file(READ "${src}/tools/muri/${unit}.cpp" code)
+  string(REGEX MATCHALL "static_cast<double>\\([^)]*kStaticTapOnSlideThresholdMinMs\\) / 1000\\.0" lower_bounds "${code}")
+  list(LENGTH lower_bounds lower_bound_count)
+  if(NOT lower_bound_count EQUAL 1)
+    message(FATAL_ERROR "Unexpected threshold clamp in ${unit}; review the upstream adaptation")
+  endif()
+  string(REGEX REPLACE "static_cast<double>\\([^)]*kStaticTapOnSlideThresholdMinMs\\) / 1000\\.0" "0.0" code "${code}")
+  if(unit STREQUAL "MuriStaticChecker")
+    string(REPLACE "return dedupeDenseOverlapReferences(records);"
+      "if (normalizedCollideThresholdSeconds == 0.0) {\n        records.erase(std::remove_if(records.begin(), records.end(), [](const MuriStaticReference& r) {\n            return r.kind == MuriKind::TapOnSlide || r.kind == MuriKind::SlideHeadTap;\n        }), records.end());\n    }\n    return dedupeDenseOverlapReferences(records);" code "${code}")
+  endif()
+  file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/${unit}.cpp" "${code}")
+  list(FILTER muri_sources EXCLUDE REGEX "/${unit}\\.cpp$")
+  list(APPEND muri_sources "${CMAKE_CURRENT_BINARY_DIR}/${unit}.cpp")
+endforeach()
 add_library(maichart_muri SHARED
   bridge.cpp ${muri_sources}
   ${src}/common/MuriTypes.cpp

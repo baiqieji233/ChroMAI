@@ -1992,11 +1992,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conflict-kind-modes", type=json.loads, default=None,
                         help='Per-kind policy JSON, e.g. {"MultiTouch":"report"}; off/report/enforce.')
     parser.add_argument("--tap-on-slide-threshold-ms", type=float, default=200,
-                        help="Static collision reference neighbourhood, 150..250 ms; not a Perfect tolerance.")
+                        help="Static collision reference neighbourhood, 0..250 ms; 0 disables proximity references, not runtime judgement.")
     parser.add_argument("--conflict-backtrack-windows", type=int, default=0,
                         help="0 current-only; -1 auto source selection up to 2 windows; or 1/2/4.")
     parser.add_argument("--conflict-backtrack-budget", type=int, default=4,
-                        help="Whole-song transaction budget, 0..8. Limits replay and prior-sustain edits.")
+                        help="Whole-song transaction budget: nonnegative count, -1 unlimited; 0 disables replay/prior-sustain edits.")
     parser.add_argument("--sustain-repair-mode", choices=("off", "hold", "hold_slide"), default="off",
                         help="Optional confirmed prior-source repair: shorten Hold, or also simplify basic Slide to its head Tap.")
     parser.add_argument("--note-repair-mode", choices=("delete", "edit", "edit_then_delete"), default="delete",

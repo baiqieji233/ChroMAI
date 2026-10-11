@@ -192,7 +192,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
                     "playability_engine": engine_status(),
-                    "playability_policy_version": 2,
+                    "playability_policy_version": 3,
                     "tasks": [_task.to_dict() for _task in _all_tasks()],
                     "datasets": _uploaded_datasets(),
                     "extractions": {key: dict(value) for key, value in _EXTRACTIONS.items()},

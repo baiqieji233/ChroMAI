@@ -39,15 +39,15 @@ class PostProcessConfig:
                 for key, mode in self.conflict_kind_modes.items()):
                 raise ValueError("无理类别策略须为五类 MiaCode 名称到 off/report/enforce 的映射")
         if (not math.isfinite(float(self.tap_on_slide_threshold_ms))
-                or not 150 <= float(self.tap_on_slide_threshold_ms) <= 250):
-            raise ValueError("撞尾静态参考范围必须为 150–250 ms")
+                or not 0 <= float(self.tap_on_slide_threshold_ms) <= 250):
+            raise ValueError("撞尾静态参考范围必须为 0–250 ms")
         if (isinstance(self.conflict_backtrack_windows, bool)
                 or self.conflict_backtrack_windows not in {-1, 0, 1, 2, 4}):
             raise ValueError("回溯窗口数须为 -1（自动）、0、1、2 或 4")
         if (isinstance(self.conflict_backtrack_budget, bool)
                 or not isinstance(self.conflict_backtrack_budget, int)
-                or not 0 <= self.conflict_backtrack_budget <= 8):
-            raise ValueError("全曲回溯预算必须为 0–8 次")
+                or self.conflict_backtrack_budget < -1):
+            raise ValueError("全曲回溯预算必须为非负整数或 -1（不限次数）")
         if self.sustain_repair_mode not in {"off", "hold", "hold_slide"}:
             raise ValueError("前置长音符修复模式须为 off/hold/hold_slide")
         if self.conflict_engine not in {"static", "miacode"}:

@@ -105,7 +105,7 @@ const GENERATION_PARAM_FIELDS = [
   "fineNoteStrength", "localOnsetBiasStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
   "conflictRepairMode", "conflictRetries", "conflictPreset", "conflictMultiTouchMode", "conflictOverlapMode",
   "conflictTapOnSlideMode", "conflictSlideHeadTapMode", "conflictSlideTooFastMode", "tapOnSlideThresholdMs",
-  "conflictBacktrackWindows", "conflictBacktrackBudget", "sustainRepairMode", "noteRepairMode",
+  "conflictBacktrackWindows", "conflictBacktrackBudget", "conflictBacktrackUnlimited", "sustainRepairMode", "noteRepairMode",
 ];
 
 const CONFLICT_KIND_FIELDS = [
@@ -283,6 +283,10 @@ function restoreSettings() {
   } catch (_) { /* optional */ }
   const values = saved?.values;
   if (!values || typeof values !== "object") return restoreLegacyDatasetPaths();
+  if (Number(values.conflictBacktrackBudget) === -1) {
+    values.conflictBacktrackUnlimited = true;
+    values.conflictBacktrackBudget = "4";
+  }
   // Migrate the former external-reference switch. An old executable path is
   // never used by the embedded detector, including after a browser reload.
   if (["report", "reject"].includes(values.runtimeReferenceMode) && values.conflictDetectionEnabled !== true) {
@@ -680,12 +684,15 @@ function updateGenerationCapabilityControls() {
   const conflictEnabled = checked && caps.conflict_detection === true
     && checkedOrDefault("#conflictDetectionEnabled", false);
   ["#detectHardConflicts", "#detectSoftConflicts", "#conflictRepairMode", "#conflictPreset",
-    "#tapOnSlideThresholdMs", "#conflictBacktrackWindows", "#conflictBacktrackBudget", "#sustainRepairMode",
+    "#tapOnSlideThresholdMs", "#conflictBacktrackWindows", "#conflictBacktrackBudget", "#conflictBacktrackUnlimited", "#sustainRepairMode",
     ...CONFLICT_KIND_FIELDS.map(([, id]) => `#${id}`)].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = !conflictEnabled;
   });
   const noteRepair = element("#noteRepairMode");
+  const backtrackBudget = element("#conflictBacktrackBudget");
+  if (backtrackBudget) backtrackBudget.disabled = !conflictEnabled
+    || checkedOrDefault("#conflictBacktrackUnlimited", false);
   if (noteRepair) noteRepair.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") === "local");
   const retries = element("#conflictRetries");
   if (retries) retries.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") !== "none");
@@ -950,7 +957,8 @@ function generationPayload() {
     conflict_kind_modes: checkedOrDefault("#conflictDetectionEnabled", false) ? conflictKindModesFromUI() : null,
     tap_on_slide_threshold_ms: Number(valueOrDefault("#tapOnSlideThresholdMs", 200)),
     conflict_backtrack_windows: Number(valueOrDefault("#conflictBacktrackWindows", 0)),
-    conflict_backtrack_budget: Number(valueOrDefault("#conflictBacktrackBudget", 4)),
+    conflict_backtrack_budget: checkedOrDefault("#conflictBacktrackUnlimited", false)
+      ? -1 : Number(valueOrDefault("#conflictBacktrackBudget", 4)),
     sustain_repair_mode: valueOrDefault("#sustainRepairMode", "off"),
     note_repair_mode: valueOrDefault("#conflictRepairMode", "none") === "local"
       ? valueOrDefault("#noteRepairMode", "edit_then_delete") : "delete",
@@ -2745,8 +2753,8 @@ async function startGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.conflict_detection_enabled) {
     const status = await api("/api/status");
-    if (status.playability_policy_version !== 2) {
-      throw new Error("当前后端尚未加载分类无理策略、跨窗修复与单音符微调，请重启 WebUI 服务后再生成");
+    if (status.playability_policy_version !== 3) {
+      throw new Error("当前后端尚未加载零阈值与不限回溯次数的无理策略，请重启 WebUI 服务后再生成");
     }
     if (status.playability_engine?.available !== true) {
       throw new Error(status.playability_engine?.error || "当前后端尚未加载内嵌 MiaCode 检测，请重启 WebUI 服务后再生成");

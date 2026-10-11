@@ -97,6 +97,33 @@ def test_failed_replay_restores_original_and_respects_budget(monkeypatch):
     assert results[-1].playability["cross_window"][-1]["status"] == "rolled_back"
 
 
+def test_unlimited_budget_works_above_the_old_upper_bound_and_deduplicates_sources():
+    config = cfg(sustain_repair_mode="hold", conflict_backtrack_budget=-1)
+    prior, trial = [window(0,[15],["1h[4:12]"])],window(16,[1],["1/2"])
+    control = CrossWindowRepair([(F(0),F(16)),(F(16),F(32))],config,TEMPO,0,event_cli._merge_windows)
+    control.used = 100
+    report = detect_chart_conflicts(event_cli._merge_windows(prior+[trial]),TEMPO,0,config)
+    with pytest.raises(RewindPlan) as captured:
+        control.consider(report,trial,prior,1)
+    changed,_ = control.begin(captured.value)
+    assert control.used == 101
+    control.finish(changed+[trial],1)
+    control.consider(report,trial,prior,1)  # the same source is not retried forever
+    assert control.pending is None and control.used == 101
+
+
+def test_zero_budget_disables_source_edits_and_large_finite_budgets_are_valid():
+    config = cfg(sustain_repair_mode="hold",conflict_backtrack_budget=0)
+    prior, trial = [window(0,[15],["1h[4:12]"])],window(16,[1],["1/2"])
+    report = detect_chart_conflicts(event_cli._merge_windows(prior+[trial]),TEMPO,0,config)
+    control = CrossWindowRepair([(F(0),F(16)),(F(16),F(32))],config,TEMPO,0,event_cli._merge_windows)
+    control.consider(report,trial,prior,1)
+    assert control.records == []
+    assert cfg(conflict_backtrack_budget=1000).conflict_backtrack_budget == 1000
+    with pytest.raises(ValueError):
+        cfg(conflict_backtrack_budget=-2)
+
+
 @pytest.mark.skipif(not miacode_native.library_path().is_file(), reason="native library required")
 def test_native_prior_hold_and_new_double_tap_are_resolved_at_source():
     config = cfg(conflict_engine="miacode", sustain_repair_mode="hold")
