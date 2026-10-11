@@ -22,7 +22,7 @@
 python tools/build_muri.py
 ```
 
-脚本会校验 `native/miacode/UPSTREAM.json` 中的源码哈希，使用本机 Qt 6/CMake 构建 `.native/miacode/runtime/maichart_muri.dll`，并把 Slide 参考数据嵌入 DLL。没有 DLL 时，WebUI 在提交生成前会明确报错，不会退回到一个看似成功但没有 MiaCode 检查的流程。
+脚本会校验 `native/miacode/UPSTREAM.json` 中的源码哈希，使用本机 Qt 6/CMake 构建 `.native/miacode/runtime/maichart_muri_v2.dll`（ABI2，支持可调静态撞尾范围），并把 Slide 参考数据嵌入 DLL。旧 DLL 保留，当前机器已构建新版；其他部署需运行构建脚本。没有匹配的 DLL 时，WebUI 在提交生成前会明确报错，不会静默跳过检测。
 
 ## WebUI 行为
 
@@ -30,11 +30,13 @@ python tools/build_muri.py
 
 - `仅检测`：保留结果，写入质量报告和日志；
 - `局部修复`：冲突窗口重新采样；若仍有可定位的 Muri，只删除明确对应的音符，并重新检测，只有冲突数量下降才接受修改；
-- `拒绝生成`：存在剩余硬 Muri 或解析失败时拒绝候选。
+- `拒绝生成`：存在剩余“参与处理”的硬 Muri 或解析失败时拒绝候选；“仅报告”的物理 Muri 保留在报告中。
 
-生成页还可以按 `MultiTouch`、`Overlap`、`TapOnSlide`、`SlideHeadTap`、`SlideTooFast` 分别选择忽略、仅报告或参与处理。`150/200/250 ms` 撞尾档位只调整静态邻近参考：150 更宽松，250 更谨慎，不修改机台 Perfect 判定。
+生成页还可以按 `MultiTouch`、`Overlap`、`TapOnSlide`、`SlideHeadTap`、`SlideTooFast` 分别选择忽略、仅报告或参与处理。`150/200/250 ms` 撞尾档位只调整静态邻近参考：150 更宽松，250 更谨慎，不修改机台 Perfect 判定。预设“保留写法／均衡”中 MultiTouch 默认仅报告，若希望多押参与修复，需要在高级选项中改为“参与处理”。
 
 当前窗口处理失败时可回溯最多 1、2 或 4 个窗口；“自动”会根据证据最多回溯 2 个。全曲预算限制事务次数。开启前置长音符修复后，系统会用反事实重检确认该 Hold/Slide 真正造成硬冲突，才会缩短简单 Hold，或将符合条件的简单 Slide 简化为起点星头 Tap；复杂 Slide/Wifi、EX 和无法确认因果的动作不会被改写。
+
+一次回溯会重建修改点之后的上下文与密度统计，不直接复用旧前缀。结果必须降低参与处理的 Muri，且重生成区间至少保留原候选 80% 的起音头；不满足则恢复原候选。最多检查 8 个活跃长音符，必要时检查前 4 个中的两两组合，因此允许“两个长 Hold 合起来占手”的有限归因，但不承诺任意规模的全曲最优修复。全曲跨窗预算 0 同时关闭回溯和前置时值修复。修复模式为“仅检测／拒绝”时，前置修改关闭。
 
 “单 note 修复策略”是生成后候选搜索：保持起音时间，尝试相邻 Tap/Touch、精确 Hold 缩短和简单 Slide 终点移动，然后重新运行 MiaCode。只有硬 Muri 减少且没有引入新硬 Muri 才接受；它不会修改模型或声称模型拥有单 note 填空能力。
 
@@ -65,5 +67,7 @@ python tools/check_playability.py <maidata.txt> --mode local --output-dir <单�
 ## 验证记录
 
 本轮完整测试为 `1087 passed, 11 skipped`；另有 8 项 Node 行为测试通过。原生核心测试实际加载本机 DLL，覆盖 Hold 尾部接音、星星头错位、复合 Slide/Wifi、Touch 组、跨窗口重试、删改单个和弦子音符、变速与 first 偏移、旧外部调用参数迁移、日志输出和三个生成模式。测试同时拦截子进程创建，确认内嵌检测没有启动外部程序。
+
+后续分类策略、跨窗与单音符微调增量按用户要求只作短功能验证：相关 Python 测试 `135 passed`，前端参数行为 `5 passed`。覆盖源窗口重生成后新前缀、失败回滚、同窗双长 Hold 归因、默认旧参数、邻键/时值候选、类别与 WebUI 参数。没有再次跑完整训练或大批生成；真实音乐表达与游玩体验由用户和玩家进一步测试。
 
 原有三个测试桩缺失 checkpoint schema/数据合同，已补齐其模拟元数据，保持真实 checkpoint 的校验规则不变。本轮不修改训练权重，不启动训练。
