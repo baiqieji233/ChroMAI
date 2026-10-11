@@ -103,8 +103,43 @@ const GENERATION_PARAM_FIELDS = [
   "audioBoundsTrim", "audioBoundsLead", "silenceThreshold", "silenceWindowShare", // 音频边界
   "guidanceScale", "presenceThreshold", "buttonThreshold",
   "fineNoteStrength", "localOnsetBiasStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
-  "conflictRepairMode", "conflictRetries",
+  "conflictRepairMode", "conflictRetries", "conflictPreset", "conflictMultiTouchMode", "conflictOverlapMode",
+  "conflictTapOnSlideMode", "conflictSlideHeadTapMode", "conflictSlideTooFastMode", "tapOnSlideThresholdMs",
+  "conflictBacktrackWindows", "conflictBacktrackBudget", "sustainRepairMode",
 ];
+
+const CONFLICT_KIND_FIELDS = [
+  ["MultiTouch", "conflictMultiTouchMode"],
+  ["Overlap", "conflictOverlapMode"],
+  ["TapOnSlide", "conflictTapOnSlideMode"],
+  ["SlideHeadTap", "conflictSlideHeadTapMode"],
+  ["SlideTooFast", "conflictSlideTooFastMode"],
+];
+const CONFLICT_PRESETS = {
+  preserve: { MultiTouch: "report", Overlap: "enforce", TapOnSlide: "enforce", SlideHeadTap: "enforce", SlideTooFast: "enforce", threshold: 150 },
+  balanced: { MultiTouch: "report", Overlap: "enforce", TapOnSlide: "enforce", SlideHeadTap: "enforce", SlideTooFast: "enforce", threshold: 200 },
+  cautious: { MultiTouch: "enforce", Overlap: "enforce", TapOnSlide: "enforce", SlideHeadTap: "enforce", SlideTooFast: "enforce", threshold: 250 },
+};
+
+function conflictKindModesFromUI() {
+  const modes = {};
+  CONFLICT_KIND_FIELDS.forEach(([kind, id]) => { modes[kind] = valueOrDefault(`#${id}`, "enforce"); });
+  return modes;
+}
+
+function applyConflictPreset(name) {
+  const preset = CONFLICT_PRESETS[name];
+  if (!preset) return;
+  CONFLICT_KIND_FIELDS.forEach(([kind, id]) => {
+    const target = element(`#${id}`);
+    if (target) target.value = preset[kind];
+  });
+  const threshold = element("#tapOnSlideThresholdMs");
+  if (threshold) threshold.value = String(preset.threshold);
+  const custom = element("#conflictPreset");
+  if (custom) custom.value = name;
+  saveSettings();
+}
 
 let activeTaskId = null;
 let datasetUploading = false;
@@ -644,7 +679,9 @@ function updateGenerationCapabilityControls() {
   }
   const conflictEnabled = checked && caps.conflict_detection === true
     && checkedOrDefault("#conflictDetectionEnabled", false);
-  ["#detectHardConflicts", "#detectSoftConflicts", "#conflictRepairMode"].forEach((selector) => {
+  ["#detectHardConflicts", "#detectSoftConflicts", "#conflictRepairMode", "#conflictPreset",
+    "#tapOnSlideThresholdMs", "#conflictBacktrackWindows", "#conflictBacktrackBudget", "#sustainRepairMode",
+    ...CONFLICT_KIND_FIELDS.map(([, id]) => `#${id}`)].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = !conflictEnabled;
   });
@@ -908,6 +945,11 @@ function generationPayload() {
       && valueOrDefault("#conflictRepairMode", "none") !== "none"
       ? Number(valueOrDefault("#conflictRetries", 0)) : 0,
     detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
+    conflict_kind_modes: checkedOrDefault("#conflictDetectionEnabled", false) ? conflictKindModesFromUI() : null,
+    tap_on_slide_threshold_ms: Number(valueOrDefault("#tapOnSlideThresholdMs", 200)),
+    conflict_backtrack_windows: Number(valueOrDefault("#conflictBacktrackWindows", 0)),
+    conflict_backtrack_budget: Number(valueOrDefault("#conflictBacktrackBudget", 4)),
+    sustain_repair_mode: valueOrDefault("#sustainRepairMode", "off"),
     fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
     local_onset_bias_strength: element("#localOnsetBiasStrength")?.disabled
       ? 0 : Number(valueOrDefault("#localOnsetBiasStrength", 0)),
@@ -1127,6 +1169,7 @@ function renderGenerationResult(task) {
               : String(playability.status || "未知");
         const hardCount = Array.isArray(playability.remaining_hard) ? playability.remaining_hard.length
           : Number(playability.remaining_hard || 0);
+        const actionableHard = Number(playability.remaining_actionable_hard ?? hardCount);
         const repairCount = Array.isArray(playability.repairs) ? playability.repairs.length
           : Number(playability.repairs || 0);
         const details = Array.isArray(playability.remaining_details) ? playability.remaining_details
@@ -1140,7 +1183,9 @@ function renderGenerationResult(task) {
           : Number(coverage.unsupported || 0);
         const parseErrors = Array.isArray(coverage.parse_errors) ? coverage.parse_errors.length
           : Number(coverage.parse_errors || 0);
-        playabilityText = `冲突参考：${statusLabel}；未解决硬冲突 ${hardCount}；软参考 ${softCount}；删除修复 ${repairCount}；窗口重试 ${retryCount}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
+        const backtrackChanges = Number(playability.backtrack_modified ?? playability.backtrack_modifications ?? 0);
+        const sustainChanges = Number(playability.sustain_modified ?? playability.sustain_repairs ?? 0);
+        playabilityText = `冲突参考：${statusLabel}；物理 Muri ${hardCount}（可处理 ${actionableHard}）；软参考 ${softCount}；删除修复 ${repairCount}；回溯重试 ${retryCount}；回溯时值修改 ${backtrackChanges}；前置长音符修改 ${sustainChanges}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
         if (softCount) playabilityText += "Warning 不直接删除，需要结合谱面与游玩复核。";
         if (["static_only", "partial"].includes(playability.status)) {
           playabilityText += "检测范围不完整，不能据此认定谱面可玩。";
@@ -2961,6 +3006,21 @@ on("#trainingModeTab", "click", () => setWorkspaceMode("training"));
 on("#qualityModeTab", "click", openDatasetWorkspace);
 on("#generationModeTab", "click", () => setWorkspaceMode("generation"));
 on("#intensityModeTab", "click", () => { setIntensitySong(intensityAudioPath()); setWorkspaceMode("intensity"); drawIntensityCurve(); });
+on("#conflictPreset", "change", () => {
+  const preset = valueOrDefault("#conflictPreset", "custom");
+  if (Object.prototype.hasOwnProperty.call(CONFLICT_PRESETS, preset)) applyConflictPreset(preset);
+  else saveSettings();
+});
+CONFLICT_KIND_FIELDS.forEach(([, id]) => on(`#${id}`, "change", () => {
+  const preset = element("#conflictPreset");
+  if (preset) preset.value = "custom";
+  saveSettings();
+}));
+on("#tapOnSlideThresholdMs", "change", () => {
+  const preset = element("#conflictPreset");
+  if (preset) preset.value = "custom";
+  saveSettings();
+});
 
 // Training panel
 on("#modelFamily", "change", () => { updateTrainingControls(); saveSettings(); });

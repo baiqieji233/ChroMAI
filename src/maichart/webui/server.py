@@ -539,6 +539,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
         conflict_enabled = bool(payload.get("conflict_detection_enabled", False))
         conflict_repair_mode = str(payload.get("conflict_repair_mode", "none"))
         conflict_retries = int(payload.get("conflict_retries", 0))
+        conflict_kind_modes = payload.get("conflict_kind_modes")
+        tap_on_slide_threshold_ms = float(payload.get("tap_on_slide_threshold_ms", 200.0))
+        conflict_backtrack_windows = int(payload.get("conflict_backtrack_windows", 0))
+        conflict_backtrack_budget = int(payload.get("conflict_backtrack_budget", 4))
+        sustain_repair_mode = str(payload.get("sustain_repair_mode", "off"))
         if conflict_repair_mode not in {"none", "local", "reject"}:
             raise ValueError("冲突处理方式只能是 none、local 或 reject")
         if not 0 <= conflict_retries <= 5:
@@ -560,6 +565,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("选择局部修复或拒绝生成时，请同时启用无理检测")
         if conflict_repair_mode == "none":
             conflict_retries = 0
+        from maichart.generation.post_process import PostProcessConfig
+        PostProcessConfig(
+            enable_conflict_detection=conflict_enabled,
+            conflict_repair_mode=conflict_repair_mode,
+            conflict_retries=conflict_retries,
+            conflict_engine="miacode" if conflict_enabled else "static",
+            conflict_kind_modes=conflict_kind_modes,
+            tap_on_slide_threshold_ms=tap_on_slide_threshold_ms,
+            conflict_backtrack_windows=conflict_backtrack_windows,
+            conflict_backtrack_budget=conflict_backtrack_budget,
+            sustain_repair_mode=sustain_repair_mode,
+        )
         if not math.isfinite(curve_strength) or not 0.0 <= curve_strength <= 1.0:
             raise ValueError("曲线控制力度必须在 0–1 之间")
         if curve_mode not in {"follow", "hard", "soft", "strict"}:
@@ -696,9 +713,20 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 args.extend(["--conflict-repair-mode", conflict_repair_mode])
                 if conflict_repair_mode != "none" and conflict_retries:
                     args.extend(["--conflict-retries", str(conflict_retries)])
+                args.extend(["--conflict-kind-modes", json.dumps(conflict_kind_modes, ensure_ascii=False)
+                             if conflict_kind_modes is not None else "null",
+                             "--tap-on-slide-threshold-ms", str(tap_on_slide_threshold_ms),
+                             "--conflict-backtrack-windows", str(conflict_backtrack_windows),
+                             "--conflict-backtrack-budget", str(conflict_backtrack_budget),
+                             "--sustain-repair-mode", sustain_repair_mode])
                 task.result["conflict_detection_enabled"] = True
                 task.result["conflict_repair_mode"] = conflict_repair_mode
                 task.result["conflict_retries"] = conflict_retries if conflict_repair_mode != "none" else 0
+                task.result["conflict_kind_modes"] = conflict_kind_modes
+                task.result["tap_on_slide_threshold_ms"] = tap_on_slide_threshold_ms
+                task.result["conflict_backtrack_windows"] = conflict_backtrack_windows
+                task.result["conflict_backtrack_budget"] = conflict_backtrack_budget
+                task.result["sustain_repair_mode"] = sustain_repair_mode
             if model_family == EVENT_CTX_MODEL_FAMILY:
                 # The window layout is part of the data contract, so the
                 # checkpoint is authoritative: the UI fields are only a copy, and

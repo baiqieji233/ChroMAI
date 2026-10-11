@@ -889,6 +889,63 @@
             <small>MiaCode 的 Warning 与 Muri 分别记录。开启后 Warning 也参与局部重试评分；Warning 不直接删音符，不触发拒绝生成。</small>
           </label>
 
+          <label class="field" data-generation-family="event_v1">无理处理预设
+            <select id="conflictPreset">
+              <option value="preserve">保留写法</option>
+              <option value="balanced" selected>均衡</option>
+              <option value="cautious">谨慎</option>
+              <option value="custom">自定义</option>
+            </select>
+            <small>保留写法与均衡都将多押记为报告，其余类别参与处理；撞尾静态参考阈值分别为 150 ms 和 200 ms。谨慎模式将全部类别纳入处理并使用 250 ms。此阈值只控制静态检查邻近范围，不改变实机 Perfect 判定，也不表示允许所有 Muri 误差。</small>
+          </label>
+
+          <details class="field span-4" data-generation-family="event_v1">
+            <summary>高级类别策略与回溯设置</summary>
+            <p class="help-text">“忽略”不检查该类；“仅报告”记录问题但不重试、修复或拒绝；“参与处理”可按下方修复模式重试、修复或拒绝。关闭全局硬冲突检测时，类别策略不生效。</p>
+            <div class="form-grid">
+              <label class="field">多押动作（MultiTouch）
+                <select id="conflictMultiTouchMode"><option value="off">忽略</option><option value="report" selected>仅报告</option><option value="enforce">参与处理</option></select>
+                <small>同一时段需要执行的动作过多。</small>
+              </label>
+              <label class="field">动作重叠（Overlap）
+                <select id="conflictOverlapMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
+                <small>按判定区与时间检查动作之间的重叠。</small>
+              </label>
+              <label class="field">Slide 撞尾（TapOnSlide）
+                <select id="conflictTapOnSlideMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
+                <small>Slide 路径结束邻近时出现的按键动作。</small>
+              </label>
+              <label class="field">星头与按键（SlideHeadTap）
+                <select id="conflictSlideHeadTapMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
+                <small>星星头与同刻按键动作的冲突。</small>
+              </label>
+              <label class="field">Slide 过快（SlideTooFast）
+                <select id="conflictSlideTooFastMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
+                <small>Slide 路径时长过短，动作难以完成。</small>
+              </label>
+              <label class="field">撞尾阈值（毫秒）
+                <input id="tapOnSlideThresholdMs" type="number" min="150" max="250" step="10" value="200">
+                <small>150 较宽松、提示更少；250 较谨慎、提示更多。它是静态邻近范围，不是实机 Perfect 判定窗口。</small>
+              </label>
+              <label class="field">回溯窗口数
+                <select id="conflictBacktrackWindows"><option value="-1">自动（按原因，最多 2 窗）</option><option value="0" selected>仅当前窗口</option><option value="1">1 个前置窗口</option><option value="2">2 个前置窗口</option><option value="4">4 个前置窗口（高级）</option></select>
+                <small>重生成前置窗口以处理跨窗原因；受全曲预算限制。</small>
+              </label>
+              <label class="field">全曲回溯预算
+                <input id="conflictBacktrackBudget" type="number" min="0" max="8" step="1" value="4">
+                <small>整首歌最多回溯重生成次数，限制反复重试。</small>
+              </label>
+              <label class="field">前置长音符修复
+                <select id="sustainRepairMode">
+                  <option value="off" selected>关闭</option>
+                  <option value="hold">缩短前置 Hold</option>
+                  <option value="hold_slide">缩短 Hold；必要时简单 Slide 转星头 Tap</option>
+                </select>
+                <small>只在反事实复检确认因果后修改并重建后续上下文。一般偏长的 Hold 不会因此自动删除或缩短。</small>
+              </label>
+            </div>
+          </details>
+
           <label class="field" data-generation-family="event_v1">修复模式
             <select id="conflictRepairMode">
               <option value="none">仅检测</option>

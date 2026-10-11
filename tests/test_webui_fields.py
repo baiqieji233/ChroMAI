@@ -156,6 +156,29 @@ def test_local_onset_training_and_generation_controls_are_real_and_gated():
     assert "每个音乐峰" in INDEX
 
 
+def test_conflict_policy_controls_are_visible_and_sent():
+    for field_id in (
+        "conflictPreset", "conflictMultiTouchMode", "conflictOverlapMode",
+        "conflictTapOnSlideMode", "conflictSlideHeadTapMode", "conflictSlideTooFastMode",
+        "tapOnSlideThresholdMs", "conflictBacktrackWindows", "conflictBacktrackBudget",
+        "sustainRepairMode",
+    ):
+        assert f'id="{field_id}"' in INDEX
+    for key in (
+        "conflict_kind_modes", "tap_on_slide_threshold_ms", "conflict_backtrack_windows",
+        "conflict_backtrack_budget", "sustain_repair_mode",
+    ):
+        assert key in APP_JS
+    server = (ROOT / "src/maichart/webui/server.py").read_text(encoding="utf-8")
+    for flag in (
+        "--conflict-kind-modes", "--tap-on-slide-threshold-ms",
+        "--conflict-backtrack-windows", "--conflict-backtrack-budget", "--sustain-repair-mode",
+    ):
+        assert flag in server
+    assert "remaining_actionable_hard" in APP_JS
+    assert "物理 Muri" in APP_JS
+
+
 def _style_keys():
     """The radar/style slide definitions from app.js (app.js list literals)."""
 
