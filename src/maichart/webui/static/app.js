@@ -73,6 +73,18 @@ const datasetStorageKey = "maichart.training.dataset.v1";
 const settingsStorageKey = "maichart.webui.settings.v1";
 const workspaceStorageKey = "maichart.webui.workspace";
 const intensityCurveStorageKey = "maichart.webui.intensity-curve.v1";
+const GENERATION_LEVEL_MIN = 12;
+const GENERATION_LEVEL_MAX = 15;
+const GENERATION_LEVEL_DEFAULT = 13.3;
+// A previous WebUI version could persist an unrelated difficulty value (for
+// example 1.0) under #level.  Keep the repair in one small, testable helper so
+// restoring settings cannot silently create an out-of-contract curve condition.
+function normalizeGenerationLevel(value, fallback = GENERATION_LEVEL_DEFAULT) {
+  const level = Number(value);
+  return Number.isFinite(level) && level >= GENERATION_LEVEL_MIN && level <= GENERATION_LEVEL_MAX
+    ? level : fallback;
+}
+let restoredSettingNotice = "";
 
 // Generation knobs only.  Song data (bpm/first/tempoMap), file paths, metadata
 // and every training control are deliberately absent: resetting the generation
@@ -244,6 +256,28 @@ function restoreSettings() {
     else if (value !== undefined && value !== null) target.value = String(value);
     restored += 1;
   });
+  const levelInput = element("#level");
+  if (levelInput) {
+    const previousLevel = levelInput.value;
+    const normalizedLevel = normalizeGenerationLevel(previousLevel);
+    const levelWasRepaired = Number(previousLevel) !== normalizedLevel;
+    levelInput.value = String(normalizedLevel);
+    // The range slider is a view of the same condition field.  Always sync it
+    // from the validated number input, including when an old browser saved a
+    // separate, stale slider value.
+    const levelRange = element("#levelRange");
+    if (levelRange) levelRange.value = String(normalizedLevel);
+    if (levelWasRepaired) {
+      restoredSettingNotice = `检测到旧设置中的目标等级 ${previousLevel || "空值"} 超出当前支持范围 12.00–15.00，已恢复为 13.30；请重新生成强度曲线。`;
+      // Canonicalize the saved copy as well, so a reload before any further
+      // user input does not repeat the repair indefinitely.
+      try {
+        saved.values.level = String(normalizedLevel);
+        if (Object.prototype.hasOwnProperty.call(saved.values, "levelRange")) saved.values.levelRange = String(normalizedLevel);
+        localStorage.setItem(settingsStorageKey, JSON.stringify(saved));
+      } catch (_) { /* storage disabled or stale */ }
+    }
+  }
   document.querySelectorAll("[data-number-for]").forEach((mirror) => {
     const source = document.getElementById(mirror.dataset.numberFor);
     if (source) mirror.value = source.value;
@@ -2840,6 +2874,10 @@ controlRows("styleControls", styleKeys);
 loadIntensityCurveState();
 generationDefaults = captureGenerationDefaults();
 const restoredSettings = restoreSettings();
+if (restoredSettingNotice) {
+  const status = element("#conditionPresetStatus");
+  if (status) status.textContent = restoredSettingNotice;
+}
 if (restoredSettings) {
   // Recompute mode-dependent defaults, then put the user's own lr back on top.
   const learningRate = valueOrDefault("#learningRate", "");

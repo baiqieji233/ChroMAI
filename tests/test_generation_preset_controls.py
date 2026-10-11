@@ -71,6 +71,21 @@ console.log(JSON.stringify({ rows, combinations, forward, reverse, repeat, noPre
     assert result["rejected"] == 4
 
 
+def test_restored_generation_level_is_kept_inside_curve_condition_range():
+    """Old saved values must not create an invalid intensity-curve condition."""
+
+    result = _run_js("const GENERATION_LEVEL_MIN = 12;\nconst GENERATION_LEVEL_MAX = 15;\nconst GENERATION_LEVEL_DEFAULT = 13.3;\n"
+                     + _function("normalizeGenerationLevel") + r'''
+const values = [1, 11.99, 12, 13.3, 15, 15.01, NaN, ""];
+console.log(JSON.stringify(values.map(value => normalizeGenerationLevel(value))));
+''')
+    assert result == [13.3, 13.3, 12, 13.3, 15, 13.3, 13.3, 13.3]
+    restore_start = APP.index("function restoreSettings")
+    restore = APP[restore_start:APP.index("\n}", restore_start) + 2]
+    assert "normalizeGenerationLevel(previousLevel)" in restore
+    assert 'levelRange.value = String(normalizedLevel)' in restore
+
+
 def test_contrast_enhancement_preserves_timing_and_supports_undo_and_persistence():
     result = _run_js("\n".join(_function(name) for name in (
         "intensityProfileValid", "cloneIntensityProfile", "pushIntensityHistory",
