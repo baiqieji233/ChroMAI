@@ -671,7 +671,7 @@
             <div class="level-recipe-slider"><input id="levelRange" type="range" min="12" max="15" step="0.1" value="13.3" aria-label="拖动选择目标等级"><div><span>12.0 · 较轻</span><span>15.0 · 较重</span></div></div>
           </div>
           <p class="acceptance-hint">填好数字或拖动后会自动应用等级基准，并保留下面勾选的偏好。也可输入 13.45 等数值，由相邻 0.1 档插值。
-            修改等级或偏好会重新计算 Radar / Style，覆盖高级微调；不会改采样、曲线或音频边界。若在使用模型来源曲线，改完后请重新生成曲线。</p>
+            修改等级或偏好会重新计算 Radar / Style，覆盖高级微调；不会改采样、曲线或音频边界。模型来源曲线仍可继续使用，界面仅提示条件变化；需要新的预测时可自行重新生成。</p>
           <div class="preset-heading"><strong>2 · 加上特殊偏好</strong><span>可多选；不选就是该等级的常规写法。</span></div>
           <div class="preference-cards">
             <label class="preference-card"><input id="preferKeyboard" type="checkbox"><span><strong>键盘</strong><small>更偏 Tap 与双手按键组合，减少 Slide / Touch；不等于大量同键连打。</small></span></label>
@@ -711,6 +711,7 @@
           </label>
           <button id="openIntensityCurveButton" class="secondary-button" type="button">打开强度曲线编辑</button>
         </div>
+        <p id="intensityCurveConditionNotice" class="inline-status warn" hidden></p>
         <p class="condition-note">
           <strong>关于条件遮罩：</strong>这是训练阶段的 <code>condition_mask_prob</code>，决定训练样本有多少次使用 null/default 条件；它不表示生成页的滑条“永远有效”或“0.5 就是不设定”。
           生成页会把你当前填写的 Radar / Style 原样放入后端条件文件，实际影响大小仍取决于 checkpoint 是否学会使用这些条件。
@@ -1065,7 +1066,7 @@
           <select id="intensityCurveSource"><option value="auto" selected>自动（新模型优先 planner）</option><option value="audio">音频多维参考</option><option value="model">模型 planner</option></select>
           <small>auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
           checkpoint 身份指具体权重文件和训练 epoch，不代表模型架构。训练中的 event_last.pt 会持续覆盖，建议选择固定的 event_epoch_NNN.pt 生成曲线。
-          audio 只依赖歌曲的音频特征。更换 checkpoint、等级、风格、BPM 或 first 后，模型来源曲线需要重新生成。</small>
+          audio 只依赖歌曲的音频特征。等级、Radar 或 Style 改动只提醒，未重新预测时继续沿用已保存曲线；更换音频、checkpoint、BPM、first 或 tempo map 后仍需重新生成。</small>
         </label>
         <div class="button-row">
           <button id="generateIntensityCurveButton" class="primary-button" type="button">生成强度曲线</button>

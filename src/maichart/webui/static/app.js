@@ -153,7 +153,7 @@ let uploadedDatasets = [];
 let checkpointInspection = { key: "", data: null };
 let generationInspection = { path: "", data: null };
 let generationDefaults = {};
-let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false, contextStale: false };
+let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false, contextStale: false, conditionChanged: false };
 const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
 // Dataset selection is intentionally separate from qualityState: selected
 // sources feed training, while activeDataset is the source currently being
@@ -224,7 +224,11 @@ function loadIntensityCurveState() {
     if (saved && typeof saved === "object") intensityCurveState = { ...intensityCurveState, ...saved,
       profile: saved.profile ? normalizeIntensityProfile(saved.profile) : null,
       automatic: saved.automatic ? normalizeIntensityProfile(saved.automatic) : null,
-      history: [], saved: saved.saved === true, contextStale: saved.contextStale === true };
+      history: [], saved: saved.saved === true,
+      // Older UI versions mixed condition and timing invalidation. Let their
+      // curves be saved again; backend identity/timing preflight stays strict.
+      contextStale: saved.contextVersion === 2 && saved.contextStale === true,
+      conditionChanged: saved.conditionChanged === true || (saved.contextVersion !== 2 && saved.contextStale === true) };
   } catch (_) { /* storage disabled or stale */ }
 }
 
@@ -237,6 +241,8 @@ function saveIntensityCurveState() {
       automatic: intensityCurveState.automatic ? { ...intensityCurveState.automatic, spectrogram: undefined } : null,
       saved: intensityCurveState.saved === true,
       contextStale: intensityCurveState.contextStale === true,
+      contextVersion: 2,
+      conditionChanged: intensityCurveState.conditionChanged === true,
     }));
   } catch (_) { /* curve is still usable for this page */ }
 }
@@ -313,13 +319,9 @@ function restoreSettings() {
     const levelRange = element("#levelRange");
     if (levelRange) levelRange.value = String(normalizedLevel);
     if (levelWasRepaired) {
-      restoredSettingNotice = `检测到旧设置中的目标等级 ${previousLevel || "空值"} 超出当前支持范围 12.00–15.00，已恢复为 13.30；请重新生成强度曲线。`;
-      // A learned curve stores the level/style snapshot used by the planner.
-      // If the repair changes that snapshot, do not leave the old curve marked
-      // as ready: the next generation should require a fresh prediction.
+      restoredSettingNotice = `检测到旧设置中的目标等级 ${previousLevel || "空值"} 超出当前支持范围 12.00–15.00，已恢复为 13.30；原强度曲线仍可使用，也可按需重新生成。`;
       if (String(intensityCurveState.profile?.method || "").startsWith("learned_music_structure_")) {
-        intensityCurveState.saved = false;
-        intensityCurveState.contextStale = true;
+        intensityCurveState.conditionChanged = true;
         saveIntensityCurveState();
       }
       // Canonicalize the saved copy as well, so a reload before any further
@@ -1210,7 +1212,8 @@ function renderGenerationResult(task) {
           playabilityText += "检测范围不完整，不能据此认定谱面可玩。";
         }
       }
-      status.textContent = `生成状态：${verdict}；音符级警告 ${warnings} 条。${playabilityText} ${task.result?.quality_notice || ""}`;
+      const curveWarnings = task.result?.curve_condition_warnings || payload.intensity_curve?.condition_warnings || [];
+      status.textContent = `生成状态：${verdict}；音符级警告 ${warnings} 条。${playabilityText} ${curveWarnings.join("；")} ${task.result?.quality_notice || ""}`;
     } else {
       status.textContent = `质量报告不可读：${report.error || "未知原因"}`;
     }
@@ -2258,6 +2261,16 @@ function updateIntensityButtons() {
   const reset = element("#intensityResetButton");
   if (reset) reset.disabled = !hasProfile || !intensityProfileValid(intensityCurveState.automatic);
   updateIntensityViewControls();
+  updateCurveConditionNotice();
+}
+
+function updateCurveConditionNotice() {
+  const node = element("#intensityCurveConditionNotice");
+  if (!node) return;
+  const show = intensityCurveState.conditionChanged && intensityCurveState.profile
+    && checkedOrDefault("#intensityCurveEnabled", false);
+  node.hidden = !show;
+  node.textContent = show ? "等级、Radar 或 Style 已变化。未重新预测时仍沿用原曲线，生成使用当前等级与风格；你也可以按需重新生成曲线。" : "";
 }
 
 function setIntensityStatus(message, kind = "") {
@@ -2612,7 +2625,7 @@ function adjustIntensitySelection(delta = null) {
 
 function showIntensityProfile(profile, audioPreviewUrl = null) {
   const normalized = normalizeIntensityProfile(profile); if (!intensityProfileValid(normalized)) throw new Error("后端返回的强度曲线格式不完整");
-  intensityCurveState.profile = normalized; intensityCurveState.automatic = cloneIntensityProfile(normalized); intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false;
+  intensityCurveState.profile = normalized; intensityCurveState.automatic = cloneIntensityProfile(normalized); intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false; intensityCurveState.conditionChanged = false;
   resetIntensityView();
   if (audioPreviewUrl) intensityCurveState.profile.audio_preview_url = audioPreviewUrl;
   if (audioPreviewUrl) intensityCurveState.automatic.audio_preview_url = audioPreviewUrl;
@@ -2687,10 +2700,10 @@ function applyIntensitySection() {
 
 function saveIntensityCurveAndReturn() {
   if (!intensityProfileValid(intensityCurveState.profile)) throw new Error("请先生成强度曲线");
-  if (intensityCurveState.contextStale) throw new Error("等级、Radar、Style 或节拍设置已变化，请重新生成模型来源曲线后再保存");
+  if (intensityCurveState.contextStale) throw new Error("节拍设置已变化，请重新生成模型来源曲线后再保存");
   intensityCurveState.profile.edited = true; intensityCurveState.saved = true; saveIntensityCurveState();
   const checkbox = element("#intensityCurveEnabled"); if (checkbox) checkbox.checked = true;
-  setWorkspaceMode("generation"); setIntensityStatus("曲线已保存；生成页将使用这份人工曲线。", "good"); saveSettings();
+  setWorkspaceMode("generation"); setIntensityStatus("曲线已保存；生成页将使用这份人工曲线。", "good"); updateCurveConditionNotice(); saveSettings();
 }
 
 function undoIntensityCurve() {
@@ -2706,7 +2719,7 @@ function resetIntensityCurve() {
 function invalidateIntensityForAudio() {
   const path = intensityAudioPath();
   if (intensityCurveState.profile && intensityCurveState.path !== path) {
-    intensityCurveState.profile = null; intensityCurveState.automatic = null; intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false;
+    intensityCurveState.profile = null; intensityCurveState.automatic = null; intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false; intensityCurveState.conditionChanged = false;
     resetIntensityView();
     setIntensitySong(path); drawIntensityCurve(); updateIntensityButtons();
     const audio = element("#intensityAudio"); if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
@@ -2727,11 +2740,12 @@ function invalidateLearnedCurveForTiming() {
 function invalidateLearnedCurveForCondition() {
   const profile = intensityCurveState.profile;
   if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
-  intensityCurveState.saved = false;
-  intensityCurveState.contextStale = true;
+  intensityCurveState.conditionChanged = true;
   saveIntensityCurveState();
   updateIntensityButtons();
-  setIntensityStatus("等级、Radar 或 Style 已变化，模型来源曲线需要重新生成。", "warn");
+  if (!intensityCurveState.contextStale) {
+    setIntensityStatus("等级、Radar 或 Style 已变化；可继续使用原曲线，或按需重新生成。", "warn");
+  }
 }
 
 async function restoreIntensityBackdrop() {
@@ -2791,6 +2805,11 @@ async function startGenerate() {
     }
   }
   const data = await api("/api/generate", payload);
+  if (data.curve_condition_warnings?.length) {
+    intensityCurveState.conditionChanged = true;
+    saveIntensityCurveState(); updateCurveConditionNotice();
+    setIntensityStatus(data.curve_condition_warnings.join("；"), "warn");
+  }
   watchTask(data.task_id, (task) => {
     if (task.status === "completed") setAcceptanceStatus("生成完成，可点击「验收谱面」做横向比较。", "good");
   });
@@ -3178,6 +3197,8 @@ on("#datasetZip", "change", async (event) => {
 // Generation panel
 on("#audioFile", "change", async (event) => { const data = await upload("audio", event.target.files[0], "#audioPath", "#audioUploadStatus"); invalidateIntensityForAudio(); return data; });
 on("#audioPath", "input", invalidateIntensityForAudio);
+on("#intensityCurveEnabled", "change", updateCurveConditionNotice);
+on("#acceptanceDifficulty", "change", invalidateLearnedCurveForCondition);
 on("#tempoMap", "input", invalidateLearnedCurveForTiming);
 on("#tempoMap", "change", invalidateLearnedCurveForTiming);
 ["#bpm", "#first", "#tempoMode"].forEach((selector) => {

@@ -471,6 +471,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if not _is_event_family(model_family) and audio_path is None and audio_features_path is None:
             raise ValueError("请导入音频或预计算的 audio_features.json")
         curve = None
+        curve_condition_warnings = []
         if payload.get("intensity_curve_enabled", False):
             if not _is_event_family(model_family):
                 raise ValueError("谱面张力曲线目前支持 event_v1 / event_ctx_v1")
@@ -505,16 +506,22 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     condition_profile=_resolve_condition_profile(payload),
                     contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
                 )
-                context_differences = _learned_curve_context_differences(
-                    curve, current_condition, payload, tempo_map_hash)
+                if not isinstance(curve.get("condition"), dict):
+                    raise ValueError("曲线缺少有效的 condition 条件快照，请重新生成曲线")
+                context_differences = _learned_curve_timing_differences(curve, payload, tempo_map_hash)
                 if context_differences:
                     detail = "；".join(context_differences[:12])
                     if len(context_differences) > 12:
                         detail += f"；另有 {len(context_differences) - 12} 项"
                     raise ValueError(
-                        "曲线预测所用等级、风格或节拍设置已变化，请重新生成曲线后继续编辑"
+                        "曲线预测所用节拍设置已变化，请重新生成曲线后继续编辑"
                         f"（具体差异：{detail}）"
                     )
+                condition_differences = _curve_condition_differences(curve["condition"], current_condition.to_dict())
+                if condition_differences:
+                    curve_condition_warnings = [
+                        "曲线预测时的等级或风格与当前设置不同，将沿用原曲线并使用当前生成参数。"
+                        "如需新的模型预测，可自行重新生成曲线。差异：" + "；".join(condition_differences)]
         tempo_mode = str(payload.get("tempo_mode", "constant")).strip().lower()
         intensity_mode = str(payload.get("intensity_mode", GENERATION_SAMPLING_DEFAULTS["intensity_mode"]))
         if _is_event_family(model_family):
@@ -593,6 +600,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if curve_mode not in {"follow", "hard", "soft", "strict"}:
             raise ValueError("曲线控制方式只能是 follow、hard、soft 或 strict")
         task = _create_task("generate")
+        task.result["curve_condition_warnings"] = curve_condition_warnings
         task.result.update({"model_family": model_family, "checkpoint_schema": checkpoint_payload.get("schema")})
         seed, seed_randomized = _resolve_seed(payload)
         task.result.update({"seed": seed, "seed_randomized": seed_randomized})
@@ -816,7 +824,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             else:
                 args.extend(["--audio", str(audio_path)])
         _run_subprocess_task(task, args, expected_epoch=None, result_paths=result_paths)
-        self._json_response({"task_id": task.task_id})
+        self._json_response({"task_id": task.task_id, "curve_condition_warnings": curve_condition_warnings})
 
     def _gold_designers(self, payload: dict[str, Any]) -> None:
         """Designer histogram for the manifest, so gold criteria are discoverable."""
@@ -2321,9 +2329,8 @@ def _curve_value_text(value: Any) -> str:
 def _curve_condition_differences(saved: Any, current: Any) -> list[str]:
     """Return human-readable condition differences for a learned curve.
 
-    The old WebUI collapsed every mismatch into one generic message, which made
-    a valid saved curve look broken.  Keep the strict rejection but expose the
-    exact field that changed so the user can correct the generation panel.
+    Condition changes are advisory: retain the original prediction snapshot
+    and describe changes without preventing use of the saved workload curve.
     """
 
     if not isinstance(saved, dict):
@@ -2354,9 +2361,9 @@ def _curve_condition_differences(saved: Any, current: Any) -> list[str]:
     return differences
 
 
-def _learned_curve_context_differences(curve: dict[str, Any], current_condition: Any,
-                                       payload: dict[str, Any], tempo_map_hash: str | None) -> list[str]:
-    differences = _curve_condition_differences(curve.get("condition"), current_condition.to_dict())
+def _learned_curve_timing_differences(curve: dict[str, Any], payload: dict[str, Any],
+                                      tempo_map_hash: str | None) -> list[str]:
+    differences = []
     if not _curve_values_equal(curve.get("first", 0), payload.get("first", 0)):
         differences.append(f"first {_curve_value_text(curve.get('first', 0))}→{_curve_value_text(payload.get('first', 0))}")
     if tempo_map_hash is None:

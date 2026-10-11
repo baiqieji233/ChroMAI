@@ -117,10 +117,14 @@ def validate_learned_curve_contract(curve: dict, *, checkpoint_path: str | Path,
                                     checkpoint_identity: dict[str, object],
                                     condition: GenerationCondition, first: float,
                                     tempo_map: list[EventTempo] | None,
-                                    tempo_mode: str, bpm_input: float | None) -> None:
-    """Reject a learned curve made for another generation context."""
+                                    tempo_mode: str, bpm_input: float | None) -> list[str]:
+    """Enforce identity/timing; allow reusing a curve under changed controls.
+
+    Its points express the user's workload intent. Keep its original condition
+    provenance, while the decoder uses the current generation condition.
+    """
     if not str(curve.get("method", "")).startswith("learned_music_structure_"):
-        return
+        return []
     curve_checkpoint = curve.get("checkpoint")
     if not curve_checkpoint:
         raise ValueError("Learned intensity curve has no checkpoint path; regenerate it")
@@ -140,8 +144,8 @@ def validate_learned_curve_contract(curve: dict, *, checkpoint_path: str | Path,
     if not same_size or not (same_hash or old_browser_mtime_match):
         raise ValueError("Learned intensity curve checkpoint identity changed; regenerate it")
     try:
-        if curve.get("condition") != condition.to_dict():
-            raise ValueError("Learned intensity curve condition differs from generation condition; regenerate it")
+        if not isinstance(curve.get("condition"), dict):
+            raise ValueError("Learned intensity curve has invalid condition metadata; regenerate it")
         if float(curve.get("first", 0.0)) != float(first):
             raise ValueError("Learned intensity curve uses another first/audio offset; regenerate it")
     except (TypeError, ValueError) as exc:
@@ -157,6 +161,9 @@ def validate_learned_curve_contract(curve: dict, *, checkpoint_path: str | Path,
         curve_bpm_input = curve.get("bpm_input")
         if curve_bpm_input != bpm_input:
             raise ValueError("Learned intensity curve uses another BPM input; regenerate it")
+    if curve["condition"] != condition.to_dict():
+        return ["等级、Radar 或 Style 与曲线预测时不同，将沿用原曲线并按当前生成参数写谱；可按需重新生成曲线。"]
+    return []
 
 
 def _tempo_map(tempo_mode: str, audio, bpm: float, *, snap: bool = True) -> list[EventTempo]:
@@ -2078,6 +2085,7 @@ def main(argv=None) -> int:
     output_ir = Path(args.output_ir) if args.output_ir else output.with_suffix(".chart.json")
     quality_path = Path(args.quality_report) if args.quality_report else output.with_suffix(".quality.json")
     intensity_curve = None
+    curve_condition_warnings = []
     # Load the gold reference up front so a bad path fails before any GPU work.
     gold_reference = load_reference(args.gold_stats) if args.gold_stats else None
     if gold_reference is not None:
@@ -2168,12 +2176,17 @@ def main(argv=None) -> int:
         audio_identity = _file_identity(args.audio)
         checkpoint_identity = _file_identity(args.checkpoint)
         if intensity_curve is not None:
-            validate_learned_curve_contract(
+            curve_condition_warnings = validate_learned_curve_contract(
                 intensity_curve, checkpoint_path=args.checkpoint,
                 checkpoint_identity=checkpoint_identity, condition=condition,
                 first=args.first, tempo_map=explicit_tempo,
                 tempo_mode=args.tempo_mode, bpm_input=args.bpm,
             )
+            if curve_condition_warnings:
+                print("intensity_curve_condition_warning " + json.dumps({
+                    "warnings": curve_condition_warnings, "source_condition": intensity_curve.get("condition"),
+                    "generation_condition": condition.to_dict(), "curve_reused": True,
+                }, ensure_ascii=False), flush=True)
     except Exception as exc:
         _write_failure_report(output, quality_path, exc)
         print(f"generation_status=failed error={exc}", flush=True)
@@ -2313,6 +2326,10 @@ def main(argv=None) -> int:
                     "mode": str(args.intensity_curve_mode),
                     "strength": float(args.intensity_curve_strength),
                     "rest_regions": intensity_curve.get("rest_regions", []),
+                    "condition_warnings": curve_condition_warnings,
+                    "reused_with_changed_condition": bool(curve_condition_warnings),
+                    "source_condition": intensity_curve.get("condition"),
+                    "generation_condition": condition.to_dict(),
                     "target": "manual_curve_effective_factor",
                     "method": ({"follow": "planner_and_decode_soft_density_feedback",
                                 "hard": "decode_hard_density_cap_with_whole_cell_guard",
@@ -2439,7 +2456,7 @@ def main(argv=None) -> int:
                 conflict_result.coverage.get("status") == "partial"
                 or bool(conflict_result.remaining_conflicts))
             quality["generation_status"] = (
-                "success_with_warnings" if note_warnings or playability_warning else "success"
+                "success_with_warnings" if note_warnings or playability_warning or curve_condition_warnings else "success"
             )
             quality["windows_decoded"] = len(decoded)
             quality["windows_closed"] = sum(1 for window in decoded if window.closed)

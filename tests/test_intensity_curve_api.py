@@ -339,9 +339,14 @@ def test_learned_curve_preflight_matches_cli_for_profile_plus_level_only_data(ap
     before_calls = len(calls)
     code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
                                               "intensity_curve": wrong_curve})
-    assert code == 400
-    assert "等级、风格或节拍设置已变化" in result["error"]
-    assert len(calls) == before_calls
+    assert code == 200, result
+    assert "Style.melody_following" in result["curve_condition_warnings"][0]
+    assert len(calls) == before_calls + 1
+    args = calls[-1]
+    saved_curve = json.loads(Path(args[args.index("--intensity-curve") + 1]).read_text(encoding="utf-8"))
+    assert saved_curve["condition"] == wrong_curve["condition"]
+    assert saved_curve["points"] == wrong_curve["points"]
+    assert webui.TASKS[result["task_id"]].result["curve_condition_warnings"]
 
 
 def test_learned_curve_preflight_reports_exact_condition_and_timing_differences(api, monkeypatch, tmp_path):
@@ -369,10 +374,16 @@ def test_learned_curve_preflight_reports_exact_condition_and_timing_differences(
     code, result, _ = api("/api/generate", {**payload, "intensity_curve_enabled": True,
                                               "intensity_curve": stale})
     assert code == 400
-    assert "等级 12.5→13.3" in result["error"]
-    assert "Style.melody_following 0.2→0.9" in result["error"]
     assert "节拍模式 auto→constant" in result["error"]
     assert not calls
+
+    # Identical condition changes are advisory once timing matches.
+    code, result, _ = api("/api/generate", {**payload, "tempo_mode": "auto",
+        "intensity_curve_enabled": True, "intensity_curve": stale})
+    assert code == 200, result
+    warning = result["curve_condition_warnings"][0]
+    assert "等级 12.5→13.3" in warning and "Style.melody_following 0.2→0.9" in warning
+    before_calls = len(calls)
 
     stale = {**curve, "bpm_input": 120.0}
     code, result, _ = api("/api/generate", {**payload, "bpm": 150,
@@ -381,7 +392,7 @@ def test_learned_curve_preflight_reports_exact_condition_and_timing_differences(
     assert code == 400
     assert "节拍模式 auto→constant" in result["error"]
     assert "BPM 120→150" in result["error"]
-    assert not calls
+    assert len(calls) == before_calls
 
 
 def test_explicit_tempo_map_is_normalized_and_forwarded_to_event_cli(api, monkeypatch, tmp_path):
