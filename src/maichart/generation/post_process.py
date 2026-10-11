@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import json
 import math
-from dataclasses import dataclass, field, asdict
+from dataclasses import dataclass, field, asdict, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -22,8 +22,34 @@ class PostProcessConfig:
     conflict_repair_mode: str = "none"
     conflict_retries: int = 0
     conflict_engine: str = "static"
+    conflict_kind_modes: dict[str, str] | None = None
+    tap_on_slide_threshold_ms: float = 200.0
+    conflict_backtrack_windows: int = 0
+    conflict_backtrack_budget: int = 4
+    sustain_repair_mode: str = "off"
+    note_repair_mode: str = "delete"
 
     def __post_init__(self):
+        if self.note_repair_mode not in {"delete", "edit", "edit_then_delete"}:
+            raise ValueError("单音符修复模式须为 delete/edit/edit_then_delete")
+        kinds = {"MultiTouch", "Overlap", "TapOnSlide", "SlideHeadTap", "SlideTooFast"}
+        if self.conflict_kind_modes is not None:
+            if not isinstance(self.conflict_kind_modes, dict) or any(
+                key not in kinds or mode not in {"off", "report", "enforce"}
+                for key, mode in self.conflict_kind_modes.items()):
+                raise ValueError("无理类别策略须为五类 MiaCode 名称到 off/report/enforce 的映射")
+        if (not math.isfinite(float(self.tap_on_slide_threshold_ms))
+                or not 150 <= float(self.tap_on_slide_threshold_ms) <= 250):
+            raise ValueError("撞尾静态参考范围必须为 150–250 ms")
+        if (isinstance(self.conflict_backtrack_windows, bool)
+                or self.conflict_backtrack_windows not in {-1, 0, 1, 2, 4}):
+            raise ValueError("回溯窗口数须为 -1（自动）、0、1、2 或 4")
+        if (isinstance(self.conflict_backtrack_budget, bool)
+                or not isinstance(self.conflict_backtrack_budget, int)
+                or not 0 <= self.conflict_backtrack_budget <= 8):
+            raise ValueError("全曲回溯预算必须为 0–8 次")
+        if self.sustain_repair_mode not in {"off", "hold", "hold_slide"}:
+            raise ValueError("前置长音符修复模式须为 off/hold/hold_slide")
         if self.conflict_engine not in {"static", "miacode"}:
             raise ValueError("conflict-engine must be static or miacode")
         if self.conflict_repair_mode not in {"none", "local", "reject"}:
@@ -59,6 +85,7 @@ class PostProcessResult:
                 "hard": sum(c.severity == "hard" for c in self.conflicts_detected),
                 "details": [c.to_dict() for c in self.conflicts_detected],
                 "remaining_hard": sum(c.severity == "hard" for c in self.remaining_conflicts),
+                "remaining_actionable_hard": sum(c.severity == "hard" and actionable(c) for c in self.remaining_conflicts),
                 "remaining_details": [c.to_dict() for c in self.remaining_conflicts],
                 "repairs": self.repairs_applied, "success": self.success,
                 "coverage": self.coverage, "message": self.message}
@@ -71,6 +98,15 @@ def _note_text(note):
         suffix = ("b" if note.is_break else "") + ("x" if note.modifiers.get("ex") else "")
         return str(note.position) + suffix
     return note.raw
+
+
+def actionable(issue):
+    """Keep physical findings separate from the user's generation policy."""
+    return getattr(issue, "action", "enforce") == "enforce"
+
+
+def actionable_hard(result):
+    return sum(c.severity == "hard" and actionable(c) for c in result.conflicts_detected)
 
 
 def _extract(points, tempo_changes, first):
@@ -131,8 +167,11 @@ def detect_chart_conflicts(points, tempo_changes, first, config):
         from maichart.generation.miacode_conflicts import detect_native_conflicts
         issues, coverage = detect_native_conflicts(points, tempo_changes, first, events, config)
     else:
-        issues = ConflictDetector(config.detect_hard_conflicts, config.detect_soft_conflicts).detect_conflicts(events)
-    hard = any(c.severity == "hard" for c in issues)
+        detector = ConflictDetector(config.detect_hard_conflicts, config.detect_soft_conflicts,
+                                    conflict_kind_modes=config.conflict_kind_modes)
+        issues = detector.detect_conflicts(events)
+        coverage["ignored"] = [item.to_dict() for item in getattr(detector, "ignored", [])]
+    hard = any(c.severity == "hard" and actionable(c) for c in issues)
     success = not (config.conflict_repair_mode == "reject" and hard)
     # An incomplete parser result cannot be presented as a strict acceptance.
     if config.conflict_repair_mode == "reject" and coverage["parse_errors"]:
@@ -163,7 +202,7 @@ def process_chart_points(points, tempo_changes, first, config, *, repair_after_b
     removed = {}
     for issue in initial.conflicts_detected:
         target = issue.repair_target
-        if issue.severity != "hard" or target not in by_source:
+        if issue.severity != "hard" or not actionable(issue) or target not in by_source:
             continue
         event = by_source[target]
         if repair_after_beat is not None and event.beat < repair_after_beat:
@@ -202,20 +241,68 @@ def _repair_native(points, tempo_changes, first, config, initial, repair_after_b
     for _ in range(16):
         if current.coverage.get("parse_errors"):
             break
-        hard_before = sum(c.severity == "hard" for c in current.conflicts_detected)
+        hard_before = actionable_hard(current)
         if not hard_before:
             break
         events, texts, _ = _extract(points, tempo_changes, first)
         by_source = {e.source_id: e for e in events}
         accepted = False
         tried = set()
+        repair_issues = []
         for issue in current.conflicts_detected:
+            repair_issues.append((issue, False))
+            if (issue.repair_target is None and issue.severity == "hard" and actionable(issue)
+                    and config.note_repair_mode in {"edit", "edit_then_delete"}):
+                # MultiTouch may have no unique victim. Propose a few nearby
+                # single-note edits, but never delete these inferred candidates.
+                nearby = [e for e in events if e.note_type in {"tap", "touch"}
+                          and abs(e.time - issue.time) <= .18 and not e.protected]
+                for event in nearby[:4]:
+                    repair_issues.append((replace(issue, repair_target=event.source_id), True))
+        for issue, inferred_target in repair_issues:
             target = issue.repair_target
-            if issue.severity != "hard" or target not in by_source or target in tried:
+            if issue.severity != "hard" or not actionable(issue) or target not in by_source or target in tried:
                 continue
             tried.add(target)
             event = by_source[target]
             if event.protected or repair_after_beat is not None and event.beat < repair_after_beat:
+                continue
+            if config.note_repair_mode in {"edit", "edit_then_delete"}:
+                from maichart.generation.note_repair import candidate_note_edits
+                normalized_event = replace(event, raw=texts[target])
+                for candidate in candidate_note_edits(normalized_event, issue, events, tempo_changes, first):
+                    new_atom = candidate["raw"]
+                    new_text = "/".join(new_atom if key == target else text
+                                       for key, text in texts.items() if key[0] == target[0])
+                    trial = [EventPoint(p.beat, new_text) if i == target[0] else p
+                             for i, p in enumerate(points)]
+                    try:
+                        after = detect_chart_conflicts(trial, tempo_changes, first, config)
+                    except ValueError:
+                        continue  # candidate cannot be parsed losslessly
+                    hard_after = actionable_hard(after)
+                    # Same source identities/onsets/count: comparing each
+                    # (kind, affected source) prevents exchanging one hard
+                    # problem for a different hard problem, even report-only.
+                    before_keys = _hard_keys(current)
+                    after_keys = _hard_keys(after)
+                    if (after.coverage.get("parse_errors") or hard_after >= hard_before
+                            or not after_keys <= before_keys):
+                        continue
+                    repair = {"point_index": target[0], "note_index": target[1],
+                              "beat": str(event.beat), "time_sec": event.time,
+                              "raw": texts[target], "replacement": new_atom,
+                              "operation": candidate["operation"], "reason": issue.conflict_type,
+                              "hard_before": hard_before, "hard_after": hard_after}
+                    repairs.append(repair)
+                    print("playability_note_edit " + json.dumps(repair, ensure_ascii=False), flush=True)
+                    points, current, accepted = trial, after, True
+                    break
+                if accepted:
+                    break
+                if config.note_repair_mode == "edit":
+                    continue
+            if inferred_target:
                 continue
             changed = "/".join(text for key, text in texts.items() if key[0] == target[0] and key != target)
             trial = [EventPoint(p.beat, changed) if i == target[0] else p
@@ -224,10 +311,10 @@ def _repair_native(points, tempo_changes, first, config, initial, repair_after_b
             if not trial:
                 continue
             after = detect_chart_conflicts(trial, tempo_changes, first, config)
-            hard_after = sum(c.severity == "hard" for c in after.conflicts_detected)
+            hard_after = actionable_hard(after)
             if after.coverage.get("parse_errors") or hard_after >= hard_before:
                 continue
-            repair = {"point_index": target[0], "note_index": target[1],
+            repair = {"point_index": target[0], "note_index": target[1], "operation": "delete",
                       "beat": str(event.beat), "time_sec": event.time, "raw": texts[target],
                       "reason": issue.conflict_type, "hard_before": hard_before, "hard_after": hard_after}
             repairs.append(repair)
@@ -241,13 +328,19 @@ def _repair_native(points, tempo_changes, first, config, initial, repair_after_b
     initial.processed_notes_count = current.processed_notes_count
     initial.remaining_conflicts = current.conflicts_detected
     initial.coverage = current.coverage
-    initial.message = f"MiaCode: removed {len(repairs)} children; rechecked; remaining_hard={sum(c.severity == 'hard' for c in current.conflicts_detected)}"
+    deleted = sum(r.get("operation") == "delete" for r in repairs)
+    initial.message = f"MiaCode: edited {len(repairs)-deleted}, removed {deleted}; rechecked; remaining_hard={sum(c.severity == 'hard' for c in current.conflicts_detected)}"
     if initial.conflicts_detected:
-        print(f"playability_repair_done engine=miacode removed={len(repairs)} "
+        print(f"playability_repair_done engine=miacode edited={len(repairs)-deleted} removed={deleted} "
               f"remaining_hard={sum(c.severity == 'hard' for c in current.conflicts_detected)} "
               f"unmapped={len(current.coverage.get('unsupported', []))} "
-              "policy=verified_deletions_only", flush=True)
+              f"policy={config.note_repair_mode}", flush=True)
     return initial
+
+
+def _hard_keys(result):
+    return {(c.conflict_type, tuple(n.source_id for n in c.notes[:1]))
+            for c in result.conflicts_detected if c.severity == "hard"}
 
 
 def save_post_process_report(result, output_path):

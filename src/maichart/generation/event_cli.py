@@ -8,7 +8,7 @@ import json
 import math
 import time
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from pathlib import Path
 
@@ -45,6 +45,7 @@ from maichart.generation.model_compatibility import (
 )
 from maichart.generation.post_process import (
     PostProcessConfig, detect_chart_conflicts, process_chart_points,
+    actionable,
 )
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.timeline import normalize_tempo_map, serialize_tempo_map, tempo_map_fingerprint, beat_at_audio_end
@@ -1244,7 +1245,12 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                   f"trimmed={span[0]:.2f}-{span[1]:.2f}s lead={audio_bounds_lead:.2f}s "
                   f"{activity.describe()} "
                   f"window_skip_below={silence_window_share:.2f}", flush=True)
-    for index, (start, end) in enumerate(windows):
+    from maichart.generation.cross_window_repair import CrossWindowRepair, RewindPlan, rebuild_feedback
+    cross = CrossWindowRepair(windows, post_process_config, tempo_changes, first, _merge_windows)
+    index = 0
+    while index < len(windows):
+        start, end = windows[index]
+        generation_seed = seed + index + cross.seed_shift
         # A window with no audible music at all gets no notes and no decode: the
         # chart is supposed to be silent there, and skipping also saves the whole
         # forward pass (a long silent outro used to cost one decode per window).
@@ -1252,6 +1258,10 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
         if share is not None and share < silence_window_share:
             print(f"event_window={index + 1}/{len(windows)} beats=[{start},{end}) "
                   f"events=0 skipped=silence audible={share:.0%}", flush=True)
+            results = cross.finish(results, index)
+            if cross.records:
+                feedback_cells = rebuild_feedback(results, tempo_changes, first, _merge_windows)
+            index += 1
             continue
         begin_beat = max(Fraction(0), start - Fraction(audio_margin_beats)) if audio_margin_beats else start
         end_beat = end + Fraction(audio_margin_beats) if audio_margin_beats else end
@@ -1299,6 +1309,10 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                                           closed=True, intensity_curve=curve_stats))
             print(f"event_window={index + 1}/{len(windows)} beats=[{start},{end}) "
                   "events=0 skipped=intensity_curve_rest", flush=True)
+            results = cross.finish(results, index)
+            if cross.records:
+                feedback_cells = rebuild_feedback(results, tempo_changes, first, _merge_windows)
+            index += 1
             continue
         segment_audio = audio_segment_tensor(
             audio, begin_sec, end_sec, song_duration=song_duration, bpm=bpm,
@@ -1376,7 +1390,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                 sequence = _decode(
                     model, vocabulary, segment_audio, global_audio, window_vector, device,
                     max_tokens=window_budget, temperature=temperature,
-                    sample=sample, seed=seed + index + attempt * 1000003, guidance_scale=guidance_scale,
+                    sample=sample, seed=generation_seed + attempt * 1000003, guidance_scale=guidance_scale,
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
                     atom_catalog=atom_catalog, prefix_ids=prefix_ids, position_offset=offset, condition_default=condition_default,
@@ -1402,7 +1416,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                 sequence = _decode(
                     model, vocabulary, segment_audio, global_audio, window_vector, device,
                     max_tokens=window_budget, temperature=temperature,
-                    sample=sample, seed=seed + index + attempt * 1000003, guidance_scale=guidance_scale,
+                    sample=sample, seed=generation_seed + attempt * 1000003, guidance_scale=guidance_scale,
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
                     atom_catalog=atom_catalog, allow_truncated=True, prefix_ids=prefix_ids,
@@ -1437,9 +1451,16 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                 removed = len(sequence.beats) - len(trimmed.beats)
                 sequence = trimmed
             return sequence, closed, curve_stats, removed
-        sequence, closed, curve_stats, removed, playability, original_sequence = _select_playable_window(
-            decode_attempt, results, start=start, end=end, tempo_changes=tempo_changes,
-            first=first, config=post_process_config, seed=seed + index)
+        try:
+            sequence, closed, curve_stats, removed, playability, original_sequence = _select_playable_window(
+                decode_attempt, results, start=start, end=end, tempo_changes=tempo_changes,
+                first=first, config=post_process_config, seed=generation_seed,
+                on_initial_conflict=lambda result, trial: cross.consider(result, trial, results, index),
+                allow_deletions=cross.pending is None)
+        except RewindPlan as plan:
+            results, index = cross.begin(plan)
+            feedback_cells = rebuild_feedback(results, tempo_changes, first, _merge_windows)
+            continue
         if feedback is not None:
             absolute_points = [EventPoint(start + beat, text) for beat, text in zip(sequence.beats, sequence.note_texts)]
             parsed_cells = parse_event_notes(absolute_points, tempo_changes, first)
@@ -1451,6 +1472,12 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
         results.append(_DecodedWindow(sequence=sequence, start_beat=start, end_beat=end,
                                       closed=closed, intensity_curve=curve_stats,
                                       playability=playability, original_sequence=original_sequence))
+        results = cross.finish(results, index)
+        if cross.records:
+            feedback_cells = rebuild_feedback(results, tempo_changes, first, _merge_windows)
+            selected_window = next((w for w in reversed(results) if w.start_beat == start), None)
+            if selected_window is not None:
+                sequence, closed = selected_window.sequence, selected_window.closed
         # Per-window progress.  Generation is one forward pass per token, so a
         # long silence here previously looked like a hang; reporting each window
         # as it closes makes the remaining work visible.  The intensity factor
@@ -1468,10 +1495,18 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             f"seconds={time.perf_counter() - window_started:.2f}",
             flush=True,
         )
+        index += 1
+    if cross.pending is not None:
+        cross.pending.record.update(status="rolled_back", reason="replay_did_not_reach_trigger_window")
+        results = cross.pending.snapshot
+    if cross.records and results:
+        results[-1] = replace(results[-1], playability={**(results[-1].playability or {}),
+                                                     "cross_window": cross.records})
     return results
 
 
-def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes, first, config, seed):
+def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes, first, config, seed,
+                            on_initial_conflict=None, allow_deletions=True):
     """Retry only a conflicting new window, preserving all preceding context.
 
     Every attempt passes the same density/rest/audio-boundary filters. A later
@@ -1495,13 +1530,13 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
             # while the conflict itself is triggered by this window's Tap.
             return (any(note.beat >= floor for note in issue.notes)
                     or issue.time >= float(seconds_at_beat(floor, tempo_changes, first)))
-        hard = [issue for issue in result.conflicts_detected if issue.severity == "hard"
+        hard = [issue for issue in result.conflicts_detected if issue.severity == "hard" and actionable(issue)
                 and affects_window(issue)] if result else []
         # Local repair is a window-level regeneration policy.  When soft
         # references are enabled, include them in the retry score as well;
         # otherwise ``local`` silently retries only hard overlaps and leaves
         # the exact Slide judgement-zone warning the user asked it to fix.
-        soft = ([issue for issue in result.conflicts_detected if issue.severity == "soft"
+        soft = ([issue for issue in result.conflicts_detected if issue.severity == "soft" and actionable(issue)
                  and affects_window(issue)]
                 if result and config.conflict_repair_mode == "local"
                 and config.detect_soft_conflicts else [])
@@ -1512,6 +1547,8 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
             best = (score, sequence, closed, curve_stats, removed, merged, result)
         print(f"playability_check engine={config.conflict_engine} beats=[{start},{end}) "
               f"attempt={attempt + 1}/{attempts} hard={len(hard)} soft={len(soft)} "
+              f"report_only={sum(not actionable(c) for c in result.conflicts_detected)} "
+              f"ignored={len(result.coverage.get('ignored', []))} "
               f"mode={config.conflict_repair_mode}", flush=True)
         if hard or soft:
             for issue in (hard + soft)[:6]:
@@ -1522,9 +1559,12 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
             print(f"playability_retry beats=[{start},{end}) next_attempt={attempt + 2}/{attempts} "
                   f"reason=hard:{len(hard)},soft:{len(soft)}", flush=True)
     _, sequence, closed, curve_stats, removed, merged, result = best
+    if on_initial_conflict is not None and result is not None:
+        on_initial_conflict(result, _DecodedWindow(sequence, start, end, closed,
+                                                   curve_stats, result.to_dict(), sequence))
     original = sequence
     report = result.to_dict() if result is not None else None
-    if config and config.enable_conflict_detection and config.conflict_repair_mode == "local":
+    if allow_deletions and config and config.enable_conflict_detection and config.conflict_repair_mode == "local":
         repaired = process_chart_points(merged, tempo_changes, first, config, repair_after_beat=floor)
         sequence = EventSequence([p.beat - start for p in repaired.points if floor <= p.beat < end],
                                  [p.note_text for p in repaired.points if floor <= p.beat < end])
@@ -1533,8 +1573,11 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
         report["attempts"] = history
         report["scope"] = "previous_context_and_current_window"
         if len(history) > 1 or report.get("conflicts") or report.get("repairs"):
+            deleted = sum(r.get("operation", "delete") == "delete" for r in report.get("repairs", []))
             print(f"playability_window_done beats=[{start},{end}) retries={len(history)-1} "
-                  f"removed={len(report.get('repairs', []))} remaining_hard={report.get('remaining_hard', 0)}", flush=True)
+                  f"edited={len(report.get('repairs', []))-deleted} removed={deleted} "
+                  f"remaining_hard={report.get('remaining_hard', 0)} "
+                  f"actionable_hard={report.get('remaining_actionable_hard', 0)}", flush=True)
     return sequence, closed, curve_stats, removed, report, original
 
 
@@ -1946,6 +1989,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Enable playability conflict detection (hold-tap overlap, slide-tap collision, etc).")
     parser.add_argument("--conflict-engine", choices=("miacode", "static"), default="miacode",
                         help="Embedded MiaCode judge by default; static retains the legacy diagnostic subset.")
+    parser.add_argument("--conflict-kind-modes", type=json.loads, default=None,
+                        help='Per-kind policy JSON, e.g. {"MultiTouch":"report"}; off/report/enforce.')
+    parser.add_argument("--tap-on-slide-threshold-ms", type=float, default=200,
+                        help="Static collision reference neighbourhood, 150..250 ms; not a Perfect tolerance.")
+    parser.add_argument("--conflict-backtrack-windows", type=int, default=0,
+                        help="0 current-only; -1 auto source selection up to 2 windows; or 1/2/4.")
+    parser.add_argument("--conflict-backtrack-budget", type=int, default=4,
+                        help="Whole-song transaction budget, 0..8. Limits replay and prior-sustain edits.")
+    parser.add_argument("--sustain-repair-mode", choices=("off", "hold", "hold_slide"), default="off",
+                        help="Optional confirmed prior-source repair: shorten Hold, or also simplify basic Slide to its head Tap.")
+    parser.add_argument("--note-repair-mode", choices=("delete", "edit", "edit_then_delete"), default="delete",
+                        help="Local single-note repair: legacy deletion, edits only, or edits before deletion.")
     parser.add_argument("--detect-hard-conflicts", action=argparse.BooleanOptionalAction, default=True,
                         help="Detect hard conflicts (game judgment system conflicts). Default True.")
     parser.add_argument("--detect-soft-conflicts", action="store_true",
@@ -2000,6 +2055,12 @@ def main(argv=None) -> int:
         conflict_repair_mode=args.conflict_repair_mode,
         conflict_retries=args.conflict_retries,
         conflict_engine=args.conflict_engine,
+        conflict_kind_modes=args.conflict_kind_modes,
+        tap_on_slide_threshold_ms=args.tap_on_slide_threshold_ms,
+        conflict_backtrack_windows=args.conflict_backtrack_windows,
+        conflict_backtrack_budget=args.conflict_backtrack_budget,
+        sustain_repair_mode=args.sustain_repair_mode,
+        note_repair_mode=args.note_repair_mode,
     )
     if args.enable_conflict_detection:
         if args.conflict_engine == "miacode":
@@ -2008,6 +2069,7 @@ def main(argv=None) -> int:
         print(f"playability_engine engine={args.conflict_engine} mode={args.conflict_repair_mode} "
               f"retries={args.conflict_retries} hard={args.detect_hard_conflicts} "
               f"soft={args.detect_soft_conflicts}", flush=True)
+        print("playability_policy " + json.dumps(post_process_config.to_dict(), ensure_ascii=False), flush=True)
     else:
         print("playability_engine engine=disabled", flush=True)
     if int(args.candidates) < 1:
@@ -2212,10 +2274,14 @@ def main(argv=None) -> int:
             conflict_result = process_chart_points(points, tempo_changes, args.first, post_process_config)
             points = conflict_result.points
             if args.enable_conflict_detection:
+                repair_records = conflict_result.repairs_applied + [
+                    r for w in decoded for r in (w.playability or {}).get("repairs", [])]
+                deleted = sum(r.get("operation", "delete") == "delete" for r in repair_records)
                 print(f"playability_final engine={args.conflict_engine} "
                       f"remaining_hard={sum(c.severity == 'hard' for c in conflict_result.remaining_conflicts)} "
+                      f"actionable_hard={sum(c.severity == 'hard' and actionable(c) for c in conflict_result.remaining_conflicts)} "
                       f"remaining_soft={sum(c.severity == 'soft' for c in conflict_result.remaining_conflicts)} "
-                      f"removed={len(conflict_result.repairs_applied) + sum(len((w.playability or {}).get('repairs', [])) for w in decoded)} "
+                      f"edited={len(repair_records)-deleted} removed={deleted} "
                       f"status={conflict_result.coverage.get('status')} playable_verified=false", flush=True)
             quality = assess_event_chart(points, tempo_changes, first=args.first,
                                          duration_sec=max(float(audio.duration_sec - args.first), 1e-3),
@@ -2277,6 +2343,9 @@ def main(argv=None) -> int:
             if args.enable_conflict_detection:
                 quality["playability"] = conflict_result.to_dict()
                 quality["playability"]["scope"] = "complete_merged_song"
+                quality["playability"]["policy"] = post_process_config.to_dict()
+                quality["playability"]["cross_window"] = [
+                    record for w in decoded for record in (w.playability or {}).get("cross_window", [])]
                 quality["playability"]["windows"] = [
                     {"start_beat": str(w.start_beat), "end_beat": str(w.end_beat),
                      **(w.playability or {})} for w in decoded]

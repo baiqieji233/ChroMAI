@@ -32,7 +32,13 @@ python tools/build_muri.py
 - `局部修复`：冲突窗口重新采样；若仍有可定位的 Muri，只删除明确对应的音符，并重新检测，只有冲突数量下降才接受修改；
 - `拒绝生成`：存在剩余硬 Muri 或解析失败时拒绝候选。
 
-日志会写出 `playability_engine`、每个窗口的 `playability_check`、`playability_issue`、`playability_retry`、`playability_repair`、修复复检摘要 `playability_repair_done` 和最终的 `playability_final`。质量报告中的 `playability.reference`、`coverage.engine`、`remaining_details` 和 `repairs` 保存同样的证据。
+生成页还可以按 `MultiTouch`、`Overlap`、`TapOnSlide`、`SlideHeadTap`、`SlideTooFast` 分别选择忽略、仅报告或参与处理。`150/200/250 ms` 撞尾档位只调整静态邻近参考：150 更宽松，250 更谨慎，不修改机台 Perfect 判定。
+
+当前窗口处理失败时可回溯最多 1、2 或 4 个窗口；“自动”会根据证据最多回溯 2 个。全曲预算限制事务次数。开启前置长音符修复后，系统会用反事实重检确认该 Hold/Slide 真正造成硬冲突，才会缩短简单 Hold，或将符合条件的简单 Slide 简化为起点星头 Tap；复杂 Slide/Wifi、EX 和无法确认因果的动作不会被改写。
+
+“单 note 修复策略”是生成后候选搜索：保持起音时间，尝试相邻 Tap/Touch、精确 Hold 缩短和简单 Slide 终点移动，然后重新运行 MiaCode。只有硬 Muri 减少且没有引入新硬 Muri 才接受；它不会修改模型或声称模型拥有单 note 填空能力。
+
+日志会写出 `playability_engine`、每个窗口的 `playability_check`、`playability_issue`、`playability_retry`、`playability_cross_window`、`playability_cross_window_done`、`playability_note_edit`、`playability_repair`、修复复检摘要 `playability_repair_done` 和最终的 `playability_final`。质量报告中的 `playability.reference`、`coverage.engine`、`remaining_details`、`cross_window` 和 `repairs` 保存同样的证据。
 
 检测只需要开启原来的“启用无理检测”。新 CLI 默认使用内嵌核心，`--conflict-engine static` 仅保留给旧规则对照。`event_v1`、`event_ctx_v1` 和旧版 planner 都可使用，不改变模型权重或训练合同。
 

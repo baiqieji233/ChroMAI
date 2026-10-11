@@ -901,7 +901,7 @@
 
           <details class="field span-4" data-generation-family="event_v1">
             <summary>高级类别策略与回溯设置</summary>
-            <p class="help-text">“忽略”不检查该类；“仅报告”记录问题但不重试、修复或拒绝；“参与处理”可按下方修复模式重试、修复或拒绝。关闭全局硬冲突检测时，类别策略不生效。</p>
+            <p class="help-text">“忽略”不处理该类，原生证据保留在报告中；“仅报告”显示问题但不重试、修复或拒绝；“参与处理”按下方修复模式处理。全局 Muri / Warning 开关分别控制这两个级别。</p>
             <div class="form-grid">
               <label class="field">多押动作（MultiTouch）
                 <select id="conflictMultiTouchMode"><option value="off">忽略</option><option value="report" selected>仅报告</option><option value="enforce">参与处理</option></select>
@@ -913,15 +913,15 @@
               </label>
               <label class="field">Slide 撞尾（TapOnSlide）
                 <select id="conflictTapOnSlideMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
-                <small>Slide 路径结束邻近时出现的按键动作。</small>
+                <small>按键或星星头被滑动经过的判定区提前触发，包含轨迹沿途与结束附近。</small>
               </label>
               <label class="field">星头与按键（SlideHeadTap）
                 <select id="conflictSlideHeadTapMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
-                <small>星星头与同刻按键动作的冲突。</small>
+                <small>Slide 开始滑动时，起点区域附近的按键或星星头被提前触发。</small>
               </label>
               <label class="field">Slide 过快（SlideTooFast）
                 <select id="conflictSlideTooFastMode"><option value="off">忽略</option><option value="report">仅报告</option><option value="enforce" selected>参与处理</option></select>
-                <small>Slide 路径时长过短，动作难以完成。</small>
+                <small>其他动作令 Slide 判定区提前完成，超出该路径的 Perfect 容差；不等同于单纯滑条写得太快。</small>
               </label>
               <label class="field">撞尾阈值（毫秒）
                 <input id="tapOnSlideThresholdMs" type="number" min="150" max="250" step="10" value="200">
@@ -933,7 +933,7 @@
               </label>
               <label class="field">全曲回溯预算
                 <input id="conflictBacktrackBudget" type="number" min="0" max="8" step="1" value="4">
-                <small>整首歌最多回溯重生成次数，限制反复重试。</small>
+                <small>整首歌最多执行的回溯或前置音符修复次数；0 关闭两种跨窗处理。一次操作会重建后续上下文，失败则恢复原候选。</small>
               </label>
               <label class="field">前置长音符修复
                 <select id="sustainRepairMode">
@@ -952,7 +952,7 @@
               <option value="local">局部修复</option>
               <option value="reject">拒绝生成</option>
             </select>
-            <small>none 仅报告；local 先重试当前窗口，仍有 Muri 时尝试删除定位明确的音符，并再次检测，确认问题减少才保留修改；reject 在剩余 Muri 或解析失败时拒绝候选。局部修复不保证所有问题都能消除，日志会显示剩余数量。</small>
+            <small>none 仅报告；local 先重试当前窗口，必要时处理前置长音符来源，再按单音符策略微调或删除并复检；reject 在剩余“参与处理”的 Muri 或解析失败时拒绝候选。“仅报告”的类别不会触发拒绝。局部修复不保证所有问题都能消除，日志显示剩余数量。</small>
           </label>
           <label class="field" data-generation-family="event_v1">单 note 修复策略
             <select id="noteRepairMode">
@@ -960,7 +960,7 @@
               <option value="edit">仅微调</option>
               <option value="edit_then_delete" selected>微调优先，失败后删除</option>
             </select>
-            <small>仅在修复模式为 local 时生效。微调会在 MiaCode 复检确认后尝试保留起音、优先数量，并候选调整邻键、缩短 Hold 或把简单 Slide 终点改为星头 Tap；微调失败时按策略保留报告或继续删除。它不是训练模型的填空能力，也不会接受新增其他 Muri。</small>
+            <small>仅在 local 时生效。候选包括相邻按键/Touch 区域、缩短 Hold、移动简单 Slide 的终点；保留起音时间与音符数量，经 MiaCode 复检确认问题减少且未新增其他 Muri 才采用。仅微调失败时保留并报告；微调优先模式可继续删除。此功能是受约束的候选搜索，不是模型填空。</small>
           </label>
           <label class="field" data-generation-family="event_v1">
             冲突重试次数

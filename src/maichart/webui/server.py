@@ -192,6 +192,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
                     "playability_engine": engine_status(),
+                    "playability_policy_version": 2,
                     "tasks": [_task.to_dict() for _task in _all_tasks()],
                     "datasets": _uploaded_datasets(),
                     "extractions": {key: dict(value) for key, value in _EXTRACTIONS.items()},
@@ -585,8 +586,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         )
         # Keep this bridge loadable while an older checkout is being upgraded;
         # the current PostProcessConfig includes this field and validates it.
-        if "note_repair_mode" in PostProcessConfig.__dataclass_fields__:
-            post_config_kwargs["note_repair_mode"] = effective_note_repair_mode
+        post_config_kwargs["note_repair_mode"] = effective_note_repair_mode
         PostProcessConfig(**post_config_kwargs)
         if not math.isfinite(curve_strength) or not 0.0 <= curve_strength <= 1.0:
             raise ValueError("曲线控制力度必须在 0–1 之间")

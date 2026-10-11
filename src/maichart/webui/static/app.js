@@ -2745,6 +2745,9 @@ async function startGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.conflict_detection_enabled) {
     const status = await api("/api/status");
+    if (status.playability_policy_version !== 2) {
+      throw new Error("当前后端尚未加载分类无理策略、跨窗修复与单音符微调，请重启 WebUI 服务后再生成");
+    }
     if (status.playability_engine?.available !== true) {
       throw new Error(status.playability_engine?.error || "当前后端尚未加载内嵌 MiaCode 检测，请重启 WebUI 服务后再生成");
     }

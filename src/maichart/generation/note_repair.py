@@ -13,6 +13,7 @@ from fractions import Fraction
 from typing import Iterable
 
 from maichart.event_timing import seconds_at_beat
+from maichart.generation.timeline import beat_at_audio_end
 
 
 _TAP_RE = re.compile(r"^(?P<position>[1-8])(?P<mods>[bx]*)$")
@@ -51,15 +52,10 @@ def _latest_grid_beat(deadline: float, start_beat: Fraction, tempo, first: float
     entries = _beat_and_bpm_entries(tempo)
     if not entries or not math.isfinite(deadline):
         return None
-    # Find an upper bound by extending from the source beat; this avoids a
-    # float-to-beat inverse and keeps the result on an exact chart grid.
-    candidate = start_beat
-    step = Fraction(1, 16)
-    for _ in range(4096):
-        probe = candidate + step
-        if float(seconds_at_beat(probe, tempo, first)) > deadline + 1e-8:
-            break
-        candidate = probe
+    if deadline < 0:
+        return None
+    beat = beat_at_audio_end(deadline, tempo, first)
+    candidate = Fraction((beat * 16).__floor__(), 16)
     if candidate <= start_beat:
         return None
     return candidate
@@ -126,6 +122,8 @@ def _hold_candidates(event, all_events: Iterable, tempo, first: float) -> list[d
     raw = str(_value(event, "raw", ""))
     if duration is None or not _DURATION_RE.search(raw):
         return []
+    if float(seconds_at_beat(end, tempo, first)) >= start + float(_value(event, "duration", 0)) - 1e-9:
+        return []  # this strategy must never lengthen a sustained action
     return [_candidate(_DURATION_RE.sub(duration, raw, count=1), "shorten_hold", 1.5)]
 
 

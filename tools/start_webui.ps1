@@ -214,7 +214,7 @@ if ($Cpu) {
 }
 
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectRoot\src;$env:PYTHONPATH" } else { "$ProjectRoot\src" }
-if (Test-Path -LiteralPath (Join-Path $ProjectRoot ".native\miacode\runtime\maichart_muri.dll")) {
+if (Test-Path -LiteralPath (Join-Path $ProjectRoot ".native\miacode\runtime\maichart_muri_v2.dll")) {
     & $Python -c "from maichart.generation.miacode_native import ensure_available; print('Embedded MiaCode judge: ready'); ensure_available()"
     if ($LASTEXITCODE -ne 0) { Fail "Embedded MiaCode judge failed verification. Rebuild with python tools/build_muri.py." }
 } else {
