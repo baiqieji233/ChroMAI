@@ -1,0 +1,2 @@
+# Preserve pinned upstream bytes across Windows/Linux checkouts for SHA-256.
+native/miacode/upstream/** -text
