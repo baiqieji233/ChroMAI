@@ -184,6 +184,25 @@ def test_cross_window_retry_keeps_history_and_preceding_hold():
     assert prior[0].sequence.note_texts == ["1h[4:4]"]
 
 
+def test_local_retry_considers_enabled_soft_slide_references():
+    calls = []
+
+    def decode(attempt):
+        calls.append(attempt)
+        if attempt == 0:
+            return EventSequence([F(0), F(2)], ["3>1[4:1]", "1>5[4:1]"]), True, None, 0
+        return EventSequence([F(0), F(2)], ["3>1[4:1]", "2>5[4:1]"]), True, None, 0
+
+    result = _select_playable_window(
+        decode, [], start=F(0), end=F(16), tempo_changes=TEMPO,
+        first=0, config=config("local", 1, detect_soft_conflicts=True), seed=42)
+    assert calls == [0, 1]
+    assert result[0].note_texts == ["3>1[4:1]", "2>5[4:1]"]
+    assert result[4]["attempts"][0]["hard"] == 0
+    assert result[4]["attempts"][0]["soft"] == 1
+    assert result[4]["attempts"][1]["score"] == 0
+
+
 def test_retry_off_and_detect_only_preserve_generated_events():
     calls = []
     def decode(attempt):

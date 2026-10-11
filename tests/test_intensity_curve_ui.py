@@ -43,6 +43,16 @@ def test_intensity_ui_uses_separate_analysis_poll_and_curve_payload():
     assert "spectrogram: undefined" in js
 
 
+def test_playability_ui_matches_backend_retry_and_timeout_contract():
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    js = (STATIC / "app.js").read_text(encoding="utf-8")
+    assert 'id="runtimeReferenceTimeoutSec" type="number" min="1" max="60"' in html
+    assert "软参考会参与当前窗口重试" in html
+    assert "按软冲突选择较好的重试结果" in html
+    assert "软参考 ${softCount}" in js
+    assert "窗口重试 ${retryCount}" in js
+
+
 def test_app_javascript_parses():
     result = subprocess.run(
         ["node", "--check", str(STATIC / "app.js")],

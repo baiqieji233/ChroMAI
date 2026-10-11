@@ -1133,12 +1133,18 @@ function renderGenerationResult(task) {
           : Number(playability.remaining_hard || 0);
         const repairCount = Array.isArray(playability.repairs) ? playability.repairs.length
           : Number(playability.repairs || 0);
+        const details = Array.isArray(playability.details) ? playability.details : [];
+        const softCount = details.filter((item) => item?.severity === "soft").length;
+        const attempts = (Array.isArray(playability.windows) ? playability.windows : [])
+          .flatMap((window) => Array.isArray(window?.attempts) ? window.attempts : []);
+        const retryCount = attempts.length ? Math.max(0, attempts.length - attempts.filter((item) => Number(item?.attempt || 0) === 0).length) : 0;
         const coverage = playability.coverage || {};
         const unsupported = Array.isArray(coverage.unsupported) ? coverage.unsupported.length
           : Number(coverage.unsupported || 0);
         const parseErrors = Array.isArray(coverage.parse_errors) ? coverage.parse_errors.length
           : Number(coverage.parse_errors || 0);
-        playabilityText = `冲突参考：${statusLabel}；未解决硬冲突 ${hardCount}；删除修复 ${repairCount}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
+        playabilityText = `冲突参考：${statusLabel}；未解决硬冲突 ${hardCount}；软参考 ${softCount}；删除修复 ${repairCount}；窗口重试 ${retryCount}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
+        if (softCount) playabilityText += "软参考不会被直接删除，需要结合谱面和实机/参考程序复核。";
         if (["static_only", "partial"].includes(playability.status)) {
           playabilityText += "检测范围不完整，不能据此认定谱面可玩。";
         }

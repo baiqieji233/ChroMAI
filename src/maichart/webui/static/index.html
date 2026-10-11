@@ -881,7 +881,7 @@
           <label class="field" data-generation-family="event_v1">
             <input id="detectSoftConflicts" type="checkbox">
             检测软参考项
-            <small>提示同刻三个以上独立按键的双手分配复核，以及 Hold 起点前后 6/180 秒同判定区起音的时序复核；这些软参考不自动删音符，也不认定人体无理。确定冲突检测另会附带已覆盖 Slide 轨迹的提前触发参考和 Touch 覆盖提示；这些参考不做完整判定区状态模拟。</small>
+            <small>提示同刻三个以上独立按键的双手分配复核，以及 Hold 起点前后 6/180 秒同判定区起音的时序复核；这些软参考不自动删音符，也不认定人体无理。开启“局部修复”时，软参考会参与当前窗口重试，但仍不会直接删除。确定冲突检测另会附带已覆盖 Slide 轨迹的提前触发参考和 Touch 覆盖提示；这些参考不做完整判定区状态模拟。</small>
           </label>
 
           <label class="field" data-generation-family="event_v1">修复模式
@@ -890,7 +890,7 @@
               <option value="local">局部修复</option>
               <option value="reject">拒绝生成</option>
             </select>
-            <small>none 仅报告；local 保留原谱，只删除检测明确冲突的原子；reject 在存在确定冲突时拒绝该结果。</small>
+            <small>none 仅报告；local 在当前窗口重新采样并删除检测明确的硬冲突原子，开启软参考时也会按软冲突选择较好的重试结果；reject 在存在确定硬冲突时拒绝该结果。</small>
           </label>
           <label class="field" data-generation-family="event_v1">
             冲突重试次数
@@ -909,7 +909,7 @@
             <small>路径只传给后端执行；请确认该程序可在当前机器上无交互运行。</small>
           </label>
           <label class="field" data-generation-family="event_v1">参考检查超时（秒）
-            <input id="runtimeReferenceTimeoutSec" type="number" min="1" max="300" step="1" value="30">
+            <input id="runtimeReferenceTimeoutSec" type="number" min="1" max="60" step="1" value="30">
             <small>每个候选的最大运行时间，默认 30 秒。</small>
           </label>
           <p id="runtimeReferenceStatus" data-generation-family="event_v1" class="inline-status" hidden></p>

@@ -1493,10 +1493,20 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
         result = detect_chart_conflicts(merged, tempo_changes, first, config) if config else None
         hard = [issue for issue in result.conflicts_detected if issue.severity == "hard"
                 and any(note.beat >= floor for note in issue.notes)] if result else []
-        history.append({"attempt": attempt, "seed": seed + attempt * 1000003, "hard": len(hard)})
-        if best is None or len(hard) < best[0]:
-            best = (len(hard), sequence, closed, curve_stats, removed, merged, result)
-        if not hard:
+        # Local repair is a window-level regeneration policy.  When soft
+        # references are enabled, include them in the retry score as well;
+        # otherwise ``local`` silently retries only hard overlaps and leaves
+        # the exact Slide judgement-zone warning the user asked it to fix.
+        soft = ([issue for issue in result.conflicts_detected if issue.severity == "soft"
+                 and any(note.beat >= floor for note in issue.notes)]
+                if result and config.conflict_repair_mode == "local"
+                and config.detect_soft_conflicts else [])
+        score = len(hard) + len(soft)
+        history.append({"attempt": attempt, "seed": seed + attempt * 1000003,
+                        "hard": len(hard), "soft": len(soft), "score": score})
+        if best is None or score < best[0]:
+            best = (score, sequence, closed, curve_stats, removed, merged, result)
+        if score == 0:
             break
     _, sequence, closed, curve_stats, removed, merged, result = best
     original = sequence
@@ -1924,8 +1934,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Detect soft conflicts (ergonomic issues, large jumps). Default False.")
     parser.add_argument("--conflict-repair-mode", choices=("none", "local", "reject"),
                         default="none",
-                        help="Conflict repair mode: none (detect only), local (remove conflicting notes), "
-                             "reject (abort on hard conflicts). Default none.")
+                        help="Conflict repair mode: none (detect only), local (retry the current window and "
+                             "remove repairable hard notes), reject (abort on hard conflicts). Default none.")
     parser.add_argument("--conflict-retries", type=int, default=0,
                         help="Optional conflicting-window retries, 0 disables, maximum 5.")
     parser.add_argument("--runtime-reference-mode", choices=("off", "report", "reject"), default="off",
