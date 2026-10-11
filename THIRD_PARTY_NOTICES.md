@@ -21,8 +21,18 @@ Sensor constants, Touch adjacency and the Touch-group threshold in
 project-owned sources MuriConfig.h, MuriAnalyzer.cpp and MuriRuntimeModelBuilder.cpp
 at [Team-MiaCode/MiaCode](https://github.com/Team-MiaCode/MiaCode/tree/6573efb611056bccd046dd17bc2f4cceda78bf88).
 No skins, sounds, slide reference assets or application binaries are redistributed.
-The Python checker implements only a documented static subset of the reference
-behaviour, not the complete runtime simulator.
+The legacy Python checker implements a static subset. The embedded generation
+checker now links the project-owned parser and Muri analysis sources verbatim
+under `native/miacode/upstream/src`, with a small local C ABI/JSON bridge. The
+upstream LICENSE, LICENSE_SCOPE and THIRD_PARTY_NOTICES are retained alongside
+the source; `UPSTREAM.json` pins every copied source hash.
+
+`tools/build_muri.py` obtains the pinned Slide reference dataset for the local
+build and links Qt Core/Gui dynamically. The dataset and runtime binaries stay
+under ignored `.native/`; they are not relicensed as MIT or committed here.
+Upstream asset distribution restrictions and Qt's own license obligations still
+apply when distributing a built runtime. No editor, font, sound, skin, audio
+backend or video backend is built by this integration.
 
 MIT License
 

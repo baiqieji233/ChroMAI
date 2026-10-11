@@ -46,6 +46,7 @@ coverage.xml
 
 # Experiments, backups, and temporary files
 /.scratch/
+/.native/
 /backups/
 *.log
 *.tmp
