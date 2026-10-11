@@ -119,7 +119,7 @@ let uploadedDatasets = [];
 let checkpointInspection = { key: "", data: null };
 let generationInspection = { path: "", data: null };
 let generationDefaults = {};
-let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false };
+let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false, contextStale: false };
 const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
 // Dataset selection is intentionally separate from qualityState: selected
 // sources feed training, while activeDataset is the source currently being
@@ -190,7 +190,7 @@ function loadIntensityCurveState() {
     if (saved && typeof saved === "object") intensityCurveState = { ...intensityCurveState, ...saved,
       profile: saved.profile ? normalizeIntensityProfile(saved.profile) : null,
       automatic: saved.automatic ? normalizeIntensityProfile(saved.automatic) : null,
-      history: [], saved: saved.saved === true };
+      history: [], saved: saved.saved === true, contextStale: saved.contextStale === true };
   } catch (_) { /* storage disabled or stale */ }
 }
 
@@ -202,6 +202,7 @@ function saveIntensityCurveState() {
       profile: profile ? { ...profile, spectrogram: undefined } : null,
       automatic: intensityCurveState.automatic ? { ...intensityCurveState.automatic, spectrogram: undefined } : null,
       saved: intensityCurveState.saved === true,
+      contextStale: intensityCurveState.contextStale === true,
     }));
   } catch (_) { /* curve is still usable for this page */ }
 }
@@ -274,6 +275,7 @@ function restoreSettings() {
       // as ready: the next generation should require a fresh prediction.
       if (String(intensityCurveState.profile?.method || "").startsWith("learned_music_structure_")) {
         intensityCurveState.saved = false;
+        intensityCurveState.contextStale = true;
         saveIntensityCurveState();
       }
       // Canonicalize the saved copy as well, so a reload before any further
@@ -920,7 +922,8 @@ function generationPayload() {
 function intensityCurvePayload() {
   if (!checkedOrDefault("#intensityCurveEnabled", false)) return null;
   const profile = intensityCurveState.profile;
-  if (!intensityCurveState.saved || !profile || !Array.isArray(profile.points) || !profile.points.length) {
+  if (!intensityCurveState.saved || intensityCurveState.contextStale || !profile
+      || !Array.isArray(profile.points) || !profile.points.length) {
     return null;
   }
   return {
@@ -2172,8 +2175,10 @@ function intensityProfileValid(profile) {
 
 function updateIntensityButtons() {
   const hasProfile = intensityProfileValid(intensityCurveState.profile);
-  ["#intensityContrastButton", "#intensitySaveButton", "#applyIntensitySectionButton"]
+  ["#intensityContrastButton", "#applyIntensitySectionButton"]
     .forEach((selector) => { const node = element(selector); if (node) node.disabled = !hasProfile; });
+  const save = element("#intensitySaveButton");
+  if (save) save.disabled = !hasProfile || intensityCurveState.contextStale === true;
   const undo = element("#intensityUndoButton");
   if (undo) undo.disabled = !hasProfile || intensityCurveState.history.length === 0;
   const reset = element("#intensityResetButton");
@@ -2533,7 +2538,7 @@ function adjustIntensitySelection(delta = null) {
 
 function showIntensityProfile(profile, audioPreviewUrl = null) {
   const normalized = normalizeIntensityProfile(profile); if (!intensityProfileValid(normalized)) throw new Error("后端返回的强度曲线格式不完整");
-  intensityCurveState.profile = normalized; intensityCurveState.automatic = cloneIntensityProfile(normalized); intensityCurveState.history = []; intensityCurveState.saved = false;
+  intensityCurveState.profile = normalized; intensityCurveState.automatic = cloneIntensityProfile(normalized); intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false;
   resetIntensityView();
   if (audioPreviewUrl) intensityCurveState.profile.audio_preview_url = audioPreviewUrl;
   if (audioPreviewUrl) intensityCurveState.automatic.audio_preview_url = audioPreviewUrl;
@@ -2608,6 +2613,7 @@ function applyIntensitySection() {
 
 function saveIntensityCurveAndReturn() {
   if (!intensityProfileValid(intensityCurveState.profile)) throw new Error("请先生成强度曲线");
+  if (intensityCurveState.contextStale) throw new Error("等级、Radar、Style 或节拍设置已变化，请重新生成模型来源曲线后再保存");
   intensityCurveState.profile.edited = true; intensityCurveState.saved = true; saveIntensityCurveState();
   const checkbox = element("#intensityCurveEnabled"); if (checkbox) checkbox.checked = true;
   setWorkspaceMode("generation"); setIntensityStatus("曲线已保存；生成页将使用这份人工曲线。", "good"); saveSettings();
@@ -2626,7 +2632,7 @@ function resetIntensityCurve() {
 function invalidateIntensityForAudio() {
   const path = intensityAudioPath();
   if (intensityCurveState.profile && intensityCurveState.path !== path) {
-    intensityCurveState.profile = null; intensityCurveState.automatic = null; intensityCurveState.history = []; intensityCurveState.saved = false;
+    intensityCurveState.profile = null; intensityCurveState.automatic = null; intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false;
     resetIntensityView();
     setIntensitySong(path); drawIntensityCurve(); updateIntensityButtons();
     const audio = element("#intensityAudio"); if (audio) { audio.pause(); audio.removeAttribute("src"); audio.load(); }
@@ -2638,6 +2644,7 @@ function invalidateLearnedCurveForTiming() {
   const profile = intensityCurveState.profile;
   if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
   intensityCurveState.saved = false;
+  intensityCurveState.contextStale = true;
   saveIntensityCurveState();
   updateIntensityButtons();
   setIntensityStatus("节拍设置已变化，模型来源曲线需要重新生成。", "warn");
@@ -2647,6 +2654,7 @@ function invalidateLearnedCurveForCondition() {
   const profile = intensityCurveState.profile;
   if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
   intensityCurveState.saved = false;
+  intensityCurveState.contextStale = true;
   saveIntensityCurveState();
   updateIntensityButtons();
   setIntensityStatus("等级、Radar 或 Style 已变化，模型来源曲线需要重新生成。", "warn");

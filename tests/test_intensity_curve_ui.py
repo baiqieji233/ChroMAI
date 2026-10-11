@@ -34,6 +34,8 @@ def test_intensity_ui_uses_separate_analysis_poll_and_curve_payload():
     assert "invalidateLearnedCurveForCondition" in js
     assert "等级、Radar 或 Style 已变化" in js
     assert "normalizeGenerationLevel(previousLevel)" in js
+    assert "contextStale" in js
+    assert "请重新生成模型来源曲线后再保存" in js
     assert "density_feedback_capability" in js
     assert "follow / hard 密度反馈能力" in js
     # The large spectrogram is for the editor only and is deliberately omitted
