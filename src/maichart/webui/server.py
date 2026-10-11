@@ -30,6 +30,7 @@ from urllib.parse import parse_qs, quote, urlparse
 from maichart.generation.conditions import CONDITION_KEYS, GENERATION_DEFAULTS, GENERATION_SAMPLING_DEFAULTS
 from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE, is_music_structure
 from maichart.generation.model_compatibility import checkpoint_capabilities
+from maichart.generation.miacode_native import engine_status
 from maichart.generation.timeline import serialize_tempo_map, tempo_map_fingerprint
 from maichart.generation.model import AUDIO_FEATURE_KEYS
 from maichart.training.checkpoints import (
@@ -190,6 +191,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "intensity_curve_capability": True,
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
+                    "playability_engine": engine_status(),
                     "tasks": [_task.to_dict() for _task in _all_tasks()],
                     "datasets": _uploaded_datasets(),
                     "extractions": {key: dict(value) for key, value in _EXTRACTIONS.items()},
@@ -542,17 +544,22 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if not 0 <= conflict_retries <= 5:
             raise ValueError("冲突重试次数必须是 0–5")
         runtime_reference_mode = str(payload.get("runtime_reference_mode", "off")).strip().lower()
-        runtime_reference_executable = str(payload.get("runtime_reference_executable") or "").strip()
-        runtime_reference_timeout_sec = float(payload.get("runtime_reference_timeout_sec", 30.0))
         if runtime_reference_mode not in {"off", "report", "reject"}:
             raise ValueError("运行时参考检查模式只能是 off、report 或 reject")
-        if not math.isfinite(runtime_reference_timeout_sec) or not 0 < runtime_reference_timeout_sec <= 60:
-            raise ValueError("运行时参考检查超时必须在 0–60 秒之间")
-        if runtime_reference_mode != "off":
-            if not runtime_reference_executable:
-                raise ValueError("启用运行时参考检查时必须填写可执行文件路径")
-            if not _resolve_path(runtime_reference_executable).is_file():
-                raise ValueError(f"运行时参考可执行文件不存在：{runtime_reference_executable}")
+        # Old browser settings migrate to the embedded judge. Never execute a
+        # persisted MiaCode.exe path, even if the previous UI supplied one.
+        if runtime_reference_mode != "off" and not conflict_enabled:
+            conflict_enabled = True
+            conflict_repair_mode = "reject" if runtime_reference_mode == "reject" else "none"
+        if conflict_enabled and not _is_event_family(model_family):
+            raise ValueError("内嵌无理检测目前支持 event_v1/event_ctx_v1；旧固定帧模型请关闭此选项")
+        if conflict_enabled and _is_event_family(model_family):
+            from maichart.generation.miacode_native import ensure_available
+            ensure_available()
+        if not conflict_enabled and conflict_repair_mode != "none":
+            raise ValueError("选择局部修复或拒绝生成时，请同时启用无理检测")
+        if conflict_repair_mode == "none":
+            conflict_retries = 0
         if not math.isfinite(curve_strength) or not 0.0 <= curve_strength <= 1.0:
             raise ValueError("曲线控制力度必须在 0–1 之间")
         if curve_mode not in {"follow", "hard", "soft", "strict"}:
@@ -561,9 +568,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task.result.update({"model_family": model_family, "checkpoint_schema": checkpoint_payload.get("schema")})
         seed, seed_randomized = _resolve_seed(payload)
         task.result.update({"seed": seed, "seed_randomized": seed_randomized})
-        task.result.update({"runtime_reference_mode": runtime_reference_mode,
-                            "runtime_reference_executable": runtime_reference_executable or None,
-                            "runtime_reference_timeout_sec": runtime_reference_timeout_sec})
+        task.result.update({"conflict_engine": "miacode" if conflict_enabled else "disabled",
+                            "runtime_reference_migrated": runtime_reference_mode != "off"})
         condition = payload.get("condition") or {"level": float(payload.get("level", GENERATION_DEFAULTS["level"]))}
         condition_path = CONDITION_ROOT / f"{task.task_id}.json"
         condition_path.write_text(json.dumps(condition, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -618,10 +624,6 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                                        GENERATION_SAMPLING_DEFAULTS["repetition_window"])),
                 "--max-tokens", str(max(1, int(payload.get("max_tokens", GENERATION_SAMPLING_DEFAULTS["max_tokens"])))),
             ]
-            if runtime_reference_mode != "off":
-                args.extend(["--runtime-reference-mode", runtime_reference_mode,
-                             "--runtime-reference-executable", runtime_reference_executable,
-                             "--runtime-reference-timeout-sec", str(runtime_reference_timeout_sec)])
             if capabilities["fine_note_strength"]:
                 args.extend(["--fine-note-strength", str(fine_note_strength)])
                 task.result["fine_note_strength"] = fine_note_strength
@@ -681,10 +683,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
             ])
             if payload.get("sample", GENERATION_SAMPLING_DEFAULTS["sample"]):
                 args.append("--sample")
-            # Static playability diagnostics are available to every event
+            # Embedded playability diagnostics are available to every event
             # checkpoint; the fine-rhythm control is gated by v3 capability.
             if conflict_enabled:
-                args.append("--enable-conflict-detection")
+                args.extend(["--enable-conflict-detection", "--conflict-engine", "miacode"])
                 if payload.get("detect_hard_conflicts", True):
                     args.append("--detect-hard-conflicts")
                 else:

@@ -15,6 +15,10 @@ from maichart.webui import server as webui
 
 @pytest.fixture
 def api(monkeypatch, tmp_path):
+    # This fixture tests HTTP/CLI forwarding; native execution is covered by
+    # test_miacode_native with the compiled upstream core.
+    from maichart.generation import miacode_native
+    monkeypatch.setattr(miacode_native, "ensure_available", lambda: {"engine": "miacode_native"})
     monkeypatch.setattr(webui, "TASKS", {})
     monkeypatch.setattr(webui, "INTENSITY_ROOT", tmp_path / "curves")
     monkeypatch.setattr(webui, "CONDITION_ROOT", tmp_path / "conditions")
@@ -516,4 +520,36 @@ def test_conflict_retries_outside_supported_range_fail_before_task(api, monkeypa
                                               "conflict_retries": retries})
     assert code == 400
     assert "冲突重试次数" in result["error"]
+    assert not calls and not webui.TASKS
+
+
+def test_generation_uses_embedded_judge_without_executable(api, monkeypatch, tmp_path):
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    code, response, _ = api("/api/generate", {**payload, "conflict_detection_enabled": True,
+        "conflict_repair_mode": "local", "conflict_retries": 2})
+    assert code == 200, response
+    args = calls[0]
+    assert args[args.index("--conflict-engine") + 1] == "miacode"
+    assert "--runtime-reference-executable" not in args
+
+
+def test_old_reference_settings_never_launch_editor(api, monkeypatch, tmp_path):
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    code, response, _ = api("/api/generate", {**payload, "runtime_reference_mode": "reject",
+        "runtime_reference_executable": "Z:/missing/MiaCode.exe"})
+    assert code == 200, response
+    assert "--enable-conflict-detection" in calls[0]
+    assert calls[0][calls[0].index("--conflict-repair-mode") + 1] == "reject"
+    assert "--runtime-reference-executable" not in calls[0]
+
+
+def test_missing_native_engine_fails_before_generation_task(api, monkeypatch, tmp_path):
+    from maichart.generation import miacode_native
+    _, payload, calls = setup_event_run(monkeypatch, tmp_path)
+    def unavailable():
+        raise RuntimeError("内嵌 MiaCode 检测库未部署")
+    monkeypatch.setattr(miacode_native, "ensure_available", unavailable)
+    code, result, _ = api("/api/generate", {**payload, "conflict_detection_enabled": True})
+    assert code >= 400
+    assert "未部署" in result["error"]
     assert not calls and not webui.TASKS

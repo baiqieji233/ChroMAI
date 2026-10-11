@@ -46,7 +46,6 @@ from maichart.generation.model_compatibility import (
 from maichart.generation.post_process import (
     PostProcessConfig, detect_chart_conflicts, process_chart_points,
 )
-from maichart.generation.runtime_reference import run_reference
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.timeline import normalize_tempo_map, serialize_tempo_map, tempo_map_fingerprint, beat_at_audio_end
 from maichart.generation.event_model import (
@@ -1491,23 +1490,37 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
         trial = _DecodedWindow(sequence, start, end, closed, curve_stats)
         merged = _merge_windows([*prior, trial], overlap_beats=1)
         result = detect_chart_conflicts(merged, tempo_changes, first, config) if config else None
+        def affects_window(issue):
+            # Runtime multi-action diagnostics may anchor a preceding Slide
+            # while the conflict itself is triggered by this window's Tap.
+            return (any(note.beat >= floor for note in issue.notes)
+                    or issue.time >= float(seconds_at_beat(floor, tempo_changes, first)))
         hard = [issue for issue in result.conflicts_detected if issue.severity == "hard"
-                and any(note.beat >= floor for note in issue.notes)] if result else []
+                and affects_window(issue)] if result else []
         # Local repair is a window-level regeneration policy.  When soft
         # references are enabled, include them in the retry score as well;
         # otherwise ``local`` silently retries only hard overlaps and leaves
         # the exact Slide judgement-zone warning the user asked it to fix.
         soft = ([issue for issue in result.conflicts_detected if issue.severity == "soft"
-                 and any(note.beat >= floor for note in issue.notes)]
+                 and affects_window(issue)]
                 if result and config.conflict_repair_mode == "local"
                 and config.detect_soft_conflicts else [])
-        score = len(hard) + len(soft)
+        score = (len(hard), len(soft))
         history.append({"attempt": attempt, "seed": seed + attempt * 1000003,
                         "hard": len(hard), "soft": len(soft), "score": score})
         if best is None or score < best[0]:
             best = (score, sequence, closed, curve_stats, removed, merged, result)
-        if score == 0:
+        print(f"playability_check engine={config.conflict_engine} beats=[{start},{end}) "
+              f"attempt={attempt + 1}/{attempts} hard={len(hard)} soft={len(soft)} "
+              f"mode={config.conflict_repair_mode}", flush=True)
+        if hard or soft:
+            for issue in (hard + soft)[:6]:
+                print("playability_issue " + json.dumps(issue.to_dict(), ensure_ascii=False), flush=True)
+        if score == (0, 0):
             break
+        if attempt + 1 < attempts:
+            print(f"playability_retry beats=[{start},{end}) next_attempt={attempt + 2}/{attempts} "
+                  f"reason=hard:{len(hard)},soft:{len(soft)}", flush=True)
     _, sequence, closed, curve_stats, removed, merged, result = best
     original = sequence
     report = result.to_dict() if result is not None else None
@@ -1519,6 +1532,9 @@ def _select_playable_window(decode_attempt, prior, *, start, end, tempo_changes,
     if report is not None:
         report["attempts"] = history
         report["scope"] = "previous_context_and_current_window"
+        if len(history) > 1 or report.get("conflicts") or report.get("repairs"):
+            print(f"playability_window_done beats=[{start},{end}) retries={len(history)-1} "
+                  f"removed={len(report.get('repairs', []))} remaining_hard={report.get('remaining_hard', 0)}", flush=True)
     return sequence, closed, curve_stats, removed, report, original
 
 
@@ -1928,6 +1944,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "window prediction, 1 increases. v3 only; no forced subdivision.")
     parser.add_argument("--enable-conflict-detection", action="store_true",
                         help="Enable playability conflict detection (hold-tap overlap, slide-tap collision, etc).")
+    parser.add_argument("--conflict-engine", choices=("miacode", "static"), default="miacode",
+                        help="Embedded MiaCode judge by default; static retains the legacy diagnostic subset.")
     parser.add_argument("--detect-hard-conflicts", action=argparse.BooleanOptionalAction, default=True,
                         help="Detect hard conflicts (game judgment system conflicts). Default True.")
     parser.add_argument("--detect-soft-conflicts", action="store_true",
@@ -1939,11 +1957,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--conflict-retries", type=int, default=0,
                         help="Optional conflicting-window retries, 0 disables, maximum 5.")
     parser.add_argument("--runtime-reference-mode", choices=("off", "report", "reject"), default="off",
-                        help="Optional MiaCode runtime-reference sidecar; default off.")
+                        help="Deprecated: migrated to the embedded conflict checker.")
     parser.add_argument("--runtime-reference-executable", type=Path,
-                        help="Path to the user-provided miacode_muri_dump executable.")
+                        help="Deprecated; ignored. Generation never starts an external editor.")
     parser.add_argument("--runtime-reference-timeout-sec", type=float, default=30.0,
-                        help="Per-candidate reference timeout in (0, 60] seconds.")
+                        help="Deprecated compatibility argument; the judge runs in process.")
     parser.add_argument("--device", choices=("auto", "cpu", "cuda"), default="auto")
     parser.add_argument("--title", default="Generated maimai chart")
     parser.add_argument("--artist", default="")
@@ -1966,19 +1984,32 @@ def main(argv=None) -> int:
         raise ValueError("local-onset-bias-strength must be finite in 0..1")
     if args.rhythm_bias != "auto":
         raise ValueError("rhythm-bias rhythm classes are not implemented; use auto with fine-note-strength")
-    if args.runtime_reference_mode != "off" and not args.runtime_reference_executable:
-        raise ValueError("runtime-reference-executable is required when runtime-reference-mode is report or reject")
-    if not math.isfinite(float(args.runtime_reference_timeout_sec)) or not 0 < float(args.runtime_reference_timeout_sec) <= 60:
-        raise ValueError("runtime-reference-timeout-sec must be finite and in (0, 60].")
-    if args.runtime_reference_mode != "off" and not Path(args.runtime_reference_executable).expanduser().is_file():
-        raise ValueError(f"runtime reference executable does not exist: {args.runtime_reference_executable}")
+    if args.runtime_reference_mode != "off":
+        if not args.enable_conflict_detection:
+            args.conflict_repair_mode = "reject" if args.runtime_reference_mode == "reject" else "none"
+        args.enable_conflict_detection = True
+        args.conflict_engine = "miacode"
+        args.runtime_reference_mode = "off"
+        if args.conflict_repair_mode == "none":
+            args.conflict_retries = 0
+        print("playability_migration legacy_runtime_reference=embedded_miacode external_executable=ignored", flush=True)
     post_process_config = PostProcessConfig(
         enable_conflict_detection=args.enable_conflict_detection,
         detect_hard_conflicts=args.detect_hard_conflicts,
         detect_soft_conflicts=args.detect_soft_conflicts,
         conflict_repair_mode=args.conflict_repair_mode,
         conflict_retries=args.conflict_retries,
+        conflict_engine=args.conflict_engine,
     )
+    if args.enable_conflict_detection:
+        if args.conflict_engine == "miacode":
+            from maichart.generation.miacode_native import ensure_available
+            ensure_available()
+        print(f"playability_engine engine={args.conflict_engine} mode={args.conflict_repair_mode} "
+              f"retries={args.conflict_retries} hard={args.detect_hard_conflicts} "
+              f"soft={args.detect_soft_conflicts}", flush=True)
+    else:
+        print("playability_engine engine=disabled", flush=True)
     if int(args.candidates) < 1:
         raise SystemExit("candidates must be positive.")
     output = Path(args.output); output.parent.mkdir(parents=True, exist_ok=True)
@@ -2180,6 +2211,12 @@ def main(argv=None) -> int:
                         tempo_changes=tempo_changes, first=args.first, span=audible_span)
             conflict_result = process_chart_points(points, tempo_changes, args.first, post_process_config)
             points = conflict_result.points
+            if args.enable_conflict_detection:
+                print(f"playability_final engine={args.conflict_engine} "
+                      f"remaining_hard={sum(c.severity == 'hard' for c in conflict_result.remaining_conflicts)} "
+                      f"remaining_soft={sum(c.severity == 'soft' for c in conflict_result.remaining_conflicts)} "
+                      f"removed={len(conflict_result.repairs_applied) + sum(len((w.playability or {}).get('repairs', [])) for w in decoded)} "
+                      f"status={conflict_result.coverage.get('status')} playable_verified=false", flush=True)
             quality = assess_event_chart(points, tempo_changes, first=args.first,
                                          duration_sec=max(float(audio.duration_sec - args.first), 1e-3),
                                          target_condition=condition)
@@ -2259,7 +2296,7 @@ def main(argv=None) -> int:
                         "first": args.first, "end_beat": str(duration_beats),
                         "audio_duration_sec": audio.duration_sec, "audio_sha256": audio_identity["sha256"], "checkpoint_identity": checkpoint_identity, "quality": quality}, ensure_ascii=False, indent=2), encoding="utf-8")
                     target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
-                    print("candidate rejected by static playability references", flush=True)
+                    print(f"candidate rejected by {args.conflict_engine} playability findings", flush=True)
                     failures += 1
                     continue
             try:
@@ -2295,39 +2332,6 @@ def main(argv=None) -> int:
                       f"error={compile_error}", flush=True)
                 failures += 1
                 continue
-            if args.runtime_reference_mode != "off":
-                runtime_reference = run_reference(
-                    args.runtime_reference_executable,
-                    text,
-                    difficulty=condition.difficulty,
-                    first=float(args.first),
-                    timeout_sec=float(args.runtime_reference_timeout_sec),
-                    mode=args.runtime_reference_mode,
-                )
-                quality["runtime_reference"] = runtime_reference
-                if runtime_reference["status"] in {"rejected", "failed"}:
-                    if args.runtime_reference_mode == "reject":
-                        quality["generation_status"] = (
-                            "rejected_by_runtime_reference"
-                            if runtime_reference["status"] == "rejected"
-                            else "runtime_reference_failed"
-                        )
-                        target_ir.write_text(json.dumps({
-                            "schema": "maichart-event-chart-v1",
-                            "points": [point.to_dict() for point in points],
-                            "tempo_changes": [{"beat": str(t.beat), "bpm": t.bpm} for t in tempo_changes],
-                            "first": args.first, "end_beat": str(duration_beats),
-                            "audio_duration_sec": audio.duration_sec,
-                            "audio_sha256": audio_identity["sha256"],
-                            "checkpoint_identity": checkpoint_identity, "quality": quality,
-                        }, ensure_ascii=False, indent=2), encoding="utf-8")
-                        target_quality.write_text(json.dumps(quality, ensure_ascii=False, indent=2), encoding="utf-8")
-                        print(f"candidate rejected by runtime reference: {runtime_reference['reject_reason']}", flush=True)
-                        failures += 1
-                        continue
-                    quality["generation_status"] = "success_with_warnings"
-                if runtime_reference["status"] == "rejected":
-                    quality["generation_status"] = "rejected_by_runtime_reference"
             # Report the note-level problems instead of discarding the chart.
             # A cell that strikes one button twice (or uses an unknown token) is a
             # real defect, but a handful of them among hundreds of good notes must
@@ -2365,9 +2369,8 @@ def main(argv=None) -> int:
             playability_warning = args.enable_conflict_detection and (
                 conflict_result.coverage.get("status") == "partial"
                 or bool(conflict_result.remaining_conflicts))
-            runtime_warning = (quality.get("runtime_reference", {}).get("status") == "failed")
             quality["generation_status"] = (
-                "success_with_warnings" if note_warnings or playability_warning or runtime_warning else "success"
+                "success_with_warnings" if note_warnings or playability_warning else "success"
             )
             quality["windows_decoded"] = len(decoded)
             quality["windows_closed"] = sum(1 for window in decoded if window.closed)

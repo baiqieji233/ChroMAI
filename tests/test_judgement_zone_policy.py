@@ -200,7 +200,7 @@ def test_local_retry_considers_enabled_soft_slide_references():
     assert result[0].note_texts == ["3>1[4:1]", "2>5[4:1]"]
     assert result[4]["attempts"][0]["hard"] == 0
     assert result[4]["attempts"][0]["soft"] == 1
-    assert result[4]["attempts"][1]["score"] == 0
+    assert result[4]["attempts"][1]["score"] == (0, 0)
 
 
 def test_retry_off_and_detect_only_preserve_generated_events():

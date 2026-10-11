@@ -104,7 +104,6 @@ const GENERATION_PARAM_FIELDS = [
   "guidanceScale", "presenceThreshold", "buttonThreshold",
   "fineNoteStrength", "localOnsetBiasStrength", "conflictDetectionEnabled", "detectHardConflicts", "detectSoftConflicts",
   "conflictRepairMode", "conflictRetries",
-  "runtimeReferenceMode", "runtimeReferenceExecutable", "runtimeReferenceTimeoutSec",
 ];
 
 let activeTaskId = null;
@@ -249,6 +248,12 @@ function restoreSettings() {
   } catch (_) { /* optional */ }
   const values = saved?.values;
   if (!values || typeof values !== "object") return restoreLegacyDatasetPaths();
+  // Migrate the former external-reference switch. An old executable path is
+  // never used by the embedded detector, including after a browser reload.
+  if (["report", "reject"].includes(values.runtimeReferenceMode) && values.conflictDetectionEnabled !== true) {
+    values.conflictDetectionEnabled = true;
+    values.conflictRepairMode = values.runtimeReferenceMode === "reject" ? "reject" : "none";
+  }
   let restored = 0;
   settingsFields().forEach((target) => {
     if (!Object.prototype.hasOwnProperty.call(values, target.id)) return;
@@ -645,17 +650,7 @@ function updateGenerationCapabilityControls() {
   });
   const retries = element("#conflictRetries");
   if (retries) retries.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") !== "none");
-  const referenceMode = valueOrDefault("#runtimeReferenceMode", "off");
-  const referenceExecutable = valueOrDefault("#runtimeReferenceExecutable", "").trim();
-  const referenceStatus = element("#runtimeReferenceStatus");
-  if (referenceStatus) {
-    const requested = referenceMode !== "off";
-    referenceStatus.hidden = !requested;
-    referenceStatus.className = `inline-status ${requested && referenceExecutable ? "success" : "warning"}`;
-    referenceStatus.textContent = !requested ? "" : referenceExecutable
-      ? `已填写运行时参考请求：${referenceMode === "reject" ? "失败时拒绝候选" : "仅报告"}；后端会检查可执行文件并在 ${Number(valueOrDefault("#runtimeReferenceTimeoutSec", 30)) || 30} 秒后超时。`
-      : "已选择运行时参考模式，但尚未填写可执行文件路径；提交生成前请补充路径。";
-  }
+
 }
 
 // A field marked for one family applies to its descendants too: the
@@ -907,12 +902,12 @@ function generationPayload() {
     // and records that unsupported checkpoint capabilities are not advertised.
     conflict_detection_enabled: checkedOrDefault("#conflictDetectionEnabled", false),
     detect_hard_conflicts: checkedOrDefault("#detectHardConflicts", true),
-    conflict_repair_mode: valueOrDefault("#conflictRepairMode", "none"),
-    conflict_retries: Number(valueOrDefault("#conflictRetries", 0)),
+    conflict_repair_mode: checkedOrDefault("#conflictDetectionEnabled", false)
+      ? valueOrDefault("#conflictRepairMode", "none") : "none",
+    conflict_retries: checkedOrDefault("#conflictDetectionEnabled", false)
+      && valueOrDefault("#conflictRepairMode", "none") !== "none"
+      ? Number(valueOrDefault("#conflictRetries", 0)) : 0,
     detect_soft_conflicts: checkedOrDefault("#detectSoftConflicts", false),
-    runtime_reference_mode: valueOrDefault("#runtimeReferenceMode", "off"),
-    runtime_reference_executable: valueOrDefault("#runtimeReferenceExecutable", "").trim() || null,
-    runtime_reference_timeout_sec: Number(valueOrDefault("#runtimeReferenceTimeoutSec", 30)),
     fine_note_strength: Number(valueOrDefault("#fineNoteStrength", 0.5)),
     local_onset_bias_strength: element("#localOnsetBiasStrength")?.disabled
       ? 0 : Number(valueOrDefault("#localOnsetBiasStrength", 0)),
@@ -1127,13 +1122,15 @@ function renderGenerationResult(task) {
       if (playability && typeof playability === "object") {
         const statusLabel = playability.status === "disabled" ? "未启用"
           : playability.status === "partial" ? "部分静态检测"
+            : playability.status === "engine_reference" ? "内嵌 MiaCode 检测"
             : playability.status === "static_only" ? "静态参考检测"
               : String(playability.status || "未知");
         const hardCount = Array.isArray(playability.remaining_hard) ? playability.remaining_hard.length
           : Number(playability.remaining_hard || 0);
         const repairCount = Array.isArray(playability.repairs) ? playability.repairs.length
           : Number(playability.repairs || 0);
-        const details = Array.isArray(playability.details) ? playability.details : [];
+        const details = Array.isArray(playability.remaining_details) ? playability.remaining_details
+          : Array.isArray(playability.details) ? playability.details : [];
         const softCount = details.filter((item) => item?.severity === "soft").length;
         const attempts = (Array.isArray(playability.windows) ? playability.windows : [])
           .flatMap((window) => Array.isArray(window?.attempts) ? window.attempts : []);
@@ -1144,7 +1141,7 @@ function renderGenerationResult(task) {
         const parseErrors = Array.isArray(coverage.parse_errors) ? coverage.parse_errors.length
           : Number(coverage.parse_errors || 0);
         playabilityText = `冲突参考：${statusLabel}；未解决硬冲突 ${hardCount}；软参考 ${softCount}；删除修复 ${repairCount}；窗口重试 ${retryCount}；未覆盖项 ${unsupported}；解析问题 ${parseErrors}。`;
-        if (softCount) playabilityText += "软参考不会被直接删除，需要结合谱面和实机/参考程序复核。";
+        if (softCount) playabilityText += "Warning 不直接删除，需要结合谱面与游玩复核。";
         if (["static_only", "partial"].includes(playability.status)) {
           playabilityText += "检测范围不完整，不能据此认定谱面可玩。";
         }
@@ -1474,6 +1471,13 @@ function currentCheckpointKey() {
 // ---------------------------------------------------------------------------
 async function loadStatus() {
   const state = await api("/api/status");
+  const engineStatus = element("#playabilityEngineStatus");
+  if (engineStatus) {
+    const available = state.playability_engine?.available === true;
+    engineStatus.className = `inline-status ${available ? "good" : "warn"}`;
+    engineStatus.textContent = available ? "内嵌 MiaCode 检测库已就绪，直接在生成进程中运行。"
+      : state.playability_engine?.error || "当前后端尚未加载内嵌检测能力，请重启 WebUI 服务。";
+  }
   const intensityNotice = state.intensity_curve_capability === true ? " · 多维强度曲线可用" : " · 多维强度曲线需重启后端";
   setStatus(`本地服务正常 · workspace: ${state.workspace}${intensityNotice}`, state.intensity_curve_capability === true);
   populateDatasets(state.datasets || []);
@@ -1686,7 +1690,7 @@ function renderCheckpointInspection(data) {
   const state = valid ? `checkpoint 可用；${capability}` : "checkpoint 不可用于当前模式";
   const caps = data.generation_capabilities || {};
   const capabilityLine = Object.keys(caps).length
-    ? `生成能力：静态冲突检测 ${caps.conflict_detection ? "可用" : "不可用"}，细碎音符调制 ${caps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐 ${caps.local_onset_guidance === true ? "可用" : "不可用"}`
+    ? `生成能力：内嵌无理检测 ${caps.conflict_detection ? "可用" : "不可用"}，细碎音符调制 ${caps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐 ${caps.local_onset_guidance === true ? "可用" : "不可用"}`
     : "";
   const details = [
     capabilityLine,
@@ -1761,7 +1765,7 @@ async function inspectGenerationCheckpoint() {
   const family = data.model_family_label || data.model_family || "未知";
   const genCaps = data.generation_capabilities || {};
   const capSuffix = Object.keys(genCaps).length
-    ? `；静态冲突检测${genCaps.conflict_detection ? "可用" : "不可用"}，细碎音符调制${genCaps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐${genCaps.local_onset_guidance === true ? "可用" : "不可用"}`
+    ? `；内嵌无理检测${genCaps.conflict_detection ? "可用" : "不可用"}，细碎音符调制${genCaps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐${genCaps.local_onset_guidance === true ? "可用" : "不可用"}`
     : "";
   setGenerationStatus(`模型族：${family}；schema：${data.schema || "未记录"}；生成入口：${data.generation_cli || "自动"}${capSuffix}`,
     data.valid ? "good" : "warn");
@@ -2683,6 +2687,12 @@ async function startGenerate() {
   const payload = generationPayload();
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
+  if (payload.conflict_detection_enabled) {
+    const status = await api("/api/status");
+    if (status.playability_engine?.available !== true) {
+      throw new Error(status.playability_engine?.error || "当前后端尚未加载内嵌 MiaCode 检测，请重启 WebUI 服务后再生成");
+    }
+  }
   if (payload.local_onset_bias_strength > 0) {
     const caps = generationInspection.path === payload.checkpoint && generationInspection.data?.valid === true
       ? generationInspection.data.generation_capabilities || {} : {};

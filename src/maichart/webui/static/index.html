@@ -861,27 +861,32 @@
           </label>
 
           <!-- ========== 可玩性与冲突检测（新增）========== -->
-          <h3 data-generation-family="event_v1">冲突参考与可选修复（实验性）</h3>
+          <h3 data-generation-family="event_v1">无理检测与修复（内嵌 MiaCode）</h3>
+          <p id="playabilityEngineStatus" data-generation-family="event_v1" class="inline-status">正在检查内嵌检测库…</p>
           <p data-generation-family="event_v1" class="help-text">
-            使用静态判定区与时间窗口作参考，不是完整机台判定模拟，也不证明谱面可玩。部分 Slide 轨迹未覆盖；这些情况只报告覆盖缺口。
+            感谢 <a href="https://github.com/Team-MiaCode/MiaCode" target="_blank" rel="noopener noreferrer">MiaCode 团队与贡献者</a>
+            开源无理检测核心。本项目直接集成其判定区、Slide/Wifi、Touch 联动与动作分析代码，并保留上游许可证和来源说明。
+          </p>
+          <p data-generation-family="event_v1" class="help-text">
+            生成进程直接使用 MiaCode 的原生检测核心，包含有序判定区、星星头、Slide/Wifi、Hold 和 Touch 联动。无需安装或打开 MiaCode 编辑器，也无需选择可执行文件。检测结果仍需结合玩家实际游玩评估。
           </p>
 
           <label class="field" data-generation-family="event_v1">
             <input id="conflictDetectionEnabled" type="checkbox">
-            启用冲突检测
-            <small>默认关闭。开启后可分别选择确定冲突与人体工学参考项。</small>
+            启用无理检测
+            <small>开启后同时检查每个生成窗口与合并后的整曲；沿用现有模型，无需重练。</small>
           </label>
 
           <label class="field" data-generation-family="event_v1">
             <input id="detectHardConflicts" type="checkbox" checked>
-            检测硬冲突
-            <small>标记同判定区同拍重复起音，以及 Hold 持续区间内再次起音。同刻相邻 Touch 可能联动判定，相关项会降为软参考。可以单独关闭。</small>
+            检测无理（Muri）
+            <small>使用 MiaCode 判为 Muri 的结果，包括叠键、Hold 尾部接音、星星头与轨迹冲突、Slide 提前完成及动作多押；按判定区和时间顺序检查 Touch 联动。</small>
           </label>
 
           <label class="field" data-generation-family="event_v1">
             <input id="detectSoftConflicts" type="checkbox">
-            检测软参考项
-            <small>提示同刻三个以上独立按键的双手分配复核，以及 Hold 起点前后 6/180 秒同判定区起音的时序复核；这些软参考不自动删音符，也不认定人体无理。开启“局部修复”时，软参考会参与当前窗口重试，但仍不会直接删除。确定冲突检测另会附带已覆盖 Slide 轨迹的提前触发参考和 Touch 覆盖提示；这些参考不做完整判定区状态模拟。</small>
+            检测警告（Warning）
+            <small>MiaCode 的 Warning 与 Muri 分别记录。开启后 Warning 也参与局部重试评分；Warning 不直接删音符，不触发拒绝生成。</small>
           </label>
 
           <label class="field" data-generation-family="event_v1">修复模式
@@ -890,29 +895,13 @@
               <option value="local">局部修复</option>
               <option value="reject">拒绝生成</option>
             </select>
-            <small>none 仅报告；local 在当前窗口重新采样并删除检测明确的硬冲突原子，开启软参考时也会按软冲突选择较好的重试结果；reject 在存在确定硬冲突时拒绝该结果。</small>
+            <small>none 仅报告；local 先重试当前窗口，仍有 Muri 时尝试删除定位明确的音符，并再次检测，确认问题减少才保留修改；reject 在剩余 Muri 或解析失败时拒绝候选。局部修复不保证所有问题都能消除，日志会显示剩余数量。</small>
           </label>
           <label class="field" data-generation-family="event_v1">
             冲突重试次数
             <input id="conflictRetries" type="number" min="0" max="5" step="1" value="0">
-            <small>仅在启用检测且修复模式不是 none 时使用。0 表示关闭重试。</small>
+            <small>每个冲突窗口的额外生成次数，0 关闭重采样。硬冲突优先减少，随后比较警告；日志显示触发原因、每次检测计数、删除的音符及最终复检结果。</small>
           </label>
-
-          <h3 data-generation-family="event_v1">运行时参考检查（可选）</h3>
-          <p data-generation-family="event_v1" class="help-text">可调用本机 MiaCode 参考程序生成报告，或在参考检查失败时拒绝候选。它不是实际机台播放器，也不是官方判定器；旧 checkpoint 默认不受影响。</p>
-          <label class="field" data-generation-family="event_v1">参考检查模式
-            <select id="runtimeReferenceMode"><option value="off" selected>关闭</option><option value="report">生成报告（不拒绝）</option><option value="reject">失败时拒绝候选</option></select>
-            <small>report 只记录参考结果；reject 会在参考程序报告失败时拒绝该候选。需要填写可执行文件路径。</small>
-          </label>
-          <label class="field span-2" data-generation-family="event_v1">参考程序可执行文件
-            <input id="runtimeReferenceExecutable" type="text" placeholder="例如 C:\\tools\\MiaCode.exe">
-            <small>路径只传给后端执行；请确认该程序可在当前机器上无交互运行。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">参考检查超时（秒）
-            <input id="runtimeReferenceTimeoutSec" type="number" min="1" max="60" step="1" value="30">
-            <small>每个候选的最大运行时间，默认 30 秒。</small>
-          </label>
-          <p id="runtimeReferenceStatus" data-generation-family="event_v1" class="inline-status" hidden></p>
 
           <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Presence threshold
             <input id="presenceThreshold" type="number" min="0" max="1" step="0.01" value="0.45">

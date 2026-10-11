@@ -245,7 +245,9 @@ def test_all_rest_cli_compiles_empty_chart_and_writes_reports(tmp_path, monkeypa
     audio_path.write_bytes(b"test audio identity")
     audio = EventAudio(np.zeros((400, ACOUSTIC_DIM)), np.arange(400) * .02, 8, 120)
     monkeypatch.setattr(event_cli, "extract_event_audio", lambda *a, **kw: audio)
-    monkeypatch.setattr(event_cli, "load_event_model", lambda *a, **kw: (ChordModel(vocabulary()), vocabulary(), {"epoch": 1}))
+    checkpoint = {"epoch": 1, "schema": "maichart-event-generator-checkpoint-v1",
+                  "data_contract": {"target_schema": "event_v1"}}
+    monkeypatch.setattr(event_cli, "load_event_model", lambda *a, **kw: (ChordModel(vocabulary()), vocabulary(), checkpoint))
     curve = profile(rests=[{"start_sec": 0, "end_sec": 8}])
     curve["audio_sha256"] = audio_sha256(audio_path)
     curve_path = tmp_path / "curve.json"

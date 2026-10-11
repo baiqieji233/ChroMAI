@@ -61,7 +61,9 @@ def test_explicit_bpm_is_used_verbatim_and_never_snapped(tmp_path, monkeypatch):
 
     monkeypatch.setattr(
         event_cli, "load_event_model",
-        lambda path, device: (object(), EventVocabulary.from_event_charts([], segment_beats=4), {"epoch": 1}),
+        lambda path, device: (object(), EventVocabulary.from_event_charts([], segment_beats=4),
+                             {"epoch": 1, "schema": "maichart-event-generator-checkpoint-v1",
+                              "data_contract": {"target_schema": "event_v1", "segment_beats": 4}}),
     )
     monkeypatch.setattr(event_cli, "extract_event_audio", fake_extract)
     monkeypatch.setattr(

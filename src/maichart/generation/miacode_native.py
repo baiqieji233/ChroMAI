@@ -58,6 +58,13 @@ def ensure_available() -> dict:
     return {"engine": "miacode_native", "commit": REFERENCE_COMMIT, "in_process": True}
 
 
+def engine_status() -> dict:
+    try:
+        return {"available": True, **ensure_available()}
+    except (OSError, ValueError, RuntimeError, KeyError) as exc:
+        return {"available": False, "engine": "miacode_native", "error": str(exc)}
+
+
 def analyze_inote(inote: str, *, first: float = 0.0) -> dict:
     if not math.isfinite(first) or "\0" in inote:
         raise ValueError("Invalid MiaCode input/offset")

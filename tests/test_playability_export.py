@@ -27,7 +27,8 @@ def test_cli_policy_reaches_exported_artifacts(tmp_path, monkeypatch, mode):
     code = event_cli.main(["--checkpoint", "test.pt", "--audio", "test.wav",
                            "--output", str(output), "--device", "cpu", "--bpm", "120",
                            "--no-audio-bounds-trim", "--no-intensity-follow",
-                           "--enable-conflict-detection", "--conflict-repair-mode", mode])
+                           "--enable-conflict-detection", "--conflict-engine", "static",
+                           "--conflict-repair-mode", mode])
     report = json.loads(output.with_suffix(".quality.json").read_text(encoding="utf-8"))
     ir = json.loads(output.with_suffix(".chart.json").read_text(encoding="utf-8"))
     assert ir["tempo_changes"] == [{"beat": "0", "bpm": 120.0}]

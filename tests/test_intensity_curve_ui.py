@@ -46,9 +46,12 @@ def test_intensity_ui_uses_separate_analysis_poll_and_curve_payload():
 def test_playability_ui_matches_backend_retry_and_timeout_contract():
     html = (STATIC / "index.html").read_text(encoding="utf-8")
     js = (STATIC / "app.js").read_text(encoding="utf-8")
-    assert 'id="runtimeReferenceTimeoutSec" type="number" min="1" max="60"' in html
-    assert "软参考会参与当前窗口重试" in html
-    assert "按软冲突选择较好的重试结果" in html
+    assert 'id="runtimeReferenceExecutable"' not in html
+    assert 'id="runtimeReferenceTimeoutSec"' not in html
+    assert "内嵌 MiaCode" in html
+    assert "确认问题减少才保留修改" in html
+    assert 'href="https://github.com/Team-MiaCode/MiaCode"' in html
+    assert "感谢" in html and "团队与贡献者" in html
     assert "软参考 ${softCount}" in js
     assert "窗口重试 ${retryCount}" in js
 

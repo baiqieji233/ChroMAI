@@ -21,8 +21,11 @@ class PostProcessConfig:
     detect_soft_conflicts: bool = False
     conflict_repair_mode: str = "none"
     conflict_retries: int = 0
+    conflict_engine: str = "static"
 
     def __post_init__(self):
+        if self.conflict_engine not in {"static", "miacode"}:
+            raise ValueError("conflict-engine must be static or miacode")
         if self.conflict_repair_mode not in {"none", "local", "reject"}:
             raise ValueError("conflict-repair-mode must be none, local or reject")
         if isinstance(self.conflict_retries, bool) or not isinstance(self.conflict_retries, int) or not 0 <= self.conflict_retries <= 5:
@@ -49,13 +52,14 @@ class PostProcessResult:
     remaining_conflicts: list[ConflictReport] = field(default_factory=list)
 
     def to_dict(self):
-        return {"schema": "maichart-playability-static-v2", "reference": REFERENCE_VERSION,
+        return {"schema": "maichart-playability-static-v2", "reference": self.coverage.get("reference", REFERENCE_VERSION),
                 "status": self.coverage.get("status", "disabled"),
                 "notes": self.processed_notes_count, "original_notes": self.original_notes_count,
                 "conflicts": len(self.conflicts_detected),
                 "hard": sum(c.severity == "hard" for c in self.conflicts_detected),
                 "details": [c.to_dict() for c in self.conflicts_detected],
                 "remaining_hard": sum(c.severity == "hard" for c in self.remaining_conflicts),
+                "remaining_details": [c.to_dict() for c in self.remaining_conflicts],
                 "repairs": self.repairs_applied, "success": self.success,
                 "coverage": self.coverage, "message": self.message}
 
@@ -123,14 +127,18 @@ def detect_chart_conflicts(points, tempo_changes, first, config):
     if not config.enable_conflict_detection:
         return PostProcessResult(0, 0, [], [], True, points=points, coverage={"status": "disabled"})
     events, _, coverage = _extract(points, tempo_changes, first)
-    issues = ConflictDetector(config.detect_hard_conflicts, config.detect_soft_conflicts).detect_conflicts(events)
+    if config.conflict_engine == "miacode":
+        from maichart.generation.miacode_conflicts import detect_native_conflicts
+        issues, coverage = detect_native_conflicts(points, tempo_changes, first, events, config)
+    else:
+        issues = ConflictDetector(config.detect_hard_conflicts, config.detect_soft_conflicts).detect_conflicts(events)
     hard = any(c.severity == "hard" for c in issues)
     success = not (config.conflict_repair_mode == "reject" and hard)
     # An incomplete parser result cannot be presented as a strict acceptance.
     if config.conflict_repair_mode == "reject" and coverage["parse_errors"]:
         success = False
     return PostProcessResult(len(events), len(events), issues, [], success,
-                             message=f"{len(issues)} static references", points=points,
+                             message=f"{len(issues)} {config.conflict_engine} references", points=points,
                              coverage=coverage, remaining_conflicts=issues)
 
 
@@ -145,6 +153,8 @@ def process_chart_points(points, tempo_changes, first, config, *, repair_after_b
     initial = detect_chart_conflicts(points, tempo_changes, first, config)
     if config.conflict_repair_mode != "local" or not config.enable_conflict_detection:
         return initial
+    if config.conflict_engine == "miacode":
+        return _repair_native(points, tempo_changes, first, config, initial, repair_after_beat)
     if any(e.get("code") != "duplicate_button_head" for e in initial.coverage.get("parse_errors", [])):
         initial.message = "Syntax diagnostics present: local repair skipped"
         return initial
@@ -173,9 +183,70 @@ def process_chart_points(points, tempo_changes, first, config, *, repair_after_b
     final = detect_chart_conflicts(repaired, tempo_changes, first, config)
     initial.points = repaired
     initial.repairs_applied = list(removed.values())
+    for repair in initial.repairs_applied:
+        print("playability_repair " + json.dumps(repair, ensure_ascii=False), flush=True)
     initial.processed_notes_count = final.processed_notes_count
     initial.remaining_conflicts = final.conflicts_detected
     initial.message = f"Removed {len(removed)} conflicting press children; rechecked full chart"
+    return initial
+
+
+def _repair_native(points, tempo_changes, first, config, initial, repair_after_beat):
+    """Remove only exactly mapped affected children and re-run the real judge.
+
+    A deletion is committed only if it reduces hard findings. Never modify
+    prior-window context, EX children, parser failures or ambiguous MultiTouch.
+    """
+    current = initial
+    repairs = []
+    for _ in range(16):
+        if current.coverage.get("parse_errors"):
+            break
+        hard_before = sum(c.severity == "hard" for c in current.conflicts_detected)
+        if not hard_before:
+            break
+        events, texts, _ = _extract(points, tempo_changes, first)
+        by_source = {e.source_id: e for e in events}
+        accepted = False
+        tried = set()
+        for issue in current.conflicts_detected:
+            target = issue.repair_target
+            if issue.severity != "hard" or target not in by_source or target in tried:
+                continue
+            tried.add(target)
+            event = by_source[target]
+            if event.protected or repair_after_beat is not None and event.beat < repair_after_beat:
+                continue
+            changed = "/".join(text for key, text in texts.items() if key[0] == target[0] and key != target)
+            trial = [EventPoint(p.beat, changed) if i == target[0] else p
+                     for i, p in enumerate(points) if i != target[0] or changed]
+            # Avoid turning a bad single-note chart into an empty success.
+            if not trial:
+                continue
+            after = detect_chart_conflicts(trial, tempo_changes, first, config)
+            hard_after = sum(c.severity == "hard" for c in after.conflicts_detected)
+            if after.coverage.get("parse_errors") or hard_after >= hard_before:
+                continue
+            repair = {"point_index": target[0], "note_index": target[1],
+                      "beat": str(event.beat), "time_sec": event.time, "raw": texts[target],
+                      "reason": issue.conflict_type, "hard_before": hard_before, "hard_after": hard_after}
+            repairs.append(repair)
+            print("playability_repair " + json.dumps(repair, ensure_ascii=False), flush=True)
+            points, current, accepted = trial, after, True
+            break
+        if not accepted:
+            break
+    initial.points = points
+    initial.repairs_applied = repairs
+    initial.processed_notes_count = current.processed_notes_count
+    initial.remaining_conflicts = current.conflicts_detected
+    initial.coverage = current.coverage
+    initial.message = f"MiaCode: removed {len(repairs)} children; rechecked; remaining_hard={sum(c.severity == 'hard' for c in current.conflicts_detected)}"
+    if initial.conflicts_detected:
+        print(f"playability_repair_done engine=miacode removed={len(repairs)} "
+              f"remaining_hard={sum(c.severity == 'hard' for c in current.conflicts_detected)} "
+              f"unmapped={len(current.coverage.get('unsupported', []))} "
+              "policy=verified_deletions_only", flush=True)
     return initial
 
 
