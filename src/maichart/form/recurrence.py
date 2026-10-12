@@ -1,0 +1,246 @@
+"""Audio-only recurrence discovery and causal chart motif memory."""
+
+from __future__ import annotations
+
+import math
+from dataclasses import dataclass, field
+from fractions import Fraction
+from typing import Iterable, Sequence
+
+import numpy as np
+
+from maichart.event_timing import EventPoint, EventTempo, seconds_at_beat
+from maichart.generation.event_audio import EventAudio
+from maichart.form.timing import MetricSpan
+
+MEL_BANDS = 8
+CHROMA_DIM = 12
+ONSET_DIM = 1
+DESCRIPTOR_CHANNELS = CHROMA_DIM + ONSET_DIM + MEL_BANDS
+DESCRIPTOR_DIM = 24 * DESCRIPTOR_CHANNELS
+
+
+@dataclass(frozen=True, slots=True)
+class Relation:
+    """Provisional audio evidence that an earlier span recurs in a later one."""
+
+    source: int
+    target: int
+    similarity: float
+    confidence: float
+    duration_ratio: float
+
+
+@dataclass(slots=True)
+class SongRelations:
+    spans: tuple[MetricSpan, ...]
+    descriptors: np.ndarray
+    links: list[Relation] = field(default_factory=list)
+    audit: dict[str, object] = field(default_factory=dict)
+
+    def prior_links(self, target: int) -> list[Relation]:
+        """Return only relations whose source is wholly before ``target``."""
+
+        target_span = self._span(target)
+        return sorted(
+            (link for link in self.links
+             if link.target == target and self._span(link.source).end <= target_span.start),
+            key=lambda link: (-link.similarity, link.source),
+        )
+
+    def _span(self, index: int) -> MetricSpan:
+        for span in self.spans:
+            if span.index == index:
+                return span
+        raise IndexError(f"Unknown span index: {index}")
+
+
+@dataclass(frozen=True, slots=True)
+class MotifReference:
+    target: int
+    source: int | None
+    points: tuple[EventPoint, ...]
+    relation: Relation | None
+    provenance: str
+
+
+def _tempo_map(changes: Iterable[EventTempo | tuple[Fraction, float]]) -> list[EventTempo]:
+    result = [
+        item if isinstance(item, EventTempo) else EventTempo(Fraction(item[0]), float(item[1]))
+        for item in changes
+    ]
+    result.sort(key=lambda item: item.beat)
+    if not result or result[0].beat != 0:
+        raise ValueError("tempo_changes must include a BPM at beat 0")
+    return result
+
+
+def _sample(audio: EventAudio, times: np.ndarray) -> np.ndarray:
+    if not len(audio.times):
+        return np.zeros((len(times), audio.features.shape[1]), dtype=np.float32)
+    stamps = np.asarray(audio.times, dtype=np.float64)
+    features = np.asarray(audio.features, dtype=np.float64)
+    return np.stack(
+        [np.interp(times, stamps, features[:, column], left=0.0, right=0.0)
+         for column in range(features.shape[1])],
+        axis=1,
+    )
+
+
+def _unit(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=np.float64).reshape(-1)
+    norm = float(np.linalg.norm(values))
+    return values / norm if norm > 1e-10 else np.zeros_like(values)
+
+
+def _describe(samples: np.ndarray, bins: int) -> tuple[np.ndarray, bool]:
+    if not len(samples):
+        return np.zeros(bins * DESCRIPTOR_CHANNELS, dtype=np.float32), False
+
+    mel = samples[:, :80]
+    chroma = np.clip(samples[:, 80:92], 0.0, None)
+    onset = np.clip(samples[:, 92], 0.0, None)
+    chroma_bins = np.zeros((bins, CHROMA_DIM), dtype=np.float64)
+    onset_bins = np.zeros((bins, 1), dtype=np.float64)
+    timbre_bins = np.zeros((bins, MEL_BANDS), dtype=np.float64)
+    frame_bins = np.minimum((np.arange(len(samples)) * bins / len(samples)).astype(int), bins - 1)
+    for index in range(bins):
+        mask = frame_bins == index
+        block_chroma = chroma[mask]
+        block_mel = mel[mask]
+        chroma_bins[index] = block_chroma.mean(axis=0) if len(block_chroma) else 0.0
+        onset_bins[index, 0] = onset[mask].mean() if mask.any() else 0.0
+        if len(block_mel):
+            edges = np.linspace(0, 80, MEL_BANDS + 1, dtype=int)
+            timbre_bins[index] = [block_mel[:, edges[j]:edges[j + 1]].mean() for j in range(MEL_BANDS)]
+
+    chroma_bins /= np.maximum(chroma_bins.sum(axis=1, keepdims=True), 1e-8)
+    onset_bins = onset_bins / max(float(onset_bins.max()), 1e-8)
+    # Retain changes over normalized time, not a static pitch or timbre snapshot.
+    chroma_shape = chroma_bins - chroma_bins.mean(axis=0, keepdims=True)
+    onset_shape = onset_bins - onset_bins.mean(axis=0, keepdims=True)
+    # Remove both frame level and a static song-wide spectral envelope.
+    timbre_bins -= timbre_bins.mean(axis=1, keepdims=True)
+    timbre_shape = timbre_bins - timbre_bins.mean(axis=0, keepdims=True)
+    raw_pieces = (chroma_shape, onset_shape, timbre_shape)
+    pieces = [_unit(piece) for piece in raw_pieces]
+    descriptor = _unit(np.concatenate(pieces))
+    temporal_evidence = any(float(np.linalg.norm(piece)) > 1e-6 for piece in raw_pieces)
+    return descriptor.astype(np.float32), temporal_evidence and bool(np.linalg.norm(descriptor) > 1e-8)
+
+
+def analyze_recurrence(
+    audio: EventAudio,
+    spans: Sequence[MetricSpan],
+    tempo_changes: Iterable[EventTempo | tuple[Fraction, float]],
+    first: float,
+    bins: int = 24,
+    top_k: int = 3,
+    min_similarity: float = 0.75,
+    min_separation: int = 1,
+) -> SongRelations:
+    """Compare beat-normalized audio spans without accessing chart events."""
+
+    if bins <= 0 or top_k < 0 or min_separation < 0:
+        raise ValueError("bins must be positive; top_k and min_separation must be nonnegative")
+    if not math.isfinite(min_similarity) or not -1 <= min_similarity <= 1:
+        raise ValueError("min_similarity must be finite and between -1 and 1")
+    tempo = _tempo_map(tempo_changes)
+    ordered = tuple(sorted(spans, key=lambda span: (span.start, span.end, span.index)))
+    descriptors = np.zeros((len(ordered), bins * DESCRIPTOR_CHANNELS), dtype=np.float32)
+    valid = np.zeros(len(ordered), dtype=bool)
+    durations: list[float] = []
+    for row, span in enumerate(ordered):
+        if span.end <= span.start:
+            raise ValueError("Metric spans must have positive duration")
+        duration = float(span.end - span.start)
+        durations.append(duration)
+        beats = [span.start + (span.end - span.start) * Fraction(2 * i + 1, 2 * bins) for i in range(bins)]
+        stamps = np.asarray([seconds_at_beat(beat, tempo, first) for beat in beats], dtype=np.float64)
+        descriptors[row], valid[row] = _describe(_sample(audio, stamps), bins)
+
+    links: list[Relation] = []
+    for target_row, target in enumerate(ordered):
+        if not valid[target_row] or top_k == 0:
+            continue
+        candidates: list[Relation] = []
+        for source_row, source in enumerate(ordered[:target_row]):
+            if target.index - source.index <= min_separation or source.end > target.start:
+                continue
+            if not valid[source_row]:
+                continue
+            similarity = float(np.dot(descriptors[source_row], descriptors[target_row]))
+            if similarity < min_similarity:
+                continue
+            confidence = max(0.0, min(1.0, (similarity - min_similarity) / max(1e-8, 1.0 - min_similarity)))
+            candidates.append(Relation(
+                source=source.index,
+                target=target.index,
+                similarity=similarity,
+                confidence=confidence,
+                duration_ratio=durations[target_row] / durations[source_row],
+            ))
+        links.extend(sorted(candidates, key=lambda item: (-item.similarity, item.source))[:top_k])
+
+    return SongRelations(
+        spans=ordered,
+        descriptors=descriptors,
+        links=links,
+        audit={
+            "status": "provisional_audio_recurrence",
+            "confirmed_chorus_labels": False,
+            "valid_span_count": int(valid.sum()),
+            "rejected_flat_span_indices": [span.index for i, span in enumerate(ordered) if not valid[i]],
+            "feature_source": "audio_only",
+        },
+    )
+
+
+class CausalMotifMemory:
+    """Committed chart points with strictly earlier, nonbinding motif references."""
+
+    def __init__(self, spans: Sequence[MetricSpan]):
+        self.spans = {span.index: span for span in spans}
+        self._committed: dict[int, tuple[EventPoint, ...]] = {}
+        self._pending_sources: dict[int, tuple[int, Relation | None]] = {}
+
+    def commit(self, index: int, points: Iterable[EventPoint]) -> None:
+        span = self._span(index)
+        normalized = tuple(EventPoint(point.beat, point.note_text) for point in points)
+        if any(point.beat < span.start or point.beat >= span.end for point in normalized):
+            raise ValueError(f"Committed points must lie within span {index}")
+        self._committed[index] = normalized
+        self._pending_sources.pop(index, None)
+
+    def reference(self, index: int, relations: SongRelations, max_events: int = 256) -> MotifReference:
+        if max_events < 0:
+            raise ValueError("max_events must be nonnegative")
+        target = self._span(index)
+        for relation in relations.prior_links(index):
+            source = self._span(relation.source)
+            source_points = self._committed.get(relation.source)
+            if source_points is None:
+                continue
+            scale = (target.end - target.start) / (source.end - source.start)
+            projected = tuple(
+                EventPoint(target.start + (point.beat - source.start) * scale, point.note_text)
+                for point in source_points[:max_events]
+            )
+            self._pending_sources[index] = (relation.source, relation)
+            return MotifReference(index, relation.source, projected, relation, "audio_recurrence_prior_chart")
+        self._pending_sources[index] = (-1, None)
+        return MotifReference(index, None, (), None, "no_committed_prior_motif")
+
+    def invalidate_from(self, index: int) -> None:
+        """Drop this span and all later outputs, whose references may depend on it."""
+
+        for key in [key for key in self._committed if key >= index]:
+            del self._committed[key]
+        for key in [key for key in self._pending_sources if key >= index]:
+            del self._pending_sources[key]
+
+    def _span(self, index: int) -> MetricSpan:
+        try:
+            return self.spans[index]
+        except KeyError as exc:
+            raise IndexError(f"Unknown span index: {index}") from exc
