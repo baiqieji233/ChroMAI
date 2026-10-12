@@ -1401,8 +1401,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if checkpoint_value:
             candidate = _resolve_path(str(checkpoint_value))
             if candidate.is_file():
-                detected_payload = _load_checkpoint_payload(candidate)
-                if _checkpoint_model_family(detected_payload) == "song_form_v1":
+                try:
+                    detected_payload = _load_checkpoint_payload(candidate)
+                except (OSError, ValueError, RuntimeError, EOFError):
+                    detected_payload = None
+                if detected_payload is not None and _checkpoint_model_family(detected_payload) == "song_form_v1":
                     from maichart.webui.form_api import inspect_form_checkpoint
                     result = inspect_form_checkpoint(candidate)
                     result.update({"model_family_label":"全曲结构实验模型 song_form_v1",

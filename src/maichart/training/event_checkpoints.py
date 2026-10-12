@@ -25,8 +25,7 @@ CURRENT_CONDITION_TARGET_VERSION = "chart_audio_clock_v2"
 INIT_MIGRATABLE_FAMILY_KEYS = frozenset({
     "slide_oversample", "touch_oversample", "oversample_policy",
     "fine_rhythm_oversample", "fine_rhythm_ratio_threshold", "fine_rhythm_stats_version",
-    "onset_profile",
-    "context_tokens",
+    "onset_profile", "context_tokens",
 })
 LEGACY_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_v1"
 CURRENT_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
@@ -205,10 +204,16 @@ def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, m
                 # temporal layout. Fine-tuning loads weights and creates a new
                 # optimizer, so it may explicitly migrate a legacy OR sampler
                 # or change either multiplier. All non-sampling keys stay strict.
+                migratable = set(INIT_MIGRATABLE_FAMILY_KEYS)
+                # A larger context token budget is an input-policy migration,
+                # not a generic sampling exception. Require the explicit new
+                # policy contract so legacy init checks stay strict.
+                if current_policies is None:
+                    migratable.discard("context_tokens")
                 before = {name: value for name, value in (before or {}).items()
-                          if name not in INIT_MIGRATABLE_FAMILY_KEYS}
+                          if name not in migratable}
                 after = {name: value for name, value in (after or {}).items()
-                         if name not in INIT_MIGRATABLE_FAMILY_KEYS}
+                         if name not in migratable}
             elif key == "family_params" and mode == "resume":
                 before = _normalize_resume_sampling(before, side="checkpoint")
                 after = _normalize_resume_sampling(after, side="current run")

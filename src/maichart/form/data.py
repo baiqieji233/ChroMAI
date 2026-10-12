@@ -300,8 +300,18 @@ class FormDataset(Dataset):
     def __len__(self): return len(self.items)
 
     def __getitem__(self,index):
-        song_index,span_index,tokens,task,local_weight=self.items[index]
-        song,points,level,weight,state_index,condition,excluded,record=self.songs[song_index]
+        item=self.items[index]
+        if len(item) == 4:
+            song_index,span_index,tokens,task=item; local_weight=1.0
+        else:
+            song_index,span_index,tokens,task,local_weight=item
+        song_record=self.songs[song_index]
+        if len(song_record) >= 8:
+            song,points,level,weight,state_index,condition,excluded,record=song_record
+        else:
+            song,points,level,weight,state_index=song_record[:5]
+            condition=GenerationCondition(level=level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
+            excluded=[]; record=None
         span=song.spans[span_index]
         history=[p for p in points if p.beat<span.start]
         target=[p for p in points if span.start<=p.beat<span.end]
