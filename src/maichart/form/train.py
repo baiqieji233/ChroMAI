@@ -6,6 +6,7 @@ import hashlib
 import json
 from pathlib import Path
 import random
+import time
 
 import numpy as np
 import torch
@@ -44,6 +45,8 @@ def main(argv=None):
     if args.resume or args.init_checkpoint:
         model,blueprint,codec,old=checkpoint.load(args.resume or args.init_checkpoint,device=device)
         args.max_tokens=model.config.max_tokens;args.max_memory_tokens=model.config.max_memory_tokens
+    print('form_prepare '+json.dumps({'stage':'dataset','manifest':str(Path(args.manifest).resolve()),
+        'limit_charts':args.limit_charts,'max_steps':args.max_steps}),flush=True)
     dataset=FormDataset(args.manifest,cache_dir=args.cache_dir,max_tokens=args.max_tokens,
         max_memory_tokens=args.max_memory_tokens,meters=meters,seed=args.seed,limit_charts=args.limit_charts,
         max_region_seconds=args.max_region_seconds)
@@ -76,18 +79,34 @@ def main(argv=None):
     (output/'dataset_audit.json').write_text(json.dumps(dataset.audit,ensure_ascii=False,indent=2),encoding='utf-8')
     print(f'form_training charts={len(dataset.songs)} examples={len(dataset)} device={device} parameters={sum(p.numel() for p in parameters)}',flush=True)
     loader=DataLoader(dataset,batch_size=args.batch_size,shuffle=True,collate_fn=collate_form)
+    first_items={}
+    for i,item in enumerate(dataset.items):first_items.setdefault(item[0],i)
     history=[]
     for epoch in range(start+1,start+args.epochs+1):
         dataset.seed=args.seed+epoch*100003
         model.train();blueprint.train();losses=[];plan_losses=[]
+        plan_total=min(len(dataset.songs),args.max_steps) if args.max_steps else len(dataset.songs)
+        layout_total=min(len(loader),args.max_steps) if args.max_steps else len(loader)
+        last_progress=0.
+        def progress(phase,completed,total,force=False):
+            nonlocal last_progress
+            now=time.monotonic()
+            if not force and completed not in (1,total) and now-last_progress<10:return
+            overall=(completed if phase=='blueprint' else plan_total+completed)/max(1,plan_total+layout_total)
+            print('form_progress '+json.dumps({'epoch':epoch,'phase':phase,'completed':completed,
+                'total':total,'overall_fraction':overall}),flush=True)
+            last_progress=now
         # Planner sees the entire song before event layout. No 16-beat resets.
         for song_index,(song,points,level,weight,_) in enumerate(dataset.songs):
             if args.max_steps and song_index>=args.max_steps: break
+            if song_index not in first_items:
+                print(f'form_skip_blueprint chart={song_index} reason=no_usable_configuration_examples',flush=True)
+                continue
             audio=form_audio(song,song.spans[0].start,song.spans[-1].end).unsqueeze(0).to(device)
             from maichart.generation.event_audio import segment_frame_times
             from maichart.event_timing import seconds_at_beat
             stamps=segment_frame_times(seconds_at_beat(song.spans[0].start,song.tempo,song.first),seconds_at_beat(song.spans[-1].end,song.tempo,song.first))
-            form=dataset[next(i for i,item in enumerate(dataset.items) if item[0]==song_index)]['form'].unsqueeze(0).to(device)
+            form=dataset[first_items[song_index]]['form'].unsqueeze(0).to(device)
             condition=GenerationCondition(level=level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS).to_vector(device=device).unsqueeze(0)
             targets=build_blueprint_targets(points,song.tempo,song.first,stamps)
             targets={key:value.unsqueeze(0).to(device) for key,value in targets.items()}
@@ -97,6 +116,7 @@ def main(argv=None):
             if not torch.isfinite(loss): raise ValueError('Nonfinite full-song planner loss')
             loss.backward();torch.nn.utils.clip_grad_norm_(parameters,1.);optimizer.step();plan_steps+=1
             plan_losses.append(float(loss.detach()))
+            progress('blueprint',song_index+1,plan_total)
         for batch_index,batch in enumerate(loader):
             if args.max_steps and batch_index>=args.max_steps: break
             batch={k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in batch.items()}
@@ -112,6 +132,7 @@ def main(argv=None):
             loss.backward();torch.nn.utils.clip_grad_norm_(parameters,1.);optimizer.step();steps+=1;losses.append(float(loss.detach()))
             for task_id,name in ((0,'draft'),(1,'revision')):
                 task_training[name]=task_training.get(name,0)+int((batch['task']==task_id).sum())
+            progress('layout_revision',batch_index+1,layout_total)
         metrics={'epoch':epoch,'draft_revision_loss':float(np.mean(losses)),'whole_song_plan_loss':float(np.mean(plan_losses)),
                  'optimizer_steps':steps,'blueprint_steps':plan_steps,'task_training':dict(task_training)}
         history.append(metrics)

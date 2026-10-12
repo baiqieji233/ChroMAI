@@ -55,3 +55,25 @@ checkpoint 分开记录全曲规划更新次数以及草稿、修订任务有效
 需要继续评估：全曲起音阈值校准、教师草稿与预测草稿的差异、从单纯重建转向真实编辑、相似区域对齐精度、参考强度与刻意变奏的可控性。当前类型/时值规划输出只作报告参考，布局解码主要受起音骨架约束，尚未充分消费这些类型参考。
 
 当前新训练器保留简单的谱面权重与排除；局部正权重细分、旧版 DPO 全配置和部分旧生成曲线功能尚未迁入新路径，仍可在兼容工作台使用。超 token 预算的训练样本明确记录为跳过；后续应评估事件预算训练分块，不让高密度资料系统性流失。
+
+
+## R4/R5 首次真实验证与 WebUI 最终核对（2026-10-12）
+
+本轮把真实官方素材接入新路径，使用 `E:\后训练（官谱）\training_manifest.json` 的 16 张限量短训，得到：
+
+- checkpoint：`checkpoints/song_form_v1_official16_epoch1/form_last.pt`
+- epoch：1；blueprint steps：16；optimizer steps：567
+- draft / revision 有效训练样本：577 / 556
+- 模型族和输入合同：`song_form_v1` / `song_form_inputs_v1`
+
+随后使用同一 checkpoint 对 `E:\后训练（官谱）\BUDDiES\10185` 的真实音频和 maidata 做了生成检查。命令成功退出，输出通过严格 simai 解析（0 errors、0 unknown tokens、coverage 1.0），生成统计约 1054 个 note（932 Tap、31 Hold、62 Slide、29 Touch、83 chords）。开启 6 次检查、2 次编辑和 10 秒修订预算后，硬冲突从 109 降到 107；报告仍为 `playable_verified=false`。这证明训练到生成的工程链路可用，不证明音乐性或实机可玩性。
+
+WebUI 核对结果：
+
+- `/form-lab` 明确显示模型族 `song_form_v1`，训练、生成、修订页面不再展示旧 event 的窗口、condition、Slide/Touch oversample 或 intensity curve 参数。
+- fresh 训练页新增只读模型族标识；选择“从头训练”即创建新 `song_form_v1` checkpoint，旧 event checkpoint 只能回主工作台。请求中显式携带 `model_family=song_form_v1`。
+- checkpoint 检查显示模型族、schema、epoch、blueprint/draft/revision readiness、token 与参数量；不兼容旧 checkpoint 会给出回主工作台的提示。
+- 结构化训练日志分为数据准备、全曲 blueprint、布局/修订和 epoch，未知准备阶段不伪造百分比。
+- 在 1440 px 桌面和 420 px 移动视口检查了四个 tab、checkpoint inspect、训练素材刷新、任务日志；没有横向溢出或脚本异常。
+
+目前 R4 工程交付已完成；R5 仍是质量阶段。真实短训模型必须经过更多官方/高质量自制谱训练、固定歌曲 A/B 和专业玩家检查后，才可判断是否改善复杂节奏、重复段落和无理问题。

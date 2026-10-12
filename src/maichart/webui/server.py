@@ -118,6 +118,9 @@ class TaskState:
         stamp = time.strftime("%H:%M:%S")
         with self.lock:
             self.message = line[-240:]
+            if self.kind.startswith('form_'):
+                from maichart.webui.form_api import update_form_progress
+                update_form_progress(self, line)
             epoch_match = re.search(r"epoch=(\d+)", line)
             if epoch_match:
                 current_epoch = int(epoch_match.group(1))
@@ -181,7 +184,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         if parsed.path == "/form-lab":
             return self._serve_static("form_lab.html")
         if parsed.path in {"/app.js", "/styles.css", "/workspace.js", "/workspace.css",
-                           "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js"}:
+                           "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
         if parsed.path == "/api/status":
             return self._json_response(
@@ -232,7 +235,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         try:
             if parsed.path.startswith("/api/form/"):
                 from maichart.webui.form_api import start_form_task
-                return start_form_task(self, parsed.path.rsplit("/",1)[-1], self._json_body())
+                return start_form_task(self, parsed.path.rsplit("/",1)[-1], self._json_body(),
+                                       runtime=sys.modules[__name__])
             if parsed.path == "/api/upload":
                 return self._upload()
             if parsed.path == "/api/generate":

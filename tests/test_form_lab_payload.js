@@ -9,6 +9,7 @@ const {
   buildRevisionPayload,
   buildTrainingPayload,
   resolvePreparedDataset,
+  formatProgressDetail,
 } = require("../src/maichart/webui/static/form_lab.js");
 
 test("analysis payload keeps unknown meter explicit and leaves Simai grid inference out", () => {
@@ -64,6 +65,7 @@ test("training requires output paths and validates the separate model configurat
     manifest: "merged.json", checkpoint_dir: "run", mode: "finetune", init_checkpoint: "base.pt",
     device: "cuda", max_steps: "300", limit_charts: "8", use_analysis_meter: true,
   }, [{beat: "0", numerator: 3, denominator: 4, grouping: [3]}]);
+  assert.equal(experimental.model_family, "song_form_v1");
   assert.equal(experimental.mode, "finetune");
   assert.equal(experimental.max_steps, 300);
   assert.equal(experimental.limit_charts, 8);
@@ -81,7 +83,9 @@ test("generation carries bounded revision controls and memory strength", () => {
     meter_denominator: 8, meter_grouping: "3,3",
     tempo_map_json: '[{"beat":"0","bpm":128},{"beat":"24","bpm":150}]',
   });
+  assert.equal(payload.model_family, "song_form_v1");
   assert.equal(payload.level, 13.3);
+  assert.equal(payload.model_family, "song_form_v1");
   assert.equal(payload.checkpoint, "run/event_best.pt");
   assert.equal(payload.checkpoint_dir, undefined);
   assert.equal(payload.bpm, 128);
@@ -95,7 +99,7 @@ test("generation carries bounded revision controls and memory strength", () => {
   assert.equal(payload.deadline_seconds, 10);
   assert.throws(() => buildGenerationPayload({
     checkpoint: "run/event_best.pt", audio: "song.mp3", output: "out.txt", level: "13.3", onset_threshold: "1",
-  }), /起音贴合阈值/);
+  }), /起音选择阈值/);
   assert.throws(() => buildGenerationPayload({
     checkpoint: "run", audio: "song.mp3", output: "out.txt", level: "13.3",
   }), /\.pt/);
@@ -150,6 +154,17 @@ test("analysis recurrence links resolve musical region ids through region spans"
   assert.equal(link.targetRegion.end, "28");
 });
 
+test("empty meter changes remain an empty optional list and copied paths stay explicit", () => {
+  const payload = buildAnalysisPayload({audio: "song.mp3", bpm: 120, first: 0}, []);
+  assert.equal(payload.meter_map, null);
+  const generated = buildGenerationPayload({checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt"}, {audio: "analysis.mp3", bpm: 120, first: 0}, []);
+  assert.equal(generated.audio, "song.mp3");
+});
+
+test("structured task phase stays readable", () => {
+  assert.equal(formatProgressDetail({phase: "arrangement", progress_detail: {span: 3, total: 8}, epoch: 2}), "arrangement · {\"span\":3,\"total\":8} · 2");
+});
+
 test("saved training source restores only when one prepared catalog entry matches exactly", () => {
   const prepared = [
     {name: "Full Set", path: "D:/data/full", manifest: "D:/data/full/training_manifest.json", prepared: true},
@@ -170,4 +185,33 @@ test("saved training source restores only when one prepared catalog entry matche
   assert.equal(resolvePreparedDataset(prepared, {
     manifest: "D:/data/other/training_manifest.json", datasets: ["D:/data/other"],
   }), null);
+});
+
+test("song_form_v1 payloads use independent bounds and sampling controls", () => {
+  const training = buildTrainingPayload({
+    manifest: "train.json", checkpoint_dir: "run", max_steps: "0",
+    d_model: "16", nhead: "1", max_tokens: "32", memory_tokens: "16",
+    max_region_seconds: "14",
+  });
+  assert.equal(training.max_steps, 0);
+  assert.equal(training.max_region_seconds, 14);
+  assert.throws(() => buildTrainingPayload({manifest: "train.json", checkpoint_dir: "run", d_model: "8"}), /d_model/);
+  assert.throws(() => buildTrainingPayload({manifest: "train.json", checkpoint_dir: "run", max_tokens: "16"}), /Max chart tokens/);
+
+  const generated = buildGenerationPayload({
+    checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt",
+    level: "15", onset_threshold: "0.001", temperature: "0", seed: "17", device: "cuda",
+  });
+  assert.equal(generated.level, 15);
+  assert.equal(generated.onset_threshold, 0.001);
+  assert.equal(generated.temperature, 0);
+  assert.equal(generated.seed, 17);
+  assert.equal(generated.device, "cuda");
+  assert.equal(generated.max_region_seconds, 14);
+  assert.throws(() => buildGenerationPayload({checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt", level: "15.1"}), /难度等级/);
+
+  assert.throws(() => buildRevisionPayload({
+    checkpoint: "run/form_last.pt", audio: "song.mp3", maidata_path: "draft.txt", output: "out.txt",
+    difficulty_index: "0", editable_start: "1", editable_end: "2",
+  }), /Difficulty index/);
 });

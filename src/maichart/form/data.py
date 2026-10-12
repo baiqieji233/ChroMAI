@@ -245,6 +245,8 @@ class FormDataset(Dataset):
                         'audio_sha256':(audio.metadata or {}).get('audio_sha256'),
                         'meter_map':[m.to_dict() for m in song.meters],
                         'quality':record,'weight':weight})
+                    print('form_prepare '+json.dumps({'stage':'chart','charts':len(self.songs),
+                        'source':str(source),'difficulty':slot,'spans':len(song.spans)},ensure_ascii=False),flush=True)
                     for span in song.spans:
                         lo=seconds_at_beat(span.start,song.tempo,song.first);hi=seconds_at_beat(span.end,song.tempo,song.first)
                         if any(lo<b and hi>a for a,b in excluded): continue
