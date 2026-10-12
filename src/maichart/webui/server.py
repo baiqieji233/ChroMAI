@@ -178,8 +178,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self._serve_static("index.html")
+        if parsed.path == "/form-lab":
+            return self._serve_static("form_lab.html")
         if parsed.path in {"/app.js", "/styles.css", "/workspace.js", "/workspace.css",
-                           "/workspace_logs.js", "/workspace_logs.css"}:
+                           "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js"}:
             return self._serve_static(parsed.path.lstrip("/"))
         if parsed.path == "/api/status":
             return self._json_response(
@@ -228,6 +230,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlparse(self.path)
         try:
+            if parsed.path.startswith("/api/form/"):
+                from maichart.webui.form_api import start_form_task
+                return start_form_task(self, parsed.path.rsplit("/",1)[-1], self._json_body())
             if parsed.path == "/api/upload":
                 return self._upload()
             if parsed.path == "/api/generate":
@@ -454,6 +459,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint = _required_path(payload.get("checkpoint"), "checkpoint", must_exist=True)
         checkpoint_payload = _load_checkpoint_payload(checkpoint)
         model_family = _checkpoint_model_family(checkpoint_payload)
+        if model_family == "song_form_v1":
+            raise ValueError("这是全曲结构新架构模型，请使用页面顶部“全曲结构研究入口”；旧模型生成参数不能直接套用。")
         capabilities = checkpoint_capabilities(checkpoint_payload)
         if model_family == "unknown":
             raise ValueError(
@@ -2125,6 +2132,13 @@ def _checkpoint_inspection(
 
     detected_family = _checkpoint_model_family(payload)
     capabilities = checkpoint_capabilities(payload)
+    if detected_family == "song_form_v1":
+        return {"valid":False,"path":str(checkpoint_path),"schema":payload.get("schema"),
+                "model_family":"song_form_v1","model_family_label":"全曲结构实验模型 song_form_v1",
+                "can_resume":False,"can_init":False,"model_config":payload.get("model_config",{}),
+                "data_contract":payload.get("input_contract",{}),"generation_capabilities":{},
+                "generation_entry":"/form-lab","warnings":[],
+                "errors":["该模型使用全曲草稿与独立训练合同，请进入页面顶部的“全曲结构研究入口”。"]}
     if detected_family == "unknown":
         init_errors = [
             f"无法确认 checkpoint schema {payload.get('schema')!r}；拒绝把未知模型当作旧固定帧或 event_v1。"

@@ -10,6 +10,8 @@
 
 当前主分支的训练、生成与日志界面已按操作流程重新分组，提供高级设置折叠、参数搜索、运行前摘要和全宽日志。更新后重启 WebUI 并刷新页面，详见 [新版界面说明](docs/WEBUI_WORKFLOW_REFRESH.md)。
 
+**全曲结构重构实验：** `codex/song-form-rebuild` 分支提供独立 `song_form_v1` 路径，使用全曲采音草稿、同曲段落关联和局部修订；新路径不使用固定 16 拍创作窗口。WebUI 顶部“全曲结构研究入口”可进入 `/form-lab`。这是可运行首版，尚无质量验收通过的新模型；旧 checkpoint 继续使用原生成页。见 [目标与阶段状态](docs/GOAL_SONG_FORM_REBUILD.md) 和 [新架构使用说明](docs/SONG_FORM_V1_GUIDE.md)。
+
 ## 项目思路
 
 一张 maimai 谱面不仅包含“在哪个时间敲一下”，还包含按钮位置、同时动作、Hold、Slide、Touch、配置衔接和段落起伏。相同音符数量也可能因为路径、连打或手部移动而具有不同难度。
