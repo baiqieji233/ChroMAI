@@ -275,4 +275,3 @@ def metrical_features(
             output[row, 4:6] = (math.sin(angle), math.cos(angle))
             output[row, 7] = 1.0
     return output
-

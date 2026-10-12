@@ -29,6 +29,8 @@ class Relation:
     similarity: float
     confidence: float
     duration_ratio: float
+    phase_shift_bins: int = 0
+    phase_bins: int = 24
 
 
 @dataclass(slots=True)
@@ -91,6 +93,20 @@ def _unit(values: np.ndarray) -> np.ndarray:
     values = np.asarray(values, dtype=np.float64).reshape(-1)
     norm = float(np.linalg.norm(values))
     return values / norm if norm > 1e-10 else np.zeros_like(values)
+
+
+def _aligned_similarity(left: np.ndarray, right: np.ndarray, bins: int) -> tuple[float, int]:
+    """Best cosine under a small circular phase offset in normalized time."""
+
+    channels = left.size // bins
+    source = left.reshape(bins, channels)
+    target = right.reshape(bins, channels)
+    candidates = [
+        (float(np.sum(source * np.roll(target, shift, axis=0))), shift)
+        for shift in range(-2, 3)
+    ]
+    similarity, phase_shift = max(candidates, key=lambda item: (item[0], -abs(item[1]), -item[1]))
+    return max(-1.0, min(1.0, similarity)), phase_shift
 
 
 def _describe(samples: np.ndarray, bins: int) -> tuple[np.ndarray, bool]:
@@ -169,7 +185,9 @@ def analyze_recurrence(
                 continue
             if not valid[source_row]:
                 continue
-            similarity = float(np.dot(descriptors[source_row], descriptors[target_row]))
+            similarity, phase_shift = _aligned_similarity(
+                descriptors[source_row], descriptors[target_row], bins
+            )
             if similarity < min_similarity:
                 continue
             confidence = max(0.0, min(1.0, (similarity - min_similarity) / max(1e-8, 1.0 - min_similarity)))
@@ -179,6 +197,8 @@ def analyze_recurrence(
                 similarity=similarity,
                 confidence=confidence,
                 duration_ratio=durations[target_row] / durations[source_row],
+                phase_shift_bins=phase_shift,
+                phase_bins=bins,
             ))
         links.extend(sorted(candidates, key=lambda item: (-item.similarity, item.source))[:top_k])
 
@@ -222,10 +242,16 @@ class CausalMotifMemory:
             if source_points is None:
                 continue
             scale = (target.end - target.start) / (source.end - source.start)
-            projected = tuple(
-                EventPoint(target.start + (point.beat - source.start) * scale, point.note_text)
-                for point in source_points[:max_events]
-            )
+            offset = Fraction(relation.phase_shift_bins, relation.phase_bins) * (target.end - target.start)
+            projected_points = []
+            if max_events:
+                for point in source_points:
+                    target_beat = target.start + (point.beat - source.start) * scale - offset
+                    if target.start <= target_beat < target.end:
+                        projected_points.append(EventPoint(target_beat, point.note_text))
+                        if len(projected_points) >= max_events:
+                            break
+            projected = tuple(projected_points)
             self._pending_sources[index] = (relation.source, relation)
             return MotifReference(index, relation.source, projected, relation, "audio_recurrence_prior_chart")
         self._pending_sources[index] = (-1, None)

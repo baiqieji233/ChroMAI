@@ -23,18 +23,18 @@ def _span(index, start, end):
     )
 
 
-def _audio(patterns, *, bpm=120):
-    """Expand each two-beat pattern to frames using a supplied beat clock."""
+def _audio(patterns, *, bpm=120, pattern_beats=2):
+    """Expand beat-normalized patterns to frames using a supplied beat clock."""
     tempo_changes = [EventTempo(Fraction(0), bpm)]
     beat_duration = 60.0 / bpm
-    duration = len(patterns) * 2 * beat_duration
+    duration = len(patterns) * pattern_beats * beat_duration
     times = np.arange(int(duration * 50) + 1, dtype=np.float32) / 50
     features = np.zeros((len(times), ACOUSTIC_DIM), dtype=np.float32)
     palette = [1, 4, 7]
     for frame, seconds in enumerate(times):
         beat = seconds / beat_duration
-        span = min(int(beat // 2), len(patterns) - 1)
-        phase = (beat % 2) / 2
+        span = min(int(beat // pattern_beats), len(patterns) - 1)
+        phase = (beat % pattern_beats) / pattern_beats
         kind = patterns[span]
         chroma_index = palette[kind]
         features[frame, 80 + chroma_index] = 1.0
@@ -105,14 +105,40 @@ def test_partial_chroma_only_descriptors_normalize_to_full_similarity():
     assert relations.links[0].similarity == pytest.approx(1.0)
 
 
+def test_repeated_realistic_clip_starting_half_second_later_matches():
+    rng = np.random.default_rng(23)
+    coarse = rng.normal(size=(10, ACOUSTIC_DIM)).astype(np.float32)
+    coarse[:, 80:92] = np.abs(coarse[:, 80:92])
+    clip = np.repeat(coarse, 40, axis=0)
+    clip = np.stack([
+        np.convolve(clip[:, column], np.ones(9, dtype=np.float32) / 9, mode="same")
+        for column in range(ACOUSTIC_DIM)
+    ], axis=1)
+    features = np.zeros((851, ACOUSTIC_DIM), dtype=np.float32)
+    features[:400] = clip
+    features[425:825] = clip
+    times = np.arange(len(features), dtype=np.float32) / 50
+    audio = EventAudio(features, times, float(times[-1]), 120.0)
+    spans = [_span(0, 0, 16), _span(1, 17, 33)]
+
+    relations = analyze_recurrence(
+        audio, spans, [EventTempo(Fraction(0), 120)], 0,
+        min_similarity=0.7,
+        min_separation=0,
+    )
+
+    assert len(relations.links) == 1
+    assert relations.links[0].similarity >= 0.7
+
+
 def test_recurrence_graph_uses_music_regions_independent_of_compute_cap():
-    audio = _audio([0, 1, 0])
+    audio = _audio([0, 1, 0], pattern_beats=6)
     tempo = [EventTempo(Fraction(0), 120)]
     regions_wide = segment_music(audio, tempo, 0, min_seconds=0.2, max_seconds=14.0)
     regions_capped = segment_music(audio, tempo, 0, min_seconds=0.2, max_seconds=0.5)
     assert len(regions_wide) != len(regions_capped)
     assert regions_wide.region_spans == regions_capped.region_spans
-    assert regions_capped.span_region_indices == [0, 0, 1, 1, 2, 2]
+    assert regions_capped.span_region_indices == [index // 6 for index in range(18)]
 
     wide = analyze_recurrence(audio, regions_wide.region_spans, tempo, 0, min_separation=1)
     capped = analyze_recurrence(audio, regions_capped.region_spans, tempo, 0, min_separation=1)
@@ -173,3 +199,26 @@ def test_causal_reference_projects_only_committed_prior_points_and_invalidation_
     assert memory.reference(2, relations).points == reference.points
     memory.invalidate_from(0)
     assert memory.reference(2, relations).source is None
+
+
+def test_phase_aligned_relation_shifts_chart_points_and_clips_without_wrapping():
+    spans = [_span(0, 0, 8), _span(1, 10, 18)]
+    relation = Relation(0, 1, 0.95, 0.8, 1.0, phase_shift_bins=3, phase_bins=24)
+    relations = SongRelations(
+        spans=tuple(spans),
+        descriptors=np.zeros((2, DESCRIPTOR_DIM), dtype=np.float32),
+        links=[relation],
+    )
+    memory = CausalMotifMemory(spans)
+    memory.commit(0, [
+        EventPoint(Fraction(1, 2), "edge"),
+        EventPoint(Fraction(2), "inside"),
+        EventPoint(Fraction(15, 2), "late"),
+    ])
+
+    reference = memory.reference(1, relations)
+
+    # Three of 24 phase bins advances the target motif by one target beat.
+    # The first point crosses the left edge and is dropped instead of wrapped.
+    assert [point.beat for point in reference.points] == [Fraction(11), Fraction(33, 2)]
+    assert [point.note_text for point in reference.points] == ["inside", "late"]

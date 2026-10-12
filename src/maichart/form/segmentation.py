@@ -69,33 +69,59 @@ def _audio_novelty(audio: EventAudio) -> np.ndarray:
     if count < 2:
         return np.zeros(count, dtype=np.float64)
 
+    rate = 1.0 / float(np.median(np.diff(audio.times))) if count > 1 else 50.0
     chroma = _normal_rows(np.clip(features[:, 80:92], 0.0, None))
     mel = features[:, :80]
     edges = np.linspace(0, 80, 9, dtype=int)
     timbre = np.stack([mel[:, edges[i]:edges[i + 1]].mean(axis=1) for i in range(8)], axis=1)
     timbre -= timbre.mean(axis=1, keepdims=True)
     timbre = _normal_rows(timbre)
-    chroma_change = np.clip(1.0 - np.sum(chroma[1:] * chroma[:-1], axis=1), 0.0, 1.0)
-    timbre_change = np.clip(1.0 - np.sum(timbre[1:] * timbre[:-1], axis=1), 0.0, 1.0)
-    onset = np.clip(features[:, 92], 0.0, None)
-    onset_scale = max(float(np.percentile(onset, 95)), 1e-6)
-    onset_change = np.clip(np.abs(np.diff(onset)) / onset_scale, 0.0, 1.0)
-    novelty = np.zeros(count, dtype=np.float64)
-    novelty[1:] = 0.45 * chroma_change + 0.35 * timbre_change + 0.20 * onset_change
+    rhythm = features[:, 92:95]
 
-    # Smooth frame noise over roughly 0.3 seconds while retaining section edges.
-    rate = 1.0 / float(np.median(np.diff(audio.times))) if count > 1 else 50.0
-    width = max(1, int(round(rate * 0.3)))
+    def context_means(values: np.ndarray, width: int) -> tuple[np.ndarray, np.ndarray]:
+        prefix = np.vstack((np.zeros((1, values.shape[1])), np.cumsum(values, axis=0)))
+        positions = np.arange(count)
+        left_start = np.maximum(0, positions - width)
+        right_end = np.minimum(count, positions + width)
+        left_sum = prefix[positions] - prefix[left_start]
+        right_sum = prefix[right_end] - prefix[positions]
+        left_count = np.maximum(1, positions - left_start)[:, None]
+        right_count = np.maximum(1, right_end - positions)[:, None]
+        return left_sum / left_count, right_sum / right_count
+
+    def cosine_change(left: np.ndarray, right: np.ndarray) -> np.ndarray:
+        left_norm = np.linalg.norm(left, axis=1)
+        right_norm = np.linalg.norm(right, axis=1)
+        active = (left_norm > 1e-5) & (right_norm > 1e-5)
+        similarity = np.sum(left * right, axis=1) / np.maximum(left_norm * right_norm, 1e-8)
+        return np.where(active, np.clip(1.0 - similarity, 0.0, 1.0), 0.0)
+
+    # Compare stable left/right contexts at two scales. Frame derivatives turn
+    # repeated beats and production texture into false phrase boundaries; these
+    # contrasts respond when the surrounding musical material changes.
+    scales: list[np.ndarray] = []
+    for seconds in (1.0, 2.0):
+        width = max(2, int(round(rate * seconds)))
+        chroma_left, chroma_right = context_means(chroma, width)
+        timbre_left, timbre_right = context_means(timbre, width)
+        rhythm_left, rhythm_right = context_means(rhythm, width)
+        chroma_change = cosine_change(chroma_left, chroma_right)
+        timbre_change = cosine_change(timbre_left, timbre_right)
+        rhythm_scale = np.maximum(np.std(rhythm, axis=0), 0.05)
+        rhythm_change = np.linalg.norm((rhythm_left - rhythm_right) / rhythm_scale, axis=1)
+        rhythm_change = np.clip(rhythm_change / math.sqrt(rhythm.shape[1]), 0.0, 1.0)
+        scales.append(0.45 * chroma_change + 0.35 * timbre_change + 0.20 * rhythm_change)
+
+    novelty = 0.65 * np.maximum(scales[0], scales[1]) + 0.35 * np.minimum(scales[0], scales[1])
+    # A short final smooth removes frame-level jumps without erasing multi-second
+    # region transitions.
+    width = max(1, int(round(rate * 0.25)))
+    width = min(width, count)
     if width > 1:
-        kernel = np.ones(width, dtype=np.float64) / width
-        novelty = np.convolve(novelty, kernel, mode="same")
-    positive = novelty[novelty > 1e-8]
-    scale = float(np.percentile(positive, 95)) if len(positive) else 0.0
-    if scale > 1e-8:
-        novelty = np.clip(novelty / scale, 0.0, 1.0)
-    else:
-        novelty[:] = 0.0
-    return novelty
+        novelty = np.convolve(novelty, np.ones(width) / width, mode="same")
+    baseline = float(np.percentile(novelty, 85))
+    scale = max(baseline, 0.20)
+    return np.clip(novelty / scale, 0.0, 1.0)
 
 
 def _beat_for_time(timestamp: float, tempo: list[EventTempo], first: float) -> Fraction:
@@ -124,7 +150,10 @@ def _nearest_grid(
         candidate = active.beat + ordinal * bar
         if abs(float(candidate - beat)) <= min(2.0, float(bar) / 2.0):
             return candidate, "meter_bar"
-    return Fraction(round(float(beat))), "beat"
+    # Symmetric context contrast peaks can trail an abrupt change by part of
+    # a beat. Floor to a quarter-beat boundary so the target region does not
+    # start after the detected change. Explicit meter bars above remain nearest.
+    return Fraction(math.floor(float(beat))), "beat"
 
 
 def _bar_boundaries(start: Fraction, end: Fraction, meters: list[MeterChange]) -> tuple[Fraction, ...]:
@@ -241,10 +270,11 @@ def segment_music(
     # Keep the strongest nearby peak when two changes are closer than the
     # requested soft minimum region length.
     kept: list[int] = []
+    edge_guard = max(float(min_seconds), 2.0)
     for candidate in sorted(local_peaks, key=lambda i: (-novelty[i], i)):
-        if frame_times[candidate] - frame_times[0] < min_seconds:
+        if frame_times[candidate] - frame_times[0] < edge_guard:
             continue
-        if audio.duration_sec - frame_times[candidate] < min_seconds:
+        if audio.duration_sec - frame_times[candidate] < edge_guard:
             continue
         nearby = [index for index in kept if abs(frame_times[candidate] - frame_times[index]) < min_seconds]
         if nearby:

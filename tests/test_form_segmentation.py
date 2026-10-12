@@ -68,6 +68,13 @@ def test_unknown_meter_has_no_fixed_sixteen_beat_regions_and_cap_is_computationa
     assert [span.source for span in result] == ["song_start", "resource_cap"]
 
 
+def test_short_audio_keeps_frame_count_and_returns_single_partial_region():
+    result = segment_music(_audio(0.1), [EventTempo(Fraction(0), 120)], 0)
+
+    assert len(result.regions) == 1
+    assert result.regions[0].end == Fraction(1, 5)
+
+
 def test_bpm_change_maps_novelty_to_exact_chart_beat():
     result = segment_music(
         _audio(14.0, changes=(5.0,)),

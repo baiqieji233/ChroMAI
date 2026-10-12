@@ -24,6 +24,15 @@ def fixture_audio(seconds=7):
     return EventAudio(features,times,seconds,120.)
 
 
+def test_frame_peak_uncertainty_does_not_force_triplets_onto_finer_binary_grid():
+    from maichart.form.generate import exact_candidate
+    tempo=[EventTempo(F(0),120)]
+    assert exact_candidate(.16,tempo,0)==F(1,3)
+    assert exact_candidate(.08,tempo,0)==F(1,6)
+    assert exact_candidate(.18,tempo,0)==F(3,8)
+    assert exact_candidate(.1,tempo,0)==F(1,5)
+
+
 def test_no_fixed_four_beat_phase_or_future_chart_in_draft_inputs():
     audio=fixture_audio()
     meters=[MeterChange(F(0),3,4)]

@@ -26,7 +26,14 @@ def exact_candidate(second,tempo,first,denominators=(1,2,3,4,5,6,8,12,16,24,32,4
     beat=_time_to_beat(float(second)-first,_normalize_tempo_map(tempo,tempo[0].bpm))
     candidates={Fraction(round(beat*d),d) for d in denominators}
     candidates={b for b in candidates if b>=0}
-    return min(candidates,key=lambda b:(abs(seconds_at_beat(b,tempo,first)-second),b.denominator,b))
+    errors={b:abs(seconds_at_beat(b,tempo,first)-second) for b in candidates}
+    # A 50 Hz peak has half-frame timing uncertainty. Prefer a simpler exact
+    # subdivision inside that uncertainty instead of turning e.g. a 1/3 beat
+    # rounded to 160 ms into an arbitrary 5/16 beat. This is grid inference,
+    # not a gameplay judgement tolerance.
+    tolerance=max(.0100001,min(errors.values())+1e-9)
+    nearby=[b for b in candidates if errors[b]<=tolerance]
+    return min(nearby,key=lambda b:(b.denominator,errors[b],b))
 
 
 def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu'):
@@ -58,7 +65,7 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu'):
         if beat not in selected or selected[beat]['score']<score: selected[beat]=record
     return {'schema':'maichart-full-song-blueprint-v1','onsets':[selected[b] for b in sorted(selected)],
             'threshold':threshold,'frame_seconds':.02,'musical_units':'whole_song',
-            'quantization':'nearest_exact_rational_candidate','limitations':[
+            'quantization':'simple_rational_within_half_frame_uncertainty','limitations':[
                 'Onset probabilities are weighted-training scores, not calibrated confidence.',
                 'Broad types and durations are provisional cues; actual layout is decoded separately.']}
 

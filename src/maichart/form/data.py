@@ -278,13 +278,10 @@ class FormDataset(Dataset):
             draft=draft,right=right,max_memory_tokens=self.max_memory_tokens,state_index=state_index)
         ref_index=result['meta']['reference_source']
         reference=[]
-        if ref_index is not None:
-            prior=song.regions[ref_index]
-            target_region=song.regions[song.span_region_indices[span_index]]
-            ratio=(target_region.end-target_region.start)/(prior.end-prior.start)
-            reference=[EventPoint(target_region.start+(p.beat-prior.start)*ratio,p.note_text)
-                for p in history if prior.start<=p.beat<prior.end]
-            reference=[p for p in reference if span.start<=p.beat<span.end]
+        if ref_index is not None and result['motif'].numel()>1:
+            # The auxiliary target must see the same phase-aligned, clipped
+            # reference as the encoder, not a separate zero-offset projection.
+            reference=self.codec.decode(result['motif'].tolist(),origin=span.start)
         # This blueprint contains positions only. Every chart configuration is
         # masked, so training cannot reveal future note types or note text.
         skeleton=[DraftPoint(p.beat,None,True) for p in points if p.beat>=span.start]
