@@ -137,6 +137,40 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
                                  and float(onset_contract.get("loss_weight", 0)) > 0)
             except (TypeError, ValueError):
                 errors.append("局部采音训练记录无效")
+    action_profile = config.get("action_state_profile", "none")
+    action_trained = False
+    from maichart.generation.action_state_spec import STATE_DIM, STATE_KEYS
+    action_weights = {key: next((state[name] for name in state_keys
+                                if name == key or str(name).endswith('.' + key)), None)
+                      for key in STATE_KEYS}
+    if action_profile not in {"none", "sustain_state_v1"}:
+        errors.append("未知持续动作摘要 profile")
+    elif action_profile == "sustain_state_v1":
+        from maichart.training.action_state_policy import state_contract
+        if not event_family:
+            errors.append("持续动作摘要仅支持事件模型")
+        if contract.get("action_state_params") != state_contract():
+            errors.append("持续动作摘要合同缺失或不兼容")
+        try:
+            width = int(config.get("d_model") or 0)
+        except (TypeError, ValueError):
+            width = 0
+        expected_shapes = {"action_state_projection.weight": (width, STATE_DIM),
+                           "action_state_projection.bias": (width,),
+                           "action_state_type_embedding": (width,)}
+        for key, shape in expected_shapes.items():
+            if width <= 0 or tuple(getattr(action_weights[key], "shape", ())) != shape:
+                errors.append(f"持续动作摘要缺少有效权重：{key}")
+        action_training = checkpoint_data.get("action_state_training")
+        steps = action_training.get("optimizer_steps") if isinstance(action_training, dict) else None
+        if (not isinstance(action_training, dict) or action_training.get("profile") != action_profile
+                or isinstance(steps, bool) or not isinstance(steps, int) or steps < 0
+                or action_training.get("trained") is not (steps > 0)):
+            errors.append("持续动作摘要训练记录无效")
+        else:
+            action_trained = steps > 0
+    elif any(weight is not None for weight in action_weights.values()):
+        errors.append("持续动作摘要已关闭但 checkpoint 仍包含其权重")
     usable_event_family = event_family
     v3_valid = (event_family and profile == MUSIC_STRUCTURE_V3_PROFILE and expected is not None
                 and bool(dimensions)
@@ -153,6 +187,8 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
         "onset_profile": onset_profile,
         "local_onset_guidance": bool(event_family and onset_trained and not errors),
         "rhythm_bias": False,
+        "action_state_profile": action_profile,
+        "sustained_action_memory": bool(event_family and action_trained and not errors),
     }
 
 

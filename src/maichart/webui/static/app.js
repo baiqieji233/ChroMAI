@@ -872,6 +872,7 @@ function trainingPayload(options = {}) {
       onset_profile: valueOrDefault("#onsetProfile", "auto"),
       onset_loss_weight: Number(valueOrDefault("#onsetLossWeight", 0.2)),
       local_pooling_policy: valueOrDefault("#localPoolingPolicy", "auto"),
+      action_state_profile: valueOrDefault("#actionStateProfile", "auto"),
       context_budget_policy: "auto",
       chart_filter_policy: "auto",
     }),
@@ -1019,6 +1020,7 @@ function parseTempoMap() {
 function setTrainingModeDefaults(force = false) {
   const mode = currentTrainingMode();
   if (force && element("#localPoolingPolicy")) element("#localPoolingPolicy").value = "auto";
+  if (force && element("#actionStateProfile")) element("#actionStateProfile").value = "auto";
   const learningRate = element("#learningRate");
   if (learningRate && (force || !learningRate.dataset.touched)) {
     learningRate.value = mode === "finetune" ? "0.00002" : "0.0002";
@@ -1073,7 +1075,7 @@ function updateTrainingControls() {
   updateFamilyFields();
   updateDatasetButtons();
   const resume = currentTrainingMode() === "resume";
-  ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy"].forEach((selector) => {
+  ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy", "#actionStateProfile"].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = resume;
   });
@@ -1725,6 +1727,7 @@ function applyCheckpointModelConfig(data) {
     if (element("#localPoolingPolicy")) {
       element("#localPoolingPolicy").value = model.local_pooling_policy || "legacy_uniform";
     }
+    if (element("#actionStateProfile")) element("#actionStateProfile").value = model.action_state_profile || "none";
     const onsetTraining = data.onset_training || {};
     const onsetProfile = onsetParams.profile || model.onset_profile || "none";
     const onsetWeight = onsetParams.loss_weight ?? onsetTraining.loss_weight ?? 0.2;
@@ -1783,6 +1786,7 @@ function renderCheckpointInspection(data) {
     `音频池化：${data.model_config?.local_pooling_policy || "legacy_uniform"}；生成按 checkpoint 继承，迁移请用加强训练`,
     `上下文预算策略：${data.data_contract?.input_policies?.context_budget_policy || "legacy_dynamic_v1"}`,
     `谱面过滤策略：${data.data_contract?.input_policies?.chart_filter_policy || "legacy_strict_v1"}`,
+    `持续动作摘要：${data.model_config?.action_state_profile || "none"}；有效训练：${data.action_state_training?.trained === true ? "是" : "否"}`,
     data.data_contract?.onset_params?.profile !== undefined
       ? `采音辅助合同：${data.data_contract.onset_params.profile}，loss weight=${data.data_contract.onset_params.loss_weight ?? "未记录"}` : "",
     data.onset_training?.trained !== undefined
@@ -1846,6 +1850,12 @@ async function inspectGenerationCheckpoint() {
   updateFamilyFields();
   const family = data.model_family_label || data.model_family || "未知";
   const genCaps = data.generation_capabilities || {};
+  const actionStatus = element("#generationActionStateStatus");
+  if (actionStatus) actionStatus.textContent = genCaps.sustained_action_memory
+    ? "此模型已训练持续动作摘要：生成时自动读取前段仍未结束的动作，修复或回溯后会按新谱面重建。"
+    : (data.model_config?.action_state_profile === "sustain_state_v1"
+      ? "此模型的持续动作模块尚无有效训练记录，需继续训练后再生成。"
+      : "此模型没有持续动作模块，继续使用原生成路径；需要新增时选择加强训练并启用持续动作摘要。");
   const capSuffix = Object.keys(genCaps).length
     ? `；内嵌无理检测${genCaps.conflict_detection ? "可用" : "不可用"}，细碎音符调制${genCaps.fine_note_strength ? "可用" : "不可用"}，局部采音对齐${genCaps.local_onset_guidance === true ? "可用" : "不可用"}`
     : "";
@@ -2001,6 +2011,9 @@ async function startTrain(options = {}) {
     const inputStatus = await api("/api/status");
     if (inputStatus.training_capabilities?.versioned_input_policies !== true) {
       throw new Error("当前后端未加载上下文预算、独立音频池化和星星过滤修正，请重启 WebUI 服务后再训练。");
+    }
+    if (payload.action_state_profile === "sustain_state_v1" && inputStatus.training_capabilities?.sustained_action_training !== true) {
+      throw new Error("当前后端未加载持续动作摘要训练，请重启 WebUI 服务后再训练。");
     }
     const status = await api("/api/status");
     if (status.training_capabilities?.event_learning_rate_control !== true) {

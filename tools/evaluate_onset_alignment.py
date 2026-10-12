@@ -31,11 +31,13 @@ from maichart.generation.event_cli import apply_contract_condition_guard  # noqa
 from maichart.generation.event_ctx import TARGET_SCHEMA  # noqa: E402
 from maichart.event_timing import seconds_at_beat  # noqa: E402
 from maichart.generation.event_model import EventVocabulary  # noqa: E402
+from maichart.generation.sustain_state import action_state_kwargs  # noqa: E402
 from maichart.training.event_checkpoints import (  # noqa: E402
     compare_event_contract, load_event_checkpoint, load_event_model, vocabulary_signature,
 )
 from maichart.training.event_ctx_dataset import EventCtxDataset  # noqa: E402
 from maichart.training.event_dataset import collate_events  # noqa: E402
+from maichart.training.event_input_policy import stored_input_policies  # noqa: E402
 from maichart.training.train_events import pool_onset_targets  # noqa: E402
 
 
@@ -174,6 +176,8 @@ def _build_dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path,
         raise ValueError("The checkpoint must enable chart_onsets_v1.")
     family = contract.get("family_params") or {}
     difficulty = contract.get("difficulty_filter") or {}
+    input_policies = stored_input_policies(checkpoint)
+    action_state_profile = str(config.get("action_state_profile", "none"))
     dataset = EventCtxDataset(
         manifest,
         cache_dir=cache_dir,
@@ -200,6 +204,9 @@ def _build_dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path,
         context_tokens=int(family.get("context_tokens", 1)),
         overlap_beats=int(family.get("overlap_beats", 0)),
         context_dropout=0.0,
+        context_budget_policy=input_policies["context_budget_policy"],
+        chart_filter_policy=input_policies["chart_filter_policy"],
+        action_state_profile=action_state_profile,
         slide_oversample=1,
         touch_oversample=1,
         fine_rhythm_oversample=1,
@@ -216,12 +223,14 @@ def _build_dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path,
         "dataset_signature": dataset.signature,
         "condition_keys": contract["condition_keys"],
         "condition_target_version": contract.get("condition_target_version", "legacy_unshifted_v1"),
+        "input_policies": input_policies,
+        "action_state_profile": action_state_profile,
     }
     stored_for_guard = {**checkpoint, "data_contract": {
         key: contract[key] for key in (
             "target_schema", "feature_profile", "input_dim", "sample_rate", "hop_length",
             "segment_beats", "max_tokens", "vocabulary_signature", "condition_keys",
-            "condition_target_version",
+            "condition_target_version", "input_policies",
         ) if key in contract
     }}
     compare_event_contract(stored_for_guard, current, mode="init")
@@ -314,6 +323,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     global_audio=batch["global_audio"] if global_audio is None else global_audio,
                     condition_null=condition_null,
                     plan_audio_mask=batch["plan_audio_mask"],
+                    **action_state_kwargs(batch, batched=True),
                 )
                 return torch.sigmoid(model.local_onset_logits(memory).float())
 
@@ -376,13 +386,19 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
         "onset_params": onset_contract,
         "model_config": {"onset_profile": model.config.onset_profile,
                          "local_pooling_policy": model.config.local_pooling_policy,
-                         "max_audio_tokens": model.config.max_audio_tokens},
+                         "max_audio_tokens": model.config.max_audio_tokens,
+                         "action_state_profile": model.config.action_state_profile},
+        "dataset_input_policies": stored_input_policies(checkpoint),
         "manifest": str(args.manifest.resolve()),
         "quality_annotations": str(args.quality_annotations.resolve()) if args.quality_annotations else None,
         "evaluation": {
             "mode": "encoder_local_head_only",
             "decoder_used": False,
             "planner_target_injected": False,
+            "input_state": {
+                "action_state_profile": model.config.action_state_profile,
+                "input_policies": stored_input_policies(checkpoint),
+            },
             "condition_source": "GENERATION_DEFAULTS radar/style plus known source level/difficulty, after contract guard",
             "window_selection": "uniform deterministic linspace over EventCtxDataset order",
             "windows_requested": int(args.limit),
@@ -396,7 +412,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "shuffle_acoustic": ({
                 "enabled": True,
                 "seed": int(args.seed),
-                "method": "evaluate_event_tokens.shuffle_acoustic_frames per window; shuffles local acoustic/rhythm rows while retaining time-context columns, global audio and conditions",
+                "method": "evaluate_event_tokens.shuffle_acoustic_frames per window; shuffles local acoustic/rhythm rows while retaining time-context columns, global audio, conditions, and authored action_state",
                 "interpretation": "alignment ablation only; not proof of audio autonomy because chart targets, conditions and global memory remain",
             } if args.shuffle_acoustic else None),
             "time_only": ({
@@ -404,7 +420,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                 "method": (f"zero local/global feature columns [0:{ACOUSTIC_DIM + len(RHYTHM_CONTEXT_KEYS)}] "
                            f"(acoustic plus audio-derived rhythm); preserve pure clock columns "
                            f"[{ACOUSTIC_DIM + len(RHYTHM_CONTEXT_KEYS)}:{INPUT_DIM}]"),
-                "interpretation": "out-of-distribution diagnostic intervention; tests whether chart-clock features alone support chart-onset prediction, but does not prove causality or deployment performance",
+                "interpretation": "out-of-distribution diagnostic intervention; tests whether chart-clock and authored action-state inputs alone support chart-onset prediction, but does not prove causality or deployment performance",
             } if args.time_only else None),
             "limitations": [
                 "Frame metrics measure agreement with author-selected chart starts, not acoustic ground truth or playability.",

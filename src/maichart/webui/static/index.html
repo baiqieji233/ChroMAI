@@ -267,6 +267,14 @@
             </select>
             <small>chart_onsets_v1 学习谱面起音相对音频的位置。finetune 可为 music_structure_v3 checkpoint 新增此头；resume 锁定并继承已保存设置。已有此头的模型继续训练时应保留；生成时可将指导强度设为 0。</small>
           </label>
+          <label class="field" data-training-family="event_v1 event_ctx_v1">持续动作摘要（action_state_profile）
+            <select id="actionStateProfile">
+              <option value="auto" selected>自动（继承模型；新训练默认关闭）</option>
+              <option value="none">关闭（兼容原模型）</option>
+              <option value="sustain_state_v1">启用：记住仍未结束的 Hold / Slide / Wifi</option>
+            </select>
+            <small>把前段仍在持续或等待起滑的动作、当前判定区和剩余时值作为独立输入，不受文本上下文拍数截断。已有模型可用加强训练新增，无需从头重练；新增模块必须训练后才可生成。断点续训继承已保存设置。它帮助模型学习动作衔接，不是硬性双手分配规则，也不替代无理检测。单独预测曲线时还没有已生成谱面，因此使用空动作摘要。</small>
+          </label>
           <label class="field" data-training-family="event_v1 event_ctx_v1">局部采音辅助损失权重
             <input id="onsetLossWeight" type="number" min="0" step="0.01" value="0.2">
             <small>辅助头损失在训练总损失中的比例，默认 0.2，启用时须大于 0；关闭时忽略。resume 自动使用 checkpoint 保存值。</small>
@@ -873,6 +881,7 @@
           <!-- ========== 可玩性与冲突检测（新增）========== -->
           <h3 data-generation-family="event_v1">无理检测与修复（MiaCode · Python）</h3>
           <p id="playabilityEngineStatus" data-generation-family="event_v1" class="inline-status">正在检查 Python 检测模块与路径数据…</p>
+          <p id="generationActionStateStatus" data-generation-family="event_v1" class="help-text">持续动作摘要按 checkpoint 自动启用；旧模型使用原生成方式。</p>
           <p data-generation-family="event_v1" class="help-text">
             感谢 <a href="https://github.com/Team-MiaCode/MiaCode" target="_blank" rel="noopener noreferrer">MiaCode 团队与贡献者</a>
             开源无理检测核心。本项目将其判定区、Slide/Wifi、Touch 联动与动作分析逻辑移植为 Python，并保留上游许可证、参考数据使用范围和来源说明。

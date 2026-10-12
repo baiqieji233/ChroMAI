@@ -63,6 +63,30 @@ def test_decoder_uses_conditional_onsets_and_respects_null_branch_and_rest_mask(
     assert run(onset_context=context, density_feedback=feedback).beats == [Fraction(0)]
 
 
+def test_cfg_branches_receive_identical_causal_sustain_state():
+    from maichart.generation.event_cli import _decode
+    vocabulary = EventVocabulary(["AT:0", "AT:1/2", "CHAR:1"])
+    model = _PositionChoiceModel(vocabulary)
+    encodes = []
+    original = model.encode_audio
+    def record(audio, condition, **kwargs):
+        encodes.append(kwargs)
+        return original(audio, condition, **kwargs)
+    model.encode_audio = record
+    states = torch.rand(1, 2, 50)
+    mask = torch.tensor([[False, True]])
+    result = _decode(model, vocabulary, torch.zeros(2,112), torch.zeros(2,112),
+                     torch.zeros(16), torch.device("cpu"), max_tokens=8, temperature=1.,
+                     sample=False, seed=7, atom_catalog=["1"], position_end=Fraction(1),
+                     guidance_scale=1.5, action_state=states, action_state_padding_mask=mask)
+    assert result.note_texts == ["1"]
+    assert len(encodes) == 2
+    assert [kw["condition_null"].item() for kw in encodes] == [False, True]
+    for kwargs in encodes:
+        torch.testing.assert_close(kwargs["action_state"], states)
+        assert torch.equal(kwargs["action_state_padding_mask"], mask)
+
+
 def test_position_guidance_preserves_stop_mass_and_hard_masks():
     logits = torch.tensor([0.1, 0.0, 0.2, float("-inf"), -0.1])
     guide = LocalOnsetGuidance([1, 2, 3], [-2.0, -0.1, 0.0], 0.6)

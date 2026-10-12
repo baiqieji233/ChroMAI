@@ -43,6 +43,7 @@ from maichart.training.checkpoints import (
 from maichart.training.frame_label_codec import DEFAULT_NOTE_TYPES
 from maichart.training.dataset_catalog import assert_no_validation_overlap
 from maichart.training.event_input_policy import resolve_input_policies
+from maichart.training.action_state_policy import resolve_action_state_profile
 from maichart.generation.event_ctx import FRESH_CONTEXT_TOKENS
 from maichart.webui.dataset_api import DatasetAPI
 from maichart.webui.quality_api import (
@@ -186,6 +187,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "project_root": str(PROJECT_ROOT),
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "versioned_input_policies": True,
+                                              "sustained_action_training": True,
                                               "fine_rhythm_oversample": True,
                                               "quality_training_capability": True,
                                               "local_onset_training": True,
@@ -1133,6 +1135,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         input_policies = (resolve_input_policies(
             payload, checkpoint=inspection, mode=training_mode, onset_profile=onset_profile or "none")
             if _is_event_family(model_family) else None)
+        action_state_profile = (resolve_action_state_profile(
+            str(payload.get("action_state_profile", "auto")), checkpoint=inspection, mode=training_mode)
+            if _is_event_family(model_family) else "none")
         if model_family in EVENT_FAMILIES and onset_profile == "chart_onsets_v1":
             stored_planner = ((inspection or {}).get("model_config") or {}).get("planner_profile")
             effective_planner = (stored_planner if planner_profile == "auto" and training_mode != "fresh"
@@ -1143,6 +1148,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task = _create_task("train")
         if input_policies is not None:
             task.result["input_policies"] = input_policies
+            task.result["action_state_profile"] = action_state_profile
             task.result["selection_metric"] = "validation_loss" if validation_manifest else "training_loss"
         if dataset_selection is not None:
             task.result["dataset_selection"] = dataset_selection
@@ -1191,6 +1197,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "--planner-profile", planner_profile,
                 "--plan-teacher-mix", str(teacher_mix),
                 "--onset-profile", onset_profile,
+                "--action-state-profile", action_state_profile,
                 "--onset-loss-weight", str(onset_loss_weight),
                 "--local-pooling-policy", input_policies["local_pooling_policy"],
                 "--context-budget-policy", input_policies["context_budget_policy"],
@@ -2082,6 +2089,7 @@ def _generation_capabilities(model_family: str, payload: dict[str, Any]) -> dict
         "local_onset_guidance": bool(_is_event_family(model_family)
                                       and detected.get("local_onset_guidance", False)
                                       and not detected["errors"]),
+        "sustained_action_memory": bool(detected.get("sustained_action_memory", False)),
     }
 
 
@@ -2222,6 +2230,7 @@ def _checkpoint_inspection(
         "model_config": checkpoint_model_config(payload),
         "data_contract": checkpoint_contract(payload),
         "onset_training": payload.get("onset_training") or {},
+        "action_state_training": payload.get("action_state_training") or {},
         "warnings": warnings,
         "errors": errors,
         "mode": mode,

@@ -112,7 +112,8 @@ def test_documented_recommendation_matches_defaults():
     assert default_of("touchOversample") == "1"
     assert default_of("contextBeats") == "8"
     assert default_of("audioMarginBeats") == "4"
-    assert default_of("contextTokens") == "192"
+    from maichart.generation.event_ctx import FRESH_CONTEXT_TOKENS
+    assert default_of("contextTokens") == str(FRESH_CONTEXT_TOKENS)
     assert default_of("overlapBeats") == "0"
     assert default_of("conditionDropout") == "0"
     assert default_of("planLossWeight") == "0.1"

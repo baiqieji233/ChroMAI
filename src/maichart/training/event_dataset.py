@@ -128,6 +128,7 @@ class EventDataset(Dataset):
         planner_profile: str = "legacy_v1",
         onset_profile: str = "none",
         chart_filter_policy: str | None = None,
+        action_state_profile: str = "none",
     ) -> None:
         if segment_beats <= 0 or max_tokens < 4:
             raise ValueError("segment_beats must be positive and max_tokens at least 4.")
@@ -139,6 +140,11 @@ class EventDataset(Dataset):
             manifest_filter_policy or DEFAULT_CHART_FILTER_POLICY
         )
         self.chart_filter_audit: list[dict[str, Any]] = []
+        if action_state_profile not in {"none", "sustain_state_v1"}:
+            raise ValueError("Unknown action_state_profile")
+        self.action_state_profile = action_state_profile
+        self._action_state_indexes = {}
+        self._action_state_overflow_seen = set()
         validate_profile(planner_profile)
         self.planner_profile = planner_profile
         self.onset_profile = validate_onset_profile(onset_profile)
@@ -833,6 +839,26 @@ class EventDataset(Dataset):
         return condition
 
 
+    def _attach_action_state(self, item, sample_index, ref, start):
+        if self.action_state_profile == "none":
+            return
+        from maichart.generation.sustain_state import SustainStateIndex
+        if sample_index not in self._action_state_indexes:
+            # Match the textual prefix: excluded/negative source events must
+            # not re-enter later windows through the longer-lived summary.
+            points = [point for point in ref.chart.points
+                      if self._quality_event_weight(sample_index, point.beat) > 0.0]
+            self._action_state_indexes[sample_index] = SustainStateIndex(
+                points, ref.chart.tempo_changes, ref.chart.audio_first)
+        states, mask, meta = self._action_state_indexes[sample_index].at(start)
+        item["action_state"] = states
+        item["action_state_padding_mask"] = mask
+        item["meta"]["action_state_count"] = meta["state_count"]
+        item["meta"]["action_state_truncated"] = meta["truncated_count"]
+        if meta["truncated_count"] and (sample_index, start) not in self._action_state_overflow_seen:
+            self._action_state_overflow_seen.add((sample_index, start))
+            print(f"action_state_truncated song={ref.song_id} beat={start} count={meta['truncated_count']}", flush=True)
+
     def __getitem__(self, index: int) -> dict[str, Any]:
         sample_index, start, end, token_ids = self.segments[index]
         ref = self.samples[sample_index]
@@ -876,6 +902,7 @@ class EventDataset(Dataset):
                 raise RuntimeError("onset frame-time grid does not match audio segment frames")
             item["onset_target"], item["onset_weight"], item["onset_valid"] = self._onset_labels(
                 sample_index, ref, sample_times, float(begin_sec), float(end_sec), float(audio.duration_sec))
+        self._attach_action_state(item, sample_index, ref, start)
         return item
 
     @property
@@ -902,6 +929,8 @@ class EventDataset(Dataset):
             payload["planner_profile"] = self.planner_profile
         if self.onset_profile != "none":
             payload["onset_profile"] = self.onset_profile
+        if self.action_state_profile != "none":
+            payload["action_state_profile"] = self.action_state_profile
         # Preserve legacy resume signatures while recording changed targets.
         if self.chart_filter_policy != "legacy_strict_v1":
             payload["chart_filter_policy"] = self.chart_filter_policy
@@ -913,6 +942,7 @@ class EventDataset(Dataset):
                 "signature": self.signature, "skipped": self.skipped,
                 "target_schema": "event_v1", "segment_beats": self.segment_beats,
                 "onset_profile": self.onset_profile,
+                "action_state_profile": self.action_state_profile,
                 "chart_filter_policy": self.chart_filter_policy,
                 "chart_filter_audit": self.chart_filter_audit,
                 "filtered_note_count": sum(item["removed_count"] for item in self.chart_filter_audit),
@@ -979,4 +1009,15 @@ def collate_events(batch: list[dict[str, Any]], *, pad_id: int = 0) -> dict[str,
                     raise ValueError(f"{key} length must match the unpadded audio frames")
                 values[index, :source.numel()] = source
             result[key] = values
+    if any("action_state" in item for item in batch):
+        if not all("action_state" in item and "action_state_padding_mask" in item for item in batch):
+            raise ValueError("A batch cannot mix enabled and disabled sustained-action samples")
+        from maichart.generation.sustain_state import STATE_DIM
+        count = max(item["action_state"].size(0) for item in batch)
+        result["action_state"] = torch.zeros(len(batch), count, STATE_DIM)
+        result["action_state_padding_mask"] = torch.ones(len(batch), count, dtype=torch.bool)
+        for index, item in enumerate(batch):
+            n = item["action_state"].size(0)
+            result["action_state"][index, :n] = item["action_state"]
+            result["action_state_padding_mask"][index, :n] = item["action_state_padding_mask"]
     return result

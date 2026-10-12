@@ -12,13 +12,14 @@ import torch
 from maichart.generation.event_model import EventConditionedTransformer, EventTransformerConfig, EventVocabulary
 from maichart.training.checkpoints import load_checkpoint
 from maichart.training.event_input_policy import POLICIES, stored_input_policies
+from maichart.training.action_state_policy import PROFILE as ACTION_STATE_PROFILE, STATE_KEYS, state_contract
 
 EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 
 # Contract keys that only exist for some families.  They are compared when
 # either side carries them, and ignored otherwise so older checkpoints keep
 # working.
-OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params", "onset_params")
+OPTIONAL_CONTRACT_KEYS = ("family_params", "condition_params", "quality_params", "planner_params", "onset_params", "action_state_params")
 LEGACY_CONDITION_TARGET_VERSION = "legacy_unshifted_v1"
 CURRENT_CONDITION_TARGET_VERSION = "chart_audio_clock_v2"
 INIT_MIGRATABLE_FAMILY_KEYS = frozenset({
@@ -119,11 +120,33 @@ def load_event_checkpoint(path: str | Path, *, device: str | torch.device = "cpu
             raise ValueError("Checkpoint onset trained status disagrees with optimizer step count.")
     elif present:
         raise ValueError("Checkpoint contains onset head weights while onset_profile is disabled.")
+    action_profile = config.get("action_state_profile", "none")
+    if action_profile not in {"none", ACTION_STATE_PROFILE}:
+        raise ValueError("Unknown checkpoint action_state_profile")
+    action_present = {key for key in STATE_KEYS if key in state or any(str(name).endswith('.' + key) for name in state)}
+    if action_profile == ACTION_STATE_PROFILE:
+        if action_present != STATE_KEYS:
+            raise ValueError("Checkpoint sustained-action weights are missing or incomplete")
+        if payload.get("data_contract", {}).get("action_state_params") != state_contract():
+            raise ValueError("Checkpoint sustained-action data contract is incompatible")
+        training = payload.get("action_state_training")
+        if not isinstance(training, dict) or training.get("profile") != action_profile:
+            raise ValueError("Checkpoint sustained-action training metadata is missing")
+        steps = training.get("optimizer_steps")
+        if isinstance(steps, bool) or not isinstance(steps, int) or steps < 0 or training.get("trained") is not (steps > 0):
+            raise ValueError("Checkpoint sustained-action training metadata is inconsistent")
+    elif action_present:
+        raise ValueError("Checkpoint contains sustained-action weights while its profile is disabled")
+    if payload.get("data_contract", {}).get("input_policies"):
+        stored_input_policies(payload)
     return payload
 
 
 def load_event_model(path: str | Path, device: torch.device):
     checkpoint = load_event_checkpoint(path, device=device)
+    if (checkpoint["model_config"].get("action_state_profile", "none") != "none"
+            and not checkpoint.get("action_state_training", {}).get("trained")):
+        raise ValueError("持续动作摘要尚未经历有效训练更新，请继续训练后再生成")
     model = EventConditionedTransformer(EventTransformerConfig(**checkpoint["model_config"])).to(device)
     # A checkpoint trained before the condition-token architecture has no
     # ``condition_type_embedding``; the compat loader switches the model to the
@@ -194,7 +217,7 @@ def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, m
                 # labels or add corrected preference pairs. Ordinary resume
                 # stays strict so optimizer state never crosses regimes.
                 before, after = None, None
-            if key == "onset_params" and mode in {"init", "finetune"}:
+            if key in {"onset_params", "action_state_params"} and mode in {"init", "finetune"}:
                 # Explicit initialization may add or retune this auxiliary
                 # objective; resume remains strict to preserve optimizer semantics.
                 before, after = None, None

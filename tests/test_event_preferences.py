@@ -72,6 +72,40 @@ def test_build_pairs_requires_corrected_path_and_keeps_shared_inputs(tmp_path):
     assert no_correction_audit["negative_without_correction"] == 1
 
 
+def test_preferences_keep_original_state_filter_corrected_stars_and_train_projection(tmp_path, capsys):
+    from maichart.generation.event_model import EventConditionedTransformer, EventTransformerConfig
+    from maichart.training.event_preferences import precompute_reference, preference_epoch
+    dataset, original_path, corrected_path = _fake_dataset(tmp_path)
+    dataset.chart_filter_policy = "drop_headless_stars_v1"
+    dataset.action_state_profile = "sustain_state_v1"
+    original = dataset[0]
+    original["action_state"] = torch.ones(1, 50)
+    original["action_state_padding_mask"] = torch.zeros(1, dtype=torch.bool)
+    corrected_path.write_text(corrected_path.read_text(encoding="utf-8").replace(
+        "1,3,2,4,", "1/8?-5[8:1],3,2,4,"), encoding="utf-8")
+    pairs, audit = build_preference_pairs(dataset, [{"label": "negative",
+        "source_path": str(original_path), "difficulty_index": 4, "corrected_path": str(corrected_path)}])
+    assert len(pairs) == 1 and audit["chart_filter_audit"][0]["removed_count"] == 1
+    assert "removed=1" in capsys.readouterr().out
+    for key in ("action_state", "action_state_padding_mask"):
+        torch.testing.assert_close(pairs[0].chosen[key], pairs[0].rejected[key])
+    old_key = pairs[0].key
+    pairs[0].chosen["action_state"][0, 0] += 1
+    assert pairs[0].key != old_key
+    pairs[0].chosen["action_state"][0, 0] -= 1
+
+    model = EventConditionedTransformer(EventTransformerConfig(input_dim=2, condition_dim=16,
+        vocab_size=len(dataset.vocabulary), d_model=16, nhead=2, num_layers=1,
+        dim_feedforward=32, max_tokens=64, max_audio_tokens=8, global_audio_tokens=2,
+        action_state_profile="sustain_state_v1"))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    before = model.action_state_projection.weight.detach().clone()
+    reference = precompute_reference(model, pairs, device="cpu")
+    metrics = preference_epoch(model, pairs, dataset, "cpu", optimizer, cached_reference=reference)
+    assert metrics["action_state_optimizer_steps_successful"] == 1
+    assert not torch.equal(before, model.action_state_projection.weight)
+
+
 def test_score_pair_logits_masks_context_and_padding_stably():
     logits = torch.tensor([[[1000.0, 0.0], [0.0, 1000.0], [0.0, 1000.0]]])
     batch = {

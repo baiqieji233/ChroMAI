@@ -22,6 +22,10 @@ from maichart.generation.music_plan import (
     validate_profile,
 )
 
+from maichart.generation.action_state_spec import (
+    STATE_DIM as ACTION_STATE_DIM, MAX_STATES as MAX_ACTION_STATE_TOKENS, STATE_KEYS,
+)
+
 EVENT_PAD = "<pad>"
 EVENT_BOS = "<bos>"
 EVENT_EOS = "<eos>"
@@ -228,6 +232,7 @@ class EventTransformerConfig:
     planner_profile: str = LEGACY_PROFILE
     onset_profile: str = "none"
     local_pooling_policy: str = "legacy_uniform"
+    action_state_profile: str = "none"
 
     def __post_init__(self) -> None:
         validate_profile(self.planner_profile)
@@ -243,6 +248,8 @@ class EventTransformerConfig:
             raise ValueError("local_pooling_policy must be 'legacy_uniform' or 'per_sample_v2'.")
         if self.onset_profile == "chart_onsets_v1" and self.local_pooling_policy != "per_sample_v2":
             raise ValueError("chart_onsets_v1 requires local_pooling_policy='per_sample_v2'.")
+        if self.action_state_profile not in {"none", "sustain_state_v1"}:
+            raise ValueError("action_state_profile must be 'none' or 'sustain_state_v1'.")
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -475,10 +482,14 @@ class EventConditionedTransformer(nn.Module):
             nn.GELU(),
             nn.Linear(self.config.d_model // 2, 1),
         ) if self.config.onset_profile == "chart_onsets_v1" else None)
+        if self.config.action_state_profile == "sustain_state_v1":
+            self.action_state_projection = nn.Linear(ACTION_STATE_DIM, self.config.d_model)
+            self.action_state_type_embedding = nn.Parameter(torch.zeros(self.config.d_model))
         self.planner_enabled = True
 
     def load_weights_compatible(self, state_dict: Mapping[str, torch.Tensor], *,
-                                allow_missing_onset_head: bool = False) -> dict[str, Any]:
+                                allow_missing_onset_head: bool = False,
+                                allow_missing_action_state: bool = False) -> dict[str, Any]:
         """Load weights, accepting a checkpoint from before the condition token.
 
         The condition-token architecture moved the condition from a per-frame
@@ -496,6 +507,16 @@ class EventConditionedTransformer(nn.Module):
 
         def present(name: str) -> bool:
             return any(key == name or key.endswith("." + name) for key in state_dict)
+
+        action_state_keys = STATE_KEYS
+        action_state_present = {key for key in action_state_keys if present(key)}
+        if self.config.action_state_profile == "sustain_state_v1":
+            if action_state_present and action_state_present != action_state_keys:
+                raise ValueError("checkpoint has an incomplete action-state projection.")
+            if not action_state_present and not allow_missing_action_state:
+                raise ValueError("checkpoint enables sustain_state_v1 but has no trained action-state projection.")
+        elif action_state_present:
+            raise ValueError("checkpoint contains an action-state projection but action_state_profile is disabled.")
 
         has_condition_token = present("condition_type_embedding")
         # The recorded fusion mode wins when the checkpoint carries one.  A run
@@ -521,6 +542,8 @@ class EventConditionedTransformer(nn.Module):
         tolerated = planner_keys | {"condition_null_embedding"}
         if not has_condition_token:
             tolerated.add("condition_type_embedding")
+        if self.config.action_state_profile == "sustain_state_v1" and not action_state_present:
+            tolerated.update(action_state_keys)
         onset_keys = {"onset_head.0.weight", "onset_head.0.bias",
                       "onset_head.2.weight", "onset_head.2.bias"}
         onset_present = {key for key in onset_keys if present(key)}
@@ -542,7 +565,8 @@ class EventConditionedTransformer(nn.Module):
                 "请确认该 checkpoint 来自同一次训练；结构不同的模型必须重新训练。"
             )
         return {"condition_fusion": self.config.condition_fusion, "legacy": not has_condition_token,
-                "planner": has_planner, "onset_head": onset_present == onset_keys}
+                "planner": has_planner, "onset_head": onset_present == onset_keys,
+                "action_state": action_state_present == action_state_keys}
 
     def local_onset_logits(self, memory: torch.Tensor) -> torch.Tensor:
         """Predict chart-onset logits from the local encoder-memory region."""
@@ -681,11 +705,34 @@ class EventConditionedTransformer(nn.Module):
         global_audio: torch.Tensor | None = None,
         condition_null: torch.Tensor | None = None,
         plan_audio_mask: torch.Tensor | None = None,
+        action_state: torch.Tensor | None = None,
+        action_state_padding_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
         if audio.ndim != 3 or condition.ndim != 2 or audio.size(0) != condition.size(0):
             raise ValueError("audio must be [B,T,F] and condition must be [B,C].")
         if audio.size(-1) != self.config.input_dim:
             raise ValueError(f"Expected {self.config.input_dim} audio features, got {audio.size(-1)}.")
+        action_state_enabled = self.config.action_state_profile == "sustain_state_v1"
+        if not action_state_enabled and (action_state is not None or action_state_padding_mask is not None):
+            raise ValueError("action-state inputs require action_state_profile='sustain_state_v1'.")
+        if action_state_enabled and action_state is None:
+            raise ValueError("action_state is required when action_state_profile='sustain_state_v1'.")
+        if action_state is not None:
+            if (action_state.ndim != 3 or action_state.size(0) != audio.size(0)
+                    or action_state.size(2) != ACTION_STATE_DIM
+                    or not 1 <= action_state.size(1) <= MAX_ACTION_STATE_TOKENS):
+                raise ValueError(
+                    f"action_state must have shape [B,N,{ACTION_STATE_DIM}] with "
+                    f"1 <= N <= {MAX_ACTION_STATE_TOKENS} and match the audio batch."
+                )
+            if action_state_padding_mask is None:
+                action_state_padding_mask = torch.zeros(
+                    action_state.shape[:2], dtype=torch.bool, device=action_state.device)
+            elif (action_state_padding_mask.shape != action_state.shape[:2]
+                  or action_state_padding_mask.dtype != torch.bool):
+                raise ValueError("action_state_padding_mask must be bool with shape [B,N].")
+            action_state = action_state.to(device=audio.device, dtype=audio.dtype)
+            action_state_padding_mask = action_state_padding_mask.to(device=audio.device)
         if plan_audio_mask is not None:
             if plan_audio_mask.shape != audio.shape[:2] or plan_audio_mask.dtype != torch.bool:
                 raise ValueError("plan_audio_mask must be bool with shape [B, local_audio_tokens].")
@@ -745,8 +792,18 @@ class EventConditionedTransformer(nn.Module):
         if legacy_fusion:
             if audio_padding_mask is not None and audio_padding_mask.size(1) != hidden.size(1):
                 raise ValueError("audio_padding_mask length does not match encoded audio memory.")
+            state_count = 0
+            if action_state_enabled:
+                if audio_padding_mask is None:
+                    audio_padding_mask = torch.zeros(hidden.shape[:2], dtype=torch.bool, device=audio.device)
+                state_hidden = (self.action_state_projection(action_state)
+                                + self.action_state_type_embedding)
+                hidden = torch.cat([hidden, state_hidden], dim=1)
+                audio_padding_mask = torch.cat([audio_padding_mask, action_state_padding_mask], dim=1)
+                state_count = action_state.size(1)
             memory = self.encoder(hidden, src_key_padding_mask=audio_padding_mask)
-            memory._planner_layout = (audio.size(1), global_audio.size(1) if global_audio is not None else 0, 0)
+            memory._planner_layout = (audio.size(1), global_audio.size(1) if global_audio is not None else 0,
+                                      state_count)
             memory._planner_core_mask = planner_core_mask
             return memory, audio_padding_mask
         condition_hidden = cond + self.condition_type_embedding
@@ -761,8 +818,16 @@ class EventConditionedTransformer(nn.Module):
         condition_mask = torch.zeros((condition_hidden.size(0), 1), dtype=torch.bool,
                                      device=audio.device)
         audio_padding_mask = torch.cat([audio_padding_mask, condition_mask], dim=1)
+        state_count = 0
+        if action_state_enabled:
+            state_hidden = (self.action_state_projection(action_state)
+                            + self.action_state_type_embedding)
+            hidden = torch.cat([hidden, state_hidden], dim=1)
+            audio_padding_mask = torch.cat([audio_padding_mask, action_state_padding_mask], dim=1)
+            state_count = action_state.size(1)
         memory = self.encoder(hidden, src_key_padding_mask=audio_padding_mask)
-        memory._planner_layout = (audio.size(1), global_audio.size(1) if global_audio is not None else 0, 1)
+        memory._planner_layout = (audio.size(1), global_audio.size(1) if global_audio is not None else 0,
+                                  1 + state_count)
         memory._planner_core_mask = planner_core_mask
         return memory, audio_padding_mask
 
@@ -782,10 +847,13 @@ class EventConditionedTransformer(nn.Module):
         plan_audio_mask: torch.Tensor | None = None,
         return_plan: bool = False,
         return_onset: bool = False,
+        action_state: torch.Tensor | None = None,
+        action_state_padding_mask: torch.Tensor | None = None,
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor] | tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         memory, audio_padding_mask = self.encode_audio(
             audio, condition, audio_padding_mask, global_audio, condition_null,
-            plan_audio_mask=plan_audio_mask)
+            plan_audio_mask=plan_audio_mask, action_state=action_state,
+            action_state_padding_mask=action_state_padding_mask)
         onset_logits = self.local_onset_logits(memory) if return_onset else None
         # Feed the predicted window plan back into the event decoder. The plan
         # is computed from encoder memory, so this remains causal with respect

@@ -25,7 +25,8 @@ from torch.nn import functional as F
 
 from maichart.event_timing import parse_event_chart, seconds_at_beat
 from maichart.generation.event_model import EventSequence
-from maichart.training.event_dataset import collate_events
+from maichart.generation.sustain_state import action_state_kwargs
+from maichart.training.event_dataset import collate_events, inspect_chart, sanitize_chart
 
 
 @dataclass
@@ -44,6 +45,18 @@ class PreferencePair:
             "chosen": self.chosen.get("target", torch.empty(0, dtype=torch.long)).detach().cpu().tolist(),
             "rejected": self.rejected.get("target", torch.empty(0, dtype=torch.long)).detach().cpu().tolist(),
         }
+        profile = self.meta.get("action_state_profile", "none")
+        action_state_present = any("action_state" in item for item in (self.chosen, self.rejected))
+        if profile != "none" or action_state_present:
+            payload["action_state_profile"] = profile
+            payload["action_inputs"] = {
+                role: {
+                    name: (example[name].detach().cpu().tolist()
+                           if isinstance(example.get(name), Tensor) else None)
+                    for name in ("action_state", "action_state_padding_mask")
+                }
+                for role, example in (("chosen", self.chosen), ("rejected", self.rejected))
+            }
         return hashlib.sha256(json.dumps(payload, sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
@@ -154,8 +167,20 @@ def _synthetic_segment(dataset: Any, sample_index: int, start: Fraction, end: Fr
         tokens = dataset.vocabulary.encode(EventSequence(
             [point.beat - block_start for point in points], [point.note_text for point in points]))
         events = lead_in_events(ref.chart.points, start, int(dataset.context_beats))
-        budget = int(dataset.max_tokens) - len(tokens) - 2
-        prefix = prefix_token_ids(dataset.vocabulary, events, max(0, min(int(dataset.context_tokens), budget)))
+        event_weight = getattr(dataset, "_quality_event_weight", None)
+        if callable(event_weight):
+            events = [event for event in events if event_weight(sample_index, block_start + event[0]) > 0.0]
+        policy = getattr(dataset, "context_budget_policy", "legacy_dynamic_v1")
+        budget = int(dataset.context_tokens)
+        if policy == "legacy_dynamic_v1":
+            budget = max(0, min(budget, int(dataset.max_tokens) - len(tokens) - 2))
+        prefix = prefix_token_ids(dataset.vocabulary, events, budget)
+        if (policy == "bounded_v2"
+                and len(tokens) + len(prefix) > int(dataset.max_tokens)):
+            raise ValueError(
+                f"fixed context preference window has {len(tokens) + len(prefix)} tokens; "
+                f"max_tokens={int(dataset.max_tokens)}"
+            )
         return (sample_index, start, end, tokens, prefix, len(prefix), start - block_start)
     points = [point for point in ref.chart.points if start <= point.beat < end]
     tokens = dataset.vocabulary.encode(EventSequence(
@@ -237,7 +262,7 @@ def build_preference_pairs(
     records = _records(annotations)
     pairs: list[PreferencePair] = []
     audit: dict[str, Any] = {"records": len(records), "windows": 0, "pairs": 0,
-                             "skipped": [], "negative_without_correction": 0}
+                             "skipped": [], "chart_filter_audit": [], "negative_without_correction": 0}
     parsed: dict[str, Any] = {}
     source_segments = list(getattr(dataset, "preference_segments", dataset.segments))
     negative_by_sample: dict[int, dict[str, Any]] = {}
@@ -298,9 +323,21 @@ def build_preference_pairs(
                 if str(expected_hash) != actual_hash:
                     raise ValueError("corrected chart hash mismatch")
             if key not in parsed:
-                parsed[key] = parse_event_chart(
+                corrected = parse_event_chart(
                     corrected_path, corrected_difficulty,
-                    strict_notes=True)
+                    strict_notes=False)
+                sanitized = sanitize_chart(
+                    corrected, getattr(dataset, "chart_filter_policy", "legacy_strict_v1")
+                )
+                corrected = sanitized.chart
+                if sanitized.removed:
+                    audit["chart_filter_audit"].append({"source_path": str(corrected_path),
+                        "difficulty_index": corrected_difficulty, **sanitized.to_dict()})
+                    preview = ", ".join(f"{item['beat']}:{item['atom']}" for item in sanitized.removed[:3])
+                    print(f"[chart_filter] preference={corrected_path} difficulty={corrected_difficulty} "
+                          f"removed={len(sanitized.removed)} sample=[{preview}]", flush=True)
+                inspect_chart(corrected)
+                parsed[key] = corrected
             corrected = parsed[key]
             reason = _validate_corrected(ref.chart, corrected)
             if reason:
@@ -312,6 +349,8 @@ def build_preference_pairs(
             # A stale path, changed tempo map or out-of-vocabulary note should
             # fail cheaply instead of decoding audio for an unusable pair.
             rejected = copy.deepcopy(_materialize(dataset, segment_entry))
+            # Reuse the original causal prefix and action-state snapshot for both
+            # candidates; deriving either from the corrected future leaks its edits.
             chosen = copy.deepcopy(rejected)
             chosen.update({"decoder_input": chosen_input, "target": chosen_target, "loss_mask": chosen_mask})
             # A pair must share the original audio, global memory and external
@@ -319,6 +358,17 @@ def build_preference_pairs(
             meta = dict(rejected.get("meta", {}))
             meta.update({"preference": True, "source_index": index, "chart_id": record.get("chart_id"),
                          "label": "negative", "corrected_path": str(corrected_path)})
+            action_state_profile = getattr(dataset, "action_state_profile", "none")
+            if action_state_profile != "none":
+                meta["action_state_profile"] = action_state_profile
+            input_policies = {
+                "context_budget_policy": getattr(dataset, "context_budget_policy", "legacy_dynamic_v1"),
+                "chart_filter_policy": getattr(dataset, "chart_filter_policy", "legacy_strict_v1"),
+            }
+            legacy_policies = {"context_budget_policy": "legacy_dynamic_v1",
+                               "chart_filter_policy": "legacy_strict_v1"}
+            if input_policies != legacy_policies:
+                meta["input_policies"] = input_policies
             pairs.append(PreferencePair(chosen=chosen, rejected=rejected, meta=meta))
         except (OSError, ValueError, UnicodeError) as exc:
             audit["skipped"].append({"index": index, "song_id": ref.song_id,
@@ -375,7 +425,8 @@ def precompute_reference(
                            plan_audio_mask=moved.get("plan_audio_mask"),
                            audio_padding_mask=moved.get("audio_padding_mask"),
                            decoder_padding_mask=moved.get("decoder_padding_mask"),
-                           global_audio=moved.get("global_audio"))
+                           global_audio=moved.get("global_audio"),
+                           **action_state_kwargs(moved, batched=True))
             scores, _ = score_pair_logits(logits, moved)
             values = scores.detach().cpu().tolist()
             for offset, pair in enumerate(chunk):
@@ -435,13 +486,18 @@ def preference_epoch(
     model.train()
     total_loss = total_tokens = total_heads = wins = 0.0
     chosen_lengths = rejected_lengths = 0.0
+    action_optimizer_steps = 0
+    def count_action_step(_optimizer, _args, _kwargs):
+        nonlocal action_optimizer_steps
+        action_optimizer_steps += 1
     for index, pair in enumerate(chosen_pairs):
         batch = collate_events([pair.chosen, pair.rejected])
         moved = {key: value.to(device) if isinstance(value, Tensor) else value for key, value in batch.items()}
         logits = model(moved["audio"], moved["decoder_input"], moved["condition"],
                        condition_null=moved.get("condition_null"), audio_padding_mask=moved.get("audio_padding_mask"),
                        plan_audio_mask=moved.get("plan_audio_mask"),
-                       decoder_padding_mask=moved.get("decoder_padding_mask"), global_audio=moved.get("global_audio"))
+                       decoder_padding_mask=moved.get("decoder_padding_mask"), global_audio=moved.get("global_audio"),
+                       **action_state_kwargs(moved, batched=True))
         policy, stats = score_pair_logits(logits, moved)
         if pair.reference is not None:
             ref_chosen, ref_rejected = pair.reference
@@ -460,17 +516,24 @@ def preference_epoch(
         chosen_nll = -policy[0]
         loss = float(weight) * dpo + 0.1 * chosen_nll
         if optimizer is not None:
-            optimizer.zero_grad(set_to_none=True)
-            if scaler is not None:
-                scaler.scale(loss).backward()
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                loss.backward()
-                torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-                optimizer.step()
+            active = ("action_state_padding_mask" in moved
+                      and bool((~moved["action_state_padding_mask"]).any()))
+            hook = optimizer.register_step_post_hook(count_action_step) if active else None
+            try:
+                optimizer.zero_grad(set_to_none=True)
+                if scaler is not None:
+                    scaler.scale(loss).backward()
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    scaler.step(optimizer)
+                    scaler.update()
+                else:
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+            finally:
+                if hook is not None:
+                    hook.remove()
         total_loss += float(loss.detach().cpu())
         total_tokens += stats["tokens"]
         total_heads += _head_count(moved["target"][0], dataset.vocabulary, moved["loss_mask"][0])
@@ -480,6 +543,7 @@ def preference_epoch(
     count = float(len(chosen_pairs))
     return {"pairs": count, "loss": total_loss / count, "win_rate": wins / count,
             "tokens": total_tokens / count, "heads": total_heads / count,
+            "action_state_optimizer_steps_successful": action_optimizer_steps,
             "chosen_length": chosen_lengths / count, "rejected_length": rejected_lengths / count}
 
 

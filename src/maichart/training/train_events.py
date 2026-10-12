@@ -42,6 +42,8 @@ from maichart.training.event_dataset import EventDataset, collate_events
 from maichart.training.event_input_policy import (
     POLICIES, resolve_input_policies, stored_input_policies,
 )
+from maichart.training.action_state_policy import resolve_action_state_profile, state_contract
+from maichart.generation.sustain_state import action_state_kwargs
 
 VALIDATION_CONDITION_SEED = 0
 VALIDATION_MASK_SCHEDULE = "fixed_seed_0_v1"
@@ -93,6 +95,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Optional local chart-onset auxiliary head; auto inherits the checkpoint or disables it for a fresh run.")
     parser.add_argument("--onset-loss-weight", type=float, default=0.2,
                         help="Weight of the local chart-onset auxiliary loss when --onset-profile is enabled.")
+    parser.add_argument("--action-state-profile", choices=("auto", "none", "sustain_state_v1"), default="auto",
+                        help="Optional sustained-action memory; auto inherits checkpoint or disables for fresh. Finetune may add it.")
     for key, choices in POLICIES.items():
         parser.add_argument("--" + key.replace("_", "-"), choices=("auto", *choices), default="auto",
                             help="Input policy: auto keeps exact resume behavior; fresh/finetune use the corrected policy. No model shape change.")
@@ -408,6 +412,9 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
     optimizer_steps_successful = 0
     onset_optimizer_steps_successful = 0
     onset_group_active = False
+    action_group_active = False
+    action_optimizer_steps = 0
+    action_active_windows = 0
     onset_bce_sum_total = None
     onset_brier_sum_total = None
     onset_weighted_frames_total = None
@@ -454,6 +461,12 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             onset_supervision_active = bool(((batch["onset_weight"] > 0) & (batch["onset_valid"] > 0)).any())
             onset_batch_active = train and onset_loss_weight > 0 and onset_supervision_active
         onset_group_active = onset_group_active or onset_batch_active
+        if getattr(getattr(model, "config", None), "action_state_profile", "none") != "none":
+            if "action_state_padding_mask" not in batch:
+                raise ValueError("Sustained-action training requires state features from the dataset")
+            active_states = (~batch["action_state_padding_mask"]).any(dim=1)
+            action_active_windows += int(active_states.sum())
+            action_group_active = action_group_active or bool(train and active_states.any())
         start_event = end_event = None
         if timing:
             start_event = torch.cuda.Event(enable_timing=True)
@@ -488,7 +501,8 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
                            audio_padding_mask=batch["audio_padding_mask"], decoder_padding_mask=batch["decoder_padding_mask"],
                            global_audio=batch["global_audio"], condition_null=condition_null,
                            plan_audio_mask=batch.get("plan_audio_mask"),
-                           return_plan=True, return_onset=onset_enabled, **planner_kwargs)
+                           return_plan=True, return_onset=onset_enabled,
+                           **action_state_kwargs(batch), **planner_kwargs)
             if onset_enabled:
                 logits, plan_pred, onset_logits = output
             else:
@@ -539,6 +553,9 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
                 if onset_group_active:
                     onset_optimizer_steps_successful += successful_steps
                 onset_group_active = False
+                if action_group_active:
+                    action_optimizer_steps += successful_steps
+                action_group_active = False
                 scaler.update()
                 optimizer.zero_grad(set_to_none=True)
         batch_windows = int(condition.size(0))
@@ -689,6 +706,9 @@ def run_epoch(model, loader, device, *, optimizer=None, scaler=None, accumulatio
             "onset_valid_frames": onset_valid_frames,
             "onset_optimizer_steps_successful": onset_optimizer_steps_successful,
         })
+    if getattr(getattr(model, "config", None), "action_state_profile", "none") != "none":
+        result.update(action_state_active_windows=action_active_windows,
+                      action_state_optimizer_steps_successful=action_optimizer_steps)
     return result
 
 
@@ -964,6 +984,10 @@ def main(argv=None) -> int:
         raise ValueError("onset-loss-weight must be finite and nonnegative.")
     random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     checkpoint = load_event_checkpoint(args.resume or args.init_checkpoint) if args.resume or args.init_checkpoint else None
+    action_state_profile = resolve_action_state_profile(
+        args.action_state_profile, checkpoint=checkpoint,
+        mode="resume" if args.resume else "finetune" if args.init_checkpoint else "fresh")
+    args.action_state_profile = action_state_profile
     if args.resume:
         condition_target_version = checkpoint.get("data_contract", {}).get(
             "condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
@@ -993,6 +1017,7 @@ def main(argv=None) -> int:
         setattr(args, key, value)
     local_pooling_policy = input_policies["local_pooling_policy"]
     print("training_input_policies " + json.dumps(input_policies, ensure_ascii=False), flush=True)
+    print(f"action_state_profile={action_state_profile}", flush=True)
     if args.resume and input_policies["context_budget_policy"] == "legacy_dynamic_v1":
         print("training_input_notice=旧 checkpoint 断点续训保留历史预算/清理策略；使用 finetune 可迁移修正输入，无需从头训练。", flush=True)
     vocabulary = EventVocabulary.from_dict(checkpoint["vocabulary"]) if checkpoint else None
@@ -1007,7 +1032,8 @@ def main(argv=None) -> int:
     # especially important for a large manifest and for smoke runs with
     # --max-steps.
     family = dataset_kwargs(args)
-    shared = {"chart_filter_policy": input_policies["chart_filter_policy"],
+    shared = {"action_state_profile": action_state_profile,
+              "chart_filter_policy": input_policies["chart_filter_policy"],
               "condition_mask_prob": args.condition_mask_prob,
               "condition_default": args.condition_default,
               "condition_target_version": condition_target_version,
@@ -1109,6 +1135,8 @@ def main(argv=None) -> int:
         # would silently mix window layouts.
         contract["family_params"] = dataset.family_params()
     contract["input_policies"] = input_policies
+    if action_state_profile != "none":
+        contract["action_state_params"] = state_contract()
     # How much of the condition vector was withheld is part of the experiment:
     # a model trained with the answer's statistics is a different model.
     contract["condition_params"] = {"mask_prob": float(args.condition_mask_prob),
@@ -1187,6 +1215,7 @@ def main(argv=None) -> int:
         "plan_dim": PLAN_DIM[planner_profile],
     }
     config_values["onset_profile"] = onset_profile
+    config_values["action_state_profile"] = action_state_profile
     config_values["local_pooling_policy"] = local_pooling_policy
     config = EventTransformerConfig(**config_values)
     device = device_for(args.device)
@@ -1196,7 +1225,9 @@ def main(argv=None) -> int:
         allow_missing_onset = bool(args.init_checkpoint and onset_profile == "chart_onsets_v1"
                                    and stored_onset_profile == "none")
         compatibility = model.load_weights_compatible(
-            checkpoint["model_state_dict"], allow_missing_onset_head=allow_missing_onset)
+            checkpoint["model_state_dict"], allow_missing_onset_head=allow_missing_onset,
+            allow_missing_action_state=bool(args.init_checkpoint and action_state_profile != "none"
+                and checkpoint.get("model_config", {}).get("action_state_profile", "none") == "none"))
         # A finetune/init run should learn the current planner even when the
         # source checkpoint predates planner injection; generation of that old
         # checkpoint remains planner-disabled in load_event_model().
@@ -1209,6 +1240,8 @@ def main(argv=None) -> int:
     scaler = torch.amp.GradScaler("cuda", enabled=device.type == "cuda" and not args.no_amp)
     start_epoch, global_step, best, stale = 0, 0, float("inf"), 0
     onset_optimizer_steps = 0
+    saved_action_training = checkpoint.get("action_state_training", {}) if checkpoint else {}
+    action_optimizer_steps = int(saved_action_training.get("optimizer_steps", 0)) if action_state_profile != "none" else 0
     saved_onset_training = checkpoint.get("onset_training", {}) if checkpoint else {}
     if (onset_profile == "chart_onsets_v1" and saved_onset_training.get("profile") == onset_profile
             and saved_onset_training.get("trained")):
@@ -1333,6 +1366,11 @@ def main(argv=None) -> int:
             stale = 0
         global_step += metrics["optimizer_steps_successful"] + preference_optimizer_steps_successful
         onset_optimizer_steps += int(metrics.get("onset_optimizer_steps_successful", 0))
+        action_optimizer_steps += int(metrics.get("action_state_optimizer_steps_successful", 0))
+        action_optimizer_steps += int(preference_metrics.get("action_state_optimizer_steps_successful", 0))
+        if action_state_profile != "none":
+            print(f"action_state_epoch={epoch:03d} active_windows={metrics.get('action_state_active_windows', 0)} "
+                  f"optimizer_steps={action_optimizer_steps}", flush=True)
         improved = score < best
         if improved: best, stale = score, 0
         else: stale += 1
@@ -1410,6 +1448,9 @@ def main(argv=None) -> int:
                    "model_state_dict": model.state_dict(), "optimizer_state_dict": optimizer.state_dict(), "scheduler_state_dict": scheduler.state_dict(),
                    "onset_training": {"profile": onset_profile, "trained": bool(onset_trained),
                                       "optimizer_steps": int(onset_optimizer_steps)},
+                   "action_state_training": {"profile": action_state_profile,
+                                             "trained": action_state_profile != "none" and action_optimizer_steps > 0,
+                                             "optimizer_steps": action_optimizer_steps},
                    "training_origin": training_origin,
                    "amp_scaler_state_dict": scaler.state_dict(), "args": vars(args),
                    "validation_mask_schedule": VALIDATION_MASK_SCHEDULE if validation else None,

@@ -29,6 +29,7 @@ from maichart.generation.event_audio import (  # noqa: E402
 from maichart.generation.event_ctx import TARGET_SCHEMA  # noqa: E402
 from maichart.generation.event_cli import apply_contract_condition_guard  # noqa: E402
 from maichart.generation.event_model import EVENT_END, EventVocabulary  # noqa: E402
+from maichart.generation.sustain_state import action_state_kwargs  # noqa: E402
 from maichart.generation.music_plan import continuous_keys, is_music_structure, plan_values  # noqa: E402
 from maichart.training.event_checkpoints import (  # noqa: E402
     compare_event_contract,
@@ -38,6 +39,7 @@ from maichart.training.event_checkpoints import (  # noqa: E402
 )
 from maichart.training.event_ctx_dataset import EventCtxDataset  # noqa: E402
 from maichart.training.event_dataset import collate_events  # noqa: E402
+from maichart.training.event_input_policy import stored_input_policies  # noqa: E402
 
 
 # These are diagnostic syntax markers, not parsed note-type labels. One chart
@@ -192,6 +194,8 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
     config = checkpoint["model_config"]
     family = contract.get("family_params") or {}
     difficulty = contract.get("difficulty_filter") or {}
+    input_policies = stored_input_policies(checkpoint)
+    action_state_profile = str(config.get("action_state_profile", "none"))
     dataset = EventCtxDataset(
         manifest,
         cache_dir=cache_dir,
@@ -216,6 +220,9 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
         context_tokens=int(family.get("context_tokens", 1)),
         overlap_beats=int(family.get("overlap_beats", 0)),
         context_dropout=0.0,
+        context_budget_policy=input_policies["context_budget_policy"],
+        chart_filter_policy=input_policies["chart_filter_policy"],
+        action_state_profile=action_state_profile,
         slide_oversample=1,
         touch_oversample=1,
         fine_rhythm_oversample=1,
@@ -232,6 +239,8 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
         "dataset_signature": dataset.signature,
         "condition_keys": list(CONDITION_KEYS),
         "condition_target_version": contract.get("condition_target_version", "legacy_unshifted_v1"),
+        "input_policies": input_policies,
+        "action_state_profile": action_state_profile,
     }
     # Match the same strict structural guard used by training, while checking
     # inference-time window geometry explicitly below.
@@ -239,7 +248,7 @@ def _dataset(checkpoint: dict[str, Any], manifest: Path, cache_dir: Path) -> Eve
         key: contract[key] for key in (
             "target_schema", "feature_profile", "input_dim", "sample_rate", "hop_length",
             "segment_beats", "max_tokens", "vocabulary_signature", "condition_keys",
-            "condition_target_version",
+            "condition_target_version", "input_policies",
         ) if key in contract
     }}
     compare_event_contract(stored_for_guard, current, mode="init")
@@ -316,6 +325,7 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
                     global_audio=batch["global_audio"].to(device),
                     plan_audio_mask=batch["plan_audio_mask"].to(device),
                     return_plan=True,
+                    **action_state_kwargs(batch, batched=True),
                 )
 
             logits, plan_logits = forward(batch["audio"])
@@ -368,12 +378,18 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
             "windows_requested": args.limit,
             "windows_evaluated": len(rows),
             "dataset_windows": len(dataset),
+            "dataset_input_policies": stored_input_policies(checkpoint),
+            "action_state_profile": model.config.action_state_profile,
             "plan_target_injected": False,
+            "input_state": {
+                "action_state_profile": model.config.action_state_profile,
+                "input_policies": stored_input_policies(checkpoint),
+            },
             "conditions": "GENERATION_DEFAULTS radar/style plus source chart level and difficulty metadata.",
             "audio_ablation": (None if args.audio_ablation == "none" else {
                 "kind": args.audio_ablation,
                 "seed": args.seed,
-                "description": "Per-window local frames are permuted for acoustic and audio-derived rhythm columns; pure time/beat columns, global_audio, conditions, decoder history, and targets are retained. The predicted planner is recomputed from ablated input. This breaks local audio-time alignment and is not an audio-autonomy score.",
+                "description": "Per-window local frames are permuted for acoustic and audio-derived rhythm columns; pure time/beat columns, global_audio, conditions, decoder history, authored action_state, and targets are retained. The predicted planner is recomputed from ablated input. This breaks local audio-time alignment and is not an audio-autonomy score.",
             }),
             "thread_count": torch.get_num_threads(),
             "limitations": [

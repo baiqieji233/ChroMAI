@@ -19,6 +19,8 @@ from maichart.generation.conditions import (
     GENERATION_DEFAULTS, RADAR_KEYS, STYLE_KEYS, GenerationCondition,
 )
 from maichart.generation.event_cli import apply_contract_condition_guard
+from maichart.generation.sustain_state import action_state_kwargs
+from maichart.training.event_input_policy import stored_input_policies
 
 
 def _condition_for_evaluation(
@@ -107,21 +109,29 @@ def evaluate(checkpoints, manifest, cache_dir, output, limit=64, *,
         if not is_music_structure(profile) or not model.planner_enabled:
             raise ValueError("This tool requires a trained structure planner")
         names = continuous_keys(profile)
+        input_policies = stored_input_policies(checkpoint)
+        action_state_profile = str(checkpoint["model_config"].get("action_state_profile", "none"))
         signature = {k: contract.get(k) for k in ("target_schema", "segment_beats", "max_tokens", "family_params", "vocabulary_signature")}
         signature["condition_target_version"] = contract.get("condition_target_version", "legacy_unshifted_v1")
         signature["planner_profile"] = profile
+        signature["action_state_profile"] = action_state_profile
+        signature["input_policies"] = input_policies
         if dataset is None:
             cls = EventCtxDataset if contract["target_schema"] == "event_ctx_v1" else EventDataset
             family = contract.get("family_params", {})
             kwargs = {k: family[k] for k in ("context_beats", "audio_margin_beats", "context_tokens", "overlap_beats") if k in family}
             if cls is EventCtxDataset:
-                kwargs.update(context_dropout=0, slide_oversample=1, touch_oversample=1, fine_rhythm_oversample=1)
+                kwargs.update(context_dropout=0, slide_oversample=1, touch_oversample=1,
+                              fine_rhythm_oversample=1,
+                              context_budget_policy=input_policies["context_budget_policy"])
             with output.with_suffix(".dataset.log").open("w", encoding="utf-8") as log, contextlib.redirect_stdout(log):
                 dataset = cls(manifest, cache_dir=cache_dir, segment_beats=contract["segment_beats"],
                               max_tokens=contract["max_tokens"], vocabulary=vocabulary, planner_profile=profile,
                               eager_audio=False, condition_mask_prob=0,
                               condition_target_version=signature["condition_target_version"],
-                              global_frames=model.config.global_audio_tokens, **kwargs)
+                              global_frames=model.config.global_audio_tokens,
+                              chart_filter_policy=input_policies["chart_filter_policy"],
+                              action_state_profile=action_state_profile, **kwargs)
             dataset_contract = signature
             selected = np.linspace(0, len(dataset)-1, min(limit, len(dataset)), dtype=int).tolist()
             selected_keys = selected
@@ -154,7 +164,8 @@ def evaluate(checkpoints, manifest, cache_dir, output, limit=64, *,
                 memory, padding = model.encode_audio(
                     item["audio"].unsqueeze(0), model_condition.to_vector().unsqueeze(0),
                     global_audio=item["global_audio"].unsqueeze(0), condition_null=condition_null,
-                    plan_audio_mask=item["plan_audio_mask"].unsqueeze(0) if "plan_audio_mask" in item else None)
+                    plan_audio_mask=item["plan_audio_mask"].unsqueeze(0) if "plan_audio_mask" in item else None,
+                    **action_state_kwargs(item, batched=False))
                 _, _, logits = model.append_plan_memory(memory, padding)
                 predicted = plan_values(logits, profile=profile)[0, :len(names)].tolist()
                 target = item["plan_target"][:len(names)].tolist()
@@ -180,6 +191,7 @@ def evaluate(checkpoints, manifest, cache_dir, output, limit=64, *,
             channels[name] = _channel_metrics(p, t, name)
         reports.append({"checkpoint": str(Path(path).resolve()), "epoch": checkpoint["epoch"],
                         "planner_profile":profile, "window_count":len(windows), "channels":channels,
+                        "dataset_contract": signature,
                         "condition": {
                             "source_mode": condition_source,
                             "source": ("GENERATION_DEFAULTS radar/style plus known level/difficulty metadata"

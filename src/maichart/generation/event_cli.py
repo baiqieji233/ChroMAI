@@ -513,15 +513,16 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
             repetition_window: int = 128, atom_catalog=None, allow_truncated=False,
             prefix_ids: list[int] | None = None, position_offset: Fraction = Fraction(0), condition_default: float = 0.5,
             plan_override=None, plan_controls=None, plan_audio_mask=None, density_feedback=None,
-            position_end: Fraction | None = None, onset_context: dict | None = None):
+            position_end: Fraction | None = None, onset_context: dict | None = None,
+            action_state=None, action_state_padding_mask=None):
     """Sample one window, optionally seeded with a lead-in context block.
 
     ``prefix_ids`` is the cross-window family's ``<ctx> ... <ctx_end>`` block.
     Those tokens are given, not produced: they are pushed through the cache
     without sampling, so the first sampled token continues from them exactly the
     way training did.  The whole composite (prefix + window) must fit the
-    checkpoint's positional grid, which is why the caller passes a reduced
-    budget.
+    checkpoint's positional grid. The caller passes the total budget once;
+    this function counts the seeded prefix as part of that total.
 
     ``position_offset`` is how many beats the lead-in block starts before the
     window.  Training positions every token relative to the block start so the
@@ -549,6 +550,9 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
         unconditional_condition[:, 1:] = float(condition_default)
     audio = audio.to(device).unsqueeze(0)
     global_audio = global_audio.to(device).unsqueeze(0)
+    state_kwargs = ({} if action_state is None else {
+        "action_state": action_state.to(device),
+        "action_state_padding_mask": action_state_padding_mask.to(device) if action_state_padding_mask is not None else None})
     prefix = list(prefix_ids or [])
     ids = [vocabulary.token_to_id[EVENT_BOS]] + prefix
     # The loop below feeds position `step` and predicts `step + 1`, so the last
@@ -588,6 +592,7 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
         memory, audio_mask = model.encode_audio(
             audio, condition, global_audio=global_audio,
             condition_null=torch.zeros((audio.size(0),), dtype=torch.bool, device=device),
+            **state_kwargs,
             **({"plan_audio_mask": plan_audio_mask} if plan_audio_mask is not None else {}),
         )
         onset_guidance = None
@@ -616,6 +621,7 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
             unconditional_memory, unconditional_audio_mask = model.encode_audio(
                 audio, unconditional_condition, global_audio=global_audio,
                 condition_null=torch.ones((audio.size(0),), dtype=torch.bool, device=device),
+                **state_kwargs,
                 **({"plan_audio_mask": plan_audio_mask} if plan_audio_mask is not None else {}),
             )
             if onset_logits is not None:
@@ -810,6 +816,7 @@ class _DecodedWindow:
     intensity_curve: dict | None = None
     playability: dict | None = None
     original_sequence: EventSequence | None = None
+    action_state: dict | None = None
 
 
 def _effective_curve_profile(profile: dict, *, strength: float, mode: str,
@@ -1359,6 +1366,19 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             if curve_controls is not None:
                 plan_controls = {**(plan_controls or {}), **curve_controls}
         planner_kwargs = {"plan_controls": plan_controls} if plan_controls is not None else {}
+        state_summary = None
+        if getattr(getattr(model, "config", None), "action_state_profile", "none") != "none":
+            from maichart.generation.sustain_state import SustainStateIndex
+            # All accepted prior notes are visible here, including notes older
+            # than the textual context. Rewinds rebuild this snapshot naturally.
+            prior_points = _merge_windows(results, overlap_beats=1)
+            states, state_mask, metadata = SustainStateIndex(prior_points, tempo_changes, first).at(start)
+            planner_kwargs.update(action_state=states.unsqueeze(0),
+                                  action_state_padding_mask=state_mask.unsqueeze(0))
+            state_summary = {"profile": metadata["profile"], "count": metadata["state_count"],
+                             "truncated": metadata["truncated_count"], "actions": metadata["states"]}
+            print(f"action_state_window beat={start} count={metadata['state_count']} "
+                  f"truncated={metadata['truncated_count']}", flush=True)
         if local_onset_bias_strength > 0:
             from maichart.generation.event_audio import segment_frame_times
             planner_kwargs["onset_context"] = {
@@ -1478,7 +1498,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                                   for point in parsed_cells.points if point.notes and float(point.time_sec) >= previous_high - 1e-8)
         results.append(_DecodedWindow(sequence=sequence, start_beat=start, end_beat=end,
                                       closed=closed, intensity_curve=curve_stats,
-                                      playability=playability, original_sequence=original_sequence))
+                                      playability=playability, original_sequence=original_sequence,
+                                      action_state=state_summary))
         results = cross.finish(results, index)
         if cross.records:
             feedback_cells = rebuild_feedback(results, tempo_changes, first, _merge_windows)
@@ -2513,6 +2534,7 @@ def main(argv=None) -> int:
                 "fine_note_strength_effective": float(generation_config.get("fine_note_strength", 0.5)),
                 "local_onset_bias_strength": float(generation_config.get("local_onset_bias_strength", 0.0)),
                 "onset_guidance_policy": "bounded_position_logprob_mass_v1",
+                "action_state_profile": str(getattr(getattr(model, "config", None), "action_state_profile", "none")),
                 "fine_note_control": "relative_window_log_odds_v1",
             }
             playability_warning = args.enable_conflict_detection and (
@@ -2533,6 +2555,10 @@ def main(argv=None) -> int:
             quality["audio_follow"] = audio_follow_metrics(
                 points, audio, tempo_changes, args.first, duration_sec=audio.duration_sec)
             quality["candidate_score"] = _candidate_quality_score(quality)
+            if getattr(getattr(model, "config", None), "action_state_profile", "none") != "none":
+                quality["action_state"] = {"profile": model.config.action_state_profile,
+                    "windows": [{"start_beat": str(w.start_beat), **w.action_state}
+                                for w in decoded if w.action_state is not None]}
             candidate_rank_key, quality["candidate_ranking"] = _candidate_quality_rank(quality)
             candidate_records.append((target, target_quality, float(quality["candidate_score"]),
                                       candidate_rank_key))

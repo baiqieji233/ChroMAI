@@ -91,10 +91,12 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
             from maichart.generation.event_audio import FEATURE_RATE_HZ
             sample_times = begin_sec + torch.arange(x.size(1), device=device) / FEATURE_RATE_HZ
             core_mask = ((sample_times < low) | (sample_times >= high)).unsqueeze(0)
+            from maichart.generation.sustain_state import neutral_action_state
             memory, padding = model.encode_audio(x, condition.to_vector(device=device).unsqueeze(0),
                                                  global_audio=global_audio,
                                                  plan_audio_mask=core_mask,
-                                                 condition_null=torch.tensor([False], device=device))
+                                                 condition_null=torch.tensor([False], device=device),
+                                                 **neutral_action_state(model, device=device))
             _, _, logits = model.append_plan_memory(memory, padding)
             plan = logits[0, :continuous_count].sigmoid().cpu().tolist()
             configs = logits[0, continuous_count:continuous_count + 4].softmax(-1).cpu().tolist()
@@ -127,6 +129,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2.0,
                                        "mtime_ns": str(identity_after["mtime_ns"]),
                                        "sha256": identity_after["sha256"]}
     profile["condition"] = condition.to_dict()
+    profile["action_state_context"] = "none_before_chart_generation"
     profile["level"] = condition.level
     profile["bpm"] = bpm
     profile["bpm_input"] = bpm_input

@@ -377,6 +377,7 @@ class EventCtxDataset(EventDataset):
                 raise RuntimeError("onset frame-time grid does not match audio segment frames")
             item["onset_target"], item["onset_weight"], item["onset_valid"] = self._onset_labels(
                 sample_index, ref, sample_times, core_begin, core_end, float(audio.duration_sec))
+        self._attach_action_state(item, sample_index, ref, start)
         return item
 
     def audit(self) -> dict[str, Any]:
