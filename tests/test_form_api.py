@@ -29,7 +29,9 @@ def _checkpoint(path, *, draft=1, revision=1, optimizer=1, blueprint=1):
     data = payload(model, planner, codec, epoch=2, optimizer_steps=optimizer,
                    blueprint_steps=blueprint, task_training={"draft": draft, "revision": revision},
                    input_contract=INPUT_CONTRACT,
-                   dataset_contract={"max_region_seconds": 14, "meter_map": None})
+                   dataset_contract={"max_region_seconds": 14, "meter_map": None},
+                   args={"lr": 0.0003, "limit_charts": 7},
+                   optimizer_state_dict={"param_groups": [{"lr": 0.00025}]})
     # payload() supplies the dataclass config; keep the serialized shape explicit.
     data["schema"] = CHECKPOINT_SCHEMA
     data["family"] = FAMILY
@@ -82,6 +84,53 @@ def test_inspect_form_checkpoint_reports_task_capabilities(tmp_path, draft, revi
     assert result["model_family"] == FAMILY
     assert result["can_generate"] is can_generate
     assert result["can_revise"] is can_revise
+    assert result["dataset_contract"]["max_region_seconds"] == 14
+    assert result["resume_settings"]["lr"] == 0.00025
+    assert result["resume_settings"]["limit_charts"] == 7
+
+
+def test_resume_inherits_checkpoint_contract_before_validating_values(monkeypatch, tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    checkpoint = tmp_path / "form.pt"
+    _checkpoint(checkpoint)
+    calls = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            task = TaskState(task_id="resume", kind=kind); calls.append(task); return task
+        def _run_subprocess_task(self, task, args, **kwargs): calls.append(args)
+
+    result = form_api.start_form_task(_Response(), "train", {
+        "manifest": str(manifest), "checkpoint_dir": str(tmp_path / "out"),
+        "mode": "resume", "init_checkpoint": str(checkpoint),
+        "lr": 1.0, "limit_charts": 999999, "max_region_seconds": 20,
+        "d_model": 15, "nhead": 64, "meter_map": [{"bad": "stale"}],
+    }, runtime=Runtime())
+    assert result == {"task_id": "resume"}
+    args = calls[-1]
+    assert args[args.index("--lr") + 1] == "0.00025"
+    assert args[args.index("--limit-charts") + 1] == "7"
+    assert args[args.index("--max-region-seconds") + 1] == "14.0"
+    assert args[args.index("--d-model") + 1] == "16"
+    assert args[args.index("--nhead") + 1] == "1"
+
+
+def test_bad_manifest_does_not_create_queued_task(tmp_path):
+    manifest = tmp_path / "bad.json"
+    manifest.write_text("{", encoding="utf-8")
+    created = []
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind): created.append(kind); return TaskState(task_id="bad", kind=kind)
+    with pytest.raises(json.JSONDecodeError):
+        form_api.start_form_task(_Response(), "train", {
+            "manifest": str(manifest), "checkpoint_dir": str(tmp_path / "out")
+        }, runtime=Runtime())
+    assert created == []
 
 
 def test_inspect_rejects_old_and_corrupt_checkpoints(tmp_path):

@@ -29,6 +29,15 @@ def inspect_form_checkpoint(path):
         # This also rejects partial/corrupt model weights and input contracts.
         model, planner, _, checked = load(path, device='cpu')
         trained = checked.get('task_training') or {}
+        args = checked.get('args') or {}
+        optimizer_state = checked.get('optimizer_state_dict') or {}
+        param_groups = optimizer_state.get('param_groups') or []
+        resume_settings = {
+            'lr': (param_groups[0].get('lr') if param_groups else args.get('lr')),
+            'limit_charts': args.get('limit_charts', 0),
+            'max_region_seconds': (checked.get('dataset_contract') or {}).get('max_region_seconds'),
+            'meter_map': (checked.get('dataset_contract') or {}).get('meter_map'),
+        }
         plan_ready = int(checked.get('blueprint_steps',0)) > 0
         base.update(valid=True, can_train=True,
             can_generate=plan_ready and int(trained.get('draft',0))>0 and int(checked.get('optimizer_steps',0))>0,
@@ -36,6 +45,8 @@ def inspect_form_checkpoint(path):
             epoch=checked.get('epoch',0), task_training=trained,
             blueprint_steps=checked.get('blueprint_steps',0), optimizer_steps=checked.get('optimizer_steps',0),
             model_config=checked['model_config'], args=checked.get('args') or {},
+            dataset_contract=checked.get('dataset_contract') or {},
+            resume_settings=resume_settings,
             input_contract=checked['input_contract'],
             parameter_count=sum(p.numel() for p in model.parameters())+sum(p.numel() for p in planner.parameters()))
     except (ValueError, RuntimeError, KeyError, TypeError) as error:
@@ -108,9 +119,6 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         return handler._json_response(inspect_form_checkpoint(file('checkpoint')))
     device=str(payload.get('device','cpu'))
     if device not in {'cpu','cuda'}: raise ValueError('device must be cpu or cuda')
-    region=number('max_region_seconds',14,2,20)
-    meters=normalize_meter_map(payload.get('meter_map'))
-    tempo=normalize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') else None
     if operation=='train':
         manifest=file('manifest')
         mode=payload.get('mode','fresh')
@@ -120,6 +128,28 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if initial:
             from maichart.form.checkpoint import load
             _, _, _, inspected = load(initial)
+        if inspected and mode == 'resume':
+            # Resume is contract preserving. Inherit these before validating UI
+            # fields because the browser may submit stale or disabled values.
+            old_args = inspected.get('args') or {}
+            old_contract = inspected.get('dataset_contract') or {}
+            if 'lr' in old_args:
+                payload = {**payload, 'lr': old_args['lr']}
+            payload = {**payload,
+                       'limit_charts': old_args.get('limit_charts', 0),
+                       'max_region_seconds': old_contract.get('max_region_seconds', 14),
+                       'meter_map': old_contract.get('meter_map')}
+            optimizer_state = inspected.get('optimizer_state_dict') or {}
+            groups = optimizer_state.get('param_groups') or []
+            if groups:
+                payload['lr'] = groups[0].get('lr', payload.get('lr', .0002))
+            config = inspected.get('model_config') or {}
+            payload = {**payload, **{key: config[key] for key in
+                       ('d_model', 'layers', 'nhead', 'max_tokens') if key in config},
+                       'max_memory_tokens': config.get('max_memory_tokens', payload.get('max_memory_tokens', 512))}
+        region=number('max_region_seconds',14,2,20)
+        meters=normalize_meter_map(payload.get('meter_map'))
+        tempo=None
         output_value=str(payload.get('checkpoint_dir') or '').strip()
         if not output_value: raise ValueError('checkpoint_dir is required')
         out=server._resolve_path(output_value)
@@ -135,9 +165,6 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             config = inspected['model_config']
             for key in ('d_model','layers','nhead','max_tokens','max_memory_tokens'):
                 values[key] = config[key]
-            if mode == 'resume':
-                region = float(inspected['dataset_contract']['max_region_seconds'])
-                meters = normalize_meter_map(inspected['dataset_contract'].get('meter_map'))
         args=['-m','maichart.form.train','--manifest',str(manifest),'--checkpoint-dir',str(out)]
         for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
         if initial: args+=['--resume' if mode=='resume' else '--init-checkpoint',str(initial)]
@@ -145,6 +172,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         start_epoch=int(inspected.get('epoch',0)) if inspected and mode=='resume' else 0
         expected=start_epoch+epochs
     else:
+        region=number('max_region_seconds',14,2,20)
+        meters=normalize_meter_map(payload.get('meter_map'))
+        tempo=normalize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') else None
         audio=file('audio')
         initial=file('checkpoint') if operation!='analyze' else None
         if initial:
@@ -172,6 +202,17 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                    '--repair-edits',str(number('max_edits',4,0,100,True)),
                    '--repair-seconds',str(number('deadline_seconds',10,0,600))]
         expected=None
+    cache_path = None
+    if payload.get('cache_dir'):
+        cache_path = server._resolve_path(str(payload['cache_dir']))
+    elif operation == 'train':
+        from maichart.generation.event_audio import audio_cache_dir
+        # Parse and validate before registering a task so malformed manifests
+        # cannot leave an orphan queued task in the UI.
+        manifest_data=json.loads(manifest.read_text(encoding='utf-8-sig'))
+        cache=Path(str(manifest_data.get('cache_dir') or 'cache'))
+        if not cache.is_absolute(): cache=manifest.parent/cache
+        cache_path=audio_cache_dir(cache)
     task=server._create_task('form_'+operation)
     workspace=server.WEBUI_ROOT/'song_form'/task.task_id;workspace.mkdir(parents=True,exist_ok=True)
     if out is None:out=workspace/'analysis.json'
@@ -179,14 +220,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         args+=['--output',str(out)]
         results=[out] if operation=='analyze' else [out,out.with_suffix('.form.json')]
     args+=['--device',device,'--max-region-seconds',str(region)]
-    if payload.get('cache_dir'):
-        args+=['--cache-dir',str(server._resolve_path(str(payload['cache_dir'])))]
-    elif operation=='train':
-        from maichart.generation.event_audio import audio_cache_dir
-        manifest_data=json.loads(manifest.read_text(encoding='utf-8-sig'))
-        cache=Path(str(manifest_data.get('cache_dir') or 'cache'))
-        if not cache.is_absolute():cache=manifest.parent/cache
-        args+=['--cache-dir',str(audio_cache_dir(cache))]
+    if cache_path is not None:
+        args+=['--cache-dir',str(cache_path)]
     if meters:
         path=workspace/'meter_map.json';path.write_text(json.dumps([m.to_dict() for m in meters]),encoding='utf-8')
         args+=['--meter-map',str(path)]
