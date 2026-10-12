@@ -77,3 +77,24 @@ WebUI 核对结果：
 - 在 1440 px 桌面和 420 px 移动视口检查了四个 tab、checkpoint inspect、训练素材刷新、任务日志；没有横向溢出或脚本异常。
 
 目前 R4 工程交付已完成；R5 仍是质量阶段。真实短训模型必须经过更多官方/高质量自制谱训练、固定歌曲 A/B 和专业玩家检查后，才可判断是否改善复杂节奏、重复段落和无理问题。
+
+
+## 统一主工作台与真实条件/曲线验证（2026-10-13）
+
+主 WebUI 已将 `song_form_v1` 设为默认模型族，并保留旧 event 模型族下拉切换。共享训练素材、质量权重、resume/finetune 手动路径、输出目录、生成页、Radar/Style、曲线编辑入口和任务日志仍在同一工作台；模型族切换只替换不兼容的参数合同。浏览器验证覆盖 1440 px 和 420 px：模型结构与上下文、条件/正则化/规划学习不再为空，Radar/Style 可见，曲线入口可见，移动端无横向溢出。
+
+使用真实 `E:\后训练（官谱）\training_manifest.json` 限量 16 张、1 epoch、CUDA、`d_model=128/layers=2/nhead=4/max_tokens=1024/max_memory_tokens=256` 完成了新合同训练：
+
+- `optimizer_steps=567`，`blueprint_steps=16`；draft/revision 计数为 577/556；
+- checkpoint 能力检查：`condition_controls_trained=true`、`load_curve_trained=true`；
+- 条件监督来自谱面事件统计（`event_derived_radar_style_v1`），训练带显式 `condition_null`，不是把 Radar/Style 静默替换成默认值；
+- 强度曲线使用 2 秒相对音频时间 bin、event density/tap/sustain/slide_touch 四通道，参与 blueprint 负荷损失与布局输入。
+
+同一 checkpoint 的生成链路验证：
+
+- 主 WebUI `/api/train` 受控 CPU smoke：1 epoch、2 张谱面、1 step，任务状态和 `form_epoch` 日志正确；
+- 主 WebUI `/api/generate` 真实路由成功，输出严格 simai 解析通过；
+- CLI 自定义 Radar/Style 条件生成成功，报告保存了 `generation_condition`；同 seed 默认条件与自定义条件产生不同 blueprint/onset 数量，证明条件进入了规划输入，但不把一次短训差异当成质量提升；
+- 模型曲线分析返回 `method=learned_song_form_v1`、64 个编辑点；带曲线的生成报告记录 `intensity_curve.applied=true`、`guidance=onset soft budget plus span-local layout condition`。
+
+早期 `song_form_v1` checkpoint 仍可加载和生成，但 capability 检查会显示条件和曲线尚未训练；旧 `event_ctx_v1` Prism checkpoint 仍走原路径。一次受控生成中，undertrained checkpoint 出现少量 decoder fallback；系统不再直接崩溃，而是在报告记录 `decoder_fallbacks`，这只证明工程可用，不代表谱面质量达标。
