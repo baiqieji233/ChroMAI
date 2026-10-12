@@ -98,3 +98,10 @@ WebUI 核对结果：
 - 模型曲线分析返回 `method=learned_song_form_v1`、64 个编辑点；带曲线的生成报告记录 `intensity_curve.applied=true`、`guidance=onset soft budget plus span-local layout condition`。
 
 早期 `song_form_v1` checkpoint 仍可加载和生成，但 capability 检查会显示条件和曲线尚未训练；旧 `event_ctx_v1` Prism checkpoint 仍走原路径。一次受控生成中，undertrained checkpoint 出现少量 decoder fallback；系统不再直接崩溃，而是在报告记录 `decoder_fallbacks`，这只证明工程可用，不代表谱面质量达标。
+
+
+## 回归门槛（2026-10-13）
+
+统一主工作台改动后的完整 Python 回归为 **1611 passed, 11 skipped**；Node 前端行为测试全部通过（3 + 10 + 1 + 6 + 4 + 2 + 5 + 1 组）。浏览器检查覆盖模型族切换、song_form 结构/学习分组、Radar/Style、曲线入口、任务日志与移动视口。
+
+这一阶段仍不把短训 checkpoint 当作可发布谱师模型：控制监督和曲线能力已经进入训练/生成合同，实际质量仍需更长训练、固定曲目 A/B 和玩家试玩。
