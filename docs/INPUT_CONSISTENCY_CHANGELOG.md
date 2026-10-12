@@ -62,4 +62,5 @@
 ## Git 记录
 
 - 阶段 A：`73f38db`，训练输入策略、上下文预算修正、过滤审计、无理候选排序。
-- 阶段 B：提交主题 `Add optional causal sustain memory across training and generation`；包含本记录、模块、WebUI 与测试，可按该主题在 Git 日志中查找。
+- 阶段 B：`fab2258`，`Add optional causal sustain memory across training and generation`；包含模块、WebUI、说明与测试。
+- 完成实施后，应用户要求补充 [QUALITY_ARCHITECTURE_ROADMAP_20261012.md](QUALITY_ARCHITECTURE_ROADMAP_20261012.md)，讨论动作模拟、手感评价、音乐理解与局部改稿。这些是后续研究规划，不代表新增模块已经训练或启用。
