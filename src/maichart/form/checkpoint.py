@@ -13,13 +13,21 @@ INPUT_CONTRACT = {"version":"song_form_inputs_v1", "time":"exact_quarter_fractio
     "skeleton":"whole_song_onsets_masked_layout_v1",
     "condition":"form_condition_v2",
     "load_curve":"load_curve_v1"}
+LEGACY_INPUT_CONTRACT = {"version":"song_form_inputs_v1", "time":"exact_quarter_fraction",
+    "meter":"explicit_or_unknown", "segmentation":"audio_content_resource_caps_v1",
+    "audio":"event_acoustic_with_explicit_meter_120_v1", "recurrence":"audio_only_causal_chart_v1",
+    "decoder":"rational_events_v1", "revision":"masked_reconstruction_v1",
+    "skeleton":"whole_song_onsets_masked_layout_v1"}
 
 
 def load(path, *, device='cpu', inference=False, task='draft'):
     payload=torch.load(path,map_location=device,weights_only=False)
     if payload.get('schema')!=CHECKPOINT_SCHEMA or payload.get('family')!=FAMILY:
         raise ValueError('This is not a song_form_v1 model; old event checkpoints use their original generator.')
-    if payload.get('input_contract')!=INPUT_CONTRACT: raise ValueError('Song-form input contract mismatch')
+    contract=payload.get('input_contract')
+    legacy_contract=contract==LEGACY_INPUT_CONTRACT
+    if contract!=INPUT_CONTRACT and not legacy_contract:
+        raise ValueError('Song-form input contract mismatch')
     codec=RationalCodec.from_dict(payload['codec'])
     config=FormConfig(**payload['model_config'])
     if config.vocab_size!=len(codec): raise ValueError('Vocabulary shape mismatch')
@@ -33,7 +41,7 @@ def load(path, *, device='cpu', inference=False, task='draft'):
     if inference and (payload.get('optimizer_steps',0)<=0 or payload.get('blueprint_steps',0)<=0
                       or payload.get('task_training',{}).get(task,0)<=0
                       or task_cap.get('steps', payload.get('task_training',{}).get(task,0))<=0
-                      or task_cap.get('contract', INPUT_CONTRACT['version']) not in (INPUT_CONTRACT['version'], 'form_condition_v2')):
+                      or (not legacy_contract and task_cap.get('contract', INPUT_CONTRACT['version']) not in (INPUT_CONTRACT['version'], 'form_condition_v2'))):
         raise ValueError(f'{task} and whole-song blueprint must both receive effective training before use')
     from maichart.form.blueprint import BlueprintConfig, SongBlueprint
     planner=SongBlueprint(BlueprintConfig(**payload['blueprint_config'])).to(device)
