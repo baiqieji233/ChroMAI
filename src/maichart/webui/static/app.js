@@ -145,6 +145,8 @@ let activeTaskId = null;
 let datasetUploading = false;
 let preprocessStarting = false;
 let trainingStarting = false;
+let trainingPreflight = false;
+let generationSubmitting = false;
 let datasetVersion = 0;
 let manifestRequest = 0;
 let checkpointInspectRequest = 0;
@@ -189,6 +191,7 @@ function guard(handler) {
       setStatus(`操作失败：${error.message || error}`, false);
       const message = element("#taskMessage");
       if (message) message.textContent = `错误：${error.message || error}`;
+      window.MaichartWorkflow?.reportError(`操作失败：${error.message || error}`);
       console.error(error);
     }
   };
@@ -211,6 +214,8 @@ function setWorkspaceMode(mode) {
   element("#generationModeTab")?.classList.toggle("active", value === "generation");
   element("#intensityModeTab")?.classList.toggle("active", value === "intensity");
   if (value === "intensity") requestAnimationFrame(drawIntensityCurve);
+  window.MaichartWorkflow?.setLogsExpanded(false);
+  window.MaichartWorkflow?.refresh();
   try { localStorage.setItem(workspaceStorageKey, value); } catch (_) { /* storage disabled */ }
 }
 
@@ -253,6 +258,8 @@ function saveIntensityCurveState() {
 function settingsFields() {
   return Array.from(document.querySelectorAll("input[id], select[id], textarea[id]"))
     .filter((element) => element.type !== "file" && element.id !== "datasetSelect"
+      && !["taskSelector", "trainingRunRecipe", "trainingBatchRecipe"].includes(element.id)
+      && !element.id.endsWith("ParameterSearch")
       && !element.id.startsWith("intensitySection"));
 }
 
@@ -261,12 +268,17 @@ function collectSettings() {
   settingsFields().forEach((target) => {
     values[target.id] = target.type === "checkbox" ? target.checked : target.value;
   });
+  values.__manualTouched = {
+    learningRate: element("#learningRate")?.dataset.touched === "1",
+    contextTokens: element("#contextTokens")?.dataset.touched === "1",
+  };
   return values;
 }
 
 function saveSettings() {
   if (settingsSaveTimer) clearTimeout(settingsSaveTimer);
   settingsSaveTimer = setTimeout(flushSettings, 200);
+  window.MaichartWorkflow?.refresh();
 }
 
 function flushSettings() {
@@ -307,6 +319,18 @@ function restoreSettings() {
     else if (value !== undefined && value !== null) target.value = String(value);
     restored += 1;
   });
+  const manualTouched = values.__manualTouched || {};
+  const learningRate = element("#learningRate");
+  const contextTokens = element("#contextTokens");
+  if (learningRate) {
+    const legacyDefault = values.trainingMode === "finetune" ? 0.00002 : 0.0002;
+    const inferLegacyTouched = Object.prototype.hasOwnProperty.call(values, "learningRate")
+      && Number.isFinite(Number(values.learningRate))
+      && Number(values.learningRate) !== legacyDefault;
+    learningRate.dataset.touched = manualTouched.learningRate === true
+      || (manualTouched.learningRate === undefined && inferLegacyTouched) ? "1" : "";
+  }
+  if (contextTokens) contextTokens.dataset.touched = manualTouched.contextTokens === true ? "1" : "";
   const levelInput = element("#level");
   if (levelInput) {
     const previousLevel = levelInput.value;
@@ -671,7 +695,6 @@ function updateGenerationCapabilityControls() {
   const onset = element("#localOnsetBiasStrength");
   if (onset) {
     onset.disabled = !(checked && caps.local_onset_guidance === true);
-    if (checked && caps.local_onset_guidance !== true) onset.value = "0";
   }
   const onsetValue = element("#localOnsetBiasStrengthValue");
   if (onsetValue && onset) onsetValue.textContent = Number(onset.value).toFixed(2);
@@ -1017,12 +1040,10 @@ function parseTempoMap() {
 // ---------------------------------------------------------------------------
 // Training-mode dependent controls
 // ---------------------------------------------------------------------------
-function setTrainingModeDefaults(force = false) {
+function setTrainingModeDefaults() {
   const mode = currentTrainingMode();
-  if (force && element("#localPoolingPolicy")) element("#localPoolingPolicy").value = "auto";
-  if (force && element("#actionStateProfile")) element("#actionStateProfile").value = "auto";
   const learningRate = element("#learningRate");
-  if (learningRate && (force || !learningRate.dataset.touched)) {
+  if (learningRate && learningRate.dataset.touched !== "1") {
     learningRate.value = mode === "finetune" ? "0.00002" : "0.0002";
   }
   const help = element("#learningRateHelp");
@@ -1038,7 +1059,7 @@ function setTrainingModeDefaults(force = false) {
   const epochsHelp = element("#epochsHelp");
   if (epochsHelp) {
     epochsHelp.textContent = mode === "fresh"
-      ? "fresh 模式的总训练轮数。配了验证 manifest 时建议填大（如 80），由早停决定实际轮数。"
+      ? "本次从头训练的轮数。短跑可先限制 batch 数验证流程；正式训练轮数按数据量和实际生成效果选择。"
       : mode === "resume"
         ? "resume 的 epochs 是从断点额外训练的轮数；会从 checkpoint 的 epoch 接着计数，早停会按验证 loss 停止。"
         : "finetune 从新阶段 epoch 1 开始计数；epochs 是本次加强训练的轮数，早停会按验证 loss 停止。";
@@ -1046,7 +1067,7 @@ function setTrainingModeDefaults(force = false) {
 }
 
 function updateDatasetButtons() {
-  const busy = datasetUploading || preprocessStarting || trainingStarting;
+  const busy = datasetUploading || preprocessStarting || trainingStarting || trainingPreflight;
   const mapping = {
     "#preprocessButton": busy,
     "#inspectManifestButton": busy,
@@ -1079,6 +1100,7 @@ function updateTrainingControls() {
     const target = element(selector);
     if (target) target.disabled = resume;
   });
+  window.MaichartWorkflow?.refresh();
 }
 
 // ---------------------------------------------------------------------------
@@ -1087,24 +1109,40 @@ function updateTrainingControls() {
 const TASK_KIND_LABEL = {
   preprocess: "预处理", train: "训练", generate: "生成", gold: "金标集", acceptance: "验收",
 };
+const taskWatchers = new Map();
 
 function watchTask(taskId, onFinished = null) {
   activeTaskId = taskId;
-  pollTask(taskId, onFinished);
+  const existing = taskWatchers.get(taskId);
+  if (existing) {
+    if (onFinished) existing.callbacks.add(onFinished);
+    if (existing.task) renderTask(existing.task);
+    return;
+  }
+  taskWatchers.set(taskId, { callbacks: new Set(onFinished ? [onFinished] : []), task: null });
+  pollTask(taskId);
 }
 
-async function pollTask(taskId, onFinished = null) {
+async function pollTask(taskId) {
+  const watcher = taskWatchers.get(taskId);
+  if (!watcher) return;
   try {
     const task = await api(`/api/task?id=${encodeURIComponent(taskId)}`);
+    watcher.task = task;
+    window.MaichartWorkflow?.recordTask(task);
     if (activeTaskId === taskId) renderTask(task);
     if (["queued", "running"].includes(task.status)) {
-      setTimeout(() => pollTask(taskId, onFinished), 800);
-    } else if (onFinished) {
-      await onFinished(task);
+      setTimeout(() => pollTask(taskId), 800);
+    } else {
+      taskWatchers.delete(taskId);
+      for (const callback of watcher.callbacks) await callback(task);
     }
   } catch (error) {
-    const message = element("#taskMessage");
-    if (message) message.textContent = error.message;
+    if (activeTaskId === taskId) {
+      const message = element("#taskMessage");
+      if (message) message.textContent = `状态读取失败，正在重连：${error.message}`;
+    }
+    if (taskWatchers.has(taskId)) setTimeout(() => pollTask(taskId), 3000);
   }
 }
 
@@ -1117,7 +1155,7 @@ function renderTask(task) {
   const logs = element("#taskLogs");
   const epochStatus = trainingEpochStatus(task);
   if (kind) kind.textContent = `${TASK_KIND_LABEL[task.kind] || task.kind} · ${task.task_id}`;
-  if (status) status.textContent = task.status;
+  if (status) status.textContent = ({queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已中断"})[task.status] || task.status;
   if (progress) {
     const unknownTrainingTarget = task.kind === "train" && !epochStatus?.knownTarget;
     if (progress.parentElement) progress.parentElement.hidden = unknownTrainingTarget;
@@ -1132,7 +1170,9 @@ function renderTask(task) {
       task.result?.selection_metric === "training_loss" ? "；best 依据训练 loss（未配置验证集）"
       : task.result?.selection_metric === "validation_loss" ? "；best 依据验证 loss" : "");
   }
-  if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
+  if (window.MaichartLogs) window.MaichartLogs.renderTask(task);
+  else if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
+  window.MaichartWorkflow?.recordTask(task);
 
   const cancel = element("#cancelButton");
   if (cancel) cancel.disabled = !["queued", "running"].includes(task.status);
@@ -1562,7 +1602,9 @@ async function loadStatus() {
   await loadDatasetCatalog();
   const running = (state.tasks || []).find((task) => ["queued", "running"].includes(task.status)
     && !String(task.kind || "").startsWith("intensity"));
-  if (running) {
+  window.MaichartWorkflow?.renderTasks(state.tasks || []);
+  window.MaichartWorkflow?.refresh();
+  if (running && !activeTaskId) {
     renderTask(running);
     watchTask(running.task_id);
   }
@@ -1711,7 +1753,9 @@ function applyCheckpointModelConfig(data) {
   const familyMapping = {
     "#contextBeats": familyParams.context_beats,
     "#audioMarginBeats": familyParams.audio_margin_beats,
-    "#contextTokens": familyParams.context_tokens,
+    "#contextTokens": currentTrainingMode() === "finetune"
+      && element("#contextTokens")?.dataset.touched === "1"
+      ? undefined : familyParams.context_tokens,
     "#overlapBeats": familyParams.overlap_beats,
     "#contextDropout": familyParams.context_dropout,
   };
@@ -1794,7 +1838,7 @@ function renderCheckpointInspection(data) {
     `模型结构：${JSON.stringify(data.model_config || {})}`,
     `数据合同：${JSON.stringify(data.data_contract || {})}`,
     data.model_config?.input_dim !== undefined ? `事件输入维度：${data.model_config.input_dim}` : "",
-    data.model_config?.plan_dim !== undefined ? `Planner 维度：${data.model_config.plan_dim}（5 个连续规划量 + 4 个配置类别 logits）` : "",
+    data.model_config?.plan_dim !== undefined ? `Planner 输出维度：${data.model_config.plan_dim}（按所选 profile 解释）` : "",
     data.data_contract?.condition_params?.null_policy ? `Null 条件策略：${data.data_contract.condition_params.null_policy}` : "",
     data.warnings?.length ? `警告：\n${formatList(data.warnings)}` : "",
     data.errors?.length ? `错误：\n${formatList(data.errors)}` : "",
@@ -1809,8 +1853,8 @@ function renderCheckpointInspection(data) {
   setCheckpointStatus(state + conditionHint + (data.warnings?.length ? `；警告 ${data.warnings.length} 条` : ""), valid ? "good" : "warn");
 }
 
-async function inspectCheckpoint() {
-  assertTrainingSelection();
+async function inspectCheckpoint({ autoPreprocess = false } = {}) {
+  assertTrainingSelection({ autoPreprocess });
   await assertDatasetBackend();
   const mode = currentTrainingMode();
   if (mode === "fresh") {
@@ -1821,7 +1865,7 @@ async function inspectCheckpoint() {
   }
   const checkpointPath = valueOrDefault("#trainingCheckpointPath", "").trim();
   if (!checkpointPath) throw new Error("请先上传或填写已有模型 checkpoint 路径");
-  const manifest = trainingSourcePaths().manifest;
+  const manifest = trainingSourcePaths({ autoPreprocess }).manifest;
   if (!manifest && !selectedTrainingManifests().length) throw new Error("请先选择训练数据集");
   const request = ++checkpointInspectRequest;
   const key = currentCheckpointKey();
@@ -1829,12 +1873,23 @@ async function inspectCheckpoint() {
   const box = element("#checkpointDetails");
   if (box) box.hidden = true;
   const data = await api("/api/checkpoint/inspect", {
-    checkpoint_path: checkpointPath, model_family: currentModelFamily(), mode, manifest, manifests: selectedTrainingManifests(), dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
+    checkpoint_path: checkpointPath, model_family: currentModelFamily(), mode, manifest,
+    auto_preprocess: autoPreprocess,
+    manifests: selectedTrainingManifests(), dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
   });
   if (request !== checkpointInspectRequest || key !== currentCheckpointKey()) return null;
   checkpointInspection = { key, data };
   if (data.valid === true) applyCheckpointModelConfig(data);
   renderCheckpointInspection(data);
+  if (data.valid === true) {
+    const contextTokens = element("#contextTokens");
+    const contextNote = mode === "finetune" && contextTokens?.dataset.touched === "1"
+      ? `；保留手动设置的上下文 token 上限 ${contextTokens.value}` : "";
+    setCheckpointStatus(
+      `${mode === "resume" ? "已从 checkpoint 载入模型结构与训练合同" : "已从 checkpoint 载入模型结构；加强训练保留采样等可调设置"}${contextNote}${data.warnings?.length ? `；另有 ${data.warnings.length} 项提示，可展开模型合同查看` : ""}`,
+      data.warnings?.length ? "warn" : "good",
+    );
+  }
   updateTrainingControls();
   return data;
 }
@@ -2002,10 +2057,27 @@ function renderGoldResult(task) {
 // Training
 // ---------------------------------------------------------------------------
 async function startTrain(options = {}) {
+  if (trainingStarting || trainingPreflight) return;
+  trainingPreflight = true;
+  updateDatasetButtons();
+  try { return await submitTrain(options); }
+  finally { trainingPreflight = false; updateDatasetButtons(); }
+}
+
+async function submitTrain(options = {}) {
   setWorkspaceMode("training");
   if (datasetUploading) throw new Error("请等待上传完成后再开始训练。");
   assertTrainingSelection({ autoPreprocess: !!options.autoPreprocess });
   await assertDatasetBackend();
+  if (currentTrainingMode() !== "fresh") {
+    if (options.autoPreprocess && currentModelFamily() === "legacy_frame_v2") {
+      throw new Error("旧固定帧模型的续训/加强训练请先点击“预处理当前目录”，完成后使用“开始训练”，以便检查完整的数据合同。");
+    }
+    const inspection = await inspectCheckpoint({ autoPreprocess: !!options.autoPreprocess });
+    if (!inspection || inspection.valid !== true) {
+      throw new Error(`已有模型检查未通过：${formatList(inspection?.errors) || "请确认路径、模型族与训练来源"}`);
+    }
+  }
   const payload = { ...trainingPayload({ autoPreprocess: !!options.autoPreprocess }), auto_preprocess: !!options.autoPreprocess };
   if (payload.model_family !== "legacy_frame_v2") {
     const inputStatus = await api("/api/status");
@@ -2793,6 +2865,15 @@ async function restoreIntensityBackdrop() {
 }
 
 async function startGenerate() {
+  if (generationSubmitting) return;
+  generationSubmitting = true;
+  const button = element("#generateButton");
+  if (button) button.disabled = true;
+  try { return await submitGenerate(); }
+  finally { generationSubmitting = false; if (button) button.disabled = false; }
+}
+
+async function submitGenerate() {
   setWorkspaceMode("generation");
   const payload = generationPayload();
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
@@ -2849,19 +2930,27 @@ async function startGenerate() {
 
 function clearGenerate() {
   resetGenerationDefaults();
-  ["#checkpointPath", "#audioPath", "#outputPath", "#tempoMap", "#goldStatsPath",
+  ["#checkpointPath", "#audioPath", "#featurePath", "#tempoMap", "#goldStatsPath",
     "#acceptanceMaidata", "#acceptanceAudio", "#qualityStatus", "#qualityDiagnostics"]
     .forEach((selector) => {
       const target = element(selector);
       if (!target) return;
-      if (target.tagName === "PRE" || target.tagName === "TEXTAREA") target.textContent = "";
+      if (target.tagName === "TEXTAREA" || target.tagName === "INPUT") target.value = "";
+      else target.textContent = "";
     });
+  ["#checkpointFile", "#audioFile", "#featureFile"].forEach((selector) => {
+    const target = element(selector); if (target) target.value = "";
+  });
+  if (element("#outputPath")) element("#outputPath").value = "webui_workspace/generated/maidata.txt";
+  generationInspection = {path: "", data: null};
+  updateFamilyFields();
   ["#checkpointUploadStatus", "#audioUploadStatus", "#featureUploadStatus"].forEach((selector) => {
     if (element(selector)) element(selector).textContent = "未导入文件";
   });
   const panel = element("#acceptancePanel");
   if (panel) panel.hidden = true;
-  setAcceptanceStatus("已清空生成参数；训练设置未改动。");
+  setGenerationStatus("已清空导入路径，请重新选择歌曲与 checkpoint。");
+  setAcceptanceStatus("已清空导入路径与生成参数，输出路径恢复默认；训练设置未改动。");
   saveSettings();
 }
 
@@ -3038,10 +3127,7 @@ if (restoredSettingNotice) {
   if (status) status.textContent = restoredSettingNotice;
 }
 if (restoredSettings) {
-  // Recompute mode-dependent defaults, then put the user's own lr back on top.
-  const learningRate = valueOrDefault("#learningRate", "");
-  setTrainingModeDefaults(true);
-  if (learningRate && element("#learningRate")) element("#learningRate").value = learningRate;
+  setTrainingModeDefaults();
 }
 updateTrainingControls();
 updateGoldFields();
@@ -3060,6 +3146,7 @@ if (intensityCurveState.profile) {
     const target = event.target;
     if (!target || !target.id || target.type === "file") return;
     if (target.id === "learningRate") target.dataset.touched = "1";
+    if (target.id === "contextTokens") target.dataset.touched = "1";
     if (target.id === "fineNoteStrength") {
       const output = element("#fineNoteStrengthValue");
       if (output) output.textContent = Number(target.value).toFixed(2);
@@ -3097,7 +3184,7 @@ on("#tapOnSlideThresholdMs", "change", () => {
 
 // Training panel
 on("#modelFamily", "change", () => { updateTrainingControls(); saveSettings(); });
-on("#trainingMode", "change", () => { setTrainingModeDefaults(true); updateTrainingControls(); });
+on("#trainingMode", "change", () => { setTrainingModeDefaults(); updateTrainingControls(); });
 on("#goldMode", "change", () => { updateGoldFields(); saveSettings(); });
 on("#preprocessButton", "click", startPreprocess);
 on("#inspectManifestButton", "click", inspectManifest);
@@ -3108,7 +3195,7 @@ on("#openQualityWorkspaceButton", "click", openDatasetWorkspace);
 on("#chooseTrainingDatasetsButton", "click", openDatasetWorkspace);
 on("#datasetWorkspaceRefreshButton", "click", async () => { await loadStatus(); });
 on("#datasetComposeButton", "click", composeSelectedDatasets);
-on("#datasetImportButton", "click", () => { setWorkspaceMode("training"); element("#rawRoot")?.scrollIntoView({ block: "center" }); element("#rawRoot")?.focus(); setStatus("上传训练集 ZIP，或填写本机目录并点击“登记当前目录到训练素材”。", true); });
+on("#datasetImportButton", "click", () => { setWorkspaceMode("training"); window.MaichartWorkflow?.focusSetting("rawRoot"); setStatus("上传训练集 ZIP，或填写本机目录并点击“登记当前目录到训练素材”。", true); });
 on("#registerDatasetButton", "click", registerCurrentDataset);
 on("#datasetBackButton", "click", showDatasetCards);
 on("#qualityRefreshButton", "click", () => loadQualityCatalog(true));

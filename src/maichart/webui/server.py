@@ -178,7 +178,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         if parsed.path == "/":
             return self._serve_static("index.html")
-        if parsed.path in {"/app.js", "/styles.css"}:
+        if parsed.path in {"/app.js", "/styles.css", "/workspace.js", "/workspace.css",
+                           "/workspace_logs.js", "/workspace_logs.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
         if parsed.path == "/api/status":
             return self._json_response(

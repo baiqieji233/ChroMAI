@@ -303,11 +303,11 @@ def test_generation_reset_is_scoped_to_the_generation_panel():
     scoped to an explicit allow-list of generation fields.
     """
 
-    # It lives in the generation panel, on the sampling group header.
+    # Reset tools remain inside the generation page's dedicated recovery group.
     generation_start = INDEX.index("生成谱面")
     button_at = INDEX.index('id="resetGenerationButton"')
     assert button_at > generation_start, "the button belongs to the generation panel"
-    assert "采样与随机性" in INDEX[button_at - 600:button_at]
+    assert 'id="generationReset"' in INDEX[button_at - 600:button_at]
 
     handler = APP_JS[APP_JS.index('$("#resetGenerationButton")'):]
     handler = handler[:handler.index("});") + 3]
@@ -358,9 +358,10 @@ def test_every_button_is_wired_and_every_reference_exists():
     buttons = re.findall(r"<button[^>]*id=\"([^\"]+)\"", INDEX)
     assert buttons, "the page must expose buttons"
 
-    referenced = set(re.findall(r'\$\("#([A-Za-z0-9_]+)"\)', APP_JS))
-    referenced |= set(re.findall(r'\bon\("#([A-Za-z0-9_]+)"', APP_JS))
-    referenced |= set(re.findall(r'\belement\("#([A-Za-z0-9_]+)"\)', APP_JS))
+    scripts = APP_JS + (ROOT / "src/maichart/webui/static/workspace.js").read_text(encoding="utf-8")
+    referenced = set(re.findall(r'\$\("#([A-Za-z0-9_]+)"\)', scripts))
+    referenced |= set(re.findall(r'\bon\("#([A-Za-z0-9_]+)"', scripts))
+    referenced |= set(re.findall(r'\belement\("#([A-Za-z0-9_]+)"\)', scripts))
 
     dead = [button for button in buttons if button not in referenced]
     assert not dead, f"buttons without any handler: {dead}"

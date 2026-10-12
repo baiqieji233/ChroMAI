@@ -5,6 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>maimai AI Chart Lab</title>
   <link rel="stylesheet" href="/styles.css">
+  <link rel="stylesheet" href="/workspace.css">
+  <link rel="stylesheet" href="/workspace_logs.css">
 </head>
 <body>
   <header class="topbar">
@@ -29,106 +31,99 @@
       </nav>
 
       <section class="panel workflow-panel training-mode-panel">
-        <div class="section-heading">
-          <div><span class="step">START</span><h2>第一次使用请按这里</h2></div>
-          <span class="muted">按 01 → 02 → 03 顺序完成</span>
-        </div>
-        <ol class="workflow-list">
-          <li><strong>准备训练集：</strong>上传 ZIP，或填写一个包含歌曲目录的本机文件夹，然后点击“预处理训练集”。</li>
-          <li><strong>检查并训练：</strong>点击“检查训练集状态”确认样本数，再点击“开始训练”。首次请用 1 个 epoch 验证流程。</li>
-          <li><strong>生成谱面：</strong>上传音频，选择训练产生的 checkpoint，调整目标等级和风格，点击“生成谱面”。</li>
-        </ol>
-        <p class="notice">
-          默认训练 event_v1。旧模型需要重新训练才能使用事件主路径；一百余张谱面仅适合流程和小样本测试，生成不保证难度或质量。
-          每个参数下方都写了它的作用和影响；<strong>只有标着“影响训练结果”的参数会改变模型学到的内容</strong>，其余只影响速度或输出元数据。
-        </p>
-      </section>
+<div class="section-heading">
+<div><span class="step">START</span><h2>先选好你要做的事</h2></div></div>
+<div class="workflow-routes"><button type="button" data-focus-setting="datasetSelect"><strong>准备新素材</strong><span>导入目录或 ZIP，完成预处理后勾选训练来源。</span></button><button type="button" data-focus-setting="trainingMode"><strong>训练或加强模型</strong><span>选择训练起点，检查 checkpoint，设置本次训练。</span></button><button type="button" data-workspace-link="generation"><strong>我已有模型，要生成谱面</strong><span>直接进入生成页，导入歌曲与 checkpoint。</span></button></div>
+<p class="workflow-hint">训练默认使用跨窗口事件模型。验证集与 gold 都是可选项。已有模型的兼容设置以检查结果为准。</p>
+</section>
 
       <section class="panel training-panel">
-        <div class="section-heading">
-          <div><span class="step">01-02</span><h2>准备训练集并开始训练</h2></div>
-          <span class="muted">先预处理 → 再检查 → 最后训练</span>
-        </div>
-
-        <h3 class="group-title">A. 训练来源、素材导入与输出位置</h3>
-        <div id="trainingDatasetSelection" class="inline-status">单数据集模式：使用下方当前训练清单。</div>
-        <div id="effectiveTrainingManifest" class="inline-status">检查所选来源后显示实际训练清单。</div>
-        <div class="button-row"><button id="chooseTrainingDatasetsButton" class="secondary-button" type="button">选择本次训练来源</button></div>
-        <p class="param-intro">在“训练素材”勾选本次要训练的数据集，可只选一份精选集，也可混合多份。下方目录控件用于导入和预处理，切换它们不会取消已有训练勾选。</p>
-        <div class="form-grid">
-          <label class="field span-4">模型族 / Model family
-            <select id="modelFamily">
-              <option value="event_ctx_v1" selected>event_ctx_v1 跨窗口事件模型（当前推荐主路径）</option>
-              <option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option>
-              <option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option>
-            </select>
-            <small id="modelFamilyHelp">事件模型当前使用 112 维 <code>event_audio_v2_rhythm</code>（包含拍内节奏特征）、窗口 planner 和显式 null embedding；不需要 frame division。旧 checkpoint 不能跨 schema 续训或微调。<strong>event_ctx_v1</strong> 在 event_v1 的基础上，让每个窗口额外看到「前面已写的音符」与「前后的音乐」，用来消除窗口接缝处的突兀——词表与 checkpoint 都与 event_v1 不通用，必须单独训练。</small>
-          </label>
-          <label class="field span-2">当前预处理数据集
+<div class="section-heading">
+<div><span class="step">TRAIN</span><h2>训练模型</h2></div><span class="muted">先准备来源，再选择起点，最后调整运行参数</span></div>
+<div class="settings-toolbar">
+<label class="parameter-search">查找参数<input id="trainingParameterSearch" type="search" placeholder="如：学习率、上下文、无理" autocomplete="off" data-parameter-search="training"></label><button type="button" class="small-button" data-expand-settings="training">展开高级设置</button><button type="button" class="small-button" data-collapse-settings="training">收起高级设置</button>
+<div id="trainingParameterResults" class="parameter-results" hidden></div></div>
+<section id="trainingDataGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">01</span>
+<div><h3>选择训练素材</h3>
+<p>可使用一份数据集，也可在训练素材中勾选多份。</p></div></div>
+<div id="trainingDatasetSelection" class="inline-status">单数据集模式：使用下方当前训练清单。</div>
+<div id="effectiveTrainingManifest" class="inline-status">检查所选来源后显示实际训练清单。</div>
+<div class="button-row"><button id="chooseTrainingDatasetsButton" class="secondary-button" type="button">选择本次训练来源</button><button id="inspectManifestButton" class="secondary-button">检查所选训练来源</button></div>
+<p id="manifestCheckStatus" class="inline-status">建议先预处理，再检查 manifest；检查通过后再开始训练。</p>
+<details id="trainingImport" class="settings-section"  >
+<summary><span>导入或预处理新的素材</span><small>已有训练集可跳过这一步</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field span-2">当前预处理数据集
             <select id="datasetSelect"><option value="">正在读取上传记录...</option></select>
             <small>只切换下面的原始目录、缓存和预处理输出；已有训练勾选保持不变。训练来源请点击“选择本次训练来源”。</small>
           </label>
-          <label class="field span-2">上传训练集 ZIP
+<label class="field span-2">上传训练集 ZIP
             <input id="datasetZip" type="file" accept=".zip">
-            <small id="datasetUploadStatus">1. 上传只解压 ZIP。完成后点击“2. 预处理训练集”生成训练清单。</small>
+            <small id="datasetUploadStatus">上传会先解压 ZIP；完成后点击“预处理当前目录”。</small>
           </label>
-          <label class="field span-4">当前预处理原始目录
+<label class="field span-4">当前预处理原始目录
             <textarea id="rawRoot" class="path-input" rows="2" placeholder="上传 ZIP 后自动填写，或粘贴本机文件夹路径"></textarea>
             <small>程序会递归寻找歌曲目录（含 maidata.txt 的文件夹）；每次上传 ZIP 会自动切换到独立目录。预处理一次针对当前目录；多份已预处理数据请在“训练素材”页勾选后合并。</small>
             <button id="registerDatasetButton" class="secondary-button" type="button">登记当前目录到训练素材</button>
-          </label>
-          <label class="field span-4">当前预处理缓存目录
+          </label></div>
+<div class="button-row"><button id="preprocessButton" class="secondary-button">预处理当前目录</button></div>
+<p class="workflow-hint">上传或登记目录后，预处理一次。随后到训练素材中勾选本次来源；已经处理过的数据集可以直接复用。</p>
+<details id="trainingImportAdvanced" class="settings-section" data-advanced >
+<summary><span>预处理路径与高级选项</span><small>缓存、清单、采样率和限量读取</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field span-4">当前预处理缓存目录
             <textarea id="cacheDir" class="path-input" rows="2">cache</textarea>
             <small>保存音频特征缓存；上传新 ZIP 后会自动换用新目录。换目录等于全部重新分析音频，不会影响已训好的模型。</small>
           </label>
-          <label class="field span-4">当前预处理输出清单（manifest）
+<label class="field span-4">当前预处理输出清单（manifest）
             <textarea id="manifestPath" class="path-input" rows="2">manifests/training_manifest.json</textarea>
             <small>当前目录预处理写入这里。已勾选训练来源时，训练会自动准备对应清单，联合清单不会覆盖这里。未使用素材勾选的兼容单集流程，仍直接读取这里的清单。</small>
           </label>
-          <label class="field span-4" data-training-family="event_v1">验证 manifest 路径（可选）
-            <textarea id="validationManifestPath" class="path-input" rows="2" placeholder="例如 manifests/splits/val.json"></textarea>
-            <small>
-              可以留空正常训练，无需建立 gold，也不会自动拆分训练集。留空时 <code>event_best.pt</code> 与学习率调度依据训练 loss，验证早停不启用；best 不表示已通过实际谱面验收。
-              如主动填写独立验证集，则按验证 loss 选择 best 和调度学习率。可按数据量与人工测试需要决定是否使用。
-            </small>
-          </label>
-          <label class="field span-4">checkpoint 输出目录
-            <textarea id="checkpointDir" class="path-input" rows="2">checkpoints/event_v1</textarea>
-            <small id="checkpointDirHelp">event_last.pt / event_best.pt / event_epoch_NNN.pt。继续训练建议使用新目录，保留原模型。</small>
-          </label>
-        </div>
-
-        <h3 class="group-title">B. 预处理参数<span class="group-note">只改变“数据怎么读进来”，不改变模型结构</span></h3>
-        <div class="form-grid">
-          <label class="field">预处理采样率
+<label class="field">预处理采样率
             <input id="prepSampleRate" type="number" value="22050" min="8000" step="100">
             <small>音频分析采样率。<strong>必须与训练时一致</strong>：改它会作废全部音频缓存，并让已有 checkpoint 不再兼容（缓存会自动重建）。不是为了特殊需求不要改。</small>
           </label>
-          <label class="field" data-training-family="legacy_frame_v2" hidden>旧基线预处理 division
+<label class="field" data-training-family="legacy_frame_v2" hidden>旧基线预处理 division
             <input id="prepDivision" type="number" value="16" min="1">
             <small>训练标签的节拍网格；整次实验保持一致。</small>
           </label>
-          <label class="field" data-training-family="legacy_frame_v2" hidden>旧基线预处理音频特征方案
+<label class="field" data-training-family="legacy_frame_v2" hidden>旧基线预处理音频特征方案
             <select id="prepFeatureProfile">
               <option value="basic_v1">basic_v1（兼容性优先）</option>
               <option value="rhythm_v2" disabled>rhythm_v2（旧基线占位，不用于 event 模型）</option>
             </select>
             <small>此控件只属于旧 fixed-frame 基线。event 模型固定使用 <code>event_audio_v2_rhythm</code>、112 维输入，由 event manifest 决定。</small>
           </label>
-          <label class="field">预处理样本上限
+<label class="field">预处理样本上限
             <input id="prepLimit" type="number" min="1" placeholder="不限制">
             <small>只处理前 N 首歌。新手验证流程可填 1 或 2 来快速跑通；<strong>正式训练务必留空</strong>，否则模型只看过极少量数据。</small>
           </label>
-          <label class="checkbox-field">
+<label class="checkbox-field">
             <input id="prepForce" type="checkbox">
             <span>强制重建缓存</span>
             <small>忽略已有缓存重新分析。改了采样率或特征方案时缓存本就会自动作废，无需手动勾选；仅在缓存疑似损坏时使用。会显著变慢。</small>
-          </label>
-        </div>
-
-        <h3 class="group-title">C. 训练方式<span class="group-note">决定“从哪里开始训练”</span></h3>
-        <div class="form-grid">
-          <label class="field span-2">训练方式
+          </label></div></div>
+</details>
+<details id="trainingOneClick" class="settings-section"  >
+<summary><span>当前单来源：预处理后立即训练</span><small>确认下方训练参数后再使用</small>
+</summary>
+<div class="settings-content">
+<p class="workflow-hint">这会按当前参数预处理当前目录，成功后立即开始训练；也会使用“强制重建缓存”设置。多个来源应分别预处理后使用主按钮。</p><button id="autoPipelineButton" class="primary-button" title="仅用于当前单来源；多个训练来源请分别预处理，再点击开始训练">一键：预处理 + 开始训练</button></div>
+</details></div>
+</details>
+<div id="processingErrors" class="processing-errors" hidden></div>
+</section>
+<section id="trainingStartGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">02</span>
+<div><h3>选择训练起点</h3>
+<p>从头训练、续训和加强训练的用途不同。</p></div></div>
+<div class="form-grid">
+<label class="field span-2">训练方式
             <select id="trainingMode">
               <option value="fresh">从头训练（fresh）</option>
               <option value="resume">从断点继续（resume）</option>
@@ -136,77 +131,67 @@
             </select>
             <small id="trainingModeHelp">从随机初始化开始；不需要已有 checkpoint。</small>
             <small data-training-family="event_v1 event_ctx_v1">从头训练 / finetune 会采用当前的节奏贴合标签时间轴，计入谱面音频偏移；resume 继承 checkpoint 的目标版本。旧模型若要采用这项修正，请用 finetune。迁移不会改变词表或生成架构。</small>
-          </label>
-          <label class="field span-4">已有模型 checkpoint（resume / finetune 使用，仅限同模型族）
+          </label></div>
+<p class="workflow-hint">首次建立模型选“从头训练”；延续同一次实验选“从断点继续”；更换精选数据或调整采样策略选“已有模型加强训练”。</p>
+<div id="trainingCheckpointGroup">
+<div class="form-grid">
+<label class="field span-4">已有模型 checkpoint（resume / finetune 使用，仅限同模型族）
             <input id="trainingCheckpointFile" type="file" accept=".pt,.pth">
             <small id="trainingCheckpointUploadStatus">可上传已有 .pt/.pth，也可以直接粘贴完整路径。</small>
             <textarea id="trainingCheckpointPath" class="path-input" rows="3" placeholder="例如 E:\simai_transformer\checkpoints\event_v1\event_last.pt"></textarea>
-          </label>
-          <div class="checkpoint-actions span-2">
+          </label></div>
+<div class="checkpoint-actions span-2">
             <button id="checkpointInspectButton" class="secondary-button" type="button">检查 checkpoint</button>
             <p id="checkpointInspectStatus" class="inline-status">从头训练不需要 checkpoint；选择已有模型模式后请先检查。</p>
-            <pre id="checkpointDetails" class="checkpoint-details" hidden></pre>
-          </div>
-          <label class="checkbox-field" data-training-family="legacy_frame_v2" hidden>
-            <input id="resetOptimizer" type="checkbox">
-            <span>重置优化器状态（finetune 默认开启）</span>
-            <small>清空动量与自适应学习率历史。finetune 时通常需要重置，否则旧状态会把新数据上的更新拉回去；resume 时<strong>不要</strong>勾选，否则等于丢掉训练进度。</small>
-          </label>
-          <label class="field" data-training-family="legacy_frame_v2" hidden>旧基线音频特征方案
-            <select id="featureProfile">
-              <option value="basic_v1">basic_v1（兼容性优先）</option>
-              <option value="rhythm_v2" disabled>rhythm_v2（旧基线占位）</option>
-              <option value="event_audio_v2_rhythm" disabled>event_audio_v2_rhythm（事件模型，由 manifest 决定）</option>
-            </select>
-            <small>rhythm_v2 会改变输入结构；旧 checkpoint 不兼容。百谱可行性测试建议先用 basic_v1。</small>
-          </label>
-          <label class="checkbox-field span-2" data-training-family="legacy_frame_v2" hidden>
-            <input id="includeUnusable" type="checkbox">
-            <span>允许使用 QC 过滤样本（只在缓存完整且已检查原因时启用）</span>
-          </label>
-        </div>
-
-        <h3 class="group-title">D. 核心训练参数<span class="group-note">这几项最直接决定模型学到什么，优先调这些</span></h3>
-        <div class="form-grid">
-          <label class="field"><span id="epochsLabel">训练 epochs</span>
+            <details class="checkpoint-contract-details"><summary>模型合同与兼容性详细信息</summary><pre id="checkpointDetails" class="checkpoint-details" hidden></pre></details>
+          </div></div>
+</section>
+<section id="trainingRunGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">03</span>
+<div><h3>设置训练与输出</h3>
+<p>先调整常用参数，其他设置保留当前值。</p></div></div>
+<div class="form-grid">
+<label class="field"><span id="epochsLabel">训练 epochs</span>
             <input id="epochs" type="number" min="1" value="20">
-            <small id="epochsHelp">fresh 模式的总训练轮数。<strong>配了验证 manifest 时建议填大（如 80）并交给"早停耐心"决定实际轮数</strong>——
-            它会在验证 loss 不再改善时自动停，填大只是给足上限，不会白跑。</small>
+            <small id="epochsHelp">本次从头训练的轮数。短跑可先限制 batch 数验证流程；正式训练轮数按数据量和实际生成效果选择。</small>
           </label>
-          <label class="field" data-training-family="event_v1">训练 batch 上限（短跑）
-            <input id="maxSteps" type="number" min="0" step="1" value="0">
-            <small>0 表示完整 epoch；填 8、32 等可通过 WebUI 做受控 smoke。只影响本次运行，不写入模型结构合同。</small>
-          </label>
-          <label class="field" data-training-family="event_v1">验证 batch 上限（短跑）
-            <input id="validationMaxSteps" type="number" min="0" step="1" value="0">
-            <small>0 表示跑完整验证集；短跑时建议填 1–8。只影响本次验证耗时。</small>
-          </label>
-          <label class="field">学习率 lr
+<label class="field">学习率 lr
             <input id="learningRate" type="number" min="0.0000001" max="1" step="0.000001" value="0.0002">
             <small id="learningRateHelp">fresh 默认 2e-4；finetune 默认 2e-5。</small>
           </label>
-          <label class="field">batch size
+<label class="field">batch size
             <input id="batchSize" type="number" min="1" value="16">
             <small><strong>影响训练速度与显存。</strong>一次并行多少片段。批会按本批最长样本补齐，批越小每批峰值显存越低。
             所需显存还取决于模型层数、宽度、音频长度和上下文，默认 16 不保证适合所有 checkpoint。当前 full v3 实验使用 batch 8、梯度累积 4；加大 batch 前先检查日志中的 <code>cuda_memory</code> 峰值和速度。
             训练已内置显存硬上限（默认 60% 设备显存）：宁可报 OOM 提示你降批，也不会静默溢出。</small>
           </label>
-          <label class="field">梯度累积
+<label class="field">梯度累积
             <input id="gradAccumulation" type="number" min="1" value="2">
             <small><strong>每次更新的样本量约为 batch × 累积。</strong>显存不足时可以缩小 batch、加大累积。默认 2 与 batch 16 约为每次 32 个样本；不同长度的 token 归一化、Dropout 和尾批会使它不完全等同于一次大 batch，速度也需要实际测量。</small>
           </label>
-          <label class="field" data-training-family="event_v1">最大事件 tokens max_tokens
-            <input id="trainMaxTokens" type="number" min="64" step="64" value="768">
-            <small id="trainMaxTokensHelp" data-training-family="event_v1">
-              <strong>影响可纳入的片段长度，也影响数据合同。</strong>这是单个训练序列允许的最大 token 数，包含跨窗口引子和目标事件。
-              超过上限的训练片段会被排除，不能假定 768 能覆盖所有训练集。实际张量按批内最长样本补齐，不是每批都补到该上限；降低它可能提速，也可能丢掉复杂长配置。改它会写入 checkpoint 数据合同，旧的同族 checkpoint 将不能 resume。
-            </small>
+<label class="field">设备
+            <select id="device"><option value="auto">自动</option><option value="cuda">CUDA 显卡</option><option value="cpu">CPU</option></select>
+            <small>仅影响速度。CPU 训练在 860 万参数 + 2000 余片段下会慢到不实用。</small>
           </label>
-          <label class="field" data-training-family="event_v1">segment beats
-            <input id="segmentBeats" type="number" min="1" step="1" value="16">
-            <small><strong>影响训练结果。</strong>每个片段切多少拍。默认 16；修改后旧 checkpoint 必须重训。</small>
-          </label>
-          <label class="field" data-training-family="event_v1">训练难度槽范围
+<label class="field span-4">checkpoint 输出目录
+            <textarea id="checkpointDir" class="path-input" rows="2">checkpoints/event_v1</textarea>
+            <small id="checkpointDirHelp">event_last.pt / event_best.pt / event_epoch_NNN.pt。继续训练建议使用新目录，保留原模型。</small>
+          </label></div>
+<div class="quick-settings">
+<div><strong>快速设置运行方式</strong>
+<p>只改运行长度或批大小，不改变模型结构与训练来源。</p></div>
+<label>运行范围<select id="trainingRunRecipe"><option value="full">完整训练：取消 batch 上限，轮数自行设置</option><option value="smoke">短跑检查：1 轮，最多 32 个训练 batch</option></select></label><button id="applyTrainingRunRecipe" type="button" class="secondary-button">应用运行范围</button>
+<label>批次组合<select id="trainingBatchRecipe"><option value="8,4">8 × 4：每次更新约 32 个片段</option><option value="4,8">4 × 8：降低每批显存</option><option value="16,2">16 × 2：提高单批并行量</option></select></label><button id="applyTrainingBatchRecipe" type="button" class="secondary-button">应用批次组合</button>
+<p id="trainingRecipeStatus" role="status">显存占用还取决于片段长度和模型大小；批次组合不是显存保证。</p></div>
+</section>
+<div class="advanced-heading"><h3>按用途调整高级设置</h3><span id="trainingAdvancedCount" class="muted"></span></div>
+<p class="workflow-hint">折叠只收起界面，里面的设置仍然生效。可用顶部搜索快速定位参数。</p>
+<details id="trainingSampling" class="settings-section" data-advanced >
+<summary><span>数据筛选与采样倾向</span><small>训练范围、Slide / Touch / 细碎节奏倍率</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-training-family="event_v1">训练难度槽范围
             <div class="inline-fields">
               <input id="minDifficultyIndex" type="number" min="1" max="6" step="1" value="4" aria-label="最低难度槽">
               <span>至</span>
@@ -214,7 +199,7 @@
             </div>
             <small>1–6 对应 Simai 难度槽：1=Easy、2=Basic、3=Advanced、4=Expert、5=Master、6=Re:Master。筛选结果会写入数据集签名。</small>
           </label>
-          <label class="field" data-training-family="event_v1">训练定数范围
+<label class="field" data-training-family="event_v1">训练定数范围
             <div class="inline-fields">
               <input id="minLevel" type="number" min="1" max="15" step="0.1" value="12" aria-label="最低定数">
               <span>至</span>
@@ -222,28 +207,174 @@
             </div>
             <small>只纳入定数位于此区间且通过谱面质量检查的难度。建议先用 1–15 扩大难度控制范围。</small>
           </label>
-          <label class="field" data-training-family="event_v1">音频最大 token
+<label class="field" data-training-family="event_ctx_v1" hidden>Slide 窗口过采样（slide_oversample）
+            <input id="slideOversample" type="number" min="1" step="1" value="2">
+            <small><strong>默认 2，填 1 表示关闭过采样。</strong>仅对含 Slide 且不含 Touch/TouchHold 的窗口生效（可同时含 Tap、Hold 等其他类型）。含 Touch 的窗口由下方 Touch 倍率处理；两者不会相乘。<strong>属数据合同</strong>：普通 resume 必须同值。</small>
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>Touch 窗口过采样（touch_oversample）
+            <input id="touchOversample" type="number" min="1" step="1" value="1">
+            <small><strong>默认 1，填 1 表示关闭过采样但仍保留真实 Touch。</strong>对含 Touch 或 TouchHold 的窗口生效；即使同时含 Slide，也优先使用 Touch 倍率。建议先用 1 抑制 Touch 先验。普通 resume 必须与 checkpoint 合同一致；finetune 可用新倍率迁移权重。</small>
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏窗口过采样（fine_rhythm_oversample）
+            <input id="fineRhythmOversample" type="number" min="1" step="1" value="1">
+            <small><strong>默认 1（关闭）。</strong>把「细碎节奏窗口」额外复制这么多次，再叠加在 Slide/Touch 策略之上（倍率相乘，不是相加）。
+            判定标准：窗口内相邻起音间隔不超过 <strong>33/128 拍</strong>（约四分之一拍）的占比达到 fine_rhythm_ratio_threshold（默认 0.25）。
+            它针对的正是模型目前容易被压平成四分/八分的位置：12 分与 24 分交替、16 分附点、密集鼓点与快速钢琴。
+            设 2–3 会略微改变数据分布；真正决定采音的是训练目标，过采样只是让模型多看到这些写法。属于采样合同，<strong>改变它必须用 finetune，不能用 resume</strong>。</small>
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏判定阈值（fine_rhythm_ratio_threshold）
+            <input id="fineRhythmRatioThreshold" type="number" min="0" max="1" step="0.05" value="0.25">
+            <small><strong>默认 0.25：四分之一起音间隔不超过约四分之一拍。</strong>
+            调高（如 0.4）只对真正极密的段落过采样，样本更少更精准；调低（如 0.15）覆盖面更广，也会纳入只有少量短间隔的段落；纯八分间隔不会命中。
+            与上面的倍率一起构成细碎节奏采样合同。</small>
+          </label>
+<label class="checkbox-field span-2" data-training-family="legacy_frame_v2" hidden>
+            <input id="includeUnusable" type="checkbox">
+            <span>允许使用 QC 过滤样本（只在缓存完整且已检查原因时启用）</span>
+          </label></div></div>
+</details>
+<details id="trainingQuality" class="settings-section" data-advanced >
+<summary><span>质量加权与反面案例</span><small>让已标注的好谱面和修正版参与学习</small>
+</summary>
+<div class="settings-content">
+<section class="quality-training-card">
+          <div class="section-heading">
+<div><span class="step">QUALITY</span><h3>质量加权与反面案例</h3></div><span class="muted">只对已保存的素材标注生效</span></div>
+          <p class="param-intro">质量标注保存在当前 manifest 对应的素材记录中。优秀谱面权重较高，普通谱面保持基准，减权谱面仍参与训练但影响较小，排除项不进入正向训练。反面案例默认只从正向示范中排除；只有提供同音频、同目标下的修正版，才会进入偏好训练。修改质量权重请使用 <strong>finetune</strong>；<strong>resume</strong> 用于严格延续同一训练合同。</p>
+          <div class="quality-training-grid">
+            <label class="checkbox-field"><input id="qualityEnabled" type="checkbox"><span>启用质量加权训练</span><small>开始训练时读取「训练素材」中已经保存的标注。没有保存标注时不会改变训练。</small></label>
+            <div class="quality-summary-inline"><strong id="qualityTrainingSummary">尚未载入素材摘要</strong><button id="openQualityWorkspaceButton" class="secondary-button" type="button">打开素材管理</button></div>
+            <label class="checkbox-field"><input id="preferenceEnabled" type="checkbox"><span>启用反面案例偏好训练</span><small>需要已保存的修正版配对；单独标记反例不会宣称模型已经学会负向偏好。</small></label>
+            <label class="field">反例偏好权重
+              <input id="preferenceWeight" type="number" min="0" max="1" step="0.01" value="0.05">
+              <small>这是 DPO 偏好项的缩放值，另保留固定修正版监督锚点；建议从 0.05 开始。</small>
+            </label>
+            <label class="field">每 epoch 最大偏好对数
+              <input id="preferenceMaxPairs" type="number" min="1" max="512" step="1" value="32">
+              <small>限制反面案例配对数量，避免少量修正版过度影响训练。</small>
+            </label>
+          </div>
+        </section></div>
+</details>
+<details id="trainingArchitecture" class="settings-section" data-advanced >
+<summary><span>模型结构与窗口布局</span><small>从头训练时配置；已有模型按 checkpoint 继承</small>
+</summary>
+<div class="settings-content">
+<p class="workflow-hint">已有模型的宽度、层数、词表与窗口布局需要兼容。加强训练允许调整上下文 token 预算；改变主干形状需要新的模型。</p>
+<div class="form-grid">
+<label class="field span-4">模型族 / Model family
+            <select id="modelFamily">
+              <option value="event_ctx_v1" selected>event_ctx_v1 跨窗口事件模型（当前推荐主路径）</option>
+              <option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option>
+              <option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option>
+            </select>
+            <small id="modelFamilyHelp">事件模型当前使用 112 维 <code>event_audio_v2_rhythm</code>（包含拍内节奏特征）、窗口 planner 和显式 null embedding；不需要 frame division。旧 checkpoint 不能跨 schema 续训或微调。<strong>event_ctx_v1</strong> 在 event_v1 的基础上，让每个窗口额外看到「前面已写的音符」与「前后的音乐」，用来消除窗口接缝处的突兀——词表与 checkpoint 都与 event_v1 不通用，必须单独训练。</small>
+          </label>
+<label class="field">模型宽度 d_model
+            <input id="dModel" type="number" min="16" value="256">
+            <small>隐藏特征的宽度。加宽会增加参数与显存需求；合适规模取决于数据、训练时长和生成效果，不能仅凭固定的 token/参数比判断。已有模型继续训练时使用 checkpoint 的结构。</small>
+          </label>
+<label class="field">注意力头数 nhead
+            <input id="nhead" type="number" min="1" value="4">
+            <small>必须整除 d_model。头数决定模型能同时关注多少种不同的节拍/音符关系；head 太窄会限制表达，通常 4–8 足够。</small>
+          </label>
+<label class="field">Transformer 层数
+            <input id="numLayers" type="number" min="1" value="4">
+            <small>Transformer 的深度。更深会增加计算和显存，也需要相应的数据与训练。已有模型继续训练时继承 checkpoint，不能在此直接更换层数。</small>
+          </label>
+<label class="field" data-training-family="event_v1 legacy_frame_v2">前馈层宽度 FFN
+            <input id="dimFeedforward" type="number" min="16" step="16" value="1024">
+            <small><strong>影响模型容量。</strong>每层里"注意力 → 前馈"两段中前馈段的隐藏宽度，是参数量的第二大来源
+            （仅次于 d_model）。经验值是 <strong>4 × d_model</strong>：d_model 256 → 1024，320 → 1280，384 → 1536。
+            加宽能提升表达能力，但参数量上去以后，在数据量不变时<strong>过拟合会更早出现</strong>——
+            先按 4 × d_model 填，不要单独往上加。旧基线默认 1024。</small>
+          </label>
+<label class="field" data-training-family="event_v1">最大事件 tokens max_tokens
+            <input id="trainMaxTokens" type="number" min="64" step="64" value="768">
+            <small id="trainMaxTokensHelp" data-training-family="event_v1">
+              <strong>影响可纳入的片段长度，也影响数据合同。</strong>这是单个训练序列允许的最大 token 数，包含跨窗口引子和目标事件。
+              超过上限的训练片段会被排除，不能假定 768 能覆盖所有训练集。实际张量按批内最长样本补齐，不是每批都补到该上限；降低它可能提速，也可能丢掉复杂长配置。改它会写入 checkpoint 数据合同，旧的同族 checkpoint 将不能 resume。
+            </small>
+          </label>
+<label class="field" data-training-family="event_v1">segment beats
+            <input id="segmentBeats" type="number" min="1" step="1" value="16">
+            <small><strong>影响训练结果。</strong>每个片段切多少拍。默认 16；修改后旧 checkpoint 必须重训。</small>
+          </label>
+<label class="field" data-training-family="event_v1">音频最大 token
             <input id="maxAudioTokens" type="number" min="128" step="128" value="1024">
             <small>音频窗口最多保留的特征帧数。1024 可减少长窗口均值池化造成的时间对齐损失；属于模型合同，修改后需重训。</small>
           </label>
-          <label class="field" data-training-family="event_v1 event_ctx_v1">音频池化策略（local_pooling_policy）
-            <select id="localPoolingPolicy">
-              <option value="auto" selected>自动（新训练/加强训练修正；断点续训继承）</option>
-              <option value="per_sample_v2">逐样本池化（per_sample_v2）</option>
-              <option value="legacy_uniform">旧版批次池化（legacy_uniform）</option>
-            </select>
-            <small>逐样本池化只压缩自身超过音频帧数上限的片段，同批长片段不会拉伸短片段。不需要启用局部采音头，也不改变网络参数形状。已有模型可用“加强训练”迁移，无需从头重练；断点续训和旧模型生成继承原策略。</small>
+<label class="field" data-training-family="legacy_frame_v2" hidden>旧基线 segment frames
+            <input id="segmentFrames" type="number" min="32" value="512">
           </label>
-          <p class="help-text span-4" data-training-family="event_v1 event_ctx_v1">新训练与加强训练会忽略 <code>8?-5[8:1]</code> 等带 <code>?</code> 的完整星星音符，保留同刻其他音符和时间轴，不改源 maidata；日志与数据审计记录删除内容。超过 token 总预算的训练窗口直接丢弃。旧 checkpoint 的断点续训保留旧读取策略，需迁移时选择“已有模型加强训练”。</p>
-          <label class="field" data-training-family="event_v1">条件遮罩默认值
+<label class="field" data-training-family="legacy_frame_v2" hidden>旧基线最大序列长度
+            <input id="maxLen" type="number" min="32" value="4096">
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：前置上下文拍数
+            <input id="contextBeats" type="number" min="0" max="64" value="8">
+            <small><strong>每个窗口额外看到它前面多少拍的音符。</strong>8 拍 = 半个窗口（segment beats 16 时）。填 0 关闭，就退化成 event_v1 的行为。歌曲开头第一个窗口天然没有前置。
+            <strong>训练与生成必须一致</strong>——生成时会自动用这里填的值。</small>
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：前后音频余量（拍）
+            <input id="audioMarginBeats" type="number" min="0" max="32" value="4">
+            <small><strong>窗口两侧各多看多少拍的音乐。</strong>音乐在生成时是全曲已知的，所以"往后看"是合法的——模型能提前知道下一段是什么样子。填 0 表示只看窗口本身。</small>
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文 token 预算
+            <input id="contextTokens" type="number" min="16" step="16" value="768">
+            <small>前置谱面内容的 token 上限，另有两个上下文分隔符。新训练默认 768；仅提高未用满的上限不会增加实际计算。实际历史量还受前置拍数限制。训练与生成使用同一上限；上下文加目标超过 max_tokens 的窗口直接丢弃，不靠目标长度偷偷扩大历史。增加预算会占用生成正文空间，建议总预算至少 1024，并查看日志中的实际用量与丢弃数。旧模型按 checkpoint 生成；更改上限可用加强训练，无需改网络形状。</small>
+          </label>
+<label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：滚动重叠拍数
+            <input id="overlapBeats" type="number" min="0" max="64" value="0">
+            <small>默认 0（窗口首尾相接）。设为 8 时窗口按 8 拍步进，整首歌被重叠扫描；重叠部分以<strong>先写的窗口为准</strong>，因为它正是后一个窗口的上下文。窗口数会成倍增加，训练与生成都变慢。</small>
+          </label>
+<label class="field" data-training-family="legacy_frame_v2" hidden>旧基线音频特征方案
+            <select id="featureProfile">
+              <option value="basic_v1">basic_v1（兼容性优先）</option>
+              <option value="rhythm_v2" disabled>rhythm_v2（旧基线占位）</option>
+              <option value="event_audio_v2_rhythm" disabled>event_audio_v2_rhythm（事件模型，由 manifest 决定）</option>
+            </select>
+            <small>rhythm_v2 会改变输入结构；旧 checkpoint 不兼容。百谱可行性测试建议先用 basic_v1。</small>
+          </label></div></div>
+</details>
+<details id="trainingLearning" class="settings-section" data-advanced >
+<summary><span>条件、正则化与规划学习</span><small>遮罩、三种 Dropout、planner 与可选辅助模块</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-training-family="event_v1">条件遮罩概率（重要）
+            <input id="conditionMaskProb" type="number" min="0" max="1" step="0.05" value="0.5">
+            <small><strong>推荐 0.5</strong>：15 个 Radar/Style 值来自目标谱面的统计量；按此概率把这些值替换为默认值并使用 null 条件，帮助模型学习有条件与缺省条件两种输入。
+            1.0 会让训练几乎总在默认 Radar/Style 条件下进行，可能削弱生成时对滑条的响应。它提供学习条件的训练信号，但<strong>不保证模型会强响应</strong>；应通过固定音频与条件 A/B 生成验证。改动写入数据合同，续训时校验。</small>
+          </label>
+<label class="field" data-training-family="event_v1">条件遮罩默认值
             <input id="conditionDefault" type="number" min="0" max="1" step="0.01" value="0.5">
             <small>条件遮罩时 radar/style 使用的数值默认值；它不同于表示“整组条件未提供”的 null embedding，必须与生成端 contract 一致。</small>
           </label>
-          <label class="field" data-training-family="event_v1">Planner 辅助损失权重
-            <input id="planLossWeight" type="number" min="0" max="1" step="0.01" value="0.1">
-            <small>事件 token CE 之外的窗口规划辅助损失权重。music_structure_v2 输出 8 个连续规划量和 4 个配置类别，v3 输出 9 个；建议 0.1–0.15。</small>
+<label class="field" data-training-family="event_v1 legacy_frame_v2">条件随机丢弃（CFG 锚，condition_dropout）
+            <input id="conditionDropout" type="number" min="0" max="1" step="0.01" value="0">
+            <small><strong>与「跨窗口：上下文随机丢弃」是两个互相独立的机制。</strong>当前事件训练默认关闭此额外 dropout；缺省 style 由
+            <code>condition_mask_prob=0.5</code> 和显式 <code>null embedding</code> 处理，只遮罩 target-derived controls，保留 level。
+            resume / finetune 必须继承所选 checkpoint 的值；旧模型可能记录为 0.15，点击“检查 checkpoint”会回填。此项对应日志的 <code>condition_params.dropout</code> 和 CLI 的 <code>--condition-dropout</code>，不能用模型内部 dropout 或 context_dropout 代替。
+            如需改变当前条件训练策略，应使用 fresh。</small>
           </label>
-          <label class="field" data-training-family="event_v1 event_ctx_v1">Planner profile
+<label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文随机丢弃（context_dropout）
+            <input id="contextDropout" type="number" min="0" max="1" step="0.05" value="0.15">
+            <small><strong>只作用于"前置上下文块"这一个输入</strong>：训练时按概率把某窗口的前置音符整体去掉（窗口几何不变），
+            帮助模型处理没有前置谱面的窗口；它本身不保证消除重复配置。
+            <strong>与「条件随机丢弃（condition_dropout）」「模型内部 Dropout（dropout）」互不相干。</strong>当前 fresh 默认分别为上下文 0.15、条件 0、模型内部 0.1；已有模型以所选 checkpoint 的记录为准。
+            验证集侧固定为 0（保证验证 loss 可比较）。</small>
+          </label>
+<label class="field">模型内部 Dropout（dropout）
+            <input id="dropout" type="number" min="0" max="1" step="0.01" value="0.1">
+            <small><strong>影响训练结果。</strong>训练时随机丢弃一部分激活，抑制死记硬背。
+            fresh 默认 0.1。resume / finetune 的模型结构来自 checkpoint，点击“检查 checkpoint”会显示原模型值。
+            此项对应 <code>model_config.dropout</code>，与条件随机丢弃 <code>condition_dropout</code>、上下文随机丢弃 <code>context_dropout</code> 独立。</small>
+          </label>
+<label class="field" data-training-family="event_v1">权重衰减 weight decay
+            <input id="weightDecay" type="number" min="0" max="1" step="0.001" value="0.01">
+            <small><strong>影响泛化、抑制过拟合。</strong>AdamW 的 L2 正则强度。数据量大或开始过拟合时调到 0.02–0.05；调太高会让模型学不动（训练 loss 下降变慢）。默认 0.01。</small>
+          </label>
+<label class="field" data-training-family="event_v1 event_ctx_v1">Planner profile
             <select id="plannerProfile">
               <option value="auto" selected>自动（新训练用 music_structure_v3）</option>
               <option value="music_structure_v3">music_structure_v3（13D，含细碎节奏通道）</option>
@@ -255,11 +386,15 @@
             生成页的细碎音符调制只柔性调整此通道，不指定三连音或附点等节奏类别；v2 及更早的 checkpoint 不支持此调制。
             换 profile 必须重新训练：旧 checkpoint 的结构不能通过 resume 或 finetune 切换。</small>
           </label>
-          <label class="field" data-training-family="event_v1 event_ctx_v1">真实规划目标混合比例（Planner teacher mix）
+<label class="field" data-training-family="event_v1">Planner 辅助损失权重
+            <input id="planLossWeight" type="number" min="0" max="1" step="0.01" value="0.1">
+            <small>事件 token CE 之外的窗口规划辅助损失权重。music_structure_v2 输出 8 个连续规划量和 4 个配置类别，v3 输出 9 个；建议 0.1–0.15。</small>
+          </label>
+<label class="field" data-training-family="event_v1 event_ctx_v1">真实规划目标混合比例（Planner teacher mix）
             <input id="planTeacherMix" type="number" min="0" max="1" step="0.05" value="0.5">
             <small>训练时送入解码器的规划值，在模型预测与真实谱面目标之间混合。0.5 表示每个有效样本各占一半，并不是随机一半样本，也不会自动随 epoch 减小。0 完全使用预测值，1 完全使用真实目标；验证和生成均使用模型预测。比例过高可能扩大训练与实际生成的差距，当前默认 0.5。</small>
           </label>
-          <label class="field" data-training-family="event_v1 event_ctx_v1">局部采音辅助目标
+<label class="field" data-training-family="event_v1 event_ctx_v1">局部采音辅助目标
             <select id="onsetProfile">
               <option value="auto" selected>自动（继承 checkpoint；从头训练时关闭）</option>
               <option value="none">关闭辅助头</option>
@@ -267,7 +402,11 @@
             </select>
             <small>chart_onsets_v1 学习谱面起音相对音频的位置。finetune 可为 music_structure_v3 checkpoint 新增此头；resume 锁定并继承已保存设置。已有此头的模型继续训练时应保留；生成时可将指导强度设为 0。</small>
           </label>
-          <label class="field" data-training-family="event_v1 event_ctx_v1">持续动作摘要（action_state_profile）
+<label class="field" data-training-family="event_v1 event_ctx_v1">局部采音辅助损失权重
+            <input id="onsetLossWeight" type="number" min="0" step="0.01" value="0.2">
+            <small>辅助头损失在训练总损失中的比例，默认 0.2，启用时须大于 0；关闭时忽略。resume 自动使用 checkpoint 保存值。</small>
+          </label>
+<label class="field" data-training-family="event_v1 event_ctx_v1">持续动作摘要（action_state_profile）
             <select id="actionStateProfile">
               <option value="auto" selected>自动（继承模型；新训练默认关闭）</option>
               <option value="none">关闭（兼容原模型）</option>
@@ -275,127 +414,40 @@
             </select>
             <small>把前段仍在持续或等待起滑的动作、当前判定区和剩余时值作为独立输入，不受文本上下文拍数截断。已有模型可用加强训练新增，无需从头重练；新增模块必须训练后才可生成。断点续训继承已保存设置。它帮助模型学习动作衔接，不是硬性双手分配规则，也不替代无理检测。单独预测曲线时还没有已生成谱面，因此使用空动作摘要。</small>
           </label>
-          <label class="field" data-training-family="event_v1 event_ctx_v1">局部采音辅助损失权重
-            <input id="onsetLossWeight" type="number" min="0" step="0.01" value="0.2">
-            <small>辅助头损失在训练总损失中的比例，默认 0.2，启用时须大于 0；关闭时忽略。resume 自动使用 checkpoint 保存值。</small>
+<label class="field" data-training-family="event_v1 event_ctx_v1">音频池化策略（local_pooling_policy）
+            <select id="localPoolingPolicy">
+              <option value="auto" selected>自动（新训练/加强训练修正；断点续训继承）</option>
+              <option value="per_sample_v2">逐样本池化（per_sample_v2）</option>
+              <option value="legacy_uniform">旧版批次池化（legacy_uniform）</option>
+            </select>
+            <small>逐样本池化只压缩自身超过音频帧数上限的片段，同批长片段不会拉伸短片段。不需要启用局部采音头，也不改变网络参数形状。已有模型可用“加强训练”迁移，无需从头重练；断点续训和旧模型生成继承原策略。</small>
           </label>
-          <label class="field" data-training-family="legacy_frame_v2" hidden>旧基线 segment frames
-            <input id="segmentFrames" type="number" min="32" value="512">
-          </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：前置上下文拍数
-            <input id="contextBeats" type="number" min="0" max="64" value="8">
-            <small><strong>每个窗口额外看到它前面多少拍的音符。</strong>8 拍 = 半个窗口（segment beats 16 时）。填 0 关闭，就退化成 event_v1 的行为。歌曲开头第一个窗口天然没有前置。
-            <strong>训练与生成必须一致</strong>——生成时会自动用这里填的值。</small>
-          </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：前后音频余量（拍）
-            <input id="audioMarginBeats" type="number" min="0" max="32" value="4">
-            <small><strong>窗口两侧各多看多少拍的音乐。</strong>音乐在生成时是全曲已知的，所以"往后看"是合法的——模型能提前知道下一段是什么样子。填 0 表示只看窗口本身。</small>
-          </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文 token 预算
-            <input id="contextTokens" type="number" min="16" step="16" value="768">
-            <small>前置谱面内容的 token 上限，另有两个上下文分隔符。新训练默认 768；仅提高未用满的上限不会增加实际计算。实际历史量还受前置拍数限制。训练与生成使用同一上限；上下文加目标超过 max_tokens 的窗口直接丢弃，不靠目标长度偷偷扩大历史。增加预算会占用生成正文空间，建议总预算至少 1024，并查看日志中的实际用量与丢弃数。旧模型按 checkpoint 生成；更改上限可用加强训练，无需改网络形状。</small>
-          </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：滚动重叠拍数
-            <input id="overlapBeats" type="number" min="0" max="64" value="0">
-            <small>默认 0（窗口首尾相接）。设为 8 时窗口按 8 拍步进，整首歌被重叠扫描；重叠部分以<strong>先写的窗口为准</strong>，因为它正是后一个窗口的上下文。窗口数会成倍增加，训练与生成都变慢。</small>
-          </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文随机丢弃（context_dropout）
-            <input id="contextDropout" type="number" min="0" max="1" step="0.05" value="0.15">
-            <small><strong>只作用于"前置上下文块"这一个输入</strong>：训练时按概率把某窗口的前置音符整体去掉（窗口几何不变），
-            防止模型学会"直接抄上一段"（文献实测会导致重复段落），并让它学会处理歌曲开头那种无上下文的窗口。
-            <strong>与「条件随机丢弃（condition_dropout）」「模型内部 Dropout（dropout）」互不相干。</strong>当前 fresh 默认分别为上下文 0.15、条件 0、模型内部 0.1；已有模型以所选 checkpoint 的记录为准。
-            验证集侧固定为 0（保证验证 loss 可比较）。</small>
-          </label>
-          <label class="field">训练随机种子
-            <input id="trainingSeed" type="number" min="0" placeholder="留空 = 每次随机" value="">
-            <small>固定权重初始化和数据打乱顺序。<strong>留空则每次训练随机抽一个种子</strong>，这是"多次抽卡"的前提；想复现某次结果就把那次日志里报告的 seed 填回来。</small>
-          </label>
-          <label class="field" data-training-family="event_v1">权重衰减 weight decay
-            <input id="weightDecay" type="number" min="0" max="1" step="0.001" value="0.01">
-            <small><strong>影响泛化、抑制过拟合。</strong>AdamW 的 L2 正则强度。数据量大或开始过拟合时调到 0.02–0.05；调太高会让模型学不动（训练 loss 下降变慢）。默认 0.01。</small>
-          </label>
-          <label class="field">每隔多少 epoch 保存
-            <input id="saveEvery" type="number" min="0" value="5">
-            <small><strong>强烈建议保留非 0。</strong>每隔 N 轮额外存一个 event_epoch_NNN.pt。它是训练被中断或后段过拟合时的唯一退路；填 0 就只剩 last 和 best 两个文件。</small>
-          </label>
-          <label class="field" data-training-family="event_v1">早停耐心 patience
-            <input id="patience" type="number" min="0" value="10">
-            <small><strong>只在填了验证 manifest 时生效</strong>（否则早停条件永远不成立）。验证 loss 连续 N 轮不再改善就停止训练，避免无意义地继续跑。填 0 表示关闭早停。</small>
-          </label>
-        </div>
-
-        <h3 class="group-title">E. 模型容量<span class="group-note">改这几项等于换一个模型结构，旧 checkpoint 不再兼容</span></h3>
-        <div class="form-grid">
-          <label class="field">模型宽度 d_model
-            <input id="dModel" type="number" min="16" value="256">
-            <small>每层特征维度。加宽能提升表达能力，但参数与显存按平方增长。
-            <strong>判断标准是"每个参数在整个训练期见过多少 token"</strong>：累计 tokens ÷ 参数量应落在 <strong>10–20</strong>。
-            full 训练集约 2000 个可用难度 → 约 4.5 万段 → 每轮约 5.5M token；配 40–80 轮即 220M–440M token，
-            对应 <strong>16M–30M 参数</strong>（d_model 256 配 FFN 1024 ≈ 16M，320 配 1280 ≈ 25M）。
-            低于 10 就是欠训练（只会输出最高频那几个音符），高于 20 则容量过剩、更容易过拟合。</small>
-          </label>
-          <label class="field">注意力头数 nhead
-            <input id="nhead" type="number" min="1" value="4">
-            <small>必须整除 d_model。头数决定模型能同时关注多少种不同的节拍/音符关系；head 太窄会限制表达，通常 4–8 足够。</small>
-          </label>
-          <label class="field">Transformer 层数
-            <input id="numLayers" type="number" min="1" value="4">
-            <small>深度。层数越多能建模越长的依赖，也越容易在小数据集上过拟合。
-            本项目的推荐档位是 <strong>8 层</strong>（配 d_model 256–320）；4 层用于快速试跑，
-            16 层以上在 5.5M token/轮的语料上收益递减。改它等于换模型结构，旧 checkpoint 不再兼容。</small>
-          </label>
-          <label class="field">模型内部 Dropout（dropout）
-            <input id="dropout" type="number" min="0" max="1" step="0.01" value="0.1">
-            <small><strong>影响训练结果。</strong>训练时随机丢弃一部分激活，抑制死记硬背。
-            fresh 默认 0.1。resume / finetune 的模型结构来自 checkpoint，点击“检查 checkpoint”会显示原模型值。
-            此项对应 <code>model_config.dropout</code>，与条件随机丢弃 <code>condition_dropout</code>、上下文随机丢弃 <code>context_dropout</code> 独立。</small>
-          </label>
-                    <label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏窗口过采样（fine_rhythm_oversample）
-            <input id="fineRhythmOversample" type="number" min="1" step="1" value="1">
-            <small><strong>默认 1（关闭）。</strong>把「细碎节奏窗口」额外复制这么多次，再叠加在 Slide/Touch 策略之上（倍率相乘，不是相加）。
-            判定标准：窗口内相邻起音间隔不超过 <strong>33/128 拍</strong>（约四分之一拍）的占比达到 fine_rhythm_ratio_threshold（默认 0.25）。
-            它针对的正是模型目前容易被压平成四分/八分的位置：12 分与 24 分交替、16 分附点、密集鼓点与快速钢琴。
-            设 2–3 会略微改变数据分布；真正决定采音的是训练目标，过采样只是让模型多看到这些写法。属于采样合同，<strong>改变它必须用 finetune，不能用 resume</strong>。</small>
-          </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>细碎节奏判定阈值（fine_rhythm_ratio_threshold）
-            <input id="fineRhythmRatioThreshold" type="number" min="0" max="1" step="0.05" value="0.25">
-            <small><strong>默认 0.25：四分之一起音间隔不超过约四分之一拍。</strong>
-            调高（如 0.4）只对真正极密的段落过采样，样本更少更精准；调低（如 0.15）覆盖面更广，也会纳入只有少量短间隔的段落；纯八分间隔不会命中。
-            与上面的倍率一起构成细碎节奏采样合同。</small>
-          </label>
-<label class="field" data-training-family="event_v1 legacy_frame_v2">前馈层宽度 FFN
-            <input id="dimFeedforward" type="number" min="16" step="16" value="1024">
-            <small><strong>影响模型容量。</strong>每层里"注意力 → 前馈"两段中前馈段的隐藏宽度，是参数量的第二大来源
-            （仅次于 d_model）。经验值是 <strong>4 × d_model</strong>：d_model 256 → 1024，320 → 1280，384 → 1536。
-            加宽能提升表达能力，但参数量上去以后，在数据量不变时<strong>过拟合会更早出现</strong>——
-            先按 4 × d_model 填，不要单独往上加。旧基线默认 1024。</small>
-          </label>
-          <label class="field" data-training-family="legacy_frame_v2" hidden>旧基线最大序列长度
-            <input id="maxLen" type="number" min="32" value="4096">
-          </label>
-          <label class="checkbox-field" data-training-family="event_v1">禁用混合精度 AMP
+<label class="checkbox-field" data-training-family="legacy_frame_v2" hidden>
+            <input id="resetOptimizer" type="checkbox">
+            <span>重置优化器状态（finetune 默认开启）</span>
+            <small>清空动量与自适应学习率历史。finetune 时通常需要重置，否则旧状态会把新数据上的更新拉回去；resume 时<strong>不要</strong>勾选，否则等于丢掉训练进度。</small>
+          </label></div></div>
+</details>
+<details id="trainingRuntime" class="settings-section" data-advanced >
+<summary><span>运行性能、保存与复现</span><small>显存、缓存、预热、检查点和短跑上限</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="checkbox-field" data-training-family="event_v1">禁用混合精度 AMP
             <input id="noAmp" type="checkbox">
             <small>默认使用 float16 混合精度加速并省显存。<strong>只影响速度与显存，不影响数学目标</strong>；若遇到 loss 出现 NaN 或数值不稳，可勾选它用 float32 重跑。</small>
           </label>
-        </div>
-
-        <h3 class="group-title">F. 运行环境</h3>
-        <div class="form-grid">
-          <label class="field">设备
-            <select id="device"><option value="auto">自动</option><option value="cuda">CUDA 显卡</option><option value="cpu">CPU</option></select>
-            <small>仅影响速度。CPU 训练在 860 万参数 + 2000 余片段下会慢到不实用。</small>
-          </label>
-          <label class="field" data-training-family="event_v1">音频缓存上限（GB）
+<label class="field" data-training-family="event_v1">音频缓存上限（GB）
             <input id="audioCacheGb" type="number" min="-1" step="0.5" value="4">
             <small><strong>用内存换速度。</strong>每首歌的特征约 3 MB，常驻缓存按这个上限做 LRU 淘汰：4 GB ≈ 1300 首。
             <strong>full 训练集有 1681 首 ≈ 4.9 GB，建议填 6</strong>（填 4 会持续淘汰、反复读盘）。被淘汰的歌会从 npz 缓存重新读取（不重新分析音频）。
             <strong>填 0 不缓存；填 -1 不设上限</strong>（歌曲数多时会把内存吃光）。</small>
           </label>
-          <label class="field" data-training-family="event_v1">CUDA 显存预算（GiB）
+<label class="field" data-training-family="event_v1">CUDA 显存预算（GiB）
             <input id="cudaMemoryBudgetGb" type="number" min="0" step="0.25" value="0">
             <small>0 = 自动按显卡总显存的 60% 设置硬上限，为桌面和其他程序留空间；大于 0 时使用指定 GiB（执行上限最多为总显存的 95%）。提高预算只在显存上限挡住训练或因此 OOM 时有帮助，不保证加速；桌面和其他程序占用较多时仍可能 OOM。</small>
           </label>
-          <label class="field" data-training-family="event_v1">音频特征预提取进程数
+<label class="field" data-training-family="event_v1">音频特征预提取进程数
             <select id="prewarmWorkers">
               <option value="auto" selected>自动（推荐）</option>
               <option value="off">关闭（边训边算）</option>
@@ -406,36 +458,44 @@
             </select>
             <small>开始训练前，用多进程把还没算过的歌曲特征一次性算完（每首约 1.4 秒，1000 首串行约 23 分钟）。开着它，第一轮 epoch 不再一边算特征一边等 GPU。<strong>本机实测 4 进程 ≈ 2.2×、8 进程 ≈ 2.3×</strong>（已接近本机 CPU 全核上限）；已经算过的歌会被跳过，重复点也不浪费时间。</small>
           </label>
-          <label class="field" data-training-family="event_v1">条件遮罩概率（重要）
-            <input id="conditionMaskProb" type="number" min="0" max="1" step="0.05" value="0.5">
-            <small><strong>推荐 0.5</strong>：15 个 Radar/Style 值来自目标谱面的统计量；按此概率把这些值替换为默认值并使用 null 条件，帮助模型学习有条件与缺省条件两种输入。
-            1.0 会让训练几乎总在默认 Radar/Style 条件下进行，可能削弱生成时对滑条的响应。它提供学习条件的训练信号，但<strong>不保证模型会强响应</strong>；应通过固定音频与条件 A/B 生成验证。改动写入数据合同，续训时校验。</small>
+<label class="field" data-training-family="event_v1">训练 batch 上限（短跑）
+            <input id="maxSteps" type="number" min="0" step="1" value="0">
+            <small>0 表示完整 epoch；填 8、32 等可通过 WebUI 做受控 smoke。只影响本次运行，不写入模型结构合同。</small>
           </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>Slide 窗口过采样（slide_oversample）
-            <input id="slideOversample" type="number" min="1" step="1" value="2">
-            <small><strong>默认 2，填 1 表示关闭过采样。</strong>仅对含 Slide 且不含 Touch/TouchHold 的窗口生效（可同时含 Tap、Hold 等其他类型）。含 Touch 的窗口由下方 Touch 倍率处理；两者不会相乘。<strong>属数据合同</strong>：普通 resume 必须同值。</small>
+<label class="field" data-training-family="event_v1">验证 batch 上限（短跑）
+            <input id="validationMaxSteps" type="number" min="0" step="1" value="0">
+            <small>0 表示跑完整验证集；短跑时建议填 1–8。只影响本次验证耗时。</small>
           </label>
-          <label class="field" data-training-family="event_ctx_v1" hidden>Touch 窗口过采样（touch_oversample）
-            <input id="touchOversample" type="number" min="1" step="1" value="1">
-            <small><strong>默认 1，填 1 表示关闭过采样但仍保留真实 Touch。</strong>对含 Touch 或 TouchHold 的窗口生效；即使同时含 Slide，也优先使用 Touch 倍率。建议先用 1 抑制 Touch 先验。普通 resume 必须与 checkpoint 合同一致；finetune 可用新倍率迁移权重。</small>
+<label class="field">训练随机种子
+            <input id="trainingSeed" type="number" min="0" placeholder="留空 = 每次随机" value="">
+            <small>固定权重初始化和数据打乱顺序。<strong>留空则每次训练随机抽一个种子</strong>，这是"多次抽卡"的前提；想复现某次结果就把那次日志里报告的 seed 填回来。</small>
           </label>
-          <label class="field" data-training-family="event_v1 legacy_frame_v2">条件随机丢弃（CFG 锚，condition_dropout）
-            <input id="conditionDropout" type="number" min="0" max="1" step="0.01" value="0">
-            <small><strong>与「跨窗口：上下文随机丢弃」是两个互相独立的机制。</strong>当前事件训练默认关闭此额外 dropout；缺省 style 由
-            <code>condition_mask_prob=0.5</code> 和显式 <code>null embedding</code> 处理，只遮罩 target-derived controls，保留 level。
-            resume / finetune 必须继承所选 checkpoint 的值；旧模型可能记录为 0.15，点击“检查 checkpoint”会回填。此项对应日志的 <code>condition_params.dropout</code> 和 CLI 的 <code>--condition-dropout</code>，不能用模型内部 dropout 或 context_dropout 代替。
-            如需改变当前条件训练策略，应使用 fresh。</small>
+<label class="field">每隔多少 epoch 保存
+            <input id="saveEvery" type="number" min="0" value="5">
+            <small><strong>强烈建议保留非 0。</strong>每隔 N 轮额外存一个 event_epoch_NNN.pt。它是训练被中断或后段过拟合时的唯一退路；填 0 就只剩 last 和 best 两个文件。</small>
+          </label></div></div>
+</details>
+<details id="trainingValidation" class="settings-section" data-advanced >
+<summary><span>独立验证集（可选）</span><small>留空也能完整训练；无需建立 gold</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field span-4" data-training-family="event_v1">验证 manifest 路径（可选）
+            <textarea id="validationManifestPath" class="path-input" rows="2" placeholder="例如 manifests/splits/val.json"></textarea>
+            <small>
+              可以留空正常训练，无需建立 gold，也不会自动拆分训练集。留空时 <code>event_best.pt</code> 与学习率调度依据训练 loss，验证早停不启用；best 不表示已通过实际谱面验收。
+              如主动填写独立验证集，则按验证 loss 选择 best 和调度学习率。可按数据量与人工测试需要决定是否使用。
+            </small>
           </label>
-        </div>
-
-        <h3 class="group-title">G. 金标集（高质量谱面）<span class="group-note">用你认可的好谱面当训练组和验收标准</span></h3>
-        <p class="param-intro">
-          <strong>为什么要这一步？</strong>只训练、不验收，你无法判断模型是"学会了"还是"背下了"。
-          金标集就是你自己挑的一批<strong>好谱面</strong>，程序会把它们切成三份：
-          <em>预训练集</em>（原训练集，但<strong>剔除</strong>金标验证曲）、<em>金标微调集</em>（第二阶段精调用）、
-          <em>金标验证集</em>（<strong>永不训练</strong>，只用来打分）。
-          之后训练时「验证 manifest」指向金标验证集，模型选择就自动偏向"像好谱面"；生成时「金标统计」填上，就能拿到逐项 PASS/FAIL 的验收报告。
-        </p>
+<label class="field" data-training-family="event_v1">早停耐心 patience
+            <input id="patience" type="number" min="0" value="10">
+            <small><strong>只在填了验证 manifest 时生效</strong>（否则早停条件永远不成立）。验证 loss 连续 N 轮不再改善就停止训练，避免无意义地继续跑。填 0 表示关闭早停。</small>
+          </label></div>
+<details id="trainingGoldTools" class="settings-section"  >
+<summary><span>辅助工具：生成金标切分</span><small>主动划分数据时才使用；完成后会改写训练与验证清单</small>
+</summary>
+<div class="settings-content">
+        <p class="param-intro">这是主动建立独立对照集时使用的可选工具。它会产生预训练、金标加强训练和金标验证清单；完成后会自动填写对应路径。若只想给优质谱面更高权重，请使用“质量加权与反面案例”，不需要做金标切分。</p>
 
         <div class="gold-howto">
           <h4>最简单：把好谱面放进一个 <code>gold</code> 文件夹</h4>
@@ -498,55 +558,22 @@
           <button id="goldDesignerListButton" class="secondary-button" hidden>列出本数据集的谱师</button>
         </div>
         <p id="goldStatus" class="inline-status">① 先扫描确认找到多少首；② 再点「生成金标集切分」。完成后会自动把「训练 manifest」改为预训练集、「验证 manifest」改为金标验证集。</p>
-        <div id="goldSummary" class="gold-summary" hidden></div>
-
-        <div class="button-row">
-          <button id="preprocessButton" class="secondary-button">2. 预处理当前目录</button>
-          <button id="inspectManifestButton" class="secondary-button">3. 检查所选训练来源</button>
-          <button id="trainButton" class="primary-button">4. 开始训练</button>
-          <button id="autoPipelineButton" class="primary-button" title="仅用于当前单来源；多个训练来源请分别预处理，再点击开始训练">一键：预处理 + 开始训练</button>
-          <button id="resetSettingsButton" class="secondary-button" title="清空浏览器里保存的【全部】设置（训练参数 + 数据集路径 + 生成参数）并恢复出厂默认值；只想重置生成参数请用生成面板里的「恢复生成默认值」">清除全部保存（含训练参数）</button>
-        </div>
-        <p class="param-intro" style="margin-top:8px">
-          <strong>「一键：预处理 + 开始训练」</strong>适合确认参数后直接开跑：它会先用当前设置生成/刷新训练清单（第 2 步），
-          成功后立刻接着开始训练（第 4 步），两步在<strong>同一个后台任务</strong>里顺序执行，中途刷新页面或关掉浏览器都不会中断。
-          预处理失败时训练不会启动，日志里会写明原因。若清单已经生成好、只想训练，用「4. 开始训练」即可。
-        </p>
-        <p id="manifestCheckStatus" class="inline-status">建议先预处理，再检查 manifest；检查通过后再开始训练。</p>
-        <section class="quality-training-card">
-          <div class="section-heading"><div><span class="step">QUALITY</span><h3>质量加权与反面案例</h3></div><span class="muted">只对已保存的素材标注生效</span></div>
-          <p class="param-intro">质量标注保存在当前 manifest 对应的素材记录中。优秀谱面权重较高，普通谱面保持基准，减权谱面仍参与训练但影响较小，排除项不进入正向训练。反面案例默认只从正向示范中排除；只有提供同音频、同目标下的修正版，才会进入偏好训练。修改质量权重请使用 <strong>finetune</strong>；<strong>resume</strong> 用于严格延续同一训练合同。</p>
-          <div class="quality-training-grid">
-            <label class="checkbox-field"><input id="qualityEnabled" type="checkbox"><span>启用质量加权训练</span><small>开始训练时读取「训练素材」中已经保存的标注。没有保存标注时不会改变训练。</small></label>
-            <div class="quality-summary-inline"><strong id="qualityTrainingSummary">尚未载入素材摘要</strong><button id="openQualityWorkspaceButton" class="secondary-button" type="button">打开素材管理</button></div>
-            <label class="checkbox-field"><input id="preferenceEnabled" type="checkbox"><span>启用反面案例偏好训练</span><small>需要已保存的修正版配对；单独标记反例不会宣称模型已经学会负向偏好。</small></label>
-            <label class="field">反例偏好权重
-              <input id="preferenceWeight" type="number" min="0" max="1" step="0.01" value="0.05">
-              <small>这是 DPO 偏好项的缩放值，另保留固定修正版监督锚点；建议从 0.05 开始。</small>
-            </label>
-            <label class="field">每 epoch 最大偏好对数
-              <input id="preferenceMaxPairs" type="number" min="1" max="512" step="1" value="32">
-              <small>限制反面案例配对数量，避免少量修正版过度影响训练。</small>
-            </label>
-          </div>
-        </section>
-        <div id="processingErrors" class="processing-errors" hidden></div>
-        <p class="notice">默认会拒绝存在解析错误的难度。勾选 QC 选项不会补齐缺失音频或缓存，只会允许你明确使用已生成缓存的研究数据。</p>
-
-        <h3 class="group-title">H. 运行日志<span class="group-note">每个任务的完整日志都会落盘，界面只显示最后 300 行</span></h3>
-        <div class="button-row">
-          <button id="refreshLogsButton" class="secondary-button" type="button">刷新日志列表</button>
-          <button id="openLogsFolderButton" class="secondary-button" type="button" title="把日志目录路径复制到剪贴板，便于在资源管理器里打开">复制日志目录路径</button>
-        </div>
-        <p id="logsStatus" class="inline-status">日志目录：webui_workspace\logs —— 每个任务一份 .log（全量）+ 一份 .meta.json（状态/参数/退出码）。</p>
-        <div id="logList" class="log-list" hidden></div>
-      </section>
+        <div id="goldSummary" class="gold-summary" hidden></div></div>
+</details></div>
+</details>
+<div class="settings-maintenance"><button id="resetSettingsButton" class="secondary-button" title="清空浏览器里保存的【全部】设置（训练参数 + 数据集路径 + 生成参数）并恢复出厂默认值；只想重置生成参数请用生成面板里的「恢复生成默认值」">清除全部保存（含训练参数）</button><small>此操作会清除浏览器保存的训练、生成和路径设置，随后恢复页面默认值。</small></div>
+<div class="run-review"><h3>本次训练摘要</h3><ul id="trainingRunSummary"></ul>
+<p id="trainingRunHint" class="inline-status" role="status"></p></div>
+<div class="workflow-actions"><button id="trainButton" class="primary-button">开始训练</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button></div>
+</section>
 
       <section class="panel quality-panel">
-        <div class="section-heading"><div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">浏览与标注素材，独立选择训练来源</span></div>
+        <div class="section-heading">
+<div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">浏览与标注素材，独立选择训练来源</span></div>
         <p class="param-intro">勾选本次训练要使用的数据集，再点进某个数据集浏览谱面。训练使用全部勾选的来源；质量标注保存在当前打开的原数据集。</p>
         <section id="datasetCardsPanel" class="dataset-workspace" aria-labelledby="datasetWorkspaceTitle">
-          <div class="section-heading"><div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
+          <div class="section-heading">
+<div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
           <p class="muted">勾选表示加入下一次训练；点击卡片进入该数据集的谱面目录。可以同时勾选多份，例如“full训练集 + 优质自制谱精选”。</p>
           <div id="datasetWorkspaceStatus" class="inline-status">正在读取数据集目录...</div>
           <div id="datasetCards" class="dataset-cards"></div>
@@ -555,7 +582,8 @@
           <div id="datasetCompositionSummary" class="inline-status" hidden></div>
         </section>
         <section id="datasetCatalogPanel" hidden>
-        <div class="section-heading"><div><span class="step">CATALOG</span><h3 id="datasetCatalogTitle">数据集谱面目录</h3></div><button id="datasetBackButton" class="secondary-button" type="button">返回数据集列表</button></div>
+        <div class="section-heading">
+<div><span class="step">CATALOG</span><h3 id="datasetCatalogTitle">数据集谱面目录</h3></div><button id="datasetBackButton" class="secondary-button" type="button">返回数据集列表</button></div>
         <p class="param-intro">下面是当前打开数据集的目录。搜索会匹配歌曲标题、文件夹名、谱师和难度；排序不会改变训练权重，只改变浏览顺序。质量标注仍需点击保存，验证集不参与加权。</p>
         <div class="quality-toolbar">
           <input id="qualitySearch" type="search" placeholder="搜索歌曲标题、文件夹、谱师、难度">
@@ -577,57 +605,61 @@
         <p id="qualitySelectionStatus" class="muted">文件夹全选包含当前数据集清单中的全部谱面，跨越所有分页，搜索和标签筛选不会缩小范围。选择后再点击“保存选中标注”。</p>
         <p class="muted">单条手动调整过的权重会跨页保留并优先使用；其余选中谱面使用上方的批量权重。</p>
         <div id="qualitySummary" class="quality-summary-box">尚未加载当前 manifest。</div>
-        <div class="quality-table-wrap"><table class="quality-table"><thead><tr><th><label><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"> 本页</label></th><th>歌曲 / 难度</th><th>谱师</th><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
-        <div class="quality-pagination"><button id="qualityPrevButton" class="small-button" type="button">上一页</button><span id="qualityPageStatus">第 0 页</span><label class="page-jump">跳到 <input id="qualityPageInput" type="number" min="1" step="1" value="1" aria-label="页码"><button id="qualityPageJumpButton" class="small-button" type="button">跳转</button></label><button id="qualityNextButton" class="small-button" type="button">下一页</button></div>
+        <div class="quality-table-wrap"><table class="quality-table"><thead><tr><th>
+<label><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"> 本页</label></th><th>歌曲 / 难度</th><th>谱师</th><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
+        <div class="quality-pagination"><button id="qualityPrevButton" class="small-button" type="button">上一页</button><span id="qualityPageStatus">第 0 页</span>
+<label class="page-jump">跳到 <input id="qualityPageInput" type="number" min="1" step="1" value="1" aria-label="页码"><button id="qualityPageJumpButton" class="small-button" type="button">跳转</button></label><button id="qualityNextButton" class="small-button" type="button">下一页</button></div>
         <section id="qualityDetail" class="quality-detail" hidden>
-          <div class="section-heading"><div><span class="step">DETAIL</span><h3 id="qualityDetailTitle">谱面详情</h3></div><button id="qualityCloseDetailButton" class="small-button" type="button">关闭</button></div>
+          <div class="section-heading">
+<div><span class="step">DETAIL</span><h3 id="qualityDetailTitle">谱面详情</h3></div><button id="qualityCloseDetailButton" class="small-button" type="button">关闭</button></div>
           <audio id="qualityDetailAudio" controls preload="metadata"></audio>
-          <details><summary>只读 maidata / inote 预览</summary><pre id="qualityDetailPreview" class="quality-preview"></pre></details>
-          <div class="quality-regions"><h4>局部标注（绝对秒）</h4><div id="qualityRegionsList"></div><button id="qualityAddRegionButton" class="secondary-button" type="button">新增片段</button><button id="qualitySaveRegionsButton" class="primary-button" type="button">保存片段标注</button></div>
-          <div class="quality-correction"><h4>修正版反例配对（可选）</h4><p class="muted">上传修正版 maidata 后选择对应难度槽；仅同音频与目标的修正版才会成为偏好训练候选。</p><input id="qualityCorrectedFile" type="file" accept=".txt,.maidata"><select id="qualityCorrectedDifficulty"><option value="">选择修正版难度槽</option><option value="1">Basic</option><option value="2">Advanced</option><option value="3">Expert</option><option value="4">Master</option><option value="5">Re:Master</option><option value="6">宴会场</option></select><span id="qualityCorrectedPath" class="muted"></span><button id="qualitySaveCorrectionButton" class="secondary-button" type="button">保存修正版配对</button></div>
+          <details>
+<summary>只读 maidata / inote 预览</summary><pre id="qualityDetailPreview" class="quality-preview"></pre>
+</details>
+          <div class="quality-regions"><h4>局部标注（绝对秒）</h4>
+<div id="qualityRegionsList"></div><button id="qualityAddRegionButton" class="secondary-button" type="button">新增片段</button><button id="qualitySaveRegionsButton" class="primary-button" type="button">保存片段标注</button></div>
+          <div class="quality-correction"><h4>修正版反例配对（可选）</h4>
+<p class="muted">上传修正版 maidata 后选择对应难度槽；仅同音频与目标的修正版才会成为偏好训练候选。</p><input id="qualityCorrectedFile" type="file" accept=".txt,.maidata"><select id="qualityCorrectedDifficulty"><option value="">选择修正版难度槽</option><option value="1">1 · Easy</option><option value="2">2 · Basic</option><option value="3">3 · Advanced</option><option value="4">4 · Expert</option><option value="5">5 · Master</option><option value="6">6 · Re:Master</option></select><span id="qualityCorrectedPath" class="muted"></span><button id="qualitySaveCorrectionButton" class="secondary-button" type="button">保存修正版配对</button></div>
         </section>
         </section>
       </section>
 
       <section class="panel generation-panel">
-        <div class="section-heading">
-          <div><span class="step">03</span><h2>生成谱面</h2></div>
-          <span class="muted">音频 + checkpoint + 目标条件</span>
-        </div>
-
-        <h3 class="group-title">A. 输入音频与模型<span class="group-note">必须先确定 checkpoint，后面的参数才会按正确模型族显示</span></h3>
-        <div class="form-grid">
-          <label class="field span-2">导入音频
+<div class="section-heading">
+<div><span class="step">GENERATE</span><h2>生成谱面</h2></div><span class="muted">已有模型可直接使用，无需先训练</span></div>
+<div class="settings-toolbar">
+<label class="parameter-search">查找参数<input id="generationParameterSearch" type="search" placeholder="如：学习率、上下文、无理" autocomplete="off" data-parameter-search="generation"></label><button type="button" class="small-button" data-expand-settings="generation">展开高级设置</button><button type="button" class="small-button" data-collapse-settings="generation">收起高级设置</button>
+<div id="generationParameterResults" class="parameter-results" hidden></div></div>
+<section id="generationInputGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">01</span>
+<div><h3>导入歌曲与模型</h3>
+<p>选择 checkpoint 后检查模型类型，页面按其能力显示可用设置。</p></div></div>
+<div class="form-grid">
+<label class="field span-2">导入音频
             <input id="audioFile" type="file" accept=".wav,.mp3,.flac,.ogg,.m4a,.aac,.opus,.wma,.mp4">
             <small id="audioUploadStatus">未导入文件</small>
           </label>
-          <label class="field span-4">音频路径
+<label class="field span-4">音频路径
             <textarea id="audioPath" class="path-input" rows="2" placeholder="上传后自动填写，也可粘贴本机绝对路径"></textarea>
           </label>
-          <label class="field span-2" data-generation-family="legacy_frame_v2" hidden>旧基线 audio_features JSON（可选）
-            <input id="featureFile" type="file" accept=".json">
-            <small id="featureUploadStatus">不填写则直接分析音频</small>
-          </label>
-          <label class="field span-2" data-generation-family="legacy_frame_v2" hidden>旧基线特征文件路径
-            <textarea id="featurePath" class="path-input" rows="2" placeholder="可粘贴已缓存的 audio_features.json 路径"></textarea>
-          </label>
-          <label class="field span-4">模型 checkpoint（根据 schema 自动选择生成路径）
+<label class="field span-4">模型 checkpoint（根据 schema 自动选择生成路径）
             <input id="checkpointFile" type="file" accept=".pt,.pth">
             <small id="checkpointUploadStatus">只加载自己训练或来源可信的 .pt；checkpoint 加载可能执行代码。</small>
             <textarea id="checkpointPath" class="path-input" rows="3" placeholder="上传后自动填写，或粘贴 event_best.pt / event_last.pt 的完整路径"></textarea>
-          </label>
-          <div class="checkpoint-actions span-4">
+          </label></div>
+<div class="checkpoint-actions span-4">
             <button id="generationInspectButton" class="secondary-button" type="button">检查生成 checkpoint 类型</button>
             <p id="generationCheckpointStatus" class="inline-status">尚未检查。默认显示 event 参数；选择旧 checkpoint 后才显示旧基线参数。</p>
             <p id="generationPlannerStatus" class="inline-status">点击检查后，这里会显示已选模型的 planner 类型与强度参数适用范围。</p>
             <p class="notice" id="generationCapabilityNotice" hidden></p>
-            <p class="notice" id="generationCheckpointNotice">
-              提示：训练目录里 <code>event_best.pt</code> 可能来自一次较短的运行。<strong>选文件前请核对保存 epoch</strong>——
-              若目录里存在轮数更多的 <code>event_epoch_NNN.pt</code>，通常应当用它而不是 best。<br>
-              <strong>event_ctx_v1 的 context_beats / audio_margin_beats / context_tokens / overlap_beats 会自动读取 checkpoint 训练合同</strong>，生成页不再借用训练参数控件覆盖它们。
-            </p>
+            <p class="notice" id="generationCheckpointNotice">选择模型时结合保存轮数、选择指标和实际生成效果，不根据文件名或轮数单独判断好坏。跨窗口布局自动继承 checkpoint，生成页不使用训练页的布局参数。</p>
           </div>
-          <label class="field span-2" data-generation-family="event_v1 legacy_frame_v2">生成设备 device
+<details id="generationInputAdvanced" class="settings-section" data-advanced >
+<summary><span>设备与旧模型输入</span><small>需要切换 CPU / GPU 或使用旧固定帧模型时调整</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2">生成设备 device
             <select id="generationDevice">
               <option value="auto" selected>自动（有 CUDA 则用 GPU）</option>
               <option value="cuda">CUDA GPU</option>
@@ -635,57 +667,27 @@
             </select>
             <small><code>auto</code> 会在 CUDA 可用时使用 GPU；训练同时占用显卡时选择 <code>cpu</code> 可避免生成抢占 GPU 显存与计算资源，但生成会更慢。</small>
           </label>
-        </div>
-
-        <h3 class="group-title">B. 节拍与时间轴<span class="group-note">BPM 是整张谱面的时钟，错了会让全部音符逐段错位</span></h3>
-        <div class="form-grid">
-          <label class="field" data-generation-family="event_v1">Tempo mode
-            <select id="tempoMode"><option value="constant">constant 单一 BPM</option><option value="auto">auto 自动分析</option></select>
-            <small>
-              <strong>影响生成结果。</strong><code>constant</code> 全曲用一个 BPM，最安全；
-              <code>auto</code> 会额外采用自动检测到的变速点——检测本身可能偏（例如把同一速度听成 3:2），
-              一旦某个变速点判错，<strong>它之后的所有音符都会错位</strong>。仅在确认歌曲确实变速时使用。手动 tempo map 优先于此选项。
-            </small>
+<label class="field span-2" data-generation-family="legacy_frame_v2" hidden>旧基线 audio_features JSON（可选）
+            <input id="featureFile" type="file" accept=".json">
+            <small id="featureUploadStatus">不填写则直接分析音频</small>
           </label>
-          <label class="field">BPM（可选）
-            <input id="bpm" type="number" min="1" step="0.01" placeholder="留空则自动估计">
-            <small id="bpmHelp">未填写 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外采用检测到的变速点。填写 tempo map 后，其 beat 0 BPM 优先。</small>
-          </label>
-          <label class="field">首拍偏移 / 秒
-            <input id="first" type="number" step="0.001" value="0">
-            <small>音频中 chart beat 0 对应的秒数；不确定时保持 0。</small>
-          </label>
-          <label class="field span-2" data-generation-family="event_v1 legacy_frame_v2">手动 tempo map JSON（可选）
-            <textarea id="tempoMap" class="code-input" rows="4" spellcheck="false" placeholder='[{"beat":"0","bpm":180},{"beat":"32","bpm":150}]'></textarea>
-            <small>输入从 beat 0 开始、拍位严格递增的变速点。填写后覆盖 BPM 与 tempo mode；留空继续使用 BPM/tempo mode 和自动检测。beat 是谱面拍，不是秒数。此设置同时用于强度曲线预测和生成。</small>
-          </label>
-          <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线节拍网格 division
-            <input id="division" type="number" min="1" value="16">
-            <small>16 表示每拍四个 frame，建议先保持 16。</small>
-          </label>
-        </div>
-
-        <h3 class="group-title">C. 目标条件<span class="group-note">以下都是软条件，用来引导模型，不保证结果</span></h3>
-        <details class="condition-advanced">
-          <summary>等级、Radar 和 Style 分别控制什么？</summary>
-        <div class="condition-guide">
-          <strong>先理解后调整：</strong>后端把这些值作为 <code>GenerationCondition</code> 的软条件发送给模型，取值范围都是 <code>0–1</code>。
-          <strong>Radar / 复杂度</strong>描述“谱面有多少、哪里爆发、使用什么节奏动作”；<strong>Style / 表现倾向</strong>描述“这些动作在全曲中偏向怎样组合”。
-          <code>note_density</code> 是整体 notes/sec 目标，<code>peak</code> 是局部爆发密度；<code>sweep</code>、<code>slide_tricky</code>、<code>slide_sequence</code> 与
-          <code>slide_bias</code> 共同表达 Slide 运动倾向；<code>chord</code> 与 <code>chord_bias</code> 共同表达和弦倾向；
-          <code>jack</code> 表达同键连打，<code>hold_bias</code> 表达 Hold，<code>touch_bias</code> 表达 Touch，<code>directionality</code> 表达环形轨道上的移动方向感。
-          这些值不是官方机台雷达公式，也不是硬约束；当前模型可能弱化或忽略部分 Style 条件，生成后应查看质量报告。
-        </div>
-          <p class="acceptance-hint">等级标签来自原谱的 &amp;lv_x。精确小数按原值读取；13+ 会按项目规则映射为 13.7，无法恢复官方精确定数。
-            单改等级不会自动改变 Radar / Style；这里的等级基准会同时同步它们。当前仍没有官方定数评分器。</p>
-        </details>
-        <div class="condition-presets">
+<label class="field span-2" data-generation-family="legacy_frame_v2" hidden>旧基线特征文件路径
+            <textarea id="featurePath" class="path-input" rows="2" placeholder="可粘贴已缓存的 audio_features.json 路径"></textarea>
+          </label></div></div>
+</details>
+</section>
+<section id="generationTargetGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">02</span>
+<div><h3>选择等级与偏好</h3>
+<p>先使用等级基准，再按需要微调。</p></div></div>
+<div class="condition-presets">
           <div class="preset-heading"><strong>1 · 选择目标等级</strong><span>自动配好对应的密度与常规写法，每 0.1 档都有基准。</span></div>
           <div class="level-recipe-row">
             <label class="field" for="level">目标等级
               <input id="level" type="number" min="12" max="15" step="0.01" value="13.3">
             </label>
-            <div class="level-recipe-slider"><input id="levelRange" type="range" min="12" max="15" step="0.1" value="13.3" aria-label="拖动选择目标等级"><div><span>12.0 · 较轻</span><span>15.0 · 较重</span></div></div>
+            <div class="level-recipe-slider"><input id="levelRange" type="range" min="12" max="15" step="0.1" value="13.3" aria-label="拖动选择目标等级">
+<div><span>12.0 · 较轻</span><span>15.0 · 较重</span></div></div>
           </div>
           <p class="acceptance-hint">填好数字或拖动后会自动应用等级基准，并保留下面勾选的偏好。也可输入 13.45 等数值，由相邻 0.1 档插值。
             修改等级或偏好会重新计算 Radar / Style，覆盖高级微调；不会改采样、曲线或音频边界。模型来源曲线仍可继续使用，界面仅提示条件变化；需要新的预测时可自行重新生成。</p>
@@ -699,14 +701,28 @@
             <label class="preference-card"><input id="preferTouch" type="checkbox"><span><strong>Touch</strong><small>增加 DX 触摸倾向，不保证合理落点。已有 Touch 偏多时先不选。</small></span></label>
             <label class="preference-card"><input id="preferMovement" type="checkbox"><span><strong>移动</strong><small>偏连续同向位置移动与一定 Slide 运动；不代表更多复杂滑条路径。</small></span></label>
           </div>
-          <div class="preference-strength-row"><label for="conditionPreferenceStrength">偏好力度</label><input id="conditionPreferenceStrength" type="range" min="0" max="1" step="0.05" value="0.5"><output id="conditionPreferenceStrengthLabel">明显 · 50%</output></div>
+          <div class="preference-strength-row">
+<label for="conditionPreferenceStrength">偏好力度</label><input id="conditionPreferenceStrength" type="range" min="0" max="1" step="0.05" value="0.5"><output id="conditionPreferenceStrengthLabel">明显 · 50%</output></div>
           <p class="acceptance-hint">0 恢复常规基准；力度越高，越向同等级真实谱面中的相应倾向靠拢。多选会平衡各项偏好，不会机械相加；相反偏好可能互相减弱。
             改变配置种类仍可能影响实际难度，即使密度不变。等级与偏好都是软条件，最终请试玩。</p>
           <div class="preset-actions"><button id="applyConditionPreset" class="secondary-button" type="button" disabled>重新应用等级与偏好</button><button id="clearConditionPreferences" class="small-button" type="button">清除偏好</button></div>
           <p id="conditionPresetStatus" class="inline-status" aria-live="polite">正在载入真实谱面等级参考…</p>
           <p id="conditionPresetEvidence" class="acceptance-hint"></p>
         </div>
-        <details class="condition-advanced">
+<details class="condition-advanced">
+          <summary>等级、Radar 和 Style 分别控制什么？</summary>
+        <div class="condition-guide">
+          <strong>先理解后调整：</strong>后端把这些值作为 <code>GenerationCondition</code> 的软条件发送给模型，取值范围都是 <code>0–1</code>。
+          <strong>Radar / 复杂度</strong>描述“谱面有多少、哪里爆发、使用什么节奏动作”；<strong>Style / 表现倾向</strong>描述“这些动作在全曲中偏向怎样组合”。
+          <code>note_density</code> 是整体 notes/sec 目标，<code>peak</code> 是局部爆发密度；<code>sweep</code>、<code>slide_tricky</code>、<code>slide_sequence</code> 与
+          <code>slide_bias</code> 共同表达 Slide 运动倾向；<code>chord</code> 与 <code>chord_bias</code> 共同表达和弦倾向；
+          <code>jack</code> 表达同键连打，<code>hold_bias</code> 表达 Hold，<code>touch_bias</code> 表达 Touch，<code>directionality</code> 表达环形轨道上的移动方向感。
+          这些值不是官方机台雷达公式，也不是硬约束；当前模型可能弱化或忽略部分 Style 条件，生成后应查看质量报告。
+        </div>
+          <p class="acceptance-hint">等级标签来自原谱的 &amp;lv_x。精确小数按原值读取；13+ 会按项目规则映射为 13.7，无法恢复官方精确定数。
+            单改等级不会自动改变 Radar / Style；这里的等级基准会同时同步它们。当前仍没有官方定数评分器。</p>
+        </details>
+<details class="condition-advanced">
           <summary>高级微调 · Radar / Style 参数</summary>
           <p class="acceptance-hint">组合应用后仍可逐项修改，微调值会直接用于生成并保存。之后再改等级、勾选偏好或调整偏好力度，会重新从等级基准计算。</p>
         <div class="condition-columns">
@@ -720,7 +736,48 @@
           </div>
         </div>
         </details>
-        <div class="intensity-follow-launch">
+</section>
+<section id="generationTimingGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">03</span>
+<div><h3>对齐节拍与起点</h3>
+<p>已知准确 BPM 时填写；首拍偏移使用音频绝对秒。</p></div></div>
+<div class="form-grid">
+<label class="field">BPM（可选）
+            <input id="bpm" type="number" min="1" step="0.01" placeholder="留空则自动估计">
+            <small id="bpmHelp">未填写 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外采用检测到的变速点。填写 tempo map 后，其 beat 0 BPM 优先。</small>
+          </label>
+<label class="field">首拍偏移 / 秒
+            <input id="first" type="number" step="0.001" value="0">
+            <small>音频中 chart beat 0 对应的秒数；不确定时保持 0。</small>
+          </label></div>
+<details id="generationTempoAdvanced" class="settings-section" data-advanced >
+<summary><span>变速与节拍高级设置</span><small>单一 BPM 通常只需填写上面的 BPM</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">Tempo mode
+            <select id="tempoMode"><option value="constant">constant 单一 BPM</option><option value="auto">auto 自动分析</option></select>
+            <small>
+              <strong>影响生成结果。</strong><code>constant</code> 全曲用一个 BPM，最安全；
+              <code>auto</code> 会额外采用自动检测到的变速点——检测本身可能偏（例如把同一速度听成 3:2），
+              一旦某个变速点判错，<strong>它之后的所有音符都会错位</strong>。仅在确认歌曲确实变速时使用。手动 tempo map 优先于此选项。
+            </small>
+          </label>
+<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2">手动 tempo map JSON（可选）
+            <textarea id="tempoMap" class="code-input" rows="4" spellcheck="false" placeholder='[{"beat":"0","bpm":180},{"beat":"32","bpm":150}]'></textarea>
+            <small>输入从 beat 0 开始、拍位严格递增的变速点。填写后覆盖 BPM 与 tempo mode；留空继续使用 BPM/tempo mode 和自动检测。beat 是谱面拍，不是秒数。此设置同时用于强度曲线预测和生成。</small>
+          </label>
+<label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线节拍网格 division
+            <input id="division" type="number" min="1" value="16">
+            <small>16 表示每拍四个 frame，建议先保持 16。</small>
+          </label></div></div>
+</details>
+</section>
+<section id="generationCurveGroup" class="workflow-group" data-generation-family="event_v1">
+<div class="workflow-group-heading"><span class="step">04</span>
+<div><h3>安排局部强弱（可选）</h3>
+<p>整曲等级决定基准，曲线决定段落之间如何起伏。</p></div></div>
+<div class="intensity-follow-launch">
           <label class="checkbox-field">
             <input id="intensityCurveEnabled" type="checkbox">
             <span>启用谱面张力曲线</span>
@@ -728,30 +785,62 @@
           </label>
           <button id="openIntensityCurveButton" class="secondary-button" type="button">打开强度曲线编辑</button>
         </div>
-        <p id="intensityCurveConditionNotice" class="inline-status warn" hidden></p>
-        <p class="condition-note">
-          <strong>关于条件遮罩：</strong>这是训练阶段的 <code>condition_mask_prob</code>，决定训练样本有多少次使用 null/default 条件；它不表示生成页的滑条“永远有效”或“0.5 就是不设定”。
-          生成页会把你当前填写的 Radar / Style 原样放入后端条件文件，实际影响大小仍取决于 checkpoint 是否学会使用这些条件。
-          默认值来自 full 训练集的中位数；目标等级语料范围为 12.0–15.0，低于 12 属于明显的训练分布外请求。
-        </p>
-
-        <h3 class="group-title">D. 采样与随机性<span class="group-note">控制“同一个模型能产出多少种结果”</span>
-          <button id="resetGenerationButton" class="small-button" type="button" title="只把本面板的生成参数（采样/温度/重复惩罚/条件/等级等）恢复为默认值；训练参数、数据集路径、checkpoint 与音频输入都不会动">恢复生成默认值</button>
-        </h3>
-        <p id="resetGenerationStatus" class="inline-status">改动这些参数后若想回到出厂设置，点右上角「恢复生成默认值」即可；它不会影响训练参数。</p>
-        <div class="condition-guide">
-          <strong>调整顺序：</strong>先选等级预设并点击「应用组合」，保持随机采样开启、Temperature 0.65、Top-p 0.9、条件强度 guidance scale 1。
-          全曲太密或太空，先改「整体密度」与「峰值密度」；配置种类不合适，再改 Radar / Style；只有局部段落不合适时，编辑强度曲线。
-          想比较效果，固定随机种子，每次只改一组参数。温度控制随机性，最大事件 tokens 控制解码预算，它们都不是难度旋钮。
-        </div>
-        <div class="condition-guide">
-          <strong>曲线如何变成生成目标：</strong>曲线值 0.5 表示你设定的全曲密度基准，低于 0.5 请求减弱，高于 0.5 请求加强；模型来源的原始曲线估计的是相对谱面负荷。
-          它不直接指定某种 Slide / Touch，也不把曲线值换算成官方定数。只有「启用谱面张力曲线」已勾选、当前歌曲曲线已保存、指导强度大于 0 时，人工曲线才参与生成。
-          <br><strong>默认参数示例：</strong>soft、指导强度 0.65、跟随幅度 0.5 时，曲线 0.2 / 0.5 / 0.8 对应约 0.675 / 1 / 1.325 倍的密度目标。
-          这是目标倍率，实际音符数仍由模型决定；soft 不会在生成后按倍率删音符。
-        </div>
-        <div class="form-grid compact-grid">
-          <div class="field span-4 fine-note-control" data-generation-family="event_v1">
+<p id="intensityCurveConditionNotice" class="inline-status warn" hidden></p>
+<p id="generationCurveSummary" class="inline-status" role="status"></p>
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">强度曲线指导强度
+            <input id="intensityCurveStrength" type="number" min="0" max="1" step="0.05" value="0.65">
+            <small>只控制已启用且保存的人工曲线。0 完全旁路数值曲线，恢复自动跟随 / 结尾衰减；显式标记的休止区仍然禁止新起音。0.65 向曲线目标靠拢，1 使用完整曲线目标。
+            它是规划控制的混合力度，不是「最终 65% 音符听曲线」。新 planner 混合音符量、密度和负荷目标；旧模型使用密度条件和可用的 planner 控制。
+            follow / hard 下仍受「强度跟随幅度」限制；soft 下保持旧版软指导兼容，strict 下保持旧版生成后上限兼容。可先保持 0.65，感觉过强时降低，感觉不明显时逐步提高。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">强度曲线模式
+            <select id="intensityCurveMode"><option value="follow" selected>follow（柔性跟随）</option><option value="hard">hard（严苛跟随）</option><option value="soft">soft（软指导 / 仅规划，兼容旧版）</option><option value="strict">strict（密度上限 / 生成后上限，兼容旧版）</option></select>
+            <small>follow：推荐。保留幅度限制，并在生成位置动态抑制过密，不因普通曲线事后删音符。hard：同样保留幅度限制，约 2 秒密度达到上限后停止该段新起音，继续后段，不补 note。soft / strict 仅用于旧配置兼容；旧 strict：不使用跟随幅度限制。显式休止区始终禁止新起音；此前已开始的 Hold / Slide 可跨入。</small>
+          </label></div>
+<details id="generationCurveAdvanced" class="settings-section" data-advanced >
+<summary><span>自动跟随、幅度与结尾处理</span><small>曲线指导强度大于 0 时，人工曲线优先</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">强度跟随（逐窗口）
+            <input id="intensityFollow" type="checkbox" checked>
+            <small><strong>控制额外的自动强度参考，默认开。</strong>多维音乐张力 / 仅响度模式会逐窗口缩放「整体密度」与「峰值密度」，不改 Style。
+            新 music_structure_v2/v3 的 auto / model 模式直接使用模型学得的局部规划，不再额外乘音频倍率；取消此开关也不会关闭模型内部 planner。
+            人工曲线启用且指导强度大于 0 时，自动跟随与结尾衰减被曲线覆盖。音频参考不是情绪识别，模型参考也不是官方定数预测。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">强度跟随模式
+            <select id="intensityMode"><option value="auto" selected>自动（新模型 planner / 旧模型音频）</option><option value="model">模型 planner</option><option value="multifeature">多维音乐张力</option><option value="loudness">仅响度（兼容旧后端）</option></select>
+            <small>auto：music_structure_v2/v3 使用学得的局部音符量、配置与负荷，旧模型使用多维音频参考。
+            model：只支持 music_structure_v2/v3；multifeature：用节奏、频谱、和声变化与响度估计相对张力；loudness：只比较相对响度，无法表达编配或谱师意图。
+            在 model 模式中，跟随幅度不限制模型自然预测的起伏；需要明确控制时，请生成并编辑曲线。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">强度跟随幅度
+            <input id="intensityFollowSpan" type="number" min="0" max="0.9" step="0.05" value="0.5">
+            <small>用于多维 / 响度自动跟随，也用于人工曲线的 follow / hard / soft 模式。0.5 先把参考倍率限制在 0.5×～1.5×；再混合指导强度，默认 0.65 后实际目标范围是 0.675×～1.325×。
+            0.2 更保守，0.8 允许更大落差。0 使这项密度缩放回到基准；它不会关闭模型内部 planner、结尾衰减或 strict 上限。
+            model 自动模式及人工曲线 strict 模式不使用此范围。follow / hard / soft 曲线过于极端时会被截到范围边缘，继续拖动可能不再产生更强效果。曲线为 0 也可能保留非零目标；需要完全休息时，请在曲线页标记休止。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">结尾衰减
+            <input id="tailDamping" type="checkbox">
+            <small><strong>默认关。</strong>对最后若干窗口逐步压低密度条件，可与自动跟随相乘；它是假定收尾应减弱的规则，不能判断结尾是否仍需爆发。
+            人工曲线启用且指导强度大于 0 时，此规则不参与。需要针对某个收尾创作时，优先直接编辑曲线。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">结尾衰减窗口数
+            <input id="tailDampingWindows" type="number" min="1" max="16" value="4">
+            <small>最后多少个生成窗口参与衰减。训练窗口为 16 拍时，4 个窗口约为 64 拍；实际长度取决于 checkpoint 的窗口设置和 BPM。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">结尾衰减强度
+            <input id="tailDampingStrength" type="number" min="0" max="0.9" step="0.05" value="0.6">
+            <small>最后一个窗口的密度倍数：<strong>0.6 表示末窗只要求原本密度的 40%</strong>，向前线性过渡回 100%。</small>
+          </label></div></div>
+</details>
+</section>
+<details id="generationRhythm" class="settings-section" data-advanced >
+<summary><span>细碎音与局部采音对齐</span><small>分别控制细节倾向和起音对齐；按模型能力开放</small>
+</summary>
+<div class="settings-content">
+<div class="field span-4 fine-note-control" data-generation-family="event_v1">
             <label for="fineNoteStrength">细碎音符倾向</label>
             <input id="fineNoteStrength" type="range" min="0" max="1" step="0.05" value="0.5" disabled>
             <output id="fineNoteStrengthValue" for="fineNoteStrength">0.50</output>
@@ -762,153 +851,87 @@
             </div>
             <small>仅适用于已检查且训练了 music_structure_v3 fine_rhythm 的 checkpoint。0 偏主音，0.5 跟随每窗口预测，1 偏细碎音型；这是柔性调制，不会锁定三连音、附点或某种节奏类别。可与局部曲线和键盘/星星等配置偏好叠加：曲线控制局部负荷，偏好影响配置类别。</small>
           </div>
-          <div class="field span-4 local-onset-control" data-generation-family="event_v1">
+<div class="field span-4 local-onset-control" data-generation-family="event_v1">
             <label for="localOnsetBiasStrength">局部采音对齐指导强度（local_onset_bias_strength）</label>
             <input id="localOnsetBiasStrength" type="range" min="0" max="1" step="0.05" value="0" disabled>
             <output id="localOnsetBiasStrengthValue" for="localOnsetBiasStrength">0.00</output>
             <small id="localOnsetGuidanceStatus">检查当前生成 checkpoint 后确认能力。</small>
             <small>0 关闭；可先试温和的 0.3–0.6，增强局部音乐节拍对落点的指导。不会强制每个音乐峰都加音符或指定三连音；它不替代强度曲线或密度限制。旧模型及未训练此辅助头的 checkpoint 不支持。</small>
-          </div>
-          <label class="field">随机种子
-            <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
-            <small><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed，抽到好谱面后照着填回来即可重现。</small>
-          </label>
-          <label class="field">候选数量
+          </div></div>
+</details>
+<section id="generationSamplingGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">05</span>
+<div><h3>设置生成方式</h3>
+<p>候选数决定生成几份；固定种子便于比较参数。</p></div></div>
+<div class="form-grid">
+<label class="field">候选数量
             <input id="candidates" type="number" min="1" max="64" value="1">
             <small>生成几份并分别保存。默认 1；大于 1 为手动实验，<strong>不代表自动挑选最佳谱面</strong>，仍需逐个试玩。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">Temperature（采样温度）
-            <input id="temperature" type="number" min="0.01" step="0.05" value="0.65">
-            <small><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。
-            较低值会让抽样更集中，较高值会保留更多不确定性；高温可能增加结构偏差。它不直接控制密度、音频跟随或难度，默认 0.65。</small>
+<label class="field">随机种子
+            <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
+            <small><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed，抽到好谱面后照着填回来即可重现。</small>
           </label>
-          <label class="checkbox-field" data-generation-family="event_v1">
+<label class="checkbox-field" data-generation-family="event_v1">
             <input id="sampleEvents" type="checkbox" checked>
             <span>启用随机采样（sample）</span>
             <small><strong>后端对应 sample / greedy 解码开关。</strong>勾选时从经过语法约束的概率分布抽样；取消时每步取最高概率 token（greedy），结果确定但可能更容易重复。
             它改变随机性，不会补足模型没学会的音符类型或配置。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">Top-p 截断
+<label class="field" data-generation-family="event_v1">Temperature（采样温度）
+            <input id="temperature" type="number" min="0.01" step="0.05" value="0.65">
+            <small><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。
+            较低值会让抽样更集中，较高值会保留更多不确定性；高温可能增加结构偏差。它不直接控制密度、音频跟随或难度，默认 0.65。</small>
+          </label></div>
+<details id="generationSamplingAdvanced" class="settings-section" data-advanced >
+<summary><span>采样与解码高级设置</span><small>Top-p、重复惩罚、条件强度与 token 预算</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">Top-p 截断
             <input id="topP" type="number" min="0" max="1" step="0.05" value="0.9">
             <small><strong>只在启用采样时生效。</strong>后端按温度缩放后的概率，从高到低保留累计概率达到该阈值的最小 token 集合。
             0 或 ≥1 表示不截断；低于 1 时，数值越低抽样候选越窄、越保守，越接近 1 候选越宽。默认 0.9。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">重复惩罚
+<label class="field" data-generation-family="event_v1">重复惩罚
             <input id="repetitionPenalty" type="number" min="1" max="2" step="0.05" value="1.05">
             <small><strong>默认 1.05 = 轻度开启。</strong>&gt;1 时，后端对最近重复窗口中出现过的<strong>非结构 token</strong>降低 logits；拍位 <code>AT:</code> 与控制 token 豁免。
             同一 token 出现一次或多次都只惩罚一次。例如 1–8 都已出现时，会一起受罚，并不专门压制转圈或两键交互。仅随机采样时生效，数值 1 关闭；提高也可能压制合理重复，不能替代完整配置的学习。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">重复窗口（token 数）
+<label class="field" data-generation-family="event_v1">重复窗口（token 数）
             <input id="repetitionWindow" type="number" min="8" step="8" value="56">
             <small><strong>后端检查最近 N 个 token，包含跨窗口引子，默认 56。</strong>它没有固定的拍数或秒数：密度、和弦、Slide 等文本长度都会改变实际覆盖时长。调大将把更早出现的字符纳入惩罚，也可能压制合法连打或动机再现。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">最大事件 tokens
-            <input id="maxTokens" type="number" min="1" value="768">
-            <small>单个窗口的生成 token 预算，和训练数据筛选用的 <code>max_tokens</code> 是不同参数。它必须容纳跨窗口引子与本窗口事件；
-            当前默认 768，增大可为更长的上下文/事件留预算，但不能超过 checkpoint 的位置表上限。若出现窗口截断或上下文占预算过多，可提高后重新验收。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">条件强度 guidance scale
+<label class="field" data-generation-family="event_v1">条件强度 guidance scale
             <input id="guidanceScale" type="number" min="0" max="3" step="0.05" value="1">
             <small><strong>Classifier-free guidance scale。</strong>1 = 只用条件分支；大于 1 会放大“条件分支 − null 分支”的 logits 差异，可能更贴近输入条件，也可能变得生硬。
             0 使用 null 分支（训练策略保留等级、把其它条件置为默认值），所以不是忽略音频，也不是把所有输入都清零。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">强度跟随（逐窗口）
-            <input id="intensityFollow" type="checkbox" checked>
-            <small><strong>控制额外的自动强度参考，默认开。</strong>多维音乐张力 / 仅响度模式会逐窗口缩放「整体密度」与「峰值密度」，不改 Style。
-            新 music_structure_v2/v3 的 auto / model 模式直接使用模型学得的局部规划，不再额外乘音频倍率；取消此开关也不会关闭模型内部 planner。
-            人工曲线启用且指导强度大于 0 时，自动跟随与结尾衰减被曲线覆盖。音频参考不是情绪识别，模型参考也不是官方定数预测。</small>
+<label class="field" data-generation-family="event_v1">最大事件 tokens
+            <input id="maxTokens" type="number" min="1" value="768">
+            <small>单个窗口的生成 token 预算，和训练数据筛选用的 <code>max_tokens</code> 是不同参数。它必须容纳跨窗口引子与本窗口事件；
+            当前默认 768，增大可为更长的上下文/事件留预算，但不能超过 checkpoint 的位置表上限。若出现窗口截断或上下文占预算过多，可提高后重新验收。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">强度跟随模式
-            <select id="intensityMode"><option value="auto" selected>自动（新模型 planner / 旧模型音频）</option><option value="model">模型 planner</option><option value="multifeature">多维音乐张力</option><option value="loudness">仅响度（兼容旧后端）</option></select>
-            <small>auto：music_structure_v2/v3 使用学得的局部音符量、配置与负荷，旧模型使用多维音频参考。
-            model：只支持 music_structure_v2/v3；multifeature：用节奏、频谱、和声变化与响度估计相对张力；loudness：只比较相对响度，无法表达编配或谱师意图。
-            在 model 模式中，跟随幅度不限制模型自然预测的起伏；需要明确控制时，请生成并编辑曲线。</small>
+<label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Presence threshold
+            <input id="presenceThreshold" type="number" min="0" max="1" step="0.01" value="0.45">
           </label>
-          <label class="field" data-generation-family="event_v1">强度曲线指导强度
-            <input id="intensityCurveStrength" type="number" min="0" max="1" step="0.05" value="0.65">
-            <small>只控制已启用且保存的人工曲线。0 完全旁路数值曲线，恢复自动跟随 / 结尾衰减；显式标记的休止区仍然禁止新起音。0.65 向曲线目标靠拢，1 使用完整曲线目标。
-            它是规划控制的混合力度，不是「最终 65% 音符听曲线」。新 planner 混合音符量、密度和负荷目标；旧模型使用密度条件和可用的 planner 控制。
-            follow / hard 下仍受「强度跟随幅度」限制；soft 下保持旧版软指导兼容，strict 下保持旧版生成后上限兼容。可先保持 0.65，感觉过强时降低，感觉不明显时逐步提高。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">强度曲线模式
-            <select id="intensityCurveMode"><option value="follow" selected>follow（柔性跟随）</option><option value="hard">hard（严苛跟随）</option><option value="soft">soft（软指导 / 仅规划，兼容旧版）</option><option value="strict">strict（密度上限 / 生成后上限，兼容旧版）</option></select>
-            <small>follow：推荐。保留幅度限制，并在生成位置动态抑制过密，不因普通曲线事后删音符。hard：同样保留幅度限制，约 2 秒密度达到上限后停止该段新起音，继续后段，不补 note。soft / strict 仅用于旧配置兼容；旧 strict：不使用跟随幅度限制。显式休止区始终禁止新起音；此前已开始的 Hold / Slide 可跨入。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">强度跟随幅度
-            <input id="intensityFollowSpan" type="number" min="0" max="0.9" step="0.05" value="0.5">
-            <small>用于多维 / 响度自动跟随，也用于人工曲线的 follow / hard / soft 模式。0.5 先把参考倍率限制在 0.5×～1.5×；再混合指导强度，默认 0.65 后实际目标范围是 0.675×～1.325×。
-            0.2 更保守，0.8 允许更大落差。0 使这项密度缩放回到基准；它不会关闭模型内部 planner、结尾衰减或 strict 上限。
-            model 自动模式及人工曲线 strict 模式不使用此范围。follow / hard / soft 曲线过于极端时会被截到范围边缘，继续拖动可能不再产生更强效果。曲线为 0 也可能保留非零目标；需要完全休息时，请在曲线页标记休止。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">结尾衰减
-            <input id="tailDamping" type="checkbox">
-            <small><strong>默认关。</strong>对最后若干窗口逐步压低密度条件，可与自动跟随相乘；它是假定收尾应减弱的规则，不能判断结尾是否仍需爆发。
-            人工曲线启用且指导强度大于 0 时，此规则不参与。需要针对某个收尾创作时，优先直接编辑曲线。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">结尾衰减窗口数
-            <input id="tailDampingWindows" type="number" min="1" max="16" value="4">
-            <small>最后多少个生成窗口参与衰减。训练窗口为 16 拍时，4 个窗口约为 64 拍；实际长度取决于 checkpoint 的窗口设置和 BPM。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">结尾衰减强度
-            <input id="tailDampingStrength" type="number" min="0" max="0.9" step="0.05" value="0.6">
-            <small>最后一个窗口的密度倍数：<strong>0.6 表示末窗只要求原本密度的 40%</strong>，向前线性过渡回 100%。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">音频边界裁剪
-            <input id="audioBoundsTrim" type="checkbox" checked>
-            <small><strong>治"开头/结尾多出音符"的关键开关，默认开。</strong>生成的时间轴是按<strong>文件长度 + BPM 网格</strong>切的，
-            所以歌曲开头的纯静音和结尾的静音尾也会被当成正常窗口要求写谱；实测某曲谱面在音乐开始前写了 <strong>8 个音符</strong>、
-            音乐结束后写了 <strong>9 个音符</strong>（最晚到 146.12 s）。
-            打开后会：① 用<strong>响度 ∪ 起音</strong>两条证据找出"音乐真正在响"的区间（只用响度会漏掉安静的起音：实测首个起音在 1.98 s，
-            而响度到 2.40 s 才过阈值，只按响度会把合法的弱拍也裁掉、开头空出 3 秒）；② <strong>完全无音乐的窗口直接输出空窗、不解码</strong>；
-            ③ 越界事件被裁掉（同时保证 <code>&lt;ctx&gt;</code> 引子与最终谱面一致）。日志会打印 <code>audio_bounds</code> 与每窗 <code>audible=</code> 占比。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">边界余量（秒）
-            <input id="audioBoundsLead" type="number" min="0" max="5" step="0.25" value="0">
-            <small><strong>默认 0 = 严格不越界</strong>：谱面不允许在静音处写任何一个音符。
-            实测把余量设成 0.5 s 时，音乐 2.40–142.96 s，谱面首音符却落在 <strong>1.94 s</strong>（早于音乐 0.46 s）、末音符 143.29 s——
-            所以默认必须是 0。只有当你要给"起音前的弱拍"或"最后一个和弦的余响"留位置时才调大（1–2 s）。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">静音阈值
-            <input id="silenceThreshold" type="number" min="0.02" max="1" step="0.05" value="0.15">
-            <small>帧响度低于"全曲中位响度 × 该值"就算静音。实测 0.10–0.40 都把同一首歌的首个可听帧判在 2.4 s，<strong>不敏感</strong>，保持 0.15 即可。</small>
-          </label>
-          <label class="field" data-generation-family="event_v1">整窗静音跳过阈值
-            <input id="silenceWindowShare" type="number" min="0" max="0.9" step="0.05" value="0.05">
-            <small>某窗口"可听帧占比"低于该值 → 该窗口直接输出空窗、不跑解码。<strong>0.05 = 只有不足 5% 的帧有声音才跳过</strong>；
-            调高（如 0.3）会更激进地留白，调 0 表示只要有一帧有声就照常解码。</small>
-          </label>
-
-          <!-- ========== 可玩性与冲突检测（新增）========== -->
-          <h3 data-generation-family="event_v1">无理检测与修复（MiaCode · Python）</h3>
-          <p id="playabilityEngineStatus" data-generation-family="event_v1" class="inline-status">正在检查 Python 检测模块与路径数据…</p>
-          <p id="generationActionStateStatus" data-generation-family="event_v1" class="help-text">持续动作摘要按 checkpoint 自动启用；旧模型使用原生成方式。</p>
-          <p data-generation-family="event_v1" class="help-text">
-            感谢 <a href="https://github.com/Team-MiaCode/MiaCode" target="_blank" rel="noopener noreferrer">MiaCode 团队与贡献者</a>
-            开源无理检测核心。本项目将其判定区、Slide/Wifi、Touch 联动与动作分析逻辑移植为 Python，并保留上游许可证、参考数据使用范围和来源说明。
-          </p>
-          <p data-generation-family="event_v1" class="help-text">
-            生成进程直接运行 Python 检测，包含有序判定区、星星头、Slide/Wifi、Hold 和 Touch 联动。路径参考数据随项目提供，无需编译 DLL、安装 Qt 或打开 MiaCode 编辑器。现有类别策略、局部修复、回溯和单音符微调继续生效；检测结果仍需结合玩家实际游玩评估。
-          </p>
-
-          <label class="field" data-generation-family="event_v1">
+<label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Button threshold
+            <input id="buttonThreshold" type="number" min="0" max="1" step="0.01" value="0.45">
+          </label></div></div>
+</details>
+</section>
+<section id="generationPlayabilityGroup" class="workflow-group" data-generation-family="event_v1">
+<div class="workflow-group-heading"><span class="step">06</span>
+<div><h3>无理检测与修复</h3>
+<p>先选择处理方式，再按需要展开细分策略。</p></div></div>
+<p id="playabilityEngineStatus" data-generation-family="event_v1" class="inline-status">正在检查 Python 检测模块与路径数据…</p>
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">
             <input id="conflictDetectionEnabled" type="checkbox">
             启用无理检测
             <small>开启后同时检查每个生成窗口与合并后的整曲；沿用现有模型，无需重练。</small>
           </label>
-
-          <label class="field" data-generation-family="event_v1">
-            <input id="detectHardConflicts" type="checkbox" checked>
-            检测无理（Muri）
-            <small>使用 MiaCode 判为 Muri 的结果，包括叠键、Hold 尾部接音、星星头与轨迹冲突、Slide 提前完成及动作多押；按判定区和时间顺序检查 Touch 联动。</small>
-          </label>
-
-          <label class="field" data-generation-family="event_v1">
-            <input id="detectSoftConflicts" type="checkbox">
-            检测警告（Warning）
-            <small>MiaCode 的 Warning 与 Muri 分别记录。开启后 Warning 也参与局部重试评分；Warning 不直接删音符，不触发拒绝生成。</small>
-          </label>
-
-          <label class="field" data-generation-family="event_v1">无理处理预设
+<label class="field" data-generation-family="event_v1">无理处理预设
             <select id="conflictPreset">
               <option value="preserve">保留写法</option>
               <option value="balanced" selected>均衡</option>
@@ -917,8 +940,44 @@
             </select>
             <small>保留写法与均衡都将多押记为报告，其余类别参与处理；撞尾静态参考阈值分别为 150 ms 和 200 ms。谨慎模式将全部类别纳入处理并使用 250 ms。此阈值只控制静态检查邻近范围，不改变实机 Perfect 判定，也不表示允许所有 Muri 误差。</small>
           </label>
-
-          <details class="field span-4" data-generation-family="event_v1">
+<label class="field" data-generation-family="event_v1">修复模式
+            <select id="conflictRepairMode">
+              <option value="none">仅检测</option>
+              <option value="local">局部修复</option>
+              <option value="reject">拒绝生成</option>
+            </select>
+            <small>none 仅报告；local 先重试当前窗口，必要时处理前置长音符来源，再按单音符策略微调或删除并复检；reject 在剩余“参与处理”的 Muri 或解析失败时拒绝候选。“仅报告”的类别不会触发拒绝。局部修复不保证所有问题都能消除，日志显示剩余数量。</small>
+          </label></div>
+<p id="generationRepairSummary" class="inline-status" role="status"></p>
+<details id="generationRepairAdvanced" class="settings-section" data-advanced >
+<summary><span>检测范围、修复策略与回溯</span><small>只在启用检测后生效；源长音修复与局部编辑分开设置</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">
+            <input id="detectHardConflicts" type="checkbox" checked>
+            检测无理（Muri）
+            <small>使用 MiaCode 判为 Muri 的结果，包括叠键、Hold 尾部接音、星星头与轨迹冲突、Slide 提前完成及动作多押；按判定区和时间顺序检查 Touch 联动。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">
+            <input id="detectSoftConflicts" type="checkbox">
+            检测警告（Warning）
+            <small>MiaCode 的 Warning 与 Muri 分别记录。开启后 Warning 也参与局部重试评分；Warning 不直接删音符，不触发拒绝生成。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">单 note 修复策略
+            <select id="noteRepairMode">
+              <option value="delete">删除修复</option>
+              <option value="edit">仅微调</option>
+              <option value="edit_then_delete" selected>微调优先，失败后删除</option>
+            </select>
+            <small>仅在 local 时生效。候选包括相邻按键/Touch 区域、缩短 Hold、移动简单 Slide 的终点；保留起音时间与音符数量，经 MiaCode 复检确认问题减少且未新增其他 Muri 才采用。仅微调失败时保留并报告；微调优先模式可继续删除。此功能是受约束的候选搜索，不是模型填空。</small>
+          </label>
+<label class="field" data-generation-family="event_v1">
+            冲突重试次数
+            <input id="conflictRetries" type="number" min="0" max="5" step="1" value="0">
+            <small>每个冲突窗口的额外生成次数，0 关闭重采样。硬冲突优先减少，随后比较警告；日志显示触发原因、每次检测计数、删除的音符及最终复检结果。</small>
+          </label></div>
+<details class="field span-4" data-generation-family="event_v1">
             <summary>高级类别策略与回溯设置</summary>
             <p class="help-text">“忽略”不处理该类，原始检测证据保留在报告中；“仅报告”显示问题但不重试、修复或拒绝；“参与处理”按下方修复模式处理。全局 Muri / Warning 开关分别控制这两个级别。</p>
             <div class="form-grid">
@@ -969,105 +1028,108 @@
               </label>
             </div>
           </details>
-
-          <label class="field" data-generation-family="event_v1">修复模式
-            <select id="conflictRepairMode">
-              <option value="none">仅检测</option>
-              <option value="local">局部修复</option>
-              <option value="reject">拒绝生成</option>
-            </select>
-            <small>none 仅报告；local 先重试当前窗口，必要时处理前置长音符来源，再按单音符策略微调或删除并复检；reject 在剩余“参与处理”的 Muri 或解析失败时拒绝候选。“仅报告”的类别不会触发拒绝。局部修复不保证所有问题都能消除，日志显示剩余数量。</small>
+<p id="generationActionStateStatus" data-generation-family="event_v1" class="help-text">持续动作摘要按 checkpoint 自动启用；旧模型使用原生成方式。</p></div>
+</details>
+<p class="workflow-hint">感谢 <a href="https://github.com/Team-MiaCode/MiaCode" target="_blank" rel="noopener noreferrer">MiaCode 团队与贡献者</a>提供无理检测核心。检测使用项目内 Python 实现，保留原许可证与参考数据使用范围。</p>
+</section>
+<details id="generationBoundaries" class="settings-section" data-advanced >
+<summary><span>音频起止与静音处理</span><small>控制开场、收尾和整窗静音的裁剪行为</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field" data-generation-family="event_v1">音频边界裁剪
+            <input id="audioBoundsTrim" type="checkbox" checked>
+            <small>结合响度与起音证据估计有效音频范围，裁剪音乐开始前和结束后的音符，并跳过静音窗口。默认开启；检测是估计值，弱起音或余响处理不合适时检查下面的阈值和实际音频。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">单 note 修复策略
-            <select id="noteRepairMode">
-              <option value="delete">删除修复</option>
-              <option value="edit">仅微调</option>
-              <option value="edit_then_delete" selected>微调优先，失败后删除</option>
-            </select>
-            <small>仅在 local 时生效。候选包括相邻按键/Touch 区域、缩短 Hold、移动简单 Slide 的终点；保留起音时间与音符数量，经 MiaCode 复检确认问题减少且未新增其他 Muri 才采用。仅微调失败时保留并报告；微调优先模式可继续删除。此功能是受约束的候选搜索，不是模型填空。</small>
+<label class="field" data-generation-family="event_v1">边界余量（秒）
+            <input id="audioBoundsLead" type="number" min="0" max="5" step="0.25" value="0">
+            <small>在估计的有效音频边界两侧保留多少秒。0 不额外扩展；调大可保留弱起音或余响，也可能使静音区出现音符。</small>
           </label>
-          <label class="field" data-generation-family="event_v1">
-            冲突重试次数
-            <input id="conflictRetries" type="number" min="0" max="5" step="1" value="0">
-            <small>每个冲突窗口的额外生成次数，0 关闭重采样。硬冲突优先减少，随后比较警告；日志显示触发原因、每次检测计数、删除的音符及最终复检结果。</small>
+<label class="field" data-generation-family="event_v1">静音阈值
+            <input id="silenceThreshold" type="number" min="0.02" max="1" step="0.05" value="0.15">
+            <small>相对全曲中位响度的静音阈值，并结合起音证据判断。调高通常会把更多安静片段视为静音；默认 0.15，出现误裁再针对歌曲调整。</small>
           </label>
-
-          <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Presence threshold
-            <input id="presenceThreshold" type="number" min="0" max="1" step="0.01" value="0.45">
-          </label>
-          <label class="field" data-generation-family="legacy_frame_v2" hidden>旧基线 Button threshold
-            <input id="buttonThreshold" type="number" min="0" max="1" step="0.01" value="0.45">
-          </label>
-        </div>
-
-        <h3 class="group-title">E. 输出与元数据<span class="group-note">只影响写进文件的信息，不影响模型生成内容</span></h3>
-        <div class="form-grid">
-          <label class="field">输出标题
+<label class="field" data-generation-family="event_v1">整窗静音跳过阈值
+            <input id="silenceWindowShare" type="number" min="0" max="0.9" step="0.05" value="0.05">
+            <small>某窗口"可听帧占比"低于该值 → 该窗口直接输出空窗、不跑解码。<strong>0.05 = 只有不足 5% 的帧有声音才跳过</strong>；
+            调高（如 0.3）会更激进地留白，调 0 表示只要有一帧有声就照常解码。</small>
+          </label></div></div>
+</details>
+<section id="generationOutputGroup" class="workflow-group" >
+<div class="workflow-group-heading"><span class="step">07</span>
+<div><h3>设置输出</h3>
+<p>生成完成后在任务区域打开谱面与质量报告。</p></div></div>
+<div class="form-grid">
+<label class="field">输出标题
             <input id="title" type="text" value="Generated maimai chart">
           </label>
-          <label class="field">谱师名
+<label class="field span-4">输出文件路径
+            <textarea id="outputPath" class="path-input" rows="2">webui_workspace/generated/maidata.txt</textarea>
+            <small>任务完成后显示实际生成文件与质量报告路径；局部修复时还会列出原谱和修正版，项目外文件请在本机打开。</small>
+          </label></div>
+<details id="generationMetadata" class="settings-section" data-advanced >
+<summary><span>输出元数据</span><small>谱师、曲师、显示等级与导出槽位</small>
+</summary>
+<div class="settings-content">
+<div class="form-grid">
+<label class="field">谱师名
             <input id="designer" type="text" value="AI">
           </label>
-          <label class="field">曲师 / artist
+<label class="field">曲师 / artist
             <input id="artist" type="text" value="">
           </label>
-          <label class="field">输出等级文字（可选）
+<label class="field">输出等级文字（可选）
             <input id="chartLevel" type="text" placeholder="例如 13+">
             <small>元数据标签，不是难度测量结果。</small>
           </label>
-          <label class="field span-4">输出文件路径
-            <textarea id="outputPath" class="path-input" rows="2">webui_workspace/generated/maidata.txt</textarea>
-            <small>任务完成后显示实际生成文件与质量报告路径；局部修复时还会列出原谱和修正版，项目外文件请在本机打开。</small>
-          </label>
-        </div>
-
-        <p class="notice">等级、Radar、Style 和 guidance scale 都是软条件，不保证实际难度、质量或可玩性。默认一个候选；多个候选仍需逐个检查。语法通过不等于可用。</p>
-        <div class="button-row">
-          <button id="generateButton" class="primary-button">生成谱面</button>
-          <button id="clearGenerate" class="secondary-button">清空生成参数</button>
-        </div>
-
-        <h3 class="group-title">F. 谱面验收<span class="group-note">把生成的谱面拿去和"好谱面"逐项对比</span></h3>
-        <p class="param-intro">
-          <strong>怎么用？</strong>先把金标统计文件（<code>gold_stats.json</code>，由训练区「生成金标集切分」产出）填到下面，
-          再点「验收谱面」。程序会算出一组客观指标，并和<strong>金标验证集</strong>的分位区间逐项比较，给出
-          PASS / WARN / FAIL。下面的时序图会直观显示：<span class="legend-swatch legend-intensity"></span>歌曲相对强度、
-          <span class="legend-swatch legend-density"></span>谱面音符密度、<span class="legend-swatch legend-blank"></span>空白段落。
-        </p>
-        <div class="form-grid">
-          <label class="field span-2">金标统计 gold_stats.json
+<label class="field">难度槽位
+            <select id="acceptanceDifficulty">
+              <option value="5" selected>5（Master 槽位）</option>
+              <option value="4">4（Expert 槽位）</option>
+              <option value="3">3（Advanced 槽位）</option>
+              <option value="6">6（Re:Master 槽位）</option>
+            </select>
+            <small>生成产物默认写在 5 号槽位，一般不用改。</small>
+          </label></div></div>
+</details>
+</section>
+<div class="run-review"><h3>本次生成摘要</h3><ul id="generationRunSummary"></ul></div>
+<div class="workflow-actions"><button id="generateButton" class="primary-button">生成谱面</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button></div>
+<details id="generationAcceptance" class="settings-section" data-advanced >
+<summary><span>生成后的诊断与对照（可选）</span><small>检查历史谱面，或使用自己选择的参考统计</small>
+</summary>
+<div class="settings-content">
+<p class="workflow-hint">报告用于定位语法、空白、密度和音乐对应问题。参考统计取决于所选谱面，不能代替实际游玩评价。</p>
+<div class="form-grid">
+<label class="field span-2">金标统计 gold_stats.json
             <textarea id="goldStatsPath" class="path-input" rows="2" placeholder="生成金标集后自动填写，或粘贴路径"></textarea>
             <small><strong>填了它，生成时就会自动附带验收报告</strong>（比较对象是永未参与训练的金标验证曲）。留空也能验收，但只能给出绝对判据（语法、空白比例等），没有"像不像好谱面"的横向比较。</small>
           </label>
-          <label class="field span-2">待验收谱面 maidata.txt
+<label class="field span-2">待验收谱面 maidata.txt
             <textarea id="acceptanceMaidata" class="path-input" rows="2" placeholder="留空 = 使用上面「输出文件路径」的当前产物"></textarea>
             <small>想复核某一份历史产物时，把它的路径粘进来即可。</small>
           </label>
-          <label class="field span-2">对应音频（可选，但强烈建议）
+<label class="field span-2">对应音频（可选，但强烈建议）
             <textarea id="acceptanceAudio" class="path-input" rows="2" placeholder="留空 = 使用生成时导入的音频"></textarea>
-            <small>填了音频才能算<strong>音频贴合度</strong>（歌曲响度与音符密度的相关性）——这是"谱面有没有跟着音乐走"的核心指标。</small>
-          </label>
-          <label class="field">难度槽位
-            <select id="acceptanceDifficulty">
-              <option value="5" selected>5（Buddies/Re:Master 槽位）</option>
-              <option value="4">4（Master 槽位）</option>
-              <option value="3">3（Expert 槽位）</option>
-              <option value="6">6（Re:Master+）</option>
-            </select>
-            <small>生成产物默认写在 5 号槽位，一般不用改。</small>
-          </label>
-        </div>
-        <div class="button-row">
-          <button id="acceptanceButton" class="secondary-button">验收谱面</button>
-        </div>
-        <p id="acceptanceStatus" class="inline-status">尚未验收。生成谱面后会自动显示结果。</p>
-        <div id="acceptancePanel" class="acceptance-panel" hidden>
+            <small>填了音频才能算<strong>音频贴合度</strong>（歌曲响度与音符密度的相关性）——这是辅助观察，不能完整评价采音、情绪与音乐表达。</small>
+          </label></div>
+<div class="button-row"><button id="acceptanceButton" class="secondary-button">验收谱面</button></div>
+<p id="acceptanceStatus" class="inline-status">尚未验收。生成谱面后会自动显示结果。</p>
+<div id="acceptancePanel" class="acceptance-panel" hidden>
           <div id="acceptanceVerdict" class="acceptance-verdict"></div>
           <canvas id="acceptanceChart" class="acceptance-canvas" width="720" height="220"></canvas>
           <p id="acceptanceChartHint" class="acceptance-hint"></p>
           <div id="acceptanceCriteria" class="acceptance-criteria"></div>
-        </div>
-      </section>
+        </div></div>
+</details>
+<details id="generationReset" class="settings-section" data-advanced >
+<summary><span>恢复生成设置</span><small>保留训练设置；两种重置的范围不同</small>
+</summary>
+<div class="settings-content">
+<div class="button-row"><button id="resetGenerationButton" class="small-button" type="button" title="只把本面板的生成参数（采样/温度/重复惩罚/条件/等级等）恢复为默认值；训练参数、数据集路径、checkpoint 与音频输入都不会动">恢复生成默认值</button><button id="clearGenerate" class="secondary-button" title="清空歌曲、模型和报告路径，恢复生成参数与默认输出路径；保留训练设置">清空导入路径与生成参数</button></div>
+<p id="resetGenerationStatus" class="inline-status">改动这些参数后若想回到出厂设置，点右上角「恢复生成默认值」即可；它不会影响训练参数。</p></div>
+</details>
+</section>
 
       <section class="panel intensity-panel">
         <div class="section-heading">
@@ -1148,6 +1210,8 @@
 
     <aside class="side-column">
       <section class="panel task-panel">
+<div class="task-navigation">
+<label for="taskSelector">查看任务</label><select id="taskSelector"><option value="">暂无任务</option></select><button id="refreshTaskSelector" type="button" class="small-button">刷新任务</button><button id="expandLogsButton" type="button" class="small-button" aria-expanded="false">全宽查看日志</button></div>
         <div class="section-heading">
           <div><span class="step">RUN</span><h2>任务状态</h2></div>
           <button id="cancelButton" class="small-button" disabled>中断</button>
@@ -1156,7 +1220,8 @@
           <span id="taskKind">暂无任务</span>
           <strong id="taskStatus">待开始</strong>
         </div>
-        <div class="progress"><div id="progressBar"></div></div>
+        <div class="progress">
+<div id="progressBar"></div></div>
         <p id="taskMessage" class="task-message">导入文件或填写路径后开始操作。</p>
         <p id="taskEpoch" class="inline-status" hidden></p>
         <p id="taskLogPath" class="inline-status" hidden></p>
@@ -1164,27 +1229,21 @@
         <div id="taskResults" class="results"></div>
         <p id="qualityStatus" class="inline-status" hidden></p>
         <pre id="qualityDiagnostics" class="checkpoint-details" hidden></pre>
-      </section>
-      <section class="panel guide-panel">
-        <h2>建议顺序</h2>
-        <ol>
-          <li>先上传少量数据集 ZIP，执行预处理。</li>
-          <li>检查 manifest 和可用难度数量。</li>
-          <li>先用 event_v1 + fresh 训练 1 个 epoch 验证流程。</li>
-          <li>划分验证 manifest，再开始正式训练。</li>
-          <li>核对保存 epoch，选择最合适的 event_epoch_NNN.pt。</li>
-          <li>对新音频生成，并用 MiaCode、Majdata 等工具人工试玩。</li>
-        </ol>
-        <a href="/api/download?path=docs/BEGINNER_GUIDE.md" target="_blank">打开完整新手手册</a>
-        <br>
-        <a href="/api/download?path=docs/EVENT_GUIDE.md" target="_blank">查看 event_v1、续训与质量诊断</a>
-        <br>
-        <a href="/api/download?path=docs/webui.md" target="_blank">查看 WebUI 详细说明</a>
-        <br>
-        <a href="/api/download?path=docs/generation_v02.md" target="_blank">查看旧固定帧基线说明（非默认路径）</a>
-      </section>
+      <details id="taskHistory" class="settings-section"  >
+<summary><span>历史日志</span><small>训练、生成和预处理的完整记录</small>
+</summary>
+<div class="settings-content">
+<div class="button-row"><button id="refreshLogsButton" class="secondary-button" type="button">刷新日志列表</button><button id="openLogsFolderButton" class="secondary-button" type="button" title="把日志目录路径复制到剪贴板，便于在资源管理器里打开">复制日志目录路径</button></div>
+<p id="logsStatus" class="inline-status">日志目录：webui_workspace\logs —— 每个任务一份 .log（全量）+ 一份 .meta.json（状态/参数/退出码）。</p>
+<div id="logList" class="log-list" hidden></div></div>
+</details>
+</section>
+      <section class="panel guide-panel"><h2>调整时记住这几件事</h2><ol><li>先确认数据或模型，再设置本次任务。</li><li>折叠的高级参数仍然生效，运行前查看摘要。</li><li>检查模型会继承需要兼容的结构；加强训练可调整已开放的迁移项。</li><li>开场、段落强弱、配置种类分别在对应分组调整。</li><li>长时间无 epoch 时，先看任务阶段和关键日志。</li></ol><a href="/api/download?path=docs/WEBUI_WORKFLOW_REFRESH.md" target="_blank">查看新版界面使用说明</a>
+</section>
     </aside>
   </main>
+  <script src="/workspace_logs.js"></script>
   <script src="/app.js"></script>
+  <script src="/workspace.js"></script>
 </body>
 </html>

@@ -1,0 +1,86 @@
+/* Workflow layout: common decisions first, intact expert controls by purpose. */
+body { font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif; }
+.layout { width: min(1600px, calc(100% - 40px)); grid-template-columns: minmax(0, 1fr) 360px; }
+.main-column { gap: 16px; }
+.mode-tabs { position: sticky; top: 0; z-index: 12; padding: 12px 0 8px; background: var(--paper, #f5f2ec); }
+.workflow-group { margin: 24px 0; padding: 20px; border: 1px solid var(--line); border-radius: 9px; background: #fffefa; scroll-margin-top: 80px; }
+.workflow-group-heading { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
+.workflow-group-heading .step { min-width: 26px; }
+.workflow-group-heading h3 { color: var(--ink); margin: 0 0 6px; font-size: 17px; }
+.workflow-group-heading p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.training-panel .form-grid, .generation-panel .form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.training-panel .form-grid > .span-2, .generation-panel .form-grid > .span-2 { grid-column: auto; }
+.training-panel .form-grid > .span-4, .generation-panel .form-grid > .span-4 { grid-column: 1 / -1; }
+.form-grid .field { align-content: start; }
+.form-grid .field small { font-size: 12px; line-height: 1.6; }
+.form-grid .field input, .form-grid .field select { min-height: 40px; }
+.form-grid .field input[type=checkbox] { width: 19px; min-height: 19px; height: 19px; accent-color: var(--teal); }
+.workflow-group .checkbox-field, .settings-section .checkbox-field { display: grid; grid-template-columns: 20px minmax(0,1fr); align-content: start; }
+.workflow-group .checkbox-field > small, .settings-section .checkbox-field > small { grid-column: 2; margin-top: 0; }
+.checkpoint-contract-details summary { cursor: pointer; color: var(--teal); padding: 8px 0; font-size: 12px; }
+.workflow-hint { font-size: 13px; color: var(--muted); line-height: 1.7; margin: 12px 0; }
+.workflow-hint a { color: var(--teal); }
+.workflow-group .inline-status, .task-panel .inline-status { min-height: 0; margin: 10px 0; font-size: 13px; }
+.task-panel .task-message { min-height: 0; }
+.task-panel .task-message:empty { display: none; }
+.task-panel .logs { font-size: 12px; line-height: 1.65; }
+.settings-section { margin: 12px 0; border: 1px solid var(--line); border-radius: 7px; background: #fff; }
+.settings-section > summary { cursor: pointer; padding: 14px 16px; color: var(--ink); font-weight: 700; line-height: 1.6; }
+.settings-section > summary > small { display: block; margin: 3px 0 0 16px; font-weight: 400; font-size: 12px; }
+.settings-section[open] > summary { border-bottom: 1px solid var(--line); background: #f7faf9; }
+.settings-section .settings-content { padding: 18px; }
+.settings-section .settings-section { background: #fcfcfa; }
+.settings-section .group-title:first-child { margin-top: 0; }
+.advanced-heading { display: flex; gap: 14px; justify-content: space-between; align-items: baseline; margin: 28px 0 4px; }
+.advanced-heading h3 { font-size: 17px; margin: 0; }
+.advanced-heading span { font-size: 12px; text-align: right; }
+.settings-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; position: relative; margin: 14px 0 20px; }
+.parameter-search { display: grid; gap: 6px; flex: 1 1 250px; font-size: 12px; font-weight: 700; }
+.parameter-search input, .quick-settings select, .task-navigation select { min-width: 0; border: 1px solid var(--line); border-radius: 5px; padding: 9px; background: #fff; color: var(--ink); font: inherit; }
+.parameter-results { width: 100%; padding: 10px; background: #f4f9f7; border: 1px solid #b9d6d1; border-radius: 6px; }
+.parameter-results p { font-size: 12px; color: var(--muted); margin: 0 0 8px; }
+.parameter-result { display: block; width: 100%; border: 0; border-radius: 3px; background: transparent; padding: 9px; text-align: left; color: var(--teal); cursor: pointer; }
+.parameter-result:hover, .parameter-result:focus-visible { background: #e6f2ed; }
+.parameter-highlight { outline: 3px solid #e6ad4d; outline-offset: 6px; }
+.quick-settings { padding: 16px; border: 1px dashed #b8d2cc; border-radius: 6px; background: #f5faf8; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: end; gap: 12px; margin-top: 18px; }
+.quick-settings > div, .quick-settings > p { grid-column: 1 / -1; }
+.quick-settings p { margin: 5px 0 0; font-size: 12px; color: var(--muted); line-height: 1.6; }
+.quick-settings label { display: grid; gap: 7px; font-size: 12px; font-weight: 700; }
+.quick-settings select { width: 100%; }
+.run-review { margin-top: 24px; padding: 18px; border-left: 4px solid var(--teal); border-radius: 5px; background: #f0f7f4; }
+.run-review h3 { margin: 0 0 10px; font-size: 16px; }
+.run-review ul { margin: 0; padding-left: 19px; font-size: 13px; line-height: 1.9; overflow-wrap: anywhere; }
+.workflow-actions { position: sticky; bottom: 0; z-index: 8; display: flex; flex-wrap: wrap; gap: 10px; margin: 14px -2px 22px; padding: 14px 2px; background: rgba(255,253,248,.97); border-top: 1px solid var(--line); }
+.workflow-actions .primary-button { min-width: 160px; }
+.settings-maintenance { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-top: 18px; }
+.settings-maintenance small { font-size: 12px; }
+.workflow-routes { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; }
+.workflow-routes button { padding: 14px; text-align: left; border: 1px solid var(--line); border-radius: 6px; background: #fff; cursor: pointer; font: inherit; }
+.workflow-routes strong { display: block; color: var(--teal); font-size: 14px; }
+.workflow-routes span { display: block; margin-top: 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
+.task-panel { padding: 18px; max-height: calc(100vh - 36px); overflow: auto; }
+.task-navigation { display: grid; grid-template-columns: 1fr auto; gap: 8px; margin-bottom: 18px; }
+.task-navigation label { grid-column: 1 / -1; font-size: 12px; color: var(--muted); }
+.task-navigation select { width: 100%; font-size: 12px; }
+#expandLogsButton { grid-column: 1 / -1; }
+.task-summary { flex-wrap: wrap; overflow-wrap: anywhere; }
+.task-panel .inline-status { overflow-wrap: anywhere; }
+.task-panel .settings-content { padding: 10px; }
+.task-panel .section-heading h2 { font-size: 17px; }
+.task-panel .section-heading { margin-bottom: 10px; }
+body.logs-expanded .layout { grid-template-columns: 1fr; }
+body.logs-expanded .side-column { grid-column: 1 / -1; grid-row: 1; }
+body.logs-expanded .main-column { grid-row: 2; }
+body.logs-expanded .task-panel { position: static; max-height: none; }
+body.logs-expanded .logs { height: min(64vh,680px); }
+body.logs-expanded .guide-panel { display: none; }
+body.logs-expanded .task-navigation { grid-template-columns: minmax(240px,1fr) auto auto; }
+body.logs-expanded #expandLogsButton { grid-column: auto; }
+.workflow-error { padding: 14px 16px; border-left: 4px solid #af493d; background: #fff0eb; border-radius: 4px; color: #81372e; white-space: pre-wrap; overflow-wrap: anywhere; }
+.quality-training-grid { grid-template-columns: repeat(2,minmax(0,1fr)); }
+.quality-training-card { margin-top: 0; }
+.settings-section .condition-guide { margin-top: 0; }
+button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
+@media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .task-panel { position: static; max-height: none; } }
+@media (max-width: 700px) { .layout { width: calc(100% - 20px); } .workflow-group { padding: 14px; } .workflow-routes { grid-template-columns: 1fr; } .settings-section .settings-content { padding: 13px; } .quick-settings { grid-template-columns: 1fr; } .quick-settings > div, .quick-settings > p { grid-column: auto; } .advanced-heading { align-items: start; flex-direction: column; gap: 6px; } }
+@media (max-width: 480px) { .training-panel .form-grid, .generation-panel .form-grid, .quality-training-grid { grid-template-columns: 1fr; } .workflow-actions > button { flex: 1 1 auto; } body.logs-expanded .task-navigation { grid-template-columns: 1fr; } }

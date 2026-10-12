@@ -1,0 +1,31 @@
+.workspace-log-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 7px;
+  margin: 10px 0 6px;
+  font-size: 11px;
+}
+.workspace-log-filter, .workspace-log-toggle { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); }
+.workspace-log-toolbar select, .workspace-log-toolbar input[type="search"] {
+  min-width: 0;
+  max-width: 145px;
+  padding: 5px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: #fff;
+  color: var(--ink);
+  font: inherit;
+}
+.workspace-log-toolbar input[type="search"] { width: 125px; }
+.workspace-log-toolbar input[type="checkbox"] { margin: 0; accent-color: var(--teal); }
+.workspace-log-toolbar .small-button { padding: 5px 7px; font-size: 10px; }
+.workspace-log-download { color: var(--teal); font-weight: 700; text-decoration: underline; }
+.workspace-log-download[hidden] { display: none; }
+.workspace-log-summary { flex: 1 1 100%; min-width: 0; color: var(--muted); overflow-wrap: anywhere; }
+.logs.workspace-log-nowrap { white-space: pre; }
+@media (max-width: 520px) {
+  .workspace-log-toolbar { gap: 6px; }
+  .workspace-log-toolbar input[type="search"] { flex: 1 1 115px; max-width: none; }
+  .workspace-log-summary { flex-basis: 100%; }
+}
