@@ -1,6 +1,7 @@
 import json
 
 from maichart.webui import server as webui
+from maichart.webui import form_api
 from test_webui import webui_api
 
 

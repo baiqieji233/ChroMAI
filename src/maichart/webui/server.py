@@ -345,21 +345,35 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     selected_source = ("model" if is_music_structure(str(profile_name or ""))
                                        else "audio")
                 if selected_source == "model":
-                    from maichart.generation.learned_curve import generate_learned_profile
-                    from maichart.generation.event_cli import resolve_generation_condition
-                    checkpoint_payload = _load_checkpoint_payload(checkpoint_path)
-                    condition, condition_source = resolve_generation_condition(
-                        level=float(payload.get("level", GENERATION_DEFAULTS["level"])),
-                        condition_data=payload.get("condition"),
-                        condition_profile=_resolve_condition_profile(payload),
-                        contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
-                    )
-                    profile = generate_learned_profile(
-                        audio, checkpoint_path, resolution_sec=resolution, local_context_sec=context,
-                        condition=condition, bpm=payload.get("bpm"),
-                        first=first, tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
-                        device="cpu")
-                    task.result["condition_source"] = condition_source
+                    requested_family = str(payload.get("model_family", ""))
+                    checkpoint_family = (_checkpoint_model_family(_load_checkpoint_payload(checkpoint_path))
+                                         if checkpoint_path else None)
+                    if requested_family == "song_form_v1" or checkpoint_family == "song_form_v1":
+                        from maichart.form.curve import generate_learned_profile
+                        profile = generate_learned_profile(
+                            audio, checkpoint_path, resolution_sec=resolution,
+                            local_context_sec=context, condition=payload.get("condition"),
+                            bpm=payload.get("bpm") or None, first=first,
+                            tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
+                            meter_map=payload.get("meter_map"), device="cpu")
+                        condition_source = "song_form_v1"
+                        task.result["condition_source"] = condition_source
+                    else:
+                        from maichart.generation.learned_curve import generate_learned_profile
+                        from maichart.generation.event_cli import resolve_generation_condition
+                        checkpoint_payload = _load_checkpoint_payload(checkpoint_path)
+                        condition, condition_source = resolve_generation_condition(
+                            level=float(payload.get("level", GENERATION_DEFAULTS["level"])),
+                            condition_data=payload.get("condition"),
+                            condition_profile=_resolve_condition_profile(payload),
+                            contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
+                        )
+                        profile = generate_learned_profile(
+                            audio, checkpoint_path, resolution_sec=resolution, local_context_sec=context,
+                            condition=condition, bpm=payload.get("bpm"),
+                            first=first, tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
+                            device="cpu")
+                        task.result["condition_source"] = condition_source
                 else:
                     profile = generate_intensity_profile(audio, resolution_sec=resolution,
                                                          local_context_sec=context)
@@ -464,7 +478,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint_payload = _load_checkpoint_payload(checkpoint)
         model_family = _checkpoint_model_family(checkpoint_payload)
         if model_family == "song_form_v1":
-            raise ValueError("这是全曲结构新架构模型，请使用页面顶部“全曲结构研究入口”；旧模型生成参数不能直接套用。")
+            from maichart.webui.form_api import start_form_task
+            form_payload = dict(payload)
+            form_payload.setdefault("checkpoint", str(checkpoint))
+            form_payload["model_family"] = model_family
+            return start_form_task(self, "generate", form_payload, runtime=sys.modules[__name__])
         capabilities = checkpoint_capabilities(checkpoint_payload)
         if model_family == "unknown":
             raise ValueError(
@@ -1023,6 +1041,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _start_train(self, payload: dict[str, Any]) -> None:
+        if payload.get("model_family") == "song_form_v1":
+            from maichart.webui.form_api import start_form_task
+            form_payload = dict(payload)
+            form_payload.setdefault("init_checkpoint", payload.get("training_checkpoint"))
+            form_payload.setdefault("mode", payload.get("training_mode", "fresh"))
+            return start_form_task(self, "train", form_payload, runtime=sys.modules[__name__])
         payload, dataset_selection = _prepare_training_sources(payload)
         model_family = _requested_model_family(payload)
         if model_family == LEGACY_MODEL_FAMILY and str(payload.get("feature_profile", "basic_v1")) != "basic_v1":
@@ -1368,6 +1392,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _inspect_checkpoint(self, payload: dict[str, Any]) -> None:
+        if payload.get("model_family") == "song_form_v1":
+            from maichart.webui.form_api import start_form_task
+            form_payload = dict(payload)
+            form_payload.setdefault("checkpoint", payload.get("checkpoint_path") or payload.get("checkpoint"))
+            return start_form_task(self, "inspect", form_payload, runtime=sys.modules[__name__])
         payload, dataset_selection = _prepare_training_sources(payload)
         checkpoint_path = _required_path(
             payload.get("checkpoint_path") or payload.get("checkpoint"),
@@ -2076,8 +2105,8 @@ def _is_event_family(family: str | None) -> bool:
 
 def _requested_model_family(payload: dict[str, Any]) -> str:
     family = str(payload.get("model_family", EVENT_MODEL_FAMILY)).strip().lower()
-    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY}:
-        raise ValueError("model family 只能是 event_v1、event_ctx_v1（跨窗口）或 legacy_frame_v2（旧固定帧基线）")
+    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1"}:
+        raise ValueError("model family 只能是 song_form_v1、event_v1、event_ctx_v1（跨窗口）或 legacy_frame_v2（旧固定帧基线）")
     return family
 
 

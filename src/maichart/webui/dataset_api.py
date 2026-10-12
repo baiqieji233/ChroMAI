@@ -181,7 +181,12 @@ class DatasetAPI:
         manifests = self._manifests(payload)
         if not manifests:
             raise ValueError("请至少勾选一个训练数据集")
-        result = compose_datasets(manifests, self.workspace_root / "composed_manifests", payload.get("model_family"))
+        family = payload.get("model_family")
+        # song_form_v1 consumes the same event-preprocessed source contract;
+        # composition must validate it as event audio, never as legacy frames.
+        if family == "song_form_v1":
+            family = "event_v1"
+        result = compose_datasets(manifests, self.workspace_root / "composed_manifests", family)
         return HTTPStatus.OK, result
 
     def prepare(self, manifests: list[str], model_family: str = "event_v1") -> dict[str, Any]:

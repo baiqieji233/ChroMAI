@@ -47,6 +47,8 @@ def inspect_form_checkpoint(path):
             model_config=checked['model_config'], args=checked.get('args') or {},
             dataset_contract=checked.get('dataset_contract') or {},
             resume_settings=resume_settings,
+            condition_supervision=checked.get('condition_supervision'),
+            condition_controls_trained=checked.get('condition_supervision') == 'event_derived_radar_style_v1',
             input_contract=checked['input_contract'],
             parameter_count=sum(p.numel() for p in model.parameters())+sum(p.numel() for p in planner.parameters()))
     except (ValueError, RuntimeError, KeyError, TypeError) as error:
@@ -96,7 +98,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         raise ValueError('此入口只接受 song_form_v1；其他模型族使用原训练/生成入口。')
     old_controls = {'segment_beats','context_beats','context_tokens','audio_margin_beats',
                     'planner_profile','condition_mask_prob','condition_dropout','guidance_scale',
-                    'slide_oversample','touch_oversample','fine_rhythm_oversample','intensity_curve'}
+                    'slide_oversample','touch_oversample','fine_rhythm_oversample'}
     invalid = old_controls & payload.keys()
     if invalid:
         raise ValueError('song_form_v1 不使用这些旧模型参数：' + ', '.join(sorted(invalid)))
@@ -117,9 +119,15 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         return path
     if operation == 'inspect':
         return handler._json_response(inspect_form_checkpoint(file('checkpoint')))
-    device=str(payload.get('device','cpu'))
-    if device not in {'cpu','cuda'}: raise ValueError('device must be cpu or cuda')
+    device=str(payload.get('device','auto'))
+    if device == 'auto':
+        import torch
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    if device not in {'cpu','cuda'}: raise ValueError('device must be auto, cpu or cuda')
     if operation=='train':
+        dataset_selection = None
+        if payload.get('manifests') and hasattr(server, '_prepare_training_sources'):
+            payload, dataset_selection = server._prepare_training_sources(payload)
         manifest=file('manifest')
         mode=payload.get('mode','fresh')
         if mode not in {'fresh','resume','finetune'}: raise ValueError('Unknown training mode')
@@ -159,14 +167,20 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'limit_charts':number('limit_charts',0,0,1000000,True),
                 'd_model':number('d_model',256,16,2048,True),'layers':number('layers',4,1,32,True),
                 'nhead':number('nhead',8,1,64,True),'max_tokens':number('max_tokens',2048,32,16384,True),
-                'max_memory_tokens':number('max_memory_tokens',512,16,4096,True)}
+                'max_memory_tokens':number('max_memory_tokens',512,16,4096,True),
+                'dropout':number('dropout',.1,0,.99),
+                'seed':number('seed',0,0,2**31-1,True),
+                'weight_decay':number('weight_decay',.02,0,10),
+                'grad_accumulation':number('grad_accumulation',1,1,1024,True),
+                'save_every':number('save_every',0,0,1000000,True)}
         if values['d_model']%values['nhead']: raise ValueError('d_model must be divisible by nhead')
         if inspected:
             config = inspected['model_config']
-            for key in ('d_model','layers','nhead','max_tokens','max_memory_tokens'):
+            for key in ('d_model','layers','nhead','max_tokens','max_memory_tokens','dropout'):
                 values[key] = config[key]
         args=['-m','maichart.form.train','--manifest',str(manifest),'--checkpoint-dir',str(out)]
         for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
+        args += ['--quality-enabled' if payload.get('quality_enabled', True) else '--no-quality-enabled']
         if initial: args+=['--resume' if mode=='resume' else '--init-checkpoint',str(initial)]
         results=[out/'form_last.pt',out/'dataset_audit.json',out/'training_history.json']
         start_epoch=int(inspected.get('epoch',0)) if inspected and mode=='resume' else 0
@@ -180,8 +194,12 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if initial:
             from maichart.form.checkpoint import load
             load(initial,inference=True,task='revision' if operation=='revise' else 'draft')
-        bpm=number('bpm',120,1,1000);first=number('first',0,-3600,3600)
-        args=['-m','maichart.form.cli',operation,'--audio',str(audio),'--bpm',str(bpm),'--first',str(first)]
+        bpm_value = payload.get('bpm')
+        bpm = number('bpm',120,1,1000) if bpm_value not in {None, ''} else None
+        first=number('first',0,-3600,3600)
+        args=['-m','maichart.form.cli',operation,'--audio',str(audio)]
+        if bpm is not None: args += ['--bpm',str(bpm)]
+        args += ['--first',str(first)]
         if initial: args+=['--checkpoint',str(initial)]
         output_value=str(payload.get('output') or '').strip()
         if operation!='analyze' and not output_value: raise ValueError('output path is required')
@@ -215,6 +233,15 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         cache_path=audio_cache_dir(cache)
     task=server._create_task('form_'+operation)
     workspace=server.WEBUI_ROOT/'song_form'/task.task_id;workspace.mkdir(parents=True,exist_ok=True)
+    if operation != 'train' and payload.get('intensity_curve_enabled') and payload.get('intensity_curve'):
+        mode = str(payload.get('intensity_curve_mode', 'follow'))
+        if mode not in {'follow', 'hard'}: raise ValueError('intensity_curve_mode must be follow or hard')
+        curve_path = workspace/'intensity_curve.json'
+        curve_path.write_text(json.dumps(payload['intensity_curve'], ensure_ascii=False), encoding='utf-8')
+        args += ['--intensity-curve-file', str(curve_path),
+                 '--intensity-curve-strength', str(number('intensity_curve_strength', .65, 0, 1)),
+                 '--intensity-curve-span', str(number('intensity_curve_span', .5, 0, 1)),
+                 '--intensity-curve-mode', mode]
     if out is None:out=workspace/'analysis.json'
     if operation!='train':
         args+=['--output',str(out)]
@@ -228,6 +255,10 @@ def start_form_task(handler,operation,payload,*,runtime=None):
     if tempo and operation!='train':
         path=workspace/'tempo_map.json';path.write_text(json.dumps([{'beat':str(t.beat),'bpm':t.bpm} for t in tempo]),encoding='utf-8')
         args+=['--tempo-map',str(path)]
+    if operation != 'analyze' and payload.get('condition'):
+        condition_path=workspace/'condition.json'
+        condition_path.write_text(json.dumps(payload['condition'],ensure_ascii=False),encoding='utf-8')
+        args+=['--condition-file',str(condition_path)]
     report=results[-1]
     task.result.update({'model_family':'song_form_v1','experimental':True,'report_path':str(report),
                         'progress_known':False,
@@ -236,5 +267,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         task.result.update(epoch_target=expected,epoch_start=start_epoch,epochs_requested=epochs,
                            last_epoch=start_epoch,phase='prepare',effective_settings=values,
                            max_region_seconds=region,source_manifest=str(manifest))
+        if dataset_selection is not None:
+            task.result['dataset_selection'] = dataset_selection
     server._run_subprocess_task(task,args,expected_epoch=expected,result_paths=results)
     return handler._json_response({'task_id':task.task_id})
