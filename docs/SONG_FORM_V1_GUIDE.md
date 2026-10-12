@@ -78,3 +78,10 @@ python -m maichart.form.cli revise --checkpoint checkpoints/song_form_trial/form
 5. 评估超 token 样本是否需要完整事件级训练续接；当前会明确跳过并审计，不能忽略由此可能产生的数据偏差。
 
 旧版完整 Radar/Style、人工曲线、质量偏好训练等功能继续在原路径可用，尚未全部迁入新架构。双手仿真需要单独验证，Majdata Unity 预览延后；二者没有混入此次可玩性判断。
+
+
+## 条件、Radar / Style 与强度曲线状态
+
+主工作台切换到 `song_form_v1` 后仍可使用同一套等级、Radar 和 Style 编辑区域。新模型的 16 维条件接口已经保留；从本轮开始，新的训练数据会用谱面事件统计生成 `event_derived_radar_style_v1` 条件监督。此前的短训 checkpoint 使用默认 Radar/Style，WebUI 会明确显示“条件未校准”，不能据此判断控件已经有效。
+
+旧 event 模型的强度曲线不能直接作为 song_form 的生成约束。song_form 的真实局部规划来自全曲 blueprint 与段落关联。强度曲线要在专用训练目标、checkpoint 能力标记和生成器约束接入完成后才会对 song_form 生效；在此之前界面必须把它显示为研究状态，避免把人工曲线误称为已控制生成结果。
