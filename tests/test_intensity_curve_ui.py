@@ -48,7 +48,8 @@ def test_playability_ui_matches_backend_retry_and_timeout_contract():
     js = (STATIC / "app.js").read_text(encoding="utf-8")
     assert 'id="runtimeReferenceExecutable"' not in html
     assert 'id="runtimeReferenceTimeoutSec"' not in html
-    assert "内嵌 MiaCode" in html
+    assert "MiaCode · Python" in html
+    assert "无需编译 DLL" in html
     assert "复检确认问题减少" in html
     assert 'href="https://github.com/Team-MiaCode/MiaCode"' in html
     assert "感谢" in html and "团队与贡献者" in html

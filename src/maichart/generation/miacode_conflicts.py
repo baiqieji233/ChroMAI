@@ -175,14 +175,14 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
     if not raw.get("ok") and not errors:
         errors.append({"message": "MiaCode parser did not complete"})
     coverage = {"status": "partial" if errors or unmapped else "engine_reference",
-                "engine": "miacode_native", "reference": REFERENCE_COMMIT,
-                "in_process": True, "unsupported": unmapped, "parse_errors": errors,
+                "engine": raw["engine"], "implementation": "python", "reference": REFERENCE_COMMIT,
+                "in_process": True, "dynamic_dependency": False, "unsupported": unmapped, "parse_errors": errors,
                 "elapsed_sec": raw["elapsed_sec"], "engine_reference_only": True,
                 "playable_verified": False,
                 "ignored": ignored,
                 "tap_on_slide_threshold_ms": threshold_ms,
                 "sustained_actions": list(sustained_by_source.values()),
-                "limitations": ["使用 MiaCode 原生判定区、Slide/Wifi、Touch 联动与动作参考；仍不等同于实机玩家认证。"]}
+                "limitations": ["使用 MiaCode 判定区、Slide/Wifi、Touch 联动与动作参考的 Python 移植；仍不等同于实机玩家认证。"]}
     # Compact diagnostic evidence keeps window reports small; detailed runtime
     # marker states remain available through analyze_maidata for investigations.
     coverage["diagnostics"] = raw.get("diagnostics", [])

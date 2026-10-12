@@ -124,7 +124,6 @@ def test_zero_budget_disables_source_edits_and_large_finite_budgets_are_valid():
         cfg(conflict_backtrack_budget=-2)
 
 
-@pytest.mark.skipif(not miacode_native.library_path().is_file(), reason="native library required")
 def test_native_prior_hold_and_new_double_tap_are_resolved_at_source():
     config = cfg(conflict_engine="miacode", sustain_repair_mode="hold")
     prior, trial = [window(0, [15], ["1h[4:12]"])], window(16, [1], ["3/6"])
@@ -140,7 +139,6 @@ def test_native_prior_hold_and_new_double_tap_are_resolved_at_source():
     assert control.records[-1]["status"] == "accepted"
 
 
-@pytest.mark.skipif(not miacode_native.library_path().is_file(), reason="native library required")
 def test_two_long_holds_are_attributed_as_a_pair():
     config = cfg(conflict_engine="miacode", sustain_repair_mode="hold")
     prior, trial = [window(0, [15], ["1h[4:12]/5h[4:12]"])], window(16, [1], ["3/7"])

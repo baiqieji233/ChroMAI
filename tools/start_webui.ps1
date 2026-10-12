@@ -214,12 +214,8 @@ if ($Cpu) {
 }
 
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectRoot\src;$env:PYTHONPATH" } else { "$ProjectRoot\src" }
-if (Test-Path -LiteralPath (Join-Path $ProjectRoot ".native\miacode\runtime\maichart_muri_v3.dll")) {
-    & $Python -c "from maichart.generation.miacode_native import ensure_available; print('Embedded MiaCode judge: ready'); ensure_available()"
-    if ($LASTEXITCODE -ne 0) { Fail "Embedded MiaCode judge failed verification. Rebuild with python tools/build_muri.py." }
-} else {
-    Write-Host "Embedded Muri check is not deployed. Build once with python tools/build_muri.py --qt <Qt SDK>; WebUI can run with conflict detection off."
-}
+& $Python -c "from maichart.generation.miacode_native import ensure_available; ensure_available(); print('MiaCode Python judge: ready (no DLL or Qt required)')"
+if ($LASTEXITCODE -ne 0) { Fail "MiaCode Python judge/reference data failed verification. Restore the project package; no native build is required." }
 if ($CheckOnly) {
     Write-Host "Environment check passed. WebUI was not started."
     exit 0

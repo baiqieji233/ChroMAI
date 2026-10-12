@@ -1,0 +1,8 @@
+{
+  "source": "Team-MiaCode/MiaCode/assets/reference/slide_data.json",
+  "commit": "6573efb611056bccd046dd17bc2f4cceda78bf88",
+  "source_sha256": "e5ef54ea1683d99ce16bababada4237f8f494de1d725b738138c41d7cd035a5d",
+  "sha256": "cbe0a80077887667cf6fb217d8537401356febba7dfb89c5705b0feac075c779",
+  "transform": "Retain only numeric path samples and judgement tables; preserve all floating point values. gzip mtime=0.",
+  "license_scope": "MiaCode non-commercial reference assets; not relicensed under MIT. See LICENSE_SCOPE.md."
+}

@@ -1178,7 +1178,7 @@ function renderGenerationResult(task) {
       if (playability && typeof playability === "object") {
         const statusLabel = playability.status === "disabled" ? "未启用"
           : playability.status === "partial" ? "部分静态检测"
-            : playability.status === "engine_reference" ? "内嵌 MiaCode 检测"
+            : playability.status === "engine_reference" ? (playability.coverage?.implementation === "python" ? "MiaCode Python 检测" : "MiaCode 检测")
             : playability.status === "static_only" ? "静态参考检测"
               : String(playability.status || "未知");
         const hardCount = Array.isArray(playability.remaining_hard) ? playability.remaining_hard.length
@@ -1542,8 +1542,11 @@ async function loadStatus() {
   if (engineStatus) {
     const available = state.playability_engine?.available === true;
     engineStatus.className = `inline-status ${available ? "good" : "warn"}`;
-    engineStatus.textContent = available ? "内嵌 MiaCode 检测库已就绪，直接在生成进程中运行。"
-      : state.playability_engine?.error || "当前后端尚未加载内嵌检测能力，请重启 WebUI 服务。";
+    engineStatus.textContent = available
+      ? (state.playability_engine?.implementation === "python"
+        ? "MiaCode Python 检测已就绪，路径数据随项目提供，无需 DLL 或 Qt。"
+        : "当前后端仍使用旧版 MiaCode 运行时；重启 WebUI 服务后启用 Python 检测。")
+      : state.playability_engine?.error || "Python 检测模块或路径数据不可用，请检查项目文件并重启 WebUI 服务。";
   }
   const intensityNotice = state.intensity_curve_capability === true ? " · 多维强度曲线可用" : " · 多维强度曲线需重启后端";
   setStatus(`本地服务正常 · workspace: ${state.workspace}${intensityNotice}`, state.intensity_curve_capability === true);
@@ -2771,7 +2774,7 @@ async function startGenerate() {
       throw new Error("当前后端尚未加载零阈值与不限回溯次数的无理策略，请重启 WebUI 服务后再生成");
     }
     if (status.playability_engine?.available !== true) {
-      throw new Error(status.playability_engine?.error || "当前后端尚未加载内嵌 MiaCode 检测，请重启 WebUI 服务后再生成");
+      throw new Error(status.playability_engine?.error || "当前后端尚未加载 MiaCode Python 检测，请重启 WebUI 服务后再生成");
     }
   }
   if (payload.local_onset_bias_strength > 0) {

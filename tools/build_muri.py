@@ -1,6 +1,7 @@
-"""Build the embedded MiaCode judge, without building or starting its editor.
+"""Build the optional ABI3 development oracle for Python-port comparisons.
 
-Requires CMake, a C++20 compiler and Qt 6 Core/Gui development files. Existing
+Production generation uses Python and does not require this tool or its DLL.
+Oracle development requires CMake, a C++20 compiler and Qt 6 Core/Gui. Existing
 local reference assets/Qt are reused; the pinned Slide data is fetched only if
 absent. Runtime loading never downloads, compiles or starts an application.
 """

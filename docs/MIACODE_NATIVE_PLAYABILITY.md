@@ -1,10 +1,10 @@
-# 内嵌 MiaCode 无理检测
+# MiaCode 无理检测（Python 实现）
 
-生成侧现在直接链接 MiaCode 项目的判定区和 Muri 分析核心。生成时不启动 MiaCode 编辑器、不创建外部子进程，也不要求用户填写可执行文件路径。
+自 2026-10-12 起，生成侧使用 MiaCode 判定逻辑的 Python 移植，替代原来的 DLL 调用。生成时不加载 MiaCode/Qt 动态库，不启动编辑器或其他检测进程。本文保留旧文件名，便于已有链接继续访问。迁移验证见 [Python 迁移报告](MIACODE_PYTHON_PORT.md)。
 
 ## 包含的检测
 
-内嵌核心沿用固定提交 `6573efb611056bccd046dd17bc2f4cceda78bf88`，包含：
+Python 实现对应固定提交 `6573efb611056bccd046dd17bc2f4cceda78bf88`，包含：
 
 - Hold / Tap / Touch 的有序判定区与叠键检查；
 - 星星头的辅助判定；
@@ -14,15 +14,11 @@
 
 它仍然是谱面判定参考，不能替代玩家实际游玩认证。
 
-## 构建与部署
+## 部署
 
-第一次部署运行：
+按项目正常安装并启动 WebUI 即可。代码与数值路径参考表随项目、Python 安装包一起提供，不再需要 CMake、C++ 编译器或 Qt。更新后重启 WebUI 并刷新页面，界面应显示“MiaCode Python 检测已就绪”。路径数据缺失或校验失败会明确报错，不会静默跳过检测。
 
-```powershell
-python tools/build_muri.py
-```
-
-脚本会校验 `native/miacode/UPSTREAM.json` 中的源码哈希，使用本机 Qt 6/CMake 构建 `.native/miacode/runtime/maichart_muri_v3.dll`（ABI3，支持 0–250 ms 静态撞尾范围），并把 Slide 参考数据嵌入 DLL。旧 DLL 保留，当前机器已构建新版；其他部署需运行构建脚本。没有匹配的 DLL 时，WebUI 在提交生成前会明确报错，不会静默跳过检测。
+`tools/build_muri.py` 仅为开发者构建旧 ABI3 对照引擎；正常训练、生成和测试快照不需要运行它。源码移植保留 MIT 版权声明；打包的数值参考数据保留上游非商业分发范围，详见 [第三方声明](../THIRD_PARTY_NOTICES.md)。
 
 ## WebUI 行为
 
@@ -64,7 +60,7 @@ python tools/check_playability.py <maidata.txt> --mode local --output-dir <单�
 
 旧版本的 `runtime_reference_mode` 请求仍可被读取，但会迁移到内嵌核心；旧的 MiaCode.exe 路径永远不会被执行。
 
-## 验证记录
+## 历史 DLL 版本验证记录（2026-10-11）
 
 本轮完整测试为 `1087 passed, 11 skipped`；另有 8 项 Node 行为测试通过。原生核心测试实际加载本机 DLL，覆盖 Hold 尾部接音、星星头错位、复合 Slide/Wifi、Touch 组、跨窗口重试、删改单个和弦子音符、变速与 first 偏移、旧外部调用参数迁移、日志输出和三个生成模式。测试同时拦截子进程创建，确认内嵌检测没有启动外部程序。
 

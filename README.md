@@ -76,7 +76,7 @@ WebUI 提供 **12.0–15.0 的连续等级基准**：每个 0.1 档有对应的 
 
 ## 快速启动
 
-无理检测核心来自 [MiaCode](https://github.com/Team-MiaCode/MiaCode)，感谢其团队与贡献者。生成进程直接加载本机编译的检测库，无需打开编辑器。首次部署该功能需准备 CMake、C++20 编译器、Qt 6.8 SDK，再运行 `python tools/build_muri.py --qt <Qt目录>`；详见 [内嵌检测说明](docs/MIACODE_NATIVE_PLAYABILITY.md) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。未部署时仍可关闭检测运行模型，WebUI 会明确显示检测库状态。
+无理检测核心基于 [MiaCode](https://github.com/Team-MiaCode/MiaCode) 的 Python 移植，感谢其团队与贡献者。生成进程直接运行 Python 检测，路径参考数据随项目提供，无需编译 DLL、安装 Qt 或打开编辑器。现有 WebUI、CLI、类别策略和修复参数继续使用；详见 [检测说明](docs/MIACODE_NATIVE_PLAYABILITY.md)、[Python 迁移报告](docs/MIACODE_PYTHON_PORT.md) 和 [第三方声明](THIRD_PARTY_NOTICES.md)。参考数值资源保留 MiaCode 的非商业分发范围，不随移植源码重新声明为 MIT。
 
 推荐安装 **64 位 Python 3.11**，然后双击根目录的 **`START_WEBUI.bat`**。
 

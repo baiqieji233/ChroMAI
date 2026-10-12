@@ -20,25 +20,34 @@ Sensor constants, Touch adjacency and the Touch-group threshold in
 `src/maichart/generation/judgment_system.py` are adapted from the MIT-licensed
 project-owned sources MuriConfig.h, MuriAnalyzer.cpp and MuriRuntimeModelBuilder.cpp
 at [Team-MiaCode/MiaCode](https://github.com/Team-MiaCode/MiaCode/tree/6573efb611056bccd046dd17bc2f4cceda78bf88).
-No skins, sounds, slide reference assets or application binaries are redistributed.
-The legacy Python checker implements a static subset. The embedded generation
-checker now links the project-owned parser and Muri analysis sources verbatim
-under `native/miacode/upstream/src`, with a small local C ABI/JSON bridge. The
+No skins, sounds or application binaries are redistributed. The generation
+checker is now a Python port under `src/maichart/generation/muri`, covering
+parsing, static references, simple-note pad events, Touch groups, hand actions,
+and ordered Slide/Wifi judgments. The original source remains available
+under `native/miacode/upstream/src` as a development reference. The
 upstream LICENSE, LICENSE_SCOPE and THIRD_PARTY_NOTICES are retained alongside
 the source; `UPSTREAM.json` pins every copied source hash.
 
-ABI3 additionally compiles two generated adaptation files with a zero lower
+The optional development ABI3 oracle compiles two generated adaptation files with a zero lower
 bound for the configurable collision-reference neighbourhood. Zero disables
 static proximity references; the judge's physical tolerances remain unchanged.
 This local adaptation is recorded in the CMake source and build provenance;
 the vendored upstream files are not edited.
 
-`tools/build_muri.py` obtains the pinned Slide reference dataset for the local
-build and links Qt Core/Gui dynamically. The dataset and runtime binaries stay
-under ignored `.native/`; they are not relicensed as MIT or committed here.
-Upstream asset distribution restrictions and Qt's own license obligations still
-apply when distributing a built runtime. No editor, font, sound, skin, audio
-backend or video backend is built by this integration.
+`src/maichart/generation/muri/reference/slide_data.json.gz` contains the numerical
+path samples and judgment tables extracted from the pinned upstream
+`assets/reference/slide_data.json`. Values are preserved; rendering arrows are
+omitted. `provenance.json` records the source commit, original hash, packaged
+hash and transformation. These reference assets retain MiaCode's **non-commercial
+distribution scope** and are not relicensed as MIT. A copy of upstream
+`LICENSE_SCOPE.md` is packaged beside the data. This exception to the source
+license also applies when distributing a wheel containing the data.
+
+`tools/build_muri.py` and `tools/compare_muri_python.py` are optional developer
+tools for comparing the port against the pinned native ABI3 oracle. Only that
+explicit developer workflow uses Qt or a native library. Its binaries remain
+under ignored `.native/`; production generation uses neither. The Python port
+does not build or launch an editor, font, sound, skin, audio or video backend.
 
 MIT License
 

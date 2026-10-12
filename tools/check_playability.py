@@ -28,7 +28,7 @@ def main():
     output.mkdir(parents=True, exist_ok=True)
     identity = hashlib.sha256(source.read_bytes()).hexdigest()
     chart = parse_event_chart(source, args.difficulty)
-    ensure_available()
+    engine_info = ensure_available()
     print(f"playability_engine engine=miacode mode={args.mode} input={source}", flush=True)
     started = time.perf_counter()
     result = process_chart_points(chart.points, chart.tempo_changes, chart.first,
@@ -37,7 +37,7 @@ def main():
     for issue in result.conflicts_detected:
         print("playability_issue " + json.dumps(issue.to_dict(), ensure_ascii=False), flush=True)
     summary = {"source": str(source), "source_sha256": identity, "mode": args.mode,
-               "engine": "miacode_native", "in_process": True,
+               "engine": engine_info["engine"], "implementation": "python", "in_process": True,
                "elapsed_sec": time.perf_counter() - started,
                "before": dict(Counter(c.conflict_type for c in result.conflicts_detected)),
                "after": dict(Counter(c.conflict_type for c in result.remaining_conflicts)),

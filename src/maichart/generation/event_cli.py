@@ -1995,7 +1995,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--enable-conflict-detection", action="store_true",
                         help="Enable playability conflict detection (hold-tap overlap, slide-tap collision, etc).")
     parser.add_argument("--conflict-engine", choices=("miacode", "static"), default="miacode",
-                        help="Embedded MiaCode judge by default; static retains the legacy diagnostic subset.")
+                        help="Python MiaCode judge by default (no DLL/build step); static retains the legacy diagnostic subset.")
     parser.add_argument("--conflict-kind-modes", type=json.loads, default=None,
                         help='Per-kind policy JSON, e.g. {"MultiTouch":"report"}; off/report/enforce.')
     parser.add_argument("--tap-on-slide-threshold-ms", type=float, default=200,
@@ -2072,7 +2072,8 @@ def main(argv=None) -> int:
     if args.enable_conflict_detection:
         if args.conflict_engine == "miacode":
             from maichart.generation.miacode_native import ensure_available
-            ensure_available()
+            engine_info = ensure_available()
+            print("playability_implementation " + json.dumps(engine_info, ensure_ascii=False), flush=True)
         print(f"playability_engine engine={args.conflict_engine} mode={args.conflict_repair_mode} "
               f"retries={args.conflict_retries} hard={args.detect_hard_conflicts} "
               f"soft={args.detect_soft_conflicts}", flush=True)

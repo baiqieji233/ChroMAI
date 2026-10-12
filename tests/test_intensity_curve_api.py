@@ -15,10 +15,8 @@ from maichart.webui import server as webui
 
 @pytest.fixture
 def api(monkeypatch, tmp_path):
-    # This fixture tests HTTP/CLI forwarding; native execution is covered by
-    # test_miacode_native with the compiled upstream core.
-    from maichart.generation import miacode_native
-    monkeypatch.setattr(miacode_native, "ensure_available", lambda: {"engine": "miacode_native"})
+    # The Python checker is usable without a separately deployed runtime;
+    # use its real availability preflight in these HTTP/CLI contract tests.
     monkeypatch.setattr(webui, "TASKS", {})
     monkeypatch.setattr(webui, "INTENSITY_ROOT", tmp_path / "curves")
     monkeypatch.setattr(webui, "CONDITION_ROOT", tmp_path / "conditions")
@@ -46,6 +44,14 @@ def api(monkeypatch, tmp_path):
     server.shutdown()
     server.server_close()
     thread.join(timeout=5)
+
+
+def test_status_advertises_python_engine_without_dynamic_dependency(api):
+    code, body, _ = api("/api/status")
+    assert code == 200
+    status = body["playability_engine"]
+    assert status["available"] and status["engine"] == "miacode_python"
+    assert status["implementation"] == "python" and not status["dynamic_dependency"]
 
 
 def profile(audio):

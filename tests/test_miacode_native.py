@@ -1,4 +1,4 @@
-"""Exercise the real embedded upstream judge, never the MiaCode editor."""
+"""Exercise the Python judge through the retained legacy import/API."""
 from fractions import Fraction as F
 import json
 from pathlib import Path
@@ -10,8 +10,6 @@ from maichart.event_timing import EventPoint as P, EventTempo as T
 from maichart.generation import miacode_native as native
 from maichart.generation.post_process import PostProcessConfig, detect_chart_conflicts, process_chart_points
 
-pytestmark = pytest.mark.skipif(not native.library_path().is_file(),
-                              reason="Build native judge with python tools/build_muri.py")
 TEMPO = [T(F(0), 150)]
 
 
@@ -25,7 +23,8 @@ def test_real_core_reports_hold_tail_without_starting_any_process(monkeypatch):
         raise AssertionError("The embedded judge must not spawn any process")
     monkeypatch.setattr(subprocess, "Popen", no_process)
     report = native.analyze_inote("(120){4}1h[1:1],,,,1,E")
-    assert report["ok"] and report["engine"] == "miacode_native"
+    assert report["ok"] and report["engine"] == "miacode_python"
+    assert report["dynamic_dependency"] is False
     assert any(d["kind"] == "Overlap" and d["alert_level"] == "Muri" for d in report["diagnostics"])
 
 

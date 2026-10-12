@@ -37,6 +37,9 @@ maichart-gui = "maichart.webui.server:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"maichart.generation.muri" = ["reference/*.gz", "reference/*.json", "reference/*.md"]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

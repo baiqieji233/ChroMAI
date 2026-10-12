@@ -862,14 +862,14 @@
           </label>
 
           <!-- ========== 可玩性与冲突检测（新增）========== -->
-          <h3 data-generation-family="event_v1">无理检测与修复（内嵌 MiaCode）</h3>
-          <p id="playabilityEngineStatus" data-generation-family="event_v1" class="inline-status">正在检查内嵌检测库…</p>
+          <h3 data-generation-family="event_v1">无理检测与修复（MiaCode · Python）</h3>
+          <p id="playabilityEngineStatus" data-generation-family="event_v1" class="inline-status">正在检查 Python 检测模块与路径数据…</p>
           <p data-generation-family="event_v1" class="help-text">
             感谢 <a href="https://github.com/Team-MiaCode/MiaCode" target="_blank" rel="noopener noreferrer">MiaCode 团队与贡献者</a>
-            开源无理检测核心。本项目直接集成其判定区、Slide/Wifi、Touch 联动与动作分析代码，并保留上游许可证和来源说明。
+            开源无理检测核心。本项目将其判定区、Slide/Wifi、Touch 联动与动作分析逻辑移植为 Python，并保留上游许可证、参考数据使用范围和来源说明。
           </p>
           <p data-generation-family="event_v1" class="help-text">
-            生成进程直接使用 MiaCode 的原生检测核心，包含有序判定区、星星头、Slide/Wifi、Hold 和 Touch 联动。无需安装或打开 MiaCode 编辑器，也无需选择可执行文件。检测结果仍需结合玩家实际游玩评估。
+            生成进程直接运行 Python 检测，包含有序判定区、星星头、Slide/Wifi、Hold 和 Touch 联动。路径参考数据随项目提供，无需编译 DLL、安装 Qt 或打开 MiaCode 编辑器。现有类别策略、局部修复、回溯和单音符微调继续生效；检测结果仍需结合玩家实际游玩评估。
           </p>
 
           <label class="field" data-generation-family="event_v1">
@@ -902,7 +902,7 @@
 
           <details class="field span-4" data-generation-family="event_v1">
             <summary>高级类别策略与回溯设置</summary>
-            <p class="help-text">“忽略”不处理该类，原生证据保留在报告中；“仅报告”显示问题但不重试、修复或拒绝；“参与处理”按下方修复模式处理。全局 Muri / Warning 开关分别控制这两个级别。</p>
+            <p class="help-text">“忽略”不处理该类，原始检测证据保留在报告中；“仅报告”显示问题但不重试、修复或拒绝；“参与处理”按下方修复模式处理。全局 Muri / Warning 开关分别控制这两个级别。</p>
             <div class="form-grid">
               <label class="field">多押动作（MultiTouch）
                 <select id="conflictMultiTouchMode"><option value="off">忽略</option><option value="report" selected>仅报告</option><option value="enforce">参与处理</option></select>
