@@ -34,6 +34,11 @@ from maichart.generation.music_plan import is_music_structure, validate_profile
 from maichart.training.onset_targets import (
     build_onset_targets, onset_times, quality_onset_params, validate_onset_profile,
 )
+from maichart.training.chart_sanitization import (
+    DEFAULT_CHART_FILTER_POLICY,
+    sanitize_chart,
+    validate_chart_filter_policy,
+)
 
 
 def resolve_path(value: str, base: Path) -> Path:
@@ -122,11 +127,18 @@ class EventDataset(Dataset):
         quality_annotations: str | Path | None = None,
         planner_profile: str = "legacy_v1",
         onset_profile: str = "none",
+        chart_filter_policy: str | None = None,
     ) -> None:
         if segment_beats <= 0 or max_tokens < 4:
             raise ValueError("segment_beats must be positive and max_tokens at least 4.")
         self.manifest_path = Path(manifest_path).resolve()
         self.manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        manifest_filter_policy = (self.manifest.get("preprocessing") or {}).get("chart_filter_policy")
+        self.chart_filter_policy = validate_chart_filter_policy(
+            chart_filter_policy if chart_filter_policy is not None else
+            manifest_filter_policy or DEFAULT_CHART_FILTER_POLICY
+        )
+        self.chart_filter_audit: list[dict[str, Any]] = []
         validate_profile(planner_profile)
         self.planner_profile = planner_profile
         self.onset_profile = validate_onset_profile(onset_profile)
@@ -246,7 +258,8 @@ class EventDataset(Dataset):
                     self.segment_quality_loss_starts.append(0)
                 except ValueError as exc:
                     self.skipped.append({"song_id": ref.song_id, "stage": "segment", "start_beat": str(start),
-                                         "reason": "segment_token_limit", "message": str(exc)})
+                                         "reason": ("vocabulary_mismatch" if "checkpoint vocabulary" in str(exc)
+                                                    else "segment_token_limit"), "message": str(exc)})
         if self.quality_annotations is not None and self.segments:
             self._filter_quality_excluded_segments()
         self._print_collection_summary()
@@ -350,6 +363,24 @@ class EventDataset(Dataset):
                             f"Tried bases: {[str(base) for base in self._candidate_bases()]}"
                         )
                     chart = parse_event_chart(source, difficulty_index)
+                    sanitized = sanitize_chart(chart, self.chart_filter_policy)
+                    chart = sanitized.chart
+                    if sanitized.removed:
+                        audit = {
+                            "song_id": song_id,
+                            "difficulty_index": difficulty_index,
+                            "source_path": str(source),
+                            **sanitized.to_dict(),
+                        }
+                        self.chart_filter_audit.append(audit)
+                        preview = ", ".join(
+                            f"{item['beat']}:{item['atom']}" for item in audit["removed_preview"]
+                        )
+                        print(
+                            f"[chart_filter] song={song_id} difficulty={difficulty_index} "
+                            f"removed={audit['removed_count']} sample=[{preview}]",
+                            flush=True,
+                        )
                     inspect_chart(chart)
                     ref = EventSample(song_id, audio_path, chart, level, source)
                     if eager_audio:
@@ -871,6 +902,9 @@ class EventDataset(Dataset):
             payload["planner_profile"] = self.planner_profile
         if self.onset_profile != "none":
             payload["onset_profile"] = self.onset_profile
+        # Preserve legacy resume signatures while recording changed targets.
+        if self.chart_filter_policy != "legacy_strict_v1":
+            payload["chart_filter_policy"] = self.chart_filter_policy
         return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
 
     def audit(self) -> dict[str, Any]:
@@ -879,6 +913,9 @@ class EventDataset(Dataset):
                 "signature": self.signature, "skipped": self.skipped,
                 "target_schema": "event_v1", "segment_beats": self.segment_beats,
                 "onset_profile": self.onset_profile,
+                "chart_filter_policy": self.chart_filter_policy,
+                "chart_filter_audit": self.chart_filter_audit,
+                "filtered_note_count": sum(item["removed_count"] for item in self.chart_filter_audit),
                 "style_in_dataset": False, "frame_division_used": False,
                 "difficulty_filter": {"min_index": self.min_difficulty_index,
                                       "max_index": self.max_difficulty_index,

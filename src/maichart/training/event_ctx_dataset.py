@@ -46,6 +46,7 @@ from maichart.generation.event_ctx import (
 from maichart.generation.event_model import EventSequence
 from maichart.generation.event_quality import parse_event_notes
 from maichart.training.event_dataset import EventDataset
+from maichart.training.event_input_policy import CONTEXT_BUDGET_POLICIES
 
 OVERSAMPLE_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
 # A window whose shared fine-note ratio reaches this
@@ -78,6 +79,7 @@ class EventCtxDataset(EventDataset):
         context_beats: int = DEFAULT_CONTEXT_BEATS,
         audio_margin_beats: int = DEFAULT_AUDIO_MARGIN_BEATS,
         context_tokens: int = DEFAULT_CONTEXT_TOKENS,
+        context_budget_policy: str = "bounded_v2",
         overlap_beats: int = 0,
         context_dropout: float = DEFAULT_CONTEXT_DROPOUT,
         touch_oversample: int = 1,
@@ -87,6 +89,9 @@ class EventCtxDataset(EventDataset):
             raise ValueError("context_beats, audio_margin_beats and overlap_beats must not be negative.")
         if context_tokens <= 0:
             raise ValueError("context_tokens must be positive (it is the lead-in budget).")
+        if context_budget_policy not in CONTEXT_BUDGET_POLICIES:
+            raise ValueError(f"Invalid context_budget_policy: {context_budget_policy!r}")
+        self.context_budget_policy = context_budget_policy
         if not 0.0 <= float(context_dropout) <= 1.0:
             raise ValueError("context_dropout must be within [0, 1].")
         # The sampling knobs are family-level settings consumed here; they must
@@ -199,25 +204,27 @@ class EventCtxDataset(EventDataset):
                 except ValueError as exc:
                     self.skipped.append({
                         "song_id": ref.song_id, "stage": "segment", "start_beat": str(start),
-                        "reason": "segment_token_limit", "message": str(exc),
+                        "reason": "vocabulary_mismatch", "message": str(exc),
                     })
                     continue
-                # Keep the window when the lead-in alone no longer fits: shrink
-                # the lead-in budget to whatever the window leaves.  Skipping
-                # dense passages entirely used to remove exactly the windows the
-                # model most needs to see with context (measured: 7% of segments
-                # at context_tokens=192 were dropped outright).
-                budget = int(self.max_tokens) - len(window_tokens) - 2
-                if budget != self.context_tokens:
-                    try:
-                        prefix = prefix_token_ids(self.vocabulary, events, budget)
-                    except ValueError:
-                        prefix = prefix_token_ids(self.vocabulary, events, self.context_tokens)
+                # New runs use the same fixed history cap as generation. Never
+                # choose a larger/smaller context after inspecting future target
+                # length. Over-budget composites are explicitly discarded.
+                # Exact resume of an older experiment keeps its recorded policy.
+                if self.context_budget_policy == "legacy_dynamic_v1":
+                    budget = int(self.max_tokens) - len(window_tokens) - 2
+                    if budget != self.context_tokens:
+                        try:
+                            prefix = prefix_token_ids(self.vocabulary, events, budget)
+                        except ValueError:
+                            prefix = prefix_token_ids(self.vocabulary, events, self.context_tokens)
                 total = len(window_tokens) + len(prefix)  # composite length minus one
                 if total > self.max_tokens:
                     self.skipped.append({
                         "song_id": ref.song_id, "stage": "segment", "start_beat": str(start),
                         "reason": "segment_token_limit",
+                        "window_tokens": len(window_tokens), "prefix_tokens": len(prefix),
+                        "context_budget_policy": self.context_budget_policy,
                         "message": (f"Window {len(window_tokens)} + context {len(prefix)} = {total} tokens "
                                     f"exceeds max_tokens={self.max_tokens}; increase max_tokens, or reduce "
                                     f"segment_beats/context_beats/context_tokens."),
@@ -268,11 +275,15 @@ class EventCtxDataset(EventDataset):
         with_lead_in = sum(1 for item in self.segments if item[4] and item[5] > 2)
         lead_in_tokens = sum(item[5] for item in self.segments)
         average = lead_in_tokens / max(1, len(self.segments))
+        maximum = max((item[5] for item in self.segments), default=0)
+        over_budget = sum(item.get("reason") == "segment_token_limit" for item in self.skipped)
         print(
             f"event_ctx_dataset segments={len(self.segments)} songs={len(self.samples)} "
             f"context_beats={self.context_beats} audio_margin_beats={self.audio_margin_beats} "
             f"overlap_beats={self.overlap_beats} stride={self.stride_beats} "
             f"segments_with_lead_in={with_lead_in} avg_prefix_tokens={average:.1f} "
+            f"max_prefix_tokens={maximum} context_tokens={self.context_tokens} "
+            f"context_budget_policy={self.context_budget_policy} dropped_token_windows={over_budget} "
             f"slide_oversample={self.slide_oversample} touch_oversample={self.touch_oversample} "
             f"fine_rhythm_oversample={self.fine_rhythm_oversample} "
             f"fine_rhythm_stats_version={self.family_params().get('fine_rhythm_stats_version', 'disabled')} "
@@ -377,6 +388,8 @@ class EventCtxDataset(EventDataset):
             "context_beats": self.context_beats,
             "audio_margin_beats": self.audio_margin_beats,
             "context_tokens": self.context_tokens,
+            "context_budget_policy": self.context_budget_policy,
+            "max_prefix_tokens": max((item[5] for item in self.segments), default=0),
             "overlap_beats": self.overlap_beats,
             "context_dropout": self.context_dropout,
             "stride_beats": self.stride_beats,

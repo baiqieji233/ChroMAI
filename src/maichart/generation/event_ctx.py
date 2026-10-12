@@ -64,6 +64,9 @@ CTX_SPECIALS: tuple[str, ...] = (CTX_OPEN, CTX_CLOSE)
 DEFAULT_CONTEXT_BEATS = 8
 DEFAULT_AUDIO_MARGIN_BEATS = 4
 DEFAULT_CONTEXT_TOKENS = 192
+# Fresh training uses a larger history cap; legacy generation fallbacks above
+# remain stable. Saved checkpoint layouts always take precedence.
+FRESH_CONTEXT_TOKENS = 768
 # PerceiverS observed that a fixed, long context makes the model emit repetitive
 # segments; dropping the lead-in at random is the cheap form of their
 # "progressively increasing context" and stops the model from simply copying it.

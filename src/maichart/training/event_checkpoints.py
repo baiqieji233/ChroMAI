@@ -11,6 +11,7 @@ import torch
 
 from maichart.generation.event_model import EventConditionedTransformer, EventTransformerConfig, EventVocabulary
 from maichart.training.checkpoints import load_checkpoint
+from maichart.training.event_input_policy import POLICIES, stored_input_policies
 
 EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 
@@ -24,6 +25,7 @@ INIT_MIGRATABLE_FAMILY_KEYS = frozenset({
     "slide_oversample", "touch_oversample", "oversample_policy",
     "fine_rhythm_oversample", "fine_rhythm_ratio_threshold", "fine_rhythm_stats_version",
     "onset_profile",
+    "context_tokens",
 })
 LEGACY_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_v1"
 CURRENT_TOUCH_PRIORITY_POLICY = "independent_note_types_touch_priority_fine_rhythm_v2"
@@ -138,6 +140,19 @@ def load_event_model(path: str | Path, device: torch.device):
 
 def compare_event_contract(stored: dict[str, Any], current: dict[str, Any], *, mode: str) -> None:
     contract = stored.get("data_contract", {})
+    # Input-only policies have no tensor-shape impact. Preserve old experiments
+    # on resume and explicitly record migrations on init/finetune.
+    current_policies = current.get("input_policies")
+    if current_policies is not None:
+        if not isinstance(current_policies, dict) or set(current_policies) != set(POLICIES):
+            raise ValueError("input_policies 必须完整记录音频池化、上下文预算和谱面过滤策略")
+        for key, value in current_policies.items():
+            if value not in POLICIES[key]:
+                raise ValueError(f"Invalid input_policies.{key}: {value!r}")
+        if mode == "resume" and stored_input_policies(stored) != current_policies:
+            raise ValueError("断点继续的 input_policies 不兼容；改变输入策略请用 finetune，无需从头训练。")
+    elif mode == "resume" and contract.get("input_policies"):
+        raise ValueError("断点继续不能丢失 checkpoint 的 input_policies")
     stored_condition_version = contract.get("condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
     current_condition_version = current.get("condition_target_version", LEGACY_CONDITION_TARGET_VERSION)
     if stored_condition_version != current_condition_version:

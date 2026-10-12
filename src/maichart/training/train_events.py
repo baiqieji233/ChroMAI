@@ -24,6 +24,7 @@ from maichart.generation.event_ctx import (
     DEFAULT_CONTEXT_BEATS,
     DEFAULT_CONTEXT_DROPOUT,
     DEFAULT_CONTEXT_TOKENS,
+    FRESH_CONTEXT_TOKENS,
 )
 from maichart.generation.event_model import (
     EventConditionedTransformer, EventTransformerConfig, EventVocabulary, pool_local_tracks,
@@ -38,6 +39,9 @@ from maichart.training.event_checkpoints import (CURRENT_CONDITION_TARGET_VERSIO
                                                 atomic_save_checkpoint, compare_event_contract,
                                                 load_event_checkpoint, vocabulary_signature)
 from maichart.training.event_dataset import EventDataset, collate_events
+from maichart.training.event_input_policy import (
+    POLICIES, resolve_input_policies, stored_input_policies,
+)
 
 VALIDATION_CONDITION_SEED = 0
 VALIDATION_MASK_SCHEDULE = "fixed_seed_0_v1"
@@ -89,6 +93,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Optional local chart-onset auxiliary head; auto inherits the checkpoint or disables it for a fresh run.")
     parser.add_argument("--onset-loss-weight", type=float, default=0.2,
                         help="Weight of the local chart-onset auxiliary loss when --onset-profile is enabled.")
+    for key, choices in POLICIES.items():
+        parser.add_argument("--" + key.replace("_", "-"), choices=("auto", *choices), default="auto",
+                            help="Input policy: auto keeps exact resume behavior; fresh/finetune use the corrected policy. No model shape change.")
     parser.add_argument("--planner-profile",
                         choices=("auto", "legacy_v1", "music_structure_v2",
                                  "music_structure_v3"),
@@ -175,7 +182,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="Lead-in notes given to each window, in beats (cross-window family only).")
     parser.add_argument("--audio-margin-beats", type=int, default=DEFAULT_AUDIO_MARGIN_BEATS,
                         help="Extra audio sampled before and after each window (cross-window family only).")
-    parser.add_argument("--context-tokens", type=int, default=DEFAULT_CONTEXT_TOKENS,
+    parser.add_argument("--context-tokens", type=int, default=FRESH_CONTEXT_TOKENS,
                         help="Token budget for the lead-in block (cross-window family only).")
     parser.add_argument("--overlap-beats", type=int, default=0,
                         help="Shorten the window stride by this many beats, sweeping the song with "
@@ -978,8 +985,16 @@ def main(argv=None) -> int:
         raise ValueError("chart_onsets_v1 currently requires planner_profile=music_structure_v3.")
     if onset_profile == "chart_onsets_v1" and args.onset_loss_weight <= 0.0:
         raise ValueError("chart_onsets_v1 finetuning requires a positive --onset-loss-weight so the head remains capability-verified.")
-    stored_pooling = str(checkpoint.get("model_config", {}).get("local_pooling_policy", "legacy_uniform")) if checkpoint else "legacy_uniform"
-    local_pooling_policy = ("per_sample_v2" if onset_profile == "chart_onsets_v1" else stored_pooling)
+    input_policies = resolve_input_policies(
+        vars(args), checkpoint=checkpoint,
+        mode="resume" if args.resume else "finetune" if args.init_checkpoint else "fresh",
+        onset_profile=onset_profile)
+    for key, value in input_policies.items():
+        setattr(args, key, value)
+    local_pooling_policy = input_policies["local_pooling_policy"]
+    print("training_input_policies " + json.dumps(input_policies, ensure_ascii=False), flush=True)
+    if args.resume and input_policies["context_budget_policy"] == "legacy_dynamic_v1":
+        print("training_input_notice=旧 checkpoint 断点续训保留历史预算/清理策略；使用 finetune 可迁移修正输入，无需从头训练。", flush=True)
     vocabulary = EventVocabulary.from_dict(checkpoint["vocabulary"]) if checkpoint else None
     quality_payload = None
     quality_normalizers = {"token": 1.0, "planner": 1.0, "positive_windows": 0.0}
@@ -992,7 +1007,8 @@ def main(argv=None) -> int:
     # especially important for a large manifest and for smoke runs with
     # --max-steps.
     family = dataset_kwargs(args)
-    shared = {"condition_mask_prob": args.condition_mask_prob,
+    shared = {"chart_filter_policy": input_policies["chart_filter_policy"],
+              "condition_mask_prob": args.condition_mask_prob,
               "condition_default": args.condition_default,
               "condition_target_version": condition_target_version,
               "onset_profile": onset_profile,
@@ -1092,6 +1108,7 @@ def main(argv=None) -> int:
         # context settings are not the same experiment, and resuming across them
         # would silently mix window layouts.
         contract["family_params"] = dataset.family_params()
+    contract["input_policies"] = input_policies
     # How much of the condition vector was withheld is part of the experiment:
     # a model trained with the answer's statistics is a different model.
     contract["condition_params"] = {"mask_prob": float(args.condition_mask_prob),
@@ -1143,6 +1160,8 @@ def main(argv=None) -> int:
             "source_epoch": checkpoint.get("epoch"),
             "source_global_step": checkpoint.get("global_step"),
             "optimizer_reset": True, "sampling_changes": sampling_changes,
+            "input_policy_changes": {"source": stored_input_policies(checkpoint), "current": input_policies},
+            "context_token_change": {"source": old_family.get("context_tokens"), "current": new_family.get("context_tokens")},
             "condition_target_version": condition_target_version,
             "condition_target_change": {
                 "source": checkpoint.get("data_contract", {}).get(
@@ -1156,6 +1175,9 @@ def main(argv=None) -> int:
               f"optimizer_reset=true sampling_changes={json.dumps(sampling_changes)}", flush=True)
     elif checkpoint is None:
         training_origin = {"mode": "fresh", "condition_target_version": condition_target_version}
+    print(f"checkpoint_selection metric={'validation_loss' if validation else 'training_loss'} "
+          f"validation={'enabled' if validation else 'disabled'} "
+          "note=best只表示所选损失最低，不等同于成谱质量认证", flush=True)
     config_values = dict(checkpoint["model_config"]) if checkpoint else {
         "input_dim": INPUT_DIM, "vocab_size": len(vocabulary), "d_model": args.d_model,
         "nhead": args.nhead, "num_layers": args.num_layers,

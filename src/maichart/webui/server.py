@@ -42,6 +42,8 @@ from maichart.training.checkpoints import (
 )
 from maichart.training.frame_label_codec import DEFAULT_NOTE_TYPES
 from maichart.training.dataset_catalog import assert_no_validation_overlap
+from maichart.training.event_input_policy import resolve_input_policies
+from maichart.generation.event_ctx import FRESH_CONTEXT_TOKENS
 from maichart.webui.dataset_api import DatasetAPI
 from maichart.webui.quality_api import (
     QualityAPI,
@@ -183,6 +185,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "workspace": str(WEBUI_ROOT),
                     "project_root": str(PROJECT_ROOT),
                     "training_capabilities": {"independent_touch_oversample": True,
+                                              "versioned_input_policies": True,
                                               "fine_rhythm_oversample": True,
                                               "quality_training_capability": True,
                                               "local_onset_training": True,
@@ -1127,6 +1130,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             training_checkpoint_path = None
         onset_profile, onset_loss_weight, onset_weight_override = _resolve_onset_training_options(
             payload, model_family=model_family, training_mode=training_mode, inspection=inspection)
+        input_policies = (resolve_input_policies(
+            payload, checkpoint=inspection, mode=training_mode, onset_profile=onset_profile or "none")
+            if _is_event_family(model_family) else None)
         if model_family in EVENT_FAMILIES and onset_profile == "chart_onsets_v1":
             stored_planner = ((inspection or {}).get("model_config") or {}).get("planner_profile")
             effective_planner = (stored_planner if planner_profile == "auto" and training_mode != "fresh"
@@ -1135,6 +1141,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if effective_planner != MUSIC_STRUCTURE_V3_PROFILE:
                 raise ValueError("chart_onsets_v1 需要 music_structure_v3 planner；请将训练 profile 设为 v3 或使用兼容 checkpoint。")
         task = _create_task("train")
+        if input_policies is not None:
+            task.result["input_policies"] = input_policies
+            task.result["selection_metric"] = "validation_loss" if validation_manifest else "training_loss"
         if dataset_selection is not None:
             task.result["dataset_selection"] = dataset_selection
             task.result["manifest"] = str(manifest)
@@ -1183,6 +1192,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "--plan-teacher-mix", str(teacher_mix),
                 "--onset-profile", onset_profile,
                 "--onset-loss-weight", str(onset_loss_weight),
+                "--local-pooling-policy", input_policies["local_pooling_policy"],
+                "--context-budget-policy", input_policies["context_budget_policy"],
+                "--chart-filter-policy", input_policies["chart_filter_policy"],
                 "--weight-decay", str(payload.get("weight_decay", 0.01)),
                 # max_tokens is both the position grid and the padded length of
                 # every batch, so it belongs to the training contract rather
@@ -1219,7 +1231,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 args.extend([
                     "--context-beats", str(max(0, int(payload.get("context_beats", 8)))),
                     "--audio-margin-beats", str(max(0, int(payload.get("audio_margin_beats", 4)))),
-                    "--context-tokens", str(max(1, int(payload.get("context_tokens", 192)))),
+                    "--context-tokens", str(max(1, int(payload.get("context_tokens", FRESH_CONTEXT_TOKENS)))),
                     "--overlap-beats", str(max(0, int(payload.get("overlap_beats", 0)))),
                     "--context-dropout",
                     str(min(1.0, max(0.0, float(payload.get("context_dropout", 0.15))))),

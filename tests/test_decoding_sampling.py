@@ -447,6 +447,26 @@ def test_ctx_entry_point_passes_the_new_flags_through():
     assert argv[argv.index("--repetition-window") + 1] == "16"
 
 
+def test_large_context_is_not_subtracted_twice_from_decode_budget(monkeypatch):
+    recorded = []
+    def decode(*args, **kwargs):
+        recorded.append(kwargs)
+        if len(recorded) == 1:
+            raise ValueError("decoder reached max_tokens before emitting <eos>.")
+        return EventSequence([Fraction(0)], ["1"])
+    monkeypatch.setattr(event_cli, "_decode", decode)
+    monkeypatch.setattr(event_cli, "audio_segment_tensor", lambda *a, **k: torch.zeros((2, 8)))
+    monkeypatch.setattr(event_cli, "_context_prefix", lambda *a, **k: [0] * 600)
+    result = event_cli._decode_windows(
+        object(), VOCABULARY, torch.zeros((2, 8)), torch.zeros((4, 8)), _CONDITION,
+        torch.device("cpu"), windows=[(Fraction(0), Fraction(4))],
+        tempo_changes=[EventTempo(Fraction(0), 120)], first=0, song_duration=0,
+        bpm=120, max_tokens=1024, temperature=.8, sample=True, seed=1,
+        context_beats=16, context_tokens=768)
+    assert len(result) == 1 and len(recorded) == 2
+    assert all(call["max_tokens"] == 1024 and len(call["prefix_ids"]) == 600 for call in recorded)
+
+
 def test_decode_windows_argmax_path_ignores_the_flags(monkeypatch):
     # The shapers are sampling-branch-only: with sample=False (argmax path) the
     # window decoder must return the same chart whether or not the flags are on.

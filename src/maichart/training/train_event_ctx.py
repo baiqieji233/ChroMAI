@@ -51,6 +51,7 @@ def family_dataset_kwargs(args: argparse.Namespace) -> dict[str, Any]:
         "context_beats": int(args.context_beats),
         "audio_margin_beats": int(args.audio_margin_beats),
         "context_tokens": int(args.context_tokens),
+        "context_budget_policy": getattr(args, "context_budget_policy", "bounded_v2"),
         "overlap_beats": int(args.overlap_beats),
         "context_dropout": float(args.context_dropout),
         "slide_oversample": int(getattr(args, "slide_oversample", 1)),

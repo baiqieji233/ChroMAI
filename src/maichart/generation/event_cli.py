@@ -1396,7 +1396,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
             try:
                 sequence = _decode(
                     model, vocabulary, segment_audio, global_audio, window_vector, device,
-                    max_tokens=window_budget, temperature=temperature,
+                    max_tokens=budget, temperature=temperature,
                     sample=sample, seed=generation_seed + attempt * 1000003, guidance_scale=guidance_scale,
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
@@ -1422,7 +1422,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     planner_kwargs["density_feedback"] = feedback
                 sequence = _decode(
                     model, vocabulary, segment_audio, global_audio, window_vector, device,
-                    max_tokens=window_budget, temperature=temperature,
+                    max_tokens=budget, temperature=temperature,
                     sample=sample, seed=generation_seed + attempt * 1000003, guidance_scale=guidance_scale,
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
@@ -1497,6 +1497,7 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
         print(
             f"event_window={index + 1}/{len(windows)} beats=[{start},{end}) "
             f"events={len(sequence.beats)} closed={closed} context_tokens={len(prefix_ids)} "
+            f"total_token_budget={budget} target_token_budget={window_budget} "
             f"intensity={intensity[index]:.2f} note_density={window_condition.radar['note_density']:.3f} "
             f"{audible_text}{trimmed_text}"
             f"seconds={time.perf_counter() - window_started:.2f}",
@@ -1782,7 +1783,7 @@ def _filter_points_to_file_span(points: list[EventPoint], *, tempo_changes, firs
 
 
 def _candidate_quality_score(quality: dict) -> float:
-    """Rank candidates without hiding structural or syntax failures."""
+    """Legacy musical/style score retained for display and final tie-breaking."""
     if not quality or not quality.get("syntax_valid", False):
         return float("-inf")
     score = 0.0
@@ -1808,6 +1809,67 @@ def _candidate_quality_score(quality: dict) -> float:
             if value is not None and math.isfinite(float(value)):
                 score -= min(1.0, abs(float(value))) * 0.1
     return float(score)
+
+
+def _candidate_quality_rank(quality: dict) -> tuple[tuple[float, ...], dict]:
+    """Return a safety-first sort key and an auditable ranking breakdown.
+
+    Missing detector or action metadata is unknown, never a clean zero-conflict
+    result. The existing musical/style score is deliberately the final tie-break.
+    """
+    syntax = quality.get("syntax_valid")
+    parser_rank = 2 if syntax is True else 0 if syntax is False else 1
+    parser_status = "valid" if syntax is True else "invalid" if syntax is False else "unknown"
+
+    playability = quality.get("playability")
+    coverage = playability.get("coverage") if isinstance(playability, dict) else None
+    coverage = coverage if isinstance(coverage, dict) else {}
+    coverage_status = coverage.get("status") or (playability.get("status") if isinstance(playability, dict) else None)
+    parse_errors = coverage.get("parse_errors")
+    unsupported = coverage.get("unsupported")
+    complete_details = ("parse_errors" in coverage and "unsupported" in coverage
+                        and not parse_errors and not unsupported)
+    if coverage_status in {"engine_reference", "static_only"}:
+        detection_rank = 2 if complete_details else 1
+        detection_status = "complete" if complete_details else "partial"
+    elif coverage_status == "partial":
+        detection_rank, detection_status = 1, "partial"
+    elif coverage_status == "disabled":
+        detection_rank, detection_status = 0, "disabled"
+    else:
+        detection_rank, detection_status = 0, "unknown"
+
+    hard_count = None
+    if isinstance(playability, dict):
+        value = playability.get("remaining_actionable_hard")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            numeric = float(value)
+            if math.isfinite(numeric) and numeric >= 0 and numeric.is_integer():
+                hard_count = int(numeric)
+        if hard_count is None:
+            details = playability.get("remaining_details")
+            if isinstance(details, list) and all(
+                isinstance(item, dict) and "severity" in item and "action" in item
+                for item in details
+            ):
+                hard_count = sum(
+                    item.get("severity") == "hard" and item.get("action") == "enforce"
+                    for item in details
+                )
+    hard_count_known = hard_count is not None
+    score = _candidate_quality_score(quality)
+    breakdown = {
+        "parser_coverage": parser_status,
+        "parser_coverage_rank": parser_rank,
+        "detection_coverage": detection_status,
+        "detection_coverage_rank": detection_rank,
+        "remaining_actionable_hard": hard_count,
+        "actionable_hard_count_known": hard_count_known,
+        "musical_quality_score": score,
+    }
+    key = (float(parser_rank), float(detection_rank), float(hard_count_known),
+           float(-hard_count if hard_count_known else 0), score)
+    return key, breakdown
 
 
 def _failure_payload(error: Exception, *, candidate: int | None = None) -> dict:
@@ -2193,7 +2255,7 @@ def main(argv=None) -> int:
         print(f"generation_status=failed error={exc}", flush=True)
         return 1
     failures = 0
-    candidate_records: list[tuple[Path, Path, float]] = []
+    candidate_records: list[tuple[Path, Path, float, tuple[float, ...]]] = []
     for candidate in range(args.candidates):
         target = _candidate_path(output, candidate, args.candidates)
         target_ir = _candidate_path(output_ir, candidate, args.candidates)
@@ -2471,7 +2533,9 @@ def main(argv=None) -> int:
             quality["audio_follow"] = audio_follow_metrics(
                 points, audio, tempo_changes, args.first, duration_sec=audio.duration_sec)
             quality["candidate_score"] = _candidate_quality_score(quality)
-            candidate_records.append((target, target_quality, float(quality["candidate_score"])))
+            candidate_rank_key, quality["candidate_ranking"] = _candidate_quality_rank(quality)
+            candidate_records.append((target, target_quality, float(quality["candidate_score"]),
+                                      candidate_rank_key))
             if gold_reference:  # noqa: SIM108 - keep the two branches explicit
                 acceptance_metrics = metric_bundle(
                     points, audio, tempo_changes, args.first,
@@ -2520,9 +2584,9 @@ def main(argv=None) -> int:
               f"windows={len(decoded)} open_windows={sum(1 for window in decoded if not window.closed)} "
               f"last_beat={points[-1].beat if points else 0} bpm={bpm} checkpoint_epoch={checkpoint.get('epoch')}", flush=True)
     if candidate_records:
-        ranked = sorted(candidate_records, key=lambda item: item[2], reverse=True)
-        rank_by_quality = {str(report_path): rank for rank, (_, report_path, _) in enumerate(ranked, start=1)}
-        for target, report_path, score in candidate_records:
+        ranked = sorted(candidate_records, key=lambda item: item[3], reverse=True)
+        rank_by_quality = {str(report_path): rank for rank, (_, report_path, _, _) in enumerate(ranked, start=1)}
+        for target, report_path, score, _rank_key in candidate_records:
             try:
                 payload = json.loads(report_path.read_text(encoding="utf-8"))
                 payload["candidate_score"] = score

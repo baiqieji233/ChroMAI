@@ -223,7 +223,8 @@ def test_window_plus_context_must_fit_the_token_budget(manifest, fake_audio):
     # A window is ~50 tokens.  A budget of 60 leaves only ~8 tokens for the
     # lead-in: that must be spent on the *newest* context tokens instead of
     # dropping the window.  Only a window that is itself too long is reported.
-    dataset = _ctx_dataset(manifest, context_beats=8, context_tokens=256, max_tokens=60)
+    dataset = _ctx_dataset(manifest, context_beats=8, context_tokens=256, max_tokens=60,
+                           context_budget_policy="legacy_dynamic_v1")
     prefix_lengths = {entry[5] for entry in dataset.segments}
     assert any(0 < length <= 10 for length in prefix_lengths), \
         "the lead-in must be cropped to whatever the window leaves, not dropped"
@@ -248,10 +249,32 @@ def test_dense_window_keeps_its_lead_in_at_a_reduced_budget(manifest, fake_audio
     exactly the densest passages -- the ones that most need their context.
     """
 
-    dataset = _ctx_dataset(manifest, context_beats=8, context_tokens=34, max_tokens=60)
+    dataset = _ctx_dataset(manifest, context_beats=8, context_tokens=34, max_tokens=60,
+                           context_budget_policy="legacy_dynamic_v1")
     prefix_lengths = [entry[5] for entry in dataset.segments]
     assert prefix_lengths, "windows must survive with a reduced lead-in budget"
     assert max(prefix_lengths) <= 30, "lead-in must be cropped before the window is dropped"
+
+
+def test_corrected_context_never_expands_past_configured_budget(manifest, fake_audio):
+    dataset = _ctx_dataset(manifest, context_beats=16, context_tokens=16,
+                           max_tokens=512, context_dropout=0)
+    assert all(len(entry[4]) <= 18 for entry in dataset.segments)
+    assert any(len(entry[4]) > 2 for entry in dataset.segments)
+    assert dataset.audit()["context_budget_policy"] == "bounded_v2"
+    legacy = _ctx_dataset(manifest, context_beats=16, context_tokens=16,
+                          max_tokens=512, context_dropout=0,
+                          context_budget_policy="legacy_dynamic_v1")
+    assert max(len(entry[4]) for entry in legacy.segments) > 18
+
+
+def test_corrected_context_drops_overbudget_window_without_truncating_history(manifest, fake_audio):
+    dataset = _ctx_dataset(manifest, context_beats=8, context_tokens=34,
+                           max_tokens=60, context_dropout=0)
+    over_budget = [x for x in dataset.skipped if x.get("reason") == "segment_token_limit"]
+    assert over_budget
+    assert any(x.get("prefix_tokens", 0) > 10 for x in over_budget)
+    assert all(len(e[3]) + len(e[4]) <= 60 for e in dataset.segments)
 
 
 def test_slide_windows_are_oversampled(manifest, fake_audio):

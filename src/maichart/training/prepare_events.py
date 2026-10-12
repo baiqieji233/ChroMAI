@@ -42,6 +42,11 @@ from maichart.preprocess import (
     _discover_sample_dirs,
     _raw_song_id,
 )
+from maichart.training.chart_sanitization import (
+    DEFAULT_CHART_FILTER_POLICY,
+    sanitize_chart,
+    validate_chart_filter_policy,
+)
 
 # Master and Re:Master only.  The event vocabulary is fitted on authored expert
 # charts, and the dataset loader applies the same two filters, so applying them
@@ -77,7 +82,7 @@ def _display_path(path: Path, base: Path) -> str:
         return path.resolve().as_posix()
 
 
-def _inspect_difficulty(source: Path, index: int) -> dict[str, Any]:
+def _inspect_difficulty(source: Path, index: int, chart_filter_policy: str = DEFAULT_CHART_FILTER_POLICY) -> dict[str, Any]:
     """Parse one difficulty and report whether it can become training data."""
 
     record: dict[str, Any] = {
@@ -93,6 +98,8 @@ def _inspect_difficulty(source: Path, index: int) -> dict[str, Any]:
         "event_usable_for_training": False,
         "filter_reasons": [],
         "error": None,
+        "chart_filter": {"policy": chart_filter_policy, "removed_count": 0,
+                          "removed_preview": [], "removed": []},
     }
     reasons: list[str] = []
     try:
@@ -102,6 +109,9 @@ def _inspect_difficulty(source: Path, index: int) -> dict[str, Any]:
         record["filter_reasons"] = ["parse_failed"]
         return record
 
+    sanitized = sanitize_chart(chart, chart_filter_policy)
+    chart = sanitized.chart
+    record["chart_filter"] = sanitized.to_dict()
     record["has_chart"] = True
     record["note_count"] = len(chart.points)
     record["end_beat"] = str(chart.end_beat)
@@ -110,6 +120,23 @@ def _inspect_difficulty(source: Path, index: int) -> dict[str, Any]:
         # The event timebase is the authored tempo, which is also what training
         # conditions on, so surface it for review.
         record["initial_bpm"] = float(chart.tempo_changes[0].bpm) if chart.tempo_changes else None
+    if sanitized.removed:
+        preview = ", ".join(
+            f"{item['beat']}:{item['atom']}" for item in sanitized.removed[:3]
+        )
+        print(
+            f"[prepare_events] chart_filter path={source} difficulty={index} "
+            f"removed={len(sanitized.removed)} sample=[{preview}]",
+            flush=True,
+        )
+    try:
+        from maichart.training.event_dataset import inspect_chart
+        inspect_chart(chart)
+    except Exception as exc:  # noqa: BLE001 - every validation error is a QC record
+        record["error"] = f"{type(exc).__name__}: {exc}"
+        record["filter_reasons"] = ["validation_failed"]
+        return record
+
     if not chart.points:
         reasons.append("empty_chart")
     if record["note_count"] is not None and record["note_count"] < 50:
@@ -119,7 +146,8 @@ def _inspect_difficulty(source: Path, index: int) -> dict[str, Any]:
     return record
 
 
-def _inspect_song(directory: Path, root: Path, *, limit: int | None) -> dict[str, Any] | None:
+def _inspect_song(directory: Path, root: Path, *, limit: int | None,
+                  chart_filter_policy: str = DEFAULT_CHART_FILTER_POLICY) -> dict[str, Any] | None:
     maidata = directory / "maidata.txt"
     if not maidata.is_file():
         return None
@@ -147,7 +175,7 @@ def _inspect_song(directory: Path, root: Path, *, limit: int | None) -> dict[str
     for block in metadata.difficulties:
         if limit is not None and len(difficulties) >= limit:
             break
-        record = _inspect_difficulty(maidata, block.index)
+        record = _inspect_difficulty(maidata, block.index, chart_filter_policy)
         record["level_raw"] = block.level
         record["designer"] = block.designer
         try:
@@ -195,7 +223,9 @@ def build_event_manifest(
     cache_dir: Path,
     sample_rate: int = 22050,
     limit: int | None = None,
+    chart_filter_policy: str = DEFAULT_CHART_FILTER_POLICY,
 ) -> dict[str, Any]:
+    chart_filter_policy = validate_chart_filter_policy(chart_filter_policy)
     directories = _discover_sample_dirs(raw_root)
     songs: list[dict[str, Any]] = []
     errors: list[dict[str, Any]] = []
@@ -203,7 +233,8 @@ def build_event_manifest(
         if limit is not None and len(songs) >= limit:
             break
         try:
-            song = _inspect_song(directory, raw_root, limit=None)
+            song = _inspect_song(directory, raw_root, limit=None,
+                                 chart_filter_policy=chart_filter_policy)
         except Exception as exc:  # noqa: BLE001
             errors.append({"stage": "inspect_song", "path": str(directory), "message": str(exc)})
             continue
@@ -215,6 +246,9 @@ def build_event_manifest(
     reason_counts = Counter(
         reason for item in difficulties for reason in item.get("filter_reasons", [])
     )
+    affected_charts = [item for item in difficulties
+                       if int((item.get("chart_filter") or {}).get("removed_count", 0)) > 0]
+    removed_atom_count = sum(int(item["chart_filter"]["removed_count"]) for item in affected_charts)
     return {
         "schema": MANIFEST_SCHEMA,
         "source_root": raw_root.resolve().as_posix(),
@@ -233,6 +267,7 @@ def build_event_manifest(
             "feature_rate_hz": 50,
             "min_difficulty_index": MIN_DIFFICULTY_INDEX,
             "min_level": MIN_LEVEL,
+            "chart_filter_policy": chart_filter_policy,
         },
         "songs": songs,
         "summary": {
@@ -242,6 +277,11 @@ def build_event_manifest(
             "usable_difficulty_count": len(usable),
             "filtered_difficulty_count": len(difficulties) - len(usable),
             "filter_reason_counts": dict(reason_counts),
+            "chart_filter": {
+                "policy": chart_filter_policy,
+                "affected_chart_count": len(affected_charts),
+                "removed_atom_count": removed_atom_count,
+            },
         },
         "warnings": [],
         "errors": errors,
@@ -256,6 +296,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", required=True, help="cache directory for audio features")
     parser.add_argument("-o", "--output", required=True, help="output manifest JSON path")
     parser.add_argument("--sample-rate", type=int, default=22050)
+    parser.add_argument("--chart-filter-policy", choices=(
+        "legacy_strict_v1", "drop_headless_stars_v1"), default=DEFAULT_CHART_FILTER_POLICY)
     parser.add_argument(
         "--force", action="store_true",
         help=(
@@ -279,6 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     # the loader resolves them against the manifest's own directory.
     manifest = build_event_manifest(
         raw_root, cache_dir=cache_dir, sample_rate=int(args.sample_rate), limit=args.limit,
+        chart_filter_policy=args.chart_filter_policy,
     )
     base = output.parent
     for song in manifest["songs"]:

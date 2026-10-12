@@ -549,6 +549,13 @@ def test_event_ctx_family_routes_training_and_generation(webui_api, monkeypatch,
                         ("--slide-oversample", "3"), ("--touch-oversample", "1")):
         assert flag in calls[0]
         assert calls[0][calls[0].index(flag) + 1] == value
+    for flag, value in (("--local-pooling-policy", "per_sample_v2"),
+                        ("--context-budget-policy", "bounded_v2"),
+                        ("--chart-filter-policy", "drop_headless_stars_v1")):
+        assert calls[0][calls[0].index(flag) + 1] == value
+    task = webui.TASKS[data["task_id"]]
+    assert task.result["selection_metric"] == "training_loss"
+    assert task.result["input_policies"]["local_pooling_policy"] == "per_sample_v2"
 
     # The same family selection routes generation to the matching generator.
     checkpoint = tmp_path / "ctx.pt"

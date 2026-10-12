@@ -785,7 +785,7 @@ function contextPayload() {
   return {
     context_beats: numberOrDefault("#contextBeats", 8),
     audio_margin_beats: numberOrDefault("#audioMarginBeats", 4),
-    context_tokens: numberOrDefault("#contextTokens", 192),
+    context_tokens: numberOrDefault("#contextTokens", 768),
     overlap_beats: numberOrDefault("#overlapBeats", 0),
     context_dropout: numberOrDefault("#contextDropout", 0.15),
   };
@@ -871,6 +871,9 @@ function trainingPayload(options = {}) {
     ...(currentModelFamily() === "legacy_frame_v2" ? {} : {
       onset_profile: valueOrDefault("#onsetProfile", "auto"),
       onset_loss_weight: Number(valueOrDefault("#onsetLossWeight", 0.2)),
+      local_pooling_policy: valueOrDefault("#localPoolingPolicy", "auto"),
+      context_budget_policy: "auto",
+      chart_filter_policy: "auto",
     }),
   };
 }
@@ -1015,6 +1018,7 @@ function parseTempoMap() {
 // ---------------------------------------------------------------------------
 function setTrainingModeDefaults(force = false) {
   const mode = currentTrainingMode();
+  if (force && element("#localPoolingPolicy")) element("#localPoolingPolicy").value = "auto";
   const learningRate = element("#learningRate");
   if (learningRate && (force || !learningRate.dataset.touched)) {
     learningRate.value = mode === "finetune" ? "0.00002" : "0.0002";
@@ -1027,7 +1031,7 @@ function setTrainingModeDefaults(force = false) {
       ? "从随机初始化开始；不需要已有 checkpoint。"
       : mode === "resume"
         ? "从断点继续：需要与当前 manifest、模型族完全一致的 checkpoint。"
-        : "已有模型加强训练：加载权重并新建优化器；可以只用比 full 更小的精选集。允许调整质量标注和 Slide/Touch 采样，模型族、词表、窗口与规划器须保持兼容。";
+        : "已有模型加强训练：加载权重并新建优化器，可用小型精选集。允许迁移池化/过滤策略、上下文 token 上限和质量采样；模型族、词表、前置拍数与规划器保持兼容。";
   }
   const epochsHelp = element("#epochsHelp");
   if (epochsHelp) {
@@ -1069,7 +1073,7 @@ function updateTrainingControls() {
   updateFamilyFields();
   updateDatasetButtons();
   const resume = currentTrainingMode() === "resume";
-  ["#onsetProfile", "#onsetLossWeight"].forEach((selector) => {
+  ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy"].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = resume;
   });
@@ -1122,7 +1126,9 @@ function renderTask(task) {
   if (message) message.textContent = task.error || task.message || "";
   if (epoch) {
     epoch.hidden = !epochStatus;
-    if (epochStatus) epoch.textContent = epochStatus.text;
+    if (epochStatus) epoch.textContent = epochStatus.text + (
+      task.result?.selection_metric === "training_loss" ? "；best 依据训练 loss（未配置验证集）"
+      : task.result?.selection_metric === "validation_loss" ? "；best 依据验证 loss" : "");
   }
   if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
 
@@ -1716,6 +1722,9 @@ function applyCheckpointModelConfig(data) {
   }
   if (currentTrainingMode() === "resume") {
     const onsetParams = contract.onset_params || {};
+    if (element("#localPoolingPolicy")) {
+      element("#localPoolingPolicy").value = model.local_pooling_policy || "legacy_uniform";
+    }
     const onsetTraining = data.onset_training || {};
     const onsetProfile = onsetParams.profile || model.onset_profile || "none";
     const onsetWeight = onsetParams.loss_weight ?? onsetTraining.loss_weight ?? 0.2;
@@ -1771,6 +1780,9 @@ function renderCheckpointInspection(data) {
     data.model_config?.dropout !== undefined ? `模型内部 Dropout（dropout）：${data.model_config.dropout}` : "",
     data.data_contract?.condition_params?.dropout !== undefined ? `条件随机丢弃（condition_dropout）：${data.data_contract.condition_params.dropout}；当前控件：${valueOrDefault("#conditionDropout", "未显示")}` : "",
     data.data_contract?.family_params?.context_dropout !== undefined ? `上下文随机丢弃（context_dropout）：${data.data_contract.family_params.context_dropout}` : "",
+    `音频池化：${data.model_config?.local_pooling_policy || "legacy_uniform"}；生成按 checkpoint 继承，迁移请用加强训练`,
+    `上下文预算策略：${data.data_contract?.input_policies?.context_budget_policy || "legacy_dynamic_v1"}`,
+    `谱面过滤策略：${data.data_contract?.input_policies?.chart_filter_policy || "legacy_strict_v1"}`,
     data.data_contract?.onset_params?.profile !== undefined
       ? `采音辅助合同：${data.data_contract.onset_params.profile}，loss weight=${data.data_contract.onset_params.loss_weight ?? "未记录"}` : "",
     data.onset_training?.trained !== undefined
@@ -1986,6 +1998,10 @@ async function startTrain(options = {}) {
   await assertDatasetBackend();
   const payload = { ...trainingPayload({ autoPreprocess: !!options.autoPreprocess }), auto_preprocess: !!options.autoPreprocess };
   if (payload.model_family !== "legacy_frame_v2") {
+    const inputStatus = await api("/api/status");
+    if (inputStatus.training_capabilities?.versioned_input_policies !== true) {
+      throw new Error("当前后端未加载上下文预算、独立音频池化和星星过滤修正，请重启 WebUI 服务后再训练。");
+    }
     const status = await api("/api/status");
     if (status.training_capabilities?.event_learning_rate_control !== true) {
       throw new Error("当前后端尚未加载事件模型学习率修复，请重启 WebUI 服务后再训练。");

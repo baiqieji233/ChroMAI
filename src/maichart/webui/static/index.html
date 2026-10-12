@@ -85,11 +85,11 @@
             <textarea id="manifestPath" class="path-input" rows="2">manifests/training_manifest.json</textarea>
             <small>当前目录预处理写入这里。已勾选训练来源时，训练会自动准备对应清单，联合清单不会覆盖这里。未使用素材勾选的兼容单集流程，仍直接读取这里的清单。</small>
           </label>
-          <label class="field span-4" data-training-family="event_v1">验证 manifest 路径（可选，但强烈建议）
+          <label class="field span-4" data-training-family="event_v1">验证 manifest 路径（可选）
             <textarea id="validationManifestPath" class="path-input" rows="2" placeholder="例如 manifests/splits/val.json"></textarea>
             <small>
-              <strong>影响训练结果。</strong>留空时训练只按训练集 loss 保存 <code>event_best.pt</code>，早停与学习率自动下降都不会触发，也无法判断模型是学会了规律还是背下了训练集。
-              填了之后：按验证 loss 选模型、验证不再改善时自动早停、并按泛化表现降低学习率。请按歌曲划分，避免同一首歌的不同难度泄漏到两边。
+              可以留空正常训练，无需建立 gold，也不会自动拆分训练集。留空时 <code>event_best.pt</code> 与学习率调度依据训练 loss，验证早停不启用；best 不表示已通过实际谱面验收。
+              如主动填写独立验证集，则按验证 loss 选择 best 和调度学习率。可按数据量与人工测试需要决定是否使用。
             </small>
           </label>
           <label class="field span-4">checkpoint 输出目录
@@ -226,6 +226,15 @@
             <input id="maxAudioTokens" type="number" min="128" step="128" value="1024">
             <small>音频窗口最多保留的特征帧数。1024 可减少长窗口均值池化造成的时间对齐损失；属于模型合同，修改后需重训。</small>
           </label>
+          <label class="field" data-training-family="event_v1 event_ctx_v1">音频池化策略（local_pooling_policy）
+            <select id="localPoolingPolicy">
+              <option value="auto" selected>自动（新训练/加强训练修正；断点续训继承）</option>
+              <option value="per_sample_v2">逐样本池化（per_sample_v2）</option>
+              <option value="legacy_uniform">旧版批次池化（legacy_uniform）</option>
+            </select>
+            <small>逐样本池化只压缩自身超过音频帧数上限的片段，同批长片段不会拉伸短片段。不需要启用局部采音头，也不改变网络参数形状。已有模型可用“加强训练”迁移，无需从头重练；断点续训和旧模型生成继承原策略。</small>
+          </label>
+          <p class="help-text span-4" data-training-family="event_v1 event_ctx_v1">新训练与加强训练会忽略 <code>8?-5[8:1]</code> 等带 <code>?</code> 的完整星星音符，保留同刻其他音符和时间轴，不改源 maidata；日志与数据审计记录删除内容。超过 token 总预算的训练窗口直接丢弃。旧 checkpoint 的断点续训保留旧读取策略，需迁移时选择“已有模型加强训练”。</p>
           <label class="field" data-training-family="event_v1">条件遮罩默认值
             <input id="conditionDefault" type="number" min="0" max="1" step="0.01" value="0.5">
             <small>条件遮罩时 radar/style 使用的数值默认值；它不同于表示“整组条件未提供”的 null embedding，必须与生成端 contract 一致。</small>
@@ -275,8 +284,8 @@
             <small><strong>窗口两侧各多看多少拍的音乐。</strong>音乐在生成时是全曲已知的，所以"往后看"是合法的——模型能提前知道下一段是什么样子。填 0 表示只看窗口本身。</small>
           </label>
           <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：上下文 token 预算
-            <input id="contextTokens" type="number" min="16" step="16" value="192">
-            <small>前置上下文最多占多少 token（超出的部分从最老的音符开始丢弃，靠窗口的近处优先）。它会计入 max_tokens 的总预算，所以 <strong>max_tokens 需要相应上调</strong>（建议 ≥ 640）。</small>
+            <input id="contextTokens" type="number" min="16" step="16" value="768">
+            <small>前置谱面内容的 token 上限，另有两个上下文分隔符。新训练默认 768；仅提高未用满的上限不会增加实际计算。实际历史量还受前置拍数限制。训练与生成使用同一上限；上下文加目标超过 max_tokens 的窗口直接丢弃，不靠目标长度偷偷扩大历史。增加预算会占用生成正文空间，建议总预算至少 1024，并查看日志中的实际用量与丢弃数。旧模型按 checkpoint 生成；更改上限可用加强训练，无需改网络形状。</small>
           </label>
           <label class="field" data-training-family="event_ctx_v1" hidden>跨窗口：滚动重叠拍数
             <input id="overlapBeats" type="number" min="0" max="64" value="0">
