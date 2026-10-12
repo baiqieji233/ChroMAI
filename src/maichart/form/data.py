@@ -14,6 +14,7 @@ from torch.utils.data import Dataset
 
 from maichart.event_timing import EventPoint, parse_event_chart, seconds_at_beat
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
+from maichart.generation.event_quality import condition_from_events
 from maichart.generation.event_audio import (
     audio_segment_tensor, extract_event_audio, _normalize_tempo_map,
     _beats_at_audio_offsets, segment_frame_times,
@@ -60,6 +61,8 @@ class FormSong:
     audit: dict
     regions: list[MetricSpan] | None = None
     span_region_indices: list[int] | None = None
+    load_curve_times_sec: np.ndarray | None = None
+    load_curve: np.ndarray | None = None
 
     def __post_init__(self):
         # Old direct constructors treat every supplied span as its own region.
@@ -71,6 +74,13 @@ class FormSong:
             raise ValueError("span_region_indices must map every computational span")
         if any(index < 0 or index >= len(self.regions) for index in self.span_region_indices):
             raise ValueError("span_region_indices contains an unknown musical region")
+        if self.load_curve_times_sec is not None or self.load_curve is not None:
+            if self.load_curve_times_sec is None or self.load_curve is None:
+                raise ValueError("load curve times and values must be supplied together")
+            if self.load_curve.ndim != 2 or self.load_curve.shape[1] != 4:
+                raise ValueError("load_curve must have shape [T, 4]")
+            if len(self.load_curve_times_sec) != len(self.load_curve):
+                raise ValueError("load curve times and values length mismatch")
 
 
 def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2.0, max_seconds=14.0):
@@ -115,7 +125,8 @@ def form_audio(song, start, end):
 
 def input_example(song, index, history, *, condition=None, codec=None, task=0,
                   draft=(), right=(), max_memory_tokens=512, memory_strength=1.0,
-                  state_index=None):
+                  state_index=None, load_curve=None, load_curve_times_sec=None,
+                  load_curve_condition_mask=None):
     codec = codec or RationalCodec()
     span = song.spans[index]
     region_index = song.span_region_indices[index]
@@ -154,13 +165,28 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     # A reused index must still be causal. Its implementation filters all heads
     # at or after the boundary, including future-dependent release flags.
     condition = condition or GenerationCondition(radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
+    curve_values = song.load_curve if load_curve is None else np.asarray(load_curve, dtype=np.float32)
+    curve_times = song.load_curve_times_sec if load_curve_times_sec is None else np.asarray(load_curve_times_sec, dtype=np.float32)
+    if curve_values is not None and curve_times is not None:
+        lo_sec = float(seconds_at_beat(span.start, song.tempo, song.first) - song.first)
+        hi_sec = float(seconds_at_beat(span.end, song.tempo, song.first) - song.first)
+        selected = (curve_times >= lo_sec) & (curve_times < hi_sec)
+        local_curve = torch.from_numpy(curve_values[selected].copy())
+        local_times = torch.from_numpy((curve_times[selected] - lo_sec).copy())
+        local_curve_mask = torch.ones_like(local_curve, dtype=torch.bool) if load_curve_condition_mask is None else torch.as_tensor(load_curve_condition_mask, dtype=torch.bool)[selected].clone()
+    else:
+        local_curve = torch.zeros((0, 4), dtype=torch.float32)
+        local_times = torch.zeros((0,), dtype=torch.float32)
+        local_curve_mask = torch.zeros((0, 4), dtype=torch.bool)
     return {
         "audio": form_audio(song,span.start,span.end), "form": torch.from_numpy(form),
         "history": torch.tensor(codec.bounded_memory(history,origin=hist_origin,max_tokens=max_memory_tokens)),
         "motif": torch.tensor(motif),
         "draft": torch.tensor(codec.bounded_memory(draft,origin=span.start,max_tokens=max_memory_tokens,newest=False)),
         "right": torch.tensor(codec.bounded_memory(right,origin=span.end,max_tokens=max_memory_tokens,newest=False)),
-        "condition": condition.to_vector(), "task": torch.tensor(task),
+        "condition": condition.to_vector(), "condition_null": torch.tensor(False), "task": torch.tensor(task),
+        "load_curve": local_curve, "load_curve_times_sec": local_times,
+        "load_curve_condition_mask": local_curve_mask,
         "action_state": states, "action_state_padding_mask": padding,
         "relation": torch.tensor([relation.similarity,relation.confidence,relation.duration_ratio,
             (region_index-relation.source)/max(len(song.regions),1)] if relation else [0.,0.,1.,0.]),
@@ -192,14 +218,14 @@ class FormDataset(Dataset):
     def __init__(self, manifest, *, cache_dir, max_tokens=2048, max_memory_tokens=512,
                  meters=None, seed=0, limit_charts=0, reconstruction=True,
                  min_level=12.,max_level=15.,min_difficulty_index=4,max_difficulty_index=6,
-                 max_region_seconds=14., audio_loader=extract_event_audio):
-        self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction"}
+                 max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio):
+        self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction","quality_enabled":bool(quality_enabled)}
         self.max_memory_tokens=max_memory_tokens; self.seed=seed
         self.audio_store=_AudioStore(audio_loader,cache_dir)
         path=Path(manifest).resolve(); data=json.loads(path.read_text(encoding='utf-8-sig'))
         annotations=None
         annotation_path=path.with_name('quality_annotations.json')
-        if annotation_path.exists():
+        if quality_enabled and annotation_path.exists():
             from maichart.training.quality_annotations import load_quality_annotations
             annotations=load_quality_annotations(annotation_path)
         for entry in data.get('songs',[]):
@@ -239,7 +265,15 @@ class FormDataset(Dataset):
                     for region in (record or {}).get('regions',[]):
                         if float(region.get('weight',1))<=0: excluded.append((float(region['start_sec']),float(region['end_sec'])))
                     points=[p for p in chart.points if not any(lo<=seconds_at_beat(p.beat,chart.tempo_changes,chart.audio_first)<hi for lo,hi in excluded)]
-                    idx=len(self.songs); self.songs.append((song,points,level,weight,SustainStateIndex(points,chart.tempo_changes,chart.audio_first)))
+                    condition = condition_from_events(points, chart.tempo_changes, level=level,
+                        duration_sec=max(float(audio.duration_sec), 1e-3), audio=audio, audio_first=chart.audio_first)
+                    try:
+                        from maichart.form.curve import build_load_curve
+                        song.load_curve_times_sec, song.load_curve = build_load_curve(
+                            points, chart.tempo_changes, chart.audio_first, float(audio.duration_sec))
+                    except ImportError:
+                        pass
+                    idx=len(self.songs); self.songs.append((song,points,level,weight,SustainStateIndex(points,chart.tempo_changes,chart.audio_first),condition,excluded,record))
                     self.audit['charts'].append({'source':str(source),'difficulty':slot,'spans':len(song.spans),'links':len(song.relations.links),'unknown_meter':not bool(song.meters),
                         'chart_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
                         'audio_sha256':(audio.metadata or {}).get('audio_sha256'),
@@ -254,8 +288,11 @@ class FormDataset(Dataset):
                         tokens=self.codec.encode(target,origin=span.start)
                         if len(tokens)>max_tokens:
                             self.audit['skipped'].append({'source':str(source),'span':span.index,'reason':'target_token_budget','tokens':len(tokens)});continue
-                        self.items.append((idx,span.index,tokens,0))
-                        if reconstruction and target: self.items.append((idx,span.index,tokens,1))
+                        local_weight=_region_weight(lo,hi,record)
+                        if local_weight <= 0:
+                            continue
+                        self.items.append((idx,span.index,tokens,0,local_weight))
+                        if reconstruction and target: self.items.append((idx,span.index,tokens,1,local_weight))
                 except (OSError,ValueError,KeyError) as error:
                     self.audit['skipped'].append({'song':entry.get('song_id'),'difficulty':slot,'reason':str(error)})
         if not self.items: raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
@@ -263,8 +300,8 @@ class FormDataset(Dataset):
     def __len__(self): return len(self.items)
 
     def __getitem__(self,index):
-        song_index,span_index,tokens,task=self.items[index]
-        song,points,level,weight,state_index=self.songs[song_index]
+        song_index,span_index,tokens,task,local_weight=self.items[index]
+        song,points,level,weight,state_index,condition,excluded,record=self.songs[song_index]
         span=song.spans[span_index]
         history=[p for p in points if p.beat<span.start]
         target=[p for p in points if span.start<=p.beat<span.end]
@@ -275,7 +312,6 @@ class FormDataset(Dataset):
             selected=set() if clean else set(rng.choice(len(target),size=max(1,int(len(target)*.3)),replace=False).tolist())
             draft=[DraftPoint(p.beat,None if i in selected else p.note_text,i in selected) for i,p in enumerate(target)]
             right=[p for p in points if p.beat>=span.end]
-        condition=GenerationCondition(level=level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
         result=input_example(song,span_index,history,condition=condition,codec=self.codec,task=task,
             draft=draft,right=right,max_memory_tokens=self.max_memory_tokens,state_index=state_index)
         ref_index=result['meta']['reference_source']
@@ -291,20 +327,39 @@ class FormDataset(Dataset):
             skeleton,origin=span.start,max_tokens=self.max_memory_tokens,newest=False))
         result.update(decoder_input=torch.tensor(tokens[:-1]),target=torch.tensor(tokens[1:]),
                       relation_target=relation_target(target,reference,span),
-                      relation_valid=torch.tensor(ref_index is not None),weight=torch.tensor(weight))
+                      relation_valid=torch.tensor(ref_index is not None),weight=torch.tensor(weight*local_weight))
         return result
 
 
 def collate_form(items):
     result={}
-    padded=('audio','form','history','motif','draft','right','skeleton','action_state','decoder_input','target')
+    padded=('audio','form','history','motif','draft','right','skeleton','action_state','decoder_input','target','load_curve','load_curve_times_sec','load_curve_condition_mask')
     for key in padded:
         if key not in items[0]: continue
         result[key]=torch.nn.utils.rnn.pad_sequence([i[key] for i in items],batch_first=True)
-        if key in ('audio','form'):
+        if key in ('audio','form','load_curve','load_curve_times_sec','load_curve_condition_mask'):
             result[key+'_padding_mask']=torch.arange(result[key].size(1))[None,:]>=torch.tensor([len(i[key]) for i in items])[:,None]
     result['action_state_padding_mask']=torch.nn.utils.rnn.pad_sequence([i['action_state_padding_mask'] for i in items],batch_first=True,padding_value=True)
-    for key in ('condition','task','relation','memory_strength','relation_target','relation_valid','weight'):
+    for key in ('condition','condition_null','task','relation','memory_strength','relation_target','relation_valid','weight'):
         if key in items[0]: result[key]=torch.stack([i[key] for i in items])
     result['meta']=[i['meta'] for i in items]
     return result
+
+
+def _region_weight(start_sec, end_sec, record):
+    """Duration-weight annotation multipliers over one computational span."""
+    regions=(record or {}).get('regions',[])
+    if not regions:
+        return 1.0
+    total=max(float(end_sec)-float(start_sec),1e-9)
+    weighted=0.0
+    covered=0.0
+    for region in regions:
+        lo=max(float(start_sec),float(region['start_sec']))
+        hi=min(float(end_sec),float(region['end_sec']))
+        if hi<=lo:
+            continue
+        duration=hi-lo
+        weighted+=duration*float(region.get('weight',1.0))
+        covered+=duration
+    return (weighted + max(0.0,total-covered))/total

@@ -36,6 +36,7 @@ class BlueprintConfig:
     temporal_layers: int = 4
     dropout: float = 0.1
     max_form_steps: int = MAX_FORM_STEPS
+    load_curve_channels: int = 4
 
     def __post_init__(self) -> None:
         if min(self.audio_dim, self.descriptor_dim, self.condition_dim, self.width) <= 0:
@@ -46,6 +47,8 @@ class BlueprintConfig:
             raise ValueError("Blueprint encoders require at least one layer")
         if not 1 <= self.max_form_steps <= MAX_FORM_STEPS:
             raise ValueError(f"max_form_steps must be in [1, {MAX_FORM_STEPS}]")
+        if self.load_curve_channels != 4:
+            raise ValueError("load_curve_channels must be 4")
         if not 0.0 <= self.dropout < 1.0:
             raise ValueError("dropout must be in [0, 1)")
 
@@ -102,6 +105,7 @@ class SongBlueprint(nn.Module):
         self.onset_head = nn.Linear(width, 1)
         self.type_head = nn.Linear(width, len(BLUEPRINT_NOTE_TYPES))
         self.duration_head = nn.Linear(width, 1)
+        self.load_curve_head = nn.Linear(width, config.load_curve_channels)
 
     def forward(
         self,
@@ -173,6 +177,7 @@ class SongBlueprint(nn.Module):
             "onset_logits": self.onset_head(hidden).squeeze(-1),
             "type_logits": self.type_head(hidden),
             "sustain_seconds": F.softplus(self.duration_head(hidden).squeeze(-1)),
+            "load_curve": self.load_curve_head(hidden),
         }
 
 
@@ -274,6 +279,7 @@ def compute_blueprint_loss(
     onset_weight: float = 1.0,
     type_weight: float = 1.0,
     duration_weight: float = 0.25,
+    load_curve_weight: float = 1.0,
 ) -> dict[str, torch.Tensor]:
     """Balanced onset BCE, onset-masked type CE, and duration regression."""
     logits = outputs["onset_logits"]
@@ -318,5 +324,18 @@ def compute_blueprint_loss(
     loss_duration_all = F.smooth_l1_loss(predicted_log, target_log, reduction="none")
     loss_duration = (loss_duration_all * duration_valid).sum() / duration_valid.sum().clamp_min(1)
     total = onset_weight * loss_onset + type_weight * loss_type + duration_weight * loss_duration
+    loss_curve = logits.new_zeros(())
+    if "load_curve" in outputs and "load_curve_target" in targets:
+        target_curve = targets["load_curve_target"].to(device=device, dtype=outputs["load_curve"].dtype)
+        curve_mask = targets.get("load_curve_mask")
+        curve_error = F.smooth_l1_loss(outputs["load_curve"], target_curve, reduction="none")
+        if curve_mask is not None:
+            curve_error = curve_error * curve_mask.to(device=device, dtype=curve_error.dtype)
+            denom = curve_mask.to(device=device, dtype=curve_error.dtype).sum().clamp_min(1.0)
+        else:
+            denom = torch.tensor(curve_error.numel(), device=device, dtype=curve_error.dtype).clamp_min(1.0)
+        loss_curve = curve_error.sum() / denom
+        total = total + load_curve_weight * loss_curve
     return {"loss": total, "loss_onset": loss_onset,
-            "loss_type": loss_type, "loss_duration": loss_duration}
+            "loss_type": loss_type, "loss_duration": loss_duration,
+            "loss_load_curve": loss_curve}

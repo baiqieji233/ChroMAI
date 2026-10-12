@@ -62,7 +62,9 @@ class FormTransformer(nn.Module):
         self.audio_projection = nn.Linear(config.audio_dim, width)
         self.form_projection = nn.Linear(config.descriptor_dim + 3, width)
         self.action_projection = nn.Linear(50, width)
+        self.load_curve_projection = nn.Linear(4, width)
         self.condition_projection = nn.Linear(config.condition_dim, width)
+        self.condition_null_embedding = nn.Parameter(torch.zeros(width))
         self.relation_projection = nn.Linear(4, width)
         self.task_embedding = nn.Embedding(2, width)
         self.motif_gate = nn.Sequential(
@@ -136,6 +138,14 @@ class FormTransformer(nn.Module):
         if condition.shape != (batch_size, self.config.condition_dim):
             raise ValueError(f"condition must have shape [B, {self.config.condition_dim}].")
         self._finite(condition, "condition")
+        condition_null = batch.get("condition_null")
+        if condition_null is None:
+            # Legacy song_form checkpoints did not serialize this field; their
+            # behavior remains conditioned exactly as before.
+            condition_null = torch.zeros((batch_size,), dtype=torch.bool, device=device)
+        if condition_null.shape not in ((batch_size,), (batch_size, 1)):
+            raise ValueError("condition_null must have shape [B] or [B, 1].")
+        condition_null = condition_null.to(device=device, dtype=torch.bool).reshape(batch_size)
         task = batch.get("task")
         if task is None or task.shape != (batch_size,):
             raise ValueError("task must have shape [B], with 0=draft and 1=revise.")
@@ -233,6 +243,21 @@ class FormTransformer(nn.Module):
         )
         add(self.action_projection(action), action_mask, 6)
 
+        load_curve = batch.get("load_curve")
+        if load_curve is not None:
+            if load_curve.ndim != 3 or load_curve.shape[0] != batch_size or load_curve.size(-1) != 4:
+                raise ValueError("load_curve must have shape [B, T, 4]")
+            raw_curve_mask = batch.get("load_curve_condition_mask")
+            if raw_curve_mask is None:
+                curve_mask = torch.zeros(load_curve.shape[:2], dtype=torch.bool, device=device)
+            else:
+                if raw_curve_mask.shape not in (load_curve.shape[:2], load_curve.shape):
+                    raise ValueError("load_curve_condition_mask must have shape [B,T] or [B,T,4]")
+                raw_curve_mask = raw_curve_mask.to(device=device, dtype=torch.bool)
+                curve_mask = raw_curve_mask if raw_curve_mask.ndim == 2 else ~raw_curve_mask.any(dim=-1)
+            self._finite(load_curve, "load_curve")
+            add(self.load_curve_projection(load_curve), curve_mask, 10)
+
         # Future *planned onsets* are supplied by the whole-song blueprint,
         # not future note configurations. Arrangement can see upcoming demands
         # before choosing a long Hold/Slide. Masked-note tokens carry no layout.
@@ -249,14 +274,17 @@ class FormTransformer(nn.Module):
             # and revise tasks; the input builder validates its mask-only cells.
             add(self.token_embedding(skeleton), skeleton == 0, 10)
 
+        condition_token = self.condition_projection(condition) + condition_null[:, None].to(audio.dtype) * self.condition_null_embedding
         global_tokens = torch.stack(
             (
-                self.condition_projection(condition),
+                condition_token,
                 self.task_embedding(task),
                 self.relation_projection(relation),
             ),
             dim=1,
         )
+        # A null condition is an explicit learned state, not an invented
+        # vector that could be mistaken for a real low-valued target.
         global_positions = torch.arange(3, device=device).unsqueeze(0)
         global_tokens = (
             global_tokens
