@@ -179,7 +179,8 @@ async function api(path, body) {
   const text = await response.text();
   let data;
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { error: text || `HTTP ${response.status}` }; }
-  if (!response.ok || data.error) throw new Error(data.error || `HTTP ${response.status}`);
+  const taskStatusResponse = body === undefined && path.split("?", 1)[0] === "/api/task";
+  if (!response.ok || (!taskStatusResponse && data.error)) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
 
