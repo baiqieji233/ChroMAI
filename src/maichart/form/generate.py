@@ -141,7 +141,7 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
     batch=to_device(collate_form([example]),device)
     rng=torch.Generator(device=device).manual_seed(seed)
     max_tokens=model.config.max_tokens
-    points=[];ids=[codec.bos_id]
+    points=[];ids=[codec.bos_id];fallbacks=0
     chars=[(i,t[2:]) for i,t in enumerate(codec.tokens) if t.startswith('N:')]
     model.eval()
     with torch.inference_mode():
@@ -179,8 +179,14 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                 if token==codec.end_id:
                     points.append(EventPoint(beat,text));break
                 text+=codec.tokens[token][2:]
-            else: raise ValueError('Maximum note text length reached')
-    return points
+            else:
+                # Undertrained checkpoints may keep emitting a partial atom.
+                # Commit a deterministic legal atom and expose this fallback
+                # in the generation report instead of aborting the whole song.
+                fallback = next((candidate for _, candidate in chars
+                                 if grammar.can_continue(candidate) and grammar.is_complete(candidate)), None)
+                points.append(EventPoint(beat, fallback or '1')); fallbacks += 1
+    return points, fallbacks
 
 
 def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memory_strength=1.,temperature=.7,seed=0,device='cpu',blueprint=None,
@@ -210,20 +216,23 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                     song, current, intensity_curve, strength=intensity_curve_strength,
                     span_limit=intensity_curve_span, mode=intensity_curve_mode)
                 if curve_values is not None:
-                    example['load_curve'] = curve_values.unsqueeze(0)
-                    example['load_curve_condition_mask'] = curve_mask.unsqueeze(0)
-                    example['load_curve_times_sec'] = curve_times.unsqueeze(0)
+                    # ``collate_form`` adds the batch dimension; keep each
+                    # example at [T, 4] / [T] here.
+                    example['load_curve'] = curve_values
+                    example['load_curve_condition_mask'] = curve_mask
+                    example['load_curve_times_sec'] = curve_times
                 from maichart.form.revision import DraftPoint
                 future=[DraftPoint(b,None,True) for b in onsets if b>=current.start]
                 example['skeleton']=torch.tensor(codec.bounded_memory(future,origin=current.start,
                     max_tokens=model.config.max_memory_tokens,newest=False))
-                generated=arrange_span(model,codec,example,desired,atoms,origin=current.start,
+                generated, fallback_count=arrange_span(model,codec,example,desired,atoms,origin=current.start,
                     temperature=temperature,seed=seed+span.index*1009+passes,device=device)
             finally: song.spans=source_spans
             if not generated: raise ValueError('Decoder made no progress within the configured token budget')
             accepted.extend(generated);desired=desired[len(generated):];passes+=1
         records.append({'span':span.index,'start':str(span.start),'end':str(span.end),
-                        'resource_passes':passes,'onsets':sum(span.start<=b<span.end for b in onsets)})
+                        'resource_passes':passes,'onsets':sum(span.start<=b<span.end for b in onsets),
+                        'decoder_fallbacks':fallback_count if passes else 0})
         print('form_arrange '+json.dumps(records[-1]),flush=True)
     if not accepted: raise ValueError('Whole-song planner selected no onsets; inspect the plan before adjusting threshold')
     quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
@@ -240,7 +249,9 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
             'guidance': 'onset soft budget plus span-local layout condition',
             'quality_guarantee': False,
         }
-    return accepted,{'blueprint':blueprint,'arrangement':records,'quality':quality,'memory_strength':memory_strength,
+    return accepted,{'blueprint':blueprint,'arrangement':records,'quality':quality,
+                     'decoder_fallbacks':sum(int(record.get('decoder_fallbacks',0)) for record in records),
+                     'memory_strength':memory_strength,
                      'intensity_curve':curve_report}
 
 

@@ -340,9 +340,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 from maichart.generation.music_intensity import generate_intensity_profile
                 selected_source = source
                 if selected_source == "auto":
-                    profile_name = (_load_checkpoint_payload(checkpoint_path).get("model_config", {}).get("planner_profile")
-                                    if checkpoint_path else None)
-                    selected_source = ("model" if is_music_structure(str(profile_name or ""))
+                    checkpoint_data = _load_checkpoint_payload(checkpoint_path) if checkpoint_path else {}
+                    checkpoint_family = _checkpoint_model_family(checkpoint_data) if checkpoint_path else None
+                    profile_name = checkpoint_data.get("model_config", {}).get("planner_profile") if checkpoint_path else None
+                    selected_source = ("model" if checkpoint_family == "song_form_v1" or is_music_structure(str(profile_name or ""))
                                        else "audio")
                 if selected_source == "model":
                     requested_family = str(payload.get("model_family", ""))
@@ -1392,6 +1393,24 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _inspect_checkpoint(self, payload: dict[str, Any]) -> None:
+        # Detect the imported file first. The main workbench may still hold a
+        # stale event model-family selection while the user pastes a new
+        # song_form checkpoint; route by schema so the UI can explain the
+        # mismatch and offer the correct controls in place.
+        checkpoint_value = payload.get("checkpoint_path") or payload.get("checkpoint")
+        if checkpoint_value:
+            candidate = _resolve_path(str(checkpoint_value))
+            if candidate.is_file():
+                detected_payload = _load_checkpoint_payload(candidate)
+                if _checkpoint_model_family(detected_payload) == "song_form_v1":
+                    from maichart.webui.form_api import inspect_form_checkpoint
+                    result = inspect_form_checkpoint(candidate)
+                    result.update({"model_family_label":"全曲结构实验模型 song_form_v1",
+                                   "can_resume":bool(result.get("valid")),
+                                   "can_init":bool(result.get("valid")),
+                                   "data_contract":result.get("input_contract",{}),
+                                   "generation_entry":"/"})
+                    return self._json_response(result)
         if payload.get("model_family") == "song_form_v1":
             from maichart.webui.form_api import start_form_task
             form_payload = dict(payload)
@@ -2166,12 +2185,14 @@ def _checkpoint_inspection(
     detected_family = _checkpoint_model_family(payload)
     capabilities = checkpoint_capabilities(payload)
     if detected_family == "song_form_v1":
-        return {"valid":False,"path":str(checkpoint_path),"schema":payload.get("schema"),
-                "model_family":"song_form_v1","model_family_label":"全曲结构实验模型 song_form_v1",
-                "can_resume":False,"can_init":False,"model_config":payload.get("model_config",{}),
-                "data_contract":payload.get("input_contract",{}),"generation_capabilities":{},
-                "generation_entry":"/form-lab","warnings":[],
-                "errors":["该模型使用全曲草稿与独立训练合同，请进入页面顶部的“全曲结构研究入口”。"]}
+        from maichart.webui.form_api import inspect_form_checkpoint
+        result = inspect_form_checkpoint(checkpoint_path)
+        result.update({"model_family_label":"全曲结构实验模型 song_form_v1",
+                       "can_resume":bool(result.get("valid")),
+                       "can_init":bool(result.get("valid")),
+                       "data_contract":result.get("input_contract",{}),
+                       "generation_entry":"/"})
+        return result
     if detected_family == "unknown":
         init_errors = [
             f"无法确认 checkpoint schema {payload.get('schema')!r}；拒绝把未知模型当作旧固定帧或 event_v1。"

@@ -29,6 +29,7 @@ def inspect_form_checkpoint(path):
         # This also rejects partial/corrupt model weights and input contracts.
         model, planner, _, checked = load(path, device='cpu')
         trained = checked.get('task_training') or {}
+        capabilities = checked.get('capabilities') or {}
         args = checked.get('args') or {}
         optimizer_state = checked.get('optimizer_state_dict') or {}
         param_groups = optimizer_state.get('param_groups') or []
@@ -39,6 +40,12 @@ def inspect_form_checkpoint(path):
             'meter_map': (checked.get('dataset_contract') or {}).get('meter_map'),
         }
         plan_ready = int(checked.get('blueprint_steps',0)) > 0
+        condition_cap = capabilities.get('draft') or {}
+        curve_cap = capabilities.get('load_curve') or {}
+        condition_ready = (condition_cap.get('contract') == 'form_condition_v2'
+                           and int(condition_cap.get('steps', 0)) > 0
+                           and checked.get('condition_supervision') == 'event_derived_radar_style_v1')
+        curve_ready = curve_cap.get('contract') == 'load_curve_v1' and int(curve_cap.get('steps', 0)) > 0
         base.update(valid=True, can_train=True,
             can_generate=plan_ready and int(trained.get('draft',0))>0 and int(checked.get('optimizer_steps',0))>0,
             can_revise=plan_ready and int(trained.get('revision',0))>0 and int(checked.get('optimizer_steps',0))>0,
@@ -48,7 +55,9 @@ def inspect_form_checkpoint(path):
             dataset_contract=checked.get('dataset_contract') or {},
             resume_settings=resume_settings,
             condition_supervision=checked.get('condition_supervision'),
-            condition_controls_trained=checked.get('condition_supervision') == 'event_derived_radar_style_v1',
+            capabilities=capabilities,
+            condition_controls_trained=condition_ready,
+            load_curve_trained=curve_ready,
             input_contract=checked['input_contract'],
             parameter_count=sum(p.numel() for p in model.parameters())+sum(p.numel() for p in planner.parameters()))
     except (ValueError, RuntimeError, KeyError, TypeError) as error:
@@ -172,7 +181,11 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'seed':number('seed',0,0,2**31-1,True),
                 'weight_decay':number('weight_decay',.02,0,10),
                 'grad_accumulation':number('grad_accumulation',1,1,1024,True),
-                'save_every':number('save_every',0,0,1000000,True)}
+                'save_every':number('save_every',0,0,1000000,True),
+                'condition_drop_prob':number('condition_drop_prob',.1,0,1),
+                'blueprint_loss_weight':number('blueprint_loss_weight',1.,0,100),
+                'load_curve_loss_weight':number('load_curve_loss_weight',1.,0,100),
+                'relation_loss_weight':number('relation_loss_weight',.1,0,100)}
         if values['d_model']%values['nhead']: raise ValueError('d_model must be divisible by nhead')
         if inspected:
             config = inspected['model_config']
@@ -180,6 +193,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 values[key] = config[key]
         args=['-m','maichart.form.train','--manifest',str(manifest),'--checkpoint-dir',str(out)]
         for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
+        if str(payload.get('control_profile','auto')) == 'none':
+            args += ['--condition-drop-prob','0','--load-curve-loss-weight','0']
         args += ['--quality-enabled' if payload.get('quality_enabled', True) else '--no-quality-enabled']
         if initial: args+=['--resume' if mode=='resume' else '--init-checkpoint',str(initial)]
         results=[out/'form_last.pt',out/'dataset_audit.json',out/'training_history.json']

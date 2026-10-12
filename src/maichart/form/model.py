@@ -146,6 +146,13 @@ class FormTransformer(nn.Module):
         if condition_null.shape not in ((batch_size,), (batch_size, 1)):
             raise ValueError("condition_null must have shape [B] or [B, 1].")
         condition_null = condition_null.to(device=device, dtype=torch.bool).reshape(batch_size)
+        effective_condition = condition.clone()
+        # A null condition is explicit: preserve the requested level, replace
+        # target-derived Radar/Style controls with the contract default, and
+        # add the learned null embedding. This prevents the raw target vector
+        # leaking through a mere flag.
+        if torch.any(condition_null):
+            effective_condition[condition_null, 1:] = 0.5
         task = batch.get("task")
         if task is None or task.shape != (batch_size,):
             raise ValueError("task must have shape [B], with 0=draft and 1=revise.")
@@ -223,7 +230,7 @@ class FormTransformer(nn.Module):
                 mask = mask | (task == 0).unsqueeze(1)
             values = self.token_embedding(ids)
             if name == "motif":
-                gate = torch.sigmoid(self.motif_gate(torch.cat((condition, relation), dim=-1)))
+                gate = torch.sigmoid(self.motif_gate(torch.cat((effective_condition, relation), dim=-1)))
                 values = values * gate.unsqueeze(1) * strength.unsqueeze(1)
                 mask = mask | (strength == 0)
             add(values, mask, branch_id)
@@ -274,7 +281,7 @@ class FormTransformer(nn.Module):
             # and revise tasks; the input builder validates its mask-only cells.
             add(self.token_embedding(skeleton), skeleton == 0, 10)
 
-        condition_token = self.condition_projection(condition) + condition_null[:, None].to(audio.dtype) * self.condition_null_embedding
+        condition_token = self.condition_projection(effective_condition) + condition_null[:, None].to(audio.dtype) * self.condition_null_embedding
         global_tokens = torch.stack(
             (
                 condition_token,

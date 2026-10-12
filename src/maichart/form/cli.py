@@ -77,6 +77,7 @@ def main(argv=None):
     model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
                                    task='revision' if args.operation=='revise' else 'draft')
     condition=GenerationCondition.from_dict(_json(args.condition_file)) if args.condition_file else GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
+    report['generation_condition'] = condition.to_dict()
     intensity_curve = None
     if args.intensity_curve_file:
         from maichart.generation.music_intensity import load_intensity_profile
