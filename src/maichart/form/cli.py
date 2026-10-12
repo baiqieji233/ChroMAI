@@ -27,6 +27,11 @@ def parser():
     p.add_argument('--device',default='cpu');p.add_argument('--level',type=float,default=13.3)
     p.add_argument('--memory-strength',type=float,default=1.);p.add_argument('--onset-threshold',type=float,default=.5)
     p.add_argument('--temperature',type=float,default=.7);p.add_argument('--seed',type=int,default=0)
+    p.add_argument('--condition-file',help='JSON GenerationCondition for Radar/Style controls')
+    p.add_argument('--intensity-curve-file',help='Saved song-form intensity curve JSON')
+    p.add_argument('--intensity-curve-strength',type=float,default=1.0)
+    p.add_argument('--intensity-curve-span',type=float,default=.5)
+    p.add_argument('--intensity-curve-mode',choices=('follow','hard'),default='follow')
     p.add_argument('--repair',action='store_true');p.add_argument('--repair-checks',type=int,default=24)
     p.add_argument('--repair-edits',type=int,default=4);p.add_argument('--repair-seconds',type=float,default=10.)
     return p
@@ -71,11 +76,25 @@ def main(argv=None):
     from maichart.form.generate import generate_chart,revise_chart
     model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
                                    task='revision' if args.operation=='revise' else 'draft')
-    condition=GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
+    condition=GenerationCondition.from_dict(_json(args.condition_file)) if args.condition_file else GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
+    intensity_curve = None
+    if args.intensity_curve_file:
+        from maichart.generation.music_intensity import load_intensity_profile
+        intensity_curve = load_intensity_profile(args.intensity_curve_file)
+        if intensity_curve.get('method') != 'learned_song_form_v1':
+            raise ValueError('song_form CLI requires a learned_song_form_v1 intensity curve')
+        if not 0.0 <= args.intensity_curve_strength <= 1.0:
+            raise ValueError('intensity curve strength must be between 0 and 1')
+        if not 0.0 <= args.intensity_curve_span <= 1.0:
+            raise ValueError('intensity curve span must be between 0 and 1')
     if args.operation=='generate':
         points,generated=generate_chart(model,planner,codec,song,condition,payload['atom_catalog'],
             threshold=args.onset_threshold,memory_strength=args.memory_strength,
-            temperature=args.temperature,seed=args.seed,device=args.device)
+            temperature=args.temperature,seed=args.seed,device=args.device,
+            intensity_curve=intensity_curve,
+            intensity_curve_strength=args.intensity_curve_strength,
+            intensity_curve_span=args.intensity_curve_span,
+            intensity_curve_mode=args.intensity_curve_mode)
         report.update(generated)
     else:
         points,revision=revise_chart(model,codec,song,chart.points,condition,payload['atom_catalog'],

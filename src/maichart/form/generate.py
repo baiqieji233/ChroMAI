@@ -36,7 +36,59 @@ def exact_candidate(second,tempo,first,denominators=(1,2,3,4,5,6,8,12,16,24,32,4
     return min(nearby,key=lambda b:(b.denominator,errors[b],b))
 
 
-def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu'):
+def _curve_factor(profile, second, *, strength=1.0, span=0.5, mode='follow'):
+    if profile is None:
+        return 1.0
+    if mode not in {'follow', 'hard'}:
+        raise ValueError('song-form intensity curve mode must be follow or hard')
+    values = np.asarray([float(point['intensity']) for point in profile['points']], dtype=np.float64)
+    times = np.asarray([float(point['time_sec']) for point in profile['points']], dtype=np.float64)
+    intensity = float(np.interp(float(second), times, values))
+    factor = 2.0 * intensity
+    limit = max(0.0, min(1.0, float(span)))
+    if mode != 'hard':
+        factor = min(1.0 + limit, max(1.0 - limit, factor))
+    return 1.0 + float(strength) * (factor - 1.0)
+
+
+def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode='follow'):
+    """Return span-local four-channel load values and availability mask."""
+    if profile is None:
+        return None, None, None
+    from maichart.form.curve import LOAD_CURVE_CHANNELS
+    import torch
+    resolution = float(profile.get('curve_resolution_sec', 2.0))
+    duration = float(song.audio.duration_sec)
+    low = max(0.0, float(seconds_at_beat(span.start, song.tempo, song.first)) - float(song.first))
+    high = min(duration, float(seconds_at_beat(span.end, song.tempo, song.first)) - float(song.first))
+    count = max(1, int(math.ceil(duration / resolution)))
+    times = np.asarray([min(duration, (i + 0.5) * resolution) for i in range(count)], dtype=np.float32)
+    components = profile.get('components') or {}
+    scalar = np.asarray([float(point['intensity']) for point in profile['points']], dtype=np.float32)
+    scalar_times = np.asarray([float(point['time_sec']) for point in profile['points']], dtype=np.float32)
+    values = np.zeros((len(times), 4), dtype=np.float32)
+    mask = np.zeros((len(times), 4), dtype=np.bool_)
+    for channel, name in enumerate(LOAD_CURVE_CHANNELS):
+        if name in components:
+            raw = np.asarray(components[name], dtype=np.float32)
+            source_times = np.asarray([float(point['time_sec']) for point in profile['points']], dtype=np.float32)
+            values[:, channel] = np.interp(times, source_times, raw)
+            mask[:, channel] = True
+        else:
+            values[:, channel] = np.interp(times, scalar_times, scalar)
+            mask[:, channel] = channel == 0
+    for index, time in enumerate(times):
+        values[index] *= np.float32(_curve_factor(profile, time, strength=strength, span=span_limit, mode=mode))
+    values = np.clip(values, 0.0, 1.0)
+    selected = (times >= low - resolution) & (times < high + resolution)
+    if not np.any(selected):
+        selected[np.argmin(np.abs(times - (low + high) * .5))] = True
+    return (torch.from_numpy(values[selected]), torch.from_numpy(mask[selected]),
+            torch.from_numpy(times[selected] - np.float32(low)))
+
+
+def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_curve=None,
+                intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow'):
     """One song-wide neural prediction, before any arrangement chunks exist."""
     if not 0<threshold<1: raise ValueError('onset threshold must be in (0,1)')
     audio=form_audio(song,song.spans[0].start,song.spans[-1].end)
@@ -55,6 +107,14 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu'):
     selected={}
     for i,score in enumerate(scores):
         if score<threshold or active[i]<.05 or not 0<=times[i]<song.audio.duration_sec: continue
+        if intensity_curve is not None:
+            if any(float(region['start_sec']) <= float(times[i]) < float(region['end_sec'])
+                   for region in intensity_curve.get('rest_regions', [])):
+                continue
+            score *= _curve_factor(intensity_curve, float(times[i]), strength=intensity_curve_strength,
+                                   span=intensity_curve_span, mode=intensity_curve_mode)
+            if score < threshold:
+                continue
         if i and score<=scores[i-1]: continue
         if i+1<len(scores) and score<scores[i+1]: continue
         beat=exact_candidate(times[i],song.tempo,song.first)
@@ -123,8 +183,13 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
     return points
 
 
-def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memory_strength=1.,temperature=.7,seed=0,device='cpu',blueprint=None):
-    blueprint=blueprint or plan_onsets(planner,song,condition,threshold=threshold,device=device)
+def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memory_strength=1.,temperature=.7,seed=0,device='cpu',blueprint=None,
+                   intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow'):
+    blueprint=blueprint or plan_onsets(planner,song,condition,threshold=threshold,device=device,
+                                       intensity_curve=intensity_curve,
+                                       intensity_curve_strength=intensity_curve_strength,
+                                       intensity_curve_span=intensity_curve_span,
+                                       intensity_curve_mode=intensity_curve_mode)
     onsets=[Fraction(item['beat']) for item in blueprint['onsets']]
     if onsets!=sorted(set(onsets)): raise ValueError('Blueprint beats must be sorted and unique')
     accepted=[];records=[]
@@ -141,6 +206,13 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
             try:
                 example=input_example(song,span.index,accepted,condition=condition,codec=codec,
                     max_memory_tokens=model.config.max_memory_tokens,memory_strength=memory_strength)
+                curve_values, curve_mask, curve_times = _curve_condition(
+                    song, current, intensity_curve, strength=intensity_curve_strength,
+                    span_limit=intensity_curve_span, mode=intensity_curve_mode)
+                if curve_values is not None:
+                    example['load_curve'] = curve_values.unsqueeze(0)
+                    example['load_curve_condition_mask'] = curve_mask.unsqueeze(0)
+                    example['load_curve_times_sec'] = curve_times.unsqueeze(0)
                 from maichart.form.revision import DraftPoint
                 future=[DraftPoint(b,None,True) for b in onsets if b>=current.start]
                 example['skeleton']=torch.tensor(codec.bounded_memory(future,origin=current.start,
@@ -156,7 +228,20 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
     if not accepted: raise ValueError('Whole-song planner selected no onsets; inspect the plan before adjusting threshold')
     quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
     if not quality.get('syntax_valid'): raise ValueError('New-model output failed exact syntax verification')
-    return accepted,{'blueprint':blueprint,'arrangement':records,'quality':quality,'memory_strength':memory_strength}
+    curve_report = None
+    if intensity_curve is not None:
+        curve_report = {
+            'applied': True,
+            'method': intensity_curve.get('method'),
+            'strength': float(intensity_curve_strength),
+            'span': float(intensity_curve_span),
+            'mode': intensity_curve_mode,
+            'rest_regions': list(intensity_curve.get('rest_regions', [])),
+            'guidance': 'onset soft budget plus span-local layout condition',
+            'quality_guarantee': False,
+        }
+    return accepted,{'blueprint':blueprint,'arrangement':records,'quality':quality,'memory_strength':memory_strength,
+                     'intensity_curve':curve_report}
 
 
 def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu',seed=0,temperature=.5,max_checks=8,memory_strength=1.):
