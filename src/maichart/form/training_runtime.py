@@ -9,7 +9,7 @@ import time
 import torch
 
 
-TRAINING_SEMANTICS = 'song_form_training_v2'
+TRAINING_SEMANTICS = 'song_form_training_v3'
 
 
 def emit(event, **fields):

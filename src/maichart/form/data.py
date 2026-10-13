@@ -243,6 +243,25 @@ def form_audio(song, start, end):
     return torch.cat((values, metric), -1)
 
 
+def _form_descriptor(song, index, relation=None):
+    region_index = song.span_region_indices[index]
+    region = song.regions[region_index]
+    relative = []
+    extent = max(float(song.regions[-1].end), 1.)
+    for span in song.regions:
+        relative.append([(float(span.start)-float(region.start))/extent,
+                         (float(span.end)-float(region.start))/extent,
+                         float(span.index == region_index)])
+    form = np.concatenate((song.relations.descriptors,
+                           np.asarray(relative, dtype=np.float32)), axis=1)
+    if len(form) > 128:
+        keep = set(np.linspace(0, len(form)-1, 126, dtype=int).tolist()) | {region_index}
+        if relation is not None:
+            keep.add(relation.source)
+        form = form[sorted(keep)]
+    return form
+
+
 def input_example(song, index, history, *, condition=None, codec=None, task=0,
                   draft=(), right=(), max_memory_tokens=512, memory_strength=1.0,
                   state_index=None, load_curve=None, load_curve_times_sec=None,
@@ -271,18 +290,7 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     points = [p for p in ref.points if span.start <= p.beat < span.end]
     motif = codec.bounded_memory(points, origin=span.start, max_tokens=max_memory_tokens, newest=False)
     relation = ref.relation
-    relative = []
-    extent = max(float(song.regions[-1].end), 1.)
-    for s in song.regions:
-        relative.append([(float(s.start)-float(region.start))/extent,
-                         (float(s.end)-float(region.start))/extent, float(s.index == region_index)])
-    form = np.concatenate((song.relations.descriptors, np.asarray(relative,dtype=np.float32)),axis=1)
-    # Bound the audio-structure memory independently of the decoder; always
-    # retain the current and retrieved source segment among sampled rows.
-    if len(form) > 128:
-        keep = set(np.linspace(0,len(form)-1,126,dtype=int).tolist()) | {region_index}
-        if relation is not None: keep.add(relation.source)
-        form = form[sorted(keep)]
+    form = _form_descriptor(song, index, relation)
     hist_origin = history[0].beat if history else span.start
     states, padding, state_meta = (state_index or SustainStateIndex(history,song.tempo,song.first)).at(span.start)
     # A reused index must still be causal. Its implementation filters all heads
@@ -341,9 +349,17 @@ def _preparation_annotation(annotations, source, slot, audio_path, cache):
         return None
     from maichart.training.quality_annotations import chart_sha256, audio_sha256, validate_record
     chart_hash = chart_sha256(source, slot)
+    source_identity = Path(source).resolve()
     audio_hash = None
     for record in annotations.get('records', []):
         if int(record.get('difficulty_index', -1)) != slot or record.get('chart_sha256') != chart_hash:
+            continue
+        try:
+            if not record.get('source_path') or Path(record['source_path']).resolve() != source_identity:
+                continue
+            if record.get('audio_path') and Path(record['audio_path']).resolve() != Path(audio_path).resolve():
+                continue
+        except (OSError, TypeError, ValueError):
             continue
         if record.get('audio_sha256'):
             if audio_hash is None:

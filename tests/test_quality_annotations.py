@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -56,8 +57,50 @@ def test_resolve_annotation_rejects_changed_content(tmp_path):
     row = iter_catalog(manifest)[0]
     source = Path(row.source_path)
     chart = parse_maidata_file(source)
-    record = {"chart_id": row.chart_id, "chart_sha256": row.chart_sha256, "label": "reduced", "weight": .25}
+    record = {"chart_id": row.chart_id, "chart_sha256": row.chart_sha256,
+              "source_path": str(source), "difficulty_index": 5,
+              "label": "reduced", "weight": .25}
     assert resolve_annotation(record, source, chart, 5)
     source.write_text(source.read_text(encoding="utf-8").replace("1,2,3,4", "1,2,3,4,5"), encoding="utf-8")
     changed = parse_maidata_file(source)
     assert resolve_annotation(record, source, changed, 5) is None
+
+
+def test_resolve_annotation_requires_source_identity_for_duplicate_chart_paths(tmp_path):
+    _manifest(tmp_path)
+    source_a = tmp_path / "song" / "maidata.txt"
+    source_b = tmp_path / "copy" / "maidata.txt"
+    source_b.parent.mkdir()
+    source_b.write_bytes(source_a.read_bytes())
+    chart_a = parse_maidata_file(source_a)
+    chart_b = parse_maidata_file(source_b)
+    hash_a = chart_sha256(source_a, 5)
+    assert hash_a == chart_sha256(source_b, 5)
+    record_a = {"song_id": "song", "difficulty_index": 5,
+                "source_path": str(source_a), "chart_sha256": hash_a,
+                "label": "excluded", "weight": 0}
+    record_b = {**record_a, "source_path": str(source_b),
+                "label": "excellent", "weight": 2}
+
+    assert resolve_annotation(record_a, source_a, chart_a, 5)["label"] == "excluded"
+    assert resolve_annotation(record_a, source_b, chart_b, 5) is None
+    assert resolve_annotation(record_b, source_b, chart_b, 5)["label"] == "excellent"
+    assert resolve_annotation({k: v for k, v in record_a.items() if k != "source_path"},
+                              source_a, chart_a, 5) is None
+
+
+def test_resolve_annotation_checks_optional_audio_path_and_hash(tmp_path):
+    _manifest(tmp_path)
+    source = tmp_path / "song" / "maidata.txt"
+    audio = tmp_path / "song" / "track.wav"
+    other_audio = tmp_path / "song" / "other.wav"
+    audio.write_bytes(b"audio-a")
+    other_audio.write_bytes(b"audio-b")
+    chart = parse_maidata_file(source)
+    record = {"difficulty_index": 5, "source_path": str(source),
+              "audio_path": str(audio), "audio_sha256": hashlib.sha256(b"audio-a").hexdigest(),
+              "chart_sha256": chart_sha256(source, 5), "label": "normal"}
+
+    assert resolve_annotation(record, source, chart, 5, audio)
+    assert resolve_annotation(record, source, chart, 5, other_audio) is None
+    assert resolve_annotation(record, source, chart, 5) is None

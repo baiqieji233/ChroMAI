@@ -424,13 +424,25 @@ def _fallback_dataset_id(manifest_file: Path, data: dict[str, Any]) -> str:
 
 def resolve_annotation(record: dict[str, Any] | None, source_path: str | Path, chart: Any,
                        difficulty_index: int, audio_path: str | Path | None = None) -> dict[str, Any] | None:
-    """Resolve one stored record against current content, never by path alone.
+    """Resolve only a record with matching source, slot, and content identity.
 
-    A changed maidata file therefore cannot inherit an old label merely because
-    it was written at the same path.  If a record has an audio hash, callers may
-    pass ``audio_path`` to enforce the corresponding content identity too.
+    Records without ``source_path`` are treated as stale because a chart hash
+    alone can match copies in unrelated folders. If an audio path or hash is
+    stored, the caller must provide the same audio identity as well.
     """
     if not record:
+        return None
+    try:
+        if int(record.get("difficulty_index", -1)) != int(difficulty_index):
+            return None
+        stored_source = record.get("source_path")
+        if not stored_source or Path(stored_source).resolve() != Path(source_path).resolve():
+            return None
+        stored_audio = record.get("audio_path")
+        if stored_audio:
+            if not audio_path or Path(stored_audio).resolve() != Path(audio_path).resolve():
+                return None
+    except (OSError, TypeError, ValueError):
         return None
     # Use the selected source slot's canonical text identity. EventChart is an
     # already parsed, timing-normalized view and cannot reproduce the authored
@@ -438,7 +450,9 @@ def resolve_annotation(record: dict[str, Any] | None, source_path: str | Path, c
     current_chart_hash = chart_sha256(source_path, difficulty_index)
     if record.get("chart_sha256") != current_chart_hash:
         return None
-    if record.get("audio_sha256") and audio_path:
+    if record.get("audio_sha256"):
+        if not audio_path:
+            return None
         try:
             if record["audio_sha256"] != audio_sha256(audio_path):
                 return None

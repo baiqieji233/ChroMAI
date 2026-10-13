@@ -109,7 +109,7 @@ def _atomic_save(value, path):
     temporary.replace(path)
 
 
-def _blueprint_input(dataset, index, first_index):
+def _blueprint_input(dataset, index):
     """CPU targets retain exact tempo/first; excluded spans get zero loss weight."""
     from maichart.form.blueprint import build_blueprint_targets
     from maichart.form.curve import resample_load_curve
@@ -129,7 +129,9 @@ def _blueprint_input(dataset, index, first_index):
         selected = (times >= float(region['start_sec'])) & (times < float(region['end_sec']))
         frame_weight[selected] *= float(region.get('weight', 1.))
     targets['frame_weight'] = torch.from_numpy(frame_weight)
-    inputs = {'audio': audio[None], 'form': dataset[first_index]['form'][None],
+    from maichart.form.data import _form_descriptor
+    form = torch.from_numpy(_form_descriptor(song, 0))
+    inputs = {'audio': audio[None], 'form': form[None],
               'condition': condition.to_vector()[None]}
     validate_cpu_batch(inputs)
     validate_cpu_batch(targets)
@@ -178,7 +180,7 @@ def main(argv=None):
     if args.loader_workers:
         emit('form_warning', message='Loader workers copy dataset metadata and each has its own cache; memory grows with worker count.')
     if old and old.get('training_semantics') != TRAINING_SEMANTICS:
-        emit('form_warning', message='Checkpoint predates accumulation/curve-loss corrections. Weights remain compatible; this run uses corrected training semantics.',
+        emit('form_warning', message='Checkpoint uses different training semantics. This version fixes load-curve time bounds, uses a stable whole-song planner reference, and matches quality annotations by source identity. Weights and generation inputs remain compatible.',
              optimizer_restored=bool(args.resume))
     emit('form_prepare', stage='dataset', manifest=str(Path(args.manifest).resolve()),
          limit_charts=args.limit_charts, max_steps=args.max_steps, prepare_workers=args.prepare_workers)
@@ -296,7 +298,7 @@ def main(argv=None):
         for position in range(plan_start, plan_total):
             index = plan_indices[position]
             before = time.perf_counter()
-            inputs, targets, weight = _blueprint_input(dataset, index, first_items[index])
+            inputs, targets, weight = _blueprint_input(dataset, index)
             progress.timing['data_wait_sec'] += time.perf_counter()-before
             tick = time.perf_counter()
             inputs = {k:v.to(device, non_blocking=True) for k,v in inputs.items()}

@@ -78,6 +78,7 @@ def test_preparation_cache_invalidates_changed_inputs(cached_source, change):
         from maichart.training.quality_annotations import SCHEMA, chart_sha256
         chart.parent.parent.joinpath('quality_annotations.json').write_text(json.dumps({
             'schema': SCHEMA, 'records': [{'difficulty_index': 5, 'label': 'excellent',
+                                         'source_path': str(chart), 'audio_path': str(audio),
                                          'weight': 2., 'chart_sha256': chart_sha256(chart, 5)}]}), encoding='utf-8')
     rebuilt = build(**extra)
     assert rebuilt.preparation_cache_stats['hits'] == 0

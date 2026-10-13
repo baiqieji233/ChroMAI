@@ -37,12 +37,15 @@ def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CUR
     if not parsed.syntax_valid:
         raise ValueError("cannot build load curve from invalid chart events: " +
                          "; ".join(issue["message"] for issue in parsed.fatal_errors[:3]))
-    count = max(1, int(math.ceil(duration / width)))
+    # The model clock is chart-relative, while duration_sec bounds the source
+    # audio clock. Audio end therefore lands at duration - first.
+    chart_duration = max(0.0, duration - first)
+    count = max(1, int(math.ceil(chart_duration / width)))
     times = np.empty(count, dtype=np.float32)
     values = np.zeros((count, len(LOAD_CURVE_CHANNELS)), dtype=np.float32)
     for index in range(count):
         low = index * width
-        high = min(duration, low + width)
+        high = min(chart_duration, low + width)
         times[index] = (low + high) * 0.5
 
     # Convert each exact event time once instead of rescanning the chart per bin.
@@ -52,8 +55,11 @@ def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CUR
     sustains = np.zeros(count, dtype=np.int64)
     slide_touches = np.zeros(count, dtype=np.int64)
     for point in parsed.points:
-        second = float(seconds_at_beat(point.beat, tempo, first)) - first
-        if second < 0.0 or second >= duration:
+        audio_second = float(seconds_at_beat(point.beat, tempo, first))
+        if audio_second < 0.0 or audio_second >= duration:
+            continue
+        second = audio_second - first
+        if second < 0.0 or second >= chart_duration:
             continue
         index = int(np.searchsorted(bin_starts, second, side="right") - 1)
         for note in point.notes:
@@ -67,7 +73,7 @@ def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CUR
                 slide_touches[index] += 1
     active = totals > 0
     if np.any(active):
-        bin_widths = np.minimum(duration, (np.arange(count) + 1) * width) - np.arange(count) * width
+        bin_widths = np.minimum(chart_duration, (np.arange(count) + 1) * width) - np.arange(count) * width
         values[active, 0] = np.minimum(totals[active] / bin_widths[active] / 8.0, 1.0)
         values[active, 1] = np.minimum(taps[active] / totals[active], 1.0)
         values[active, 2] = np.minimum(sustains[active] / totals[active], 1.0)
