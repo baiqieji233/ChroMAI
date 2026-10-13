@@ -866,7 +866,10 @@ function songFormTrainingPayload(options = {}) {
   if (manifests.length > 1) throw new Error("song_form_v1 一次训练需要一份已合并 manifest；请先在训练素材页合并所选数据集。");
   return { model_family: "song_form_v1", manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
     mode, init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(), epochs: Number(valueOrDefault("#epochs", 20)), batch_size: Number(valueOrDefault("#batchSize", 4)),
-    device: formDevice("#device"), lr: Number(valueOrDefault("#learningRate", .0002)), max_steps: Number(valueOrDefault("#maxSteps", 0)), limit_charts: Number(valueOrDefault("#formLimitCharts", 0)),
+    device: formDevice("#device"), lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
+    grad_accumulation: Number(valueOrDefault("#gradAccumulation", 1)), save_every: Number(valueOrDefault("#saveEvery", 0)),
+    seed: valueOrDefault("#trainingSeed", "").trim() === "" ? 0 : Number(valueOrDefault("#trainingSeed", 0)),
+    max_steps: Number(valueOrDefault("#maxSteps", 0)), limit_charts: Number(valueOrDefault("#formLimitCharts", 0)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),
