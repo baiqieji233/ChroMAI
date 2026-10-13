@@ -124,6 +124,7 @@ from maichart.maidata import (
     RawMaidataChart,
     parse_maidata_file,
     parse_maidata_metadata,
+    resolve_chart_first,
     raw_maidata_to_dict,
     raw_maidata_to_json,
     read_text_with_encoding,
@@ -189,6 +190,7 @@ from maichart.timing import (
     timing_point_to_dict,
     timing_points_to_json,
     tokenize_difficulty_timing,
+    tokenize_chart_difficulty_timing,
     tokenize_inote_timing,
 )
 from maichart.validation import (
@@ -362,7 +364,9 @@ __all__ = [
     "timing_points_to_json",
     "training_manifest_to_dict",
     "tokenize_difficulty_timing",
+    "tokenize_chart_difficulty_timing",
     "tokenize_inote_timing",
+    "resolve_chart_first",
     "validate_raw_maidata_chart",
     "validation_report_to_dict",
     "validation_report_to_json",

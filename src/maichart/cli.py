@@ -56,7 +56,7 @@ from maichart.stats import (
     compute_event_maidata_stats,
     compute_raw_maidata_stats,
 )
-from maichart.timing import timing_points_to_json, tokenize_difficulty_timing
+from maichart.timing import timing_points_to_json, tokenize_chart_difficulty_timing
 from maichart.validation import (
     validate_event_maidata_chart,
     validate_raw_maidata_chart,
@@ -453,7 +453,8 @@ def _parse_command(args: argparse.Namespace) -> int:
                 ir = build_chart_ir_by_difficulty_index(chart, args.difficulty)
                 payload = chart_to_json(ir)
             else:
-                points = tokenize_difficulty_timing(difficulty, initial_bpm=initial_bpm)
+                points = tokenize_chart_difficulty_timing(
+                    chart, difficulty.index, initial_bpm=initial_bpm)
                 if args.notes:
                     payload = parsed_timing_points_notes_to_json(parse_timing_points_notes(points))
                 else:

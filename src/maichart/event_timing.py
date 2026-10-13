@@ -12,7 +12,8 @@ from typing import Any, Iterable, Mapping
 
 from maichart.duration import duration_to_ticks_or_none
 from maichart.generation.simai_compile import TempoChange
-from maichart.maidata import RawMaidataChart, parse_maidata_file, parse_maidata_metadata
+from maichart.maidata import (RawMaidataChart, parse_maidata_file,
+                              parse_maidata_metadata, resolve_chart_first)
 from maichart.timing import TimingDirective, _parse_point_directives, _split_top_level_commas, normalize_note_text
 
 # Keep the tempo contract shared with the frame compiler.
@@ -347,7 +348,8 @@ def _parse_event_metadata(
         initial_bpm = _finite_number(chart.wholebpm or 120, "wholebpm", positive=True)
     except ValueError:
         initial_bpm = 120.0
-    first = _finite_number(chart.first or 0, "first")
+    first_raw = resolve_chart_first(chart, difficulty_index)
+    first = _finite_number(first_raw or 0, "first")
     timing = tokenize_event_timing(difficulty.inote, initial_bpm, first=first)
 
     if strict_notes:

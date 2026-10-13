@@ -292,8 +292,8 @@ def audio_segment_tensor(
     duration = max(float(song_duration if song_duration is not None else audio.duration_sec), 1e-9)
     if bpm is not None and float(bpm) <= 0:
         raise ValueError("bpm must be positive when supplied.")
-    if first < -duration or first > duration:
-        raise ValueError("first must be a plausible full-song audio anchor.")
+    if not math.isfinite(float(first)):
+        raise ValueError("first must be finite.")
     selected = _sample_audio(audio, start, end)
     times = selected[0]
     acoustic = selected[1]
@@ -313,6 +313,7 @@ def audio_segment_tensor(
     )
     beats = _beats_at_audio_offsets(np.asarray(times, dtype=np.float64) - float(first), map_entries)
     rhythm = _beat_normalized_rhythm(acoustic, np.asarray(times), beats, context[:, 2] * 240.0)
+    rhythm[times < 0.0] = 0.0
     values = np.concatenate([acoustic, rhythm, context], axis=1).astype(np.float32, copy=False)
     if values.shape[1] != INPUT_DIM:
         raise AssertionError(f"event audio input dimension drifted: {values.shape[1]} != {INPUT_DIM}")
@@ -383,6 +384,8 @@ def compress_event_audio(
     )
     beats = _beats_at_audio_offsets(np.asarray(times, dtype=np.float64) - float(first), memory_tempo)
     rhythm = _beat_normalized_rhythm(acoustic, np.asarray(times), beats, context[:, 2] * 240.0)
+    if origin < 0.0:
+        rhythm[times < 0.0] = 0.0
     return torch.from_numpy(np.concatenate([acoustic, rhythm, context], axis=1).astype(np.float32))
 
 

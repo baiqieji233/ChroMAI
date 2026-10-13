@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass, field
 
 from maichart.maidata import RawDifficultyBlock, RawMaidataChart
 from maichart.notes import parse_timing_points_notes
-from maichart.timing import tokenize_difficulty_timing
+from maichart.timing import tokenize_chart_difficulty_timing
 
 
 @dataclass(slots=True)
@@ -121,8 +121,8 @@ def _compute_difficulty_stats(
     points=None,
 ) -> DifficultyStats:
     if points is None:
-        points = tokenize_difficulty_timing(
-            difficulty,
+        points = tokenize_chart_difficulty_timing(
+            chart, difficulty.index,
             initial_bpm=_parse_initial_bpm(chart.wholebpm),
         )
     parsed_points = parse_timing_points_notes(points)

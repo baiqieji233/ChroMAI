@@ -16,8 +16,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from maichart.maidata import parse_maidata_file
-from maichart.timing import tokenize_inote_timing
+from maichart.maidata import parse_maidata_file, resolve_chart_first
+from maichart.timing import tokenize_chart_difficulty_timing
 
 SCHEMA = "maichart-quality-annotations-v1"
 DEFAULT_WEIGHTS = {"normal": 1.0, "excellent": 2.0, "reduced": 0.25, "excluded": 0.0, "negative": 0.0}
@@ -76,7 +76,7 @@ def _canonical_chart(maidata_path: Path, difficulty_index: int) -> tuple[str, An
     canonical = "\n".join([
         f"slot={difficulty_index}",
         f"wholebpm={chart.wholebpm or ''}",
-        f"first={chart.first or ''}",
+        f"first={resolve_chart_first(chart, difficulty_index) or ''}",
         f"level={difficulty.level or ''}",
         f"designer={difficulty.designer or ''}",
         (difficulty.inote or "").replace("\r\n", "\n").replace("\r", "\n").strip(),
@@ -106,7 +106,7 @@ def hash_chart(chart_or_path: Any, difficulty_index: int | None = None) -> str:
     if difficulty is None:
         raise ValueError(f"找不到难度槽位 {difficulty_index}")
     canonical = "\n".join([f"slot={int(difficulty_index)}", f"wholebpm={getattr(chart_or_path, 'wholebpm', '') or ''}",
-                             f"first={getattr(chart_or_path, 'first', '') or ''}", f"level={difficulty.level or ''}",
+                             f"first={resolve_chart_first(chart_or_path, difficulty_index) or ''}", f"level={difficulty.level or ''}",
                              f"designer={difficulty.designer or ''}", (difficulty.inote or "").replace("\r\n", "\n").replace("\r", "\n").strip()])
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
@@ -463,8 +463,9 @@ def chart_duration(maidata_path: str | Path, difficulty_index: int) -> float | N
     if difficulty is None or not difficulty.inote:
         return None
     try:
-        points = tokenize_inote_timing(difficulty.inote, initial_bpm=float(chart.wholebpm or 120))
-        return max((float(point.time_sec or 0.0) for point in points), default=0.0) + max(float(chart.first or 0), 0.0)
+        points = tokenize_chart_difficulty_timing(
+            chart, difficulty_index, initial_bpm=float(chart.wholebpm or 120))
+        return max((float(point.time_sec or 0.0) for point in points), default=0.0, key=float)
     except Exception:
         return None
 

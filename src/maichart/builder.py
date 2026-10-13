@@ -11,12 +11,12 @@ from maichart.ir import (
     TimingData,
     UnknownChartToken,
 )
-from maichart.maidata import RawDifficultyBlock, RawMaidataChart
+from maichart.maidata import RawDifficultyBlock, RawMaidataChart, resolve_chart_first
 from maichart.notes import (
     parse_timing_points_notes,
     parsed_timing_notes_to_chart_notes,
 )
-from maichart.timing import RawTimingPoint, tokenize_difficulty_timing
+from maichart.timing import RawTimingPoint, tokenize_chart_difficulty_timing
 
 
 def build_chart_ir_for_difficulty(
@@ -28,8 +28,8 @@ def build_chart_ir_for_difficulty(
     """Build a single-difficulty ChartIR from raw Maidata parser output."""
 
     initial_bpm = _parse_initial_bpm(chart.wholebpm)
-    timing_points = tokenize_difficulty_timing(
-        difficulty,
+    timing_points = tokenize_chart_difficulty_timing(
+        chart, difficulty.index,
         initial_bpm=initial_bpm,
         initial_division=initial_division,
     )
@@ -39,7 +39,7 @@ def build_chart_ir_for_difficulty(
         metadata=ChartMetadata(
             title=chart.title,
             artist=chart.artist,
-            offset=_parse_float(chart.first),
+            offset=_parse_float(resolve_chart_first(chart, difficulty.index)),
             raw=chart.raw,
         ),
         difficulty=DifficultyMetadata(

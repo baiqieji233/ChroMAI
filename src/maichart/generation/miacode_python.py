@@ -105,12 +105,13 @@ def analyze_inote(inote: str, *, first: float = 0.0,
 
 def analyze_maidata(text: str, *, difficulty: int = 5, first: float | None = None,
                     tap_on_slide_threshold_ms: float = 200.0) -> dict:
-    from maichart.maidata import parse_maidata_metadata
+    from maichart.maidata import parse_maidata_metadata, resolve_chart_first
     chart = parse_maidata_metadata(text)
     inote = chart.fields.get(f"inote_{difficulty}")
     if inote is None:
         raise ValueError(f"No inote_{difficulty} in maidata")
     if chart.wholebpm:
         inote = f"({float(chart.wholebpm):.12g})" + inote
-    return analyze_inote(inote, first=float(chart.first or 0) if first is None else first,
+    raw_first = resolve_chart_first(chart, difficulty)
+    return analyze_inote(inote, first=float(raw_first or 0) if first is None else first,
                          tap_on_slide_threshold_ms=tap_on_slide_threshold_ms)

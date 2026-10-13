@@ -11,7 +11,7 @@ from typing import Literal
 from maichart.maidata import RawDifficultyBlock, RawMaidataChart
 from maichart.notes import parse_timing_points_notes
 from maichart.duration import parse_duration_expr
-from maichart.timing import RawTimingPoint, tokenize_difficulty_timing
+from maichart.timing import RawTimingPoint, tokenize_chart_difficulty_timing
 
 Severity = Literal["error", "warning"]
 
@@ -218,8 +218,8 @@ def _validate_difficulty(
         )
         return
 
-    points = tokenize_difficulty_timing(
-        difficulty,
+    points = tokenize_chart_difficulty_timing(
+        chart, difficulty.index,
         initial_bpm=_parse_initial_bpm(chart.wholebpm),
     )
     _validate_timing_points(difficulty, points, issues)
@@ -232,7 +232,7 @@ def _validate_timing_points(
     issues: list[ValidationIssue],
 ) -> None:
     previous_tick = -1
-    previous_time = -1.0
+    previous_time = None
     for point in points:
         if point.tick < previous_tick:
             issues.append(
@@ -245,7 +245,8 @@ def _validate_timing_points(
                     raw=point.raw,
                 )
             )
-        if point.time_sec is not None and point.time_sec < previous_time:
+        if (point.time_sec is not None and previous_time is not None
+                and point.time_sec < previous_time):
             issues.append(
                 ValidationIssue(
                     "error",

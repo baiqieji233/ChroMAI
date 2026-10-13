@@ -164,6 +164,21 @@ def parse_maidata_file(
     return parse_maidata_metadata(text)
 
 
+def resolve_chart_first(chart: RawMaidataChart, difficulty_index: int) -> str | None:
+    """Resolve difficulty-specific ``first_N`` before the chart-wide ``first``.
+
+    The returned raw string preserves the authored decimal spelling. An
+    explicit ``0`` is a real override; an absent or blank slot value falls
+    back to the global value.
+    """
+    slot_value = chart.fields.get(f"first_{int(difficulty_index)}")
+    if slot_value is not None and slot_value.strip():
+        return slot_value.strip()
+    if chart.first is not None and chart.first.strip():
+        return chart.first.strip()
+    return None
+
+
 def _is_inote_key(key: str) -> bool:
     match = re.fullmatch(r"inote_(\d+)", key)
     return match is not None and int(match.group(1)) in DIFFICULTY_RANGE

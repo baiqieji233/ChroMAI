@@ -16,7 +16,7 @@ from typing import Any
 from urllib.parse import quote
 
 from maichart.maidata import parse_maidata_file
-from maichart.timing import tokenize_inote_timing
+from maichart.timing import tokenize_chart_difficulty_timing
 from maichart.training.quality_annotations import (
     DEFAULT_WEIGHTS,
     LABELS,
@@ -309,7 +309,8 @@ class QualityAPI:
         points = []
         try:
             points = [{"time_sec": point.time_sec, "beat": float(point.beat), "raw": point.raw, "note_text": point.note_text}
-                      for point in tokenize_inote_timing(difficulty.inote or "", initial_bpm=float(chart.wholebpm or 120))]
+                      for point in tokenize_chart_difficulty_timing(
+                          chart, difficulty.index, initial_bpm=float(chart.wholebpm or 120))]
         except Exception:
             points = []
         annotation = find_annotation(row, records, verify_audio=True)

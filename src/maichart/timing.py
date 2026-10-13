@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 from dataclasses import dataclass, field
 from fractions import Fraction
 from typing import Any
 
-from maichart.maidata import RawDifficultyBlock
+from maichart.maidata import RawDifficultyBlock, RawMaidataChart, resolve_chart_first
 
 TICKS_PER_BEAT = 1920
 
@@ -85,6 +86,7 @@ def tokenize_inote_timing(
     raw_inote: str,
     initial_bpm: float = 120.0,
     initial_division: int = 4,
+    first: float = 0.0,
 ) -> list[RawTimingPoint]:
     """Tokenize raw ``inote_x`` text into timing points.
 
@@ -96,10 +98,13 @@ def tokenize_inote_timing(
         raise ValueError("initial_division must be a positive integer.")
     if initial_bpm <= 0:
         raise ValueError("initial_bpm must be positive.")
+    first = float(first)
+    if not math.isfinite(first):
+        raise ValueError("first must be finite.")
 
     points: list[RawTimingPoint] = []
     beat = Fraction(0, 1)
-    time_sec = 0.0
+    time_sec = first
     bpm = float(initial_bpm)
     division = int(initial_division)
 
@@ -141,6 +146,7 @@ def tokenize_difficulty_timing(
     difficulty: RawDifficultyBlock,
     initial_bpm: float = 120.0,
     initial_division: int = 4,
+    first: float = 0.0,
 ) -> list[RawTimingPoint]:
     """Tokenize the raw ``inote`` field from a difficulty block."""
 
@@ -150,6 +156,31 @@ def tokenize_difficulty_timing(
         difficulty.inote,
         initial_bpm=initial_bpm,
         initial_division=initial_division,
+        first=first,
+    )
+
+
+def tokenize_chart_difficulty_timing(
+    chart: RawMaidataChart,
+    difficulty_index: int,
+    initial_bpm: float = 120.0,
+    initial_division: int = 4,
+) -> list[RawTimingPoint]:
+    """Tokenize one chart slot with its resolved audio-time ``first`` anchor."""
+    difficulty = next((item for item in chart.difficulties
+                       if item.index == int(difficulty_index)), None)
+    if difficulty is None:
+        raise ValueError(f"No difficulty {difficulty_index} found.")
+    raw_first = resolve_chart_first(chart, difficulty_index)
+    try:
+        first = float(raw_first) if raw_first is not None else 0.0
+    except (TypeError, ValueError) as exc:
+        raise ValueError("first must be finite.") from exc
+    if not math.isfinite(first):
+        raise ValueError("first must be finite.")
+    return tokenize_difficulty_timing(
+        difficulty, initial_bpm=initial_bpm,
+        initial_division=initial_division, first=first,
     )
 
 

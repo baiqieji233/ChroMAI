@@ -37,7 +37,7 @@ def test_quality_api_catalog_save_detail_preview(tmp_path):
                               "corrected_difficulty": 5})
     assert status == 200 and saved["summary"]["preference_pairs"] == 1
     corrected.write_text(corrected.read_text(encoding="utf-8").replace("&title=T", "&title=T\n&first=-1"), encoding="utf-8")
-    with pytest.raises(ValueError, match="first/audio_first"):
+    with pytest.raises(ValueError, match="first/audio_first|时长不一致"):
         api.save({"manifest": str(manifest), "chart_ids": [chart_id],
                   "label": "negative", "corrected_path": str(corrected), "corrected_difficulty": 5})
 
