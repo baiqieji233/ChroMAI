@@ -245,7 +245,8 @@ def test_form_audio_cache_event_is_exposed_as_current_progress():
     assert task.result["progress_known"] is True
 
 
-def test_generation_forwards_bounded_onset_merge_ms(monkeypatch, tmp_path):
+@pytest.mark.parametrize("first", [0.5, -0.5])
+def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_path, first):
     checkpoint = tmp_path / "form_last.pt"
     audio = tmp_path / "song.wav"
     checkpoint.write_bytes(b"checkpoint")
@@ -263,10 +264,12 @@ def test_generation_forwards_bounded_onset_merge_ms(monkeypatch, tmp_path):
     form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio),
         "output": str(tmp_path / "out.txt"), "onset_merge_ms": 55.6,
+        "first": first,
         "rhythm_snap_enabled": True, "rhythm_snap_ms": 8,
         "rhythm_snap_divisions": [64, 48, 64],
     }, runtime=Runtime())
     args = calls[0]
+    assert args[args.index("--first") + 1] == str(first)
     assert args[args.index("--onset-merge-ms") + 1] == "55.6"
     assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
     assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"

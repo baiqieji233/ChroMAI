@@ -14,6 +14,8 @@ function setup() {
     "#intensityCurveConditionNotice": {}, "#intensityCurveStatus": {} };
   const profile = {schema:"maichart-intensity-curve-v1",method:"learned_music_structure_v3",audio_sha256:"a".repeat(64),
     duration_sec:10,points:[{time_sec:0,intensity:.5},{time_sec:10,intensity:.3}],
+    time_axis:"audio_absolute_v2",curve_resolution_sec:2.5,
+    components:{density:[.4,.6],onset:[.2,.8]},
     condition:{level:13.3,radar:{note_density:.3},style:{slide_bias:.1}},rest_regions:[{start_sec:2,end_sec:4}]};
   let stored = null;
   const context = vm.createContext({
@@ -41,6 +43,9 @@ test("changing controls keeps saved curve and original prediction metadata usabl
   assert.deepEqual(JSON.parse(JSON.stringify(payload.points)),profile.points);
   assert.deepEqual(JSON.parse(JSON.stringify(payload.rest_regions)),profile.rest_regions);
   assert.deepEqual(JSON.parse(JSON.stringify(payload.condition)),profile.condition);
+  assert.equal(payload.time_axis,"audio_absolute_v2");
+  assert.equal(payload.curve_resolution_sec,2.5);
+  assert.deepEqual(JSON.parse(JSON.stringify(payload.components)),profile.components);
   assert.equal(JSON.stringify(profile),original);
   assert.equal(stored().conditionChanged,true);
 });

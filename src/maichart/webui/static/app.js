@@ -1214,6 +1214,9 @@ function intensityCurvePayload() {
     ...(profile.tempo_changes ? { tempo_changes: profile.tempo_changes } : {}),
     ...(profile.explicit_tempo_map ? { explicit_tempo_map: profile.explicit_tempo_map } : {}),
     ...(profile.tempo_map_sha256 ? { tempo_map_sha256: profile.tempo_map_sha256 } : {}),
+    ...(profile.time_axis ? { time_axis: profile.time_axis } : {}),
+    ...(profile.components !== undefined ? { components: profile.components } : {}),
+    ...(profile.curve_resolution_sec !== undefined ? { curve_resolution_sec: profile.curve_resolution_sec } : {}),
   };
 }
 

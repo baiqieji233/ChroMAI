@@ -62,6 +62,8 @@ Planner 预测起音、单类类型、持续时长与曲线；配置解码实际
 
 ### A03 / P0 / 已确认代码参照混用：曲线时钟需要统一
 
+2026-10-13 后续修复：新曲线统一音频绝对秒，并在旧配置模型输入前转换回其原 bin 约定；旧曲线按显式/默认版本兼容。正负 first、难度专属 first 与导出已验证，见 [偏移对齐修复](FIRST_AUDIO_ALIGNMENT_FIX_20261013.md)。以下保留原审计证据，不再将已修复的传输坐标问题列为待修。
+
 位置：`curve.py:49 build_load_curve` 使用 `seconds_at_beat-first`；`train.py:123 _blueprint_input` 重采样也减 first；`curve.py:153` 预测帧时钟减 first；`generate.py:63 _curve_condition` 减 first，但起音门控用音频绝对秒访问 profile。
 
 first=0 时两种参照相同；非零 first 时不能假定编辑器点、起音门控和配置曲线指向同一段声音。代码参照差异已确认，实际错位量和影响应通过正/负 first 合成曲线测试量化，不能仅凭命名断言全部偏移。
@@ -95,6 +97,8 @@ weight=0 区域与 span 相交会丢弃整个配置训练片段，而规划训�
 建议：明确“排除起音”还是“排除时间内所有动作”。若精确排除，需要局部 token/frame 监督或分割 span，不能通过删掉局部目标将该区误教成休止。测试跨排除边界的长音、空白目标和两阶段权重一致性。
 
 ### A07 / P1 / 已确认缺口：完整曲线编辑与组件值不完全同步
+
+后续修复已保留 WebUI 保存的 components、time_axis 和 curve_resolution_sec，避免传输丢失。下述指导公式、strength=0 仍读取基值以及模型未编码真实曲线时间等设计项继续保留，不以元数据修复代替模型能力升级。
 
 位置：`generate.py:72 _curve_condition`；编辑器保存的 points 与 components；`curve.py:165` 标量曲线归一化。
 

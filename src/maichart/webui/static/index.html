@@ -803,7 +803,7 @@
           </label>
 <label class="field">首拍偏移 / 秒
             <input id="first" type="number" step="0.001" value="0">
-            <small>音频中 chart beat 0 对应的秒数；不确定时保持 0。</small>
+            <small>与 <code>&amp;first</code> 一致：正 0.5 表示谱面第 0 拍对应原音频 0.5 秒；负数把谱面时钟放在音频开始前，形成前置静音。开头 <code>{1}</code> 与休止单独计时，不自动推断。</small>
           </label></div>
 <details id="generationTempoAdvanced" class="settings-section" data-advanced >
 <summary><span>变速与节拍高级设置</span><small>单一 BPM 通常只需填写上面的 BPM</small>
