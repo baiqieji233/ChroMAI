@@ -83,6 +83,7 @@ class SongBlueprint(nn.Module):
     def __init__(self, config: BlueprintConfig = BlueprintConfig()) -> None:
         super().__init__()
         self.config = config
+        self.validate_inputs = True
         width = config.width
         self.audio_projection = nn.Linear(config.audio_dim, width)
         self.form_projection = nn.Linear(config.descriptor_dim + FORM_EXTRA_DIM, width)
@@ -138,16 +139,17 @@ class SongBlueprint(nn.Module):
             raise ValueError("audio_padding_mask must have shape [B, T]")
         if form_padding_mask is not None and form_padding_mask.shape != (batch, steps):
             raise ValueError("form_padding_mask must have shape [B, S]")
-        if not torch.isfinite(audio).all():
+        if self.validate_inputs and not torch.isfinite(audio).all():
             raise ValueError("audio features must be finite")
-        if not torch.isfinite(form).all() or not torch.isfinite(condition).all():
+        if self.validate_inputs and (not torch.isfinite(form).all() or not torch.isfinite(condition).all()):
             raise ValueError("form and condition features must be finite")
 
         audio_padding_mask = (None if audio_padding_mask is None else
                               audio_padding_mask.to(device=audio.device, dtype=torch.bool))
         form_padding_mask = (None if form_padding_mask is None else
                              form_padding_mask.to(device=form.device, dtype=torch.bool))
-        if form_padding_mask is not None and torch.any(form_padding_mask.all(dim=1)):
+        if (self.validate_inputs and form_padding_mask is not None
+                and torch.any(form_padding_mask.all(dim=1))):
             raise ValueError("Each song needs at least one unmasked form descriptor")
 
         positions = torch.arange(steps, device=form.device).unsqueeze(0)
@@ -293,15 +295,24 @@ def compute_blueprint_loss(
     if duration_target.shape != logits.shape or duration_mask.shape != logits.shape:
         raise ValueError("duration targets and mask must have shape [B, T]")
     valid = torch.ones_like(logits, dtype=torch.bool)
+    frame_weight = targets.get("frame_weight")
+    if frame_weight is None:
+        weights = torch.ones_like(logits)
+    else:
+        if frame_weight.shape != logits.shape:
+            raise ValueError("frame_weight must have shape [B, T]")
+        weights = frame_weight.to(device=device, dtype=logits.dtype)
+        valid &= weights > 0
     if audio_padding_mask is not None:
         if audio_padding_mask.shape != logits.shape:
             raise ValueError("audio_padding_mask must have shape [B, T]")
         valid &= ~audio_padding_mask.to(device=device, dtype=torch.bool)
+    effective_weights = weights * valid.to(dtype=weights.dtype)
     if isinstance(onset_pos_weight, str):
         if onset_pos_weight.lower() != "auto":
             raise ValueError("onset_pos_weight must be numeric or 'auto'")
-        positive = (onset_target * valid).sum()
-        negative = valid.sum().to(logits.dtype) - positive
+        positive = (onset_target * effective_weights).sum()
+        negative = effective_weights.sum() - positive
         pos_weight = (negative / positive.clamp_min(1.0)).clamp_min(1.0)
     else:
         if not math.isfinite(float(onset_pos_weight)) or float(onset_pos_weight) <= 0:
@@ -310,31 +321,42 @@ def compute_blueprint_loss(
     loss_onset = F.binary_cross_entropy_with_logits(
         logits, onset_target, reduction="none", pos_weight=pos_weight,
     )
-    loss_onset = (loss_onset * valid).sum() / valid.sum().clamp_min(1)
+    loss_onset = (loss_onset * effective_weights).sum() / effective_weights.sum().clamp_min(1.0)
 
     type_valid = valid & (type_target >= 0) & (onset_target >= 0.5)
     type_safe = type_target.masked_fill(~type_valid, -100)
     loss_type_all = F.cross_entropy(outputs["type_logits"].transpose(1, 2), type_safe,
                                     ignore_index=-100, reduction="none")
-    loss_type = (loss_type_all * type_valid).sum() / type_valid.sum().clamp_min(1)
+    type_weights = effective_weights * type_valid.to(dtype=weights.dtype)
+    loss_type = (loss_type_all * type_weights).sum() / type_weights.sum().clamp_min(1.0)
 
     duration_valid = valid & duration_mask
     predicted_log = torch.log1p(outputs["sustain_seconds"].clamp_min(0.0))
     target_log = torch.log1p(duration_target.clamp_min(0.0))
     loss_duration_all = F.smooth_l1_loss(predicted_log, target_log, reduction="none")
-    loss_duration = (loss_duration_all * duration_valid).sum() / duration_valid.sum().clamp_min(1)
+    duration_weights = effective_weights * duration_valid.to(dtype=weights.dtype)
+    loss_duration = (loss_duration_all * duration_weights).sum() / duration_weights.sum().clamp_min(1.0)
     total = onset_weight * loss_onset + type_weight * loss_type + duration_weight * loss_duration
     loss_curve = logits.new_zeros(())
     if "load_curve" in outputs and "load_curve_target" in targets:
         target_curve = targets["load_curve_target"].to(device=device, dtype=outputs["load_curve"].dtype)
         curve_mask = targets.get("load_curve_mask")
-        curve_error = F.smooth_l1_loss(outputs["load_curve"], target_curve, reduction="none")
+        if target_curve.shape != outputs["load_curve"].shape:
+            raise ValueError("load_curve_target must match load_curve shape [B, T, 4]")
+        # The public prediction contract is probability-valued: generation
+        # applies sigmoid before resampling the curve.
+        curve_error = F.smooth_l1_loss(outputs["load_curve"].sigmoid(), target_curve, reduction="none")
         if curve_mask is not None:
-            curve_error = curve_error * curve_mask.to(device=device, dtype=curve_error.dtype)
-            denom = curve_mask.to(device=device, dtype=curve_error.dtype).sum().clamp_min(1.0)
+            if curve_mask.shape not in (logits.shape, target_curve.shape):
+                raise ValueError("load_curve_mask must have shape [B,T] or [B,T,4]")
+            curve_mask = curve_mask.to(device=device, dtype=torch.bool)
+            if curve_mask.ndim == 2:
+                curve_mask = curve_mask.unsqueeze(-1).expand_as(target_curve)
         else:
-            denom = torch.tensor(curve_error.numel(), device=device, dtype=curve_error.dtype).clamp_min(1.0)
-        loss_curve = curve_error.sum() / denom
+            curve_mask = torch.ones_like(target_curve, dtype=torch.bool)
+        curve_weights = effective_weights.unsqueeze(-1) * curve_mask.to(dtype=weights.dtype)
+        curve_error = curve_error * curve_weights
+        loss_curve = curve_error.sum() / curve_weights.sum().clamp_min(1.0)
         total = total + load_curve_weight * loss_curve
     return {"loss": total, "loss_onset": loss_onset,
             "loss_type": loss_type, "loss_duration": loss_duration,

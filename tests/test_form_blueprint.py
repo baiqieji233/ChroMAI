@@ -133,3 +133,105 @@ def test_composite_loss_masks_padding_and_backpropagates_all_heads():
     assert model.type_head.weight.grad is not None
     assert model.duration_head.weight.grad is not None
 
+
+def test_load_curve_loss_uses_the_sigmoid_prediction_scale():
+    outputs = {
+        "onset_logits": torch.zeros(1, 2),
+        "type_logits": torch.zeros(1, 2, 4),
+        "sustain_seconds": torch.zeros(1, 2),
+        "load_curve": torch.tensor([[[-2.0, 2.0, 0.0, 1.0],
+                                      [1.0, 0.0, 2.0, -2.0]]]),
+    }
+    targets = {
+        "onset_target": torch.zeros(1, 2),
+        "type_target": torch.full((1, 2), -100),
+        "duration_target_seconds": torch.zeros(1, 2),
+        "duration_mask": torch.zeros(1, 2, dtype=torch.bool),
+        "load_curve_target": torch.tensor([[[0.1, 0.9, 0.5, 0.7],
+                                            [0.7, 0.5, 0.9, 0.1]]]),
+        "load_curve_mask": torch.ones(1, 2, 4, dtype=torch.bool),
+    }
+    losses = compute_blueprint_loss(outputs, targets)
+    expected = torch.nn.functional.smooth_l1_loss(
+        outputs["load_curve"].sigmoid(), targets["load_curve_target"])
+    torch.testing.assert_close(losses["loss_load_curve"], expected)
+
+
+def test_row_curve_mask_matches_explicit_channel_mask_normalization():
+    outputs = {
+        "onset_logits": torch.zeros(1, 2),
+        "type_logits": torch.zeros(1, 2, 4),
+        "sustain_seconds": torch.zeros(1, 2),
+        "load_curve": torch.tensor([[[0.0, 1.0, -1.0, 2.0],
+                                      [2.0, -1.0, 1.0, 0.0]]]),
+    }
+    targets = {
+        "onset_target": torch.zeros(1, 2),
+        "type_target": torch.full((1, 2), -100),
+        "duration_target_seconds": torch.zeros(1, 2),
+        "duration_mask": torch.zeros(1, 2, dtype=torch.bool),
+        "load_curve_target": torch.full((1, 2, 4), 0.25),
+        "load_curve_mask": torch.tensor([[True, False]]),
+    }
+    row_mask_loss = compute_blueprint_loss(outputs, targets)["loss_load_curve"]
+    targets["load_curve_mask"] = targets["load_curve_mask"].unsqueeze(-1).expand_as(
+        targets["load_curve_target"])
+    channel_mask_loss = compute_blueprint_loss(outputs, targets)["loss_load_curve"]
+    torch.testing.assert_close(row_mask_loss, channel_mask_loss)
+
+
+def test_zero_weight_frames_do_not_affect_any_blueprint_loss():
+    outputs = {
+        "onset_logits": torch.tensor([[1.0, -1.0]]),
+        "type_logits": torch.tensor([[[2.0, 0.0, 0.0, 0.0],
+                                      [0.0, 2.0, 0.0, 0.0]]]),
+        "sustain_seconds": torch.tensor([[2.0, 3.0]]),
+        "load_curve": torch.tensor([[[0.0, 0.0, 0.0, 0.0],
+                                      [1.0, 1.0, 1.0, 1.0]]]),
+    }
+    targets = {
+        "onset_target": torch.tensor([[1.0, 0.0]]),
+        "type_target": torch.tensor([[0, 1]]),
+        "duration_target_seconds": torch.tensor([[2.0, 1.0]]),
+        "duration_mask": torch.ones(1, 2, dtype=torch.bool),
+        "load_curve_target": torch.tensor([[[0.5, 0.5, 0.5, 0.5],
+                                            [0.0, 0.0, 0.0, 0.0]]]),
+        "load_curve_mask": torch.ones(1, 2, 4, dtype=torch.bool),
+        "frame_weight": torch.tensor([[1.0, 0.0]]),
+    }
+    baseline = compute_blueprint_loss(outputs, targets)
+    excluded_changed = {key: value.clone() for key, value in outputs.items()}
+    excluded_changed["onset_logits"][0, 1] = 25.0
+    excluded_changed["type_logits"][0, 1] = torch.tensor([20.0, -20.0, 20.0, -20.0])
+    excluded_changed["sustain_seconds"][0, 1] = 100.0
+    excluded_changed["load_curve"][0, 1] = -20.0
+    changed_targets = {key: value.clone() for key, value in targets.items()}
+    changed_targets["onset_target"][0, 1] = 1.0
+    changed_targets["type_target"][0, 1] = 3
+    changed_targets["duration_target_seconds"][0, 1] = 50.0
+    changed_targets["load_curve_target"][0, 1] = 1.0
+    altered = compute_blueprint_loss(excluded_changed, changed_targets)
+    for name in baseline:
+        torch.testing.assert_close(baseline[name], altered[name])
+
+
+def test_all_zero_frame_weights_produce_finite_zero_losses():
+    outputs = {
+        "onset_logits": torch.zeros(1, 2),
+        "type_logits": torch.zeros(1, 2, 4),
+        "sustain_seconds": torch.zeros(1, 2),
+        "load_curve": torch.zeros(1, 2, 4),
+    }
+    targets = {
+        "onset_target": torch.ones(1, 2),
+        "type_target": torch.zeros(1, 2, dtype=torch.long),
+        "duration_target_seconds": torch.ones(1, 2),
+        "duration_mask": torch.ones(1, 2, dtype=torch.bool),
+        "load_curve_target": torch.ones(1, 2, 4),
+        "load_curve_mask": torch.ones(1, 2, 4, dtype=torch.bool),
+        "frame_weight": torch.zeros(1, 2),
+    }
+    losses = compute_blueprint_loss(outputs, targets)
+    assert all(torch.isfinite(value) for value in losses.values())
+    assert all(value.item() == 0.0 for value in losses.values())
+

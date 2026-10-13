@@ -51,6 +51,7 @@ class FormTransformer(nn.Module):
     def __init__(self, config: FormConfig) -> None:
         super().__init__()
         self.config = config
+        self.validate_inputs = True
         width = config.d_model
 
         self.token_embedding = nn.Embedding(config.vocab_size, width, padding_idx=0)
@@ -151,13 +152,13 @@ class FormTransformer(nn.Module):
         # target-derived Radar/Style controls with the contract default, and
         # add the learned null embedding. This prevents the raw target vector
         # leaking through a mere flag.
-        if torch.any(condition_null):
-            effective_condition[condition_null, 1:] = 0.5
+        effective_condition[:, 1:] = torch.where(
+            condition_null[:, None], 0.5, effective_condition[:, 1:])
         task = batch.get("task")
         if task is None or task.shape != (batch_size,):
             raise ValueError("task must have shape [B], with 0=draft and 1=revise.")
         task = task.to(device=device, dtype=torch.long)
-        if torch.any((task < 0) | (task > 1)):
+        if self.validate_inputs and torch.any((task < 0) | (task > 1)):
             raise ValueError("task values must be 0 (draft) or 1 (revise).")
 
         relation = batch.get("relation")
@@ -173,7 +174,7 @@ class FormTransformer(nn.Module):
             raise ValueError("memory_strength must have shape [B] or [B, 1].")
         strength = strength.to(device=device, dtype=audio.dtype).reshape(batch_size, 1)
         self._finite(strength, "memory_strength")
-        if torch.any((strength < 0) | (strength > 1)):
+        if self.validate_inputs and torch.any((strength < 0) | (strength > 1)):
             raise ValueError("memory_strength must be between 0 and 1.")
 
         branches: list[torch.Tensor] = []
@@ -219,13 +220,13 @@ class FormTransformer(nn.Module):
             if ids.ndim != 2 or ids.size(0) != batch_size:
                 raise ValueError(f"{name} must have shape [B, L].")
             ids = ids.to(device=device, dtype=torch.long)
-            if torch.any((ids < 0) | (ids >= self.config.vocab_size)):
+            if self.validate_inputs and torch.any((ids < 0) | (ids >= self.config.vocab_size)):
                 raise ValueError(f"{name} contains token ids outside the vocabulary.")
             mask = self._mask(batch, f"{name}_padding_mask", ids.shape, device, default=ids == 0)
             self._validate_padding_ids(ids, mask, name)
             if name in ("draft", "right"):
                 leaked = (task == 0).unsqueeze(1) & (ids != 0)
-                if torch.any(leaked):
+                if self.validate_inputs and torch.any(leaked):
                     raise ValueError(f"{name} tokens cannot be supplied for draft task rows.")
                 mask = mask | (task == 0).unsqueeze(1)
             values = self.token_embedding(ids)
@@ -256,14 +257,26 @@ class FormTransformer(nn.Module):
                 raise ValueError("load_curve must have shape [B, T, 4]")
             raw_curve_mask = batch.get("load_curve_condition_mask")
             if raw_curve_mask is None:
-                curve_mask = torch.zeros(load_curve.shape[:2], dtype=torch.bool, device=device)
+                visible_channels = torch.ones_like(load_curve, dtype=torch.bool)
             else:
                 if raw_curve_mask.shape not in (load_curve.shape[:2], load_curve.shape):
                     raise ValueError("load_curve_condition_mask must have shape [B,T] or [B,T,4]")
                 raw_curve_mask = raw_curve_mask.to(device=device, dtype=torch.bool)
-                curve_mask = raw_curve_mask if raw_curve_mask.ndim == 2 else ~raw_curve_mask.any(dim=-1)
+                visible_channels = (~raw_curve_mask.unsqueeze(-1).expand_as(load_curve)
+                                    if raw_curve_mask.ndim == 2 else raw_curve_mask)
+            curve_padding_mask = batch.get("load_curve_padding_mask")
+            if curve_padding_mask is None:
+                curve_padding_mask = batch.get("load_curve_condition_mask_padding_mask")
+            if curve_padding_mask is None:
+                curve_padding_mask = torch.zeros(load_curve.shape[:2], dtype=torch.bool, device=device)
+            if curve_padding_mask.shape != load_curve.shape[:2]:
+                raise ValueError("load_curve_padding_mask must have shape [B,T]")
+            curve_padding_mask = curve_padding_mask.to(device=device, dtype=torch.bool)
+            visible_channels = visible_channels & ~curve_padding_mask.unsqueeze(-1)
+            curve_mask = curve_padding_mask | ~visible_channels.any(dim=-1)
             self._finite(load_curve, "load_curve")
-            add(self.load_curve_projection(load_curve), curve_mask, 10)
+            safe_curve = load_curve.masked_fill(~visible_channels, 0.0)
+            add(self.load_curve_projection(safe_curve), curve_mask, 10)
 
         # Future *planned onsets* are supplied by the whole-song blueprint,
         # not future note configurations. Arrangement can see upcoming demands
@@ -273,7 +286,7 @@ class FormTransformer(nn.Module):
             if skeleton.ndim != 2 or skeleton.size(0) != batch_size:
                 raise ValueError("skeleton must have shape [B,L]")
             skeleton = skeleton.to(device=device, dtype=torch.long)
-            if torch.any((skeleton < 0) | (skeleton >= self.config.vocab_size)):
+            if self.validate_inputs and torch.any((skeleton < 0) | (skeleton >= self.config.vocab_size)):
                 raise ValueError("skeleton token outside vocabulary")
             if skeleton.size(1) > self.config.max_memory_tokens:
                 raise ValueError("skeleton exceeds max_memory_tokens")
@@ -329,7 +342,7 @@ class FormTransformer(nn.Module):
         if memory_mask.shape != memory.shape[:2]:
             raise ValueError("memory_mask must have shape [B, M].")
         ids = ids.to(device=memory.device, dtype=torch.long)
-        if torch.any((ids < 0) | (ids >= self.config.vocab_size)):
+        if self.validate_inputs and torch.any((ids < 0) | (ids >= self.config.vocab_size)):
             raise ValueError("decoder ids contain token ids outside the vocabulary.")
         length = ids.size(1)
         positions = torch.arange(length, device=ids.device).unsqueeze(0)
@@ -386,12 +399,10 @@ class FormTransformer(nn.Module):
             raise ValueError(f"{key} must have shape {tuple(shape)}.")
         return value.to(device=device, dtype=torch.bool)
 
-    @staticmethod
-    def _finite(tensor: torch.Tensor, name: str) -> None:
-        if not torch.isfinite(tensor).all():
+    def _finite(self, tensor: torch.Tensor, name: str) -> None:
+        if self.validate_inputs and not torch.isfinite(tensor).all():
             raise ValueError(f"{name} must contain only finite values.")
 
-    @staticmethod
-    def _validate_padding_ids(ids: torch.Tensor, mask: torch.Tensor, name: str) -> None:
-        if torch.any((ids == 0) & ~mask):
+    def _validate_padding_ids(self, ids: torch.Tensor, mask: torch.Tensor, name: str) -> None:
+        if self.validate_inputs and torch.any((ids == 0) & ~mask):
             raise ValueError(f"{name} padding id 0 must be masked.")

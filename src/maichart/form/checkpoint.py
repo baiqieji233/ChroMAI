@@ -33,7 +33,8 @@ def load(path, *, device='cpu', inference=False, task='draft'):
     if config.vocab_size!=len(codec): raise ValueError('Vocabulary shape mismatch')
     model=FormTransformer(config).to(device)
     missing,unexpected=model.load_state_dict(payload['model_state_dict'],strict=False)
-    allowed_missing={'condition_null_embedding','load_curve_projection.weight','load_curve_projection.bias'}
+    allowed_missing = ({'condition_null_embedding', 'load_curve_projection.weight',
+                        'load_curve_projection.bias'} if legacy_contract else set())
     if unexpected or any(name not in allowed_missing for name in missing):
         raise ValueError('Model checkpoint parameter contract mismatch')
     caps=payload.get('capabilities',{})
@@ -46,7 +47,9 @@ def load(path, *, device='cpu', inference=False, task='draft'):
     from maichart.form.blueprint import BlueprintConfig, SongBlueprint
     planner=SongBlueprint(BlueprintConfig(**payload['blueprint_config'])).to(device)
     missing,unexpected=planner.load_state_dict(payload['blueprint_state_dict'],strict=False)
-    if unexpected or any(name != 'load_curve_head.weight' and name != 'load_curve_head.bias' for name in missing):
+    allowed_planner_missing = ({'load_curve_head.weight', 'load_curve_head.bias'}
+                               if legacy_contract else set())
+    if unexpected or any(name not in allowed_planner_missing for name in missing):
         raise ValueError('Blueprint checkpoint parameter contract mismatch')
     model.eval(); planner.eval()
     return model,planner,codec,payload

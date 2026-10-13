@@ -226,6 +226,38 @@ def test_batch_padding_in_other_examples_does_not_shift_audio_or_memory_position
     assert torch.allclose(alone["relation_logits"][0], together["relation_logits"][0], atol=1e-5)
 
 
+def test_curve_visibility_hides_unknown_channels_and_padded_rows():
+    model = make_model()
+    batch = make_batch(batch_size=1)
+    batch["load_curve"] = torch.tensor([[[0.2, 0.3, 0.4, 0.5],
+                                         [0.6, 0.7, 0.8, 0.9]]])
+    batch["load_curve_condition_mask"] = torch.tensor([[[True, False, True, False],
+                                                        [True, True, True, True]]])
+    batch["load_curve_padding_mask"] = torch.tensor([[False, True]])
+    changed = copy.deepcopy(batch)
+    changed["load_curve"][0, 0, 1] = 0.99
+    changed["load_curve"][0, 0, 3] = 0.01
+    changed["load_curve"][0, 1] = torch.tensor([0.01, 0.02, 0.03, 0.04])
+    with torch.no_grad():
+        original = model(batch)["logits"]
+        altered = model(changed)["logits"]
+    torch.testing.assert_close(original, altered)
+
+
+def test_two_dimensional_curve_mask_retains_legacy_hidden_row_semantics():
+    model = make_model()
+    batch = make_batch(batch_size=1)
+    batch["load_curve"] = torch.tensor([[[0.2, 0.3, 0.4, 0.5],
+                                         [0.6, 0.7, 0.8, 0.9]]])
+    batch["load_curve_condition_mask"] = torch.tensor([[True, False]])
+    changed = copy.deepcopy(batch)
+    changed["load_curve"][0, 0] = torch.tensor([0.01, 0.02, 0.03, 0.04])
+    with torch.no_grad():
+        original = model(batch)["logits"]
+        altered = model(changed)["logits"]
+    torch.testing.assert_close(original, altered)
+
+
 def test_decoder_is_causal_and_checks_token_limits():
     model = make_model()
     batch = make_batch(batch_size=1)
