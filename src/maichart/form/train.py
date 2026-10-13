@@ -177,6 +177,8 @@ def main(argv=None):
             rng_state={'python':random.getstate(),'numpy':np.random.get_state(),'torch':torch.get_rng_state(),
                        'cuda':torch.cuda.get_rng_state_all() if device.type=='cuda' else None})
         temporary=output/'form_last.tmp';torch.save(saved,temporary);temporary.replace(output/'form_last.pt')
+        if args.save_every and epoch % args.save_every == 0:
+            torch.save(saved, output / f'form_epoch_{epoch:03d}.pt')
         (output/'training_history.json').write_text(json.dumps(history,indent=2),encoding='utf-8')
         print('form_epoch '+json.dumps(metrics),flush=True)
     return 0
