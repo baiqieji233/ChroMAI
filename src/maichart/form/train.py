@@ -84,6 +84,18 @@ def _validate(args):
         raise ValueError('Choose resume or finetune, not both')
     if args.audio_cache_mode == 'resident' and (args.loader_workers or args.audio_cache_gb <= 0):
         raise ValueError('Full audio residency requires loader-workers=0 and a positive audio-cache-gb budget')
+    if not args.resume and not args.init_checkpoint:
+        fresh_model_configs(args)
+
+
+def fresh_model_configs(args):
+    from maichart.form.blueprint import BlueprintConfig
+    from maichart.form.codec import RationalCodec
+    config = FormConfig(vocab_size=len(RationalCodec()), d_model=args.d_model, nhead=args.nhead,
+        dropout=args.dropout, layers=args.layers, dim_feedforward=4*args.d_model,
+        max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens)
+    planner_config = BlueprintConfig(width=max(16, args.d_model//2))
+    return config, planner_config
 
 
 def layout_loss(prediction, batch, relation_weight):
@@ -126,7 +138,9 @@ def _blueprint_input(dataset, index):
     audio = form_audio(song, song.spans[0].start, song.spans[-1].end)
     times = segment_frame_times(seconds_at_beat(song.spans[0].start, song.tempo, song.first),
                                 seconds_at_beat(song.spans[-1].end, song.tempo, song.first))
-    targets = build_blueprint_targets(points, song.tempo, song.first, times)
+    targets = build_blueprint_targets(points, song.tempo, song.first, times,
+        frame_end_sec=min(float(song.audio.duration_sec),
+                          float(seconds_at_beat(song.spans[-1].end, song.tempo, song.first))))
     curve = resample_load_curve(song.load_curve_times_sec, song.load_curve, times-float(song.first))
     targets['load_curve_target'] = torch.from_numpy(curve)
     targets['load_curve_mask'] = torch.ones_like(targets['load_curve_target'], dtype=torch.bool)
@@ -206,10 +220,9 @@ def main(argv=None):
     from maichart.form.blueprint import BlueprintConfig, SongBlueprint, compute_blueprint_loss
     if old is None:
         codec = dataset.codec
-        model = FormTransformer(FormConfig(vocab_size=len(codec), d_model=args.d_model, nhead=args.nhead,
-                    dropout=args.dropout, layers=args.layers, dim_feedforward=4*args.d_model,
-                    max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens))
-        blueprint = SongBlueprint(BlueprintConfig(width=max(16, args.d_model//2)))
+        config, planner_config = fresh_model_configs(args)
+        model = FormTransformer(config)
+        blueprint = SongBlueprint(planner_config)
     model.to(device); blueprint.to(device)
     # Inputs are checked on CPU before copying. Shapes are always checked in
     # the model; avoid per-forward GPU -> host scalar synchronizations.

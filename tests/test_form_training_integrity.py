@@ -35,7 +35,7 @@ def test_blueprint_input_uses_song_start_descriptor_not_a_retained_item(monkeypa
     span = SimpleNamespace(start=Fraction(0), end=Fraction(4))
     song = SimpleNamespace(
         spans=[span], tempo=tempo, first=0., load_curve_times_sec=np.asarray([0., 2.]),
-        load_curve=np.zeros((2, 4), dtype=np.float32),
+        load_curve=np.zeros((2, 4), dtype=np.float32), audio=SimpleNamespace(duration_sec=2.),
     )
     condition = SimpleNamespace(to_vector=lambda: torch.ones(4))
     dataset = SimpleNamespace(
@@ -45,7 +45,7 @@ def test_blueprint_input_uses_song_start_descriptor_not_a_retained_item(monkeypa
     )
     descriptor_indexes = []
     monkeypatch.setattr(train, 'form_audio', lambda *_: torch.zeros((2, 3)))
-    monkeypatch.setattr(blueprint, 'build_blueprint_targets', lambda *_: {})
+    monkeypatch.setattr(blueprint, 'build_blueprint_targets', lambda *_a, **_kw: {})
     monkeypatch.setattr(curve, 'resample_load_curve', lambda _times, _values, frames: np.zeros((len(frames), 4), dtype=np.float32))
     monkeypatch.setattr('maichart.generation.event_audio.segment_frame_times', lambda *_: np.asarray([.5, 1.5]))
     monkeypatch.setattr(train, 'validate_cpu_batch', lambda _batch: None)

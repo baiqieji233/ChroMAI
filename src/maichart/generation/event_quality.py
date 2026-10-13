@@ -187,42 +187,36 @@ def parse_event_notes(
                 if duration is None:
                     continue
                 values = list(duration.values or [])
-                # `[delay##duration]`: a NEGATIVE DELAY is legitimate.  A chart
-                # needs blank space before its body, and when the audio has no
-                # lead-in the charter writes a negative delay so the chart moves
-                # earlier as a whole -- equivalent to prepending silent audio
-                # (see EventChart.time_offset / audio_segment_tensor).  Only the
-                # duration part has to be positive.
+                # Note-local waits do not change the chart's `first` clock.
+                # The judgement paths clamp a negative Slide wait to zero.
                 delay = values[0] if duration.kind == "timing_pair" and values else None
                 duration_values = values[1:] if duration.kind == "timing_pair" else values
                 if delay is not None and delay < 0:
                     result.warnings.append({
                         "code": "negative_delay", "point_index": index,
                         "beat": str(beat), "raw": note.raw, "delay": delay,
-                        "message": "Negative delay accepted: the chart starts before the audio; "
-                                   "the missing region is treated as silent audio.",
+                        "message": "Negative local wait accepted without changing the chart clock; "
+                                   "Slide judgement clamps this wait to zero.",
                     })
                 # Two idioms are legal in real maimai charts but used to reject the
                 # whole chart here:
                 #   * `[1:0]` (zero grid count) on a hold -- a placeholder, 158 uses
                 #     in this corpus, essentially all on holds and touch holds;
-                #   * a negative duration expression, which is how a charter shifts
-                #     a note (or the whole chart, when it leads) earlier in time.
-                # Neither changes where the note's head sits, which is all the
-                # training token stream encodes, so they are reported instead of
-                # fatal.  Only non-finite values still break the chart.
+                #   * a nonpositive local duration, retained as authored metadata.
+                # These do not change the head's clock; only non-finite values
+                # still break the chart here.
                 if duration.beats is not None and math.isfinite(float(duration.beats)) and duration.beats <= 0:
                     result.warnings.append({
                         "code": "zero_or_negative_grid_duration", "point_index": index,
                         "beat": str(beat), "raw": note.raw, "beats": str(duration.beats),
-                        "message": "Zero/negative grid duration accepted as a placeholder or time shift.",
+                        "message": "Zero/negative local grid duration retained; the head clock is unchanged.",
                     })
                 if (duration.seconds is not None and math.isfinite(duration.seconds)
                         and duration.seconds <= 0):
                     result.warnings.append({
                         "code": "zero_or_negative_seconds_duration", "point_index": index,
                         "beat": str(beat), "raw": note.raw, "seconds": duration.seconds,
-                        "message": "Zero/negative seconds duration accepted as a time shift.",
+                        "message": "Zero/negative local seconds duration retained; the head clock is unchanged.",
                     })
                 if (duration.beats is not None and not math.isfinite(float(duration.beats))
                         or duration.seconds is not None and not math.isfinite(duration.seconds)

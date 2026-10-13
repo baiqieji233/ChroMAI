@@ -190,6 +190,7 @@ def build_blueprint_targets(
     frame_times: Sequence[float] | torch.Tensor,
     *,
     sigma_seconds: float = 0.02,
+    frame_end_sec: float | None = None,
 ) -> dict[str, torch.Tensor]:
     """Map trusted authored notes onto a full-song frame clock.
 
@@ -209,6 +210,12 @@ def build_blueprint_targets(
         raise ValueError("frame_times must be nonempty and finite")
     if torch.any(times[1:] <= times[:-1]):
         raise ValueError("frame_times must be strictly increasing")
+    if frame_end_sec is None:
+        step = float(torch.median(times[1:] - times[:-1])) if times.numel() > 1 else 0.02
+        frame_end_sec = float(times[-1]) + step
+    frame_end_sec = float(frame_end_sec)
+    if not math.isfinite(frame_end_sec) or frame_end_sec <= float(times[-1]):
+        raise ValueError('frame_end_sec must be finite and after the last frame center')
     chart_points = tuple(EventPoint(p.beat, p.note_text) for p in points)
     tempo = tuple(tempo_changes)
     parsed = parse_event_notes(chart_points, tempo, first)
@@ -221,7 +228,7 @@ def build_blueprint_targets(
         grouped.setdefault(Fraction(note.beat), []).append(note)
     onset_times = [seconds_at_beat(beat, tempo, first) for beat in sorted(grouped)]
     in_range = [(beat, second) for beat, second in zip(sorted(grouped), onset_times)
-                if float(times[0]) <= second <= float(times[-1])]
+                if float(times[0]) <= second < frame_end_sec]
     in_range_beats = [item[0] for item in in_range]
     onset_times = [item[1] for item in in_range]
     onset_target = torch.zeros(times.shape, dtype=torch.float32)
