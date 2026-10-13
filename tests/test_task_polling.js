@@ -97,7 +97,13 @@ test("song-form task summaries distinguish batches from optimizer steps and repo
   assert.doesNotMatch(status.text, /全程 ETA/);
   const preparing = harness.trainingEpochStatus({kind: "form_train", status: "running", progress: 0,
     result: {phase: "prepare", progress_detail: {stage: "dataset"}}});
-  assert.match(preparing.text, /准备数据 · dataset/);
+  assert.match(preparing.text, /准备数据 · 读取数据集/);
+  const cached = harness.trainingEpochStatus({kind: "form_train", status: "running", progress: 0,
+    result: {phase: "prepare", progress_detail: {stage: "chart", charts: 84, completed_songs: 67,
+      total_songs: 1922, cache: "hit", preparation_cache: {hits: 84, rebuilt: 0, invalid: 0}}}});
+  assert.match(cached.text, /歌曲 67\/1922/);
+  assert.match(cached.text, /结构缓存：命中，直接复用/);
+  assert.match(cached.text, /结构缓存累计：命中 84 \/ 重建 0 \/ 损坏 0/);
 });
 
 test("network errors retain the watcher and schedule reconnect", async () => {

@@ -8,13 +8,25 @@ function trainingEpochStatus(task) {
     const phaseKey = detail.phase || result.phase;
     if (!phaseKey) return null;
     const phases = {prepare: "准备数据", blueprint: "全曲规划", layout_revision: "谱面配置训练", draft: "谱面草稿", revision: "谱面修订", saved: "保存检查点", checkpoint: "保存检查点", arrangement: "整理输出"};
-    const phase = `${phases[phaseKey] || String(phaseKey)}${detail.stage ? ` · ${detail.stage}` : ""}`;
+    const stages = {dataset: "读取数据集", preparation: "构建训练索引", chart: "准备谱面", ready: "数据准备完成"};
+    const phase = `${phases[phaseKey] || String(phaseKey)}${detail.stage ? ` · ${stages[detail.stage] || detail.stage}` : ""}`;
     const epoch = Number(detail.epoch), epochTarget = Number(result.epoch_target);
     const completed = Number(detail.completed), total = Number(detail.total);
     const phaseFraction = Number(detail.phase_fraction), runFraction = Number(detail.overall_fraction);
     const unit = detail.unit === "charts" ? "首" : detail.unit === "batches" ? "batch"
       : detail.unit === "optimizer_step" ? "优化器步" : detail.unit === "blueprint_step" ? "规划步" : "项";
     const parts = [];
+    if (phaseKey === "prepare") {
+      if (Number.isFinite(Number(detail.completed_songs)) && Number(detail.total_songs) > 0) {
+        parts.push(`歌曲 ${detail.completed_songs}/${detail.total_songs}`);
+      }
+      if (Number.isFinite(Number(detail.charts))) parts.push(`谱面 ${detail.charts} 张`);
+      if (detail.cache) parts.push(`结构缓存：${({hit: "命中，直接复用", rebuilt: "已重新构建", disabled: "未启用"})[detail.cache] || detail.cache}`);
+      const prepared = detail.preparation_cache;
+      if (prepared && prepared.enabled !== false) {
+        parts.push(`结构缓存累计：命中 ${prepared.hits ?? 0} / 重建 ${prepared.rebuilt ?? 0} / 损坏 ${prepared.invalid ?? 0}`);
+      }
+    }
     if (Number.isFinite(epoch) && epoch > 0) {
       const local = Number.isFinite(completed) && Number.isFinite(total) && total > 0
         ? ` · 当前阶段 ${unit} ${completed}/${total}` : "";

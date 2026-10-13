@@ -280,6 +280,7 @@
 </section>
 <section class="song-form-only" data-training-family="song_form_v1" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>
+<p class="workflow-hint">谱面准备结果会自动缓存到磁盘，重启后可复用。修改谱面、音频、质量标注或分段设置后会重新构建；下方缓存上限仅控制运行中的内存。</p>
 <div class="form-grid">
 <label class="field">数值精度<select id="formPrecision"><option value="auto">自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16，CPU 使用 FP32。</small></label>
 <label class="field">数据加载 worker<input id="formLoaderWorkers" type="number" min="0" max="64" value="0"><small>0 表示主进程加载；增加 worker 可并行读取批次。</small></label>
