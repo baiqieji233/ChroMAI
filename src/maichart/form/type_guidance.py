@@ -57,9 +57,10 @@ def _probabilities(cue):
     if values is None:
         return None
     values = np.asarray(values, dtype=np.float64)
-    if values.shape != (4,) or not np.isfinite(values).all() or (values < 0).any() or not values.sum():
+    if values.shape != (4,) or not np.isfinite(values).all() or (values < 0).any() or not (values > 0).any():
         raise ValueError('Blueprint type_probabilities must contain four finite nonnegative values')
-    return values / values.sum()
+    scaled = values / values.max()
+    return scaled / scaled.sum()
 
 
 class TypeGuidance:

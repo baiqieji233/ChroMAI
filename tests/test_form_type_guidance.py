@@ -142,3 +142,6 @@ def test_uniform_planner_cue_does_not_add_a_type_preference():
     guide = TypeGuidance(ATOMS, condition(), [{'beat': '0', 'type_probabilities': [.25]*4}],
                          planner_strength=1, style_strength=0)
     assert guide.event(F(0)).biases('1', [None, '-', 'h', '/']) == pytest.approx([0]*4)
+    huge = TypeGuidance(ATOMS, condition(), [{'beat': '0', 'type_probabilities': [1e308]*4}],
+                        planner_strength=1, style_strength=0)
+    assert huge.event(F(0)).biases('1', [None, '-', 'h', '/']) == pytest.approx([0]*4)

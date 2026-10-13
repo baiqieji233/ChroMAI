@@ -939,6 +939,14 @@
             <input id="temperature" type="number" min="0" step="0.05" value="0.65">
             <small data-generation-family="event_v1"><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。较低值会让抽样更集中，较高值会保留更多不确定性。</small>
             <small data-generation-family="song_form_v1" hidden>控制配置解码随机性，不改变全曲起音数或条件目标；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
+          </label>
+<label class="field" data-generation-family="song_form_v1">规划类型指导强度
+            <input id="formPlannerTypeStrength" type="number" min="0" max="3" step="0.1" value="1.0">
+            <small>仅用于 song_form_v1 自动生成。按 Planner 的 Tap / Hold / Slide / Touch 概率做有界软偏置，不会用 argmax 强制类型；0 关闭此项指导。</small>
+          </label>
+<label class="field" data-generation-family="song_form_v1">类型比例纠偏强度
+            <input id="formStyleBalanceStrength" type="number" min="0" max="3" step="0.1" value="1.0">
+            <small>仅用于 song_form_v1 自动生成。根据已生成 note 头与 Style 目标的差异做软纠偏，不设固定配额；0 关闭此项指导，两项均为 0 恢复原字符采样。较高值可能损害配置自然性或可玩性；默认 1.0 只是起点，尚未做质量校准。</small>
           </label></div>
 <details id="generationSamplingAdvanced" data-generation-family="event_v1 legacy_frame_v2" class="settings-section" data-advanced >
 <summary><span>采样与解码高级设置</span><small>Top-p、重复惩罚、条件强度与 token 预算</small>

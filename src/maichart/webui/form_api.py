@@ -275,6 +275,10 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'seed':effective_seed}
             for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
             if operation == 'generate':
+                planner_type_strength=number('planner_type_strength',1.0,0,3)
+                style_balance_strength=number('style_balance_strength',1.0,0,3)
+                args += ['--planner-type-strength',str(planner_type_strength),
+                         '--style-balance-strength',str(style_balance_strength)]
                 raw_divisions = payload.get('rhythm_snap_divisions', list(COMMON_DIVISIONS))
                 empty_divisions = raw_divisions == [] or (isinstance(raw_divisions, str) and not raw_divisions.strip())
                 if rhythm_snap_enabled and empty_divisions:
@@ -346,6 +350,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             task.result['dataset_selection'] = dataset_selection
     elif operation == 'generate':
         task.result.update(seed=values['seed'],effective_settings={'seed':values['seed'],'temperature':values['temperature'],
+                            'planner_type_strength':planner_type_strength,
+                            'style_balance_strength':style_balance_strength,
                             'rhythm_snap_enabled':rhythm_snap_enabled,
                             'rhythm_snap_ms':number('rhythm_snap_ms',15,0,50),
                             'rhythm_snap_divisions':list(divisions)})

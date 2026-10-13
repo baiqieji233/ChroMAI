@@ -271,6 +271,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
         "checkpoint": str(checkpoint), "audio": str(audio),
         "output": str(tmp_path / "out.txt"), "onset_merge_ms": 55.6,
         "first": first,
+        "planner_type_strength": 3, "style_balance_strength": 0,
         "rhythm_snap_enabled": True, "rhythm_snap_ms": 8,
         "rhythm_snap_divisions": [64, 48, 64],
     }, runtime=Runtime())
@@ -278,6 +279,8 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert args[args.index("--first") + 1] == str(first)
     assert args[args.index("--device") + 1] == "cpu"
     assert args[args.index("--onset-merge-ms") + 1] == "55.6"
+    assert args[args.index("--planner-type-strength") + 1] == "3.0"
+    assert args[args.index("--style-balance-strength") + 1] == "0.0"
     assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
     assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"
     assert "--rhythm-snap" in args
@@ -285,6 +288,8 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert tasks[0].result["seed"] == 123456
     assert tasks[0].result["effective_settings"]["seed"] == 123456
     assert tasks[0].result["effective_settings"]["temperature"] == 0.7
+    assert tasks[0].result["effective_settings"]["planner_type_strength"] == 3
+    assert tasks[0].result["effective_settings"]["style_balance_strength"] == 0
     fixed = form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "fixed.txt"),
         "seed": 42,
@@ -292,6 +297,10 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert fixed["task_id"] == "onset-merge-1"
     assert calls[1][calls[1].index("--seed") + 1] == "42"
     assert tasks[1].result["effective_settings"]["seed"] == 42
+    assert calls[1][calls[1].index("--planner-type-strength") + 1] == "1.0"
+    assert calls[1][calls[1].index("--style-balance-strength") + 1] == "1.0"
+    assert tasks[1].result["effective_settings"]["planner_type_strength"] == 1.0
+    assert tasks[1].result["effective_settings"]["style_balance_strength"] == 1.0
     form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "zero.txt"),
         "seed": 0,
@@ -310,6 +319,32 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
                 "output": str(tmp_path / "bad-divisions.txt"),
                 "rhythm_snap_enabled": True, "rhythm_snap_divisions": invalid,
             }, runtime=Runtime())
+
+
+@pytest.mark.parametrize("field", ["planner_type_strength", "style_balance_strength"])
+@pytest.mark.parametrize("value", [-0.1, 3.1, float("nan"), True])
+def test_generation_type_guidance_strengths_are_bounded_before_task_creation(monkeypatch, tmp_path, field, value):
+    checkpoint = tmp_path / "form.pt"
+    audio = tmp_path / "song.wav"
+    checkpoint.write_bytes(b"checkpoint")
+    audio.write_bytes(b"audio")
+    from maichart.form import checkpoint as form_checkpoint
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    created = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            created.append(kind)
+            return TaskState(task_id="invalid-guidance", kind=kind)
+
+    with pytest.raises(ValueError):
+        form_api.start_form_task(_Response(), "generate", {
+            "checkpoint": str(checkpoint), "audio": str(audio),
+            "output": str(tmp_path / "out.txt"), field: value,
+        }, runtime=Runtime())
+    assert created == []
 
 
 def test_revision_rejects_rhythm_snap_request_before_task_creation(tmp_path):

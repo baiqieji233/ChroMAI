@@ -83,6 +83,38 @@ test("main song-form generation payload forwards the onset merge range", () => {
   assert.equal(payload.device, "auto");
 });
 
+test("main song-form generation payload forwards both type guidance strengths", () => {
+  const begin = source.indexOf("function songFormGenerationPayload() {");
+  const end = source.indexOf("function generationPayload()", begin);
+  const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
+    "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
+    source.slice(begin, end) + "; return songFormGenerationPayload();");
+  const payload = build((selector, fallback) => ({
+    "#formPlannerTypeStrength": "2.4", "#formStyleBalanceStrength": "0",
+  }[selector] ?? fallback), (_selector, fallback) => fallback, () => ({}), () => "auto",
+  () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
+  assert.equal(payload.planner_type_strength, 2.4);
+  assert.equal(payload.style_balance_strength, 0);
+
+  const defaults = build((_selector, fallback) => fallback, (_selector, fallback) => fallback,
+    () => ({}), () => "auto", () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
+  assert.equal(defaults.planner_type_strength, 1.0);
+  assert.equal(defaults.style_balance_strength, 1.0);
+});
+
+test("legacy event generation payload does not include song-form type guidance", () => {
+  const begin = source.indexOf("function generationPayload() {");
+  const end = source.indexOf("function ", begin + 12);
+  const build = new Function("currentModelFamily", "songFormGenerationPayload", "collectCondition",
+    "valueOrDefault", "datasetPaths", "element", "checkedOrDefault", "intensityCurvePayload", "parseTempoMap",
+    source.slice(begin, end) + "; return generationPayload();");
+  const payload = build(() => "event_v1", () => ({}), () => ({level: 13.3}),
+    (_selector, fallback) => fallback, () => ({manifest: "manifest.json"}), () => ({value: ""}),
+    (_selector, fallback) => fallback, () => null, () => null);
+  assert.equal(payload.planner_type_strength, undefined);
+  assert.equal(payload.style_balance_strength, undefined);
+});
+
 test("shared formDevice leaves auto for backend hardware detection", () => {
   const begin = source.indexOf("function formDevice(selector) {");
   const end = source.indexOf("function songFormRhythmSnapDivisions", begin);

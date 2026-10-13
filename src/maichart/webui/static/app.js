@@ -1143,6 +1143,8 @@ function songFormGenerationPayload() {
     rhythm_snap_enabled: checkedOrDefault("#formRhythmSnapEnabled", false),
     rhythm_snap_ms: Number(valueOrDefault("#formRhythmSnapMs", 15)),
     rhythm_snap_divisions: songFormRhythmSnapDivisions(checkedOrDefault("#formRhythmSnapEnabled", false)),
+    planner_type_strength: Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),
+    style_balance_strength: Number(valueOrDefault("#formStyleBalanceStrength", 1.0)),
     temperature: Number(valueOrDefault("#temperature", .65)), seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
 }
 function generationPayload() {
