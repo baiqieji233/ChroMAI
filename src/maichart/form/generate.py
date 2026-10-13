@@ -90,10 +90,14 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
 
 def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_curve=None,
                 intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
-                onset_merge_ms=40.):
+                onset_merge_ms=40.,rhythm_snap_enabled=False,rhythm_snap_ms=15.,
+                rhythm_snap_divisions=(4,8,12,16,24,32)):
     """One song-wide neural prediction, before any arrangement chunks exist."""
     if not 0<threshold<1: raise ValueError('onset threshold must be in (0,1)')
     merge_close_onsets([], onset_merge_ms)
+    from maichart.form.rhythm_snap import validate_snap_ms, approximate_onsets, normalize_divisions
+    validate_snap_ms(rhythm_snap_ms)
+    rhythm_snap_divisions = normalize_divisions(rhythm_snap_divisions)
     audio=form_audio(song,song.spans[0].start,song.spans[-1].end)
     example=input_example(song,0,[],condition=condition)
     with torch.inference_mode():
@@ -135,6 +139,15 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
                  'quantization_duplicates':candidate_count-len(before),
                  'suppressed_close_onsets':len(before)-len(onsets),
                  'before_merge':interval_statistics(before),'after_merge':interval_statistics(onsets)}
+    if rhythm_snap_enabled:
+        onsets, selection['rhythm_snap'] = approximate_onsets(onsets,song.tempo,song.first,
+            tolerance_ms=rhythm_snap_ms,min_interval_ms=onset_merge_ms,end_beat=song.spans[-1].end,
+            duration_sec=song.audio.duration_sec,
+            rest_regions=(intensity_curve or {}).get('rest_regions', []),divisions=rhythm_snap_divisions)
+        selection['after_rhythm_snap'] = interval_statistics(onsets)
+        print('form_rhythm_snap '+json.dumps(selection['rhythm_snap']),flush=True)
+    else:
+        selection['rhythm_snap'] = {'enabled':False}
     print('form_onsets '+json.dumps(selection), flush=True)
     return {'schema':'maichart-full-song-blueprint-v1','onsets':onsets,'selection':selection,
             'threshold':threshold,'frame_seconds':.02,'musical_units':'whole_song',
@@ -204,12 +217,15 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
 
 def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memory_strength=1.,temperature=.7,seed=0,device='cpu',blueprint=None,
                    intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
-                   onset_merge_ms=40.):
+                   onset_merge_ms=40.,rhythm_snap_enabled=False,rhythm_snap_ms=15.,
+                   rhythm_snap_divisions=(4,8,12,16,24,32)):
     blueprint=blueprint or plan_onsets(planner,song,condition,threshold=threshold,device=device,
                                        intensity_curve=intensity_curve,
                                        intensity_curve_strength=intensity_curve_strength,
                                        intensity_curve_span=intensity_curve_span,
-                                       intensity_curve_mode=intensity_curve_mode,onset_merge_ms=onset_merge_ms)
+                                       intensity_curve_mode=intensity_curve_mode,onset_merge_ms=onset_merge_ms,
+                                       rhythm_snap_enabled=rhythm_snap_enabled,rhythm_snap_ms=rhythm_snap_ms,
+                                       rhythm_snap_divisions=rhythm_snap_divisions)
     onsets=[Fraction(item['beat']) for item in blueprint['onsets']]
     if onsets!=sorted(set(onsets)): raise ValueError('Blueprint beats must be sorted and unique')
     accepted=[];records=[]

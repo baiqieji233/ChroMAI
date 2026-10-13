@@ -47,6 +47,9 @@ def parser():
     p.add_argument('--memory-strength',type=float,default=1.);p.add_argument('--onset-threshold',type=float,default=.5)
     p.add_argument('--onset-merge-ms',type=float,default=40.,
                    help='keep the strongest onset within this many milliseconds; 0 disables merging')
+    p.add_argument('--rhythm-snap',action='store_true',help='approximate nearby onsets to common musical grids')
+    p.add_argument('--rhythm-snap-ms',type=float,default=15.,help='maximum approximation shift in milliseconds')
+    p.add_argument('--rhythm-snap-divisions',default='4,8,12,16,24,32',help='comma-separated allowed musical divisions')
     p.add_argument('--temperature',type=float,default=.7);p.add_argument('--seed',type=int,default=0)
     p.add_argument('--condition-file',help='JSON GenerationCondition for Radar/Style controls')
     p.add_argument('--intensity-curve-file',help='Saved song-form intensity curve JSON')
@@ -75,6 +78,11 @@ def main(argv=None):
     args=parser().parse_args(argv)
     from maichart.form.onset_selection import merge_close_onsets
     merge_close_onsets([], args.onset_merge_ms)
+    from maichart.form.rhythm_snap import validate_snap_ms, normalize_divisions
+    validate_snap_ms(args.rhythm_snap_ms)
+    rhythm_snap_divisions = normalize_divisions(args.rhythm_snap_divisions)
+    if args.rhythm_snap and args.operation != 'generate':
+        raise ValueError('Rhythm approximation applies only to automatic generation, not source-chart revision')
     audio=extract_event_audio(args.audio,cache_dir=args.cache_dir)
     structure=_json(args.structure_file) or {}
     meters=_json(args.meter_map) or structure.get('meter_map')
@@ -120,6 +128,8 @@ def main(argv=None):
     if args.operation=='generate':
         points,generated=generate_chart(model,planner,codec,song,condition,payload['atom_catalog'],
             threshold=args.onset_threshold,memory_strength=args.memory_strength,onset_merge_ms=args.onset_merge_ms,
+            rhythm_snap_enabled=args.rhythm_snap,rhythm_snap_ms=args.rhythm_snap_ms,
+            rhythm_snap_divisions=rhythm_snap_divisions,
             temperature=args.temperature,seed=args.seed,device=args.device,
             intensity_curve=intensity_curve,
             intensity_curve_strength=args.intensity_curve_strength,
