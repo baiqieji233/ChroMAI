@@ -303,6 +303,24 @@ def relation_target(target, reference, span):
     return torch.tensor([float(np.dot(x,y)/(max(np.linalg.norm(x)*np.linalg.norm(y),1e-8))) for x,y in zip(a,b)])
 
 
+def _preparation_annotation(annotations, source, slot, audio_path, cache):
+    if not annotations:
+        return None
+    from maichart.training.quality_annotations import chart_sha256, audio_sha256, validate_record
+    chart_hash = chart_sha256(source, slot)
+    audio_hash = None
+    for record in annotations.get('records', []):
+        if int(record.get('difficulty_index', -1)) != slot or record.get('chart_sha256') != chart_hash:
+            continue
+        if record.get('audio_sha256'):
+            if audio_hash is None:
+                audio_hash = cache.file_digest(audio_path) if cache else audio_sha256(audio_path)
+            if record['audio_sha256'] != audio_hash:
+                continue
+        return validate_record(record)
+    return None
+
+
 def _prepare_form_entry(entry, options, annotations, audio_store):
     path = options['manifest']
     data = options['source_data']
@@ -323,21 +341,24 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
                 continue
             source = _source_asset(entry['maidata_path'], path, data)
             audio_path = _source_asset(entry['audio_path'], path, data)
+            cache = options.get('preparation_cache')
+            record = _preparation_annotation(annotations, source, slot, audio_path, cache)
+            cache_key = cache_identity = None
+            cache_status = 'disabled'
+            if cache is not None:
+                cache_key, cache_identity = cache.identity(source, audio_path, slot, level, record, options)
+                cached, cache_status = cache.load(cache_key, cache_identity)
+                if cached is not None:
+                    cached['cache'] = 'hit'
+                    results[-1] = cached
+                    accepted += 1
+                    continue
             original = parse_event_chart(source, slot)
             filtered = sanitize_chart(original)
             chart = filtered.chart
             inspect_chart(chart)
             if filtered.removed:
                 result['filtered'].append({'source': str(source), 'difficulty': slot, **filtered.to_dict()})
-            record = None
-            if annotations:
-                from maichart.training.quality_annotations import resolve_annotation
-                for candidate in annotations.get('records', []):
-                    if int(candidate.get('difficulty_index', -1)) == slot:
-                        resolved = resolve_annotation(candidate, source, chart, slot, audio_path)
-                        if resolved:
-                            record = resolved
-                            break
             if record and (record.get('label') in ('excluded', 'negative') or float(record.get('weight', 1)) <= 0):
                 result['skipped'].append({'source': str(source), 'reason': 'quality_excluded_or_negative'})
                 continue
@@ -385,6 +406,13 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
                        'chart_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
                        'audio_sha256': (audio.metadata or {}).get('audio_sha256'),
                        'meter_map': [m.to_dict() for m in song.meters], 'quality': record, 'weight': weight})
+            if cache is not None:
+                warning = cache.save(cache_key, cache_identity, result)
+                result.update(cache='rebuilt', cache_reason=cache_status)
+                if warning:
+                    result['cache_warning'] = warning
+            else:
+                result['cache'] = 'disabled'
             accepted += 1
         except (OSError, ValueError, KeyError) as error:
             result['skipped'].append({'song': entry.get('song_id'), 'difficulty': slot, 'reason': str(error)})
@@ -455,13 +483,19 @@ class FormDataset(Dataset):
         workers = max(1, min(workers, len(entries), os.cpu_count() or 1))
         if audio_loader is not extract_event_audio:
             workers = 1
+        preparation_cache = None
+        if audio_loader is extract_event_audio:
+            from maichart.form.preparation_cache import PreparationCache
+            preparation_cache = PreparationCache(cache_dir)
         options = dict(manifest=path, source_data={'source_root': data.get('source_root')}, cache_dir=cache_dir,
             max_tokens=max_tokens, meters=meters, limit_charts=limit_charts, reconstruction=reconstruction,
             min_level=min_level, max_level=max_level, min_difficulty_index=min_difficulty_index,
-            max_difficulty_index=max_difficulty_index, max_region_seconds=max_region_seconds)
+            max_difficulty_index=max_difficulty_index, max_region_seconds=max_region_seconds,
+            preparation_cache=preparation_cache)
         started = time.monotonic()
         print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,
             'total_songs':len(entries),'completed_songs':0,'charts':0,
+            'preparation_cache':preparation_cache.stats() if preparation_cache else {'enabled':False},
             'custom_audio_loader':audio_loader is not extract_event_audio}),flush=True)
         prepared = _ordered_form_preparation(entries, options, annotations, self.audio_store, workers)
         try:
@@ -471,6 +505,9 @@ class FormDataset(Dataset):
                         break
                     self.audit['skipped'].extend(result['skipped'])
                     self.audit['filtered'].extend(result['filtered'])
+                    if result.get('cache_warning'):
+                        print('form_warning '+json.dumps({'message':'Preparation cache could not be saved; training continues.',
+                            'detail':result['cache_warning']},ensure_ascii=False),flush=True)
                     for filtered in result['filtered']:
                         print(f'form_chart_filter source={filtered["source"]} removed={filtered["removed_count"]}',flush=True)
                     if 'song' not in result:
@@ -485,14 +522,21 @@ class FormDataset(Dataset):
                     print('form_prepare '+json.dumps({'stage':'chart','charts':len(self.songs),
                         'source':result['chart']['source'],'difficulty':result['chart']['difficulty'],'spans':len(song.spans),
                         'workers':workers,'completed_songs':completed,'total_songs':len(entries),
+                        'cache':result.get('cache','disabled'),'cache_reason':result.get('cache_reason'),
                         'elapsed_sec':round(time.monotonic()-started,2)},ensure_ascii=False),flush=True)
                 if completed % 25 == 0:
                     print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,
-                        'completed_songs':completed,'total_songs':len(entries),'charts':len(self.songs)}),flush=True)
+                        'completed_songs':completed,'total_songs':len(entries),'charts':len(self.songs),
+                        'preparation_cache':preparation_cache.stats() if preparation_cache else {'enabled':False}}),flush=True)
                 if limit_charts and len(self.songs) >= limit_charts:
                     break
         finally:
             prepared.close()
+        self.preparation_cache_stats = preparation_cache.stats() if preparation_cache else {'enabled':False}
+        self.audit['preparation_cache'] = self.preparation_cache_stats
+        print('form_prepare '+json.dumps({'stage':'ready','charts':len(self.songs),'examples':len(self.items),
+            'preparation_cache':self.preparation_cache_stats,
+            'elapsed_sec':round(time.monotonic()-started,2)},ensure_ascii=False),flush=True)
         if not self.items: raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
 
     def __len__(self): return len(self.items)
