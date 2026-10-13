@@ -170,14 +170,14 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
                 'Broad types and durations are provisional cues; actual layout is decoded separately.']}
 
 
-def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0,device='cpu'):
+def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0,device='cpu',type_guidance=None):
     """Arrange the given whole-song skeleton without redeciding each chunk's rhythm.
 
     Exact position tokens are forced from the blueprint; the model composes
     note atoms. At token budget, return a continuation point without changing
     the musical segment or asking the planner to invent a new rhythm.
     """
-    grammar=_NoteGrammar.from_atoms(atoms)
+    grammar=type_guidance.grammar if type_guidance is not None else _NoteGrammar.from_atoms(atoms)
     batch=to_device(collate_form([example]),device)
     rng=torch.Generator(device=device).manual_seed(seed)
     max_tokens=model.config.max_tokens
@@ -194,6 +194,7 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                 consumed+=1
             return logits[0,-1]
         for beat in onsets:
+            event_bias = type_guidance.event(beat) if type_guidance is not None else None
             header=codec.position(beat-origin)
             if len(ids)+len(header)+4>=max_tokens: break
             ids.extend(header);text=''
@@ -211,13 +212,18 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                 else:
                     logits=next_logits()
                     values=logits[allowed]
+                    if event_bias is not None:
+                        biases=event_bias.biases(text,[None if token==codec.end_id else codec.tokens[token][2:] for token in allowed])
+                        values=values+torch.as_tensor(biases,device=values.device,dtype=values.dtype)
                     if temperature<=0: token=allowed[int(values.argmax())]
                     else:
                         probabilities=torch.softmax(values/temperature,dim=-1)
                         token=allowed[int(torch.multinomial(probabilities,1,generator=rng))]
                 ids.append(token)
                 if token==codec.end_id:
-                    points.append(EventPoint(beat,text));break
+                    points.append(EventPoint(beat,text))
+                    if type_guidance is not None: type_guidance.commit(text,beat)
+                    break
                 text+=codec.tokens[token][2:]
             else:
                 # Undertrained checkpoints may keep emitting a partial atom.
@@ -226,13 +232,18 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                 fallback = next((candidate for _, candidate in chars
                                  if grammar.can_continue(candidate) and grammar.is_complete(candidate)), None)
                 points.append(EventPoint(beat, fallback or '1')); fallbacks += 1
+                if type_guidance is not None: type_guidance.commit(fallback or '1',beat)
     return points, fallbacks
 
 
 def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memory_strength=1.,temperature=.7,seed=0,device='cpu',blueprint=None,
                    intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
                    onset_merge_ms=40.,rhythm_snap_enabled=False,rhythm_snap_ms=15.,
-                   rhythm_snap_divisions=(4,8,12,16,24,32)):
+                   rhythm_snap_divisions=(4,8,12,16,24,32),
+                   planner_type_strength=1.,style_balance_strength=1.):
+    from maichart.form.type_guidance import TypeGuidance,validate_strength
+    planner_type_strength=validate_strength(planner_type_strength,'planner_type_strength')
+    style_balance_strength=validate_strength(style_balance_strength,'style_balance_strength')
     blueprint=blueprint or plan_onsets(planner,song,condition,threshold=threshold,device=device,
                                        intensity_curve=intensity_curve,
                                        intensity_curve_strength=intensity_curve_strength,
@@ -242,6 +253,9 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                                        rhythm_snap_divisions=rhythm_snap_divisions)
     onsets=[Fraction(item['beat']) for item in blueprint['onsets']]
     if onsets!=sorted(set(onsets)): raise ValueError('Blueprint beats must be sorted and unique')
+    type_guidance = TypeGuidance(atoms,condition,blueprint['onsets'],
+        planner_strength=planner_type_strength,style_strength=style_balance_strength) if (
+        planner_type_strength or style_balance_strength) else None
     accepted=[];records=[]
     for span in song.spans:
         desired=[b for b in onsets if span.start<=b<span.end]
@@ -271,7 +285,7 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                 example['skeleton']=torch.tensor(codec.bounded_memory(future,origin=current.start,
                     max_tokens=model.config.max_memory_tokens,newest=False))
                 generated, fallback_count=arrange_span(model,codec,example,desired,atoms,origin=current.start,
-                    temperature=temperature,seed=seed+span.index*1009+passes,device=device)
+                    temperature=temperature,seed=seed+span.index*1009+passes,device=device,type_guidance=type_guidance)
             finally: song.spans=source_spans
             if not generated: raise ValueError('Decoder made no progress within the configured token budget')
             span_fallbacks += fallback_count
@@ -283,6 +297,10 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
     if not accepted: raise ValueError('Whole-song planner selected no onsets; inspect the plan before adjusting threshold')
     quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
     if not quality.get('syntax_valid'): raise ValueError('New-model output failed exact syntax verification')
+    type_report=type_guidance.report() if type_guidance is not None else {
+        'schema':'song_form_type_guidance_v1','applied':False,
+        'planner_type_strength':0.,'style_balance_strength':0.,'hard_quota':False}
+    print('form_type_guidance '+json.dumps(type_report),flush=True)
     curve_report = None
     if intensity_curve is not None:
         curve_report = {
@@ -298,7 +316,7 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
     return accepted,{'blueprint':blueprint,'arrangement':records,'quality':quality,
                      'decoder_fallbacks':sum(int(record.get('decoder_fallbacks',0)) for record in records),
                      'memory_strength':memory_strength,
-                     'intensity_curve':curve_report}
+                     'intensity_curve':curve_report,'type_guidance':type_report}
 
 
 def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu',seed=0,temperature=.5,max_checks=8,memory_strength=1.):

@@ -16,13 +16,17 @@ def test_generation_report_records_actual_vector_and_decoder_values(tmp_path,mon
                'atom_catalog':['1']}
     model = SimpleNamespace(config=SimpleNamespace(max_tokens=2048,max_memory_tokens=512))
     monkeypatch.setattr(checkpoint,'load',lambda *_a,**_kw:(model,None,RationalCodec(),payload))
-    monkeypatch.setattr(generate,'generate_chart',lambda *_a,**_kw:([EventPoint(F(1),'1')],{}))
+    received = {}
+    def fake_generate(*_args, **kwargs):
+        received.update(kwargs)
+        return [EventPoint(F(1),'1')], {}
+    monkeypatch.setattr(generate,'generate_chart',fake_generate)
     condition = tmp_path/'condition.json'
     condition.write_text(json.dumps({'level':14.5,'radar':{'note_density':.35},'style':{'slide_bias':.2}}))
     output = tmp_path/'maidata.txt'
     cli.main(['generate','--audio','fixture.wav','--output',str(output),'--checkpoint','fixture.pt',
               '--bpm','120','--level','13.3','--condition-file',str(condition),
-              '--temperature','.2','--seed','42'])
+              '--temperature','.2','--seed','42','--planner-type-strength','1.5','--style-balance-strength','0'])
     report = json.loads(output.with_suffix('.form.json').read_text())
     effective = report['effective_generation_settings']
     assert effective['temperature'] == .2 and effective['seed'] == 42
@@ -32,4 +36,6 @@ def test_generation_report_records_actual_vector_and_decoder_values(tmp_path,mon
     assert abs(effective['condition_vector'][0]-14.5/15) < 1e-6
     assert effective['condition_vector_dtype'] == 'float32'
     assert effective['condition_vector_level_divisor'] == 15.0
+    assert effective['planner_type_strength'] == received['planner_type_strength'] == 1.5
+    assert effective['style_balance_strength'] == received['style_balance_strength'] == 0
     assert parse_event_chart(output,5).level == '14.5'

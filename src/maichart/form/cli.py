@@ -51,6 +51,8 @@ def parser():
     p.add_argument('--rhythm-snap-ms',type=float,default=15.,help='maximum approximation shift in milliseconds')
     p.add_argument('--rhythm-snap-divisions',default='4,8,12,16,24,32',help='comma-separated allowed musical divisions')
     p.add_argument('--temperature',type=float,default=.7);p.add_argument('--seed',type=int,default=0)
+    p.add_argument('--planner-type-strength',type=float,default=1.,help='bounded soft planner type guidance; 0 disables it')
+    p.add_argument('--style-balance-strength',type=float,default=1.,help='bounded note-head share feedback; 0 disables it')
     p.add_argument('--condition-file',help='JSON GenerationCondition for Radar/Style controls')
     p.add_argument('--intensity-curve-file',help='Saved song-form intensity curve JSON')
     p.add_argument('--intensity-curve-strength',type=float,default=1.0)
@@ -78,6 +80,9 @@ def analysis_report(song):
 
 def main(argv=None):
     args=parser().parse_args(argv)
+    from maichart.form.type_guidance import validate_strength
+    validate_strength(args.planner_type_strength,'planner_type_strength')
+    validate_strength(args.style_balance_strength,'style_balance_strength')
     from maichart.form.onset_selection import merge_close_onsets
     merge_close_onsets([], args.onset_merge_ms)
     from maichart.form.rhythm_snap import validate_snap_ms, normalize_divisions
@@ -122,6 +127,8 @@ def main(argv=None):
         'operation':args.operation,'level':condition.level,'temperature':args.temperature,'seed':args.seed,
         'device':args.device,'onset_threshold':args.onset_threshold,'onset_merge_ms':args.onset_merge_ms,
         'memory_strength':args.memory_strength,'max_region_seconds':args.max_region_seconds,
+        'planner_type_strength':args.planner_type_strength if args.operation=='generate' else 0.,
+        'style_balance_strength':args.style_balance_strength if args.operation=='generate' else 0.,
         'rhythm_snap_enabled':args.rhythm_snap,'rhythm_snap_ms':args.rhythm_snap_ms,
         'rhythm_snap_divisions':list(rhythm_snap_divisions),
         'intensity_curve_enabled':bool(args.intensity_curve_file),
@@ -152,6 +159,7 @@ def main(argv=None):
             threshold=args.onset_threshold,memory_strength=args.memory_strength,onset_merge_ms=args.onset_merge_ms,
             rhythm_snap_enabled=args.rhythm_snap,rhythm_snap_ms=args.rhythm_snap_ms,
             rhythm_snap_divisions=rhythm_snap_divisions,
+            planner_type_strength=args.planner_type_strength,style_balance_strength=args.style_balance_strength,
             temperature=args.temperature,seed=args.seed,device=args.device,
             intensity_curve=intensity_curve,
             intensity_curve_strength=args.intensity_curve_strength,
