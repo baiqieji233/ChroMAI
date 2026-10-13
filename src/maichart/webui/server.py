@@ -1541,9 +1541,15 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("任务不存在")
         process = task.process
         if process is not None and process.poll() is None:
-            process.terminate()
+            from maichart.webui.subprocess_control import terminate_task_process
+            previous_status = task.status
             task.status = "cancelled"
             task.message = "已请求中断"
+            try:
+                terminate_task_process(process)
+            except Exception:
+                task.status = previous_status
+                raise
         self._json_response(task.to_dict())
 
     def _upload(self) -> None:
@@ -1686,6 +1692,7 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 text=True,
                 encoding="utf-8",
                 bufsize=1,
+                start_new_session=os.name != 'nt',
             )
             task.process = process
             assert process.stdout is not None
