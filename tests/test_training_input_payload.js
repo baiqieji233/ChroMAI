@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 const test = require("node:test");
 const source = fs.readFileSync(path.join(__dirname, "../src/maichart/webui/static/app.js"), "utf8");
+const html = fs.readFileSync(path.join(__dirname, "../src/maichart/webui/static/index.html"), "utf8");
 const begin = source.indexOf("function trainingPayload(options = {}) {");
 const end = source.indexOf("function collectValues(", begin);
 assert.ok(begin >= 0 && end > begin);
@@ -74,9 +75,55 @@ test("main song-form generation payload forwards the onset merge range", () => {
   const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
     "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
     source.slice(begin, end) + "; return songFormGenerationPayload();");
-  const payload = build((selector, fallback) => selector === "#formOnsetMergeMs" ? "0" : fallback,
-    (_selector, fallback) => fallback, () => ({}), () => "cpu", () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
+  const payload = build((selector, fallback) => ({"#formOnsetMergeMs": "0", "#temperature": "0.2", "#seed": ""}[selector] ?? fallback),
+    (_selector, fallback) => fallback, () => ({}), () => "auto", () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
   assert.equal(payload.onset_merge_ms, 0);
+  assert.equal(payload.temperature, 0.2);
+  assert.equal(payload.seed, null);
+  assert.equal(payload.device, "auto");
+});
+
+test("shared formDevice leaves auto for backend hardware detection", () => {
+  const begin = source.indexOf("function formDevice(selector) {");
+  const end = source.indexOf("function songFormRhythmSnapDivisions", begin);
+  const formDevice = new Function("valueOrDefault", source.slice(begin, end) + "; return formDevice;")(
+    (_selector, fallback) => fallback);
+  assert.equal(formDevice("#generationDevice"), "auto");
+});
+
+test("candidate count is hidden outside event and legacy generation", () => {
+  assert.match(html, /class="field" data-generation-family="event_v1 legacy_frame_v2">候选数量/);
+});
+
+test("song-form curve restrictions reset unsupported saved values and restore event options", () => {
+  const begin = source.indexOf("function updateSongFormGenerationOptions() {");
+  const end = source.indexOf("function updateFamilyFields()", begin);
+  const curveMode = {options: ["follow", "hard", "soft", "strict"].map(value => ({value, textContent: value})), value: "soft",
+    querySelector: selector => selector.includes("hard") ? curveMode.options.find(option => option.value === "hard") : null};
+  const audioOption = {disabled: false};
+  const curveSource = {value: "audio", querySelector: () => audioOption};
+  let family = "song_form_v1", saves = 0;
+  const apply = new Function("currentGenerationFamily", "element", "saveSettings",
+    "songFormCurveSourceBeforeRestriction", "songFormCurveModeBeforeRestriction", "songFormCurveRestrictionsActive",
+    source.slice(begin, end) + "; return updateSongFormGenerationOptions;")(
+      () => family, selector => selector === "#intensityCurveMode" ? curveMode
+        : selector === "#intensityCurveSource" ? curveSource : null,
+      () => { saves += 1; }, null, null, false);
+  apply();
+  assert.equal(curveMode.value, "follow");
+  assert.equal(curveMode.options.find(option => option.value === "soft").disabled, true);
+  assert.equal(curveMode.options.find(option => option.value === "strict").disabled, true);
+  assert.equal(curveMode.options.find(option => option.value === "hard").textContent, "hard（放宽幅度裁剪）");
+  assert.equal(curveSource.value, "model");
+  assert.equal(audioOption.disabled, true);
+  family = "event_v1";
+  apply();
+  assert.equal(curveMode.value, "soft");
+  assert.equal(curveMode.options.find(option => option.value === "soft").disabled, false);
+  assert.equal(curveMode.options.find(option => option.value === "hard").textContent, "hard（严苛跟随）");
+  assert.equal(curveSource.value, "audio");
+  assert.equal(audioOption.disabled, false);
+  assert.equal(saves, 3);
 });
 
 test("main song-form rhythm snapping defaults off and forwards its tolerance", () => {

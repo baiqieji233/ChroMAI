@@ -253,12 +253,18 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     audio.write_bytes(b"audio")
     from maichart.form import checkpoint as form_checkpoint
     monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
+    monkeypatch.setattr(form_api.secrets, "randbelow", lambda upper: 123456)
     calls = []
+    tasks = []
 
     class Runtime:
         WEBUI_ROOT = tmp_path
         def _resolve_path(self, value): return Path(value)
-        def _create_task(self, kind): return TaskState(task_id="onset-merge", kind=kind)
+        def _create_task(self, kind):
+            task = TaskState(task_id=f"onset-merge-{len(tasks)}", kind=kind)
+            tasks.append(task)
+            return task
         def _run_subprocess_task(self, task, args, **kwargs): calls.append(args)
 
     form_api.start_form_task(_Response(), "generate", {
@@ -270,10 +276,28 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     }, runtime=Runtime())
     args = calls[0]
     assert args[args.index("--first") + 1] == str(first)
+    assert args[args.index("--device") + 1] == "cpu"
     assert args[args.index("--onset-merge-ms") + 1] == "55.6"
     assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
     assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"
     assert "--rhythm-snap" in args
+    assert args[args.index("--seed") + 1] == "123456"
+    assert tasks[0].result["seed"] == 123456
+    assert tasks[0].result["effective_settings"]["seed"] == 123456
+    assert tasks[0].result["effective_settings"]["temperature"] == 0.7
+    fixed = form_api.start_form_task(_Response(), "generate", {
+        "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "fixed.txt"),
+        "seed": 42,
+    }, runtime=Runtime())
+    assert fixed["task_id"] == "onset-merge-1"
+    assert calls[1][calls[1].index("--seed") + 1] == "42"
+    assert tasks[1].result["effective_settings"]["seed"] == 42
+    form_api.start_form_task(_Response(), "generate", {
+        "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "zero.txt"),
+        "seed": 0,
+    }, runtime=Runtime())
+    assert calls[2][calls[2].index("--seed") + 1] == "0"
+    assert tasks[2].result["effective_settings"]["seed"] == 0
     with pytest.raises(ValueError, match="onset_merge_ms out of range"):
         form_api.start_form_task(_Response(), "generate", {
             "checkpoint": str(checkpoint), "audio": str(audio),

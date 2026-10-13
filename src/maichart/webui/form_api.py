@@ -5,6 +5,7 @@ from fractions import Fraction
 import json
 import math
 from pathlib import Path
+import secrets
 
 from maichart.form.timing import normalize_meter_map
 from maichart.generation.timeline import normalize_tempo_map
@@ -263,10 +264,15 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if operation!='analyze' and not output_value: raise ValueError('output path is required')
         out=server._resolve_path(output_value) if output_value else None
         if operation!='analyze':
+            seed_value = payload.get('seed')
+            if seed_value is None or seed_value == '':
+                effective_seed = secrets.randbelow(2**31) if operation == 'generate' else 0
+            else:
+                effective_seed = number('seed',0,0,2**31-1,True)
             values={'level':number('level',13.3,1,15),'memory_strength':number('memory_strength',1,0,1),
                 'onset_threshold':number('onset_threshold',.5,.001,.999),'temperature':number('temperature',.7,0,3),
                 'onset_merge_ms':number('onset_merge_ms',40,0,250),
-                'seed':number('seed',0,0,2**31-1,True)}
+                'seed':effective_seed}
             for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
             if operation == 'generate':
                 raw_divisions = payload.get('rhythm_snap_divisions', list(COMMON_DIVISIONS))
@@ -338,5 +344,10 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                            max_region_seconds=region,source_manifest=str(manifest))
         if dataset_selection is not None:
             task.result['dataset_selection'] = dataset_selection
+    elif operation == 'generate':
+        task.result.update(seed=values['seed'],effective_settings={'seed':values['seed'],'temperature':values['temperature'],
+                            'rhythm_snap_enabled':rhythm_snap_enabled,
+                            'rhythm_snap_ms':number('rhythm_snap_ms',15,0,50),
+                            'rhythm_snap_divisions':list(divisions)})
     server._run_subprocess_task(task,args,expected_epoch=expected,result_paths=results)
     return handler._json_response({'task_id':task.task_id})

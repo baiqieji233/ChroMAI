@@ -123,28 +123,27 @@ function trainingEpochStatus(task) {
 
 // ---------------------------------------------------------------------------
 // Condition sliders.  Each entry is [key, label, help, default]; the help text
-// cites where the default came from, and the defaults are the corpus medians
-// (maichart/generation/conditions.py GENERATION_DEFAULTS) so a fresh session
-// starts where real charts are instead of at the neutral 0.5 mask value.
+// Tooltips give the current 1,859-chart global P10-P90. The level preset
+// replaces these fallback defaults with its per-level calibrated baseline.
 // ---------------------------------------------------------------------------
 const radarKeys = [
-  ["note_density", "整体密度", "notes/sec 的整体目标：一段时间内平均写多少可玩音符。不是响度，也不是峰值。语料中位等级带 0.24–0.37，中位 0.305。", "0.305"],
-  ["peak", "峰值密度", "高潮或爆发段的局部密度目标；与整体密度一起决定普通段和密集段的落差。语料中位等级带 0.25–0.56，中位 0.375。", "0.375"],
-  ["sweep", "滑条量（sweep）", "Slide 的总体使用量/运动量倾向；只提高它不等于每段都会出现 Slide。语料中位等级带 0.06–0.18，中位 0.109。", "0.109"],
-  ["slide_tricky", "滑条复杂度", "Slide 路径和转折的复杂程度倾向；数值越高越偏向更复杂的 Slide 写法。语料中位等级带 0.05–0.19，中位 0.114。", "0.114"],
-  ["slide_sequence", "连续滑条", "连续安排多个 Slide 的倾向；过高可能造成长段 Slide 堆叠，应配合 sweep 和 slide_bias 调整。语料中位等级带 0.02–0.13，中位 0.066。", "0.066"],
-  ["jack", "同键连打（jack）", "相邻时刻重复同一个按键的倾向；高值会增加 Jack 感，但不代表整体难度自动提高。语料中位等级带 0.11–0.28，中位 0.188。", "0.188"],
-  ["chord", "和弦比例", "同一时刻同时按多个键的目标比例；应与 Style 中的 chord_bias 同方向设置。语料中位等级带 0.16–0.41，中位 0.280。", "0.280"],
+  ["note_density", "整体密度", "音符头总数/音频秒数/16 的归一化值；默认 0.305 约 4.88 heads/s。不是响度。当前 1,859 张全局 P10–P90：0.226–0.409；等级预设会改用该等级区间。", "0.305"],
+  ["peak", "峰值密度", "一秒窗口内最大起音事件组数/32 的归一化值；同刻多押算一个事件组。当前 1,859 张全局 P10–P90：0.219–0.656；等级预设会改用该等级区间。", "0.375"],
+  ["sweep", "滑条量（sweep）", "Slide 头比例×平均路径端点环距/4；不是完整描线长度或体感运动量。当前 1,859 张全局 P10–P90：0.053–0.170。", "0.109"],
+  ["slide_tricky", "滑条复杂度", "Slide 头比例×程序判作复杂的 Slide 比例；复杂度含多部件、短时值和部分路径符号，不等于主观手法难度。当前全局 P10–P90：0.046–0.182。", "0.114"],
+  ["slide_sequence", "连续滑条", "Slide 头比例×相邻 Slide 间隔满足 0<间隔≤2 拍的比例；同刻 Slide 不计入。当前全局 P10–P90：0.020–0.125。", "0.066"],
+  ["jack", "同键连打（jack）", "分子是间隔≤0.5 秒的相邻起音组同键重复按钮头；分母是所有可比相邻组的后继按钮头（不限时间），长间隔也会稀释。当前全局 P10–P90：0.105–0.275。", "0.188"],
+  ["chord", "和弦比例", "含 Touch 等类型的同刻多 note 起音组/有音起音组；preset 会与 Style 的 chord_bias 设为相同值。当前全局 P10–P90：0.162–0.403。", "0.280"],
 ];
 const styleKeys = [
-  ["tap_bias", "Tap 倾向", "Tap 在整体谱面中的使用倾向；数值越高越偏向普通按键和较少特殊 note。语料中位等级带 0.59–0.83，中位 0.720。", "0.720"],
-  ["slide_bias", "Slide 倾向", "Slide 类型在整体谱面中的使用倾向；建议与 Radar 的 sweep、slide_tricky、slide_sequence 同方向设置。语料中位等级带 0.07–0.23，中位 0.140。", "0.140"],
-  ["hold_bias", "Hold 倾向", "Hold 长条在整体谱面中的使用倾向；music_structure_v2/v3 planner 有 Hold 比例预测，旧 planner 没有独立 Hold 控制。此滑条始终是软条件，不是强制配额。语料中位等级带 0.03–0.14，中位 0.077。", "0.077"],
-  ["touch_bias", "Touch 倾向", "Touch / Touch Hold 在整体谱面中的使用倾向；高值不保证每个窗口都出现 Touch。语料中位等级带 0.00–0.14，中位 0.039。", "0.039"],
-  ["chord_bias", "和弦倾向", "和弦在整体谱面中的表现倾向；它和 Radar 的 chord 是一对，建议同时提高或降低。语料中位等级带 0.16–0.41，中位 0.280。", "0.280"],
-  ["melody_following", "节奏贴合（非旋律，melody_following）", "后端条件名为 melody_following。当前项目主要把它解释为跟随节奏/起音结构，不等于直接识别人声旋律，也不等于响度。训练侧实测中位约 0.895。", "0.900"],
-  ["pattern_reuse", "模式复用", "重复使用已经出现过的节奏/配置模式的倾向；低值鼓励更多变化，高值允许更多动机再现。当前模型已有长段重复风险，建议保持较低。语料中位数 0.028。", "0.028"],
-  ["directionality", "方向性", "后端统计相邻单键位置变化在顺时针/逆时针方向上的一致程度；高值偏向连续同向移动，不是 Slide 路径长度。语料中位等级带 0.01–0.14，中位 0.043。", "0.043"],
+  ["tap_bias", "Tap 倾向", "Tap 头比例，含 break 修饰的 Tap。当前 1,859 张全局 P10–P90：0.602–0.827。", "0.720"],
+  ["slide_bias", "Slide 倾向", "Slide 头占全部 note 头比例；建议配合 Radar 的 sweep、complexity 与 sequence 理解。当前全局 P10–P90：0.068–0.218。", "0.140"],
+  ["hold_bias", "Hold 倾向", "Hold+TouchHold 头比例。当前全局 P10–P90：0.032–0.139；TouchHold 同时也计入 touch_bias，两项不互斥。", "0.077"],
+  ["touch_bias", "Touch 倾向", "Touch+TouchHold 头比例。当前全局 P10–P90：0.000–0.137；TouchHold 同时也计入 hold_bias。", "0.039"],
+  ["chord_bias", "和弦倾向", "与 Radar 的 chord 使用完全相同的同刻多 note 事件组比例；preset 会联动，手动分开设置会偏离训练中的成对值。当前全局 P10–P90：0.162–0.403。", "0.280"],
+  ["melody_following", "节奏贴合（非旋律，melody_following）", "谱面起音落在音频起音±80ms 内的匹配比例代理；没有声部/音高标签，不代表识别旋律。当前全局 P10–P90：0.830–0.967，中位0.912；fallback预设固定0.9。", "0.900"],
+  ["pattern_reuse", "模式复用", "完全相同的非恒定四拍配置签名重复率；不是主歌/副歌级段落呼应。当前全局 P10–P90：0.000–0.100。", "0.028"],
+  ["directionality", "方向性", "|顺时针−逆时针|/有效单键转移数，只看净旋向一致度，不指定方向或所有双手动作。当前全局 P10–P90：0.008–0.138。", "0.043"],
 ];
 
 // Difficulty controls are calibrated from original charts. Preferences move
@@ -248,6 +247,9 @@ let uploadedDatasets = [];
 let checkpointInspection = { key: "", data: null };
 let generationInspection = { path: "", data: null };
 let generationDefaults = {};
+let songFormCurveSourceBeforeRestriction = null;
+let songFormCurveModeBeforeRestriction = null;
+let songFormCurveRestrictionsActive = false;
 let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false, contextStale: false, conditionChanged: false };
 const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
 // Dataset selection is intentionally separate from qualityState: selected
@@ -831,6 +833,38 @@ function familyFieldVisible(declared, current) {
   ));
 }
 
+function updateSongFormGenerationOptions() {
+  const isSongForm = currentGenerationFamily() === "song_form_v1";
+  const curveMode = element("#intensityCurveMode");
+  const legacyCurveModes = curveMode ? [...curveMode.options].filter((option) => ["soft", "strict"].includes(option.value)) : [];
+  legacyCurveModes.forEach((option) => { option.disabled = isSongForm; });
+  const hardMode = curveMode?.querySelector('option[value="hard"]');
+  if (hardMode) hardMode.textContent = isSongForm ? "hard（放宽幅度裁剪）" : "hard（严苛跟随）";
+  const curveSource = element("#intensityCurveSource");
+  const audioCurveSource = curveSource?.querySelector('option[value="audio"]');
+  if (isSongForm && ["soft", "strict"].includes(curveMode?.value)) {
+    if (songFormCurveModeBeforeRestriction === null) songFormCurveModeBeforeRestriction = curveMode.value;
+    curveMode.value = "follow";
+    saveSettings();
+  }
+  if (audioCurveSource) audioCurveSource.disabled = isSongForm;
+  if (isSongForm && !songFormCurveRestrictionsActive) {
+    songFormCurveRestrictionsActive = true;
+    if (curveSource) songFormCurveSourceBeforeRestriction = curveSource.value;
+  }
+  if (isSongForm && ["audio", "auto"].includes(curveSource?.value)) {
+    curveSource.value = "model";
+    saveSettings();
+  } else if (!isSongForm && songFormCurveRestrictionsActive) {
+    if (curveSource && songFormCurveSourceBeforeRestriction) curveSource.value = songFormCurveSourceBeforeRestriction;
+    if (curveMode && songFormCurveModeBeforeRestriction) curveMode.value = songFormCurveModeBeforeRestriction;
+    songFormCurveRestrictionsActive = false;
+    songFormCurveSourceBeforeRestriction = null;
+    songFormCurveModeBeforeRestriction = null;
+    saveSettings();
+  }
+}
+
 function updateFamilyFields() {
   document.querySelectorAll("[data-training-family]").forEach((target) => {
     target.hidden = !familyFieldVisible(target.dataset.trainingFamily, currentModelFamily());
@@ -860,6 +894,7 @@ function updateFamilyFields() {
     document.querySelectorAll(".condition-advanced").forEach((details) => details.setAttribute("open", ""));
     element("#generationCurveGroup")?.setAttribute("open", "");
   }
+  updateSongFormGenerationOptions();
   updateGenerationCapabilityControls();
   const family = currentModelFamily();
   const familyHelp = element("#modelFamilyHelp");
@@ -957,8 +992,7 @@ function preprocessPayload() {
 }
 
 function formDevice(selector) {
-  const device = valueOrDefault(selector, "auto");
-  return device === "auto" ? "cuda" : device;
+  return valueOrDefault(selector, "auto");
 }
 function songFormRhythmSnapDivisions(enabled) {
   const divisions = [4, 8, 12, 16, 24, 32, 48, 64]
@@ -1109,7 +1143,7 @@ function songFormGenerationPayload() {
     rhythm_snap_enabled: checkedOrDefault("#formRhythmSnapEnabled", false),
     rhythm_snap_ms: Number(valueOrDefault("#formRhythmSnapMs", 15)),
     rhythm_snap_divisions: songFormRhythmSnapDivisions(checkedOrDefault("#formRhythmSnapEnabled", false)),
-    temperature: Number(valueOrDefault("#formTemperature", .7)), seed: valueOrDefault("#seed", "").trim() === "" ? 0 : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
+    temperature: Number(valueOrDefault("#temperature", .65)), seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
 }
 function generationPayload() {
   if (currentModelFamily() === "song_form_v1") return songFormGenerationPayload();

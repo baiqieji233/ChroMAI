@@ -846,13 +846,13 @@
 <div class="form-grid">
 <label class="field" data-generation-family="event_v1 song_form_v1">强度曲线指导强度
             <input id="intensityCurveStrength" type="number" min="0" max="1" step="0.05" value="0.65">
-            <small>只控制已启用且保存的人工曲线。0 完全旁路数值曲线，恢复自动跟随 / 结尾衰减；显式标记的休止区仍然禁止新起音。0.65 向曲线目标靠拢，1 使用完整曲线目标。
-            它是规划控制的混合力度，不是「最终 65% 音符听曲线」。新 planner 混合音符量、密度和负荷目标；旧模型使用密度条件和可用的 planner 控制。
-            follow / hard 下仍受「强度跟随幅度」限制；soft 下保持旧版软指导兼容，strict 下保持旧版生成后上限兼容。可先保持 0.65，感觉过强时降低，感觉不明显时逐步提高。</small>
+            <small data-generation-family="event_v1">只控制已启用且保存的人工曲线。0 完全旁路数值曲线，恢复自动跟随 / 结尾衰减；显式标记的休止区仍然禁止新起音。0.65 向曲线目标靠拢，1 使用完整曲线目标。soft / strict 仅用于旧 event 配置兼容。</small>
+            <small data-generation-family="song_form_v1" hidden>曲线派生负荷始终作为基础条件输入；strength 只混合派生密度因子，0 时因子为 1，因此基础曲线条件和休止区仍生效。follow 范围为 1 ± strength × span（默认 0.65×0.5，因子约 0.675–1.325）；hard 不做 span 裁剪，默认约 0.35–1.65。两种模式都是软引导，不是密度硬上限。</small>
           </label>
 <label class="field" data-generation-family="event_v1 song_form_v1">强度曲线模式
             <select id="intensityCurveMode"><option value="follow" selected>follow（柔性跟随）</option><option value="hard">hard（严苛跟随）</option><option value="soft">soft（软指导 / 仅规划，兼容旧版）</option><option value="strict">strict（密度上限 / 生成后上限，兼容旧版）</option></select>
-            <small>follow：推荐。保留幅度限制，并在生成位置动态抑制过密，不因普通曲线事后删音符。hard：同样保留幅度限制，约 2 秒密度达到上限后停止该段新起音，继续后段，不补 note。soft / strict 仅用于旧配置兼容；旧 strict：不使用跟随幅度限制。显式休止区始终禁止新起音；此前已开始的 Hold / Slide 可跨入。</small>
+            <small data-generation-family="event_v1">follow：推荐。保留幅度限制，并在生成位置动态抑制过密；hard：同样保留幅度限制，过密时停止该段新起音。soft / strict 仅用于旧 event 配置兼容。显式休止区始终禁止新起音；此前已开始的 Hold / Slide 可跨入。</small>
+            <small data-generation-family="song_form_v1" hidden>song_form_v1 仅支持 follow / hard。follow 将曲线派生负荷作为软条件并按强度混合、按幅度裁剪；hard 跳过幅度裁剪，仍是软条件，不设密度配额或停止起音。strength=0 仍保留基础曲线条件与休止区。soft / strict 不适用。</small>
           </label></div>
 <details id="generationCurveAdvanced" class="settings-section" data-advanced >
 <summary><span>自动跟随、幅度与结尾处理</span><small>曲线指导强度大于 0 时，人工曲线优先</small>
@@ -873,9 +873,8 @@
           </label>
 <label class="field" data-generation-family="event_v1 song_form_v1">强度跟随幅度
             <input id="intensityFollowSpan" type="number" min="0" max="0.9" step="0.05" value="0.5">
-            <small>用于多维 / 响度自动跟随，也用于人工曲线的 follow / hard / soft 模式。0.5 先把参考倍率限制在 0.5×～1.5×；再混合指导强度，默认 0.65 后实际目标范围是 0.675×～1.325×（示意值：0.675 / 1 / 1.325）。
-            0.2 更保守，0.8 允许更大落差。0 使这项密度缩放回到基准；它不会关闭模型内部 planner、结尾衰减或 strict 上限。
-            model 自动模式及人工曲线 strict 模式不使用此范围。follow / hard / soft 曲线过于极端时会被截到范围边缘，继续拖动可能不再产生更强效果。曲线为 0 也可能保留非零目标；需要完全休息时，请在曲线页标记休止。</small>
+            <small data-generation-family="event_v1">用于多维 / 响度自动跟随，也用于人工曲线的 follow / hard / soft 模式。0.5 先把参考倍率限制在 0.5×～1.5×；再混合指导强度。0 使密度缩放回到基准；model 自动模式及 strict 不使用此范围。</small>
+            <small data-generation-family="song_form_v1" hidden>只用于 song_form_v1 曲线 follow 模式的因子裁剪；默认 span=0.5，将派生因子限制在 0.5×～1.5×，随后由指导强度混合。hard 不使用此范围；strength=0 仍保留基础曲线负荷与休止区。</small>
           </label>
 <label class="field" data-generation-family="event_v1">结尾衰减
             <input id="tailDamping" type="checkbox">
@@ -918,15 +917,17 @@
 <section id="generationSamplingGroup" class="workflow-group" >
 <div class="workflow-group-heading"><span class="step">05</span>
 <div><h3>设置生成方式</h3>
-<p>候选数决定生成几份；固定种子便于比较参数。</p></div></div>
+<p data-generation-family="event_v1 legacy_frame_v2">候选数决定生成几份；固定种子便于比较参数。</p>
+<p data-generation-family="song_form_v1" hidden>song_form_v1 每次生成一份；留空随机抽种子，任务记录会显示实际种子，填回后可复现。</p></div></div>
 <div class="form-grid">
-<label class="field">候选数量
+<label class="field" data-generation-family="event_v1 legacy_frame_v2">候选数量
             <input id="candidates" type="number" min="1" max="64" value="1">
             <small>生成几份并分别保存。默认 1；大于 1 为手动实验，<strong>不代表自动挑选最佳谱面</strong>，仍需逐个试玩。</small>
           </label>
 <label class="field">随机种子
             <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
-            <small><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed，抽到好谱面后照着填回来即可重现。</small>
+            <small data-generation-family="event_v1 legacy_frame_v2"><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed。</small>
+            <small data-generation-family="song_form_v1" hidden>留空时由服务随机生成 seed，并把实际值记入任务结果与生成报告；填固定整数可复现。</small>
           </label>
 <label class="checkbox-field" data-generation-family="event_v1">
             <input id="sampleEvents" type="checkbox" checked>
@@ -936,8 +937,8 @@
           </label>
 <label class="field" data-generation-family="event_v1 song_form_v1">Temperature（采样温度）
             <input id="temperature" type="number" min="0" step="0.05" value="0.65">
-            <small><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。
-            较低值会让抽样更集中，较高值会保留更多不确定性；高温可能增加结构偏差。它不直接控制密度、音频跟随或难度，默认 0.65。</small>
+            <small data-generation-family="event_v1"><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。较低值会让抽样更集中，较高值会保留更多不确定性。</small>
+            <small data-generation-family="song_form_v1" hidden>控制配置解码随机性，不改变全曲起音数或条件目标；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
           </label></div>
 <details id="generationSamplingAdvanced" data-generation-family="event_v1 legacy_frame_v2" class="settings-section" data-advanced >
 <summary><span>采样与解码高级设置</span><small>Top-p、重复惩罚、条件强度与 token 预算</small>
@@ -1201,9 +1202,10 @@
         </div>
         <label class="field">自动曲线来源
           <select id="intensityCurveSource"><option value="auto" selected>自动（新模型优先 planner）</option><option value="audio">音频多维参考</option><option value="model">模型 planner</option></select>
-          <small>auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
+          <small data-generation-family="event_v1 legacy_frame_v2">auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
           checkpoint 身份指具体权重文件和训练 epoch，不代表模型架构。训练中的 event_last.pt 会持续覆盖，建议选择固定的 event_epoch_NNN.pt 生成曲线。
           audio 只依赖歌曲的音频特征。等级、Radar 或 Style 改动只提醒，未重新预测时继续沿用已保存曲线；更换音频、checkpoint、BPM、first 或 tempo map 后仍需重新生成。</small>
+          <small data-generation-family="song_form_v1" hidden>song_form_v1 的 auto 会从已选 song_form checkpoint 预测曲线；model 也使用该 checkpoint。audio 曲线不是 learned_song_form_v1，不能用于 song_form 生成。</small>
         </label>
         <div class="button-row">
           <button id="generateIntensityCurveButton" class="primary-button" type="button">生成强度曲线</button>
