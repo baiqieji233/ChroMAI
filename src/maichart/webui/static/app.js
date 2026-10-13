@@ -161,7 +161,7 @@ const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, fol
 // sources feed training, while activeDataset is the source currently being
 // browsed/annotated. This prevents a merged training manifest from hiding the
 // origin of a quality label.
-const datasetWorkspaceState = { items: [], selected: new Set(), activePath: "", catalog: null, catalogRequest: 0, selectionTouched: false, view: "cards", prepared: null };
+const datasetWorkspaceState = { items: [], selected: new Set(), activePath: "", catalog: null, catalogRequest: 0, selectionTouched: false, view: "cards", prepared: null, applying: false };
 const intensityView = { start: 0, end: null, selected: new Set(), gesture: null, spectrogram: null, specSource: null, sectionSelectionKey: "" };
 let settingsSaveTimer = null;
 const preprocessTasks = new Map();
@@ -869,8 +869,9 @@ function formDevice(selector) {
 }
 function songFormTrainingPayload(options = {}) {
   const mode = currentTrainingMode(); const source = trainingSourcePaths(options); const manifests = selectedTrainingManifests();
-  if (manifests.length > 1) throw new Error("song_form_v1 一次训练需要一份已合并 manifest；请先在训练素材页合并所选数据集。");
   return { model_family: "song_form_v1", manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
+    manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
+    quality_enabled: checkedOrDefault("#qualityEnabled", false),
     mode, init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(), epochs: Number(valueOrDefault("#epochs", 20)), batch_size: Number(valueOrDefault("#batchSize", 4)),
     device: formDevice("#device"), lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
     grad_accumulation: Number(valueOrDefault("#gradAccumulation", 1)), save_every: Number(valueOrDefault("#saveEvery", 0)),
@@ -1135,6 +1136,8 @@ function setTrainingModeDefaults() {
 function updateDatasetButtons() {
   const busy = datasetUploading || preprocessStarting || trainingStarting || trainingPreflight;
   const mapping = {
+    "#datasetComposeButton": busy || datasetWorkspaceState.applying,
+    "#trainingDatasetApplyButton": busy || datasetWorkspaceState.applying,
     "#preprocessButton": busy,
     "#inspectManifestButton": busy,
     "#trainButton": busy,
@@ -1459,7 +1462,7 @@ function renderDatasetWorkspace() {
     : datasetWorkspaceState.selectionTouched ? "尚未勾选训练数据集，请到“训练素材”页选择。" : "单数据集模式：使用下方当前训练清单。";
   const preparedManifest = element("#effectiveTrainingManifest");
   if (preparedManifest) preparedManifest.textContent = datasetWorkspaceState.prepared?.manifest
-    ? `上次准备的训练清单（只读）：${datasetWorkspaceState.prepared.manifest}`
+    ? `已准备的训练清单（只读）：${datasetWorkspaceState.prepared.manifest}`
     : "训练清单将在检查所选来源或开始训练时自动准备；当前预处理输出保持独立。";
   const status = element("#datasetWorkspaceStatus");
   if (status && datasetWorkspaceState.items.length) status.textContent = `共发现 ${datasetWorkspaceState.items.length} 个数据集；点击卡片查看目录，勾选后用于训练。`;
@@ -1524,13 +1527,12 @@ function selectedDatasetItems() {
 }
 
 async function composeSelectedDatasets() {
+  if (datasetWorkspaceState.applying) return;
   datasetWorkspaceState.selectionTouched = true;
-  const button = element("#datasetComposeButton");
-  const originalLabel = button?.textContent || "应用勾选的数据集";
-  if (button) {
-    button.disabled = true;
-    button.textContent = "正在应用…";
-  }
+  datasetWorkspaceState.applying = true;
+  const buttons = [element("#datasetComposeButton"), element("#trainingDatasetApplyButton")].filter(Boolean);
+  buttons.forEach((button) => { button.disabled = true; button.textContent = "正在应用…"; });
+  setManifestStatus("正在检查勾选来源并准备训练清单…");
   const compositionSummary = element("#datasetCompositionSummary");
   if (compositionSummary) {
     compositionSummary.hidden = false;
@@ -1538,55 +1540,41 @@ async function composeSelectedDatasets() {
     compositionSummary.textContent = "正在检查已勾选来源并生成训练清单…";
   }
   try {
-  const items = selectedDatasetItems();
-  if (!items.length) throw new Error("请至少勾选一个训练数据集。");
-  const unprepared = items.filter((item) => !item.manifest || item.prepared === false);
-  if (unprepared.length) throw new Error(`所选数据集尚未全部预处理：${unprepared.map((item) => item.name || item.path).join("、")}。请先进入对应卡片完成预处理。`);
-  const manifests = items.map((item) => item.manifest).filter(Boolean);
-  const paths = items.map((item) => item.path).filter(Boolean);
-  if (manifests.length <= 1 && paths.length <= 1) {
-    const item = items[0];
-    if (item.path) selectDataset(item);
-    if (item.manifest && element("#manifestPath")) element("#manifestPath").value = item.manifest;
-    datasetWorkspaceState.prepared = { manifest: item.manifest };
+    assertTrainingSelection();
+    const items = selectedDatasetItems();
+    if (!items.length) throw new Error("请至少勾选一个训练数据集。");
+    const manifests = items.map((item) => item.manifest).filter(Boolean);
+    const paths = items.map((item) => item.path).filter(Boolean);
+    const family = currentModelFamily();
+    let data;
+    try {
+      data = await api("/api/datasets/compose", { manifests, dataset_paths: paths, datasets: items, model_family: family });
+    } catch (error) {
+      if (!String(error.message || "").match(/404|Not Found|不存在|未找到/i)) throw error;
+      throw new Error("当前 WebUI 后端尚未提供多数据集合并接口，请重启/更新服务后再应用多选数据集。");
+    }
+    if (family !== currentModelFamily() || JSON.stringify(manifests) !== JSON.stringify(selectedTrainingManifests())) {
+      throw new Error("应用过程中训练来源或模型族已变化，请按当前选择重新应用。");
+    }
+    const manifest = data.manifest || data.effective_manifest || data.composed_manifest || data.path;
+    if (!manifest) throw new Error("后端没有返回合并后的 manifest 路径。");
+    datasetWorkspaceState.prepared = { ...data, manifest };
+    invalidateDatasetStatus(`已应用 ${items.length} 个数据集，请检查所选训练来源。`);
     renderDatasetWorkspace();
     saveDatasetWorkspace();
-    const summaryBox = element("#datasetCompositionSummary");
-    if (summaryBox) {
-      summaryBox.hidden = false;
-      summaryBox.className = "inline-status good";
-      summaryBox.textContent = `已完成：应用 1 个数据集；训练 manifest：${item.manifest}`;
-    }
-    setStatus("已应用 1 个训练数据集。", true);
-    return;
-  }
-  let data;
-  try {
-    data = await api("/api/datasets/compose", { manifests, dataset_paths: paths, datasets: items, model_family: currentModelFamily() });
-  } catch (error) {
-    // Older servers can still accept the first manifest. Never silently claim
-    // that multiple sources were merged when the compose endpoint is absent.
-    if (!String(error.message || "").match(/404|Not Found|不存在|未找到/i)) throw error;
-    throw new Error("当前 WebUI 后端尚未提供多数据集合并接口，请重启/更新服务后再应用多选数据集。");
-  }
-  const manifest = data.manifest || data.effective_manifest || data.composed_manifest || data.path;
-  if (!manifest) throw new Error("后端没有返回合并后的 manifest 路径。");
-  if (element("#manifestPath")) element("#manifestPath").value = manifest;
-  datasetWorkspaceState.prepared = { ...data, manifest };
-  renderDatasetWorkspace();
-  invalidateDatasetStatus(`已合并 ${items.length} 个数据集，请重新检查训练集状态。`);
-  saveDatasetWorkspace();
-  const summary = data.summary || {};
-  const summaryBox = element("#datasetCompositionSummary");
-  if (summaryBox) {
-    summaryBox.hidden = false;
-    summaryBox.className = "inline-status good";
-    summaryBox.textContent = `已完成：应用 ${items.length} 个来源；${summary.song_count ?? "?"} 首歌曲，${summary.difficulty_count ?? "?"} 张谱面；联合 manifest：${manifest}`
+    const summary = data.summary || {};
+    const message = `已完成：应用 ${items.length} 个来源；${summary.song_count ?? "?"} 首歌曲，${summary.difficulty_count ?? "?"} 张谱面；训练 manifest：${manifest}`
       + `；按原文件去重 ${summary.duplicate_source_charts ?? 0} 张；汇总质量标注 ${summary.quality_records ?? 0} 条。`
       + (summary.stale_quality_annotations ? ` ${summary.stale_quality_annotations} 条标注因原谱或音频变化已失效，请回原数据集重新检查并保存。` : "");
-  }
-  setStatus(`已应用 ${items.length} 个训练数据集。`, true);
+    if (compositionSummary) {
+      compositionSummary.hidden = false;
+      compositionSummary.className = "inline-status good";
+      compositionSummary.textContent = message;
+    }
+    setManifestStatus(`已应用 ${items.length} 个来源；清单已准备。可检查可用谱面数量或开始训练。`, "good");
+    setStatus(`已应用 ${items.length} 个训练数据集。`, true);
   } catch (error) {
+    setManifestStatus(`应用失败：${error?.message || error}`, "warn");
     if (compositionSummary) {
       compositionSummary.hidden = false;
       compositionSummary.className = "inline-status warn";
@@ -1594,10 +1582,9 @@ async function composeSelectedDatasets() {
     }
     throw error;
   } finally {
-    if (button) {
-      button.disabled = false;
-      button.textContent = originalLabel;
-    }
+    datasetWorkspaceState.applying = false;
+    buttons.forEach((button) => { button.textContent = "应用勾选的数据集"; });
+    updateDatasetButtons();
   }
 }
 
@@ -3338,6 +3325,7 @@ on("#openQualityWorkspaceButton", "click", openDatasetWorkspace);
 on("#chooseTrainingDatasetsButton", "click", openDatasetWorkspace);
 on("#datasetWorkspaceRefreshButton", "click", async () => { await loadStatus(); });
 on("#datasetComposeButton", "click", composeSelectedDatasets);
+on("#trainingDatasetApplyButton", "click", composeSelectedDatasets);
 on("#datasetImportButton", "click", () => { setWorkspaceMode("training"); window.MaichartWorkflow?.focusSetting("rawRoot"); setStatus("上传训练集 ZIP，或填写本机目录并点击“登记当前目录到训练素材”。", true); });
 on("#registerDatasetButton", "click", registerCurrentDataset);
 on("#datasetBackButton", "click", showDatasetCards);
@@ -3400,6 +3388,12 @@ document.addEventListener("change", (event) => {
   const key = checkbox.dataset.datasetKey;
   if (checkbox.checked) datasetWorkspaceState.selected.add(key); else datasetWorkspaceState.selected.delete(key);
   datasetWorkspaceState.prepared = null;
+  const compositionSummary = element("#datasetCompositionSummary");
+  if (compositionSummary) {
+    compositionSummary.hidden = false;
+    compositionSummary.className = "inline-status warn";
+    compositionSummary.textContent = "勾选来源已变化；检查或开始训练时将按当前选择自动准备清单。";
+  }
   invalidateDatasetStatus("本次训练来源已变化，请重新检查训练集与 checkpoint。");
   saveDatasetWorkspace();
   renderDatasetWorkspace();

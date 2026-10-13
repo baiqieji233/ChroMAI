@@ -40,3 +40,22 @@ test("auto inherits in the backend, and legacy frame requests omit event-only in
   assert.equal(legacy.action_state_profile, undefined);
   assert.equal(legacy.local_pooling_policy, undefined);
 });
+
+test("song form submits every selected source for backend composition", () => {
+  const formBegin = source.indexOf("function songFormTrainingPayload(options = {}) {");
+  const formEnd = source.indexOf('// Shared by', formBegin);
+  const items = [{manifest: "a.json", path: "dataset-a"}, {manifest: "b.json", path: "dataset-b"}];
+  const build = new Function("currentTrainingMode", "trainingSourcePaths", "selectedTrainingManifests",
+    "selectedDatasetItems", "valueOrDefault", "formDevice", "checkedOrDefault",
+    source.slice(formBegin, formEnd) + "; return songFormTrainingPayload();");
+  for (const qualityEnabled of [false, true]) {
+    const payload = build(() => "fresh", () => ({manifest: "a.json"}),
+      () => items.map((item) => item.manifest), () => items,
+      (_selector, fallback) => fallback, () => "cpu", () => qualityEnabled);
+    assert.deepEqual(payload.manifests, ["a.json", "b.json"]);
+    assert.deepEqual(payload.dataset_paths, ["dataset-a", "dataset-b"]);
+    assert.equal(payload.model_family, "song_form_v1");
+    assert.equal(payload.quality_enabled, qualityEnabled);
+    assert.equal(payload.segment_beats, undefined);
+  }
+});

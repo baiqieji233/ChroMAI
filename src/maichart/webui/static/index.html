@@ -50,7 +50,7 @@
 <p>可使用一份数据集，也可在训练素材中勾选多份。</p></div></div>
 <div id="trainingDatasetSelection" class="inline-status">单数据集模式：使用下方当前训练清单。</div>
 <div id="effectiveTrainingManifest" class="inline-status">检查所选来源后显示实际训练清单。</div>
-<div class="button-row"><button id="chooseTrainingDatasetsButton" class="secondary-button" type="button">选择本次训练来源</button><button id="inspectManifestButton" class="secondary-button">检查所选训练来源</button></div>
+<div class="button-row"><button id="chooseTrainingDatasetsButton" class="secondary-button" type="button">选择本次训练来源</button><button id="trainingDatasetApplyButton" class="secondary-button" type="button">应用勾选的数据集</button><button id="inspectManifestButton" class="secondary-button">检查所选训练来源</button></div>
 <p id="manifestCheckStatus" class="inline-status">建议先预处理，再检查 manifest；检查通过后再开始训练。</p>
 <details id="trainingImport" class="settings-section"  >
 <summary><span>导入或预处理新的素材</span><small>已有训练集可跳过这一步</small>
@@ -71,7 +71,7 @@
             <button id="registerDatasetButton" class="secondary-button" type="button">登记当前目录到训练素材</button>
           </label></div>
 <div class="button-row"><button id="preprocessButton" class="secondary-button">预处理当前目录</button></div>
-<p class="workflow-hint">上传或登记目录后，预处理一次。随后到训练素材中勾选本次来源；已经处理过的数据集可以直接复用。</p>
+<p id="preprocessFamilyStatus" class="workflow-hint">上传或登记目录后，预处理一次。随后到训练素材中勾选本次来源；已经处理过的数据集可以直接复用。</p>
 <details id="trainingImportAdvanced" class="settings-section" data-advanced >
 <summary><span>预处理路径与高级选项</span><small>缓存、清单、采样率和限量读取</small>
 </summary>
@@ -594,15 +594,15 @@
         <div class="section-heading">
 <div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">浏览与标注素材，独立选择训练来源</span></div>
         <p class="param-intro">勾选本次训练要使用的数据集，再点进某个数据集浏览谱面。训练使用全部勾选的来源；质量标注保存在当前打开的原数据集。</p>
+        <div class="dataset-workspace-actions"><button id="datasetComposeButton" class="primary-button" type="button">应用勾选的数据集</button><button id="datasetImportButton" class="secondary-button" type="button">导入新数据集</button><span id="datasetSelectionSummary" class="muted">尚未选择数据集</span></div>
+        <div id="datasetCompositionSummary" class="inline-status" role="status" aria-live="polite" hidden></div>
         <section id="datasetCardsPanel" class="dataset-workspace" aria-labelledby="datasetWorkspaceTitle">
           <div class="section-heading">
 <div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
           <p class="muted">勾选表示加入下一次训练；点击卡片进入该数据集的谱面目录。可以同时勾选多份，例如“full训练集 + 优质自制谱精选”。</p>
           <div id="datasetWorkspaceStatus" class="inline-status">正在读取数据集目录...</div>
           <div id="datasetCards" class="dataset-cards"></div>
-          <div class="dataset-workspace-actions"><button id="datasetComposeButton" class="primary-button" type="button">应用勾选的数据集</button><button id="datasetImportButton" class="secondary-button" type="button">导入新数据集</button><span id="datasetSelectionSummary" class="muted">尚未选择数据集</span></div>
           <p class="muted">多选按可训练窗口混合，并非每个数据集各占相同比例。复制到不同目录的相同谱面会增加其学习份额；可信标杆也可用质量权重加强学习。</p>
-          <div id="datasetCompositionSummary" class="inline-status" hidden></div>
         </section>
         <section id="datasetCatalogPanel" hidden>
         <div class="section-heading">
