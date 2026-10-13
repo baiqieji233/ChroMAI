@@ -51,11 +51,17 @@ test("song form submits every selected source for backend composition", () => {
   for (const qualityEnabled of [false, true]) {
     const payload = build(() => "fresh", () => ({manifest: "a.json"}),
       () => items.map((item) => item.manifest), () => items,
-      (_selector, fallback) => fallback, () => "cpu", () => qualityEnabled);
+      (selector, fallback) => ({"#formPrecision": "bf16", "#formLoaderWorkers": 2,
+        "#formPrefetchFactor": 3, "#formLogInterval": 4, "#formCheckpointIntervalSteps": 80,
+        "#formAudioCacheGb": 1.5, "#formSampleCacheMb": 512}[selector] ?? fallback),
+      () => "cpu", () => qualityEnabled);
     assert.deepEqual(payload.manifests, ["a.json", "b.json"]);
     assert.deepEqual(payload.dataset_paths, ["dataset-a", "dataset-b"]);
     assert.equal(payload.model_family, "song_form_v1");
     assert.equal(payload.quality_enabled, qualityEnabled);
     assert.equal(payload.segment_beats, undefined);
+    assert.deepEqual([payload.precision, payload.loader_workers, payload.prefetch_factor,
+      payload.log_interval, payload.checkpoint_interval_steps, payload.audio_cache_gb,
+      payload.sample_cache_mb], ["bf16", 2, 3, 4, 80, 1.5, 512]);
   }
 });

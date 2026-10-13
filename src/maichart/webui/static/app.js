@@ -1,7 +1,77 @@
 "use strict";
 
 function trainingEpochStatus(task) {
-  if (!task || task.kind !== "train") return null;
+  if (!task) return null;
+  if (task.kind === "form_train") {
+    const result = task.result || {};
+    const detail = result.progress_detail || {};
+    const phaseKey = detail.phase || result.phase;
+    if (!phaseKey) return null;
+    const phases = {prepare: "准备数据", blueprint: "全曲规划", layout_revision: "谱面配置训练", draft: "谱面草稿", revision: "谱面修订", saved: "保存检查点", checkpoint: "保存检查点", arrangement: "整理输出"};
+    const phase = `${phases[phaseKey] || String(phaseKey)}${detail.stage ? ` · ${detail.stage}` : ""}`;
+    const epoch = Number(detail.epoch), epochTarget = Number(result.epoch_target);
+    const completed = Number(detail.completed), total = Number(detail.total);
+    const phaseFraction = Number(detail.phase_fraction), runFraction = Number(detail.overall_fraction);
+    const unit = detail.unit === "charts" ? "首" : detail.unit === "batches" ? "batch"
+      : detail.unit === "optimizer_step" ? "优化器步" : detail.unit === "blueprint_step" ? "规划步" : "项";
+    const parts = [];
+    if (Number.isFinite(epoch) && epoch > 0) {
+      const local = Number.isFinite(completed) && Number.isFinite(total) && total > 0
+        ? ` · 当前阶段 ${unit} ${completed}/${total}` : "";
+      parts.push(`epoch ${epoch}${epochTarget > 0 ? `/${epochTarget}` : ""}${local}`);
+    } else if (Number.isFinite(completed) && Number.isFinite(total) && total > 0) {
+      parts.push(`${unit} ${completed}/${total}`);
+    }
+    if (Number.isFinite(runFraction)) parts.push(`本轮任务数进度（规划谱面数＋配置 batch 数）${(runFraction * 100).toFixed(0)}%`);
+    if (Number.isFinite(phaseFraction)) parts.push(`本阶段进度 ${(phaseFraction * 100).toFixed(0)}%`);
+    const optimizerSteps = Number(detail.optimizer_steps);
+    const blueprintSteps = Number(detail.blueprint_steps);
+    if (Number.isFinite(optimizerSteps)) parts.push(`参数更新 ${optimizerSteps} 步`);
+    if (Number.isFinite(blueprintSteps)) parts.push(`全曲规划 ${blueprintSteps} 步`);
+    const pending = Number(detail.accumulation_pending), accumulationTarget = Number(detail.grad_accumulation);
+    if (Number.isFinite(pending) && Number.isFinite(accumulationTarget)) parts.push(`累积 batch ${pending}/${accumulationTarget}`);
+    const phaseEta = detail.eta_phase_sec == null ? NaN : Number(detail.eta_phase_sec);
+    if (Number.isFinite(phaseEta) && phaseEta >= 0) {
+      const seconds = Math.floor(phaseEta);
+      parts.push(`本阶段 ETA ${seconds >= 3600 ? `${Math.floor(seconds / 3600)}小时${Math.floor(seconds % 3600 / 60)}分` : seconds >= 60 ? `${Math.floor(seconds / 60)}分${seconds % 60}秒` : `${seconds}秒`}`);
+    }
+    const speed = Number(detail.items_per_sec);
+    if (Number.isFinite(speed) && speed >= 0) parts.push(`${speed.toFixed(2)} ${unit}/秒`);
+    const samplesSpeed = Number(detail.samples_per_sec), tokensSpeed = Number(detail.tokens_per_sec);
+    if (Number.isFinite(samplesSpeed) && samplesSpeed >= 0) parts.push(`${samplesSpeed.toFixed(1)} 样本/秒`);
+    if (Number.isFinite(tokensSpeed) && tokensSpeed >= 0) parts.push(`${tokensSpeed.toFixed(0)} token/秒`);
+    const elapsed = Number(detail.elapsed_sec), phaseElapsed = Number(detail.phase_elapsed_sec);
+    const duration = (seconds) => seconds >= 3600 ? `${Math.floor(seconds / 3600)}小时${Math.floor(seconds % 3600 / 60)}分` : seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`;
+    if (Number.isFinite(elapsed) && elapsed >= 0) parts.push(`已用时 ${duration(elapsed)}`);
+    if (Number.isFinite(phaseElapsed) && phaseElapsed >= 0) parts.push(`阶段已用时 ${duration(phaseElapsed)}`);
+    const lr = Number(detail.lr);
+    if (Number.isFinite(lr)) parts.push(`lr ${lr.toExponential(2)}`);
+    if (detail.precision) parts.push(String(detail.precision));
+    const losses = detail.losses && typeof detail.losses === "object" ? Object.entries(detail.losses)
+      .filter(([, value]) => Number.isFinite(Number(value))).slice(0, 3)
+      .map(([key, value]) => `${key} ${Number(value).toFixed(3)}`) : [];
+    if (losses.length) parts.push(losses.join(" / "));
+    const timing = detail.timing && typeof detail.timing === "object" ? ["data_wait_sec", "h2d_sec", "compute_sec", "checkpoint_sec"]
+      .filter((key) => Number.isFinite(Number(detail.timing[key])))
+      .map((key) => `${({data_wait_sec: "数据", h2d_sec: "传输", compute_sec: "计算", checkpoint_sec: "保存"})[key]} ${Number(detail.timing[key]).toFixed(1)}s`) : [];
+    if (timing.length) parts.push(`主机累计计时（非 GPU 计时）：${timing.join(" / ")}`);
+    const memory = detail.memory && typeof detail.memory === "object" ? ["allocated_gib", "reserved_gib", "peak_allocated_gib"]
+      .filter((key) => Number.isFinite(Number(detail.memory[key])))
+      .map((key) => `${({allocated_gib: "已分配", reserved_gib: "已保留", peak_allocated_gib: "峰值已分配"})[key]} ${Number(detail.memory[key]).toFixed(2)} GiB`) : [];
+    if (memory.length) parts.push(`CUDA 显存：${memory.join(" / ")}`);
+    const cache = detail.cache && typeof detail.cache === "object" ? ["audio", "samples"].flatMap((name) => {
+      const stat = detail.cache[name];
+      if (!stat || typeof stat !== "object") return [];
+      const size = Number(stat.bytes), budget = Number(stat.budget_bytes);
+      const byteLabel = (value) => value >= 1024 ** 2 ? `${(value / 1024 ** 2).toFixed(0)} MB` : `${(value / 1024).toFixed(0)} KB`;
+      return [`${name === "audio" ? "音频" : "样本"}命中 ${stat.hits ?? 0} / 未命中 ${stat.misses ?? 0}${Number.isFinite(size) ? ` · ${byteLabel(size)}${Number.isFinite(budget) ? `/${byteLabel(budget)}` : ""}` : ""}`];
+    }) : [];
+    if (cache.length) parts.push(`缓存${detail.cache_scope === "main_process_only" ? "（主进程本地，worker 缓存未汇总）" : "（训练进程本地）"}：${cache.join("；")}`);
+    return {knownTarget: Number.isFinite(epochTarget) && epochTarget > 0,
+      progress: Number.isFinite(Number(task.progress)) ? Number(task.progress) : 0,
+      text: `${phase}${parts.length ? ` · ${parts.join(" · ")}` : ""}`};
+  }
+  if (task.kind !== "train") return null;
   const result = task.result || {};
   const target = Number(result.epoch_target);
   const hasTarget = Number.isFinite(target) && target > 0;
@@ -878,6 +948,13 @@ function songFormTrainingPayload(options = {}) {
     seed: valueOrDefault("#trainingSeed", "").trim() === "" ? 0 : Number(valueOrDefault("#trainingSeed", 0)),
     max_steps: Number(valueOrDefault("#maxSteps", 0)), limit_charts: Number(valueOrDefault("#formLimitCharts", 0)),
     prepare_workers: Number(valueOrDefault("#formPrepareWorkers", 1)),
+    precision: valueOrDefault("#formPrecision", "auto"),
+    loader_workers: Number(valueOrDefault("#formLoaderWorkers", 0)),
+    prefetch_factor: Number(valueOrDefault("#formPrefetchFactor", 2)),
+    log_interval: Number(valueOrDefault("#formLogInterval", 10)),
+    checkpoint_interval_steps: Number(valueOrDefault("#formCheckpointIntervalSteps", 500)),
+    audio_cache_gb: Number(valueOrDefault("#formAudioCacheGb", 1)),
+    sample_cache_mb: Number(valueOrDefault("#formSampleCacheMb", 256)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),

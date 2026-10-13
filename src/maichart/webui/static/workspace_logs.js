@@ -5,7 +5,7 @@
 })(typeof window === "undefined" ? null : window, function () {
   "use strict";
 
-  const KEY_EVENT = /\b(epoch|loss|best|checkpoint|saved|saving|validation|generation|sample|complete|finished|failed|resume)\b|playability_|action_state_|audio_bounds|prewarm|event_audio_loads|已完成|保存|验证|生成|采样|失败|轮次|预热/i;
+  const KEY_EVENT = /\b(epoch|loss|best|checkpoint|saved|saving|validation|generation|sample|complete|finished|failed|resume)\b|form_|playability_|action_state_|audio_bounds|prewarm|event_audio_loads|已完成|保存|验证|生成|采样|失败|轮次|预热/i;
 
   function severityOf(line) {
     if (/\b(error|exception|traceback|failed|fatal)\b|\b\w*(?:Error|Exception):|错误|失败|异常/i.test(line)) return "error";

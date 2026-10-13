@@ -70,7 +70,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint'}:
         return
     try:
         value = json.loads(body)
@@ -91,6 +91,8 @@ def update_form_progress(task, line):
         task.result.update(last_epoch=value.get('epoch'),metrics=value,phase='saved',progress_known=True)
         if task.result.get('epoch_target'):
             task.progress=min(.99,float(value.get('epoch',0))/task.result['epoch_target'])
+    elif prefix == 'form_checkpoint':
+        task.result.update(last_checkpoint=value,phase='checkpoint',progress_detail=value,progress_known=True)
     else:
         task.result.update(phase='arrangement',progress_detail=value,progress_known=False)
 
@@ -150,6 +152,12 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             # fields because the browser may submit stale or disabled values.
             old_args = inspected.get('args') or {}
             old_contract = inspected.get('dataset_contract') or {}
+            inherited = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
+                         'condition_drop_prob', 'blueprint_loss_weight',
+                         'load_curve_loss_weight', 'relation_loss_weight',
+                         'quality_enabled', 'max_steps')
+            payload = {**payload, **{key: old_args[key] for key in inherited if key in old_args}}
+            payload['precision'] = inspected.get('precision') or old_args.get('precision', 'fp32')
             if 'lr' in old_args:
                 payload = {**payload, 'lr': old_args['lr']}
             payload = {**payload,
@@ -183,20 +191,36 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'weight_decay':number('weight_decay',.02,0,10),
                 'grad_accumulation':number('grad_accumulation',1,1,1024,True),
                 'save_every':number('save_every',0,0,1000000,True),
+                'checkpoint_interval_steps':number('checkpoint_interval_steps',500,0,1000000,True),
+                'loader_workers':number('loader_workers',0,0,64,True),
+                'prefetch_factor':number('prefetch_factor',2,1,16,True),
+                'log_interval':number('log_interval',10,0.1,3600),
+                'audio_cache_gb':number('audio_cache_gb',1,0,1024),
+                'sample_cache_mb':number('sample_cache_mb',256,0,1048576,True),
                 'condition_drop_prob':number('condition_drop_prob',.1,0,1),
                 'blueprint_loss_weight':number('blueprint_loss_weight',1.,0,100),
                 'load_curve_loss_weight':number('load_curve_loss_weight',1.,0,100),
                 'relation_loss_weight':number('relation_loss_weight',.1,0,100)}
+        values['quality_enabled'] = bool(payload.get('quality_enabled', True))
+        precision=str(payload.get('precision','auto')).lower()
+        if precision not in {'auto','fp32','bf16','fp16'}: raise ValueError('precision must be auto, fp32, bf16 or fp16')
+        values['precision']=precision
         if values['d_model']%values['nhead']: raise ValueError('d_model must be divisible by nhead')
         if inspected:
             config = inspected['model_config']
             for key in ('d_model','layers','nhead','max_tokens','max_memory_tokens','dropout'):
                 values[key] = config[key]
         args=['-m','maichart.form.train','--manifest',str(manifest),'--checkpoint-dir',str(out)]
-        for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
-        if str(payload.get('control_profile','auto')) == 'none':
-            args += ['--condition-drop-prob','0','--load-curve-loss-weight','0']
-        args += ['--quality-enabled' if payload.get('quality_enabled', True) else '--no-quality-enabled']
+        for key,value in values.items():
+            if key == 'quality_enabled':
+                continue
+            args+=['--'+key.replace('_','-'),str(value)]
+        if mode != 'resume' and str(payload.get('control_profile','auto')) == 'none':
+            values['condition_drop_prob'] = 0
+            values['load_curve_loss_weight'] = 0
+            args[args.index('--condition-drop-prob') + 1] = '0'
+            args[args.index('--load-curve-loss-weight') + 1] = '0'
+        args += ['--quality-enabled' if values['quality_enabled'] else '--no-quality-enabled']
         if initial: args+=['--resume' if mode=='resume' else '--init-checkpoint',str(initial)]
         results=[out/'form_last.pt',out/'dataset_audit.json',out/'training_history.json']
         start_epoch=int(inspected.get('epoch',0)) if inspected and mode=='resume' else 0
