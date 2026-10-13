@@ -9,6 +9,7 @@ from pathlib import Path
 from maichart.form.timing import normalize_meter_map
 from maichart.generation.timeline import normalize_tempo_map
 from maichart.form import FAMILY, CHECKPOINT_SCHEMA
+from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
 
 
 def inspect_form_checkpoint(path):
@@ -109,6 +110,13 @@ def start_form_task(handler,operation,payload,*,runtime=None):
     if operation not in {'inspect','analyze','train','generate','revise'}: raise ValueError('Unknown song-form operation')
     if payload.get('model_family', FAMILY) != FAMILY:
         raise ValueError('此入口只接受 song_form_v1；其他模型族使用原训练/生成入口。')
+    rhythm_snap_value = payload.get('rhythm_snap_enabled', False)
+    rhythm_snap_enabled = (rhythm_snap_value is True
+                           or (type(rhythm_snap_value) is int and rhythm_snap_value == 1)
+                           or (isinstance(rhythm_snap_value, str)
+                               and rhythm_snap_value.lower() in {'true','on','yes'}))
+    if operation == 'revise' and rhythm_snap_enabled:
+        raise ValueError('近似到常见分音目前只支持 song_form_v1 自动生成，修订入口不支持。')
     old_controls = {'segment_beats','context_beats','context_tokens','audio_margin_beats',
                     'planner_profile','condition_mask_prob','condition_dropout','guidance_scale',
                     'slide_oversample','touch_oversample','fine_rhythm_oversample'}
@@ -260,6 +268,16 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'onset_merge_ms':number('onset_merge_ms',40,0,250),
                 'seed':number('seed',0,0,2**31-1,True)}
             for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
+            if operation == 'generate':
+                raw_divisions = payload.get('rhythm_snap_divisions', list(COMMON_DIVISIONS))
+                empty_divisions = raw_divisions == [] or (isinstance(raw_divisions, str) and not raw_divisions.strip())
+                if rhythm_snap_enabled and empty_divisions:
+                    raise ValueError('启用节奏近似时至少选择一种候选分音。')
+                divisions = COMMON_DIVISIONS if empty_divisions else normalize_divisions(raw_divisions)
+                args += ['--rhythm-snap-ms', str(number('rhythm_snap_ms',15,0,50)),
+                         '--rhythm-snap-divisions', ','.join(map(str, divisions))]
+                if rhythm_snap_enabled:
+                    args.append('--rhythm-snap')
         if operation=='revise':
             source=file('maidata_path');start=Fraction(str(payload.get('editable_start','')));end=Fraction(str(payload.get('editable_end','')))
             if start<0 or end<=start: raise ValueError('Edit range must be increasing nonnegative beats')

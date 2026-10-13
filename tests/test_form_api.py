@@ -263,14 +263,43 @@ def test_generation_forwards_bounded_onset_merge_ms(monkeypatch, tmp_path):
     form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio),
         "output": str(tmp_path / "out.txt"), "onset_merge_ms": 55.6,
+        "rhythm_snap_enabled": True, "rhythm_snap_ms": 8,
+        "rhythm_snap_divisions": [64, 48, 64],
     }, runtime=Runtime())
     args = calls[0]
     assert args[args.index("--onset-merge-ms") + 1] == "55.6"
+    assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
+    assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"
+    assert "--rhythm-snap" in args
     with pytest.raises(ValueError, match="onset_merge_ms out of range"):
         form_api.start_form_task(_Response(), "generate", {
             "checkpoint": str(checkpoint), "audio": str(audio),
             "output": str(tmp_path / "bad.txt"), "onset_merge_ms": 251,
         }, runtime=Runtime())
+    for invalid in ([4.0], [True], "4,769", []):
+        with pytest.raises(ValueError):
+            form_api.start_form_task(_Response(), "generate", {
+                "checkpoint": str(checkpoint), "audio": str(audio),
+                "output": str(tmp_path / "bad-divisions.txt"),
+                "rhythm_snap_enabled": True, "rhythm_snap_divisions": invalid,
+            }, runtime=Runtime())
+
+
+def test_revision_rejects_rhythm_snap_request_before_task_creation(tmp_path):
+    created = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            created.append(kind)
+            return TaskState(task_id="revision-rhythm-snap", kind=kind)
+
+    with pytest.raises(ValueError, match="修订入口不支持"):
+        form_api.start_form_task(_Response(), "revise", {
+            "rhythm_snap_enabled": True,
+        }, runtime=Runtime())
+    assert created == []
 
 
 def test_bad_manifest_does_not_create_queued_task(tmp_path):

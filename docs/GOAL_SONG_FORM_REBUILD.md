@@ -1,5 +1,7 @@
 # 全曲段落关联与草稿修订架构重构
 
+当前实现的风险与后续优先级见 [2026-10-13 全链路代码审计](SONG_FORM_FULL_CHAIN_AUDIT_20261013.md)。下文的阶段验收描述工程链路，不代表所有质量问题已经解决；尤其需关注训练/生成条件差异、曲线坐标和规划/配置连接。
+
 日期：2026-10-12。旧架构基线：`af440da`。工作分支：`codex/song-form-rebuild`。
 修改前源码备份：`backups/form_rebuild_20261012_af440da/project_before_rebuild.zip`。
 

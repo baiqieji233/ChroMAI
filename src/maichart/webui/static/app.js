@@ -960,6 +960,24 @@ function formDevice(selector) {
   const device = valueOrDefault(selector, "auto");
   return device === "auto" ? "cuda" : device;
 }
+function songFormRhythmSnapDivisions(enabled) {
+  const divisions = [4, 8, 12, 16, 24, 32, 48, 64]
+    .filter((division) => checkedOrDefault(`#formRhythmDivision${division}`, division <= 32));
+  const custom = valueOrDefault("#formRhythmDivisionCustom", "").trim();
+  if (custom) {
+    for (const token of custom.split(",")) {
+      const value = token.trim();
+      if (!/^\d+$/.test(value)) throw new Error("其他分音请用逗号分隔的整数填写。");
+      const division = Number(value);
+      if (division < 1 || division > 768) throw new Error("分音范围为 1–768。");
+      divisions.push(division);
+    }
+  }
+  const unique = [...new Set(divisions)];
+  if (unique.length > 32) throw new Error("候选分音去重后最多 32 种。");
+  if (enabled && !unique.length) throw new Error("启用节奏近似时至少选择一种候选分音。");
+  return unique;
+}
 function songFormTrainingPayload(options = {}) {
   const mode = currentTrainingMode(); const source = trainingSourcePaths(options); const manifests = selectedTrainingManifests();
   return { model_family: "song_form_v1", manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
@@ -1088,6 +1106,9 @@ function songFormGenerationPayload() {
     intensity_curve_strength: Number(valueOrDefault("#intensityCurveStrength", .65)), intensity_curve_span: Number(valueOrDefault("#intensityFollowSpan", .5)), intensity_curve_mode: valueOrDefault("#intensityCurveMode", "follow"),
     memory_strength: Number(valueOrDefault("#formMemoryStrength", .6)), onset_threshold: Number(valueOrDefault("#formOnsetThreshold", .5)),
     onset_merge_ms: Number(valueOrDefault("#formOnsetMergeMs", 40)),
+    rhythm_snap_enabled: checkedOrDefault("#formRhythmSnapEnabled", false),
+    rhythm_snap_ms: Number(valueOrDefault("#formRhythmSnapMs", 15)),
+    rhythm_snap_divisions: songFormRhythmSnapDivisions(checkedOrDefault("#formRhythmSnapEnabled", false)),
     temperature: Number(valueOrDefault("#formTemperature", .7)), seed: valueOrDefault("#seed", "").trim() === "" ? 0 : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
 }
 function generationPayload() {

@@ -77,6 +77,7 @@ test("generation carries bounded revision controls and memory strength", () => {
   const payload = buildGenerationPayload({
     checkpoint: "run/event_best.pt", audio: "song.mp3", output: "out.txt", level: "13.3",
     memory_strength: "0", onset_threshold: "0.4", onset_merge_ms: "55.6", repair: true,
+    rhythm_snap_enabled: true, rhythm_snap_ms: "8", rhythm_snap_divisions: "4,8,48,64,20,20",
     max_checks: "24", max_edits: "4", deadline_seconds: "10",
   }, {
     bpm: "128", first: "-0.1", meter_known: true, meter_numerator: 6,
@@ -94,6 +95,9 @@ test("generation carries bounded revision controls and memory strength", () => {
   assert.deepEqual(payload.tempo_map, [{beat: "0/1", bpm: 128}, {beat: "24/1", bpm: 150}]);
   assert.equal(payload.memory_strength, 0);
   assert.equal(payload.onset_merge_ms, 55.6);
+  assert.equal(payload.rhythm_snap_enabled, true);
+  assert.equal(payload.rhythm_snap_ms, 8);
+  assert.deepEqual(payload.rhythm_snap_divisions, [4, 8, 48, 64, 20]);
   assert.equal(payload.repair, true);
   assert.equal(payload.max_checks, 24);
   assert.equal(payload.max_edits, 4);
@@ -103,6 +107,8 @@ test("generation carries bounded revision controls and memory strength", () => {
   }), /起音选择阈值/);
   assert.equal(buildGenerationPayload({checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt", onset_merge_ms: "0"}).onset_merge_ms, 0);
   assert.throws(() => buildGenerationPayload({checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt", onset_merge_ms: "251"}), /相邻起音合并范围/);
+  assert.equal(buildGenerationPayload({checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt"}).rhythm_snap_enabled, false);
+  assert.throws(() => buildGenerationPayload({checkpoint: "run/form_last.pt", audio: "song.mp3", output: "out.txt", rhythm_snap_ms: "51"}), /最大采音偏移/);
   assert.throws(() => buildGenerationPayload({
     checkpoint: "run", audio: "song.mp3", output: "out.txt", level: "13.3",
   }), /\.pt/);
