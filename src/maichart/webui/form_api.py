@@ -174,6 +174,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         values={"epochs":epochs,"batch_size":number('batch_size',2,1,512,True),
                 'lr':number('lr',.0002,1e-8,1.),'max_steps':number('max_steps',0,0,1000000,True),
                 'limit_charts':number('limit_charts',0,0,1000000,True),
+                'prepare_workers':number('prepare_workers',1,0,64,True),
                 'd_model':number('d_model',256,16,2048,True),'layers':number('layers',4,1,32,True),
                 'nhead':number('nhead',8,1,64,True),'max_tokens':number('max_tokens',2048,32,16384,True),
                 'max_memory_tokens':number('max_memory_tokens',512,16,4096,True),

@@ -30,3 +30,21 @@ def test_resample_load_curve_interpolates_and_rejects_bad_shape():
     assert np.allclose(output[:, 0], [0.0, 0.5, 1.0])
     with pytest.raises(ValueError, match="shape"):
         resample_load_curve(times, values[:, :3], [1.0])
+
+
+def test_load_curve_preserves_exact_bins_and_converts_each_event_once(monkeypatch):
+    from maichart.form import curve
+    from maichart.event_timing import seconds_at_beat
+    tempo = [EventTempo(Fraction(0), 120.0), EventTempo(Fraction(4), 60.0)]
+    points = [EventPoint(Fraction(0), "1/2"), EventPoint(Fraction(4), "3h[4:1]"),
+              EventPoint(Fraction(6), "C"), EventPoint(Fraction(9), "4")]
+    calls = []
+    def timed(beat, *args):
+        calls.append(beat)
+        return seconds_at_beat(beat, *args)
+    monkeypatch.setattr(curve, "seconds_at_beat", timed)
+    times, values = curve.build_load_curve(points, tempo, first=-0.5, duration_sec=6.5)
+    assert calls == [point.beat for point in points]
+    np.testing.assert_array_equal(times, [1.0, 3.0, 5.0, 6.25])
+    np.testing.assert_array_equal(values, [[0.125, 1, 0, 0], [0.0625, 0, 1, 0],
+                                          [0.0625, 0, 0, 1], [0, 0, 0, 0]])

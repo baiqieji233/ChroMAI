@@ -23,6 +23,8 @@ def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest',required=True);p.add_argument('--checkpoint-dir',required=True)
     p.add_argument('--cache-dir',default='cache/song_form');p.add_argument('--epochs',type=int,default=10)
+    p.add_argument('--prepare-workers',type=int,default=1,
+                   help='parallel song preparation workers; default 1, 0 means auto (up to 4)')
     p.add_argument('--device',default='cpu');p.add_argument('--batch-size',type=int,default=2)
     p.add_argument('--lr',type=float,default=0.0002);p.add_argument('--seed',type=int,default=0)
     p.add_argument('--max-steps',type=int,default=0);p.add_argument('--limit-charts',type=int,default=0)
@@ -46,7 +48,7 @@ def parser():
 
 def main(argv=None):
     args=parser().parse_args(argv)
-    if args.epochs<1 or args.batch_size<1 or args.lr<=0 or args.max_steps<0 or args.grad_accumulation<1 or args.weight_decay<0 or not 0<=args.condition_drop_prob<=1: raise ValueError('Invalid training limits')
+    if args.epochs<1 or args.batch_size<1 or args.lr<=0 or args.max_steps<0 or args.grad_accumulation<1 or args.weight_decay<0 or args.prepare_workers<0 or not 0<=args.condition_drop_prob<=1: raise ValueError('Invalid training limits')
     if args.resume and args.init_checkpoint: raise ValueError('Choose resume or finetune, not both')
     meters=json.loads(Path(args.meter_map).read_text(encoding='utf-8')) if args.meter_map else None
     device=torch.device(args.device)
@@ -65,10 +67,12 @@ def main(argv=None):
                     setattr(args,name,saved_args[name])
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     print('form_prepare '+json.dumps({'stage':'dataset','manifest':str(Path(args.manifest).resolve()),
-        'limit_charts':args.limit_charts,'max_steps':args.max_steps}),flush=True)
+        'limit_charts':args.limit_charts,'max_steps':args.max_steps,
+        'prepare_workers':args.prepare_workers}),flush=True)
     dataset=FormDataset(args.manifest,cache_dir=args.cache_dir,max_tokens=args.max_tokens,
         max_memory_tokens=args.max_memory_tokens,meters=meters,seed=args.seed,limit_charts=args.limit_charts,
-        max_region_seconds=args.max_region_seconds,quality_enabled=args.quality_enabled)
+        max_region_seconds=args.max_region_seconds,quality_enabled=args.quality_enabled,
+        preparation_workers=args.prepare_workers)
     source_digest=hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest()
     contract={"manifest_sha256":source_digest,"meter_map":meters,"max_region_seconds":args.max_region_seconds,
               "charts":dataset.audit['charts']}

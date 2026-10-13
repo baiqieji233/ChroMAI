@@ -275,6 +275,7 @@
 <label class="field">注意力头数 nhead<input id="formNhead" type="number" min="1" max="64" value="8"><small>必须整除 d_model。</small></label>
 <label class="field">最大谱面 token<input id="formMaxTokens" type="number" min="32" max="16384" value="2048"><small>每个配置目标的 token 容量，不定义拍号或乐句。</small></label>
 <label class="field">段落记忆 token 上限<input id="formMaxMemoryTokens" type="number" min="16" max="4096" value="512"><small>限制已完成谱面与相似段落参考的上下文。</small></label>
+<label class="field">准备进程数<input id="formPrepareWorkers" type="number" min="0" max="64" value="1"><small>只并行准备独立歌曲的谱面与音频缓存；0 = 自动（最多 4 个）。主进程仍按原顺序组装训练样本。首次冷缓存可设 4，已有缓存或内存紧张时保持 1。</small></label>
 </div><p class="workflow-hint">fresh 可以调整全部结构参数；resume 严格继承 checkpoint 合同；finetune 复用权重并在新输出目录调整训练数据与学习率。</p>
 </section>
 <p class="workflow-hint" data-training-family="event_v1 legacy_frame_v2">已有模型的宽度、层数、词表与窗口布局需要兼容。加强训练允许调整上下文 token 预算；改变主干形状需要新的模型。</p>

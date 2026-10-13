@@ -877,6 +877,7 @@ function songFormTrainingPayload(options = {}) {
     grad_accumulation: Number(valueOrDefault("#gradAccumulation", 1)), save_every: Number(valueOrDefault("#saveEvery", 0)),
     seed: valueOrDefault("#trainingSeed", "").trim() === "" ? 0 : Number(valueOrDefault("#trainingSeed", 0)),
     max_steps: Number(valueOrDefault("#maxSteps", 0)), limit_charts: Number(valueOrDefault("#formLimitCharts", 0)),
+    prepare_workers: Number(valueOrDefault("#formPrepareWorkers", 1)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),

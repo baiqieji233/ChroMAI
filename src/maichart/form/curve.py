@@ -37,29 +37,35 @@ def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CUR
     for index in range(count):
         low = index * width
         high = min(duration, low + width)
-        bin_width = high - low
         times[index] = (low + high) * 0.5
-        total = tap = sustain = slide_touch = 0
-        for point in parsed.points:
-            second = float(seconds_at_beat(point.beat, tempo, first)) - first
-            if not low <= second < high:
-                continue
-            for note in point.notes:
-                total += 1
-                kind = note.note_type
-                if kind == "tap":
-                    tap += 1
-                if kind in {"hold", "slide", "touch_hold"}:
-                    sustain += 1
-                if kind in {"slide", "touch", "touch_hold"}:
-                    slide_touch += 1
-        if total:
-            values[index] = (
-                min(total / bin_width / 8.0, 1.0),
-                min(tap / total, 1.0),
-                min(sustain / total, 1.0),
-                min(slide_touch / total, 1.0),
-            )
+
+    # Convert each exact event time once instead of rescanning the chart per bin.
+    bin_starts = np.arange(count) * width
+    totals = np.zeros(count, dtype=np.int64)
+    taps = np.zeros(count, dtype=np.int64)
+    sustains = np.zeros(count, dtype=np.int64)
+    slide_touches = np.zeros(count, dtype=np.int64)
+    for point in parsed.points:
+        second = float(seconds_at_beat(point.beat, tempo, first)) - first
+        if second < 0.0 or second >= duration:
+            continue
+        index = int(np.searchsorted(bin_starts, second, side="right") - 1)
+        for note in point.notes:
+            totals[index] += 1
+            kind = note.note_type
+            if kind == "tap":
+                taps[index] += 1
+            if kind in {"hold", "slide", "touch_hold"}:
+                sustains[index] += 1
+            if kind in {"slide", "touch", "touch_hold"}:
+                slide_touches[index] += 1
+    active = totals > 0
+    if np.any(active):
+        bin_widths = np.minimum(duration, (np.arange(count) + 1) * width) - np.arange(count) * width
+        values[active, 0] = np.minimum(totals[active] / bin_widths[active] / 8.0, 1.0)
+        values[active, 1] = np.minimum(taps[active] / totals[active], 1.0)
+        values[active, 2] = np.minimum(sustains[active] / totals[active], 1.0)
+        values[active, 3] = np.minimum(slide_touches[active] / totals[active], 1.0)
     return times, values
 
 

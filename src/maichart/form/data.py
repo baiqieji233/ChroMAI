@@ -2,11 +2,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections import OrderedDict
+from collections import OrderedDict, deque
+from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
 import hashlib
 import json
+import os
 from pathlib import Path
+import threading
+import time
 
 import numpy as np
 import torch
@@ -213,12 +217,134 @@ def relation_target(target, reference, span):
     return torch.tensor([float(np.dot(x,y)/(max(np.linalg.norm(x)*np.linalg.norm(y),1e-8))) for x,y in zip(a,b)])
 
 
+def _prepare_form_entry(entry, options, annotations, audio_store):
+    path = options['manifest']
+    data = options['source_data']
+    codec = RationalCodec()
+    results = []
+    accepted = 0
+    for difficulty in entry.get('difficulties', []):
+        slot = int(difficulty.get('difficulty_index', difficulty.get('index', 0)))
+        if not options['min_difficulty_index'] <= slot <= options['max_difficulty_index']:
+            continue
+        if options['limit_charts'] and accepted >= options['limit_charts']:
+            break
+        result = {'skipped': [], 'filtered': []}
+        results.append(result)
+        try:
+            level = numeric_level(difficulty.get('level_raw', difficulty.get('level')))
+            if not options['min_level'] <= level <= options['max_level']:
+                continue
+            source = _source_asset(entry['maidata_path'], path, data)
+            audio_path = _source_asset(entry['audio_path'], path, data)
+            original = parse_event_chart(source, slot)
+            filtered = sanitize_chart(original)
+            chart = filtered.chart
+            inspect_chart(chart)
+            if filtered.removed:
+                result['filtered'].append({'source': str(source), 'difficulty': slot, **filtered.to_dict()})
+            record = None
+            if annotations:
+                from maichart.training.quality_annotations import resolve_annotation
+                for candidate in annotations.get('records', []):
+                    if int(candidate.get('difficulty_index', -1)) == slot:
+                        resolved = resolve_annotation(candidate, source, chart, slot, audio_path)
+                        if resolved:
+                            record = resolved
+                            break
+            if record and (record.get('label') in ('excluded', 'negative') or float(record.get('weight', 1)) <= 0):
+                result['skipped'].append({'source': str(source), 'reason': 'quality_excluded_or_negative'})
+                continue
+            weight = float((record or {}).get('weight', 1.))
+            audio = audio_store.get(audio_path)
+            structure_path = source.parent / 'music_structure.json'
+            structure = json.loads(structure_path.read_text(encoding='utf-8')) if structure_path.exists() else {}
+            song = organize_song(audio, chart.tempo_changes, chart.audio_first,
+                                 meters=structure.get('meter_map', options['meters']),
+                                 max_seconds=options['max_region_seconds'])
+            excluded = [(float(region['start_sec']), float(region['end_sec']))
+                        for region in (record or {}).get('regions', []) if float(region.get('weight', 1)) <= 0]
+            points = [p for p in chart.points if not any(
+                lo <= seconds_at_beat(p.beat, chart.tempo_changes, chart.audio_first) < hi for lo, hi in excluded)]
+            condition = condition_from_events(points, chart.tempo_changes, level=level,
+                duration_sec=max(float(audio.duration_sec), 1e-3), audio=audio, audio_first=chart.audio_first)
+            from maichart.form.curve import build_load_curve
+            song.load_curve_times_sec, song.load_curve = build_load_curve(
+                points, chart.tempo_changes, chart.audio_first, float(audio.duration_sec))
+            state = SustainStateIndex(points, chart.tempo_changes, chart.audio_first)
+            items = []
+            for span in song.spans:
+                lo = seconds_at_beat(span.start, song.tempo, song.first)
+                hi = seconds_at_beat(span.end, song.tempo, song.first)
+                if any(lo < b and hi > a for a, b in excluded):
+                    continue
+                target = [p for p in points if span.start <= p.beat < span.end]
+                tokens = codec.encode(target, origin=span.start)
+                if len(tokens) > options['max_tokens']:
+                    result['skipped'].append({'source': str(source), 'span': span.index,
+                                             'reason': 'target_token_budget', 'tokens': len(tokens)})
+                    continue
+                local_weight = _region_weight(lo, hi, record)
+                if local_weight <= 0:
+                    continue
+                items.append((span.index, tokens, 0, local_weight))
+                if options['reconstruction'] and target:
+                    items.append((span.index, tokens, 1, local_weight))
+            # Acoustic arrays stay in the atomic disk cache, not the IPC payload.
+            song.audio = None
+            result.update(song=(song, points, level, weight, state, condition, excluded, record),
+                audio_path=audio_path, items=items,
+                chart={'source': str(source), 'difficulty': slot, 'spans': len(song.spans),
+                       'links': len(song.relations.links), 'unknown_meter': not bool(song.meters),
+                       'chart_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
+                       'audio_sha256': (audio.metadata or {}).get('audio_sha256'),
+                       'meter_map': [m.to_dict() for m in song.meters], 'quality': record, 'weight': weight})
+            accepted += 1
+        except (OSError, ValueError, KeyError) as error:
+            result['skipped'].append({'song': entry.get('song_id'), 'difficulty': slot, 'reason': str(error)})
+    return results
+
+
+_form_thread_local = threading.local()
+
+
+def _prepare_form_thread_worker(entry, options, annotations):
+    audio_store = getattr(_form_thread_local, 'audio_store', None)
+    if audio_store is None or audio_store.cache_dir != options['cache_dir']:
+        audio_store = _AudioStore(extract_event_audio, options['cache_dir'], budget=64 * 1024 * 1024)
+        _form_thread_local.audio_store = audio_store
+    return _prepare_form_entry(entry, options, annotations, audio_store)
+
+
+def _ordered_form_preparation(entries, options, annotations, audio_store, workers):
+    if workers == 1:
+        for entry in entries:
+            yield _prepare_form_entry(entry, options, annotations, audio_store)
+        return
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix='song-form-prepare')
+    try:
+        iterator = iter(entries)
+        pending = deque()
+        for _ in range(min(len(entries), workers * 2)):
+            pending.append(pool.submit(_prepare_form_thread_worker, next(iterator), options, annotations))
+        while pending:
+            # Ordered, bounded admission keeps chart ids/seed offsets stable and
+            # prevents a full dataset of completed results accumulating in RAM.
+            yield pending.popleft().result()
+            entry = next(iterator, None)
+            if entry is not None:
+                pending.append(pool.submit(_prepare_form_thread_worker, entry, options, annotations))
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+
+
 class FormDataset(Dataset):
     """Separate target schema; old checkpoints never consume these examples."""
     def __init__(self, manifest, *, cache_dir, max_tokens=2048, max_memory_tokens=512,
                  meters=None, seed=0, limit_charts=0, reconstruction=True,
                  min_level=12.,max_level=15.,min_difficulty_index=4,max_difficulty_index=6,
-                 max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio):
+                 max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
+                 preparation_workers=1):
         self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction","quality_enabled":bool(quality_enabled)}
         self.max_memory_tokens=max_memory_tokens; self.seed=seed
         self.audio_store=_AudioStore(audio_loader,cache_dir)
@@ -228,73 +354,50 @@ class FormDataset(Dataset):
         if quality_enabled and annotation_path.exists():
             from maichart.training.quality_annotations import load_quality_annotations
             annotations=load_quality_annotations(annotation_path)
-        for entry in data.get('songs',[]):
-            for difficulty in entry.get('difficulties',[]):
-                slot=int(difficulty.get('difficulty_index',difficulty.get('index',0)))
-                if not min_difficulty_index<=slot<=max_difficulty_index: continue
-                if limit_charts and len(self.songs)>=limit_charts: break
-                try:
-                    level=numeric_level(difficulty.get('level_raw',difficulty.get('level')))
-                    if not min_level<=level<=max_level: continue
-                    source=_source_asset(entry['maidata_path'],path,data)
-                    audio_path=_source_asset(entry['audio_path'],path,data)
-                    original=parse_event_chart(source,slot)
-                    filtered=sanitize_chart(original)
-                    chart=filtered.chart; inspect_chart(chart)
-                    if filtered.removed:
-                        self.audit['filtered'].append({'source':str(source),'difficulty':slot,**filtered.to_dict()})
-                        print(f'form_chart_filter source={source} removed={len(filtered.removed)}',flush=True)
-                    record=None
-                    if annotations:
-                        from maichart.training.quality_annotations import resolve_annotation
-                        for candidate in annotations.get('records',[]):
-                            if int(candidate.get('difficulty_index',-1))==slot:
-                                resolved=resolve_annotation(candidate,source,chart,slot,audio_path)
-                                if resolved: record=resolved; break
-                    if record and (record.get('label') in ('excluded','negative') or float(record.get('weight',1))<=0):
-                        self.audit['skipped'].append({'source':str(source),'reason':'quality_excluded_or_negative'}); continue
-                    weight=float((record or {}).get('weight',1.))
-                    audio=self.audio_store.get(audio_path)
-                    structure_path=source.parent/'music_structure.json'
-                    structure=json.loads(structure_path.read_text(encoding='utf-8')) if structure_path.exists() else {}
-                    meter_data=structure.get('meter_map',meters)
-                    song=organize_song(audio,chart.tempo_changes,chart.audio_first,meters=meter_data,max_seconds=max_region_seconds)
-                    song.audio=_LazyAudio(self.audio_store,audio_path)
-                    # Local quality exclusions must not reappear as history.
-                    excluded=[]
-                    for region in (record or {}).get('regions',[]):
-                        if float(region.get('weight',1))<=0: excluded.append((float(region['start_sec']),float(region['end_sec'])))
-                    points=[p for p in chart.points if not any(lo<=seconds_at_beat(p.beat,chart.tempo_changes,chart.audio_first)<hi for lo,hi in excluded)]
-                    condition = condition_from_events(points, chart.tempo_changes, level=level,
-                        duration_sec=max(float(audio.duration_sec), 1e-3), audio=audio, audio_first=chart.audio_first)
-                    try:
-                        from maichart.form.curve import build_load_curve
-                        song.load_curve_times_sec, song.load_curve = build_load_curve(
-                            points, chart.tempo_changes, chart.audio_first, float(audio.duration_sec))
-                    except ImportError:
-                        pass
-                    idx=len(self.songs); self.songs.append((song,points,level,weight,SustainStateIndex(points,chart.tempo_changes,chart.audio_first),condition,excluded,record))
-                    self.audit['charts'].append({'source':str(source),'difficulty':slot,'spans':len(song.spans),'links':len(song.relations.links),'unknown_meter':not bool(song.meters),
-                        'chart_sha256':hashlib.sha256(source.read_bytes()).hexdigest(),
-                        'audio_sha256':(audio.metadata or {}).get('audio_sha256'),
-                        'meter_map':[m.to_dict() for m in song.meters],
-                        'quality':record,'weight':weight})
+        if isinstance(preparation_workers, bool) or not isinstance(preparation_workers, int) or preparation_workers < 0:
+            raise ValueError('preparation_workers must be a nonnegative integer')
+        entries = data.get('songs', [])
+        workers = preparation_workers or min(4, os.cpu_count() or 1)
+        workers = max(1, min(workers, len(entries), os.cpu_count() or 1))
+        if audio_loader is not extract_event_audio:
+            workers = 1
+        options = dict(manifest=path, source_data={'source_root': data.get('source_root')}, cache_dir=cache_dir,
+            max_tokens=max_tokens, meters=meters, limit_charts=limit_charts, reconstruction=reconstruction,
+            min_level=min_level, max_level=max_level, min_difficulty_index=min_difficulty_index,
+            max_difficulty_index=max_difficulty_index, max_region_seconds=max_region_seconds)
+        started = time.monotonic()
+        print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,
+            'total_songs':len(entries),'completed_songs':0,'charts':0,
+            'custom_audio_loader':audio_loader is not extract_event_audio}),flush=True)
+        prepared = _ordered_form_preparation(entries, options, annotations, self.audio_store, workers)
+        try:
+            for completed, results in enumerate(prepared, 1):
+                for result in results:
+                    if limit_charts and len(self.songs) >= limit_charts:
+                        break
+                    self.audit['skipped'].extend(result['skipped'])
+                    self.audit['filtered'].extend(result['filtered'])
+                    for filtered in result['filtered']:
+                        print(f'form_chart_filter source={filtered["source"]} removed={filtered["removed_count"]}',flush=True)
+                    if 'song' not in result:
+                        continue
+                    idx = len(self.songs)
+                    song = result['song'][0]
+                    song.audio = _LazyAudio(self.audio_store, result['audio_path'])
+                    self.songs.append(result['song'])
+                    self.audit['charts'].append(result['chart'])
+                    self.items.extend((idx, *item) for item in result['items'])
                     print('form_prepare '+json.dumps({'stage':'chart','charts':len(self.songs),
-                        'source':str(source),'difficulty':slot,'spans':len(song.spans)},ensure_ascii=False),flush=True)
-                    for span in song.spans:
-                        lo=seconds_at_beat(span.start,song.tempo,song.first);hi=seconds_at_beat(span.end,song.tempo,song.first)
-                        if any(lo<b and hi>a for a,b in excluded): continue
-                        target=[p for p in points if span.start<=p.beat<span.end]
-                        tokens=self.codec.encode(target,origin=span.start)
-                        if len(tokens)>max_tokens:
-                            self.audit['skipped'].append({'source':str(source),'span':span.index,'reason':'target_token_budget','tokens':len(tokens)});continue
-                        local_weight=_region_weight(lo,hi,record)
-                        if local_weight <= 0:
-                            continue
-                        self.items.append((idx,span.index,tokens,0,local_weight))
-                        if reconstruction and target: self.items.append((idx,span.index,tokens,1,local_weight))
-                except (OSError,ValueError,KeyError) as error:
-                    self.audit['skipped'].append({'song':entry.get('song_id'),'difficulty':slot,'reason':str(error)})
+                        'source':result['chart']['source'],'difficulty':result['chart']['difficulty'],'spans':len(song.spans),
+                        'workers':workers,'completed_songs':completed,'total_songs':len(entries),
+                        'elapsed_sec':round(time.monotonic()-started,2)},ensure_ascii=False),flush=True)
+                if completed % 25 == 0:
+                    print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,
+                        'completed_songs':completed,'total_songs':len(entries),'charts':len(self.songs)}),flush=True)
+                if limit_charts and len(self.songs) >= limit_charts:
+                    break
+        finally:
+            prepared.close()
         if not self.items: raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
 
     def __len__(self): return len(self.items)
