@@ -169,9 +169,29 @@ test("main song-form rhythm snapping defaults off and forwards its tolerance", (
     () => ({}), () => "cpu", () => null, () => null,
     (enabled) => enabled ? [4, 8, 12, 16, 24, 32, 48, 20, 40] : [4, 8, 12, 16, 24, 32]);
   assert.equal(payload.rhythm_snap_enabled, true);
+  assert.equal(payload.rhythm_snap_mode, "sequence");
   assert.equal(payload.rhythm_snap_ms, 15);
   assert.deepEqual(payload.rhythm_snap_divisions, [4, 8, 12, 16, 24, 32, 48, 20, 40]);
   assert.equal(payload.onset_merge_ms, 40);
+});
+
+test("main song-form generation forwards selected rhythm snapping mode even when disabled", () => {
+  const begin = source.indexOf("function songFormGenerationPayload() {");
+  const end = source.indexOf("function generationPayload()", begin);
+  const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
+    "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
+    source.slice(begin, end) + "; return songFormGenerationPayload();");
+  const payload = build((selector, fallback) => ({"#formRhythmSnapMode": "point"}[selector] ?? fallback),
+    (_selector, fallback) => fallback, () => ({}), () => "auto", () => null, () => null,
+    () => [4, 8, 12, 16, 24, 32]);
+  assert.equal(payload.rhythm_snap_enabled, false);
+  assert.equal(payload.rhythm_snap_mode, "point");
+});
+
+test("song-form UI exposes the two rhythm snapping modes and usage limits", () => {
+  assert.match(html, /<select id="formRhythmSnapMode">[\s\S]*?<option value="sequence" selected>局部节奏一致（推荐）<\/option>[\s\S]*?<option value="point">逐点最近<\/option>/);
+  assert.match(html, /最大位移仍受容差约束/);
+  assert.match(html, /保留 16 分附点通常也需勾选 32 分网格/);
 });
 
 test("main song-form division choices merge custom values and reject an empty enabled grid", () => {

@@ -377,6 +377,15 @@ class FormTransformer(nn.Module):
         return self.output_head(self.decoder_norm(hidden)),updated
 
     @staticmethod
+    def rewind_decode_cache(caches, token_count):
+        if caches is None:
+            return None
+        if token_count < 0 or any(key.size(1) < token_count or value.size(1) < token_count
+                                  for key,value in caches):
+            raise ValueError('Cannot rewind decoder cache beyond its consumed prefix')
+        return [(key[:,:token_count],value[:,:token_count]) for key,value in caches]
+
+    @staticmethod
     def _required(batch: dict[str, torch.Tensor], key: str, ndim: int) -> torch.Tensor:
         value = batch.get(key)
         if value is None or value.ndim != ndim:

@@ -44,10 +44,10 @@ def test_equal_peak_plateau_yields_one_candidate_and_inputs_must_be_finite():
             merge_close_onsets([],bad)
 
 
-def mocked_plan(monkeypatch, scores, *, curve=None, merge_ms=40):
+def mocked_plan(monkeypatch, scores, *, curve=None, merge_ms=40, first=0):
     times = np.arange(len(scores),dtype=np.float64)*.02
     song = SimpleNamespace(spans=[SimpleNamespace(start=F(0),end=F(1))],
-                           tempo=[EventTempo(F(0),120)],first=0,audio=SimpleNamespace(duration_sec=1))
+                           tempo=[EventTempo(F(0),120)],first=first,audio=SimpleNamespace(duration_sec=1))
     monkeypatch.setattr(generate,'form_audio',lambda *_:torch.zeros(len(scores),120))
     monkeypatch.setattr(generate,'input_example',lambda *_,**__: {'form':torch.zeros(1,507)})
     monkeypatch.setattr(generate,'segment_frame_times',lambda *_:times)

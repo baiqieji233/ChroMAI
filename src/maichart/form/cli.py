@@ -50,6 +50,8 @@ def parser():
     p.add_argument('--rhythm-snap',action='store_true',help='approximate nearby onsets to common musical grids')
     p.add_argument('--rhythm-snap-ms',type=float,default=15.,help='maximum approximation shift in milliseconds')
     p.add_argument('--rhythm-snap-divisions',default='4,8,12,16,24,32',help='comma-separated allowed musical divisions')
+    p.add_argument('--rhythm-snap-mode',choices=('sequence','point'),default='sequence',
+                   help='infer locally consistent grids or use independent nearest-point approximation')
     p.add_argument('--temperature',type=float,default=.7);p.add_argument('--seed',type=int,default=0)
     p.add_argument('--planner-type-strength',type=float,default=1.,help='bounded soft planner type guidance; 0 disables it')
     p.add_argument('--style-balance-strength',type=float,default=1.,help='bounded note-head share feedback; 0 disables it')
@@ -90,11 +92,18 @@ def main(argv=None):
     rhythm_snap_divisions = normalize_divisions(args.rhythm_snap_divisions)
     if args.rhythm_snap and args.operation != 'generate':
         raise ValueError('Rhythm approximation applies only to automatic generation, not source-chart revision')
+    if args.intensity_curve_file and args.operation != 'generate':
+        raise ValueError('Song-form intensity curves apply only to generate; revise uses the source chart clock')
     audio=extract_event_audio(args.audio,cache_dir=args.cache_dir)
     structure=_json(args.structure_file) or {}
     meters=_json(args.meter_map) or structure.get('meter_map')
     explicit_tempo=_json(args.tempo_map) or structure.get('tempo_map')
-    tempo=normalize_tempo_map(explicit_tempo) if explicit_tempo else [EventTempo(Fraction(0),args.bpm or audio.tempo_bpm)]
+    if explicit_tempo:
+        tempo=normalize_tempo_map(explicit_tempo)
+    else:
+        from maichart.generation.event_cli import _musical_bpm
+        resolved_bpm = args.bpm if args.bpm is not None else _musical_bpm(audio.tempo_bpm)
+        tempo=[EventTempo(Fraction(0),resolved_bpm)]
     first=args.first
     chart=None
     if args.operation=='revise':
@@ -131,6 +140,7 @@ def main(argv=None):
         'style_balance_strength':args.style_balance_strength if args.operation=='generate' else 0.,
         'rhythm_snap_enabled':args.rhythm_snap,'rhythm_snap_ms':args.rhythm_snap_ms,
         'rhythm_snap_divisions':list(rhythm_snap_divisions),
+        'rhythm_snap_mode':args.rhythm_snap_mode if args.rhythm_snap else 'disabled',
         'intensity_curve_enabled':bool(args.intensity_curve_file),
         'intensity_curve_strength':args.intensity_curve_strength,'intensity_curve_span':args.intensity_curve_span,
         'intensity_curve_mode':args.intensity_curve_mode,'repair':args.repair,
@@ -141,15 +151,20 @@ def main(argv=None):
         'condition_kind':'learned_soft_condition_not_a_hard_quota',
         'first':first,'tempo_map':report['tempo_map']}
     intensity_curve = None
+    curve_condition_warnings = []
     if args.intensity_curve_file:
         from maichart.generation.music_intensity import load_intensity_profile
         intensity_curve = load_intensity_profile(args.intensity_curve_file)
-        from maichart.form.clock import curve_axis
-        curve_axis(intensity_curve)
-        if 'first' in intensity_curve and abs(float(intensity_curve['first'])-first) > 1e-9:
-            raise ValueError('Curve first differs from chart first; regenerate the curve for the current offset')
         if intensity_curve.get('method') != 'learned_song_form_v1':
             raise ValueError('song_form CLI requires a learned_song_form_v1 intensity curve')
+        from maichart.form.curve_validation import validate_saved_curve
+        curve_condition_warnings = validate_saved_curve(
+            intensity_curve, audio_path=args.audio, checkpoint_path=args.checkpoint,
+            checkpoint_identity=payload['source_checkpoint_identity'], first=first,
+            tempo_map=explicit_tempo, bpm_input=args.bpm, condition=condition.to_dict(),
+            resolved_tempo_map=tempo)
+        if curve_condition_warnings:
+            report['curve_condition_warnings'] = curve_condition_warnings
         if not 0.0 <= args.intensity_curve_strength <= 1.0:
             raise ValueError('intensity curve strength must be between 0 and 1')
         if not 0.0 <= args.intensity_curve_span <= 1.0:
@@ -159,6 +174,7 @@ def main(argv=None):
             threshold=args.onset_threshold,memory_strength=args.memory_strength,onset_merge_ms=args.onset_merge_ms,
             rhythm_snap_enabled=args.rhythm_snap,rhythm_snap_ms=args.rhythm_snap_ms,
             rhythm_snap_divisions=rhythm_snap_divisions,
+            rhythm_snap_mode=args.rhythm_snap_mode,
             planner_type_strength=args.planner_type_strength,style_balance_strength=args.style_balance_strength,
             temperature=args.temperature,seed=args.seed,device=args.device,
             intensity_curve=intensity_curve,

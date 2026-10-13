@@ -277,6 +277,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             if operation == 'generate':
                 planner_type_strength=number('planner_type_strength',1.0,0,3)
                 style_balance_strength=number('style_balance_strength',1.0,0,3)
+                rhythm_snap_mode=str(payload.get('rhythm_snap_mode','sequence'))
+                if rhythm_snap_mode not in {'sequence','point'}:
+                    raise ValueError('rhythm_snap_mode must be sequence or point')
                 args += ['--planner-type-strength',str(planner_type_strength),
                          '--style-balance-strength',str(style_balance_strength)]
                 raw_divisions = payload.get('rhythm_snap_divisions', list(COMMON_DIVISIONS))
@@ -287,7 +290,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 args += ['--rhythm-snap-ms', str(number('rhythm_snap_ms',15,0,50)),
                          '--rhythm-snap-divisions', ','.join(map(str, divisions))]
                 if rhythm_snap_enabled:
-                    args.append('--rhythm-snap')
+                    args += ['--rhythm-snap', '--rhythm-snap-mode', rhythm_snap_mode]
         if operation=='revise':
             source=file('maidata_path');start=Fraction(str(payload.get('editable_start','')));end=Fraction(str(payload.get('editable_end','')))
             if start<0 or end<=start: raise ValueError('Edit range must be increasing nonnegative beats')
@@ -310,13 +313,38 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         cache=Path(str(manifest_data.get('cache_dir') or 'cache'))
         if not cache.is_absolute(): cache=manifest.parent/cache
         cache_path=audio_cache_dir(cache)
+    curve_to_forward = None
+    curve_condition_warnings = []
+    if operation not in {'train', 'analyze'} and payload.get('intensity_curve_enabled'):
+        curve_to_forward = payload.get('intensity_curve')
+        if not isinstance(curve_to_forward, dict) or not curve_to_forward:
+            raise ValueError('已启用张力曲线，但曲线内容为空；请重新生成或关闭曲线。')
+        if operation == 'revise':
+            raise ValueError('song_form 张力曲线只用于 generate；revise 使用源谱面时钟且不应用曲线。')
+        from maichart.generation.music_intensity import validate_intensity_profile
+        curve_to_forward = validate_intensity_profile(curve_to_forward)
+        if curve_to_forward.get('method') != 'learned_song_form_v1':
+            raise ValueError('song_form 生成需要 learned_song_form_v1 曲线；请重新生成曲线。')
+        from maichart.form.curve_validation import validate_saved_curve
+        from maichart.generation.event_cli import _file_identity
+        from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
+        effective_condition = (GenerationCondition.from_dict(payload['condition'])
+                               if payload.get('condition') else
+                               GenerationCondition(level=values['level'], radar=GENERATION_DEFAULTS,
+                                                   style=GENERATION_DEFAULTS))
+        curve_condition_warnings = validate_saved_curve(
+            curve_to_forward, audio_path=audio, checkpoint_path=initial,
+            checkpoint_identity=_file_identity(initial), first=first,
+            tempo_map=tempo, bpm_input=bpm, condition=effective_condition.to_dict())
     task=server._create_task('form_'+operation)
+    if curve_condition_warnings:
+        task.result['curve_condition_warnings'] = curve_condition_warnings
     workspace=server.WEBUI_ROOT/'song_form'/task.task_id;workspace.mkdir(parents=True,exist_ok=True)
-    if operation != 'train' and payload.get('intensity_curve_enabled') and payload.get('intensity_curve'):
+    if curve_to_forward is not None:
         mode = str(payload.get('intensity_curve_mode', 'follow'))
         if mode not in {'follow', 'hard'}: raise ValueError('intensity_curve_mode must be follow or hard')
         curve_path = workspace/'intensity_curve.json'
-        curve_path.write_text(json.dumps(payload['intensity_curve'], ensure_ascii=False), encoding='utf-8')
+        curve_path.write_text(json.dumps(curve_to_forward, ensure_ascii=False), encoding='utf-8')
         args += ['--intensity-curve-file', str(curve_path),
                  '--intensity-curve-strength', str(number('intensity_curve_strength', .65, 0, 1)),
                  '--intensity-curve-span', str(number('intensity_curve_span', .5, 0, 1)),
@@ -353,6 +381,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                             'planner_type_strength':planner_type_strength,
                             'style_balance_strength':style_balance_strength,
                             'rhythm_snap_enabled':rhythm_snap_enabled,
+                            'rhythm_snap_mode':rhythm_snap_mode,
                             'rhythm_snap_ms':number('rhythm_snap_ms',15,0,50),
                             'rhythm_snap_divisions':list(divisions)})
     server._run_subprocess_task(task,args,expected_epoch=expected,result_paths=results)

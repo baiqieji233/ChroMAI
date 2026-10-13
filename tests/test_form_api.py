@@ -284,12 +284,14 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
     assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"
     assert "--rhythm-snap" in args
+    assert args[args.index("--rhythm-snap-mode") + 1] == "sequence"
     assert args[args.index("--seed") + 1] == "123456"
     assert tasks[0].result["seed"] == 123456
     assert tasks[0].result["effective_settings"]["seed"] == 123456
     assert tasks[0].result["effective_settings"]["temperature"] == 0.7
     assert tasks[0].result["effective_settings"]["planner_type_strength"] == 3
     assert tasks[0].result["effective_settings"]["style_balance_strength"] == 0
+    assert tasks[0].result["effective_settings"]["rhythm_snap_mode"] == "sequence"
     fixed = form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "fixed.txt"),
         "seed": 42,
@@ -299,14 +301,22 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert tasks[1].result["effective_settings"]["seed"] == 42
     assert calls[1][calls[1].index("--planner-type-strength") + 1] == "1.0"
     assert calls[1][calls[1].index("--style-balance-strength") + 1] == "1.0"
+    assert "--rhythm-snap-mode" not in calls[1]
     assert tasks[1].result["effective_settings"]["planner_type_strength"] == 1.0
     assert tasks[1].result["effective_settings"]["style_balance_strength"] == 1.0
+    assert tasks[1].result["effective_settings"]["rhythm_snap_mode"] == "sequence"
     form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "zero.txt"),
         "seed": 0,
     }, runtime=Runtime())
     assert calls[2][calls[2].index("--seed") + 1] == "0"
     assert tasks[2].result["effective_settings"]["seed"] == 0
+    form_api.start_form_task(_Response(), "generate", {
+        "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "point.txt"),
+        "rhythm_snap_enabled": True, "rhythm_snap_mode": "point",
+    }, runtime=Runtime())
+    assert calls[3][calls[3].index("--rhythm-snap-mode") + 1] == "point"
+    assert tasks[3].result["effective_settings"]["rhythm_snap_mode"] == "point"
     with pytest.raises(ValueError, match="onset_merge_ms out of range"):
         form_api.start_form_task(_Response(), "generate", {
             "checkpoint": str(checkpoint), "audio": str(audio),
@@ -319,6 +329,30 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
                 "output": str(tmp_path / "bad-divisions.txt"),
                 "rhythm_snap_enabled": True, "rhythm_snap_divisions": invalid,
             }, runtime=Runtime())
+
+
+def test_generation_rejects_unknown_rhythm_snap_mode_before_task_creation(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "form.pt"
+    audio = tmp_path / "song.wav"
+    checkpoint.write_bytes(b"checkpoint")
+    audio.write_bytes(b"audio")
+    from maichart.form import checkpoint as form_checkpoint
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    created = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            created.append(kind)
+            return TaskState(task_id="bad-snap-mode", kind=kind)
+
+    with pytest.raises(ValueError, match="rhythm_snap_mode must be sequence or point"):
+        form_api.start_form_task(_Response(), "generate", {
+            "checkpoint": str(checkpoint), "audio": str(audio),
+            "output": str(tmp_path / "out.txt"), "rhythm_snap_mode": "invalid",
+        }, runtime=Runtime())
+    assert created == []
 
 
 @pytest.mark.parametrize("field", ["planner_type_strength", "style_balance_strength"])
@@ -360,6 +394,59 @@ def test_revision_rejects_rhythm_snap_request_before_task_creation(tmp_path):
     with pytest.raises(ValueError, match="修订入口不支持"):
         form_api.start_form_task(_Response(), "revise", {
             "rhythm_snap_enabled": True,
+        }, runtime=Runtime())
+    assert created == []
+
+
+def test_enabled_empty_intensity_curve_is_rejected_before_task_creation(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "form.pt"
+    audio = tmp_path / "song.wav"
+    checkpoint.write_bytes(b"checkpoint")
+    audio.write_bytes(b"audio")
+    from maichart.form import checkpoint as form_checkpoint
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    created = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            created.append(kind)
+            return TaskState(task_id="empty-curve", kind=kind)
+
+    with pytest.raises(ValueError, match="曲线内容为空"):
+        form_api.start_form_task(_Response(), "generate", {
+            "checkpoint": str(checkpoint), "audio": str(audio),
+            "output": str(tmp_path / "out.txt"), "intensity_curve_enabled": True,
+            "intensity_curve": {},
+        }, runtime=Runtime())
+    assert created == []
+
+
+def test_revision_rejects_enabled_intensity_curve_before_task_creation(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "form.pt"
+    audio = tmp_path / "song.wav"
+    maidata = tmp_path / "maidata.txt"
+    checkpoint.write_bytes(b"checkpoint")
+    audio.write_bytes(b"audio")
+    maidata.write_text("", encoding="utf-8")
+    from maichart.form import checkpoint as form_checkpoint
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    created = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            created.append(kind)
+            return TaskState(task_id="revision-curve", kind=kind)
+
+    with pytest.raises(ValueError, match="revise 使用源谱面时钟"):
+        form_api.start_form_task(_Response(), "revise", {
+            "checkpoint": str(checkpoint), "audio": str(audio),
+            "maidata_path": str(maidata), "editable_start": "0", "editable_end": "4",
+            "output": str(tmp_path / "out.txt"), "intensity_curve_enabled": True,
+            "intensity_curve": {"profile": True},
         }, runtime=Runtime())
     assert created == []
 

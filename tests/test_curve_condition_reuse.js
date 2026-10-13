@@ -72,3 +72,23 @@ test("legacy mixed stale flag no longer requires regenerating just to save",()=>
   assert.equal(context.intensityCurveState.contextStale,false);
   assert.ok(vm.runInContext("intensityCurvePayload()",context));
 });
+
+test("song-form curve editing and reload preserve null optional tempo identity",()=>{
+  const {context,profile}=setup();
+  Object.assign(profile,{method:"learned_song_form_v1",bpm_input:null,
+    explicit_tempo_map:null,tempo_map_sha256:null,first:0,
+    tempo_changes:[{beat:"0",bpm:184}],checkpoint:"model.pt",
+    checkpoint_identity:{size:100,sha256:"b".repeat(64)}});
+  profile.points[0].intensity=.7;
+  context.intensityCurveState.saved=false;
+  vm.runInContext("saveIntensityCurveAndReturn(); loadIntensityCurveState();",context);
+  const payload=JSON.parse(JSON.stringify(vm.runInContext("intensityCurvePayload()",context)));
+  assert.ok(Object.hasOwn(payload,"tempo_map_sha256"));
+  assert.ok(Object.hasOwn(payload,"explicit_tempo_map"));
+  assert.equal(payload.tempo_map_sha256,null);
+  assert.equal(payload.explicit_tempo_map,null);
+  assert.equal(payload.bpm_input,null);
+  assert.equal(payload.points[0].intensity,.7);
+  assert.deepEqual(payload.tempo_changes,profile.tempo_changes);
+  assert.deepEqual(payload.checkpoint_identity,profile.checkpoint_identity);
+});

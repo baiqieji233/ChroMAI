@@ -19,6 +19,8 @@ from maichart.generation.event_audio import segment_frame_times, _normalize_temp
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_quality import assess_event_chart
 
+MAX_NOTE_CHARACTERS = 256
+
 
 def to_device(batch, device):
     return {k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in batch.items()}
@@ -96,7 +98,7 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
 def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_curve=None,
                 intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
                 onset_merge_ms=40.,rhythm_snap_enabled=False,rhythm_snap_ms=15.,
-                rhythm_snap_divisions=(4,8,12,16,24,32)):
+                rhythm_snap_divisions=(4,8,12,16,24,32),rhythm_snap_mode='sequence'):
     """One song-wide neural prediction, before any arrangement chunks exist."""
     if not 0<threshold<1: raise ValueError('onset threshold must be in (0,1)')
     merge_close_onsets([], onset_merge_ms)
@@ -128,6 +130,7 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
     # prevents a random high score in file-leading/trailing silence.
     selected={}
     candidate_count = 0
+    rest_rejected_after_quantization = 0
     for i,score in enumerate(scores):
         if not peaks[i] or active[i]<.05 or not 0<=times[i]<song.audio.duration_sec: continue
         raw_score = float(score)
@@ -139,8 +142,13 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
                                    span=intensity_curve_span, mode=intensity_curve_mode)
         if score < threshold: continue
         beat=exact_candidate(times[i],song.tempo,song.first)
-        if not 0<=seconds_at_beat(beat,song.tempo,song.first)<song.audio.duration_sec: continue
+        quantized_second = float(seconds_at_beat(beat,song.tempo,song.first))
+        if not 0<=quantized_second<song.audio.duration_sec: continue
         if beat>=song.spans[-1].end: continue
+        if any(float(region['start_sec']) <= quantized_second < float(region['end_sec'])
+               for region in audio_rests):
+            rest_rejected_after_quantization += 1
+            continue
         record={'beat':str(beat),'second':float(seconds_at_beat(beat,song.tempo,song.first)),
                 'score':float(score),'raw_score':raw_score,'source_second':float(times[i]),
                 'type_probabilities':types[i].tolist(),'sustain_seconds':float(durations[i])}
@@ -151,17 +159,25 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
     selection = {'algorithm':'raw_peaks_curve_gate_temporal_nms_v2', 'onset_merge_ms':float(onset_merge_ms),
                  'raw_local_peaks':int(peaks.sum()),'eligible_candidates':candidate_count,
                  'quantization_duplicates':candidate_count-len(before),
+                 'rest_rejected_after_quantization':rest_rejected_after_quantization,
                  'suppressed_close_onsets':len(before)-len(onsets),
                  'before_merge':interval_statistics(before),'after_merge':interval_statistics(onsets)}
     if rhythm_snap_enabled:
         onsets, selection['rhythm_snap'] = approximate_onsets(onsets,song.tempo,song.first,
             tolerance_ms=rhythm_snap_ms,min_interval_ms=onset_merge_ms,end_beat=song.spans[-1].end,
             duration_sec=song.audio.duration_sec,
-            rest_regions=audio_rests,divisions=rhythm_snap_divisions)
+            rest_regions=audio_rests,divisions=rhythm_snap_divisions,mode=rhythm_snap_mode)
         selection['after_rhythm_snap'] = interval_statistics(onsets)
         print('form_rhythm_snap '+json.dumps(selection['rhythm_snap']),flush=True)
     else:
         selection['rhythm_snap'] = {'enabled':False}
+    final = [item for item in onsets if not any(
+        float(region['start_sec']) <= float(item['second']) < float(region['end_sec'])
+        for region in audio_rests)]
+    selection['rest_rejected_after_snap'] = len(onsets)-len(final)
+    onsets = final
+    if rhythm_snap_enabled:
+        selection['after_rhythm_snap'] = interval_statistics(onsets)
     print('form_onsets '+json.dumps(selection), flush=True)
     return {'schema':'maichart-full-song-blueprint-v1','onsets':onsets,'selection':selection,
             'threshold':threshold,'frame_seconds':.02,'musical_units':'whole_song',
@@ -198,7 +214,8 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
             header=codec.position(beat-origin)
             if len(ids)+len(header)+4>=max_tokens: break
             ids.extend(header);text=''
-            for _ in range(256):
+            body_start = len(ids)
+            for _ in range(MAX_NOTE_CHARACTERS):
                 allowed=[i for i,c in chars if grammar.can_continue(text+c)]
                 if grammar.is_complete(text): allowed.append(codec.end_id)
                 if not allowed: raise ValueError(f'No valid atom continuation for {text!r}')
@@ -226,13 +243,24 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                     break
                 text+=codec.tokens[token][2:]
             else:
-                # Undertrained checkpoints may keep emitting a partial atom.
-                # Commit a deterministic legal atom and expose this fallback
-                # in the generation report instead of aborting the whole song.
-                fallback = next((candidate for _, candidate in chars
-                                 if grammar.can_continue(candidate) and grammar.is_complete(candidate)), None)
-                points.append(EventPoint(beat, fallback or '1')); fallbacks += 1
-                if type_guidance is not None: type_guidance.commit(fallback or '1',beat)
+                available = max_tokens-body_start-1
+                fallback = text if grammar.is_complete(text) and len(text) <= available else next(
+                    (atom for atom in sorted(grammar.atoms,key=lambda atom:(len(atom),atom))
+                     if len(atom) <= available and grammar.is_complete(atom)), None)
+                if fallback is None:
+                    return points, fallbacks
+                # Replace the speculative body in both tokens and causal KV
+                # memory; later notes must observe the chart actually emitted.
+                ids = ids[:body_start]+[codec.ids['N:'+char] for char in fallback]+[codec.end_id]
+                if hasattr(model,'rewind_decode_cache'):
+                    cache=model.rewind_decode_cache(cache,body_start)
+                    consumed=body_start
+                else:
+                    cache=None;consumed=0
+                points.append(EventPoint(beat,fallback));fallbacks += 1
+                if type_guidance is not None: type_guidance.commit(fallback,beat)
+                print('form_decoder_fallback '+json.dumps({'beat':str(beat),'discarded_chars':len(text),
+                    'replacement_chars':len(fallback),'context_repaired':True}),flush=True)
     return points, fallbacks
 
 
@@ -240,7 +268,7 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                    intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
                    onset_merge_ms=40.,rhythm_snap_enabled=False,rhythm_snap_ms=15.,
                    rhythm_snap_divisions=(4,8,12,16,24,32),
-                   planner_type_strength=1.,style_balance_strength=1.):
+                   planner_type_strength=1.,style_balance_strength=1.,rhythm_snap_mode='sequence'):
     from maichart.form.type_guidance import TypeGuidance,validate_strength
     planner_type_strength=validate_strength(planner_type_strength,'planner_type_strength')
     style_balance_strength=validate_strength(style_balance_strength,'style_balance_strength')
@@ -250,7 +278,7 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                                        intensity_curve_span=intensity_curve_span,
                                        intensity_curve_mode=intensity_curve_mode,onset_merge_ms=onset_merge_ms,
                                        rhythm_snap_enabled=rhythm_snap_enabled,rhythm_snap_ms=rhythm_snap_ms,
-                                       rhythm_snap_divisions=rhythm_snap_divisions)
+                                       rhythm_snap_divisions=rhythm_snap_divisions,rhythm_snap_mode=rhythm_snap_mode)
     onsets=[Fraction(item['beat']) for item in blueprint['onsets']]
     if onsets!=sorted(set(onsets)): raise ValueError('Blueprint beats must be sorted and unique')
     type_guidance = TypeGuidance(atoms,condition,blueprint['onsets'],
