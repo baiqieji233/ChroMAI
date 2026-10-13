@@ -72,7 +72,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair'}:
         return
     try:
         value = json.loads(body)
@@ -97,6 +97,8 @@ def update_form_progress(task, line):
         task.result.update(last_checkpoint=value,phase='checkpoint',progress_detail=value,progress_known=True)
     elif prefix == 'form_audio_cache':
         task.result.update(phase='audio_cache',progress_detail=value,progress_known=True)
+    elif prefix == 'form_repair':
+        task.result.update(repair_summary=value)
     else:
         task.result.update(phase='arrangement',progress_detail=value,progress_known=False)
 

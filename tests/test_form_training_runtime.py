@@ -1,4 +1,5 @@
 from copy import deepcopy
+from fractions import Fraction
 import json
 
 import pytest
@@ -6,6 +7,9 @@ import torch
 
 from maichart.form.training_runtime import EpochBatches, Progress, UpdateEngine, resolve_precision
 from maichart.form.train import layout_loss
+from maichart.event_timing import EventPoint
+from maichart.form.codec import RationalCodec
+from maichart.form.layout_metrics import layout_diagnostics
 
 
 @pytest.mark.parametrize('partitions', [[2, 2], [2, 1], [1, 1, 1, 1], [1]])
@@ -47,6 +51,76 @@ def test_loss_normalization_is_independent_of_microbatch_partition_and_zero_weig
         micro.append(loss)
     torch.testing.assert_close(sum(micro), expected)
     assert float(micro[-1]) == 0
+
+
+def test_layout_diagnostics_separate_sampled_configuration_from_forced_headers():
+    codec = RationalCodec()
+    encoded = codec.encode([EventPoint(Fraction(0), '12'), EventPoint(Fraction(1), '3')])
+    target = torch.tensor([encoded[1:], encoded[1:]])
+    decoder_input = torch.tensor([encoded[:-1], encoded[:-1]])
+    logits = torch.full((2, target.size(1), len(codec)), -8.)
+    logits.scatter_(2, target.unsqueeze(-1), 8.)
+
+    first_at = 0
+    first_head = int(torch.nonzero(decoder_input[0] == codec.note_id)[0])
+    first_end = int(torch.nonzero(target[0] == codec.end_id)[0])
+    logits[0, first_at, codec.at_id] = -8.
+    logits[0, first_at, codec.end_id] = 8.
+    logits[0, first_head, codec.ids['N:1']] = -8.
+    logits[0, first_head, codec.ids['N:2']] = 8.
+    logits[0, first_end, codec.end_id] = -8.
+    logits[0, first_end, codec.ids['N:1']] = 8.
+    logits[0, -1, codec.eos_id] = -8.
+    logits[0, -1, codec.ids['N:1']] = 8.
+
+    token_ce = torch.nn.functional.cross_entropy(
+        logits.transpose(1, 2), target, ignore_index=codec.pad_id, reduction='none')
+    values, counts = layout_diagnostics(
+        logits, target, decoder_input, torch.tensor([0, 1]), token_ce, codec)
+
+    assert counts['draft_note_configuration_loss'].item() == 5
+    assert counts['draft_note_configuration_accuracy'].item() == 5
+    assert values['draft_note_configuration_accuracy'].item() == pytest.approx(3 / 5)
+    assert counts['draft_position_header_accuracy'].item() == 6
+    assert values['draft_position_header_accuracy'].item() == pytest.approx(5 / 6)
+    assert counts['draft_first_head_accuracy'].item() == 2
+    assert values['draft_first_head_accuracy'].item() == pytest.approx(1 / 2)
+    assert counts['revision_note_configuration_accuracy'].item() == 5
+    assert values['revision_note_configuration_accuracy'].item() == 1
+
+
+def test_layout_loss_objective_is_unchanged_by_diagnostic_metrics():
+    torch.manual_seed(44)
+    prediction = {'logits': torch.randn(2, 7, len(RationalCodec())),
+                  'relation_logits': torch.randn(2, 2)}
+    batch = {'target': torch.tensor([[3, 8, 4, 18, 5, 2, 0], [3, 9, 4, 19, 5, 2, 0]]),
+             'decoder_input': torch.tensor([[1, 3, 8, 4, 18, 5, 2], [1, 3, 9, 4, 19, 5, 2]]),
+             'task': torch.tensor([0, 1]), 'weight': torch.tensor([1., .5]),
+             'relation_valid': torch.tensor([1, 0]), 'relation_target': torch.rand(2, 2)}
+    loss_sum, _parts = layout_loss(prediction, batch, .1)
+    logits = prediction['logits'].float()
+    valid = batch['target'] != 0
+    ce = torch.nn.functional.cross_entropy(
+        logits.transpose(1, 2), batch['target'], ignore_index=0, reduction='none')
+    per_example = (ce * valid).sum(1) / valid.sum(1).clamp_min(1)
+    relation = torch.nn.functional.binary_cross_entropy_with_logits(
+        prediction['relation_logits'].float(), batch['relation_target'], reduction='none').mean(1)
+    expected = (per_example * batch['weight']
+                + .1 * relation * batch['relation_valid'] * batch['weight']).sum()
+    torch.testing.assert_close(loss_sum, expected)
+
+
+def test_metric_aggregation_uses_selected_counts_and_ignores_empty_task_batches(capsys):
+    progress = Progress(1, 0, 2, 10., torch.device('cpu'), 'fp32')
+    progress.begin('layout_revision')
+    progress.add({'draft_note_configuration_accuracy': torch.tensor(.25)},
+                 weights={'draft_note_configuration_accuracy': 4})
+    progress.add({'draft_note_configuration_accuracy': torch.tensor(0.)},
+                 weights={'draft_note_configuration_accuracy': 0})
+    progress.log(2, 2, force=True)
+    record = json.loads(capsys.readouterr().out.split(' ', 1)[1])
+    assert record['losses']['draft_note_configuration_accuracy'] == pytest.approx(.25)
+    assert record['metric_counts']['draft_note_configuration_accuracy'] == 4
 
 
 def test_sampler_resume_skips_exactly_consumed_batches_and_retains_tail():

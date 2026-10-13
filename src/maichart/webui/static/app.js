@@ -5,7 +5,8 @@ function trainingEpochStatus(task) {
   if (task.kind === "form_train") {
     const result = task.result || {};
     const detail = result.progress_detail || {};
-    const phaseKey = result.phase === "audio_cache" ? result.phase : detail.phase || result.phase;
+    const phaseKey = result.phase === "audio_cache" || result.phase === "saved"
+      ? result.phase : detail.phase || result.phase;
     if (!phaseKey) return null;
     const phases = {prepare: "准备数据", audio_cache: "音频全量驻留", blueprint: "全曲规划", layout_revision: "谱面配置训练", draft: "谱面草稿", revision: "谱面修订", saved: "保存检查点", checkpoint: "保存检查点", arrangement: "整理输出"};
     const stages = {dataset: "读取数据集", preparation: "构建训练索引", chart: "准备谱面", ready: "数据准备完成"};
@@ -70,10 +71,38 @@ function trainingEpochStatus(task) {
     const lr = Number(detail.lr);
     if (Number.isFinite(lr)) parts.push(`lr ${lr.toExponential(2)}`);
     if (detail.precision) parts.push(String(detail.precision));
-    const losses = detail.losses && typeof detail.losses === "object" ? Object.entries(detail.losses)
-      .filter(([, value]) => Number.isFinite(Number(value))).slice(0, 3)
-      .map(([key, value]) => `${key} ${Number(value).toFixed(3)}`) : [];
-    if (losses.length) parts.push(losses.join(" / "));
+    const finalMetrics = phaseKey === "saved" && result.metrics && typeof result.metrics === "object"
+      ? result.metrics : null;
+    const metricValues = finalMetrics || (detail.losses && typeof detail.losses === "object" ? detail.losses : {});
+    const metricCounts = finalMetrics?.metric_counts || detail.metric_counts || {};
+    const taskMetricSpecs = [
+      ["draft", "note_configuration_loss", "草稿音符字符损失", "loss"],
+      ["draft", "note_configuration_accuracy", "草稿音符字符准确率", "accuracy"],
+      ["draft", "position_header_accuracy", "草稿拍位/头部准确率", "accuracy"],
+      ["draft", "first_head_accuracy", "草稿首个音符字符准确率", "accuracy"],
+      ["revision", "note_configuration_loss", "修订音符字符损失", "loss"],
+      ["revision", "note_configuration_accuracy", "修订音符字符准确率", "accuracy"],
+      ["revision", "position_header_accuracy", "修订拍位/头部准确率", "accuracy"],
+      ["revision", "first_head_accuracy", "修订首个音符字符准确率", "accuracy"],
+    ];
+    const taskMetrics = taskMetricSpecs.flatMap(([taskName, metricName, label, kind]) => {
+      const key = `${taskName}_${metricName}`;
+      const value = Number(metricValues[key]);
+      if (!Number.isFinite(value)) return [];
+      const formatted = kind === "accuracy" ? `${(value * 100).toFixed(1)}%` : value.toFixed(3);
+      const count = Number(metricCounts[key]);
+      return [`${label} ${formatted}${Number.isFinite(count) ? `（n=${count}）` : ""}`];
+    });
+    if (taskMetrics.length) {
+      const combined = Number(metricValues.draft_revision_loss);
+      if (Number.isFinite(combined)) taskMetrics.unshift(`草稿+修订总损失 ${combined.toFixed(3)}`);
+      parts.push(taskMetrics.join(" / "));
+    } else {
+      const losses = detail.losses && typeof detail.losses === "object" ? Object.entries(detail.losses)
+        .filter(([, value]) => Number.isFinite(Number(value))).slice(0, 3)
+        .map(([key, value]) => `${key} ${Number(value).toFixed(3)}`) : [];
+      if (losses.length) parts.push(losses.join(" / "));
+    }
     const timing = detail.timing && typeof detail.timing === "object" ? ["data_wait_sec", "h2d_sec", "compute_sec", "checkpoint_sec"]
       .filter((key) => Number.isFinite(Number(detail.timing[key])))
       .map((key) => `${({data_wait_sec: "数据", h2d_sec: "传输", compute_sec: "计算", checkpoint_sec: "保存"})[key]} ${Number(detail.timing[key]).toFixed(1)}s`) : [];
@@ -1426,6 +1455,16 @@ function renderTaskResults(task) {
   const container = element("#taskResults");
   if (!container) return;
   container.replaceChildren();
+  const repair = task.kind === "form_generate" ? task.result?.repair_summary : null;
+  if (repair && repair.remaining_actionable_hard !== undefined && repair.remaining_actionable_hard !== null) {
+    const remaining = Number(repair.remaining_actionable_hard);
+    if (Number.isFinite(remaining)) {
+      const notice = document.createElement("p");
+      notice.className = "inline-status warn";
+      notice.textContent = `MiaCode 检查剩余可处理硬冲突：${remaining} 项。有限修订结果不构成可玩性认证，请查看生成报告并复核。`;
+      container.appendChild(notice);
+    }
+  }
   const files = task.result?.files || [];
   const urls = task.result?.download_urls || [];
   const paths = task.result?.paths || [];

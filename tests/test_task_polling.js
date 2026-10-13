@@ -13,8 +13,11 @@ const epochStart = appSource.indexOf("function trainingEpochStatus(task) {");
 const epochEnd = appSource.indexOf("\n// ---------------------------------------------------------------------------", epochStart);
 const taskStart = appSource.indexOf("const TASK_KIND_LABEL = {");
 const taskEnd = appSource.indexOf("\nfunction renderTaskResults(task)", taskStart);
+const resultsStart = appSource.indexOf("function renderTaskResults(task) {");
+const resultsEnd = appSource.indexOf("\nfunction renderGenerationResult(task)", resultsStart);
 assert.ok(apiStart >= 0 && apiEnd > apiStart, "api() must exist in app.js");
 assert.ok(taskStart >= 0 && taskEnd > taskStart, "task polling functions must exist in app.js");
+assert.ok(resultsStart >= 0 && resultsEnd > resultsStart, "task result renderer must exist in app.js");
 
 function createHarness(fetchImpl) {
   const timers = [];
@@ -25,7 +28,6 @@ function createHarness(fetchImpl) {
     setTimeout(callback, delay) { timers.push({callback, delay}); return timers.length; },
     window: {MaichartWorkflow: null, MaichartLogs: null},
     trainingEpochStatus: () => null,
-    renderTaskResults() {},
     renderGenerationResult() {},
     renderAcceptanceFromTask() {},
     renderGoldResult() {},
@@ -33,12 +35,15 @@ function createHarness(fetchImpl) {
   };
   context.element = selector => {
     if (!elements.has(selector)) {
-      elements.set(selector, {textContent: "", hidden: false, disabled: false, style: {}, parentElement: {hidden: false}});
+      elements.set(selector, {textContent: "", hidden: false, disabled: false, style: {}, parentElement: {hidden: false},
+        children: [], replaceChildren() { this.children = []; }, appendChild(child) { this.children.push(child); }});
     }
     return elements.get(selector);
   };
+  context.document = {createElement: tag => ({tagName: tag, textContent: "", className: "", children: [],
+    appendChild(child) { this.children.push(child); }})};
   vm.createContext(context);
-  vm.runInContext(`${appSource.slice(epochStart, epochEnd)}\n${appSource.slice(apiStart, apiEnd)}\n${appSource.slice(taskStart, taskEnd)}\nglobalThis.harness = {api, watchTask, pollTask, taskWatchers, trainingEpochStatus};`, context);
+  vm.runInContext(`${appSource.slice(epochStart, epochEnd)}\n${appSource.slice(apiStart, apiEnd)}\n${appSource.slice(taskStart, taskEnd)}\n${appSource.slice(resultsStart, resultsEnd)}\nglobalThis.harness = {api, watchTask, pollTask, taskWatchers, trainingEpochStatus, renderTaskResults};`, context);
   return {context, elements, timers, harness: context.harness};
 }
 
@@ -112,6 +117,47 @@ test("song-form task summaries distinguish batches from optimizer steps and repo
   assert.match(cached.text, /歌曲 67\/1922/);
   assert.match(cached.text, /结构缓存：命中，直接复用/);
   assert.match(cached.text, /结构缓存累计：命中 84 \/ 重建 0 \/ 损坏 0/);
+});
+
+test("song-form task summaries separate draft and revision character and position metrics", () => {
+  const {harness} = createHarness(async () => jsonResponse({}));
+  const progress = harness.trainingEpochStatus({kind: "form_train", status: "running", progress: 0.4,
+    result: {epoch_target: 1, progress_detail: {epoch: 1, phase: "layout_revision", unit: "batches",
+      completed: 2, total: 4, overall_fraction: 0.4, phase_fraction: 0.5,
+      losses: {draft_note_configuration_loss: 0.42, draft_note_configuration_accuracy: 0.71,
+        draft_position_header_accuracy: 0.9, draft_first_head_accuracy: 0.6,
+        revision_note_configuration_loss: 0.31, revision_note_configuration_accuracy: 0.8,
+        revision_position_header_accuracy: 0.95, revision_first_head_accuracy: 0.75},
+      metric_counts: {draft_note_configuration_loss: 120, draft_note_configuration_accuracy: 120,
+        draft_position_header_accuracy: 140, draft_first_head_accuracy: 18,
+        revision_note_configuration_loss: 80, revision_note_configuration_accuracy: 80,
+        revision_position_header_accuracy: 100, revision_first_head_accuracy: 12}}}});
+  assert.match(progress.text, /草稿音符字符损失 0\.420（n=120）/);
+  assert.match(progress.text, /草稿拍位\/头部准确率 90\.0%（n=140）/);
+  assert.match(progress.text, /草稿首个音符字符准确率 60\.0%（n=18）/);
+  assert.match(progress.text, /修订音符字符准确率 80\.0%（n=80）/);
+
+  const completed = harness.trainingEpochStatus({kind: "form_train", status: "completed", progress: 1,
+    result: {epoch_target: 1, phase: "saved", progress_detail: {phase: "layout_revision"}, metrics: {epoch: 1, draft_revision_loss: 0.37,
+      draft_note_configuration_loss: 0.42, draft_note_configuration_accuracy: 0.71,
+      draft_position_header_accuracy: 0.9, draft_first_head_accuracy: 0.6,
+      revision_note_configuration_loss: 0.31, revision_note_configuration_accuracy: 0.8,
+      revision_position_header_accuracy: 0.95, revision_first_head_accuracy: 0.75,
+      metric_counts: {draft_note_configuration_loss: 120, draft_note_configuration_accuracy: 120,
+        draft_position_header_accuracy: 140, draft_first_head_accuracy: 18,
+        revision_note_configuration_loss: 80, revision_note_configuration_accuracy: 80,
+        revision_position_header_accuracy: 100, revision_first_head_accuracy: 12}}}});
+  assert.match(completed.text, /草稿\+修订总损失 0\.370/);
+  assert.match(completed.text, /修订首个音符字符准确率 75\.0%（n=12）/);
+});
+
+test("song-form repair results surface remaining hard conflicts without claiming playability", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  harness.renderTaskResults({kind: "form_generate", result: {repair_summary: {
+    remaining_actionable_hard: 19, status: "partial_budget_exhausted"}}});
+  const notice = elements.get("#taskResults").children[0];
+  assert.match(notice.textContent, /剩余可处理硬冲突：19 项/);
+  assert.match(notice.textContent, /不构成可玩性认证/);
 });
 
 test("network errors retain the watcher and schedule reconnect", async () => {

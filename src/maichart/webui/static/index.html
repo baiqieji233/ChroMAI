@@ -369,13 +369,13 @@
 <p class="workflow-hint"><strong>song_form_v1 条件与 planner</strong>：等级、Radar 与 Style 会作为 16 维条件进入全曲 blueprint 和布局模型。训练使用谱面事件统计生成监督；生成时依 checkpoint 的真实能力开放，尚未训练过的控制不能开启。</p>
 <div class="form-grid">
 <label class="field">模型内部 Dropout<input id="formDropout" type="number" min="0" max="0.99" step="0.01" value="0.1"><small>只影响 fresh 的模型正则化；resume 继承 checkpoint，finetune 不能改变主干结构。</small></label>
-<label class="field">条件与曲线训练方案<select id="formControlProfile"><option value="auto" selected>自动（新训练启用，已有模型继承）</option><option value="song_form_controls_v1">启用 Radar / Style 与局部负荷控制</option><option value="none">原始 song_form（兼容早期短训模型）</option></select><small>fresh 启用真实条件监督和负荷曲线；旧 song_form 可通过 finetune 新增模块。resume 按保存的合同继续。</small></label>
-<label class="field">条件随机省略概率<input id="formConditionDropout" type="number" min="0" max="1" step="0.05" value="0.15"><small>训练中随机不提供 Radar / Style，以显式空条件标记学习缺省控制；等级和音频仍保留。</small></label>
+<label class="field">条件与曲线训练方案<select id="formControlProfile"><option value="auto" selected>自动（新训练启用，已有模型继承）</option><option value="song_form_controls_v1">启用 Radar / Style 与局部负荷控制</option><option value="none">关闭条件省略与曲线预测损失</option></select><small>此选项只将条件随机省略概率和局部负荷预测损失权重设为 0；Radar / Style 目标、曲线输入和布局训练仍保留。fresh 可启用条件与曲线监督；旧 song_form 可通过 finetune 新增训练能力，resume 按 checkpoint 合同继续。</small></label>
+<label class="field">条件随机省略概率<input id="formConditionDropout" type="number" min="0" max="1" step="0.05" value="0.15"><small>训练中随机不提供 Radar / Style，以显式空条件标记学习缺省控制；等级、音频和局部负荷曲线输入仍保留。此概率不遮罩曲线输入或目标；曲线预测监督由下方单独的损失权重控制。</small></label>
 <label class="field">全曲规划损失权重<input id="formBlueprintLossWeight" type="number" min="0" step="0.1" value="1"><small>训练谱面起音及规划目标；过低可能使规划器学不足。</small></label>
-<label class="field">局部负荷预测损失权重<input id="formCurveLossWeight" type="number" min="0" step="0.1" value="0.2"><small>让模型从音频与全曲条件预测谱面局部负荷，为曲线预测和编辑提供基础。</small></label>
+<label class="field">局部负荷预测损失权重<input id="formCurveLossWeight" type="number" min="0" step="0.1" value="0.2"><small>单独缩放局部负荷曲线目标的监督损失；不由上方 Radar / Style 条件省略概率控制。设为 0 会关闭这项损失，不等于遮罩曲线输入。</small></label>
 <label class="field">段落关联辅助损失权重<input id="formRelationLossWeight" type="number" min="0" step="0.05" value="0.1"><small>学习相似段落中配置的呼应关系；不会把参考谱面直接复制进输出。</small></label>
 </div>
-<p class="workflow-hint">全曲规划预测局部负荷；保存的人工曲线会指导全曲起音和配置布局。图上的强弱是局部负荷目标，不是官方定数，也不只表示响度。</p>
+<p class="workflow-hint">全曲规划预测局部负荷；保存的人工曲线会指导全曲起音和配置布局。draft_revision_loss 汇总草稿与修订批次的整体目标，包含序列中的拍位/头部 token 和加权关联损失。日志另列两类任务的音符字符损失/准确率（N 字符与 END）、拍位/头部准确率（AT/P/NOTE）及每个 NOTE 后首个 N 字符准确率；EOS 不计入这些指标，准确率带有对应目标位置数。拍位/头部准确率不是音符配置准确率；图上的强弱是局部负荷目标，不是官方定数，也不只表示响度。</p>
 </div>
 <div class="form-grid">
 <label class="field" data-training-family="event_v1">条件遮罩概率（重要）

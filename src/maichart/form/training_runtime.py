@@ -153,6 +153,7 @@ class Progress:
         self.timing = dict(data_wait_sec=0., h2d_sec=0., compute_sec=0., checkpoint_sec=0.)
         self.loss_sums = {}
         self.loss_counts = {}
+        self.metric_counts = {}
 
     def begin(self, phase, completed=0):
         self.phase, self.phase_start_count = phase, completed
@@ -161,6 +162,7 @@ class Progress:
         self.last_count = completed
         self.loss_sums.clear()
         self.loss_counts.clear()
+        self.metric_counts.clear()
         self.phase_samples = 0
         self.phase_tokens = 0
         self.timing = dict(data_wait_sec=0., h2d_sec=0., compute_sec=0., checkpoint_sec=0.)
@@ -172,6 +174,7 @@ class Progress:
             value = value.detach().float() if isinstance(value, torch.Tensor) else float(value)
             self.loss_sums[key] = self.loss_sums.get(key, 0.) + value * item_weight
             self.loss_counts[key] = self.loss_counts.get(key, 0) + item_weight
+            self.metric_counts[key] = self.metric_counts.get(key, 0) + item_weight
 
     def log(self, completed, total, *, force=False, **extra):
         now = time.perf_counter()
@@ -180,9 +183,12 @@ class Progress:
         elapsed = now-self.phase_started
         processed = completed-self.phase_start_count
         rate = processed/max(elapsed, 1e-9)
-        losses = {key: float(value)/max(1,self.loss_counts[key]) for key,value in self.loss_sums.items()}
+        scalar = lambda value: float(value.detach().cpu()) if isinstance(value, torch.Tensor) else float(value)
+        losses = {key: scalar(value)/max(1, scalar(self.loss_counts[key]))
+                  for key,value in self.loss_sums.items()}
         if not all(math.isfinite(value) for value in losses.values()):
             raise ValueError(f'Nonfinite training losses: {losses}')
+        metric_counts = {key: int(round(scalar(value))) for key, value in self.metric_counts.items()}
         fraction = ((completed if self.phase == 'blueprint' else self.plan_total + completed)
                     / max(1, self.plan_total + self.layout_total))
         emit('form_progress', epoch=self.epoch, phase=self.phase, completed=completed, total=total,
@@ -193,7 +199,8 @@ class Progress:
              eta_phase_sec=round((total-completed)/rate, 1) if processed else None,
              samples_per_sec=round(self.phase_samples/max(elapsed,1e-9), 2),
              tokens_per_sec=round(self.phase_tokens/max(elapsed,1e-9), 1),
-             losses=losses, timing={k:round(v,3) for k,v in self.timing.items()},
+             losses=losses, metric_counts=metric_counts,
+             timing={k:round(v,3) for k,v in self.timing.items()},
              timing_scope='host_wall_including_synchronization',
              precision=self.precision, memory=memory_snapshot(self.device), **extra)
         self.last_logged, self.last_count = now, completed

@@ -2,6 +2,8 @@
 
 当前实现的风险与后续优先级见 [2026-10-13 全链路代码审计](SONG_FORM_FULL_CHAIN_AUDIT_20261013.md)。下文的阶段验收描述工程链路，不代表所有质量问题已经解决；尤其需关注训练/生成条件差异、曲线坐标和规划/配置连接。
 
+当前模型配置质量的新诊断、已确认的曲线条件错误、训练任务处置及未实施的风险项，见 [配置质量根因排查](SONG_FORM_QUALITY_ROOT_CAUSE_AUDIT_20261013.md)。该报告包含固定检查点 A/B 的负面结果，不将工程修复表述为谱面质量已达标。
+
 日期：2026-10-12。旧架构基线：`af440da`。工作分支：`codex/song-form-rebuild`。
 修改前源码备份：`backups/form_rebuild_20261012_af440da/project_before_rebuild.zip`。
 

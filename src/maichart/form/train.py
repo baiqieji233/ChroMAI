@@ -17,6 +17,7 @@ from torch.nn import functional as F
 
 from maichart.form.data import FormDataset, collate_form, form_audio
 from maichart.form.model import FormConfig, FormTransformer
+from maichart.form.layout_metrics import layout_diagnostics
 from maichart.form import checkpoint
 from maichart.form.training_runtime import (
     TRAINING_SEMANTICS, EpochBatches, Progress, UpdateEngine, capture_rng, emit,
@@ -98,9 +99,15 @@ def layout_loss(prediction, batch, relation_weight):
     token = per_token * weights
     loss_sum = (token + relation_weight * relation).sum()
     correct = ((logits.detach().argmax(-1) == batch['target']) & valid).sum()
+    if 'decoder_input' in batch and 'task' in batch:
+        diagnostic_values, diagnostic_counts = layout_diagnostics(
+            logits, batch['target'], batch['decoder_input'], batch['task'], ce)
+    else:
+        diagnostic_values, diagnostic_counts = {}, {}
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
                       'loss': loss_sum.detach() / len(weights),
-                      'token_accuracy': correct.float() / valid.sum().clamp_min(1)}
+                      'token_accuracy': correct.float() / valid.sum().clamp_min(1),
+                      'diagnostics': {'values': diagnostic_values, 'counts': diagnostic_counts}}
 
 
 def _atomic_save(value, path):
@@ -294,6 +301,8 @@ def main(argv=None):
                 layout_start = int(cursor['completed'])
         phase_loss_sums = dict(plan_loss=0., layout_loss=0.)
         phase_counts = dict(plan_loss=0, layout_loss=0)
+        layout_metric_sums = {}
+        layout_metric_counts = {}
         progress.begin('blueprint', plan_start)
         for position in range(plan_start, plan_total):
             index = plan_indices[position]
@@ -361,6 +370,7 @@ def main(argv=None):
             with engine.autocast():
                 prediction = model(batch)
             loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight)
+            diagnostics = parts.pop('diagnostics')
             if not torch.isfinite(loss_sum):
                 raise ValueError('Nonfinite layout loss')
             engine.backward(loss_sum, batch_size)
@@ -386,6 +396,11 @@ def main(argv=None):
             progress.phase_samples += batch_size
             progress.phase_tokens += tokens
             progress.add(parts, batch_size, weights={'token_accuracy': tokens})
+            progress.add(diagnostics['values'], weights=diagnostics['counts'])
+            for key, value in diagnostics['values'].items():
+                count = diagnostics['counts'][key]
+                layout_metric_sums[key] = layout_metric_sums.get(key, 0.) + value.detach() * count
+                layout_metric_counts[key] = layout_metric_counts.get(key, 0) + count
             phase_loss_sums['layout_loss'] += parts['loss']*batch_size
             phase_counts['layout_loss'] += batch_size
             if update and args.checkpoint_interval_steps and steps+plan_steps-last_save_steps >= args.checkpoint_interval_steps:
@@ -402,6 +417,11 @@ def main(argv=None):
                    'optimizer_steps':steps, 'blueprint_steps':plan_steps, 'task_training':dict(task_training),
                    'elapsed_sec':round(time.perf_counter()-progress.started,2),
                    'partial_epoch_metrics':bool(plan_start or layout_start)}
+        metrics['metric_counts'] = {}
+        for key, value in layout_metric_sums.items():
+            count = layout_metric_counts[key]
+            metrics[key] = float((value / count.clamp_min(1)).detach().cpu())
+            metrics['metric_counts'][key] = int(count.detach().cpu())
         history.append(metrics)
         save(epoch, 'layout_revision', layout_total, complete=True, reason='epoch_complete')
         (output/'training_history.json').write_text(json.dumps(history, indent=2), encoding='utf-8')

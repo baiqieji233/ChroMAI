@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from maichart.webui import server as webui
 from maichart.webui import form_api
@@ -55,3 +56,32 @@ def test_new_schema_is_identified_without_relabeling_legacy_models():
     old=checkpoint_capabilities({'schema':'maichart-event-generator-checkpoint-v1',
         'data_contract':{'target_schema':'event_ctx_v1'}})
     assert old['model_family']=='event_ctx_v1'
+
+
+def test_form_repair_log_event_is_exposed_on_task_result():
+    class Task:
+        kind='form_generate'
+        result={}
+
+    task=Task()
+    form_api.update_form_progress(task,
+        'form_repair {"checks":12,"elapsed_secs":10.2,"remaining_actionable_hard":19,"status":"partial_budget_exhausted"}')
+    assert task.result['repair_summary']['remaining_actionable_hard']==19
+    assert task.result['repair_summary']['status']=='partial_budget_exhausted'
+
+
+def test_none_control_profile_label_matches_its_two_zeroed_training_weights(webui_api,monkeypatch,tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    calls=[]
+    monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append(args))
+    status,result=webui_api('/api/form/train',{'manifest':str(manifest),'checkpoint_dir':str(tmp_path/'new'),
+        'mode':'fresh','control_profile':'none','max_steps':1,'limit_charts':1,'epochs':1,'batch_size':1,
+        'd_model':32,'nhead':2,'layers':1,'device':'cpu'})
+    assert status==200,result
+    from maichart.form.train import parser
+    args=parser().parse_args(calls[0][2:])
+    assert args.condition_drop_prob==0
+    assert args.load_curve_loss_weight==0
+    html=(Path(__file__).parents[1]/'src/maichart/webui/static/index.html').read_text(encoding='utf-8')
+    assert '<option value="none">关闭条件省略与曲线预测损失</option>' in html
+    assert 'Radar / Style 目标、曲线输入和布局训练仍保留' in html
