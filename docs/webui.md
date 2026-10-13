@@ -4,7 +4,15 @@ WebUI 是本地运行的训练和生成界面。它不需要用户编写代码�
 
 多训练集管理入口是顶部的「训练素材」：勾选多个来源参与联合训练，进入单个来源查看标题、文件夹、谱师和质量标注；支持排序与输入页码跳转。新增素材后使用已有 checkpoint 做 finetune 的操作见 [多训练集管理与加强训练](MULTI_DATASET_TRAINING.md)。
 
-## 当前主路径：event_ctx_v1
+## 当前主路径：song_form_v1
+
+当前主工作台默认使用 `song_form_v1`。它使用全曲 blueprint、段落关联记忆、真实 Radar/Style 条件监督和局部负荷曲线，不使用旧 event 的固定窗口、Slide/Touch 过采样或 `condition_dropout` 合同。
+
+主页面仍可从“模型族”切换到 `event_ctx_v1`、`event_v1` 或 `legacy_frame_v2`。切换后训练、生成、强度曲线和高级参数会恢复对应模型族的设置；训练素材、质量权重、checkpoint 路径、输出和日志流程共用。
+
+song_form 的正式训练建议使用完整已准备清单，模型宽度 256、4 层、8 头、token 2048、记忆 token 512、batch 4、梯度累积 4、学习率 0.0002、Dropout 0.1、权重衰减 0.01、20–30 epochs。训练控制中的 Radar/Style 条件监督、局部负荷损失和段落关联损失只在新合同 checkpoint 中有效；早期短训 checkpoint 会在页面显示能力未校准。
+
+旧 event 兼容路径说明如下。
 
 当前页面默认选择 `event_ctx_v1`，预处理按钮会运行：
 
