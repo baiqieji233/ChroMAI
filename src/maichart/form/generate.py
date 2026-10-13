@@ -13,7 +13,10 @@ import torch
 from maichart.event_timing import EventPoint, seconds_at_beat
 from maichart.form.data import input_example, collate_form, form_audio
 from maichart.form.revision import EditPatch, RevisionBudget, apply_patch_candidate
-from maichart.form.onset_selection import local_peak_mask, merge_close_onsets, interval_statistics
+from maichart.form.onset_selection import (
+    local_peak_mask, merge_close_onsets, interval_statistics,
+    odds_modulate_probabilities, onset_gap_diagnostics,
+)
 from maichart.form.clock import profile_seconds, chart_curve_to_audio
 from maichart.generation.event_audio import segment_frame_times, _normalize_tempo_map, _time_to_beat
 from maichart.generation.event_cli import _NoteGrammar
@@ -116,16 +119,37 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
     from maichart.generation.intensity import music_activity
     activity=music_activity(song.audio)
     active=np.interp(times,activity.times,activity.active().astype(float),left=0,right=0) if len(activity.times) else np.ones_like(times)
+    audio_valid = (times >= 0) & (times < float(song.audio.duration_sec))
+    active = np.where(audio_valid, active, 0.0)
     peaks = local_peak_mask(scores)
     curve_times = profile_seconds(intensity_curve,times,song.first) if intensity_curve is not None else times
+    curve_factors = np.ones_like(scores, dtype=np.float64)
+    curve_intensities = None
     if intensity_curve is not None:
+        curve_times_in_profile = np.asarray(
+            [float(point['time_sec']) for point in intensity_curve['points']], dtype=np.float64)
+        curve_values_in_profile = np.asarray(
+            [float(point['intensity']) for point in intensity_curve['points']], dtype=np.float64)
+        curve_intensities = np.interp(curve_times, curve_times_in_profile, curve_values_in_profile)
+        curve_factors = np.asarray([
+            _curve_factor(intensity_curve, float(time), strength=intensity_curve_strength,
+                          span=intensity_curve_span, mode=intensity_curve_mode)
+            for time in curve_times
+        ], dtype=np.float64)
         # Rhythm snapping consumes raw-audio seconds, whereas a saved legacy
         # curve's rest regions were measured from the chart start.
         offset = float(song.first) if intensity_curve.get('time_axis','chart_relative_v1') == 'chart_relative_v1' else 0.
         audio_rests = [{'start_sec':float(r['start_sec'])+offset,'end_sec':float(r['end_sec'])+offset}
                        for r in intensity_curve.get('rest_regions', [])]
+        curve_rest_mask = np.asarray([
+            any(float(region['start_sec']) <= float(time) < float(region['end_sec'])
+                for region in intensity_curve.get('rest_regions', []))
+            for time in curve_times
+        ], dtype=np.bool_)
     else:
         audio_rests = []
+        curve_rest_mask = np.zeros_like(scores, dtype=np.bool_)
+    adjusted_scores = odds_modulate_probabilities(scores, curve_factors)
     # The planner predicts authored selection; an independent audible-span gate
     # prevents a random high score in file-leading/trailing silence.
     selected={}
@@ -135,11 +159,9 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
         if not peaks[i] or active[i]<.05 or not 0<=times[i]<song.audio.duration_sec: continue
         raw_score = float(score)
         if intensity_curve is not None:
-            if any(float(region['start_sec']) <= float(curve_times[i]) < float(region['end_sec'])
-                   for region in intensity_curve.get('rest_regions', [])):
+            if curve_rest_mask[i]:
                 continue
-            score *= _curve_factor(intensity_curve, float(curve_times[i]), strength=intensity_curve_strength,
-                                   span=intensity_curve_span, mode=intensity_curve_mode)
+            score = float(adjusted_scores[i])
         if score < threshold: continue
         beat=exact_candidate(times[i],song.tempo,song.first)
         quantized_second = float(seconds_at_beat(beat,song.tempo,song.first))
@@ -151,12 +173,15 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
             continue
         record={'beat':str(beat),'second':float(seconds_at_beat(beat,song.tempo,song.first)),
                 'score':float(score),'raw_score':raw_score,'source_second':float(times[i]),
+                'curve_factor':float(curve_factors[i]),
                 'type_probabilities':types[i].tolist(),'sustain_seconds':float(durations[i])}
         candidate_count += 1
         if beat not in selected or selected[beat]['score']<score: selected[beat]=record
     before = [selected[b] for b in sorted(selected)]
     onsets = merge_close_onsets(before, onset_merge_ms)
-    selection = {'algorithm':'raw_peaks_curve_gate_temporal_nms_v2', 'onset_merge_ms':float(onset_merge_ms),
+    selection = {'algorithm':'raw_peaks_curve_odds_gate_temporal_nms_v3',
+                 'curve_modulation':'odds_factors' if intensity_curve is not None else 'identity',
+                 'onset_merge_ms':float(onset_merge_ms),
                  'raw_local_peaks':int(peaks.sum()),'eligible_candidates':candidate_count,
                  'quantization_duplicates':candidate_count-len(before),
                  'rest_rejected_after_quantization':rest_rejected_after_quantization,
@@ -176,6 +201,18 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
         for region in audio_rests)]
     selection['rest_rejected_after_snap'] = len(onsets)-len(final)
     onsets = final
+    diagnostics = onset_gap_diagnostics(
+        times=times, probabilities=scores, adjusted=adjusted_scores, peaks=peaks,
+        activity=active, rest_mask=curve_rest_mask, rest_regions=audio_rests,
+        onsets=onsets, threshold=threshold, curve_intensity=curve_intensities,
+        curve_factors=curve_factors,
+        start_sec=max(0.0,float(seconds_at_beat(song.spans[0].start,song.tempo,song.first))),
+        end_sec=min(float(song.audio.duration_sec),
+                    float(seconds_at_beat(song.spans[-1].end,song.tempo,song.first))),
+    )
+    diagnostics['curve_modulation'] = selection['curve_modulation']
+    selection['onset_diagnostics'] = diagnostics
+    print('form_onset_diagnostics '+json.dumps(diagnostics),flush=True)
     if rhythm_snap_enabled:
         selection['after_rhythm_snap'] = interval_statistics(onsets)
     print('form_onsets '+json.dumps(selection), flush=True)

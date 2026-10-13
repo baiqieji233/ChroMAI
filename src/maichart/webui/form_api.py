@@ -72,7 +72,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets'}:
         return
     try:
         value = json.loads(body)
@@ -84,6 +84,9 @@ def update_form_progress(task, line):
         task.result.update(phase='prepare',progress_known=False,progress_detail=value)
     elif prefix == 'form_progress':
         task.result.update(phase=value.get('phase'),progress_detail=value,progress_known=True)
+        if task.kind == 'form_train' and isinstance(value.get('losses'), dict):
+            snapshots = task.result.setdefault('training_metrics', {})
+            snapshots[value.get('phase', 'unknown')] = value
         target = task.result.get('epoch_target')
         epoch = value.get('epoch')
         fraction = value.get('overall_fraction')
@@ -91,6 +94,10 @@ def update_form_progress(task, line):
             task.progress = min(.99,max(0.,(int(epoch)-1+float(fraction))/int(target)))
     elif prefix == 'form_epoch':
         task.result.update(last_epoch=value.get('epoch'),metrics=value,phase='saved',progress_known=True)
+        history = task.result.setdefault('metric_history', [])
+        history[:] = [item for item in history if item.get('epoch') != value.get('epoch')]
+        history.append(value)
+        del history[:-20]
         if task.result.get('epoch_target'):
             task.progress=min(.99,float(value.get('epoch',0))/task.result['epoch_target'])
     elif prefix == 'form_checkpoint':
@@ -99,6 +106,8 @@ def update_form_progress(task, line):
         task.result.update(phase='audio_cache',progress_detail=value,progress_known=True)
     elif prefix == 'form_repair':
         task.result.update(repair_summary=value)
+    elif prefix == 'form_onsets':
+        task.result.update(onset_summary=value)
     else:
         task.result.update(phase='arrangement',progress_detail=value,progress_known=False)
 

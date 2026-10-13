@@ -9,12 +9,13 @@ const test = require("node:test");
 const appSource = fs.readFileSync(path.join(__dirname, "../src/maichart/webui/static/app.js"), "utf8");
 const apiStart = appSource.indexOf("async function api(path, body) {");
 const apiEnd = appSource.indexOf("\nfunction guard(handler)", apiStart);
-const epochStart = appSource.indexOf("function trainingEpochStatus(task) {");
+const epochStart = appSource.indexOf("function trainingMetricNumber(values, key) {");
 const epochEnd = appSource.indexOf("\n// ---------------------------------------------------------------------------", epochStart);
 const taskStart = appSource.indexOf("const TASK_KIND_LABEL = {");
 const taskEnd = appSource.indexOf("\nfunction renderTaskResults(task)", taskStart);
 const resultsStart = appSource.indexOf("function renderTaskResults(task) {");
 const resultsEnd = appSource.indexOf("\nfunction renderGenerationResult(task)", resultsStart);
+assert.ok(epochStart >= 0 && epochEnd > epochStart, "training metrics and task summary helpers must exist in app.js");
 assert.ok(apiStart >= 0 && apiEnd > apiStart, "api() must exist in app.js");
 assert.ok(taskStart >= 0 && taskEnd > taskStart, "task polling functions must exist in app.js");
 assert.ok(resultsStart >= 0 && resultsEnd > resultsStart, "task result renderer must exist in app.js");
@@ -36,19 +37,28 @@ function createHarness(fetchImpl) {
   context.element = selector => {
     if (!elements.has(selector)) {
       elements.set(selector, {textContent: "", hidden: false, disabled: false, style: {}, parentElement: {hidden: false},
-        children: [], replaceChildren() { this.children = []; }, appendChild(child) { this.children.push(child); }});
+        children: [], replaceChildren(...children) { this.children = children; },
+        appendChild(child) { this.children.push(child); return child; },
+        append(...children) { this.children.push(...children); },
+        prepend(child) { this.children.unshift(child); return child; }});
     }
     return elements.get(selector);
   };
   context.document = {createElement: tag => ({tagName: tag, textContent: "", className: "", children: [],
-    appendChild(child) { this.children.push(child); }})};
+    appendChild(child) { this.children.push(child); return child; },
+    append(...children) { this.children.push(...children); },
+    prepend(child) { this.children.unshift(child); return child; }})};
   vm.createContext(context);
-  vm.runInContext(`${appSource.slice(epochStart, epochEnd)}\n${appSource.slice(apiStart, apiEnd)}\n${appSource.slice(taskStart, taskEnd)}\n${appSource.slice(resultsStart, resultsEnd)}\nglobalThis.harness = {api, watchTask, pollTask, taskWatchers, trainingEpochStatus, renderTaskResults};`, context);
+  vm.runInContext(`${appSource.slice(epochStart, epochEnd)}\n${appSource.slice(apiStart, apiEnd)}\n${appSource.slice(taskStart, taskEnd)}\n${appSource.slice(resultsStart, resultsEnd)}\nglobalThis.harness = {api, watchTask, pollTask, taskWatchers, trainingEpochStatus, trainingMetricEvents, renderTaskTrainingMetrics, taskOnsetDiagnostics, renderTaskOnsetDiagnostics, renderTaskResults};`, context);
   return {context, elements, timers, harness: context.harness};
 }
 
 function jsonResponse(data, ok = true, status = 200) {
   return {ok, status, text: async () => JSON.stringify(data)};
+}
+
+function descendantText(node) {
+  return [node?.textContent || "", ...(node?.children || []).map(descendantText)].join(" ");
 }
 
 test("failed task renders its error and logs, stops polling, and releases callbacks", async () => {
@@ -119,36 +129,97 @@ test("song-form task summaries distinguish batches from optimizer steps and repo
   assert.match(cached.text, /结构缓存累计：命中 84 \/ 重建 0 \/ 损坏 0/);
 });
 
-test("song-form task summaries separate draft and revision character and position metrics", () => {
+test("song-form task summaries keep metric detail out of the phase line", () => {
   const {harness} = createHarness(async () => jsonResponse({}));
   const progress = harness.trainingEpochStatus({kind: "form_train", status: "running", progress: 0.4,
     result: {epoch_target: 1, progress_detail: {epoch: 1, phase: "layout_revision", unit: "batches",
       completed: 2, total: 4, overall_fraction: 0.4, phase_fraction: 0.5,
-      losses: {draft_note_configuration_loss: 0.42, draft_note_configuration_accuracy: 0.71,
-        draft_position_header_accuracy: 0.9, draft_first_head_accuracy: 0.6,
-        revision_note_configuration_loss: 0.31, revision_note_configuration_accuracy: 0.8,
-        revision_position_header_accuracy: 0.95, revision_first_head_accuracy: 0.75},
-      metric_counts: {draft_note_configuration_loss: 120, draft_note_configuration_accuracy: 120,
-        draft_position_header_accuracy: 140, draft_first_head_accuracy: 18,
-        revision_note_configuration_loss: 80, revision_note_configuration_accuracy: 80,
-        revision_position_header_accuracy: 100, revision_first_head_accuracy: 12}}}});
-  assert.match(progress.text, /草稿音符字符损失 0\.420（n=120）/);
-  assert.match(progress.text, /草稿拍位\/头部准确率 90\.0%（n=140）/);
-  assert.match(progress.text, /草稿首个音符字符准确率 60\.0%（n=18）/);
-  assert.match(progress.text, /修订音符字符准确率 80\.0%（n=80）/);
+      losses: {draft_note_configuration_loss: 0.42, draft_note_configuration_accuracy: 0.71},
+      metric_counts: {draft_note_configuration_loss: 120, draft_note_configuration_accuracy: 120}}}});
+  assert.match(progress.text, /epoch 1\/1/);
+  assert.match(progress.text, /batch 2\/4/);
+  assert.doesNotMatch(progress.text, /0\.4200|音符字符准确率/);
+});
 
-  const completed = harness.trainingEpochStatus({kind: "form_train", status: "completed", progress: 1,
-    result: {epoch_target: 1, phase: "saved", progress_detail: {phase: "layout_revision"}, metrics: {epoch: 1, draft_revision_loss: 0.37,
-      draft_note_configuration_loss: 0.42, draft_note_configuration_accuracy: 0.71,
-      draft_position_header_accuracy: 0.9, draft_first_head_accuracy: 0.6,
-      revision_note_configuration_loss: 0.31, revision_note_configuration_accuracy: 0.8,
-      revision_position_header_accuracy: 0.95, revision_first_head_accuracy: 0.75,
-      metric_counts: {draft_note_configuration_loss: 120, draft_note_configuration_accuracy: 120,
-        draft_position_header_accuracy: 140, draft_first_head_accuracy: 18,
-        revision_note_configuration_loss: 80, revision_note_configuration_accuracy: 80,
-        revision_position_header_accuracy: 100, revision_first_head_accuracy: 12}}}});
-  assert.match(completed.text, /草稿\+修订总损失 0\.370/);
-  assert.match(completed.text, /修订首个音符字符准确率 75\.0%（n=12）/);
+function renderedMetricText(groups) {
+  return groups.flatMap(group => group.children).flatMap(child => child.children || [])
+    .map(node => node.textContent).join(" ");
+}
+
+test("song-form metric panel shows live draft/revision plus same-epoch planner values", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  const task = {kind: "form_train", status: "running", logs: [
+    `[06:37:21] form_progress ${JSON.stringify({epoch: 9, phase: "blueprint", completed: 1859, total: 1859, unit: "charts", losses: {loss: 1.31, loss_onset: 0.68}})}`,
+    `[06:38:02] form_progress ${JSON.stringify({epoch: 9, phase: "layout_revision", completed: 517, total: 65392, unit: "batches", losses: {draft_note_configuration_loss: 0.62, draft_note_configuration_accuracy: 0.78, draft_position_header_accuracy: 0.99, draft_first_head_accuracy: 0.55, revision_note_configuration_loss: 0.17, revision_note_configuration_accuracy: 0.94, revision_position_header_accuracy: 0.99, revision_first_head_accuracy: 0.88}, metric_counts: {draft_note_configuration_loss: 39640, draft_note_configuration_accuracy: 39640, draft_position_header_accuracy: 38049, draft_first_head_accuracy: 8513, revision_note_configuration_loss: 36216, revision_note_configuration_accuracy: 36216, revision_position_header_accuracy: 35412, revision_first_head_accuracy: 7966}})}`,
+  ], result: {phase: "checkpoint", progress_detail: {phase: "checkpoint"}, training_metrics: {
+    blueprint: {epoch: 9, phase: "blueprint", completed: 1859, total: 1859, unit: "charts", losses: {loss: 1.31, loss_onset: 0.68}},
+    layout_revision: {epoch: 9, phase: "layout_revision", completed: 517, total: 65392, unit: "batches", losses: {draft_note_configuration_loss: 0.62, draft_note_configuration_accuracy: 0.78, draft_position_header_accuracy: 0.99, draft_first_head_accuracy: 0.55, revision_note_configuration_loss: 0.17, revision_note_configuration_accuracy: 0.94, revision_position_header_accuracy: 0.99, revision_first_head_accuracy: 0.88}, metric_counts: {draft_note_configuration_loss: 39640, draft_note_configuration_accuracy: 39640, draft_position_header_accuracy: 38049, draft_first_head_accuracy: 8513, revision_note_configuration_loss: 36216, revision_note_configuration_accuracy: 36216, revision_position_header_accuracy: 35412, revision_first_head_accuracy: 7966}},
+  }, metrics: {epoch: 8, draft_revision_loss: 0.22, whole_song_plan_loss: 1.44, draft_note_configuration_accuracy: 0.77}}};
+  harness.renderTaskTrainingMetrics(task);
+  const groups = elements.get("#taskTrainingMetricsGroups").children;
+  const text = groups.map(descendantText).join(" ");
+  assert.equal(elements.get("#taskTrainingMetrics").hidden, false);
+  assert.match(elements.get("#taskTrainingMetricsSource").textContent, /最近阶段记录：谱面配置 · epoch 9/);
+  assert.match(text, /草稿配置/);
+  assert.match(text, /修订配置/);
+  assert.match(text, /本 epoch 已完成的全曲规划/);
+  assert.match(text, /0\.6200/);
+  assert.match(text, /n=4万/);
+  assert.match(text, /1\.3100/);
+  assert.doesNotMatch(text, /0\.7700/);
+});
+
+test("song-form metric panel recovers the latest epoch when phase logs have rolled off", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  harness.renderTaskTrainingMetrics({kind: "form_train", status: "running", logs: [], result: {
+    phase: "checkpoint", progress_detail: {phase: "checkpoint"}, training_metrics: {},
+    metric_history: [{epoch: 8, draft_revision_loss: 0.22, whole_song_plan_loss: 1.44,
+      draft_note_configuration_loss: 0.65, draft_note_configuration_accuracy: 0.77,
+      draft_position_header_accuracy: 0.99, draft_first_head_accuracy: 0.53,
+      revision_note_configuration_loss: 0.17, revision_note_configuration_accuracy: 0.94,
+      revision_position_header_accuracy: 0.99, revision_first_head_accuracy: 0.88,
+      metric_counts: {draft_note_configuration_loss: 4726494, draft_note_configuration_accuracy: 4726494,
+        draft_position_header_accuracy: 4415130, draft_first_head_accuracy: 997733,
+        revision_note_configuration_loss: 4726494, revision_note_configuration_accuracy: 4726494,
+        revision_position_header_accuracy: 4415130, revision_first_head_accuracy: 997733}}],
+  }});
+  assert.equal(elements.get("#taskTrainingMetrics").hidden, false);
+  assert.match(elements.get("#taskTrainingMetricsSource").textContent, /最近记录：epoch 8/);
+  const text = elements.get("#taskTrainingMetricsGroups").children.map(descendantText).join(" ");
+  assert.match(text, /n=472\.6万/);
+  assert.match(text, /0\.2200/);
+});
+
+test("song-form metric panel omits task groups with zero selected targets", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  harness.renderTaskTrainingMetrics({kind: "form_train", status: "running", result: {
+    training_metrics: {layout_revision: {epoch: 2, phase: "layout_revision",
+      losses: {draft_note_configuration_loss: 0.4, revision_note_configuration_loss: 0.0},
+      metric_counts: {draft_note_configuration_loss: 20, revision_note_configuration_loss: 0}}},
+  }});
+  const text = elements.get("#taskTrainingMetricsGroups").children.map(descendantText).join(" ");
+  assert.match(text, /草稿配置/);
+  assert.doesNotMatch(text, /修订配置/);
+  assert.match(text, /0\.4000/);
+  assert.doesNotMatch(text, /0\.0000/);
+});
+
+test("song-form onset diagnostics render from payload or retained log", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  const diagnostics = {schema: "song_form_onset_diagnostics_v1", gap_threshold_sec: 2,
+    gap_count: 1, totals: {raw_local_peaks: 120, audible_peaks: 30},
+    gaps: [{start_sec: 10, end_sec: 18.8, duration_sec: 8.8, raw_peak_count: 0,
+      audible_peak_count: 0, classification: "low_audio_activity"}]};
+  harness.renderTaskResults({kind: "form_generate", result: {}, logs: [
+    `[12:00:00] form_onset_diagnostics ${JSON.stringify(diagnostics)}`,
+  ]});
+  const notice = elements.get("#taskResults").children[0];
+  assert.match(descendantText(notice), /起音空白诊断/);
+  assert.match(descendantText(notice), /10\.0–18\.8 秒/);
+  assert.match(descendantText(notice), /音频活动较低/);
+  assert.equal(harness.taskOnsetDiagnostics({kind: "form_generate", result: {
+    onset_summary: {selection: {onset_diagnostics: diagnostics}}, logs: []}}).schema,
+  "song_form_onset_diagnostics_v1");
 });
 
 test("song-form repair results surface remaining hard conflicts without claiming playability", () => {

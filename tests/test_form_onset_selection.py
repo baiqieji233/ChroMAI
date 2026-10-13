@@ -7,7 +7,10 @@ import torch
 
 from maichart.event_timing import EventTempo
 from maichart.form import generate
-from maichart.form.onset_selection import local_peak_mask, merge_close_onsets, interval_statistics
+from maichart.form.onset_selection import (
+    local_peak_mask, merge_close_onsets, interval_statistics,
+    odds_modulate_probabilities, onset_gap_diagnostics,
+)
 from maichart.generation.conditions import GenerationCondition
 
 
@@ -42,6 +45,50 @@ def test_equal_peak_plateau_yields_one_candidate_and_inputs_must_be_finite():
     for bad in (-1,float('nan'),251):
         with pytest.raises(ValueError,match='onset_merge_ms'):
             merge_close_onsets([],bad)
+
+
+def test_curve_odds_modulation_is_identity_at_one_and_preserves_confident_peaks():
+    probabilities = np.asarray([0.0, .4, .746, 1.0])
+    factors = np.asarray([0.0, 1.0, .685, .5])
+    adjusted = odds_modulate_probabilities(probabilities, factors)
+    assert adjusted.tolist()[:2] == probabilities.tolist()[:2]
+    assert adjusted[2] == pytest.approx(.6679781963634462)
+    assert adjusted[2] > .641
+    assert adjusted[3] == 1.0
+    assert odds_modulate_probabilities([.2, .7], [1, 1]).tolist() == [.2, .7]
+    assert odds_modulate_probabilities([.2, .7], [0, 0]).tolist() == [0, 0]
+    for probability, factor in ((float('nan'), 1), (1.1, 1), (.2, -1), (.2, float('inf'))):
+        with pytest.raises(ValueError):
+            odds_modulate_probabilities(probability, factor)
+
+
+def test_gap_diagnostics_separate_curve_suppression_from_weak_planner():
+    times = np.arange(301, dtype=np.float64) * .02
+    probabilities = np.zeros_like(times)
+    probabilities[1] = .99
+    probabilities[50] = .7
+    probabilities[199] = .99
+    peaks = np.zeros_like(times, dtype=np.bool_)
+    peaks[[1, 50, 199]] = True
+    adjusted = odds_modulate_probabilities(probabilities, np.full_like(times, .6))
+    report = onset_gap_diagnostics(
+        times=times, probabilities=probabilities, adjusted=adjusted, peaks=peaks,
+        activity=np.ones_like(times), rest_mask=np.zeros_like(peaks), rest_regions=[],
+        onsets=[{'second':0.0,'source_second':.02},
+                {'second':4.0,'source_second':3.98}], threshold=.641,
+        curve_intensity=np.full_like(times, .3), curve_factors=np.full_like(times, .6),
+        start_sec=0., end_sec=6.,
+    )
+    assert report['schema'] == 'song_form_onset_diagnostics_v1'
+    assert report['thresholds'] == [.4, .5, .641]
+    gap = report['gaps'][0]
+    assert gap['classification'] == 'curve_suppressed'
+    assert gap['raw_peak_count'] == 1
+    assert gap['raw_max'] == pytest.approx(.7)
+    assert gap['raw_pass_by_threshold']['0.641'] == 1
+    assert gap['adjusted_pass_by_threshold']['0.641'] == 0
+    assert report['gaps'][1]['classification'] == 'planner_below_threshold'
+    assert report['gaps_truncated'] is False
 
 
 def mocked_plan(monkeypatch, scores, *, curve=None, merge_ms=40, first=0):
