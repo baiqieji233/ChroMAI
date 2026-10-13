@@ -70,7 +70,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache'}:
         return
     try:
         value = json.loads(body)
@@ -93,6 +93,8 @@ def update_form_progress(task, line):
             task.progress=min(.99,float(value.get('epoch',0))/task.result['epoch_target'])
     elif prefix == 'form_checkpoint':
         task.result.update(last_checkpoint=value,phase='checkpoint',progress_detail=value,progress_known=True)
+    elif prefix == 'form_audio_cache':
+        task.result.update(phase='audio_cache',progress_detail=value,progress_known=True)
     else:
         task.result.update(phase='arrangement',progress_detail=value,progress_known=False)
 
@@ -196,12 +198,20 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'prefetch_factor':number('prefetch_factor',2,1,16,True),
                 'log_interval':number('log_interval',10,0.1,3600),
                 'audio_cache_gb':number('audio_cache_gb',1,0,1024),
+                'audio_cache_mode':str(payload.get('audio_cache_mode','lru')).lower(),
                 'sample_cache_mb':number('sample_cache_mb',256,0,1048576,True),
                 'condition_drop_prob':number('condition_drop_prob',.1,0,1),
                 'blueprint_loss_weight':number('blueprint_loss_weight',1.,0,100),
                 'load_curve_loss_weight':number('load_curve_loss_weight',1.,0,100),
                 'relation_loss_weight':number('relation_loss_weight',.1,0,100)}
         values['quality_enabled'] = bool(payload.get('quality_enabled', True))
+        if values['audio_cache_mode'] not in {'lru','resident'}:
+            raise ValueError('audio_cache_mode must be lru or resident')
+        if values['audio_cache_mode'] == 'resident':
+            if values['loader_workers'] != 0:
+                raise ValueError('全量驻留内存要求数据加载 worker=0，以避免多进程复制音频缓存。')
+            if values['audio_cache_gb'] <= 0:
+                raise ValueError('全量驻留内存要求音频缓存上限大于 0 GB；该值是硬预算，必须足以容纳全部音频。')
         precision=str(payload.get('precision','auto')).lower()
         if precision not in {'auto','fp32','bf16','fp16'}: raise ValueError('precision must be auto, fp32, bf16 or fp16')
         values['precision']=precision

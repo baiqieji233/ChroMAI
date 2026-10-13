@@ -93,6 +93,14 @@ test("song-form task summaries distinguish batches from optimizer steps and repo
   assert.match(status.text, /主进程本地，worker 缓存未汇总/);
   assert.match(status.text, /CUDA 显存：/);
   assert.match(status.text, /累积 batch 1\/4/);
+  const caching = harness.trainingEpochStatus({kind: "form_train", status: "running", progress: 0,
+    result: {phase: "audio_cache", progress_detail: {mode: "resident", phase: "audio",
+      completed: 2, total: 4, bytes: 1024 ** 2, required_bytes: 2 * 1024 ** 3,
+      budget_bytes: 3 * 1024 ** 3, unique_audio: 4, preload_loads: 3}}});
+  assert.match(caching.text, /音频全量驻留/);
+  assert.match(caching.text, /音频 2\/4/);
+  assert.match(caching.text, /预计需求 2.00 GB/);
+  assert.match(caching.text, /预加载读取 3 次/);
   assert.match(status.text, /本阶段 ETA 1分5秒/);
   assert.doesNotMatch(status.text, /全程 ETA/);
   const preparing = harness.trainingEpochStatus({kind: "form_train", status: "running", progress: 0,

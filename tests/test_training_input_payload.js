@@ -53,7 +53,8 @@ test("song form submits every selected source for backend composition", () => {
       () => items.map((item) => item.manifest), () => items,
       (selector, fallback) => ({"#formPrecision": "bf16", "#formLoaderWorkers": 2,
         "#formPrefetchFactor": 3, "#formLogInterval": 4, "#formCheckpointIntervalSteps": 80,
-        "#formAudioCacheGb": 1.5, "#formSampleCacheMb": 512}[selector] ?? fallback),
+        "#formAudioCacheGb": 1.5, "#formAudioCacheMode": "resident",
+        "#formSampleCacheMb": 512}[selector] ?? fallback),
       () => "cpu", () => qualityEnabled);
     assert.deepEqual(payload.manifests, ["a.json", "b.json"]);
     assert.deepEqual(payload.dataset_paths, ["dataset-a", "dataset-b"]);
@@ -62,6 +63,6 @@ test("song form submits every selected source for backend composition", () => {
     assert.equal(payload.segment_beats, undefined);
     assert.deepEqual([payload.precision, payload.loader_workers, payload.prefetch_factor,
       payload.log_interval, payload.checkpoint_interval_steps, payload.audio_cache_gb,
-      payload.sample_cache_mb], ["bf16", 2, 3, 4, 80, 1.5, 512]);
+      payload.audio_cache_mode, payload.sample_cache_mb], ["bf16", 2, 3, 4, 80, 1.5, "resident", 512]);
   }
 });

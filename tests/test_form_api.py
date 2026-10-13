@@ -184,14 +184,39 @@ def test_train_forwards_song_form_runtime_controls_as_cli_flags(tmp_path):
         "manifest": str(manifest), "checkpoint_dir": str(tmp_path / "out"),
         "precision": "bf16", "loader_workers": 2, "prefetch_factor": 3,
         "log_interval": 4.5, "checkpoint_interval_steps": 80,
-        "audio_cache_gb": 1.5, "sample_cache_mb": 512,
+        "audio_cache_gb": 1.5, "audio_cache_mode": "lru", "sample_cache_mb": 512,
     }, runtime=Runtime())
     args = calls[0]
     for flag, expected in (("--precision", "bf16"), ("--loader-workers", "2"),
                            ("--prefetch-factor", "3"), ("--log-interval", "4.5"),
                            ("--checkpoint-interval-steps", "80"),
-                           ("--audio-cache-gb", "1.5"), ("--sample-cache-mb", "512")):
+                           ("--audio-cache-gb", "1.5"), ("--audio-cache-mode", "lru"),
+                           ("--sample-cache-mb", "512")):
         assert args[args.index(flag) + 1] == expected
+
+
+@pytest.mark.parametrize(("workers", "budget", "message"), [
+    (1, 2, "worker=0"), (0, 0, "硬预算"),
+])
+def test_resident_audio_cache_rejects_unsafe_runtime_settings(tmp_path, workers, budget, message):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    created = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            created.append(kind)
+            return TaskState(task_id="resident-rejected", kind=kind)
+
+    with pytest.raises(ValueError, match=message):
+        form_api.start_form_task(_Response(), "train", {
+            "manifest": str(manifest), "checkpoint_dir": str(tmp_path / "out"),
+            "audio_cache_mode": "resident", "loader_workers": workers,
+            "audio_cache_gb": budget,
+        }, runtime=Runtime())
+    assert created == []
 
 
 def test_form_progress_keeps_new_fields_and_checkpoint_events():
@@ -207,6 +232,17 @@ def test_form_progress_keeps_new_fields_and_checkpoint_events():
     update_form_progress(task, 'form_checkpoint {"path":"form_last.pt","epoch":1,"phase":"draft","batch":3,"optimizer_steps":2,"resumable":true,"elapsed_sec":30}')
     assert task.result["last_checkpoint"]["path"] == "form_last.pt"
     assert task.result["progress_detail"]["optimizer_steps"] == 2
+
+
+def test_form_audio_cache_event_is_exposed_as_current_progress():
+    task = TaskState(task_id="form-audio-cache", kind="form_train")
+    event = {"mode": "resident", "phase": "audio", "completed": 2, "total": 4,
+             "bytes": 1024, "required_bytes": 2048, "budget_bytes": 4096,
+             "unique_audio": 4, "saved_reads": 3}
+    update_form_progress(task, "form_audio_cache " + json.dumps(event))
+    assert task.result["phase"] == "audio_cache"
+    assert task.result["progress_detail"] == event
+    assert task.result["progress_known"] is True
 
 
 def test_bad_manifest_does_not_create_queued_task(tmp_path):

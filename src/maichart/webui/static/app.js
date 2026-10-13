@@ -5,9 +5,9 @@ function trainingEpochStatus(task) {
   if (task.kind === "form_train") {
     const result = task.result || {};
     const detail = result.progress_detail || {};
-    const phaseKey = detail.phase || result.phase;
+    const phaseKey = result.phase === "audio_cache" ? result.phase : detail.phase || result.phase;
     if (!phaseKey) return null;
-    const phases = {prepare: "准备数据", blueprint: "全曲规划", layout_revision: "谱面配置训练", draft: "谱面草稿", revision: "谱面修订", saved: "保存检查点", checkpoint: "保存检查点", arrangement: "整理输出"};
+    const phases = {prepare: "准备数据", audio_cache: "音频全量驻留", blueprint: "全曲规划", layout_revision: "谱面配置训练", draft: "谱面草稿", revision: "谱面修订", saved: "保存检查点", checkpoint: "保存检查点", arrangement: "整理输出"};
     const stages = {dataset: "读取数据集", preparation: "构建训练索引", chart: "准备谱面", ready: "数据准备完成"};
     const phase = `${phases[phaseKey] || String(phaseKey)}${detail.stage ? ` · ${stages[detail.stage] || detail.stage}` : ""}`;
     const epoch = Number(detail.epoch), epochTarget = Number(result.epoch_target);
@@ -16,6 +16,17 @@ function trainingEpochStatus(task) {
     const unit = detail.unit === "charts" ? "首" : detail.unit === "batches" ? "batch"
       : detail.unit === "optimizer_step" ? "优化器步" : detail.unit === "blueprint_step" ? "规划步" : "项";
     const parts = [];
+    if (phaseKey === "audio_cache") {
+      const bytes = Number(detail.bytes), required = Number(detail.required_bytes), budget = Number(detail.budget_bytes);
+      const formatBytes = (value) => value >= 1024 ** 3 ? `${(value / 1024 ** 3).toFixed(2)} GB` : `${(value / 1024 ** 2).toFixed(0)} MB`;
+      if (Number.isFinite(completed) && Number.isFinite(total)) parts.push(`音频 ${completed}/${total}`);
+      if (Number.isFinite(bytes)) parts.push(`已驻留 ${formatBytes(bytes)}`);
+      if (Number.isFinite(required)) parts.push(`预计需求 ${formatBytes(required)}`);
+      if (Number.isFinite(budget)) parts.push(`硬预算 ${formatBytes(budget)}`);
+      if (detail.unique_audio != null) parts.push(`唯一音频 ${detail.unique_audio}`);
+      if (detail.preload_loads != null) parts.push(`预加载读取 ${detail.preload_loads} 次`);
+      if (detail.saved_reads != null) parts.push(`避免重复读取 ${detail.saved_reads} 次`);
+    }
     if (phaseKey === "prepare") {
       if (Number.isFinite(Number(detail.completed_songs)) && Number(detail.total_songs) > 0) {
         parts.push(`歌曲 ${detail.completed_songs}/${detail.total_songs}`);
@@ -966,6 +977,7 @@ function songFormTrainingPayload(options = {}) {
     log_interval: Number(valueOrDefault("#formLogInterval", 10)),
     checkpoint_interval_steps: Number(valueOrDefault("#formCheckpointIntervalSteps", 500)),
     audio_cache_gb: Number(valueOrDefault("#formAudioCacheGb", 1)),
+    audio_cache_mode: valueOrDefault("#formAudioCacheMode", "lru"),
     sample_cache_mb: Number(valueOrDefault("#formSampleCacheMb", 256)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
