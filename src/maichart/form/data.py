@@ -21,7 +21,8 @@ from maichart.event_timing import EventPoint, parse_event_chart, seconds_at_beat
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
 from maichart.generation.event_quality import condition_from_events
 from maichart.generation.event_audio import (
-    audio_segment_tensor, extract_event_audio, _normalize_tempo_map,
+    audio_segment_tensor, extract_event_audio, event_audio_cache_path, load_event_audio,
+    _normalize_tempo_map,
     _beats_at_audio_offsets, segment_frame_times,
 )
 from maichart.generation.sustain_state import SustainStateIndex
@@ -39,6 +40,8 @@ class _AudioStore:
         self.loader,self.cache_dir,self.budget=loader,cache_dir,budget
         self.entries=OrderedDict();self.bytes=0
         self.hits=self.misses=self.evictions=self.loads=0
+        self.disk_loads=self.source_resolutions=0
+        self._resolved_sources={}
         self._lock=threading.RLock()
 
     def __getstate__(self):
@@ -47,19 +50,48 @@ class _AudioStore:
         # every resident audio feature array in the parent process.
         state['entries']=OrderedDict();state['bytes']=0
         state['hits']=state['misses']=state['evictions']=state['loads']=0
+        state['disk_loads']=state['source_resolutions']=0
         return state
 
     def __setstate__(self,state):
         self.__dict__.update(state);self._lock=threading.RLock()
 
+    def disk_cache_path(self,path):
+        """Return this source's resolved event-audio cache path, if applicable."""
+        if self.loader is not extract_event_audio or self.cache_dir is None:
+            return None
+        key=str(path)
+        source=Path(path)
+        stat=source.stat()
+        signature=(stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
+        with self._lock:
+            resolution=self._resolved_sources.get(key)
+            if resolution is None or resolution[0] != signature:
+                cache_path=event_audio_cache_path(source,self.cache_dir)
+                resolution=(signature,cache_path)
+                self._resolved_sources[key]=resolution
+                self.source_resolutions+=1
+                if key in self.entries:
+                    old=self.entries.pop(key)
+                    self.bytes-=old.features.nbytes+old.times.nbytes
+            return resolution[1]
+
     def get(self,path):
         key=str(path)
         with self._lock:
+            cache_path=self.disk_cache_path(path)
             if key in self.entries:
                 self.hits+=1
                 self.entries.move_to_end(key);return self.entries[key]
             self.misses+=1
-            audio=self.loader(path,cache_dir=self.cache_dir)
+            if cache_path is not None and cache_path.is_file():
+                try:
+                    audio=load_event_audio(cache_path,sample_rate=22050,hop_length=441)
+                    self.disk_loads+=1
+                except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError):
+                    audio=self.loader(path,cache_dir=self.cache_dir)
+            else:
+                audio=self.loader(path,cache_dir=self.cache_dir)
             self.loads+=1
             size=audio.features.nbytes+audio.times.nbytes
             if self.budget is None or self.budget > 0:
@@ -75,7 +107,8 @@ class _AudioStore:
         with self._lock:
             return {'hits':self.hits,'misses':self.misses,'loads':self.loads,
                     'evictions':self.evictions,'entries':len(self.entries),
-                    'bytes':self.bytes,'budget_bytes':self.budget}
+                    'bytes':self.bytes,'budget_bytes':self.budget,
+                    'disk_loads':self.disk_loads,'source_resolutions':self.source_resolutions}
 
 
 class _SampleStore:
@@ -540,6 +573,10 @@ class FormDataset(Dataset):
         if not self.items: raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
 
     def __len__(self): return len(self.items)
+
+    def preload_audio(self, report):
+        from maichart.form.audio_residency import preload_audio
+        return preload_audio(self.audio_store, [song[0].audio.path for song in self.songs], report=report)
 
     def cache_stats(self):
         return {'audio':self.audio_store.stats(),'samples':self.sample_store.stats()}

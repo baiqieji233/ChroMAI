@@ -1,11 +1,13 @@
 from fractions import Fraction as F
 import pickle
+from pathlib import Path
 
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
 from maichart.event_timing import EventPoint
+from maichart.form import data as form_data
 from maichart.form.codec import RationalCodec
 from maichart.form.data import _AudioStore, _LazyAudio, _SampleStore
 from maichart.form.timing import metrical_features
@@ -69,9 +71,10 @@ def test_audio_lru_reports_hits_misses_evictions_and_pickles_lock():
     first = store.get('a')
     assert store.get('a') is first
     store.get('b')
-    assert store.stats() == {'hits': 1, 'misses': 2, 'loads': 2,
-                             'evictions': 1, 'entries': 1,
-                             'bytes': per_entry, 'budget_bytes': per_entry}
+    stats=store.stats()
+    assert {key:stats[key] for key in ('hits','misses','loads','evictions','entries','bytes','budget_bytes')} == {
+        'hits': 1, 'misses': 2, 'loads': 2, 'evictions': 1,
+        'entries': 1, 'bytes': per_entry, 'budget_bytes': per_entry}
 
     restored = pickle.loads(pickle.dumps(_AudioStore(_pickle_audio_loader, 'cache', budget=per_entry)))
     assert restored.stats()['budget_bytes'] == per_entry
@@ -83,6 +86,81 @@ def test_lazy_audio_is_safe_to_pickle_before_first_attribute_access():
     lazy = pickle.loads(pickle.dumps(_LazyAudio(store, 'asset')))
     assert lazy.features[0, 0] == 7
     assert lazy.store.stats()['entries'] == 1
+
+
+def test_audio_store_resolves_disk_cache_once_and_reloads_after_lru_eviction(monkeypatch, tmp_path):
+    source = tmp_path / 'source.wav'
+    other = tmp_path / 'other.wav'
+    source.write_bytes(b'audio')
+    other.write_bytes(b'other')
+    resolved = []
+    disk_loads = []
+    extractions = []
+
+    def cache_path_for(path, _cache_dir):
+        resolved.append(1)
+        return tmp_path / f'{path.stem}.event_audio.json'
+
+    def load_cache(path, **_kwargs):
+        disk_loads.append(str(path))
+        return _audio(2)
+
+    def extract(path, **_kwargs):
+        extractions.append(str(path))
+        cache_path = tmp_path / f'{Path(path).stem}.event_audio.json'
+        cache_path.write_text('valid cache marker', encoding='utf-8')
+        return _audio(1)
+
+    monkeypatch.setattr(form_data, 'event_audio_cache_path', cache_path_for)
+    monkeypatch.setattr(form_data, 'load_event_audio', load_cache)
+    monkeypatch.setattr(form_data, 'extract_event_audio', extract)
+    entry_bytes = _audio(1).features.nbytes + _audio(1).times.nbytes
+    store = _AudioStore(extract, tmp_path / 'cache', budget=entry_bytes)
+
+    assert store.get(source).features[0, 0] == 1
+    assert store.get(source).features[0, 0] == 1
+    store.get(other)
+    store.get(source)
+    stats = store.stats()
+    assert len(resolved) == 2
+    assert len(disk_loads) == 1
+    assert extractions.count(str(source)) == 1
+    assert stats['source_resolutions'] == 2
+    assert stats['disk_loads'] == 1
+
+
+def test_audio_store_re_resolves_when_source_stat_changes_and_falls_back_on_bad_cache(monkeypatch, tmp_path):
+    source = tmp_path / 'source.wav'
+    source.write_bytes(b'audio')
+    resolved = []
+    fallbacks = []
+
+    def cache_path_for(path, _cache_dir):
+        resolved.append(path.stat().st_size)
+        return tmp_path / f'{path.stat().st_size}.event_audio.json'
+
+    def bad_cache(_path, **_kwargs):
+        raise ValueError('corrupt cache')
+
+    def extract(path, **_kwargs):
+        fallbacks.append(str(path))
+        return _audio(3)
+
+    monkeypatch.setattr(form_data, 'event_audio_cache_path', cache_path_for)
+    monkeypatch.setattr(form_data, 'load_event_audio', bad_cache)
+    monkeypatch.setattr(form_data, 'extract_event_audio', extract)
+    store = _AudioStore(extract, tmp_path / 'cache')
+
+    first_path = store.disk_cache_path(source)
+    first_path.write_text('bad', encoding='utf-8')
+    assert store.get(source).features[0, 0] == 3
+    source.write_bytes(b'changed audio')
+    second_path = store.disk_cache_path(source)
+    assert second_path != first_path
+    assert len(resolved) == 2
+    assert store.get(source).features[0, 0] == 3
+    assert len(fallbacks) == 2
+    assert store.stats()['source_resolutions'] == 2
 
 
 def test_sample_cache_is_bounded_and_returns_independent_tensors():

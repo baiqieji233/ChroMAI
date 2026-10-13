@@ -62,6 +62,7 @@ def parser():
     p.add_argument('--loader-workers', type=int, default=0)
     p.add_argument('--prefetch-factor', type=int, default=2)
     p.add_argument('--audio-cache-gb', type=float, default=1.)
+    p.add_argument('--audio-cache-mode', choices=('lru', 'resident'), default='lru')
     p.add_argument('--sample-cache-mb', type=int, default=256)
     p.add_argument('--log-interval', type=float, default=10.)
     return p
@@ -80,6 +81,8 @@ def _validate(args):
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
         raise ValueError('Choose resume or finetune, not both')
+    if args.audio_cache_mode == 'resident' and (args.loader_workers or args.audio_cache_gb <= 0):
+        raise ValueError('Full audio residency requires loader-workers=0 and a positive audio-cache-gb budget')
 
 
 def layout_loss(prediction, batch, relation_weight):
@@ -170,6 +173,7 @@ def main(argv=None):
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
+         audio_cache_mode=args.audio_cache_mode,
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
     if args.loader_workers:
         emit('form_warning', message='Loader workers copy dataset metadata and each has its own cache; memory grows with worker count.')
@@ -187,6 +191,9 @@ def main(argv=None):
                 'meter_map': meters, 'max_region_seconds': args.max_region_seconds, 'charts': dataset.audit['charts']}
     if args.resume and old.get('dataset_contract') != contract:
         raise ValueError('Resume data changed; use --init-checkpoint')
+    if args.audio_cache_mode == 'resident':
+        residency = dataset.preload_audio(lambda **fields: emit('form_audio_cache', mode='resident', **fields))
+        emit('form_audio_cache', **residency, phase='in_memory_training')
     from maichart.form.blueprint import BlueprintConfig, SongBlueprint, compute_blueprint_loss
     if old is None:
         codec = dataset.codec
