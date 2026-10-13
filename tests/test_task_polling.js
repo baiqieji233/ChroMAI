@@ -85,3 +85,14 @@ test("successful task reads may contain error, while failed POST responses still
   const postHarness = createHarness(async () => jsonResponse({error: "invalid request"}));
   await assert.rejects(postHarness.harness.api("/api/form/generate", {audio: "song.mp3"}), /invalid request/);
 });
+
+test("HTTP and application errors without a task record still reject GET task reads", async () => {
+  for (const [data, ok, status] of [
+    [{error: "task missing"}, false, 404],
+    [{error: "backend error"}, true, 200],
+    [{task_id: "t5", status: "failed", error: "service unavailable"}, false, 503],
+  ]) {
+    const {harness} = createHarness(async () => jsonResponse(data, ok, status));
+    await assert.rejects(harness.api("/api/task?id=t5"), new RegExp(data.error));
+  }
+});

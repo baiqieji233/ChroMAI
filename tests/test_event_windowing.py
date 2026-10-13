@@ -90,11 +90,10 @@ def test_nonpositive_or_nonfinite_bpm_is_rejected(value):
         event_cli._musical_bpm(value)
 
 
-def test_written_bpm_is_never_a_raw_lag_bin():
-    # Formatting strips representation noise but is not allowed to make musical
-    # decisions: 136.36363636363637 is already quantized by _musical_bpm before
-    # it arrives here, and an explicit odd tempo must survive as given.
-    assert _format_number(136.36363636363637) == "136.364"
+def test_written_bpm_preserves_the_clock_chosen_by_the_caller():
+    # Automatic tempo quantization belongs to _musical_bpm. The lossless
+    # compiler must also preserve callers' unquantized or explicit BPMs.
+    assert _format_number(136.36363636363637) == "136.36363636363637"
     assert _format_number(91.0) == "91"
     assert _format_number(128.5) == "128.5"
     assert _format_number(174.63) == "174.63"

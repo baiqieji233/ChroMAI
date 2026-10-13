@@ -127,3 +127,18 @@ def test_negative_audio_clock_still_carries_active_slide():
     states, mask, metadata = _index([EventPoint(0, "1-5[4:4]")], first=-2).at(2)
     assert metadata["boundary_second"] == -1
     assert metadata["state_count"] == 1 and mask.tolist() == [False]
+
+
+def test_detected_fractional_bpm_and_precise_offset_preserve_sustain_clock():
+    bpm = 92.54999999999788
+    first = -0.123456789
+    tempos = [EventTempo(Fraction(0), bpm)]
+    empty = _index([], tempos=tempos, first=first)
+    assert empty.at(0)[2]["state_count"] == 0
+
+    index = _index([EventPoint(Fraction(0), "1h[4:4]")], tempos=tempos, first=first)
+    _states, mask, metadata = index.at(2)
+    assert mask.tolist() == [False]
+    assert metadata["states"][0]["source_second"] == first
+    assert metadata["boundary_second"] == pytest.approx(first + 120 / bpm, abs=1e-12)
+    assert metadata["states"][0]["end_second"] == pytest.approx(first + 240 / bpm, abs=1e-12)

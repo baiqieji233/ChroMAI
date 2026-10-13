@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
+from decimal import Decimal
 from fractions import Fraction
 from math import gcd
 from typing import Iterable
@@ -226,19 +227,15 @@ def _build_ir(events: EventChart, inote: str, designer: str) -> ChartIR:
 
 
 def _format_number(value: float) -> str:
-    """Render a BPM for a ``(N)`` or ``&wholebpm=`` field.
+    """Serialize a chosen BPM/offset without changing its float value.
 
-    A beat tracker returns lag bins, so writing ``repr()`` of the estimate put
-    values such as ``136.36363636363637`` straight into the chart.  This function
-    only removes float representation noise -- it never rounds a tempo onto a
-    musical grid, because the caller has already chosen the clock and an
-    explicit ``--bpm 174.63`` must survive verbatim.  Values that need more than
-    three decimals to distinguish are rounded to three, which is finer than any
-    ``{division}`` can resolve in practice.
+    Tempo selection belongs to the caller. Rounding here changes the clock
+    used by generated notes and sustain-state snapshots and breaks the strict
+    event roundtrip. ``repr`` supplies a roundtrippable decimal, while Decimal
+    expands exponent notation that Simai BPM directives cannot parse.
     """
 
     number = float(value)
     if number.is_integer():
         return str(int(number))
-    text = f"{number:.3f}".rstrip("0").rstrip(".")
-    return text or "0"
+    return format(Decimal(repr(number)), "f")
