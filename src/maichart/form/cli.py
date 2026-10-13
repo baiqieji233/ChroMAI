@@ -194,7 +194,9 @@ def main(argv=None):
             config=PostProcessConfig(enable_conflict_detection=True,conflict_engine='miacode',conflict_repair_mode='local',note_repair_mode='edit'),
             budget=RepairBudget(args.repair_checks,args.repair_edits,args.repair_seconds))
         points=list(result.points);report['repair']=result.to_dict()
-        print('form_repair '+json.dumps({k:report['repair'][k] for k in ('checks','cache_hits','elapsed_secs','remaining_actionable_hard','status')}),flush=True)
+        print('form_repair '+json.dumps({k:report['repair'][k] for k in (
+            'checks','cache_hits','elapsed_secs','remaining_actionable_hard','status',
+            'coverage_status','budget_exhausted')}),flush=True)
     from maichart.generation.event_quality import assess_event_chart
     if 'quality' in report: report['draft_quality']=report.pop('quality')
     report['quality']=assess_event_chart(points,tempo,first=first,duration_sec=audio.duration_sec,target_condition=condition)

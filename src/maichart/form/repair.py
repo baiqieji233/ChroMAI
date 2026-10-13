@@ -68,6 +68,7 @@ class FormRepairResult:
     message: str = ""
     original_coverage: dict | None = None
     final_coverage: dict | None = None
+    budget_exhausted: bool = False
 
     def to_dict(self) -> dict:
         return {
@@ -81,6 +82,7 @@ class FormRepairResult:
             "elapsed_secs": self.elapsed_secs,
             "message": self.message,
             "coverage_status": _coverage_status(self.final_coverage),
+            "budget_exhausted": self.budget_exhausted,
             "original_coverage": self.original_coverage,
             "final_coverage": self.final_coverage,
         }
@@ -238,7 +240,7 @@ def repair_chart(
         before = assess(current)
     except _BudgetStop:
         return FormRepairResult(original, (), (), None, checks, cache_hits,
-                                time.monotonic() - started, "budget_exhausted")
+                                time.monotonic() - started, "budget_exhausted", budget_exhausted=True)
     except Exception as exc:
         return FormRepairResult(original, (), (), None, checks, cache_hits,
                                 time.monotonic() - started, "baseline_validation_failed",
@@ -327,4 +329,5 @@ def repair_chart(
         elapsed_secs=time.monotonic() - started, status=status,
         original_coverage=original_report.coverage,
         final_coverage=final_coverage,
+        budget_exhausted=expired,
     )
