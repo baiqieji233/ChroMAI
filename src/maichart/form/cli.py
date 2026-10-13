@@ -117,6 +117,22 @@ def main(argv=None):
                                   'model_config':payload['model_config']}
     condition=GenerationCondition.from_dict(_json(args.condition_file)) if args.condition_file else GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
     report['generation_condition'] = condition.to_dict()
+    from maichart.generation.conditions import CONDITION_KEYS
+    report['effective_generation_settings'] = {
+        'operation':args.operation,'level':condition.level,'temperature':args.temperature,'seed':args.seed,
+        'device':args.device,'onset_threshold':args.onset_threshold,'onset_merge_ms':args.onset_merge_ms,
+        'memory_strength':args.memory_strength,'max_region_seconds':args.max_region_seconds,
+        'rhythm_snap_enabled':args.rhythm_snap,'rhythm_snap_ms':args.rhythm_snap_ms,
+        'rhythm_snap_divisions':list(rhythm_snap_divisions),
+        'intensity_curve_enabled':bool(args.intensity_curve_file),
+        'intensity_curve_strength':args.intensity_curve_strength,'intensity_curve_span':args.intensity_curve_span,
+        'intensity_curve_mode':args.intensity_curve_mode,'repair':args.repair,
+        'repair_checks':args.repair_checks,'repair_edits':args.repair_edits,'repair_seconds':args.repair_seconds,
+        'model_max_tokens':model.config.max_tokens,'model_max_memory_tokens':model.config.max_memory_tokens,
+        'condition_vector_keys':list(CONDITION_KEYS),'condition_vector':condition.to_vector().tolist(),
+        'condition_vector_dtype':'float32','condition_vector_level_divisor':15.0,
+        'condition_kind':'learned_soft_condition_not_a_hard_quota',
+        'first':first,'tempo_map':report['tempo_map']}
     intensity_curve = None
     if args.intensity_curve_file:
         from maichart.generation.music_intensity import load_intensity_profile
@@ -162,7 +178,8 @@ def main(argv=None):
         song.spans[-1].end, tempo, first, existing_end=chart.end_beat if chart else None)
     report['export_timing'] = export_timing
     text,_=compile_event_points(points,tempo_changes=tempo,first=first,end_beat=export_end,
-                                title=chart.title if chart else Path(args.audio).stem,level=str(args.level),difficulty=args.difficulty)
+                                title=chart.title if chart else Path(args.audio).stem,
+                                level=chart.level if chart else str(condition.level),difficulty=args.difficulty)
     output.write_text(text,encoding='utf-8')
     report_path=output.with_suffix('.form.json')
     report_path.write_text(json.dumps(report,ensure_ascii=False,indent=2,default=lambda value:list(value) if isinstance(value,(set,frozenset)) else str(value)),encoding='utf-8')
