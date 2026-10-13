@@ -42,9 +42,10 @@ class RationalCodec:
         return [self.bos_id] + [t for p in values for t in self.cell(p, origin=origin)] + [self.eos_id]
 
     def bounded_memory(self, points, *, origin=Fraction(0), max_tokens=512, newest=True):
-        cells = [self.cell(p, origin=origin) for p in points]
         kept, used = [], 2
-        for cell in reversed(cells) if newest else cells:
+        values = (reversed(points) if hasattr(points, '__reversed__') else reversed(list(points))) if newest else iter(points)
+        for point in values:
+            cell = self.cell(point, origin=origin)
             if used + len(cell) > max_tokens:
                 break
             kept.append(cell); used += len(cell)

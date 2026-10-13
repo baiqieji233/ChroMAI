@@ -7,6 +7,7 @@ directives describe event spacing; they do not define a time signature.
 from __future__ import annotations
 
 import math
+from bisect import bisect_right
 from dataclasses import dataclass
 from fractions import Fraction
 from typing import Any, Iterable, Mapping
@@ -243,16 +244,20 @@ def metrical_features(
     if any(value < 0 for value in positions):
         raise ValueError("Feature beats must be nonnegative.")
     meter_map = normalize_meter_map(meters)
+    if not meter_map:
+        output = np.zeros((len(positions), 8), dtype=np.float32)
+        for row, beat in enumerate(positions):
+            angle = 2 * math.pi * float(beat % 1)
+            output[row, 0] = math.sin(angle)
+            output[row, 1] = math.cos(angle)
+        return output
+    meter_beats = [change.beat for change in meter_map]
     output = np.zeros((len(positions), 8), dtype=np.float32)
     for row, beat in enumerate(positions):
         beat_phase = beat % 1
         angle = 2 * math.pi * float(beat_phase)
         output[row, 0:2] = (math.sin(angle), math.cos(angle))
-        active: MeterChange | None = None
-        for change in meter_map:
-            if change.beat > beat:
-                break
-            active = change
+        active = meter_map[bisect_right(meter_beats, beat) - 1] if beat >= meter_beats[0] else None
         if active is None:
             continue
         bar = active.beats_per_bar

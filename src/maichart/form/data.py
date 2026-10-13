@@ -8,6 +8,7 @@ from fractions import Fraction
 import hashlib
 import json
 import os
+from bisect import bisect_left
 from pathlib import Path
 import threading
 import time
@@ -34,24 +35,106 @@ from maichart.training.event_dataset import inspect_chart, numeric_level
 
 
 class _AudioStore:
-    def __init__(self, loader, cache_dir, budget=256*1024*1024):
+    def __init__(self, loader, cache_dir, budget=1024*1024*1024):
         self.loader,self.cache_dir,self.budget=loader,cache_dir,budget
         self.entries=OrderedDict();self.bytes=0
+        self.hits=self.misses=self.evictions=self.loads=0
+        self._lock=threading.RLock()
+
+    def __getstate__(self):
+        state=self.__dict__.copy();state.pop('_lock',None)
+        # Spawned workers get independent, lazy caches rather than a copy of
+        # every resident audio feature array in the parent process.
+        state['entries']=OrderedDict();state['bytes']=0
+        state['hits']=state['misses']=state['evictions']=state['loads']=0
+        return state
+
+    def __setstate__(self,state):
+        self.__dict__.update(state);self._lock=threading.RLock()
 
     def get(self,path):
         key=str(path)
-        if key in self.entries:
-            self.entries.move_to_end(key);return self.entries[key]
-        audio=self.loader(path,cache_dir=self.cache_dir)
-        self.entries[key]=audio;self.bytes+=audio.features.nbytes+audio.times.nbytes
-        while len(self.entries)>1 and self.bytes>self.budget:
-            _,old=self.entries.popitem(last=False);self.bytes-=old.features.nbytes+old.times.nbytes
-        return audio
+        with self._lock:
+            if key in self.entries:
+                self.hits+=1
+                self.entries.move_to_end(key);return self.entries[key]
+            self.misses+=1
+            audio=self.loader(path,cache_dir=self.cache_dir)
+            self.loads+=1
+            size=audio.features.nbytes+audio.times.nbytes
+            if self.budget is None or self.budget > 0:
+                self.entries[key]=audio;self.bytes+=size
+                while len(self.entries)>1 and self.budget is not None and self.bytes>self.budget:
+                    _,old=self.entries.popitem(last=False);self.bytes-=old.features.nbytes+old.times.nbytes
+                    self.evictions+=1
+                if self.budget == 0:
+                    self.entries.pop(key, None);self.bytes-=size
+            return audio
+
+    def stats(self):
+        with self._lock:
+            return {'hits':self.hits,'misses':self.misses,'loads':self.loads,
+                    'evictions':self.evictions,'entries':len(self.entries),
+                    'bytes':self.bytes,'budget_bytes':self.budget}
+
+
+class _SampleStore:
+    def __init__(self, budget):
+        self.budget=budget;self.entries=OrderedDict();self.bytes=0
+        self.hits=self.misses=self.evictions=0
+
+    def __getstate__(self):
+        return {'budget':self.budget,'entries':OrderedDict(),'bytes':0,
+                'hits':0,'misses':0,'evictions':0}
+
+    def __setstate__(self,state): self.__dict__.update(state)
+
+    @staticmethod
+    def _size(value):
+        if torch.is_tensor(value): return value.numel()*value.element_size()
+        if isinstance(value, dict): return sum(_SampleStore._size(v) for v in value.values())
+        if isinstance(value, (tuple,list)): return sum(_SampleStore._size(v) for v in value)
+        return 0
+
+    @staticmethod
+    def _copy(value):
+        if torch.is_tensor(value): return value.clone()
+        if isinstance(value, dict): return {k:_SampleStore._copy(v) for k,v in value.items()}
+        if isinstance(value, list): return [_SampleStore._copy(v) for v in value]
+        if isinstance(value, tuple): return tuple(_SampleStore._copy(v) for v in value)
+        return value
+
+    def get(self,key):
+        if key not in self.entries:
+            self.misses+=1;return None
+        self.hits+=1;self.entries.move_to_end(key)
+        return self._copy(self.entries[key][0])
+
+    def put(self,key,value):
+        if self.budget == 0: return
+        stored=self._copy(value);size=self._size(stored)
+        if self.budget is not None and size > self.budget: return
+        old=self.entries.pop(key,None)
+        if old: self.bytes-=old[1]
+        self.entries[key]=(stored,size);self.bytes+=size
+        while self.budget is not None and self.bytes>self.budget:
+            _,(_,removed)=self.entries.popitem(last=False)
+            self.bytes-=removed;self.evictions+=1
+
+    def stats(self):
+        return {'hits':self.hits,'misses':self.misses,'evictions':self.evictions,
+                'entries':len(self.entries),'bytes':self.bytes,'budget_bytes':self.budget}
 
 
 class _LazyAudio:
     def __init__(self,store,path): self.store,self.path=store,path
-    def __getattr__(self,key): return getattr(self.store.get(self.path),key)
+    def __getstate__(self): return {'store':self.store,'path':self.path}
+    def __setstate__(self,state): self.store,self.path=state['store'],state['path']
+    def __getattr__(self,key):
+        try: store=object.__getattribute__(self,'store')
+        except AttributeError: raise AttributeError(key) from None
+        path=object.__getattribute__(self,'path')
+        return getattr(store.get(path),key)
 
 
 @dataclass
@@ -143,9 +226,12 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     if any(p.beat < span.end for p in right):
         raise ValueError("Right context overlaps edit region")
     memory = CausalMotifMemory(song.regions)
+    history_beats = [point.beat for point in history]
     for prior in song.regions:
         if prior.end <= region.start:
-            memory.commit(prior.index, [p for p in history if prior.start <= p.beat < prior.end])
+            lo = bisect_left(history_beats, prior.start)
+            hi = bisect_left(history_beats, prior.end)
+            memory.commit(prior.index, history[lo:hi])
     ref = memory.reference(region.index, song.relations)
     # A recurrence is expressed across the full musical region. A compute cap
     # receives only its overlapping portion and never becomes a motif boundary.
@@ -344,10 +430,18 @@ class FormDataset(Dataset):
                  meters=None, seed=0, limit_charts=0, reconstruction=True,
                  min_level=12.,max_level=15.,min_difficulty_index=4,max_difficulty_index=6,
                  max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
-                 preparation_workers=1):
+                 preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256):
         self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction","quality_enabled":bool(quality_enabled)}
         self.max_memory_tokens=max_memory_tokens; self.seed=seed
-        self.audio_store=_AudioStore(audio_loader,cache_dir)
+        if audio_cache_gb is not None and audio_cache_gb < 0:
+            raise ValueError('audio_cache_gb must be nonnegative or None')
+        if sample_cache_mb is not None and sample_cache_mb < 0:
+            raise ValueError('sample_cache_mb must be nonnegative or None')
+        audio_budget=None if audio_cache_gb is None else int(audio_cache_gb*1024**3)
+        sample_budget=None if sample_cache_mb is None else int(sample_cache_mb*1024**2)
+        self.audio_store=_AudioStore(audio_loader,cache_dir,budget=audio_budget)
+        self.sample_store=_SampleStore(sample_budget)
+        self._point_beats=[]
         path=Path(manifest).resolve(); data=json.loads(path.read_text(encoding='utf-8-sig'))
         annotations=None
         annotation_path=path.with_name('quality_annotations.json')
@@ -385,6 +479,7 @@ class FormDataset(Dataset):
                     song = result['song'][0]
                     song.audio = _LazyAudio(self.audio_store, result['audio_path'])
                     self.songs.append(result['song'])
+                    self._point_beats.append([p.beat for p in result['song'][1]])
                     self.audit['charts'].append(result['chart'])
                     self.items.extend((idx, *item) for item in result['items'])
                     print('form_prepare '+json.dumps({'stage':'chart','charts':len(self.songs),
@@ -402,12 +497,22 @@ class FormDataset(Dataset):
 
     def __len__(self): return len(self.items)
 
+    def cache_stats(self):
+        return {'audio':self.audio_store.stats(),'samples':self.sample_store.stats()}
+
+    def stats(self): return self.cache_stats()
+
     def __getitem__(self,index):
         item=self.items[index]
         if len(item) == 4:
             song_index,span_index,tokens,task=item; local_weight=1.0
         else:
             song_index,span_index,tokens,task,local_weight=item
+        cache_key=index if task == 0 else None
+        sample_store=getattr(self,'sample_store',None)
+        if cache_key is not None and sample_store is not None:
+            cached=sample_store.get(cache_key)
+            if cached is not None: return cached
         song_record=self.songs[song_index]
         if len(song_record) >= 8:
             song,points,level,weight,state_index,condition,excluded,record=song_record
@@ -416,15 +521,18 @@ class FormDataset(Dataset):
             condition=GenerationCondition(level=level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
             excluded=[]; record=None
         span=song.spans[span_index]
-        history=[p for p in points if p.beat<span.start]
-        target=[p for p in points if span.start<=p.beat<span.end]
+        point_beats=getattr(self,'_point_beats',None)
+        beats=point_beats[song_index] if point_beats is not None else [p.beat for p in points]
+        lo=bisect_left(beats,span.start);hi=bisect_left(beats,span.end)
+        history=points[:lo]
+        target=points[lo:hi]
         draft=[];right=[]
         if task:
             rng=np.random.default_rng(self.seed+index)
             clean=rng.random()<.1
             selected=set() if clean else set(rng.choice(len(target),size=max(1,int(len(target)*.3)),replace=False).tolist())
             draft=[DraftPoint(p.beat,None if i in selected else p.note_text,i in selected) for i,p in enumerate(target)]
-            right=[p for p in points if p.beat>=span.end]
+            right=points[hi:]
         result=input_example(song,span_index,history,condition=condition,codec=self.codec,task=task,
             draft=draft,right=right,max_memory_tokens=self.max_memory_tokens,state_index=state_index)
         ref_index=result['meta']['reference_source']
@@ -435,12 +543,13 @@ class FormDataset(Dataset):
             reference=self.codec.decode(result['motif'].tolist(),origin=span.start)
         # This blueprint contains positions only. Every chart configuration is
         # masked, so training cannot reveal future note types or note text.
-        skeleton=[DraftPoint(p.beat,None,True) for p in points if p.beat>=span.start]
+        skeleton=[DraftPoint(p.beat,None,True) for p in points[lo:]]
         result['skeleton']=torch.tensor(self.codec.bounded_memory(
             skeleton,origin=span.start,max_tokens=self.max_memory_tokens,newest=False))
         result.update(decoder_input=torch.tensor(tokens[:-1]),target=torch.tensor(tokens[1:]),
                       relation_target=relation_target(target,reference,span),
                       relation_valid=torch.tensor(ref_index is not None),weight=torch.tensor(weight*local_weight))
+        if cache_key is not None and sample_store is not None: sample_store.put(cache_key,result)
         return result
 
 
