@@ -72,11 +72,11 @@ def test_compact_chord_and_modifier_order_are_supported() -> None:
     assert parsed.unknown_tokens == []
 
 
-def test_meter_directive_is_timing_metadata_not_a_note() -> None:
-    points = tokenize_inote_timing("||4/4\n1,2,E")
+def test_meter_looking_double_pipe_text_is_a_comment() -> None:
+    points = tokenize_inote_timing("||4/4, (999){16} E\n1,2,E")
 
     assert points[0].note_text == "1"
-    assert points[0].directives[0].directive_type == "meter"
+    assert points[0].directives == []
     assert parse_timing_point_notes(points[0]).unknown_tokens == []
 
 

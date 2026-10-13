@@ -99,18 +99,18 @@ def test_global_memory_covers_the_chart_start_when_it_starts_early():
     assert memory[0, CONTEXT_OFFSET + 5] == pytest.approx(0.0, abs=1e-6)
 
 
-def test_leading_negative_delay_becomes_a_chart_offset():
-    """`[delay##duration]` with a negative delay shifts the whole chart."""
+def test_leading_negative_delay_remains_note_local():
+    """A negative slide wait is local and clamped like the MiaCode parser."""
 
     chart = parse_event_chart_text(chart_text(0.0, "1>-2[-0.4##0.5],3,4,"), 5)
-    assert chart.time_offset == pytest.approx(-0.4)
-    assert chart.audio_first == pytest.approx(-0.4)
-    # Saved and reloaded charts keep the offset.
-    assert chart.to_dict()["time_offset"] == pytest.approx(-0.4)
+    assert chart.time_offset == 0.0
+    assert chart.audio_first == 0.0
+    assert chart.points[0].beat == 0
 
 
 def test_positive_or_absent_delay_leaves_the_offset_alone():
     assert parse_event_chart_text(chart_text(0.0, "1>-2[0.4##0.5],3,4,"), 5).time_offset == 0.0
+    assert parse_event_chart_text(chart_text(0.0, "1>-2[-0.4##0.5],3,4,"), 5).time_offset == 0.0
     assert parse_event_chart_text(chart_text(0.0), 5).time_offset == 0.0
     # `&first` still works on its own, negative or positive.
     assert parse_event_chart_text(chart_text(-0.3), 5).audio_first == pytest.approx(-0.3)
@@ -119,7 +119,58 @@ def test_positive_or_absent_delay_leaves_the_offset_alone():
 
 def test_chart_offset_combines_with_first():
     chart = parse_event_chart_text(chart_text(-0.1, "1>-2[-0.4##0.5],3,4,"), 5)
+    assert chart.audio_first == pytest.approx(-0.1)
+
+
+def test_difficulty_specific_first_remains_the_global_clock():
+    chart = parse_event_chart_text(
+        "&wholebpm=120\n&first=-0.1\n&first_5=-0.75\n&lv_5=13\n"
+        "&inote_5=1-4[-0.4##0.5],2,3,E\n",
+        5,
+    )
+
+    assert chart.first == pytest.approx(-0.75)
+    assert chart.audio_first == pytest.approx(-0.75)
+    assert chart.time_offset == 0.0
+
+
+def test_negative_first_and_negative_note_wait_keep_distinct_clocks():
+    from maichart.generation.muri.parser import parse_markers
+    from maichart.generation.event_quality import parse_event_notes
+    from maichart.generation.event_compile import compile_event_points
+
+    chart = parse_event_chart_text(
+        chart_text(-0.5, "1-4[-0.4##0.5],(180),2,3,"), 5
+    )
+    inote = "(120){4}1-4[-0.4##0.5],(180),2,3,E"
+    marker, errors, _warnings = parse_markers(inote, first=chart.first)
+    notes = parse_event_notes(chart.points, chart.tempo_changes, chart.audio_first)
+    compiled_text, _compiled_ir = compile_event_points(
+        chart.points, tempo_changes=chart.tempo_changes,
+        first=chart.first, end_beat=chart.end_beat,
+    )
+    compiled = parse_event_chart_text(compiled_text, 5)
+
+    assert not errors
     assert chart.audio_first == pytest.approx(-0.5)
+    assert compiled.first == pytest.approx(-0.5)
+    assert compiled.time_offset == 0.0
+    assert compiled.tempo_changes == chart.tempo_changes
+    assert notes.points[0].notes[0].time_sec == pytest.approx(-0.5)
+    assert marker[0]["second"] == pytest.approx(-0.5)
+    assert marker[0]["slide_trace_second"] == pytest.approx(-0.5)
+    assert notes.points[1].notes[0].time_sec == pytest.approx(1 / 3)
+    assert marker[1]["second"] == pytest.approx(1 / 3)
+
+
+def test_static_slide_trace_clamps_negative_wait_like_miacode():
+    from maichart.generation.post_process import _extract
+
+    points = [type("Point", (), {"beat": Fraction(0), "note_text": "1-4[-0.4##0.5]"})()]
+    events, _serializable, coverage = _extract(points, TEMPO, -0.5)
+
+    assert coverage["status"] == "static_only"
+    assert events[0].trajectories[0].start_time == pytest.approx(-0.5)
 
 
 def test_negative_delay_is_accepted_and_reported():
@@ -158,10 +209,9 @@ def test_hold_placeholder_duration_is_accepted():
     assert not parsed.fatal_errors
 
 
-def test_negative_grid_count_leads_to_a_chart_offset():
-    """`[-16:1]` is how this dialect writes a shift earlier."""
+def test_negative_grid_count_does_not_change_the_global_chart_clock():
+    """Unrecognized/local negative grid syntax cannot override ``&first``."""
 
-    # 16:1 means 4*(-1)/16 = -1/4 beat; at 120 BPM that is -0.125 s.
     chart = parse_event_chart_text(chart_text(0.0, "5-1[-16:1],2,3,4,"), 5)
-    assert chart.time_offset == pytest.approx(-0.125)
-    assert chart.audio_first == pytest.approx(-0.125)
+    assert chart.time_offset == 0.0
+    assert chart.audio_first == 0.0

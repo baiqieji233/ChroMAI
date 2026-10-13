@@ -77,6 +77,16 @@ def test_multiline_inote_strings_are_supported() -> None:
     assert points[2].directives[0].directive_type == "end"
 
 
+def test_double_pipe_comments_are_removed_before_comma_splitting() -> None:
+    points = tokenize_inote_timing(
+        "(120){4}1,\n|| comma, (240){16} E ||3/4 is comment text\n2,E"
+    )
+
+    assert [point.note_text for point in points] == ["1", "2", ""]
+    assert [point.beat for point in points] == [Fraction(0), Fraction(1), Fraction(2)]
+    assert points[-1].directives[0].directive_type == "end"
+
+
 def test_unknown_note_syntax_remains_opaque() -> None:
     points = tokenize_inote_timing("{8}???/@weird,A1$not-yet,E")
 

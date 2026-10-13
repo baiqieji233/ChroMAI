@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import re
 from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -65,17 +64,8 @@ class EventChart:
     end_beat: Fraction = Fraction(0)
     artist: str = ""
     difficulty: int = 5
-    # Negative chart offset, in seconds, taken from a leading negative delay.
-    #
-    # A maimai chart needs blank space in front of its body, because the player
-    # has to see the notes coming.  When the audio has no such lead-in, the
-    # charter expresses the blank space as a negative delay: the whole chart
-    # moves earlier in time.  `first` is already the audio timestamp of beat 0,
-    # so the effect is `audio_time(beat) = first + time_offset + integral(beat)`.
-    # The interval that ends up before audio time 0 has no music behind it, which
-    # is the same thing as prepending silent audio -- see
-    # `event_audio.audio_segment_tensor`, which fills that region with zeros
-    # instead of clamping the first frame.
+    # Optional explicit chart-wide offset in seconds. Parsed note-local waits
+    # do not populate this field; callers may set it when constructing an IR.
     time_offset: float = 0.0
 
     @property
@@ -111,6 +101,7 @@ class EventChart:
                 for change in data.get("tempo_changes", [])
             ],
             first=float(data.get("first", 0)),
+            time_offset=float(data.get("time_offset", 0)),
             level=str(data.get("level", "")),
             title=str(data.get("title", "")),
             end_beat=_exact_beat(data.get("end_beat", "0")),
@@ -403,64 +394,4 @@ def _parse_event_metadata(
         end_beat=end_beat,
         artist=chart.artist or "",
         difficulty=difficulty_index,
-        time_offset=_leading_negative_delay(
-            (point.note_text for point in timing if point.note_text), initial_bpm
-        ),
     )
-
-
-# Duration expressions that can carry a negative value, i.e. a shift earlier:
-#   `[delay##duration]`  timing pair, first value is the delay
-#   `[division:count]`   grid duration, count may be negative
-#   `[#seconds]`         explicit seconds
-_LEADING_DELAY_RE = re.compile(
-    r"\[(?P<body>[^\]]*)\]"
-)
-_NEGATIVE_DELAY_RE = re.compile(
-    r"^(?P<delay>[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))##"
-    r"(?P<duration>[+-]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+))$"
-)
-# Grid form with the minus on either side: `[-16:1]` negates the division,
-# `[8:-1]` negates the count.  `GRID_DURATION_RE` only accepts a positive
-# division, so `[-16:1]` otherwise degrades to an unknown duration.
-_NEGATIVE_GRID_RE = re.compile(
-    r"^(?P<sign>-)?(?P<division>[1-9][0-9]*):(?P<count>[+-]?[0-9]+)$"
-)
-_NEGATIVE_SECONDS_RE = re.compile(r"^#(?P<seconds>-[0-9]+(?:\.[0-9]*)?|\.[0-9]+-?[0-9]*)$")
-
-
-def _leading_negative_delay(note_texts: Iterable[str], initial_bpm: float = 120.0) -> float:
-    """Chart offset encoded by a negative duration expression on the earliest note.
-
-    A charter who needs blank space before the chart body, but whose audio has no
-    lead-in, writes a negative delay: the chart moves earlier as a whole, and the
-    part that ends up before audio time 0 behaves like prepended silence.  Real
-    charts express it in three ways, so all three are recognised:
-
-    * ``[delay##duration]``  -- the delay (first value) is negative;
-    * ``[division:count]``   -- the grid count is negative, e.g. ``[-16:1]``;
-    * ``[#seconds]``         -- the seconds value is negative.
-
-    Only the *leading* expression can mean a chart-wide shift -- later ones are
-    local nudges -- so the first one found wins.  Grid values are converted with
-    the chart's initial BPM, which is the clock in force at beat 0.
-    """
-
-    for text in note_texts:
-        for match in _LEADING_DELAY_RE.finditer(text):
-            body = match.group("body").strip()
-            pair = _NEGATIVE_DELAY_RE.fullmatch(body)
-            if pair is not None:
-                delay = float(pair.group("delay"))
-                return delay if delay < 0 else 0.0
-            grid = _NEGATIVE_GRID_RE.fullmatch(body)
-            if grid is not None:
-                beats = Fraction(4 * int(grid.group("count")), int(grid.group("division")))
-                if grid.group("sign") or int(grid.group("count")) < 0:
-                    return -abs(float(beats)) * 60.0 / float(initial_bpm)
-                return 0.0
-            seconds = _NEGATIVE_SECONDS_RE.fullmatch(body)
-            if seconds is not None:
-                return float(seconds.group("seconds"))
-            return 0.0
-    return 0.0

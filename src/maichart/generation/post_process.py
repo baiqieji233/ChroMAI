@@ -131,7 +131,7 @@ def _extract(points, tempo_changes, first):
                         continue
                     if duration.kind == "timing_pair":
                         delay, length = duration.values
-                        begin = event.time + float(delay)
+                        begin = event.time + max(0.0, float(delay))
                     else:
                         # Default Simai head wait is one beat, not zero.
                         trace_beat = event.beat + 1

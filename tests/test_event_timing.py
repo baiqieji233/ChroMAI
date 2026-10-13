@@ -49,6 +49,7 @@ def test_event_chart_serialization_and_joint_char_tokens_keep_exact_data():
         points=[EventPoint(Fraction(1, 7), "3-7[8:1]*-5[4:1]/A1")],
         tempo_changes=[EventTempo(Fraction(0), 120), EventTempo(Fraction(1, 7), 150)],
         first=-0.125,
+        time_offset=-0.4,
         level="13+",
         title="Exact",
         end_beat=Fraction(8, 7),
@@ -56,6 +57,9 @@ def test_event_chart_serialization_and_joint_char_tokens_keep_exact_data():
         difficulty=5,
     )
     assert EventChart.from_dict(original.to_dict()) == original
+    legacy = original.to_dict()
+    legacy.pop("time_offset")
+    assert EventChart.from_dict(legacy).time_offset == 0.0
     tokens = encode_event_points(original.points, local_start=Fraction(0))
     assert joint_tokens_to_event_points(tokens) == original.points
 

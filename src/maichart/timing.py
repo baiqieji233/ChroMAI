@@ -218,6 +218,9 @@ def timing_points_to_json(points: list[RawTimingPoint], *, indent: int = 2) -> s
 
 
 def _split_top_level_commas(raw_inote: str) -> list[str]:
+    # MiaCode treats `||` as a line comment, including commas and directive-
+    # looking text after it. Strip comments before they can affect timing.
+    raw_inote = "\n".join(line.split("||", 1)[0] for line in raw_inote.splitlines())
     points: list[str] = []
     current: list[str] = []
     square_depth = 0
@@ -279,15 +282,6 @@ def _parse_point_directives(raw_point: str) -> tuple[list[TimingDirective], str]
                 raise ValueError(f"BPM must be positive in {raw!r}.")
             directives.append(TimingDirective("bpm", raw, value))
             cursor = end + 1
-            continue
-
-        if text.startswith("||", cursor):
-            match = re.match(r"\|\|\s*(\d+)\s*/\s*(\d+)", text[cursor:])
-            if match is None:
-                raise ValueError(f"Malformed meter directive in timing point: {raw_point!r}")
-            raw = match.group(0)
-            directives.append(TimingDirective("meter", raw, f"{match.group(1)}/{match.group(2)}"))
-            cursor += len(raw)
             continue
 
         if char == "E" and text[cursor + 1 :].strip() == "":
