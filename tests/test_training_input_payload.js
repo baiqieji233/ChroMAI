@@ -66,3 +66,15 @@ test("song form submits every selected source for backend composition", () => {
       payload.audio_cache_mode, payload.sample_cache_mb], ["bf16", 2, 3, 4, 80, 1.5, "resident", 512]);
   }
 });
+
+test("main song-form generation payload forwards the onset merge range", () => {
+  const begin = source.indexOf("function songFormGenerationPayload() {");
+  const end = source.indexOf("function generationPayload()", begin);
+  assert.ok(begin >= 0 && end > begin);
+  const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
+    "formDevice", "parseTempoMap", "intensityCurvePayload",
+    source.slice(begin, end) + "; return songFormGenerationPayload();");
+  const payload = build((selector, fallback) => selector === "#formOnsetMergeMs" ? "0" : fallback,
+    (_selector, fallback) => fallback, () => ({}), () => "cpu", () => null, () => null);
+  assert.equal(payload.onset_merge_ms, 0);
+});

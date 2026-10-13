@@ -245,6 +245,34 @@ def test_form_audio_cache_event_is_exposed_as_current_progress():
     assert task.result["progress_known"] is True
 
 
+def test_generation_forwards_bounded_onset_merge_ms(monkeypatch, tmp_path):
+    checkpoint = tmp_path / "form_last.pt"
+    audio = tmp_path / "song.wav"
+    checkpoint.write_bytes(b"checkpoint")
+    audio.write_bytes(b"audio")
+    from maichart.form import checkpoint as form_checkpoint
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    calls = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind): return TaskState(task_id="onset-merge", kind=kind)
+        def _run_subprocess_task(self, task, args, **kwargs): calls.append(args)
+
+    form_api.start_form_task(_Response(), "generate", {
+        "checkpoint": str(checkpoint), "audio": str(audio),
+        "output": str(tmp_path / "out.txt"), "onset_merge_ms": 55.6,
+    }, runtime=Runtime())
+    args = calls[0]
+    assert args[args.index("--onset-merge-ms") + 1] == "55.6"
+    with pytest.raises(ValueError, match="onset_merge_ms out of range"):
+        form_api.start_form_task(_Response(), "generate", {
+            "checkpoint": str(checkpoint), "audio": str(audio),
+            "output": str(tmp_path / "bad.txt"), "onset_merge_ms": 251,
+        }, runtime=Runtime())
+
+
 def test_bad_manifest_does_not_create_queued_task(tmp_path):
     manifest = tmp_path / "bad.json"
     manifest.write_text("{", encoding="utf-8")

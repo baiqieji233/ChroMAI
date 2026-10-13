@@ -257,6 +257,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if operation!='analyze':
             values={'level':number('level',13.3,1,15),'memory_strength':number('memory_strength',1,0,1),
                 'onset_threshold':number('onset_threshold',.5,.001,.999),'temperature':number('temperature',.7,0,3),
+                'onset_merge_ms':number('onset_merge_ms',40,0,250),
                 'seed':number('seed',0,0,2**31-1,True)}
             for key,value in values.items():args+=['--'+key.replace('_','-'),str(value)]
         if operation=='revise':

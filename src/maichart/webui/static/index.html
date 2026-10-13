@@ -781,6 +781,7 @@
 <div class="form-grid">
 <label class="field">Motif 记忆强度<input id="formMemoryStrength" type="number" min="0" max="1" step="0.05" value="0.6"><small>重复音频段落只作为参考证据；0关闭参考，1允许模型完整使用门控参考。</small></label>
 <label class="field">谱面起音选择阈值<input id="formOnsetThreshold" type="number" min="0.001" max="0.999" step="0.01" value="0.5"><small>越低通常保留更多全曲起音候选；它不是音量阈值。</small></label>
+<label class="field">相邻起音合并范围（毫秒）<input id="formOnsetMergeMs" type="number" min="0" max="250" step="1" value="40"><small>范围内的附近候选只保留最强峰；不会禁止同一时刻的多押。0 关闭邻近合并。初试 30–40 ms；180 BPM 的 24 分音符约 55.6 ms，设得过大（如 60 ms）可能删掉真实快速节奏。</small></label>
 <label class="field">单次音频计算上限（秒）<input id="formGenerationMaxRegionSeconds" type="number" min="2" max="20" step="1" value="14"><small>只控制计算资源；全曲起音草稿不会因计算块重新决定。</small></label>
 </div>
 <details class="settings-section"><summary>生成后有限修订</summary><div class="settings-content"><label class="checkbox-field"><input id="formRepair" type="checkbox"><span>生成后运行有界修订</span><small>从单 note/来源动作开始尝试，预算耗尽保留最佳结果并报告剩余问题。</small></label><div class="form-grid two-col"><label class="field">最多检查次数<input id="formMaxChecks" type="number" min="1" value="24"></label><label class="field">最多编辑数<input id="formMaxEdits" type="number" min="0" value="4"></label><label class="field">修订时限（秒）<input id="formDeadlineSeconds" type="number" min="0" value="10"></label></div></div></details>
