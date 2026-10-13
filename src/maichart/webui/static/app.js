@@ -793,6 +793,12 @@ function updateFamilyFields() {
       ? "旧基线：留空自动分析；填写则覆盖为单一 BPM，tempo map 可进一步覆盖。"
       : "未填 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外使用高置信度变速点。填写 tempo map 后，其 beat 0 BPM 与变速点优先。";
   }
+  const preprocessHelp = element("#preprocessFamilyStatus");
+  if (preprocessHelp) preprocessHelp.textContent = family === "song_form_v1"
+    ? "song_form_v1 使用 event source manifest：解析 maidata、音频特征和精确时间缓存；不生成旧 fixed-frame labels/alignment。已有 event manifest 可直接复用。"
+    : family === "legacy_frame_v2"
+      ? "旧固定帧模型才使用 legacy preprocess build、division、frame labels 和 alignment。"
+      : "event 模型使用 prepare_events：解析 maidata、音频特征和精确时间缓存，不生成 fixed-frame labels/alignment。";
 }
 
 function datasetPaths() {
@@ -1519,6 +1525,19 @@ function selectedDatasetItems() {
 
 async function composeSelectedDatasets() {
   datasetWorkspaceState.selectionTouched = true;
+  const button = element("#datasetComposeButton");
+  const originalLabel = button?.textContent || "应用勾选的数据集";
+  if (button) {
+    button.disabled = true;
+    button.textContent = "正在应用…";
+  }
+  const compositionSummary = element("#datasetCompositionSummary");
+  if (compositionSummary) {
+    compositionSummary.hidden = false;
+    compositionSummary.className = "inline-status";
+    compositionSummary.textContent = "正在检查已勾选来源并生成训练清单…";
+  }
+  try {
   const items = selectedDatasetItems();
   if (!items.length) throw new Error("请至少勾选一个训练数据集。");
   const unprepared = items.filter((item) => !item.manifest || item.prepared === false);
@@ -1532,6 +1551,12 @@ async function composeSelectedDatasets() {
     datasetWorkspaceState.prepared = { manifest: item.manifest };
     renderDatasetWorkspace();
     saveDatasetWorkspace();
+    const summaryBox = element("#datasetCompositionSummary");
+    if (summaryBox) {
+      summaryBox.hidden = false;
+      summaryBox.className = "inline-status good";
+      summaryBox.textContent = `已完成：应用 1 个数据集；训练 manifest：${item.manifest}`;
+    }
     setStatus("已应用 1 个训练数据集。", true);
     return;
   }
@@ -1546,6 +1571,7 @@ async function composeSelectedDatasets() {
   }
   const manifest = data.manifest || data.effective_manifest || data.composed_manifest || data.path;
   if (!manifest) throw new Error("后端没有返回合并后的 manifest 路径。");
+  if (element("#manifestPath")) element("#manifestPath").value = manifest;
   datasetWorkspaceState.prepared = { ...data, manifest };
   renderDatasetWorkspace();
   invalidateDatasetStatus(`已合并 ${items.length} 个数据集，请重新检查训练集状态。`);
@@ -1554,10 +1580,25 @@ async function composeSelectedDatasets() {
   const summaryBox = element("#datasetCompositionSummary");
   if (summaryBox) {
     summaryBox.hidden = false;
-    summaryBox.textContent = `已应用 ${items.length} 个来源：${summary.song_count ?? "?"} 首歌曲，${summary.difficulty_count ?? "?"} 张谱面；按原文件去重 ${summary.duplicate_source_charts ?? 0} 张；汇总质量标注 ${summary.quality_records ?? 0} 条。`
+    summaryBox.className = "inline-status good";
+    summaryBox.textContent = `已完成：应用 ${items.length} 个来源；${summary.song_count ?? "?"} 首歌曲，${summary.difficulty_count ?? "?"} 张谱面；联合 manifest：${manifest}`
+      + `；按原文件去重 ${summary.duplicate_source_charts ?? 0} 张；汇总质量标注 ${summary.quality_records ?? 0} 条。`
       + (summary.stale_quality_annotations ? ` ${summary.stale_quality_annotations} 条标注因原谱或音频变化已失效，请回原数据集重新检查并保存。` : "");
   }
   setStatus(`已应用 ${items.length} 个训练数据集。`, true);
+  } catch (error) {
+    if (compositionSummary) {
+      compositionSummary.hidden = false;
+      compositionSummary.className = "inline-status warn";
+      compositionSummary.textContent = `应用失败：${error?.message || error}`;
+    }
+    throw error;
+  } finally {
+    if (button) {
+      button.disabled = false;
+      button.textContent = originalLabel;
+    }
+  }
 }
 
 async function openDataset(item) {
