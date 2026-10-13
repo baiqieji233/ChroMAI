@@ -59,15 +59,15 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
     """Return span-local four-channel load values and availability mask."""
     if profile is None:
         return None, None, None
-    from maichart.form.curve import LOAD_CURVE_CHANNELS
+    from maichart.form.curve import LOAD_CURVE_CHANNELS, load_curve_bin_centers
     import torch
     resolution = float(profile.get('curve_resolution_sec', 2.0))
     duration = float(song.audio.duration_sec)
     low = float(seconds_at_beat(span.start, song.tempo, song.first))-float(song.first)
     high = float(seconds_at_beat(span.end, song.tempo, song.first))-float(song.first)
     chart_duration = max(0.,duration-float(song.first))
-    count = max(1, int(math.ceil(chart_duration / resolution)))
-    times = np.asarray([min(chart_duration, (i + 0.5) * resolution) for i in range(count)], dtype=np.float32)
+    # Use the same bin centers and half-open span selection as training.
+    times = load_curve_bin_centers(chart_duration, resolution).astype(np.float32)
     absolute_times = chart_curve_to_audio(times,song.first)
     source_clock = profile_seconds(profile,absolute_times,song.first)
     components = profile.get('components') or {}
@@ -85,12 +85,12 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
             values[:, channel] = np.interp(source_clock, scalar_times, scalar)
             mask[:, channel] = channel == 0
     for index, time in enumerate(source_clock):
-        values[index] *= np.float32(_curve_factor(profile, time, strength=strength, span=span_limit, mode=mode))
+        # Only channel zero is a density. The other channels are proportions
+        # of note heads, so intensity scaling must not change their units.
+        values[index, 0] *= np.float32(_curve_factor(profile, time, strength=strength, span=span_limit, mode=mode))
     values[(absolute_times < 0)|(absolute_times >= duration)] = 0
     values = np.clip(values, 0.0, 1.0)
-    selected = (times >= low - resolution) & (times < high + resolution)
-    if not np.any(selected):
-        selected[np.argmin(np.abs(times - (low + high) * .5))] = True
+    selected = (times >= low) & (times < high)
     return (torch.from_numpy(values[selected]), torch.from_numpy(mask[selected]),
             torch.from_numpy(times[selected] - np.float32(low)))
 

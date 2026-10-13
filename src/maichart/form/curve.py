@@ -14,6 +14,16 @@ LOAD_CURVE_CHANNELS = ("event_density", "tap", "sustain", "slide_touch")
 LOAD_CURVE_BIN_SECONDS = 2.0
 
 
+def load_curve_bin_centers(duration_sec, bin_seconds=LOAD_CURVE_BIN_SECONDS):
+    duration, width = float(duration_sec), float(bin_seconds)
+    if not math.isfinite(duration) or duration < 0:
+        raise ValueError('curve duration must be finite and nonnegative')
+    if not math.isfinite(width) or width <= 0:
+        raise ValueError('curve resolution must be finite and positive')
+    starts = np.arange(max(1, int(math.ceil(duration / width))), dtype=np.float64) * width
+    return (starts + np.minimum(duration, starts + width)) * .5
+
+
 def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CURVE_BIN_SECONDS):
     """Build legacy chart-relative workload bins for compatible model inputs.
 
@@ -169,9 +179,9 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     predicted = prediction["load_curve"][0].sigmoid().cpu().numpy()
     if len(predicted) != len(frame_times):
         raise ValueError("blueprint load-curve clock does not align with song audio frames")
-    bin_count = max(1, int(math.ceil(float(audio.duration_sec) / resolution)))
-    points_times = np.asarray([min(float(audio.duration_sec), (i + 0.5) * resolution)
-                               for i in range(bin_count)], dtype=np.float32)
+    # Keep editor timestamps in float64; a rounded float32 EOF can land past
+    # the actual audio duration and produce an extra invalid terminal point.
+    points_times = load_curve_bin_centers(audio.duration_sec, resolution)
     profile_values = resample_load_curve(frame_times, predicted, points_times)
     # Inaccessible audio before a positive chart start and virtual pre-audio
     # silence must not inherit an extrapolated nonzero model prediction.
