@@ -1703,26 +1703,42 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                     if match:
                         task.progress = min(0.99, int(match.group(1)) / expected_epoch)
             code = process.wait()
-            if task.status == "cancelled":
-                _close_task_log(task, status="cancelled", exit_code=code)
+            with task.lock:
+                cancelled = task.status == "cancelled"
+            if cancelled:
+                with task.lock:
+                    _close_task_log(task, status="cancelled", exit_code=code)
                 return
             if code != 0:
-                task.status = "failed"
-                tail = "\n".join(task.logs[-6:])
-                task.error = f"子进程退出码 {code}" + (f"\n{tail}" if tail else "")
-                task.message = "任务失败"
-                _close_task_log(task, status="failed", exit_code=code, error=task.error)
+                with task.lock:
+                    tail = "\n".join(task.logs[-6:])
+                    task.error = f"子进程退出码 {code}" + (f"\n{tail}" if tail else "")
+                    task.message = "任务失败"
+                    _close_task_log(task, status="failed", exit_code=code, error=task.error)
+                    task.status = "failed"
                 return
-            task.status = "completed"
-            task.progress = 1.0
-            task.message = "任务完成"
-            _close_task_log(task, status="completed", exit_code=0)
+
+            # Artifact visibility is part of task completion. Keep the task in
+            # running state until all declared outputs have been collected.
             _collect_task_results(task, result_paths)
+            missing = [str(path) for path in dict.fromkeys(result_paths) if not path.is_file()]
+            if missing:
+                task.result["missing_artifacts"] = missing
+                task.log(f"artifact_warning missing={len(missing)} paths={'; '.join(missing)}")
+            with task.lock:
+                if task.status == "cancelled":
+                    _close_task_log(task, status="cancelled", exit_code=code)
+                    return
+                _close_task_log(task, status="completed", exit_code=0)
+                task.status = "completed"
+                task.progress = 1.0
+                task.message = "任务完成" if not missing else "任务完成，但部分输出文件缺失"
         except Exception as exc:  # noqa: BLE001 - task state carries the error
-            task.status = "failed"
-            task.error = str(exc)
-            task.message = "任务启动失败"
-            _close_task_log(task, status="failed", error=str(exc))
+            with task.lock:
+                task.status = "failed"
+                task.error = str(exc)
+                task.message = "任务启动失败"
+                _close_task_log(task, status="failed", error=str(exc))
         finally:
             task.process = None
 

@@ -13,6 +13,33 @@ from maichart.form import FAMILY, CHECKPOINT_SCHEMA
 from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
 
 
+RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
+                       'condition_drop_prob', 'blueprint_loss_weight',
+                       'load_curve_loss_weight', 'relation_loss_weight',
+                       'quality_enabled', 'max_steps')
+
+
+def form_resume_settings(payload):
+    args = payload.get('args') or {}
+    contract = payload.get('dataset_contract') or {}
+    groups = (payload.get('optimizer_state_dict') or {}).get('param_groups') or []
+    values = {key: args[key] for key in RESUME_ARGUMENT_KEYS if key in args}
+    values.update(lr=groups[0].get('lr', args.get('lr')) if groups else args.get('lr'),
+                  limit_charts=args.get('limit_charts', 0),
+                  max_region_seconds=contract.get('max_region_seconds', 14),
+                  meter_map=contract.get('meter_map'),
+                  precision=payload.get('precision') or args.get('precision', 'fp32'))
+    if 'dropout' in (payload.get('model_config') or {}):
+        values['dropout'] = payload['model_config']['dropout']
+    return values
+
+
+def isolated_form_output(requested, task_id):
+    """Keep each task's chart/report pair immutable while retaining filenames."""
+    path = Path(requested)
+    return path.parent / task_id / path.name
+
+
 def inspect_form_checkpoint(path):
     """Inspect this family's actual weights, without running training or inference."""
     from maichart.webui import server
@@ -33,14 +60,7 @@ def inspect_form_checkpoint(path):
         trained = checked.get('task_training') or {}
         capabilities = checked.get('capabilities') or {}
         args = checked.get('args') or {}
-        optimizer_state = checked.get('optimizer_state_dict') or {}
-        param_groups = optimizer_state.get('param_groups') or []
-        resume_settings = {
-            'lr': (param_groups[0].get('lr') if param_groups else args.get('lr')),
-            'limit_charts': args.get('limit_charts', 0),
-            'max_region_seconds': (checked.get('dataset_contract') or {}).get('max_region_seconds'),
-            'meter_map': (checked.get('dataset_contract') or {}).get('meter_map'),
-        }
+        resume_settings = form_resume_settings(checked)
         plan_ready = int(checked.get('blueprint_steps',0)) > 0
         condition_cap = capabilities.get('draft') or {}
         curve_cap = capabilities.get('load_curve') or {}
@@ -174,11 +194,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             # fields because the browser may submit stale or disabled values.
             old_args = inspected.get('args') or {}
             old_contract = inspected.get('dataset_contract') or {}
-            inherited = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
-                         'condition_drop_prob', 'blueprint_loss_weight',
-                         'load_curve_loss_weight', 'relation_loss_weight',
-                         'quality_enabled', 'max_steps')
-            payload = {**payload, **{key: old_args[key] for key in inherited if key in old_args}}
+            payload = {**payload, **{key: old_args[key] for key in RESUME_ARGUMENT_KEYS if key in old_args}}
             payload['precision'] = inspected.get('precision') or old_args.get('precision', 'fp32')
             if 'lr' in old_args:
                 payload = {**payload, 'lr': old_args['lr']}
@@ -240,6 +256,10 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             config = inspected['model_config']
             for key in ('d_model','layers','nhead','max_tokens','max_memory_tokens','dropout'):
                 values[key] = config[key]
+        else:
+            from types import SimpleNamespace
+            from maichart.form.train import fresh_model_configs
+            fresh_model_configs(SimpleNamespace(**values))
         args=['-m','maichart.form.train','--manifest',str(manifest),'--checkpoint-dir',str(out)]
         for key,value in values.items():
             if key == 'quality_enabled':
@@ -274,6 +294,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         output_value=str(payload.get('output') or '').strip()
         if operation!='analyze' and not output_value: raise ValueError('output path is required')
         out=server._resolve_path(output_value) if output_value else None
+        requested_output = server._resolve_path(str(payload.get('requested_output') or output_value).strip()) if out else None
         if operation!='analyze':
             seed_value = payload.get('seed')
             if seed_value is None or seed_value == '':
@@ -305,7 +326,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if operation=='revise':
             source=file('maidata_path');start=Fraction(str(payload.get('editable_start','')));end=Fraction(str(payload.get('editable_end','')))
             if start<0 or end<=start: raise ValueError('Edit range must be increasing nonnegative beats')
-            if out.resolve()==source.resolve(): raise ValueError('Revision output must preserve the source maidata file')
+            if out.resolve()==source.resolve() or requested_output.resolve()==source.resolve():
+                raise ValueError('Revision output must preserve the source maidata file')
             args+=['--maidata',str(source),'--difficulty',str(number('difficulty_index',5,1,6,True)),
                    '--start',str(start),'--end',str(end)]
         if payload.get('repair'):
@@ -348,6 +370,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             checkpoint_identity=_file_identity(initial), first=first,
             tempo_map=tempo, bpm_input=bpm, condition=effective_condition.to_dict())
     task=server._create_task('form_'+operation)
+    if operation in {'generate', 'revise'}:
+        out = isolated_form_output(requested_output, task.task_id)
+        task.result.update(requested_output=str(requested_output), actual_output=str(out))
     if curve_condition_warnings:
         task.result['curve_condition_warnings'] = curve_condition_warnings
     workspace=server.WEBUI_ROOT/'song_form'/task.task_id;workspace.mkdir(parents=True,exist_ok=True)
