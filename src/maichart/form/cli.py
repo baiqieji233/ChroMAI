@@ -65,8 +65,10 @@ def _json(path): return json.loads(Path(path).read_text(encoding='utf-8-sig')) i
 
 
 def analysis_report(song):
+    from maichart.form.clock import clock_report
     return {'schema':'maichart-song-form-analysis-v1','audio_duration':song.audio.duration_sec,
             'first':song.first,'tempo_map':[{'beat':str(t.beat),'bpm':t.bpm} for t in song.tempo],
+            'timing_alignment':clock_report(song.first),
             'meter_map':[m.to_dict() for m in song.meters],
             'spans':[s.to_dict() for s in song.spans], 'segmentation':song.audit,
             'recurrence':{'links':[asdict(link) for link in song.relations.links],**song.relations.audit},
@@ -119,6 +121,10 @@ def main(argv=None):
     if args.intensity_curve_file:
         from maichart.generation.music_intensity import load_intensity_profile
         intensity_curve = load_intensity_profile(args.intensity_curve_file)
+        from maichart.form.clock import curve_axis
+        curve_axis(intensity_curve)
+        if 'first' in intensity_curve and abs(float(intensity_curve['first'])-first) > 1e-9:
+            raise ValueError('Curve first differs from chart first; regenerate the curve for the current offset')
         if intensity_curve.get('method') != 'learned_song_form_v1':
             raise ValueError('song_form CLI requires a learned_song_form_v1 intensity curve')
         if not 0.0 <= args.intensity_curve_strength <= 1.0:

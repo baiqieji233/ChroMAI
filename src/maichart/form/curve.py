@@ -7,6 +7,7 @@ from pathlib import Path
 import numpy as np
 
 from maichart.event_timing import seconds_at_beat
+from maichart.form.clock import AUDIO_CURVE_AXIS
 
 
 LOAD_CURVE_CHANNELS = ("event_density", "tap", "sustain", "slide_touch")
@@ -14,7 +15,12 @@ LOAD_CURVE_BIN_SECONDS = 2.0
 
 
 def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CURVE_BIN_SECONDS):
-    """Build normalized, audio-relative [left, right) workload bins."""
+    """Build legacy chart-relative workload bins for compatible model inputs.
+
+    Bin coordinates are seconds from chart beat zero, not raw audio seconds.
+    The training frame clock converts with audio_second - first. Public editor
+    profiles use a separately versioned absolute-audio time axis.
+    """
     duration = float(duration_sec)
     width = float(bin_seconds)
     first = float(first)
@@ -151,9 +157,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
         prediction = planner(audio_values, form_values, condition_values)
     if "load_curve" not in prediction:
         raise ValueError("song_form blueprint has no load-curve output head")
-    frame_start = max(0.0, float(seconds_at_beat(song.spans[0].start, tempo, first)) - float(first))
-    frame_end = min(float(audio.duration_sec),
-                    float(seconds_at_beat(song.spans[-1].end, tempo, first)) - float(first))
+    frame_start = float(seconds_at_beat(song.spans[0].start, tempo, first))
+    frame_end = float(seconds_at_beat(song.spans[-1].end, tempo, first))
     frame_times = segment_frame_times(frame_start, frame_end)
     predicted = prediction["load_curve"][0].sigmoid().cpu().numpy()
     if len(predicted) != len(frame_times):
@@ -162,6 +167,10 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     points_times = np.asarray([min(float(audio.duration_sec), (i + 0.5) * resolution)
                                for i in range(bin_count)], dtype=np.float32)
     profile_values = resample_load_curve(frame_times, predicted, points_times)
+    # Inaccessible audio before a positive chart start and virtual pre-audio
+    # silence must not inherit an extrapolated nonzero model prediction.
+    valid_bins = (points_times >= max(0.,float(first))) & (points_times < float(audio.duration_sec))
+    profile_values[~valid_bins] = 0
     density = profile_values[:, 0]
     positive = density[density > 1e-6]
     reference = float(np.mean(positive)) if len(positive) else 1.0
@@ -169,6 +178,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     editor_times = np.unique(np.concatenate(([0.0], points_times, [float(audio.duration_sec)])))
     editor_values = np.interp(editor_times, points_times, intensity).astype(np.float32)
     component_values = resample_load_curve(points_times, profile_values, editor_times)
+    editor_values[editor_times < max(0.,float(first))] = 0
+    component_values[editor_times < max(0.,float(first))] = 0
     rest_regions = []
     rest_start = None
     for i, value in enumerate(density):
@@ -185,6 +196,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
         raise ValueError("Checkpoint changed during curve inference; retry with a fixed checkpoint")
     profile = {
         "schema": "maichart-intensity-curve-v1", "method": "learned_song_form_v1",
+        "time_axis": AUDIO_CURVE_AXIS,
         "duration_sec": float(audio.duration_sec),
         "points": [{"time_sec": float(t), "intensity": float(v)}
                    for t, v in zip(editor_times, editor_values)],

@@ -439,6 +439,15 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
                        'chart_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
                        'audio_sha256': (audio.metadata or {}).get('audio_sha256'),
                        'meter_map': [m.to_dict() for m in song.meters], 'quality': record, 'weight': weight})
+            # The source bytes alone cannot reveal that an old parser ignored
+            # difficulty-specific offsets. Make this changed training alignment
+            # part of the existing strict resume contract when an override exists.
+            from maichart.maidata import parse_maidata_file
+            raw_metadata = parse_maidata_file(source)
+            if raw_metadata.fields.get(f'first_{slot}', '').strip():
+                result['chart']['first_override'] = {
+                    'global_first':raw_metadata.first or '0', 'effective_first':float(chart.first),
+                    'semantics':'difficulty_overrides_global_v1'}
             if cache is not None:
                 warning = cache.save(cache_key, cache_identity, result)
                 result.update(cache='rebuilt', cache_reason=cache_status)
