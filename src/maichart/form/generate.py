@@ -13,6 +13,7 @@ import torch
 from maichart.event_timing import EventPoint, seconds_at_beat
 from maichart.form.data import input_example, collate_form, form_audio
 from maichart.form.revision import EditPatch, RevisionBudget, apply_patch_candidate
+from maichart.form.onset_selection import local_peak_mask, merge_close_onsets, interval_statistics
 from maichart.generation.event_audio import segment_frame_times, _normalize_tempo_map, _time_to_beat
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_quality import assess_event_chart
@@ -88,9 +89,11 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
 
 
 def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_curve=None,
-                intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow'):
+                intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
+                onset_merge_ms=40.):
     """One song-wide neural prediction, before any arrangement chunks exist."""
     if not 0<threshold<1: raise ValueError('onset threshold must be in (0,1)')
+    merge_close_onsets([], onset_merge_ms)
     audio=form_audio(song,song.spans[0].start,song.spans[-1].end)
     example=input_example(song,0,[],condition=condition)
     with torch.inference_mode():
@@ -102,28 +105,38 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
     from maichart.generation.intensity import music_activity
     activity=music_activity(song.audio)
     active=np.interp(times,activity.times,activity.active().astype(float),left=0,right=0) if len(activity.times) else np.ones_like(times)
+    peaks = local_peak_mask(scores)
     # The planner predicts authored selection; an independent audible-span gate
     # prevents a random high score in file-leading/trailing silence.
     selected={}
+    candidate_count = 0
     for i,score in enumerate(scores):
-        if score<threshold or active[i]<.05 or not 0<=times[i]<song.audio.duration_sec: continue
+        if not peaks[i] or active[i]<.05 or not 0<=times[i]<song.audio.duration_sec: continue
+        raw_score = float(score)
         if intensity_curve is not None:
             if any(float(region['start_sec']) <= float(times[i]) < float(region['end_sec'])
                    for region in intensity_curve.get('rest_regions', [])):
                 continue
             score *= _curve_factor(intensity_curve, float(times[i]), strength=intensity_curve_strength,
                                    span=intensity_curve_span, mode=intensity_curve_mode)
-            if score < threshold:
-                continue
-        if i and score<=scores[i-1]: continue
-        if i+1<len(scores) and score<scores[i+1]: continue
+        if score < threshold: continue
         beat=exact_candidate(times[i],song.tempo,song.first)
         if not 0<=seconds_at_beat(beat,song.tempo,song.first)<song.audio.duration_sec: continue
         if beat>=song.spans[-1].end: continue
         record={'beat':str(beat),'second':float(seconds_at_beat(beat,song.tempo,song.first)),
-                'score':float(score),'type_probabilities':types[i].tolist(),'sustain_seconds':float(durations[i])}
+                'score':float(score),'raw_score':raw_score,'source_second':float(times[i]),
+                'type_probabilities':types[i].tolist(),'sustain_seconds':float(durations[i])}
+        candidate_count += 1
         if beat not in selected or selected[beat]['score']<score: selected[beat]=record
-    return {'schema':'maichart-full-song-blueprint-v1','onsets':[selected[b] for b in sorted(selected)],
+    before = [selected[b] for b in sorted(selected)]
+    onsets = merge_close_onsets(before, onset_merge_ms)
+    selection = {'algorithm':'raw_peaks_curve_gate_temporal_nms_v2', 'onset_merge_ms':float(onset_merge_ms),
+                 'raw_local_peaks':int(peaks.sum()),'eligible_candidates':candidate_count,
+                 'quantization_duplicates':candidate_count-len(before),
+                 'suppressed_close_onsets':len(before)-len(onsets),
+                 'before_merge':interval_statistics(before),'after_merge':interval_statistics(onsets)}
+    print('form_onsets '+json.dumps(selection), flush=True)
+    return {'schema':'maichart-full-song-blueprint-v1','onsets':onsets,'selection':selection,
             'threshold':threshold,'frame_seconds':.02,'musical_units':'whole_song',
             'quantization':'simple_rational_within_half_frame_uncertainty','limitations':[
                 'Onset probabilities are weighted-training scores, not calibrated confidence.',
@@ -166,7 +179,7 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                         # Do not commit half an atom or reroll a whole musical
                         # region. The caller continues this onset with fresh
                         # compute capacity and all previously accepted notes.
-                        return points
+                        return points, fallbacks
                     token=codec.end_id
                 else:
                     logits=next_logits()
@@ -190,18 +203,20 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
 
 
 def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memory_strength=1.,temperature=.7,seed=0,device='cpu',blueprint=None,
-                   intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow'):
+                   intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
+                   onset_merge_ms=40.):
     blueprint=blueprint or plan_onsets(planner,song,condition,threshold=threshold,device=device,
                                        intensity_curve=intensity_curve,
                                        intensity_curve_strength=intensity_curve_strength,
                                        intensity_curve_span=intensity_curve_span,
-                                       intensity_curve_mode=intensity_curve_mode)
+                                       intensity_curve_mode=intensity_curve_mode,onset_merge_ms=onset_merge_ms)
     onsets=[Fraction(item['beat']) for item in blueprint['onsets']]
     if onsets!=sorted(set(onsets)): raise ValueError('Blueprint beats must be sorted and unique')
     accepted=[];records=[]
     for span in song.spans:
         desired=[b for b in onsets if span.start<=b<span.end]
         passes=0
+        span_fallbacks = 0
         while desired:
             # Continue at the first not-yet-written event. Keep the region and
             # its full-song motif reference, and expose accepted local events.
@@ -229,10 +244,11 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                     temperature=temperature,seed=seed+span.index*1009+passes,device=device)
             finally: song.spans=source_spans
             if not generated: raise ValueError('Decoder made no progress within the configured token budget')
+            span_fallbacks += fallback_count
             accepted.extend(generated);desired=desired[len(generated):];passes+=1
         records.append({'span':span.index,'start':str(span.start),'end':str(span.end),
                         'resource_passes':passes,'onsets':sum(span.start<=b<span.end for b in onsets),
-                        'decoder_fallbacks':fallback_count if passes else 0})
+                        'decoder_fallbacks':span_fallbacks})
         print('form_arrange '+json.dumps(records[-1]),flush=True)
     if not accepted: raise ValueError('Whole-song planner selected no onsets; inspect the plan before adjusting threshold')
     quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
@@ -280,7 +296,7 @@ def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu
     example['skeleton']=torch.tensor(codec.bounded_memory(
         [DraftPoint(p.beat,None,True) for p in points if p.beat>=start],origin=start,
         max_tokens=model.config.max_memory_tokens,newest=False))
-    candidate=arrange_span(model,codec,example,[p.beat for p in region],atoms,origin=start,
+    candidate,fallback_count=arrange_span(model,codec,example,[p.beat for p in region],atoms,origin=start,
         temperature=temperature,seed=seed,device=device)
     if len(candidate)!=len(region): raise ValueError('Edit exceeds decoder budget; select a smaller region')
     config=PostProcessConfig(enable_conflict_detection=True,conflict_engine='miacode')
@@ -288,6 +304,7 @@ def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu
         lambda chart:_assessment(detect_chart_conflicts(chart,song.tempo,song.first,config)),
         budget=RevisionBudget(max_checks=max_checks,max_edits=8,deadline_secs=10.))
     report={'accepted':result.accepted,'reason':result.reason,'checks':result.checks,'edits':result.edits,
+            'decoder_fallbacks':fallback_count,
             'before':asdict(result.before) if result.before else None,'after':asdict(result.after) if result.after else None}
     # The unaccepted proposal is retained for review, never called preferred.
     report['proposal']=[p.to_dict() for p in candidate]

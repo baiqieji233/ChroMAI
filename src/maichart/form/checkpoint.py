@@ -1,5 +1,8 @@
 """Strict new-family loading; never reinterpret an old event checkpoint."""
 from dataclasses import asdict
+import hashlib
+import os
+from pathlib import Path
 import torch
 
 from maichart.form import FAMILY, CHECKPOINT_SCHEMA
@@ -20,8 +23,21 @@ LEGACY_INPUT_CONTRACT = {"version":"song_form_inputs_v1", "time":"exact_quarter_
     "skeleton":"whole_song_onsets_masked_layout_v1"}
 
 
-def load(path, *, device='cpu', inference=False, task='draft'):
-    payload=torch.load(path,map_location=device,weights_only=False)
+def load(path, *, device='cpu', inference=False, task='draft', record_identity=False):
+    if record_identity:
+        # Hash the same open file used for loading, even if form_last.pt is
+        # atomically replaced by a training checkpoint during generation.
+        with open(path, 'rb') as source:
+            payload=torch.load(source,map_location=device,weights_only=False)
+            source.seek(0)
+            checksum=hashlib.sha256()
+            for block in iter(lambda:source.read(1024*1024),b''):
+                checksum.update(block)
+            stat=os.fstat(source.fileno())
+        payload['source_checkpoint_identity']={'path':str(Path(path).resolve()),'size':stat.st_size,
+                                              'mtime_ns':str(stat.st_mtime_ns),'sha256':checksum.hexdigest()}
+    else:
+        payload=torch.load(path,map_location=device,weights_only=False)
     if payload.get('schema')!=CHECKPOINT_SCHEMA or payload.get('family')!=FAMILY:
         raise ValueError('This is not a song_form_v1 model; old event checkpoints use their original generator.')
     contract=payload.get('input_contract')

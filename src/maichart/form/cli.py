@@ -7,12 +7,31 @@ from fractions import Fraction
 import json
 from pathlib import Path
 
-from maichart.event_timing import EventTempo, parse_event_chart
+from maichart.event_timing import EventTempo, parse_event_chart, seconds_at_beat
 from maichart.form.data import organize_song
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
 from maichart.generation.event_audio import extract_event_audio
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.timeline import normalize_tempo_map
+
+
+_EXPORT_TAIL_TICKS_PER_BEAT = 1920
+
+
+def _export_end_timing(audio_end_beat, tempo, first, *, existing_end=None):
+    """Normalize only the audio EOF anchor; preserve a later source-chart end."""
+    audio_end = Fraction(audio_end_beat)
+    ticks = (audio_end * _EXPORT_TAIL_TICKS_PER_BEAT).__ceil__()
+    normalized_audio_end = Fraction(ticks, _EXPORT_TAIL_TICKS_PER_BEAT)
+    export_end = max(normalized_audio_end, Fraction(existing_end)) if existing_end is not None else normalized_audio_end
+    extension_sec = float(seconds_at_beat(export_end, tempo, first) - seconds_at_beat(audio_end, tempo, first))
+    return export_end, {
+        'audio_end_beat': str(audio_end),
+        'export_end_beat': str(export_end),
+        'end_extension_sec': extension_sec,
+        'end_only_normalized': export_end == normalized_audio_end and normalized_audio_end != audio_end,
+        'notes_unchanged': True,
+    }
 
 
 def parser():
@@ -26,6 +45,8 @@ def parser():
     p.add_argument('--cache-dir',default='cache/song_form');p.add_argument('--max-region-seconds',type=float,default=14.)
     p.add_argument('--device',default='cpu');p.add_argument('--level',type=float,default=13.3)
     p.add_argument('--memory-strength',type=float,default=1.);p.add_argument('--onset-threshold',type=float,default=.5)
+    p.add_argument('--onset-merge-ms',type=float,default=40.,
+                   help='keep the strongest onset within this many milliseconds; 0 disables merging')
     p.add_argument('--temperature',type=float,default=.7);p.add_argument('--seed',type=int,default=0)
     p.add_argument('--condition-file',help='JSON GenerationCondition for Radar/Style controls')
     p.add_argument('--intensity-curve-file',help='Saved song-form intensity curve JSON')
@@ -52,6 +73,8 @@ def analysis_report(song):
 
 def main(argv=None):
     args=parser().parse_args(argv)
+    from maichart.form.onset_selection import merge_close_onsets
+    merge_close_onsets([], args.onset_merge_ms)
     audio=extract_event_audio(args.audio,cache_dir=args.cache_dir)
     structure=_json(args.structure_file) or {}
     meters=_json(args.meter_map) or structure.get('meter_map')
@@ -75,7 +98,13 @@ def main(argv=None):
     from maichart.form.checkpoint import load
     from maichart.form.generate import generate_chart,revise_chart
     model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
-                                   task='revision' if args.operation=='revise' else 'draft')
+                                   task='revision' if args.operation=='revise' else 'draft',record_identity=True)
+    report['source_checkpoint'] = {**payload['source_checkpoint_identity'],
+                                  'family':payload['family'],'completed_epoch':payload.get('epoch'),
+                                  'training_position':payload.get('training_position'),
+                                  'optimizer_steps':payload.get('optimizer_steps'),
+                                  'blueprint_steps':payload.get('blueprint_steps'),
+                                  'model_config':payload['model_config']}
     condition=GenerationCondition.from_dict(_json(args.condition_file)) if args.condition_file else GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
     report['generation_condition'] = condition.to_dict()
     intensity_curve = None
@@ -90,7 +119,7 @@ def main(argv=None):
             raise ValueError('intensity curve span must be between 0 and 1')
     if args.operation=='generate':
         points,generated=generate_chart(model,planner,codec,song,condition,payload['atom_catalog'],
-            threshold=args.onset_threshold,memory_strength=args.memory_strength,
+            threshold=args.onset_threshold,memory_strength=args.memory_strength,onset_merge_ms=args.onset_merge_ms,
             temperature=args.temperature,seed=args.seed,device=args.device,
             intensity_curve=intensity_curve,
             intensity_curve_strength=args.intensity_curve_strength,
@@ -113,7 +142,10 @@ def main(argv=None):
     from maichart.generation.event_quality import assess_event_chart
     if 'quality' in report: report['draft_quality']=report.pop('quality')
     report['quality']=assess_event_chart(points,tempo,first=first,duration_sec=audio.duration_sec,target_condition=condition)
-    text,_=compile_event_points(points,tempo_changes=tempo,first=first,end_beat=max(song.spans[-1].end,chart.end_beat) if chart else song.spans[-1].end,
+    export_end, export_timing = _export_end_timing(
+        song.spans[-1].end, tempo, first, existing_end=chart.end_beat if chart else None)
+    report['export_timing'] = export_timing
+    text,_=compile_event_points(points,tempo_changes=tempo,first=first,end_beat=export_end,
                                 title=chart.title if chart else Path(args.audio).stem,level=str(args.level),difficulty=args.difficulty)
     output.write_text(text,encoding='utf-8')
     report_path=output.with_suffix('.form.json')
