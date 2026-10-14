@@ -65,6 +65,25 @@ test("training mode changes update only untouched learning-rate defaults", () =>
   assert.equal(learningRate.value, "0.0002");
 });
 
+test("song-form resume help describes selected migration without changing learning rate", () => {
+  const values = {
+    "#modelFamily": {value:"song_form_v1"},
+    "#formResumeDataPolicy": {value:"restart_epoch"},
+    "#trainingModeHelp": {textContent:""}, "#epochsHelp": {textContent:""},
+    "#learningRate": {value:"0.00007"},
+  };
+  const update = new Function("element", "currentTrainingMode",
+    functionSource("updateTrainingModeHelp", "updateDatasetButtons") + "; return updateTrainingModeHelp;")(
+      makeElement(values), () => "resume");
+  update();
+  assert.match(values["#trainingModeHelp"].textContent,/迁移续训/);
+  assert.match(values["#epochsHelp"].textContent,/重跑未完成轮次/);
+  assert.equal(values["#learningRate"].value,"0.00007");
+  values["#formResumeDataPolicy"].value="strict";
+  update();
+  assert.match(values["#trainingModeHelp"].textContent,/严格从断点/);
+});
+
 test("checkpoint inspection preserves a manual finetune context-token limit but resume adopts the contract", () => {
   const contextTokens = {value: "512", dataset: {touched: "1"}};
   const dModel = {value: "256"};

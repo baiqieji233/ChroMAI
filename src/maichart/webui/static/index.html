@@ -138,6 +138,11 @@
 <select id="modelFamily"><option value="song_form_v1" selected>song_form_v1 全曲结构模型（全曲规划与段落关联）</option><option value="event_ctx_v1">event_ctx_v1 跨窗口事件模型（旧模型兼容路径）</option><option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option><option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option></select>
 <small id="modelFamilyHelp">song_form_v1 是当前主架构：先建立全曲起音草稿，再生成配置；切换模型族后，本页会显示对应专属参数。</small></label></div>
 <div id="trainingCheckpointGroup">
+<div id="formResumeDataPolicyGroup" class="form-grid" hidden>
+<label class="field span-4">续训数据变化处理
+<select id="formResumeDataPolicy"><option value="strict" selected>严格续训：使用原数据与原进度</option><option value="restart_epoch">解析结果变化时，保留状态并重跑当前轮</option></select>
+<small>默认严格检查。同一清单因注释/解析或段落匹配修复而增加可用谱面时，可选第二项：保留模型、优化器、已完成轮次，清空旧样本游标，从未完成轮次的全曲规划重新开始。已训练素材或质量标注改变时仍须使用finetune；迁移请设置新的输出目录，保留原模型。新模型后续可切回严格续训。</small>
+</label></div>
 <div class="form-grid">
 <label class="field span-4">已有模型 checkpoint（resume / finetune 使用，仅限同模型族）
             <input id="trainingCheckpointFile" type="file" accept=".pt,.pth">

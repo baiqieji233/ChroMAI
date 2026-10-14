@@ -1361,6 +1361,7 @@ function songFormTrainingPayload(options = {}) {
   return { model_family: "song_form_v1", manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     quality_enabled: checkedOrDefault("#qualityEnabled", false),
+    resume_data_policy: mode === "resume" ? valueOrDefault("#formResumeDataPolicy", "strict") : "strict",
     mode, init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(), epochs: Number(valueOrDefault("#epochs", 20)), batch_size: Number(valueOrDefault("#batchSize", 4)),
     device: formDevice("#device"), lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
     grad_accumulation: Number(valueOrDefault("#gradAccumulation", 1)), save_every: Number(valueOrDefault("#saveEvery", 0)),
@@ -1636,12 +1637,20 @@ function setTrainingModeDefaults() {
   }
   const help = element("#learningRateHelp");
   if (help) help.textContent = mode === "finetune" ? "finetune 默认 2e-5。" : "fresh 默认 2e-4。";
+  updateTrainingModeHelp(mode);
+}
+
+function updateTrainingModeHelp(mode = currentTrainingMode()) {
+  const songForm = element("#modelFamily")?.value === "song_form_v1";
+  const restartEpoch = songForm && element("#formResumeDataPolicy")?.value === "restart_epoch";
   const modeHelp = element("#trainingModeHelp");
   if (modeHelp) {
     modeHelp.textContent = mode === "fresh"
       ? "从随机初始化开始；不需要已有 checkpoint。"
       : mode === "resume"
-        ? "从断点继续：需要与当前 manifest、模型族完全一致的 checkpoint。"
+        ? restartEpoch
+          ? "迁移续训：保留权重与优化器；原素材不变且解析结果变化时，清空旧游标并重跑当前轮。请使用新的输出目录。"
+          : "严格从断点继续：需要与当前数据合同、模型族完全一致的 checkpoint。"
         : "已有模型加强训练：加载权重并新建优化器，可用小型精选集。允许迁移池化/过滤策略、上下文 token 上限和质量采样；模型族、词表、前置拍数与规划器保持兼容。";
   }
   const epochsHelp = element("#epochsHelp");
@@ -1649,7 +1658,9 @@ function setTrainingModeDefaults() {
     epochsHelp.textContent = mode === "fresh"
       ? "本次从头训练的轮数。短跑可先限制 batch 数验证流程；正式训练轮数按数据量和实际生成效果选择。"
       : mode === "resume"
-        ? "resume 的 epochs 是从断点额外训练的轮数；会从 checkpoint 的 epoch 接着计数，早停会按验证 loss 停止。"
+        ? songForm
+          ? "本次继续训练的轮数，从 checkpoint 已完成轮次的下一轮开始；迁移时重跑未完成轮次，保留其中已学到的权重。"
+          : "resume 的 epochs 是从断点额外训练的轮数；会从 checkpoint 的 epoch 接着计数，早停会按验证 loss 停止。"
         : "finetune 从新阶段 epoch 1 开始计数；epochs 是本次加强训练的轮数，早停会按验证 loss 停止。";
   }
 }
@@ -1685,7 +1696,10 @@ function updateDatasetButtons() {
 function updateTrainingControls() {
   updateFamilyFields();
   updateDatasetButtons();
+  updateTrainingModeHelp();
   const resume = currentTrainingMode() === "resume";
+  const resumePolicy = element("#formResumeDataPolicyGroup");
+  if (resumePolicy) resumePolicy.hidden = !resume || currentModelFamily() !== "song_form_v1";
   ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy", "#actionStateProfile"].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = resume;
@@ -2671,7 +2685,7 @@ async function inspectCheckpoint({ autoPreprocess = false } = {}) {
         || currentModelFamily() !== "song_form_v1"
         || checkpointPath !== valueOrDefault("#trainingCheckpointPath", "").trim()) return null;
     checkpointInspection = { key: currentCheckpointKey(), data };
-    if (data.valid && data.can_train) { applySongFormCheckpointConfig(data, mode); setCheckpointStatus(`song_form_v1 checkpoint 可用；${mode === "resume" ? "严格继承合同" : "可加强训练"}`, "good"); }
+    if (data.valid && data.can_train) { applySongFormCheckpointConfig(data, mode); setCheckpointStatus(`song_form_v1 checkpoint 可用；${mode === "resume" ? "权重与优化器可加载，实际数据合同将在启动时核对" : "可加强训练"}`, "good"); }
     else setCheckpointStatus((data.errors || []).join("；") || "song_form_v1 checkpoint 不可用于当前模式", "warn");
     updateTrainingControls(); return data;
   }
@@ -4029,6 +4043,7 @@ on("#tapOnSlideThresholdMs", "change", () => {
 // Training panel
 on("#modelFamily", "change", () => { generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null }; applySongFormCheckpointConfig({valid: false}, "fresh"); updateTrainingControls(); updateFamilyFields(); saveSettings(); });
 on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
+on("#formResumeDataPolicy", "change", () => { updateTrainingControls(); saveSettings(); });
 on("#trainingCheckpointPath", "input", () => { if (currentModelFamily() === "song_form_v1") applySongFormCheckpointConfig({valid: false}, "fresh"); invalidateCheckpointInspection("checkpoint 路径已变化，请重新检查。"); });
 on("#goldMode", "change", () => { updateGoldFields(); saveSettings(); });
 on("#preprocessButton", "click", startPreprocess);

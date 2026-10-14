@@ -169,6 +169,80 @@ def test_resume_effective_settings_match_checkpoint_and_ignore_disabled_ui_value
     assert args[args.index("--lr") + 1] == "0.00025"
 
 
+def test_resume_migration_policy_reaches_cli_and_effective_settings(tmp_path):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    checkpoint = tmp_path / "form.pt"
+    _checkpoint(checkpoint)
+    calls = []
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind):
+            task = TaskState(task_id="migration", kind=kind); calls.append(task); return task
+        def _run_subprocess_task(self, task, args, **kwargs): calls.append(args)
+
+    form_api.start_form_task(_Response(), "train", {
+        "manifest": str(manifest), "checkpoint_dir": str(tmp_path / "new"),
+        "mode": "resume", "init_checkpoint": str(checkpoint), "resume_data_policy": "restart_epoch",
+    }, runtime=Runtime())
+    task, args = calls
+    assert args.count("--resume-data-policy") == 1
+    assert args[args.index("--resume-data-policy") + 1] == "restart_epoch"
+    assert task.result["effective_settings"]["resume_data_policy"] == "restart_epoch"
+
+
+@pytest.mark.parametrize(("policy", "mode", "same_output", "error"), [
+    ("invalid", "resume", False, "resume_data_policy"),
+    ("restart_epoch", "fresh", False, "仅用于"),
+    ("restart_epoch", "finetune", False, "仅用于"),
+    ("restart_epoch", "resume", True, "新的 checkpoint"),
+])
+def test_invalid_resume_policy_is_rejected_before_registering_task(tmp_path, policy, mode, same_output, error):
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    checkpoint = tmp_path / "form.pt"
+    _checkpoint(checkpoint)
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind): pytest.fail("Invalid resume must not register a task")
+
+    with pytest.raises(ValueError, match=error):
+        form_api.start_form_task(_Response(), "train", {
+            "manifest": str(manifest), "checkpoint_dir": str(tmp_path if same_output else tmp_path / "new"),
+            "mode": mode, "init_checkpoint": str(checkpoint), "resume_data_policy": policy,
+        }, runtime=Runtime())
+
+
+def test_resume_source_edit_is_rejected_before_registering_task(tmp_path):
+    import hashlib
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text("{}", encoding="utf-8")
+    source = tmp_path / "maidata.txt"
+    source.write_text("old", encoding="utf-8")
+    checkpoint = tmp_path / "form.pt"
+    _checkpoint(checkpoint)
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    saved["dataset_contract"]["charts"] = [
+        {"source": str(source), "chart_sha256": hashlib.sha256(source.read_bytes()).hexdigest()}]
+    torch.save(saved, checkpoint)
+    source.write_text("edited", encoding="utf-8")
+
+    class Runtime:
+        WEBUI_ROOT = tmp_path
+        def _resolve_path(self, value): return Path(value)
+        def _create_task(self, kind): pytest.fail("Source edits must fail before task registration")
+
+    with pytest.raises(ValueError, match="源文件变化或缺失"):
+        form_api.start_form_task(_Response(), "train", {
+            "manifest": str(manifest), "checkpoint_dir": str(tmp_path / "new"),
+            "mode": "resume", "init_checkpoint": str(checkpoint), "resume_data_policy": "restart_epoch",
+        }, runtime=Runtime())
+
+
 def test_train_forwards_song_form_runtime_controls_as_cli_flags(tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text("{}", encoding="utf-8")

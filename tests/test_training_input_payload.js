@@ -68,6 +68,21 @@ test("song form submits every selected source for backend composition", () => {
   }
 });
 
+test("song-form migration policy is submitted only for resume", () => {
+  const begin = source.indexOf("function songFormTrainingPayload(options = {}) {");
+  const end = source.indexOf('// Shared by', begin);
+  const build = new Function("currentTrainingMode", "trainingSourcePaths", "selectedTrainingManifests",
+    "selectedDatasetItems", "valueOrDefault", "formDevice", "checkedOrDefault",
+    source.slice(begin, end) + "; return songFormTrainingPayload();");
+  for (const mode of ["resume", "finetune", "fresh"]) {
+    const payload = build(() => mode, () => ({manifest: "full.json"}), () => [], () => [],
+      (selector, fallback) => selector === "#formResumeDataPolicy" ? "restart_epoch" : fallback,
+      () => "cpu", (_selector, fallback) => fallback);
+    assert.equal(payload.resume_data_policy, mode === "resume" ? "restart_epoch" : "strict");
+  }
+  assert.match(html, /id="formResumeDataPolicy"[\s\S]*?<option value="strict" selected>/);
+});
+
 test("main song-form generation payload forwards the onset merge range", () => {
   const begin = source.indexOf("function songFormGenerationPayload() {");
   const end = source.indexOf("function generationPayload()", begin);

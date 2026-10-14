@@ -15,6 +15,29 @@ function functionSource(start, end) {
   return source.slice(from, to);
 }
 
+test("migration controls are visible only for song-form resume", () => {
+  const group = {hidden: true};
+  const context = {
+    updateFamilyFields() {}, updateDatasetButtons() {}, updateTrainingModeHelp() {},
+    currentTrainingMode: () => "resume", currentModelFamily: () => "song_form_v1",
+    element: selector => selector === "#formResumeDataPolicyGroup" ? group : null,
+    window: {},
+  };
+  vm.createContext(context);
+  const begin = source.indexOf("function updateTrainingControls() {");
+  const end = source.indexOf("// ---------------------------------------------------------------------------", begin);
+  vm.runInContext(source.slice(begin, end), context);
+  context.updateTrainingControls();
+  assert.equal(group.hidden, false);
+  context.currentTrainingMode = () => "fresh";
+  context.updateTrainingControls();
+  assert.equal(group.hidden, true);
+  context.currentTrainingMode = () => "resume";
+  context.currentModelFamily = () => "event_ctx_v1";
+  context.updateTrainingControls();
+  assert.equal(group.hidden, true);
+});
+
 test("song-form resume restores and locks inherited settings while finetune keeps them editable", () => {
   const elements = new Map();
   const context = {element(selector) {

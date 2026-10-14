@@ -188,6 +188,11 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         manifest=file('manifest')
         mode=payload.get('mode','fresh')
         if mode not in {'fresh','resume','finetune'}: raise ValueError('Unknown training mode')
+        resume_data_policy=str(payload.get('resume_data_policy','strict'))
+        if resume_data_policy not in {'strict','restart_epoch'}:
+            raise ValueError('resume_data_policy must be strict or restart_epoch')
+        if mode != 'resume' and resume_data_policy != 'strict':
+            raise ValueError('迁移续训选项仅用于“从断点继续（resume）”。')
         initial=file('init_checkpoint',required=mode!='fresh') if mode!='fresh' else None
         inspected = None
         if initial:
@@ -220,6 +225,13 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         output_value=str(payload.get('checkpoint_dir') or '').strip()
         if not output_value: raise ValueError('checkpoint_dir is required')
         out=server._resolve_path(output_value)
+        if mode == 'resume':
+            from maichart.form.resume_contract import contract_header, preflight_resume, verify_saved_chart_sources
+            preflight_resume(inspected.get('dataset_contract') or {},
+                             contract_header(manifest,(inspected.get('dataset_contract') or {}).get('meter_map'),region))
+            verify_saved_chart_sources(inspected.get('dataset_contract') or {})
+            if resume_data_policy == 'restart_epoch' and out.resolve() == initial.resolve().parent:
+                raise ValueError('迁移续训请设置新的 checkpoint 输出目录，以保留来源模型。')
         epochs=number('epochs',10,1,10000,True)
         values={"epochs":epochs,"batch_size":number('batch_size',2,1,512,True),
                 'lr':number('lr',.0002,1e-8,1.),'max_steps':number('max_steps',0,0,1000000,True),
@@ -275,6 +287,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             args[args.index('--condition-drop-prob') + 1] = '0'
             args[args.index('--load-curve-loss-weight') + 1] = '0'
         args += ['--quality-enabled' if values['quality_enabled'] else '--no-quality-enabled']
+        if mode == 'resume':
+            args += ['--resume-data-policy',resume_data_policy]
+            values['resume_data_policy']=resume_data_policy
         if initial: args+=['--resume' if mode=='resume' else '--init-checkpoint',str(initial)]
         results=[out/'form_last.pt',out/'dataset_audit.json',out/'training_history.json']
         start_epoch=int(inspected.get('epoch',0)) if inspected and mode=='resume' else 0
