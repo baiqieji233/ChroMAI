@@ -32,6 +32,7 @@ LEGACY_STATE_KEYS = {
 
 class ModelFamily(Enum):
     SONG_FORM_V1 = "song_form_v1"
+    SONG_FORM_V2 = "song_form_v2"
     EVENT_V1 = "event_v1"
     EVENT_CTX_V1 = "event_ctx_v1"
     LEGACY_FRAME_V2 = "legacy_frame_v2"
@@ -42,12 +43,14 @@ class ModelFamily(Enum):
 
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
-    if checkpoint_data.get("schema") == "maichart-song-form-checkpoint-v1":
-        from maichart.form.checkpoint import INPUT_CONTRACT
+    if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:
+        from maichart.form.checkpoint import INPUT_CONTRACT, RATIONAL_INPUT_CONTRACT
+        rational=checkpoint_data.get('schema')=='maichart-song-form-checkpoint-v2'
+        family='song_form_v2' if rational else 'song_form_v1'
         errors=[]
-        if checkpoint_data.get("family") != "song_form_v1": errors.append("新架构模型族声明不一致")
-        if checkpoint_data.get("input_contract") != INPUT_CONTRACT: errors.append("新架构输入合同不匹配")
-        return {"model_family":"song_form_v1","planner_profile":"whole_song_blueprint_v1",
+        if checkpoint_data.get("family") != family: errors.append("新架构模型族声明不一致")
+        if checkpoint_data.get("input_contract") != (RATIONAL_INPUT_CONTRACT if rational else INPUT_CONTRACT): errors.append("新架构输入合同不匹配")
+        return {"model_family":family,"planner_profile":"musical_query_workload_v1" if rational else "whole_song_blueprint_v1",
                 "valid":not errors,"errors":errors,"experimental":True,
                 "conflict_detection":True,"conflict_repair":True,"fine_note_strength":False,
                 "onset_profile":"none","local_onset_guidance":False,"rhythm_bias":False,

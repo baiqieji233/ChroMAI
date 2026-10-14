@@ -39,6 +39,9 @@ def parser():
     p.add_argument('operation',choices=('analyze','generate','revise'))
     p.add_argument('--audio',required=True);p.add_argument('--output',required=True)
     p.add_argument('--checkpoint');p.add_argument('--maidata');p.add_argument('--difficulty',type=int,default=5)
+    p.add_argument('--model-family',choices=('auto','song_form_v1','song_form_v2'),default='auto')
+    p.add_argument('--position-temperature',type=float,default=.2)
+    p.add_argument('--position-characters',type=int,default=24)
     p.add_argument('--start');p.add_argument('--end')
     p.add_argument('--bpm',type=float);p.add_argument('--first',type=float,default=0.)
     p.add_argument('--meter-map');p.add_argument('--tempo-map');p.add_argument('--structure-file')
@@ -113,7 +116,20 @@ def main(argv=None):
         raise ValueError('Rhythm approximation applies only to automatic generation, not source-chart revision')
     if args.intensity_curve_file and args.operation != 'generate':
         raise ValueError('Song-form intensity curves apply only to generate; revise uses the source chart clock')
-    audio=extract_event_audio(args.audio,cache_dir=args.cache_dir)
+    model=planner=codec=payload=None
+    if args.operation!='analyze':
+        if not args.checkpoint: raise ValueError('Generate/revise requires a trained song-form checkpoint')
+        from maichart.form.checkpoint import load
+        model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
+            task='revision' if args.operation=='revise' else 'draft',record_identity=True)
+        if args.model_family!='auto' and args.model_family!=payload['family']:
+            raise ValueError('Selected model family differs from checkpoint; inspect the model and use its detected family')
+    rational=(payload or {}).get('family',args.model_family)=='song_form_v2' or (args.operation=='analyze' and args.model_family=='auto')
+    if rational:
+        from maichart.form.rational_audio import extract_rational_audio
+        audio=extract_rational_audio(args.audio,cache_dir=args.cache_dir)
+    else:
+        audio=extract_event_audio(args.audio,cache_dir=args.cache_dir)
     structure=_json(args.structure_file) or {}
     meters=_json(args.meter_map) or structure.get('meter_map')
     explicit_tempo=_json(args.tempo_map) or structure.get('tempo_map')
@@ -140,8 +156,6 @@ def main(argv=None):
     if not args.checkpoint: raise ValueError('Generate/revise requires a trained song_form_v1 checkpoint')
     from maichart.form.checkpoint import load
     from maichart.form.generate import generate_chart,revise_chart
-    model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
-                                   task='revision' if args.operation=='revise' else 'draft',record_identity=True)
     trained_region_seconds = (payload.get('dataset_contract') or {}).get('max_region_seconds')
     if trained_region_seconds is not None and args.max_region_seconds > float(trained_region_seconds)+1e-9:
         print('form_warning '+json.dumps({'message':
@@ -179,13 +193,19 @@ def main(argv=None):
         'condition_vector_dtype':'float32','condition_vector_level_divisor':15.0,
         'condition_kind':'learned_soft_condition_not_a_hard_quota',
         'first':first,'tempo_map':report['tempo_map']}
+    if rational:
+        report['effective_generation_settings'].update(model_family='song_form_v2',
+            onset_threshold=None,onset_merge_ms=None,planner_type_strength=0,
+            rhythm_snap_enabled=False,rhythm_snap_mode='not_applicable',
+            position_temperature=args.position_temperature,position_characters=args.position_characters,
+            time_representation='direct_canonical_fraction',audio_profile=song.audio_profile)
     intensity_curve = None
     curve_condition_warnings = []
     if args.intensity_curve_file:
         from maichart.generation.music_intensity import load_intensity_profile
         intensity_curve = load_intensity_profile(args.intensity_curve_file)
-        if intensity_curve.get('method') != 'learned_song_form_v1':
-            raise ValueError('song_form CLI requires a learned_song_form_v1 intensity curve')
+        if intensity_curve.get('method') != ('learned_song_form_v2' if rational else 'learned_song_form_v1'):
+            raise ValueError('Saved intensity curve belongs to a different song-form architecture')
         from maichart.form.curve_validation import validate_saved_curve
         curve_condition_warnings = validate_saved_curve(
             intensity_curve, audio_path=args.audio, checkpoint_path=args.checkpoint,
@@ -199,6 +219,9 @@ def main(argv=None):
         if not 0.0 <= args.intensity_curve_span <= 1.0:
             raise ValueError('intensity curve span must be between 0 and 1')
     if args.operation=='generate':
+        if rational:
+            from maichart.form.rational_generate import generate_rational_chart
+            generate_chart=generate_rational_chart
         points,generated=generate_chart(model,planner,codec,song,condition,payload['atom_catalog'],
             threshold=args.onset_threshold,memory_strength=args.memory_strength,onset_merge_ms=args.onset_merge_ms,
             rhythm_snap_enabled=args.rhythm_snap,rhythm_snap_ms=args.rhythm_snap_ms,
@@ -211,7 +234,8 @@ def main(argv=None):
             intensity_curve=intensity_curve,
             intensity_curve_strength=args.intensity_curve_strength,
             intensity_curve_span=args.intensity_curve_span,
-            intensity_curve_mode=args.intensity_curve_mode)
+            intensity_curve_mode=args.intensity_curve_mode,
+            **({'position_temperature':args.position_temperature,'position_characters':args.position_characters} if rational else {}))
         report.update(generated)
     else:
         points,revision=revise_chart(model,codec,song,chart.points,condition,payload['atom_catalog'],

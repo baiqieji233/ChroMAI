@@ -79,6 +79,17 @@ def _audio_novelty(audio: EventAudio) -> np.ndarray:
     rhythm = features[:, 92:95]
 
     def context_means(values: np.ndarray, width: int) -> tuple[np.ndarray, np.ndarray]:
+        if (audio.metadata or {}).get('profile') == 'rational_audio_queries_v1':
+            # Index distances vary with acoustic activity; use actual elapsed
+            # time for nonuniform musical evidence instead of inventing a rate.
+            seconds=float(width)
+            stamps=np.asarray(audio.times,dtype=np.float64)
+            positions=np.arange(count)
+            left_start=np.searchsorted(stamps,stamps-seconds)
+            right_end=np.searchsorted(stamps,stamps+seconds,side='right')
+            prefix=np.vstack((np.zeros((1,values.shape[1])),np.cumsum(values,axis=0)))
+            return ((prefix[positions]-prefix[left_start])/np.maximum(1,positions-left_start)[:,None],
+                    (prefix[right_end]-prefix[positions])/np.maximum(1,right_end-positions)[:,None])
         prefix = np.vstack((np.zeros((1, values.shape[1])), np.cumsum(values, axis=0)))
         positions = np.arange(count)
         left_start = np.maximum(0, positions - width)
@@ -101,7 +112,8 @@ def _audio_novelty(audio: EventAudio) -> np.ndarray:
     # contrasts respond when the surrounding musical material changes.
     scales: list[np.ndarray] = []
     for seconds in (1.0, 2.0):
-        width = max(2, int(round(rate * seconds)))
+        width = (seconds if (audio.metadata or {}).get('profile')=='rational_audio_queries_v1'
+                 else max(2, int(round(rate * seconds))))
         chroma_left, chroma_right = context_means(chroma, width)
         timbre_left, timbre_right = context_means(timbre, width)
         rhythm_left, rhythm_right = context_means(rhythm, width)
@@ -117,7 +129,13 @@ def _audio_novelty(audio: EventAudio) -> np.ndarray:
     # region transitions.
     width = max(1, int(round(rate * 0.25)))
     width = min(width, count)
-    if width > 1:
+    if (audio.metadata or {}).get('profile')=='rational_audio_queries_v1':
+        stamps=np.asarray(audio.times,dtype=np.float64)
+        lo=np.searchsorted(stamps,stamps-.125)
+        hi=np.searchsorted(stamps,stamps+.125,side='right')
+        prefix=np.r_[0,np.cumsum(novelty)]
+        novelty=(prefix[hi]-prefix[lo])/np.maximum(hi-lo,1)
+    elif width > 1:
         novelty = np.convolve(novelty, np.ones(width) / width, mode="same")
     baseline = float(np.percentile(novelty, 85))
     scale = max(baseline, 0.20)

@@ -58,7 +58,8 @@ class _AudioStore:
 
     def disk_cache_path(self,path):
         """Return this source's resolved event-audio cache path, if applicable."""
-        if self.loader is not extract_event_audio or self.cache_dir is None:
+        from maichart.form.rational_audio import extract_rational_audio, cache_path as rational_cache_path
+        if self.loader not in (extract_event_audio, extract_rational_audio) or self.cache_dir is None:
             return None
         key=str(path)
         source=Path(path)
@@ -67,7 +68,8 @@ class _AudioStore:
         with self._lock:
             resolution=self._resolved_sources.get(key)
             if resolution is None or resolution[0] != signature:
-                cache_path=event_audio_cache_path(source,self.cache_dir)
+                cache_path=(rational_cache_path(source,self.cache_dir) if self.loader is extract_rational_audio
+                            else event_audio_cache_path(source,self.cache_dir))
                 resolution=(signature,cache_path)
                 self._resolved_sources[key]=resolution
                 self.source_resolutions+=1
@@ -86,7 +88,9 @@ class _AudioStore:
             self.misses+=1
             if cache_path is not None and cache_path.is_file():
                 try:
-                    audio=load_event_audio(cache_path,sample_rate=22050,hop_length=441)
+                    from maichart.form.rational_audio import extract_rational_audio, load_rational_audio
+                    audio=(load_rational_audio(cache_path) if self.loader is extract_rational_audio
+                           else load_event_audio(cache_path,sample_rate=22050,hop_length=441))
                     self.disk_loads+=1
                 except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError):
                     audio=self.loader(path,cache_dir=self.cache_dir)
@@ -183,6 +187,7 @@ class FormSong:
     span_region_indices: list[int] | None = None
     load_curve_times_sec: np.ndarray | None = None
     load_curve: np.ndarray | None = None
+    audio_profile: str = "legacy_50hz"
 
     def __post_init__(self):
         # Old direct constructors treat every supplied span as its own region.
@@ -221,10 +226,13 @@ def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2
     audit['region_count'] = len(regions)
     audit['computational_span_count'] = len(spans)
     return FormSong(audio, list(tempo), float(first), meters, spans, relations, audit,
-                    regions, span_region_indices)
+                    regions, span_region_indices, audio_profile=(audio.metadata or {}).get('profile','legacy_50hz'))
 
 
 def form_audio(song, start, end):
+    if song.audio_profile == 'rational_audio_queries_v1':
+        from maichart.form.rational_audio import audio_queries
+        return audio_queries(song,start,end,max_nodes=1024)[0]
     from maichart.form.timing import metrical_features
     lo = float(seconds_at_beat(start, song.tempo, song.first))
     hi = float(seconds_at_beat(end, song.tempo, song.first))
@@ -265,13 +273,16 @@ def _form_descriptor(song, index, relation=None):
 def input_example(song, index, history, *, condition=None, codec=None, task=0,
                   draft=(), right=(), max_memory_tokens=512, memory_strength=1.0,
                   state_index=None, load_curve=None, load_curve_times_sec=None,
-                  load_curve_condition_mask=None):
+                  load_curve_condition_mask=None, history_before=None):
     codec = codec or RationalCodec()
     span = song.spans[index]
     region_index = song.span_region_indices[index]
     region = song.regions[region_index]
     history = tuple(history)
-    if any(p.beat >= span.start for p in history):
+    boundary = span.start if history_before is None else Fraction(history_before)
+    if history_before is not None and (song.audio_profile != 'rational_audio_queries_v1' or not span.start <= boundary < span.end):
+        raise ValueError('Continuation history boundary requires a rational-audio span')
+    if any(p.beat >= boundary for p in history):
         raise ValueError("History includes current/future chart targets")
     if task == 0 and (len(draft) or len(right)):
         raise ValueError("Fresh generation cannot read draft/right targets")
@@ -292,7 +303,7 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     relation = ref.relation
     form = _form_descriptor(song, index, relation)
     hist_origin = history[0].beat if history else span.start
-    states, padding, state_meta = (state_index or SustainStateIndex(history,song.tempo,song.first)).at(span.start)
+    states, padding, state_meta = (state_index or SustainStateIndex(history,song.tempo,song.first)).at(boundary)
     # A reused index must still be causal. Its implementation filters all heads
     # at or after the boundary, including future-dependent release flags.
     condition = condition or GenerationCondition(radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
@@ -526,7 +537,14 @@ class FormDataset(Dataset):
                  meters=None, seed=0, limit_charts=0, reconstruction=True,
                  min_level=12.,max_level=15.,min_difficulty_index=4,max_difficulty_index=6,
                  max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
-                 preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256):
+                 preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz'):
+        from maichart.form.rational_audio import PROFILE, extract_rational_audio
+        if audio_profile == PROFILE:
+            if audio_loader is not extract_event_audio:
+                raise ValueError('Rational audio profile owns its waveform query loader')
+            audio_loader = extract_rational_audio
+        elif audio_profile != 'legacy_50hz':
+            raise ValueError('Unknown form audio profile')
         self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction","quality_enabled":bool(quality_enabled)}
         self.max_memory_tokens=max_memory_tokens; self.seed=seed
         if audio_cache_gb is not None and audio_cache_gb < 0:
@@ -549,17 +567,17 @@ class FormDataset(Dataset):
         entries = data.get('songs', [])
         workers = preparation_workers or min(4, os.cpu_count() or 1)
         workers = max(1, min(workers, len(entries), os.cpu_count() or 1))
-        if audio_loader is not extract_event_audio:
+        if audio_loader not in (extract_event_audio, extract_rational_audio):
             workers = 1
         preparation_cache = None
-        if audio_loader is extract_event_audio:
+        if audio_loader in (extract_event_audio, extract_rational_audio):
             from maichart.form.preparation_cache import PreparationCache
             preparation_cache = PreparationCache(cache_dir)
         options = dict(manifest=path, source_data={'source_root': data.get('source_root')}, cache_dir=cache_dir,
             max_tokens=max_tokens, meters=meters, limit_charts=limit_charts, reconstruction=reconstruction,
             min_level=min_level, max_level=max_level, min_difficulty_index=min_difficulty_index,
             max_difficulty_index=max_difficulty_index, max_region_seconds=max_region_seconds,
-            preparation_cache=preparation_cache)
+            preparation_cache=preparation_cache, audio_profile=audio_profile)
         started = time.monotonic()
         print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,
             'total_songs':len(entries),'completed_songs':0,'charts':0,
@@ -659,9 +677,12 @@ class FormDataset(Dataset):
             reference=self.codec.decode(result['motif'].tolist(),origin=span.start)
         # This blueprint contains positions only. Every chart configuration is
         # masked, so training cannot reveal future note types or note text.
-        skeleton=[DraftPoint(p.beat,None,True) for p in points[lo:]]
-        result['skeleton']=torch.tensor(self.codec.bounded_memory(
-            skeleton,origin=span.start,max_tokens=self.max_memory_tokens,newest=False))
+        if song.audio_profile == 'rational_audio_queries_v1':
+            result['skeleton']=torch.tensor([self.codec.pad_id])
+        else:
+            skeleton=[DraftPoint(p.beat,None,True) for p in points[lo:]]
+            result['skeleton']=torch.tensor(self.codec.bounded_memory(
+                skeleton,origin=span.start,max_tokens=self.max_memory_tokens,newest=False))
         result.update(decoder_input=torch.tensor(tokens[:-1]),target=torch.tensor(tokens[1:]),
                       relation_target=relation_target(target,reference,span),
                       relation_valid=torch.tensor(ref_index is not None),weight=torch.tensor(weight*local_weight))

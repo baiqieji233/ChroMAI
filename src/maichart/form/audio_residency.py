@@ -42,10 +42,15 @@ def preload_audio(store, paths, *, report):
         index = store.disk_cache_path(path)
         if index is None or not index.exists():
             raise ValueError(f'Full audio residency requires prepared disk features: {path}')
-        metadata = json.loads(index.read_text(encoding='utf-8'))
-        frames = len(metadata['times'])
-        width = int(metadata.get('metadata', {}).get('acoustic_dim', ACOUSTIC_DIM))
-        required += frames * (width + 1) * 4
+        if index.suffix=='.npz':
+            import numpy as np
+            with np.load(index,allow_pickle=False) as arrays:
+                required+=arrays['features'].nbytes+arrays['times'].nbytes
+        else:
+            metadata = json.loads(index.read_text(encoding='utf-8'))
+            frames = len(metadata['times'])
+            width = int(metadata.get('metadata', {}).get('acoustic_dim', ACOUSTIC_DIM))
+            required += frames * (width + 1) * 4
     report(phase='estimate', completed=0, total=len(paths), unique_audio=len(paths),
            required_bytes=required, budget_bytes=budget, bytes=store.bytes)
     if required > budget:

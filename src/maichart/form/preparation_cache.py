@@ -24,6 +24,7 @@ from maichart.generation.sustain_state import SustainStateIndex
 SCHEMA = 'song_form_preparation_v1'
 _DEPENDENCIES = (
     'form/preparation_cache.py', 'form/data.py', 'form/codec.py',
+    'form/rational_audio.py',
     'form/timing.py', 'form/segmentation.py', 'form/recurrence.py', 'form/curve.py',
     'event_timing.py', 'maidata.py', 'notes.py', 'timing.py', 'duration.py', 'ir.py',
     'generation/event_compile.py', 'generation/event_audio.py', 'generation/event_model.py',
@@ -89,7 +90,9 @@ class PreparationCache:
             'runtime': self.runtime,
             'source': str(source), 'chart_sha256': self.file_digest(source),
             'audio': str(audio_path), 'audio_sha256': self.file_digest(audio_path),
-            'audio_config': _feature_config(22050, 441),
+            'audio_config': ({'profile': options['audio_profile'], 'fixed_feature_rate': None}
+                             if options.get('audio_profile') == 'rational_audio_queries_v1'
+                             else _feature_config(22050, 441)),
             'structure_sha256': self.file_digest(structure) if structure.exists() else None,
             'difficulty': slot, 'level': level, 'quality': record,
             'settings': {'max_tokens': options['max_tokens'],
@@ -170,7 +173,7 @@ def _encode(result):
                     points=[[str(p.beat), p.note_text] for p in points],
                     condition=condition.to_dict(), excluded=excluded, record=record,
                     state_markers=state.markers,
-                    song={'tempo': tempo, 'first': song.first,
+                    song={'tempo': tempo, 'first': song.first, 'audio_profile': song.audio_profile,
                           'meters': [m.to_dict() for m in song.meters],
                           'spans': [s.to_dict() for s in song.spans],
                           'regions': [s.to_dict() for s in song.regions],
@@ -201,7 +204,7 @@ def _decode(metadata, arrays):
     song = FormSong(None, tempo, values['first'], [MeterChange.from_dict(m) for m in values['meters']],
                     [MetricSpan.from_dict(s) for s in values['spans']], relations, values['audit'],
                     [MetricSpan.from_dict(s) for s in values['regions']], values['span_region_indices'],
-                    times, curve)
+                    times, curve, values.get('audio_profile','legacy_50hz'))
     # Restore parsed markers instead of recompiling and parsing the same chart.
     # Its code/reference digest participates in the cache identity above.
     state = SustainStateIndex.__new__(SustainStateIndex)

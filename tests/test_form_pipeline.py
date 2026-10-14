@@ -59,7 +59,7 @@ def test_real_cpu_training_finetune_resume_and_blueprint_layout(tmp_path,monkeyp
     manifest.write_text(json.dumps({'songs':[{'song_id':'fixture','maidata_path':'song/maidata.txt','audio_path':'song/track.wav','difficulties':[{'difficulty_index':5,'level_raw':'13'}]}]}))
     real_dataset=data.FormDataset
     monkeypatch.setattr(train,'FormDataset',lambda *args,**kw:real_dataset(*args,**kw,audio_loader=lambda *a,**k:audio))
-    common=['--manifest',str(manifest),'--cache-dir',str(tmp_path/'cache'),'--epochs','1',
+    common=['--model-family','song_form_v1','--manifest',str(manifest),'--cache-dir',str(tmp_path/'cache'),'--epochs','1',
             '--batch-size','1','--max-steps','2','--d-model','16','--nhead','2','--layers','1',
             '--max-tokens','192','--max-memory-tokens','64','--max-region-seconds','3']
     threads=torch.get_num_threads();torch.set_num_threads(1)

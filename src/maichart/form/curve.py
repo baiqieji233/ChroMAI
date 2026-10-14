@@ -144,7 +144,12 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     _curve_capability(payload)
     if int(payload.get("optimizer_steps", 0)) <= 0 or int(payload.get("blueprint_steps", 0)) <= 0:
         raise ValueError("song_form draft and whole-song blueprint must be trained before curve inference")
-    audio = extract_event_audio(audio_path, cache_dir=Path(checkpoint_path).resolve().parent / "curve_audio_cache")
+    rational=payload.get('family','song_form_v1')=='song_form_v2'
+    if rational:
+        from maichart.form.rational_audio import extract_rational_audio
+        audio=extract_rational_audio(audio_path,cache_dir=Path(checkpoint_path).resolve().parent/'curve_audio_cache')
+    else:
+        audio = extract_event_audio(audio_path, cache_dir=Path(checkpoint_path).resolve().parent / "curve_audio_cache")
     bpm_input = float(bpm) if bpm is not None else None
     bpm = bpm_input if bpm_input is not None else _musical_bpm(float(audio.tempo_bpm))
     if not math.isfinite(bpm) or bpm <= 0:
@@ -167,6 +172,9 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
                             codec=RationalCodec.from_dict(payload["codec"]))
     planner.eval()
     audio_values = form_audio(song, song.spans[0].start, song.spans[-1].end).unsqueeze(0).to(device)
+    if rational:
+        from maichart.form.rational_audio import audio_queries
+        audio_values=audio_queries(song,song.spans[0].start,song.spans[-1].end)[0][None].to(device)
     form_values = torch.as_tensor(example["form"], dtype=torch.float32, device=device).unsqueeze(0)
     condition_values = condition.to_vector(device=device).unsqueeze(0)
     with torch.inference_mode():
@@ -175,7 +183,11 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
         raise ValueError("song_form blueprint has no load-curve output head")
     frame_start = float(seconds_at_beat(song.spans[0].start, tempo, first))
     frame_end = float(seconds_at_beat(song.spans[-1].end, tempo, first))
-    frame_times = segment_frame_times(frame_start, frame_end)
+    if rational:
+        from maichart.form.rational_audio import audio_queries
+        frame_times=audio_queries(song,song.spans[0].start,song.spans[-1].end)[1]
+    else:
+        frame_times = segment_frame_times(frame_start, frame_end)
     predicted = prediction["load_curve"][0].sigmoid().cpu().numpy()
     if len(predicted) != len(frame_times):
         raise ValueError("blueprint load-curve clock does not align with song audio frames")
@@ -211,7 +223,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     if identity_before != identity_after:
         raise ValueError("Checkpoint changed during curve inference; retry with a fixed checkpoint")
     profile = {
-        "schema": "maichart-intensity-curve-v1", "method": "learned_song_form_v1",
+        "schema": "maichart-intensity-curve-v1", "method": "learned_song_form_v2" if rational else "learned_song_form_v1",
+        "model_family":payload.get('family','song_form_v1'),
         "time_axis": AUDIO_CURVE_AXIS,
         "duration_sec": float(audio.duration_sec),
         "points": [{"time_sec": float(t), "intensity": float(v)}

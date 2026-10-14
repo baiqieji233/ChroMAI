@@ -7,7 +7,7 @@ from maichart.webui import form_api
 
 
 def test_invalid_derived_planner_width_is_rejected_before_data_preparation():
-    args = parser().parse_args(['--manifest', 'unopened.json', '--checkpoint-dir', 'unused',
+    args = parser().parse_args(['--model-family','song_form_v1','--manifest', 'unopened.json', '--checkpoint-dir', 'unused',
                                 '--d-model', '180', '--nhead', '6'])
     with pytest.raises(ValueError, match='width must be divisible by form_heads'):
         _validate(args)

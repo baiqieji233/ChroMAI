@@ -27,6 +27,7 @@ from maichart.form.training_runtime import (
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest', required=True)
+    p.add_argument('--model-family', choices=('song_form_v1','song_form_v2'), default='song_form_v2')
     p.add_argument('--checkpoint-dir', required=True)
     p.add_argument('--cache-dir', default='cache/song_form')
     p.add_argument('--epochs', type=int, default=10)
@@ -38,6 +39,8 @@ def parser():
     p.add_argument('--max-steps', type=int, default=0)
     p.add_argument('--limit-charts', type=int, default=0)
     p.add_argument('--d-model', type=int, default=256)
+    p.add_argument('--dim-feedforward', type=int, default=0, help='0 uses 3*d-model for v2 or 4*d-model for v1')
+    p.add_argument('--planner-width', type=int, default=128, help='independent workload Planner width for v2')
     p.add_argument('--layers', type=int, default=4)
     p.add_argument('--nhead', type=int, default=8)
     p.add_argument('--max-tokens', type=int, default=2048)
@@ -94,10 +97,16 @@ def _validate(args):
 def fresh_model_configs(args):
     from maichart.form.blueprint import BlueprintConfig
     from maichart.form.codec import RationalCodec
+    rational=getattr(args,'model_family','song_form_v1')=='song_form_v2'
+    ff=getattr(args,'dim_feedforward',0) or (3 if rational else 4)*args.d_model
     config = FormConfig(vocab_size=len(RationalCodec()), d_model=args.d_model, nhead=args.nhead,
-        dropout=args.dropout, layers=args.layers, dim_feedforward=4*args.d_model,
+        dropout=args.dropout, layers=args.layers, dim_feedforward=ff,
         max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens)
-    planner_config = BlueprintConfig(width=max(16, args.d_model//2))
+    if rational:
+        from maichart.form.rational_planner import RationalPlannerConfig
+        planner_config=RationalPlannerConfig(width=getattr(args,'planner_width',128))
+    else:
+        planner_config = BlueprintConfig(width=max(16, args.d_model//2))
     return config, planner_config
 
 
@@ -138,6 +147,25 @@ def _blueprint_input(dataset, index):
     from maichart.event_timing import seconds_at_beat
     from maichart.generation.event_audio import segment_frame_times
     song, points, level, weight, _, condition, *rest = dataset.songs[index]
+    if song.audio_profile == 'rational_audio_queries_v1':
+        from maichart.form.rational_audio import audio_queries
+        audio,times,_=audio_queries(song,song.spans[0].start,song.spans[-1].end)
+        curve=resample_load_curve(song.load_curve_times_sec,song.load_curve,times-song.first)
+        boundaries=np.r_[times[0],(times[1:]+times[:-1])*.5,
+            seconds_at_beat(song.spans[-1].end,song.tempo,song.first)]
+        weights=np.maximum(np.diff(boundaries),0).astype(np.float32)
+        weights/=max(float(weights.mean()),1e-8)
+        record=rest[1] if len(rest)>1 else None
+        for region in (record or {}).get('regions',[]):
+            weights[(times>=region['start_sec'])&(times<region['end_sec'])]*=region.get('weight',1.)
+        from maichart.form.data import _form_descriptor
+        inputs={'audio':audio[None],'form':torch.from_numpy(_form_descriptor(song,0))[None],
+                'condition':condition.to_vector()[None]}
+        targets={'load_curve_target':torch.from_numpy(curve)[None],
+                 'load_curve_mask':torch.ones((1,len(times),4),dtype=torch.bool),
+                 'frame_weight':torch.from_numpy(weights)[None]}
+        validate_cpu_batch(inputs);validate_cpu_batch(targets)
+        return inputs,targets,float(weight)
     audio = form_audio(song, song.spans[0].start, song.spans[-1].end)
     times = segment_frame_times(seconds_at_beat(song.spans[0].start, song.tempo, song.first),
                                 seconds_at_beat(song.spans[-1].end, song.tempo, song.first))
@@ -165,12 +193,14 @@ def _blueprint_input(dataset, index):
 def main(argv=None):
     args = parser().parse_args(argv)
     _validate(args)
+    semantics='song_form_training_v4_rational' if args.model_family=='song_form_v2' else TRAINING_SEMANTICS
     device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
                           else 'cpu' if args.device == 'auto' else args.device)
     meters = json.loads(Path(args.meter_map).read_text(encoding='utf-8-sig')) if args.meter_map else None
     old = None
     if args.resume or args.init_checkpoint:
         model, blueprint, codec, old = checkpoint.load(args.resume or args.init_checkpoint, device='cpu')
+        args.model_family = old['family']
         for key in ('max_tokens', 'max_memory_tokens', 'd_model', 'layers', 'nhead', 'dropout'):
             setattr(args, key, getattr(model.config, key))
         if args.resume:
@@ -204,7 +234,7 @@ def main(argv=None):
         preflight_resume(old.get('dataset_contract') or {}, current_header)
         verify_saved_chart_sources(old.get('dataset_contract') or {})
     output.mkdir(parents=True, exist_ok=True)
-    emit('form_runtime', training_semantics=TRAINING_SEMANTICS, device=str(device), precision=precision,
+    emit('form_runtime', training_semantics=semantics, model_family=args.model_family, device=str(device), precision=precision,
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
@@ -213,7 +243,7 @@ def main(argv=None):
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
     if args.loader_workers:
         emit('form_warning', message='Loader workers copy dataset metadata and each has its own cache; memory grows with worker count.')
-    if old and old.get('training_semantics') != TRAINING_SEMANTICS:
+    if old and old.get('training_semantics') != semantics:
         emit('form_warning', message='Checkpoint uses different training semantics. This version fixes load-curve time bounds, uses a stable whole-song planner reference, and matches quality annotations by source identity. Weights and generation inputs remain compatible.',
              optimizer_restored=bool(args.resume))
     emit('form_prepare', stage='dataset', manifest=str(Path(args.manifest).resolve()),
@@ -222,7 +252,8 @@ def main(argv=None):
                           max_memory_tokens=args.max_memory_tokens, meters=meters, seed=args.seed,
                           limit_charts=args.limit_charts, max_region_seconds=args.max_region_seconds,
                           quality_enabled=args.quality_enabled, preparation_workers=args.prepare_workers,
-                          audio_cache_gb=args.audio_cache_gb, sample_cache_mb=args.sample_cache_mb)
+                          audio_cache_gb=args.audio_cache_gb, sample_cache_mb=args.sample_cache_mb,
+                          audio_profile='rational_audio_queries_v1' if args.model_family=='song_form_v2' else 'legacy_50hz')
     contract = {**current_header, 'charts': dataset.audit['charts']}
     migration = None
     if args.resume:
@@ -247,7 +278,11 @@ def main(argv=None):
         codec = dataset.codec
         config, planner_config = fresh_model_configs(args)
         model = FormTransformer(config)
-        blueprint = SongBlueprint(planner_config)
+        if args.model_family=='song_form_v2':
+            from maichart.form.rational_planner import RationalPlanner
+            blueprint = RationalPlanner(planner_config)
+        else:
+            blueprint = SongBlueprint(planner_config)
     model.to(device); blueprint.to(device)
     # Inputs are checked on CPU before copying. Shapes are always checked in
     # the model; avoid per-forward GPU -> host scalar synchronizations.
@@ -267,7 +302,7 @@ def main(argv=None):
     steps = int(old.get('optimizer_steps', 0)) if old else 0
     plan_steps = int(old.get('blueprint_steps', 0)) if old else 0
     task_training = dict(old.get('task_training', {})) if old else {'draft': 0, 'revision': 0}
-    capabilities = dict(old.get('capabilities', {})) if old and old.get('training_semantics') == TRAINING_SEMANTICS else {}
+    capabilities = dict(old.get('capabilities', {})) if old and old.get('training_semantics') == semantics else {}
     history = list(old.get('training_history', [])) if args.resume else []
     start_epoch = int(old.get('epoch', 0)) if args.resume else 0
     cursor = dict(old.get('training_position') or {}) if args.resume else {}
@@ -312,7 +347,7 @@ def main(argv=None):
             grad_scaler_state=engine.scaler.state_dict(), dataset_contract=contract, args=vars(args),
             atom_catalog=atoms, metrics=metrics, training_history=history,
             data_migrations=migrations,
-            condition_supervision='event_derived_radar_style_v1', training_semantics=TRAINING_SEMANTICS,
+            condition_supervision='event_derived_radar_style_v1', training_semantics=semantics,
             precision=precision,
             training_position={'epoch':epoch, 'phase':'complete' if complete else phase, 'completed':completed,
                                'layout_total':layout_total, 'plan_total':plan_total, 'batch_size':args.batch_size,
@@ -369,9 +404,17 @@ def main(argv=None):
             progress.timing['h2d_sec'] += time.perf_counter()-tick
             tick = time.perf_counter()
             with engine.autocast():
-                prediction = blueprint(inputs['audio'], inputs['form'], inputs['condition'])
-            parts = compute_blueprint_loss({k:v.float() for k,v in prediction.items()}, targets,
-                                           load_curve_weight=args.load_curve_loss_weight)
+                if args.model_family=='song_form_v2':
+                    null=torch.rand(inputs['condition'].shape[0],device=device)<args.condition_drop_prob
+                    prediction=blueprint(inputs['audio'],inputs['form'],inputs['condition'],condition_null=null)
+                else:
+                    prediction = blueprint(inputs['audio'], inputs['form'], inputs['condition'])
+            if args.model_family=='song_form_v2':
+                from maichart.form.rational_planner import rational_planner_loss
+                parts = rational_planner_loss(prediction,targets,load_curve_weight=args.load_curve_loss_weight)
+            else:
+                parts = compute_blueprint_loss({k:v.float() for k,v in prediction.items()}, targets,
+                    load_curve_weight=args.load_curve_loss_weight)
             loss = parts['loss'] * weight * args.blueprint_loss_weight
             if not torch.isfinite(loss):
                 raise ValueError('Nonfinite blueprint loss')

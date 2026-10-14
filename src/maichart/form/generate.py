@@ -419,13 +419,14 @@ def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu
     # Keep the original whole-song audio graph and reference identities. An
     # edit is a local compute query, not a new truncated song with new motifs.
     editing=FormSong(song.audio,song.tempo,song.first,song.meters,[edit],song.relations,song.audit,
-                     song.regions,[region_index])
+                     song.regions,[region_index],audio_profile=song.audio_profile)
     example=input_example(editing,0,history,condition=condition,codec=codec,task=1,
         draft=region,right=right,max_memory_tokens=model.config.max_memory_tokens,memory_strength=memory_strength)
     from maichart.form.revision import DraftPoint
-    example['skeleton']=torch.tensor(codec.bounded_memory(
-        [DraftPoint(p.beat,None,True) for p in points if p.beat>=start],origin=start,
-        max_tokens=model.config.max_memory_tokens,newest=False))
+    example['skeleton']=(torch.tensor([codec.pad_id]) if song.audio_profile=='rational_audio_queries_v1'
+        else torch.tensor(codec.bounded_memory(
+            [DraftPoint(p.beat,None,True) for p in points if p.beat>=start],origin=start,
+            max_tokens=model.config.max_memory_tokens,newest=False)))
     candidate,fallback_count=arrange_span(model,codec,example,[p.beat for p in region],atoms,origin=start,
         temperature=temperature,seed=seed,device=device)
     if len(candidate)!=len(region): raise ValueError('Edit exceeds decoder budget; select a smaller region')
