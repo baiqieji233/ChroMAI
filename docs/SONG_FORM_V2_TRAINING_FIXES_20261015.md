@@ -12,6 +12,7 @@
 - `_blueprint_input` 使用同一预算调用 `audio_queries`。
 - Blueprint 输入缓存身份记录同一 `max_nodes=1024`，避免继续复用旧的无限节点缓存。
 - 增加回归测试，确认训练调用实际传递 1024，并保持 rational Planner 的其他接口不变。
+- Blueprint 日志新增 `planner_density_prediction` 与 `planner_density_target`，只用于监控预测负荷均值和目标均值，不改变梯度或 loss。
 
 这样做的目的，是让训练和生成都使用相同的原生音频证据选择规则；它不把位置量化到固定帧，也不改变 Fraction 事件表达能力。
 

@@ -502,6 +502,23 @@ def main(argv=None):
                     parts = rational_planner_loss(prediction,targets,load_curve_weight=args.load_curve_loss_weight,
                                                   reduction='none')
                     loss = (parts['loss'] * weights * args.blueprint_loss_weight).sum()
+                    # Keep a calibration signal beside the loss.  A low loss
+                    # can still hide a planner that predicts a flat workload;
+                    # this diagnostic uses the same non-padding frame mask as
+                    # the objective and does not affect gradients.
+                    planner_valid = targets['frame_weight'] > 0
+                    planner_valid &= ~inputs['audio_padding_mask']
+                    planner_denominator = planner_valid.sum().clamp_min(1).to(
+                        prediction['load_curve'].dtype)
+                    planner_density = prediction['load_curve'][..., 0].sigmoid()
+                    planner_target_density = targets['load_curve_target'][..., 0].to(
+                        planner_density)
+                    parts['planner_density_prediction'] = (
+                        planner_density.masked_select(planner_valid).sum()
+                        / planner_denominator)
+                    parts['planner_density_target'] = (
+                        planner_target_density.masked_select(planner_valid).sum()
+                        / planner_denominator)
                     parts = {key:value.mean() for key,value in parts.items()}
                 else:
                     parts = compute_blueprint_loss({k:v.float() for k,v in prediction.items()}, targets,
