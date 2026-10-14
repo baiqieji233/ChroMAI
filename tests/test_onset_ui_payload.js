@@ -13,10 +13,10 @@ test("a stored onset strength is suppressed for an unsupported checkpoint", () =
   const element = selector => selector === "#localOnsetBiasStrength" ? control : null;
   const value = (selector, fallback) => selector === "#localOnsetBiasStrength" ? control.value : fallback;
   const payload = new Function("element", "valueOrDefault", "checkedOrDefault", "collectCondition",
-    "currentModelFamily", "datasetPaths", "intensityCurvePayload", "parseTempoMap",
+    "currentModelFamily", "datasetPaths", "intensityCurvePayload", "parseTempoMap", "currentGenerationFamily", "conflictKindModesFromUI",
     source.slice(begin, end) + "; return generationPayload;")(
       element, value, (_selector, fallback) => fallback, () => ({level:13.3}),
-      () => "event_ctx_v1", () => ({manifest:""}), () => null, () => null,
+      () => "event_ctx_v1", () => ({manifest:""}), () => null, () => null, () => "event_ctx_v1", () => ({}),
     );
   assert.equal(payload().local_onset_bias_strength, 0);
   control.disabled = false;

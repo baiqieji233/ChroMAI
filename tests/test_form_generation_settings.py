@@ -44,6 +44,18 @@ def test_generation_report_records_actual_vector_and_decoder_values(tmp_path,mon
     assert parse_event_chart(output,5).level == '14.5'
 
 
+def test_running_webui_condition_transport_carries_rational_controls_with_cli_precedence():
+    parser=cli.parser()
+    common=['generate','--audio','a.wav','--output','out.txt']
+    args=parser.parse_args(common)
+    condition={'generation_options':{'position_complexity':.7,'position_beam_size':4,'early_eos_penalty':2}}
+    cli._resolve_carried_generation_options(args,condition)
+    assert (args.position_complexity,args.position_beam_size,args.early_eos_penalty)==(.7,4,2)
+    args=parser.parse_args(common+['--position-complexity','0','--position-beam-size','1','--early-eos-penalty','0'])
+    cli._resolve_carried_generation_options(args,condition)
+    assert (args.position_complexity,args.position_beam_size,args.early_eos_penalty)==(0,1,0)
+
+
 @pytest.mark.parametrize('explicit,expected', [(None,0.),('2',2.)])
 def test_existing_condition_transport_carries_new_control_with_cli_precedence(tmp_path,monkeypatch,explicit,expected):
     # The existing server forwards condition JSON but does not know new flags.

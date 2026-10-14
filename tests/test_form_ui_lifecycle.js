@@ -95,8 +95,11 @@ test("rational resume without saved planner batch displays the trainer fallback"
   context.apply({valid: true, model_family: "song_form_v2", args: {}}, "resume");
   assert.equal(elements.get("#formBlueprintBatchSize").value, "1");
   assert.equal(elements.get("#formBlueprintBatchSize").disabled, true);
+  assert.equal(elements.get("#formEventDecisionLossWeight").value, "0");
+  assert.equal(elements.get("#formEventDecisionLossWeight").disabled, true);
   context.apply({valid: true, model_family: "song_form_v2", args: {}}, "finetune");
   assert.equal(elements.get("#formBlueprintBatchSize").disabled, false);
+  assert.equal(elements.get("#formEventDecisionLossWeight").disabled, false);
 });
 
 test("completed song-form task retries artifact collection at most three times", async () => {

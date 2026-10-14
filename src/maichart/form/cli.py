@@ -42,6 +42,12 @@ def parser():
     p.add_argument('--model-family',choices=('auto','song_form_v1','song_form_v2'),default='auto')
     p.add_argument('--position-temperature',type=float,default=.2)
     p.add_argument('--position-characters',type=int,default=24)
+    p.add_argument('--position-complexity',type=float,default=None,
+                   help='soft cost on Fraction and interval denominators; 0 disables, never snaps positions')
+    p.add_argument('--position-beam-size',type=int,default=None,
+                   help='whole-Fraction lookahead candidates; 1 uses character sampling, 2-8 batched search')
+    p.add_argument('--early-eos-penalty',type=float,default=None,
+                   help='optional EOS logit penalty for v2; 0 preserves learned stopping, never fills explicit rests')
     p.add_argument('--max-events-per-span',type=int,default=0,
                    help='song_form_v2 safety budget; 0 derives a generous budget from Planner density')
     p.add_argument('--rational-min-spacing-ms',type=float,default=2.0,
@@ -84,7 +90,8 @@ def _resolve_carried_generation_options(args, condition_data):
     carried = (condition_data or {}).get('generation_options') or {}
     if not isinstance(carried, dict):
         raise ValueError('condition generation_options must be an object')
-    for name, default in (('local_chord_strength', 1.0), ('rhythm_snap_source_ms', 30.0)):
+    for name, default in (('local_chord_strength', 1.0), ('rhythm_snap_source_ms', 30.0),
+                          ('position_complexity', .2), ('position_beam_size', 1), ('early_eos_penalty', 0.)):
         if getattr(args, name) is None:
             setattr(args, name, carried.get(name, default))
 
@@ -204,10 +211,18 @@ def main(argv=None):
         'condition_kind':'learned_soft_condition_not_a_hard_quota',
         'first':first,'tempo_map':report['tempo_map']}
     if rational:
+        if not math.isfinite(args.position_complexity) or not 0<=args.position_complexity<=2:
+            raise ValueError('position_complexity must be between 0 and 2')
+        if not math.isfinite(args.early_eos_penalty) or not 0<=args.early_eos_penalty<=8:
+            raise ValueError('early_eos_penalty must be between 0 and 8')
+        if isinstance(args.position_beam_size,bool) or not isinstance(args.position_beam_size,int) or not 1<=args.position_beam_size<=8:
+            raise ValueError('position_beam_size must be between 1 and 8')
         report['effective_generation_settings'].update(model_family='song_form_v2',
             onset_threshold=None,onset_merge_ms=None,planner_type_strength=0,
             rhythm_snap_enabled=False,rhythm_snap_mode='not_applicable',
             position_temperature=args.position_temperature,position_characters=args.position_characters,
+            position_complexity=args.position_complexity,early_eos_penalty=args.early_eos_penalty,
+            position_beam_size=args.position_beam_size,
              max_events_per_span=args.max_events_per_span,
              rational_min_spacing_ms=args.rational_min_spacing_ms,
             time_representation='direct_canonical_fraction',audio_profile=song.audio_profile)
@@ -248,6 +263,8 @@ def main(argv=None):
             intensity_curve_span=args.intensity_curve_span,
             intensity_curve_mode=args.intensity_curve_mode,
              **({'position_temperature':args.position_temperature,'position_characters':args.position_characters,
+                 'position_complexity':args.position_complexity,'early_eos_penalty':args.early_eos_penalty,
+                 'position_beam_size':args.position_beam_size,
                  'max_events_per_span':args.max_events_per_span,
                  'min_spacing_ms':args.rational_min_spacing_ms} if rational else {}))
         report.update(generated)

@@ -208,6 +208,27 @@ def test_rational_dataset_hides_future_onset_positions(source,tmp_path):
     assert cached[0]['skeleton'].tolist()==[0]
 
 
+def test_corrupt_query_cache_rebuild_retains_the_requested_node_budget(source,tmp_path,monkeypatch):
+    from maichart.form import rational_audio
+    audio=extract_rational_audio(source[0],tmp_path/'cache')
+    song=organize_song(audio,[EventTempo(F(0),190)],0,max_seconds=3)
+    start,end=song.spans[0].start,song.spans[-1].end
+    original=rational_audio.audio_queries
+    original(song,start,end,max_nodes=16)
+    stored=list((tmp_path/'cache'/PROFILE).glob('*.queries.npz'))
+    assert len(stored)==1
+    stored[0].write_bytes(b'corrupt query cache')
+    audio._views.clear()
+    called=[]
+    def checked(*args,**kwargs):
+        called.append(kwargs.get('max_nodes'))
+        return original(*args,**kwargs)
+    monkeypatch.setattr(rational_audio,'audio_queries',checked)
+    values,_,_=checked(song,start,end,max_nodes=16)
+    assert called==[16,16]
+    assert len(values)<=16
+
+
 def test_workload_planner_has_no_frame_onset_head_and_updates_conditions():
     model=RationalPlanner(RationalPlannerConfig(descriptor_dim=8,width=16,form_heads=2,form_layers=1,dropout=0))
     audio=torch.randn(1,37,120);form=torch.randn(1,3,11);condition=torch.randn(1,16)
@@ -268,6 +289,8 @@ def test_real_rational_training_and_checkpoint_roundtrip(source,tmp_path):
             '--max-memory-tokens','64','--max-region-seconds','3'])==0
         model,planner,codec,saved=checkpoint.load(output/'form_last.pt',inference=True)
         assert saved['family']=='song_form_v2'
+        assert saved['args']['event_decision_loss_weight']==.25
+        assert saved['training_history'][-1]['draft_event_continue_accuracy'] >= 0
         assert saved['input_contract']['skeleton']=='absent_joint_exact_events_v1'
         assert saved['blueprint_steps']==1 and saved['optimizer_steps']==2
         assert isinstance(planner,RationalPlanner)

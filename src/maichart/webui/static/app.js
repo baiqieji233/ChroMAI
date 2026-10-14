@@ -101,6 +101,8 @@ function trainingMetricEvents(task) {
 }
 
 function taskOnsetDiagnostics(task) {
+  const rational = task?.result?.rational_diagnostics;
+  if (rational?.schema === "song_form_rational_diagnostics_v1") return rational;
   const summary = task?.result?.onset_summary;
   if (summary?.schema === "song_form_onset_diagnostics_v1") return summary;
   if (summary?.onset_diagnostics?.schema === "song_form_onset_diagnostics_v1") return summary.onset_diagnostics;
@@ -108,13 +110,13 @@ function taskOnsetDiagnostics(task) {
     return summary.selection.onset_diagnostics;
   }
   for (const line of Array.isArray(task?.logs) ? task.logs : []) {
-    for (const eventName of ["form_onset_diagnostics", "form_onsets"]) {
+    for (const eventName of ["form_onset_diagnostics", "form_onsets", "form_rational_diagnostics"]) {
       const match = String(line).match(new RegExp("(?:^|\\s)" + eventName + "\\s+(\\{.*\\})\\s*$"));
       if (!match) continue;
       try {
         const event = JSON.parse(match[1]);
-        const diagnostics = eventName === "form_onset_diagnostics" ? event : event.onset_diagnostics;
-        if (diagnostics?.schema === "song_form_onset_diagnostics_v1") return diagnostics;
+        const diagnostics = eventName === "form_onsets" ? event.onset_diagnostics : event;
+        if (["song_form_onset_diagnostics_v1", "song_form_rational_diagnostics_v1"].includes(diagnostics?.schema)) return diagnostics;
       } catch (_) { /* Ignore truncated or malformed log records. */ }
     }
   }
@@ -126,6 +128,17 @@ function renderTaskOnsetDiagnostics(task) {
   if (!container || task?.kind !== "form_generate") return;
   const diagnostics = taskOnsetDiagnostics(task);
   if (!diagnostics) return;
+
+  if (diagnostics.schema === "song_form_rational_diagnostics_v1") {
+    const section = document.createElement("section");
+    section.className = "task-onset-diagnostics";
+    const heading = document.createElement("h3"); heading.textContent = "有理数事件诊断";
+    const summary = document.createElement("p");
+    summary.textContent = `生成 ${diagnostics.event_count ?? 0} 个采音点；${diagnostics.empty_eos_spans ?? 0} 个计算段由模型直接结束；${diagnostics.incomplete_spans?.length ?? 0} 段搜索未完成。最长起音间隔 ${Number(diagnostics.max_gap_sec || 0).toFixed(1)} 秒；较大分母事件 ${diagnostics.large_denominator_events ?? 0} 个。大分母不自动判错，空白也可能是合理休止，需结合音乐检查。`;
+    const guidance = document.createElement("p");
+    guidance.textContent = "v2 联合生成拍位与配置，旧起音阈值不参与。拍位简洁偏好只作软惩罚；过早结束抑制默认关闭，可小幅上调观察，但可能增加密度，不能代替训练。";
+    section.append(heading, summary, guidance); container.prepend(section); return;
+  }
 
   const section = document.createElement("section");
   section.className = "task-onset-diagnostics";
@@ -250,7 +263,10 @@ function renderTaskTrainingMetrics(task) {
     : livePhase === "layout_revision" && live ? phaseSource : epochSource;
   const draftRows = [["draft_note_configuration_loss", "音符字符交叉熵（越低越好）", "loss"],
     ["draft_note_configuration_accuracy", "音符字符准确率", "accuracy"],
-    ["draft_first_head_accuracy", "首个音符选择", "accuracy"]];
+    ["draft_first_head_accuracy", "首个音符选择", "accuracy"],
+    ["draft_position_fraction_exact_accuracy", "完整分数拍位匹配（给定正确前缀）", "accuracy"],
+    ["draft_event_continue_accuracy", "该续写时选择续写", "accuracy"],
+    ["draft_event_terminate_accuracy", "该结束时选择结束", "accuracy"]];
   const revisionRows = [["revision_note_configuration_loss", "音符字符交叉熵", "loss"],
     ["revision_note_configuration_accuracy", "音符字符准确率", "accuracy"],
     ["revision_first_head_accuracy", "首个音符选择", "accuracy"]];
@@ -276,7 +292,9 @@ function renderTaskTrainingMetrics(task) {
   const plannerCounts = sameEpochBlueprint ? {} : epochCounts;
   const plannerRows = sameEpochBlueprint
     ? [["loss", "规划总损失", "loss"], ["loss_onset", "起音损失", "loss"], ["loss_type", "类型损失", "loss"],
-      ["loss_duration", "时值损失", "loss"], ["loss_load_curve", "局部负荷损失", "loss"]]
+      ["loss_duration", "时值损失", "loss"], ["loss_load_curve", "局部负荷损失", "loss"],
+      ["load_curve_loss", "负荷曲线损失", "loss"],
+      ["planner_density_prediction", "预测负荷均值", "loss"], ["planner_density_target", "目标负荷均值", "loss"]]
     : [["whole_song_plan_loss", "全曲规划损失", "loss"]];
   const plannerRowsAvailable = plannerRows.filter(([key]) => !(epochValues.partial_epoch_metrics === true
     && !sameEpochBlueprint && key === "whole_song_plan_loss"
@@ -530,6 +548,7 @@ const GENERATION_PARAM_FIELDS = [
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
   "generationDevice",                                       // 生成运行设备
+  "formPositionComplexity", "formPositionBeamSize", "formEarlyEosPenalty",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
   "topP", "repetitionPenalty", "repetitionWindow", "maxTokens",
   "intensityFollow", "intensityFollowSpan",                  // 逐窗口强度跟随
@@ -1387,6 +1406,7 @@ function songFormTrainingPayload(options = {}) {
     audio_cache_mode: valueOrDefault("#formAudioCacheMode", "lru"),
     sample_cache_mb: Number(valueOrDefault("#formSampleCacheMb", 256)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
+    event_decision_loss_weight: Number(valueOrDefault("#formEventDecisionLossWeight", .25)),
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),
     max_region_seconds: Number(valueOrDefault("#formMaxRegionSeconds", 14)), d_model: Number(valueOrDefault("#formDModel", 256)), layers: Number(valueOrDefault("#formLayers", 4)), nhead: Number(valueOrDefault("#formNhead", 8)),
@@ -1495,7 +1515,10 @@ function songFormGenerationPayload() {
   const localChordStrength = Number(valueOrDefault("#formLocalChordStrength", 1.0));
   const rhythmSourceMs = Number(valueOrDefault("#formRhythmSnapSourceMs", 30));
   const condition = {...collectCondition(), generation_options: {
-    local_chord_strength: localChordStrength, rhythm_snap_source_ms: rhythmSourceMs}};
+    local_chord_strength: localChordStrength, rhythm_snap_source_ms: rhythmSourceMs,
+    position_complexity: Number(valueOrDefault("#formPositionComplexity", .2)),
+    position_beam_size: Number(valueOrDefault("#formPositionBeamSize", 1)),
+    early_eos_penalty: Number(valueOrDefault("#formEarlyEosPenalty", 0))}};
   return { model_family: currentGenerationFamily(), checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
     level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
@@ -1510,6 +1533,9 @@ function songFormGenerationPayload() {
     planner_type_strength: rational ? 0 : Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),
     position_temperature: Number(valueOrDefault("#formPositionTemperature", .2)),
     position_characters: Number(valueOrDefault("#formPositionCharacters", 24)),
+    position_complexity: Number(valueOrDefault("#formPositionComplexity", .2)),
+    position_beam_size: Number(valueOrDefault("#formPositionBeamSize", 1)),
+    early_eos_penalty: Number(valueOrDefault("#formEarlyEosPenalty", 0)),
      max_events_per_span: Number(valueOrDefault("#formMaxEventsPerSpan", 0)),
      rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 2)),
     style_balance_strength: Number(valueOrDefault("#formStyleBalanceStrength", 1.0)),
@@ -2666,11 +2692,15 @@ function applySongFormCheckpointConfig(data, mode) {
     ["#formBlueprintLossWeight", "blueprint_loss_weight"], ["#formCurveLossWeight", "load_curve_loss_weight"],
     ["#formRelationLossWeight", "relation_loss_weight"], ["#qualityEnabled", "quality_enabled"],
     ["#maxSteps", "max_steps"], ["#formLimitCharts", "limit_charts"], ["#formPrecision", "precision"],
-    ["#formMaxRegionSeconds", "max_region_seconds"], ["#formBlueprintBatchSize", "blueprint_batch_size"]];
+    ["#formMaxRegionSeconds", "max_region_seconds"], ["#formBlueprintBatchSize", "blueprint_batch_size"],
+    ["#formEventDecisionLossWeight", "event_decision_loss_weight"]];
   inherited.forEach(([selector]) => { const node = element(selector); if (node) node.disabled = false; });
   const settings = {...(data?.args || {}), ...(data?.resume_settings || {})};
   if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.blueprint_batch_size == null) {
     settings.blueprint_batch_size = 1;
+  }
+  if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.event_decision_loss_weight == null) {
+    settings.event_decision_loss_weight = 0;
   }
   if (settings.max_region_seconds == null && data?.dataset_contract?.max_region_seconds != null) {
     settings.max_region_seconds = data.dataset_contract.max_region_seconds;

@@ -16,7 +16,7 @@ from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
 RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
                        'condition_drop_prob', 'blueprint_loss_weight',
                        'load_curve_loss_weight', 'relation_loss_weight',
-                       'quality_enabled', 'max_steps', 'blueprint_batch_size')
+                       'quality_enabled', 'max_steps', 'blueprint_batch_size','event_decision_loss_weight')
 
 
 def form_resume_settings(payload):
@@ -26,6 +26,7 @@ def form_resume_settings(payload):
     values = {key: args[key] for key in RESUME_ARGUMENT_KEYS if key in args}
     if payload.get('family') == 'song_form_v2':
         values['blueprint_batch_size'] = args.get('blueprint_batch_size') or 1
+        values['event_decision_loss_weight'] = args.get('event_decision_loss_weight',0.)
     values.update(lr=groups[0].get('lr', args.get('lr')) if groups else args.get('lr'),
                   limit_charts=args.get('limit_charts', 0),
                   max_region_seconds=contract.get('max_region_seconds', 14),
@@ -98,7 +99,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics'}:
         return
     try:
         value = json.loads(body)
@@ -106,7 +107,9 @@ def update_form_progress(task, line):
         return
     if not isinstance(value,dict):
         return
-    if prefix == 'form_prepare':
+    if prefix == 'form_rational_diagnostics':
+        task.result['rational_diagnostics'] = value
+    elif prefix == 'form_prepare':
         task.result.update(phase='prepare',progress_known=False,progress_detail=value)
     elif prefix == 'form_progress':
         task.result.update(phase=value.get('phase'),progress_detail=value,progress_known=True)
@@ -268,6 +271,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             values['blueprint_batch_size'] = number('blueprint_batch_size',4,1,16,True)
         values['blueprint_workers'] = number('blueprint_workers',0,0,4,True)
         values['blueprint_prefetch'] = number('blueprint_prefetch',8,1,64,True)
+        if (inspected or {}).get('family',payload.get('model_family',FAMILY))=='song_form_v2':
+            values['event_decision_loss_weight']=number('event_decision_loss_weight',.25,0,10)
         values['quality_enabled'] = bool(payload.get('quality_enabled', True))
         if values['audio_cache_mode'] not in {'lru','resident'}:
             raise ValueError('audio_cache_mode must be lru or resident')
@@ -333,6 +338,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if family=='song_form_v2' and operation=='generate':
             args+=['--position-temperature',str(number('position_temperature',.2,0,3)),
                    '--position-characters',str(number('position_characters',24,4,128,True)),
+                   '--position-complexity',str(number('position_complexity',.2,0,2)),
+                   '--position-beam-size',str(number('position_beam_size',1,1,8,True)),
+                   '--early-eos-penalty',str(number('early_eos_penalty',0,0,8)),
                    '--max-events-per-span',str(number('max_events_per_span',0,0,512,True)),
                    '--rational-min-spacing-ms',str(number('rational_min_spacing_ms',2,0,50))]
         if bpm is not None: args += ['--bpm',str(bpm)]

@@ -76,6 +76,8 @@ def parser():
     p.add_argument('--blueprint-loss-weight', type=float, default=1.)
     p.add_argument('--load-curve-loss-weight', type=float, default=1.)
     p.add_argument('--relation-loss-weight', type=float, default=.1)
+    p.add_argument('--event-decision-loss-weight',type=float,default=None,
+                   help='v2 auxiliary AT/EOS objective; fresh/finetune default .25, old strict resume retains 0')
     p.add_argument('--quality-enabled', dest='quality_enabled', action='store_true', default=True)
     p.add_argument('--no-quality-enabled', dest='quality_enabled', action='store_false')
     p.add_argument('--max-memory-tokens', type=int, default=512)
@@ -108,6 +110,9 @@ def _validate(args):
         raise ValueError('blueprint_batch_size must be positive')
     if args.blueprint_workers > 4:
         raise ValueError('blueprint_workers cannot exceed 4')
+    if args.event_decision_loss_weight is not None and (not math.isfinite(args.event_decision_loss_weight)
+            or not 0<=args.event_decision_loss_weight<=10):
+        raise ValueError('event_decision_loss_weight must be between 0 and 10')
     if not math.isfinite(args.condition_drop_prob) or not 0 <= args.condition_drop_prob <= 1:
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
@@ -136,7 +141,7 @@ def fresh_model_configs(args):
     return config, planner_config
 
 
-def layout_loss(prediction, batch, relation_weight):
+def layout_loss(prediction, batch, relation_weight, event_decision_weight=0.):
     """Per-example objectives. Their sum can be accumulated across batch sizes."""
     logits = prediction['logits'].float()
     valid = batch['target'] != 0
@@ -148,6 +153,11 @@ def layout_loss(prediction, batch, relation_weight):
     relation = relation * batch['relation_valid'].float() * weights
     token = per_token * weights
     loss_sum = (token + relation_weight * relation).sum()
+    auxiliary = None
+    if event_decision_weight:
+        from maichart.form.rational_objectives import event_decision_loss
+        auxiliary = event_decision_loss(logits,batch)*weights
+        loss_sum=loss_sum+event_decision_weight*auxiliary.sum()
     correct = ((logits.detach().argmax(-1) == batch['target']) & valid).sum()
     if 'decoder_input' in batch and 'task' in batch:
         diagnostic_values, diagnostic_counts = layout_diagnostics(
@@ -155,6 +165,7 @@ def layout_loss(prediction, batch, relation_weight):
     else:
         diagnostic_values, diagnostic_counts = {}, {}
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
+                      **({'event_decision_aux_loss':auxiliary.detach().mean()} if auxiliary is not None else {}),
                       'loss': loss_sum.detach() / len(weights),
                       'token_accuracy': correct.float() / valid.sum().clamp_min(1),
                       'diagnostics': {'values': diagnostic_values, 'counts': diagnostic_counts}}
@@ -241,9 +252,14 @@ def main(argv=None):
             meters = (old.get('dataset_contract') or {}).get('meter_map', meters)
     _validate(args)
     if args.model_family=='song_form_v2':
+        if args.resume:
+            args.event_decision_loss_weight=(old.get('args') or {}).get('event_decision_loss_weight',0.)
+        elif args.event_decision_loss_weight is None:
+            args.event_decision_loss_weight=.25
         saved_blueprint_batch_size = (old.get('args') or {}).get('blueprint_batch_size', 1) if args.resume else 4
         args.blueprint_batch_size = args.blueprint_batch_size or saved_blueprint_batch_size or 1
     else:
+        args.event_decision_loss_weight=0.
         args.blueprint_batch_size = 1
     precision = resolve_precision(args.precision, device)
     random.seed(args.seed)
@@ -272,6 +288,7 @@ def main(argv=None):
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
          blueprint_batch_size=args.blueprint_batch_size,
          blueprint_workers=blueprint_workers, blueprint_prefetch=args.blueprint_prefetch,
+         event_decision_loss_weight=args.event_decision_loss_weight,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
@@ -587,7 +604,8 @@ def main(argv=None):
                 batch['condition_null'] = torch.rand(batch_size, device=device) < args.condition_drop_prob
             with engine.autocast():
                 prediction = model(batch)
-            loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight)
+            loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight,
+                event_decision_weight=args.event_decision_loss_weight)
             diagnostics = parts.pop('diagnostics')
             if not torch.isfinite(loss_sum):
                 raise ValueError('Nonfinite layout loss')

@@ -57,6 +57,25 @@ def test_blueprint_batch_size_blank_uses_checkpoint_aware_trainer_default(webui_
     assert '全曲规划批大小' in html and '规划准备线程' in html and '规划预取谱面数' in html
 
 
+def test_rational_decoding_controls_reach_the_actual_cli(webui_api,monkeypatch,tmp_path):
+    from types import SimpleNamespace
+    from maichart.form import checkpoint
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    model_path=tmp_path/'model.pt';model_path.write_bytes(b'fixture')
+    config=SimpleNamespace(max_tokens=2048,max_memory_tokens=640)
+    monkeypatch.setattr(checkpoint,'load',lambda *_a,**_k:(SimpleNamespace(config=config),None,None,
+        {'family':'song_form_v2','model_config':{},'dataset_contract':{'max_region_seconds':20}}))
+    calls=[]
+    monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append(args))
+    status,result=webui_api('/api/form/generate',{'audio':str(audio),'checkpoint':str(model_path),
+        'model_family':'song_form_v2','output':str(tmp_path/'maidata.txt'),
+        'position_complexity':.4,'position_beam_size':4,'early_eos_penalty':2})
+    assert status==200,result
+    from maichart.form.cli import parser
+    args=parser().parse_args(calls[0][2:])
+    assert args.position_complexity==.4 and args.position_beam_size==4 and args.early_eos_penalty==2
+
+
 @pytest.mark.parametrize('workers', [0, 1, 4, 5, 8])
 def test_blueprint_worker_bounds_match_cli_and_visible_control(webui_api, monkeypatch, tmp_path, workers):
     manifest = tmp_path / 'manifest.json'

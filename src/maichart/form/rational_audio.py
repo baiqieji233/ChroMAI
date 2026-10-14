@@ -244,7 +244,9 @@ def audio_queries(song, start, end, *, max_nodes=None):
                 beats = tuple(Fraction(str(b)) for b in data["beats"])
             if values.shape != (len(beats), INPUT_DIM) or not np.isfinite(values).all() or len(times) != len(beats):
                 raise ValueError("Invalid musical query cache")
-        except (OSError, ValueError, KeyError): stored.unlink(missing_ok=True); return audio_queries(song,start,end)
+        except (OSError, ValueError, KeyError):
+            stored.unlink(missing_ok=True)
+            return audio_queries(song,start,end,max_nodes=max_nodes)
     else:
         positions = {Fraction(start)}
         positions.update(Fraction(i) for i in range(math.ceil(start), math.ceil(end)))

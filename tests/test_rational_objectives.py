@@ -53,3 +53,19 @@ def test_event_decision_loss_without_boundaries_is_finite_zero():
     logits = torch.randn(1, 2, len(codec))
     value = event_decision_loss(logits, batch)
     assert value.tolist() == [0.0]
+
+
+def test_trainer_adds_boundary_objective_without_replacing_primary_ce():
+    from maichart.form.train import layout_loss
+    codec=RationalCodec()
+    batch={'decoder_input':torch.tensor([[codec.bos_id,codec.at_id,codec.end_id]]),
+           'target':torch.tensor([[codec.at_id,codec.ids['P:1'],codec.eos_id]]),
+           'task':torch.tensor([0]),'weight':torch.tensor([2.]),
+           'relation_target':torch.zeros(1,2),'relation_valid':torch.tensor([False])}
+    logits=torch.zeros(1,3,len(codec),requires_grad=True)
+    prediction={'logits':logits,'relation_logits':torch.zeros(1,2)}
+    original,_=layout_loss(prediction,batch,.1)
+    adjusted,metrics=layout_loss(prediction,batch,.1,event_decision_weight=.25)
+    expected=event_decision_loss(logits,batch)*batch['weight']
+    torch.testing.assert_close(adjusted,original+.25*expected.sum())
+    assert 'event_decision_aux_loss' in metrics

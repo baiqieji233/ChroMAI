@@ -34,3 +34,12 @@ def test_onset_diagnostics_are_exposed_without_changing_arrangement_progress():
     update_form_progress(task, 'form_onsets '+json.dumps(summary))
     assert task.result['onset_summary'] == summary
     assert task.result['phase'] == 'arrangement'
+
+
+def test_rational_decode_diagnostics_reach_task_result_without_changing_progress():
+    task=TaskState('rational','form_generate')
+    task.result['phase']='arrangement'
+    value={'schema':'song_form_rational_diagnostics_v1','event_count':118,'empty_eos_spans':16,'incomplete_spans':[4]}
+    update_form_progress(task,'form_rational_diagnostics '+json.dumps(value))
+    assert task.result['rational_diagnostics']==value
+    assert task.result['phase']=='arrangement'

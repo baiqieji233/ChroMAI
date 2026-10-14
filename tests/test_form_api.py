@@ -24,6 +24,7 @@ def test_rational_resume_settings_make_planner_batch_explicit(saved, expected):
     args = {} if saved is None else {'blueprint_batch_size': saved}
     settings = form_api.form_resume_settings({'family': 'song_form_v2', 'args': args})
     assert settings['blueprint_batch_size'] == expected
+    assert settings['event_decision_loss_weight']==0
     assert 'blueprint_batch_size' not in form_api.form_resume_settings({'family': 'song_form_v1', 'args': {}})
 
 
