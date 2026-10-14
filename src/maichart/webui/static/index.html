@@ -783,6 +783,7 @@
 </section>
 <details id="songFormGenerationControls" class="settings-section song-form-only" data-generation-family="song_form_v1" hidden>
 <summary><span>全曲规划与段落参考</span><small>起音选择、段落呼应与计算资源</small></summary><p class="workflow-hint">全曲规划决定采音；段落记忆提供之前相似段落的写法。等级、Radar / Style 和曲线仍在原位置调整。</p>
+<p id="formTimingResolutionHelp" class="workflow-hint">当前音频特征与 Planner 每 20 毫秒一帧（50 Hz）；下面的误差参数控制生成后的时间规整，不会提高模型输入分辨率。Simai 拍位仍用精确分数表示。相邻起音先合并，再做分音规整；勾选 48/64 无法找回已被合并或未形成独立峰的音。快速段可先减小合并范围，但不要仅为消除偏差而不断放大移动容差。</p>
 <div class="form-grid">
 <label class="field">Motif 记忆强度<input id="formMemoryStrength" type="number" min="0" max="1" step="0.05" value="0.6"><small>只调节已找到的相似段落配置参考，0关闭参考，1完整使用门控参考；不调节近期历史与持续动作记忆。没有可信段落关联时提高此值不会增加参考，具体覆盖见生成报告。</small></label>
 <label class="field">谱面起音选择阈值<input id="formOnsetThreshold" type="number" min="0.001" max="0.999" step="0.01" value="0.5"><small>0.5 是初始参考值；提高阈值会要求更强的 planner 起音证据，但高阈值仍可能留下长空白。张力曲线会改变候选起音胜算，不能用原始概率线性缩放来理解。不同 checkpoint 的阈值没有统一校准，不能直接横向比较；试听并查看本次诊断。</small></label>

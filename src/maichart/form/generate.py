@@ -18,7 +18,7 @@ from maichart.form.onset_selection import (
     odds_modulate_probabilities, onset_gap_diagnostics,
 )
 from maichart.form.clock import profile_seconds, chart_curve_to_audio
-from maichart.generation.event_audio import segment_frame_times, _normalize_tempo_map, _time_to_beat
+from maichart.generation.event_audio import FEATURE_RATE_HZ, segment_frame_times, _normalize_tempo_map, _time_to_beat
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_quality import assess_event_chart
 
@@ -182,6 +182,10 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
     onsets = merge_close_onsets(before, onset_merge_ms)
     selection = {'algorithm':'raw_peaks_curve_odds_gate_temporal_nms_v3',
                  'curve_modulation':'odds_factors' if intensity_curve is not None else 'identity',
+                 'timing_resolution':{'feature_rate_hz':FEATURE_RATE_HZ,
+                     'source_frame_interval_ms':1000./FEATURE_RATE_HZ,
+                     'source_time_representation':'frame_center_without_subframe_residual',
+                     'merge_before_rhythm_snap':True},
                  'onset_merge_ms':float(onset_merge_ms),
                  'raw_local_peaks':int(peaks.sum()),'eligible_candidates':candidate_count,
                  'quantization_duplicates':candidate_count-len(before),
@@ -219,7 +223,7 @@ def plan_onsets(planner,song,condition,*,threshold=.5,device='cpu',intensity_cur
         selection['after_rhythm_snap'] = interval_statistics(onsets)
     print('form_onsets '+json.dumps(selection), flush=True)
     return {'schema':'maichart-full-song-blueprint-v1','onsets':onsets,'selection':selection,
-            'threshold':threshold,'frame_seconds':.02,'musical_units':'whole_song',
+            'threshold':threshold,'frame_seconds':1./FEATURE_RATE_HZ,'musical_units':'whole_song',
             'quantization':'simple_rational_within_half_frame_uncertainty','limitations':[
                 'Onset probabilities are weighted-training scores, not calibrated confidence.',
                 'Broad types and durations are provisional cues; actual layout is decoded separately.']}
