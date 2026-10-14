@@ -385,6 +385,66 @@ def _cached_decoder_layer(
     return hidden, (keys, values)
 
 
+def _cached_decoder_layer_with_cross_cache(
+    layer: nn.TransformerDecoderLayer,
+    hidden: torch.Tensor,
+    memory: torch.Tensor,
+    past_key: torch.Tensor | None,
+    past_value: torch.Tensor | None,
+    past_memory_key: torch.Tensor | None,
+    past_memory_value: torch.Tensor | None,
+    memory_key_padding_mask: torch.Tensor | None,
+) -> tuple[torch.Tensor, tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]]:
+    """Cached decoder step for song-form generation.
+
+    The legacy helper above caches only decoder self-attention.  Song-form
+    generation keeps the encoder memory fixed for an entire span, so projecting
+    that memory through every layer's cross-attention on every token is wasted
+    work.  This variant caches the cross-attention K/V projections as well;
+    callers that use the legacy event model continue to receive the original
+    two-tensor cache contract.
+    """
+    if hidden.size(1) != 1:
+        raise ValueError("_cached_decoder_layer_with_cross_cache expects one new position")
+
+    def project(module: nn.MultiheadAttention, inputs: torch.Tensor) -> torch.Tensor:
+        return torch.nn.functional.linear(inputs, module.in_proj_weight, module.in_proj_bias)
+
+    normalized = layer.norm1(hidden) if layer.norm_first else hidden
+    projected = project(layer.self_attn, normalized)
+    query, key, value = projected.chunk(3, dim=-1)
+    keys = key if past_key is None else torch.cat([past_key, key], dim=1)
+    values = value if past_value is None else torch.cat([past_value, value], dim=1)
+    attended = _attention(layer.self_attn, query, keys, values, mask=None)
+    hidden = hidden + layer.dropout1(attended)
+    if not layer.norm_first:
+        hidden = layer.norm1(hidden)
+
+    query_source = layer.norm2(hidden) if layer.norm_first else hidden
+    query = project(layer.multihead_attn, query_source).chunk(3, dim=-1)[0]
+    if past_memory_key is None or past_memory_value is None:
+        cross = project(layer.multihead_attn, memory)
+        _, memory_key, memory_value = cross.chunk(3, dim=-1)
+    else:
+        memory_key, memory_value = past_memory_key, past_memory_value
+    cross_mask = None
+    if memory_key_padding_mask is not None:
+        cross_mask = torch.zeros(
+            memory_key_padding_mask.shape, dtype=query.dtype, device=query.device
+        ).masked_fill(memory_key_padding_mask, float("-inf"))
+    attended = _attention(layer.multihead_attn, query, memory_key, memory_value, mask=cross_mask)
+    hidden = hidden + layer.dropout2(attended)
+    if not layer.norm_first:
+        hidden = layer.norm2(hidden)
+
+    source = layer.norm3(hidden) if layer.norm_first else hidden
+    feedforward = layer.linear2(layer.dropout(layer.activation(layer.linear1(source))))
+    hidden = hidden + layer.dropout3(feedforward)
+    if not layer.norm_first:
+        hidden = layer.norm3(hidden)
+    return hidden, (keys, values, memory_key, memory_value)
+
+
 def _attention(
     module: nn.MultiheadAttention,
     query: torch.Tensor,

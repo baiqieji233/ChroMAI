@@ -365,14 +365,24 @@ class FormTransformer(nn.Module):
             raise ValueError("Cached decoding requires eval mode")
         if token.ndim != 2 or token.size(1) != 1 or not 0 <= position < self.config.max_tokens:
             raise ValueError("decode_step expects one token within max_tokens")
-        from maichart.generation.event_model import _cached_decoder_layer
+        from maichart.generation.event_model import _cached_decoder_layer_with_cross_cache
         hidden = self.token_embedding(token) + self.position_embedding(
             torch.tensor([position],device=token.device)).unsqueeze(0)
         caches=caches or []
         updated=[]
         for i,layer in enumerate(self.decoder.layers):
-            previous=caches[i] if i < len(caches) else (None,None)
-            hidden,present=_cached_decoder_layer(layer,hidden,memory,*previous,memory_mask)
+            previous=caches[i] if i < len(caches) else None
+            if previous is None:
+                past_key = past_value = past_memory_key = past_memory_value = None
+            elif len(previous) == 2:
+                # Accept caches produced by the pre-optimization decoder so a
+                # caller can resume a partially built prefix safely.
+                past_key, past_value = previous
+                past_memory_key = past_memory_value = None
+            else:
+                past_key, past_value, past_memory_key, past_memory_value = previous
+            hidden,present=_cached_decoder_layer_with_cross_cache(
+                layer,hidden,memory,past_key,past_value,past_memory_key,past_memory_value,memory_mask)
             updated.append(present)
         return self.output_head(self.decoder_norm(hidden)),updated
 
@@ -380,10 +390,15 @@ class FormTransformer(nn.Module):
     def rewind_decode_cache(caches, token_count):
         if caches is None:
             return None
-        if token_count < 0 or any(key.size(1) < token_count or value.size(1) < token_count
-                                  for key,value in caches):
+        if token_count < 0 or any(item[0].size(1) < token_count or item[1].size(1) < token_count
+                                  for item in caches):
             raise ValueError('Cannot rewind decoder cache beyond its consumed prefix')
-        return [(key[:,:token_count],value[:,:token_count]) for key,value in caches]
+        # Cross-attention K/V are independent of decoder position and must be
+        # retained when an equivalent Fraction spelling rewinds the self cache.
+        return [(
+            item[0][:, :token_count], item[1][:, :token_count],
+            *(item[2:] if len(item) > 2 else (None, None)),
+        ) for item in caches]
 
     @staticmethod
     def _required(batch: dict[str, torch.Tensor], key: str, ndim: int) -> torch.Tensor:

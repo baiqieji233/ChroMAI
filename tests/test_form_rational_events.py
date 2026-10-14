@@ -9,7 +9,7 @@ import torch
 from maichart.event_timing import EventPoint, EventTempo, seconds_at_beat
 from maichart.form.codec import RationalCodec
 from maichart.form.data import FormDataset, organize_song, input_example
-from maichart.form.rational_audio import PROFILE, extract_rational_audio, audio_queries, beat_at_second
+from maichart.form.rational_audio import PROFILE, extract_rational_audio, audio_queries, beat_at_second, _tempo_hint
 from maichart.form.rational_generate import PositionGrammar, compose_span
 from maichart.form.rational_planner import RationalPlanner, RationalPlannerConfig, rational_planner_loss
 
@@ -52,6 +52,21 @@ def test_native_audio_queries_are_nonuniform_and_do_not_use_legacy_frames(source
     assert input_example(song,0,[])['audio'].shape==local.shape
 
 
+def test_tempo_hint_uses_global_detector_instead_of_attack_spacing(monkeypatch):
+    import librosa
+    import maichart.generation.tempo as tempo
+    calls = {}
+    monkeypatch.setattr(librosa.onset, 'onset_strength',
+                        lambda **kwargs: np.ones(32, dtype=np.float32))
+    def fake_detect(envelope, *, fps, **kwargs):
+        calls['fps'] = fps
+        calls['length'] = len(envelope)
+        return 187.5, 0.4
+    monkeypatch.setattr(tempo, 'detect_global_bpm', fake_detect)
+    assert _tempo_hint(np.zeros(4000, dtype=np.float32), 20000) == pytest.approx(187.5)
+    assert calls == {'fps': pytest.approx(200.0), 'length': 32}
+
+
 def test_exact_clock_preserves_unusual_fractions_across_tempo_changes():
     tempo=[EventTempo(F(0),190),EventTempo(F(3,2),127.5)]
     for beat in (F(1,8),F(37,997),F(23,7),F(7,20)):
@@ -69,10 +84,92 @@ def test_fraction_grammar_is_not_a_division_whitelist():
         for i in range(1,len(text)+1): assert grammar.prefix(text[:i])
         assert grammar.complete(text)
         assert codec.note_id in grammar.allowed(text,codec)
-    for text in ('2/4','1/0','01','0/3','4','-1'):
+    assert grammar.complete('2/4')
+    for text in ('1/0','01','0/3','4','-1'):
         assert not grammar.complete(text)
     grammar.lower=F(1,8)
     assert not grammar.complete('1/8')
+
+
+def test_position_prefix_has_a_reachable_later_value_and_respects_rest_holes():
+    codec=RationalCodec()
+    grammar=PositionGrammar(1,4)
+    assert grammar.prefix('1')  # e.g. 10/3 can still be reached.
+    assert not grammar.prefix('1/')
+    assert codec.ids['P:/'] not in grammar.allowed('1',codec)
+    hole=PositionGrammar(-1,4,allowed_ranges=[(F(2),F(4))])
+    assert not hole.prefix('1/')
+    assert not hole.complete('1/2')
+    assert hole.complete('7/3')
+    short=PositionGrammar(10,11,characters=4)
+    assert not short.prefix('999')
+
+
+def test_equal_fraction_normalization_rewinds_the_actual_decoder_prefix(source,tmp_path):
+    codec=RationalCodec()
+    canonical=codec.encode([EventPoint(F(1,2),'1')])
+    raw=[codec.bos_id,codec.at_id,codec.ids['P:2'],codec.ids['P:/'],codec.ids['P:4'],
+         codec.note_id,codec.ids['N:1'],codec.end_id,codec.eos_id]
+    class ForcedModel:
+        config=SimpleNamespace(max_tokens=512)
+        sequence=raw
+        rewinds=[]
+        def eval(self):return self
+        def encode(self,_):return torch.zeros(1,1,1),None
+        def decode_step(self,token,position,*_):
+            assert int(token[0,0])==self.sequence[position]
+            logits=torch.full((1,1,len(codec)),-100.)
+            logits[0,0,self.sequence[position+1]]=100
+            return logits,None
+        def rewind_decode_cache(self,cache,position):
+            self.rewinds.append(position);self.sequence=canonical
+            return None
+    audio=extract_rational_audio(source[0],tmp_path/'cache')
+    song=organize_song(audio,[EventTempo(F(0),190)],0,max_seconds=3)
+    model=ForcedModel()
+    points,status=compose_span(model,codec,input_example(song,0,[],codec=codec),['1'],origin=F(0),end=F(4),temperature=0,position_temperature=0)
+    assert points==[EventPoint(F(1,2),'1')]
+    assert model.rewinds==[1]
+    assert status['equivalent_fraction_normalizations']==1
+
+
+def test_all_rest_emits_an_explicit_empty_chart_without_position_dead_ends(source,tmp_path):
+    from maichart.form.rational_generate import generate_rational_chart
+    from maichart.form.clock import AUDIO_CURVE_AXIS
+    from maichart.generation.conditions import GenerationCondition
+    codec=RationalCodec()
+    class Model:
+        config=SimpleNamespace(max_tokens=512,max_memory_tokens=64)
+        def eval(self):return self
+        def encode(self,batch):return torch.zeros(1,1,1),None
+        def decode_step(self,*_):
+            logits=torch.zeros(1,1,len(codec));logits[0,0,codec.at_id]=100
+            return logits,None
+    def planner(audio,*_):return {'load_curve':torch.zeros(1,audio.shape[1],4)}
+    audio=extract_rational_audio(source[0],tmp_path/'cache')
+    song=organize_song(audio,[EventTempo(F(0),190)],-.137,max_seconds=3)
+    curve=dict(time_axis=AUDIO_CURVE_AXIS,method='learned_song_form_v2',
+        points=[dict(time_sec=0,intensity=0),dict(time_sec=3,intensity=0)],
+        rest_regions=[dict(start_sec=0,end_sec=3)])
+    points,report=generate_rational_chart(Model(),planner,codec,song,GenerationCondition(),['1'],
+        intensity_curve=curve,style_balance_strength=0,local_chord_strength=0)
+    assert points==[] and report['quality']['syntax_valid']
+    assert report['blueprint']['selection']['explicit_all_rest']
+
+
+def test_waveform_cache_tracks_content_when_size_and_mtime_stay_equal(tmp_path):
+    import os
+    import soundfile as sf
+    from maichart.form.rational_audio import waveform
+    path=tmp_path/'replace.wav';sr=22050
+    sf.write(path,np.zeros(sr,dtype=np.float32),sr,subtype='PCM_16')
+    stat=path.stat()
+    before,_=waveform(path)
+    sf.write(path,np.full(sr,.5,dtype=np.float32),sr,subtype='PCM_16')
+    os.utime(path,ns=(stat.st_atime_ns,stat.st_mtime_ns))
+    assert path.stat().st_size==stat.st_size
+    after,_=waveform(path)
+    assert np.max(before)==0 and np.mean(after)==pytest.approx(.5)
 
 
 def test_joint_decoder_emits_exact_events_without_a_planner_candidate(source,tmp_path):

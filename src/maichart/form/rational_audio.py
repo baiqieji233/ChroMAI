@@ -35,16 +35,18 @@ def _digest(path):
 
 
 @lru_cache(maxsize=2)
-def _wave(path, size, mtime_ns):
+def _wave(path, size, mtime_ns, sha256):
     import librosa
+    if _digest(path)!=sha256:
+        raise ValueError('Audio content changed before waveform query; reload the audio source')
     signal, sr = librosa.load(path, sr=None, mono=True)
     return np.asarray(signal, dtype=np.float32), int(sr)
 
 
-def waveform(path):
+def waveform(path, sha256=None):
     path = Path(path).resolve()
     stat = path.stat()
-    return _wave(str(path), stat.st_size, stat.st_mtime_ns)
+    return _wave(str(path), stat.st_size, stat.st_mtime_ns,sha256 or _digest(path))
 
 
 @lru_cache(maxsize=6)
@@ -107,16 +109,34 @@ def attack_samples(signal, sr):
     return peaks.astype(np.int64)
 
 
-def _tempo_hint(times):
-    # Tempo is only a hint for the optional automatic clock, not an onset grid.
-    gaps = np.diff(times)
-    gaps = gaps[(gaps >= .15) & (gaps <= 1.5)]
-    if not len(gaps):
-        return 120.
-    bpm = 60 / float(np.median(gaps))
-    while bpm < 80: bpm *= 2
-    while bpm > 240: bpm /= 2
-    return bpm
+def _tempo_hint(signal, sr):
+    """Estimate a global musical tempo for metadata and UI hints.
+
+    The attack-node spacing is deliberately *not* a tempo estimator: a chart or
+    recording can contain eighth notes, triplets, fills, and several voices, so
+    its median inter-attack interval routinely selects a faster subdivision
+    (for example 189 BPM for a 150 BPM song).  We use the existing global tempo
+    detector on a temporary 200 Hz onset envelope instead.  This envelope is
+    only an analysis aid for the scalar hint; rational audio queries still use
+    native sample attacks and exact Fraction beat positions.
+    """
+    try:
+        import librosa
+        from maichart.generation.tempo import detect_global_bpm
+        hop = max(1, round(float(sr) / 200.0))
+        onset = librosa.onset.onset_strength(
+            y=np.asarray(signal, dtype=np.float32), sr=int(sr),
+            hop_length=hop, aggregate=np.median,
+        )
+        bpm, confidence = detect_global_bpm(onset, fps=float(sr) / hop)
+        if bpm > 0 and np.isfinite(bpm) and confidence >= 0:
+            return float(bpm)
+    except Exception:
+        # Metadata estimation must not make an otherwise readable audio file
+        # unusable.  Keep a conservative UI hint when the optional detector is
+        # unavailable; no chart positions depend on this fallback.
+        pass
+    return 120.0
 
 
 def cache_path(path, cache_dir):
@@ -157,7 +177,8 @@ def extract_rational_audio(path, cache_dir=None):
     if cached is not None and cached.is_file():
         try: return load_rational_audio(cached)
         except (OSError, ValueError, KeyError): pass
-    signal, sr = waveform(path)
+    content_sha256=_digest(path)
+    signal, sr = waveform(path,content_sha256)
     samples = np.unique(np.r_[0, attack_samples(signal, sr), max(0, len(signal)-1)])
     times = samples.astype(np.float64) / sr
     features = query_spectra(signal, sr, times)
@@ -168,8 +189,8 @@ def extract_rational_audio(path, cache_dir=None):
     if len(times) > 1:
         features[:, 96] = np.clip(np.gradient(rms, times), -8, 8)
         features[1:, 97] = np.linalg.norm(np.diff(features[:, 80:92], axis=0), axis=1)
-    meta = dict(profile=PROFILE, audio_sha256=_digest(path), source=str(path), sample_rate=sr,
-                duration_sec=len(signal)/sr, tempo_bpm=_tempo_hint(times[1:-1]),
+    meta = dict(profile=PROFILE, audio_sha256=content_sha256, source=str(path), sample_rate=sr,
+                duration_sec=len(signal)/sr, tempo_bpm=_tempo_hint(signal, sr),
                 normalization_scale=scale.tolist(), cache_dir=str(cache_dir) if cache_dir is not None else None,
                 timing="native_sample_attacks_and_exact_fraction_queries", feature_rate_hz=None)
     audio = RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta, str(path), meta["cache_dir"])
@@ -239,7 +260,7 @@ def audio_queries(song, start, end, *, max_nodes=None):
             if start <= beat < end: positions.add(beat)
         beats = tuple(sorted(positions))
         times = np.asarray([seconds_at_beat(b,song.tempo,song.first) for b in beats],dtype=np.float64)
-        signal, sr = waveform(audio.source)
+        signal, sr = waveform(audio.source,audio.metadata['audio_sha256'])
         acoustic = query_spectra(signal,sr,times)
         acoustic[:, :95] /= np.asarray(audio.metadata["normalization_scale"],dtype=np.float32)
         for column in range(95,98): acoustic[:,column] = np.interp(times,audio.times,audio.features[:,column],left=0,right=0)

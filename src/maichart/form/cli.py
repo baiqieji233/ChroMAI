@@ -42,6 +42,10 @@ def parser():
     p.add_argument('--model-family',choices=('auto','song_form_v1','song_form_v2'),default='auto')
     p.add_argument('--position-temperature',type=float,default=.2)
     p.add_argument('--position-characters',type=int,default=24)
+    p.add_argument('--max-events-per-span',type=int,default=0,
+                   help='song_form_v2 safety budget; 0 derives a generous budget from Planner density')
+    p.add_argument('--rational-min-spacing-ms',type=float,default=2.0,
+                   help='minimum exact-event spacing for song_form_v2 output; 0 disables the safety guard')
     p.add_argument('--start');p.add_argument('--end')
     p.add_argument('--bpm',type=float);p.add_argument('--first',type=float,default=0.)
     p.add_argument('--meter-map');p.add_argument('--tempo-map');p.add_argument('--structure-file')
@@ -198,6 +202,8 @@ def main(argv=None):
             onset_threshold=None,onset_merge_ms=None,planner_type_strength=0,
             rhythm_snap_enabled=False,rhythm_snap_mode='not_applicable',
             position_temperature=args.position_temperature,position_characters=args.position_characters,
+             max_events_per_span=args.max_events_per_span,
+             rational_min_spacing_ms=args.rational_min_spacing_ms,
             time_representation='direct_canonical_fraction',audio_profile=song.audio_profile)
     intensity_curve = None
     curve_condition_warnings = []
@@ -235,7 +241,9 @@ def main(argv=None):
             intensity_curve_strength=args.intensity_curve_strength,
             intensity_curve_span=args.intensity_curve_span,
             intensity_curve_mode=args.intensity_curve_mode,
-            **({'position_temperature':args.position_temperature,'position_characters':args.position_characters} if rational else {}))
+             **({'position_temperature':args.position_temperature,'position_characters':args.position_characters,
+                 'max_events_per_span':args.max_events_per_span,
+                 'min_spacing_ms':args.rational_min_spacing_ms} if rational else {}))
         report.update(generated)
     else:
         points,revision=revise_chart(model,codec,song,chart.points,condition,payload['atom_catalog'],
