@@ -6,9 +6,11 @@ import pytest
 from maichart.event_timing import EventPoint, EventTempo
 from maichart.form.recurrence import (
     DESCRIPTOR_DIM,
+    DESCRIPTOR_CHANNELS,
     CausalMotifMemory,
     Relation,
     SongRelations,
+    _aligned_similarity,
     analyze_recurrence,
 )
 from maichart.form.timing import MetricSpan
@@ -69,6 +71,8 @@ def test_silence_does_not_form_false_recurrence_group():
 
     assert relations.links == []
     assert relations.audit["valid_span_count"] == 0
+    assert relations.audit["candidate_count"] == 0
+    assert relations.audit["empty_reason"] == "no_eligible_prior_pairs"
 
 
 def test_static_nonzero_texture_is_rejected_as_recurrence_evidence():
@@ -103,6 +107,51 @@ def test_partial_chroma_only_descriptors_normalize_to_full_similarity():
 
     assert len(relations.links) == 1
     assert relations.links[0].similarity == pytest.approx(1.0)
+
+
+def test_phase_alignment_shifts_channel_major_descriptor_blocks_and_reports_sign():
+    rng = np.random.default_rng(19)
+    bins = 24
+    blocks = [rng.normal(size=(bins, width)) for width in (12, 1, 8)]
+    blocks = [block / np.linalg.norm(block) for block in blocks]
+    source = np.concatenate([block.reshape(-1) for block in blocks]) / np.sqrt(3.0)
+    delayed = np.concatenate([
+        np.roll(block, 1, axis=0).reshape(-1) for block in blocks
+    ]) / np.sqrt(3.0)
+
+    similarity, phase_shift = _aligned_similarity(source, delayed, bins)
+
+    assert source.size == bins * DESCRIPTOR_CHANNELS
+    assert similarity == pytest.approx(1.0)
+    # The target is one bin later, so rolling it by -1 aligns it to the source.
+    assert phase_shift == -1
+
+
+def test_phase_alignment_does_not_force_unrelated_descriptor_match():
+    rng = np.random.default_rng(29)
+    bins = 24
+    source = rng.normal(size=bins * DESCRIPTOR_CHANNELS)
+    target = rng.normal(size=bins * DESCRIPTOR_CHANNELS)
+    source /= np.linalg.norm(source)
+    target /= np.linalg.norm(target)
+
+    similarity, _ = _aligned_similarity(source, target, bins)
+
+    assert similarity < 0.75
+
+
+def test_empty_recurrence_audit_distinguishes_threshold_from_missing_candidates():
+    spans = [_span(0, 0, 2), _span(1, 2, 4)]
+    relations = analyze_recurrence(
+        _audio([0, 1]), spans, [EventTempo(Fraction(0), 120)], 0,
+        min_similarity=0.99,
+        min_separation=0,
+    )
+
+    assert relations.links == []
+    assert relations.audit["candidate_count"] == 1
+    assert relations.audit["candidate_max"] < 0.99
+    assert relations.audit["empty_reason"] == "below_similarity_threshold"
 
 
 def test_repeated_realistic_clip_starting_half_second_later_matches():

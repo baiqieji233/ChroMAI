@@ -96,13 +96,34 @@ def _unit(values: np.ndarray) -> np.ndarray:
 
 
 def _aligned_similarity(left: np.ndarray, right: np.ndarray, bins: int) -> tuple[float, int]:
-    """Best cosine under a small circular phase offset in normalized time."""
+    """Best cosine under a small circular phase offset in normalized time.
 
-    channels = left.size // bins
-    source = left.reshape(bins, channels)
-    target = right.reshape(bins, channels)
+    Descriptors retain their public channel-major layout: all chroma bins,
+    then onset bins, then timbre bins. Unpack those blocks before shifting so
+    only normalized-time positions move and feature channels remain aligned.
+    """
+
+    expected_size = bins * DESCRIPTOR_CHANNELS
+    if bins <= 0 or left.size != expected_size or right.size != expected_size:
+        raise ValueError("Descriptors must contain the configured number of bins")
+    widths = (CHROMA_DIM, ONSET_DIM, MEL_BANDS)
+    offsets = np.cumsum((0, *(bins * width for width in widths)))
+    source_blocks = [
+        left[offsets[i]:offsets[i + 1]].reshape(bins, width)
+        for i, width in enumerate(widths)
+    ]
+    target_blocks = [
+        right[offsets[i]:offsets[i + 1]].reshape(bins, width)
+        for i, width in enumerate(widths)
+    ]
     candidates = [
-        (float(np.sum(source * np.roll(target, shift, axis=0))), shift)
+        (
+            float(sum(
+                np.sum(source * np.roll(target, shift, axis=0))
+                for source, target in zip(source_blocks, target_blocks)
+            )),
+            shift,
+        )
         for shift in range(-2, 3)
     ]
     similarity, phase_shift = max(candidates, key=lambda item: (item[0], -abs(item[1]), -item[1]))
@@ -176,6 +197,8 @@ def analyze_recurrence(
         descriptors[row], valid[row] = _describe(_sample(audio, stamps), bins)
 
     links: list[Relation] = []
+    candidate_count = 0
+    candidate_max: float | None = None
     for target_row, target in enumerate(ordered):
         if not valid[target_row] or top_k == 0:
             continue
@@ -185,9 +208,12 @@ def analyze_recurrence(
                 continue
             if not valid[source_row]:
                 continue
+            candidate_count += 1
             similarity, phase_shift = _aligned_similarity(
                 descriptors[source_row], descriptors[target_row], bins
             )
+            if candidate_max is None or similarity > candidate_max:
+                candidate_max = similarity
             if similarity < min_similarity:
                 continue
             confidence = max(0.0, min(1.0, (similarity - min_similarity) / max(1e-8, 1.0 - min_similarity)))
@@ -212,6 +238,14 @@ def analyze_recurrence(
             "valid_span_count": int(valid.sum()),
             "rejected_flat_span_indices": [span.index for i, span in enumerate(ordered) if not valid[i]],
             "feature_source": "audio_only",
+            "candidate_count": candidate_count,
+            "candidate_max": candidate_max,
+            "empty_reason": (
+                None if links else
+                "top_k_zero" if top_k == 0 else
+                "no_eligible_prior_pairs" if candidate_count == 0 else
+                "below_similarity_threshold"
+            ),
         },
     )
 
