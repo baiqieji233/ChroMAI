@@ -5,8 +5,11 @@ import argparse
 from collections import Counter
 import json
 import math
+import os
 from pathlib import Path
 import random
+import sys
+import threading
 import time
 
 import numpy as np
@@ -34,6 +37,12 @@ def parser():
     p.add_argument('--prepare-workers', type=int, default=1)
     p.add_argument('--device', default='cpu')
     p.add_argument('--batch-size', type=int, default=2)
+    p.add_argument('--blueprint-batch-size', type=int, default=None,
+                   help='v2 whole-song Planner charts per update; default 4 for fresh training, legacy resume keeps 1')
+    p.add_argument('--blueprint-workers', type=int, default=0,
+                   help='Planner input preparation threads; 0 chooses up to four workers, one lock per audio source')
+    p.add_argument('--blueprint-prefetch', type=int, default=8,
+                   help='maximum prepared or pending whole-song Planner charts')
     p.add_argument('--lr', type=float, default=.0002)
     p.add_argument('--seed', type=int, default=0)
     p.add_argument('--max-steps', type=int, default=0)
@@ -74,14 +83,18 @@ def parser():
 
 
 def _validate(args):
-    positive = ('epochs', 'batch_size', 'lr', 'grad_accumulation', 'prefetch_factor', 'log_interval')
+    positive = ('epochs', 'batch_size', 'lr', 'grad_accumulation', 'prefetch_factor', 'log_interval', 'blueprint_prefetch')
     nonnegative = ('max_steps', 'limit_charts', 'weight_decay', 'prepare_workers', 'loader_workers',
                    'audio_cache_gb', 'sample_cache_mb', 'checkpoint_interval_steps', 'save_every',
-                   'blueprint_loss_weight', 'load_curve_loss_weight', 'relation_loss_weight')
+                   'blueprint_loss_weight', 'load_curve_loss_weight', 'relation_loss_weight', 'blueprint_workers')
     for name in positive + nonnegative:
         value = float(getattr(args, name))
         if not math.isfinite(value) or value < 0 or (name in positive and value == 0):
             raise ValueError(f'Invalid training setting: {name}')
+    if args.blueprint_batch_size is not None and args.blueprint_batch_size < 1:
+        raise ValueError('blueprint_batch_size must be positive')
+    if args.blueprint_workers > 4:
+        raise ValueError('blueprint_workers cannot exceed 4')
     if not math.isfinite(args.condition_drop_prob) or not 0 <= args.condition_drop_prob <= 1:
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
@@ -192,12 +205,12 @@ def _blueprint_input(dataset, index):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    old = None
     _validate(args)
     semantics='song_form_training_v4_rational' if args.model_family=='song_form_v2' else TRAINING_SEMANTICS
     device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
                           else 'cpu' if args.device == 'auto' else args.device)
     meters = json.loads(Path(args.meter_map).read_text(encoding='utf-8-sig')) if args.meter_map else None
-    old = None
     if args.resume or args.init_checkpoint:
         model, blueprint, codec, old = checkpoint.load(args.resume or args.init_checkpoint, device='cpu')
         args.model_family = old['family']
@@ -215,6 +228,11 @@ def main(argv=None):
             args.precision = old.get('precision', saved_args.get('precision', 'fp32'))
             meters = (old.get('dataset_contract') or {}).get('meter_map', meters)
     _validate(args)
+    if args.model_family=='song_form_v2':
+        saved_blueprint_batch_size = (old.get('args') or {}).get('blueprint_batch_size', 1) if args.resume else 4
+        args.blueprint_batch_size = args.blueprint_batch_size or saved_blueprint_batch_size or 1
+    else:
+        args.blueprint_batch_size = 1
     precision = resolve_precision(args.precision, device)
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -236,8 +254,12 @@ def main(argv=None):
         preflight_resume(old.get('dataset_contract') or {}, current_header)
         verify_saved_chart_sources(old.get('dataset_contract') or {})
     output.mkdir(parents=True, exist_ok=True)
+    blueprint_workers = (min(4, os.cpu_count() or 1) if args.blueprint_workers == 0
+                         else args.blueprint_workers) if args.model_family=='song_form_v2' else 0
     emit('form_runtime', training_semantics=semantics, model_family=args.model_family, device=str(device), precision=precision,
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
+         blueprint_batch_size=args.blueprint_batch_size,
+         blueprint_workers=blueprint_workers, blueprint_prefetch=args.blueprint_prefetch,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
@@ -395,50 +417,118 @@ def main(argv=None):
         layout_metric_sums = {}
         layout_metric_counts = {}
         progress.begin('blueprint', plan_start)
-        for position in range(plan_start, plan_total):
-            index = plan_indices[position]
-            before = time.perf_counter()
-            inputs, targets, weight = _blueprint_input(dataset, index)
-            progress.timing['data_wait_sec'] += time.perf_counter()-before
-            tick = time.perf_counter()
-            inputs = {k:v.to(device, non_blocking=True) for k,v in inputs.items()}
-            targets = {k:v.to(device, non_blocking=True) for k,v in targets.items()}
-            progress.timing['h2d_sec'] += time.perf_counter()-tick
-            tick = time.perf_counter()
-            with engine.autocast():
-                if args.model_family=='song_form_v2':
-                    null=torch.rand(inputs['condition'].shape[0],device=device)<args.condition_drop_prob
-                    prediction=blueprint(inputs['audio'],inputs['form'],inputs['condition'],condition_null=null)
-                else:
-                    prediction = blueprint(inputs['audio'], inputs['form'], inputs['condition'])
-            if args.model_family=='song_form_v2':
-                from maichart.form.rational_planner import rational_planner_loss
-                parts = rational_planner_loss(prediction,targets,load_curve_weight=args.load_curve_loss_weight)
+        plan_batch_size = args.blueprint_batch_size
+        blueprint_cache = None
+        if args.model_family=='song_form_v2':
+            from maichart.form.blueprint_batch import collate_blueprint
+            from maichart.form.blueprint_cache import BlueprintInputCache
+            from maichart.form.blueprint_prefetch import iter_prefetched_blueprints
+            source_locks = {}
+            source_locks_guard = threading.Lock()
+            from maichart.form.rational_audio import extract_rational_audio
+            blueprint_cache = (BlueprintInputCache(args.cache_dir)
+                               if getattr(dataset.audio_store, 'loader', None) is extract_rational_audio
+                               else None)
+
+            def prepare_blueprint(index):
+                audio = dataset.songs[index][0].audio
+                source = str(getattr(audio, 'path', getattr(audio, 'source', index)))
+                with source_locks_guard:
+                    lock = source_locks.setdefault(source, threading.Lock())
+                with lock:
+                    if blueprint_cache is None:
+                        return _blueprint_input(dataset, index)
+                    key, identity = blueprint_cache.identity_for_dataset(
+                        dataset, index, max_tokens=args.max_tokens,
+                        max_region_seconds=args.max_region_seconds,
+                        audio_feature_config={'profile': 'rational_audio_queries_v1',
+                                              'max_nodes': None})
+                    inputs, targets, weight, _ = blueprint_cache.get_or_build(
+                        key, identity, lambda: _blueprint_input(dataset, index))
+                    return inputs, targets, weight
+
+            plan_stream = iter_prefetched_blueprints(plan_indices[plan_start:], prepare_blueprint,
+                                                     workers=blueprint_workers, depth=args.blueprint_prefetch)
+        else:
+            plan_stream = None
+        stream_entered = False
+        try:
+            if plan_stream is not None:
+                plan_stream.__enter__()
+                stream_entered = True
+                stream_iter = iter(plan_stream)
             else:
-                parts = compute_blueprint_loss({k:v.float() for k,v in prediction.items()}, targets,
-                    load_curve_weight=args.load_curve_loss_weight)
-            loss = parts['loss'] * weight * args.blueprint_loss_weight
-            if not torch.isfinite(loss):
-                raise ValueError('Nonfinite blueprint loss')
-            if args.blueprint_loss_weight > 0 and weight > 0 and bool(targets['frame_weight'].sum() > 0):
-                engine.backward(loss, 1)
-                update = engine.step()
-                if update['applied']:
-                    plan_steps += 1
-                    if args.load_curve_loss_weight > 0:
-                        increment_cap('load_curve', 1, 'load_curve_v1')
+                stream_iter = None
+            for position in range(plan_start, plan_total, plan_batch_size):
+                end_position = min(position+plan_batch_size, plan_total)
+                chart_count = end_position-position
+                before = time.perf_counter()
+                if args.model_family=='song_form_v2':
+                    samples = [next(stream_iter)[1] for _ in range(chart_count)]
+                    inputs, targets, weights, trainable = collate_blueprint(samples)
+                    update_samples = int(trainable.sum())
                 else:
-                    emit('form_warning', message='AMP overflow: blueprint update skipped', epoch=epoch, chart=position+1)
-            progress.timing['compute_sec'] += time.perf_counter()-tick
-            progress.add(parts)
-            phase_loss_sums['plan_loss'] += loss.detach()
-            phase_counts['plan_loss'] += 1
-            progress.phase_samples += 1
-            if args.checkpoint_interval_steps and steps+plan_steps-last_save_steps >= args.checkpoint_interval_steps:
-                save(epoch, 'blueprint', position+1)
-            progress.log(position+1, plan_total, optimizer_steps=steps, blueprint_steps=plan_steps,
+                    inputs, targets, weight = _blueprint_input(dataset, plan_indices[position])
+                    update_samples = int(weight > 0 and bool(targets['frame_weight'].sum() > 0))
+                progress.timing['data_wait_sec'] += time.perf_counter()-before
+                tick = time.perf_counter()
+                inputs = {k:v.to(device, non_blocking=True) for k,v in inputs.items()}
+                targets = {k:v.to(device, non_blocking=True) for k,v in targets.items()}
+                if args.model_family=='song_form_v2':
+                    weights = weights.to(device, non_blocking=True)
+                progress.timing['h2d_sec'] += time.perf_counter()-tick
+                tick = time.perf_counter()
+                with engine.autocast():
+                    if args.model_family=='song_form_v2':
+                        null=torch.rand(inputs['condition'].shape[0],device=device)<args.condition_drop_prob
+                        prediction=blueprint(inputs['audio'],inputs['form'],inputs['condition'],
+                            audio_padding_mask=inputs['audio_padding_mask'],
+                            form_padding_mask=inputs['form_padding_mask'],condition_null=null)
+                    else:
+                        prediction = blueprint(inputs['audio'], inputs['form'], inputs['condition'])
+                if args.model_family=='song_form_v2':
+                    from maichart.form.rational_planner import rational_planner_loss
+                    parts = rational_planner_loss(prediction,targets,load_curve_weight=args.load_curve_loss_weight,
+                                                  reduction='none')
+                    loss = (parts['loss'] * weights * args.blueprint_loss_weight).sum()
+                    parts = {key:value.mean() for key,value in parts.items()}
+                else:
+                    parts = compute_blueprint_loss({k:v.float() for k,v in prediction.items()}, targets,
+                        load_curve_weight=args.load_curve_loss_weight)
+                    loss = parts['loss'] * weight * args.blueprint_loss_weight
+                if not torch.isfinite(loss):
+                    raise ValueError('Nonfinite blueprint loss')
+                if args.blueprint_loss_weight > 0 and update_samples:
+                    engine.backward(loss, update_samples)
+                    update = engine.step()
+                    if update['applied']:
+                        plan_steps += 1
+                        if args.load_curve_loss_weight > 0:
+                            increment_cap('load_curve', 1, 'load_curve_v1')
+                    else:
+                        emit('form_warning', message='AMP overflow: blueprint update skipped', epoch=epoch, chart=end_position)
+                progress.timing['compute_sec'] += time.perf_counter()-tick
+                progress.add(parts, chart_count)
+                phase_loss_sums['plan_loss'] += loss.detach()
+                phase_counts['plan_loss'] += chart_count
+                progress.phase_samples += chart_count
+                if args.checkpoint_interval_steps and steps+plan_steps-last_save_steps >= args.checkpoint_interval_steps:
+                    save(epoch, 'blueprint', end_position)
+                progress.log(end_position, plan_total, force=position==plan_start,
+                             optimizer_steps=steps, blueprint_steps=plan_steps, blueprint_batch_size=plan_batch_size,
+                         blueprint_workers=blueprint_workers,
+                         blueprint_cache=blueprint_cache.stats() if blueprint_cache is not None else None,
                          lr=optimizer.param_groups[0]['lr'])
+        except BaseException:
+            if plan_stream is not None and stream_entered:
+                plan_stream.__exit__(*sys.exc_info())
+            raise
+        else:
+            if plan_stream is not None and stream_entered:
+                plan_stream.__exit__(None, None, None)
         if plan_start < plan_total:
+            if blueprint_cache is not None:
+                emit('form_blueprint_cache', phase='blueprint_complete', **blueprint_cache.stats())
             save(epoch, 'layout_revision', 0, reason='blueprint_complete')
         progress.begin('layout_revision', layout_start)
         sampler = EpochBatches(len(dataset), args.batch_size, args.seed, epoch, start=layout_start, limit=args.max_steps)

@@ -68,11 +68,17 @@ class RationalPlanner(nn.Module):
         return {'load_curve':values}
 
 
-def rational_planner_loss(outputs,targets,*,load_curve_weight=1.):
+def rational_planner_loss(outputs,targets,*,load_curve_weight=1.,reduction='mean'):
     values = outputs['load_curve'].float().sigmoid()
     target = targets['load_curve_target'].to(values)
     weights = targets['frame_weight'].to(values)[...,None]
     mask = targets['load_curve_mask'].to(values)
     effective = weights*mask
-    loss = (F.smooth_l1_loss(values,target,reduction='none')*effective).sum()/effective.sum().clamp_min(1)
+    errors = F.smooth_l1_loss(values,target,reduction='none')*effective
+    if reduction == 'none':
+        loss = errors.sum((1,2))/effective.sum((1,2)).clamp_min(1)
+    elif reduction == 'mean':
+        loss = errors.sum()/effective.sum().clamp_min(1)
+    else:
+        raise ValueError("Rational planner loss reduction must be 'mean' or 'none'")
     return {'loss':loss*load_curve_weight,'load_curve_loss':loss}

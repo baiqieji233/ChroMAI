@@ -30,12 +30,30 @@ def test_training_dispatch_is_independent_and_short_run_controls_arrive(webui_ap
     monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append(args))
     status,result=webui_api('/api/form/train',{'manifest':str(manifest),'checkpoint_dir':str(tmp_path/'new'),
         'mode':'fresh','max_steps':2,'limit_charts':1,'epochs':1,'batch_size':1,'d_model':32,'nhead':2,'layers':1,
-        'device':'cpu','lr':.0003,'prepare_workers':3})
+        'device':'cpu','lr':.0003,'prepare_workers':3,'blueprint_batch_size':2,
+        'blueprint_workers':1,'blueprint_prefetch':4})
     assert status==200,result
     from maichart.form.train import parser
     args=parser().parse_args(calls[0][2:])
     assert args.max_steps==2 and args.limit_charts==1 and args.lr==.0003 and args.prepare_workers==3
+    assert args.blueprint_batch_size==2 and args.blueprint_workers==1 and args.blueprint_prefetch==4
     assert calls[0][:2]==['-m','maichart.form.train']
+
+
+def test_blueprint_batch_size_blank_uses_checkpoint_aware_trainer_default(webui_api,monkeypatch,tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    calls=[]
+    monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append(args))
+    status,result=webui_api('/api/form/train',{'manifest':str(manifest),'checkpoint_dir':str(tmp_path/'new'),
+        'mode':'fresh','max_steps':1,'limit_charts':1,'epochs':1,'batch_size':1,
+        'd_model':32,'nhead':2,'layers':1,'device':'cpu','blueprint_batch_size':None})
+    assert status==200,result
+    from maichart.form.train import parser
+    args=parser().parse_args(calls[0][2:])
+    assert args.blueprint_batch_size is None
+    assert args.blueprint_workers==0 and args.blueprint_prefetch==8
+    html=(Path(__file__).parents[1]/'src/maichart/webui/static/index.html').read_text(encoding='utf-8')
+    assert '全曲规划批大小' in html and '规划准备线程' in html and '规划预取谱面数' in html
 
 
 def test_old_checkpoint_is_not_accepted_by_new_training(webui_api,tmp_path):

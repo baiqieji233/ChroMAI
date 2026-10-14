@@ -16,7 +16,7 @@ from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
 RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
                        'condition_drop_prob', 'blueprint_loss_weight',
                        'load_curve_loss_weight', 'relation_loss_weight',
-                       'quality_enabled', 'max_steps')
+                       'quality_enabled', 'max_steps', 'blueprint_batch_size')
 
 
 def form_resume_settings(payload):
@@ -262,6 +262,10 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'blueprint_loss_weight':number('blueprint_loss_weight',1.,0,100),
                 'load_curve_loss_weight':number('load_curve_loss_weight',1.,0,100),
                 'relation_loss_weight':number('relation_loss_weight',.1,0,100)}
+        if payload.get('blueprint_batch_size') not in {None, ''}:
+            values['blueprint_batch_size'] = number('blueprint_batch_size',4,1,16,True)
+        values['blueprint_workers'] = number('blueprint_workers',0,0,8,True)
+        values['blueprint_prefetch'] = number('blueprint_prefetch',8,1,64,True)
         values['quality_enabled'] = bool(payload.get('quality_enabled', True))
         if values['audio_cache_mode'] not in {'lru','resident'}:
             raise ValueError('audio_cache_mode must be lru or resident')
@@ -289,6 +293,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         args=['-m','maichart.form.train','--manifest',str(manifest),'--checkpoint-dir',str(out)]
         for key,value in values.items():
             if key == 'quality_enabled':
+                continue
+            if value is None:
                 continue
             args+=['--'+key.replace('_','-'),str(value)]
         if mode != 'resume' and str(payload.get('control_profile','auto')) == 'none':
