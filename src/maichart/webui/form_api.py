@@ -92,7 +92,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary'}:
         return
     try:
         value = json.loads(body)
@@ -130,6 +130,8 @@ def update_form_progress(task, line):
         task.result.update(onset_summary=value)
     elif prefix == 'form_local_load':
         task.result.update(local_load_summary=value)
+    elif prefix == 'form_model_summary':
+        task.result.update(model_summary=value)
     else:
         task.result.update(phase='arrangement',progress_detail=value,progress_known=False)
 
@@ -413,6 +415,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
     if operation=='train':
         task.result.update(epoch_target=expected,epoch_start=start_epoch,epochs_requested=epochs,
                            last_epoch=start_epoch,phase='prepare',effective_settings=values,
+                           checkpoint_dir=str(out),training_history_path=str(out/'training_history.json'),
+                           training_model_summary_path=str(out/'training_model_summary.json'),
                            max_region_seconds=region,source_manifest=str(manifest))
         if dataset_selection is not None:
             task.result['dataset_selection'] = dataset_selection

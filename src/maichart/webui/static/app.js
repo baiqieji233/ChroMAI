@@ -18,7 +18,7 @@ function formatTrainingMetricCount(count) {
 
 function trainingMetricEvents(task) {
   const phaseMetrics = {};
-  const epochCandidates = [];
+  const epochByNumber = new Map();
   let latestProgress = null;
   const addPhase = (snapshot) => {
     if (!snapshot || !["blueprint", "layout_revision"].includes(snapshot.phase)
@@ -36,7 +36,15 @@ function trainingMetricEvents(task) {
   };
   const addEpoch = (snapshot) => {
     if (snapshot && typeof snapshot === "object" && trainingMetricNumber(snapshot, "epoch") !== null) {
-      epochCandidates.push(snapshot);
+      const epochNumber = trainingMetricNumber(snapshot, "epoch");
+      const previous = epochByNumber.get(epochNumber) || {};
+      const previousPartial = previous.partial_epoch_metrics === true;
+      const nextPartial = snapshot.partial_epoch_metrics === true;
+      epochByNumber.set(epochNumber, !Object.keys(previous).length ? {...snapshot}
+        : previousPartial && !nextPartial
+          ? {...snapshot, partial_epoch_metrics: false}
+          : !previousPartial && nextPartial ? {...previous, partial_epoch_metrics: false}
+            : {...previous, ...snapshot});
     }
   };
   for (const line of Array.isArray(task?.logs) ? task.logs : []) {
@@ -63,13 +71,12 @@ function trainingMetricEvents(task) {
     ? result.training_metrics : {};
   for (const [phase, value] of Object.entries(savedPhases)) addPhase({phase, ...value});
   if (Array.isArray(result.metric_history)) result.metric_history.forEach(addEpoch);
+  if (Array.isArray(result.training_history)) result.training_history.forEach(addEpoch);
   addEpoch(result.metrics);
-  let epoch = null;
-  for (const candidate of epochCandidates) {
-    const candidateEpoch = trainingMetricNumber(candidate, "epoch");
-    const currentEpoch = trainingMetricNumber(epoch, "epoch");
-    if (epoch === null || candidateEpoch >= currentEpoch) epoch = candidate;
-  }
+  const history = [...epochByNumber.entries()]
+    .sort(([epochA], [epochB]) => epochA - epochB)
+    .map(entry => entry[1]).filter(value => value !== null && value !== undefined);
+  const epoch = history.at(-1) || null;
   const reportedPhase = ["blueprint", "layout_revision"].includes(result.phase)
     ? result.phase : latestProgress?.phase;
   const currentEpoch = trainingMetricNumber(epoch, "epoch");
@@ -90,7 +97,7 @@ function trainingMetricEvents(task) {
     });
     phase = candidates.at(-1)?.[0] || null;
   }
-  return {phaseMetrics, epoch, phase, phaseFromCurrentProgress};
+  return {phaseMetrics, epoch, phase, phaseFromCurrentProgress, history, epochs: history};
 }
 
 function taskOnsetDiagnostics(task) {
@@ -183,7 +190,12 @@ function renderTaskTrainingMetrics(task) {
   const events = trainingMetricEvents(task);
   const livePhase = events.phase;
   const live = ["queued", "running"].includes(task.status) && livePhase !== null;
-  const phaseSnapshot = live ? events.phaseMetrics[livePhase] : null;
+  const latestPhaseEpoch = trainingMetricNumber(events.phaseMetrics[livePhase], "epoch");
+  const latestSummaryEpoch = trainingMetricNumber(events.epoch, "epoch");
+  const archivedProgress = task.status === "archived" && livePhase !== null
+    && (latestSummaryEpoch === null || (latestPhaseEpoch !== null && latestPhaseEpoch > latestSummaryEpoch)
+        || events.epoch?.partial_epoch_metrics === true);
+  const phaseSnapshot = (live || archivedProgress) ? events.phaseMetrics[livePhase] : null;
   const liveValues = phaseSnapshot?.losses || {};
   const liveCounts = phaseSnapshot?.metric_counts || {};
   const epochValues = events.epoch || {};
@@ -193,112 +205,144 @@ function renderTaskTrainingMetrics(task) {
   const phasePrefix = events.phaseFromCurrentProgress ? "当前阶段" : "最近阶段记录";
   const dataLabel = live
     ? `${phasePrefix}：${phaseNames[livePhase]}${trainingMetricNumber(phaseSnapshot, "epoch") !== null ? ` · epoch ${trainingMetricNumber(phaseSnapshot, "epoch")}` : ""}`
+    : archivedProgress && phaseSnapshot
+      ? `历史末条进度：${phaseNames[livePhase] || "训练"} · epoch ${trainingMetricNumber(phaseSnapshot, "epoch") ?? "?"}（本轮未完成）`
     : epochNumber !== null
       ? `最近记录：epoch ${epochNumber}${epochValues.partial_epoch_metrics ? "（部分 epoch）" : ""}`
       : "等待训练指标日志";
   if (source) source.textContent = dataLabel;
-
-  const descriptors = {
-    draft: [
-      ["note_configuration_loss", "音符字符损失", "loss"],
-      ["note_configuration_accuracy", "音符字符准确率", "accuracy"],
-      ["position_header_accuracy", "拍位与起始格式准确率", "accuracy"],
-      ["first_head_accuracy", "首个音符选择准确率", "accuracy"],
-    ],
-    revision: [
-      ["note_configuration_loss", "音符字符损失", "loss"],
-      ["note_configuration_accuracy", "音符字符准确率", "accuracy"],
-      ["position_header_accuracy", "拍位与起始格式准确率", "accuracy"],
-      ["first_head_accuracy", "首个音符选择准确率", "accuracy"],
-    ],
+  const formatValue = (value, kind) => value === null ? "—" : kind === "text" ? String(value) : kind === "params"
+    ? `${(value / 1e6).toFixed(2)}M` : kind === "accuracy"
+    ? `${(value * 100).toFixed(1)}%` : kind === "count"
+      ? formatTrainingMetricCount(value) : value.toFixed(4);
+  const hasValue = (values, key, counts) => trainingMetricNumber(counts, key) !== 0
+    && (Object.prototype.hasOwnProperty.call(values || {}, key) || trainingMetricNumber(counts, key) !== null);
+  const appendMetric = (list, label, value, kind, count) => {
+    if (count === 0 || (value === null && count === null)) return;
+    const term = document.createElement("dt"); term.textContent = label;
+    const definition = document.createElement("dd");
+    definition.textContent = `${formatValue(value, kind)}${count !== null ? ` · n=${formatTrainingMetricCount(count)}` : ""}`;
+    if (count !== null) definition.title = `目标位置数：${count}`;
+    list.append(term, definition);
   };
-  const formatValue = (value, kind) => value === null ? "—" : kind === "accuracy"
-    ? `${(value * 100).toFixed(1)}%` : value.toFixed(4);
-  const appendGroup = (title, sourceText, rows, values, counts, prefix) => {
-    const known = rows.some(([name]) => {
-      const key = prefix ? `${prefix}_${name}` : name;
-      return trainingMetricNumber(counts, key) !== 0
-        && (Object.prototype.hasOwnProperty.call(values || {}, key)
-          || Object.prototype.hasOwnProperty.call(counts || {}, key));
-    });
-    if (!known) return;
-    const group = document.createElement("section");
-    group.className = "training-metric-group";
-    const heading = document.createElement("h4");
-    heading.textContent = title;
-    group.appendChild(heading);
-    const sourceLabel = document.createElement("p");
-    sourceLabel.className = "training-metric-source";
-    sourceLabel.textContent = sourceText;
-    group.appendChild(sourceLabel);
-    const list = document.createElement("dl");
-    list.className = "training-metric-list";
-    for (const [name, label, kind] of rows) {
-      const key = prefix ? `${prefix}_${name}` : name;
-      const count = trainingMetricNumber(counts, key);
-      if (count === 0) continue;
-      const term = document.createElement("dt");
-      term.textContent = label;
-      const definition = document.createElement("dd");
-      const value = trainingMetricNumber(values, key);
-      definition.textContent = `${formatValue(value, kind)}${count !== null ? ` · n=${formatTrainingMetricCount(count)}` : ""}`;
-      if (count !== null) definition.title = `目标位置数：${count}`;
-      list.append(term, definition);
-    }
-    if (!list.children.length) return;
-    group.appendChild(list);
-    groups.appendChild(group);
+  const appendCard = (title, sourceText, rows, values, counts, className = "", target = groups) => {
+    if (!rows.some(([key]) => hasValue(values, key, counts))) return null;
+    const card = document.createElement("section");
+    card.className = `training-metric-group training-metric-card${className ? ` ${className}` : ""}`;
+    const heading = document.createElement("h4"); heading.textContent = title; card.appendChild(heading);
+    const sourceLabel = document.createElement("p"); sourceLabel.className = "training-metric-source";
+    sourceLabel.textContent = sourceText; card.appendChild(sourceLabel);
+    const list = document.createElement("dl"); list.className = "training-metric-list";
+    for (const [key, label, kind] of rows) appendMetric(list, label, kind === "text" ? (values?.[key] ?? null)
+      : trainingMetricNumber(values, key), kind,
+      trainingMetricNumber(counts, key));
+    if (!list.children.length) return null;
+    card.appendChild(list); target.appendChild(card); return card;
   };
-
   const epochSource = epochNumber === null ? "epoch 汇总" : `epoch ${epochNumber}${epochValues.partial_epoch_metrics ? "（部分 epoch）" : ""}`;
-  const phaseSource = `${events.phaseFromCurrentProgress ? "当前" : "最近"}${phaseNames[livePhase]}进度 · epoch ${trainingMetricNumber(phaseSnapshot, "epoch") ?? "?"}`
+  const phaseSource = `${events.phaseFromCurrentProgress ? "当前" : "最近"}${phaseNames[livePhase] || "训练"}进度 · epoch ${trainingMetricNumber(phaseSnapshot, "epoch") ?? "?"}`
     + (trainingMetricNumber(phaseSnapshot, "completed") !== null && trainingMetricNumber(phaseSnapshot, "total") !== null
       ? ` · ${phaseSnapshot.unit === "charts" ? "谱面" : "batch"} ${phaseSnapshot.completed}/${phaseSnapshot.total}` : "");
-  const layoutValues = livePhase === "layout_revision" && live ? liveValues : epochValues;
-  const layoutCounts = livePhase === "layout_revision" && live ? liveCounts : epochCounts;
-  const layoutSource = livePhase === "layout_revision" && live ? phaseSource : epochSource;
-  const layoutLossRows = livePhase === "layout_revision" && live
-    ? [["loss", "当前 batch 总损失", "loss"]]
-    : [["draft_revision_loss", "草稿 + 修订总损失", "loss"]];
-  appendGroup("配置总体", layoutSource, layoutLossRows, layoutValues, layoutCounts, "");
-  appendGroup("草稿配置", layoutSource, descriptors.draft, layoutValues, layoutCounts, "draft");
-  appendGroup("修订配置", layoutSource, descriptors.revision, layoutValues, layoutCounts, "revision");
-
+  const layoutValues = livePhase === "layout_revision" && (live || archivedProgress) ? liveValues : epochValues;
+  const layoutCounts = livePhase === "layout_revision" && (live || archivedProgress) ? liveCounts : epochCounts;
+  const layoutSource = livePhase === "layout_revision" && archivedProgress
+    ? `${phaseSource} · 历史末条进度（本轮未完成）`
+    : livePhase === "layout_revision" && live ? phaseSource : epochSource;
+  const draftRows = [["draft_note_configuration_loss", "音符字符交叉熵（越低越好）", "loss"],
+    ["draft_note_configuration_accuracy", "音符字符准确率", "accuracy"],
+    ["draft_first_head_accuracy", "首个音符选择", "accuracy"]];
+  const revisionRows = [["revision_note_configuration_loss", "音符字符交叉熵", "loss"],
+    ["revision_note_configuration_accuracy", "音符字符准确率", "accuracy"],
+    ["revision_first_head_accuracy", "首个音符选择", "accuracy"]];
+  const totalRows = [["loss", "阶段累计配置损失", "loss"], ["draft_revision_loss", "草稿 + 修订累计损失", "loss"]];
+  const totalDetails = document.createElement("details"); totalDetails.className = "training-metric-advanced";
+  const totalSummary = document.createElement("summary"); totalSummary.textContent = "配置总体（高级）";
+  totalDetails.appendChild(totalSummary);
+  const totalCard = appendCard("配置总体", layoutSource, totalRows, layoutValues, layoutCounts, "training-metric-total", totalDetails);
+  if (totalCard) groups.appendChild(totalDetails);
+  appendCard("草稿配置", layoutSource, draftRows, layoutValues, layoutCounts, "training-metric-draft");
+  const revisionDetails = document.createElement("details"); revisionDetails.className = "training-metric-advanced";
+  const revisionSummary = document.createElement("summary"); revisionSummary.textContent = "修订配置（高级）";
+  revisionDetails.appendChild(revisionSummary);
+  const revisionCard = appendCard("修订配置", layoutSource, revisionRows, layoutValues, layoutCounts, "training-metric-revision", revisionDetails);
+  if (revisionCard) {
+    groups.appendChild(revisionDetails);
+  }
   const currentBlueprint = livePhase === "blueprint" && live;
   const blueprintSnapshot = currentBlueprint ? phaseSnapshot : events.phaseMetrics.blueprint;
-  const sameEpochBlueprint = live && blueprintSnapshot
+  const sameEpochBlueprint = (live || archivedProgress) && blueprintSnapshot
     && trainingMetricNumber(blueprintSnapshot, "epoch") === trainingMetricNumber(phaseSnapshot, "epoch");
   const plannerValues = sameEpochBlueprint ? blueprintSnapshot.losses : epochValues;
+  const plannerCounts = sameEpochBlueprint ? {} : epochCounts;
   const plannerRows = sameEpochBlueprint
-    ? [["loss", "规划总损失"], ["loss_onset", "起音损失"], ["loss_type", "类型损失"],
-      ["loss_duration", "时值损失"], ["loss_load_curve", "局部负荷损失"]]
-    : [["whole_song_plan_loss", "全曲规划损失"]];
-  const plannerHasMetrics = plannerRows.some(([key]) => Object.prototype.hasOwnProperty.call(plannerValues, key));
-  if (plannerHasMetrics) {
-    const group = document.createElement("section");
-    group.className = "training-metric-group";
-    const heading = document.createElement("h4");
-    heading.textContent = "全曲规划";
-    group.appendChild(heading);
-    const plannerSource = document.createElement("p");
-    plannerSource.className = "training-metric-source";
-    plannerSource.textContent = sameEpochBlueprint
-      ? `${livePhase === "blueprint" && events.phaseFromCurrentProgress ? "当前" : "本 epoch 已完成的"}${phaseNames.blueprint} · epoch ${trainingMetricNumber(blueprintSnapshot, "epoch") ?? "?"}`
-        + (trainingMetricNumber(blueprintSnapshot, "completed") !== null && trainingMetricNumber(blueprintSnapshot, "total") !== null
-          ? ` · 谱面 ${blueprintSnapshot.completed}/${blueprintSnapshot.total}` : "")
-      : epochSource;
-    group.appendChild(plannerSource);
-    const list = document.createElement("dl");
-    list.className = "training-metric-list";
-    for (const [key, label] of plannerRows) {
-      const term = document.createElement("dt"); term.textContent = label;
-      const definition = document.createElement("dd");
-      definition.textContent = formatValue(trainingMetricNumber(plannerValues, key), "loss");
-      list.append(term, definition);
-    }
-    group.appendChild(list);
-    groups.appendChild(group);
+    ? [["loss", "规划总损失", "loss"], ["loss_onset", "起音损失", "loss"], ["loss_type", "类型损失", "loss"],
+      ["loss_duration", "时值损失", "loss"], ["loss_load_curve", "局部负荷损失", "loss"]]
+    : [["whole_song_plan_loss", "全曲规划损失", "loss"]];
+  const plannerRowsAvailable = plannerRows.filter(([key]) => !(epochValues.partial_epoch_metrics === true
+    && !sameEpochBlueprint && key === "whole_song_plan_loss"
+    && trainingMetricNumber(plannerValues, key) === 0));
+  appendCard("全曲规划", sameEpochBlueprint ? `本 epoch 已完成的全曲规划 · epoch ${trainingMetricNumber(blueprintSnapshot, "epoch") ?? "?"}` : epochSource,
+    plannerRowsAvailable, plannerValues, plannerCounts, "training-metric-planner");
+  const formatRows = [["draft_position_header_accuracy", "拍位与起始格式准确率", "accuracy"],
+    ["revision_position_header_accuracy", "修订拍位与起始格式准确率", "accuracy"]];
+  const formatDetails = document.createElement("details"); formatDetails.className = "training-metric-advanced";
+  const formatSummary = document.createElement("summary"); formatSummary.textContent = "格式准确率（高级）";
+  formatDetails.appendChild(formatSummary);
+  const formatCard = appendCard("格式准确率", layoutSource, formatRows, layoutValues, layoutCounts, "training-metric-format", formatDetails);
+  if (formatCard) {
+    groups.appendChild(formatDetails);
   }
+
+  const rawModelSummary = task?.result?.model_summary || {};
+  const modelConfig = rawModelSummary.model_config || {};
+  const modelSummary = {...rawModelSummary,
+    config_width: rawModelSummary.config_width ?? modelConfig.d_model,
+    config_heads: rawModelSummary.config_heads ?? modelConfig.nhead,
+    config_layers: rawModelSummary.config_layers ?? (modelConfig.layers != null ? Number(modelConfig.layers) * 2 : null),
+    config_layer_label: rawModelSummary.config_layer_label ?? (modelConfig.layers != null ? `${modelConfig.layers} 编码 + ${modelConfig.layers} 解码` : null),
+    audio_dim: rawModelSummary.audio_dim ?? modelConfig.audio_dim,
+    condition_count: rawModelSummary.condition_count ?? modelConfig.condition_dim,
+    planner_width: rawModelSummary.planner_width ?? rawModelSummary.blueprint_config?.width};
+  const modelRows = [["parameter_count", "总参数量", "params"], ["layout_parameter_count", "配置参数量", "params"],
+    ["planner_parameter_count", "Planner 参数量", "params"], ["condition_count", "条件数量", "count"], ["audio_dim", "音频维度", "count"],
+    ["config_width", "配置宽度", "count"], ["config_heads", "注意力头数", "count"], ["config_layer_label", "配置层数", "text"],
+    ["planner_width", "规划器宽度", "count"]];
+  appendCard("模型与数据", "当前任务摘要", modelRows, modelSummary, {}, "training-metric-model");
+
+  const completeHistory = events.history.filter(item => item && item.partial_epoch_metrics !== true);
+  const trendRows = [["draft_note_configuration_loss", "草稿 CE", "loss"],
+    ["revision_note_configuration_loss", "修订 CE", "loss"], ["whole_song_plan_loss", "Planner 损失", "loss"]];
+  const trend = document.createElement("section"); trend.className = "training-metric-trends";
+  const trendHeading = document.createElement("h4"); trendHeading.textContent = "完整 epoch 趋势"; trend.appendChild(trendHeading);
+  const trendNote = document.createElement("p"); trendNote.className = "training-metric-source";
+  trendNote.textContent = completeHistory.length ? `显示最近 ${Math.min(completeHistory.length, 20)} 个完整 epoch；每条曲线独立缩放，只比较自身走势。` : "等待完整 epoch 汇总；部分 epoch 不计入完成趋势。";
+  trend.appendChild(trendNote);
+  const svgCreate = (tag) => typeof document.createElementNS === "function"
+    ? document.createElementNS("http://www.w3.org/2000/svg", tag) : document.createElement(tag);
+  const setAttr = (node, key, value) => { if (typeof node.setAttribute === "function") node.setAttribute(key, String(value)); else node[key] = String(value); };
+  const trendHistory = completeHistory.slice(-20);
+  for (const [key, label, kind] of trendRows) {
+    const pointPairs = trendHistory.map(item => ({epoch: item.epoch, value: trainingMetricNumber(item, key)}))
+      .filter(point => point.value !== null);
+    const points = pointPairs.map(point => point.value);
+    if (!points.length) continue;
+    const chart = document.createElement("div"); chart.className = "training-metric-trend";
+    const labelNode = document.createElement("span"); labelNode.className = "training-metric-trend-label"; labelNode.textContent = label; chart.appendChild(labelNode);
+    const svg = svgCreate("svg"); setAttr(svg, "class", "training-metric-sparkline"); setAttr(svg, "viewBox", "0 0 240 48"); setAttr(svg, "role", "img");
+    const min = Math.min(...points), max = Math.max(...points), span = max - min || 1;
+    setAttr(svg, "aria-label", `${label}：epoch ${pointPairs[0].epoch}到${pointPairs.at(-1).epoch}，范围${min.toFixed(4)}到${max.toFixed(4)}`);
+    const polyline = svgCreate("polyline"); setAttr(polyline, "fill", "none"); setAttr(polyline, "stroke", "currentColor"); setAttr(polyline, "stroke-width", "2");
+    const firstEpoch=Number(pointPairs[0].epoch), epochSpan=Number(pointPairs.at(-1).epoch)-firstEpoch;
+    setAttr(polyline, "points", pointPairs.map(point => `${epochSpan > 0 ? (Number(point.epoch)-firstEpoch)*240/epochSpan : 120},${44 - (point.value - min) / span * 36}`).join(" ")); svg.appendChild(polyline); chart.appendChild(svg);
+    const first = points[0], last = points[points.length - 1];
+    const footer = document.createElement("span"); footer.className = "training-metric-trend-meta";
+    const previous = points.length > 1 ? points[points.length - 2] : null;
+    const previousDelta = previous === null ? null : last - previous;
+    footer.textContent = `epoch ${pointPairs[0].epoch}–${pointPairs[pointPairs.length - 1].epoch} · 起 ${formatValue(first, kind)} · 终 ${formatValue(last, kind)}`
+      + (previousDelta === null ? "" : ` · 较前 ${previousDelta > 0 ? "+" : ""}${formatValue(previousDelta, kind)}`);
+    chart.appendChild(footer); trend.appendChild(chart);
+  }
+  if (trend.children.length > 1) groups.appendChild(trend);
   panel.hidden = false;
   if (!groups.children.length && source) source.textContent = "尚无训练指标日志";
 }
@@ -1656,6 +1700,111 @@ const TASK_KIND_LABEL = {
   preprocess: "预处理", train: "训练", generate: "生成", form_train: "song_form_v1 训练", form_generate: "song_form_v1 生成", form_analyze: "song_form_v1 分析", form_revise: "song_form_v1 修订", intensity: "强度曲线", gold: "金标集", acceptance: "验收",
 };
 const taskWatchers = new Map();
+const trainingMetricSupportCache = new Map();
+
+function trainingSupportPaths(task) {
+  if (task?.kind !== "form_train") return null;
+  const result = task.result || {};
+  const artifacts = Array.isArray(result.artifacts) ? result.artifacts.map(item => item?.path) : [];
+  const checkpoint = [...artifacts, ...(result.paths || [])].find(path => /\.pt$/i.test(String(path || "")));
+  const directory = result.checkpoint_dir || (checkpoint ? String(checkpoint).replace(/[\\/][^\\/]+$/, "") : "");
+  const join = filename => directory ? `${String(directory).replace(/[\\/]+$/, "")}/${filename}` : "";
+  const history = result.training_history_path || join("training_history.json");
+  const model = result.training_model_summary_path || join("training_model_summary.json");
+  return history || model ? {history, model} : null;
+}
+
+function applyTrainingMetricSupport(task, record) {
+  if (Array.isArray(record.history)) {
+    task.result = {...(task.result || {}), metric_history: record.history,
+                   metric_history_source: "checkpoint_history"};
+  }
+  if (record.model?.schema === "song_form_training_model_summary_v1") {
+    task.result = {...(task.result || {}), model_summary: record.model};
+  }
+}
+
+function hydrateTrainingMetricHistory(task) {
+  const paths = trainingSupportPaths(task);
+  if (!paths) return;
+  const key = JSON.stringify(paths);
+  let record = trainingMetricSupportCache.get(task.task_id);
+  if (!record || record.key !== key) {
+    record = {key, fetchedAt: 0, pending: false};
+    trainingMetricSupportCache.set(task.task_id, record);
+    if (trainingMetricSupportCache.size > 20) trainingMetricSupportCache.delete(trainingMetricSupportCache.keys().next().value);
+  }
+  applyTrainingMetricSupport(task, record);
+  if (record.pending || Date.now() - record.fetchedAt < 60000) return;
+  record.pending = true;
+  record.fetchedAt = Date.now();
+  const read = async path => {
+    if (!path) return null;
+    const response = await fetch(`/api/download?path=${encodeURIComponent(path)}`, {cache: "no-store"});
+    if (!response.ok) return null;
+    return JSON.parse(await response.text());
+  };
+  Promise.allSettled([read(paths.history), read(paths.model)]).then(results => {
+    if (trainingMetricSupportCache.get(task.task_id) !== record) return;
+    const history = results[0].status === "fulfilled" ? results[0].value : null;
+    const model = results[1].status === "fulfilled" ? results[1].value : null;
+    if (Array.isArray(history)) record.history = history.slice(-100);
+    if (model?.schema === "song_form_training_model_summary_v1") record.model = model;
+    applyTrainingMetricSupport(task, record);
+    if (activeTaskId === task.task_id) {
+      const latest = taskWatchers.get(task.task_id)?.task || task;
+      applyTrainingMetricSupport(latest, record);
+      renderTaskTrainingMetrics(latest);
+    }
+  }).finally(() => {record.pending = false;});
+}
+
+function parseArchivedFormTrainingLog(text, entry) {
+  const lines = String(text).split(/\r?\n/);
+  const history = [];
+  const phases = {};
+  let latest = null, model = null;
+  for (const line of lines) {
+    const match = line.match(/(?:^|\s)(form_progress|form_epoch|form_model_summary)\s+(\{.*\})\s*$/);
+    if (!match) continue;
+    let value;
+    try {value = JSON.parse(match[2]);} catch (_) {continue;}
+    if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+    if (match[1] === "form_epoch") history.push(value);
+    else if (match[1] === "form_model_summary") model = value;
+    else {latest = value; if (value.phase && value.losses) phases[value.phase] = value;}
+  }
+  const argv = lines.find(line => line.startsWith("# argv=")) || "";
+  const directory = argv.match(/--checkpoint-dir\s+(.+?)(?=\s+--[a-z]|$)/)?.[1]?.replace(/^"|"$/g, "") || "";
+  const epochsRequested = Number(argv.match(/--epochs\s+(\d+)/)?.[1]);
+  const headerId = lines.find(line => line.startsWith("# task_id="))?.slice(10);
+  const result = {
+    log_path: entry.log_path, checkpoint_dir: directory, metric_history: history,
+    training_metrics: phases, metrics: history.at(-1), progress_detail: latest,
+    phase: latest?.phase, model_summary: model, archived_status: entry.status,
+    epoch_target: Number.isFinite(epochsRequested) ? epochsRequested : null,
+  };
+  return {
+    task_id: entry.task_id || headerId || "archived-training", kind: "form_train", status: "archived",
+    message: `历史训练日志 · 原记录状态：${entry.status || "未知"}；当前运行状态请查看任务列表。`,
+    progress: 0, result, logs: lines.filter(line => line && !line.startsWith("#")).slice(-300),
+  };
+}
+
+async function viewArchivedTrainingLog(entry, button) {
+  button.disabled = true;
+  button.textContent = "正在读取…";
+  try {
+    const response = await fetch(entry.download, {cache: "no-store"});
+    if (!response.ok) throw new Error(`日志读取失败：HTTP ${response.status}`);
+    const task = parseArchivedFormTrainingLog(await response.text(), entry);
+    activeTaskId = task.task_id;
+    renderTask(task);
+  } finally {
+    button.disabled = false;
+    button.textContent = "查看训练走势";
+  }
+}
 
 function watchTask(taskId, onFinished = null) {
   activeTaskId = taskId;
@@ -1718,10 +1867,10 @@ function renderTask(task) {
   const logs = element("#taskLogs");
   const epochStatus = trainingEpochStatus(task);
   if (kind) kind.textContent = `${TASK_KIND_LABEL[task.kind] || task.kind} · ${task.task_id}`;
-  if (status) status.textContent = ({queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已中断"})[task.status] || task.status;
+  if (status) status.textContent = ({queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已中断", archived: "历史记录"})[task.status] || task.status;
   if (progress) {
     const unknownTrainingTarget = task.kind === "train" && !epochStatus?.knownTarget;
-    if (progress.parentElement) progress.parentElement.hidden = unknownTrainingTarget;
+    if (progress.parentElement) progress.parentElement.hidden = unknownTrainingTarget || task.status === "archived";
     const amount = task.kind === "train" && epochStatus?.knownTarget
       ? epochStatus.progress : task.progress || 0;
     progress.style.width = `${Math.round(amount * 100)}%`;
@@ -1733,6 +1882,7 @@ function renderTask(task) {
       task.result?.selection_metric === "training_loss" ? "；best 依据训练 loss（未配置验证集）"
       : task.result?.selection_metric === "validation_loss" ? "；best 依据验证 loss" : "");
   }
+  hydrateTrainingMetricHistory(task);
   renderTaskTrainingMetrics(task);
   if (window.MaichartLogs) window.MaichartLogs.renderTask(task);
   else if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
@@ -3783,6 +3933,14 @@ async function refreshLogs() {
       link.textContent = "下载";
       link.className = "log-link";
       row.appendChild(link);
+      if (entry.kind === "form_train") {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "small-button";
+        button.textContent = "查看训练走势";
+        button.addEventListener("click", guard(() => viewArchivedTrainingLog(entry, button)));
+        row.appendChild(button);
+      }
     }
     container.appendChild(row);
   });

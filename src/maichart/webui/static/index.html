@@ -1300,7 +1300,7 @@
           <h3>训练指标</h3>
           <p id="taskTrainingMetricsSource" class="muted"></p>
           <div id="taskTrainingMetricsGroups" class="task-training-metrics-grid"></div>
-          <p class="task-training-metrics-note">草稿组学习从头写谱，修订组学习依据部分草稿重建。损失主要看同一任务内的变化，没有通用达标线；格式位置准确率高不代表音符配置已学好，首个音符选择也可能与官谱采用不同的合理写法。这些都不是可玩率评分。</p>
+          <p class="task-training-metrics-note">阶段损失是该阶段截至当前的累计均值，会在阶段切换时重置，且样本顺序会打乱；它不是单个 batch 总损失。草稿与修订、Planner 使用不同目标，损失不可直接横比。趋势只比较同一指标的完整 epoch；部分 epoch 不计入完成度，也没有通用的“练好百分比”。</p>
         </section>
         <p id="taskLogPath" class="inline-status" hidden></p>
         <pre id="taskLogs" class="logs">暂无日志</pre>

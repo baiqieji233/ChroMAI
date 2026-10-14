@@ -204,6 +204,55 @@ test("song-form metric panel omits task groups with zero selected targets", () =
   assert.doesNotMatch(text, /0\.0000/);
 });
 
+test("song-form metric events deduplicate epochs and prefer complete summaries", () => {
+  const {harness} = createHarness(async () => jsonResponse({}));
+  const events = harness.trainingMetricEvents({kind: "form_train", logs: [], result: {
+    metric_history: [
+      {epoch: 2, partial_epoch_metrics: true, draft_note_configuration_loss: 0.8},
+      {epoch: 1, draft_note_configuration_loss: 0.9},
+      {epoch: 2, draft_note_configuration_loss: 0.6},
+    ],
+  }});
+  assert.deepEqual(Array.from(events.history, item => item.epoch), [1, 2]);
+  assert.equal(events.history[1]?.partial_epoch_metrics, false);
+  assert.equal(events.history[1].draft_note_configuration_loss, 0.6);
+});
+
+test("archived progress is labeled incomplete and partial planner loss is omitted", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  harness.renderTaskTrainingMetrics({kind: "form_train", status: "archived", logs: [], result: {
+    phase: "layout_revision", progress_detail: {phase: "layout_revision", epoch: 12, completed: 5, total: 10,
+      unit: "batches", losses: {draft_note_configuration_loss: 0.57}, metric_counts: {draft_note_configuration_loss: 20}},
+    metric_history: [{epoch: 11, draft_note_configuration_loss: 0.59},
+      {epoch: 12, partial_epoch_metrics: true, whole_song_plan_loss: 0, draft_note_configuration_loss: 0.57}],
+  }});
+  assert.match(elements.get("#taskTrainingMetricsSource").textContent, /历史末条进度/);
+  const text = elements.get("#taskTrainingMetricsGroups").children.map(descendantText).join(" ");
+  assert.match(text, /本轮未完成/);
+  assert.doesNotMatch(text, /Planner 损失/);
+});
+
+test("a later partial duplicate cannot fill missing metrics in a complete epoch",()=>{
+  const {harness}=createHarness(async()=>jsonResponse({}));
+  const events=harness.trainingMetricEvents({kind:"form_train",result:{metric_history:[
+    {epoch:4,partial_epoch_metrics:false,draft_note_configuration_loss:.6},
+    {epoch:4,partial_epoch_metrics:true,draft_note_configuration_loss:.5,whole_song_plan_loss:0},
+  ]}});
+  assert.equal(events.epoch.draft_note_configuration_loss,.6);
+  assert.equal(events.epoch.whole_song_plan_loss,undefined);
+  assert.equal(events.history[0].partial_epoch_metrics,false);
+});
+
+test("completed archived epoch is not labeled as an unfinished current epoch",()=>{
+  const {harness,elements}=createHarness(async()=>jsonResponse({}));
+  harness.renderTaskTrainingMetrics({kind:"form_train",status:"archived",result:{
+    phase:"layout_revision",progress_detail:{phase:"layout_revision",epoch:11,losses:{draft_note_configuration_loss:.6}},
+    metric_history:[{epoch:11,partial_epoch_metrics:false,draft_note_configuration_loss:.59}],
+  }});
+  assert.doesNotMatch(elements.get("#taskTrainingMetricsSource").textContent,/本轮未完成/);
+  assert.match(elements.get("#taskTrainingMetricsSource").textContent,/epoch 11/);
+});
+
 test("song-form onset diagnostics render from payload or retained log", () => {
   const {harness, elements} = createHarness(async () => jsonResponse({}));
   const diagnostics = {schema: "song_form_onset_diagnostics_v1", gap_threshold_sec: 2,

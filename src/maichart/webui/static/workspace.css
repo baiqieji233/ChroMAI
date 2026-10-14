@@ -74,10 +74,22 @@ body { font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-s
 .task-training-metrics-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 9px; }
 .training-metric-group { min-width: 0; padding-top: 7px; border-top: 1px solid var(--line); }
 .training-metric-group h4 { margin: 0 0 4px; font-size: 12px; }
+.training-metric-card { padding: 9px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); }
+.training-metric-draft { border-left: 3px solid var(--teal); }
+.training-metric-planner { border-left: 3px solid #af493d; }
+.training-metric-advanced { grid-column: 1 / -1; border-top: 1px solid var(--line); padding-top: 7px; }
+.training-metric-advanced > summary { cursor: pointer; color: var(--muted); font-size: 11px; }
+.training-metric-advanced > .training-metric-card { margin-top: 6px; }
 .training-metric-source { margin: 0 0 5px; color: var(--muted); font-size: 10px; line-height: 1.35; }
 .training-metric-list { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 3px 8px; margin: 0; font-size: 11px; line-height: 1.4; }
 .training-metric-list dt { min-width: 0; overflow-wrap: anywhere; color: var(--muted); }
-.training-metric-list dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; }
+.training-metric-list dd { margin: 0; text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.training-metric-trends { grid-column: 1 / -1; min-width: 0; padding-top: 9px; border-top: 1px solid var(--line); }
+.training-metric-trends h4 { margin: 0 0 4px; font-size: 12px; }
+.training-metric-trend { display: grid; grid-template-columns: 62px minmax(0, 1fr); align-items: center; gap: 4px 8px; min-width: 0; margin: 8px 0; font-size: 10px; }
+.training-metric-trend-label, .training-metric-trend-meta { color: var(--muted); white-space: nowrap; }
+.training-metric-trend-meta { grid-column: 1 / -1; text-align: left; font-variant-numeric: tabular-nums; white-space: normal; overflow-wrap: anywhere; }
+.training-metric-sparkline { width: 100%; height: 30px; color: var(--teal); overflow: visible; }
 .task-training-metrics-note { color: var(--muted); }
 body.logs-expanded .layout { grid-template-columns: 1fr; }
 body.logs-expanded .side-column { grid-column: 1 / -1; grid-row: 1; }
@@ -93,5 +105,5 @@ body.logs-expanded #expandLogsButton { grid-column: auto; }
 .settings-section .condition-guide { margin-top: 0; }
 button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--teal); outline-offset: 3px; }
 @media (max-width: 1100px) { .layout { grid-template-columns: 1fr; } .task-panel { position: static; max-height: none; } }
-@media (max-width: 700px) { .layout { width: calc(100% - 20px); } .workflow-group { padding: 14px; } .workflow-routes { grid-template-columns: 1fr; } .settings-section .settings-content { padding: 13px; } .quick-settings { grid-template-columns: 1fr; } .quick-settings > div, .quick-settings > p { grid-column: auto; } .advanced-heading { align-items: start; flex-direction: column; gap: 6px; } }
+@media (max-width: 700px) { .layout { width: calc(100% - 20px); } .workflow-group { padding: 14px; } .workflow-routes { grid-template-columns: 1fr; } .settings-section .settings-content { padding: 13px; } .quick-settings { grid-template-columns: 1fr; } .quick-settings > div, .quick-settings > p { grid-column: auto; } .advanced-heading { align-items: start; flex-direction: column; gap: 6px; } .task-training-metrics-grid { grid-template-columns: 1fr; } .training-metric-trend { grid-template-columns: 62px minmax(80px, 1fr); } .training-metric-trend-meta { grid-column: 2; text-align: left; } }
 @media (max-width: 480px) { .training-panel .form-grid, .generation-panel .form-grid, .quality-training-grid { grid-template-columns: 1fr; } .workflow-actions > button { flex: 1 1 auto; } body.logs-expanded .task-navigation { grid-template-columns: 1fr; } }

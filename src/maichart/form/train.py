@@ -228,6 +228,10 @@ def main(argv=None):
     # the model; avoid per-forward GPU -> host scalar synchronizations.
     model.validate_inputs = False
     blueprint.validate_inputs = False
+    from maichart.form.monitoring import training_model_summary, write_training_model_summary
+    model_summary = training_model_summary(model, blueprint)
+    write_training_model_summary(output, model_summary)
+    emit('form_model_summary', **model_summary)
     parameters = list(model.parameters()) + list(blueprint.parameters())
     optimizer = torch.optim.AdamW(parameters, lr=args.lr, weight_decay=args.weight_decay)
     if args.resume:
