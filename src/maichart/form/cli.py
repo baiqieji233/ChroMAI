@@ -49,6 +49,8 @@ def parser():
                    help='keep the strongest onset within this many milliseconds; 0 disables merging')
     p.add_argument('--rhythm-snap',action='store_true',help='approximate nearby onsets to common musical grids')
     p.add_argument('--rhythm-snap-ms',type=float,default=15.,help='maximum approximation shift in milliseconds')
+    p.add_argument('--rhythm-snap-source-ms',type=float,default=None,
+                   help='maximum distance from the raw onset peak for moved grid candidates, in milliseconds (default 30)')
     p.add_argument('--rhythm-snap-divisions',default='4,8,12,16,24,32',help='comma-separated allowed musical divisions')
     p.add_argument('--rhythm-snap-mode',choices=('sequence','point'),default='sequence',
                    help='infer locally consistent grids or use independent nearest-point approximation')
@@ -70,6 +72,16 @@ def parser():
 def _json(path): return json.loads(Path(path).read_text(encoding='utf-8-sig')) if path else None
 
 
+def _resolve_carried_generation_options(args, condition_data):
+    """Keep new scalar controls usable through an already-running WebUI."""
+    carried = (condition_data or {}).get('generation_options') or {}
+    if not isinstance(carried, dict):
+        raise ValueError('condition generation_options must be an object')
+    for name, default in (('local_chord_strength', 1.0), ('rhythm_snap_source_ms', 30.0)):
+        if getattr(args, name) is None:
+            setattr(args, name, carried.get(name, default))
+
+
 def analysis_report(song):
     from maichart.form.clock import clock_report
     return {'schema':'maichart-song-form-analysis-v1','audio_duration':song.audio.duration_sec,
@@ -85,22 +97,17 @@ def analysis_report(song):
 def main(argv=None):
     args=parser().parse_args(argv)
     condition_data = _json(args.condition_file)
-    # A running pre-upgrade WebUI already forwards condition JSON unchanged.
-    # Carry only this scalar option through that existing transport; an explicit
-    # CLI flag takes precedence, and GenerationCondition ignores this metadata.
-    carried_options = (condition_data or {}).get('generation_options') or {}
-    if not isinstance(carried_options, dict):
-        raise ValueError('condition generation_options must be an object')
-    if args.local_chord_strength is None:
-        args.local_chord_strength = carried_options.get('local_chord_strength', 1.0)
+    # Explicit CLI flags take precedence; GenerationCondition ignores this metadata.
+    _resolve_carried_generation_options(args, condition_data)
     from maichart.form.type_guidance import validate_strength
     validate_strength(args.planner_type_strength,'planner_type_strength')
     validate_strength(args.style_balance_strength,'style_balance_strength')
     args.local_chord_strength = validate_strength(args.local_chord_strength,'local_chord_strength')
     from maichart.form.onset_selection import merge_close_onsets
     merge_close_onsets([], args.onset_merge_ms)
-    from maichart.form.rhythm_snap import validate_snap_ms, normalize_divisions
+    from maichart.form.rhythm_snap import validate_snap_ms, validate_source_ms, normalize_divisions
     validate_snap_ms(args.rhythm_snap_ms)
+    args.rhythm_snap_source_ms = validate_source_ms(args.rhythm_snap_source_ms)
     rhythm_snap_divisions = normalize_divisions(args.rhythm_snap_divisions)
     if args.rhythm_snap and args.operation != 'generate':
         raise ValueError('Rhythm approximation applies only to automatic generation, not source-chart revision')
@@ -160,6 +167,7 @@ def main(argv=None):
         'local_chord_strength':args.local_chord_strength if args.operation=='generate' else 0.,
         'training_max_region_seconds':trained_region_seconds,
         'rhythm_snap_enabled':args.rhythm_snap,'rhythm_snap_ms':args.rhythm_snap_ms,
+        'rhythm_snap_source_ms':args.rhythm_snap_source_ms,
         'rhythm_snap_divisions':list(rhythm_snap_divisions),
         'rhythm_snap_mode':args.rhythm_snap_mode if args.rhythm_snap else 'disabled',
         'intensity_curve_enabled':bool(args.intensity_curve_file),
@@ -194,6 +202,7 @@ def main(argv=None):
         points,generated=generate_chart(model,planner,codec,song,condition,payload['atom_catalog'],
             threshold=args.onset_threshold,memory_strength=args.memory_strength,onset_merge_ms=args.onset_merge_ms,
             rhythm_snap_enabled=args.rhythm_snap,rhythm_snap_ms=args.rhythm_snap_ms,
+            rhythm_snap_source_ms=args.rhythm_snap_source_ms,
             rhythm_snap_divisions=rhythm_snap_divisions,
             rhythm_snap_mode=args.rhythm_snap_mode,
             planner_type_strength=args.planner_type_strength,style_balance_strength=args.style_balance_strength,

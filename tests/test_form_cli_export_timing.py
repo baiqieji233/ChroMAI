@@ -5,6 +5,32 @@ from maichart.form.cli import _export_end_timing
 from maichart.generation.event_compile import compile_event_points
 
 
+def test_source_tolerance_carried_by_running_webui_and_explicit_cli_precedence():
+    from maichart.form.cli import parser, _resolve_carried_generation_options
+    base = ['generate', '--audio', 'fixture.wav', '--output', 'fixture.txt']
+    args = parser().parse_args(base)
+    _resolve_carried_generation_options(args, None)
+    assert args.rhythm_snap_source_ms == 30
+    args = parser().parse_args(base)
+    _resolve_carried_generation_options(args, {'generation_options': {'rhythm_snap_source_ms': 25}})
+    assert args.rhythm_snap_source_ms == 25
+    args = parser().parse_args(base+['--rhythm-snap-source-ms', '20'])
+    _resolve_carried_generation_options(args, {'generation_options': {'rhythm_snap_source_ms': 25}})
+    assert args.rhythm_snap_source_ms == 20
+
+
+def test_allowed_triplet_and_binary_positions_can_export_48_as_a_gap_bridge():
+    from maichart.event_timing import EventPoint
+    points = [EventPoint(Fraction(1,3), 'E5'), EventPoint(Fraction(3,4), 'E4')]
+    tempo = [EventTempo(Fraction(0),130.)]
+    assert all(any((point.beat*division/4).denominator == 1 for division in (4,8,12,16,24,32))
+               for point in points)
+    text, _ = compile_event_points(points, tempo_changes=tempo, end_beat=Fraction(1))
+    assert '{48}' in text
+    assert points[1].beat-points[0].beat == Fraction(5,12)
+    assert parse_event_chart_text(text,5).points == points
+
+
 def test_generated_audio_end_is_rounded_up_on_export_grid_without_moving_notes():
     tempo = [EventTempo(Fraction(0), 185.005)]
     audio_end = Fraction(123456789, 1000000)
