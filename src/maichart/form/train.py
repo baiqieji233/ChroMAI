@@ -27,16 +27,17 @@ from maichart.form.training_runtime import (
 )
 
 # Keep the rational Planner's training evidence distribution identical to
-# rational_generate.py.  Weak native attacks beyond this budget are omitted
-# consistently at training and inference time.
-RATIONAL_PLANNER_MAX_AUDIO_NODES = 1024
+# curve prediction and generation.  The contract lives with rational audio so
+# every caller uses one source of truth.
+from maichart.form.rational_audio import (
+    PLANNER_MAX_AUDIO_NODES as RATIONAL_PLANNER_MAX_AUDIO_NODES,
+    planner_audio_queries,
+)
 
 
 def _rational_planner_audio(song):
     """Build the bounded Planner query clock shared with generation."""
-    from maichart.form.rational_audio import audio_queries
-    return audio_queries(song, song.spans[0].start, song.spans[-1].end,
-                         max_nodes=RATIONAL_PLANNER_MAX_AUDIO_NODES)
+    return planner_audio_queries(song)
 
 
 def parser():

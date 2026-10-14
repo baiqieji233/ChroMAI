@@ -13,6 +13,7 @@
 - Blueprint 输入缓存身份记录同一 `max_nodes=1024`，避免继续复用旧的无限节点缓存。
 - 增加回归测试，确认训练调用实际传递 1024，并保持 rational Planner 的其他接口不变。
 - Blueprint 日志新增 `planner_density_prediction` 与 `planner_density_target`，只用于监控预测负荷均值和目标均值，不改变梯度或 loss。
+- `PLANNER_MAX_AUDIO_NODES` 与 `planner_audio_queries` 已移至 `rational_audio.py`，训练和曲线预测共用；曲线预测的 rational 分支复用同一次查询，不再重复构造整曲查询。
 
 这样做的目的，是让训练和生成都使用相同的原生音频证据选择规则；它不把位置量化到固定帧，也不改变 Fraction 事件表达能力。
 
@@ -28,6 +29,21 @@ tests/test_form_blueprint_cache.py
 ```
 
 未启动或重启正式训练。已有运行中的 checkpoint 不会自动改变；修改对新建 Blueprint 缓存和后续训练生效。
+
+## 当前 checkpoint 的只读前向审计
+
+以下结果来自真实命令：
+
+```text
+python -  # 读取 checkpoints/Prism_Re_v1/form_last.pt 与一个 Blueprint 输入缓存，CPU 前向 RationalPlanner
+```
+
+输入文件：
+
+- `E:/simai_transformer/checkpoints/Prism_Re_v1/form_last.pt`
+- `E:/simai_transformer/webui_workspace/datasets/full训练集/cache/blueprint_inputs/v1/00976b38869d616dd3c1e477a328b812efe4e56222fc04a29cc6eda5608e5991.pt`
+
+输出：Planner 预测形状为 `(6114, 4)`；四个通道预测均值为 `[0.6821, 0.6479, 0.2570, 0.2095]`，目标均值为 `[0.5878, 0.5327, 0.2491, 0.3084]`；event-density 通道相关系数为 `0.7109`。这是单个缓存样本的只读诊断，不代表整套数据的质量验收，也不证明生成端已经可用。
 
 ## 尚未修改的质量风险
 

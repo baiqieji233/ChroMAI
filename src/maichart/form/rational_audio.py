@@ -24,6 +24,10 @@ PROFILE = "rational_audio_queries_v1"
 ACOUSTIC_DIM = 98
 INPUT_DIM = 120
 MAX_EVIDENCE_NODES = 8192
+# Maximum native audio evidence nodes exposed to the whole-song Planner.  The
+# same bound is used during training, curve prediction, and chart generation;
+# it limits memory/latency without quantising the musical Fraction clock.
+PLANNER_MAX_AUDIO_NODES = 1024
 
 
 def _digest(path):
@@ -282,3 +286,10 @@ def audio_queries(song, start, end, *, max_nodes=None):
     audio._views[key] = (values,times,beats)
     while len(audio._views)>4: audio._views.popitem(last=False)
     return torch.from_numpy(values.copy()), times.copy(), beats
+
+
+def planner_audio_queries(song, start=None, end=None):
+    """Return the bounded full-song query used by the Planner contract."""
+    start = song.spans[0].start if start is None else start
+    end = song.spans[-1].end if end is None else end
+    return audio_queries(song, start, end, max_nodes=PLANNER_MAX_AUDIO_NODES)

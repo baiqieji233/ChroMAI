@@ -223,6 +223,7 @@ def test_workload_planner_has_no_frame_onset_head_and_updates_conditions():
 def test_training_planner_query_budget_matches_generation(monkeypatch):
     """Training must use the same bounded native-evidence budget as inference."""
     import maichart.form.train as train
+    from maichart.form.rational_audio import PLANNER_MAX_AUDIO_NODES, planner_audio_queries
     from types import SimpleNamespace
 
     calls = []
@@ -235,8 +236,11 @@ def test_training_planner_query_budget_matches_generation(monkeypatch):
     span = SimpleNamespace(start=0, end=4)
     result = train._rational_planner_audio(SimpleNamespace(spans=[span]))
     assert result == ('audio', 'times', 'beats')
-    assert calls == [1024]
-    assert train.RATIONAL_PLANNER_MAX_AUDIO_NODES == 1024
+    assert calls == [PLANNER_MAX_AUDIO_NODES]
+    assert train.RATIONAL_PLANNER_MAX_AUDIO_NODES == PLANNER_MAX_AUDIO_NODES == 1024
+    calls.clear()
+    assert planner_audio_queries(SimpleNamespace(spans=[span])) == ('audio', 'times', 'beats')
+    assert calls == [PLANNER_MAX_AUDIO_NODES]
 
 
 def test_compact_default_retains_all_model_branches():

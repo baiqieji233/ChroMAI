@@ -165,16 +165,17 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     song = organize_song(audio, tempo, first, meters=meter_map)
     if not song.spans:
         raise ValueError("Audio is too short to predict a song-form workload curve")
-    from maichart.form.generate import to_device
     from maichart.form.data import input_example
 
     example = input_example(song, 0, [], condition=condition,
                             codec=RationalCodec.from_dict(payload["codec"]))
     planner.eval()
+    planner_times = None
     audio_values = form_audio(song, song.spans[0].start, song.spans[-1].end).unsqueeze(0).to(device)
     if rational:
-        from maichart.form.rational_audio import audio_queries
-        audio_values=audio_queries(song,song.spans[0].start,song.spans[-1].end)[0][None].to(device)
+        from maichart.form.rational_audio import planner_audio_queries
+        queried_audio, planner_times, _ = planner_audio_queries(song)
+        audio_values = queried_audio[None].to(device)
     form_values = torch.as_tensor(example["form"], dtype=torch.float32, device=device).unsqueeze(0)
     condition_values = condition.to_vector(device=device).unsqueeze(0)
     with torch.inference_mode():
@@ -184,8 +185,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     frame_start = float(seconds_at_beat(song.spans[0].start, tempo, first))
     frame_end = float(seconds_at_beat(song.spans[-1].end, tempo, first))
     if rational:
-        from maichart.form.rational_audio import audio_queries
-        frame_times=audio_queries(song,song.spans[0].start,song.spans[-1].end)[1]
+        frame_times = planner_times
     else:
         frame_times = segment_frame_times(frame_start, frame_end)
     predicted = prediction["load_curve"][0].sigmoid().cpu().numpy()
