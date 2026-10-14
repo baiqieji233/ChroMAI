@@ -147,7 +147,7 @@ def _blueprint_input(dataset, index):
     from maichart.event_timing import seconds_at_beat
     from maichart.generation.event_audio import segment_frame_times
     song, points, level, weight, _, condition, *rest = dataset.songs[index]
-    if song.audio_profile == 'rational_audio_queries_v1':
+    if getattr(song, 'audio_profile', 'legacy_50hz') == 'rational_audio_queries_v1':
         from maichart.form.rational_audio import audio_queries
         audio,times,_=audio_queries(song,song.spans[0].start,song.spans[-1].end)
         curve=resample_load_curve(song.load_curve_times_sec,song.load_curve,times-song.first)

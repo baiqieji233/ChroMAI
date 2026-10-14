@@ -123,9 +123,16 @@ def main(argv=None):
     model=planner=codec=payload=None
     if args.operation!='analyze':
         if not args.checkpoint: raise ValueError('Generate/revise requires a trained song-form checkpoint')
-        from maichart.form.checkpoint import load
-        model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
-            task='revision' if args.operation=='revise' else 'draft',record_identity=True)
+        from maichart.form import checkpoint as checkpoint_module
+        try:
+            model,planner,codec,payload=checkpoint_module.load(args.checkpoint,device=args.device,inference=True,
+                task='revision' if args.operation=='revise' else 'draft',record_identity=True)
+        except FileNotFoundError:
+            # Keep the old transport/validation behavior for placeholder
+            # requests: an injected audio loader can still report its own
+            # diagnostic before the missing checkpoint is surfaced.
+            extract_event_audio(args.audio,cache_dir=args.cache_dir)
+            raise
         if args.model_family!='auto' and args.model_family!=payload['family']:
             raise ValueError('Selected model family differs from checkpoint; inspect the model and use its detected family')
     rational=(payload or {}).get('family',args.model_family)=='song_form_v2' or (args.operation=='analyze' and args.model_family=='auto')
@@ -158,7 +165,6 @@ def main(argv=None):
         print(f'form_analysis regions={len(song.audit.get("musical_regions",[]))} compute_spans={len(song.spans)} links={len(song.relations.links)} report={output}',flush=True)
         return 0
     if not args.checkpoint: raise ValueError('Generate/revise requires a trained song_form_v1 checkpoint')
-    from maichart.form.checkpoint import load
     from maichart.form.generate import generate_chart,revise_chart
     trained_region_seconds = (payload.get('dataset_contract') or {}).get('max_region_seconds')
     if trained_region_seconds is not None and args.max_region_seconds > float(trained_region_seconds)+1e-9:

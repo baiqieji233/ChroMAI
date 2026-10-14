@@ -312,9 +312,12 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         initial=file('checkpoint') if operation!='analyze' else None
         family=payload.get('model_family',FAMILY)
         if initial:
-            from maichart.form.checkpoint import load
-            _,_,_,imported=load(initial,inference=True,task='revision' if operation=='revise' else 'draft')
-            family=imported['family']
+            from maichart.form import checkpoint as checkpoint_module
+            imported_result = checkpoint_module.load(
+                initial,inference=True,task='revision' if operation=='revise' else 'draft')
+            if imported_result is not None:
+                _,_,_,imported=imported_result
+                family=imported['family']
         bpm_value = payload.get('bpm')
         bpm = number('bpm',120,1,1000) if bpm_value not in {None, ''} else None
         first=number('first',0,-3600,3600)

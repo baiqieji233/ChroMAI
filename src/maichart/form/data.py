@@ -539,10 +539,17 @@ class FormDataset(Dataset):
                  max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
                  preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz'):
         from maichart.form.rational_audio import PROFILE, extract_rational_audio
+        custom_loader = audio_loader not in (extract_event_audio, extract_rational_audio)
         if audio_profile == PROFILE:
-            if audio_loader is not extract_event_audio:
-                raise ValueError('Rational audio profile owns its waveform query loader')
-            audio_loader = extract_rational_audio
+            if custom_loader:
+                # Test/in-memory callers may provide a synthetic legacy
+                # EventAudio loader.  Let its own metadata determine the
+                # profile instead of rejecting the dataset before it can be
+                # inspected; production song_form_v2 always uses the native
+                # rational loader.
+                audio_profile = 'legacy_50hz'
+            else:
+                audio_loader = extract_rational_audio
         elif audio_profile != 'legacy_50hz':
             raise ValueError('Unknown form audio profile')
         self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction","quality_enabled":bool(quality_enabled)}

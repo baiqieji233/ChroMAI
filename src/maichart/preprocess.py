@@ -505,6 +505,8 @@ def _process_difficulty(
     raw_difficulty = next(
         candidate for candidate in chart.difficulties if candidate.index == difficulty_index
     )
+    if "||" in str(raw_difficulty.inote or ""):
+        raise ValueError("Malformed timing marker in chart text")
     stats = _stats_for_difficulty(chart, difficulty_index)
     report = validate_raw_maidata_chart(chart, difficulty_index=difficulty_index)
     warning_codes = [issue.code for issue in report.issues if issue.severity == "warning"]
@@ -620,6 +622,14 @@ def _process_difficulty(
         frame_labels_ok=frame_labels_ok,
         audio_features_ok=(audio_features is not None and not skip_audio),
     )
+    # Keep a stable high-level reason for malformed chart syntax.  The parser
+    # can recover enough note statistics to continue QC, so relying only on the
+    # low note-count reason would hide the actual cause in the manifest.
+    raw_chart_text = str(raw_difficulty.inote or "")
+    if (report.errors or stats.parse_coverage < 1.0 or stats.unknown_token_count > 0
+            or "||" in raw_chart_text):
+        if "parse_error" not in filter_reasons:
+            filter_reasons.append("parse_error")
     if skip_audio:
         filter_reasons.append("audio_skipped")
     if not skip_alignment:
