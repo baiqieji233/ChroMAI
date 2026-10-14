@@ -170,12 +170,13 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     example = input_example(song, 0, [], condition=condition,
                             codec=RationalCodec.from_dict(payload["codec"]))
     planner.eval()
-    planner_times = None
-    audio_values = form_audio(song, song.spans[0].start, song.spans[-1].end).unsqueeze(0).to(device)
     if rational:
         from maichart.form.rational_audio import planner_audio_queries
         queried_audio, planner_times, _ = planner_audio_queries(song)
         audio_values = queried_audio[None].to(device)
+    else:
+        planner_times = None
+        audio_values = form_audio(song, song.spans[0].start, song.spans[-1].end).unsqueeze(0).to(device)
     form_values = torch.as_tensor(example["form"], dtype=torch.float32, device=device).unsqueeze(0)
     condition_values = condition.to_vector(device=device).unsqueeze(0)
     with torch.inference_mode():
