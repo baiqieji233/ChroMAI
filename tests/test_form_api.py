@@ -19,6 +19,14 @@ class _Response:
         return value
 
 
+@pytest.mark.parametrize(('saved', 'expected'), [(None, 1), (1, 1), (4, 4)])
+def test_rational_resume_settings_make_planner_batch_explicit(saved, expected):
+    args = {} if saved is None else {'blueprint_batch_size': saved}
+    settings = form_api.form_resume_settings({'family': 'song_form_v2', 'args': args})
+    assert settings['blueprint_batch_size'] == expected
+    assert 'blueprint_batch_size' not in form_api.form_resume_settings({'family': 'song_form_v1', 'args': {}})
+
+
 def _checkpoint(path, *, draft=1, revision=1, optimizer=1, blueprint=1):
     codec = RationalCodec()
     model = FormTransformer(FormConfig(vocab_size=len(codec), d_model=16, nhead=1,

@@ -40,7 +40,7 @@ test("migration controls are visible only for song-form resume", () => {
 
 test("song-form resume restores and locks inherited settings while finetune keeps them editable", () => {
   const elements = new Map();
-  const context = {element(selector) {
+  const context = {currentModelFamily: () => "song_form_v2", element(selector) {
     if (!elements.has(selector)) elements.set(selector, {value: "manual", checked: false, disabled: false, type: selector === "#qualityEnabled" ? "checkbox" : "number"});
     return elements.get(selector);
   }};
@@ -49,19 +49,20 @@ test("song-form resume restores and locks inherited settings while finetune keep
   const settings = {lr: 0.0003, batch_size: 2, grad_accumulation: 4, seed: 7, weight_decay: 0.02,
     condition_drop_prob: 0.1, blueprint_loss_weight: 1.2, load_curve_loss_weight: 0.3,
     relation_loss_weight: 0.2, quality_enabled: true, max_steps: 12, limit_charts: 16,
-    precision: "bf16", max_region_seconds: 12};
+    precision: "bf16", max_region_seconds: 12, blueprint_batch_size: 4};
   context.apply({valid: true, resume_settings: settings,
     model_config: {d_model: 128, layers: 3, nhead: 4, max_tokens: 1024, max_memory_tokens: 256, dropout: 0.2},
     epoch: 5, blueprint_steps: 10, optimizer_steps: 20, can_generate: true, can_revise: false}, "resume");
   for (const selector of ["#learningRate", "#batchSize", "#gradAccumulation", "#trainingSeed", "#weightDecay",
     "#formConditionDropout", "#formBlueprintLossWeight", "#formCurveLossWeight", "#formRelationLossWeight",
-    "#qualityEnabled", "#maxSteps", "#formLimitCharts", "#formPrecision", "#formMaxRegionSeconds"]) {
+    "#qualityEnabled", "#maxSteps", "#formLimitCharts", "#formPrecision", "#formMaxRegionSeconds", "#formBlueprintBatchSize"]) {
     assert.equal(elements.get(selector).disabled, true, `${selector} should be locked for resume`);
   }
   assert.equal(elements.get("#formLimitCharts").value, "16");
   assert.equal(elements.get("#qualityEnabled").checked, true);
   assert.equal(elements.get("#formDModel").disabled, true);
   assert.equal(elements.get("#formDropout").value, "0.2");
+  assert.equal(elements.get("#formBlueprintBatchSize").value, "4");
   assert.match(elements.get("#checkpointInspectStatus").textContent, /limit_charts=16/);
 
   context.apply({valid: true, model_config: {d_model: 256, layers: 4, nhead: 8}}, "finetune");
@@ -69,6 +70,7 @@ test("song-form resume restores and locks inherited settings while finetune keep
   assert.equal(elements.get("#formDModel").disabled, true);
   assert.equal(elements.get("#learningRate").disabled, false);
   assert.equal(elements.get("#formLimitCharts").disabled, false);
+  assert.equal(elements.get("#formBlueprintBatchSize").disabled, false);
 });
 
 test("song-form output nonce is a directory component and preserves the requested filename", () => {
@@ -80,6 +82,21 @@ test("song-form output nonce is a directory component and preserves the requeste
   assert.match(first, /^webui_workspace\/generated\/\.task-[^/]+\/maidata\.txt$/);
   assert.notEqual(first, second);
   assert.match(context.unique("D:\\charts\\maidata.txt"), /^D:\\charts\\\.task-[^\\]+\\maidata\.txt$/);
+});
+
+test("rational resume without saved planner batch displays the trainer fallback", () => {
+  const elements = new Map();
+  const context = {currentModelFamily: () => "song_form_v2", element(selector) {
+    if (!elements.has(selector)) elements.set(selector, {value: "", disabled: false, type: "number"});
+    return elements.get(selector);
+  }};
+  vm.createContext(context);
+  vm.runInContext(`${functionSource("function applySongFormCheckpointConfig(data, mode) {", "async function inspectCheckpoint(")}\nglobalThis.apply = applySongFormCheckpointConfig;`, context);
+  context.apply({valid: true, model_family: "song_form_v2", args: {}}, "resume");
+  assert.equal(elements.get("#formBlueprintBatchSize").value, "1");
+  assert.equal(elements.get("#formBlueprintBatchSize").disabled, true);
+  context.apply({valid: true, model_family: "song_form_v2", args: {}}, "finetune");
+  assert.equal(elements.get("#formBlueprintBatchSize").disabled, false);
 });
 
 test("completed song-form task retries artifact collection at most three times", async () => {

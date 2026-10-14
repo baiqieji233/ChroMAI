@@ -44,3 +44,11 @@ P0 主体备份：`backups/rational_event_rebuild_20261014/source_before_rebuild
 本轮测试证据：`tests/test_form_rational_events.py` 13 passed；组合的 form、legacy checkpoint、缓存、source contract、prepare、API 和 WebUI 测试 135 passed；WebUI 浏览器探针通过 1440×1000 与 390×844；`git diff --check` 通过。短跑只证明链路、合同和输出可编译，不证明谱面音乐质量。
 
 旧训练 `f953c729af16` 已按授权停止：完成第13轮，保存第14轮配置阶段16000批断点。原目录与额外备份 `song_form_v1_last_before_rebuild.pt` 保留，未迁移为新架构权重。
+
+## Blueprint 性能优化收尾（2026-10-15）
+
+主体 `6ae89c5` 已增加 Planner CPU 输入缓存、带遮罩的全曲批处理、有界有序线程预取和主 WebUI 参数。实际用户训练 `d69dff3da685` 使用规划 batch=4、准备线程=4、预取=8，完成 1866 张谱面规划并写出 1866 份缓存，损坏/写入错误均为 0，随后进入配置训练。
+
+本次收尾统一 HTML/API/CLI 的准备线程上限 4，补齐 resume 的规划批大小显示/锁定及旧 v2 默认值 1，并修正前端测试环境。最终 71 项定向 Python 检查和 17 项前端检查通过；另有 69 项已有微型链路检查通过。正式训练未被本次启动、重启或停止。首轮冷缓存约 27 分 27 秒，第二轮全量热缓存速度尚待实际日志；8 份真实缓存只读抽查全部命中，不外推整轮性能或谱面质量。
+
+完整证据、备份、服务生效边界和冷加载锁限制见 [Blueprint 优化收尾报告](BLUEPRINT_OPTIMIZATION_CLOSEOUT_20261015.md)。

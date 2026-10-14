@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+import pytest
 
 from maichart.webui import server as webui
 from maichart.webui import form_api
@@ -54,6 +55,30 @@ def test_blueprint_batch_size_blank_uses_checkpoint_aware_trainer_default(webui_
     assert args.blueprint_workers==0 and args.blueprint_prefetch==8
     html=(Path(__file__).parents[1]/'src/maichart/webui/static/index.html').read_text(encoding='utf-8')
     assert '全曲规划批大小' in html and '规划准备线程' in html and '规划预取谱面数' in html
+
+
+@pytest.mark.parametrize('workers', [0, 1, 4, 5, 8])
+def test_blueprint_worker_bounds_match_cli_and_visible_control(webui_api, monkeypatch, tmp_path, workers):
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text('{}')
+    calls = []
+    monkeypatch.setattr(webui, '_run_subprocess_task', lambda task, args, **kwargs: calls.append(args))
+    status, result = webui_api('/api/form/train', {
+        'manifest': str(manifest), 'checkpoint_dir': str(tmp_path / 'new'),
+        'mode': 'fresh', 'model_family': 'song_form_v2', 'device': 'cpu',
+        'blueprint_workers': workers,
+    })
+    if workers > 4:
+        assert status == 400 and 'blueprint_workers' in result['error']
+        assert not calls
+    else:
+        assert status == 200, result
+        from maichart.form.train import parser, _validate
+        args = parser().parse_args(calls[0][2:])
+        _validate(args)
+        assert args.blueprint_workers == workers
+    html = (Path(__file__).parents[1] / 'src/maichart/webui/static/index.html').read_text(encoding='utf-8')
+    assert 'id="formBlueprintWorkers" type="number" min="0" max="4"' in html
 
 
 def test_old_checkpoint_is_not_accepted_by_new_training(webui_api,tmp_path):

@@ -24,6 +24,8 @@ def form_resume_settings(payload):
     contract = payload.get('dataset_contract') or {}
     groups = (payload.get('optimizer_state_dict') or {}).get('param_groups') or []
     values = {key: args[key] for key in RESUME_ARGUMENT_KEYS if key in args}
+    if payload.get('family') == 'song_form_v2':
+        values['blueprint_batch_size'] = args.get('blueprint_batch_size') or 1
     values.update(lr=groups[0].get('lr', args.get('lr')) if groups else args.get('lr'),
                   limit_charts=args.get('limit_charts', 0),
                   max_region_seconds=contract.get('max_region_seconds', 14),
@@ -264,7 +266,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'relation_loss_weight':number('relation_loss_weight',.1,0,100)}
         if payload.get('blueprint_batch_size') not in {None, ''}:
             values['blueprint_batch_size'] = number('blueprint_batch_size',4,1,16,True)
-        values['blueprint_workers'] = number('blueprint_workers',0,0,8,True)
+        values['blueprint_workers'] = number('blueprint_workers',0,0,4,True)
         values['blueprint_prefetch'] = number('blueprint_prefetch',8,1,64,True)
         values['quality_enabled'] = bool(payload.get('quality_enabled', True))
         if values['audio_cache_mode'] not in {'lru','resident'}:

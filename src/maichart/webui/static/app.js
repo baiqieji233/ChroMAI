@@ -2666,9 +2666,12 @@ function applySongFormCheckpointConfig(data, mode) {
     ["#formBlueprintLossWeight", "blueprint_loss_weight"], ["#formCurveLossWeight", "load_curve_loss_weight"],
     ["#formRelationLossWeight", "relation_loss_weight"], ["#qualityEnabled", "quality_enabled"],
     ["#maxSteps", "max_steps"], ["#formLimitCharts", "limit_charts"], ["#formPrecision", "precision"],
-    ["#formMaxRegionSeconds", "max_region_seconds"]];
+    ["#formMaxRegionSeconds", "max_region_seconds"], ["#formBlueprintBatchSize", "blueprint_batch_size"]];
   inherited.forEach(([selector]) => { const node = element(selector); if (node) node.disabled = false; });
   const settings = {...(data?.args || {}), ...(data?.resume_settings || {})};
+  if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.blueprint_batch_size == null) {
+    settings.blueprint_batch_size = 1;
+  }
   if (settings.max_region_seconds == null && data?.dataset_contract?.max_region_seconds != null) {
     settings.max_region_seconds = data.dataset_contract.max_region_seconds;
   }
