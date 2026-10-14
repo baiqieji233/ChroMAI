@@ -157,6 +157,8 @@ def _sequence_onsets(records,tempo,first,*,tolerance_ms,min_interval_ms,
             and not any(float(region['start_sec']) <= second < float(region['end_sec'])
                         for region in rest_regions))
     runs=[]
+    gapped_run_count=ungapped_run_count=0
+    gapped_run_changes=ungapped_run_changes=0
     index=0
     while tolerance > 0 and index+4 <= len(original):
         chosen=None
@@ -167,18 +169,26 @@ def _sequence_onsets(records,tempo,first,*,tolerance_ms,min_interval_ms,
             if any(gap <= 0 for gap in gaps):continue
             mean=sum(gaps)/len(gaps)
             variation=math.sqrt(sum((gap-mean)**2 for gap in gaps)/len(gaps))/mean
-            if variation > .35:continue
             if any(beats[index] < boundary < beats[stop-1] for boundary in boundaries):continue
             if any(source[0] < float(region['end_sec']) and source[-1] > float(region['start_sec'])
                    for region in rest_regions):continue
             prior_gaps=[b-a for a,b in zip(beats[index:stop],beats[index+1:stop])]
-            if len(set(prior_gaps)) == 1:continue
+            if len(set(prior_gaps)) == 1:
+                continue
             candidates=[]
             for division in divisions:
                 step=Fraction(4,division)
                 positions=[round(Fraction(str(raw_beats[i]))/step)*step for i in range(index,stop)]
                 intervals=[b-a for a,b in zip(positions,positions[1:])]
-                if not intervals or intervals[0] <= 0 or len(set(intervals)) != 1:continue
+                grid_steps=[interval/step for interval in intervals]
+                uniform_grid=bool(intervals) and intervals[0] > 0 and len(set(intervals)) == 1
+                if not uniform_grid:
+                    if any(value.denominator != 1 or not 1 <= value <= 2 for value in grid_steps):
+                        continue
+                    # Nonuniform runs may include a single missed grid onset,
+                    # but most intervals must retain the primary spacing.
+                    if sum(value == 1 for value in grid_steps) < max(2,math.ceil(len(intervals)*.5)):
+                        continue
                 if any('rhythm_grid_division' in result[i] and position != Fraction(result[i]['beat'])
                        for i,position in zip(range(index,stop),positions)):continue
                 if not all(safe(i,position) for i,position in zip(range(index,stop),positions)):continue
@@ -189,13 +199,32 @@ def _sequence_onsets(records,tempo,first,*,tolerance_ms,min_interval_ms,
                 if stop < len(result) and (positions[-1] >= Fraction(result[stop]['beat'])
                     or float(result[stop]['second'])-seconds[-1] < minimum-1e-9):continue
                 cost=sum((a-b)**2 for a,b in zip(seconds,source))/length
-                candidates.append((cost,division,positions,seconds))
+                source_rms_ms=math.sqrt(cost)*1000
+                current_cost=sum((stamp(Fraction(result[i]['beat']))-raw[i])**2
+                                  for i in range(index,stop))/length
+                changed_positions=sum(position != Fraction(result[i]['beat'])
+                                     for i,position in zip(range(index,stop),positions))
+                has_missing_onset=(not uniform_grid and any(value == 2 for value in grid_steps))
+                if (not has_missing_onset and variation > .35):
+                    continue
+                # Missing-note gaps raise raw interval variation by design.
+                # Admit those runs only when the projected grid fits the frame
+                # timestamps tightly and both ends agree with existing anchors.
+                if (has_missing_onset and (source_rms_ms > 15 or changed_positions < 2
+                        or cost >= current_cost-1e-10
+                        or positions[0] != Fraction(result[index]['beat'])
+                        or positions[-1] != Fraction(result[stop-1]['beat']))):
+                    continue
+                missed_steps=sum(value == 2 for value in grid_steps) if has_missing_onset else 0
+                candidates.append((cost,division,positions,seconds,grid_steps,
+                                   changed_positions,missed_steps,variation))
             if candidates:
                 chosen=(stop,min(candidates,key=lambda item:(item[0],item[1])))
                 break
         if chosen is None:
             index+=1;continue
-        stop,(cost,division,positions,seconds)=chosen
+        stop,(cost,division,positions,seconds,grid_steps,changed_positions,
+              missed_steps,variation)=chosen
         for i,position,second in zip(range(index,stop),positions,seconds):
             item=dict(original[i])
             item['rhythm_grid_division']=division
@@ -205,18 +234,88 @@ def _sequence_onsets(records,tempo,first,*,tolerance_ms,min_interval_ms,
                     rhythm_snap_shift_ms=(second-float(original[i]['second']))*1000,
                     rhythm_snap_division=division)
             result[i]=item
+        if missed_steps:
+            gapped_run_count+=1
+            gapped_run_changes+=changed_positions
+        else:
+            ungapped_run_count+=1
+            ungapped_run_changes+=changed_positions
         runs.append({'start_index':index,'end_index':stop-1,'division':division,
-                     'source_rms_ms':math.sqrt(cost)*1000})
+                     'missed_grid_steps':missed_steps,
+                     'source_gap_cv':variation,'source_rms_ms':math.sqrt(cost)*1000})
         index=stop-1
     changed=[i for i,item in enumerate(result) if Fraction(item['beat']) != beats[i]]
     common=lambda beat:any((beat*division/4).denominator==1 for division in divisions)
-    stats={'enabled':True,'mode':'sequence','algorithm':'bounded_uniform_run_inference_v1',
+    ambiguous_phases=_ambiguous_uniform_phases(
+        original,tempo,first,divisions,enabled=tolerance > 0,rest_regions=rest_regions)
+    stats={'enabled':True,'mode':'sequence','algorithm':'bounded_local_grid_inference_v2',
         'divisions':list(divisions),'tolerance_ms':float(tolerance_ms),'changed':len(changed),
         'already_common':sum(common(beat) for beat in beats),
         'common_reconsidered':sum(common(beats[i]) for i in changed),
         'maximum_shift_ms':max((abs(float(result[i]['second'])-float(original[i]['second']))*1000
                                 for i in changed),default=0.),
         'uniform_runs_count':len(runs),'uniform_runs':runs[:32],
-        'run_records_truncated':len(runs)>32,'point_pass':point_stats,
+        'gapped_runs_count':gapped_run_count,'gapped_run_changed_onsets':gapped_run_changes,
+        'ungapped_runs_count':ungapped_run_count,'ungapped_run_changed_onsets':ungapped_run_changes,
+        'run_records_truncated':len(runs)>32,'ambiguous_phase_runs':ambiguous_phases[:32],
+        'ambiguous_phase_runs_truncated':len(ambiguous_phases)>32,'point_pass':point_stats,
         'count_before':len(original),'count_after':len(result)}
     return result,stats
+
+
+def _ambiguous_uniform_phases(records,tempo,first,divisions,*,enabled=True,rest_regions=()):
+    """Report coherent off-grid phases without deciding whether they are errors."""
+    from maichart.generation.event_audio import _time_to_beat,_normalize_tempo_map
+
+    if not enabled or len(records) < 5:
+        return []
+    clock=_normalize_tempo_map(tempo,tempo[0].bpm)
+    raw=[float(item.get('source_second',item['second'])) for item in records]
+    raw_beats=[float(_time_to_beat(second-first,clock)) for second in raw]
+    spans=[]
+    index=0
+    while index+5 <= len(records):
+        found=None
+        for stop in range(min(len(records),index+16),index+4,-1):
+            gaps=[b-a for a,b in zip(raw[index:stop],raw[index+1:stop])]
+            if not gaps or any(gap <= 0 for gap in gaps):
+                continue
+            raw_start,raw_end=raw[index],raw[stop-1]
+            beat_start,beat_end=Fraction(str(raw_beats[index])),Fraction(str(raw_beats[stop-1]))
+            if any(beat_start < Fraction(item.beat) < beat_end for item in tempo):
+                continue
+            if any(raw_start < float(region['end_sec']) and raw_end > float(region['start_sec'])
+                   for region in rest_regions):
+                continue
+            mean=sum(gaps)/len(gaps)
+            variation=math.sqrt(sum((gap-mean)**2 for gap in gaps)/len(gaps))/mean
+            if variation > .08:
+                continue
+            candidates=[]
+            for division in divisions:
+                step=Fraction(4,division)
+                beats=raw_beats[index:stop]
+                residuals=[float(Fraction(str(beat)) % step) for beat in beats]
+                # A single coherent nonzero phase is intrinsically ambiguous:
+                # it can be a delayed model peak or authored syncopation.
+                wrapped=[min(value,float(step)-value) for value in residuals]
+                phase=residuals[0]
+                distance=[min(abs(value-phase),float(step)-abs(value-phase)) for value in residuals]
+                if max(wrapped) < .0125 or max(distance) > .0125:
+                    continue
+                signed_phase=phase if phase <= float(step)/2 else phase-float(step)
+                candidates.append((variation,division,signed_phase))
+            if candidates:
+                found=(stop,min(candidates,key=lambda item:(item[0],item[1],item[2])))
+                break
+        if found is None:
+            index+=1
+            continue
+        stop,(variation,division,phase)=found
+        anchor=Fraction(str(raw_beats[index]))
+        offset=seconds_at_beat(anchor+Fraction(str(phase)),tempo,first)-seconds_at_beat(anchor,tempo,first)
+        spans.append({'start_index':index,'end_index':stop-1,'division':division,
+                      'phase_offset_beats':phase,'phase_offset_ms':float(offset)*1000,
+                      'gap_cv':variation})
+        index=stop-1
+    return spans

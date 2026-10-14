@@ -70,6 +70,78 @@ def test_sequence_never_moves_across_tempo_anchors_or_exceeds_minimum_spacing_bu
     assert report['uniform_runs_count'] == 0
 
 
+def test_missing_onset_grid_run_recovers_two_shifted_points_from_20ms_frames():
+    tempo=[EventTempo(F(0),220)]
+    targets=[F(0),F(1,3),F(2,3),F(1),F(5,3),F(7,3),F(8,3),F(3)]
+    current=[F(0),F(1,3),F(2,3),F(1),F(13,8),F(19,8),F(8,3),F(3)]
+    raw=[round(float(seconds_at_beat(beat,tempo,0))/.02)*.02 for beat in targets]
+    records=[dict(beat=str(beat),second=seconds_at_beat(beat,tempo,0),
+                  source_second=source,score=.9)
+             for beat,source in zip(current,raw)]
+    fixed,report=approximate_onsets(records,tempo,0,tolerance_ms=40,mode='sequence')
+    assert [F(item['beat']) for item in fixed] == targets
+    assert report['changed'] == 2
+    assert len(fixed) == len(records)
+    assert all(any((F(item['beat'])*division/4).denominator == 1
+                   for division in (4,8,12,16,24,32)) for item in records)
+    assert report['uniform_runs'][0]['missed_grid_steps'] == 2
+
+
+def test_safe_uniform_grid_repair_still_allows_a_single_interior_correction():
+    tempo=[EventTempo(F(0),190)]
+    targets=[F(0),F(1,4),F(1,2),F(3,4)]
+    current=[F(0),F(1,4),F(11,24),F(3,4)]
+    raw=[round(float(seconds_at_beat(beat,tempo,0))/.02)*.02 for beat in targets]
+    records=[dict(beat=str(beat),second=seconds_at_beat(beat,tempo,0),
+                  source_second=source,score=.9)
+             for beat,source in zip(current,raw)]
+    fixed,report=approximate_onsets(records,tempo,0,tolerance_ms=20,mode='sequence')
+    assert [F(item['beat']) for item in fixed] == targets
+    assert report['changed'] == 1
+
+
+def test_half_note_spacing_keeps_uniform_two_step_repair_behavior():
+    tempo=[EventTempo(F(0),300)]
+    targets=[F(0),F(2),F(4),F(6),F(8)]
+    current=[F(0),F(2),F(33,8),F(6),F(8)]
+    raw=[round(float(seconds_at_beat(beat,tempo,0))/.02)*.02 for beat in targets]
+    records=[dict(beat=str(beat),second=seconds_at_beat(beat,tempo,0),
+                  source_second=source,score=.9)
+             for beat,source in zip(current,raw)]
+    fixed,report=approximate_onsets(records,tempo,0,tolerance_ms=40,mode='sequence')
+    assert [F(item['beat']) for item in fixed] == targets
+    assert report['changed'] == 1
+    assert report['gapped_runs_count'] == 0
+
+
+def test_uniform_shifted_eighth_phase_is_reported_and_left_unchanged():
+    tempo=[EventTempo(F(0),190)]
+    beats=[F(1,8)+i*F(1,2) for i in range(6)]
+    records=[dict(beat=str(beat),second=seconds_at_beat(beat,tempo,0),
+                  source_second=seconds_at_beat(beat,tempo,0),score=.9) for beat in beats]
+    fixed,report=approximate_onsets(records,tempo,0,tolerance_ms=40,mode='sequence')
+    assert [F(item['beat']) for item in fixed] == beats
+    assert report['changed'] == 0
+    assert report['ambiguous_phase_runs']
+    assert report['ambiguous_phase_runs'][0]['division'] == 8
+    assert report['ambiguous_phase_runs'][0]['phase_offset_beats'] == pytest.approx(.125)
+    unchanged,disabled=approximate_onsets(records,tempo,0,tolerance_ms=0,mode='sequence')
+    assert unchanged == records
+    assert disabled['ambiguous_phase_runs'] == []
+
+
+@pytest.mark.parametrize('beats',[
+    [F(0),F(1,3),F(1,2),F(5,6),F(1),F(4,3),F(3,2)],
+    [F(0),F(3,8),F(1,2),F(7,8),F(1),F(11,8),F(3,2),F(15,8),F(2)],
+])
+def test_exact_mixed_triplet_and_alternating_dotted_eighth_runs_are_preserved(beats):
+    records=[dict(beat=str(beat),second=seconds_at_beat(beat,TEMPO,0),
+                  source_second=seconds_at_beat(beat,TEMPO,0),score=.9) for beat in beats]
+    fixed,report=approximate_onsets(records,TEMPO,0,tolerance_ms=32,mode='sequence')
+    assert [F(item['beat']) for item in fixed] == beats
+    assert report['changed'] == 0
+
+
 def test_custom_fine_grids_and_zero_tolerance_remain_available():
     tempo=[EventTempo(F(0),60)]
     beats=[F(i,12) for i in range(6)]
