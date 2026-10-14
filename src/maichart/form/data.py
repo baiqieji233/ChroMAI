@@ -309,9 +309,14 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
         local_curve = torch.zeros((0, 4), dtype=torch.float32)
         local_times = torch.zeros((0,), dtype=torch.float32)
         local_curve_mask = torch.zeros((0, 4), dtype=torch.bool)
+    history_tokens = codec.bounded_memory(history,origin=hist_origin,max_tokens=max_memory_tokens)
+    history_kept = history_tokens.count(codec.end_id)
+    history_seconds = (float(seconds_at_beat(span.start, song.tempo, song.first)
+                             - seconds_at_beat(history[-history_kept].beat, song.tempo, song.first))
+                       if history_kept else 0.0)
     return {
         "audio": form_audio(song,span.start,span.end), "form": torch.from_numpy(form),
-        "history": torch.tensor(codec.bounded_memory(history,origin=hist_origin,max_tokens=max_memory_tokens)),
+        "history": torch.tensor(history_tokens),
         "motif": torch.tensor(motif),
         "draft": torch.tensor(codec.bounded_memory(draft,origin=span.start,max_tokens=max_memory_tokens,newest=False)),
         "right": torch.tensor(codec.bounded_memory(right,origin=span.end,max_tokens=max_memory_tokens,newest=False)),
@@ -326,7 +331,12 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
             max_tokens=max_memory_tokens, newest=False)),
         "meta": {"span": span.to_dict(), "reference_source": ref.source,
                  "region": region.to_dict(), "region_index": region_index,
-                 "state_count": state_meta["state_count"], "task": "draft" if task==0 else "reconstruction"},
+                 "state_count": state_meta["state_count"],
+                 "state_truncated_count": state_meta.get("truncated_count", 0),
+                 "history_events_available":len(history), "history_events_kept":history_kept,
+                 "history_tokens":len(history_tokens), "history_coverage_seconds":history_seconds,
+                 "motif_events_kept":motif.count(codec.end_id),
+                 "task": "draft" if task==0 else "reconstruction"},
     }
 
 

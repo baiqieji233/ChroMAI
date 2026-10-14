@@ -70,6 +70,15 @@ def test_form_repair_log_event_is_exposed_on_task_result():
     assert task.result['repair_summary']['status']=='partial_budget_exhausted'
 
 
+def test_form_local_load_log_retains_head_and_event_peak_units():
+    from types import SimpleNamespace
+    task=SimpleNamespace(kind='form_generate',result={})
+    form_api.update_form_progress(task,
+        'form_local_load {"peak_all_head_nps":20,"peak_occupied_events_nps":14}')
+    assert task.result['local_load_summary']['peak_all_head_nps']==20
+    assert task.result['local_load_summary']['peak_occupied_events_nps']==14
+
+
 def test_none_control_profile_label_matches_its_two_zeroed_training_weights(webui_api,monkeypatch,tmp_path):
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')
     calls=[]

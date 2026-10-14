@@ -271,7 +271,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
         "checkpoint": str(checkpoint), "audio": str(audio),
         "output": str(tmp_path / "out.txt"), "onset_merge_ms": 55.6,
         "first": first,
-        "planner_type_strength": 3, "style_balance_strength": 0,
+        "planner_type_strength": 3, "style_balance_strength": 0, "local_chord_strength": 0,
         "rhythm_snap_enabled": True, "rhythm_snap_ms": 8,
         "rhythm_snap_divisions": [64, 48, 64],
     }, runtime=Runtime())
@@ -281,6 +281,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert args[args.index("--onset-merge-ms") + 1] == "55.6"
     assert args[args.index("--planner-type-strength") + 1] == "3.0"
     assert args[args.index("--style-balance-strength") + 1] == "0.0"
+    assert args[args.index("--local-chord-strength") + 1] == "0.0"
     assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
     assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"
     assert "--rhythm-snap" in args
@@ -291,6 +292,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert tasks[0].result["effective_settings"]["temperature"] == 0.7
     assert tasks[0].result["effective_settings"]["planner_type_strength"] == 3
     assert tasks[0].result["effective_settings"]["style_balance_strength"] == 0
+    assert tasks[0].result["effective_settings"]["local_chord_strength"] == 0
     assert tasks[0].result["effective_settings"]["rhythm_snap_mode"] == "sequence"
     fixed = form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "fixed.txt"),
@@ -301,6 +303,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert tasks[1].result["effective_settings"]["seed"] == 42
     assert calls[1][calls[1].index("--planner-type-strength") + 1] == "1.0"
     assert calls[1][calls[1].index("--style-balance-strength") + 1] == "1.0"
+    assert calls[1][calls[1].index("--local-chord-strength") + 1] == "1.0"
     assert "--rhythm-snap-mode" not in calls[1]
     assert tasks[1].result["effective_settings"]["planner_type_strength"] == 1.0
     assert tasks[1].result["effective_settings"]["style_balance_strength"] == 1.0
@@ -355,7 +358,7 @@ def test_generation_rejects_unknown_rhythm_snap_mode_before_task_creation(monkey
     assert created == []
 
 
-@pytest.mark.parametrize("field", ["planner_type_strength", "style_balance_strength"])
+@pytest.mark.parametrize("field", ["planner_type_strength", "style_balance_strength", "local_chord_strength"])
 @pytest.mark.parametrize("value", [-0.1, 3.1, float("nan"), True])
 def test_generation_type_guidance_strengths_are_bounded_before_task_creation(monkeypatch, tmp_path, field, value):
     checkpoint = tmp_path / "form.pt"

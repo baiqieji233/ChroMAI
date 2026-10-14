@@ -145,3 +145,47 @@ def test_uniform_planner_cue_does_not_add_a_type_preference():
     huge = TypeGuidance(ATOMS, condition(), [{'beat': '0', 'type_probabilities': [1e308]*4}],
                         planner_strength=1, style_strength=0)
     assert huge.event(F(0)).biases('1', [None, '-', 'h', '/']) == pytest.approx([0]*4)
+
+
+def test_local_chord_pressure_prices_slash_before_another_head_is_unavoidable():
+    atoms = ['1', '2', '3', 'C']
+    cues = [{'beat':str(i), 'second':i*.1} for i in range(10)]
+    guide = TypeGuidance(atoms, condition(), cues, planner_strength=0, style_strength=0,
+                         local_chord_strength=1)
+    for i in range(8):
+        guide.commit('1/2', F(i))
+    bias = guide.event(F(8))
+    end, slash = bias.biases('1', [None, '/'])
+    assert slash < end
+    # A button plus a Touch is not treated as two button heads.
+    assert bias._local_potential('1/C', complete=True) == 0
+    assert bias._local_potential('1/2', complete=True) < 0
+    # Score the complete cell once, without multiplying the penalty by length.
+    text = ''
+    total = 0.
+    for char in '1/2':
+        total += bias.biases(text, [char])[0]
+        text += char
+    total += bias.biases(text, [None])[0]
+    assert total == pytest.approx(bias._local_potential(text, complete=True))
+
+
+def test_local_chord_pressure_changes_actual_decoding_and_zero_is_exact_bypass():
+    atoms = ['1', '2', '3']
+    codec = RationalCodec()
+    cues = [{'beat':str(i), 'second':i*.1} for i in range(10)]
+    class ChordPreferringModel(TapPreferringModel):
+        def decode_step(self, *_):
+            logits = torch.full((1,1,len(self.codec)), -10.)
+            for char, score in (('1',3.),('2',2.),('3',1.),('/',.9)):
+                logits[...,self.codec.ids['N:'+char]] = score
+            logits[...,self.codec.end_id] = .8
+            return logits, None
+    def generate_one(strength):
+        guide = TypeGuidance(atoms, condition(), cues, planner_strength=0, style_strength=0,
+                             local_chord_strength=strength)
+        for i in range(8):guide.commit('1/2',F(i))
+        return arrange_span(ChordPreferringModel(codec),codec,EXAMPLE,[F(8)],atoms,
+                            origin=F(0),temperature=0,type_guidance=guide)[0][0].note_text
+    assert generate_one(0) == '1/2/3'
+    assert generate_one(1) == '1'

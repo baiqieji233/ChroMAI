@@ -1434,8 +1434,10 @@ function collectCondition() {
 }
 
 function songFormGenerationPayload() {
+  const localChordStrength = Number(valueOrDefault("#formLocalChordStrength", 1.0));
+  const condition = {...collectCondition(), generation_options: {local_chord_strength: localChordStrength}};
   return { model_family: "song_form_v1", checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
-    level: Number(valueOrDefault("#level", 13.3)), condition: collectCondition(), bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
+    level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
     intensity_curve_strength: Number(valueOrDefault("#intensityCurveStrength", .65)), intensity_curve_span: Number(valueOrDefault("#intensityFollowSpan", .5)), intensity_curve_mode: valueOrDefault("#intensityCurveMode", "follow"),
     memory_strength: Number(valueOrDefault("#formMemoryStrength", .6)), onset_threshold: Number(valueOrDefault("#formOnsetThreshold", .5)),
@@ -1446,6 +1448,7 @@ function songFormGenerationPayload() {
     rhythm_snap_mode: valueOrDefault("#formRhythmSnapMode", "sequence"),
     planner_type_strength: Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),
     style_balance_strength: Number(valueOrDefault("#formStyleBalanceStrength", 1.0)),
+    local_chord_strength: localChordStrength,
     temperature: Number(valueOrDefault("#temperature", .65)), seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
 }
 function uniqueSongFormOutputPath(requested) {
@@ -1773,6 +1776,22 @@ function renderTaskResults(task) {
     }
   }
   renderTaskOnsetDiagnostics(task);
+  if (task.kind === "form_generate") {
+    let load = task.result?.local_load_summary;
+    if (!load) for (const line of [...(task.logs || [])].reverse()) {
+      const start = line.indexOf("form_local_load ");
+      if (start < 0) continue;
+      try { load = JSON.parse(line.slice(start + "form_local_load ".length)); break; } catch (_) {}
+    }
+    if (load) {
+      const notice = document.createElement("p");
+      notice.className = "inline-status";
+      const heads = Number(load.peak_all_head_nps), events = Number(load.peak_occupied_events_nps);
+      const bursts = Array.isArray(load.burst_intervals) ? load.burst_intervals : [];
+      notice.textContent = `局部负荷：一秒峰值 ${Number.isFinite(heads) ? heads : "未知"} 个音符头 / ${Number.isFinite(events) ? events : "未知"} 个起音（两项分别统计）。按键多押集中段 ${load.burst_interval_count ?? bursts.length} 处；详细时间见生成报告，统计不代表这些段落一定不合理。`;
+      container.appendChild(notice);
+    }
+  }
   const files = task.result?.files || [];
   const urls = task.result?.download_urls || [];
   const paths = task.result?.paths || [];

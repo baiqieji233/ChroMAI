@@ -66,13 +66,20 @@ def _probabilities(cue):
 class TypeGuidance:
     """Keep head-share feedback across resource passes and musical regions."""
 
-    def __init__(self, atoms, condition, cues, *, planner_strength=1.0, style_strength=1.0):
+    def __init__(self, atoms, condition, cues, *, planner_strength=1.0, style_strength=1.0,
+                 local_chord_strength=0.0):
         self.planner_strength = validate_strength(planner_strength, 'planner_type_strength')
         self.style_strength = validate_strength(style_strength, 'style_balance_strength')
+        self.local_chord_strength = validate_strength(local_chord_strength, 'local_chord_strength')
         self.grammar = _NoteGrammar.from_atoms(atoms)
         if self.grammar is None:
             raise ValueError('Type guidance requires a nonempty checkpoint atom catalog')
         self.cues = {Fraction(cue['beat']): cue for cue in cues}
+        self.local_chords = None
+        if self.local_chord_strength:
+            from maichart.form.local_load import LocalChordGuard
+            self.local_chords = LocalChordGuard(list(self.cues.values()),
+                target_chord_ratio=condition.style['chord_bias'], strength=self.local_chord_strength)
         probabilities = [_probabilities(cue) for cue in self.cues.values()] if self.planner_strength else []
         probabilities = [value for value in probabilities if value is not None]
         # Use event-class probabilities, not head fractions, as the reference.
@@ -111,7 +118,8 @@ class TypeGuidance:
         style_log = self.style_strength*np.log((self.target+1e-4)/(observed+1e-4))
         planner_log = np.zeros(4) if probabilities is None else self.planner_strength*np.log(
             np.maximum(probabilities, 1e-4)/self.planner_reference)
-        return _EventBias(self, planner_log, style_log)
+        local = self.local_chords.event(beat) if self.local_chords is not None else None
+        return _EventBias(self, planner_log, style_log, local)
 
     def compatible(self, prefix, used):
         key = (prefix, used)
@@ -134,6 +142,8 @@ class TypeGuidance:
         if counts is None:
             return
         self.counts += counts
+        if self.local_chords is not None:
+            self.local_chords.commit(counts, beat)
         probabilities = _probabilities(self.cues.get(Fraction(beat))) if self.planner_strength else None
         if probabilities is not None:
             index = int(probabilities.argmax())
@@ -150,8 +160,10 @@ class TypeGuidance:
         actual['hold'] += float(ratios[4])
         actual['touch'] += float(ratios[4])
         return {
-            'schema': 'song_form_type_guidance_v1', 'applied': bool(self.planner_strength or self.style_strength),
+            'schema': 'song_form_type_guidance_v1', 'applied': bool(self.planner_strength or self.style_strength or self.local_chord_strength),
             'planner_type_strength': self.planner_strength, 'style_balance_strength': self.style_strength,
+            'local_chord_guidance': (self.local_chords.report() if self.local_chords is not None else
+                                     {'enabled':False, 'strength':0.0}),
             'planner_reference': dict(zip(PLANNER_TYPES, map(float, self.planner_reference))),
             'hard_quota': False, 'counter_unit': 'note_heads', 'counter_scope': 'whole_song',
             'measurement_stage': 'draft_before_optional_repair',
@@ -167,7 +179,7 @@ class TypeGuidance:
             'heads': int(self.counts.sum()), 'planner_cues_used': self.cue_events,
             'planner_argmax_counts': dict(self.argmax_counts), 'planner_argmax_matches': self.argmax_matches,
             'guided_tokens': self.guided_tokens, 'max_abs_token_bias': self.max_abs_bias,
-            'token_bias_bound': 2*MAX_POTENTIAL,
+            'token_bias_bound': 2*MAX_POTENTIAL+(4.0 if self.local_chords is not None else 0.0),
             'prefix_cache': {'entries': len(self._compatible_indices), 'bytes': self._cache_bytes,
                              'budget_bytes': CACHE_BYTES, 'max_entries': CACHE_ENTRIES},
             'limitations': ['Soft guidance does not guarantee target shares or playability.',
@@ -177,11 +189,13 @@ class TypeGuidance:
 
 class _EventBias:
     """Potential differences bias complete cells without a per-character reward."""
-    def __init__(self, owner, planner_log, style_log):
+    def __init__(self, owner, planner_log, style_log, local_chords=None):
         self.owner = owner
         self.planner_log = planner_log
         self.style_log = style_log
         self._potential_cache = {}
+        self.local_chords = local_chords
+        self._local_cache = {}
 
     def _score(self, counts):
         style = (counts*self.style_log).sum(-1)/np.maximum(counts.sum(-1), 1.0)
@@ -215,10 +229,44 @@ class _EventBias:
         self._potential_cache[text] = value
         return value
 
+    def _local_potential(self, text, *, complete=False):
+        """Price the eventual complete cell, including a head required by '/'.
+
+        Waiting until after the slash would subtract the same penalty from
+        every next-head choice, which cancels in softmax and cannot stop chords.
+        """
+        if self.local_chords is None:
+            return 0.0
+        key = (text, complete)
+        if key in self._local_cache:
+            return self._local_cache[key]
+        parts = self.owner.grammar._split_slashes(text)
+        if complete:
+            counts = self._completed(parts)
+            value = -float(self.local_chords.penalty(counts[:3].sum())) if counts is not None else 0.0
+        else:
+            fixed = self._completed(parts[:-1])
+            used = frozenset().union(*(self.owner.grammar.heads[part] for part in parts[:-1]))
+            indices = self.owner.compatible(parts[-1], used)
+            if fixed is None or not len(indices):
+                value = 0.0
+            else:
+                heads = self.owner.matrix[indices, :3].sum(-1)+fixed[:3].sum()
+                scores = -self.local_chords.penalty(heads)
+                maximum = float(scores.max())
+                value = maximum+float(np.log(np.exp(scores-maximum).mean()))
+        self._local_cache[key] = value
+        return value
+
     def biases(self, text, continuations):
         parent = self.potential(text)
         values = [self.complete(text)-parent if char is None else self.potential(text+char)-parent
                   for char in continuations]
+        if self.local_chords is not None:
+            local_parent = self._local_potential(text)
+            values = [value+self._local_potential(text if char is None else text+char,
+                                                  complete=char is None)-local_parent
+                      for value, char in zip(values, continuations)]
         maximum = max(map(abs, values), default=0.0)
         self.owner.max_abs_bias = max(self.owner.max_abs_bias, maximum)
         self.owner.guided_tokens += int(maximum > 1e-9)

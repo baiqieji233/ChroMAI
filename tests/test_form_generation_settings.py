@@ -1,4 +1,5 @@
 import json
+import pytest
 from fractions import Fraction as F
 from types import SimpleNamespace
 
@@ -26,7 +27,8 @@ def test_generation_report_records_actual_vector_and_decoder_values(tmp_path,mon
     output = tmp_path/'maidata.txt'
     cli.main(['generate','--audio','fixture.wav','--output',str(output),'--checkpoint','fixture.pt',
               '--bpm','120','--level','13.3','--condition-file',str(condition),
-              '--temperature','.2','--seed','42','--planner-type-strength','1.5','--style-balance-strength','0'])
+              '--temperature','.2','--seed','42','--planner-type-strength','1.5','--style-balance-strength','0',
+              '--local-chord-strength','0'])
     report = json.loads(output.with_suffix('.form.json').read_text())
     effective = report['effective_generation_settings']
     assert effective['temperature'] == .2 and effective['seed'] == 42
@@ -38,4 +40,28 @@ def test_generation_report_records_actual_vector_and_decoder_values(tmp_path,mon
     assert effective['condition_vector_level_divisor'] == 15.0
     assert effective['planner_type_strength'] == received['planner_type_strength'] == 1.5
     assert effective['style_balance_strength'] == received['style_balance_strength'] == 0
+    assert effective['local_chord_strength'] == received['local_chord_strength'] == 0
     assert parse_event_chart(output,5).level == '14.5'
+
+
+@pytest.mark.parametrize('explicit,expected', [(None,0.),('2',2.)])
+def test_existing_condition_transport_carries_new_control_with_cli_precedence(tmp_path,monkeypatch,explicit,expected):
+    # The existing server forwards condition JSON but does not know new flags.
+    class ReachedAudio(Exception): pass
+    received = {}
+    from maichart.form import type_guidance
+    real_validate = type_guidance.validate_strength
+    def validated(value,name):
+        result=real_validate(value,name)
+        received[name]=result
+        return result
+    def stop_before_audio(*_args,**_kwargs): raise ReachedAudio()
+    monkeypatch.setattr(type_guidance,'validate_strength',validated)
+    monkeypatch.setattr(cli,'extract_event_audio',stop_before_audio)
+    path=tmp_path/'condition.json'
+    path.write_text(json.dumps({'level':14.7,'generation_options':{'local_chord_strength':0}}))
+    argv=['generate','--audio','fixture.wav','--output',str(tmp_path/'out.txt'),
+          '--checkpoint','fixture.pt','--condition-file',str(path)]
+    if explicit is not None:argv+=['--local-chord-strength',explicit]
+    with pytest.raises(ReachedAudio):cli.main(argv)
+    assert received['local_chord_strength']==expected

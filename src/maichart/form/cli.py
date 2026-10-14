@@ -55,6 +55,8 @@ def parser():
     p.add_argument('--temperature',type=float,default=.7);p.add_argument('--seed',type=int,default=0)
     p.add_argument('--planner-type-strength',type=float,default=1.,help='bounded soft planner type guidance; 0 disables it')
     p.add_argument('--style-balance-strength',type=float,default=1.,help='bounded note-head share feedback; 0 disables it')
+    p.add_argument('--local-chord-strength',type=float,default=None,
+                   help='softly discourage concentrated button chords in the recent two seconds; 0 disables it')
     p.add_argument('--condition-file',help='JSON GenerationCondition for Radar/Style controls')
     p.add_argument('--intensity-curve-file',help='Saved song-form intensity curve JSON')
     p.add_argument('--intensity-curve-strength',type=float,default=1.0)
@@ -82,9 +84,19 @@ def analysis_report(song):
 
 def main(argv=None):
     args=parser().parse_args(argv)
+    condition_data = _json(args.condition_file)
+    # A running pre-upgrade WebUI already forwards condition JSON unchanged.
+    # Carry only this scalar option through that existing transport; an explicit
+    # CLI flag takes precedence, and GenerationCondition ignores this metadata.
+    carried_options = (condition_data or {}).get('generation_options') or {}
+    if not isinstance(carried_options, dict):
+        raise ValueError('condition generation_options must be an object')
+    if args.local_chord_strength is None:
+        args.local_chord_strength = carried_options.get('local_chord_strength', 1.0)
     from maichart.form.type_guidance import validate_strength
     validate_strength(args.planner_type_strength,'planner_type_strength')
     validate_strength(args.style_balance_strength,'style_balance_strength')
+    args.local_chord_strength = validate_strength(args.local_chord_strength,'local_chord_strength')
     from maichart.form.onset_selection import merge_close_onsets
     merge_close_onsets([], args.onset_merge_ms)
     from maichart.form.rhythm_snap import validate_snap_ms, normalize_divisions
@@ -123,13 +135,20 @@ def main(argv=None):
     from maichart.form.generate import generate_chart,revise_chart
     model,planner,codec,payload=load(args.checkpoint,device=args.device,inference=True,
                                    task='revision' if args.operation=='revise' else 'draft',record_identity=True)
+    trained_region_seconds = (payload.get('dataset_contract') or {}).get('max_region_seconds')
+    if trained_region_seconds is not None and args.max_region_seconds > float(trained_region_seconds)+1e-9:
+        print('form_warning '+json.dumps({'message':
+            f'Generation audio span limit {args.max_region_seconds:g}s exceeds the training limit '
+            f'{float(trained_region_seconds):g}s; this can change layout context distribution.',
+            'training_max_region_seconds':trained_region_seconds,
+            'generation_max_region_seconds':args.max_region_seconds}),flush=True)
     report['source_checkpoint'] = {**payload['source_checkpoint_identity'],
                                   'family':payload['family'],'completed_epoch':payload.get('epoch'),
                                   'training_position':payload.get('training_position'),
                                   'optimizer_steps':payload.get('optimizer_steps'),
                                   'blueprint_steps':payload.get('blueprint_steps'),
                                   'model_config':payload['model_config']}
-    condition=GenerationCondition.from_dict(_json(args.condition_file)) if args.condition_file else GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
+    condition=GenerationCondition.from_dict(condition_data) if args.condition_file else GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
     report['generation_condition'] = condition.to_dict()
     from maichart.generation.conditions import CONDITION_KEYS
     report['effective_generation_settings'] = {
@@ -138,6 +157,8 @@ def main(argv=None):
         'memory_strength':args.memory_strength,'max_region_seconds':args.max_region_seconds,
         'planner_type_strength':args.planner_type_strength if args.operation=='generate' else 0.,
         'style_balance_strength':args.style_balance_strength if args.operation=='generate' else 0.,
+        'local_chord_strength':args.local_chord_strength if args.operation=='generate' else 0.,
+        'training_max_region_seconds':trained_region_seconds,
         'rhythm_snap_enabled':args.rhythm_snap,'rhythm_snap_ms':args.rhythm_snap_ms,
         'rhythm_snap_divisions':list(rhythm_snap_divisions),
         'rhythm_snap_mode':args.rhythm_snap_mode if args.rhythm_snap else 'disabled',
@@ -176,6 +197,7 @@ def main(argv=None):
             rhythm_snap_divisions=rhythm_snap_divisions,
             rhythm_snap_mode=args.rhythm_snap_mode,
             planner_type_strength=args.planner_type_strength,style_balance_strength=args.style_balance_strength,
+            local_chord_strength=args.local_chord_strength,
             temperature=args.temperature,seed=args.seed,device=args.device,
             intensity_curve=intensity_curve,
             intensity_curve_strength=args.intensity_curve_strength,
@@ -200,6 +222,10 @@ def main(argv=None):
     from maichart.generation.event_quality import assess_event_chart
     if 'quality' in report: report['draft_quality']=report.pop('quality')
     report['quality']=assess_event_chart(points,tempo,first=first,duration_sec=audio.duration_sec,target_condition=condition)
+    from maichart.form.local_load import local_load_statistics
+    report['quality']['local_load'] = local_load_statistics(points,tempo,first,
+        target_chord_ratio=condition.style['chord_bias'])
+    print('form_local_load '+json.dumps(report['quality']['local_load']),flush=True)
     export_end, export_timing = _export_end_timing(
         song.spans[-1].end, tempo, first, existing_end=chart.end_beat if chart else None)
     report['export_timing'] = export_timing

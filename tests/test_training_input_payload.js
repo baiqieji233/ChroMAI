@@ -90,16 +90,19 @@ test("main song-form generation payload forwards both type guidance strengths", 
     "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
     source.slice(begin, end) + "; return songFormGenerationPayload();");
   const payload = build((selector, fallback) => ({
-    "#formPlannerTypeStrength": "2.4", "#formStyleBalanceStrength": "0",
+    "#formPlannerTypeStrength": "2.4", "#formStyleBalanceStrength": "0", "#formLocalChordStrength": "0",
   }[selector] ?? fallback), (_selector, fallback) => fallback, () => ({}), () => "auto",
   () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
   assert.equal(payload.planner_type_strength, 2.4);
   assert.equal(payload.style_balance_strength, 0);
+  assert.equal(payload.local_chord_strength, 0);
+  assert.equal(payload.condition.generation_options.local_chord_strength, 0);
 
   const defaults = build((_selector, fallback) => fallback, (_selector, fallback) => fallback,
     () => ({}), () => "auto", () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
   assert.equal(defaults.planner_type_strength, 1.0);
   assert.equal(defaults.style_balance_strength, 1.0);
+  assert.equal(defaults.local_chord_strength, 1.0);
 });
 
 test("legacy event generation payload does not include song-form type guidance", () => {
@@ -113,6 +116,7 @@ test("legacy event generation payload does not include song-form type guidance",
     (_selector, fallback) => fallback, () => null, () => null);
   assert.equal(payload.planner_type_strength, undefined);
   assert.equal(payload.style_balance_strength, undefined);
+  assert.equal(payload.local_chord_strength, undefined);
 });
 
 test("shared formDevice leaves auto for backend hardware detection", () => {

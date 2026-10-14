@@ -104,3 +104,19 @@ test("repair summary calls out exhausted budget and partial coverage when report
   context.render({kind: "form_generate", result: {repair_summary: {remaining_actionable_hard: 3}}});
   assert.doesNotMatch(container.children[0].textContent, /预算已耗尽|未覆盖/);
 });
+
+test("local load notice preserves separate peak units and reads existing worker logs", () => {
+  const container = {children: [], replaceChildren(...children) { this.children = children; }, appendChild(child) { this.children.push(child); }};
+  const context = {
+    element: () => container,
+    document: {createElement: () => ({textContent: "", className: "", children: [], appendChild(child) { this.children.push(child); }})},
+    renderTaskOnsetDiagnostics() {},
+  };
+  vm.createContext(context);
+  vm.runInContext(`${functionSource("function renderTaskResults(task) {", "function renderGenerationResult(task) {")}\nglobalThis.render = renderTaskResults;`, context);
+  context.render({kind:"form_generate", result:{}, logs:[
+    '[12:00:00] form_local_load {"peak_all_head_nps":20,"peak_occupied_events_nps":14,"burst_interval_count":1,"burst_intervals":[]}'
+  ]});
+  assert.match(container.children[0].textContent, /20 个音符头 \/ 14 个起音/);
+  assert.match(container.children[0].textContent, /集中段 1 处/);
+});

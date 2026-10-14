@@ -79,3 +79,17 @@ def test_legacy_form_song_constructor_defaults_to_identity_region_mapping():
 
     assert legacy.regions == song.spans
     assert legacy.span_region_indices == list(range(len(song.spans)))
+
+
+def test_context_report_counts_actual_retained_history_and_keeps_older_sustain_state():
+    song = _organized()
+    history = [EventPoint(F(0),'1h[1:4]')]+[EventPoint(F(i,2),'2') for i in range(1,24)]
+    codec = RationalCodec()
+    example = input_example(song,12,history,codec=codec,max_memory_tokens=20)
+    retained = codec.decode(example['history'].tolist(),origin=history[0].beat)
+    assert retained[0].beat > 0
+    assert example['meta']['history_events_available']==len(history)
+    assert example['meta']['history_events_kept']==len(retained)<len(history)
+    assert example['meta']['history_tokens']==example['history'].numel()<=20
+    assert example['meta']['history_coverage_seconds'] == float((F(12)-retained[0].beat)/2)
+    assert example['meta']['state_count']==1

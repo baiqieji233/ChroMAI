@@ -92,7 +92,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load'}:
         return
     try:
         value = json.loads(body)
@@ -128,6 +128,8 @@ def update_form_progress(task, line):
         task.result.update(repair_summary=value)
     elif prefix == 'form_onsets':
         task.result.update(onset_summary=value)
+    elif prefix == 'form_local_load':
+        task.result.update(local_load_summary=value)
     else:
         task.result.update(phase='arrangement',progress_detail=value,progress_known=False)
 
@@ -309,11 +311,13 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             if operation == 'generate':
                 planner_type_strength=number('planner_type_strength',1.0,0,3)
                 style_balance_strength=number('style_balance_strength',1.0,0,3)
+                local_chord_strength=number('local_chord_strength',1.0,0,3)
                 rhythm_snap_mode=str(payload.get('rhythm_snap_mode','sequence'))
                 if rhythm_snap_mode not in {'sequence','point'}:
                     raise ValueError('rhythm_snap_mode must be sequence or point')
                 args += ['--planner-type-strength',str(planner_type_strength),
-                         '--style-balance-strength',str(style_balance_strength)]
+                         '--style-balance-strength',str(style_balance_strength),
+                         '--local-chord-strength',str(local_chord_strength)]
                 raw_divisions = payload.get('rhythm_snap_divisions', list(COMMON_DIVISIONS))
                 empty_divisions = raw_divisions == [] or (isinstance(raw_divisions, str) and not raw_divisions.strip())
                 if rhythm_snap_enabled and empty_divisions:
@@ -416,6 +420,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         task.result.update(seed=values['seed'],effective_settings={'seed':values['seed'],'temperature':values['temperature'],
                             'planner_type_strength':planner_type_strength,
                             'style_balance_strength':style_balance_strength,
+                            'local_chord_strength':local_chord_strength,
                             'rhythm_snap_enabled':rhythm_snap_enabled,
                             'rhythm_snap_mode':rhythm_snap_mode,
                             'rhythm_snap_ms':number('rhythm_snap_ms',15,0,50),

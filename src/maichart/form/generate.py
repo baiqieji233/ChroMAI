@@ -247,9 +247,9 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
                 consumed+=1
             return logits[0,-1]
         for beat in onsets:
-            event_bias = type_guidance.event(beat) if type_guidance is not None else None
             header=codec.position(beat-origin)
             if len(ids)+len(header)+4>=max_tokens: break
+            event_bias = type_guidance.event(beat) if type_guidance is not None else None
             ids.extend(header);text=''
             body_start = len(ids)
             for _ in range(MAX_NOTE_CHARACTERS):
@@ -305,10 +305,12 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                    intensity_curve=None,intensity_curve_strength=1.0,intensity_curve_span=.5,intensity_curve_mode='follow',
                    onset_merge_ms=40.,rhythm_snap_enabled=False,rhythm_snap_ms=15.,
                    rhythm_snap_divisions=(4,8,12,16,24,32),
-                   planner_type_strength=1.,style_balance_strength=1.,rhythm_snap_mode='sequence'):
+                   planner_type_strength=1.,style_balance_strength=1.,rhythm_snap_mode='sequence',
+                   local_chord_strength=1.):
     from maichart.form.type_guidance import TypeGuidance,validate_strength
     planner_type_strength=validate_strength(planner_type_strength,'planner_type_strength')
     style_balance_strength=validate_strength(style_balance_strength,'style_balance_strength')
+    local_chord_strength=validate_strength(local_chord_strength,'local_chord_strength')
     blueprint=blueprint or plan_onsets(planner,song,condition,threshold=threshold,device=device,
                                        intensity_curve=intensity_curve,
                                        intensity_curve_strength=intensity_curve_strength,
@@ -318,13 +320,17 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                                        rhythm_snap_divisions=rhythm_snap_divisions,rhythm_snap_mode=rhythm_snap_mode)
     onsets=[Fraction(item['beat']) for item in blueprint['onsets']]
     if onsets!=sorted(set(onsets)): raise ValueError('Blueprint beats must be sorted and unique')
-    type_guidance = TypeGuidance(atoms,condition,blueprint['onsets'],
-        planner_strength=planner_type_strength,style_strength=style_balance_strength) if (
-        planner_type_strength or style_balance_strength) else None
+    guidance_cues = [{**item, 'second':float(seconds_at_beat(Fraction(item['beat']),song.tempo,song.first))}
+                     for item in blueprint['onsets']]
+    type_guidance = TypeGuidance(atoms,condition,guidance_cues,
+        planner_strength=planner_type_strength,style_strength=style_balance_strength,
+        local_chord_strength=local_chord_strength) if (
+        planner_type_strength or style_balance_strength or local_chord_strength) else None
     accepted=[];records=[]
     for span in song.spans:
         desired=[b for b in onsets if span.start<=b<span.end]
         passes=0
+        context_records=[]
         span_fallbacks = 0
         while desired:
             # Continue at the first not-yet-written event. Keep the region and
@@ -336,6 +342,7 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
             try:
                 example=input_example(song,span.index,accepted,condition=condition,codec=codec,
                     max_memory_tokens=model.config.max_memory_tokens,memory_strength=memory_strength)
+                context_records.append(dict(example['meta']))
                 curve_values, curve_mask, curve_times = _curve_condition(
                     song, current, intensity_curve, strength=intensity_curve_strength,
                     span_limit=intensity_curve_span, mode=intensity_curve_mode)
@@ -357,10 +364,13 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
             accepted.extend(generated);desired=desired[len(generated):];passes+=1
         records.append({'span':span.index,'start':str(span.start),'end':str(span.end),
                         'resource_passes':passes,'onsets':sum(span.start<=b<span.end for b in onsets),
-                        'decoder_fallbacks':span_fallbacks})
+                        'decoder_fallbacks':span_fallbacks,'contexts':context_records})
         print('form_arrange '+json.dumps(records[-1]),flush=True)
     if not accepted: raise ValueError('Whole-song planner selected no onsets; inspect the plan before adjusting threshold')
     quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
+    from maichart.form.local_load import local_load_statistics
+    quality['local_load'] = local_load_statistics(accepted,song.tempo,song.first,
+                                                 target_chord_ratio=condition.style['chord_bias'])
     if not quality.get('syntax_valid'): raise ValueError('New-model output failed exact syntax verification')
     type_report=type_guidance.report() if type_guidance is not None else {
         'schema':'song_form_type_guidance_v1','applied':False,

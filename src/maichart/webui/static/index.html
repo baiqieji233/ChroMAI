@@ -779,16 +779,16 @@
 <details id="songFormGenerationControls" class="settings-section song-form-only" data-generation-family="song_form_v1" hidden>
 <summary><span>全曲规划与段落参考</span><small>起音选择、段落呼应与计算资源</small></summary><p class="workflow-hint">全曲规划决定采音；段落记忆提供之前相似段落的写法。等级、Radar / Style 和曲线仍在原位置调整。</p>
 <div class="form-grid">
-<label class="field">Motif 记忆强度<input id="formMemoryStrength" type="number" min="0" max="1" step="0.05" value="0.6"><small>重复音频段落只作为参考证据；0关闭参考，1允许模型完整使用门控参考。</small></label>
+<label class="field">Motif 记忆强度<input id="formMemoryStrength" type="number" min="0" max="1" step="0.05" value="0.6"><small>只调节已找到的相似段落配置参考，0关闭参考，1完整使用门控参考；不调节近期历史与持续动作记忆。没有可信段落关联时提高此值不会增加参考，具体覆盖见生成报告。</small></label>
 <label class="field">谱面起音选择阈值<input id="formOnsetThreshold" type="number" min="0.001" max="0.999" step="0.01" value="0.5"><small>0.5 是初始参考值；提高阈值会要求更强的 planner 起音证据，但高阈值仍可能留下长空白。张力曲线会改变候选起音胜算，不能用原始概率线性缩放来理解。不同 checkpoint 的阈值没有统一校准，不能直接横向比较；试听并查看本次诊断。</small></label>
 <label class="field">相邻起音合并范围（毫秒）<input id="formOnsetMergeMs" type="number" min="0" max="250" step="1" value="40"><small>范围内的附近候选只保留最强峰；不会禁止同一时刻的多押。0 关闭邻近合并。初试 30–40 ms；180 BPM 的 24 分音符约 55.6 ms，设得过大（如 60 ms）可能删掉真实快速节奏。</small></label>
 <label class="checkbox-field"><input id="formRhythmSnapEnabled" type="checkbox"><span>近似到常见分音</span><small>只把容差内的附近起音近似到已勾选候选分音；保留三连。不会直接替换谱面文本中的 <code>{192}</code>。默认关闭，小容差可保留细节；若近似会造成重合或顺序错乱则保留原时间。</small></label>
 <label class="field">最大采音偏移（毫秒）<input id="formRhythmSnapMs" type="number" min="0" max="50" step="1" value="15"><small>只在启用“近似到常见分音”后生效；数值越小越保留原始起音细节。</small></label>
-<label class="field">分音规整方式<select id="formRhythmSnapMode"><option value="sequence" selected>局部节奏一致（推荐）</option><option value="point">逐点最近</option></select><small>局部节奏一致会依据连续起音支持的均匀网格纠正微小抖动，可保留真实 12/24 分，不会把全曲固定成 16 分；最大位移仍受容差约束。证据不足时沿用逐点处理，复杂节奏请实际试听。想保留 16 分附点通常也需勾选 32 分网格。仅在启用近似时生效。</small></label>
+<label class="field">分音规整方式<select id="formRhythmSnapMode"><option value="sequence" selected>局部节奏一致（推荐）</option><option value="point">逐点最近</option></select><small>局部节奏一致根据前后起音支持的网格纠正微小抖动，也可处理有少量漏采间隔的音列；保留真实12/24分，不把全曲固定成16分。整串相位无法区分偏移与切分音时仅记录供复核，不能保证自动纠正；最大位移仍受容差约束。想保留 16 分附点通常也需勾选 32 分网格。仅在启用近似时生效。</small></label>
 <fieldset class="field span-4"><legend>近似候选分音</legend><small>选择 48/64 只增加近似候选，不会覆盖相邻起音合并范围；需要更密集采音时减小或关闭合并范围。</small><div class="inline-fields">
 <label class="checkbox-field"><input id="formRhythmDivision4" type="checkbox" checked><span>4</span></label><label class="checkbox-field"><input id="formRhythmDivision8" type="checkbox" checked><span>8</span></label><label class="checkbox-field"><input id="formRhythmDivision12" type="checkbox" checked><span>12</span></label><label class="checkbox-field"><input id="formRhythmDivision16" type="checkbox" checked><span>16</span></label><label class="checkbox-field"><input id="formRhythmDivision24" type="checkbox" checked><span>24</span></label><label class="checkbox-field"><input id="formRhythmDivision32" type="checkbox" checked><span>32</span></label><label class="checkbox-field"><input id="formRhythmDivision48" type="checkbox"><span>48</span></label><label class="checkbox-field"><input id="formRhythmDivision64" type="checkbox"><span>64</span></label>
 </div><label class="field">其他分音（逗号分隔）<input id="formRhythmDivisionCustom" type="text" placeholder="例如 20,40"><small>允许 1–768，去重后最多 32 种；启用近似时至少选择一种。</small></label></fieldset>
-<label class="field">单次音频计算上限（秒）<input id="formGenerationMaxRegionSeconds" type="number" min="2" max="20" step="1" value="14"><small>只控制计算资源；全曲起音草稿不会因计算块重新决定。</small></label>
+<label class="field">单次音频计算上限（秒）<input id="formGenerationMaxRegionSeconds" type="number" min="2" max="20" step="1" value="14"><small>建议与训练上限一致，默认14秒。增大会改变配置模型一次看到的上下文长度；全曲起音草稿不会因计算块重新决定，超出训练值时日志会提醒。</small></label>
 </div>
 <details class="settings-section"><summary>生成后有限修订</summary><div class="settings-content"><label class="checkbox-field"><input id="formRepair" type="checkbox"><span>生成后运行有界修订</span><small>从单 note/来源动作开始尝试，预算耗尽保留最佳结果并报告剩余问题。</small></label><div class="form-grid two-col"><label class="field">最多检查次数<input id="formMaxChecks" type="number" min="1" value="24"></label><label class="field">最多编辑数<input id="formMaxEdits" type="number" min="0" value="4"></label><label class="field">修订时限（秒）<input id="formDeadlineSeconds" type="number" min="0" value="10"></label></div></div></details>
 <p class="workflow-hint">音频上限按秒分配计算资源，不规定乐句必须多少拍。起音阈值先选择声音事件；曲线再调整局部负荷趋势，二者不同。</p>
@@ -947,7 +947,11 @@
           </label>
 <label class="field" data-generation-family="song_form_v1">类型比例纠偏强度
             <input id="formStyleBalanceStrength" type="number" min="0" max="3" step="0.1" value="1.0">
-            <small>仅用于 song_form_v1 自动生成。根据已生成 note 头与 Style 目标的差异做软纠偏，不设固定配额；0 关闭此项指导，两项均为 0 恢复原字符采样。较高值可能损害配置自然性或可玩性；默认 1.0 只是起点，尚未做质量校准。</small>
+            <small>仅用于 song_form_v1 自动生成。根据已生成 note 头与 Style 类型目标的差异做软纠偏，不限制局部多押。0 关闭此项；规划类型、类型比例、局部多押三项强度均为 0 时恢复原字符采样。默认 1.0，较高值可能损害配置自然性。</small>
+          </label>
+<label class="field" data-generation-family="song_form_v1">局部多押抑制强度
+            <input id="formLocalChordStrength" type="number" min="0" max="3" step="0.1" value="1.0">
+            <small>参考最近2秒的按键多押比例、Style多押倾向与曲线相对强度；集中超出参考后，降低继续叠加按键的概率。默认1，0关闭；不强制单押、不移动采音点，也不会为了补足全曲比例突然加多押。Touch与TouchHold不计入此按键多押压力；这不是无理检测。</small>
           </label></div>
 <details id="generationSamplingAdvanced" data-generation-family="event_v1 legacy_frame_v2" class="settings-section" data-advanced >
 <summary><span>采样与解码高级设置</span><small>Top-p、重复惩罚、条件强度与 token 预算</small>
