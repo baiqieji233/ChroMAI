@@ -326,7 +326,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     checkpoint.write_bytes(b"checkpoint")
     audio.write_bytes(b"audio")
     from maichart.form import checkpoint as form_checkpoint
-    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: (None,None,None,{"family":"song_form_v1"}))
     monkeypatch.setattr(torch.cuda, "is_available", lambda: False)
     monkeypatch.setattr(form_api.secrets, "randbelow", lambda upper: 123456)
     calls = []
@@ -425,7 +425,7 @@ def test_generation_rejects_unknown_rhythm_snap_mode_before_task_creation(monkey
     checkpoint.write_bytes(b"checkpoint")
     audio.write_bytes(b"audio")
     from maichart.form import checkpoint as form_checkpoint
-    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: (None,None,None,{"family":"song_form_v1"}))
     created = []
 
     class Runtime:
@@ -451,7 +451,7 @@ def test_generation_type_guidance_strengths_are_bounded_before_task_creation(mon
     checkpoint.write_bytes(b"checkpoint")
     audio.write_bytes(b"audio")
     from maichart.form import checkpoint as form_checkpoint
-    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: (None,None,None,{"family":"song_form_v1"}))
     created = []
 
     class Runtime:
@@ -492,7 +492,7 @@ def test_enabled_empty_intensity_curve_is_rejected_before_task_creation(monkeypa
     checkpoint.write_bytes(b"checkpoint")
     audio.write_bytes(b"audio")
     from maichart.form import checkpoint as form_checkpoint
-    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: (None,None,None,{"family":"song_form_v1"}))
     created = []
 
     class Runtime:
@@ -519,7 +519,7 @@ def test_revision_rejects_enabled_intensity_curve_before_task_creation(monkeypat
     audio.write_bytes(b"audio")
     maidata.write_text("", encoding="utf-8")
     from maichart.form import checkpoint as form_checkpoint
-    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: None)
+    monkeypatch.setattr(form_checkpoint, "load", lambda *args, **kwargs: (None,None,None,{"family":"song_form_v1"}))
     created = []
 
     class Runtime:

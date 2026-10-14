@@ -16,6 +16,24 @@ from typing import Any
 SCHEMA = "maichart-training-manifest-v1"
 PATH_KEYS = ("maidata_path", "audio_path", "convert_report_path")
 _COMPOSE_LOCK = threading.RLock()
+SONG_FORM_V2_AUDIO_PROFILE = "rational_audio_queries_v1"
+SONG_FORM_V2_IGNORED_AUDIO_CONTRACT_KEYS = frozenset({
+    "feature_profile",
+    "hop_length",
+    "feature_rate_hz",
+    "division",
+    "sample_rate",
+    "audio_features_schema",
+    "frame_labels_schema",
+    "audio_feature_keys",
+})
+SONG_FORM_V2_LEGACY_AUDIO_METADATA_KEYS = frozenset({
+    *SONG_FORM_V2_IGNORED_AUDIO_CONTRACT_KEYS,
+    "input_dim",
+    "feature_config",
+    "audio_feature_dim",
+    "feature_dim",
+})
 
 
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -93,6 +111,7 @@ def merge_training_manifests(
     dataset_ids: list[str] | None = None,
     dataset_names: list[str] | None = None,
     merge_annotations: bool = True,
+    model_family: str | None = None,
 ) -> dict[str, Any]:
     """Merge compatible manifests for one training run.
 
@@ -140,6 +159,8 @@ def merge_training_manifests(
             f"{key}: {reference[key]!r} != {contract[key]!r}"
             for key in reference
             if reference[key] != contract[key]
+            and not (model_family == "song_form_v2"
+                     and key in SONG_FORM_V2_IGNORED_AUDIO_CONTRACT_KEYS)
             and (key in {"target_schema", "feature_profile"}
                  or reference[key] is not None and contract[key] is not None)
         ]
@@ -270,6 +291,16 @@ def merge_training_manifests(
         accepted_records.append(record)
     annotation_records = accepted_records
 
+    merged_preprocessing = {**(loaded[0][1].get("preprocessing") or {}), **{
+        key: reference[key]
+        for key in reference
+        if reference[key] is not None
+    }}
+    if model_family == "song_form_v2":
+        for key in SONG_FORM_V2_LEGACY_AUDIO_METADATA_KEYS:
+            merged_preprocessing.pop(key, None)
+        merged_preprocessing["feature_profile"] = SONG_FORM_V2_AUDIO_PROFILE
+
     merged = {
         "schema": SCHEMA,
         # All source paths are absolute after composition.  Keeping the output
@@ -285,11 +316,7 @@ def merge_training_manifests(
             for difficulty in song.get("difficulties", [])
             if difficulty.get("event_usable_for_training", difficulty.get("usable_for_training"))
         ),
-        "preprocessing": {**(loaded[0][1].get("preprocessing") or {}), **{
-            key: reference[key]
-            for key in reference
-            if reference[key] is not None
-        }},
+        "preprocessing": merged_preprocessing,
         "merged_from": [str(path) for path, _, _, _ in loaded],
         "datasets": source_entries,
         "songs": songs,
@@ -392,7 +419,7 @@ def compose_datasets(
     with _COMPOSE_LOCK:
         return merge_training_manifests(
             manifests, target, dataset_ids=dataset_ids, dataset_names=dataset_names,
-            merge_annotations=True,
+            merge_annotations=True, model_family=model_family,
         )
 
 

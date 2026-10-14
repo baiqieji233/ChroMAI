@@ -22,15 +22,25 @@
 
 - [x] P0：备份、旧实现对照、冻结版本合同与实施说明。
 - [x] P1：不等间距音频查询、直接有理数事件训练/解码、曲线 Planner 与缓存。
-- [ ] P2：checkpoint 路由、CLI、主 WebUI 同页参数和说明、旧生成兼容。
-- [ ] P3：精确有理数/变BPM/first/休止回归，适度 GPU 训练生成链路检查，阶段报告。
+- [x] P2：checkpoint 路由、CLI、主 WebUI 同页参数和说明、旧生成兼容。
+- [x] P3：精确有理数/变BPM/first/休止回归，适度 GPU 训练生成链路检查，阶段报告。
 
 测试不依赖新 gold/验证集合，不将短跑 loss、语法通过当作高质量出谱证明。每阶段独立 Git 提交，只提交本任务内容；不覆盖已有四个文件的未提交修改。
+
+## 本轮验证与性能修复
+
+- `PositionGrammar` 现在使用精确可达性检查、前缀缓存、等价分数 canonical rewind，以及明确的最小事件间隔和增量分母安全界限。它仍不使用 `{16}/{24}/{32}` 白名单；短跑模型输出的巨大分母会被丢弃当前未完成事件，不会把整首歌判失败。
+- song-form 解码器额外缓存每层 cross-attention 的 encoder K/V；rational 音频查询保留原生瞬态与 Fraction 拍位，但生成时与训练共用有界的 1024 个最强原生证据节点，避免长音频把每个单 token 解码步骤拖到数千节点。
+- Planner 负荷只提供宽松的每段事件资源预算；`0` 表示自动预算，CLI/WebUI 可设置 `max-events-per-span`。另有 `rational-min-spacing-ms`（默认 2 ms）用于阻止物理上过近的事件。这两项不把位置吸附到固定分音。
+- 自动 BPM 提示改用既有全局节拍检测器的临时 onset envelope，而不是原生攻击间隔中位数；实际 `BUDDiES/10185` 从错误的约 189.4 BPM 回归到 150.0 BPM。临时 envelope 只用于提示，不能成为模型位置时钟。
+- GPU 生成回归：5 秒探针、`song_form_v2` checkpoint、CUDA、`max-events-per-span=12` 成功生成 `maidata.txt` 与 `.form.json`，3 个区域共 8 个事件，报告声明 `frame_seconds=null`、`candidate_position_whitelist=false`。此前的 `No exact rational continuation` 已不再出现。该 checkpoint 只有 1 个 epoch，输出仍会有不规则 Fraction，这是训练未收敛的质量信号，不是固定帧转换错误。
 
 ## 状态
 
 P0 主体备份：`backups/rational_event_rebuild_20261014/source_before_rebuild.zip`。完成实现后逐项更新本文与交付说明。
 
 补充要求：音频查询也优先依据有理数拍位，固定时间帧仅作为测量成本后必要时的备用且须高于50Hz。配置模型默认 256 维/4 层/前馈 768，Planner 默认独立 128 维，实际总参数 7,593,918。各条件、历史和曲线分支保留；容量缩小的质量影响须由训练与实际生成评估。
+
+本轮测试证据：`tests/test_form_rational_events.py` 13 passed；组合的 form、legacy checkpoint、缓存、source contract、prepare、API 和 WebUI 测试 135 passed；WebUI 浏览器探针通过 1440×1000 与 390×844；`git diff --check` 通过。短跑只证明链路、合同和输出可编译，不证明谱面音乐质量。
 
 旧训练 `f953c729af16` 已按授权停止：完成第13轮，保存第14轮配置阶段16000批断点。原目录与额外备份 `song_form_v1_last_before_rebuild.pt` 保留，未迁移为新架构权重。

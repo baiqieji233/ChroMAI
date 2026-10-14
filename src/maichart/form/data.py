@@ -322,7 +322,7 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
         local_curve_mask = torch.zeros((0, 4), dtype=torch.bool)
     history_tokens = codec.bounded_memory(history,origin=hist_origin,max_tokens=max_memory_tokens)
     history_kept = history_tokens.count(codec.end_id)
-    history_seconds = (float(seconds_at_beat(span.start, song.tempo, song.first)
+    history_seconds = (float(seconds_at_beat(boundary, song.tempo, song.first)
                              - seconds_at_beat(history[-history_kept].beat, song.tempo, song.first))
                        if history_kept else 0.0)
     return {

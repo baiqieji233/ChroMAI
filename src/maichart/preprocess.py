@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from concurrent.futures import ProcessPoolExecutor
 import random
 import re
 from collections import Counter
@@ -214,6 +215,70 @@ def build_raw_sample_manifest(
     return manifest
 
 
+def _build_training_song(job: tuple[Any, ...]) -> dict[str, Any]:
+    """Build one legacy training-manifest song in an isolated worker.
+
+    Cache paths are song-specific. The worker returns JSON-ready data and the
+    parent process preserves source order and writes the final manifest once.
+    """
+    (sample, base_path, cache_root, division, force, encoding, skip_audio,
+     skip_alignment, sample_rate) = job
+    song_errors: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    parse_failure_count = audio_failure_count = alignment_failure_count = 0
+    chart: RawMaidataChart | None = None
+    if sample.maidata_path:
+        try:
+            chart = parse_maidata_file(_resolve_display_path(sample.maidata_path, base_path), encoding=encoding)
+        except Exception as exc:  # noqa: BLE001 - preserve batch progress
+            parse_failure_count += 1
+            error = _error_dict("parse_maidata", exc, song_id=sample.song_id, path=sample.maidata_path)
+            errors.append(error); song_errors.append(error)
+    else:
+        parse_failure_count += 1
+
+    metadata_bpm = _parse_level(chart.wholebpm)[0] if chart and chart.wholebpm else None
+    audio_info, audio_features = _build_song_audio_qc(
+        sample, cache_root=cache_root, base_path=base_path, division=division,
+        force=force, skip_audio=skip_audio, sample_rate=sample_rate,
+        metadata_bpm=metadata_bpm, errors=errors,
+    )
+    if audio_info.get("readable") is False:
+        audio_failure_count += 1
+    song = {
+        "song_id": sample.song_id, "title": chart.title if chart else None,
+        "artist": chart.artist if chart else None, "maidata_path": sample.maidata_path,
+        "audio_path": sample.audio_path, "convert_report_path": sample.convert_report_path,
+        "conversion_status": sample.conversion_status, "dataset_usable": sample.dataset_usable,
+        "audio": audio_info, "difficulties": [],
+    }
+    if song_errors:
+        song["processing_errors"] = song_errors
+    if chart is not None:
+        for difficulty in chart.difficulties:
+            try:
+                difficulty_entry = _process_difficulty(
+                    chart, sample=sample, difficulty_index=difficulty.index,
+                    cache_root=cache_root, base_path=base_path, division=division,
+                    force=force, audio_readable=bool(audio_info.get("readable")),
+                    audio_features=audio_features, skip_audio=skip_audio,
+                    skip_alignment=skip_alignment, errors=errors,
+                )
+            except Exception as exc:  # noqa: BLE001 - isolate one bad difficulty
+                parse_failure_count += 1
+                error = _error_dict("difficulty", exc, song_id=sample.song_id,
+                                    difficulty_index=difficulty.index)
+                errors.append(error); song_errors.append(error)
+                difficulty_entry = _failed_difficulty_entry(difficulty, exc, base_path=base_path)
+            if difficulty_entry.get("alignment_status") == "failed":
+                alignment_failure_count += 1
+            song["difficulties"].append(difficulty_entry)
+    return {"song": song, "warnings": [], "errors": errors,
+            "parse_failure_count": parse_failure_count,
+            "audio_failure_count": audio_failure_count,
+            "alignment_failure_count": alignment_failure_count}
+
+
 def build_training_manifest(
     raw_root: str | Path,
     *,
@@ -226,6 +291,7 @@ def build_training_manifest(
     skip_audio: bool = False,
     skip_alignment: bool = False,
     sample_rate: int = 22050,
+    workers: int = 1,
 ) -> TrainingManifest:
     """Build QC caches and a supervised-learning training manifest."""
 
@@ -234,6 +300,7 @@ def build_training_manifest(
     base_path = _base_for_output(output_path)
     raw_manifest = build_raw_sample_manifest(root, output_path=None, path_base=base_path)
     raw_samples = raw_manifest.samples[:limit] if limit is not None else raw_manifest.samples
+    workers = max(1, int(workers))
     songs: list[dict[str, Any]] = []
     warnings = list(raw_manifest.warnings)
     errors: list[dict[str, Any]] = []
@@ -241,93 +308,30 @@ def build_training_manifest(
     audio_failure_count = 0
     alignment_failure_count = 0
 
-    for index, sample in enumerate(raw_samples, start=1):
-        print(f"[preprocess] {index}/{len(raw_samples)} {sample.song_id}")
-        song_errors: list[dict[str, Any]] = []
-        chart: RawMaidataChart | None = None
-        if sample.maidata_path:
-            try:
-                chart = parse_maidata_file(_resolve_display_path(sample.maidata_path, base_path), encoding=encoding)
-            except Exception as exc:  # noqa: BLE001 - batch processing must continue.
-                parse_failure_count += 1
-                error = _error_dict(
-                    "parse_maidata",
-                    exc,
-                    song_id=sample.song_id,
-                    path=sample.maidata_path,
-                )
-                errors.append(error)
-                song_errors.append(error)
-        else:
-            parse_failure_count += 1
+    jobs = [
+        (sample, base_path, cache_root, division, force, encoding, skip_audio, skip_alignment, sample_rate)
+        for sample in raw_samples
+    ]
 
-        metadata_bpm = _parse_level(chart.wholebpm)[0] if chart and chart.wholebpm else None
-        audio_info, audio_features = _build_song_audio_qc(
-            sample,
-            cache_root=cache_root,
-            base_path=base_path,
-            division=division,
-            force=force,
-            skip_audio=skip_audio,
-            sample_rate=sample_rate,
-            metadata_bpm=metadata_bpm,
-            errors=errors,
-        )
-        if audio_info.get("readable") is False:
-            audio_failure_count += 1
+    def consume(index: int, result: dict[str, Any]) -> None:
+        nonlocal parse_failure_count, audio_failure_count, alignment_failure_count
+        print(f"[preprocess] {index}/{len(raw_samples)} {result['song']['song_id']}", flush=True)
+        songs.append(result["song"])
+        warnings.extend(result["warnings"])
+        errors.extend(result["errors"])
+        parse_failure_count += result["parse_failure_count"]
+        audio_failure_count += result["audio_failure_count"]
+        alignment_failure_count += result["alignment_failure_count"]
 
-        song = {
-            "song_id": sample.song_id,
-            "title": chart.title if chart else None,
-            "artist": chart.artist if chart else None,
-            "maidata_path": sample.maidata_path,
-            "audio_path": sample.audio_path,
-            "convert_report_path": sample.convert_report_path,
-            "conversion_status": sample.conversion_status,
-            "dataset_usable": sample.dataset_usable,
-            "audio": audio_info,
-            "difficulties": [],
-        }
-        if song_errors:
-            song["processing_errors"] = song_errors
-
-        if chart is not None:
-            for difficulty in chart.difficulties:
-                try:
-                    difficulty_entry = _process_difficulty(
-                        chart,
-                        sample=sample,
-                        difficulty_index=difficulty.index,
-                        cache_root=cache_root,
-                        base_path=base_path,
-                        division=division,
-                        force=force,
-                        audio_readable=bool(audio_info.get("readable")),
-                        audio_features=audio_features,
-                        skip_audio=skip_audio,
-                        skip_alignment=skip_alignment,
-                        errors=errors,
-                    )
-                except Exception as exc:  # noqa: BLE001 - one bad difficulty must not stop the batch.
-                    parse_failure_count += 1
-                    error = _error_dict(
-                        "difficulty",
-                        exc,
-                        song_id=sample.song_id,
-                        difficulty_index=difficulty.index,
-                    )
-                    errors.append(error)
-                    song_errors.append(error)
-                    difficulty_entry = _failed_difficulty_entry(
-                        difficulty,
-                        exc,
-                        base_path=base_path,
-                    )
-                if difficulty_entry.get("alignment_status") == "failed":
-                    alignment_failure_count += 1
-                song["difficulties"].append(difficulty_entry)
-
-        songs.append(song)
+    if workers == 1 or len(jobs) <= 1:
+        results = (_build_training_song(job) for job in jobs)
+        for index, result in enumerate(results, start=1):
+            consume(index, result)
+    else:
+        print(f"[preprocess] workers={workers}（按歌曲并行，manifest 由主进程按原顺序写入）", flush=True)
+        with ProcessPoolExecutor(max_workers=workers) as pool:
+            for index, result in enumerate(pool.map(_build_training_song, jobs), start=1):
+                consume(index, result)
 
     summary = _build_preprocess_summary(
         raw_sample_count=len(raw_samples),

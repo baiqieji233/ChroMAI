@@ -246,6 +246,28 @@ def test_event_preprocess_uses_prepare_events_and_event_profile(webui_api, monke
     assert "--force" in calls[0] and "--limit" in calls[0]
 
 
+def test_song_form_preprocess_reuses_event_source_manifest_path(webui_api, monkeypatch, tmp_path):
+    raw_root = tmp_path / "raw"
+    raw_root.mkdir()
+    calls = []
+
+    def fake_run(task, args, *, expected_epoch, result_paths):
+        calls.append(args)
+        task.status = "completed"
+
+    monkeypatch.setattr(webui, "_run_subprocess_task", fake_run)
+    status, data = webui_api("/api/preprocess", {
+        "model_family": "song_form_v1", "raw_root": str(raw_root),
+        "cache_dir": str(tmp_path / "cache"), "manifest": str(tmp_path / "form.json"),
+        "sample_rate": 22050, "workers": 4,
+    })
+    assert status == 200, data
+    assert calls[0][:4] == ["-m", "maichart.training.prepare_events", str(raw_root), "--cache-dir"]
+    # The raw-root temporary path itself may contain the word "preprocess";
+    # assert the command shape instead of searching the rendered path text.
+    assert calls[0][1] == "maichart.training.prepare_events"
+
+
 def test_event_train_does_not_reject_old_fixed_frame_usable_flag(webui_api, monkeypatch, tmp_path):
     manifest = tmp_path / "manifest.json"
     manifest.write_text(json.dumps({

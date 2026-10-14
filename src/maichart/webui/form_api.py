@@ -9,7 +9,7 @@ import secrets
 
 from maichart.form.timing import normalize_meter_map
 from maichart.generation.timeline import normalize_tempo_map
-from maichart.form import FAMILY, CHECKPOINT_SCHEMA
+from maichart.form import FAMILY, CHECKPOINT_SCHEMA, FORM_FAMILIES
 from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
 
 
@@ -49,9 +49,9 @@ def inspect_form_checkpoint(path):
     detected = caps['model_family']
     base = {'path':str(path), 'schema':payload.get('schema'), 'model_family':detected,
             'valid':False, 'can_train':False, 'can_generate':False, 'can_revise':False,
-            'model_config':{}, 'args':{}, 'errors':[], 'route':'/form-lab'}
-    if detected != FAMILY:
-        base.update(route='/', errors=['该 checkpoint 不属于 song_form_v1；已有事件模型请回兼容模型工作台使用。'])
+            'model_config':{}, 'args':{}, 'errors':[], 'route':'/'}
+    if detected not in FORM_FAMILIES:
+        base.update(route='/', errors=['该 checkpoint 不属于 song-form；请在主页面切换对应旧事件模型族。'])
         return base
     try:
         from maichart.form.checkpoint import load
@@ -82,6 +82,10 @@ def inspect_form_checkpoint(path):
             load_curve_trained=curve_ready,
             input_contract=checked['input_contract'],
             parameter_count=sum(p.numel() for p in model.parameters())+sum(p.numel() for p in planner.parameters()))
+        base['blueprint_config']=checked['blueprint_config']
+        base['generation_capabilities']={'rational_event_positions':detected=='song_form_v2',
+            'frame_onset_threshold':detected=='song_form_v1','planner_type_guidance':detected=='song_form_v1',
+            'style_balance':True,'local_chord_guard':True,'conflict_detection':True}
     except (ValueError, RuntimeError, KeyError, TypeError) as error:
         base['errors']=[str(error)]
     return base
@@ -144,8 +148,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         # canonical module again here creates a second, invisible task registry.
         server = runtime
     if operation not in {'inspect','analyze','train','generate','revise'}: raise ValueError('Unknown song-form operation')
-    if payload.get('model_family', FAMILY) != FAMILY:
-        raise ValueError('此入口只接受 song_form_v1；其他模型族使用原训练/生成入口。')
+    if payload.get('model_family', FAMILY) not in FORM_FAMILIES:
+        raise ValueError('此入口接受 song_form_v1 / song_form_v2；其他模型族使用原训练/生成入口。')
     rhythm_snap_value = payload.get('rhythm_snap_enabled', False)
     rhythm_snap_enabled = (rhythm_snap_value is True
                            or (type(rhythm_snap_value) is int and rhythm_snap_value == 1)
@@ -158,7 +162,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                     'slide_oversample','touch_oversample','fine_rhythm_oversample'}
     invalid = old_controls & payload.keys()
     if invalid:
-        raise ValueError('song_form_v1 不使用这些旧模型参数：' + ', '.join(sorted(invalid)))
+        raise ValueError('song-form 不使用这些旧模型参数：' + ', '.join(sorted(invalid)))
     def number(key,default,minimum,maximum,integer=False):
         value=payload.get(key,default)
         if isinstance(value,bool): raise ValueError(f'{key} must be numeric')
@@ -198,6 +202,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if initial:
             from maichart.form.checkpoint import load
             _, _, _, inspected = load(initial)
+            if inspected['family']!=payload.get('model_family',FAMILY):
+                raise ValueError('初始化模型属于 '+inspected['family']+'；请切换对应模型族续训，新有理数架构需从头训练。')
         if inspected and mode == 'resume':
             # Resume is contract preserving. Inherit these before validating UI
             # fields because the browser may submit stale or disabled values.
@@ -268,6 +274,10 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if precision not in {'auto','fp32','bf16','fp16'}: raise ValueError('precision must be auto, fp32, bf16 or fp16')
         values['precision']=precision
         if values['d_model']%values['nhead']: raise ValueError('d_model must be divisible by nhead')
+        family=(inspected or {}).get('family',payload.get('model_family',FAMILY))
+        values['model_family']=family
+        values['dim_feedforward']=(inspected or {}).get('model_config',{}).get('dim_feedforward',number('dim_feedforward',0,0,32768,True))
+        values['planner_width']=(inspected or {}).get('blueprint_config',{}).get('width',number('planner_width',128,16,2048,True))
         if inspected:
             config = inspected['model_config']
             for key in ('d_model','layers','nhead','max_tokens','max_memory_tokens','dropout'):
@@ -300,13 +310,20 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         tempo=normalize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') else None
         audio=file('audio')
         initial=file('checkpoint') if operation!='analyze' else None
+        family=payload.get('model_family',FAMILY)
         if initial:
             from maichart.form.checkpoint import load
-            load(initial,inference=True,task='revision' if operation=='revise' else 'draft')
+            _,_,_,imported=load(initial,inference=True,task='revision' if operation=='revise' else 'draft')
+            family=imported['family']
         bpm_value = payload.get('bpm')
         bpm = number('bpm',120,1,1000) if bpm_value not in {None, ''} else None
         first=number('first',0,-3600,3600)
-        args=['-m','maichart.form.cli',operation,'--audio',str(audio)]
+        args=['-m','maichart.form.cli',operation,'--audio',str(audio),'--model-family',family]
+        if family=='song_form_v2' and operation=='generate':
+            args+=['--position-temperature',str(number('position_temperature',.2,0,3)),
+                   '--position-characters',str(number('position_characters',24,4,128,True)),
+                   '--max-events-per-span',str(number('max_events_per_span',0,0,512,True)),
+                   '--rational-min-spacing-ms',str(number('rational_min_spacing_ms',2,0,50))]
         if bpm is not None: args += ['--bpm',str(bpm)]
         args += ['--first',str(first)]
         if initial: args+=['--checkpoint',str(initial)]
@@ -378,8 +395,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             raise ValueError('song_form 张力曲线只用于 generate；revise 使用源谱面时钟且不应用曲线。')
         from maichart.generation.music_intensity import validate_intensity_profile
         curve_to_forward = validate_intensity_profile(curve_to_forward)
-        if curve_to_forward.get('method') != 'learned_song_form_v1':
-            raise ValueError('song_form 生成需要 learned_song_form_v1 曲线；请重新生成曲线。')
+        if curve_to_forward.get('method') != ('learned_song_form_v2' if family=='song_form_v2' else 'learned_song_form_v1'):
+            raise ValueError('曲线所属模型架构与当前 checkpoint 不同；请用当前模型生成曲线。')
         from maichart.form.curve_validation import validate_saved_curve
         from maichart.generation.event_cli import _file_identity
         from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
@@ -425,7 +442,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         condition_path.write_text(json.dumps(payload['condition'],ensure_ascii=False),encoding='utf-8')
         args+=['--condition-file',str(condition_path)]
     report=results[-1]
-    task.result.update({'model_family':'song_form_v1','experimental':True,'report_path':str(report),
+    task.result.update({'model_family':family,'experimental':True,'report_path':str(report),
                         'progress_known':False,
                         'artifacts':[{'path':str(p),'label':p.name} for p in results]})
     if operation=='train':

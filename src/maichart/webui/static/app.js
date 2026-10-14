@@ -726,7 +726,7 @@ function saveSettings() {
 function flushSettings() {
   if (settingsSaveTimer) { clearTimeout(settingsSaveTimer); settingsSaveTimer = null; }
   try {
-    localStorage.setItem(settingsStorageKey, JSON.stringify({ version: 1, values: collectSettings() }));
+    localStorage.setItem(settingsStorageKey, JSON.stringify({ version: 2, values: collectSettings() }));
   } catch (_) { /* storage disabled or full */ }
 }
 
@@ -743,6 +743,11 @@ function restoreSettings() {
   } catch (_) { /* optional */ }
   const values = saved?.values;
   if (!values || typeof values !== "object") return restoreLegacyDatasetPaths();
+  if (saved.version !== 2 && values.modelFamily === "song_form_v1" && values.trainingMode === "fresh") {
+    Object.assign(values, {modelFamily:"song_form_v2",formDModel:"256",formLayers:"4",formNhead:"8",formDimFeedforward:"0",formPlannerWidth:"128"});
+    if (values.checkpointDir === "checkpoints/song_form_v1") values.checkpointDir="checkpoints/song_form_v2";
+    restoredSettingNotice = "从头训练入口已更新为精确有理数事件模型；默认采用 256 维紧凑配置。旧模型仍可通过模型族选择生成与续训。";
+  }
   if (Number(values.conflictBacktrackBudget) === -1) {
     values.conflictBacktrackUnlimited = true;
     values.conflictBacktrackBudget = "4";
@@ -1115,13 +1120,13 @@ function currentTrainingMode() {
 }
 
 function currentModelFamily() {
-  return valueOrDefault("#modelFamily", "song_form_v1");
+  return valueOrDefault("#modelFamily", "song_form_v2");
 }
 
 function currentGenerationFamily() {
   const selected = currentModelFamily();
   const inspected = generationInspection.data?.model_family;
-  return inspected && inspected === selected ? inspected : selected;
+  return inspected && generationInspection.path === valueOrDefault("#checkpointPath", "").trim() ? inspected : selected;
 }
 
 function updateGenerationCapabilityControls() {
@@ -1178,7 +1183,7 @@ function familyFieldVisible(declared, current) {
 }
 
 function updateSongFormGenerationOptions() {
-  const isSongForm = currentGenerationFamily() === "song_form_v1";
+  const isSongForm = ["song_form_v1", "song_form_v2"].includes(currentGenerationFamily());
   const curveMode = element("#intensityCurveMode");
   const legacyCurveModes = curveMode ? [...curveMode.options].filter((option) => ["soft", "strict"].includes(option.value)) : [];
   legacyCurveModes.forEach((option) => { option.disabled = isSongForm; });
@@ -1216,7 +1221,7 @@ function updateFamilyFields() {
   document.querySelectorAll("[data-generation-family]").forEach((target) => {
     target.hidden = !familyFieldVisible(target.dataset.generationFamily, currentGenerationFamily());
   });
-  const songTraining = currentModelFamily() === "song_form_v1";
+  const songTraining = ["song_form_v1", "song_form_v2"].includes(currentModelFamily());
   ["#dModel", "#nhead", "#numLayers", "#dimFeedforward", "#trainMaxTokens", "#segmentBeats", "#maxAudioTokens",
    "#conditionMaskProb", "#conditionDefault", "#conditionDropout", "#contextDropout", "#dropout", "#weightDecay",
    "#plannerProfile", "#planLossWeight", "#planTeacherMix", "#onsetProfile", "#onsetLossWeight", "#actionStateProfile",
@@ -1229,12 +1234,12 @@ function updateFamilyFields() {
     else if (field && !songTraining && !field.dataset.trainingFamily) field.hidden = false;
   });
   const songHint = element("#songFormTrainingControls"); if (songHint) songHint.hidden = !songTraining;
-  const songGenerationHint = element("#songFormGenerationControls"); if (songGenerationHint) songGenerationHint.hidden = currentGenerationFamily() !== "song_form_v1";
+  const songGenerationHint = element("#songFormGenerationControls"); if (songGenerationHint) songGenerationHint.hidden = !["song_form_v1", "song_form_v2"].includes(currentGenerationFamily());
   if (songTraining) {
     element("#trainingArchitecture")?.setAttribute("open", "");
     element("#trainingLearning")?.setAttribute("open", "");
   }
-  if (currentGenerationFamily() === "song_form_v1") {
+  if (["song_form_v1", "song_form_v2"].includes(currentGenerationFamily())) {
     document.querySelectorAll(".condition-advanced").forEach((details) => details.setAttribute("open", ""));
     element("#generationCurveGroup")?.setAttribute("open", "");
   }
@@ -1243,7 +1248,9 @@ function updateFamilyFields() {
   const family = currentModelFamily();
   const familyHelp = element("#modelFamilyHelp");
   if (familyHelp) {
-    familyHelp.textContent = family === "song_form_v1"
+    familyHelp.textContent = family === "song_form_v2"
+      ? "song_form_v2：直接联合生成精确有理数拍位与配置，音频按节拍/音乐事件查询。保留 Planner、段落关联、Radar / Style、负荷曲线和修订；旧 checkpoint 自动使用原生成方式。"
+      : ["song_form_v1", "song_form_v2"].includes(family)
       ? "song_form_v1：全曲 blueprint、段落关联与草稿修订模型。Radar / Style 由 event_derived_radar_style_v1 条件监督提供；强度曲线需完成独立训练接入后才会成为真实生成约束。"
       : family === "event_v1"
       ? "事件模型使用 112 维 event_audio_v2_rhythm 和显式 null embedding；Planner profile 选择 music_structure_v2/v3 时使用音乐结构规划器，选择 legacy_v1 才是旧 planner。"
@@ -1253,8 +1260,8 @@ function updateFamilyFields() {
   }
   const dirHelp = element("#checkpointDirHelp");
   if (dirHelp) {
-    dirHelp.textContent = family === "song_form_v1"
-      ? "song_form_v1 产物为 form_last.pt；resume 严格继承合同，finetune 请使用新的输出目录。"
+    dirHelp.textContent = ["song_form_v1", "song_form_v2"].includes(family)
+      ? "song-form 产物为 form_last.pt；resume 严格继承合同，finetune 请使用新的输出目录。"
       : family === "legacy_frame_v2"
         ? "旧基线输出 generator_last.pt / generator_epoch_NNN.pt，不能作为 event checkpoint 使用。"
         : "event_last.pt / event_best.pt / event_epoch_NNN.pt。建议使用独立输出目录。";
@@ -1266,8 +1273,8 @@ function updateFamilyFields() {
       : "未填 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外使用高置信度变速点。填写 tempo map 后，其 beat 0 BPM 与变速点优先。";
   }
   const preprocessHelp = element("#preprocessFamilyStatus");
-  if (preprocessHelp) preprocessHelp.textContent = family === "song_form_v1"
-    ? "song_form_v1 使用 event source manifest：解析 maidata、音频特征和精确时间缓存；不生成旧 fixed-frame labels/alignment。已有 event manifest 可直接复用。"
+  if (preprocessHelp) preprocessHelp.textContent = ["song_form_v1", "song_form_v2"].includes(family)
+    ? "song-form 使用 event source manifest：解析 maidata、音频特征和精确时间缓存；不生成旧 fixed-frame labels/alignment。已有 event manifest 可直接复用。"
     : family === "legacy_frame_v2"
       ? "旧固定帧模型才使用 legacy preprocess build、division、frame labels 和 alignment。"
       : "event 模型使用 prepare_events：解析 maidata、音频特征和精确时间缓存，不生成 fixed-frame labels/alignment。";
@@ -1358,7 +1365,7 @@ function songFormRhythmSnapDivisions(enabled) {
 }
 function songFormTrainingPayload(options = {}) {
   const mode = currentTrainingMode(); const source = trainingSourcePaths(options); const manifests = selectedTrainingManifests();
-  return { model_family: "song_form_v1", manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
+  return { model_family: currentModelFamily(), manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     quality_enabled: checkedOrDefault("#qualityEnabled", false),
     resume_data_policy: mode === "resume" ? valueOrDefault("#formResumeDataPolicy", "strict") : "strict",
@@ -1380,11 +1387,13 @@ function songFormTrainingPayload(options = {}) {
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),
     max_region_seconds: Number(valueOrDefault("#formMaxRegionSeconds", 14)), d_model: Number(valueOrDefault("#formDModel", 256)), layers: Number(valueOrDefault("#formLayers", 4)), nhead: Number(valueOrDefault("#formNhead", 8)),
+    dim_feedforward: currentModelFamily() === "song_form_v2" ? Number(valueOrDefault("#formDimFeedforward", 0)) : 0,
+    planner_width: Number(valueOrDefault("#formPlannerWidth", 128)),
     max_tokens: Number(valueOrDefault("#formMaxTokens", 2048)), max_memory_tokens: Number(valueOrDefault("#formMaxMemoryTokens", 512)), dropout: Number(valueOrDefault("#formDropout", .1)) };
 }
 // Shared by "开始训练" and the one-click button, so both send the same settings.
 function trainingPayload(options = {}) {
-  if (currentModelFamily() === "song_form_v1") return songFormTrainingPayload(options);
+  if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) return songFormTrainingPayload(options);
   const mode = currentTrainingMode();
   // planner_profile values: "auto", "music_structure_v3", "music_structure_v2",
   // "legacy_v1".  The generation panel only reads it to describe the checkpoint
@@ -1479,22 +1488,27 @@ function collectCondition() {
 }
 
 function songFormGenerationPayload() {
+  const rational = currentGenerationFamily() === "song_form_v2";
   const localChordStrength = Number(valueOrDefault("#formLocalChordStrength", 1.0));
   const rhythmSourceMs = Number(valueOrDefault("#formRhythmSnapSourceMs", 30));
   const condition = {...collectCondition(), generation_options: {
     local_chord_strength: localChordStrength, rhythm_snap_source_ms: rhythmSourceMs}};
-  return { model_family: "song_form_v1", checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
+  return { model_family: currentGenerationFamily(), checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
     level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
     intensity_curve_strength: Number(valueOrDefault("#intensityCurveStrength", .65)), intensity_curve_span: Number(valueOrDefault("#intensityFollowSpan", .5)), intensity_curve_mode: valueOrDefault("#intensityCurveMode", "follow"),
     memory_strength: Number(valueOrDefault("#formMemoryStrength", .6)), onset_threshold: Number(valueOrDefault("#formOnsetThreshold", .5)),
     onset_merge_ms: Number(valueOrDefault("#formOnsetMergeMs", 40)),
-    rhythm_snap_enabled: checkedOrDefault("#formRhythmSnapEnabled", false),
+    rhythm_snap_enabled: !rational && checkedOrDefault("#formRhythmSnapEnabled", false),
     rhythm_snap_ms: Number(valueOrDefault("#formRhythmSnapMs", 15)),
     rhythm_snap_source_ms: rhythmSourceMs,
     rhythm_snap_divisions: songFormRhythmSnapDivisions(checkedOrDefault("#formRhythmSnapEnabled", false)),
     rhythm_snap_mode: valueOrDefault("#formRhythmSnapMode", "sequence"),
-    planner_type_strength: Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),
+    planner_type_strength: rational ? 0 : Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),
+    position_temperature: Number(valueOrDefault("#formPositionTemperature", .2)),
+    position_characters: Number(valueOrDefault("#formPositionCharacters", 24)),
+     max_events_per_span: Number(valueOrDefault("#formMaxEventsPerSpan", 0)),
+     rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 2)),
     style_balance_strength: Number(valueOrDefault("#formStyleBalanceStrength", 1.0)),
     local_chord_strength: localChordStrength,
     temperature: Number(valueOrDefault("#temperature", .65)), seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
@@ -1510,7 +1524,7 @@ function uniqueSongFormOutputPath(requested) {
   return `${directory}.task-${nonce}${separator}${filename}`;
 }
 function generationPayload() {
-  if (currentModelFamily() === "song_form_v1") return songFormGenerationPayload();
+  if (["song_form_v1", "song_form_v2"].includes(currentGenerationFamily())) return songFormGenerationPayload();
   const condition = collectCondition();
   return {
     checkpoint: valueOrDefault("#checkpointPath", "").trim(),
@@ -1644,7 +1658,7 @@ function setTrainingModeDefaults() {
 }
 
 function updateTrainingModeHelp(mode = currentTrainingMode()) {
-  const songForm = element("#modelFamily")?.value === "song_form_v1";
+  const songForm = ["song_form_v1", "song_form_v2"].includes(element("#modelFamily")?.value);
   const restartEpoch = songForm && element("#formResumeDataPolicy")?.value === "restart_epoch";
   const modeHelp = element("#trainingModeHelp");
   if (modeHelp) {
@@ -1702,7 +1716,7 @@ function updateTrainingControls() {
   updateTrainingModeHelp();
   const resume = currentTrainingMode() === "resume";
   const resumePolicy = element("#formResumeDataPolicyGroup");
-  if (resumePolicy) resumePolicy.hidden = !resume || currentModelFamily() !== "song_form_v1";
+  if (resumePolicy) resumePolicy.hidden = !resume || !["song_form_v1", "song_form_v2"].includes(currentModelFamily());
   ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy", "#actionStateProfile"].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = resume;
@@ -1714,7 +1728,7 @@ function updateTrainingControls() {
 // Task handling
 // ---------------------------------------------------------------------------
 const TASK_KIND_LABEL = {
-  preprocess: "预处理", train: "训练", generate: "生成", form_train: "song_form_v1 训练", form_generate: "song_form_v1 生成", form_analyze: "song_form_v1 分析", form_revise: "song_form_v1 修订", intensity: "强度曲线", gold: "金标集", acceptance: "验收",
+  preprocess: "预处理", train: "训练", generate: "生成", form_train: "song-form 训练", form_generate: "song-form 生成", form_analyze: "song-form 分析", form_revise: "song-form 修订", intensity: "强度曲线", gold: "金标集", acceptance: "验收",
 };
 const taskWatchers = new Map();
 const trainingMetricSupportCache = new Map();
@@ -2640,8 +2654,10 @@ function renderCheckpointInspection(data) {
 
 function applySongFormCheckpointConfig(data, mode) {
   const config = data?.model_config || {}, locked = mode !== "fresh";
-  const structure = [["#formDModel", "d_model"], ["#formLayers", "layers"], ["#formNhead", "nhead"], ["#formMaxTokens", "max_tokens"], ["#formMaxMemoryTokens", "max_memory_tokens"], ["#formDropout", "dropout"]];
+  const structure = [["#formDModel", "d_model"], ["#formLayers", "layers"], ["#formNhead", "nhead"], ["#formMaxTokens", "max_tokens"], ["#formMaxMemoryTokens", "max_memory_tokens"], ["#formDropout", "dropout"], ["#formDimFeedforward", "dim_feedforward"]];
   structure.forEach(([selector, key]) => { const node = element(selector); if (!node) return; if (locked && config[key] != null) node.value = String(config[key]); node.disabled = locked; });
+  const plannerWidth=element("#formPlannerWidth");
+  if (plannerWidth) { if (locked && data?.blueprint_config?.width != null) plannerWidth.value=String(data.blueprint_config.width); plannerWidth.disabled=locked; }
   const inherited = [["#learningRate", "lr"], ["#batchSize", "batch_size"], ["#gradAccumulation", "grad_accumulation"],
     ["#trainingSeed", "seed"], ["#weightDecay", "weight_decay"], ["#formConditionDropout", "condition_drop_prob"],
     ["#formBlueprintLossWeight", "blueprint_loss_weight"], ["#formCurveLossWeight", "load_curve_loss_weight"],
@@ -2665,11 +2681,11 @@ function applySongFormCheckpointConfig(data, mode) {
   if (locked) structure.forEach(([selector, key]) => {
     if (element(selector) && config[key] != null) effective.push(`${key}=${config[key]}`);
   });
-  const status = element("#checkpointInspectStatus"); if (status && data.valid) status.textContent = `song_form_v1：epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；配置训练 ${data.optimizer_steps || 0} 步；生成${data.can_generate ? "可用" : "未就绪"}，修订${data.can_revise ? "可用" : "未就绪"}${locked ? `；${mode === "resume" ? "resume 继承值" : "checkpoint 固定结构"}：${effective.join(" · ") || "未记录"}` : ""}。`;
+  const status = element("#checkpointInspectStatus"); if (status && data.valid) status.textContent = `${data.model_family || currentModelFamily()}：epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；配置训练 ${data.optimizer_steps || 0} 步；生成${data.can_generate ? "可用" : "未就绪"}，修订${data.can_revise ? "可用" : "未就绪"}${locked ? `；${mode === "resume" ? "resume 继承值" : "checkpoint 固定结构"}：${effective.join(" · ") || "未记录"}` : ""}。`;
 }
 
 async function inspectCheckpoint({ autoPreprocess = false } = {}) {
-  if (currentModelFamily() === "song_form_v1") applySongFormCheckpointConfig({valid: false}, "fresh");
+  if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) applySongFormCheckpointConfig({valid: false}, "fresh");
   assertTrainingSelection({ autoPreprocess });
   await assertDatasetBackend();
   const mode = currentTrainingMode();
@@ -2680,16 +2696,20 @@ async function inspectCheckpoint({ autoPreprocess = false } = {}) {
     return null;
   }
   const checkpointPath = valueOrDefault("#trainingCheckpointPath", "").trim();
-  if (currentModelFamily() === "song_form_v1") {
-    if (!checkpointPath) throw new Error("请先填写已有 song_form_v1 checkpoint 路径");
-    const request = ++checkpointInspectRequest; setCheckpointStatus("正在检查 song_form_v1 checkpoint…");
+  if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) {
+    if (!checkpointPath) throw new Error("请先填写已有 song-form checkpoint 路径");
+    const request = ++checkpointInspectRequest; setCheckpointStatus("正在检查 song-form checkpoint…");
     const data = await api("/api/form/inspect", { checkpoint: checkpointPath, operation: "train", mode });
     if (request !== checkpointInspectRequest || mode !== currentTrainingMode()
-        || currentModelFamily() !== "song_form_v1"
+        || !["song_form_v1", "song_form_v2"].includes(currentModelFamily())
         || checkpointPath !== valueOrDefault("#trainingCheckpointPath", "").trim()) return null;
+    if (data.valid && data.model_family !== currentModelFamily()) {
+      data.valid=false;data.can_train=false;
+      data.errors=[`该模型属于 ${data.model_family}，请切换对应模型族续训；新有理数架构须从头训练。`];
+    }
     checkpointInspection = { key: currentCheckpointKey(), data };
-    if (data.valid && data.can_train) { applySongFormCheckpointConfig(data, mode); setCheckpointStatus(`song_form_v1 checkpoint 可用；${mode === "resume" ? "权重与优化器可加载，实际数据合同将在启动时核对" : "可加强训练"}`, "good"); }
-    else setCheckpointStatus((data.errors || []).join("；") || "song_form_v1 checkpoint 不可用于当前模式", "warn");
+    if (data.valid && data.can_train) { applySongFormCheckpointConfig(data, mode); setCheckpointStatus(`${data.model_family} checkpoint 可用；${mode === "resume" ? "权重与优化器可加载，实际数据合同将在启动时核对" : "可加强训练"}`, "good"); }
+    else setCheckpointStatus((data.errors || []).join("；") || "song-form checkpoint 不可用于当前模式", "warn");
     updateTrainingControls(); return data;
   }
   if (!checkpointPath) throw new Error("请先上传或填写已有模型 checkpoint 路径");
@@ -2727,14 +2747,14 @@ async function inspectGenerationCheckpoint() {
   if (!checkpointPath) throw new Error("请先上传或填写生成使用的 checkpoint 路径");
   const request = ++generationInspectRequest;
   setGenerationStatus("正在检查生成 checkpoint...");
-  if (currentModelFamily() === "song_form_v1") {
+  if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) {
     const data = await api("/api/form/inspect", { checkpoint: checkpointPath, operation: "generate", mode: "fresh" });
     if (request !== generationInspectRequest) return null;
     generationInspection = { path: checkpointPath, data }; updateFamilyFields();
     const conditionNote = data.condition_controls_trained ? "Radar / Style 条件监督已训练" : "Radar / Style 仍是未校准条件，请先做 A/B 验证";
     const curveNote = data.load_curve_trained ? "song_form 强度曲线已训练" : "song_form 强度曲线尚未训练";
     const curveBox = element("#formCurveCapability"); if (curveBox) { curveBox.hidden = false; curveBox.textContent = `${curveNote}；${conditionNote}。`; curveBox.classList.toggle("warn", !data.load_curve_trained); }
-    setGenerationStatus(data.valid && data.can_generate ? `模型族：song_form_v1；epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；生成可用；${conditionNote}；${curveNote}` : ((data.errors || []).join("；") || "song_form_v1 checkpoint 尚未完成草稿训练"), data.valid && data.can_generate ? "good" : "warn");
+    setGenerationStatus(data.valid && data.can_generate ? `模型族：${data.model_family}；epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；生成可用；${conditionNote}；${curveNote}` : ((data.errors || []).join("；") || "song-form checkpoint 尚未完成事件训练"), data.valid && data.can_generate ? "good" : "warn");
     return data;
   }
   const data = await api("/api/checkpoint/inspect", { checkpoint_path: checkpointPath, mode: "generate" });
@@ -2917,8 +2937,8 @@ async function submitTrain(options = {}) {
     }
   }
   const payload = { ...trainingPayload({ autoPreprocess: !!options.autoPreprocess }), auto_preprocess: !!options.autoPreprocess };
-  if (payload.model_family === "song_form_v1") {
-    if (options.autoPreprocess) throw new Error("song_form_v1 请先在训练素材页完成预处理，再从已准备 manifest 开始训练。");
+  if (["song_form_v1", "song_form_v2"].includes(payload.model_family)) {
+    if (options.autoPreprocess) throw new Error("song-form 请先在训练素材页完成预处理，再从已准备 manifest 开始训练。");
     if (!payload.manifest) throw new Error("请先在训练素材中选择或填写已准备的 manifest");
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/form/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
@@ -3724,11 +3744,11 @@ async function submitGenerate() {
   const payload = generationPayload();
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
-  if (payload.model_family === "song_form_v1") {
+  if (["song_form_v1", "song_form_v2"].includes(payload.model_family)) {
     payload.requested_output = payload.output;
     payload.output = uniqueSongFormOutputPath(payload.output);
     const data = await api("/api/form/generate", payload);
-    watchTask(data.task_id, (task) => { if (task.status === "completed") setAcceptanceStatus("song_form_v1 生成完成；请查看报告并进行人工试听与游玩检查。", "good"); });
+    watchTask(data.task_id, (task) => { if (task.status === "completed") setAcceptanceStatus("song-form 生成完成；请查看报告并进行人工试听与游玩检查。", "good"); });
     return;
   }
   if (payload.conflict_detection_enabled) {
@@ -4044,10 +4064,10 @@ on("#tapOnSlideThresholdMs", "change", () => {
 });
 
 // Training panel
-on("#modelFamily", "change", () => { generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null }; applySongFormCheckpointConfig({valid: false}, "fresh"); updateTrainingControls(); updateFamilyFields(); saveSettings(); });
+on("#modelFamily", "change", () => { generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null }; applySongFormCheckpointConfig({valid: false}, "fresh"); if (currentModelFamily()==="song_form_v2" && currentTrainingMode()==="fresh") { for (const [id,v] of Object.entries({formDModel:256,formLayers:4,formNhead:8,formDimFeedforward:0,formPlannerWidth:128})) { const node=element("#"+id);if(node)node.value=String(v); } } updateTrainingControls(); updateFamilyFields(); saveSettings(); });
 on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
 on("#formResumeDataPolicy", "change", () => { updateTrainingControls(); saveSettings(); });
-on("#trainingCheckpointPath", "input", () => { if (currentModelFamily() === "song_form_v1") applySongFormCheckpointConfig({valid: false}, "fresh"); invalidateCheckpointInspection("checkpoint 路径已变化，请重新检查。"); });
+on("#trainingCheckpointPath", "input", () => { if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) applySongFormCheckpointConfig({valid: false}, "fresh"); invalidateCheckpointInspection("checkpoint 路径已变化，请重新检查。"); });
 on("#goldMode", "change", () => { updateGoldFields(); saveSettings(); });
 on("#preprocessButton", "click", startPreprocess);
 on("#inspectManifestButton", "click", inspectManifest);

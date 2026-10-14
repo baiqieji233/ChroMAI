@@ -221,6 +221,8 @@ def main(argv=None):
     torch.manual_seed(args.seed)
     started = time.perf_counter()
     output = Path(args.checkpoint_dir)
+    if args.model_family=='song_form_v2' and old is None and (output/'form_last.pt').is_file():
+        raise ValueError('从头训练请使用新输出目录；该目录已存在 form_last.pt，避免覆盖现有模型。')
     if old and args.init_checkpoint and Path(args.init_checkpoint).resolve().parent == output.resolve():
         raise ValueError('Finetune uses a separate output directory to preserve the source model')
     if args.resume and args.resume_data_policy == 'restart_epoch' and Path(args.resume).resolve().parent == output.resolve():

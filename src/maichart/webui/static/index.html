@@ -17,7 +17,7 @@
     <div class="top-actions">
       <span id="serverStatus" class="status-dot">检查本地服务</span>
       <a href="/api/status" target="_blank">服务状态</a>
-      <span class="muted">全曲结构 · song_form_v1</span>
+      <span class="muted">音乐结构 · 精确事件生成</span>
     </div>
   </header>
 
@@ -135,7 +135,8 @@
           </label></div>
 <p class="workflow-hint">首次建立模型选“从头训练”；延续同一次实验选“从断点继续”；更换精选数据或调整采样策略选“已有模型加强训练”。</p>
 <div class="form-grid"><label class="field span-4">模型族 / Model family
-<select id="modelFamily"><option value="song_form_v1" selected>song_form_v1 全曲结构模型（全曲规划与段落关联）</option><option value="event_ctx_v1">event_ctx_v1 跨窗口事件模型（旧模型兼容路径）</option><option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option><option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option></select>
+<select id="modelFamily"><option value="song_form_v2" selected>song_form_v2（精确有理数事件，推荐）</option>
+              <option value="song_form_v1">song_form_v1 全曲结构模型（全曲规划与段落关联）</option><option value="event_ctx_v1">event_ctx_v1 跨窗口事件模型（旧模型兼容路径）</option><option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option><option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option></select>
 <small id="modelFamilyHelp">song_form_v1 是当前主架构：先建立全曲起音草稿，再生成配置；切换模型族后，本页会显示对应专属参数。</small></label></div>
 <div id="trainingCheckpointGroup">
 <div id="formResumeDataPolicyGroup" class="form-grid" hidden>
@@ -183,7 +184,7 @@
             <small>仅影响速度。CPU 训练在 860 万参数 + 2000 余片段下会慢到不实用。</small>
           </label>
 <label class="field span-4">checkpoint 输出目录
-            <textarea id="checkpointDir" class="path-input" rows="2">checkpoints/song_form_v1</textarea>
+            <textarea id="checkpointDir" class="path-input" rows="2">checkpoints/song_form_v2</textarea>
             <small id="checkpointDirHelp">event_last.pt / event_best.pt / event_epoch_NNN.pt。继续训练建议使用新目录，保留原模型。</small>
           </label></div>
 <div class="quick-settings">
@@ -250,7 +251,7 @@
           <div class="section-heading">
 <div><span class="step">QUALITY</span><h3>质量加权与反面案例</h3></div><span class="muted">只对已保存的素材标注生效</span></div>
           <p class="param-intro">质量标注保存在当前 manifest 对应的素材记录中。优秀谱面权重较高，普通谱面保持基准，减权谱面仍参与训练但影响较小，排除项不进入正向训练。反面案例默认只从正向示范中排除；只有提供同音频、同目标下的修正版，才会进入偏好训练。修改质量权重请使用 <strong>finetune</strong>；<strong>resume</strong> 用于严格延续同一训练合同。</p>
-          <p data-training-family="song_form_v1" class="workflow-hint" hidden>沿用“训练素材”中的整谱与局部权重；启用后读取保存的优秀、减权和排除标注。反例标注先用于排除；没有修正版偏好训练模块的模型不会假装学到了 DPO。改变资料或权重请使用 finetune。</p>
+          <p data-training-family="song_form_v1 song_form_v2" class="workflow-hint" hidden>沿用“训练素材”中的整谱与局部权重；启用后读取保存的优秀、减权和排除标注。反例标注先用于排除；没有修正版偏好训练模块的模型不会假装学到了 DPO。改变资料或权重请使用 finetune。</p>
 <div class="quality-training-grid">
             <label class="checkbox-field"><input id="qualityEnabled" type="checkbox"><span>启用质量加权训练</span><small>开始训练时读取「训练素材」中已经保存的标注。没有保存标注时不会改变训练。</small></label>
             <div class="quality-summary-inline"><strong id="qualityTrainingSummary">尚未载入素材摘要</strong><button id="openQualityWorkspaceButton" class="secondary-button" type="button">打开素材管理</button></div>
@@ -271,11 +272,14 @@
 <summary><span id="trainingArchitectureTitle">模型结构与上下文</span><small>从头训练时配置；已有模型按 checkpoint 继承</small>
 </summary>
 <div class="settings-content">
-<section id="songFormTrainingControls" class="song-form-only" data-training-family="song_form_v1" hidden>
-<div class="workflow-group-heading"><span class="step">SONG FORM</span><div><h3>song_form_v1 专属训练参数</h3><p>全曲起音草稿先于配置生成；音频秒数只是计算资源上限，不是固定乐句长度。</p></div></div>
+<section id="songFormTrainingControls" class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
+<div class="workflow-group-heading"><span class="step">SONG FORM</span><div><h3>音乐结构与事件模型参数</h3><p>模型族决定采音与配置的实现；音频秒数只是计算资源上限，不是固定乐句长度。</p></div></div>
 <div class="form-grid">
 <label class="field">单次音频计算上限（秒）<input id="formMaxRegionSeconds" type="number" min="2" max="20" step="1" value="14"><small>限制一次配置计算的音频范围；不会把歌曲切成固定16拍，也不会改变全曲起音规划。</small></label>
 <label class="field">模型宽度 d_model<input id="formDModel" type="number" min="16" max="2048" step="1" value="256"></label>
+<label class="field" data-training-family="song_form_v2">前馈层宽度<input id="formDimFeedforward" type="number" min="0" max="32768" step="1" value="0"><small>0 自动采用 3 × 模型宽度；可独立增加容量，无需同时把所有层扩到 512。</small></label>
+<label class="field" data-training-family="song_form_v2">Planner 宽度<input id="formPlannerWidth" type="number" min="16" max="2048" step="4" value="128"><small>独立于配置模型，必须能被 4 整除；规划全曲负荷与段落条件。</small></label>
+<p class="workflow-hint span-4" data-training-family="song_form_v2">默认 256 维、4 层、前馈 768、Planner 128：约 759 万参数。保留等级、Radar / Style、难度曲线、段落参考和持续动作；增加宽度不会自动提高采音时间精度。新架构须从头训练，旧模型可切换到兼容模型族继续生成或续训。</p>
 <label class="field">Transformer 层数<input id="formLayers" type="number" min="1" max="32" value="4"></label>
 <label class="field">注意力头数 nhead<input id="formNhead" type="number" min="1" max="64" value="8"><small>必须整除 d_model。</small></label>
 <label class="field">最大谱面 token<input id="formMaxTokens" type="number" min="32" max="16384" value="2048"><small>每个配置目标的 token 容量，不定义拍号或乐句。</small></label>
@@ -283,7 +287,7 @@
 <label class="field">准备进程数<input id="formPrepareWorkers" type="number" min="0" max="64" value="1"><small>只并行准备独立歌曲的谱面与音频缓存；0 = 自动（最多 4 个）。主进程仍按原顺序组装训练样本。首次冷缓存可设 4，已有缓存或内存紧张时保持 1。</small></label>
 </div><p class="workflow-hint">fresh 可以调整全部结构参数；resume 严格继承 checkpoint 合同；finetune 复用权重并在新输出目录调整训练数据与学习率。</p>
 </section>
-<section class="song-form-only" data-training-family="song_form_v1" hidden>
+<section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>
 <p class="workflow-hint">谱面准备结果会自动缓存到磁盘，重启后可复用。修改谱面、音频、质量标注或分段设置后会重新构建；下方缓存上限仅控制运行中的内存。</p>
 <div class="form-grid">
@@ -370,7 +374,7 @@
 <summary><span>条件、正则化与规划学习</span><small>遮罩、三种 Dropout、planner 与可选辅助模块</small>
 </summary>
 <div class="settings-content">
-<div class="song-form-learning" data-training-family="song_form_v1" hidden>
+<div class="song-form-learning" data-training-family="song_form_v1 song_form_v2" hidden>
 <p class="workflow-hint"><strong>song_form_v1 条件与 planner</strong>：等级、Radar 与 Style 会作为 16 维条件进入全曲 blueprint 和布局模型。训练使用谱面事件统计生成监督；生成时依 checkpoint 的真实能力开放，尚未训练过的控制不能开启。</p>
 <div class="form-grid">
 <label class="field">模型内部 Dropout<input id="formDropout" type="number" min="0" max="0.99" step="0.01" value="0.1"><small>只影响 fresh 的模型正则化；resume 继承 checkpoint，finetune 不能改变主干结构。</small></label>
@@ -504,7 +508,7 @@
             <input id="maxSteps" type="number" min="0" step="1" value="0">
             <small>0 表示完整 epoch；填 8、32 等可通过 WebUI 做受控 smoke。只影响本次运行，不写入模型结构合同。</small>
           </label>
-<label class="field" data-training-family="song_form_v1" hidden>谱面数量上限（短跑）<input id="formLimitCharts" type="number" min="0" value="0"><small>0 使用全部合格谱面；测试时可限量。resume 继承原数据限量。</small></label>
+<label class="field" data-training-family="song_form_v1 song_form_v2" hidden>谱面数量上限（短跑）<input id="formLimitCharts" type="number" min="0" value="0"><small>0 使用全部合格谱面；测试时可限量。resume 继承原数据限量。</small></label>
 <label class="field" data-training-family="event_v1">验证 batch 上限（短跑）
             <input id="validationMaxSteps" type="number" min="0" step="1" value="0">
             <small>0 表示跑完整验证集；短跑时建议填 1–8。只影响本次验证耗时。</small>
@@ -723,7 +727,7 @@
 <div class="workflow-group-heading"><span class="step">02</span>
 <div><h3>选择等级与偏好</h3>
 <p>先使用等级基准，再按需要微调。</p></div></div>
-<p class="song-form-condition-note" data-generation-family="song_form_v1" hidden><strong>song_form_v1 条件说明：</strong>等级、Radar 与 Style 会随当前生成条件传入；只有标记为“已训练 Radar / Style 监督”的 checkpoint 才能把这些值当作可靠控制。旧短训 checkpoint 仍可生成，但应先做固定歌曲 A/B 验证。</p>
+<p class="song-form-condition-note" data-generation-family="song_form_v1 song_form_v2" hidden><strong>song_form_v1 条件说明：</strong>等级、Radar 与 Style 会随当前生成条件传入；只有标记为“已训练 Radar / Style 监督”的 checkpoint 才能把这些值当作可靠控制。旧短训 checkpoint 仍可生成，但应先做固定歌曲 A/B 验证。</p>
 <div class="condition-presets">
           <div class="preset-heading"><strong>1 · 选择目标等级</strong><span>自动配好对应的密度与常规写法，每 0.1 档都有基准。</span></div>
           <div class="level-recipe-row">
@@ -781,18 +785,25 @@
         </div>
         </details>
 </section>
-<details id="songFormGenerationControls" class="settings-section song-form-only" data-generation-family="song_form_v1" hidden>
+<details id="songFormGenerationControls" class="settings-section song-form-only" data-generation-family="song_form_v1 song_form_v2" hidden>
 <summary><span>全曲规划与段落参考</span><small>起音选择、段落呼应与计算资源</small></summary><p class="workflow-hint">全曲规划决定采音；段落记忆提供之前相似段落的写法。等级、Radar / Style 和曲线仍在原位置调整。</p>
-<p id="formTimingResolutionHelp" class="workflow-hint">当前音频特征与 Planner 每 20 毫秒一帧（50 Hz）；下面的误差参数控制生成后的时间规整，不会提高模型输入分辨率。Simai 拍位仍用精确分数表示。相邻起音先合并，再做分音规整；勾选 48/64 无法找回已被合并或未形成独立峰的音。快速段可先减小合并范围，但不要仅为消除偏差而不断放大移动容差。</p>
+<p class="workflow-hint" data-generation-family="song_form_v2">直接生成精确分数拍位与配置，音频按节拍和音乐事件查询；没有固定时间帧起音阈值，也不需要从 50 Hz 峰近似分音。Planner 提供全曲负荷，曲线引导采音取舍与配置；音乐候选不限制可输出的分母。</p>
+<div class="form-grid" data-generation-family="song_form_v2">
+<label class="field">采音位置温度<input id="formPositionTemperature" type="number" min="0" max="3" step="0.05" value="0.2"><small>控制事件位置与段落结束选择的随机性；0 采用最高概率，配置随机性仍由原温度控制。</small></label>
+<label class="field">分数位置字符预算<input id="formPositionCharacters" type="number" min="4" max="128" value="24"><small>限制每个分数的文本长度，防止无止境解码；不是分音白名单，不会将结果近似到固定格点。</small></label>
+  <label class="field">最小有理事件间隔（毫秒）<input id="formRationalMinSpacingMs" type="number" min="0" max="50" step="0.1" value="2"><small>只防止两个事件挤在不可感知的时间距离内；仍允许任意有理数拍位，不会改成固定分音。0 关闭此保护。</small></label>
+  <label class="field">每个计算段最多事件数<input id="formMaxEventsPerSpan" type="number" min="0" max="512" step="1" value="0"><small>0 由 Planner 负荷自动给出宽松预算；仅用于防止未收敛模型无限生成。正常模型建议保持 0。</small></label>
+</div>
+<p data-generation-family="song_form_v1" id="formTimingResolutionHelp" class="workflow-hint">当前音频特征与 Planner 每 20 毫秒一帧（50 Hz）；下面的误差参数控制生成后的时间规整，不会提高模型输入分辨率。Simai 拍位仍用精确分数表示。相邻起音先合并，再做分音规整；勾选 48/64 无法找回已被合并或未形成独立峰的音。快速段可先减小合并范围，但不要仅为消除偏差而不断放大移动容差。</p>
 <div class="form-grid">
 <label class="field">Motif 记忆强度<input id="formMemoryStrength" type="number" min="0" max="1" step="0.05" value="0.6"><small>只调节已找到的相似段落配置参考，0关闭参考，1完整使用门控参考；不调节近期历史与持续动作记忆。没有可信段落关联时提高此值不会增加参考，具体覆盖见生成报告。</small></label>
-<label class="field">谱面起音选择阈值<input id="formOnsetThreshold" type="number" min="0.001" max="0.999" step="0.01" value="0.5"><small>0.5 是初始参考值；提高阈值会要求更强的 planner 起音证据，但高阈值仍可能留下长空白。张力曲线会改变候选起音胜算，不能用原始概率线性缩放来理解。不同 checkpoint 的阈值没有统一校准，不能直接横向比较；试听并查看本次诊断。</small></label>
-<label class="field">相邻起音合并范围（毫秒）<input id="formOnsetMergeMs" type="number" min="0" max="250" step="1" value="40"><small>范围内的附近候选只保留最强峰；不会禁止同一时刻的多押。0 关闭邻近合并。初试 30–40 ms；180 BPM 的 24 分音符约 55.6 ms，设得过大（如 60 ms）可能删掉真实快速节奏。</small></label>
-<label class="checkbox-field"><input id="formRhythmSnapEnabled" type="checkbox"><span>近似到常见分音</span><small>只把容差内的附近起音近似到已勾选候选分音；保留三连。不会直接替换谱面文本中的 <code>{192}</code>。默认关闭，小容差可保留细节；若近似会造成重合或顺序错乱则保留原时间。</small></label>
-<label class="field">最大采音偏移（毫秒）<input id="formRhythmSnapMs" type="number" min="0" max="50" step="1" value="15"><small>只在启用“近似到常见分音”后生效；数值越小越保留原始起音细节。</small></label>
-<label class="field">原始起音允许误差（毫秒）<input id="formRhythmSnapSourceMs" type="number" min="0" max="50" step="1" value="30"><small>限制纠正后的起音离模型原始峰有多远，与“最大采音偏移”同时约束移动。原先局部算法隐藏的 20 毫秒保护现可调整：20 更保守，30 可处理略超一帧的抖动，继续增大需谨慎。局部节奏一致只有两端和多数中间点支持同一网格时才放宽一帧保护；超出上限保留原位置，不删除音符。</small></label>
-<label class="field">分音规整方式<select id="formRhythmSnapMode"><option value="sequence" selected>局部节奏一致（推荐）</option><option value="point">逐点最近</option></select><small>两种方式都以原始峰时间比较候选，避免重复量化。局部节奏一致根据前后起音支持的网格纠正微小抖动，也可处理有少量漏采间隔的音列；保留真实12/24分，不把全曲固定成16分。整串相位无法区分偏移与切分音时仅记录供复核，不能保证自动纠正；最大位移仍受容差约束。想保留 16 分附点通常也需勾选 32 分网格。仅在启用近似时生效。</small></label>
-<fieldset class="field span-4"><legend>近似候选分音</legend><small>选择 48/64 只增加近似候选，不会覆盖相邻起音合并范围；需要更密集采音时减小或关闭合并范围。</small><div class="inline-fields">
+<label data-generation-family="song_form_v1" class="field">谱面起音选择阈值<input id="formOnsetThreshold" type="number" min="0.001" max="0.999" step="0.01" value="0.5"><small>0.5 是初始参考值；提高阈值会要求更强的 planner 起音证据，但高阈值仍可能留下长空白。张力曲线会改变候选起音胜算，不能用原始概率线性缩放来理解。不同 checkpoint 的阈值没有统一校准，不能直接横向比较；试听并查看本次诊断。</small></label>
+<label data-generation-family="song_form_v1" class="field">相邻起音合并范围（毫秒）<input id="formOnsetMergeMs" type="number" min="0" max="250" step="1" value="40"><small>范围内的附近候选只保留最强峰；不会禁止同一时刻的多押。0 关闭邻近合并。初试 30–40 ms；180 BPM 的 24 分音符约 55.6 ms，设得过大（如 60 ms）可能删掉真实快速节奏。</small></label>
+<label data-generation-family="song_form_v1" class="checkbox-field"><input id="formRhythmSnapEnabled" type="checkbox"><span>近似到常见分音</span><small>只把容差内的附近起音近似到已勾选候选分音；保留三连。不会直接替换谱面文本中的 <code>{192}</code>。默认关闭，小容差可保留细节；若近似会造成重合或顺序错乱则保留原时间。</small></label>
+<label data-generation-family="song_form_v1" class="field">最大采音偏移（毫秒）<input id="formRhythmSnapMs" type="number" min="0" max="50" step="1" value="15"><small>只在启用“近似到常见分音”后生效；数值越小越保留原始起音细节。</small></label>
+<label data-generation-family="song_form_v1" class="field">原始起音允许误差（毫秒）<input id="formRhythmSnapSourceMs" type="number" min="0" max="50" step="1" value="30"><small>限制纠正后的起音离模型原始峰有多远，与“最大采音偏移”同时约束移动。原先局部算法隐藏的 20 毫秒保护现可调整：20 更保守，30 可处理略超一帧的抖动，继续增大需谨慎。局部节奏一致只有两端和多数中间点支持同一网格时才放宽一帧保护；超出上限保留原位置，不删除音符。</small></label>
+<label data-generation-family="song_form_v1" class="field">分音规整方式<select id="formRhythmSnapMode"><option value="sequence" selected>局部节奏一致（推荐）</option><option value="point">逐点最近</option></select><small>两种方式都以原始峰时间比较候选，避免重复量化。局部节奏一致根据前后起音支持的网格纠正微小抖动，也可处理有少量漏采间隔的音列；保留真实12/24分，不把全曲固定成16分。整串相位无法区分偏移与切分音时仅记录供复核，不能保证自动纠正；最大位移仍受容差约束。想保留 16 分附点通常也需勾选 32 分网格。仅在启用近似时生效。</small></label>
+<fieldset data-generation-family="song_form_v1" class="field span-4"><legend>近似候选分音</legend><small>选择 48/64 只增加近似候选，不会覆盖相邻起音合并范围；需要更密集采音时减小或关闭合并范围。</small><div class="inline-fields">
 <label class="checkbox-field"><input id="formRhythmDivision4" type="checkbox" checked><span>4</span></label><label class="checkbox-field"><input id="formRhythmDivision8" type="checkbox" checked><span>8</span></label><label class="checkbox-field"><input id="formRhythmDivision12" type="checkbox" checked><span>12</span></label><label class="checkbox-field"><input id="formRhythmDivision16" type="checkbox" checked><span>16</span></label><label class="checkbox-field"><input id="formRhythmDivision24" type="checkbox" checked><span>24</span></label><label class="checkbox-field"><input id="formRhythmDivision32" type="checkbox" checked><span>32</span></label><label class="checkbox-field"><input id="formRhythmDivision48" type="checkbox"><span>48</span></label><label class="checkbox-field"><input id="formRhythmDivision64" type="checkbox"><span>64</span></label>
 </div><label class="field">其他分音（逗号分隔）<input id="formRhythmDivisionCustom" type="text" placeholder="例如 20,40"><small>允许 1–768，去重后最多 32 种；启用近似时至少选择一种。这些是起音位置的候选网格，不是导出文本标签白名单；12/16 网格交替时仍可能用 {48} 编码空白过渡，这不代表出现了 48 分连打。</small></label></fieldset>
 <label class="field">单次音频计算上限（秒）<input id="formGenerationMaxRegionSeconds" type="number" min="2" max="20" step="1" value="14"><small>建议与训练上限一致，默认14秒。增大会改变配置模型一次看到的上下文长度；全曲起音草稿不会因计算块重新决定，超出训练值时日志会提醒。</small></label>
@@ -849,18 +860,18 @@
           <button id="openIntensityCurveButton" class="secondary-button" type="button">打开强度曲线编辑</button>
         </div>
 <p id="intensityCurveConditionNotice" class="inline-status warn" hidden></p>
-<p id="formCurveCapability" class="inline-status" data-generation-family="song_form_v1" hidden>检查 checkpoint 后显示曲线能力。</p>
+<p id="formCurveCapability" class="inline-status" data-generation-family="song_form_v1 song_form_v2" hidden>检查 checkpoint 后显示曲线能力。</p>
 <p id="generationCurveSummary" class="inline-status" role="status"></p>
 <div class="form-grid">
 <label class="field" data-generation-family="event_v1 song_form_v1">强度曲线指导强度
             <input id="intensityCurveStrength" type="number" min="0" max="1" step="0.05" value="0.65">
             <small data-generation-family="event_v1">只控制已启用且保存的人工曲线。0 完全旁路数值曲线，恢复自动跟随 / 结尾衰减；显式标记的休止区仍然禁止新起音。0.65 向曲线目标靠拢，1 使用完整曲线目标。soft / strict 仅用于旧 event 配置兼容。</small>
-            <small data-generation-family="song_form_v1" hidden>曲线派生负荷始终作为基础条件输入；strength 只混合派生密度因子，0 时因子为 1，因此基础曲线条件和休止区仍生效。follow 范围为 1 ± strength × span（默认 0.65×0.5，因子约 0.675–1.325）；hard 不做 span 裁剪，默认约 0.35–1.65。两种模式都是软引导，不是密度硬上限。</small>
+            <small data-generation-family="song_form_v1 song_form_v2" hidden>曲线派生负荷始终作为基础条件输入；strength 只混合派生密度因子，0 时因子为 1，因此基础曲线条件和休止区仍生效。follow 范围为 1 ± strength × span（默认 0.65×0.5，因子约 0.675–1.325）；hard 不做 span 裁剪，默认约 0.35–1.65。两种模式都是软引导，不是密度硬上限。</small>
           </label>
 <label class="field" data-generation-family="event_v1 song_form_v1">强度曲线模式
             <select id="intensityCurveMode"><option value="follow" selected>follow（柔性跟随）</option><option value="hard">hard（严苛跟随）</option><option value="soft">soft（软指导 / 仅规划，兼容旧版）</option><option value="strict">strict（密度上限 / 生成后上限，兼容旧版）</option></select>
             <small data-generation-family="event_v1">follow：推荐。保留幅度限制，并在生成位置动态抑制过密；hard：同样保留幅度限制，过密时停止该段新起音。soft / strict 仅用于旧 event 配置兼容。显式休止区始终禁止新起音；此前已开始的 Hold / Slide 可跨入。</small>
-            <small data-generation-family="song_form_v1" hidden>song_form_v1 仅支持 follow / hard。follow 将曲线派生负荷作为软条件并按强度混合、按幅度裁剪；hard 跳过幅度裁剪，仍是软条件，不设密度配额或停止起音。strength=0 仍保留基础曲线条件与休止区。soft / strict 不适用。</small>
+            <small data-generation-family="song_form_v1 song_form_v2" hidden>song_form_v1 仅支持 follow / hard。follow 将曲线派生负荷作为软条件并按强度混合、按幅度裁剪；hard 跳过幅度裁剪，仍是软条件，不设密度配额或停止起音。strength=0 仍保留基础曲线条件与休止区。soft / strict 不适用。</small>
           </label></div>
 <details id="generationCurveAdvanced" class="settings-section" data-advanced >
 <summary><span>自动跟随、幅度与结尾处理</span><small>曲线指导强度大于 0 时，人工曲线优先</small>
@@ -882,7 +893,7 @@
 <label class="field" data-generation-family="event_v1 song_form_v1">强度跟随幅度
             <input id="intensityFollowSpan" type="number" min="0" max="0.9" step="0.05" value="0.5">
             <small data-generation-family="event_v1">用于多维 / 响度自动跟随，也用于人工曲线的 follow / hard / soft 模式。0.5 先把参考倍率限制在 0.5×～1.5×；再混合指导强度。0 使密度缩放回到基准；model 自动模式及 strict 不使用此范围。</small>
-            <small data-generation-family="song_form_v1" hidden>只用于 song_form_v1 曲线 follow 模式的因子裁剪；默认 span=0.5，将派生因子限制在 0.5×～1.5×，随后由指导强度混合。hard 不使用此范围；strength=0 仍保留基础曲线负荷与休止区。</small>
+            <small data-generation-family="song_form_v1 song_form_v2" hidden>只用于 song_form_v1 曲线 follow 模式的因子裁剪；默认 span=0.5，将派生因子限制在 0.5×～1.5×，随后由指导强度混合。hard 不使用此范围；strength=0 仍保留基础曲线负荷与休止区。</small>
           </label>
 <label class="field" data-generation-family="event_v1">结尾衰减
             <input id="tailDamping" type="checkbox">
@@ -926,7 +937,7 @@
 <div class="workflow-group-heading"><span class="step">05</span>
 <div><h3>设置生成方式</h3>
 <p data-generation-family="event_v1 legacy_frame_v2">候选数决定生成几份；固定种子便于比较参数。</p>
-<p data-generation-family="song_form_v1" hidden>song_form_v1 每次生成一份；留空随机抽种子，任务记录会显示实际种子，填回后可复现。</p></div></div>
+<p data-generation-family="song_form_v1 song_form_v2" hidden>song_form_v1 每次生成一份；留空随机抽种子，任务记录会显示实际种子，填回后可复现。</p></div></div>
 <div class="form-grid">
 <label class="field" data-generation-family="event_v1 legacy_frame_v2">候选数量
             <input id="candidates" type="number" min="1" max="64" value="1">
@@ -935,7 +946,7 @@
 <label class="field">随机种子
             <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
             <small data-generation-family="event_v1 legacy_frame_v2"><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed。</small>
-            <small data-generation-family="song_form_v1" hidden>留空时由服务随机生成 seed，并把实际值记入任务结果与生成报告；填固定整数可复现。</small>
+            <small data-generation-family="song_form_v1 song_form_v2" hidden>留空时由服务随机生成 seed，并把实际值记入任务结果与生成报告；填固定整数可复现。</small>
           </label>
 <label class="checkbox-field" data-generation-family="event_v1">
             <input id="sampleEvents" type="checkbox" checked>
@@ -943,20 +954,20 @@
             <small><strong>后端对应 sample / greedy 解码开关。</strong>勾选时从经过语法约束的概率分布抽样；取消时每步取最高概率 token（greedy），结果确定但可能更容易重复。
             它改变随机性，不会补足模型没学会的音符类型或配置。</small>
           </label>
-<label class="field" data-generation-family="event_v1 song_form_v1">Temperature（采样温度）
+<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2">Temperature（配置采样温度）
             <input id="temperature" type="number" min="0" step="0.05" value="0.65">
             <small data-generation-family="event_v1"><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。较低值会让抽样更集中，较高值会保留更多不确定性。</small>
-            <small data-generation-family="song_form_v1" hidden>控制配置解码随机性，不改变全曲起音数或条件目标；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
+            <small data-generation-family="song_form_v1 song_form_v2" hidden>控制配置解码随机性，不改变全曲起音数或条件目标；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
           </label>
 <label class="field" data-generation-family="song_form_v1">规划类型指导强度
             <input id="formPlannerTypeStrength" type="number" min="0" max="3" step="0.1" value="1.0">
             <small>仅用于 song_form_v1 自动生成。按 Planner 的 Tap / Hold / Slide / Touch 概率做有界软偏置，不会用 argmax 强制类型；0 关闭此项指导。</small>
           </label>
-<label class="field" data-generation-family="song_form_v1">类型比例纠偏强度
+<label class="field" data-generation-family="song_form_v1 song_form_v2">类型比例纠偏强度
             <input id="formStyleBalanceStrength" type="number" min="0" max="3" step="0.1" value="1.0">
-            <small>仅用于 song_form_v1 自动生成。根据已生成 note 头与 Style 类型目标的差异做软纠偏，不限制局部多押。0 关闭此项；规划类型、类型比例、局部多押三项强度均为 0 时恢复原字符采样。默认 1.0，较高值可能损害配置自然性。</small>
+            <small>根据已生成 note 头与 Style 类型目标的差异做软纠偏，不限制局部多押。0 关闭此项；所有纠偏强度均为 0 时使用模型原配置分布。默认 1.0，较高值可能损害配置自然性。</small>
           </label>
-<label class="field" data-generation-family="song_form_v1">局部多押抑制强度
+<label class="field" data-generation-family="song_form_v1 song_form_v2">局部多押抑制强度
             <input id="formLocalChordStrength" type="number" min="0" max="3" step="0.1" value="1.0">
             <small>参考最近2秒的按键多押比例、Style多押倾向与曲线相对强度；集中超出参考后，降低继续叠加按键的概率。默认1，0关闭；不强制单押、不移动采音点，也不会为了补足全曲比例突然加多押。Touch与TouchHold不计入此按键多押压力；这不是无理检测。</small>
           </label></div>
@@ -1225,7 +1236,7 @@
           <small data-generation-family="event_v1 legacy_frame_v2">auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
           checkpoint 身份指具体权重文件和训练 epoch，不代表模型架构。训练中的 event_last.pt 会持续覆盖，建议选择固定的 event_epoch_NNN.pt 生成曲线。
           audio 只依赖歌曲的音频特征。等级、Radar 或 Style 改动只提醒，未重新预测时继续沿用已保存曲线；更换音频、checkpoint、BPM、first 或 tempo map 后仍需重新生成。</small>
-          <small data-generation-family="song_form_v1" hidden>song_form_v1 的 auto 会从已选 song_form checkpoint 预测曲线；model 也使用该 checkpoint。audio 曲线不是 learned_song_form_v1，不能用于 song_form 生成。</small>
+          <small data-generation-family="song_form_v1 song_form_v2" hidden>song_form_v1 的 auto 会从已选 song_form checkpoint 预测曲线；model 也使用该 checkpoint。audio 曲线不是 learned_song_form_v1，不能用于 song_form 生成。</small>
         </label>
         <div class="button-row">
           <button id="generateIntensityCurveButton" class="primary-button" type="button">生成强度曲线</button>

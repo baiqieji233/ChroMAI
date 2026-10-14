@@ -305,7 +305,7 @@ def build_parser() -> argparse.ArgumentParser:
     preprocess_build_cmd.add_argument("--skip-audio", action="store_true", help="skip audio feature extraction")
     preprocess_build_cmd.add_argument("--skip-alignment", action="store_true", help="skip alignment report generation")
     preprocess_build_cmd.add_argument("--sample-rate", type=int, default=22050, help="audio sample rate; default: 22050")
-    preprocess_build_cmd.add_argument("--workers", type=int, default=1, help="reserved; current implementation is serial")
+    preprocess_build_cmd.add_argument("--workers", type=int, default=1, help="parallel song workers; default: 1")
     preprocess_build_cmd.set_defaults(handler=_preprocess_build_command)
 
     preprocess_split_cmd = preprocess_subparsers.add_parser(
@@ -588,8 +588,8 @@ def _preprocess_scan_command(args: argparse.Namespace) -> int:
 
 
 def _preprocess_build_command(args: argparse.Namespace) -> int:
-    if args.workers != 1:
-        print("[preprocess] --workers is reserved; running serially.")
+    if args.workers < 1:
+        raise ValueError("--workers must be at least 1")
     manifest = build_training_manifest(
         args.raw_root,
         cache_dir=args.cache_dir,
@@ -601,6 +601,7 @@ def _preprocess_build_command(args: argparse.Namespace) -> int:
         skip_audio=args.skip_audio,
         skip_alignment=args.skip_alignment,
         sample_rate=args.sample_rate,
+        workers=args.workers,
     )
     print(
         f"[preprocess] songs={manifest.song_count} difficulties={manifest.difficulty_count} "

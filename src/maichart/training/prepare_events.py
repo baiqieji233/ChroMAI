@@ -56,6 +56,9 @@ MIN_LEVEL = 12.0
 
 MANIFEST_SCHEMA = "maichart-training-manifest-v1"
 PREPROCESSING_SCHEMA = "maichart-preprocessing-contract-v1"
+LEGACY_AUDIO_PROFILE = "event_audio_v2_rhythm"
+RATIONAL_AUDIO_PROFILE = "rational_audio_queries_v1"
+AUDIO_PROFILES = (LEGACY_AUDIO_PROFILE, RATIONAL_AUDIO_PROFILE)
 
 DIFFICULTY_NAMES = {0: "basic", 1: "advanced", 2: "expert", 3: "master", 4: "remaster"}
 
@@ -224,7 +227,10 @@ def build_event_manifest(
     sample_rate: int = 22050,
     limit: int | None = None,
     chart_filter_policy: str = DEFAULT_CHART_FILTER_POLICY,
+    audio_profile: str = LEGACY_AUDIO_PROFILE,
 ) -> dict[str, Any]:
+    if audio_profile not in AUDIO_PROFILES:
+        raise ValueError(f"unsupported audio profile: {audio_profile}")
     chart_filter_policy = validate_chart_filter_policy(chart_filter_policy)
     directories = _discover_sample_dirs(raw_root)
     songs: list[dict[str, Any]] = []
@@ -249,7 +255,7 @@ def build_event_manifest(
     affected_charts = [item for item in difficulties
                        if int((item.get("chart_filter") or {}).get("removed_count", 0)) > 0]
     removed_atom_count = sum(int(item["chart_filter"]["removed_count"]) for item in affected_charts)
-    return {
+    manifest = {
         "schema": MANIFEST_SCHEMA,
         "source_root": raw_root.resolve().as_posix(),
         "cache_dir": cache_dir.as_posix(),
@@ -261,10 +267,7 @@ def build_event_manifest(
             # These two fields are what make the WebUI recognise this as an event
             # manifest instead of the legacy fixed-frame format.
             "target_schema": "event_v1",
-            "feature_profile": "event_audio_v2_rhythm",
-            "sample_rate": int(sample_rate),
-            "hop_length": 441,
-            "feature_rate_hz": 50,
+            "feature_profile": audio_profile,
             "min_difficulty_index": MIN_DIFFICULTY_INDEX,
             "min_level": MIN_LEVEL,
             "chart_filter_policy": chart_filter_policy,
@@ -287,6 +290,18 @@ def build_event_manifest(
         "errors": errors,
     }
 
+    # Fixed-frame feature dimensions and hop timing describe only the legacy
+    # event audio contract. Rational audio is queried at authored event times.
+    if audio_profile == LEGACY_AUDIO_PROFILE:
+        manifest["preprocessing"].update({
+            "sample_rate": int(sample_rate),
+            "hop_length": 441,
+            "feature_rate_hz": 50,
+        })
+    # Rational audio controls its own waveform analysis rate; do not claim
+    # fixed-frame extraction settings in this manifest.
+    return manifest
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
@@ -296,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--cache-dir", required=True, help="cache directory for audio features")
     parser.add_argument("-o", "--output", required=True, help="output manifest JSON path")
     parser.add_argument("--sample-rate", type=int, default=22050)
+    parser.add_argument("--audio-profile", choices=AUDIO_PROFILES, default=LEGACY_AUDIO_PROFILE,
+                        help="audio contract recorded for downstream training")
     parser.add_argument("--chart-filter-policy", choices=(
         "legacy_strict_v1", "drop_headless_stars_v1"), default=DEFAULT_CHART_FILTER_POLICY)
     parser.add_argument(
@@ -322,6 +339,7 @@ def main(argv: list[str] | None = None) -> int:
     manifest = build_event_manifest(
         raw_root, cache_dir=cache_dir, sample_rate=int(args.sample_rate), limit=args.limit,
         chart_filter_policy=args.chart_filter_policy,
+        audio_profile=args.audio_profile,
     )
     base = output.parent
     for song in manifest["songs"]:
