@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-import hashlib
 import json
 import math
 from pathlib import Path
@@ -59,6 +58,8 @@ def parser():
     p.add_argument('--meter-map', help='per-song music_structure.json may override this map')
     p.add_argument('--init-checkpoint')
     p.add_argument('--resume')
+    p.add_argument('--resume-data-policy', choices=('strict', 'restart_epoch'), default='strict',
+                   help='strict continuation, or preserve source/optimizer state and restart the current epoch after preparation changes')
     p.add_argument('--precision', choices=('auto', 'fp32', 'bf16', 'fp16'), default='auto')
     p.add_argument('--loader-workers', type=int, default=0)
     p.add_argument('--prefetch-factor', type=int, default=2)
@@ -82,6 +83,8 @@ def _validate(args):
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
         raise ValueError('Choose resume or finetune, not both')
+    if args.resume_data_policy != 'strict' and not args.resume:
+        raise ValueError('resume_data_policy only applies to resume')
     if args.audio_cache_mode == 'resident' and (args.loader_workers or args.audio_cache_gb <= 0):
         raise ValueError('Full audio residency requires loader-workers=0 and a positive audio-cache-gb budget')
     if not args.resume and not args.init_checkpoint:
@@ -190,6 +193,16 @@ def main(argv=None):
     output = Path(args.checkpoint_dir)
     if old and args.init_checkpoint and Path(args.init_checkpoint).resolve().parent == output.resolve():
         raise ValueError('Finetune uses a separate output directory to preserve the source model')
+    if args.resume and args.resume_data_policy == 'restart_epoch' and Path(args.resume).resolve().parent == output.resolve():
+        raise ValueError('迁移续训请使用新的 checkpoint 输出目录，以保留来源模型。')
+    from maichart.form.resume_contract import (
+        contract_header, preflight_resume, verify_saved_chart_sources,
+        compare_resume_contract, resolve_resume_contract, validate_resume_cursor,
+    )
+    current_header = contract_header(args.manifest, meters, args.max_region_seconds)
+    if args.resume:
+        preflight_resume(old.get('dataset_contract') or {}, current_header)
+        verify_saved_chart_sources(old.get('dataset_contract') or {})
     output.mkdir(parents=True, exist_ok=True)
     emit('form_runtime', training_semantics=TRAINING_SEMANTICS, device=str(device), precision=precision,
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
@@ -210,10 +223,22 @@ def main(argv=None):
                           limit_charts=args.limit_charts, max_region_seconds=args.max_region_seconds,
                           quality_enabled=args.quality_enabled, preparation_workers=args.prepare_workers,
                           audio_cache_gb=args.audio_cache_gb, sample_cache_mb=args.sample_cache_mb)
-    contract = {'manifest_sha256': hashlib.sha256(Path(args.manifest).read_bytes()).hexdigest(),
-                'meter_map': meters, 'max_region_seconds': args.max_region_seconds, 'charts': dataset.audit['charts']}
-    if args.resume and old.get('dataset_contract') != contract:
-        raise ValueError('Resume data changed; use --init-checkpoint')
+    contract = {**current_header, 'charts': dataset.audit['charts']}
+    migration = None
+    if args.resume:
+        diff = compare_resume_contract(old.get('dataset_contract') or {}, contract)
+        if not diff['compatible']:
+            (output/'resume_contract_diff.json').write_text(json.dumps(diff,ensure_ascii=False,indent=2),encoding='utf-8')
+            emit('form_resume_contract', old_charts=diff['old_chart_count'], new_charts=diff['new_chart_count'],
+                 added=len(diff['added']), removed=len(diff['removed']), changed=len(diff['changed']),
+                 can_restart_epoch=diff['can_restart_epoch'], policy=args.resume_data_policy,
+                 report=str(output/'resume_contract_diff.json'))
+        resolve_resume_contract(old.get('dataset_contract') or {}, contract, args.resume_data_policy)
+        if not diff['compatible']:
+            migration = {'source_checkpoint':str(Path(args.resume).resolve()),
+                         'old_chart_count':diff['old_chart_count'],'new_chart_count':diff['new_chart_count'],
+                         'old_position':old.get('training_position'), 'restart_epoch':int(old.get('epoch',0))+1,
+                         'optimizer_restored':True,'policy':args.resume_data_policy}
     if args.audio_cache_mode == 'resident':
         residency = dataset.preload_audio(lambda **fields: emit('form_audio_cache', mode='resident', **fields))
         emit('form_audio_cache', **residency, phase='in_memory_training')
@@ -246,6 +271,12 @@ def main(argv=None):
     history = list(old.get('training_history', [])) if args.resume else []
     start_epoch = int(old.get('epoch', 0)) if args.resume else 0
     cursor = dict(old.get('training_position') or {}) if args.resume else {}
+    migrations = list(old.get('data_migrations') or []) if args.resume else []
+    if migration:
+        cursor = {}
+        migrations.append(migration)
+        emit('form_resume_migration', **migration,
+             message='保留模型与优化器状态；丢弃旧样本游标，从未完成轮次的规划阶段重新开始。')
     first_items = {}
     for i, item in enumerate(dataset.items):
         first_items.setdefault(item[0], i)
@@ -254,6 +285,9 @@ def main(argv=None):
         plan_indices = plan_indices[:args.max_steps]
     plan_total = len(plan_indices)
     layout_total = min(math.ceil(len(dataset)/args.batch_size), args.max_steps or math.ceil(len(dataset)/args.batch_size))
+    if args.resume:
+        validate_resume_cursor(cursor, epoch=start_epoch, layout_total=layout_total,
+                               plan_total=plan_total, batch_size=args.batch_size, max_steps=args.max_steps)
     (output/'dataset_audit.json').write_text(json.dumps(dataset.audit, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f'form_training charts={len(dataset.songs)} examples={len(dataset)} device={device} parameters={sum(p.numel() for p in parameters)}', flush=True)
     emit('form_dataset', charts=len(dataset.songs), examples=len(dataset), draft_examples=sum(item[3] == 0 for item in dataset.items),
@@ -277,6 +311,7 @@ def main(argv=None):
             capabilities={k:dict(v) for k,v in capabilities.items()}, optimizer_state_dict=optimizer.state_dict(),
             grad_scaler_state=engine.scaler.state_dict(), dataset_contract=contract, args=vars(args),
             atom_catalog=atoms, metrics=metrics, training_history=history,
+            data_migrations=migrations,
             condition_supervision='event_derived_radar_style_v1', training_semantics=TRAINING_SEMANTICS,
             precision=precision,
             training_position={'epoch':epoch, 'phase':'complete' if complete else phase, 'completed':completed,
@@ -300,10 +335,12 @@ def main(argv=None):
         value['contract'] = contract_name
 
     if args.resume:
-        restore_rng(old.get('rng_state'), device)
+        if migration:
+            restart_seed = args.seed+(start_epoch+1)*100003
+            random.seed(restart_seed);np.random.seed(restart_seed);torch.manual_seed(restart_seed)
+        else:
+            restore_rng(old.get('rng_state'), device)
         if cursor and cursor.get('phase') != 'complete':
-            if cursor.get('layout_total') != layout_total or cursor.get('plan_total') != plan_total or cursor.get('max_steps') != args.max_steps:
-                raise ValueError('Mid-epoch resume requires identical batch/step limits; use finetune for a new run')
             emit('form_resume', **cursor, optimizer_steps=steps, blueprint_steps=plan_steps)
     for epoch in range(start_epoch+1, start_epoch+args.epochs+1):
         dataset.seed = args.seed + epoch*100003
