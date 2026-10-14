@@ -26,6 +26,18 @@ from maichart.form.training_runtime import (
     resolve_precision, restore_rng, validate_cpu_batch,
 )
 
+# Keep the rational Planner's training evidence distribution identical to
+# rational_generate.py.  Weak native attacks beyond this budget are omitted
+# consistently at training and inference time.
+RATIONAL_PLANNER_MAX_AUDIO_NODES = 1024
+
+
+def _rational_planner_audio(song):
+    """Build the bounded Planner query clock shared with generation."""
+    from maichart.form.rational_audio import audio_queries
+    return audio_queries(song, song.spans[0].start, song.spans[-1].end,
+                         max_nodes=RATIONAL_PLANNER_MAX_AUDIO_NODES)
+
 
 def parser():
     p = argparse.ArgumentParser(description=__doc__)
@@ -161,8 +173,7 @@ def _blueprint_input(dataset, index):
     from maichart.generation.event_audio import segment_frame_times
     song, points, level, weight, _, condition, *rest = dataset.songs[index]
     if getattr(song, 'audio_profile', 'legacy_50hz') == 'rational_audio_queries_v1':
-        from maichart.form.rational_audio import audio_queries
-        audio,times,_=audio_queries(song,song.spans[0].start,song.spans[-1].end)
+        audio,times,_=_rational_planner_audio(song)
         curve=resample_load_curve(song.load_curve_times_sec,song.load_curve,times-song.first)
         boundaries=np.r_[times[0],(times[1:]+times[:-1])*.5,
             seconds_at_beat(song.spans[-1].end,song.tempo,song.first)]
@@ -442,7 +453,7 @@ def main(argv=None):
                         dataset, index, max_tokens=args.max_tokens,
                         max_region_seconds=args.max_region_seconds,
                         audio_feature_config={'profile': 'rational_audio_queries_v1',
-                                              'max_nodes': None})
+                                              'max_nodes': RATIONAL_PLANNER_MAX_AUDIO_NODES})
                     inputs, targets, weight, _ = blueprint_cache.get_or_build(
                         key, identity, lambda: _blueprint_input(dataset, index))
                     return inputs, targets, weight

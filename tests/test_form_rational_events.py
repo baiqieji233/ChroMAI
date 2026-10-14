@@ -220,6 +220,25 @@ def test_workload_planner_has_no_frame_onset_head_and_updates_conditions():
     assert model.region_attention.in_proj_weight.grad.abs().sum()>0
 
 
+def test_training_planner_query_budget_matches_generation(monkeypatch):
+    """Training must use the same bounded native-evidence budget as inference."""
+    import maichart.form.train as train
+    from types import SimpleNamespace
+
+    calls = []
+
+    def fake_queries(song, start, end, *, max_nodes=None):
+        calls.append(max_nodes)
+        return 'audio', 'times', 'beats'
+
+    monkeypatch.setattr('maichart.form.rational_audio.audio_queries', fake_queries)
+    span = SimpleNamespace(start=0, end=4)
+    result = train._rational_planner_audio(SimpleNamespace(spans=[span]))
+    assert result == ('audio', 'times', 'beats')
+    assert calls == [1024]
+    assert train.RATIONAL_PLANNER_MAX_AUDIO_NODES == 1024
+
+
 def test_compact_default_retains_all_model_branches():
     from maichart.form.train import parser,fresh_model_configs
     from maichart.form.model import FormTransformer
