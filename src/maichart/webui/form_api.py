@@ -341,6 +341,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                     raise ValueError('启用节奏近似时至少选择一种候选分音。')
                 divisions = COMMON_DIVISIONS if empty_divisions else normalize_divisions(raw_divisions)
                 args += ['--rhythm-snap-ms', str(number('rhythm_snap_ms',15,0,50)),
+                         '--rhythm-snap-source-ms', str(number('rhythm_snap_source_ms',30,0,50)),
                          '--rhythm-snap-divisions', ','.join(map(str, divisions))]
                 if rhythm_snap_enabled:
                     args += ['--rhythm-snap', '--rhythm-snap-mode', rhythm_snap_mode]
@@ -443,6 +444,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                             'rhythm_snap_enabled':rhythm_snap_enabled,
                             'rhythm_snap_mode':rhythm_snap_mode,
                             'rhythm_snap_ms':number('rhythm_snap_ms',15,0,50),
+                            'rhythm_snap_source_ms':number('rhythm_snap_source_ms',30,0,50),
                             'rhythm_snap_divisions':list(divisions)})
     server._run_subprocess_task(task,args,expected_epoch=expected,result_paths=results)
     return handler._json_response({'task_id':task.task_id})

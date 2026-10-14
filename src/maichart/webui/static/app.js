@@ -1480,7 +1480,9 @@ function collectCondition() {
 
 function songFormGenerationPayload() {
   const localChordStrength = Number(valueOrDefault("#formLocalChordStrength", 1.0));
-  const condition = {...collectCondition(), generation_options: {local_chord_strength: localChordStrength}};
+  const rhythmSourceMs = Number(valueOrDefault("#formRhythmSnapSourceMs", 30));
+  const condition = {...collectCondition(), generation_options: {
+    local_chord_strength: localChordStrength, rhythm_snap_source_ms: rhythmSourceMs}};
   return { model_family: "song_form_v1", checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
     level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
@@ -1489,6 +1491,7 @@ function songFormGenerationPayload() {
     onset_merge_ms: Number(valueOrDefault("#formOnsetMergeMs", 40)),
     rhythm_snap_enabled: checkedOrDefault("#formRhythmSnapEnabled", false),
     rhythm_snap_ms: Number(valueOrDefault("#formRhythmSnapMs", 15)),
+    rhythm_snap_source_ms: rhythmSourceMs,
     rhythm_snap_divisions: songFormRhythmSnapDivisions(checkedOrDefault("#formRhythmSnapEnabled", false)),
     rhythm_snap_mode: valueOrDefault("#formRhythmSnapMode", "sequence"),
     planner_type_strength: Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),

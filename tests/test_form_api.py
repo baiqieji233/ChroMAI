@@ -346,7 +346,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
         "output": str(tmp_path / "out.txt"), "onset_merge_ms": 55.6,
         "first": first,
         "planner_type_strength": 3, "style_balance_strength": 0, "local_chord_strength": 0,
-        "rhythm_snap_enabled": True, "rhythm_snap_ms": 8,
+        "rhythm_snap_enabled": True, "rhythm_snap_ms": 8, "rhythm_snap_source_ms": 25,
         "rhythm_snap_divisions": [64, 48, 64],
     }, runtime=Runtime())
     args = calls[0]
@@ -357,6 +357,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert args[args.index("--style-balance-strength") + 1] == "0.0"
     assert args[args.index("--local-chord-strength") + 1] == "0.0"
     assert args[args.index("--rhythm-snap-ms") + 1] == "8.0"
+    assert args[args.index("--rhythm-snap-source-ms") + 1] == "25.0"
     assert args[args.index("--rhythm-snap-divisions") + 1] == "48,64"
     assert "--rhythm-snap" in args
     assert args[args.index("--rhythm-snap-mode") + 1] == "sequence"
@@ -368,6 +369,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert tasks[0].result["effective_settings"]["style_balance_strength"] == 0
     assert tasks[0].result["effective_settings"]["local_chord_strength"] == 0
     assert tasks[0].result["effective_settings"]["rhythm_snap_mode"] == "sequence"
+    assert tasks[0].result["effective_settings"]["rhythm_snap_source_ms"] == 25
     fixed = form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "fixed.txt"),
         "seed": 42,
@@ -382,6 +384,7 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
     assert tasks[1].result["effective_settings"]["planner_type_strength"] == 1.0
     assert tasks[1].result["effective_settings"]["style_balance_strength"] == 1.0
     assert tasks[1].result["effective_settings"]["rhythm_snap_mode"] == "sequence"
+    assert tasks[1].result["effective_settings"]["rhythm_snap_source_ms"] == 30
     form_api.start_form_task(_Response(), "generate", {
         "checkpoint": str(checkpoint), "audio": str(audio), "output": str(tmp_path / "zero.txt"),
         "seed": 0,
@@ -406,6 +409,14 @@ def test_generation_forwards_first_and_bounded_onset_merge_ms(monkeypatch, tmp_p
                 "output": str(tmp_path / "bad-divisions.txt"),
                 "rhythm_snap_enabled": True, "rhythm_snap_divisions": invalid,
             }, runtime=Runtime())
+    previous_tasks = len(tasks)
+    for invalid in (-1, 51, float('nan'), float('inf')):
+        with pytest.raises(ValueError, match='rhythm_snap_source_ms'):
+            form_api.start_form_task(_Response(), "generate", {
+                "checkpoint": str(checkpoint), "audio": str(audio),
+                "output": str(tmp_path / "bad-source-tolerance.txt"), "rhythm_snap_source_ms": invalid,
+            }, runtime=Runtime())
+    assert len(tasks) == previous_tasks
 
 
 def test_generation_rejects_unknown_rhythm_snap_mode_before_task_creation(monkeypatch, tmp_path):
