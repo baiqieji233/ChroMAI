@@ -487,7 +487,8 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
             cache_status = 'disabled'
             if cache is not None:
                 cache_key, cache_identity = cache.identity(source, audio_path, slot, level, record, options)
-                cached, cache_status = cache.load(cache_key, cache_identity)
+                cached, cache_status = cache.load(cache_key, cache_identity,
+                                                  source_path=source, audio_path=audio_path)
                 if cached is not None:
                     cached['cache'] = 'hit'
                     results[-1] = cached

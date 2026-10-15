@@ -45,6 +45,78 @@ QUERY_CACHE_MAX_BYTES = 64 * 1024 * 1024
 _QUERY_CACHE = OrderedDict()
 _QUERY_CACHE_BYTES = 0
 _QUERY_CACHE_LOCK = threading.RLock()
+_QUERY_FILE_LOCKS = {}
+_QUERY_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def _query_file_lock(path):
+    key = str(path)
+    with _QUERY_FILE_LOCKS_GUARD:
+        lock = _QUERY_FILE_LOCKS.get(key)
+        if lock is None:
+            lock = threading.RLock()
+            _QUERY_FILE_LOCKS[key] = lock
+        return lock
+
+
+def _publish_query_cache(temporary, stored):
+    """Publish one query cache safely when Blueprint threads share a source.
+
+    Windows can reject ``os.replace`` while another thread still has the
+    destination open.  A per-target lock prevents in-process collisions; the
+    short retry also tolerates a publisher from an older process.
+    """
+    import time
+    with _query_file_lock(stored):
+        if stored.is_file():
+            temporary.unlink(missing_ok=True)
+            return False
+        last = None
+        for attempt in range(8):
+            try:
+                temporary.replace(stored)
+                return True
+            except PermissionError as exc:
+                last = exc
+                if stored.is_file():
+                    temporary.unlink(missing_ok=True)
+                    return False
+                time.sleep(0.025 * (attempt + 1))
+        raise last
+
+
+def _query_cache_candidates(cache_dir, filename):
+    """Find reusable query caches across dataset-specific cache roots.
+
+    Query filenames already contain the audio content hash and the complete
+    musical-query identity, so sharing them across dataset directories is
+    safe.  The current directory remains first; legacy sibling roots are only
+    consulted on a miss.
+    """
+    roots = []
+    if cache_dir:
+        current = Path(cache_dir).resolve()
+        roots.append(current)
+        parent = current.parent
+        if parent.is_dir():
+            for sibling in sorted(parent.iterdir()):
+                if sibling.is_dir():
+                    # Dataset roots commonly use names such as
+                    # ``后训练（官谱）`` and keep ``cache`` underneath.
+                    if sibling.name.lower().endswith('cache'):
+                        roots.append(sibling)
+                    if (sibling / 'cache').is_dir():
+                        roots.append(sibling / 'cache')
+    shared = Path(__file__).resolve().parents[3] / 'webui_workspace' / 'cache' / 'song_form_shared'
+    roots.append(shared)
+    seen = set()
+    for root in roots:
+        candidate = root / PROFILE / filename
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        yield candidate
 
 
 def _query_source_token(audio):
@@ -470,8 +542,10 @@ def audio_queries(song, start, end, *, max_nodes=None):
         while len(audio._views) > 4:
             audio._views.popitem(last=False)
         return torch.from_numpy(values.copy()), times.copy(), beats
-    stored = Path(audio.cache_dir)/PROFILE/(audio.metadata["audio_sha256"]+"."+key+".queries.npz") if audio.cache_dir else None
-    if stored is not None and stored.is_file():
+    filename = audio.metadata["audio_sha256"]+"."+key+".queries.npz"
+    stored = next((candidate for candidate in _query_cache_candidates(audio.cache_dir, filename)
+                   if candidate.is_file()), None) if audio.cache_dir else None
+    if stored is not None:
         try:
             with np.load(stored, allow_pickle=False) as data:
                 values, times = data["values"].copy(), data["times"].copy()
@@ -534,12 +608,15 @@ def audio_queries(song, start, end, *, max_nodes=None):
         rhythm = np.column_stack((acoustic[:,92], acoustic[:,92], acoustic[:,94], acoustic[:,93]))
         values = np.concatenate((acoustic,rhythm,context,metrical_features(beats,song.meters)),axis=1).astype(np.float32)
         values[(times < 0)|(times >= audio.duration_sec)] = 0
-        if stored is not None:
+        if audio.cache_dir:
+            # Always publish new entries to the active root. A cache found in
+            # a sibling/legacy root is read-only from this call's perspective.
+            stored = Path(audio.cache_dir)/PROFILE/filename
             stored.parent.mkdir(parents=True,exist_ok=True)
             with tempfile.NamedTemporaryFile(dir=stored.parent,suffix=".tmp",delete=False) as stream:
                 temporary = Path(stream.name)
                 np.savez_compressed(stream,values=values,times=times,beats=np.asarray([str(b) for b in beats]))
-            temporary.replace(stored)
+            _publish_query_cache(temporary, stored)
     _query_cache_put(cache_token, values, times, beats)
     audio._views[cache_token] = None
     while len(audio._views)>4: audio._views.popitem(last=False)

@@ -88,8 +88,12 @@ class PreparationCache:
         identity = {
             'schema': SCHEMA, 'code_sha256': self.code_hash,
             'runtime': self.runtime,
-            'source': str(source), 'chart_sha256': self.file_digest(source),
-            'audio': str(audio_path), 'audio_sha256': self.file_digest(audio_path),
+            # Absolute dataset paths are deliberately excluded. The content
+            # hashes and structural settings fully determine this artifact;
+            # keeping paths here made identical copied datasets miss every
+            # preparation cache entry.
+            'chart_sha256': self.file_digest(source),
+            'audio_sha256': self.file_digest(audio_path),
             'audio_config': ({'profile': options['audio_profile'], 'fixed_feature_rate': None}
                              if options.get('audio_profile') == 'rational_audio_queries_v1'
                              else _feature_config(22050, 441)),
@@ -111,9 +115,29 @@ class PreparationCache:
         with self._lock:
             self._counts[key] += 1
 
-    def load(self, key, identity):
+    def load(self, key, identity, *, source_path=None, audio_path=None):
         index = self.root / f'{key}.index.json'
         if not index.exists():
+            # Migrate caches written before paths were removed from the
+            # identity. Compare a normalized identity while scanning only
+            # the preparation index files; successful entries are copied to
+            # the new stable key on the next save path.
+            for candidate in self.root.glob('*.index.json'):
+                try:
+                    probe = json.loads(candidate.read_text(encoding='utf-8'))
+                    old_identity = dict(probe.get('identity') or {})
+                    old_identity.pop('source', None); old_identity.pop('audio', None)
+                    if old_identity != identity:
+                        continue
+                    arrays_path = self.root / f"{candidate.name[:-len('.index.json')]}.{probe['arrays_sha256']}.npz"
+                    with np.load(arrays_path, allow_pickle=False) as arrays:
+                        result = _decode(probe['result'], arrays)
+                    if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
+                    if audio_path is not None: result['audio_path'] = Path(audio_path).resolve()
+                    self._count('hits')
+                    return result, 'hit_legacy_identity'
+                except (OSError, ValueError, KeyError, TypeError, EOFError, zipfile.BadZipFile):
+                    continue
             self._count('misses')
             return None, 'miss'
         try:
@@ -128,6 +152,10 @@ class PreparationCache:
                 raise ValueError('Preparation arrays checksum mismatch')
             with np.load(arrays_path, allow_pickle=False) as arrays:
                 result = _decode(metadata['result'], arrays)
+                if source_path is not None:
+                    result['chart']['source'] = str(Path(source_path).resolve())
+                if audio_path is not None:
+                    result['audio_path'] = Path(audio_path).resolve()
             self._count('hits')
             return result, 'hit'
         except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, zipfile.BadZipFile):
