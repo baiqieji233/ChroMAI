@@ -134,7 +134,7 @@ function renderTaskOnsetDiagnostics(task) {
     section.className = "task-onset-diagnostics";
     const heading = document.createElement("h3"); heading.textContent = "有理数事件诊断";
     const summary = document.createElement("p");
-    summary.textContent = `生成 ${diagnostics.event_count ?? 0} 个采音点；${diagnostics.empty_eos_spans ?? 0} 个计算段由模型直接结束；${diagnostics.incomplete_spans?.length ?? 0} 段搜索未完成。最长起音间隔 ${Number(diagnostics.max_gap_sec || 0).toFixed(1)} 秒；较大分母事件 ${diagnostics.large_denominator_events ?? 0} 个。大分母不自动判错，空白也可能是合理休止，需结合音乐检查。`;
+    summary.textContent = `生成 ${diagnostics.event_count ?? 0} 个采音点；${diagnostics.empty_eos_spans ?? 0} 个计算段由模型直接结束（其中 ${diagnostics.forced_empty_eos_spans?.length ?? 0} 段当时仍有合法位置）；${diagnostics.incomplete_spans?.length ?? 0} 段搜索未完成。最长起音间隔 ${Number(diagnostics.max_gap_sec || 0).toFixed(1)} 秒；较大分母事件 ${diagnostics.large_denominator_events ?? 0} 个。大分母不自动判错，空白也可能是合理休止，需结合音乐检查。`;
     const guidance = document.createElement("p");
     guidance.textContent = "v2 联合生成拍位与配置，旧起音阈值不参与。拍位简洁偏好只作软惩罚；过早结束抑制默认关闭，可小幅上调观察，但可能增加密度，不能代替训练。";
     section.append(heading, summary, guidance); container.prepend(section); return;
@@ -1399,6 +1399,16 @@ function songFormRhythmSnapDivisions(enabled) {
   if (enabled && !unique.length) throw new Error("启用节奏近似时至少选择一种候选分音。");
   return unique;
 }
+function songFormRationalGridDivisions() {
+  const raw = valueOrDefault("#formRationalGridDivisions", "4,6,8,12,16,24,32,48,64,96").trim();
+  const values = raw ? raw.split(",").map((token) => token.trim()) : [];
+  if (!values.length) throw new Error("有理拍近似至少需要一种候选分音；填 0 可关闭近似，而不是清空候选。");
+  if (values.some((token) => !/^\d+$/.test(token))) throw new Error("有理拍近似候选请用逗号分隔的整数填写。");
+  const unique = [...new Set(values.map(Number))];
+  if (unique.some((value) => value < 1 || value > 768)) throw new Error("有理拍近似候选范围为 1–768。");
+  if (unique.length > 32) throw new Error("有理拍近似候选去重后最多 32 种。");
+  return unique;
+}
 
 function songFormRhythmGeometryUiState(mode, requested, checkpointProfile = "none") {
   const profile = ["none", "exact_fraction_v1"].includes(checkpointProfile) ? checkpointProfile : "none";
@@ -1640,7 +1650,12 @@ function songFormGenerationPayload() {
     local_chord_strength: localChordStrength, rhythm_snap_source_ms: rhythmSourceMs,
     position_complexity: Number(valueOrDefault("#formPositionComplexity", .2)),
     position_beam_size: Number(valueOrDefault("#formPositionBeamSize", 1)),
-    early_eos_penalty: Number(valueOrDefault("#formEarlyEosPenalty", 0))}};
+    early_eos_penalty: Number(valueOrDefault("#formEarlyEosPenalty", 0)),
+    position_max_denominator: Number(valueOrDefault("#formPositionMaxDenominator", 96)),
+    interval_max_denominator: Number(valueOrDefault("#formIntervalMaxDenominator", 96)),
+    rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 20)),
+    rational_grid_snap_ms: Number(valueOrDefault("#formRationalGridSnapMs", 8)),
+    rational_grid_divisions: songFormRationalGridDivisions()}};
   return { model_family: currentGenerationFamily(), checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
     level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
@@ -1655,11 +1670,15 @@ function songFormGenerationPayload() {
     planner_type_strength: rational ? 0 : Number(valueOrDefault("#formPlannerTypeStrength", 1.0)),
     position_temperature: Number(valueOrDefault("#formPositionTemperature", .2)),
     position_characters: Number(valueOrDefault("#formPositionCharacters", 24)),
+    position_max_denominator: Number(valueOrDefault("#formPositionMaxDenominator", 96)),
+    interval_max_denominator: Number(valueOrDefault("#formIntervalMaxDenominator", 96)),
     position_complexity: Number(valueOrDefault("#formPositionComplexity", .2)),
     position_beam_size: Number(valueOrDefault("#formPositionBeamSize", 1)),
     early_eos_penalty: Number(valueOrDefault("#formEarlyEosPenalty", 0)),
      max_events_per_span: Number(valueOrDefault("#formMaxEventsPerSpan", 0)),
-     rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 2)),
+     rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 20)),
+    rational_grid_snap_ms: Number(valueOrDefault("#formRationalGridSnapMs", 8)),
+    rational_grid_divisions: songFormRationalGridDivisions(),
     style_balance_strength: Number(valueOrDefault("#formStyleBalanceStrength", 1.0)),
     local_chord_strength: localChordStrength,
     temperature: Number(valueOrDefault("#temperature", .65)), seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };

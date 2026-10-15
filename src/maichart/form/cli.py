@@ -43,6 +43,10 @@ def parser():
     p.add_argument('--model-family',choices=('auto','song_form_v1','song_form_v2'),default='auto')
     p.add_argument('--position-temperature',type=float,default=.2)
     p.add_argument('--position-characters',type=int,default=24)
+    p.add_argument('--position-max-denominator',type=int,default=None,
+                   help='v2 whole-chart beat denominator cap; default96, 0 relaxes to existing resource limits')
+    p.add_argument('--interval-max-denominator',type=int,default=None,
+                   help='v2 inter-event Fraction denominator cap across spans; default96, 0 disables')
     p.add_argument('--position-complexity',type=float,default=None,
                    help='soft cost on Fraction and interval denominators; 0 disables, never snaps positions')
     p.add_argument('--position-beam-size',type=int,default=None,
@@ -51,8 +55,12 @@ def parser():
                    help='optional EOS logit penalty for v2; 0 preserves learned stopping, never fills explicit rests')
     p.add_argument('--max-events-per-span',type=int,default=0,
                    help='song_form_v2 safety budget; 0 derives a generous budget from Planner density')
-    p.add_argument('--rational-min-spacing-ms',type=float,default=2.0,
+    p.add_argument('--rational-min-spacing-ms',type=float,default=None,
                    help='minimum exact-event spacing for song_form_v2 output; 0 disables the safety guard')
+    p.add_argument('--rational-grid-snap-ms',type=float,default=None,
+                   help='v2 near-common-grid cleanup tolerance in milliseconds; 0 preserves decoder Fractions exactly')
+    p.add_argument('--rational-grid-divisions',default=None,
+                   help='v2 near-common-grid candidates, comma-separated; this is not a denominator whitelist')
     p.add_argument('--start');p.add_argument('--end')
     p.add_argument('--bpm',type=float);p.add_argument('--first',type=float,default=0.)
     p.add_argument('--meter-map');p.add_argument('--tempo-map');p.add_argument('--structure-file')
@@ -92,7 +100,10 @@ def _resolve_carried_generation_options(args, condition_data):
     if not isinstance(carried, dict):
         raise ValueError('condition generation_options must be an object')
     for name, default in (('local_chord_strength', 1.0), ('rhythm_snap_source_ms', 30.0),
-                          ('position_complexity', .2), ('position_beam_size', 1), ('early_eos_penalty', 0.)):
+                          ('position_complexity', .2), ('position_beam_size', 1), ('early_eos_penalty', 0.),
+                          ('position_max_denominator',96), ('interval_max_denominator',96),
+                          ('rational_min_spacing_ms',20.), ('rational_grid_snap_ms',8.),
+                          ('rational_grid_divisions','4,6,8,12,16,24,32,48,64,96')):
         if getattr(args, name) is None:
             setattr(args, name, carried.get(name, default))
 
@@ -145,6 +156,16 @@ def main(argv=None):
             raise ValueError('Selected model family differs from checkpoint; inspect the model and use its detected family')
     rational=(payload or {}).get('family',args.model_family)=='song_form_v2' or (args.operation=='analyze' and args.model_family=='auto')
     if rational:
+        for name in ('position_max_denominator','interval_max_denominator'):
+            value=getattr(args,name)
+            if isinstance(value,bool) or not isinstance(value,int) or not 0<=value<=4096:
+                raise ValueError(f'{name} must be an integer between 0 and 4096')
+        if not math.isfinite(args.rational_min_spacing_ms) or not 0<=args.rational_min_spacing_ms<=50:
+            raise ValueError('rational_min_spacing_ms must be between 0 and 50')
+        if not math.isfinite(args.rational_grid_snap_ms) or not 0<=args.rational_grid_snap_ms<=50:
+            raise ValueError('rational_grid_snap_ms must be between 0 and 50')
+        from maichart.form.rational_grid import normalize_rational_grid_divisions
+        rational_grid_divisions = normalize_rational_grid_divisions(args.rational_grid_divisions)
         from maichart.form.rational_audio import extract_rational_audio
         audio=extract_rational_audio(args.audio,cache_dir=args.cache_dir)
     else:
@@ -225,8 +246,12 @@ def main(argv=None):
             position_temperature=args.position_temperature,position_characters=args.position_characters,
             position_complexity=args.position_complexity,early_eos_penalty=args.early_eos_penalty,
             position_beam_size=args.position_beam_size,
+            position_max_denominator=args.position_max_denominator,
+            interval_max_denominator=args.interval_max_denominator,
              max_events_per_span=args.max_events_per_span,
              rational_min_spacing_ms=args.rational_min_spacing_ms,
+            rational_grid_snap_ms=args.rational_grid_snap_ms,
+            rational_grid_divisions=list(rational_grid_divisions),
             time_representation='direct_canonical_fraction',audio_profile=song.audio_profile)
     intensity_curve = None
     curve_condition_warnings = []
@@ -268,7 +293,11 @@ def main(argv=None):
                  'position_complexity':args.position_complexity,'early_eos_penalty':args.early_eos_penalty,
                  'position_beam_size':args.position_beam_size,
                  'max_events_per_span':args.max_events_per_span,
-                 'min_spacing_ms':args.rational_min_spacing_ms} if rational else {}))
+                 'max_beat_denominator':args.position_max_denominator,
+                 'max_interval_denominator':args.interval_max_denominator,
+                 'min_spacing_ms':args.rational_min_spacing_ms,
+                 'rational_grid_snap_ms':args.rational_grid_snap_ms,
+                 'rational_grid_divisions':list(rational_grid_divisions)} if rational else {}))
         report.update(generated)
     else:
         points,revision=revise_chart(model,codec,song,chart.points,condition,payload['atom_catalog'],

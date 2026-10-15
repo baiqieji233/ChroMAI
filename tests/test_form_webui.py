@@ -69,11 +69,18 @@ def test_rational_decoding_controls_reach_the_actual_cli(webui_api,monkeypatch,t
     monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append(args))
     status,result=webui_api('/api/form/generate',{'audio':str(audio),'checkpoint':str(model_path),
         'model_family':'song_form_v2','output':str(tmp_path/'maidata.txt'),
-        'position_complexity':.4,'position_beam_size':4,'early_eos_penalty':2})
+        'position_complexity':.4,'position_beam_size':4,'early_eos_penalty':2,
+        'position_max_denominator':96,'interval_max_denominator':96,
+        'rational_min_spacing_ms':20,'rational_grid_snap_ms':8,
+        'rational_grid_divisions':[4,6,8,12,16,24,32,48,64,96]})
     assert status==200,result
     from maichart.form.cli import parser
     args=parser().parse_args(calls[0][2:])
     assert args.position_complexity==.4 and args.position_beam_size==4 and args.early_eos_penalty==2
+    assert args.position_max_denominator == 96 and args.interval_max_denominator == 96
+    assert args.rational_min_spacing_ms == 20
+    assert args.rational_grid_snap_ms == 8
+    assert args.rational_grid_divisions == '4,6,8,12,16,24,32,48,64,96'
 
 
 def test_rhythm_geometry_controls_reach_form_training_cli_with_fresh_auto_default(webui_api, monkeypatch, tmp_path):

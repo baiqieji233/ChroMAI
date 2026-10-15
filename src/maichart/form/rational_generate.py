@@ -17,8 +17,16 @@ from maichart.generation.event_cli import _NoteGrammar
 class PositionGrammar:
     """A finite text budget, with no list of legal denominators or note grids."""
     def __init__(self,lower,upper,*,characters=24,valid_position=None,allowed_ranges=None,
-                 max_denominator=4_096,min_spacing=Fraction(0),max_delta_denominator=None):
+                 max_denominator=4_096,min_spacing=Fraction(0),max_delta_denominator=None,
+                 origin=Fraction(0),max_beat_denominator=None,delta_reference=None):
         self.lower,self.upper = Fraction(lower),Fraction(upper)
+        self.origin = Fraction(origin)
+        self.delta_reference = (Fraction(delta_reference) if delta_reference is not None
+                                else self.lower if self.lower >= 0 else -self.origin)
+        self.max_beat_denominator = max_beat_denominator
+        if max_beat_denominator is not None and (isinstance(max_beat_denominator,bool)
+                or not isinstance(max_beat_denominator,int) or max_beat_denominator < 1):
+            raise ValueError('max_beat_denominator must be a positive integer or None')
         if self.upper <= self.lower or not 4 <= characters <= 128:
             raise ValueError('Invalid rational position bounds/budget')
         self.characters = characters
@@ -57,10 +65,12 @@ class PositionGrammar:
             beat = Fraction(text)
             return (self.lower < beat < self.upper and any(a<=beat<b for a,b in self.ranges)
                     and beat.denominator <= self.max_denominator
+                    and (self.max_beat_denominator is None
+                         or (self.origin+beat).denominator <= self.max_beat_denominator)
                     and beat.numerator <= self.max_numerator
                     and beat-self.lower >= self.min_spacing
                     and (self.max_delta_denominator is None
-                         or (beat-self.lower).denominator <= self.max_delta_denominator)
+                         or (beat-self.delta_reference).denominator <= self.max_delta_denominator)
                     and self.valid_position(beat))
         except (ValueError,ZeroDivisionError): return False
 
@@ -183,7 +193,8 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
                  position_temperature=.2,seed=0,device='cpu',history_last=None,
                  valid_position=None,position_characters=24,type_guidance=None,
                  max_events=None,min_spacing_beats=Fraction(0),min_spacing_seconds=0.,
-                 position_complexity=0.2,early_eos_penalty=0.,position_beam_size=1):
+                 position_complexity=0.2,early_eos_penalty=0.,position_beam_size=1,
+                 max_beat_denominator=0,max_interval_denominator=0):
     """Choose timing and notes jointly. At a resource cap retain completed events."""
     grammar = _NoteGrammar.from_atoms(atoms)
     if grammar is None: raise ValueError('Checkpoint note grammar is empty')
@@ -197,6 +208,10 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
         raise ValueError('min_spacing_seconds must be finite and nonnegative')
     if isinstance(position_beam_size,bool) or not isinstance(position_beam_size,int) or not 1<=position_beam_size<=8:
         raise ValueError('position_beam_size must be an integer between 1 and 8')
+    for name,value in (('max_beat_denominator',max_beat_denominator),
+                       ('max_interval_denominator',max_interval_denominator)):
+        if isinstance(value,bool) or not isinstance(value,int) or not 0<=value<=4096:
+            raise ValueError(f'{name} must be an integer between 0 and 4096')
     batch = to_device(collate_form([example]),device)
     ids = [codec.bos_id]
     points = []
@@ -204,6 +219,10 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
     limit = model.config.max_tokens
     state,text,position = 'event','',None
     header_start=0;normalizations=0;recoveries=0;position_tried={};initial_eos_margin=None
+    # Distinguish an intentional/forced EOS from a span that merely has no
+    # permitted audio interval.  ``has_allowed_positions`` in the outer
+    # report is not sufficient for this decision.
+    event_start_allowed=False
     chars = [(i,t[2:]) for i,t in enumerate(codec.tokens) if t.startswith('N:')]
     rng = torch.Generator(device=device).manual_seed(seed)
     model.eval()
@@ -245,7 +264,10 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
             return max(Fraction(min_spacing_beats), temporal)
         position_grammar = PositionGrammar(lower,end-origin,characters=position_characters,
             valid_position=lambda b: b>=0 and (valid_position is None or valid_position(origin+b)),
-            allowed_ranges=example.get('_position_ranges'),min_spacing=spacing_gap(history_last))
+            allowed_ranges=example.get('_position_ranges'),min_spacing=spacing_gap(history_last),
+            origin=origin,max_beat_denominator=max_beat_denominator or None,
+            max_delta_denominator=max_interval_denominator or None,
+            delta_reference=Fraction(history_last)-origin if history_last is not None else -origin)
         def event_bias(beat):
             if type_guidance is None:
                 return None
@@ -268,7 +290,9 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
                     timing_features=geometry.search_features(device))
                 if selected is None:
                     return points,{'closed':False,'reason':'position_search_exhausted',
-                        'tokens':len(ids),'discarded_partial_event':True,'position_recoveries':recoveries}
+                        'tokens':len(ids),'discarded_partial_event':True,
+                        'position_recoveries':recoveries,
+                        'event_start_allowed':event_start_allowed}
                 position=origin+Fraction(selected)
                 # Search has its own causal cache. Commit only the selected
                 # canonical spelling, replaying through the normal decoder.
@@ -282,7 +306,8 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
             if state=='event':
                 if max_events is not None and len(points) >= max_events:
                     return points,{'closed':False,'reason':'event_budget','tokens':len(ids),
-                                   'max_events':int(max_events)}
+                                   'max_events':int(max_events),
+                                   'event_start_allowed':event_start_allowed}
                 allowed=[codec.eos_id]
                 # Checking only the interval end is insufficient when the
                 # previous event is very close to the span boundary: there
@@ -290,10 +315,12 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
                 # technically greater than the lower bound.  Ask the grammar
                 # whether at least one first numerator digit has a reachable
                 # continuation before exposing <at> to the model.
-                if position_grammar.allowed('',codec):
+                event_start_allowed=bool(position_grammar.allowed('',codec))
+                if event_start_allowed:
                     allowed.append(codec.at_id)
                 if len(ids)+position_characters+MAX_NOTE_CHARACTERS+4>limit and points:
-                    return points,{'closed':False,'reason':'token_budget','tokens':len(ids)}
+                    return points,{'closed':False,'reason':'token_budget','tokens':len(ids),
+                                   'event_start_allowed':event_start_allowed}
             elif state=='position':
                 allowed=[token for token in position_grammar.allowed(text,codec)
                          if token not in position_tried.get(text,set())]
@@ -316,7 +343,8 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
                 if state == 'position':
                     return points,{'closed':False,'reason':'position_search_exhausted',
                                    'tokens':len(ids),'discarded_partial_event':True,
-                                   'position_recoveries':recoveries}
+                                   'position_recoveries':recoveries,
+                                   'event_start_allowed':event_start_allowed}
                 raise ValueError(f'No exact rational continuation for {state} prefix {text!r}; no timing approximation was applied')
             values=logits()[allowed]
             if state=='event' and not points and initial_eos_margin is None and codec.at_id in allowed:
@@ -356,6 +384,8 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
             if state=='event':
                 if token==codec.eos_id:
                     return points,{'closed':True,'reason':'eos','tokens':len(ids),
+                                   'eos_forced':not event_start_allowed,
+                                   'event_start_allowed':event_start_allowed,
                                    'equivalent_fraction_normalizations':normalizations,
                                    'position_recoveries':recoveries,'initial_eos_minus_at':initial_eos_margin}
                 header_start=len(ids)-1
@@ -379,6 +409,7 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
                 if type_guidance is not None: type_guidance.commit(text,position)
                 state,text='event',''
                 position_grammar.lower=position-origin
+                position_grammar.delta_reference=position-origin
                 position_grammar.min_spacing=spacing_gap(position)
                 position_grammar._prefix_cache.clear()
                 position_grammar._allowed_cache.clear()
@@ -390,13 +421,21 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
         position_temperature=.2,seed=0,device='cpu',memory_strength=1.,intensity_curve=None,
         intensity_curve_strength=1.,intensity_curve_span=.5,intensity_curve_mode='follow',
         style_balance_strength=1.,position_characters=24,max_events_per_span=0,
-        min_spacing_ms=2.0,position_complexity=.2,early_eos_penalty=0.,position_beam_size=1,**unused_legacy_options):
+        min_spacing_ms=20.0,position_complexity=.2,early_eos_penalty=0.,position_beam_size=1,
+        max_beat_denominator=96,max_interval_denominator=96,
+        rational_grid_snap_ms=8.0,rational_grid_divisions=(4,6,8,12,16,24,32,48,64,96),
+        **unused_legacy_options):
     from maichart.form.type_guidance import TypeGuidance
     from maichart.generation.event_quality import assess_event_chart
     from maichart.form.local_load import local_load_statistics
     from maichart.form.curve import resample_load_curve, load_curve_bin_centers
     from maichart.form.rational_audio import planner_audio_queries, beat_at_second
     from maichart.form.data import _form_descriptor
+    from maichart.form.rational_grid import (normalize_rational_grid_divisions,
+                                              simplify_rational_events)
+    rational_grid_divisions = normalize_rational_grid_divisions(rational_grid_divisions)
+    if not math.isfinite(float(rational_grid_snap_ms)) or not 0 <= float(rational_grid_snap_ms) <= 50:
+        raise ValueError('rational_grid_snap_ms must be in [0, 50]')
     # Keep the nonuniform/native clock, but use the same bounded evidence
     # budget as training.  Passing every transient in a long song (often many
     # thousands of MP3 decoder peaks) makes each tiny autoregressive decoder
@@ -416,7 +455,7 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
     local_strength=unused_legacy_options.get('local_chord_strength',1.)
     guidance=TypeGuidance(atoms,condition,[],planner_strength=0,style_strength=style_balance_strength,
         local_chord_strength=local_strength) if style_balance_strength or local_strength else None
-    accepted=[];records=[]
+    accepted=[];records=[];grid_simplification=[]
     offset=song.first if intensity_curve is not None and intensity_curve.get('time_axis','chart_relative_v1')=='chart_relative_v1' else 0
     rests=[(r['start_sec']+offset,r['end_sec']+offset) for r in (intensity_curve or {}).get('rest_regions',[])]
     audio_start=max(Fraction(0),beat_at_second(0,song.tempo,song.first))
@@ -487,9 +526,23 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
                         sum(span.start<=p.beat<span.end for p in accepted))),
                     min_spacing_seconds=min_spacing_seconds,
                     position_complexity=position_complexity,early_eos_penalty=early_eos_penalty,
-                    position_beam_size=position_beam_size)
+                    position_beam_size=position_beam_size,
+                    max_beat_denominator=max_beat_denominator,max_interval_denominator=max_interval_denominator)
             finally: song.spans=source_spans
             accepted.extend(points);passes+=1
+            # Apply the optional near-grid cleanup before the next span uses
+            # this history.  It does not restrict arbitrary Fractions: only
+            # locally-supported positions within the configured time
+            # tolerance are moved, so genuine unusual rhythms remain intact.
+            if rational_grid_snap_ms:
+                accepted, grid_stats = simplify_rational_events(
+                    accepted, song.tempo, song.first,
+                    tolerance_ms=rational_grid_snap_ms,
+                    divisions=rational_grid_divisions,
+                    min_spacing_ms=min_spacing_ms,
+                    end_beat=song.spans[-1].end,
+                    valid_position=valid)
+                grid_simplification.append(dict(span=span.index, **grid_stats))
             if status['closed']: break
             if status['reason']=='event_budget':
                 if max_events_per_span or budget_expansions >= 3 or span_event_budget >= 768:
@@ -533,10 +586,20 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
     incomplete=[record['span'] for record in records if record['status'].get('incomplete')]
     from maichart.form.rational_diagnostics import rational_diagnostics
     diagnostics=rational_diagnostics(accepted,records,song.tempo,song.first,song.audio.duration_sec)
+    diagnostics['near_grid_simplification'] = {
+        'enabled': bool(rational_grid_snap_ms),
+        'tolerance_ms': float(rational_grid_snap_ms),
+        'divisions': list(rational_grid_divisions),
+        'changed': sum(item.get('changed', 0) for item in grid_simplification),
+        'maximum_shift_ms': max((item.get('maximum_shift_ms', 0.) for item in grid_simplification), default=0.),
+        'span_records': grid_simplification[-32:],
+    }
     print('form_rational_diagnostics '+json.dumps(diagnostics),flush=True)
     blueprint={'schema':'maichart-rational-event-plan-v1','onsets':[dict(beat=str(p.beat),second=seconds_at_beat(p.beat,song.tempo,song.first)) for p in accepted],
                'selection':{'algorithm':'joint_exact_fraction_events_v1','frame_seconds':None,'candidate_position_whitelist':False,
-                            'onset_threshold_used':False,'rhythm_snap_used':False,'explicit_all_rest':not bool(permitted),
+                         'onset_threshold_used':False,'rhythm_snap_used':False,
+                         'near_grid_simplification_used':bool(rational_grid_snap_ms),
+                         'explicit_all_rest':not bool(permitted),
                             'incomplete_spans':incomplete},'musical_units':'exact_quarter_fraction'}
     print('form_onsets '+json.dumps(blueprint['selection']),flush=True)
     return accepted,dict(blueprint=blueprint,arrangement=records,quality=quality,decoder_fallbacks=0,

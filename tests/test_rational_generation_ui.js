@@ -12,7 +12,8 @@ test("main-page rational controls reach payload and running-server condition tra
     valueOrDefault: (key, fallback) => Object.hasOwn(values, key) ? values[key] : fallback,
     checkedOrDefault: (_key, fallback) => fallback,
     parseTempoMap: () => null, formDevice: () => "cpu", intensityCurvePayload: () => null,
-    songFormRhythmSnapDivisions: () => [4,8,12,16,24,32]};
+    songFormRhythmSnapDivisions: () => [4,8,12,16,24,32],
+    songFormRationalGridDivisions: () => [4,6,8,12,16,24,32,48,64,96]};
   vm.createContext(context);
   const start = source.indexOf("function songFormGenerationPayload() {");
   const end = source.indexOf("function uniqueSongFormOutputPath(", start);

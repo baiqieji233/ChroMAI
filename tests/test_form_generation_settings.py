@@ -48,6 +48,11 @@ def test_generation_report_records_actual_vector_and_decoder_values(tmp_path,mon
         assert effective['position_complexity']==received['position_complexity']==.2
         assert effective['early_eos_penalty']==received['early_eos_penalty']==0
         assert effective['position_beam_size']==received['position_beam_size']==1
+        assert effective['position_max_denominator']==received['max_beat_denominator']==96
+        assert effective['interval_max_denominator']==received['max_interval_denominator']==96
+        assert effective['rational_min_spacing_ms']==received['min_spacing_ms']==20
+        assert effective['rational_grid_snap_ms']==received['rational_grid_snap_ms']==8
+        assert effective['rational_grid_divisions']==received['rational_grid_divisions']==[4,6,8,12,16,24,32,48,64,96]
     assert effective['style_balance_strength'] == received['style_balance_strength'] == 0
     assert effective['local_chord_strength'] == received['local_chord_strength'] == 0
     assert parse_event_chart(output,5).level == '14.5'

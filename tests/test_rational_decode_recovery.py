@@ -31,6 +31,16 @@ def test_reachability_keeps_inclusive_minimum_spacing_boundary():
     assert all(grammar.prefix('1/8'[:i]) for i in range(1, 4))
 
 
+def test_optional_absolute_and_interval_denominator_caps_preserve_small_unusual_values():
+    grammar = generation.PositionGrammar(0, 4, origin=F(0),
+        max_beat_denominator=96, max_delta_denominator=96)
+    assert grammar.complete('1/7')
+    assert grammar.complete('5/12')
+    assert not grammar.complete('1/97')
+    shifted = generation.PositionGrammar(0, 4, origin=F(1, 97), max_beat_denominator=96)
+    assert not shifted.complete('1/7')
+
+
 def test_partial_position_recovery_preserves_notes_and_causal_cache(monkeypatch):
     codec = RationalCodec()
     original_prefix = generation.PositionGrammar.prefix

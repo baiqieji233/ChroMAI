@@ -11,6 +11,7 @@ from maichart.form.timing import normalize_meter_map
 from maichart.generation.timeline import normalize_tempo_map
 from maichart.form import FAMILY, CHECKPOINT_SCHEMA, FORM_FAMILIES
 from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
+from maichart.form.rational_grid import DEFAULT_DIVISIONS as RATIONAL_GRID_DIVISIONS, normalize_rational_grid_divisions
 from maichart.form.training_input_perturbation import QUALITY_TRAINING_DEFAULTS
 
 
@@ -414,13 +415,21 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         first=number('first',0,-3600,3600)
         args=['-m','maichart.form.cli',operation,'--audio',str(audio),'--model-family',family]
         if family=='song_form_v2' and operation=='generate':
+            raw_rational_divisions = payload.get('rational_grid_divisions', list(RATIONAL_GRID_DIVISIONS))
+            if isinstance(raw_rational_divisions, str) and not raw_rational_divisions.strip():
+                raw_rational_divisions = list(RATIONAL_GRID_DIVISIONS)
+            rational_grid_divisions = normalize_rational_grid_divisions(raw_rational_divisions)
             args+=['--position-temperature',str(number('position_temperature',.2,0,3)),
                    '--position-characters',str(number('position_characters',24,4,128,True)),
+                   '--position-max-denominator',str(number('position_max_denominator',96,0,4096,True)),
+                   '--interval-max-denominator',str(number('interval_max_denominator',96,0,4096,True)),
                    '--position-complexity',str(number('position_complexity',.2,0,2)),
                    '--position-beam-size',str(number('position_beam_size',1,1,8,True)),
                    '--early-eos-penalty',str(number('early_eos_penalty',0,0,8)),
                    '--max-events-per-span',str(number('max_events_per_span',0,0,512,True)),
-                   '--rational-min-spacing-ms',str(number('rational_min_spacing_ms',2,0,50))]
+                   '--rational-min-spacing-ms',str(number('rational_min_spacing_ms',20,0,50)),
+                   '--rational-grid-snap-ms',str(number('rational_grid_snap_ms',8,0,50)),
+                   '--rational-grid-divisions',','.join(map(str,rational_grid_divisions))]
         if bpm is not None: args += ['--bpm',str(bpm)]
         args += ['--first',str(first)]
         if initial: args+=['--checkpoint',str(initial)]
