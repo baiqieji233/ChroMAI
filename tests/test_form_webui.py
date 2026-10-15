@@ -32,12 +32,13 @@ def test_training_dispatch_is_independent_and_short_run_controls_arrive(webui_ap
     status,result=webui_api('/api/form/train',{'manifest':str(manifest),'checkpoint_dir':str(tmp_path/'new'),
         'mode':'fresh','max_steps':2,'limit_charts':1,'epochs':1,'batch_size':1,'d_model':32,'nhead':2,'layers':1,
         'device':'cpu','lr':.0003,'prepare_workers':3,'blueprint_batch_size':2,
-        'blueprint_workers':1,'blueprint_prefetch':4})
+        'blueprint_workers':1,'blueprint_prefetch':4,'cuda_memory_budget_gb':7.5})
     assert status==200,result
     from maichart.form.train import parser
     args=parser().parse_args(calls[0][2:])
     assert args.max_steps==2 and args.limit_charts==1 and args.lr==.0003 and args.prepare_workers==3
     assert args.blueprint_batch_size==2 and args.blueprint_workers==1 and args.blueprint_prefetch==4
+    assert args.cuda_memory_budget_gb == 7.5
     assert calls[0][:2]==['-m','maichart.form.train']
 
 

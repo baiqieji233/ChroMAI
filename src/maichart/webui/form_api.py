@@ -299,6 +299,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         rhythm_geometry_profile, rhythm_loss_weight = resolve_rhythm_geometry_training_options(
             payload, family=family, mode=mode, inspected=inspected)
         values={"epochs":epochs,"batch_size":number('batch_size',2,1,512,True),
+                'cuda_memory_budget_gb':number('cuda_memory_budget_gb',0,0,1024),
                 'lr':number('lr',.0002,1e-8,1.),'max_steps':number('max_steps',0,0,1000000,True),
                 'limit_charts':number('limit_charts',0,0,1000000,True),
                 'prepare_workers':number('prepare_workers',1,0,64,True),

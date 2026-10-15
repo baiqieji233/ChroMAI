@@ -33,6 +33,10 @@ MAX_EVIDENCE_NODES = 8192
 # it limits memory/latency without quantising the musical Fraction clock.
 PLANNER_MAX_AUDIO_NODES = 1024
 
+
+class _ShortAudioRead(ValueError):
+    """Decoder header advertises more frames than the stream yields."""
+
 # Query tensors are much larger than the sparse native feature arrays.  Keep
 # them in one process-wide, byte-bounded LRU instead of retaining up to four
 # full tensors on every RationalAudio object.  The per-audio ``_views`` field
@@ -125,40 +129,47 @@ def waveform(path, sha256=None):
 def _read_mono(path, start_sec=None, end_sec=None, *, padding_sec=1.0):
     """Decode in small channel blocks; retain only mono native-rate samples."""
     import soundfile as sf
-    try:
-        source = sf.SoundFile(str(path))
-    except (OSError, RuntimeError):
-        # Preserve librosa's alternate-codec support. Never catch MemoryError
-        # and then retry a larger full-file allocation.
+    def fallback():
+        # Some MP3/VBR files expose a frame count larger than the decodable
+        # stream.  librosa/audioread is the safe fallback for that metadata
+        # mismatch; keep the bounded window arguments so this never allocates
+        # a second full waveform unnecessarily.
         import librosa
         start = max(0., float(start_sec or 0.) - padding_sec) if start_sec is not None else 0.
         duration = max(0., float(end_sec) + padding_sec - start) if end_sec is not None else None
         signal, sr = librosa.load(path, sr=None, mono=True, offset=start, duration=duration)
         return np.asarray(signal, dtype=np.float32), int(sr), int(start * sr)
-    with source:
-        sr = int(source.samplerate)
-        # Include the complete analysis window and +/-40 ms native probes,
-        # even for unusually low-rate source audio.
-        padding = max(float(padding_sec), .04 + 1025. / sr)
-        start = (min(source.frames, max(0, math.floor((float(start_sec) - padding) * sr)))
-                 if start_sec is not None else 0)
-        stop = (min(source.frames, max(start, math.ceil((float(end_sec) + padding) * sr)))
-                if end_sec is not None else source.frames)
-        count = stop - start
-        signal = np.empty(count, dtype=np.float32)
-        if not count:
+    try:
+        source = sf.SoundFile(str(path))
+    except (OSError, RuntimeError):
+        return fallback()
+    try:
+        with source:
+            sr = int(source.samplerate)
+            # Include the complete analysis window and +/-40 ms native probes,
+            # even for unusually low-rate source audio.
+            padding = max(float(padding_sec), .04 + 1025. / sr)
+            start = (min(source.frames, max(0, math.floor((float(start_sec) - padding) * sr)))
+                     if start_sec is not None else 0)
+            stop = (min(source.frames, max(start, math.ceil((float(end_sec) + padding) * sr)))
+                    if end_sec is not None else source.frames)
+            count = stop - start
+            signal = np.empty(count, dtype=np.float32)
+            if not count:
+                return signal, sr, start
+            source.seek(start)
+            block = np.empty((min(65536, count), source.channels), dtype=np.float32)
+            cursor = 0
+            while cursor < count:
+                chunk = source.read(out=block[:min(len(block), count-cursor)])
+                if not len(chunk):
+                    raise _ShortAudioRead(f'Audio ended before its declared frame count: {path}')
+                # Match librosa.to_mono's channel mean at float32 precision.
+                np.mean(chunk, axis=1, dtype=np.float32, out=signal[cursor:cursor+len(chunk)])
+                cursor += len(chunk)
             return signal, sr, start
-        source.seek(start)
-        block = np.empty((min(65536, count), source.channels), dtype=np.float32)
-        cursor = 0
-        while cursor < count:
-            chunk = source.read(out=block[:min(len(block), count-cursor)])
-            if not len(chunk):
-                raise ValueError(f'Audio ended before its declared frame count: {path}')
-            # Match librosa.to_mono's channel mean at float32 precision.
-            np.mean(chunk, axis=1, dtype=np.float32, out=signal[cursor:cursor+len(chunk)])
-            cursor += len(chunk)
-        return signal, sr, start
+    except _ShortAudioRead:
+        return fallback()
 
 
 def _query_waveform_spectra(audio, seconds, offsets):

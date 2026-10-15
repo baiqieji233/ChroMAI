@@ -1521,6 +1521,7 @@ function songFormTrainingPayload(options = {}) {
     resume_data_policy: mode === "resume" ? valueOrDefault("#formResumeDataPolicy", "strict") : "strict",
     mode, init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(), epochs: Number(valueOrDefault("#epochs", 20)), batch_size: Number(valueOrDefault("#batchSize", 4)),
     device: formDevice("#device"), lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
+    cuda_memory_budget_gb: Number(valueOrDefault("#formCudaMemoryBudgetGb", 0)),
     grad_accumulation: Number(valueOrDefault("#gradAccumulation", 1)), save_every: Number(valueOrDefault("#saveEvery", 0)),
     seed: valueOrDefault("#trainingSeed", "").trim() === "" ? 0 : Number(valueOrDefault("#trainingSeed", 0)),
     max_steps: Number(valueOrDefault("#maxSteps", 0)), limit_charts: Number(valueOrDefault("#formLimitCharts", 0)),

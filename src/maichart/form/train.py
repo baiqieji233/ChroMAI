@@ -49,6 +49,8 @@ def parser():
     p.add_argument('--epochs', type=int, default=10)
     p.add_argument('--prepare-workers', type=int, default=1)
     p.add_argument('--device', default='cpu')
+    p.add_argument('--cuda-memory-budget-gb', type=float, default=0.0,
+                   help='CUDA allocator budget in GiB; 0 uses 60%% of total VRAM, capped at 95%%')
     p.add_argument('--batch-size', type=int, default=2)
     p.add_argument('--blueprint-batch-size', type=int, default=None,
                    help='v2 whole-song Planner charts per update; default 4 for fresh training, legacy resume keeps 1')
@@ -130,6 +132,8 @@ def _validate(args):
         value = float(getattr(args, name))
         if not math.isfinite(value) or value < 0 or (name in positive and value == 0):
             raise ValueError(f'Invalid training setting: {name}')
+    if not math.isfinite(args.cuda_memory_budget_gb) or args.cuda_memory_budget_gb < 0:
+        raise ValueError('cuda_memory_budget_gb must be nonnegative')
     quality_limits = {
         'perturb_onset_drop_prob': .5, 'perturb_onset_add_prob': .5,
         'perturb_onset_shift_ms': 50., 'perturb_curve_noise_std': .3,
@@ -340,6 +344,12 @@ def _train(args):
     old = None
     device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
                           else 'cpu' if args.device == 'auto' else args.device)
+    cuda_budget_gib = 0.0
+    if device.type == 'cuda':
+        total_gib = torch.cuda.get_device_properties(device).total_memory / 1024**3
+        requested = float(args.cuda_memory_budget_gb)
+        cuda_budget_gib = min(total_gib * .95, requested if requested > 0 else total_gib * .60)
+        torch.cuda.set_per_process_memory_fraction(cuda_budget_gib / total_gib, device=device)
     meters = json.loads(Path(args.meter_map).read_text(encoding='utf-8-sig')) if args.meter_map else None
     if args.resume or args.init_checkpoint:
         model, blueprint, codec, old = checkpoint.load(args.resume or args.init_checkpoint, device='cpu')
@@ -408,6 +418,7 @@ def _train(args):
     blueprint_workers = (min(4, os.cpu_count() or 1) if args.blueprint_workers == 0
                          else args.blueprint_workers) if args.model_family=='song_form_v2' else 0
     emit('form_runtime', training_semantics=semantics, model_family=args.model_family, device=str(device), precision=precision,
+         cuda_memory_budget_gb=round(cuda_budget_gib, 3), cuda_memory_budget_requested_gb=float(args.cuda_memory_budget_gb),
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
          blueprint_batch_size=args.blueprint_batch_size,
          planner_objective_enabled=planner_objective_enabled,

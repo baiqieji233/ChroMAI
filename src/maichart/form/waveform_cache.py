@@ -51,7 +51,7 @@ def _build_lock(directory):
 
 @lru_cache(maxsize=4)
 def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
-    from maichart.form.rational_audio import _digest, _read_mono
+    from maichart.form.rational_audio import _ShortAudioRead, _digest, _read_mono
     if _digest(path) != sha256:
         raise ValueError('Audio content changed before waveform mapping; reload the audio source')
     root = (Path(cache_dir) / 'rational_audio_queries_v1' / 'waveforms_v1'
@@ -82,16 +82,17 @@ def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
                         while cursor < frames:
                             chunk = source.read(out=block[:min(len(block), frames-cursor)])
                             if not len(chunk):
-                                raise ValueError(f'Audio ended before declared frame count: {path}')
+                                raise _ShortAudioRead(f'Audio ended before declared frame count: {path}')
                             np.mean(chunk, axis=1, dtype=np.float32,
                                     out=mapped[cursor:cursor+len(chunk)])
                             cursor += len(chunk)
                         mapped.flush()
                     finally:
                         del mapped
-            except sf.LibsndfileError:
-                # Only unsupported codecs use the established alternate
-                # decoder. Allocation failures must propagate, not retry.
+            except (sf.LibsndfileError, _ShortAudioRead):
+                # Unsupported codecs and truncated/inaccurate compressed
+                # frame headers use the alternate decoder. Allocation
+                # failures still propagate and are never retried here.
                 values, rate, _ = _read_mono(path)
                 frames = len(values)
                 with array_path.open('wb') as stream:

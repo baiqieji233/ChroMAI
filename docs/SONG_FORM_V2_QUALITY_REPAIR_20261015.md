@@ -104,3 +104,9 @@
 同时修正 EOS 诊断：`event_start_allowed` 记录选择 EOS 时是否仍存在合法 `<at>` 位置，`forced_empty_eos_spans` 只统计“空段且仍有合法位置”的真正早停候选，避免把显式休止或保护耗尽误报为模型主动留白。
 
 定向验证：Python 38 项（含新有理网格清理、旧解码/CLI/WebUI/诊断）通过；Node 生成参数、form-lab 和生命周期检查通过。该清理是生成后的小范围时间修正，不是固定分音白名单，也不改变旧 `song_form_v1` / `event_ctx_v1` 生成路径。
+
+## 9. 音频尾部声明帧数不一致与 v2 显存预算
+
+部分 MP3/VBR 文件的容器头声明帧数会略大于实际可解码帧数。原 waveform cache 和 rational audio reader 将一次读不到数据直接当作致命错误，表现为 `Audio ended before declared frame count`。现在这类明确的短读会回退到 librosa/audioread 的兼容解码路径，并继续使用受限窗口读取；真正的内存分配错误不会被吞掉或重复放大。指定上传文件已完成实际 memmap 构建验证。
+
+song_form v1/v2 训练界面现在也显示 **CUDA 显存预算（GiB）**。0 使用总显存 60%，正数使用指定预算并封顶总显存 95%；它只控制训练进程的 CUDA 上限，不改变模型结构。v2 参数量建议优先按 `d_model → 层数 → dim_feedforward` 顺序小步增加，Planner 宽度单独调整；在 8 GB 显卡上可先试 `d_model=320、layers=6、dim_feedforward=1280、planner_width=160`，同时把 batch size 保持 2–4、梯度累积提高来维持有效批量。已有 checkpoint 的 resume 仍继承结构，不能通过该控件改变模型维度。
