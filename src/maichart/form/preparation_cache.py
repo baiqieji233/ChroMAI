@@ -11,6 +11,7 @@ from pathlib import Path
 import shutil
 import tempfile
 import threading
+import time
 import zipfile
 
 import numpy as np
@@ -24,6 +25,8 @@ from maichart.generation.sustain_state import SustainStateIndex
 
 
 SCHEMA = 'song_form_preparation_v1'
+# Bump when parsing, segmentation, labels or cached tensor semantics change.
+SEMANTICS = 'song_form_preparation_exact_geometry_v1'
 _DEPENDENCIES = (
     'form/preparation_cache.py', 'form/data.py', 'form/codec.py',
     'form/rational_audio.py', 'form/waveform_cache.py', 'form/rhythm_geometry.py',
@@ -70,6 +73,8 @@ class PreparationCache:
         self._lock = threading.RLock()
         self._digests = {}
         self._legacy_index = None
+        from maichart.form.cache_support import source_digests
+        self._source_digests = source_digests(str(Path(cache_dir).resolve()))
         self._counts = dict(hits=0, misses=0, rebuilt=0, invalid=0, write_errors=0)
 
     @staticmethod
@@ -78,22 +83,15 @@ class PreparationCache:
         value.pop('code_sha256', None)
         value.pop('source', None)
         value.pop('audio', None)
+        # Legacy entries predate the explicit version; never default them to
+        # a future SEMANTICS value when preprocessing changes again.
+        value.setdefault('semantics', 'song_form_preparation_exact_geometry_v1')
         return _json_bytes(value)
 
     def _legacy_roots(self):
-        roots = [self.root]
-        # Search sibling dataset cache roots once, not once per chart.
-        cache_root = self.root.parent.parent
-        dataset_root = cache_root.parent
-        if dataset_root.parent.is_dir():
-            for sibling in dataset_root.parent.iterdir():
-                candidate = sibling / 'cache' / 'song_form_prepare' / 'v1'
-                if candidate.is_dir() and candidate not in roots:
-                    roots.append(candidate)
-        shared = Path(__file__).resolve().parents[3] / 'webui_workspace' / 'cache' / 'song_form_shared' / 'song_form_prepare' / 'v1'
-        if shared.is_dir() and shared not in roots:
-            roots.append(shared)
-        return roots
+        from maichart.form.cache_support import cache_roots
+        return [root / 'song_form_prepare' / 'v1'
+                for root in cache_roots(str(self.root.parent.parent))]
 
     def _promote_legacy(self, key, identity, candidate, probe):
         """Create the current stable key without recompressing cached arrays."""
@@ -131,35 +129,32 @@ class PreparationCache:
             if self._legacy_index is not None:
                 return self._legacy_index
             index = {}
+            started = time.monotonic()
+            scanned = 0
+            print('form_cache_index '+json.dumps(dict(family='preparation',stage='scan',path=str(self.root))),flush=True)
             for root in self._legacy_roots():
                 for candidate in root.glob('*.index.json'):
                     try:
                         probe = json.loads(candidate.read_text(encoding='utf-8'))
                         normalized = self._normalized_identity(probe.get('identity'))
-                        index.setdefault(normalized, []).append((candidate, probe))
+                        index.setdefault(normalized, []).append(candidate)
+                        scanned += 1
                     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                         continue
             self._legacy_index = index
+            print('form_cache_index '+json.dumps(dict(family='preparation',stage='ready',entries=scanned,
+                elapsed_sec=round(time.monotonic()-started,2))),flush=True)
             return index
 
     def file_digest(self, path):
-        path = Path(path).resolve()
-        stat = path.stat()
-        signature = (stat.st_size, stat.st_mtime_ns)
-        with self._lock:
-            cached = self._digests.get(path)
-            if cached is not None and cached[0] == signature:
-                return cached[1]
-            checksum = _digest(path)
-            self._digests[path] = (signature, checksum)
-            return checksum
+        return self._source_digests.digest(path)
 
     def identity(self, source, audio_path, slot, level, record, options):
         source, audio_path = Path(source).resolve(), Path(audio_path).resolve()
         structure = source.with_name('music_structure.json')
         meters = [item.to_dict() for item in normalize_meter_map(options['meters'])]
         identity = {
-            'schema': SCHEMA, 'code_sha256': self.code_hash,
+            'schema': SCHEMA, 'semantics':SEMANTICS, 'code_sha256': self.code_hash,
             'runtime': self.runtime,
             # Absolute dataset paths are deliberately excluded. The content
             # hashes and structural settings fully determine this artifact;
@@ -184,7 +179,7 @@ class PreparationCache:
 
     def stats(self):
         with self._lock:
-            return {**self._counts, 'path': str(self.root)}
+            return {**self._counts, 'path': str(self.root), 'source_hashes':self._source_digests.stats()}
 
     def _count(self, key):
         with self._lock:
@@ -196,9 +191,13 @@ class PreparationCache:
         if index.exists():
             try:
                 metadata = json.loads(index.read_text(encoding='utf-8'))
-                if metadata.get('schema') == SCHEMA and metadata.get('identity') == identity:
+                if metadata.get('schema') == SCHEMA and self._normalized_identity(metadata.get('identity')) == self._normalized_identity(identity):
                     checksum = metadata['arrays_sha256']
+                    if not isinstance(checksum,str) or len(checksum)!=64 or any(c not in '0123456789abcdef' for c in checksum):
+                        raise ValueError('Invalid preparation array checksum')
                     arrays_path = self.root / f'{key}.{checksum}.npz'
+                    if self.file_digest(arrays_path) != checksum:
+                        raise ValueError('Preparation arrays checksum mismatch')
                     with np.load(arrays_path, allow_pickle=False) as arrays:
                         result = _decode(metadata['result'], arrays)
                     if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
@@ -208,15 +207,21 @@ class PreparationCache:
                 direct_invalid = True
             except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, zipfile.BadZipFile):
                 direct_invalid = True
+                self._count('invalid')
         if not index.exists() or direct_invalid:
             # Migrate caches written before paths were removed from the
             # identity. Compare a normalized identity while scanning only
             # the preparation index files; successful entries are copied to
             # the new stable key on the next save path.
             expected_normalized = self._normalized_identity(identity)
-            for candidate, probe in self._build_legacy_index().get(expected_normalized, ()):
+            for candidate in self._build_legacy_index().get(expected_normalized, ()):
                 try:
+                    probe = json.loads(candidate.read_text(encoding='utf-8'))
+                    if probe.get('schema') != SCHEMA or self._normalized_identity(probe.get('identity')) != expected_normalized:
+                        continue
                     arrays_path = candidate.parent / f"{candidate.name[:-len('.index.json')]}.{probe['arrays_sha256']}.npz"
+                    if self.file_digest(arrays_path) != probe['arrays_sha256']:
+                        continue
                     with np.load(arrays_path, allow_pickle=False) as arrays:
                         result = _decode(probe['result'], arrays)
                     if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())

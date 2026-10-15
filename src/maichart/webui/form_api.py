@@ -148,7 +148,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics','form_cache_index'}:
         return
     try:
         value = json.loads(body)
@@ -158,6 +158,8 @@ def update_form_progress(task, line):
         return
     if prefix == 'form_rational_diagnostics':
         task.result['rational_diagnostics'] = value
+    elif prefix == 'form_cache_index':
+        task.result['cache_index_progress'] = value
     elif prefix == 'form_prepare':
         task.result.update(phase='prepare',progress_known=False,progress_detail=value)
     elif prefix == 'form_progress':
@@ -485,13 +487,16 @@ def start_form_task(handler,operation,payload,*,runtime=None):
     if payload.get('cache_dir'):
         cache_path = server._resolve_path(str(payload['cache_dir']))
     elif operation == 'train':
-        from maichart.generation.event_audio import audio_cache_dir
         # Parse and validate before registering a task so malformed manifests
         # cannot leave an orphan queued task in the UI.
         manifest_data=json.loads(manifest.read_text(encoding='utf-8-sig'))
         cache=Path(str(manifest_data.get('cache_dir') or 'cache'))
         if not cache.is_absolute(): cache=manifest.parent/cache
-        cache_path=audio_cache_dir(cache)
+        # FormDataset owns multiple cache families (preparation, Blueprint,
+        # rational audio and waveform). Pass the manifest's base cache root;
+        # appending ``/audio`` here made every preparation cache miss after a
+        # WebUI launch and forced a full rebuild.
+        cache_path=cache
     curve_to_forward = None
     curve_condition_warnings = []
     if operation not in {'train', 'analyze'} and payload.get('intensity_curve_enabled'):

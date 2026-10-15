@@ -93,44 +93,10 @@ def _query_cache_candidates(cache_dir, filename):
     safe.  The current directory remains first; legacy sibling roots are only
     consulted on a miss.
     """
-    roots = []
     if cache_dir:
-        current = Path(cache_dir).resolve()
-        roots.append(current)
-        # ``cache_dir`` is normally ``<dataset>/cache``.  Looking at
-        # ``current.parent`` enumerates song folders inside one dataset and
-        # therefore never reaches sibling dataset roots such as
-        # ``E:\\后训练（官谱）\\cache``.  Walk the dataset parent instead.
-        dataset_parent = current.parent.parent
-        if dataset_parent.is_dir():
-            try:
-                siblings = sorted(dataset_parent.iterdir())
-            except OSError:
-                siblings = []
-            for sibling in siblings:
-                try:
-                    if not sibling.is_dir():
-                        continue
-                    # Dataset roots commonly use names such as
-                    # ``后训练（官谱）`` and keep ``cache`` underneath.
-                    if sibling.name.lower().endswith('cache'):
-                        roots.append(sibling)
-                    if (sibling / 'cache').is_dir():
-                        roots.append(sibling / 'cache')
-                except OSError:
-                    # Protected/system directories on the drive are not
-                    # dataset roots; ignore them rather than failing training.
-                    continue
-    shared = Path(__file__).resolve().parents[3] / 'webui_workspace' / 'cache' / 'song_form_shared'
-    roots.append(shared)
-    seen = set()
-    for root in roots:
-        candidate = root / PROFILE / filename
-        key = str(candidate).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        yield candidate
+        from maichart.form.cache_support import cache_roots
+        for root in cache_roots(str(Path(cache_dir).resolve())):
+            yield root / PROFILE / filename
 
 
 def _query_source_token(audio):
@@ -190,8 +156,7 @@ class _QueryViewRefs(OrderedDict):
         super().clear()
 
 
-@lru_cache(maxsize=1024)
-def _digest_cached(path, size, mtime_ns, ctime_ns, probe_hash):
+def _digest(path):
     checksum = hashlib.sha256()
     with Path(path).open("rb") as stream:
         for block in iter(lambda: stream.read(1024 * 1024), b""):
@@ -199,16 +164,15 @@ def _digest_cached(path, size, mtime_ns, ctime_ns, probe_hash):
     return checksum.hexdigest()
 
 
-def _digest(path):
-    source = Path(path).resolve()
-    stat = source.stat()
-    with source.open('rb') as stream:
-        probe_hash = hashlib.sha256(stream.read(4096)).hexdigest()
-    return _digest_cached(str(source), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, probe_hash)
+def _source_digest(path, cache_dir=None):
+    if cache_dir is None:
+        return _digest(path)
+    from maichart.form.cache_support import source_digests
+    return source_digests(str(Path(cache_dir).resolve())).digest(path)
 
 
 @lru_cache(maxsize=2)
-def _wave(path, size, mtime_ns, probe_hash, sha256):
+def _wave(path, size, mtime_ns, sha256):
     if _digest(path)!=sha256:
         raise ValueError('Audio content changed before waveform query; reload the audio source')
     signal, sr, _ = _read_mono(path)
@@ -218,13 +182,8 @@ def _wave(path, size, mtime_ns, probe_hash, sha256):
 def waveform(path, sha256=None):
     path = Path(path).resolve()
     stat = path.stat()
-    # Include a cheap content probe so same-size/same-mtime replacements do
-    # not reuse stale waveform data. The full SHA is still computed inside
-    # the uncached decode path and for persistent rational caches.
-    probe = path.open('rb').read(4096)
-    probe_hash = hashlib.sha256(probe).hexdigest()
     full_hash = sha256 or _digest(path)
-    return _wave(str(path), stat.st_size, stat.st_mtime_ns, probe_hash, full_hash)
+    return _wave(str(path), stat.st_size, stat.st_mtime_ns, full_hash)
 
 
 def _read_mono(path, start_sec=None, end_sec=None, *, padding_sec=1.0):
@@ -398,7 +357,7 @@ def _tempo_hint(signal, sr):
 
 def cache_path(path, cache_dir, sha256=None):
     if cache_dir is None: return None
-    return Path(cache_dir) / PROFILE / ((sha256 or _digest(path))+".npz")
+    return Path(cache_dir) / PROFILE / ((sha256 or _source_digest(path,cache_dir))+".npz")
 
 
 def _cache_candidates(path, cache_dir, sha256=None):
@@ -406,19 +365,25 @@ def _cache_candidates(path, cache_dir, sha256=None):
     if cache_dir is None:
         return []
     path = Path(path).resolve()
-    digest = sha256 or _digest(path)
+    digest = sha256 or _source_digest(path,cache_dir)
     current = Path(cache_dir).resolve()
     candidates = [current / PROFILE / (digest + '.npz')]
     # Legacy key included the absolute source path.
     legacy_identity = {'profile': PROFILE, 'source': str(path), 'audio_sha256': digest}
     legacy_key = hashlib.sha256(json.dumps(legacy_identity, sort_keys=True).encode()).hexdigest()
     candidates.append(current / PROFILE / (legacy_key + '.npz'))
-    dataset_root = current.parent
-    if dataset_root.parent.is_dir():
-        for sibling in dataset_root.parent.iterdir():
-            sibling_cache = sibling / current.name / PROFILE
-            candidates.append(sibling_cache / (digest + '.npz'))
-            candidates.append(sibling_cache / (legacy_key + '.npz'))
+    from maichart.form.cache_support import cache_roots
+    for root in cache_roots(str(current)):
+        candidates.append(root / PROFILE / (digest+'.npz'))
+        candidates.append(root / PROFILE / (legacy_key+'.npz'))
+        try:
+            relative = path.relative_to(current.parent)
+        except ValueError:
+            continue
+        relocated = root.parent / relative
+        identity = {'profile':PROFILE,'source':str(relocated),'audio_sha256':digest}
+        relocated_key = hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+        candidates.append(root / PROFILE / (relocated_key+'.npz'))
     return list(dict.fromkeys(candidates))
 
 
@@ -446,7 +411,7 @@ class RationalAudio:
             self._views = _QueryViewRefs(_query_source_token(self))
 
 
-def load_rational_audio(path):
+def load_rational_audio(path, *, source=None, cache_dir=None):
     with np.load(path, allow_pickle=False) as saved:
         meta = json.loads(str(saved["metadata"].item()))
         features, times = saved["features"].copy(), saved["times"].copy()
@@ -454,6 +419,10 @@ def load_rational_audio(path):
         raise ValueError("Rational audio cache contract mismatch")
     if len(times) != len(features) or not np.isfinite(features).all() or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
         raise ValueError("Invalid rational audio cache")
+    if source is not None:
+        meta['source'] = str(Path(source).resolve())
+    if cache_dir is not None:
+        meta['cache_dir'] = str(cache_dir)
     return RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta,
                          meta["source"], meta.get("cache_dir"),
                          feature_policy=meta.get("feature_policy", LEGACY_FEATURE_POLICY))
@@ -461,18 +430,15 @@ def load_rational_audio(path):
 
 def extract_rational_audio(path, cache_dir=None):
     path = Path(path).resolve()
-    content_sha256 = _digest(path)
+    content_sha256 = _source_digest(path,cache_dir)
     cached = cache_path(path, cache_dir, content_sha256)
     for candidate in _cache_candidates(path, cache_dir, content_sha256):
         if not candidate.is_file():
             continue
         try:
-            audio = load_rational_audio(candidate)
-            audio.source = str(path)
-            audio.cache_dir = str(cache_dir) if cache_dir is not None else None
-            audio.metadata['source'] = str(path)
-            audio.metadata['cache_dir'] = audio.cache_dir
-            cached = candidate
+            audio = load_rational_audio(candidate,source=path,cache_dir=cache_dir)
+            if audio.metadata.get('audio_sha256') != content_sha256:
+                raise ValueError('Rational audio cache content mismatch')
             break
         except (OSError, ValueError, KeyError):
             audio = None

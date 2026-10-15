@@ -71,6 +71,10 @@ class _AudioStore:
             if resolution is None or resolution[0] != signature:
                 cache_path=(rational_cache_path(source,self.cache_dir) if self.loader is extract_rational_audio
                             else event_audio_cache_path(source,self.cache_dir))
+                if self.loader is extract_rational_audio and not cache_path.is_file():
+                    from maichart.form.rational_audio import _cache_candidates
+                    cache_path = next((candidate for candidate in _cache_candidates(source,self.cache_dir)
+                                       if candidate.is_file()),cache_path)
                 resolution=(signature,cache_path)
                 self._resolved_sources[key]=resolution
                 self.source_resolutions+=1
@@ -90,7 +94,7 @@ class _AudioStore:
             if cache_path is not None and cache_path.is_file():
                 try:
                     from maichart.form.rational_audio import extract_rational_audio, load_rational_audio
-                    audio=(load_rational_audio(cache_path) if self.loader is extract_rational_audio
+                    audio=(load_rational_audio(cache_path,source=path,cache_dir=self.cache_dir) if self.loader is extract_rational_audio
                            else load_event_audio(cache_path,sample_rate=22050,hop_length=441))
                     self.disk_loads+=1
                 except (OSError,ValueError,KeyError,TypeError,json.JSONDecodeError):
@@ -441,16 +445,11 @@ def _preparation_annotation(annotations, source, slot, audio_path, cache, annota
     from maichart.training.quality_annotations import chart_sha256, audio_sha256, validate_record
     source_identity = Path(source).resolve()
     audio_hash = None
-    candidates = (annotation_index or {}).get((slot, str(source_identity)), annotations.get('records', []))
+    candidates = (annotation_index.get((slot, str(source_identity)), [])
+                  if annotation_index is not None else annotations.get('records', []))
     chart_hash = None
     for record in candidates:
         if int(record.get('difficulty_index', -1)) != slot:
-            continue
-        if record.get('source_path') and Path(record['source_path']).resolve() != source_identity:
-            continue
-        if chart_hash is None and len(candidates) != 1:
-            chart_hash = chart_sha256(source, slot)
-        if chart_hash is not None and record.get('chart_sha256') != chart_hash:
             continue
         try:
             if not record.get('source_path') or Path(record['source_path']).resolve() != source_identity:
@@ -458,6 +457,10 @@ def _preparation_annotation(annotations, source, slot, audio_path, cache, annota
             if record.get('audio_path') and Path(record['audio_path']).resolve() != Path(audio_path).resolve():
                 continue
         except (OSError, TypeError, ValueError):
+            continue
+        if chart_hash is None:
+            chart_hash = chart_sha256(source, slot)
+        if record.get('chart_sha256') != chart_hash:
             continue
         if record.get('audio_sha256'):
             if audio_hash is None:

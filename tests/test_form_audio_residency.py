@@ -62,3 +62,15 @@ def test_resident_mode_rejects_worker_copies_before_dataset_preparation():
                                '--audio-cache-mode','resident','--loader-workers','1'])
     with pytest.raises(ValueError, match='loader-workers=0'):
         _validate(args)
+
+
+def test_rational_residency_estimate_reads_headers_without_loading_arrays(tmp_path,monkeypatch):
+    store,sources,calls,size=store_with_features(tmp_path,monkeypatch,1)
+    for source in sources:
+        np.savez_compressed(source.with_suffix('.npz'),features=np.zeros((30,ACOUSTIC_DIM),np.float32),
+                            times=np.arange(30,dtype=np.float32))
+    monkeypatch.setattr(store,'disk_cache_path',lambda path:Path(path).with_suffix('.npz'))
+    monkeypatch.setattr(np,'load',lambda *_a,**_kw:pytest.fail('Estimate must only read array headers'))
+    with pytest.raises(ValueError,match='Raise the budget'):
+        audio_residency.preload_audio(store,sources,report=lambda **_:None)
+    assert not calls

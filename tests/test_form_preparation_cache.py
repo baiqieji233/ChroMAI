@@ -9,6 +9,10 @@ from test_form_pipeline import fixture_audio
 
 @pytest.fixture
 def cached_source(tmp_path, monkeypatch):
+    # Each case measures its own cold build; cross-dataset reuse is covered
+    # separately and must not import another test's identical fixture cache.
+    from maichart.form.preparation_cache import PreparationCache
+    monkeypatch.setattr(PreparationCache,'_legacy_roots',lambda self:[self.root])
     folder = tmp_path / 'song'; folder.mkdir()
     chart = folder / 'maidata.txt'
     chart.write_text('&title=fixture\n&wholebpm=120\n&lv_5=13\n'

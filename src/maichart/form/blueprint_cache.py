@@ -14,11 +14,13 @@ import pickle
 from pathlib import Path
 import tempfile
 import threading
+import time
 import zipfile
 
 import numpy as np
 
 SCHEMA = 'song_form_blueprint_input_v1'
+SEMANTICS = 'song_form_blueprint_exact_geometry_v1'
 
 
 def _json_bytes(value):
@@ -63,18 +65,13 @@ class BlueprintInputCache:
         value = dict(identity or {})
         value.pop('code_sha256', None)
         value.pop('source', None)
+        value.setdefault('semantics','song_form_blueprint_exact_geometry_v1')
         return _json_bytes(value)
 
     def _legacy_roots(self):
-        roots = [self.root]
-        cache_root = self.root.parent.parent
-        dataset_root = cache_root.parent
-        if dataset_root.parent.is_dir():
-            for sibling in dataset_root.parent.iterdir():
-                candidate = sibling / 'cache' / 'blueprint_inputs' / 'v1'
-                if candidate.is_dir() and candidate not in roots:
-                    roots.append(candidate)
-        return roots
+        from maichart.form.cache_support import cache_roots
+        return [root / 'blueprint_inputs' / 'v1'
+                for root in cache_roots(str(self.root.parent.parent))]
 
     def _build_legacy_index(self):
         with self._lock:
@@ -82,17 +79,21 @@ class BlueprintInputCache:
                 return self._legacy_index
             result = {}
             import torch
+            started = time.monotonic()
+            print('form_cache_index '+json.dumps(dict(family='blueprint',stage='scan',path=str(self.root))),flush=True)
             for root in self._legacy_roots():
                 for path in root.glob('*.pt'):
                     try:
-                        payload = torch.load(path, map_location='cpu', weights_only=True)
+                        payload = torch.load(path, map_location='cpu', weights_only=True,mmap=True)
                         if payload.get('schema') != SCHEMA:
                             continue
                         result.setdefault(self._normalized_identity(payload.get('identity')), []).append(path)
                     except (OSError, ValueError, TypeError, KeyError, RuntimeError,
-                            pickle.UnpicklingError, zipfile.BadZipFile):
+                            pickle.UnpicklingError, EOFError, zipfile.BadZipFile):
                         continue
             self._legacy_index = result
+            print('form_cache_index '+json.dumps(dict(family='blueprint',stage='ready',entries=sum(map(len,result.values())),
+                elapsed_sec=round(time.monotonic()-started,2))),flush=True)
             return result
 
     def identity(self, chart=None, *, audio_profile=None, max_tokens=None,
@@ -106,7 +107,7 @@ class BlueprintInputCache:
         """
         chart = chart or {}
         identity = {
-            'schema': SCHEMA, 'code_sha256': self.code_sha256,
+            'schema': SCHEMA, 'semantics':SEMANTICS, 'code_sha256': self.code_sha256,
             'source': chart.get('source'), 'difficulty': chart.get('difficulty'),
             'chart_sha256': chart.get('chart_sha256'),
             'audio_sha256': chart.get('audio_sha256'),
@@ -184,50 +185,53 @@ class BlueprintInputCache:
             self._counts[name] += 1
 
     def load(self, key, identity):
+        import torch
         path = self.root / f'{key}.pt'
-        if not path.is_file():
-            expected = self._normalized_identity(identity)
-            for candidate in self._build_legacy_index().get(expected, ()):
-                try:
-                    import torch
-                    payload = torch.load(candidate, map_location='cpu', weights_only=True)
-                    result = payload['tensors']
-                    if not isinstance(result, dict) or any(not torch.is_tensor(v) for v in result.values()):
-                        continue
-                    result = dict(result)
-                    result['_weight'] = float(payload['weight'])
-                    # Promote the legacy payload under the stable semantic key
-                    # so the next run takes the direct O(1) path.
-                    self.root.mkdir(parents=True, exist_ok=True)
-                    promoted = dict(payload, identity=identity)
-                    temporary = self.root / f'.{key}.tmp'
-                    torch.save(promoted, temporary)
-                    temporary.replace(self.root / f'{key}.pt')
-                    self._count('hits')
-                    return result
-                except (OSError, ValueError, TypeError, KeyError, RuntimeError,
-                        pickle.UnpicklingError, zipfile.BadZipFile):
-                    continue
-            self._count('misses')
-            return None
-        try:
-            import torch
-            payload = torch.load(path, map_location='cpu', weights_only=True)
-            if payload.get('schema') != SCHEMA or payload.get('identity') != identity:
+        expected = self._normalized_identity(identity)
+        def checked(candidate):
+            payload = torch.load(candidate,map_location='cpu',weights_only=True)
+            if payload.get('schema') != SCHEMA or self._normalized_identity(payload.get('identity')) != expected:
                 raise ValueError('Blueprint cache identity mismatch')
-            result = payload['tensors']
-            if not isinstance(result, dict) or any(not torch.is_tensor(v) for v in result.values()):
+            tensors = payload['tensors']
+            if not isinstance(tensors,dict) or any(not torch.is_tensor(v) for v in tensors.values()):
                 raise ValueError('Blueprint cache tensors are invalid')
-            if any(v.device.type != 'cpu' or not torch.isfinite(v).all() for v in result.values()):
+            if any(v.device.type!='cpu' or not torch_finite(v) for v in tensors.values()):
                 raise ValueError('Blueprint cache contains non-CPU or nonfinite tensors')
+            result = dict(tensors)
             result['_weight'] = float(payload['weight'])
+            if not np.isfinite(result['_weight']):
+                raise ValueError('Blueprint cache weight is nonfinite')
+            return payload,result
+        errors = (OSError,ValueError,TypeError,KeyError,IndexError,EOFError,
+                  pickle.UnpicklingError,RuntimeError,zipfile.BadZipFile)
+        if path.is_file():
+            try:
+                _,result = checked(path)
+                self._count('hits')
+                return result
+            except errors:
+                self._count('invalid')
+        for candidate in self._build_legacy_index().get(expected,()):
+            try:
+                payload,result = checked(candidate)
+            except errors:
+                continue
+            temporary = None
+            try:
+                self.root.mkdir(parents=True,exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=self.root,suffix='.tmp',delete=False) as stream:
+                    temporary = Path(stream.name)
+                torch.save(dict(payload,identity=identity),temporary)
+                temporary.replace(path)
+            except errors:
+                self._count('write_errors')
+            finally:
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
             self._count('hits')
             return result
-        except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError,
-                pickle.UnpicklingError,
-                RuntimeError, zipfile.BadZipFile):
-            self._count('invalid'); self._count('misses')
-            return None
+        self._count('misses')
+        return None
 
     def save(self, key, identity, inputs, targets, weight):
         self._count('rebuilt')

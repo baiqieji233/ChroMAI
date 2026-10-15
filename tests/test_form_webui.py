@@ -40,6 +40,7 @@ def test_training_dispatch_is_independent_and_short_run_controls_arrive(webui_ap
     assert args.blueprint_batch_size==2 and args.blueprint_workers==1 and args.blueprint_prefetch==4
     assert args.cuda_memory_budget_gb == 7.5
     assert calls[0][:2]==['-m','maichart.form.train']
+    assert calls[0][calls[0].index('--cache-dir') + 1] == str(manifest.parent / 'cache')
 
 
 def test_blueprint_batch_size_blank_uses_checkpoint_aware_trainer_default(webui_api,monkeypatch,tmp_path):

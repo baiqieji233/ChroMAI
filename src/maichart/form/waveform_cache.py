@@ -35,40 +35,39 @@ def _load(directory):
 
 def _promote_waveform(source_dir, target_dir):
     """Copy/link an immutable waveform cache into the active cache root."""
+    target_array = temporary = None
     try:
         metadata_path = source_dir / 'index.json'
         metadata = json.loads(metadata_path.read_text(encoding='utf-8'))
         source_array = source_dir / metadata['array']
         target_dir.mkdir(parents=True, exist_ok=True)
-        target_array = target_dir / metadata['array']
-        if not target_array.exists():
-            try:
-                os.link(source_array, target_array)
-            except OSError:
-                shutil.copyfile(source_array, target_array)
-        temporary = target_dir / '.index.tmp'
-        temporary.write_text(json.dumps(metadata), encoding='utf-8')
+        with tempfile.NamedTemporaryFile(dir=target_dir, suffix='.npy', delete=False) as stream:
+            target_array = Path(stream.name)
+        target_array.unlink()
+        try:
+            os.link(source_array, target_array)
+        except OSError:
+            shutil.copyfile(source_array, target_array)
+        metadata = {**metadata, 'array': target_array.name}
+        with tempfile.NamedTemporaryFile(dir=target_dir, suffix='.json.tmp', delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(json.dumps(metadata).encode('utf-8'))
         temporary.replace(target_dir / 'index.json')
         return _load(target_dir)
     except (OSError, ValueError, KeyError, TypeError, EOFError):
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+        if target_array is not None:
+            target_array.unlink(missing_ok=True)
         return None
 
 
 def _waveform_roots(cache_dir):
     if not cache_dir:
         return [Path(tempfile.gettempdir()) / 'maichart-waveforms-v1']
-    current = Path(cache_dir).resolve()
-    roots = [current / 'rational_audio_queries_v1' / 'waveforms_v1']
-    dataset_root = current.parent
-    if dataset_root.parent.is_dir():
-        for sibling in dataset_root.parent.iterdir():
-            candidate = sibling / current.name / 'rational_audio_queries_v1' / 'waveforms_v1'
-            if candidate.is_dir() and candidate not in roots:
-                roots.append(candidate)
-    shared = Path(__file__).resolve().parents[3] / 'webui_workspace' / 'cache' / 'song_form_shared' / 'rational_audio_queries_v1' / 'waveforms_v1'
-    if shared.is_dir() and shared not in roots:
-        roots.append(shared)
-    return roots
+    from maichart.form.cache_support import cache_roots
+    return [root / 'rational_audio_queries_v1' / 'waveforms_v1'
+            for root in cache_roots(str(Path(cache_dir).resolve()))]
 
 
 @contextmanager
@@ -91,25 +90,24 @@ def _build_lock(directory):
 
 @lru_cache(maxsize=4)
 def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
-    from maichart.form.rational_audio import _ShortAudioRead, _digest, _read_mono
-    if _digest(path) != sha256:
+    from maichart.form.rational_audio import _ShortAudioRead, _read_mono, _source_digest
+    if _source_digest(path,cache_dir) != sha256:
         raise ValueError('Audio content changed before waveform mapping; reload the audio source')
     roots = _waveform_roots(cache_dir)
     root = roots[0]
     directory = root / sha256
-    for candidate_root in roots:
-        cached = _load(candidate_root / sha256)
-        if cached is not None:
-            if candidate_root != root:
-                promoted = _promote_waveform(candidate_root / sha256, directory)
-                if promoted is not None:
-                    return promoted
-            return cached
-    cached = None
+    cached = _load(directory)
+    if cached is not None:
+        return cached
     with _build_lock(directory):
         cached = _load(directory)
         if cached is not None:
             return cached
+        for candidate_root in roots[1:]:
+            cached = _load(candidate_root / sha256)
+            if cached is not None:
+                promoted = _promote_waveform(candidate_root / sha256, directory)
+                return promoted if promoted is not None else cached
         # Each published array is immutable; an existing mapping cannot block
         # replacement of a repaired cache on Windows.
         with tempfile.NamedTemporaryFile(dir=directory, suffix='.npy', delete=False) as stream:
@@ -143,11 +141,7 @@ def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
                 frames = len(values)
                 with array_path.open('wb') as stream:
                     np.save(stream, values, allow_pickle=False)
-            stable_array = directory / 'waveform.npy'
-            if stable_array.exists():
-                stable_array.unlink(missing_ok=True)
-            array_path.replace(stable_array)
-            metadata = dict(schema=SCHEMA, array=stable_array.name, sample_rate=rate,
+            metadata = dict(schema=SCHEMA, array=array_path.name, sample_rate=rate,
                             frames=frames, audio_sha256=sha256)
             with tempfile.NamedTemporaryFile(dir=directory, suffix='.json.tmp', delete=False) as stream:
                 temporary_index = Path(stream.name)
@@ -163,8 +157,8 @@ def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
 
 
 def mapped_waveform(path, sha256=None, cache_dir=None):
-    from maichart.form.rational_audio import _digest
+    from maichart.form.rational_audio import _source_digest
     source = Path(path).resolve()
     stat = source.stat()
     return _mapped(str(source), stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns,
-                   sha256 or _digest(source), str(Path(cache_dir).resolve()) if cache_dir else None)
+                   sha256 or _source_digest(source,cache_dir), str(Path(cache_dir).resolve()) if cache_dir else None)

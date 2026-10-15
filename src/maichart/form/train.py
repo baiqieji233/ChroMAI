@@ -428,6 +428,7 @@ def _train(args):
     blueprint_workers = (min(4, os.cpu_count() or 1) if args.blueprint_workers == 0
                          else args.blueprint_workers) if args.model_family=='song_form_v2' else 0
     emit('form_runtime', training_semantics=semantics, model_family=args.model_family, device=str(device), precision=precision,
+         cache_dir=str(Path(args.cache_dir).resolve()),max_region_seconds=args.max_region_seconds,
          cuda_memory_budget_gb=round(cuda_budget_gib, 3), cuda_memory_budget_requested_gb=float(args.cuda_memory_budget_gb),
          cuda_memory_budget_error=cuda_budget_error,
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
@@ -454,6 +455,7 @@ def _train(args):
         emit('form_warning', message='Checkpoint uses different training semantics. Prepared audio/skeleton identities are now explicit; optional exact geometry changes the versioned input contract. Use finetune for changed inputs. Source checkpoint generation keeps its own profile.',
              optimizer_restored=bool(args.resume))
     emit('form_prepare', stage='dataset', manifest=str(Path(args.manifest).resolve()),
+         cache_dir=str(Path(args.cache_dir).resolve()),max_region_seconds=args.max_region_seconds,
          limit_charts=args.limit_charts, max_steps=args.max_steps, prepare_workers=args.prepare_workers)
     # Create perturbation config for training input robustness
     from maichart.form.training_input_perturbation import PerturbationConfig

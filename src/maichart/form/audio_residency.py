@@ -5,6 +5,9 @@ import ctypes
 import json
 import os
 from pathlib import Path
+import zipfile
+
+import numpy as np
 
 from maichart.generation.event_audio import ACOUSTIC_DIM
 
@@ -38,19 +41,32 @@ def preload_audio(store, paths, *, report):
     if budget is None or budget <= 0:
         raise ValueError('Full audio residency requires a positive audio-cache-gb budget')
     required = 0
-    for path in paths:
+    for position,path in enumerate(paths,1):
         index = store.disk_cache_path(path)
         if index is None or not index.exists():
             raise ValueError(f'Full audio residency requires prepared disk features: {path}')
         if index.suffix=='.npz':
-            import numpy as np
-            with np.load(index,allow_pickle=False) as arrays:
-                required+=arrays['features'].nbytes+arrays['times'].nbytes
+            # NPZ is a ZIP of NPY arrays. Their small headers contain the
+            # exact allocation sizes; decompressing all features here reads
+            # the entire dataset twice before any training can begin.
+            with zipfile.ZipFile(index) as arrays:
+                for name in ('features.npy','times.npy'):
+                    with arrays.open(name) as stream:
+                        version = np.lib.format.read_magic(stream)
+                        read_header = (np.lib.format.read_array_header_1_0 if version == (1,0)
+                                       else np.lib.format.read_array_header_2_0)
+                        shape,_fortran,dtype = read_header(stream)
+                        if dtype.hasobject:
+                            raise ValueError(f'Audio cache contains object arrays: {index}')
+                        required += int(np.prod(shape,dtype=np.int64)) * dtype.itemsize
         else:
             metadata = json.loads(index.read_text(encoding='utf-8'))
             frames = len(metadata['times'])
             width = int(metadata.get('metadata', {}).get('acoustic_dim', ACOUSTIC_DIM))
             required += frames * (width + 1) * 4
+        if position == 1 or position % 50 == 0:
+            report(phase='estimate',completed=position,total=len(paths),unique_audio=len(paths),
+                   required_bytes=required,budget_bytes=budget,bytes=store.bytes)
     report(phase='estimate', completed=0, total=len(paths), unique_audio=len(paths),
            required_bytes=required, budget_bytes=budget, bytes=store.bytes)
     if required > budget:

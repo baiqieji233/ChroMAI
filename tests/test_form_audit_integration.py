@@ -42,7 +42,9 @@ def test_threaded_preparation_matches_serial_native_profile_and_cache(source,tmp
             torch.testing.assert_close(value,warm[0][key],rtol=0,atol=0)
 
 
-def test_duplicate_source_rows_are_not_lost_under_parallel_preparation(source,tmp_path):
+def test_duplicate_source_rows_are_not_lost_under_parallel_preparation(source,tmp_path,monkeypatch):
+    from maichart.form.preparation_cache import PreparationCache
+    monkeypatch.setattr(PreparationCache,'_legacy_roots',lambda self:[self.root])
     content=json.loads(source[1].read_text(encoding='utf-8'))
     content['songs'].extend([{**content['songs'][0], 'song_id':f'alias-{i}'} for i in range(5)])
     source[1].write_text(json.dumps(content),encoding='utf-8')
