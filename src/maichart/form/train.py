@@ -345,11 +345,21 @@ def _train(args):
     device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
                           else 'cpu' if args.device == 'auto' else args.device)
     cuda_budget_gib = 0.0
+    cuda_budget_error = None
     if device.type == 'cuda':
-        total_gib = torch.cuda.get_device_properties(device).total_memory / 1024**3
+        # PyTorch rejects a bare ``cuda`` device for this API. Resolve it to
+        # the active ordinal while preserving an explicit cuda:N selection.
+        cuda_index = device.index if device.index is not None else torch.cuda.current_device()
+        total_gib = torch.cuda.get_device_properties(cuda_index).total_memory / 1024**3
         requested = float(args.cuda_memory_budget_gb)
         cuda_budget_gib = min(total_gib * .95, requested if requested > 0 else total_gib * .60)
-        torch.cuda.set_per_process_memory_fraction(cuda_budget_gib / total_gib, device=device)
+        try:
+            torch.cuda.set_per_process_memory_fraction(cuda_budget_gib / total_gib, device=cuda_index)
+        except (RuntimeError, ValueError) as exc:
+            # A cap is an optimization guard; failure to install it must not
+            # abort an otherwise valid training run. Keep the requested value
+            # visible and explain the fallback in the structured log.
+            cuda_budget_error = str(exc)
     meters = json.loads(Path(args.meter_map).read_text(encoding='utf-8-sig')) if args.meter_map else None
     if args.resume or args.init_checkpoint:
         model, blueprint, codec, old = checkpoint.load(args.resume or args.init_checkpoint, device='cpu')
@@ -419,6 +429,7 @@ def _train(args):
                          else args.blueprint_workers) if args.model_family=='song_form_v2' else 0
     emit('form_runtime', training_semantics=semantics, model_family=args.model_family, device=str(device), precision=precision,
          cuda_memory_budget_gb=round(cuda_budget_gib, 3), cuda_memory_budget_requested_gb=float(args.cuda_memory_budget_gb),
+         cuda_memory_budget_error=cuda_budget_error,
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
          blueprint_batch_size=args.blueprint_batch_size,
          planner_objective_enabled=planner_objective_enabled,
@@ -431,6 +442,9 @@ def _train(args):
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
          audio_cache_mode=args.audio_cache_mode,
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
+    if cuda_budget_error:
+        emit('form_warning', message='无法安装 CUDA 显存硬上限，训练继续使用 PyTorch 默认分配策略。',
+             cuda_memory_budget_error=cuda_budget_error)
     if args.model_family == 'song_form_v2' and not planner_objective_enabled:
         emit('form_warning', message='全曲负荷规划损失已关闭：Planner 保持冻结，不计训练步数。只有来源模型已学会全曲规划时才能生成；从头训练需开启规划损失与曲线预测损失。',
              planner_pretrained=bool(old and checkpoint.planner_is_ready(old)))

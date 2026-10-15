@@ -110,3 +110,5 @@
 部分 MP3/VBR 文件的容器头声明帧数会略大于实际可解码帧数。原 waveform cache 和 rational audio reader 将一次读不到数据直接当作致命错误，表现为 `Audio ended before declared frame count`。现在这类明确的短读会回退到 librosa/audioread 的兼容解码路径，并继续使用受限窗口读取；真正的内存分配错误不会被吞掉或重复放大。指定上传文件已完成实际 memmap 构建验证。
 
 song_form v1/v2 训练界面现在也显示 **CUDA 显存预算（GiB）**。0 使用总显存 60%，正数使用指定预算并封顶总显存 95%；它只控制训练进程的 CUDA 上限，不改变模型结构。v2 参数量建议优先按 `d_model → 层数 → dim_feedforward` 顺序小步增加，Planner 宽度单独调整；在 8 GB 显卡上可先试 `d_model=320、layers=6、dim_feedforward=1280、planner_width=160`，同时把 batch size 保持 2–4、梯度累积提高来维持有效批量。已有 checkpoint 的 resume 仍继承结构，不能通过该控件改变模型维度。
+
+随后发现 PyTorch 对裸 `cuda` 设备调用显存比例接口会抛出 `Expected a torch.device with a specified index`。现已将其解析为当前默认 GPU ordinal；如果驱动不支持设置硬上限，则记录结构化 warning 并继续训练，不再在启动阶段崩溃。
