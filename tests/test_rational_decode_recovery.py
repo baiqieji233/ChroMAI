@@ -15,7 +15,7 @@ def example():
 
 def test_prefix_oracle_checks_delta_denominator_and_callback():
     codec = RationalCodec()
-    grammar = generation.PositionGrammar(F(1, 4093), 1, characters=8)
+    grammar = generation.PositionGrammar(F(1, 4093), 1, characters=8, max_delta_denominator=16384)
     assert not grammar.prefix('1/100')
     assert grammar.allowed('1/100', codec) == []
     limited = generation.PositionGrammar(0, 1, characters=4,
@@ -34,6 +34,7 @@ def test_reachability_keeps_inclusive_minimum_spacing_boundary():
 def test_partial_position_recovery_preserves_notes_and_causal_cache(monkeypatch):
     codec = RationalCodec()
     original_prefix = generation.PositionGrammar.prefix
+    original_init = generation.PositionGrammar.__init__
     bad = '1/100'
 
     def loose_prefix(self, text):
@@ -42,6 +43,12 @@ def test_partial_position_recovery_preserves_notes_and_causal_cache(monkeypatch)
         return original_prefix(self, text)
 
     monkeypatch.setattr(generation.PositionGrammar, 'prefix', loose_prefix)
+    # Inject an explicitly restricted policy to exercise recovery. Production
+    # no longer rejects a legal interval merely for its LCM denominator.
+    def restricted_init(self,*args,**kwargs):
+        kwargs['max_delta_denominator']=16384
+        original_init(self,*args,**kwargs)
+    monkeypatch.setattr(generation.PositionGrammar,'__init__',restricted_init)
 
     class Model:
         config = SimpleNamespace(max_tokens=512)

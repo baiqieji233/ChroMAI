@@ -1382,9 +1382,58 @@ function songFormRhythmSnapDivisions(enabled) {
   if (enabled && !unique.length) throw new Error("启用节奏近似时至少选择一种候选分音。");
   return unique;
 }
+
+function songFormRhythmGeometryUiState(mode, requested, checkpointProfile = "none") {
+  const profile = ["none", "exact_fraction_v1"].includes(checkpointProfile) ? checkpointProfile : "none";
+  if (mode === "resume") return { effective: profile, locked: true, upgradeNeedsExplicitChoice: false };
+  if (mode === "finetune" && profile === "exact_fraction_v1") {
+    return { effective: profile, locked: true, upgradeNeedsExplicitChoice: false };
+  }
+  if (mode === "finetune") {
+    return { effective: requested === "exact_fraction_v1" ? "exact_fraction_v1" : "none",
+      locked: false, upgradeNeedsExplicitChoice: requested !== "exact_fraction_v1" };
+  }
+  return { effective: requested === "auto" ? "exact_fraction_v1" : requested,
+    locked: false, upgradeNeedsExplicitChoice: false };
+}
+
+function updateSongFormRhythmGeometryControls() {
+  const selector = element("#formRhythmGeometryProfileSelect");
+  const help = element("#formRhythmGeometryProfileHelp");
+  const loss = element("#formRhythmLossWeight");
+  if (!selector) return;
+  const inspection = checkpointInspection.data;
+  const checkpointProfile = inspection?.valid === true
+    ? inspection.model_config?.rhythm_geometry_profile : "none";
+  const state = songFormRhythmGeometryUiState(currentTrainingMode(), selector.value, checkpointProfile);
+  selector.disabled = currentModelFamily() !== "song_form_v2" || state.locked;
+  if (loss) loss.disabled = currentModelFamily() !== "song_form_v2"
+    || currentTrainingMode() === "resume" || state.effective !== "exact_fraction_v1";
+  if (!help) return;
+  if (currentModelFamily() !== "song_form_v2") {
+    help.textContent = "仅 song_form_v2 支持精确节奏几何训练。";
+  } else if (currentTrainingMode() === "resume") {
+    help.textContent = `resume 严格继承 checkpoint 的 ${state.effective} 几何合同与辅助损失设置。`;
+  } else if (currentTrainingMode() === "finetune" && state.upgradeNeedsExplicitChoice) {
+    help.textContent = "当前 checkpoint 没有数值几何合同；选择 exact_fraction_v1 才会迁移。自动与 none 都保持旧路径。";
+  } else if (state.effective === "exact_fraction_v1") {
+    help.textContent = "使用精确拍位数值坐标与相邻间隔辅助监督；不吸附固定分音，也不使用固定帧率。生成仍保留现有拍位字符预算与分母资源上限。";
+  } else {
+    help.textContent = "关闭数值几何辅助，保持旧输入合同。";
+  }
+}
+
 function songFormTrainingPayload(options = {}) {
   const mode = currentTrainingMode(); const source = trainingSourcePaths(options); const manifests = selectedTrainingManifests();
-  return { model_family: currentModelFamily(), manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
+  const selectedFamily = typeof currentModelFamily === "function" ? currentModelFamily() : "song_form_v1";
+  const rhythmGeometryProfile = valueOrDefault("#formRhythmGeometryProfileSelect", "auto");
+  if (!["auto", "none", "exact_fraction_v1"].includes(rhythmGeometryProfile)) throw new Error("节奏几何训练方案无效。");
+  const rawRhythmLossWeight = valueOrDefault("#formRhythmLossWeight", "").trim();
+  const rhythmLossWeight = rawRhythmLossWeight === "" ? null : Number(rawRhythmLossWeight);
+  if (rhythmLossWeight !== null && (!Number.isFinite(rhythmLossWeight) || rhythmLossWeight < 0 || rhythmLossWeight > 10)) {
+    throw new Error("节奏几何辅助损失权重必须在 0–10 之间。");
+  }
+  return { model_family: selectedFamily, manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     quality_enabled: checkedOrDefault("#qualityEnabled", false),
     resume_data_policy: mode === "resume" ? valueOrDefault("#formResumeDataPolicy", "strict") : "strict",
@@ -1407,10 +1456,11 @@ function songFormTrainingPayload(options = {}) {
     sample_cache_mb: Number(valueOrDefault("#formSampleCacheMb", 256)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
     event_decision_loss_weight: Number(valueOrDefault("#formEventDecisionLossWeight", .25)),
+    rhythm_geometry_profile: rhythmGeometryProfile, rhythm_loss_weight: rhythmLossWeight,
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),
     max_region_seconds: Number(valueOrDefault("#formMaxRegionSeconds", 14)), d_model: Number(valueOrDefault("#formDModel", 256)), layers: Number(valueOrDefault("#formLayers", 4)), nhead: Number(valueOrDefault("#formNhead", 8)),
-    dim_feedforward: currentModelFamily() === "song_form_v2" ? Number(valueOrDefault("#formDimFeedforward", 0)) : 0,
+    dim_feedforward: selectedFamily === "song_form_v2" ? Number(valueOrDefault("#formDimFeedforward", 0)) : 0,
     planner_width: Number(valueOrDefault("#formPlannerWidth", 128)),
     max_tokens: Number(valueOrDefault("#formMaxTokens", 2048)), max_memory_tokens: Number(valueOrDefault("#formMaxMemoryTokens", 512)), dropout: Number(valueOrDefault("#formDropout", .1)) };
 }
@@ -1750,6 +1800,7 @@ function updateTrainingControls() {
     const target = element(selector);
     if (target) target.disabled = resume;
   });
+  updateSongFormRhythmGeometryControls();
   window.MaichartWorkflow?.refresh();
 }
 
@@ -2687,13 +2738,17 @@ function applySongFormCheckpointConfig(data, mode) {
   structure.forEach(([selector, key]) => { const node = element(selector); if (!node) return; if (locked && config[key] != null) node.value = String(config[key]); node.disabled = locked; });
   const plannerWidth=element("#formPlannerWidth");
   if (plannerWidth) { if (locked && data?.blueprint_config?.width != null) plannerWidth.value=String(data.blueprint_config.width); plannerWidth.disabled=locked; }
+  const geometryProfile = element("#formRhythmGeometryProfileSelect");
+  if (geometryProfile && locked && (mode === "resume" || data?.model_config?.rhythm_geometry_profile === "exact_fraction_v1")) {
+    geometryProfile.value = data?.model_config?.rhythm_geometry_profile === "exact_fraction_v1" ? "exact_fraction_v1" : "none";
+  }
   const inherited = [["#learningRate", "lr"], ["#batchSize", "batch_size"], ["#gradAccumulation", "grad_accumulation"],
     ["#trainingSeed", "seed"], ["#weightDecay", "weight_decay"], ["#formConditionDropout", "condition_drop_prob"],
     ["#formBlueprintLossWeight", "blueprint_loss_weight"], ["#formCurveLossWeight", "load_curve_loss_weight"],
     ["#formRelationLossWeight", "relation_loss_weight"], ["#qualityEnabled", "quality_enabled"],
     ["#maxSteps", "max_steps"], ["#formLimitCharts", "limit_charts"], ["#formPrecision", "precision"],
     ["#formMaxRegionSeconds", "max_region_seconds"], ["#formBlueprintBatchSize", "blueprint_batch_size"],
-    ["#formEventDecisionLossWeight", "event_decision_loss_weight"]];
+    ["#formEventDecisionLossWeight", "event_decision_loss_weight"], ["#formRhythmLossWeight", "rhythm_loss_weight"]];
   inherited.forEach(([selector]) => { const node = element(selector); if (node) node.disabled = false; });
   const settings = {...(data?.args || {}), ...(data?.resume_settings || {})};
   if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.blueprint_batch_size == null) {
@@ -2702,6 +2757,7 @@ function applySongFormCheckpointConfig(data, mode) {
   if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.event_decision_loss_weight == null) {
     settings.event_decision_loss_weight = 0;
   }
+  if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.rhythm_loss_weight == null) settings.rhythm_loss_weight = 0;
   if (settings.max_region_seconds == null && data?.dataset_contract?.max_region_seconds != null) {
     settings.max_region_seconds = data.dataset_contract.max_region_seconds;
   }
@@ -2717,7 +2773,9 @@ function applySongFormCheckpointConfig(data, mode) {
   if (locked) structure.forEach(([selector, key]) => {
     if (element(selector) && config[key] != null) effective.push(`${key}=${config[key]}`);
   });
-  const status = element("#checkpointInspectStatus"); if (status && data.valid) status.textContent = `${data.model_family || currentModelFamily()}：epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；配置训练 ${data.optimizer_steps || 0} 步；生成${data.can_generate ? "可用" : "未就绪"}，修订${data.can_revise ? "可用" : "未就绪"}${locked ? `；${mode === "resume" ? "resume 继承值" : "checkpoint 固定结构"}：${effective.join(" · ") || "未记录"}` : ""}。`;
+  const geometry = data?.model_config?.rhythm_geometry_profile || "none";
+  const status = element("#checkpointInspectStatus"); if (status && data.valid) status.textContent = `${data.model_family || currentModelFamily()}：epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；配置训练 ${data.optimizer_steps || 0} 步；节奏几何 ${geometry}；生成${data.can_generate ? "可用" : "未就绪"}，修订${data.can_revise ? "可用" : "未就绪"}${locked ? `；${mode === "resume" ? "resume 继承值" : "checkpoint 固定结构"}：${effective.join(" · ") || "未记录"}` : ""}。`;
+  updateSongFormRhythmGeometryControls();
 }
 
 async function inspectCheckpoint({ autoPreprocess = false } = {}) {
@@ -2790,7 +2848,10 @@ async function inspectGenerationCheckpoint() {
     const conditionNote = data.condition_controls_trained ? "Radar / Style 条件监督已训练" : "Radar / Style 仍是未校准条件，请先做 A/B 验证";
     const curveNote = data.load_curve_trained ? "song_form 强度曲线已训练" : "song_form 强度曲线尚未训练";
     const curveBox = element("#formCurveCapability"); if (curveBox) { curveBox.hidden = false; curveBox.textContent = `${curveNote}；${conditionNote}。`; curveBox.classList.toggle("warn", !data.load_curve_trained); }
-    setGenerationStatus(data.valid && data.can_generate ? `模型族：${data.model_family}；epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；生成可用；${conditionNote}；${curveNote}` : ((data.errors || []).join("；") || "song-form checkpoint 尚未完成事件训练"), data.valid && data.can_generate ? "good" : "warn");
+    const unreadyNote = data.planner_trained === false
+      ? "Planner 尚无有效负荷监督，暂不能生成；请用非零规划与曲线损失完成训练。"
+      : "song-form checkpoint 尚未完成事件训练";
+    setGenerationStatus(data.valid && data.can_generate ? `模型族：${data.model_family}；epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；生成可用；${conditionNote}；${curveNote}` : ((data.errors || []).join("；") || unreadyNote), data.valid && data.can_generate ? "good" : "warn");
     return data;
   }
   const data = await api("/api/checkpoint/inspect", { checkpoint_path: checkpointPath, mode: "generate" });
@@ -4102,6 +4163,7 @@ on("#tapOnSlideThresholdMs", "change", () => {
 // Training panel
 on("#modelFamily", "change", () => { generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null }; applySongFormCheckpointConfig({valid: false}, "fresh"); if (currentModelFamily()==="song_form_v2" && currentTrainingMode()==="fresh") { for (const [id,v] of Object.entries({formDModel:256,formLayers:4,formNhead:8,formDimFeedforward:0,formPlannerWidth:128})) { const node=element("#"+id);if(node)node.value=String(v); } } updateTrainingControls(); updateFamilyFields(); saveSettings(); });
 on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
+on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });
 on("#formResumeDataPolicy", "change", () => { updateTrainingControls(); saveSettings(); });
 on("#trainingCheckpointPath", "input", () => { if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) applySongFormCheckpointConfig({valid: false}, "fresh"); invalidateCheckpointInspection("checkpoint 路径已变化，请重新检查。"); });
 on("#goldMode", "change", () => { updateGoldFields(); saveSettings(); });

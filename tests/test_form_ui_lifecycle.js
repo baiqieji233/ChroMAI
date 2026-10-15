@@ -15,6 +15,13 @@ function functionSource(start, end) {
   return source.slice(from, to);
 }
 
+function installGeometryControls(context) {
+  context.checkpointInspection = {data:null};
+  context.currentTrainingMode ||= () => context.mode || 'fresh';
+  vm.runInContext(functionSource('function songFormRhythmGeometryUiState(',
+    'function songFormTrainingPayload('),context);
+}
+
 test("migration controls are visible only for song-form resume", () => {
   const group = {hidden: true};
   const context = {
@@ -24,6 +31,7 @@ test("migration controls are visible only for song-form resume", () => {
     window: {},
   };
   vm.createContext(context);
+  installGeometryControls(context);
   const begin = source.indexOf("function updateTrainingControls() {");
   const end = source.indexOf("// ---------------------------------------------------------------------------", begin);
   vm.runInContext(source.slice(begin, end), context);
@@ -45,6 +53,7 @@ test("song-form resume restores and locks inherited settings while finetune keep
     return elements.get(selector);
   }};
   vm.createContext(context);
+  installGeometryControls(context);
   vm.runInContext(`${functionSource("function applySongFormCheckpointConfig(data, mode) {", "async function inspectCheckpoint(")}\nglobalThis.apply = applySongFormCheckpointConfig;`, context);
   const settings = {lr: 0.0003, batch_size: 2, grad_accumulation: 4, seed: 7, weight_decay: 0.02,
     condition_drop_prob: 0.1, blueprint_loss_weight: 1.2, load_curve_loss_weight: 0.3,
@@ -91,6 +100,7 @@ test("rational resume without saved planner batch displays the trainer fallback"
     return elements.get(selector);
   }};
   vm.createContext(context);
+  installGeometryControls(context);
   vm.runInContext(`${functionSource("function applySongFormCheckpointConfig(data, mode) {", "async function inspectCheckpoint(")}\nglobalThis.apply = applySongFormCheckpointConfig;`, context);
   context.apply({valid: true, model_family: "song_form_v2", args: {}}, "resume");
   assert.equal(elements.get("#formBlueprintBatchSize").value, "1");

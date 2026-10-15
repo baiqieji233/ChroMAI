@@ -16,7 +16,8 @@ from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
 RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
                        'condition_drop_prob', 'blueprint_loss_weight',
                        'load_curve_loss_weight', 'relation_loss_weight',
-                       'quality_enabled', 'max_steps', 'blueprint_batch_size','event_decision_loss_weight')
+                       'quality_enabled', 'max_steps', 'blueprint_batch_size','event_decision_loss_weight',
+                       'rhythm_loss_weight')
 
 
 def form_resume_settings(payload):
@@ -43,6 +44,45 @@ def isolated_form_output(requested, task_id):
     return path.parent / task_id / path.name
 
 
+def resolve_rhythm_geometry_training_options(payload, *, family, mode, inspected):
+    """Resolve browser intent without changing a saved resume contract."""
+    requested = str(payload.get('rhythm_geometry_profile', 'auto')).lower()
+    if requested not in {'auto', 'none', 'exact_fraction_v1'}:
+        raise ValueError('rhythm_geometry_profile must be auto, none, or exact_fraction_v1')
+    config = (inspected or {}).get('model_config') or {}
+    stored_profile = str(config.get('rhythm_geometry_profile', 'none'))
+    if stored_profile not in {'none', 'exact_fraction_v1'}:
+        raise ValueError('checkpoint has an unknown rhythm geometry profile')
+    saved = (inspected or {}).get('args') or {}
+    if family != 'song_form_v2':
+        profile = 'none'
+    elif mode == 'resume':
+        profile = stored_profile
+    elif mode == 'finetune':
+        # Old checkpoints migrate only after the user explicitly asks for it.
+        profile = 'exact_fraction_v1' if requested == 'exact_fraction_v1' else stored_profile
+    else:
+        profile = 'exact_fraction_v1' if requested == 'auto' else requested
+
+    raw_weight = payload.get('rhythm_loss_weight')
+    if mode == 'resume':
+        weight=saved.get('rhythm_loss_weight',0.)
+    elif profile=='none':
+        weight=0.
+    elif raw_weight in {None, ''}:
+        if mode == 'finetune' and profile == stored_profile:
+            weight = saved.get('rhythm_loss_weight', 0.)
+        else:
+            weight = .1 if profile == 'exact_fraction_v1' else 0.
+    else:
+        if isinstance(raw_weight, bool):
+            raise ValueError('rhythm_loss_weight must be numeric')
+        weight = float(raw_weight)
+    if not math.isfinite(weight) or not 0 <= weight <= 10:
+        raise ValueError('rhythm_loss_weight must be between 0 and 10')
+    return profile, weight
+
+
 def inspect_form_checkpoint(path):
     """Inspect this family's actual weights, without running training or inference."""
     from maichart.webui import server
@@ -57,14 +97,14 @@ def inspect_form_checkpoint(path):
         base.update(route='/', errors=['该 checkpoint 不属于 song-form；请在主页面切换对应旧事件模型族。'])
         return base
     try:
-        from maichart.form.checkpoint import load
+        from maichart.form.checkpoint import load,task_is_ready,planner_is_ready
         # This also rejects partial/corrupt model weights and input contracts.
         model, planner, _, checked = load(path, device='cpu')
         trained = checked.get('task_training') or {}
         capabilities = checked.get('capabilities') or {}
         args = checked.get('args') or {}
         resume_settings = form_resume_settings(checked)
-        plan_ready = int(checked.get('blueprint_steps',0)) > 0
+        plan_ready = planner_is_ready(checked)
         condition_cap = capabilities.get('draft') or {}
         curve_cap = capabilities.get('load_curve') or {}
         condition_ready = (condition_cap.get('contract') == 'form_condition_v2'
@@ -72,10 +112,13 @@ def inspect_form_checkpoint(path):
                            and checked.get('condition_supervision') == 'event_derived_radar_style_v1')
         curve_ready = curve_cap.get('contract') == 'load_curve_v1' and int(curve_cap.get('steps', 0)) > 0
         base.update(valid=True, can_train=True,
-            can_generate=plan_ready and int(trained.get('draft',0))>0 and int(checked.get('optimizer_steps',0))>0,
-            can_revise=plan_ready and int(trained.get('revision',0))>0 and int(checked.get('optimizer_steps',0))>0,
+            can_generate=task_is_ready(checked,'draft'),
+            can_revise=task_is_ready(checked,'revision'),
             epoch=checked.get('epoch',0), task_training=trained,
             blueprint_steps=checked.get('blueprint_steps',0), optimizer_steps=checked.get('optimizer_steps',0),
+            planner_trained=plan_ready,
+            planner_effective_steps=checked.get('planner_effective_steps'),
+            planner_training_status=('trained' if plan_ready else 'untrained_workload'),
             model_config=checked['model_config'], args=checked.get('args') or {},
             dataset_contract=checked.get('dataset_contract') or {},
             resume_settings=resume_settings,
@@ -84,6 +127,8 @@ def inspect_form_checkpoint(path):
             condition_controls_trained=condition_ready,
             load_curve_trained=curve_ready,
             input_contract=checked['input_contract'],
+            rhythm_geometry_profile=checked['model_config'].get('rhythm_geometry_profile', 'none'),
+            rhythm_geometry_available=detected == 'song_form_v2',
             parameter_count=sum(p.numel() for p in model.parameters())+sum(p.numel() for p in planner.parameters()))
         base['blueprint_config']=checked['blueprint_config']
         base['generation_capabilities']={'rational_event_positions':detected=='song_form_v2',
@@ -244,6 +289,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             if resume_data_policy == 'restart_epoch' and out.resolve() == initial.resolve().parent:
                 raise ValueError('迁移续训请设置新的 checkpoint 输出目录，以保留来源模型。')
         epochs=number('epochs',10,1,10000,True)
+        family=(inspected or {}).get('family',payload.get('model_family',FAMILY))
+        rhythm_geometry_profile, rhythm_loss_weight = resolve_rhythm_geometry_training_options(
+            payload, family=family, mode=mode, inspected=inspected)
         values={"epochs":epochs,"batch_size":number('batch_size',2,1,512,True),
                 'lr':number('lr',.0002,1e-8,1.),'max_steps':number('max_steps',0,0,1000000,True),
                 'limit_charts':number('limit_charts',0,0,1000000,True),
@@ -266,7 +314,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'condition_drop_prob':number('condition_drop_prob',.1,0,1),
                 'blueprint_loss_weight':number('blueprint_loss_weight',1.,0,100),
                 'load_curve_loss_weight':number('load_curve_loss_weight',1.,0,100),
-                'relation_loss_weight':number('relation_loss_weight',.1,0,100)}
+                'relation_loss_weight':number('relation_loss_weight',.1,0,100),
+                'rhythm_geometry_profile':rhythm_geometry_profile,
+                'rhythm_loss_weight':rhythm_loss_weight}
         if payload.get('blueprint_batch_size') not in {None, ''}:
             values['blueprint_batch_size'] = number('blueprint_batch_size',4,1,16,True)
         values['blueprint_workers'] = number('blueprint_workers',0,0,4,True)
@@ -285,7 +335,6 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         if precision not in {'auto','fp32','bf16','fp16'}: raise ValueError('precision must be auto, fp32, bf16 or fp16')
         values['precision']=precision
         if values['d_model']%values['nhead']: raise ValueError('d_model must be divisible by nhead')
-        family=(inspected or {}).get('family',payload.get('model_family',FAMILY))
         values['model_family']=family
         values['dim_feedforward']=(inspected or {}).get('model_config',{}).get('dim_feedforward',number('dim_feedforward',0,0,32768,True))
         values['planner_width']=(inspected or {}).get('blueprint_config',{}).get('width',number('planner_width',128,16,2048,True))
@@ -306,9 +355,16 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             args+=['--'+key.replace('_','-'),str(value)]
         if mode != 'resume' and str(payload.get('control_profile','auto')) == 'none':
             values['condition_drop_prob'] = 0
-            values['load_curve_loss_weight'] = 0
             args[args.index('--condition-drop-prob') + 1] = '0'
-            args[args.index('--load-curve-loss-weight') + 1] = '0'
+            # v2 always feeds its workload Planner into joint event decoding.
+            # Disabling optional external controls cannot disable that core
+            # supervision. An explicit zero still freezes a pretrained Planner.
+            if family != 'song_form_v2':
+                values['load_curve_loss_weight'] = 0
+                args[args.index('--load-curve-loss-weight') + 1] = '0'
+        if family == 'song_form_v2':
+            values['planner_objective_enabled'] = (values['blueprint_loss_weight'] > 0
+                                                   and values['load_curve_loss_weight'] > 0)
         args += ['--quality-enabled' if values['quality_enabled'] else '--no-quality-enabled']
         if mode == 'resume':
             args += ['--resume-data-policy',resume_data_policy]

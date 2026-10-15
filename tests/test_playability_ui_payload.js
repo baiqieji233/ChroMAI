@@ -14,7 +14,7 @@ function payloadFor(controls) {
   const getter = (key, fallback) => Object.hasOwn(controls, key) ? controls[key] : fallback;
   return new Function("element", "valueOrDefault", "checkedOrDefault", "collectCondition", "saveSettings",
     "currentModelFamily", "datasetPaths", "intensityCurvePayload", "parseTempoMap",
-    source.slice(helperStart, helperEnd) + source.slice(begin, end) + ";return generationPayload();")(
+    "const currentGenerationFamily=currentModelFamily;\n"+source.slice(helperStart, helperEnd) + source.slice(begin, end) + ";return generationPayload();")(
       () => null, getter, getter, () => ({ level: 13.3 }),
       () => {}, () => "event_ctx_v1", () => ({ manifest: "" }), () => null, () => null);
 }

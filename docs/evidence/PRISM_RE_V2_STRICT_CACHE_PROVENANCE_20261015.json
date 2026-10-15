@@ -1,0 +1,99 @@
+{
+  "baseline_commit": "8f39afb",
+  "baseline_code_sha256": "4f60aa9c2ed2379d37e2488f25884ac225b3746c97334b772acc555cbfe929c9",
+  "checkpoint_charts": 1866,
+  "matched_chart_count": 1866,
+  "matched_cache_count": 3733,
+  "matching_archive_byte_code_hash_records": 0,
+  "code_hash_caveat": "Git archive bytes can differ from Windows working-tree CRLF bytes; code hash equality is not required by this result match.",
+  "profile_counts": {
+    "legacy_50hz": 3732,
+    "rational_audio_queries_v1": 1
+  },
+  "ambiguous_charts": 1866,
+  "settings": {
+    "max_tokens": 2048,
+    "max_region_seconds": 20.0
+  },
+  "ambiguous_audio_charts": 1,
+  "sample": [
+    {
+      "source": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\UNiVERSE\\11305\\maidata.txt",
+      "difficulty": 4,
+      "records": [
+        {
+          "path": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\cache\\song_form_prepare\\v1\\0024a740e0ee0bce9ed2e1b49eeaf85704eaf675ec4e1dee6c0161908d049d41.index.json",
+          "audio_profile": "legacy_50hz",
+          "feature": {
+            "fixed_feature_rate": null,
+            "profile": "rational_audio_queries_v1"
+          },
+          "code_sha256": "5ca17d47ed3107145cba265ec85cb2b4bf6d9e84050b49ff0020b07691502586",
+          "source_profile_recorded": false
+        },
+        {
+          "path": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\cache\\song_form_prepare\\v1\\6842d8fa5f2c2bc80915319f197962dc4821cbb067fdeb5ffee77280977436ba.index.json",
+          "audio_profile": "legacy_50hz",
+          "feature": {
+            "fixed_feature_rate": null,
+            "profile": "rational_audio_queries_v1"
+          },
+          "code_sha256": "0d108c23f5a4af7086d9a85324fd267579f2c5ab9134304e3cdeeca87901b205",
+          "source_profile_recorded": false
+        }
+      ]
+    },
+    {
+      "source": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\Somewhere but not here [c2fc3f79-c017-48ba-bf77-e97ac51dbd58]\\maidata.txt",
+      "difficulty": 5,
+      "records": [
+        {
+          "path": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\cache\\song_form_prepare\\v1\\005da2b35a419ccc71f2c86667b9b7b4d86bcceff95396d9bcb2cee85abb4bd6.index.json",
+          "audio_profile": "legacy_50hz",
+          "feature": {
+            "fixed_feature_rate": null,
+            "profile": "rational_audio_queries_v1"
+          },
+          "code_sha256": "5ca17d47ed3107145cba265ec85cb2b4bf6d9e84050b49ff0020b07691502586",
+          "source_profile_recorded": false
+        },
+        {
+          "path": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\cache\\song_form_prepare\\v1\\418d46e925d255592f26917aca5a0fd2705dd37ae12fd2d6771e7ec2b0c0153d.index.json",
+          "audio_profile": "legacy_50hz",
+          "feature": {
+            "fixed_feature_rate": null,
+            "profile": "rational_audio_queries_v1"
+          },
+          "code_sha256": "0d108c23f5a4af7086d9a85324fd267579f2c5ab9134304e3cdeeca87901b205",
+          "source_profile_recorded": false
+        }
+      ]
+    },
+    {
+      "source": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\BUDDiES\\11578\\maidata.txt",
+      "difficulty": 5,
+      "records": [
+        {
+          "path": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\cache\\song_form_prepare\\v1\\006ad32f0a7eb51d38e38c52905f4ede946385a25681b8d45f0519ac3814ba5f.index.json",
+          "audio_profile": "legacy_50hz",
+          "feature": {
+            "fixed_feature_rate": null,
+            "profile": "rational_audio_queries_v1"
+          },
+          "code_sha256": "5ca17d47ed3107145cba265ec85cb2b4bf6d9e84050b49ff0020b07691502586",
+          "source_profile_recorded": false
+        },
+        {
+          "path": "E:\\simai_transformer\\webui_workspace\\datasets\\full训练集\\cache\\song_form_prepare\\v1\\57622ea1e6423c85d1ce7433e42645791b2e18c2214762b4a84e704b35e56187.index.json",
+          "audio_profile": "legacy_50hz",
+          "feature": {
+            "fixed_feature_rate": null,
+            "profile": "rational_audio_queries_v1"
+          },
+          "code_sha256": "0d108c23f5a4af7086d9a85324fd267579f2c5ab9134304e3cdeeca87901b205",
+          "source_profile_recorded": false
+        }
+      ]
+    }
+  ]
+}

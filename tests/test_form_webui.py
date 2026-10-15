@@ -76,6 +76,36 @@ def test_rational_decoding_controls_reach_the_actual_cli(webui_api,monkeypatch,t
     assert args.position_complexity==.4 and args.position_beam_size==4 and args.early_eos_penalty==2
 
 
+def test_rhythm_geometry_controls_reach_form_training_cli_with_fresh_auto_default(webui_api, monkeypatch, tmp_path):
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    calls = []
+    monkeypatch.setattr(webui, '_run_subprocess_task', lambda task, args, **kwargs: calls.append(args))
+    status, result = webui_api('/api/form/train', {
+        'manifest': str(manifest), 'checkpoint_dir': str(tmp_path / 'new'),
+        'mode': 'fresh', 'model_family': 'song_form_v2', 'device': 'cpu',
+        'rhythm_geometry_profile': 'auto', 'rhythm_loss_weight': None,
+    })
+    assert status == 200, result
+    from maichart.form.train import parser
+    args = parser().parse_args(calls[0][2:])
+    assert args.rhythm_geometry_profile == 'exact_fraction_v1'
+    assert args.rhythm_loss_weight == .1
+
+
+def test_rhythm_geometry_rejects_invalid_ui_profile_before_dispatch(webui_api, monkeypatch, tmp_path):
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    calls = []
+    monkeypatch.setattr(webui, '_run_subprocess_task', lambda task, args, **kwargs: calls.append(args))
+    status, result = webui_api('/api/form/train', {
+        'manifest': str(manifest), 'checkpoint_dir': str(tmp_path / 'new'),
+        'mode': 'fresh', 'model_family': 'song_form_v2', 'device': 'cpu',
+        'rhythm_geometry_profile': 'grid_16',
+    })
+    assert status == 400
+    assert 'rhythm_geometry_profile' in result['error']
+    assert not calls
+
+
 @pytest.mark.parametrize('workers', [0, 1, 4, 5, 8])
 def test_blueprint_worker_bounds_match_cli_and_visible_control(webui_api, monkeypatch, tmp_path, workers):
     manifest = tmp_path / 'manifest.json'
@@ -114,7 +144,7 @@ def test_new_schema_is_identified_without_relabeling_legacy_models():
     from maichart.form.checkpoint import INPUT_CONTRACT
     from maichart.generation.model_compatibility import checkpoint_capabilities
     caps=checkpoint_capabilities({'schema':CHECKPOINT_SCHEMA,'family':FAMILY,'input_contract':INPUT_CONTRACT})
-    assert caps['model_family']==FAMILY and caps['generation_entry']=='/form-lab'
+    assert caps['model_family']==FAMILY and caps['generation_entry']=='/'
     old=checkpoint_capabilities({'schema':'maichart-event-generator-checkpoint-v1',
         'data_contract':{'target_schema':'event_ctx_v1'}})
     assert old['model_family']=='event_ctx_v1'
@@ -141,7 +171,7 @@ def test_form_local_load_log_retains_head_and_event_peak_units():
     assert task.result['local_load_summary']['peak_occupied_events_nps']==14
 
 
-def test_none_control_profile_label_matches_its_two_zeroed_training_weights(webui_api,monkeypatch,tmp_path):
+def test_none_control_profile_label_describes_family_specific_training_weights(webui_api,monkeypatch,tmp_path):
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')
     calls=[]
     monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append(args))
@@ -154,5 +184,22 @@ def test_none_control_profile_label_matches_its_two_zeroed_training_weights(webu
     assert args.condition_drop_prob==0
     assert args.load_curve_loss_weight==0
     html=(Path(__file__).parents[1]/'src/maichart/webui/static/index.html').read_text(encoding='utf-8')
-    assert '<option value="none">关闭条件省略与曲线预测损失</option>' in html
+    assert '<option value="none">关闭条件随机省略（v2 保留必要规划学习）</option>' in html
     assert 'Radar / Style 目标、曲线输入和布局训练仍保留' in html
+
+
+def test_rational_none_control_profile_preserves_required_workload_planner(webui_api,monkeypatch,tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    calls=[]
+    monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append((task,args)))
+    status,result=webui_api('/api/form/train',{'manifest':str(manifest),'checkpoint_dir':str(tmp_path/'new'),
+        'model_family':'song_form_v2','mode':'fresh','control_profile':'none','max_steps':1,
+        'limit_charts':1,'epochs':1,'batch_size':1,'d_model':32,'nhead':2,'layers':1,
+        'device':'cpu','load_curve_loss_weight':.4})
+    assert status==200,result
+    from maichart.form.train import parser
+    task,command=calls[0]
+    args=parser().parse_args(command[2:])
+    assert args.condition_drop_prob==0
+    assert args.load_curve_loss_weight==.4
+    assert task.result['effective_settings']['planner_objective_enabled'] is True
