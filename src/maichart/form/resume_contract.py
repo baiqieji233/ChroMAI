@@ -5,7 +5,8 @@ from pathlib import Path
 
 
 HEADER_KEYS = ('manifest_sha256', 'meter_map', 'max_region_seconds')
-SOURCE_KEYS = ('chart_sha256', 'audio_sha256', 'meter_map', 'quality', 'weight', 'first_override')
+SOURCE_KEYS = ('chart_sha256', 'audio_sha256', 'meter_map', 'quality', 'weight', 'first_override',
+               'training_inputs')
 
 
 def contract_header(manifest, meter_map, max_region_seconds):
@@ -100,7 +101,8 @@ def resolve_resume_contract(saved, current, policy='strict'):
     raise ValueError(summary + '。' + action + ' 详细差异见 resume_contract_diff.json。')
 
 
-def validate_resume_cursor(cursor, *, epoch, layout_total, plan_total, batch_size, max_steps):
+def validate_resume_cursor(cursor, *, epoch, layout_total, plan_total, batch_size, max_steps,
+                           blueprint_batch_size=None):
     """An exact contract still needs a valid completed/unfinished batch position."""
     if not cursor:
         return
@@ -108,6 +110,10 @@ def validate_resume_cursor(cursor, *, epoch, layout_total, plan_total, batch_siz
     expected_epoch = epoch if phase == 'complete' else epoch + 1
     limits = {'epoch': expected_epoch, 'layout_total': layout_total, 'plan_total': plan_total,
               'batch_size': batch_size, 'max_steps': max_steps}
+    # Old checkpoints did not serialize this counter. Their trainer still
+    # inherits the saved argument (or its historical default of one).
+    if 'blueprint_batch_size' in cursor:
+        limits['blueprint_batch_size'] = blueprint_batch_size
     if phase not in {'blueprint', 'layout_revision', 'complete'}:
         raise ValueError('续训游标阶段无效；请用 finetune。')
     for name, expected in limits.items():

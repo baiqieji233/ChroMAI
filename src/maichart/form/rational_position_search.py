@@ -24,7 +24,7 @@ def _select_cache(caches, indices):
 
 
 def search_position(model, codec, grammar, root_logits, root_cache, memory, mask, *,
-                    consumed, width=4, complexity=.2):
+                    consumed, width=4, complexity=.2, timing_features=None):
     """Return the best complete Fraction, never a nearest musical grid.
 
     Score full token probabilities before grammar renormalization: forcing a
@@ -73,7 +73,9 @@ def search_position(model, codec, grammar, root_logits, root_cache, memory, mask
         batch_size = len(candidates)
         batch_memory = memory.expand(batch_size, -1, -1)
         batch_mask = None if mask is None else mask.expand(batch_size, -1)
-        prediction, caches = model.decode_step(tokens, consumed + depth, batch_memory, batch_mask, cache_batch)
+        kwargs = ({'timing_features':timing_features.expand(batch_size,-1,-1)}
+                  if timing_features is not None else {})
+        prediction, caches = model.decode_step(tokens, consumed + depth, batch_memory, batch_mask, cache_batch,**kwargs)
         logits = prediction[:, -1]
         expanded += batch_size
     return (None if best is None else best[1]), {'expanded_hypotheses': expanded,

@@ -246,10 +246,13 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
     with torch.inference_mode():
         memory,mask=model.encode(batch)
         cache=None;consumed=0
+        from maichart.form.rhythm_decode import DecodeGeometry
+        geometry=DecodeGeometry(model,codec,origin)
         def next_logits():
             nonlocal cache,consumed
             while consumed < len(ids):
-                logits,cache=model.decode_step(torch.tensor([[ids[consumed]]],device=device),consumed,memory,mask,cache)
+                logits,cache=model.decode_step(torch.tensor([[ids[consumed]]],device=device),consumed,memory,mask,cache,
+                    **geometry.kwargs(ids,consumed,device))
                 consumed+=1
             return logits[0,-1]
         for beat in onsets:
@@ -416,10 +419,18 @@ def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu
     # future targets into draft mode. Revision is a separate task contract.
     region_index=next(i for i,r in enumerate(song.regions) if r.start<=start<r.end)
     edit=_metric_span(0,start,end,song.meters,1.,'explicit_edit')
+    # Reconstruction training receives the source chart workload. The editor
+    # has the same authored draft available, so retain that input at inference
+    # instead of silently dropping the entire load-curve branch.
+    from maichart.form.curve import build_load_curve
+    curve_times,curve_values=(build_load_curve(points,song.tempo,song.first,song.audio.duration_sec)
+        if song.rhythm_geometry_profile!='none' else (song.load_curve_times_sec,song.load_curve))
     # Keep the original whole-song audio graph and reference identities. An
     # edit is a local compute query, not a new truncated song with new motifs.
     editing=FormSong(song.audio,song.tempo,song.first,song.meters,[edit],song.relations,song.audit,
-                     song.regions,[region_index],audio_profile=song.audio_profile)
+                     song.regions,[region_index],audio_profile=song.audio_profile,
+                     load_curve_times_sec=curve_times,load_curve=curve_values,
+                     rhythm_geometry_profile=song.rhythm_geometry_profile)
     example=input_example(editing,0,history,condition=condition,codec=codec,task=1,
         draft=region,right=right,max_memory_tokens=model.config.max_memory_tokens,memory_strength=memory_strength)
     from maichart.form.revision import DraftPoint

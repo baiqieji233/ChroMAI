@@ -78,6 +78,10 @@ def parser():
     p.add_argument('--relation-loss-weight', type=float, default=.1)
     p.add_argument('--event-decision-loss-weight',type=float,default=None,
                    help='v2 auxiliary AT/EOS objective; fresh/finetune default .25, old strict resume retains 0')
+    p.add_argument('--rhythm-geometry-profile', choices=('auto','none','exact_fraction_v1'), default='auto',
+                   help='checkpointed v2 numeric Fraction geometry contract; enable only for fresh/finetune')
+    p.add_argument('--rhythm-loss-weight', type=float, default=None,
+                   help='masked next-event Fraction gap/phase loss; fresh exact profile defaults to .1')
     p.add_argument('--quality-enabled', dest='quality_enabled', action='store_true', default=True)
     p.add_argument('--no-quality-enabled', dest='quality_enabled', action='store_false')
     p.add_argument('--max-memory-tokens', type=int, default=512)
@@ -113,6 +117,11 @@ def _validate(args):
     if args.event_decision_loss_weight is not None and (not math.isfinite(args.event_decision_loss_weight)
             or not 0<=args.event_decision_loss_weight<=10):
         raise ValueError('event_decision_loss_weight must be between 0 and 10')
+    if args.rhythm_geometry_profile not in {'auto','none','exact_fraction_v1'}:
+        raise ValueError('Unknown rhythm_geometry_profile')
+    if args.rhythm_loss_weight is not None and (not math.isfinite(args.rhythm_loss_weight)
+            or not 0 <= args.rhythm_loss_weight <= 10):
+        raise ValueError('rhythm_loss_weight must be between 0 and 10')
     if not math.isfinite(args.condition_drop_prob) or not 0 <= args.condition_drop_prob <= 1:
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
@@ -130,9 +139,13 @@ def fresh_model_configs(args):
     from maichart.form.codec import RationalCodec
     rational=getattr(args,'model_family','song_form_v1')=='song_form_v2'
     ff=getattr(args,'dim_feedforward',0) or (3 if rational else 4)*args.d_model
+    profile = getattr(args, 'rhythm_geometry_profile', 'none')
+    if profile == 'auto':
+        profile = 'exact_fraction_v1' if rational else 'none'
     config = FormConfig(vocab_size=len(RationalCodec()), d_model=args.d_model, nhead=args.nhead,
         dropout=args.dropout, layers=args.layers, dim_feedforward=ff,
-        max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens)
+        max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens,
+        rhythm_geometry_profile=profile)
     if rational:
         from maichart.form.rational_planner import RationalPlannerConfig
         planner_config=RationalPlannerConfig(width=getattr(args,'planner_width',128))
@@ -141,7 +154,36 @@ def fresh_model_configs(args):
     return config, planner_config
 
 
-def layout_loss(prediction, batch, relation_weight, event_decision_weight=0.):
+def resolve_rhythm_geometry_settings(args, old=None, model=None):
+    """Resolve profile/loss once before dataset or optimizer construction."""
+    saved_profile = (getattr(model.config, 'rhythm_geometry_profile', 'none')
+                     if model is not None else 'none')
+    requested_profile = args.rhythm_geometry_profile
+    if args.model_family == 'song_form_v1':
+        if requested_profile not in ('auto', 'none'):
+            raise ValueError('song_form_v1 only supports rhythm_geometry_profile=none')
+        args.rhythm_geometry_profile = 'none'
+    elif getattr(args, 'resume', None):
+        if requested_profile not in ('auto', saved_profile):
+            raise ValueError('resume must inherit the checkpoint rhythm_geometry_profile')
+        args.rhythm_geometry_profile = saved_profile
+    elif old:
+        args.rhythm_geometry_profile = (saved_profile if requested_profile == 'auto' else requested_profile)
+    else:
+        args.rhythm_geometry_profile = ('exact_fraction_v1' if requested_profile == 'auto' else requested_profile)
+    if args.rhythm_loss_weight is None:
+        if getattr(args, 'resume', None):
+            args.rhythm_loss_weight = float((old.get('args') or {}).get('rhythm_loss_weight', 0.))
+        else:
+            args.rhythm_loss_weight = .1 if args.rhythm_geometry_profile == 'exact_fraction_v1' else 0.
+    if old and getattr(args, 'init_checkpoint', None) and saved_profile == 'exact_fraction_v1' and args.rhythm_geometry_profile == 'none':
+        raise ValueError('finetune cannot remove the checkpoint rhythm_geometry_profile')
+    if args.rhythm_geometry_profile=='none' and args.rhythm_loss_weight:
+        raise ValueError('rhythm_loss_weight requires rhythm_geometry_profile=exact_fraction_v1')
+    return args.rhythm_geometry_profile, args.rhythm_loss_weight
+
+
+def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rhythm_loss_weight=0.):
     """Per-example objectives. Their sum can be accumulated across batch sizes."""
     logits = prediction['logits'].float()
     valid = batch['target'] != 0
@@ -158,6 +200,13 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0.):
         from maichart.form.rational_objectives import event_decision_loss
         auxiliary = event_decision_loss(logits,batch)*weights
         loss_sum=loss_sum+event_decision_weight*auxiliary.sum()
+    numeric_timing = None
+    if rhythm_loss_weight:
+        from maichart.form.rhythm_geometry import numeric_timing_loss
+        if 'timing_prediction' not in prediction or 'timing_labels' not in batch or 'timing_mask' not in batch:
+            raise ValueError('numeric timing objective requires exact_fraction_v1 model and dataset labels')
+        numeric_timing = numeric_timing_loss(prediction['timing_prediction'], batch['timing_labels'], batch['timing_mask'], reduction='none') * weights
+        loss_sum = loss_sum + rhythm_loss_weight * numeric_timing.sum()
     correct = ((logits.detach().argmax(-1) == batch['target']) & valid).sum()
     if 'decoder_input' in batch and 'task' in batch:
         diagnostic_values, diagnostic_counts = layout_diagnostics(
@@ -166,6 +215,7 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0.):
         diagnostic_values, diagnostic_counts = {}, {}
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
                       **({'event_decision_aux_loss':auxiliary.detach().mean()} if auxiliary is not None else {}),
+                      **({'numeric_timing_aux_loss':numeric_timing.detach().mean()} if numeric_timing is not None else {}),
                       'loss': loss_sum.detach() / len(weights),
                       'token_accuracy': correct.float() / valid.sum().clamp_min(1),
                       'diagnostics': {'values': diagnostic_values, 'counts': diagnostic_counts}}
@@ -228,9 +278,14 @@ def _blueprint_input(dataset, index):
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    old = None
     _validate(args)
-    semantics='song_form_training_v4_rational' if args.model_family=='song_form_v2' else TRAINING_SEMANTICS
+    from maichart.form.output_guard import training_output_guard
+    with training_output_guard(args.checkpoint_dir):
+        return _train(args)
+
+
+def _train(args):
+    old = None
     device = torch.device('cuda' if args.device == 'auto' and torch.cuda.is_available()
                           else 'cpu' if args.device == 'auto' else args.device)
     meters = json.loads(Path(args.meter_map).read_text(encoding='utf-8-sig')) if args.meter_map else None
@@ -243,13 +298,21 @@ def main(argv=None):
             saved_args = old.get('args') or {}
             for name in ('seed', 'weight_decay', 'grad_accumulation', 'condition_drop_prob',
                          'blueprint_loss_weight', 'load_curve_loss_weight', 'relation_loss_weight',
-                         'quality_enabled', 'max_region_seconds', 'limit_charts', 'batch_size', 'max_steps'):
+                          'quality_enabled', 'max_region_seconds', 'limit_charts', 'batch_size', 'max_steps',
+                          'rhythm_loss_weight'):
                 if name in saved_args:
                     setattr(args, name, saved_args[name])
             # Resume retains the optimizer's numerical regime. Old trainers
             # were FP32; performance options remain adjustable during finetune.
             args.precision = old.get('precision', saved_args.get('precision', 'fp32'))
             meters = (old.get('dataset_contract') or {}).get('meter_map', meters)
+    # The profile is architectural. Resume always inherits it; finetune only
+    # migrates when the user explicitly requests exact_fraction_v1.
+    saved_profile = getattr(model.config, 'rhythm_geometry_profile', 'none') if old else 'none'
+    resolve_rhythm_geometry_settings(args, old, model if old else None)
+    semantics=(('song_form_training_v5_exact_geometry' if args.rhythm_geometry_profile!='none'
+                else 'song_form_training_v5_rational_inputs')
+               if args.model_family=='song_form_v2' else TRAINING_SEMANTICS)
     _validate(args)
     if args.model_family=='song_form_v2':
         if args.resume:
@@ -257,17 +320,20 @@ def main(argv=None):
         elif args.event_decision_loss_weight is None:
             args.event_decision_loss_weight=.25
         saved_blueprint_batch_size = (old.get('args') or {}).get('blueprint_batch_size', 1) if args.resume else 4
-        args.blueprint_batch_size = args.blueprint_batch_size or saved_blueprint_batch_size or 1
+        args.blueprint_batch_size = ((saved_blueprint_batch_size or 1) if args.resume
+                                    else args.blueprint_batch_size or saved_blueprint_batch_size or 1)
     else:
         args.event_decision_loss_weight=0.
         args.blueprint_batch_size = 1
+    planner_objective_enabled = (args.blueprint_loss_weight > 0
+        and (args.model_family != 'song_form_v2' or args.load_curve_loss_weight > 0))
     precision = resolve_precision(args.precision, device)
     random.seed(args.seed)
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     started = time.perf_counter()
     output = Path(args.checkpoint_dir)
-    if args.model_family=='song_form_v2' and old is None and (output/'form_last.pt').is_file():
+    if old is None and (output/'form_last.pt').is_file():
         raise ValueError('从头训练请使用新输出目录；该目录已存在 form_last.pt，避免覆盖现有模型。')
     if old and args.init_checkpoint and Path(args.init_checkpoint).resolve().parent == output.resolve():
         raise ValueError('Finetune uses a separate output directory to preserve the source model')
@@ -287,17 +353,23 @@ def main(argv=None):
     emit('form_runtime', training_semantics=semantics, model_family=args.model_family, device=str(device), precision=precision,
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
          blueprint_batch_size=args.blueprint_batch_size,
+         planner_objective_enabled=planner_objective_enabled,
          blueprint_workers=blueprint_workers, blueprint_prefetch=args.blueprint_prefetch,
          event_decision_loss_weight=args.event_decision_loss_weight,
+         rhythm_geometry_profile=args.rhythm_geometry_profile,
+         rhythm_loss_weight=args.rhythm_loss_weight,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
          audio_cache_mode=args.audio_cache_mode,
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
+    if args.model_family == 'song_form_v2' and not planner_objective_enabled:
+        emit('form_warning', message='全曲负荷规划损失已关闭：Planner 保持冻结，不计训练步数。只有来源模型已学会全曲规划时才能生成；从头训练需开启规划损失与曲线预测损失。',
+             planner_pretrained=bool(old and checkpoint.planner_is_ready(old)))
     if args.loader_workers:
         emit('form_warning', message='Loader workers copy dataset metadata and each has its own cache; memory grows with worker count.')
     if old and old.get('training_semantics') != semantics:
-        emit('form_warning', message='Checkpoint uses different training semantics. This version fixes load-curve time bounds, uses a stable whole-song planner reference, and matches quality annotations by source identity. Weights and generation inputs remain compatible.',
+        emit('form_warning', message='Checkpoint uses different training semantics. Prepared audio/skeleton identities are now explicit; optional exact geometry changes the versioned input contract. Use finetune for changed inputs. Source checkpoint generation keeps its own profile.',
              optimizer_restored=bool(args.resume))
     emit('form_prepare', stage='dataset', manifest=str(Path(args.manifest).resolve()),
          limit_charts=args.limit_charts, max_steps=args.max_steps, prepare_workers=args.prepare_workers)
@@ -306,7 +378,8 @@ def main(argv=None):
                           limit_charts=args.limit_charts, max_region_seconds=args.max_region_seconds,
                           quality_enabled=args.quality_enabled, preparation_workers=args.prepare_workers,
                           audio_cache_gb=args.audio_cache_gb, sample_cache_mb=args.sample_cache_mb,
-                          audio_profile='rational_audio_queries_v1' if args.model_family=='song_form_v2' else 'legacy_50hz')
+                          audio_profile='rational_audio_queries_v1' if args.model_family=='song_form_v2' else 'legacy_50hz',
+                          rhythm_geometry_profile=args.rhythm_geometry_profile)
     contract = {**current_header, 'charts': dataset.audit['charts']}
     migration = None
     if args.resume:
@@ -336,6 +409,13 @@ def main(argv=None):
             blueprint = RationalPlanner(planner_config)
         else:
             blueprint = SongBlueprint(planner_config)
+    elif args.init_checkpoint and args.rhythm_geometry_profile != saved_profile:
+        # The only supported finetune architecture migration adds zero-started
+        # geometry projections and the interval head.  Old learned branches
+        # are copied exactly; missing keys are checked in checkpoint.load.
+        from dataclasses import replace
+        migrated_config = replace(model.config, rhythm_geometry_profile=args.rhythm_geometry_profile)
+        model = checkpoint.load_finetune_model(args.init_checkpoint, migrated_config, device='cpu')
     model.to(device); blueprint.to(device)
     # Inputs are checked on CPU before copying. Shapes are always checked in
     # the model; avoid per-forward GPU -> host scalar synchronizations.
@@ -354,6 +434,8 @@ def main(argv=None):
         engine.scaler.load_state_dict(old['grad_scaler_state'])
     steps = int(old.get('optimizer_steps', 0)) if old else 0
     plan_steps = int(old.get('blueprint_steps', 0)) if old else 0
+    planner_effective_steps = (int(old.get('planner_effective_steps', plan_steps))
+                               if old and checkpoint.planner_is_ready(old) else 0)
     task_training = dict(old.get('task_training', {})) if old else {'draft': 0, 'revision': 0}
     capabilities = dict(old.get('capabilities', {})) if old and old.get('training_semantics') == semantics else {}
     history = list(old.get('training_history', [])) if args.resume else []
@@ -375,7 +457,8 @@ def main(argv=None):
     layout_total = min(math.ceil(len(dataset)/args.batch_size), args.max_steps or math.ceil(len(dataset)/args.batch_size))
     if args.resume:
         validate_resume_cursor(cursor, epoch=start_epoch, layout_total=layout_total,
-                               plan_total=plan_total, batch_size=args.batch_size, max_steps=args.max_steps)
+                               plan_total=plan_total, batch_size=args.batch_size, max_steps=args.max_steps,
+                               blueprint_batch_size=args.blueprint_batch_size)
     (output/'dataset_audit.json').write_text(json.dumps(dataset.audit, ensure_ascii=False, indent=2), encoding='utf-8')
     print(f'form_training charts={len(dataset.songs)} examples={len(dataset)} device={device} parameters={sum(p.numel() for p in parameters)}', flush=True)
     emit('form_dataset', charts=len(dataset.songs), examples=len(dataset), draft_examples=sum(item[3] == 0 for item in dataset.items),
@@ -396,6 +479,7 @@ def main(argv=None):
         tick = time.perf_counter()
         saved = checkpoint.payload(model, blueprint, codec, epoch=epoch if complete else epoch-1,
             optimizer_steps=steps, blueprint_steps=plan_steps, task_training=dict(task_training),
+            planner_effective_steps=planner_effective_steps,
             capabilities={k:dict(v) for k,v in capabilities.items()}, optimizer_state_dict=optimizer.state_dict(),
             grad_scaler_state=engine.scaler.state_dict(), dataset_contract=contract, args=vars(args),
             atom_catalog=atoms, metrics=metrics, training_history=history,
@@ -404,6 +488,7 @@ def main(argv=None):
             precision=precision,
             training_position={'epoch':epoch, 'phase':'complete' if complete else phase, 'completed':completed,
                                'layout_total':layout_total, 'plan_total':plan_total, 'batch_size':args.batch_size,
+                               'blueprint_batch_size':args.blueprint_batch_size,
                                'max_steps':args.max_steps}, rng_state=capture_rng(device),
             supervision='authored_draft_and_masked_reconstruction_not_aesthetic_reward')
         _atomic_save(saved, output/'form_last.pt')
@@ -544,11 +629,12 @@ def main(argv=None):
                     loss = parts['loss'] * weight * args.blueprint_loss_weight
                 if not torch.isfinite(loss):
                     raise ValueError('Nonfinite blueprint loss')
-                if args.blueprint_loss_weight > 0 and update_samples:
+                if planner_objective_enabled and update_samples:
                     engine.backward(loss, update_samples)
                     update = engine.step()
                     if update['applied']:
                         plan_steps += 1
+                        planner_effective_steps += 1
                         if args.load_curve_loss_weight > 0:
                             increment_cap('load_curve', 1, 'load_curve_v1')
                     else:
@@ -587,6 +673,7 @@ def main(argv=None):
         iterator = iter(loader)
         pending_tasks = Counter()
         pending_cap_tasks = Counter()
+        pending_rhythm_count = None
         last_update = {}
         for batch_index in range(layout_start, layout_total):
             tick = time.perf_counter()
@@ -605,7 +692,8 @@ def main(argv=None):
             with engine.autocast():
                 prediction = model(batch)
             loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight,
-                event_decision_weight=args.event_decision_loss_weight)
+                event_decision_weight=args.event_decision_loss_weight,
+                rhythm_loss_weight=args.rhythm_loss_weight)
             diagnostics = parts.pop('diagnostics')
             if not torch.isfinite(loss_sum):
                 raise ValueError('Nonfinite layout loss')
@@ -614,6 +702,16 @@ def main(argv=None):
             for task_id in (0, 1):
                 mask = (batch['task'] == task_id) & ~batch['condition_null'] & (batch['weight'] > 0)
                 pending_cap_tasks[task_id] += mask.sum().detach()
+            if args.rhythm_geometry_profile != 'none' and args.rhythm_loss_weight > 0:
+                timing_mask = batch.get('timing_mask')
+                if timing_mask is not None:
+                    # Keep this on-device through the accumulation group. A
+                    # row contributes only when it has a valid timing label
+                    # and positive chart/region weight; null conditioning is
+                    # still legitimate auxiliary supervision.
+                    valid_rhythm = timing_mask.any(dim=1) & (batch['weight'] > 0)
+                    count = valid_rhythm.sum()
+                    pending_rhythm_count = count if pending_rhythm_count is None else pending_rhythm_count + count
             update = None
             if engine.microbatches >= args.grad_accumulation or batch_index+1 == layout_total:
                 update = engine.step()
@@ -625,9 +723,11 @@ def main(argv=None):
                         conditioned_count = int(pending_cap_tasks[task_id])
                         if conditioned_count:
                             increment_cap(name, conditioned_count, 'form_condition_v2')
+                    if pending_rhythm_count is not None and bool(pending_rhythm_count.item()):
+                        increment_cap('rhythm_geometry', int(pending_rhythm_count.item()), args.rhythm_geometry_profile)
                 else:
                     emit('form_warning', message='AMP overflow: accumulated layout update skipped', epoch=epoch, batch=batch_index+1)
-                pending_tasks.clear(); pending_cap_tasks.clear()
+                pending_tasks.clear(); pending_cap_tasks.clear(); pending_rhythm_count = None
             progress.timing['compute_sec'] += time.perf_counter()-tick
             progress.phase_samples += batch_size
             progress.phase_tokens += tokens

@@ -36,8 +36,9 @@ from maichart.training.event_dataset import inspect_chart, numeric_level
 
 
 class _AudioStore:
-    def __init__(self, loader, cache_dir, budget=1024*1024*1024):
+    def __init__(self, loader, cache_dir, budget=1024*1024*1024,feature_policy='legacy_sparse_v1'):
         self.loader,self.cache_dir,self.budget=loader,cache_dir,budget
+        self.feature_policy=feature_policy
         self.entries=OrderedDict();self.bytes=0
         self.hits=self.misses=self.evictions=self.loads=0
         self.disk_loads=self.source_resolutions=0
@@ -97,6 +98,8 @@ class _AudioStore:
             else:
                 audio=self.loader(path,cache_dir=self.cache_dir)
             self.loads+=1
+            if hasattr(audio,'feature_policy'):
+                audio.feature_policy=self.feature_policy
             size=audio.features.nbytes+audio.times.nbytes
             if self.budget is None or self.budget > 0:
                 self.entries[key]=audio;self.bytes+=size
@@ -188,6 +191,7 @@ class FormSong:
     load_curve_times_sec: np.ndarray | None = None
     load_curve: np.ndarray | None = None
     audio_profile: str = "legacy_50hz"
+    rhythm_geometry_profile: str = 'none'
 
     def __post_init__(self):
         # Old direct constructors treat every supplied span as its own region.
@@ -208,7 +212,12 @@ class FormSong:
                 raise ValueError("load curve times and values length mismatch")
 
 
-def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2.0, max_seconds=14.0):
+def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2.0, max_seconds=14.0,
+                  rhythm_geometry_profile='none'):
+    if rhythm_geometry_profile not in {'none','exact_fraction_v1'}:
+        raise ValueError('Unknown rhythm geometry profile')
+    if hasattr(audio,'feature_policy'):
+        audio.feature_policy='native_measured_v2' if rhythm_geometry_profile!='none' else 'legacy_sparse_v1'
     meters = normalize_meter_map(meters)
     if spans is None:
         from maichart.form.segmentation import segment_music
@@ -226,7 +235,8 @@ def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2
     audit['region_count'] = len(regions)
     audit['computational_span_count'] = len(spans)
     return FormSong(audio, list(tempo), float(first), meters, spans, relations, audit,
-                    regions, span_region_indices, audio_profile=(audio.metadata or {}).get('profile','legacy_50hz'))
+                    regions, span_region_indices, audio_profile=(audio.metadata or {}).get('profile','legacy_50hz'),
+                    rhythm_geometry_profile=rhythm_geometry_profile)
 
 
 def form_audio(song, start, end):
@@ -325,7 +335,7 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     history_seconds = (float(seconds_at_beat(boundary, song.tempo, song.first)
                              - seconds_at_beat(history[-history_kept].beat, song.tempo, song.first))
                        if history_kept else 0.0)
-    return {
+    result = {
         "audio": form_audio(song,span.start,span.end), "form": torch.from_numpy(form),
         "history": torch.tensor(history_tokens),
         "motif": torch.tensor(motif),
@@ -349,6 +359,37 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
                  "motif_events_kept":motif.count(codec.end_id),
                  "task": "draft" if task==0 else "reconstruction"},
     }
+    if song.rhythm_geometry_profile != 'none':
+        from maichart.form.rhythm_geometry import coordinate_features,causal_prefix_geometry
+        from maichart.form.rational_audio import audio_queries,beat_at_second
+        if song.audio_profile == 'rational_audio_queries_v1':
+            values,_,audio_beats=audio_queries(song,span.start,span.end,max_nodes=1024)
+            result['audio']=values
+        else:
+            # Synthetic callers may supply EventAudio; preserve that evidence
+            # clock, while keeping chart targets and output beats exact.
+            low=seconds_at_beat(span.start,song.tempo,song.first)
+            high=seconds_at_beat(span.end,song.tempo,song.first)
+            audio_beats=[beat_at_second(float(t),song.tempo,song.first)
+                         for t in segment_frame_times(low,high)]
+        result['audio_geometry']=coordinate_features(audio_beats,origin=span.start)
+        result['history_geometry']=causal_prefix_geometry(history_tokens,codec,
+            origin=hist_origin,coordinate_origin=span.start)
+        for name, branch_origin in (('motif',span.start),('draft',span.start),('right',span.end)):
+            result[name+'_geometry']=causal_prefix_geometry(result[name],codec,
+                origin=branch_origin,coordinate_origin=span.start)
+        result['load_curve_geometry']=curve_geometry(song,span.start,local_times)
+    return result
+
+
+def curve_geometry(song, origin, local_times):
+    """Map local curve seconds into the same beat coordinates as audio/history."""
+    from maichart.form.rhythm_geometry import coordinate_features
+    from maichart.form.rational_audio import beat_at_second
+    local_begin=Fraction(str(seconds_at_beat(origin,song.tempo,song.first)))
+    beats=[beat_at_second(local_begin+Fraction(str(float(time))),song.tempo,song.first)
+           for time in local_times]
+    return coordinate_features(beats,origin=origin)
 
 
 def relation_target(target, reference, span):
@@ -438,7 +479,8 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
             structure = json.loads(structure_path.read_text(encoding='utf-8')) if structure_path.exists() else {}
             song = organize_song(audio, chart.tempo_changes, chart.audio_first,
                                  meters=structure.get('meter_map', options['meters']),
-                                 max_seconds=options['max_region_seconds'])
+                                 max_seconds=options['max_region_seconds'],
+                                 rhythm_geometry_profile=options.get('rhythm_geometry_profile','none'))
             excluded = [(float(region['start_sec']), float(region['end_sec']))
                         for region in (record or {}).get('regions', []) if float(region.get('weight', 1)) <= 0]
             points = [p for p in chart.points if not any(
@@ -473,6 +515,10 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
                 audio_path=audio_path, items=items,
                 chart={'source': str(source), 'difficulty': slot, 'spans': len(song.spans),
                        'links': len(song.relations.links), 'unknown_meter': not bool(song.meters),
+                       'training_inputs': {'audio': song.audio_profile,
+                           'rhythm_geometry': song.rhythm_geometry_profile,
+                           'skeleton': ('absent_joint_exact_events_v1' if song.audio_profile == 'rational_audio_queries_v1'
+                                        else 'whole_song_onsets_masked_layout_v1')},
                        'chart_sha256': hashlib.sha256(source.read_bytes()).hexdigest(),
                        'audio_sha256': (audio.metadata or {}).get('audio_sha256'),
                        'meter_map': [m.to_dict() for m in song.meters], 'quality': record, 'weight': weight})
@@ -499,14 +545,36 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
 
 
 _form_thread_local = threading.local()
+_form_prepare_locks = {}
+_form_prepare_locks_guard = threading.Lock()
+
+
+def _form_prepare_lock(options, entry):
+    """Serialize duplicate source preparation within one process.
+
+    Two manifest rows can intentionally reference the same maidata/audio (for
+    example difficulty aliases). Their cache identity is identical, so allowing
+    both workers to publish at once can replace an index while the other worker
+    is still reading it and silently drop one result.
+    """
+    key = (str(Path(options['cache_dir']).resolve()),
+           str(entry.get('maidata_path', '')), str(entry.get('audio_path', '')))
+    with _form_prepare_locks_guard:
+        return _form_prepare_locks.setdefault(key, threading.Lock())
 
 
 def _prepare_form_thread_worker(entry, options, annotations):
+    from maichart.form.rational_audio import extract_rational_audio, PROFILE
+    loader = extract_rational_audio if options.get('audio_profile') == PROFILE else extract_event_audio
+    policy = 'native_measured_v2' if options.get('rhythm_geometry_profile', 'none') != 'none' else 'legacy_sparse_v1'
     audio_store = getattr(_form_thread_local, 'audio_store', None)
-    if audio_store is None or audio_store.cache_dir != options['cache_dir']:
-        audio_store = _AudioStore(extract_event_audio, options['cache_dir'], budget=64 * 1024 * 1024)
+    if (audio_store is None or audio_store.cache_dir != options['cache_dir']
+            or audio_store.loader is not loader or audio_store.feature_policy != policy):
+        audio_store = _AudioStore(loader, options['cache_dir'], budget=64 * 1024 * 1024,
+                                  feature_policy=policy)
         _form_thread_local.audio_store = audio_store
-    return _prepare_form_entry(entry, options, annotations, audio_store)
+    with _form_prepare_lock(options, entry):
+        return _prepare_form_entry(entry, options, annotations, audio_store)
 
 
 def _ordered_form_preparation(entries, options, annotations, audio_store, workers):
@@ -537,8 +605,12 @@ class FormDataset(Dataset):
                  meters=None, seed=0, limit_charts=0, reconstruction=True,
                  min_level=12.,max_level=15.,min_difficulty_index=4,max_difficulty_index=6,
                  max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
-                 preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz'):
+                 preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz',
+                 rhythm_geometry_profile='none'):
         from maichart.form.rational_audio import PROFILE, extract_rational_audio
+        if rhythm_geometry_profile not in {'none', 'exact_fraction_v1'}:
+            raise ValueError('Unknown rhythm geometry profile')
+        self.rhythm_geometry_profile = rhythm_geometry_profile
         custom_loader = audio_loader not in (extract_event_audio, extract_rational_audio)
         if audio_profile == PROFILE:
             if custom_loader:
@@ -560,7 +632,8 @@ class FormDataset(Dataset):
             raise ValueError('sample_cache_mb must be nonnegative or None')
         audio_budget=None if audio_cache_gb is None else int(audio_cache_gb*1024**3)
         sample_budget=None if sample_cache_mb is None else int(sample_cache_mb*1024**2)
-        self.audio_store=_AudioStore(audio_loader,cache_dir,budget=audio_budget)
+        self.audio_store=_AudioStore(audio_loader,cache_dir,budget=audio_budget,
+            feature_policy='native_measured_v2' if rhythm_geometry_profile!='none' else 'legacy_sparse_v1')
         self.sample_store=_SampleStore(sample_budget)
         self._point_beats=[]
         path=Path(manifest).resolve(); data=json.loads(path.read_text(encoding='utf-8-sig'))
@@ -584,7 +657,8 @@ class FormDataset(Dataset):
             max_tokens=max_tokens, meters=meters, limit_charts=limit_charts, reconstruction=reconstruction,
             min_level=min_level, max_level=max_level, min_difficulty_index=min_difficulty_index,
             max_difficulty_index=max_difficulty_index, max_region_seconds=max_region_seconds,
-            preparation_cache=preparation_cache, audio_profile=audio_profile)
+            preparation_cache=preparation_cache, audio_profile=audio_profile,
+            rhythm_geometry_profile=rhythm_geometry_profile)
         started = time.monotonic()
         print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,
             'total_songs':len(entries),'completed_songs':0,'charts':0,
@@ -607,6 +681,8 @@ class FormDataset(Dataset):
                         continue
                     idx = len(self.songs)
                     song = result['song'][0]
+                    if song.audio_profile != audio_profile or song.rhythm_geometry_profile != rhythm_geometry_profile:
+                        raise ValueError('Prepared song audio/rhythm profile differs from the effective dataset contract')
                     song.audio = _LazyAudio(self.audio_store, result['audio_path'])
                     self.songs.append(result['song'])
                     self._point_beats.append([p.beat for p in result['song'][1]])
@@ -693,17 +769,23 @@ class FormDataset(Dataset):
         result.update(decoder_input=torch.tensor(tokens[:-1]),target=torch.tensor(tokens[1:]),
                       relation_target=relation_target(target,reference,span),
                       relation_valid=torch.tensor(ref_index is not None),weight=torch.tensor(weight*local_weight))
+        if song.rhythm_geometry_profile != 'none':
+            from maichart.form.rhythm_geometry import causal_prefix_geometry,event_timing_targets
+            result['decoder_geometry']=causal_prefix_geometry(result['decoder_input'],self.codec,origin=span.start)
+            labels=event_timing_targets(result['decoder_input'],result['target'],self.codec,origin=span.start)
+            result['timing_labels']=labels['labels']
+            result['timing_mask']=labels['mask']
         if cache_key is not None and sample_store is not None: sample_store.put(cache_key,result)
         return result
 
 
 def collate_form(items):
     result={}
-    padded=('audio','form','history','motif','draft','right','skeleton','action_state','decoder_input','target','load_curve','load_curve_times_sec','load_curve_condition_mask')
+    padded=('audio','form','history','motif','draft','right','skeleton','action_state','decoder_input','target','load_curve','load_curve_times_sec','load_curve_condition_mask','audio_geometry','history_geometry','motif_geometry','draft_geometry','right_geometry','load_curve_geometry','decoder_geometry','timing_labels','timing_mask')
     for key in padded:
         if key not in items[0]: continue
         result[key]=torch.nn.utils.rnn.pad_sequence([i[key] for i in items],batch_first=True)
-        if key in ('audio','form','load_curve','load_curve_times_sec','load_curve_condition_mask'):
+        if key in ('audio','form','load_curve','load_curve_times_sec','load_curve_condition_mask','audio_geometry','history_geometry','load_curve_geometry'):
             result[key+'_padding_mask']=torch.arange(result[key].size(1))[None,:]>=torch.tensor([len(i[key]) for i in items])[:,None]
     result['action_state_padding_mask']=torch.nn.utils.rnn.pad_sequence([i['action_state_padding_mask'] for i in items],batch_first=True,padding_value=True)
     for key in ('condition','condition_null','task','relation','memory_strength','relation_target','relation_valid','weight'):

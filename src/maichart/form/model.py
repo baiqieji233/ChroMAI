@@ -22,6 +22,7 @@ class FormConfig:
     max_tokens: int = 2048
     max_audio_tokens: int = 1024
     max_memory_tokens: int = 512
+    rhythm_geometry_profile: str = 'none'
 
     def __post_init__(self) -> None:
         for name in (
@@ -36,6 +37,8 @@ class FormConfig:
             raise ValueError("d_model must be divisible by nhead.")
         if not 0 <= self.dropout < 1:
             raise ValueError("dropout must be in [0, 1).")
+        if self.rhythm_geometry_profile not in {'none','exact_fraction_v1'}:
+            raise ValueError('Unknown rhythm geometry profile')
 
 
 class FormTransformer(nn.Module):
@@ -98,17 +101,29 @@ class FormTransformer(nn.Module):
         self.decoder_norm = nn.LayerNorm(width)
         self.output_head = nn.Linear(width, config.vocab_size)
         self.relation_head = nn.Linear(width, 2)
+        if config.rhythm_geometry_profile != 'none':
+            self.time_geometry_projection = nn.Linear(8,width,bias=False)
+            self.decoder_geometry_projection = nn.Linear(8,width,bias=False)
+            self.interval_head = nn.Linear(width,3)
+            # A migrated model initially retains its learned main-branch
+            # computation; timing geometry becomes effective during finetune.
+            nn.init.zeros_(self.time_geometry_projection.weight)
+            nn.init.zeros_(self.decoder_geometry_projection.weight)
 
     def forward(self, batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         memory, memory_mask = self.encode(batch)
         decoder_input = batch.get("decoder_input")
         if decoder_input is None:
             raise ValueError("batch must include decoder_input [B, L].")
-        hidden = self.decode(decoder_input, memory, memory_mask, return_hidden=True)
-        return {
+        hidden = self.decode(decoder_input, memory, memory_mask, return_hidden=True,
+                             timing_features=batch.get('decoder_geometry'))
+        result = {
             "logits": self.output_head(hidden),
             "relation_logits": self.relation_head(memory[:, -1]),
         }
+        if self.config.rhythm_geometry_profile != 'none':
+            result['timing_prediction']=self.interval_head(hidden)
+        return result
 
     def encode(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
         """Encode audio and authored memories once for one or more decode steps."""
@@ -181,10 +196,21 @@ class FormTransformer(nn.Module):
         masks: list[torch.Tensor] = []
         authored_lengths = 0
 
-        def add(values: torch.Tensor, mask: torch.Tensor, branch_id: int) -> None:
+        def add(values: torch.Tensor, mask: torch.Tensor, branch_id: int,geometry_key=None) -> None:
             nonlocal authored_lengths
             if values.size(1) == 0:
                 return
+            if self.config.rhythm_geometry_profile != 'none':
+                geometry_key=geometry_key or {0:'audio_geometry',2:'history_geometry',
+                    3:'motif_geometry',4:'draft_geometry',5:'right_geometry'}.get(branch_id)
+                if geometry_key:
+                    if geometry_key not in batch:
+                        raise ValueError(f'Exact geometry memory requires {geometry_key}')
+                    geometry=batch[geometry_key].to(device=device,dtype=values.dtype)
+                    if geometry.shape != (*values.shape[:2],8):
+                        raise ValueError(f'{geometry_key} shape differs from its memory branch')
+                    self._finite(geometry,geometry_key)
+                    values=values+self.time_geometry_projection(geometry)
             if branch_id == 0:
                 if values.size(1) > self.config.max_audio_tokens:
                     raise ValueError("audio exceeds max_audio_tokens.")
@@ -276,7 +302,7 @@ class FormTransformer(nn.Module):
             curve_mask = curve_padding_mask | ~visible_channels.any(dim=-1)
             self._finite(load_curve, "load_curve")
             safe_curve = load_curve.masked_fill(~visible_channels, 0.0)
-            add(self.load_curve_projection(safe_curve), curve_mask, 10)
+            add(self.load_curve_projection(safe_curve), curve_mask, 10,'load_curve_geometry')
 
         # Future *planned onsets* are supplied by the whole-song blueprint,
         # not future note configurations. Arrangement can see upcoming demands
@@ -330,6 +356,7 @@ class FormTransformer(nn.Module):
         memory_mask: torch.Tensor,
         *,
         return_hidden: bool = False,
+        timing_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
         """Decode a causal event-token prefix against previously encoded memory."""
 
@@ -347,6 +374,11 @@ class FormTransformer(nn.Module):
         length = ids.size(1)
         positions = torch.arange(length, device=ids.device).unsqueeze(0)
         target = self.token_embedding(ids) + self.position_embedding(positions)
+        if self.config.rhythm_geometry_profile != 'none':
+            if timing_features is None or timing_features.shape != (*ids.shape,8):
+                raise ValueError('Exact geometry decoding needs causal decoder_geometry [B,L,8]')
+            self._finite(timing_features,'decoder_geometry')
+            target=target+self.decoder_geometry_projection(timing_features.to(target))
         causal_mask = torch.triu(
             torch.ones((length, length), dtype=torch.bool, device=ids.device), diagonal=1
         )
@@ -359,7 +391,7 @@ class FormTransformer(nn.Module):
         hidden = self.decoder_norm(hidden)
         return hidden if return_hidden else self.output_head(hidden)
 
-    def decode_step(self, token, position, memory, memory_mask, caches=None):
+    def decode_step(self, token, position, memory, memory_mask, caches=None,*,timing_features=None,return_timing=False):
         """Incremental inference; completed decoder prefixes are not recomputed."""
         if self.training:
             raise ValueError("Cached decoding requires eval mode")
@@ -368,6 +400,10 @@ class FormTransformer(nn.Module):
         from maichart.generation.event_model import _cached_decoder_layer_with_cross_cache
         hidden = self.token_embedding(token) + self.position_embedding(
             torch.tensor([position],device=token.device)).unsqueeze(0)
+        if self.config.rhythm_geometry_profile != 'none':
+            if timing_features is None or timing_features.shape != (*token.shape,8):
+                raise ValueError('Exact geometry cached decoding needs causal timing_features [B,1,8]')
+            hidden=hidden+self.decoder_geometry_projection(timing_features.to(hidden))
         caches=caches or []
         updated=[]
         for i,layer in enumerate(self.decoder.layers):
@@ -384,7 +420,12 @@ class FormTransformer(nn.Module):
             hidden,present=_cached_decoder_layer_with_cross_cache(
                 layer,hidden,memory,past_key,past_value,past_memory_key,past_memory_value,memory_mask)
             updated.append(present)
-        return self.output_head(self.decoder_norm(hidden)),updated
+        hidden=self.decoder_norm(hidden)
+        if return_timing:
+            if self.config.rhythm_geometry_profile == 'none':
+                raise ValueError('Checkpoint has no numerical interval head')
+            return self.output_head(hidden),updated,self.interval_head(hidden)
+        return self.output_head(hidden),updated
 
     @staticmethod
     def rewind_decode_cache(caches, token_count):

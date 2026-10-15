@@ -164,7 +164,8 @@ def main(argv=None):
         if not args.maidata or args.start is None or args.end is None: raise ValueError('Revision needs maidata and exact --start/--end beats')
         chart=parse_event_chart(args.maidata,args.difficulty,strict_notes=True)
         tempo,first=chart.tempo_changes,chart.audio_first
-    song=organize_song(audio,tempo,first,meters=meters,max_seconds=args.max_region_seconds)
+    song=organize_song(audio,tempo,first,meters=meters,max_seconds=args.max_region_seconds,
+        rhythm_geometry_profile=getattr(getattr(model,'config',None),'rhythm_geometry_profile','none'))
     if not song.spans: raise ValueError('No audio interval available')
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
     report=analysis_report(song)

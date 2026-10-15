@@ -129,6 +129,7 @@ class BlueprintInputCache:
             'curve_sha256': curve_sha,
             'form_descriptor_sha256': array_hash(song.relations.descriptors),
             'audio_profile': song.audio_profile,
+            'rhythm_geometry_profile': getattr(song, 'rhythm_geometry_profile', 'none'),
             'audio_feature_config': audio_feature_config,
             'max_tokens': max_tokens,
             'max_memory_tokens': getattr(dataset, 'max_memory_tokens', None),

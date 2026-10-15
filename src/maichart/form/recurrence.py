@@ -80,6 +80,10 @@ def _tempo_map(changes: Iterable[EventTempo | tuple[Fraction, float]]) -> list[E
 def _sample(audio: EventAudio, times: np.ndarray) -> np.ndarray:
     if not len(audio.times):
         return np.zeros((len(times), audio.features.shape[1]), dtype=np.float32)
+    if (getattr(audio, "metadata", {}) or {}).get("profile") == "rational_audio_queries_v1" \
+            and getattr(audio, "feature_policy", "legacy_sparse_v1") == "native_measured_v2":
+        from maichart.form.rational_audio import acoustic_at_times
+        return acoustic_at_times(audio, times, derived_policy="native_measured_v2")
     stamps = np.asarray(audio.times, dtype=np.float64)
     features = np.asarray(audio.features, dtype=np.float64)
     return np.stack(

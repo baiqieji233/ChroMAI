@@ -162,7 +162,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     bpm = float(tempo[0].bpm)
     condition = GenerationCondition.from_dict(condition) if isinstance(condition, dict) else condition
     condition = condition or GenerationCondition(level=13.3, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
-    song = organize_song(audio, tempo, first, meters=meter_map)
+    song = organize_song(audio, tempo, first, meters=meter_map,
+        rhythm_geometry_profile=getattr(getattr(model,'config',None),'rhythm_geometry_profile','none'))
     if not song.spans:
         raise ValueError("Audio is too short to predict a song-form workload curve")
     from maichart.form.data import input_example

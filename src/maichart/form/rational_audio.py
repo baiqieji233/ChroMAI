@@ -15,12 +15,16 @@ import json
 import math
 from pathlib import Path
 import tempfile
+import threading
 
 import numpy as np
 
 from maichart.event_timing import seconds_at_beat
 
 PROFILE = "rational_audio_queries_v1"
+LEGACY_FEATURE_POLICY = "legacy_sparse_v1"
+NATIVE_FEATURE_POLICY = "native_measured_v2"
+FEATURE_POLICIES = (LEGACY_FEATURE_POLICY, NATIVE_FEATURE_POLICY)
 ACOUSTIC_DIM = 98
 INPUT_DIM = 120
 MAX_EVIDENCE_NODES = 8192
@@ -28,6 +32,72 @@ MAX_EVIDENCE_NODES = 8192
 # same bound is used during training, curve prediction, and chart generation;
 # it limits memory/latency without quantising the musical Fraction clock.
 PLANNER_MAX_AUDIO_NODES = 1024
+
+# Query tensors are much larger than the sparse native feature arrays.  Keep
+# them in one process-wide, byte-bounded LRU instead of retaining up to four
+# full tensors on every RationalAudio object.  The per-audio ``_views`` field
+# below stores only lightweight keys into this cache.
+QUERY_CACHE_MAX_BYTES = 64 * 1024 * 1024
+_QUERY_CACHE = OrderedDict()
+_QUERY_CACHE_BYTES = 0
+_QUERY_CACHE_LOCK = threading.RLock()
+
+
+def _query_source_token(audio):
+    metadata = getattr(audio, "metadata", {}) or {}
+    return str(metadata.get("audio_sha256") or getattr(audio, "source", ""))
+
+
+def _query_cache_get(token):
+    with _QUERY_CACHE_LOCK:
+        item = _QUERY_CACHE.get(token)
+        if item is None:
+            return None
+        _QUERY_CACHE.move_to_end(token)
+        return item[:3]
+
+
+def _query_cache_put(token, values, times, beats):
+    global _QUERY_CACHE_BYTES
+    size = int(values.nbytes + times.nbytes + len(beats) * 64)
+    if size > QUERY_CACHE_MAX_BYTES:
+        return False
+    with _QUERY_CACHE_LOCK:
+        old = _QUERY_CACHE.pop(token, None)
+        if old is not None:
+            _QUERY_CACHE_BYTES -= old[3]
+        # Own immutable storage: callers receive copies, and the global cache
+        # must never freeze a mutable array still held by a builder.
+        values = np.asarray(values).copy()
+        times = np.asarray(times).copy()
+        values.setflags(write=False)
+        times.setflags(write=False)
+        _QUERY_CACHE[token] = (values, times, beats, size)
+        _QUERY_CACHE_BYTES += size
+        while _QUERY_CACHE and _QUERY_CACHE_BYTES > QUERY_CACHE_MAX_BYTES:
+            _, (_, _, _, removed) = _QUERY_CACHE.popitem(last=False)
+            _QUERY_CACHE_BYTES -= removed
+    return True
+
+
+def _query_cache_clear_source(source_token):
+    global _QUERY_CACHE_BYTES
+    with _QUERY_CACHE_LOCK:
+        for token in [token for token in _QUERY_CACHE if token[0] == source_token]:
+            _, _, _, size = _QUERY_CACHE.pop(token)
+            _QUERY_CACHE_BYTES -= size
+
+
+class _QueryViewRefs(OrderedDict):
+    """At most four lightweight query keys associated with one audio source."""
+
+    def __init__(self, source_token):
+        super().__init__()
+        self.source_token = source_token
+
+    def clear(self):
+        _query_cache_clear_source(self.source_token)
+        super().clear()
 
 
 def _digest(path):
@@ -161,6 +231,17 @@ class RationalAudio:
     cache_dir: str | None = None
     tempo_changes: list = field(default_factory=list)
     _views: OrderedDict = field(default_factory=OrderedDict, repr=False)
+    feature_policy: str = LEGACY_FEATURE_POLICY
+
+    def __post_init__(self):
+        policy = self.feature_policy or (self.metadata or {}).get("feature_policy", LEGACY_FEATURE_POLICY)
+        if policy not in FEATURE_POLICIES:
+            raise ValueError(f"Unknown rational audio feature policy: {policy}")
+        self.feature_policy = policy
+        # Backward-compatible direct constructors may pass an ordinary
+        # OrderedDict.  Replace it before any query cache interaction.
+        if not isinstance(self._views, _QueryViewRefs):
+            self._views = _QueryViewRefs(_query_source_token(self))
 
 
 def load_rational_audio(path):
@@ -172,7 +253,8 @@ def load_rational_audio(path):
     if len(times) != len(features) or not np.isfinite(features).all() or not np.isfinite(times).all() or np.any(np.diff(times) <= 0):
         raise ValueError("Invalid rational audio cache")
     return RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta,
-                         meta["source"], meta.get("cache_dir"))
+                         meta["source"], meta.get("cache_dir"),
+                         feature_policy=meta.get("feature_policy", LEGACY_FEATURE_POLICY))
 
 
 def extract_rational_audio(path, cache_dir=None):
@@ -197,7 +279,9 @@ def extract_rational_audio(path, cache_dir=None):
                 duration_sec=len(signal)/sr, tempo_bpm=_tempo_hint(signal, sr),
                 normalization_scale=scale.tolist(), cache_dir=str(cache_dir) if cache_dir is not None else None,
                 timing="native_sample_attacks_and_exact_fraction_queries", feature_rate_hz=None)
-    audio = RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta, str(path), meta["cache_dir"])
+    meta["feature_policy"] = LEGACY_FEATURE_POLICY
+    audio = RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta, str(path), meta["cache_dir"],
+                          feature_policy=LEGACY_FEATURE_POLICY)
     if cached is not None:
         cached.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=cached.parent, suffix=".tmp", delete=False) as stream:
@@ -205,6 +289,52 @@ def extract_rational_audio(path, cache_dir=None):
             np.savez_compressed(stream, features=features, times=times, metadata=json.dumps(meta))
         temporary.replace(cached)
     return audio
+
+
+def acoustic_at_times(audio, times, *, derived_policy=None):
+    """Measure rational audio features at arbitrary seconds.
+
+    ``legacy_sparse_v1`` preserves the original cache/query behavior: the
+    first 95 columns are measured from the waveform and columns 95--97 are
+    interpolated from sparse attack nodes. ``native_measured_v2`` measures
+    those derived columns from short neighboring waveform windows, so gaps
+    between attack nodes cannot acquire synthetic ramps. This policy is
+    explicit because it changes the model input distribution.
+    """
+    policy = derived_policy or getattr(audio, "feature_policy", None) or LEGACY_FEATURE_POLICY
+    if policy not in FEATURE_POLICIES:
+        raise ValueError(f"Unknown rational audio feature policy: {policy}")
+    seconds = np.asarray(times, dtype=np.float64).reshape(-1)
+    signal, sr = waveform(audio.source, audio.metadata.get("audio_sha256"))
+    scale = np.asarray(audio.metadata["normalization_scale"], dtype=np.float32)
+    if scale.shape != (95,):
+        raise ValueError("Rational audio normalization scale must contain 95 values")
+    if policy == LEGACY_FEATURE_POLICY:
+        measured = query_spectra(signal, sr, seconds)
+        measured[:, :95] /= scale
+        for column in range(95, 98):
+            measured[:, column] = np.interp(
+                seconds, audio.times, audio.features[:, column], left=0.0, right=0.0
+            )
+        return measured
+
+    # Center spectra are exact waveform measurements. Neighbor queries are
+    # analysis probes only; they do not create an output clock.
+    offsets = np.asarray([0.0, -0.04, 0.04, -0.01, 0.01], dtype=np.float64)
+    measured = query_spectra(signal, sr, (seconds[:, None] + offsets).reshape(-1))
+    measured[:, :95] /= scale
+    measured = measured.reshape(len(seconds), len(offsets), ACOUSTIC_DIM)
+    center = measured[:, 0, :].copy()
+    rms = center[:, 93]
+    reference = np.asarray(audio.features[:, 93], dtype=np.float64)
+    positive = reference[reference > 0]
+    median_rms = max(float(np.median(positive)) if len(positive) else 1.0, 1e-5)
+    center[:, 95] = rms / median_rms
+    center[:, 96] = np.clip((measured[:, 2, 93] - measured[:, 1, 93]) / 0.08, -8.0, 8.0)
+    center[:, 97] = np.linalg.norm(measured[:, 4, 80:92] - measured[:, 3, 80:92], axis=1)
+    outside = (seconds < 0.0) | (seconds >= len(signal) / float(sr))
+    center[outside] = 0.0
+    return center.astype(np.float32, copy=False)
 
 
 def beat_at_second(second, tempo, first):
@@ -227,14 +357,36 @@ def audio_queries(song, start, end, *, max_nodes=None):
     """Return nonuniform evidence and a clock made entirely of Fraction beats."""
     import torch
     from maichart.form.timing import metrical_features
+    start, end = Fraction(start), Fraction(end)
+    if end <= start:
+        raise ValueError('Musical audio query range must have end > start')
+    if max_nodes is not None and (isinstance(max_nodes, bool)
+            or not isinstance(max_nodes, int) or max_nodes < 1):
+        raise ValueError('max_nodes must be a positive integer or None')
     audio = song.audio
+    policy = getattr(audio, "feature_policy", LEGACY_FEATURE_POLICY)
+    if policy not in FEATURE_POLICIES:
+        raise ValueError(f"Unknown rational audio feature policy: {policy}")
     identity = dict(start=str(start), end=str(end), first=song.first, max_nodes=max_nodes,
                     tempo=[(str(t.beat), t.bpm) for t in song.tempo],
                     meter=[m.to_dict() for m in song.meters], profile=PROFILE)
+    if policy != LEGACY_FEATURE_POLICY:
+        identity["feature_policy"] = policy
+        identity['anchor_budget_policy'] = 'bounded_long_song_v1'
+        regions=getattr(song,'regions',None)
+        extent=regions[-1].end if regions else song.spans[-1].end
+        identity['song_end_beat']=str(extent)
+    else:
+        extent=song.spans[-1].end
     key = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-    if key in audio._views:
-        audio._views.move_to_end(key)
-        values, times, beats = audio._views[key]
+    cache_token = (_query_source_token(audio), key)
+    cached_view = _query_cache_get(cache_token)
+    if cached_view is not None:
+        values, times, beats = cached_view
+        audio._views[cache_token] = None
+        audio._views.move_to_end(cache_token)
+        while len(audio._views) > 4:
+            audio._views.popitem(last=False)
         return torch.from_numpy(values.copy()), times.copy(), beats
     stored = Path(audio.cache_dir)/PROFILE/(audio.metadata["audio_sha256"]+"."+key+".queries.npz") if audio.cache_dir else None
     if stored is not None and stored.is_file():
@@ -242,7 +394,14 @@ def audio_queries(song, start, end, *, max_nodes=None):
             with np.load(stored, allow_pickle=False) as data:
                 values, times = data["values"].copy(), data["times"].copy()
                 beats = tuple(Fraction(str(b)) for b in data["beats"])
-            if values.shape != (len(beats), INPUT_DIM) or not np.isfinite(values).all() or len(times) != len(beats):
+            if (values.shape != (len(beats), INPUT_DIM) or not np.isfinite(values).all()
+                    or times.ndim != 1 or len(times) != len(beats) or not len(beats)
+                    or not np.isfinite(times).all() or np.any(np.diff(times)<=0)
+                    or any(not start<=beat<end for beat in beats)
+                    or any(b<=a for a,b in zip(beats,beats[1:]))
+                    or (max_nodes is not None and len(beats)>max_nodes)
+                    or not np.allclose(times,[seconds_at_beat(b,song.tempo,song.first) for b in beats],
+                                       rtol=1e-12,atol=1e-10)):
                 raise ValueError("Invalid musical query cache")
         except (OSError, ValueError, KeyError):
             stored.unlink(missing_ok=True)
@@ -252,6 +411,20 @@ def audio_queries(song, start, end, *, max_nodes=None):
         positions.update(Fraction(i) for i in range(math.ceil(start), math.ceil(end)))
         positions.update(Fraction(t.beat) for t in song.tempo if start <= t.beat < end)
         positions.update(Fraction(m.beat) for m in song.meters if start <= m.beat < end)
+        if max_nodes is not None and len(positions) > max_nodes and policy == NATIVE_FEATURE_POLICY:
+            # Full-song queries can exceed 1024 quarter beats on long/fast
+            # music. Keep exact tempo/meter boundaries and distributed beat
+            # evidence, leaving room for transients. These are memory nodes,
+            # never a list of legal chart positions.
+            required = {start}
+            required.update(Fraction(t.beat) for t in song.tempo if start <= t.beat < end)
+            required.update(Fraction(m.beat) for m in song.meters if start <= m.beat < end)
+            if len(required) > max_nodes:
+                raise ValueError('Tempo/meter anchors exceed audio memory budget; reduce the resource span')
+            optional = sorted(positions - required)
+            count = min(len(optional), max(0, max(max_nodes // 2, len(required)) - len(required)))
+            chosen = np.linspace(0, len(optional) - 1, count, dtype=int) if count else []
+            positions = required | {optional[i] for i in chosen}
         lo, hi = seconds_at_beat(start,song.tempo,song.first), seconds_at_beat(end,song.tempo,song.first)
         sr = audio.metadata["sample_rate"]
         selected=np.flatnonzero((audio.times >= lo) & (audio.times < hi))
@@ -266,16 +439,19 @@ def audio_queries(song, start, end, *, max_nodes=None):
             if start <= beat < end: positions.add(beat)
         beats = tuple(sorted(positions))
         times = np.asarray([seconds_at_beat(b,song.tempo,song.first) for b in beats],dtype=np.float64)
-        signal, sr = waveform(audio.source,audio.metadata['audio_sha256'])
-        acoustic = query_spectra(signal,sr,times)
-        acoustic[:, :95] /= np.asarray(audio.metadata["normalization_scale"],dtype=np.float32)
-        for column in range(95,98): acoustic[:,column] = np.interp(times,audio.times,audio.features[:,column],left=0,right=0)
+        if policy == LEGACY_FEATURE_POLICY:
+            signal, sr = waveform(audio.source,audio.metadata['audio_sha256'])
+            acoustic = query_spectra(signal,sr,times)
+            acoustic[:, :95] /= np.asarray(audio.metadata["normalization_scale"],dtype=np.float32)
+            for column in range(95,98): acoustic[:,column] = np.interp(times,audio.times,audio.features[:,column],left=0,right=0)
+        else:
+            acoustic = acoustic_at_times(audio, times, derived_policy=policy)
         beat_values = np.asarray([float(b) for b in beats])
         bpm_values = np.asarray([next(t.bpm for t in reversed(song.tempo) if t.beat <= b) for b in beats])
         progress = np.clip(times/max(audio.duration_sec,1e-6),0,1)
         context = np.column_stack((progress, np.full(len(beats), min(audio.duration_sec/300,1)),
                                   bpm_values/300, np.sin(2*np.pi*beat_values), np.cos(2*np.pi*beat_values),
-                                  beat_values/max(float(song.spans[-1].end),1), np.zeros((len(beats),4))))
+                                  beat_values/max(float(extent),1), np.zeros((len(beats),4))))
         rhythm = np.column_stack((acoustic[:,92], acoustic[:,92], acoustic[:,94], acoustic[:,93]))
         values = np.concatenate((acoustic,rhythm,context,metrical_features(beats,song.meters)),axis=1).astype(np.float32)
         values[(times < 0)|(times >= audio.duration_sec)] = 0
@@ -285,7 +461,8 @@ def audio_queries(song, start, end, *, max_nodes=None):
                 temporary = Path(stream.name)
                 np.savez_compressed(stream,values=values,times=times,beats=np.asarray([str(b) for b in beats]))
             temporary.replace(stored)
-    audio._views[key] = (values,times,beats)
+    _query_cache_put(cache_token, values, times, beats)
+    audio._views[cache_token] = None
     while len(audio._views)>4: audio._views.popitem(last=False)
     return torch.from_numpy(values.copy()), times.copy(), beats
 
