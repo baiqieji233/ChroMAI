@@ -5,6 +5,7 @@ import argparse
 from dataclasses import asdict
 from fractions import Fraction
 import json
+import math
 from pathlib import Path
 
 from maichart.event_timing import EventTempo, parse_event_chart, seconds_at_beat
