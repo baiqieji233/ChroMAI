@@ -435,15 +435,22 @@ def relation_target(target, reference, span):
     return torch.tensor([float(np.dot(x,y)/(max(np.linalg.norm(x)*np.linalg.norm(y),1e-8))) for x,y in zip(a,b)])
 
 
-def _preparation_annotation(annotations, source, slot, audio_path, cache):
+def _preparation_annotation(annotations, source, slot, audio_path, cache, annotation_index=None):
     if not annotations:
         return None
     from maichart.training.quality_annotations import chart_sha256, audio_sha256, validate_record
-    chart_hash = chart_sha256(source, slot)
     source_identity = Path(source).resolve()
     audio_hash = None
-    for record in annotations.get('records', []):
-        if int(record.get('difficulty_index', -1)) != slot or record.get('chart_sha256') != chart_hash:
+    candidates = (annotation_index or {}).get((slot, str(source_identity)), annotations.get('records', []))
+    chart_hash = None
+    for record in candidates:
+        if int(record.get('difficulty_index', -1)) != slot:
+            continue
+        if record.get('source_path') and Path(record['source_path']).resolve() != source_identity:
+            continue
+        if chart_hash is None and len(candidates) != 1:
+            chart_hash = chart_sha256(source, slot)
+        if chart_hash is not None and record.get('chart_sha256') != chart_hash:
             continue
         try:
             if not record.get('source_path') or Path(record['source_path']).resolve() != source_identity:
@@ -482,7 +489,8 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
             source = _source_asset(entry['maidata_path'], path, data)
             audio_path = _source_asset(entry['audio_path'], path, data)
             cache = options.get('preparation_cache')
-            record = _preparation_annotation(annotations, source, slot, audio_path, cache)
+            record = _preparation_annotation(annotations, source, slot, audio_path, cache,
+                                             options.get('annotation_index'))
             cache_key = cache_identity = None
             cache_status = 'disabled'
             if cache is not None:
@@ -673,6 +681,17 @@ class FormDataset(Dataset):
         if quality_enabled and annotation_path.exists():
             from maichart.training.quality_annotations import load_quality_annotations
             annotations=load_quality_annotations(annotation_path)
+        annotation_index = {}
+        if annotations:
+            for record in annotations.get('records', []):
+                raw_source = record.get('source_path')
+                if not raw_source:
+                    continue
+                try:
+                    key = (int(record.get('difficulty_index', -1)), str(Path(raw_source).resolve()))
+                except (OSError, TypeError, ValueError):
+                    continue
+                annotation_index.setdefault(key, []).append(record)
         if isinstance(preparation_workers, bool) or not isinstance(preparation_workers, int) or preparation_workers < 0:
             raise ValueError('preparation_workers must be a nonnegative integer')
         entries = data.get('songs', [])
@@ -688,7 +707,8 @@ class FormDataset(Dataset):
             max_tokens=max_tokens, meters=meters, limit_charts=limit_charts, reconstruction=reconstruction,
             min_level=min_level, max_level=max_level, min_difficulty_index=min_difficulty_index,
             max_difficulty_index=max_difficulty_index, max_region_seconds=max_region_seconds,
-            preparation_cache=preparation_cache, audio_profile=audio_profile,
+            preparation_cache=preparation_cache, annotation_index=annotation_index,
+            audio_profile=audio_profile,
             rhythm_geometry_profile=rhythm_geometry_profile)
         started = time.monotonic()
         print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,

@@ -6,7 +6,9 @@ from fractions import Fraction
 import hashlib
 from importlib.metadata import PackageNotFoundError, version
 import json
+import os
 from pathlib import Path
+import shutil
 import tempfile
 import threading
 import zipfile
@@ -67,7 +69,78 @@ class PreparationCache:
                 self.runtime[name] = None
         self._lock = threading.RLock()
         self._digests = {}
+        self._legacy_index = None
         self._counts = dict(hits=0, misses=0, rebuilt=0, invalid=0, write_errors=0)
+
+    @staticmethod
+    def _normalized_identity(identity):
+        value = dict(identity or {})
+        value.pop('code_sha256', None)
+        value.pop('source', None)
+        value.pop('audio', None)
+        return _json_bytes(value)
+
+    def _legacy_roots(self):
+        roots = [self.root]
+        # Search sibling dataset cache roots once, not once per chart.
+        cache_root = self.root.parent.parent
+        dataset_root = cache_root.parent
+        if dataset_root.parent.is_dir():
+            for sibling in dataset_root.parent.iterdir():
+                candidate = sibling / 'cache' / 'song_form_prepare' / 'v1'
+                if candidate.is_dir() and candidate not in roots:
+                    roots.append(candidate)
+        shared = Path(__file__).resolve().parents[3] / 'webui_workspace' / 'cache' / 'song_form_shared' / 'song_form_prepare' / 'v1'
+        if shared.is_dir() and shared not in roots:
+            roots.append(shared)
+        return roots
+
+    def _promote_legacy(self, key, identity, candidate, probe):
+        """Create the current stable key without recompressing cached arrays."""
+        target_index = self.root / f'{key}.index.json'
+        if target_index.exists():
+            try:
+                current = json.loads(target_index.read_text(encoding='utf-8'))
+                if current.get('identity') == identity:
+                    return
+            except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                pass
+        source_arrays = candidate.parent / f"{candidate.name[:-len('.index.json')]}.{probe['arrays_sha256']}.npz"
+        target_arrays = self.root / f'{key}.{probe["arrays_sha256"]}.npz'
+        try:
+            self.root.mkdir(parents=True, exist_ok=True)
+            if not target_arrays.exists():
+                try:
+                    os.link(source_arrays, target_arrays)
+                except OSError:
+                    shutil.copyfile(source_arrays, target_arrays)
+            payload = dict(schema=SCHEMA, identity=identity,
+                           arrays_sha256=probe['arrays_sha256'], result=probe['result'])
+            with tempfile.NamedTemporaryFile(dir=self.root, suffix='.tmp', delete=False) as stream:
+                temporary = Path(stream.name)
+                stream.write(_json_bytes(payload))
+            temporary.replace(target_index)
+        except (OSError, ValueError, TypeError):
+            try:
+                temporary.unlink(missing_ok=True)
+            except (NameError, OSError):
+                pass
+
+    def _build_legacy_index(self):
+        with self._lock:
+            if self._legacy_index is not None:
+                return self._legacy_index
+            index = {}
+            for root in self._legacy_roots():
+                for candidate in root.glob('*.index.json'):
+                    try:
+                        probe = json.loads(candidate.read_text(encoding='utf-8'))
+                        normalized = self._normalized_identity(probe.get('identity'))
+                        index.setdefault(normalized, []).append((candidate, probe))
+                    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+                        continue
+            self._legacy_index = index
+            return index
 
     def file_digest(self, path):
         path = Path(path).resolve()
@@ -105,7 +178,9 @@ class PreparationCache:
                          'max_region_seconds': options['max_region_seconds'],
                          'reconstruction': options['reconstruction'], 'meter_map': meters},
         }
-        return hashlib.sha256(_json_bytes(identity)).hexdigest(), identity
+        # Cache keys describe semantic inputs. Implementation code changes
+        # are kept in metadata for diagnostics but do not force a full rebuild.
+        return hashlib.sha256(self._normalized_identity(identity)).hexdigest(), identity
 
     def stats(self):
         with self._lock:
@@ -117,65 +192,42 @@ class PreparationCache:
 
     def load(self, key, identity, *, source_path=None, audio_path=None):
         index = self.root / f'{key}.index.json'
-        if not index.exists():
+        direct_invalid = False
+        if index.exists():
+            try:
+                metadata = json.loads(index.read_text(encoding='utf-8'))
+                if metadata.get('schema') == SCHEMA and metadata.get('identity') == identity:
+                    checksum = metadata['arrays_sha256']
+                    arrays_path = self.root / f'{key}.{checksum}.npz'
+                    with np.load(arrays_path, allow_pickle=False) as arrays:
+                        result = _decode(metadata['result'], arrays)
+                    if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
+                    if audio_path is not None: result['audio_path'] = Path(audio_path).resolve()
+                    self._count('hits')
+                    return result, 'hit'
+                direct_invalid = True
+            except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, zipfile.BadZipFile):
+                direct_invalid = True
+        if not index.exists() or direct_invalid:
             # Migrate caches written before paths were removed from the
             # identity. Compare a normalized identity while scanning only
             # the preparation index files; successful entries are copied to
             # the new stable key on the next save path.
-            roots = [self.root]
-            parent = self.root.parent.parent
-            if parent.is_dir():
-                for sibling in parent.parent.iterdir():
-                    candidate_root = sibling / 'cache' / 'song_form_prepare' / 'v1'
-                    if candidate_root.is_dir() and candidate_root not in roots:
-                        roots.append(candidate_root)
-            for root in roots:
-              for candidate in root.glob('*.index.json'):
+            expected_normalized = self._normalized_identity(identity)
+            for candidate, probe in self._build_legacy_index().get(expected_normalized, ()):
                 try:
-                    probe = json.loads(candidate.read_text(encoding='utf-8'))
-                    old_identity = dict(probe.get('identity') or {})
-                    old_identity.pop('source', None); old_identity.pop('audio', None)
-                    # A preparation code hash change should invalidate only
-                    # when semantic inputs changed. Recent cache changes were
-                    # path/locking fixes and do not alter the prepared arrays.
-                    old_identity.pop('code_sha256', None)
-                    expected_identity = dict(identity)
-                    expected_identity.pop('code_sha256', None)
-                    if old_identity != expected_identity:
-                        continue
                     arrays_path = candidate.parent / f"{candidate.name[:-len('.index.json')]}.{probe['arrays_sha256']}.npz"
                     with np.load(arrays_path, allow_pickle=False) as arrays:
                         result = _decode(probe['result'], arrays)
                     if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
                     if audio_path is not None: result['audio_path'] = Path(audio_path).resolve()
+                    self._promote_legacy(key, identity, candidate, probe)
                     self._count('hits')
                     return result, 'hit_legacy_identity'
                 except (OSError, ValueError, KeyError, TypeError, EOFError, zipfile.BadZipFile):
                     continue
             self._count('misses')
             return None, 'miss'
-        try:
-            metadata = json.loads(index.read_text(encoding='utf-8'))
-            if metadata['schema'] != SCHEMA or metadata['identity'] != identity:
-                raise ValueError('Preparation index identity mismatch')
-            checksum = metadata['arrays_sha256']
-            if not isinstance(checksum, str) or len(checksum) != 64 or any(c not in '0123456789abcdef' for c in checksum):
-                raise ValueError('Invalid preparation array checksum')
-            arrays_path = self.root / f'{key}.{checksum}.npz'
-            if self.file_digest(arrays_path) != metadata['arrays_sha256']:
-                raise ValueError('Preparation arrays checksum mismatch')
-            with np.load(arrays_path, allow_pickle=False) as arrays:
-                result = _decode(metadata['result'], arrays)
-                if source_path is not None:
-                    result['chart']['source'] = str(Path(source_path).resolve())
-                if audio_path is not None:
-                    result['audio_path'] = Path(audio_path).resolve()
-            self._count('hits')
-            return result, 'hit'
-        except (OSError, ValueError, TypeError, KeyError, IndexError, EOFError, zipfile.BadZipFile):
-            self._count('invalid')
-            self._count('misses')
-            return None, 'invalid'
 
     def save(self, key, identity, result):
         self._count('rebuilt')

@@ -56,6 +56,44 @@ class BlueprintInputCache:
         self.code_sha256 = hashlib.sha256(_json_bytes(parts)).hexdigest()
         self._counts = dict(hits=0, misses=0, rebuilt=0, invalid=0, write_errors=0)
         self._lock = threading.RLock()
+        self._legacy_index = None
+
+    @staticmethod
+    def _normalized_identity(identity):
+        value = dict(identity or {})
+        value.pop('code_sha256', None)
+        value.pop('source', None)
+        return _json_bytes(value)
+
+    def _legacy_roots(self):
+        roots = [self.root]
+        cache_root = self.root.parent.parent
+        dataset_root = cache_root.parent
+        if dataset_root.parent.is_dir():
+            for sibling in dataset_root.parent.iterdir():
+                candidate = sibling / 'cache' / 'blueprint_inputs' / 'v1'
+                if candidate.is_dir() and candidate not in roots:
+                    roots.append(candidate)
+        return roots
+
+    def _build_legacy_index(self):
+        with self._lock:
+            if self._legacy_index is not None:
+                return self._legacy_index
+            result = {}
+            import torch
+            for root in self._legacy_roots():
+                for path in root.glob('*.pt'):
+                    try:
+                        payload = torch.load(path, map_location='cpu', weights_only=True)
+                        if payload.get('schema') != SCHEMA:
+                            continue
+                        result.setdefault(self._normalized_identity(payload.get('identity')), []).append(path)
+                    except (OSError, ValueError, TypeError, KeyError, RuntimeError,
+                            pickle.UnpicklingError, zipfile.BadZipFile):
+                        continue
+            self._legacy_index = result
+            return result
 
     def identity(self, chart=None, *, audio_profile=None, max_tokens=None,
                  max_memory_tokens=None, max_region_seconds=None, **extra):
@@ -80,7 +118,7 @@ class BlueprintInputCache:
         identity.update(extra)
         # Canonicalise and validate JSON types before deriving the key.
         identity = json.loads(_json_bytes(identity).decode('utf-8'))
-        return hashlib.sha256(_json_bytes(identity)).hexdigest(), identity
+        return hashlib.sha256(self._normalized_identity(identity)).hexdigest(), identity
 
     def identity_for_dataset(self, dataset, index, *, max_tokens=None,
                              max_region_seconds=None, audio_feature_config=None):
@@ -148,6 +186,28 @@ class BlueprintInputCache:
     def load(self, key, identity):
         path = self.root / f'{key}.pt'
         if not path.is_file():
+            expected = self._normalized_identity(identity)
+            for candidate in self._build_legacy_index().get(expected, ()):
+                try:
+                    import torch
+                    payload = torch.load(candidate, map_location='cpu', weights_only=True)
+                    result = payload['tensors']
+                    if not isinstance(result, dict) or any(not torch.is_tensor(v) for v in result.values()):
+                        continue
+                    result = dict(result)
+                    result['_weight'] = float(payload['weight'])
+                    # Promote the legacy payload under the stable semantic key
+                    # so the next run takes the direct O(1) path.
+                    self.root.mkdir(parents=True, exist_ok=True)
+                    promoted = dict(payload, identity=identity)
+                    temporary = self.root / f'.{key}.tmp'
+                    torch.save(promoted, temporary)
+                    temporary.replace(self.root / f'{key}.pt')
+                    self._count('hits')
+                    return result
+                except (OSError, ValueError, TypeError, KeyError, RuntimeError,
+                        pickle.UnpicklingError, zipfile.BadZipFile):
+                    continue
             self._count('misses')
             return None
         try:
