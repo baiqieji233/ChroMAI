@@ -358,8 +358,14 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     history_seconds = (float(seconds_at_beat(boundary, song.tempo, song.first)
                              - seconds_at_beat(history[-history_kept].beat, song.tempo, song.first))
                        if history_kept else 0.0)
+    # Exact geometry also needs the query clock; build the query once.
+    rational_query = None
+    if song.rhythm_geometry_profile != 'none' and song.audio_profile == 'rational_audio_queries_v1':
+        from maichart.form.rational_audio import audio_queries
+        rational_query = audio_queries(song,span.start,span.end,max_nodes=1024)
     result = {
-        "audio": form_audio(song,span.start,span.end), "form": torch.from_numpy(form),
+        "audio": rational_query[0] if rational_query is not None else form_audio(song,span.start,span.end),
+        "form": torch.from_numpy(form),
         "history": torch.tensor(history_tokens),
         "motif": torch.tensor(motif),
         "draft": torch.tensor(codec.bounded_memory(draft,origin=span.start,max_tokens=max_memory_tokens,newest=False)),
@@ -385,10 +391,9 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     }
     if song.rhythm_geometry_profile != 'none':
         from maichart.form.rhythm_geometry import coordinate_features,causal_prefix_geometry
-        from maichart.form.rational_audio import audio_queries,beat_at_second
-        if song.audio_profile == 'rational_audio_queries_v1':
-            values,_,audio_beats=audio_queries(song,span.start,span.end,max_nodes=1024)
-            result['audio']=values
+        from maichart.form.rational_audio import beat_at_second
+        if rational_query is not None:
+            audio_beats=rational_query[2]
         else:
             # Synthetic callers may supply EventAudio; preserve that evidence
             # clock, while keeping chart targets and output beats exact.
@@ -802,8 +807,12 @@ class FormDataset(Dataset):
                     and sample_perturbation.onset_drop_prob + sample_perturbation.onset_add_prob
                         + sample_perturbation.onset_shift_sigma_ms > 0):
                 from maichart.form.training_input_perturbation import perturb_onset_skeleton
+                # A masked skeleton cell takes at least five tokens, so onsets
+                # beyond this window cannot reach the bounded memory even at the
+                # maximum drop rate; skipping them avoids needless snapping work.
+                window = 3 * (self.max_memory_tokens // 5) + 1
                 noisy=perturb_onset_skeleton(
-                    [EventPoint(point.beat, '1') for point in points[lo:]],
+                    [EventPoint(point.beat, '1') for point in points[lo:lo+window]],
                     song.tempo, song.first,
                     drop_prob=sample_perturbation.onset_drop_prob,
                     add_prob=sample_perturbation.onset_add_prob,

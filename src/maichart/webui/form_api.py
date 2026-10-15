@@ -322,8 +322,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'relation_loss_weight':number('relation_loss_weight',.1,0,100),
                 'rhythm_geometry_profile':rhythm_geometry_profile,
                 'rhythm_loss_weight':rhythm_loss_weight,
-                # Training input perturbation parameters (default: disabled for safety)
-                # Users can enable progressively: stage1 -> stage2 -> stage3
+                # Input perturbation and auxiliary objectives. API callers that
+                # omit them keep the legacy off values; the main WebUI submits
+                # its own recommended defaults explicitly.
                 'perturb_onset_drop_prob':number('perturb_onset_drop_prob',0,0,0.5),
                 'perturb_onset_add_prob':number('perturb_onset_add_prob',0,0,0.5),
                 'perturb_onset_shift_ms':number('perturb_onset_shift_ms',0,0,50),
@@ -331,10 +332,13 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'perturb_curve_dropout_prob':number('perturb_curve_dropout_prob',0,0,0.5),
                 'perturb_history_corruption_prob':number('perturb_history_corruption_prob',0,0,0.3),
                 'perturb_apply_prob':number('perturb_apply_prob',1.0,0,1.0),
-                # Repetition penalty and diversity parameters (conservative defaults)
-                # Recommend enabling after baseline training for comparison
                 'repetition_penalty_weight':number('repetition_penalty_weight',0,0,0.5),
                 'diversity_loss_weight':number('diversity_loss_weight',0,0,0.3)}
+        if values['repetition_penalty_weight']:
+            if mode != 'resume':
+                raise ValueError('重复惩罚损失尚未接入可训练目标，请保持 0。')
+            # It never produced a gradient, so resuming with 0 is numerically identical.
+            values['repetition_penalty_weight'] = 0.
         if payload.get('blueprint_batch_size') not in {None, ''}:
             values['blueprint_batch_size'] = number('blueprint_batch_size',4,1,16,True)
         values['blueprint_workers'] = number('blueprint_workers',0,0,4,True)

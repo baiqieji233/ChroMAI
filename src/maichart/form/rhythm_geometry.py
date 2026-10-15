@@ -64,6 +64,11 @@ class CausalGeometry:
         self.state = 'start'
         self.digits = ''
         self.pending = None
+        # The row depends only on the committed coordinate, which changes once
+        # per event; recomputing its Fraction arithmetic for every token of a
+        # long prefix dominated data preparation.
+        self._row_beat = None
+        self._row = None
 
     def consume(self, token_id: int) -> tuple[float, ...]:
         token = self.codec.tokens[int(token_id)]
@@ -85,7 +90,10 @@ class CausalGeometry:
         elif token == '<end>' and self.state == 'note' and self.pending is not None:
             self.current = self.pending
             self.state, self.digits, self.pending = 'start', '', None
-        return _coordinate_row(self.current, self.coordinate_origin)
+        if self._row is None or self.current != self._row_beat:
+            self._row_beat = self.current
+            self._row = _coordinate_row(self.current, self.coordinate_origin)
+        return self._row
 
 
 def causal_prefix_geometry(ids: Sequence[int] | torch.Tensor, codec, *, origin=Fraction(0), coordinate_origin=None) -> torch.Tensor:

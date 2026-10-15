@@ -7,6 +7,26 @@ from maichart.form.codec import RationalCodec
 
 
 _CODEC = RationalCodec()
+_TOKEN_TABLES = {}
+
+
+def _token_tables(codec, device):
+    """Vocabulary flags built once per device.
+
+    Creating index tensors from Python lists for every batch is a blocking
+    host-to-device copy, which waits for the whole queued forward pass.
+    """
+    key = (codec.tokens, device)
+    tables = _TOKEN_TABLES.get(key)
+    if tables is None:
+        flags = (
+            [token.startswith("N:") for token in codec.tokens],
+            [token in ("<at>", "<note>") or token.startswith("P:") for token in codec.tokens],
+            [token.startswith("P:") for token in codec.tokens],
+        )
+        tables = _TOKEN_TABLES[key] = tuple(
+            torch.tensor(values, dtype=torch.bool).to(device) for values in flags)
+    return tables
 
 
 def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_CODEC):
@@ -28,16 +48,12 @@ def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_C
     if tasks.shape != (target.shape[0],):
         raise ValueError("tasks must have shape [B]")
 
-    note_ids = [index for index, token in enumerate(codec.tokens) if token.startswith("N:")]
-    position_ids = [index for index, token in enumerate(codec.tokens)
-                    if token == "<at>" or token == "<note>" or token.startswith("P:")]
     device = target.device
-    note_ids = torch.tensor(note_ids, dtype=target.dtype, device=device)
-    position_ids = torch.tensor(position_ids, dtype=target.dtype, device=device)
+    note_table, position_table, fraction_table = _token_tables(codec, device)
     valid = target != codec.pad_id
-    note_token = (target.unsqueeze(-1) == note_ids).any(dim=-1) & valid
+    note_token = note_table[target] & valid
     configuration = (note_token | (target == codec.end_id)) & valid
-    position_header = (target.unsqueeze(-1) == position_ids).any(dim=-1) & valid
+    position_header = position_table[target] & valid
     first_head = note_token & (decoder_input == codec.note_id)
 
     # Each target <at> starts one event.  Cumulative AT/NOTE counts identify
@@ -45,11 +61,7 @@ def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_C
     at = (target == codec.at_id) & valid
     note = (target == codec.note_id) & valid
     event_ids = at.to(torch.long).cumsum(dim=1) - 1
-    p_token = torch.zeros_like(target, dtype=torch.bool)
-    for token_id, token in enumerate(codec.tokens):
-        if token.startswith("P:"):
-            p_token |= target == token_id
-    p_token &= valid
+    p_token = fraction_table[target] & valid
     p_mismatch = p_token & (predictions != target)
     event_slots = torch.zeros_like(target, dtype=torch.float32)
     event_slots.scatter_reduce_(1, event_ids.clamp_min(0),

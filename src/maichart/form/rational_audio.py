@@ -110,17 +110,88 @@ def _digest(path):
 
 @lru_cache(maxsize=2)
 def _wave(path, size, mtime_ns, sha256):
-    import librosa
     if _digest(path)!=sha256:
         raise ValueError('Audio content changed before waveform query; reload the audio source')
-    signal, sr = librosa.load(path, sr=None, mono=True)
-    return np.asarray(signal, dtype=np.float32), int(sr)
+    signal, sr, _ = _read_mono(path)
+    return signal, sr
 
 
 def waveform(path, sha256=None):
     path = Path(path).resolve()
     stat = path.stat()
     return _wave(str(path), stat.st_size, stat.st_mtime_ns,sha256 or _digest(path))
+
+
+def _read_mono(path, start_sec=None, end_sec=None, *, padding_sec=1.0):
+    """Decode in small channel blocks; retain only mono native-rate samples."""
+    import soundfile as sf
+    try:
+        source = sf.SoundFile(str(path))
+    except (OSError, RuntimeError):
+        # Preserve librosa's alternate-codec support. Never catch MemoryError
+        # and then retry a larger full-file allocation.
+        import librosa
+        start = max(0., float(start_sec or 0.) - padding_sec) if start_sec is not None else 0.
+        duration = max(0., float(end_sec) + padding_sec - start) if end_sec is not None else None
+        signal, sr = librosa.load(path, sr=None, mono=True, offset=start, duration=duration)
+        return np.asarray(signal, dtype=np.float32), int(sr), int(start * sr)
+    with source:
+        sr = int(source.samplerate)
+        # Include the complete analysis window and +/-40 ms native probes,
+        # even for unusually low-rate source audio.
+        padding = max(float(padding_sec), .04 + 1025. / sr)
+        start = (min(source.frames, max(0, math.floor((float(start_sec) - padding) * sr)))
+                 if start_sec is not None else 0)
+        stop = (min(source.frames, max(start, math.ceil((float(end_sec) + padding) * sr)))
+                if end_sec is not None else source.frames)
+        count = stop - start
+        signal = np.empty(count, dtype=np.float32)
+        if not count:
+            return signal, sr, start
+        source.seek(start)
+        block = np.empty((min(65536, count), source.channels), dtype=np.float32)
+        cursor = 0
+        while cursor < count:
+            chunk = source.read(out=block[:min(len(block), count-cursor)])
+            if not len(chunk):
+                raise ValueError(f'Audio ended before its declared frame count: {path}')
+            # Match librosa.to_mono's channel mean at float32 precision.
+            np.mean(chunk, axis=1, dtype=np.float32, out=signal[cursor:cursor+len(chunk)])
+            cursor += len(chunk)
+        return signal, sr, start
+
+
+def _query_waveform_spectra(audio, seconds, offsets):
+    """Measure identical source sample centers in bounded eight-second reads."""
+    seconds = np.asarray(seconds, dtype=np.float64)
+    offsets = np.asarray(offsets, dtype=np.float64)
+    result = np.zeros((len(seconds), len(offsets), ACOUSTIC_DIM), dtype=np.float32)
+    if not len(seconds):
+        return result
+    if not np.isfinite(seconds).all():
+        raise ValueError('Acoustic query times must be finite')
+    source = Path(audio.source).resolve()
+    if not source.is_file():
+        # Keep the existing virtual-waveform protocol for synthetic callers.
+        signal, sr = waveform(audio.source, audio.metadata.get('audio_sha256'))
+        return query_spectra(signal, sr, (seconds[:, None] + offsets).reshape(-1)).reshape(result.shape)
+    from maichart.form.waveform_cache import mapped_waveform
+    full_signal, sr = mapped_waveform(source, audio.metadata.get('audio_sha256'), audio.cache_dir)
+    # Include just-outside-file centers: probes near zero/EOF still need the
+    # real neighboring waveform, then the center is masked as before.
+    indices = np.flatnonzero((seconds + offsets.max() >= 0)
+                             & (seconds + offsets.min() < float(audio.duration_sec)))
+    groups = np.floor(seconds[indices] / 8.).astype(np.int64)
+    for group in np.unique(groups):
+        selected = indices[groups == group]
+        padding = max(1., .04 + 1025. / sr)
+        sample_offset = max(0, math.floor((float(seconds[selected].min()) - padding) * sr))
+        stop = min(len(full_signal), math.ceil((float(seconds[selected].max()) + padding) * sr))
+        signal = full_signal[sample_offset:stop]
+        times = (seconds[selected, None] + offsets).reshape(-1)
+        measured = query_spectra(signal, sr, times, sample_offset=sample_offset)
+        result[selected] = measured.reshape(len(selected), len(offsets), ACOUSTIC_DIM)
+    return result
 
 
 @lru_cache(maxsize=6)
@@ -130,7 +201,7 @@ def _filters(sr, size):
             librosa.filters.chroma(sr=sr, n_fft=size, n_chroma=12))
 
 
-def query_spectra(signal, sr, seconds):
+def query_spectra(signal, sr, seconds, *, sample_offset=0):
     """Measure spectra at requested centers, including a short transient view.
 
     Long and short analysis windows share a musical center; neither establishes
@@ -144,7 +215,7 @@ def query_spectra(signal, sr, seconds):
     window = np.hanning(size)
     short_size = max(16, round(sr * .006))
     for start in range(0, len(seconds), 128):
-        centers = np.rint(seconds[start:start + 128] * sr).astype(np.int64)
+        centers = np.rint(seconds[start:start + 128] * sr).astype(np.int64) - sample_offset
         indices = centers[:, None] + offsets[None]
         inside = (indices >= 0) & (indices < len(signal))
         samples = signal[np.clip(indices, 0, max(0, len(signal) - 1))] * inside if len(signal) else np.zeros_like(indices, dtype=np.float32)
@@ -264,7 +335,8 @@ def extract_rational_audio(path, cache_dir=None):
         try: return load_rational_audio(cached)
         except (OSError, ValueError, KeyError): pass
     content_sha256=_digest(path)
-    signal, sr = waveform(path,content_sha256)
+    from maichart.form.waveform_cache import mapped_waveform
+    signal, sr = mapped_waveform(path,content_sha256,cache_dir)
     samples = np.unique(np.r_[0, attack_samples(signal, sr), max(0, len(signal)-1)])
     times = samples.astype(np.float64) / sr
     features = query_spectra(signal, sr, times)
@@ -305,12 +377,11 @@ def acoustic_at_times(audio, times, *, derived_policy=None):
     if policy not in FEATURE_POLICIES:
         raise ValueError(f"Unknown rational audio feature policy: {policy}")
     seconds = np.asarray(times, dtype=np.float64).reshape(-1)
-    signal, sr = waveform(audio.source, audio.metadata.get("audio_sha256"))
     scale = np.asarray(audio.metadata["normalization_scale"], dtype=np.float32)
     if scale.shape != (95,):
         raise ValueError("Rational audio normalization scale must contain 95 values")
     if policy == LEGACY_FEATURE_POLICY:
-        measured = query_spectra(signal, sr, seconds)
+        measured = _query_waveform_spectra(audio, seconds, [0.])[:, 0]
         measured[:, :95] /= scale
         for column in range(95, 98):
             measured[:, column] = np.interp(
@@ -321,9 +392,8 @@ def acoustic_at_times(audio, times, *, derived_policy=None):
     # Center spectra are exact waveform measurements. Neighbor queries are
     # analysis probes only; they do not create an output clock.
     offsets = np.asarray([0.0, -0.04, 0.04, -0.01, 0.01], dtype=np.float64)
-    measured = query_spectra(signal, sr, (seconds[:, None] + offsets).reshape(-1))
-    measured[:, :95] /= scale
-    measured = measured.reshape(len(seconds), len(offsets), ACOUSTIC_DIM)
+    measured = _query_waveform_spectra(audio, seconds, offsets)
+    measured[:, :, :95] /= scale
     center = measured[:, 0, :].copy()
     rms = center[:, 93]
     reference = np.asarray(audio.features[:, 93], dtype=np.float64)
@@ -332,7 +402,8 @@ def acoustic_at_times(audio, times, *, derived_policy=None):
     center[:, 95] = rms / median_rms
     center[:, 96] = np.clip((measured[:, 2, 93] - measured[:, 1, 93]) / 0.08, -8.0, 8.0)
     center[:, 97] = np.linalg.norm(measured[:, 4, 80:92] - measured[:, 3, 80:92], axis=1)
-    outside = (seconds < 0.0) | (seconds >= len(signal) / float(sr))
+    # Keep EOF on the source clock, never on the local window duration.
+    outside = (seconds < 0.0) | (seconds >= float(audio.duration_sec))
     center[outside] = 0.0
     return center.astype(np.float32, copy=False)
 
@@ -440,10 +511,7 @@ def audio_queries(song, start, end, *, max_nodes=None):
         beats = tuple(sorted(positions))
         times = np.asarray([seconds_at_beat(b,song.tempo,song.first) for b in beats],dtype=np.float64)
         if policy == LEGACY_FEATURE_POLICY:
-            signal, sr = waveform(audio.source,audio.metadata['audio_sha256'])
-            acoustic = query_spectra(signal,sr,times)
-            acoustic[:, :95] /= np.asarray(audio.metadata["normalization_scale"],dtype=np.float32)
-            for column in range(95,98): acoustic[:,column] = np.interp(times,audio.times,audio.features[:,column],left=0,right=0)
+            acoustic = acoustic_at_times(audio, times, derived_policy=policy)
         else:
             acoustic = acoustic_at_times(audio, times, derived_policy=policy)
         beat_values = np.asarray([float(b) for b in beats])

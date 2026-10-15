@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import random
 import re
-from fractions import Fraction
 from typing import Sequence
 
 import numpy as np
@@ -41,60 +40,43 @@ def perturb_onset_skeleton(
     shift_sigma_ms: float = 0.0,
     rng: random.Random | None = None,
 ) -> list[EventPoint]:
-    """Add controlled noise to onset positions to simulate prediction errors.
+    """Simulate planner onset errors on a position-only v1 skeleton.
 
-    Args:
-        points: Original chart points
-        tempo_changes: Tempo map for time conversion
-        first: First beat offset
-        drop_prob: Probability of dropping each onset (0-0.3 recommended)
-        add_prob: Probability of adding spurious onsets (0-0.2 recommended)
-        shift_sigma_ms: Gaussian shift standard deviation in milliseconds
-        rng: Random generator for reproducibility
-
-    Returns:
-        Perturbed points list (may be shorter/longer than input)
+    Shifted and added onsets use the same simple-rational candidate rule as
+    generation. A raw time-to-beat conversion would produce denominators the
+    generator never emits, and their long digit strings would also crowd the
+    bounded skeleton memory. The result may contain duplicate beats; callers
+    deduplicate them.
     """
     if not points:
         return []
+    from maichart.form.generate import exact_candidate
 
     rng = rng or random.Random()
+    # Charts have no beats before zero; keep candidates nonnegative.
+    earliest = float(first)
+
+    def snapped(second):
+        return exact_candidate(max(earliest, second), tempo_changes, first)
+
     result = []
-
-    # Drop some onsets
     for point in points:
-        if rng.random() >= drop_prob:
-            if shift_sigma_ms > 0:
-                # Shift onset timing slightly
-                original_sec = float(seconds_at_beat(point.beat, tempo_changes, first))
-                shift_sec = rng.gauss(0, shift_sigma_ms / 1000.0)
-                shifted_sec = max(0, original_sec + shift_sec)
+        if rng.random() < drop_prob:
+            continue
+        if shift_sigma_ms > 0:
+            second = float(seconds_at_beat(point.beat, tempo_changes, first))
+            second += rng.gauss(0.0, shift_sigma_ms / 1000.0)
+            result.append(EventPoint(snapped(second), point.note_text))
+        else:
+            result.append(point)
 
-                # Convert back to beat (approximate)
-                from maichart.form.rational_audio import beat_at_second
-                shifted_beat = beat_at_second(Fraction(str(shifted_sec)), tempo_changes, first)
-                result.append(EventPoint(shifted_beat, point.note_text))
-            else:
-                result.append(point)
+    if add_prob > 0:
+        low = float(seconds_at_beat(points[0].beat, tempo_changes, first))
+        high = float(seconds_at_beat(points[-1].beat, tempo_changes, first))
+        for _ in range(int(len(points) * add_prob * rng.random())):
+            second = low + (high - low) * rng.random()
+            result.append(EventPoint(snapped(second), points[0].note_text))
 
-    # Add spurious onsets
-    if add_prob > 0 and points:
-        num_add = int(len(points) * add_prob * rng.random())
-        start_beat = points[0].beat
-        end_beat = points[-1].beat
-
-        for _ in range(num_add):
-            # Random beat between first and last
-            random_fraction = rng.random()
-            beat = start_beat + (end_beat - start_beat) * Fraction(
-                int(random_fraction * 1000), 1000
-            ).limit_denominator(96)
-
-            # Use simplest note from nearby real notes
-            nearby = min(points, key=lambda p: abs(float(p.beat - beat)))
-            result.append(EventPoint(beat, nearby.note_text))
-
-    # Re-sort by beat
     result.sort(key=lambda p: p.beat)
     return result
 

@@ -383,11 +383,14 @@ class FormTransformer(nn.Module):
         causal_mask = torch.triu(
             torch.ones((length, length), dtype=torch.bool, device=ids.device), diagonal=1
         )
+        # The mask is causal by construction. Stating it avoids PyTorch's
+        # per-forward mask comparison, which is a GPU -> host synchronization.
         hidden = self.decoder(
             target,
             memory,
             tgt_mask=causal_mask,
             memory_key_padding_mask=memory_mask.to(device=ids.device, dtype=torch.bool),
+            tgt_is_causal=True,
         )
         hidden = self.decoder_norm(hidden)
         return hidden if return_hidden else self.output_head(hidden)

@@ -393,28 +393,28 @@
 <label class="field">段落关联辅助损失权重<input id="formRelationLossWeight" type="number" min="0" step="0.05" value="0.1"><small>学习相似段落中配置的呼应关系；不会把参考谱面直接复制进输出。</small></label>
 </div>
 <details id="formQualityTrainingControls" class="settings-section">
-<summary><span>训练鲁棒性与配置多样性</span><small>输入扰动、实验性辅助目标；默认关闭，可逐项调整</small></summary>
+<summary><span>训练鲁棒性与配置多样性</span><small>默认启用轻度输入扰动；实验性辅助目标默认关闭</small></summary>
 <div class="settings-content">
-<p class="workflow-hint">输入扰动只改变模型看到的历史、曲线或 v1 起音骨架，监督答案仍使用原谱。它用于练习应对不完美输入，不是生成时的采样设置。先保留关闭基线，再用 fresh / finetune 小幅启用；resume 自动继承原值。下面的快捷方案只改本分组，不更改数据集、学习率或模型结构。</p>
+<p class="workflow-hint">输入扰动只改变模型看到的历史、曲线或 v1 起音骨架，监督答案仍使用原谱。它用于练习应对生成时不完美的输入，不是生成时的采样设置。默认采用“推荐”方案的轻度扰动；需要与旧模型严格对照时选择“全部关闭（基线）”。resume 自动继承原值。下面的快捷方案只改本分组，不更改数据集、学习率或模型结构。</p>
 <div class="quality-toolbar">
-<label>快捷方案 <select id="formQualityRecipe"><option value="off" selected>全部关闭（基线）</option><option value="light">轻量曲线扰动</option><option value="history">曲线 + 少量历史扰动</option><option value="custom">自定义</option></select></label>
+<label>快捷方案 <select id="formQualityRecipe"><option value="history" selected>推荐：轻度曲线 + 历史扰动</option><option value="light">仅轻度曲线扰动</option><option value="off">全部关闭（基线）</option><option value="custom">自定义</option></select></label>
 <button id="formQualityApplyRecipe" type="button" class="secondary-button">应用方案</button>
 </div>
-<p id="formQualityTrainingStatus" class="workflow-hint" role="status">所有新增权重默认为 0；尚未接入的功能明确禁用。</p>
+<p id="formQualityTrainingStatus" class="workflow-hint" role="status">默认使用推荐的轻度曲线与历史扰动；多样性损失默认关闭；重复惩罚与 Planner Guidance 尚未接入。</p>
 <h4>输入扰动</h4>
 <div class="form-grid">
-<label class="field">扰动应用概率<input id="formPerturbApplyProb" type="number" min="0" max="1" step="0.05" value="1"><small>每个训练样本尝试应用下方扰动的概率；0 完全关闭。只有下方至少一项幅度大于 0 时才生效。</small></label>
-<label class="field">曲线噪声标准差<input id="formPerturbCurveNoiseStd" type="number" min="0" max="0.3" step="0.01" value="0"><small>在 0–1 的四通道负荷曲线上加入高斯噪声，再裁剪至 0–1。模拟曲线预测误差；0 关闭，可先试 0.02。</small></label>
-<label class="field">曲线整点置零概率<input id="formPerturbCurveDropoutProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>随机将一个曲线时间点的四个通道同时置零，模拟局部预测空白。它仍是可见的零值，不是显式休止区或条件遮罩；0 关闭。</small></label>
-<label class="field">历史配置扰动概率<input id="formPerturbHistoryCorruptionProb" type="number" min="0" max="0.3" step="0.01" value="0"><small>在已提供的历史中，按此概率将单个 Tap 改成相邻按键，模拟前文配置误差；保留拍位、Hold / Slide 时值与路径。0 关闭；开头没有历史时不生效。</small></label>
-<label class="field" data-training-family="song_form_v1">起音骨架删除概率<input id="formPerturbOnsetDropProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>仅 v1：随机删除输入骨架的起音，模拟漏检；不删除监督答案中的音符。v2 自主生成拍位，不读取这个骨架。</small></label>
-<label class="field" data-training-family="song_form_v1">起音骨架添加强度<input id="formPerturbOnsetAddProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>仅 v1：在已有起音范围内随机添加输入证据；添加数量约小于“原数量 × 此值”，不是最终谱面密度配额。0 关闭。</small></label>
-<label class="field" data-training-family="song_form_v1">起音骨架偏移标准差（毫秒）<input id="formPerturbOnsetShiftMs" type="number" min="0" max="50" step="1" value="0"><small>仅 v1：向输入骨架起音加入高斯时间误差；数值是标准差，不是最大偏移。保持原谱目标不变；0 关闭，可从 5 毫秒试起。</small></label>
+<label class="field">扰动应用概率<input id="formPerturbApplyProb" type="number" min="0" max="1" step="0.05" value="0.5"><small>默认 0.5：每个训练样本有一半机会应用下方已启用的扰动，另一半保持原始输入，使模型既学会准确输入下的写法，也能容忍输入偏差。下方幅度全为 0 时不起作用；1 表示每个样本都尝试扰动。</small></label>
+<label class="field">曲线噪声标准差<input id="formPerturbCurveNoiseStd" type="number" min="0" max="0.3" step="0.01" value="0.03"><small>默认 0.03：在 0–1 的四通道负荷曲线上逐点加入高斯噪声后裁剪，模拟 Planner 预测曲线或人工编辑曲线与原谱统计之间的小幅偏差。噪声均值为 0，不改变曲线整体高低；值过大会让模型少依赖曲线细节，建议不超过 0.05。0 关闭。</small></label>
+<label class="field">曲线整点置零概率<input id="formPerturbCurveDropoutProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>默认 0，不推荐开启：随机把某个曲线时间点的四个通道同时置零，而监督答案仍保留该处的音符，会让模型学到“负荷为零处也可以有音符”，削弱低负荷段的表达。显式休止区在生成时单独禁止起音，不受此项影响。</small></label>
+<label class="field">历史配置扰动概率<input id="formPerturbHistoryCorruptionProb" type="number" min="0" max="0.3" step="0.01" value="0.02"><small>默认 0.02：把前文中单独的 Tap 按此概率改到相邻按键，模拟生成时前文由模型自己写出、与原谱不同的情况，练习在前文略有偏差时继续写出合理配置。拍位、多押、Hold / Slide 的时值与路径保持不变；开头没有前文时不生效。建议不超过 0.05。</small></label>
+<label class="field" data-training-family="song_form_v1">起音骨架删除概率<input id="formPerturbOnsetDropProb" type="number" min="0" max="0.5" step="0.01" value="0.05"><small>仅 v1，默认 0.05：随机删除输入起音骨架中的起音，模拟 Planner 漏采；监督答案中的音符不删除。v2 联合生成拍位，不读取此骨架。</small></label>
+<label class="field" data-training-family="song_form_v1">起音骨架添加强度<input id="formPerturbOnsetAddProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>仅 v1，默认 0：在骨架已有范围内随机添加起音，模拟 Planner 多采，新增数量最多约为“原数量 × 此值”；新位置按生成时的分音规则取整。每个新增点都要额外换算拍位，开启后数据准备会变慢。</small></label>
+<label class="field" data-training-family="song_form_v1">起音骨架偏移标准差（毫秒）<input id="formPerturbOnsetShiftMs" type="number" min="0" max="50" step="1" value="0"><small>仅 v1，默认 0：向骨架起音加入高斯时间误差后，再按生成时的分音规则取整；数值是标准差，不是最大偏移。取整容差约 10 毫秒，更小的偏移大多回到原位置；逐点取整会使数据准备变慢。</small></label>
 </div>
 <h4>实验性多样性目标</h4>
 <div class="form-grid">
-<label class="field">配置表示多样性损失权重<input id="formDiversityLossWeight" type="number" min="0" max="0.3" step="0.01" value="0"><small>对解码器每 8 个 token 的平均隐藏表示，降低附近 1–3 组间过高的相似度；并非直接统计相同按键连点或音乐段落。可能削弱合理重复与副歌呼应，默认 0；需单独试验。</small></label>
-<label class="field">重复惩罚损失权重（待接入）<input id="formRepetitionPenaltyWeight" type="number" min="0" max="0.5" step="0.01" value="0" disabled><small>现有 layout_loss 未提供该函数所需的前置生成序列，当前项恒为 0 且没有有效梯度。保留后端接口；暂不允许在页面启用，避免无效调参。</small></label>
+<label class="field">配置表示多样性损失权重<input id="formDiversityLossWeight" type="number" min="0" max="0.3" step="0.01" value="0"><small>默认 0，不推荐开启：降低解码器每 8 个 token 平均隐藏表示在相邻 1–3 组之间过高的相似度。它不直接统计相同按键连打，也不识别副歌，可能削弱合理的重复与呼应，并与主损失互相牵制。如需试验，在单独的 finetune 中从 0.01 起，并与关闭时对比同一首歌。</small></label>
+<label class="field">重复惩罚损失权重（未接入）<input id="formRepetitionPenaltyWeight" type="number" min="0" max="0.5" step="0.01" value="0" disabled><small>当前实现没有可训练梯度：训练时没有模型自己生成的前文可供比较，函数恒返回 0，开启只会增加耗时。保持禁用；后端也会拒绝非 0 值。</small></label>
 </div>
 <p class="workflow-hint">Planner Guidance 的类型/时值门控模块尚未接入 forward，因此暂不提供启用开关。生成时 token 重复惩罚函数也尚未接入采样器。本分组不承诺提高音乐质量，应对比相同歌曲与生成参数。</p>
 </div>

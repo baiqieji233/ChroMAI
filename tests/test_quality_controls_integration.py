@@ -42,6 +42,17 @@ def test_quality_resume_settings_have_explicit_legacy_defaults():
         assert options[name] == (.04 if name == 'perturb_curve_noise_std' else default)
 
 
+def test_api_rejects_repetition_penalty_for_new_runs(webui_api, monkeypatch, tmp_path):
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    calls = []
+    monkeypatch.setattr(webui, '_run_subprocess_task', lambda task, args, **kw: calls.append(args))
+    status, result = webui_api('/api/form/train', {
+        'manifest': str(manifest), 'checkpoint_dir': str(tmp_path / 'out'),
+        'model_family': 'song_form_v2', 'mode': 'fresh', 'repetition_penalty_weight': .1})
+    assert status != 200 and '重复惩罚' in json.dumps(result, ensure_ascii=False)
+    assert not calls
+
+
 @pytest.mark.parametrize('name,value', [('perturb_curve_noise_std', float('nan')),
     ('perturb_onset_shift_ms', 51), ('diversity_loss_weight', -.1)])
 def test_cli_quality_options_validate_bounds(name, value, tmp_path):

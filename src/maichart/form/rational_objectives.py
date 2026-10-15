@@ -45,7 +45,8 @@ def event_decision_loss(
 
     # Keep the objective in fp32 even when the model uses BF16/FP16. This is a
     # tiny binary CE and otherwise can lose the AT/EOS margin near zero.
-    values = logits.float()[..., (codec.at_id, codec.eos_id)]
+    # Integer indexing avoids building a host index tensor for every batch.
+    values = torch.stack((logits[..., codec.at_id], logits[..., codec.eos_id]), dim=-1).float()
     boundary = (decoder_input == codec.bos_id) | (decoder_input == codec.end_id)
     valid = boundary & (decoder_input != codec.pad_id) & (target != codec.pad_id)
     decision_target = torch.where(

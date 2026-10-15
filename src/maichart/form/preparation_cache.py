@@ -24,7 +24,7 @@ from maichart.generation.sustain_state import SustainStateIndex
 SCHEMA = 'song_form_preparation_v1'
 _DEPENDENCIES = (
     'form/preparation_cache.py', 'form/data.py', 'form/codec.py',
-    'form/rational_audio.py', 'form/rhythm_geometry.py',
+    'form/rational_audio.py', 'form/waveform_cache.py', 'form/rhythm_geometry.py',
     'form/timing.py', 'form/segmentation.py', 'form/recurrence.py', 'form/curve.py',
     'event_timing.py', 'maidata.py', 'notes.py', 'timing.py', 'duration.py', 'ir.py',
     'generation/event_compile.py', 'generation/event_audio.py', 'generation/event_model.py',

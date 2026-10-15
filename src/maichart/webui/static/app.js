@@ -733,7 +733,23 @@ function collectSettings() {
     learningRate: element("#learningRate")?.dataset.touched === "1",
     contextTokens: element("#contextTokens")?.dataset.touched === "1",
   };
+  values.__songFormQualityDefaults = 2;
   return values;
+}
+
+// Settings saved before the recommended robustness defaults hold the former
+// all-off values. Drop them once so index.html defaults apply; any value the
+// user changed (or a recipe other than the old default) is kept.
+function migrateSongFormQualityDefaults(values) {
+  if (!values || values.__songFormQualityDefaults === 2) return false;
+  const legacy = {formPerturbApplyProb: 1, formPerturbCurveNoiseStd: 0, formPerturbCurveDropoutProb: 0,
+    formPerturbHistoryCorruptionProb: 0, formPerturbOnsetDropProb: 0, formPerturbOnsetAddProb: 0,
+    formPerturbOnsetShiftMs: 0, formDiversityLossWeight: 0};
+  const untouched = (values.formQualityRecipe ?? "off") === "off"
+    && Object.entries(legacy).every(([id, value]) => values[id] == null || Number(values[id]) === value);
+  if (!untouched) return false;
+  for (const id of [...Object.keys(legacy), "formQualityRecipe"]) delete values[id];
+  return true;
 }
 
 function saveSettings() {
@@ -777,6 +793,7 @@ function restoreSettings() {
     values.conflictDetectionEnabled = true;
     values.conflictRepairMode = values.runtimeReferenceMode === "reject" ? "reject" : "none";
   }
+  migrateSongFormQualityDefaults(values);
   let restored = 0;
   settingsFields().forEach((target) => {
     if (!Object.prototype.hasOwnProperty.call(values, target.id)) return;
@@ -1439,21 +1456,22 @@ function updateSongFormQualityControls(mode = currentTrainingMode()) {
   const status = element("#formQualityTrainingStatus");
   if (status) status.textContent = resume
     ? "resume 继承并锁定 checkpoint 的扰动与辅助损失；旧模型未记录时按关闭值继承。调整请使用 finetune 和新输出目录。"
-    : `${family === "song_form_v2" ? "v2 联合生成拍位，不使用 v1 起音骨架扰动。" : "v1 可扰动输入起音骨架，监督答案保持原谱。"}曲线/历史扰动默认关闭，多样性损失为实验项；重复惩罚与 Planner Guidance 尚未接入。`;
+    : `${family === "song_form_v2" ? "v2 联合生成拍位，不使用 v1 起音骨架扰动。" : "v1 可扰动输入起音骨架，监督答案保持原谱。"}默认使用推荐的轻度曲线与历史扰动；多样性损失默认关闭；重复惩罚与 Planner Guidance 尚未接入。`;
 }
 
 function applySongFormQualityRecipe() {
   if (currentTrainingMode() === "resume") return;
-  const selected = element("#formQualityRecipe")?.value || "off";
+  const selected = element("#formQualityRecipe")?.value || "history";
+  // Field order: apply, curve noise, curve dropout, history, v1 onset drop/add/shift, diversity.
+  // "history" is the recommended recipe and must match the index.html defaults.
   const recipes = {
-    off: [1, 0, 0, 0], light: [.3, .02, 0, 0], history: [.5, .03, .02, .03],
+    off: [1, 0, 0, 0, 0, 0, 0, 0], light: [.3, .02, 0, 0, 0, 0, 0, 0], history: [.5, .03, 0, .02, .05, 0, 0, 0],
   };
   if (!Object.hasOwn(recipes, selected)) return;
-  const ids = ["formPerturbApplyProb", "formPerturbCurveNoiseStd", "formPerturbCurveDropoutProb", "formPerturbHistoryCorruptionProb"];
+  const ids = ["formPerturbApplyProb", "formPerturbCurveNoiseStd", "formPerturbCurveDropoutProb", "formPerturbHistoryCorruptionProb",
+    "formPerturbOnsetDropProb", "formPerturbOnsetAddProb", "formPerturbOnsetShiftMs", "formDiversityLossWeight"];
   ids.forEach((id, index) => { const node = element(`#${id}`); if (node) node.value = String(recipes[selected][index]); });
-  for (const id of ["formPerturbOnsetDropProb", "formPerturbOnsetAddProb", "formPerturbOnsetShiftMs", "formRepetitionPenaltyWeight", "formDiversityLossWeight"]) {
-    const node = element(`#${id}`); if (node) node.value = "0";
-  }
+  const repetition = element("#formRepetitionPenaltyWeight"); if (repetition) repetition.value = "0";
   updateSongFormQualityControls(); saveSettings();
 }
 
@@ -1468,11 +1486,11 @@ function songFormTrainingPayload(options = {}) {
     throw new Error("节奏几何辅助损失权重必须在 0–10 之间。");
   }
   const qualityFields = [
-    ["perturb_apply_prob", "#formPerturbApplyProb", 1, 1, "扰动应用概率"],
-    ["perturb_curve_noise_std", "#formPerturbCurveNoiseStd", 0, .3, "曲线噪声标准差"],
+    ["perturb_apply_prob", "#formPerturbApplyProb", .5, 1, "扰动应用概率"],
+    ["perturb_curve_noise_std", "#formPerturbCurveNoiseStd", .03, .3, "曲线噪声标准差"],
     ["perturb_curve_dropout_prob", "#formPerturbCurveDropoutProb", 0, .5, "曲线整点置零概率"],
-    ["perturb_history_corruption_prob", "#formPerturbHistoryCorruptionProb", 0, .3, "历史配置扰动概率"],
-    ["perturb_onset_drop_prob", "#formPerturbOnsetDropProb", 0, .5, "起音骨架删除概率"],
+    ["perturb_history_corruption_prob", "#formPerturbHistoryCorruptionProb", .02, .3, "历史配置扰动概率"],
+    ["perturb_onset_drop_prob", "#formPerturbOnsetDropProb", .05, .5, "起音骨架删除概率"],
     ["perturb_onset_add_prob", "#formPerturbOnsetAddProb", 0, .5, "起音骨架添加强度"],
     ["perturb_onset_shift_ms", "#formPerturbOnsetShiftMs", 0, 50, "起音骨架偏移标准差"],
     ["diversity_loss_weight", "#formDiversityLossWeight", 0, .3, "配置表示多样性损失权重"],

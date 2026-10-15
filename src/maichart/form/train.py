@@ -141,6 +141,10 @@ def _validate(args):
         value = float(getattr(args, name))
         if not math.isfinite(value) or not 0 <= value <= maximum:
             raise ValueError(f'{name} must be between 0 and {maximum}')
+    if args.repetition_penalty_weight:
+        # The helper returns a constant without a gradient path to the logits,
+        # and teacher-forced batches have no generated prefix to compare.
+        raise ValueError('repetition_penalty_weight is not a trainable objective yet; keep it at 0')
     if args.blueprint_batch_size is not None and args.blueprint_batch_size < 1:
         raise ValueError('blueprint_batch_size must be positive')
     if args.blueprint_workers > 4:
@@ -226,16 +230,8 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
         prediction['relation_logits'].float(), batch['relation_target'].float(), reduction='none').mean(1)
     relation = relation * batch['relation_valid'].float() * weights
     token = per_token * weights
-
-    # Add repetition penalty if enabled
-    repetition_loss = torch.tensor(0.0, device=logits.device)
-    if repetition_penalty_weight > 0:
-        from maichart.form.repetition_penalty import compute_repetition_penalty_loss
-        repetition_loss = compute_repetition_penalty_loss(
-            logits, batch['target'],
-            penalty_weight=repetition_penalty_weight,
-            lookback_window=16
-        )
+    if repetition_penalty_weight:
+        raise ValueError('repetition_penalty_weight is not a trainable objective yet; keep it at 0')
 
     # Add diversity loss if enabled
     diversity_loss = weights.new_zeros(weights.shape)
@@ -249,7 +245,7 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
         )
         diversity_loss = diversity_loss * weights
 
-    loss_sum = (token + relation_weight * relation).sum() + repetition_loss + diversity_loss.sum()
+    loss_sum = (token + relation_weight * relation).sum() + diversity_loss.sum()
     auxiliary = None
     if event_decision_weight:
         from maichart.form.rational_objectives import event_decision_loss
@@ -270,7 +266,6 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
         diagnostic_values, diagnostic_counts = {}, {}
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
                       **({'diversity_loss': diversity_loss.detach().mean()} if diversity_weight else {}),
-                      **({'repetition_loss': repetition_loss.detach()} if repetition_penalty_weight else {}),
                       **({'event_decision_aux_loss':auxiliary.detach().mean()} if auxiliary is not None else {}),
                       **({'numeric_timing_aux_loss':numeric_timing.detach().mean()} if numeric_timing is not None else {}),
                       'loss': loss_sum.detach() / len(weights),
@@ -362,6 +357,8 @@ def _train(args):
             from maichart.form.training_input_perturbation import QUALITY_TRAINING_DEFAULTS
             for name, default in QUALITY_TRAINING_DEFAULTS.items():
                 setattr(args, name, saved_args.get(name, default))
+            # Never had a gradient path; zero keeps the saved run's numerics.
+            args.repetition_penalty_weight = 0.
             # Resume retains the optimizer's numerical regime. Old trainers
             # were FP32; performance options remain adjustable during finetune.
             args.precision = old.get('precision', saved_args.get('precision', 'fp32'))
@@ -756,6 +753,10 @@ def _train(args):
         pending_tasks = Counter()
         pending_cap_tasks = Counter()
         pending_rhythm_count = None
+        # A per-batch finiteness test would make the host wait for each forward
+        # pass before queueing its backward or preparing the next batch. Keep
+        # the flag on the device and test it once before the optimizer update.
+        pending_finite = None
         last_update = {}
         for batch_index in range(layout_start, layout_total):
             tick = time.perf_counter()
@@ -779,8 +780,8 @@ def _train(args):
                 repetition_penalty_weight=args.repetition_penalty_weight,
                 diversity_weight=args.diversity_loss_weight)
             diagnostics = parts.pop('diagnostics')
-            if not torch.isfinite(loss_sum):
-                raise ValueError('Nonfinite layout loss')
+            finite = torch.isfinite(loss_sum.detach())
+            pending_finite = finite if pending_finite is None else pending_finite & finite
             engine.backward(loss_sum, batch_size)
             pending_tasks.update(task_counts)
             for task_id in (0, 1):
@@ -798,6 +799,9 @@ def _train(args):
                     pending_rhythm_count = count if pending_rhythm_count is None else pending_rhythm_count + count
             update = None
             if engine.microbatches >= args.grad_accumulation or batch_index+1 == layout_total:
+                if not bool(pending_finite):
+                    raise ValueError('Nonfinite layout loss')
+                pending_finite = None
                 update = engine.step()
                 last_update = update
                 if update['applied']:

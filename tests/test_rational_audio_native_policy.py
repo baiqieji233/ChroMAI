@@ -127,6 +127,31 @@ def test_native_policy_gets_an_independent_query_view(monkeypatch):
     assert len(audio._views) == 2
 
 
+def test_native_queries_read_a_bounded_waveform_window(monkeypatch, tmp_path):
+    from maichart.form import waveform_cache
+    audio = _audio(rational_audio.NATIVE_FEATURE_POLICY)
+    audio.duration_sec = 30.
+    source = tmp_path / 'track.wav'
+    source.write_bytes(b'fixture')
+    audio.source = str(source)
+    audio.metadata['audio_sha256'] = None
+    calls = []
+    monkeypatch.setattr(waveform_cache, 'mapped_waveform',
+        lambda *args: (np.zeros(30000,dtype=np.float32),1000))
+    def spectra(signal, sr, times, *, sample_offset):
+        calls.append((len(signal),sample_offset,times.copy()))
+        return np.ones((len(times),rational_audio.ACOUSTIC_DIM),dtype=np.float32)
+    monkeypatch.setattr(
+        rational_audio, "query_spectra",
+        spectra,
+    )
+    values = rational_audio.acoustic_at_times(audio, [10.1, 10.4], derived_policy='native_measured_v2')
+    assert calls and calls[0][0] < 2500
+    assert calls[0][1] > 0
+    assert values.shape == (2, rational_audio.ACOUSTIC_DIM)
+    assert values.any() and np.isfinite(values).all()
+
+
 def test_query_views_are_process_bounded_and_clearable(monkeypatch):
     audio = _audio(rational_audio.LEGACY_FEATURE_POLICY)
     span = SimpleNamespace(start=F(0), end=F(1))
