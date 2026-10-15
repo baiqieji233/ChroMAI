@@ -98,6 +98,26 @@ def parser():
     p.add_argument('--audio-cache-mode', choices=('lru', 'resident'), default='lru')
     p.add_argument('--sample-cache-mb', type=int, default=256)
     p.add_argument('--log-interval', type=float, default=10.)
+    # Training input perturbation to reduce train-generation gap
+    p.add_argument('--perturb-onset-drop-prob', type=float, default=0.0,
+                   help='Probability of dropping each onset during training (0-0.3 recommended)')
+    p.add_argument('--perturb-onset-add-prob', type=float, default=0.0,
+                   help='Probability of adding spurious onsets (0-0.2 recommended)')
+    p.add_argument('--perturb-onset-shift-ms', type=float, default=0.0,
+                   help='Gaussian shift std for onset timing in milliseconds (0-20 recommended)')
+    p.add_argument('--perturb-curve-noise-std', type=float, default=0.0,
+                   help='Gaussian noise std for load curve values (0-0.1 recommended)')
+    p.add_argument('--perturb-curve-dropout-prob', type=float, default=0.0,
+                   help='Probability of zeroing curve frames (0-0.2 recommended)')
+    p.add_argument('--perturb-history-corruption-prob', type=float, default=0.0,
+                   help='Probability of corrupting history notes (0-0.1 recommended)')
+    p.add_argument('--perturb-apply-prob', type=float, default=1.0,
+                   help='Overall probability of applying perturbations (0-1)')
+    # Repetition penalty and diversity loss
+    p.add_argument('--repetition-penalty-weight', type=float, default=0.0,
+                   help='Weight for repetition penalty loss (0-0.2 recommended)')
+    p.add_argument('--diversity-loss-weight', type=float, default=0.0,
+                   help='Weight for pattern diversity loss (0-0.1 recommended)')
     return p
 
 
@@ -110,6 +130,17 @@ def _validate(args):
         value = float(getattr(args, name))
         if not math.isfinite(value) or value < 0 or (name in positive and value == 0):
             raise ValueError(f'Invalid training setting: {name}')
+    quality_limits = {
+        'perturb_onset_drop_prob': .5, 'perturb_onset_add_prob': .5,
+        'perturb_onset_shift_ms': 50., 'perturb_curve_noise_std': .3,
+        'perturb_curve_dropout_prob': .5, 'perturb_history_corruption_prob': .3,
+        'perturb_apply_prob': 1., 'repetition_penalty_weight': .5,
+        'diversity_loss_weight': .3,
+    }
+    for name, maximum in quality_limits.items():
+        value = float(getattr(args, name))
+        if not math.isfinite(value) or not 0 <= value <= maximum:
+            raise ValueError(f'{name} must be between 0 and {maximum}')
     if args.blueprint_batch_size is not None and args.blueprint_batch_size < 1:
         raise ValueError('blueprint_batch_size must be positive')
     if args.blueprint_workers > 4:
@@ -183,7 +214,8 @@ def resolve_rhythm_geometry_settings(args, old=None, model=None):
     return args.rhythm_geometry_profile, args.rhythm_loss_weight
 
 
-def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rhythm_loss_weight=0.):
+def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rhythm_loss_weight=0.,
+                repetition_penalty_weight=0., diversity_weight=0.):
     """Per-example objectives. Their sum can be accumulated across batch sizes."""
     logits = prediction['logits'].float()
     valid = batch['target'] != 0
@@ -194,7 +226,30 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
         prediction['relation_logits'].float(), batch['relation_target'].float(), reduction='none').mean(1)
     relation = relation * batch['relation_valid'].float() * weights
     token = per_token * weights
-    loss_sum = (token + relation_weight * relation).sum()
+
+    # Add repetition penalty if enabled
+    repetition_loss = torch.tensor(0.0, device=logits.device)
+    if repetition_penalty_weight > 0:
+        from maichart.form.repetition_penalty import compute_repetition_penalty_loss
+        repetition_loss = compute_repetition_penalty_loss(
+            logits, batch['target'],
+            penalty_weight=repetition_penalty_weight,
+            lookback_window=16
+        )
+
+    # Add diversity loss if enabled
+    diversity_loss = weights.new_zeros(weights.shape)
+    if diversity_weight > 0 and 'hidden_states' in prediction:
+        from maichart.form.repetition_penalty import compute_pattern_diversity_loss
+        diversity_loss = compute_pattern_diversity_loss(
+            prediction['hidden_states'],
+            segment_size=8,
+            diversity_weight=diversity_weight,
+            valid_mask=valid, reduction='none',
+        )
+        diversity_loss = diversity_loss * weights
+
+    loss_sum = (token + relation_weight * relation).sum() + repetition_loss + diversity_loss.sum()
     auxiliary = None
     if event_decision_weight:
         from maichart.form.rational_objectives import event_decision_loss
@@ -214,6 +269,8 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
     else:
         diagnostic_values, diagnostic_counts = {}, {}
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
+                      **({'diversity_loss': diversity_loss.detach().mean()} if diversity_weight else {}),
+                      **({'repetition_loss': repetition_loss.detach()} if repetition_penalty_weight else {}),
                       **({'event_decision_aux_loss':auxiliary.detach().mean()} if auxiliary is not None else {}),
                       **({'numeric_timing_aux_loss':numeric_timing.detach().mean()} if numeric_timing is not None else {}),
                       'loss': loss_sum.detach() / len(weights),
@@ -302,6 +359,9 @@ def _train(args):
                           'rhythm_loss_weight'):
                 if name in saved_args:
                     setattr(args, name, saved_args[name])
+            from maichart.form.training_input_perturbation import QUALITY_TRAINING_DEFAULTS
+            for name, default in QUALITY_TRAINING_DEFAULTS.items():
+                setattr(args, name, saved_args.get(name, default))
             # Resume retains the optimizer's numerical regime. Old trainers
             # were FP32; performance options remain adjustable during finetune.
             args.precision = old.get('precision', saved_args.get('precision', 'fp32'))
@@ -373,13 +433,35 @@ def _train(args):
              optimizer_restored=bool(args.resume))
     emit('form_prepare', stage='dataset', manifest=str(Path(args.manifest).resolve()),
          limit_charts=args.limit_charts, max_steps=args.max_steps, prepare_workers=args.prepare_workers)
+    # Create perturbation config for training input robustness
+    from maichart.form.training_input_perturbation import PerturbationConfig
+    perturbation_config = PerturbationConfig(
+        onset_drop_prob=args.perturb_onset_drop_prob,
+        onset_add_prob=args.perturb_onset_add_prob,
+        onset_shift_sigma_ms=args.perturb_onset_shift_ms,
+        curve_noise_std=args.perturb_curve_noise_std,
+        curve_dropout_prob=args.perturb_curve_dropout_prob,
+        history_corruption_prob=args.perturb_history_corruption_prob,
+        apply_prob=args.perturb_apply_prob,
+        seed=args.seed + 999999  # Different seed for perturbation
+    )
+    if perturbation_config.is_enabled():
+        emit('form_perturbation', enabled=True,
+             onset_drop_prob=perturbation_config.onset_drop_prob,
+             onset_add_prob=perturbation_config.onset_add_prob,
+             onset_shift_ms=perturbation_config.onset_shift_sigma_ms,
+             curve_noise_std=perturbation_config.curve_noise_std,
+             curve_dropout_prob=perturbation_config.curve_dropout_prob,
+             history_corruption_prob=perturbation_config.history_corruption_prob,
+             apply_prob=perturbation_config.apply_prob)
     dataset = FormDataset(args.manifest, cache_dir=args.cache_dir, max_tokens=args.max_tokens,
                           max_memory_tokens=args.max_memory_tokens, meters=meters, seed=args.seed,
                           limit_charts=args.limit_charts, max_region_seconds=args.max_region_seconds,
                           quality_enabled=args.quality_enabled, preparation_workers=args.prepare_workers,
                           audio_cache_gb=args.audio_cache_gb, sample_cache_mb=args.sample_cache_mb,
                           audio_profile='rational_audio_queries_v1' if args.model_family=='song_form_v2' else 'legacy_50hz',
-                          rhythm_geometry_profile=args.rhythm_geometry_profile)
+                          rhythm_geometry_profile=args.rhythm_geometry_profile,
+                          perturbation_config=perturbation_config)
     contract = {**current_header, 'charts': dataset.audit['charts']}
     migration = None
     if args.resume:
@@ -693,7 +775,9 @@ def _train(args):
                 prediction = model(batch)
             loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight,
                 event_decision_weight=args.event_decision_loss_weight,
-                rhythm_loss_weight=args.rhythm_loss_weight)
+                rhythm_loss_weight=args.rhythm_loss_weight,
+                repetition_penalty_weight=args.repetition_penalty_weight,
+                diversity_weight=args.diversity_loss_weight)
             diagnostics = parts.pop('diagnostics')
             if not torch.isfinite(loss_sum):
                 raise ValueError('Nonfinite layout loss')

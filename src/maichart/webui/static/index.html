@@ -392,6 +392,33 @@
 <label class="field">局部负荷预测损失权重<input id="formCurveLossWeight" type="number" min="0" step="0.1" value="0.2"><small>单独缩放局部负荷曲线目标的监督损失；不由上方 Radar / Style 条件省略概率控制。设为 0 会关闭这项损失，不等于遮罩曲线输入。</small></label>
 <label class="field">段落关联辅助损失权重<input id="formRelationLossWeight" type="number" min="0" step="0.05" value="0.1"><small>学习相似段落中配置的呼应关系；不会把参考谱面直接复制进输出。</small></label>
 </div>
+<details id="formQualityTrainingControls" class="settings-section">
+<summary><span>训练鲁棒性与配置多样性</span><small>输入扰动、实验性辅助目标；默认关闭，可逐项调整</small></summary>
+<div class="settings-content">
+<p class="workflow-hint">输入扰动只改变模型看到的历史、曲线或 v1 起音骨架，监督答案仍使用原谱。它用于练习应对不完美输入，不是生成时的采样设置。先保留关闭基线，再用 fresh / finetune 小幅启用；resume 自动继承原值。下面的快捷方案只改本分组，不更改数据集、学习率或模型结构。</p>
+<div class="quality-toolbar">
+<label>快捷方案 <select id="formQualityRecipe"><option value="off" selected>全部关闭（基线）</option><option value="light">轻量曲线扰动</option><option value="history">曲线 + 少量历史扰动</option><option value="custom">自定义</option></select></label>
+<button id="formQualityApplyRecipe" type="button" class="secondary-button">应用方案</button>
+</div>
+<p id="formQualityTrainingStatus" class="workflow-hint" role="status">所有新增权重默认为 0；尚未接入的功能明确禁用。</p>
+<h4>输入扰动</h4>
+<div class="form-grid">
+<label class="field">扰动应用概率<input id="formPerturbApplyProb" type="number" min="0" max="1" step="0.05" value="1"><small>每个训练样本尝试应用下方扰动的概率；0 完全关闭。只有下方至少一项幅度大于 0 时才生效。</small></label>
+<label class="field">曲线噪声标准差<input id="formPerturbCurveNoiseStd" type="number" min="0" max="0.3" step="0.01" value="0"><small>在 0–1 的四通道负荷曲线上加入高斯噪声，再裁剪至 0–1。模拟曲线预测误差；0 关闭，可先试 0.02。</small></label>
+<label class="field">曲线整点置零概率<input id="formPerturbCurveDropoutProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>随机将一个曲线时间点的四个通道同时置零，模拟局部预测空白。它仍是可见的零值，不是显式休止区或条件遮罩；0 关闭。</small></label>
+<label class="field">历史配置扰动概率<input id="formPerturbHistoryCorruptionProb" type="number" min="0" max="0.3" step="0.01" value="0"><small>在已提供的历史中，按此概率将单个 Tap 改成相邻按键，模拟前文配置误差；保留拍位、Hold / Slide 时值与路径。0 关闭；开头没有历史时不生效。</small></label>
+<label class="field" data-training-family="song_form_v1">起音骨架删除概率<input id="formPerturbOnsetDropProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>仅 v1：随机删除输入骨架的起音，模拟漏检；不删除监督答案中的音符。v2 自主生成拍位，不读取这个骨架。</small></label>
+<label class="field" data-training-family="song_form_v1">起音骨架添加强度<input id="formPerturbOnsetAddProb" type="number" min="0" max="0.5" step="0.01" value="0"><small>仅 v1：在已有起音范围内随机添加输入证据；添加数量约小于“原数量 × 此值”，不是最终谱面密度配额。0 关闭。</small></label>
+<label class="field" data-training-family="song_form_v1">起音骨架偏移标准差（毫秒）<input id="formPerturbOnsetShiftMs" type="number" min="0" max="50" step="1" value="0"><small>仅 v1：向输入骨架起音加入高斯时间误差；数值是标准差，不是最大偏移。保持原谱目标不变；0 关闭，可从 5 毫秒试起。</small></label>
+</div>
+<h4>实验性多样性目标</h4>
+<div class="form-grid">
+<label class="field">配置表示多样性损失权重<input id="formDiversityLossWeight" type="number" min="0" max="0.3" step="0.01" value="0"><small>对解码器每 8 个 token 的平均隐藏表示，降低附近 1–3 组间过高的相似度；并非直接统计相同按键连点或音乐段落。可能削弱合理重复与副歌呼应，默认 0；需单独试验。</small></label>
+<label class="field">重复惩罚损失权重（待接入）<input id="formRepetitionPenaltyWeight" type="number" min="0" max="0.5" step="0.01" value="0" disabled><small>现有 layout_loss 未提供该函数所需的前置生成序列，当前项恒为 0 且没有有效梯度。保留后端接口；暂不允许在页面启用，避免无效调参。</small></label>
+</div>
+<p class="workflow-hint">Planner Guidance 的类型/时值门控模块尚未接入 forward，因此暂不提供启用开关。生成时 token 重复惩罚函数也尚未接入采样器。本分组不承诺提高音乐质量，应对比相同歌曲与生成参数。</p>
+</div>
+</details>
 <p class="workflow-hint">全曲规划预测局部负荷；保存的人工曲线会指导全曲起音和配置布局。draft_revision_loss 汇总草稿与修订批次的整体目标，包含序列中的拍位/头部 token 和加权关联损失。日志另列两类任务的音符字符损失/准确率（N 字符与 END）、拍位/头部准确率（AT/P/NOTE）及每个 NOTE 后首个 N 字符准确率；EOS 不计入这些指标，准确率带有对应目标位置数。拍位/头部准确率不是音符配置准确率；图上的强弱是局部负荷目标，不是官方定数，也不只表示响度。</p>
 <p class="workflow-hint" data-training-family="song_form_v2">新增完整分数匹配和 AT/EOS 决策指标：完整拍位要求该事件所有 P 数字都预测正确；“该续写时选择续写”和“该结束时选择结束”单独统计，避免高格式准确率掩盖早停。这些都基于给定正确前缀的训练预测，不是自由生成的采音正确率；启用续写与结束学习权重后，总损失另含该辅助项，不能直接与旧损失比较。</p>
 </div>

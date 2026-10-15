@@ -83,6 +83,51 @@ test("song-form migration policy is submitted only for resume", () => {
   assert.match(html, /id="formResumeDataPolicy"[\s\S]*?<option value="strict" selected>/);
 });
 
+test("song-form quality controls forward effective perturbation and diversity settings", () => {
+  const formBegin = source.indexOf("function songFormTrainingPayload(options = {}) {");
+  const formEnd = source.indexOf('// Shared by', formBegin);
+  const values = {
+    "#formPerturbApplyProb": "0.5", "#formPerturbCurveNoiseStd": "0.03",
+    "#formPerturbCurveDropoutProb": "0.04", "#formPerturbHistoryCorruptionProb": "0.02",
+    "#formPerturbOnsetDropProb": "0.05", "#formPerturbOnsetAddProb": "0.01",
+    "#formPerturbOnsetShiftMs": "5", "#formDiversityLossWeight": "0.05",
+    "#formRepetitionPenaltyWeight": "0.1",
+  };
+  const build = new Function("currentTrainingMode", "trainingSourcePaths", "selectedTrainingManifests",
+    "selectedDatasetItems", "valueOrDefault", "formDevice", "checkedOrDefault", "currentModelFamily",
+    source.slice(formBegin, formEnd) + "; return songFormTrainingPayload;")(
+      () => "fresh", () => ({manifest: "full.json"}), () => [], () => [],
+      (selector, fallback) => values[selector] ?? fallback, () => "cpu",
+      (_selector, fallback) => fallback, () => "song_form_v1");
+  const payload = build();
+  assert.equal(payload.perturb_apply_prob, .5);
+  assert.equal(payload.perturb_curve_noise_std, .03);
+  assert.equal(payload.perturb_curve_dropout_prob, .04);
+  assert.equal(payload.perturb_history_corruption_prob, .02);
+  assert.equal(payload.perturb_onset_drop_prob, .05);
+  assert.equal(payload.perturb_onset_shift_ms, 5);
+  assert.equal(payload.diversity_loss_weight, .05);
+  // The backend accepts this for compatibility, but the UI keeps it disabled
+  // until a true prefix-aware repetition objective is integrated.
+  assert.equal(payload.repetition_penalty_weight, 0);
+});
+
+test("song-form quality controls disable v1-only skeleton perturbation for v2", () => {
+  const formBegin = source.indexOf("function songFormTrainingPayload(options = {}) {");
+  const formEnd = source.indexOf('// Shared by', formBegin);
+  const build = new Function("currentTrainingMode", "trainingSourcePaths", "selectedTrainingManifests",
+    "selectedDatasetItems", "valueOrDefault", "formDevice", "checkedOrDefault", "currentModelFamily",
+    source.slice(formBegin, formEnd) + "; return songFormTrainingPayload;")(
+      () => "fresh", () => ({manifest: "full.json"}), () => [], () => [],
+      (selector, fallback) => ({"#formPerturbOnsetDropProb": ".2",
+        "#formPerturbOnsetAddProb": ".1", "#formPerturbOnsetShiftMs": "10"}[selector] ?? fallback), () => "cpu", (_selector, fallback) => fallback,
+      () => "song_form_v2");
+  const payload = build();
+  assert.equal(payload.perturb_onset_drop_prob, 0);
+  assert.equal(payload.perturb_onset_add_prob, 0);
+  assert.equal(payload.perturb_onset_shift_ms, 0);
+});
+
 test("main song-form generation payload forwards the onset merge range", () => {
   const begin = source.indexOf("function songFormGenerationPayload() {");
   const end = source.indexOf("function generationPayload()", begin);

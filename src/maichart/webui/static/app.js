@@ -1423,6 +1423,40 @@ function updateSongFormRhythmGeometryControls() {
   }
 }
 
+function updateSongFormQualityControls(mode = currentTrainingMode()) {
+  const family = currentModelFamily();
+  const resume = mode === "resume";
+  const supported = ["song_form_v1", "song_form_v2"].includes(family);
+  const common = ["#formPerturbApplyProb", "#formPerturbCurveNoiseStd", "#formPerturbCurveDropoutProb",
+    "#formPerturbHistoryCorruptionProb", "#formDiversityLossWeight", "#formQualityRecipe", "#formQualityApplyRecipe"];
+  for (const selector of common) {
+    const node = element(selector); if (node) node.disabled = !supported || resume;
+  }
+  for (const selector of ["#formPerturbOnsetDropProb", "#formPerturbOnsetAddProb", "#formPerturbOnsetShiftMs"]) {
+    const node = element(selector); if (node) node.disabled = family !== "song_form_v1" || resume;
+  }
+  const repetition = element("#formRepetitionPenaltyWeight"); if (repetition) repetition.disabled = true;
+  const status = element("#formQualityTrainingStatus");
+  if (status) status.textContent = resume
+    ? "resume 继承并锁定 checkpoint 的扰动与辅助损失；旧模型未记录时按关闭值继承。调整请使用 finetune 和新输出目录。"
+    : `${family === "song_form_v2" ? "v2 联合生成拍位，不使用 v1 起音骨架扰动。" : "v1 可扰动输入起音骨架，监督答案保持原谱。"}曲线/历史扰动默认关闭，多样性损失为实验项；重复惩罚与 Planner Guidance 尚未接入。`;
+}
+
+function applySongFormQualityRecipe() {
+  if (currentTrainingMode() === "resume") return;
+  const selected = element("#formQualityRecipe")?.value || "off";
+  const recipes = {
+    off: [1, 0, 0, 0], light: [.3, .02, 0, 0], history: [.5, .03, .02, .03],
+  };
+  if (!Object.hasOwn(recipes, selected)) return;
+  const ids = ["formPerturbApplyProb", "formPerturbCurveNoiseStd", "formPerturbCurveDropoutProb", "formPerturbHistoryCorruptionProb"];
+  ids.forEach((id, index) => { const node = element(`#${id}`); if (node) node.value = String(recipes[selected][index]); });
+  for (const id of ["formPerturbOnsetDropProb", "formPerturbOnsetAddProb", "formPerturbOnsetShiftMs", "formRepetitionPenaltyWeight", "formDiversityLossWeight"]) {
+    const node = element(`#${id}`); if (node) node.value = "0";
+  }
+  updateSongFormQualityControls(); saveSettings();
+}
+
 function songFormTrainingPayload(options = {}) {
   const mode = currentTrainingMode(); const source = trainingSourcePaths(options); const manifests = selectedTrainingManifests();
   const selectedFamily = typeof currentModelFamily === "function" ? currentModelFamily() : "song_form_v1";
@@ -1433,7 +1467,27 @@ function songFormTrainingPayload(options = {}) {
   if (rhythmLossWeight !== null && (!Number.isFinite(rhythmLossWeight) || rhythmLossWeight < 0 || rhythmLossWeight > 10)) {
     throw new Error("节奏几何辅助损失权重必须在 0–10 之间。");
   }
+  const qualityFields = [
+    ["perturb_apply_prob", "#formPerturbApplyProb", 1, 1, "扰动应用概率"],
+    ["perturb_curve_noise_std", "#formPerturbCurveNoiseStd", 0, .3, "曲线噪声标准差"],
+    ["perturb_curve_dropout_prob", "#formPerturbCurveDropoutProb", 0, .5, "曲线整点置零概率"],
+    ["perturb_history_corruption_prob", "#formPerturbHistoryCorruptionProb", 0, .3, "历史配置扰动概率"],
+    ["perturb_onset_drop_prob", "#formPerturbOnsetDropProb", 0, .5, "起音骨架删除概率"],
+    ["perturb_onset_add_prob", "#formPerturbOnsetAddProb", 0, .5, "起音骨架添加强度"],
+    ["perturb_onset_shift_ms", "#formPerturbOnsetShiftMs", 0, 50, "起音骨架偏移标准差"],
+    ["diversity_loss_weight", "#formDiversityLossWeight", 0, .3, "配置表示多样性损失权重"],
+    ["repetition_penalty_weight", "#formRepetitionPenaltyWeight", 0, .5, "重复惩罚损失权重"],
+  ];
+  const quality = {};
+  for (const [key, selector, fallback, maximum, label] of qualityFields) {
+    let value = Number(valueOrDefault(selector, fallback));
+    if (mode !== "resume" && (key === "repetition_penalty_weight"
+      || (selectedFamily !== "song_form_v1" && key.startsWith("perturb_onset_")))) value = 0;
+    if (!Number.isFinite(value) || value < 0 || value > maximum) throw new Error(`${label}必须在 0–${maximum} 之间。`);
+    quality[key] = value;
+  }
   return { model_family: selectedFamily, manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
+    ...quality,
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     quality_enabled: checkedOrDefault("#qualityEnabled", false),
     resume_data_policy: mode === "resume" ? valueOrDefault("#formResumeDataPolicy", "strict") : "strict",
@@ -1801,6 +1855,7 @@ function updateTrainingControls() {
     if (target) target.disabled = resume;
   });
   updateSongFormRhythmGeometryControls();
+  updateSongFormQualityControls();
   window.MaichartWorkflow?.refresh();
 }
 
@@ -2748,9 +2803,18 @@ function applySongFormCheckpointConfig(data, mode) {
     ["#formRelationLossWeight", "relation_loss_weight"], ["#qualityEnabled", "quality_enabled"],
     ["#maxSteps", "max_steps"], ["#formLimitCharts", "limit_charts"], ["#formPrecision", "precision"],
     ["#formMaxRegionSeconds", "max_region_seconds"], ["#formBlueprintBatchSize", "blueprint_batch_size"],
-    ["#formEventDecisionLossWeight", "event_decision_loss_weight"], ["#formRhythmLossWeight", "rhythm_loss_weight"]];
+    ["#formEventDecisionLossWeight", "event_decision_loss_weight"], ["#formRhythmLossWeight", "rhythm_loss_weight"],
+    ["#formPerturbApplyProb", "perturb_apply_prob"], ["#formPerturbCurveNoiseStd", "perturb_curve_noise_std"],
+    ["#formPerturbCurveDropoutProb", "perturb_curve_dropout_prob"], ["#formPerturbHistoryCorruptionProb", "perturb_history_corruption_prob"],
+    ["#formPerturbOnsetDropProb", "perturb_onset_drop_prob"], ["#formPerturbOnsetAddProb", "perturb_onset_add_prob"],
+    ["#formPerturbOnsetShiftMs", "perturb_onset_shift_ms"], ["#formDiversityLossWeight", "diversity_loss_weight"],
+    ["#formRepetitionPenaltyWeight", "repetition_penalty_weight"]];
   inherited.forEach(([selector]) => { const node = element(selector); if (node) node.disabled = false; });
   const settings = {...(data?.args || {}), ...(data?.resume_settings || {})};
+  for (const [, key] of inherited) {
+    if ((key.startsWith("perturb_") || ["repetition_penalty_weight", "diversity_loss_weight"].includes(key))
+      && settings[key] == null) settings[key] = key === "perturb_apply_prob" ? 1 : 0;
+  }
   if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.blueprint_batch_size == null) {
     settings.blueprint_batch_size = 1;
   }
@@ -2776,6 +2840,7 @@ function applySongFormCheckpointConfig(data, mode) {
   const geometry = data?.model_config?.rhythm_geometry_profile || "none";
   const status = element("#checkpointInspectStatus"); if (status && data.valid) status.textContent = `${data.model_family || currentModelFamily()}：epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；配置训练 ${data.optimizer_steps || 0} 步；节奏几何 ${geometry}；生成${data.can_generate ? "可用" : "未就绪"}，修订${data.can_revise ? "可用" : "未就绪"}${locked ? `；${mode === "resume" ? "resume 继承值" : "checkpoint 固定结构"}：${effective.join(" · ") || "未记录"}` : ""}。`;
   updateSongFormRhythmGeometryControls();
+  if (typeof updateSongFormQualityControls === "function") updateSongFormQualityControls(mode);
 }
 
 async function inspectCheckpoint({ autoPreprocess = false } = {}) {
@@ -4164,6 +4229,10 @@ on("#tapOnSlideThresholdMs", "change", () => {
 on("#modelFamily", "change", () => { generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null }; applySongFormCheckpointConfig({valid: false}, "fresh"); if (currentModelFamily()==="song_form_v2" && currentTrainingMode()==="fresh") { for (const [id,v] of Object.entries({formDModel:256,formLayers:4,formNhead:8,formDimFeedforward:0,formPlannerWidth:128})) { const node=element("#"+id);if(node)node.value=String(v); } } updateTrainingControls(); updateFamilyFields(); saveSettings(); });
 on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
 on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });
+on("#formQualityApplyRecipe", "click", applySongFormQualityRecipe);
+for (const id of ["formPerturbApplyProb", "formPerturbCurveNoiseStd", "formPerturbCurveDropoutProb", "formPerturbHistoryCorruptionProb", "formPerturbOnsetDropProb", "formPerturbOnsetAddProb", "formPerturbOnsetShiftMs", "formDiversityLossWeight"]) {
+  on(`#${id}`, "input", () => { const recipe = element("#formQualityRecipe"); if (recipe) recipe.value = "custom"; saveSettings(); });
+}
 on("#formResumeDataPolicy", "change", () => { updateTrainingControls(); saveSettings(); });
 on("#trainingCheckpointPath", "input", () => { if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) applySongFormCheckpointConfig({valid: false}, "fresh"); invalidateCheckpointInspection("checkpoint 路径已变化，请重新检查。"); });
 on("#goldMode", "change", () => { updateGoldFields(); saveSettings(); });

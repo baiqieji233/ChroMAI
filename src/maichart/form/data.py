@@ -283,12 +283,24 @@ def _form_descriptor(song, index, relation=None):
 def input_example(song, index, history, *, condition=None, codec=None, task=0,
                   draft=(), right=(), max_memory_tokens=512, memory_strength=1.0,
                   state_index=None, load_curve=None, load_curve_times_sec=None,
-                  load_curve_condition_mask=None, history_before=None):
+                  load_curve_condition_mask=None, history_before=None,
+                  perturbation_config=None):
     codec = codec or RationalCodec()
     span = song.spans[index]
     region_index = song.span_region_indices[index]
     region = song.regions[region_index]
     history = tuple(history)
+    perturbation_applied = bool(
+        perturbation_config is not None
+        and perturbation_config.is_enabled()
+        and perturbation_config.should_apply()
+    )
+    if (perturbation_applied and history
+            and perturbation_config.history_corruption_prob > 0):
+        from maichart.form.training_input_perturbation import perturb_history_notes
+        history = tuple(perturb_history_notes(
+            history, corruption_prob=perturbation_config.history_corruption_prob,
+            rng=perturbation_config._rng))
     boundary = span.start if history_before is None else Fraction(history_before)
     if history_before is not None and (song.audio_profile != 'rational_audio_queries_v1' or not span.start <= boundary < span.end):
         raise ValueError('Continuation history boundary requires a rational-audio span')
@@ -330,6 +342,17 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
         local_curve = torch.zeros((0, 4), dtype=torch.float32)
         local_times = torch.zeros((0,), dtype=torch.float32)
         local_curve_mask = torch.zeros((0, 4), dtype=torch.bool)
+    if perturbation_applied and perturbation_config is not None:
+        from maichart.form.training_input_perturbation import perturb_load_curve
+        # Perturb curve to simulate prediction errors
+        if curve_values is not None and curve_times is not None and len(local_curve) > 0:
+            if perturbation_config.curve_noise_std > 0 or perturbation_config.curve_dropout_prob > 0:
+                local_curve_np = perturb_load_curve(local_curve.numpy(),
+                    noise_std=perturbation_config.curve_noise_std,
+                    dropout_prob=perturbation_config.curve_dropout_prob,
+                    rng=perturbation_config._rng)
+                local_curve = torch.from_numpy(local_curve_np)
+
     history_tokens = codec.bounded_memory(history,origin=hist_origin,max_tokens=max_memory_tokens)
     history_kept = history_tokens.count(codec.end_id)
     history_seconds = (float(seconds_at_beat(boundary, song.tempo, song.first)
@@ -357,6 +380,7 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
                  "history_events_available":len(history), "history_events_kept":history_kept,
                  "history_tokens":len(history_tokens), "history_coverage_seconds":history_seconds,
                  "motif_events_kept":motif.count(codec.end_id),
+                 "input_perturbation_applied":perturbation_applied,
                  "task": "draft" if task==0 else "reconstruction"},
     }
     if song.rhythm_geometry_profile != 'none':
@@ -606,7 +630,7 @@ class FormDataset(Dataset):
                  min_level=12.,max_level=15.,min_difficulty_index=4,max_difficulty_index=6,
                  max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
                  preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz',
-                 rhythm_geometry_profile='none'):
+                 rhythm_geometry_profile='none', perturbation_config=None):
         from maichart.form.rational_audio import PROFILE, extract_rational_audio
         if rhythm_geometry_profile not in {'none', 'exact_fraction_v1'}:
             raise ValueError('Unknown rhythm geometry profile')
@@ -626,6 +650,7 @@ class FormDataset(Dataset):
             raise ValueError('Unknown form audio profile')
         self.codec=RationalCodec(); self.items=[]; self.songs=[]; self.audit={"skipped":[],"filtered":[],"charts":[],"supervision":"draft_and_masked_reconstruction","quality_enabled":bool(quality_enabled)}
         self.max_memory_tokens=max_memory_tokens; self.seed=seed
+        self.perturbation_config=perturbation_config
         if audio_cache_gb is not None and audio_cache_gb < 0:
             raise ValueError('audio_cache_gb must be nonnegative or None')
         if sample_cache_mb is not None and sample_cache_mb < 0:
@@ -725,7 +750,11 @@ class FormDataset(Dataset):
             song_index,span_index,tokens,task=item; local_weight=1.0
         else:
             song_index,span_index,tokens,task,local_weight=item
-        cache_key=index if task == 0 else None
+        perturbing = bool(getattr(self, 'perturbation_config', None)
+                          and self.perturbation_config.is_enabled())
+        # A cached clean sample would otherwise freeze the first random
+        # augmentation and replay it unchanged in every later epoch.
+        cache_key=index if task == 0 and not perturbing else None
         sample_store=getattr(self,'sample_store',None)
         if cache_key is not None and sample_store is not None:
             cached=sample_store.get(cache_key)
@@ -750,8 +779,12 @@ class FormDataset(Dataset):
             selected=set() if clean else set(rng.choice(len(target),size=max(1,int(len(target)*.3)),replace=False).tolist())
             draft=[DraftPoint(p.beat,None if i in selected else p.note_text,i in selected) for i,p in enumerate(target)]
             right=points[hi:]
+        sample_perturbation = (self.perturbation_config.for_seed(
+            (int(self.seed) * 1_000_003 + int(index) * 97_409) % (2**63 - 1))
+            if perturbing else None)
         result=input_example(song,span_index,history,condition=condition,codec=self.codec,task=task,
-            draft=draft,right=right,max_memory_tokens=self.max_memory_tokens,state_index=state_index)
+            draft=draft,right=right,max_memory_tokens=self.max_memory_tokens,state_index=state_index,
+            perturbation_config=sample_perturbation)
         ref_index=result['meta']['reference_source']
         reference=[]
         if ref_index is not None and result['motif'].numel()>1:
@@ -764,6 +797,24 @@ class FormDataset(Dataset):
             result['skeleton']=torch.tensor([self.codec.pad_id])
         else:
             skeleton=[DraftPoint(p.beat,None,True) for p in points[lo:]]
+            if (sample_perturbation is not None
+                    and result['meta'].get('input_perturbation_applied')
+                    and sample_perturbation.onset_drop_prob + sample_perturbation.onset_add_prob
+                        + sample_perturbation.onset_shift_sigma_ms > 0):
+                from maichart.form.training_input_perturbation import perturb_onset_skeleton
+                noisy=perturb_onset_skeleton(
+                    [EventPoint(point.beat, '1') for point in points[lo:]],
+                    song.tempo, song.first,
+                    drop_prob=sample_perturbation.onset_drop_prob,
+                    add_prob=sample_perturbation.onset_add_prob,
+                    shift_sigma_ms=sample_perturbation.onset_shift_sigma_ms,
+                    rng=sample_perturbation._rng)
+                from maichart.form.rational_audio import beat_at_second
+                final_beat = beat_at_second(song.audio.duration_sec, song.tempo, song.first)
+                noisy_by_beat = {point.beat for point in noisy
+                                 if span.start <= point.beat < final_beat}
+                skeleton=[DraftPoint(beat,None,True) for beat in sorted(noisy_by_beat)]
+                result['meta']['perturbed_skeleton_events']=len(skeleton)
             result['skeleton']=torch.tensor(self.codec.bounded_memory(
                 skeleton,origin=span.start,max_tokens=self.max_memory_tokens,newest=False))
         result.update(decoder_input=torch.tensor(tokens[:-1]),target=torch.tensor(tokens[1:]),

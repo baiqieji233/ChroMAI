@@ -140,6 +140,8 @@ def test_resume_effective_settings_match_checkpoint_and_ignore_disabled_ui_value
         "blueprint_loss_weight": 0.4, "load_curve_loss_weight": 0.6,
         "relation_loss_weight": 0.2, "quality_enabled": False,
         "max_steps": 9, "precision": "fp16",
+        "perturb_curve_noise_std": .03, "perturb_apply_prob": .5,
+        "diversity_loss_weight": .01,
     })
     torch.save(saved, checkpoint)
     calls = []
@@ -158,6 +160,8 @@ def test_resume_effective_settings_match_checkpoint_and_ignore_disabled_ui_value
         "condition_drop_prob": 2, "blueprint_loss_weight": -1,
         "load_curve_loss_weight": -1, "relation_loss_weight": -1,
         "quality_enabled": True, "max_steps": 1000001, "precision": "invalid",
+        "perturb_curve_noise_std": .9, "perturb_apply_prob": -1,
+        "diversity_loss_weight": -.1, "perturb_history_corruption_prob": .8,
     }, runtime=Runtime())
     task, args = calls
     effective = task.result["effective_settings"]
@@ -165,7 +169,9 @@ def test_resume_effective_settings_match_checkpoint_and_ignore_disabled_ui_value
                 "weight_decay": 0.07, "condition_drop_prob": 0.3,
                 "blueprint_loss_weight": 0.4, "load_curve_loss_weight": 0.6,
                 "relation_loss_weight": 0.2, "quality_enabled": False,
-                "max_steps": 9, "precision": "bf16"}
+                "max_steps": 9, "precision": "bf16",
+                "perturb_curve_noise_std": .03, "perturb_apply_prob": .5,
+                "diversity_loss_weight": .01, "perturb_history_corruption_prob": 0.}
     for key, value in expected.items():
         assert effective[key] == value
     for key, value in expected.items():

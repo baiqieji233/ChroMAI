@@ -120,6 +120,7 @@ class FormTransformer(nn.Module):
         result = {
             "logits": self.output_head(hidden),
             "relation_logits": self.relation_head(memory[:, -1]),
+            "hidden_states": hidden,  # Export for diversity loss
         }
         if self.config.rhythm_geometry_profile != 'none':
             result['timing_prediction']=self.interval_head(hidden)

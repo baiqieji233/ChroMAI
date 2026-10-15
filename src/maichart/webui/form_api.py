@@ -11,13 +11,14 @@ from maichart.form.timing import normalize_meter_map
 from maichart.generation.timeline import normalize_tempo_map
 from maichart.form import FAMILY, CHECKPOINT_SCHEMA, FORM_FAMILIES
 from maichart.form.rhythm_snap import COMMON_DIVISIONS, normalize_divisions
+from maichart.form.training_input_perturbation import QUALITY_TRAINING_DEFAULTS
 
 
 RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay',
                        'condition_drop_prob', 'blueprint_loss_weight',
                        'load_curve_loss_weight', 'relation_loss_weight',
                        'quality_enabled', 'max_steps', 'blueprint_batch_size','event_decision_loss_weight',
-                       'rhythm_loss_weight')
+                       'rhythm_loss_weight', *QUALITY_TRAINING_DEFAULTS)
 
 
 def form_resume_settings(payload):
@@ -25,6 +26,8 @@ def form_resume_settings(payload):
     contract = payload.get('dataset_contract') or {}
     groups = (payload.get('optimizer_state_dict') or {}).get('param_groups') or []
     values = {key: args[key] for key in RESUME_ARGUMENT_KEYS if key in args}
+    values.update({key: args.get(key, default)
+                   for key, default in QUALITY_TRAINING_DEFAULTS.items()})
     if payload.get('family') == 'song_form_v2':
         values['blueprint_batch_size'] = args.get('blueprint_batch_size') or 1
         values['event_decision_loss_weight'] = args.get('event_decision_loss_weight',0.)
@@ -260,6 +263,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
             old_args = inspected.get('args') or {}
             old_contract = inspected.get('dataset_contract') or {}
             payload = {**payload, **{key: old_args[key] for key in RESUME_ARGUMENT_KEYS if key in old_args}}
+            payload.update({key: old_args.get(key, default)
+                            for key, default in QUALITY_TRAINING_DEFAULTS.items()})
             payload['precision'] = inspected.get('precision') or old_args.get('precision', 'fp32')
             if 'lr' in old_args:
                 payload = {**payload, 'lr': old_args['lr']}
@@ -316,7 +321,20 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'load_curve_loss_weight':number('load_curve_loss_weight',1.,0,100),
                 'relation_loss_weight':number('relation_loss_weight',.1,0,100),
                 'rhythm_geometry_profile':rhythm_geometry_profile,
-                'rhythm_loss_weight':rhythm_loss_weight}
+                'rhythm_loss_weight':rhythm_loss_weight,
+                # Training input perturbation parameters (default: disabled for safety)
+                # Users can enable progressively: stage1 -> stage2 -> stage3
+                'perturb_onset_drop_prob':number('perturb_onset_drop_prob',0,0,0.5),
+                'perturb_onset_add_prob':number('perturb_onset_add_prob',0,0,0.5),
+                'perturb_onset_shift_ms':number('perturb_onset_shift_ms',0,0,50),
+                'perturb_curve_noise_std':number('perturb_curve_noise_std',0,0,0.3),
+                'perturb_curve_dropout_prob':number('perturb_curve_dropout_prob',0,0,0.5),
+                'perturb_history_corruption_prob':number('perturb_history_corruption_prob',0,0,0.3),
+                'perturb_apply_prob':number('perturb_apply_prob',1.0,0,1.0),
+                # Repetition penalty and diversity parameters (conservative defaults)
+                # Recommend enabling after baseline training for comparison
+                'repetition_penalty_weight':number('repetition_penalty_weight',0,0,0.5),
+                'diversity_loss_weight':number('diversity_loss_weight',0,0,0.3)}
         if payload.get('blueprint_batch_size') not in {None, ''}:
             values['blueprint_batch_size'] = number('blueprint_batch_size',4,1,16,True)
         values['blueprint_workers'] = number('blueprint_workers',0,0,4,True)

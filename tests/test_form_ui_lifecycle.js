@@ -58,7 +58,8 @@ test("song-form resume restores and locks inherited settings while finetune keep
   const settings = {lr: 0.0003, batch_size: 2, grad_accumulation: 4, seed: 7, weight_decay: 0.02,
     condition_drop_prob: 0.1, blueprint_loss_weight: 1.2, load_curve_loss_weight: 0.3,
     relation_loss_weight: 0.2, quality_enabled: true, max_steps: 12, limit_charts: 16,
-    precision: "bf16", max_region_seconds: 12, blueprint_batch_size: 4};
+    precision: "bf16", max_region_seconds: 12, blueprint_batch_size: 4,
+    perturb_curve_noise_std: .03, perturb_apply_prob: .5, diversity_loss_weight: .02};
   context.apply({valid: true, resume_settings: settings,
     model_config: {d_model: 128, layers: 3, nhead: 4, max_tokens: 1024, max_memory_tokens: 256, dropout: 0.2},
     epoch: 5, blueprint_steps: 10, optimizer_steps: 20, can_generate: true, can_revise: false}, "resume");
@@ -72,6 +73,12 @@ test("song-form resume restores and locks inherited settings while finetune keep
   assert.equal(elements.get("#formDModel").disabled, true);
   assert.equal(elements.get("#formDropout").value, "0.2");
   assert.equal(elements.get("#formBlueprintBatchSize").value, "4");
+  assert.equal(elements.get("#formPerturbCurveNoiseStd").value, "0.03");
+  assert.equal(elements.get("#formPerturbCurveNoiseStd").disabled, true);
+  assert.equal(elements.get("#formPerturbHistoryCorruptionProb").value, "0");
+  assert.equal(elements.get("#formPerturbHistoryCorruptionProb").disabled, true);
+  assert.equal(elements.get("#formDiversityLossWeight").value, "0.02");
+  assert.equal(elements.get("#formQualityApplyRecipe").disabled, true);
   assert.match(elements.get("#checkpointInspectStatus").textContent, /limit_charts=16/);
 
   context.apply({valid: true, model_config: {d_model: 256, layers: 4, nhead: 8}}, "finetune");
@@ -80,6 +87,9 @@ test("song-form resume restores and locks inherited settings while finetune keep
   assert.equal(elements.get("#learningRate").disabled, false);
   assert.equal(elements.get("#formLimitCharts").disabled, false);
   assert.equal(elements.get("#formBlueprintBatchSize").disabled, false);
+  assert.equal(elements.get("#formDiversityLossWeight").disabled, false);
+  assert.equal(elements.get("#formRepetitionPenaltyWeight").disabled, true);
+  assert.equal(elements.get("#formPerturbOnsetDropProb").disabled, true);
 });
 
 test("song-form output nonce is a directory component and preserves the requested filename", () => {

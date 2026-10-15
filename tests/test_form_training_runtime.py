@@ -169,7 +169,8 @@ def test_scaler_skips_overflowed_norm_without_corrupting_optimizer():
     assert torch.isfinite(parameter).all() and (parameter < 1).all()
 
 
-def test_mid_epoch_checkpoint_resume_matches_uninterrupted_updates(tmp_path, monkeypatch):
+@pytest.mark.parametrize('with_quality', [False, True])
+def test_mid_epoch_checkpoint_resume_matches_uninterrupted_updates(tmp_path, monkeypatch, with_quality):
     from maichart.form import train, data
     from test_form_pipeline import fixture_audio
     audio = fixture_audio(5)
@@ -186,6 +187,9 @@ def test_mid_epoch_checkpoint_resume_matches_uninterrupted_updates(tmp_path, mon
               '--max-tokens','256','--max-memory-tokens','64','--max-region-seconds','2',
               '--checkpoint-interval-steps','1','--precision','fp32','--seed','33','--dropout','.1',
               '--max-steps','4']
+    if with_quality:
+        common += ['--perturb-curve-noise-std', '.03', '--perturb-apply-prob', '.5',
+                   '--perturb-history-corruption-prob', '.1', '--diversity-loss-weight', '.01']
     threads = torch.get_num_threads(); torch.set_num_threads(1)
     try:
         train.main(common + ['--checkpoint-dir', str(tmp_path/'full')])
@@ -209,6 +213,7 @@ def test_mid_epoch_checkpoint_resume_matches_uninterrupted_updates(tmp_path, mon
         assert resumed['optimizer_steps'] == uninterrupted['optimizer_steps']
         assert resumed['task_training'] == uninterrupted['task_training']
         assert resumed['precision'] == 'fp32' and resumed['args']['max_steps'] == 4
+        assert resumed['args']['perturb_curve_noise_std'] == (.03 if with_quality else 0.)
         for key in ('model_state_dict','blueprint_state_dict'):
             for name in uninterrupted[key]:
                 torch.testing.assert_close(resumed[key][name], uninterrupted[key][name], rtol=0, atol=0)
