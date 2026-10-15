@@ -112,3 +112,5 @@
 song_form v1/v2 训练界面现在也显示 **CUDA 显存预算（GiB）**。0 使用总显存 60%，正数使用指定预算并封顶总显存 95%；它只控制训练进程的 CUDA 上限，不改变模型结构。v2 参数量建议优先按 `d_model → 层数 → dim_feedforward` 顺序小步增加，Planner 宽度单独调整；在 8 GB 显卡上可先试 `d_model=320、layers=6、dim_feedforward=1280、planner_width=160`，同时把 batch size 保持 2–4、梯度累积提高来维持有效批量。已有 checkpoint 的 resume 仍继承结构，不能通过该控件改变模型维度。
 
 随后发现 PyTorch 对裸 `cuda` 设备调用显存比例接口会抛出 `Expected a torch.device with a specified index`。现已将其解析为当前默认 GPU ordinal；如果驱动不支持设置硬上限，则记录结构化 warning 并继续训练，不再在启动阶段崩溃。
+
+准备缓存随后发现仍会因 `code_sha256` 变化把旧缓存全部判为 miss。现在迁移读取会忽略仅影响缓存实现的代码版本和绝对路径差异，仍严格比较谱面/音频哈希、运行时依赖、训练输入合同和配置；同时会查找同级数据集目录下的缓存根。当前已经开始的进程不会热加载此修改，下一次训练启动后生效。

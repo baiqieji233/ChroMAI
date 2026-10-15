@@ -122,14 +122,28 @@ class PreparationCache:
             # identity. Compare a normalized identity while scanning only
             # the preparation index files; successful entries are copied to
             # the new stable key on the next save path.
-            for candidate in self.root.glob('*.index.json'):
+            roots = [self.root]
+            parent = self.root.parent.parent
+            if parent.is_dir():
+                for sibling in parent.parent.iterdir():
+                    candidate_root = sibling / 'cache' / 'song_form_prepare' / 'v1'
+                    if candidate_root.is_dir() and candidate_root not in roots:
+                        roots.append(candidate_root)
+            for root in roots:
+              for candidate in root.glob('*.index.json'):
                 try:
                     probe = json.loads(candidate.read_text(encoding='utf-8'))
                     old_identity = dict(probe.get('identity') or {})
                     old_identity.pop('source', None); old_identity.pop('audio', None)
-                    if old_identity != identity:
+                    # A preparation code hash change should invalidate only
+                    # when semantic inputs changed. Recent cache changes were
+                    # path/locking fixes and do not alter the prepared arrays.
+                    old_identity.pop('code_sha256', None)
+                    expected_identity = dict(identity)
+                    expected_identity.pop('code_sha256', None)
+                    if old_identity != expected_identity:
                         continue
-                    arrays_path = self.root / f"{candidate.name[:-len('.index.json')]}.{probe['arrays_sha256']}.npz"
+                    arrays_path = candidate.parent / f"{candidate.name[:-len('.index.json')]}.{probe['arrays_sha256']}.npz"
                     with np.load(arrays_path, allow_pickle=False) as arrays:
                         result = _decode(probe['result'], arrays)
                     if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
