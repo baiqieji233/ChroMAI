@@ -42,6 +42,8 @@ Python 全套 2223 passed、12 skipped（145.12 秒），Node 全套 94 passed�
 
 7860 主 WebUI 已启动，Python PID 28020，页面与 `/api/status` 正常，实际浏览器无 JS 异常。fresh 自动增强；finetune 显式升级恢复新默认并保留手调；resume 继承锁定；7 个曲线/设备/tempo 控件实际可见。7861 保持停止；没有启动正式训练。
 
+2026-10-17 用户要求补充必要测试：新增增强合同断点恢复逐位一致性回归，本轮 150 项 Python、50 项 Node 通过；真实旧权重迁移和 resume、26,382 完整配置目录跨段生成、跨段修订、三拍子/变 BPM/负 first 时钟回读和真实 HTTP inspection 均完成。生产代码未改。详细见 `QUALITY_REBUILD_ADDITIONAL_TESTS_20261017.md`；保留开头人工时钟压力用例主动 EOS 空谱，以及辅助指针仅四步仍未学会的质量风险。
+
 下一次训练可选择主界面 song_form_v2 + fresh 自动增强，或旧 v2 + finetune 显式“增强音乐证据”并使用新目录。resume 不会升级旧模型。实际音乐收益和辅助权重仍需用户充分训练后评估；不得用短跑语法通过替代质量验收。
 
 临时浏览器 profile 清理被工具自动审批阻止：`C:\Users\mywor\AppData\Local\Temp\maichart-ui-audit-af9f5111dcf04e3f915c7f237af0ef22`。浏览器已关闭；未绕过策略，不影响功能。
