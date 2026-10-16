@@ -23,7 +23,7 @@
 - `bd80919`：物理时值、双手状态、统计时值版本化；GOAL 与交接入口。
 - `3e08f9d`：音频覆盖、动态描述、精确位置辅助、Planner 时间汇聚、曲线与缓存合同、生成/迁移，以及相应回归。
 - `8463d93`：主 WebUI 控件、曲线插点、拍号与质量身份、resume/finetune 行为及指标。
-- 最终报告与证据：`QUALITY_REBUILD_RESULTS_20261017.md`、`evidence/QUALITY_REBUILD_20261017.json`。等待最终文档提交及推送核对。
+- 最终报告与证据：`QUALITY_REBUILD_RESULTS_20261017.md`、`evidence/QUALITY_REBUILD_20261017.json`，提交 `7f93b6c`。修复与报告均已推送 GitHub，远端 SHA 与本地一致；GOAL 状态记录随后单独提交。
 
 ## 新合同的边界
 
