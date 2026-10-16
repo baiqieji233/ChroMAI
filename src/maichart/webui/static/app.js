@@ -265,6 +265,9 @@ function renderTaskTrainingMetrics(task) {
     ["draft_note_configuration_accuracy", "音符字符准确率", "accuracy"],
     ["draft_first_head_accuracy", "首个音符选择", "accuracy"],
     ["draft_position_fraction_exact_accuracy", "完整分数拍位匹配（给定正确前缀）", "accuracy"],
+    ["position_alignment_loss", "音频—拍位辅助损失（草稿）", "loss"],
+    ["position_alignment_event_accuracy", "音频位置匹配准确率（给定正确前缀）", "accuracy"],
+    ["position_alignment_coverage", "官谱起音的音频查询覆盖率", "accuracy"],
     ["draft_event_continue_accuracy", "该续写时选择续写", "accuracy"],
     ["draft_event_terminate_accuracy", "该结束时选择结束", "accuracy"]];
   const revisionRows = [["revision_note_configuration_loss", "音符字符交叉熵", "loss"],
@@ -733,6 +736,14 @@ function collectSettings() {
     learningRate: element("#learningRate")?.dataset.touched === "1",
     contextTokens: element("#contextTokens")?.dataset.touched === "1",
   };
+  values.__songFormEvidenceProvenance = Object.fromEntries([
+    "formQualityProfile", "formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs",
+    "formPlannerContextSeconds", "formCurveBinSeconds",
+  ].map((id) => {
+    const data = element(`#${id}`)?.dataset || {};
+    return [id, {manual: data.evidenceManual === "1", inherited: data.evidenceInheritedProfile,
+      inheritedValue: data.evidenceInheritedValue}];
+  }));
   values.__songFormQualityDefaults = 2;
   return values;
 }
@@ -814,6 +825,15 @@ function restoreSettings() {
       || (manualTouched.learningRate === undefined && inferLegacyTouched) ? "1" : "";
   }
   if (contextTokens) contextTokens.dataset.touched = manualTouched.contextTokens === true ? "1" : "";
+  for (const [id, provenance] of Object.entries(values.__songFormEvidenceProvenance || {})) {
+    if (!["formQualityProfile", "formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs",
+      "formPlannerContextSeconds", "formCurveBinSeconds"].includes(id)) continue;
+    const node = element(`#${id}`);
+    if (!node || !provenance || typeof provenance !== "object") continue;
+    node.dataset.evidenceManual = provenance.manual === true ? "1" : "";
+    if (typeof provenance.inherited === "string") node.dataset.evidenceInheritedProfile = provenance.inherited;
+    if (typeof provenance.inheritedValue === "string") node.dataset.evidenceInheritedValue = provenance.inheritedValue;
+  }
   const levelInput = element("#level");
   if (levelInput) {
     const previousLevel = levelInput.value;
@@ -1461,6 +1481,44 @@ function updateSongFormRhythmGeometryControls() {
   }
 }
 
+function updateSongFormQualityProfileControls() {
+  const selector = element("#formQualityProfile");
+  if (!selector) return;
+  const mode = currentTrainingMode();
+  const config = checkpointInspection.data?.valid ? checkpointInspection.data.model_config || {} : {};
+  const saved = config.quality_profile || "legacy";
+  const effective = mode === "resume" || (mode === "finetune" && selector.value === "auto")
+    ? saved : selector.value === "auto" ? "musical_evidence_v1" : selector.value;
+  const locked = mode === "resume";
+  selector.disabled = locked || currentModelFamily() !== "song_form_v2";
+  for (const id of ["formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs", "formPlannerContextSeconds", "formCurveBinSeconds"]) {
+    const node = element(`#${id}`);
+    if (node && !locked && effective === "musical_evidence_v1"
+        && node.dataset?.evidenceInheritedProfile === "legacy" && node.dataset.evidenceManual !== "1"
+        && node.value === node.dataset.evidenceInheritedValue) {
+      // Values restored for resume describe the old contract. They are not
+      // deliberate overrides of the explicitly selected upgrade defaults.
+      node.value = "";
+      delete node.dataset.evidenceInheritedProfile;
+      delete node.dataset.evidenceInheritedValue;
+    }
+    if (node) node.disabled = locked || currentModelFamily() !== "song_form_v2" || effective === "legacy";
+  }
+  const help = element("#formQualityProfileHelp");
+  if (help) help.textContent = locked
+    ? `resume 继承 ${effective} 合同与相关权重。修改这些目标请使用 finetune 和新输出目录。`
+    : effective === "musical_evidence_v1"
+      ? "增强音乐证据：均衡音频时间覆盖、Planner 局部时序、1 秒负荷标签和音频—谱面位置辅助监督。官谱拍位只作为监督答案，解码仍可输出任意有理数拍。已有模型升级需 finetune，并使用新输出目录；新增目标需训练后才生效。"
+      : "保持已有模型的输入与训练合同。finetune 的自动模式继承 checkpoint；显式选择增强音乐证据才会升级，现有权重不会自动获得新能力。";
+}
+
+function markSongFormEvidenceInput(node) {
+  if (!node?.dataset) return;
+  node.dataset.evidenceManual = "1";
+  delete node.dataset.evidenceInheritedProfile;
+  delete node.dataset.evidenceInheritedValue;
+}
+
 function updateSongFormQualityControls(mode = currentTrainingMode()) {
   const family = currentModelFamily();
   const resume = mode === "resume";
@@ -1510,6 +1568,25 @@ function songFormTrainingPayload(options = {}) {
   if (!Number.isFinite(positionEventLossWeight) || positionEventLossWeight < 0 || positionEventLossWeight > 10) {
     throw new Error("拍位均衡损失权重必须在 0–10 之间。");
   }
+  const qualityProfile = valueOrDefault("#formQualityProfile", "auto");
+  if (!["auto", "legacy", "musical_evidence_v1"].includes(qualityProfile)) throw new Error("音乐证据训练方案无效。");
+  const evidenceOptions = {};
+  for (const [key, selector, maximum, positive, label] of [
+    ["position_alignment_loss_weight", "#formPositionAlignmentLossWeight", 10, false, "音频—谱面位置辅助损失权重"],
+    ["position_alignment_tolerance_ms", "#formPositionAlignmentToleranceMs", 100, true, "音频—谱面位置监督容差"],
+    ["planner_context_seconds", "#formPlannerContextSeconds", 30, false, "Planner 局部时序范围"],
+    ["curve_bin_seconds", "#formCurveBinSeconds", 30, true, "负荷标签时间粒度"],
+  ]) {
+    const inactive = mode !== "resume" && (qualityProfile === "legacy"
+      || (typeof element === "function" && element(selector)?.disabled === true));
+    const raw = inactive ? "" : valueOrDefault(selector, "").trim();
+    const value = raw === "" ? null : Number(raw);
+    if (value !== null && (!Number.isFinite(value) || value < 0 || (positive && value === 0) || value > maximum
+        || (key === "position_alignment_tolerance_ms" && value < 1))) {
+      throw new Error(`${label}须${positive ? "大于 0 且" : "在 0–"}${positive ? `不超过 ${maximum}` : maximum}，或留空自动。`);
+    }
+    evidenceOptions[key] = value;
+  }
   const qualityFields = [
     ["perturb_apply_prob", "#formPerturbApplyProb", .5, 1, "扰动应用概率"],
     ["perturb_curve_noise_std", "#formPerturbCurveNoiseStd", .03, .3, "曲线噪声标准差"],
@@ -1530,6 +1607,8 @@ function songFormTrainingPayload(options = {}) {
     quality[key] = value;
   }
   return { model_family: selectedFamily, manifest: source.manifest || manifests[0] || "", checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
+    ...(selectedFamily === "song_form_v2" ? {quality_profile: qualityProfile, ...evidenceOptions} : {}),
+    meter_map: valueOrDefault("#formTrainingMeterMap", "").trim() ? parseMeterMap("#formTrainingMeterMap") : null,
     ...quality,
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     quality_enabled: checkedOrDefault("#qualityEnabled", false),
@@ -1675,7 +1754,9 @@ function songFormGenerationPayload() {
     rational_grid_divisions: songFormRationalGridDivisions(),
     physical_feasibility_strength: Number(valueOrDefault("#formPhysicalFeasibilityStrength", 0))}};
   return { model_family: currentGenerationFamily(), checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
-    level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
+    level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(),
+    meter_map: valueOrDefault("#formGenerationMeterMap", "").trim() ? parseMeterMap("#formGenerationMeterMap") : null,
+    device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
     intensity_curve_strength: Number(valueOrDefault("#intensityCurveStrength", .65)), intensity_curve_span: Number(valueOrDefault("#intensityFollowSpan", .5)), intensity_curve_mode: valueOrDefault("#intensityCurveMode", "follow"),
     memory_strength: Number(valueOrDefault("#formMemoryStrength", .6)), onset_threshold: Number(valueOrDefault("#formOnsetThreshold", .5)),
@@ -1815,6 +1896,9 @@ function intensityCurvePayload() {
     ...(profile.tempo_changes ? { tempo_changes: profile.tempo_changes } : {}),
     ...(profile.explicit_tempo_map !== undefined ? { explicit_tempo_map: profile.explicit_tempo_map } : {}),
     ...(profile.tempo_map_sha256 !== undefined ? { tempo_map_sha256: profile.tempo_map_sha256 } : {}),
+    ...(profile.meter_map !== undefined ? { meter_map: profile.meter_map } : {}),
+    ...(profile.quality_profile !== undefined ? { quality_profile: profile.quality_profile } : {}),
+    ...(profile.curve_bin_seconds !== undefined ? { curve_bin_seconds: profile.curve_bin_seconds } : {}),
     ...(profile.time_axis ? { time_axis: profile.time_axis } : {}),
     ...(profile.components !== undefined ? { components: profile.components } : {}),
     ...(profile.curve_resolution_sec !== undefined ? { curve_resolution_sec: profile.curve_resolution_sec } : {}),
@@ -1829,6 +1913,32 @@ function parseTempoMap() {
   if (!Array.isArray(parsed) && (!parsed || !Array.isArray(parsed.tempo_changes))) {
     throw new Error("Tempo map 必须是数组，或包含 tempo_changes 数组的对象");
   }
+  return parsed;
+}
+
+function parseMeterMap(selector) {
+  const text = valueOrDefault(selector, "").trim();
+  if (!text) return null;
+  let parsed;
+  try { parsed = JSON.parse(text); }
+  catch (_) { throw new Error("拍号表必须填写有效的 JSON 数组。"); }
+  if (!Array.isArray(parsed)) throw new Error("拍号表必须是 JSON 数组；留空表示未知拍号。");
+  parsed.forEach((meter) => {
+    const beat = meter?.beat;
+    const beatText = typeof beat === "number" && Number.isSafeInteger(beat) ? String(beat) : beat;
+    if (typeof beatText !== "string" || !/^\+?\d+(?:\/[1-9]\d*)?$/.test(beatText.trim())) {
+      throw new Error('拍号表的 beat 必须是非负整数或有理数字符串，例如 "0"、"9/2"。');
+    }
+    if (!Number.isSafeInteger(meter.numerator) || meter.numerator <= 0
+        || !Number.isSafeInteger(meter.denominator) || meter.denominator <= 0) {
+      throw new Error("拍号的 numerator 和 denominator 必须是正整数。");
+    }
+    if (meter.grouping !== undefined && (!Array.isArray(meter.grouping)
+        || meter.grouping.some((value) => !Number.isSafeInteger(value) || value <= 0)
+        || (meter.grouping.length && meter.grouping.reduce((sum, value) => sum + value, 0) !== meter.numerator))) {
+      throw new Error("拍组 grouping 必须由正整数组成，非空时总和须等于 numerator。");
+    }
+  });
   return parsed;
 }
 
@@ -1912,6 +2022,7 @@ function updateTrainingControls() {
   });
   updateSongFormRhythmGeometryControls();
   updateSongFormQualityControls();
+  if (typeof updateSongFormQualityProfileControls === "function") updateSongFormQualityProfileControls();
   window.MaichartWorkflow?.refresh();
 }
 
@@ -2849,6 +2960,47 @@ function applySongFormCheckpointConfig(data, mode) {
   structure.forEach(([selector, key]) => { const node = element(selector); if (!node) return; if (locked && config[key] != null) node.value = String(config[key]); node.disabled = locked; });
   const plannerWidth=element("#formPlannerWidth");
   if (plannerWidth) { if (locked && data?.blueprint_config?.width != null) plannerWidth.value=String(data.blueprint_config.width); plannerWidth.disabled=locked; }
+  const trainingMeter = element("#formTrainingMeterMap");
+  if (trainingMeter) {
+    const storedMeters = data?.resume_settings?.meter_map ?? data?.dataset_contract?.meter_map;
+    if (locked && data?.valid) trainingMeter.value = Array.isArray(storedMeters) && storedMeters.length
+      ? JSON.stringify(storedMeters, null, 2) : "";
+    trainingMeter.disabled = mode === "resume" && data?.valid === true;
+  }
+  const qualityProfile = element("#formQualityProfile");
+  const savedQuality = config.quality_profile || "legacy";
+  if (qualityProfile && locked && data?.valid) {
+    if (mode === "resume" || qualityProfile.dataset?.evidenceManual !== "1") {
+      qualityProfile.value = mode === "resume" ? savedQuality : "auto";
+    }
+    if (qualityProfile.dataset && mode === "resume") {
+      qualityProfile.dataset.evidenceManual = "";
+      qualityProfile.dataset.evidenceInheritedProfile = savedQuality;
+      qualityProfile.dataset.evidenceInheritedValue = qualityProfile.value;
+    }
+  }
+  for (const [id, value] of [
+    ["formPositionAlignmentLossWeight", data?.resume_settings?.position_alignment_loss_weight ?? data?.args?.position_alignment_loss_weight ?? 0],
+    ["formPositionAlignmentToleranceMs", data?.resume_settings?.position_alignment_tolerance_ms ?? data?.args?.position_alignment_tolerance_ms ?? 15],
+    ["formPlannerContextSeconds", data?.blueprint_config?.context_seconds ?? config.planner_context_seconds ?? 0],
+    ["formCurveBinSeconds", config.curve_bin_seconds ?? 2],
+  ]) {
+    const node = element(`#${id}`);
+    if (node && mode === "resume" && data?.valid) {
+      node.value = String(value);
+      if (node.dataset) {
+        node.dataset.evidenceManual = "";
+        node.dataset.evidenceInheritedProfile = savedQuality;
+        node.dataset.evidenceInheritedValue = node.value;
+      }
+    } else if (node && mode === "finetune" && data?.valid && node.dataset?.evidenceManual !== "1") {
+      node.value = "";
+      if (node.dataset) {
+        node.dataset.evidenceInheritedProfile = savedQuality;
+        node.dataset.evidenceInheritedValue = "";
+      }
+    }
+  }
   const geometryProfile = element("#formRhythmGeometryProfileSelect");
   if (geometryProfile && locked) {
     const stored = data?.model_config?.rhythm_geometry_profile;
@@ -2905,10 +3057,21 @@ function applySongFormCheckpointConfig(data, mode) {
   const geometry = data?.model_config?.rhythm_geometry_profile || "none";
   const status = element("#checkpointInspectStatus"); if (status && data.valid) status.textContent = `${data.model_family || currentModelFamily()}：epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；配置训练 ${data.optimizer_steps || 0} 步；节奏几何 ${geometry}；生成${data.can_generate ? "可用" : "未就绪"}，修订${data.can_revise ? "可用" : "未就绪"}${locked ? `；${mode === "resume" ? "resume 继承值" : "checkpoint 固定结构"}：${effective.join(" · ") || "未记录"}` : ""}。`;
   updateSongFormRhythmGeometryControls();
+  if (typeof updateSongFormQualityProfileControls === "function") updateSongFormQualityProfileControls();
   if (typeof updateSongFormQualityControls === "function") updateSongFormQualityControls(mode);
 }
 
-async function inspectCheckpoint({ autoPreprocess = false } = {}) {
+async function inspectCheckpoint({ autoPreprocess = false, preserveEditableConfig = false } = {}) {
+  // Starting finetune always rechecks the checkpoint. Keep explicit upgrades
+  // and overrides made after inspection instead of replacing them just before
+  // the payload is serialized. Resume still inherits all saved values.
+  const editable = preserveEditableConfig && currentTrainingMode() === "finetune"
+    ? ["#formTrainingMeterMap", "#formQualityProfile", "#formPositionAlignmentLossWeight", "#formPositionAlignmentToleranceMs",
+      "#formPlannerContextSeconds", "#formCurveBinSeconds", "#formRhythmGeometryProfileSelect", "#formRhythmLossWeight"]
+      .filter((selector) => {
+        const node = element(selector);
+        return !(node?.dataset?.evidenceInheritedProfile && node.dataset.evidenceManual !== "1");
+      }).map((selector) => [selector, element(selector)?.value]) : [];
   if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) applySongFormCheckpointConfig({valid: false}, "fresh");
   assertTrainingSelection({ autoPreprocess });
   await assertDatasetBackend();
@@ -2932,7 +3095,11 @@ async function inspectCheckpoint({ autoPreprocess = false } = {}) {
       data.errors=[`该模型属于 ${data.model_family}，请切换对应模型族续训；新有理数架构须从头训练。`];
     }
     checkpointInspection = { key: currentCheckpointKey(), data };
-    if (data.valid && data.can_train) { applySongFormCheckpointConfig(data, mode); setCheckpointStatus(`${data.model_family} checkpoint 可用；${mode === "resume" ? "权重与优化器可加载，实际数据合同将在启动时核对" : "可加强训练"}`, "good"); }
+    if (data.valid && data.can_train) {
+      applySongFormCheckpointConfig(data, mode);
+      editable.forEach(([selector, value]) => { const node = element(selector); if (node && value !== undefined) node.value = value; });
+      setCheckpointStatus(`${data.model_family} checkpoint 可用；${mode === "resume" ? "权重与优化器可加载，实际数据合同将在启动时核对" : "可加强训练"}`, "good");
+    }
     else setCheckpointStatus((data.errors || []).join("；") || "song-form checkpoint 不可用于当前模式", "warn");
     updateTrainingControls(); return data;
   }
@@ -3158,7 +3325,7 @@ async function submitTrain(options = {}) {
     if (options.autoPreprocess && currentModelFamily() === "legacy_frame_v2") {
       throw new Error("旧固定帧模型的续训/加强训练请先点击“预处理当前目录”，完成后使用“开始训练”，以便检查完整的数据合同。");
     }
-    const inspection = await inspectCheckpoint({ autoPreprocess: !!options.autoPreprocess });
+    const inspection = await inspectCheckpoint({ autoPreprocess: !!options.autoPreprocess, preserveEditableConfig: true });
     if (!inspection || inspection.valid !== true) {
       throw new Error(`已有模型检查未通过：${formatList(inspection?.errors) || "请确认路径、模型族与训练来源"}`);
     }
@@ -3444,7 +3611,11 @@ function intensityProfileValid(profile) {
     && points.every((point, index) => Number.isFinite(Number(point.time_sec))
       && Number(point.time_sec) >= 0 && Number(point.time_sec) <= duration
       && Number(point.intensity) >= 0 && Number(point.intensity) <= 1
-      && (index === 0 || Number(point.time_sec) > Number(points[index - 1].time_sec)));
+      && (index === 0 || Number(point.time_sec) > Number(points[index - 1].time_sec)))
+    && (profile.components === undefined || (profile.components !== null
+      && typeof profile.components === "object" && !Array.isArray(profile.components)
+      && Object.values(profile.components).every((values) => Array.isArray(values) && values.length === points.length
+        && values.every((value) => Number.isFinite(Number(value)) && Number(value) >= 0 && Number(value) <= 1))));
 }
 
 function updateIntensityButtons() {
@@ -3515,14 +3686,52 @@ function enhanceIntensityContrast() {
   setIntensityStatus("已增强全曲强弱对比：围绕 0.5 放大差值 1.25 倍。可撤销；确认后请保存并返回生成页。", "good");
 }
 
+function resampleIntensityComponents(sourcePoints, components, targetPoints) {
+  if (components === undefined) return undefined;
+  if (!components || typeof components !== "object" || Array.isArray(components)) throw new Error("曲线基础通道格式无效。");
+  const rows = sourcePoints.map((point, index) => ({time: Number(point.time_sec), index}))
+    .filter((row) => Number.isFinite(row.time)).sort((a, b) => a.time - b.time);
+  // Keep the last point and its channels at duplicate times, matching profile
+  // normalization. Components remain baseline predictions: scalar edits do not
+  // replace the learned type proportions with the manually chosen intensity.
+  const unique = [];
+  rows.forEach((row) => {
+    if (unique.length && unique[unique.length - 1].time === row.time) unique[unique.length - 1] = row;
+    else unique.push(row);
+  });
+  return Object.fromEntries(Object.entries(components).map(([key, values]) => {
+    if (!Array.isArray(values) || values.length !== sourcePoints.length
+        || values.some((value) => !Number.isFinite(Number(value)) || Number(value) < 0 || Number(value) > 1)
+        || !unique.length) throw new Error(`曲线基础通道 ${key} 与控制点不一致，请重新生成曲线。`);
+    let right = 0;
+    const sampled = targetPoints.map((point) => {
+      const time = Number(point.time_sec);
+      while (right < unique.length - 1 && unique[right].time < time) right++;
+      if (right === 0) return Number(values[unique[0].index]);
+      if (time >= unique[unique.length - 1].time) return Number(values[unique[unique.length - 1].index]);
+      const left = right - 1;
+      const mix = (time - unique[left].time) / (unique[right].time - unique[left].time);
+      return Number(values[unique[left].index]) * (1 - mix) + Number(values[unique[right].index]) * mix;
+    });
+    return [key, sampled];
+  }));
+}
+
 function normalizeIntensityProfile(profile) {
   if (!profile || !Array.isArray(profile.points)) return null;
-  const points = profile.points.map((point) => ({
+  const sorted = profile.points.map((point) => ({
     time_sec: Number(point.time_sec),
     intensity: Math.max(0, Math.min(1, Number(point.intensity ?? point.value ?? 0.5))),
   })).filter((point) => Number.isFinite(point.time_sec)).sort((a, b) => a.time_sec - b.time_sec);
+  const points = [];
+  sorted.forEach((point) => {
+    if (points.length && points[points.length - 1].time_sec === point.time_sec) points[points.length - 1] = point;
+    else points.push(point);
+  });
+  const components = resampleIntensityComponents(profile.points, profile.components, points);
   const duration_sec = Number(profile.duration_sec || 0);
   return { ...profile, schema: "maichart-intensity-curve-v1", duration_sec, points,
+    ...(components !== undefined ? {components} : {}),
     rest_regions: normalizeRestRegions(profile.rest_regions, duration_sec) };
 }
 
@@ -3857,6 +4066,7 @@ async function generateIntensityCurve() {
     condition: generation.condition, bpm: generation.bpm,
     first: generation.first, tempo_mode: generation.tempo_mode,
     tempo_map: generation.tempo_map,
+    meter_map: generation.meter_map,
   });
   if (intensityCurveState.timer) clearTimeout(intensityCurveState.timer);
   intensityCurveState.taskId = data.task_id; await pollIntensityTask(data.task_id, audio);
@@ -3872,7 +4082,6 @@ function applyIntensitySection() {
   start = Math.max(0, Math.min(Number(profile.duration_sec), start)); end = Math.max(0, Math.min(Number(profile.duration_sec), end));
   if (!(end > start)) throw new Error("结束时间必须大于开始时间");
   if (profile.points.length > 2044) throw new Error("当前曲线点过多，无法安全插入段落边界");
-  pushIntensityHistory(); intensityCurveState.saved = false;
   const source = profile.points.map((point) => ({ ...point }));
   const at = (time) => {
     if (time <= source[0].time_sec) return Number(source[0].intensity);
@@ -3885,13 +4094,17 @@ function applyIntensitySection() {
   if (blend > 0) boundaryTimes.push(Math.max(0, start - blend), Math.min(Number(profile.duration_sec), end + blend));
   const times = [...new Set([...source.map((point) => point.time_sec), ...boundaryTimes])].sort((a, b) => a - b);
   if (times.length > 2048) throw new Error("应用段落后曲线点将超过 2048 个");
-  profile.points = times.map((time_sec) => {
+  const points = times.map((time_sec) => {
     const original = at(time_sec);
     let weight = time_sec >= start && time_sec <= end ? 1 : 0;
     if (blend > 0 && time_sec < start) weight = Math.max(0, Math.min(1, (time_sec - (start - blend)) / blend));
     if (blend > 0 && time_sec > end) weight = Math.max(0, Math.min(1, ((end + blend) - time_sec) / blend));
     return { time_sec, intensity: Number((original * (1 - weight) + target * weight).toFixed(4)) };
   });
+  const components = resampleIntensityComponents(source, profile.components, points);
+  pushIntensityHistory(); intensityCurveState.saved = false;
+  profile.points = points;
+  if (components !== undefined) profile.components = components;
   profile.edited = true; intensityView.selected.clear(); saveIntensityCurveState(); drawIntensityCurve(); updateIntensityButtons();
 }
 
@@ -3926,7 +4139,7 @@ function invalidateIntensityForAudio() {
 
 function invalidateLearnedCurveForTiming() {
   const profile = intensityCurveState.profile;
-  if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
+  if (!profile || !/^(learned_music_structure_|learned_song_form_)/.test(String(profile.method || ""))) return;
   intensityCurveState.saved = false;
   intensityCurveState.contextStale = true;
   saveIntensityCurveState();
@@ -3936,7 +4149,7 @@ function invalidateLearnedCurveForTiming() {
 
 function invalidateLearnedCurveForCondition() {
   const profile = intensityCurveState.profile;
-  if (!profile || !String(profile.method || "").startsWith("learned_music_structure_")) return;
+  if (!profile || !/^(learned_music_structure_|learned_song_form_)/.test(String(profile.method || ""))) return;
   intensityCurveState.conditionChanged = true;
   saveIntensityCurveState();
   updateIntensityButtons();
@@ -4030,7 +4243,7 @@ async function submitGenerate() {
 
 function clearGenerate() {
   resetGenerationDefaults();
-  ["#checkpointPath", "#audioPath", "#featurePath", "#tempoMap", "#goldStatsPath",
+  ["#checkpointPath", "#audioPath", "#featurePath", "#tempoMap", "#formGenerationMeterMap", "#goldStatsPath",
     "#acceptanceMaidata", "#acceptanceAudio", "#qualityStatus", "#qualityDiagnostics"]
     .forEach((selector) => {
       const target = element(selector);
@@ -4255,6 +4468,8 @@ if (intensityCurveState.profile) {
     if (!target || !target.id || target.type === "file") return;
     if (target.id === "learningRate") target.dataset.touched = "1";
     if (target.id === "contextTokens") target.dataset.touched = "1";
+    if (["formQualityProfile", "formPositionAlignmentLossWeight", "formPositionAlignmentToleranceMs",
+      "formPlannerContextSeconds", "formCurveBinSeconds"].includes(target.id)) markSongFormEvidenceInput(target);
     if (target.id === "fineNoteStrength") {
       const output = element("#fineNoteStrengthValue");
       if (output) output.textContent = Number(target.value).toFixed(2);
@@ -4442,6 +4657,9 @@ on("#intensityCurveEnabled", "change", updateCurveConditionNotice);
 on("#acceptanceDifficulty", "change", invalidateLearnedCurveForCondition);
 on("#tempoMap", "input", invalidateLearnedCurveForTiming);
 on("#tempoMap", "change", invalidateLearnedCurveForTiming);
+on("#formGenerationMeterMap", "input", invalidateLearnedCurveForTiming);
+on("#formGenerationMeterMap", "change", invalidateLearnedCurveForTiming);
+on("#formQualityProfile", "change", () => { updateSongFormQualityProfileControls(); saveSettings(); });
 ["#bpm", "#first", "#tempoMode"].forEach((selector) => {
   on(selector, "change", invalidateLearnedCurveForTiming);
 });

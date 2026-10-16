@@ -146,6 +146,22 @@ function renderedMetricText(groups) {
     .map(node => node.textContent).join(" ");
 }
 
+test("draft panel displays audio-position accuracy and coverage with their own denominators",()=>{
+  const {harness,elements}=createHarness(async()=>jsonResponse({}));
+  harness.renderTaskTrainingMetrics({kind:"form_train",status:"running",logs:[],result:{
+    phase:"layout_revision",training_metrics:{layout_revision:{epoch:1,phase:"layout_revision",completed:3,total:10,
+      losses:{position_alignment_loss:.3,position_alignment_event_accuracy:.75,position_alignment_coverage:.5},
+      metric_counts:{position_alignment_loss:8,position_alignment_event_accuracy:6,position_alignment_coverage:8}}}}});
+  const groups=elements.get("#taskTrainingMetricsGroups").children;
+  const draft=groups.find(group=>group.className.includes("training-metric-draft"));
+  const text=descendantText(draft);
+  assert.match(text,/音频—拍位辅助损失/);
+  assert.match(text,/音频位置匹配准确率/);
+  assert.match(text,/官谱起音的音频查询覆盖率/);
+  assert.match(text,/75\.0% · n=6/);
+  assert.match(text,/50\.0% · n=8/);
+});
+
 test("song-form metric panel shows live draft/revision plus same-epoch planner values", () => {
   const {harness, elements} = createHarness(async () => jsonResponse({}));
   const task = {kind: "form_train", status: "running", logs: [

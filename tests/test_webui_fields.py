@@ -8,6 +8,7 @@ exist, so this pins the contract rather than the one field.
 """
 
 import re
+from html.parser import HTMLParser
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -16,6 +17,39 @@ APP_JS = (ROOT / "src/maichart/webui/static/app.js").read_text(encoding="utf-8")
 
 # Model-capacity inputs the event trainer actually consumes.
 CAPACITY_FIELDS = ("dModel", "nhead", "numLayers", "dimFeedforward", "dropout")
+
+
+def test_song_form_v2_controls_have_no_incompatible_hidden_ancestor():
+    class Controls(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.stack = []
+            self.controls = {}
+
+        def handle_starttag(self, tag, attrs):
+            attrs = dict(attrs)
+            if attrs.get("id"):
+                self.controls[attrs["id"]] = [*self.stack, (tag, attrs)]
+            if tag not in {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}:
+                self.stack.append((tag, attrs))
+
+        def handle_endtag(self, tag):
+            for index in range(len(self.stack) - 1, -1, -1):
+                if self.stack[index][0] == tag:
+                    self.stack = self.stack[:index]
+                    break
+
+    parsed = Controls()
+    parsed.feed(INDEX)
+    for field in ("generationDevice", "tempoMap", "formGenerationMeterMap", "intensityCurveEnabled",
+                  "intensityCurveStrength", "intensityCurveMode", "intensityFollowSpan",
+                  "formTrainingMeterMap", "formQualityProfile", "formPositionAlignmentLossWeight",
+                  "formPositionAlignmentToleranceMs", "formPlannerContextSeconds", "formCurveBinSeconds"):
+        assert field in parsed.controls
+        for _, attrs in parsed.controls[field]:
+            for key in ("data-training-family", "data-generation-family"):
+                if key in attrs:
+                    assert "song_form_v2" in attrs[key].split(), (field, key, attrs[key])
 
 
 def label_block(field_id: str) -> str:

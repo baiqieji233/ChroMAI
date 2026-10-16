@@ -77,6 +77,7 @@ test("song-form curve editing and reload preserve null optional tempo identity",
   const {context,profile}=setup();
   Object.assign(profile,{method:"learned_song_form_v1",bpm_input:null,
     explicit_tempo_map:null,tempo_map_sha256:null,first:0,
+    quality_profile:"musical_evidence_v1",curve_bin_seconds:1,
     tempo_changes:[{beat:"0",bpm:184}],checkpoint:"model.pt",
     checkpoint_identity:{size:100,sha256:"b".repeat(64)}});
   profile.points[0].intensity=.7;
@@ -88,6 +89,8 @@ test("song-form curve editing and reload preserve null optional tempo identity",
   assert.equal(payload.tempo_map_sha256,null);
   assert.equal(payload.explicit_tempo_map,null);
   assert.equal(payload.bpm_input,null);
+  assert.equal(payload.quality_profile,"musical_evidence_v1");
+  assert.equal(payload.curve_bin_seconds,1);
   assert.equal(payload.points[0].intensity,.7);
   assert.deepEqual(payload.tempo_changes,profile.tempo_changes);
   assert.deepEqual(payload.checkpoint_identity,profile.checkpoint_identity);

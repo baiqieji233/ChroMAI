@@ -97,6 +97,16 @@ def test_analysis_rejects_bad_options(api, tmp_path, values):
     assert not webui.TASKS
 
 
+@pytest.mark.parametrize("meter_map", ["not-an-array", [{"beat": "1", "numerator": 3, "denominator": 4}],
+                                      [{"beat": "0", "numerator": 7, "denominator": 8, "grouping": [3, 3]}]])
+def test_analysis_rejects_bad_meter_before_creating_task(api, tmp_path, meter_map):
+    audio = tmp_path / "song.mp3"; audio.write_bytes(b"audio")
+    status, result, _ = api("/api/intensity/analyze", {"audio": str(audio), "meter_map": meter_map})
+    assert status == 400, result
+    assert "拍号表无效" in result["error"]
+    assert not webui.TASKS
+
+
 def test_audio_preview_supports_external_file_and_seek_ranges(api, tmp_path):
     audio = tmp_path / "outside_project.mp3"
     audio.write_bytes(b"0123456789abcdef")
@@ -244,6 +254,40 @@ def test_learned_curve_analysis_uses_generation_condition_and_timing(api, monkey
     assert received["bpm"] == 150 and received["first"] == 1.2
     assert received["tempo_map"] == [{"beat": "0", "bpm": 120.0},
                                      {"beat": "32", "bpm": 150.0}]
+    assert received["device"] == "cpu"
+
+
+def test_song_form_curve_analysis_normalizes_meter_before_inference(api, monkeypatch, tmp_path):
+    from maichart.form import curve
+
+    audio = tmp_path / "song.wav"; audio.write_bytes(b"audio")
+    checkpoint = tmp_path / "model.pt"; checkpoint.write_bytes(b"weights")
+    received = {}
+    expected = profile(audio)
+    expected["method"] = "learned_song_form_v2"
+    monkeypatch.setattr(webui, "_load_checkpoint_payload", lambda *a: {"family": "song_form_v2"})
+    monkeypatch.setattr(webui, "_checkpoint_model_family", lambda *a: "song_form_v2")
+
+    def generate(_audio, _checkpoint, **kwargs):
+        received.update(kwargs)
+        return expected
+
+    monkeypatch.setattr(curve, "generate_learned_profile", generate)
+    status, result, _ = api("/api/intensity/analyze", {
+        "audio": str(audio), "checkpoint": str(checkpoint), "curve_source": "model",
+        "model_family": "song_form_v2", "meter_map": [{"beat": "0/1", "numerator": 7,
+            "denominator": 8, "grouping": [2, 2, 3]}],
+    })
+    assert status == 200, result
+    deadline = time.monotonic() + 4
+    while time.monotonic() < deadline:
+        _, completed, _ = api("/api/task?id=" + result["task_id"])
+        if completed["status"] not in {"queued", "running"}:
+            break
+        time.sleep(.02)
+    assert completed["status"] == "completed", completed
+    assert received["meter_map"] == [{"beat": "0", "numerator": 7, "denominator": 8,
+                                      "grouping": [2, 2, 3], "confidence": 1., "source": "manual"}]
     assert received["device"] == "cpu"
 
 

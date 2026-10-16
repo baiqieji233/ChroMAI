@@ -314,6 +314,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
         tempo_mode = str(payload.get("tempo_mode", "constant")).strip().lower()
         explicit_tempo_map = (serialize_tempo_map(payload["tempo_map"])
                               if payload.get("tempo_map") is not None else None)
+        from maichart.form.timing import normalize_meter_map
+        try:
+            meter_map = [meter.to_dict() for meter in normalize_meter_map(payload.get("meter_map"))]
+        except (TypeError, ValueError, KeyError) as exc:
+            raise ValueError(f"拍号表无效：{exc}") from exc
         tempo_map_hash = tempo_map_fingerprint(explicit_tempo_map)
         if not math.isfinite(resolution) or not 0.5 <= resolution <= 16:
             raise ValueError("曲线时间间隔必须在 0.5–16 秒之间")
@@ -356,7 +361,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                             local_context_sec=context, condition=payload.get("condition"),
                             bpm=payload.get("bpm") or None, first=first,
                             tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
-                            meter_map=payload.get("meter_map"), device="cpu")
+                            meter_map=meter_map, device="cpu")
                         condition_source = checkpoint_family or requested_family
                         task.result["condition_source"] = condition_source
                     else:

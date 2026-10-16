@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 import subprocess
 
 
@@ -65,3 +66,16 @@ def test_app_javascript_parses():
         check=False,
     )
     assert result.returncode == 0, result.stderr
+
+
+def test_inserted_curve_points_preserve_backend_component_contract():
+    from maichart.generation.music_intensity import validate_intensity_profile
+
+    result = subprocess.run(
+        ["node", str(ROOT / "tests/test_intensity_component_edit.js"), "--emit-profile"],
+        capture_output=True, text=True, check=True,
+    )
+    profile = json.loads(result.stdout)
+    validated = validate_intensity_profile(profile)
+    assert len(validated["points"]) == 6
+    assert all(len(values) == 6 for values in validated["components"].values())

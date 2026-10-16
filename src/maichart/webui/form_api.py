@@ -19,7 +19,10 @@ RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay
                        'condition_drop_prob', 'blueprint_loss_weight',
                        'load_curve_loss_weight', 'relation_loss_weight',
                        'quality_enabled', 'max_steps', 'blueprint_batch_size','event_decision_loss_weight',
-                       'rhythm_loss_weight', 'position_event_loss_weight', *QUALITY_TRAINING_DEFAULTS)
+                       'rhythm_loss_weight', 'position_event_loss_weight',
+                       'quality_profile', 'position_alignment_loss_weight',
+                       'position_alignment_tolerance_ms', 'planner_context_seconds',
+                       'curve_bin_seconds', *QUALITY_TRAINING_DEFAULTS)
 
 
 def form_resume_settings(payload):
@@ -32,6 +35,14 @@ def form_resume_settings(payload):
     if payload.get('family') == 'song_form_v2':
         values['blueprint_batch_size'] = args.get('blueprint_batch_size') or 1
         values['event_decision_loss_weight'] = args.get('event_decision_loss_weight',0.)
+        config = payload.get('model_config') or {}
+        planner_config = payload.get('blueprint_config') or {}
+        values.update(quality_profile=config.get('quality_profile', 'legacy'),
+                      position_alignment_loss_weight=args.get('position_alignment_loss_weight', 0.),
+                      position_alignment_tolerance_ms=config.get('position_alignment_tolerance_ms',
+                                                                args.get('position_alignment_tolerance_ms', 15.)),
+                      planner_context_seconds=planner_config.get('context_seconds', 0.),
+                      curve_bin_seconds=config.get('curve_bin_seconds', 2.))
     values.update(lr=groups[0].get('lr', args.get('lr')) if groups else args.get('lr'),
                   limit_charts=args.get('limit_charts', 0),
                   max_region_seconds=contract.get('max_region_seconds', 14),
@@ -40,6 +51,54 @@ def form_resume_settings(payload):
     if 'dropout' in (payload.get('model_config') or {}):
         values['dropout'] = payload['model_config']['dropout']
     return values
+
+
+def resolve_quality_training_options(payload, *, family, mode, inspected):
+    """Share CLI quality-contract resolution without instantiating a model."""
+    from types import SimpleNamespace
+    from maichart.form.train import resolve_quality_training_settings
+
+    requested = payload.get('quality_profile', 'auto')
+    if requested is None or requested == '':
+        requested = 'auto'
+    if mode != 'resume' and (not isinstance(requested, str)
+                            or requested not in {'auto', 'legacy', 'musical_evidence_v1'}):
+        raise ValueError('quality_profile must be auto, legacy, or musical_evidence_v1')
+    values = dict(model_family=family, mode=mode,
+                  quality_profile='auto' if mode == 'resume' else requested,
+                  resume='checkpoint' if mode == 'resume' else None,
+                  init_checkpoint='checkpoint' if mode == 'finetune' else None)
+    for key, minimum, maximum in (
+        ('position_alignment_loss_weight', 0., 10.),
+        ('position_alignment_tolerance_ms', 1., 100.),
+        ('planner_context_seconds', 0., 30.),
+        ('curve_bin_seconds', .01, 30.),
+    ):
+        raw = None if mode == 'resume' else payload.get(key)
+        if raw is None or raw == '':
+            values[key] = None
+            continue
+        if isinstance(raw, bool):
+            raise ValueError(f'{key} must be numeric')
+        try:
+            value = float(raw)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'{key} must be numeric') from exc
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(f'{key} must be between {minimum:g} and {maximum:g}')
+        values[key] = value
+    model_config = SimpleNamespace(**((inspected or {}).get('model_config') or {}))
+    planner_config = SimpleNamespace(**((inspected or {}).get('blueprint_config') or {}))
+    options = SimpleNamespace(**values)
+    result = resolve_quality_training_settings(
+        options, old=inspected,
+        model=SimpleNamespace(config=model_config) if inspected else None,
+        planner=SimpleNamespace(config=planner_config) if inspected else None,
+    )
+    keys = ('quality_profile', 'position_alignment_loss_weight', 'position_alignment_tolerance_ms',
+            'planner_context_seconds', 'curve_bin_seconds')
+    return {key: result[key] if isinstance(result, dict) and key in result else getattr(options, key)
+            for key in keys}
 
 
 def isolated_form_output(requested, task_id):
@@ -140,9 +199,15 @@ def inspect_form_checkpoint(path):
             rhythm_geometry_available=detected == 'song_form_v2',
             parameter_count=sum(p.numel() for p in model.parameters())+sum(p.numel() for p in planner.parameters()))
         base['blueprint_config']=checked['blueprint_config']
+        evidence_capabilities = {key: caps.get(key) for key in (
+            'quality_profile', 'descriptor_dim', 'curve_bin_seconds', 'planner_context_seconds',
+            'audio_evidence_profile', 'position_alignment_supervision', 'position_alignment_trained',
+            'position_alignment_tolerance_ms')}
+        base.update(evidence_capabilities)
         base['generation_capabilities']={'rational_event_positions':detected=='song_form_v2',
             'frame_onset_threshold':detected=='song_form_v1','planner_type_guidance':detected=='song_form_v1',
-            'style_balance':True,'local_chord_guard':True,'conflict_detection':True}
+            'style_balance':True,'local_chord_guard':True,'conflict_detection':True,
+            **evidence_capabilities}
     except (ValueError, RuntimeError, KeyError, TypeError) as error:
         base['errors']=[str(error)]
     return base
@@ -307,6 +372,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         family=(inspected or {}).get('family',payload.get('model_family',FAMILY))
         rhythm_geometry_profile, rhythm_loss_weight = resolve_rhythm_geometry_training_options(
             payload, family=family, mode=mode, inspected=inspected)
+        quality_options = resolve_quality_training_options(
+            payload, family=family, mode=mode, inspected=inspected)
         values={"epochs":epochs,"batch_size":number('batch_size',2,1,512,True),
                 'cuda_memory_budget_gb':number('cuda_memory_budget_gb',0,0,1024),
                 'lr':number('lr',.0002,1e-8,1.),'max_steps':number('max_steps',0,0,1000000,True),
@@ -344,7 +411,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'perturb_history_corruption_prob':number('perturb_history_corruption_prob',0,0,0.3),
                 'perturb_apply_prob':number('perturb_apply_prob',1.0,0,1.0),
                 'repetition_penalty_weight':number('repetition_penalty_weight',0,0,0.5),
-                'diversity_loss_weight':number('diversity_loss_weight',0,0,0.3)}
+                'diversity_loss_weight':number('diversity_loss_weight',0,0,0.3),
+                **quality_options}
         if values['repetition_penalty_weight']:
             if mode != 'resume':
                 raise ValueError('重复惩罚损失尚未接入可训练目标，请保持 0。')
@@ -421,6 +489,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         audio=file('audio')
         initial=file('checkpoint') if operation!='analyze' else None
         family=payload.get('model_family',FAMILY)
+        imported = None
         if initial:
             from maichart.form import checkpoint as checkpoint_module
             imported_result = checkpoint_module.load(
@@ -535,7 +604,9 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         curve_condition_warnings = validate_saved_curve(
             curve_to_forward, audio_path=audio, checkpoint_path=initial,
             checkpoint_identity=_file_identity(initial), first=first,
-            tempo_map=tempo, bpm_input=bpm, condition=effective_condition.to_dict())
+            tempo_map=tempo, bpm_input=bpm, condition=effective_condition.to_dict(),
+            meter_map=meters,
+            quality_profile=((imported or {}).get('model_config') or {}).get('quality_profile', 'legacy'))
     task=server._create_task('form_'+operation)
     if operation in {'generate', 'revise'}:
         out = isolated_form_output(requested_output, task.task_id)
