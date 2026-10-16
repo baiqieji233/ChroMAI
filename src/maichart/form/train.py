@@ -125,6 +125,9 @@ def parser():
     p.add_argument('--layout-prefetch-batches', type=int, default=None,
                    help='in-process single-thread CPU batch lookahead for loader-workers=0; '
                         'default uses prefetch-factor, 0 disables for comparison')
+    p.add_argument('--layout-prepare-threads', type=int, default=4,
+                   help='CPU layout sample preparation threads sharing audio; '
+                        'same-source samples stay serialized, 1 preserves a single producer')
     p.add_argument('--audio-cache-gb', type=float, default=1.)
     p.add_argument('--audio-cache-mode', choices=('lru', 'resident'), default='lru')
     p.add_argument('--sample-cache-mb', type=int, default=256)
@@ -185,6 +188,8 @@ def _validate(args):
     if args.layout_prefetch_batches is not None and (isinstance(args.layout_prefetch_batches, bool)
             or not 0 <= args.layout_prefetch_batches <= 16):
         raise ValueError('layout_prefetch_batches must be between 0 and 16')
+    if isinstance(args.layout_prepare_threads, bool) or not 1 <= args.layout_prepare_threads <= 8:
+        raise ValueError('layout_prepare_threads must be between 1 and 8')
     if args.event_decision_loss_weight is not None and (not math.isfinite(args.event_decision_loss_weight)
             or not 0<=args.event_decision_loss_weight<=10):
         raise ValueError('event_decision_loss_weight must be between 0 and 10')
@@ -629,6 +634,8 @@ def _train(args):
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          layout_prefetch_batches=(args.layout_prefetch_batches if args.layout_prefetch_batches is not None
                                   else min(args.prefetch_factor, 16)) if not args.loader_workers else 0,
+         layout_prepare_threads=(args.layout_prepare_threads if not args.loader_workers
+                                 and args.layout_prefetch_batches != 0 else 0),
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
          audio_cache_mode=args.audio_cache_mode,
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
@@ -991,7 +998,8 @@ def _train(args):
                                   else min(args.prefetch_factor, 16)) if not args.loader_workers else 0)
         if layout_prefetch_depth:
             from maichart.form.layout_prefetch import LayoutBatchPrefetch
-            batch_stream = LayoutBatchPrefetch(loader, depth=layout_prefetch_depth)
+            batch_stream = LayoutBatchPrefetch(loader, depth=layout_prefetch_depth,
+                                               sample_workers=args.layout_prepare_threads)
         else:
             batch_stream = nullcontext(iter(loader))
         pending_tasks = Counter()

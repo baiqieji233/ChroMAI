@@ -1,0 +1,129 @@
+{
+  "date": "2026-10-17",
+  "baseline_commit": "e890137",
+  "reason": "cold_native_queries_starve_single_producer",
+  "cpu_cold_forward": {
+    "1": {
+      "seconds": 2.762698700011242,
+      "bitwise_equal": true,
+      "scratch_query_files": 24
+    },
+    "2": {
+      "seconds": 2.0862414999864995,
+      "bitwise_equal": true,
+      "scratch_query_files": 24
+    },
+    "4": {
+      "seconds": 1.8615174999576993,
+      "bitwise_equal": true,
+      "scratch_query_files": 24
+    }
+  },
+  "cpu_cold_reverse": {
+    "4": {
+      "seconds": 1.764759200043045,
+      "bitwise_equal": true,
+      "scratch_query_files": 24
+    },
+    "2": {
+      "seconds": 2.1417247999925166,
+      "bitwise_equal": true,
+      "scratch_query_files": 24
+    },
+    "1": {
+      "seconds": 2.988012499990873,
+      "bitwise_equal": true,
+      "scratch_query_files": 24
+    }
+  },
+  "same_sample_gpu_cold": [
+    {
+      "sample_workers": 1,
+      "batches": 16,
+      "samples": 128,
+      "seconds": 10.412523700040765,
+      "samples_per_sec": 12.292889186845153,
+      "consumer_wait_sec": 4.384609899949282,
+      "query_files_built": 81,
+      "mean_loss": 1.9459844827651978,
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 16,
+        "prepare_sec": 9.501,
+        "consumer_wait_sec": 4.362,
+        "buffered_tensor_bytes": 0,
+        "max_buffered_tensor_bytes": 6375992
+      }
+    },
+    {
+      "sample_workers": 4,
+      "batches": 16,
+      "samples": 128,
+      "seconds": 8.194138799968641,
+      "samples_per_sec": 15.620921627601653,
+      "consumer_wait_sec": 1.8939332999289036,
+      "query_files_built": 81,
+      "mean_loss": 1.945967197418213,
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 4,
+        "prepared_batches": 16,
+        "prepare_sec": 6.664,
+        "consumer_wait_sec": 1.791,
+        "buffered_tensor_bytes": 0,
+        "max_buffered_tensor_bytes": 8768392
+      }
+    }
+  ],
+  "serial_production_cold": {
+    "first_batch": 501,
+    "last_batch": 1457,
+    "seconds": 817.8599999999999,
+    "samples_per_sec": 9.3512337074805,
+    "data_wait_sec": 551.688,
+    "compute_sec": 230.60399999999998
+  },
+  "parallel_production_cold": {
+    "first_batch": 1460,
+    "last_batch": 1568,
+    "seconds": 62.420000000000016,
+    "samples_per_sec": 13.841717398269783,
+    "data_wait_sec": 18.676000000000002,
+    "compute_sec": 40.004000000000005
+  },
+  "production_windows_identical_samples": false,
+  "sample_gpu_mean_percent": 67.24,
+  "sample_gpu_min_percent": 0,
+  "sample_gpu_max_percent": 100,
+  "sample_gpu_observations": 25,
+  "restored_task": {
+    "task_id": "613fa459f890",
+    "status": "running",
+    "last_checkpoint": {
+      "path": "E:\\simai_transformer\\checkpoints\\Prism_Re_v7\\form_last.pt",
+      "epoch": 1,
+      "phase": "layout_revision",
+      "batch": 1600,
+      "optimizer_steps": 400,
+      "blueprint_steps": 529,
+      "epoch_complete": false,
+      "resumable": true,
+      "reason": "interval",
+      "elapsed_sec": 0.787
+    },
+    "sample_workers": 4,
+    "current_batch": 1644,
+    "cumulative_samples_per_sec": 16.23
+  },
+  "validation": {
+    "initial_python_passed": 52,
+    "final_equivalence_api_python_passed": 32,
+    "node_passed": 23,
+    "counts_overlap": true
+  },
+  "unchanged_training_semantics": true,
+  "full_gpu_saturation_claimed": false
+}

@@ -24,6 +24,9 @@ class SeededRows(Dataset):
         return {'value': torch.rand(3, generator=torch.Generator().manual_seed(77+index)),
                 'index': torch.tensor(index)}
 
+    def prepare_concurrency_key(self, index):
+        return index % 3
+
 
 def loader(dataset):
     return DataLoader(dataset, batch_size=2, num_workers=0,
@@ -73,3 +76,58 @@ def test_prefetch_handles_empty_dataset():
 def test_prefetch_depth_is_explicitly_bounded(depth):
     with pytest.raises(ValueError, match='depth'):
         LayoutBatchPrefetch(loader(SeededRows()), depth=depth)
+
+
+def test_parallel_sample_preparation_preserves_order_values_and_rng():
+    expected = list(loader(SeededRows(20)))
+    before = torch.get_rng_state().clone()
+    dataset = SeededRows(20)
+    with LayoutBatchPrefetch(loader(dataset), depth=2, sample_workers=4) as stream:
+        actual = list(stream)
+        assert stream.stats()['sample_workers'] == 4
+    torch.testing.assert_close(torch.get_rng_state(), before, rtol=0, atol=0)
+    for a, b in zip(expected, actual):
+        for key in a:
+            torch.testing.assert_close(a[key], b[key], rtol=0, atol=0)
+
+
+def test_parallel_sample_preparation_serializes_the_same_source():
+    class GuardedRows(SeededRows):
+        def __init__(self):
+            super().__init__(20)
+            self.active = set()
+            self.lock = threading.Lock()
+            self.maximum_active = 0
+
+        def __getitem__(self, index):
+            key = self.prepare_concurrency_key(index)
+            with self.lock:
+                assert key not in self.active
+                self.active.add(key)
+                self.maximum_active = max(self.maximum_active, len(self.active))
+            time.sleep(.01)
+            result = super().__getitem__(index)
+            with self.lock:
+                self.active.remove(key)
+            return result
+
+    dataset = GuardedRows()
+    multi_loader = DataLoader(dataset, batch_size=8, num_workers=0,
+                              generator=torch.Generator().manual_seed(33))
+    with LayoutBatchPrefetch(multi_loader, depth=2, sample_workers=4) as stream:
+        assert sum(len(batch['index']) for batch in stream) == 20
+    assert dataset.maximum_active > 1
+    assert not dataset.active
+
+
+def test_parallel_preparation_propagates_errors_and_joins_workers():
+    with pytest.raises(ValueError, match='original preparation failure'):
+        with LayoutBatchPrefetch(loader(SeededRows(fail=2)), depth=2, sample_workers=4) as stream:
+            list(stream)
+    assert not any(thread.name.startswith('song-form-sample') for thread in threading.enumerate())
+
+
+@pytest.mark.parametrize('workers', [0, -1, 9, True])
+def test_sample_worker_count_is_bounded(workers):
+    with pytest.raises(ValueError, match='sample workers'):
+        LayoutBatchPrefetch(loader(SeededRows()), sample_workers=workers)

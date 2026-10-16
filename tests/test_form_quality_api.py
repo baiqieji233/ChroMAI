@@ -80,6 +80,7 @@ def test_fresh_evidence_fields_reach_cli_and_effective_settings(webui_api, monke
         "mode": "fresh", "model_family": "song_form_v2", "device": "cpu",
         "d_model": 32, "nhead": 4, "layers": 1,
         "quality_profile": "musical_evidence_v1", "position_alignment_loss_weight": .3,
+        "layout_prepare_threads": 3,
         "position_alignment_tolerance_ms": 20., "planner_context_seconds": 1.5, "curve_bin_seconds": 1.25,
     })
     assert status == 200, result
@@ -91,6 +92,8 @@ def test_fresh_evidence_fields_reach_cli_and_effective_settings(webui_api, monke
                           "curve_bin_seconds": 1.25}.items():
         assert getattr(args, key) == expected
         assert task.result["effective_settings"][key] == expected
+    assert args.layout_prepare_threads == 3
+    assert task.result['effective_settings']['layout_prepare_threads'] == 3
 
 
 def test_generation_preflight_forwards_meter_and_checkpoint_quality_to_curve_validator(webui_api, monkeypatch, tmp_path):

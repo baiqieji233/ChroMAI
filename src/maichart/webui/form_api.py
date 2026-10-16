@@ -390,6 +390,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'checkpoint_interval_steps':number('checkpoint_interval_steps',500,0,1000000,True),
                 'loader_workers':number('loader_workers',0,0,64,True),
                 'prefetch_factor':number('prefetch_factor',2,1,16,True),
+                'layout_prepare_threads':number('layout_prepare_threads',4,1,8,True),
                 'log_interval':number('log_interval',10,0.1,3600),
                 'audio_cache_gb':number('audio_cache_gb',1,0,1024),
                 'audio_cache_mode':str(payload.get('audio_cache_mode','lru')).lower(),

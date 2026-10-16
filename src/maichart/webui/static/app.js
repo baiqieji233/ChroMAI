@@ -1626,6 +1626,7 @@ function songFormTrainingPayload(options = {}) {
     precision: valueOrDefault("#formPrecision", "auto"),
     loader_workers: Number(valueOrDefault("#formLoaderWorkers", 0)),
     prefetch_factor: Number(valueOrDefault("#formPrefetchFactor", 2)),
+    layout_prepare_threads: Number(valueOrDefault("#formLayoutPrepareThreads", 4)),
     log_interval: Number(valueOrDefault("#formLogInterval", 10)),
     checkpoint_interval_steps: Number(valueOrDefault("#formCheckpointIntervalSteps", 500)),
     audio_cache_gb: Number(valueOrDefault("#formAudioCacheGb", 1)),

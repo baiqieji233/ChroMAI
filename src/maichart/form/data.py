@@ -142,12 +142,15 @@ class _SampleStore:
     def __init__(self, budget):
         self.budget=budget;self.entries=OrderedDict();self.bytes=0
         self.hits=self.misses=self.evictions=0
+        self._lock=threading.RLock()
 
     def __getstate__(self):
-        return {'budget':self.budget,'entries':OrderedDict(),'bytes':0,
-                'hits':0,'misses':0,'evictions':0}
+        with self._lock:
+            return {'budget':self.budget,'entries':OrderedDict(),'bytes':0,
+                    'hits':0,'misses':0,'evictions':0}
 
-    def __setstate__(self,state): self.__dict__.update(state)
+    def __setstate__(self,state):
+        self.__dict__.update(state);self._lock=threading.RLock()
 
     @staticmethod
     def _size(value):
@@ -165,25 +168,28 @@ class _SampleStore:
         return value
 
     def get(self,key):
-        if key not in self.entries:
-            self.misses+=1;return None
-        self.hits+=1;self.entries.move_to_end(key)
-        return self._copy(self.entries[key][0])
+        with self._lock:
+            if key not in self.entries:
+                self.misses+=1;return None
+            self.hits+=1;self.entries.move_to_end(key)
+            return self._copy(self.entries[key][0])
 
     def put(self,key,value):
         if self.budget == 0: return
         stored=self._copy(value);size=self._size(stored)
         if self.budget is not None and size > self.budget: return
-        old=self.entries.pop(key,None)
-        if old: self.bytes-=old[1]
-        self.entries[key]=(stored,size);self.bytes+=size
-        while self.budget is not None and self.bytes>self.budget:
-            _,(_,removed)=self.entries.popitem(last=False)
-            self.bytes-=removed;self.evictions+=1
+        with self._lock:
+            old=self.entries.pop(key,None)
+            if old: self.bytes-=old[1]
+            self.entries[key]=(stored,size);self.bytes+=size
+            while self.budget is not None and self.bytes>self.budget:
+                _,(_,removed)=self.entries.popitem(last=False)
+                self.bytes-=removed;self.evictions+=1
 
     def stats(self):
-        return {'hits':self.hits,'misses':self.misses,'evictions':self.evictions,
-                'entries':len(self.entries),'bytes':self.bytes,'budget_bytes':self.budget}
+        with self._lock:
+            return {'hits':self.hits,'misses':self.misses,'evictions':self.evictions,
+                    'entries':len(self.entries),'bytes':self.bytes,'budget_bytes':self.budget}
 
 
 class _LazyAudio:
@@ -856,6 +862,28 @@ class FormDataset(Dataset):
         if not self.items: raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
 
     def __len__(self): return len(self.items)
+
+    def prepare_concurrency_key(self, index):
+        """Return the shared audio owner without resolving or loading audio.
+
+        A sample preparer can serialize same-source work to protect its audio
+        view bookkeeping and sustained-action index, while preparing unrelated
+        songs concurrently. This key affects scheduling only, never sample
+        content, cache identity, epoch order or perturbation seeds.
+        """
+        song_index = self.items[index][0]
+        audio = self.songs[song_index][0].audio
+        if isinstance(audio, _LazyAudio):
+            source = audio.path
+        else:
+            source = getattr(audio, 'source', None)
+            if not source:
+                source = (getattr(audio, 'metadata', None) or {}).get('source')
+        if source:
+            return os.path.normcase(os.path.abspath(str(source)))
+        # Synthetic/in-memory datasets may have no source path. Shared object
+        # identity still keeps their mutable views on a single preparation lane.
+        return f'in_memory_audio:{id(audio)}'
 
     def preload_audio(self, report):
         from maichart.form.audio_residency import preload_audio

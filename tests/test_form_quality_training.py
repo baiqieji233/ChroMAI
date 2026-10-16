@@ -64,6 +64,19 @@ def test_interrupted_finetune_does_not_inherit_layout_readiness_under_new_inputs
 
 def test_enhanced_mid_epoch_resume_matches_uninterrupted_updates(source, tmp_path, monkeypatch):
     """New auxiliary heads, dropout and perturbations must survive interruption."""
+    import json
+    import shutil
+    # Two distinct sources force the threaded path to do real concurrent
+    # work; a single song would serialize everything under its source lock.
+    manifest = json.loads(source[1].read_text(encoding='utf-8'))
+    duplicate = tmp_path/'another_source'
+    duplicate.mkdir()
+    shutil.copyfile(source[0], duplicate/'track.wav')
+    original_chart = manifest['songs'][0]['maidata_path']
+    shutil.copyfile(original_chart, duplicate/'maidata.txt')
+    manifest['songs'].append({**manifest['songs'][0], 'song_id':'rational_copy',
+        'maidata_path':str(duplicate/'maidata.txt'), 'audio_path':str(duplicate/'track.wav')})
+    source[1].write_text(json.dumps(manifest),encoding='utf-8')
     thread_count = torch.get_num_threads()
     torch.set_num_threads(1)
     try:
@@ -91,7 +104,8 @@ def test_enhanced_mid_epoch_resume_matches_uninterrupted_updates(source, tmp_pat
         partial_dir = tmp_path/'partial'
         monkeypatch.setattr(train, '_atomic_save', interrupt_after_update)
         with pytest.raises(InterruptedError, match='accumulation group'):
-            train.main(common + ['--checkpoint-dir', str(partial_dir), '--layout-prefetch-batches', '2'])
+            train.main(common + ['--checkpoint-dir', str(partial_dir), '--layout-prefetch-batches', '2',
+                                 '--layout-prepare-threads', '4'])
         monkeypatch.setattr(train, '_atomic_save', atomic_save)
         resumed_dir = tmp_path/'resumed'
         assert train.main(common + ['--checkpoint-dir', str(resumed_dir),
