@@ -1,7 +1,7 @@
 """Song-level organization and causal training inputs for the new family."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from collections import OrderedDict, deque
 from concurrent.futures import ThreadPoolExecutor
 from fractions import Fraction
@@ -218,7 +218,8 @@ class FormSong:
 
 def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2.0, max_seconds=14.0,
                   rhythm_geometry_profile='none'):
-    if rhythm_geometry_profile not in {'none','exact_fraction_v1'}:
+    from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
+    if rhythm_geometry_profile not in GEOMETRY_PROFILES:
         raise ValueError('Unknown rhythm geometry profile')
     if hasattr(audio,'feature_policy'):
         audio.feature_policy='native_measured_v2' if rhythm_geometry_profile!='none' else 'legacy_sparse_v1'
@@ -290,6 +291,10 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
                   load_curve_condition_mask=None, history_before=None,
                   perturbation_config=None):
     codec = codec or RationalCodec()
+    # Resolve lazy audio once per example. Attribute-by-attribute resolution
+    # otherwise repeats source stat checks and LRU updates for resident data.
+    if isinstance(song.audio,_LazyAudio):
+        song = replace(song,audio=song.audio.store.get(song.audio.path))
     span = song.spans[index]
     region_index = song.span_region_indices[index]
     region = song.regions[region_index]
@@ -396,6 +401,11 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
     if song.rhythm_geometry_profile != 'none':
         from maichart.form.rhythm_geometry import coordinate_features,causal_prefix_geometry
         from maichart.form.rational_audio import beat_at_second
+        # The geometry contract is checkpointed, so the profile and the meter
+        # map must travel together with every coordinate this example builds.
+        # Under v2 the map is what makes a 24th on beat 1 differ from a 24th on
+        # beat 2; omitting it would silently fall back to an unanchored prior.
+        geometry = {'profile': song.rhythm_geometry_profile, 'meters': song.meters}
         if rational_query is not None:
             audio_beats=rational_query[2]
         else:
@@ -405,13 +415,17 @@ def input_example(song, index, history, *, condition=None, codec=None, task=0,
             high=seconds_at_beat(span.end,song.tempo,song.first)
             audio_beats=[beat_at_second(float(t),song.tempo,song.first)
                          for t in segment_frame_times(low,high)]
-        result['audio_geometry']=coordinate_features(audio_beats,origin=span.start)
+        result['audio_geometry']=coordinate_features(audio_beats,origin=span.start,**geometry)
         result['history_geometry']=causal_prefix_geometry(history_tokens,codec,
-            origin=hist_origin,coordinate_origin=span.start)
+            origin=hist_origin,coordinate_origin=span.start,**geometry)
         for name, branch_origin in (('motif',span.start),('draft',span.start),('right',span.end)):
             result[name+'_geometry']=causal_prefix_geometry(result[name],codec,
-                origin=branch_origin,coordinate_origin=span.start)
+                origin=branch_origin,coordinate_origin=span.start,**geometry)
         result['load_curve_geometry']=curve_geometry(song,span.start,local_times)
+        # Song-level meter context for the decode-side geometry state. It is
+        # not a model input; it lets cached decoding rebuild the same
+        # meter-anchored coordinates the training example used.
+        result['_meters']=song.meters
     return result
 
 
@@ -422,7 +436,8 @@ def curve_geometry(song, origin, local_times):
     local_begin=Fraction(str(seconds_at_beat(origin,song.tempo,song.first)))
     beats=[beat_at_second(local_begin+Fraction(str(float(time))),song.tempo,song.first)
            for time in local_times]
-    return coordinate_features(beats,origin=origin)
+    return coordinate_features(beats,origin=origin,profile=song.rhythm_geometry_profile,
+                               meters=song.meters)
 
 
 def relation_target(target, reference, span):
@@ -649,7 +664,8 @@ class FormDataset(Dataset):
                  preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz',
                  rhythm_geometry_profile='none', perturbation_config=None):
         from maichart.form.rational_audio import PROFILE, extract_rational_audio
-        if rhythm_geometry_profile not in {'none', 'exact_fraction_v1'}:
+        from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
+        if rhythm_geometry_profile not in GEOMETRY_PROFILES:
             raise ValueError('Unknown rhythm geometry profile')
         self.rhythm_geometry_profile = rhythm_geometry_profile
         custom_loader = audio_loader not in (extract_event_audio, extract_rational_audio)
@@ -855,8 +871,11 @@ class FormDataset(Dataset):
                       relation_valid=torch.tensor(ref_index is not None),weight=torch.tensor(weight*local_weight))
         if song.rhythm_geometry_profile != 'none':
             from maichart.form.rhythm_geometry import causal_prefix_geometry,event_timing_targets
-            result['decoder_geometry']=causal_prefix_geometry(result['decoder_input'],self.codec,origin=span.start)
-            labels=event_timing_targets(result['decoder_input'],result['target'],self.codec,origin=span.start)
+            geometry = {'profile': song.rhythm_geometry_profile, 'meters': song.meters}
+            result['decoder_geometry']=causal_prefix_geometry(result['decoder_input'],self.codec,
+                origin=span.start,**geometry)
+            labels=event_timing_targets(result['decoder_input'],result['target'],self.codec,
+                origin=span.start,**geometry)
             result['timing_labels']=labels['labels']
             result['timing_mask']=labels['mask']
         if cache_key is not None and sample_store is not None: sample_store.put(cache_key,result)

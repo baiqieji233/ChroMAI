@@ -229,6 +229,69 @@ def build_spans(
     return result
 
 
+def meter_phase(meter: MeterChange, beat: Fraction) -> tuple[float, float, float, float, float]:
+    """Return ``(bar_phase, group_phase, beats_per_bar, meter_known, grouping_known)``.
+
+    Bar phase is measured from the active meter change, whose declared beat is
+    a bar line by construction, so the coordinate is anchored to real bars
+    rather than to whatever point a computational span happens to start at.
+    """
+    bar = meter.beats_per_bar
+    within = (beat - meter.beat) % bar
+    grouping_known = 1.0 if meter.grouping else 0.0
+    group_phase = 0.0
+    if meter.grouping:
+        start = Fraction(0)
+        for size in meter.grouping:
+            length = Fraction(size * 4, meter.denominator)
+            if within < start + length:
+                group_phase = float((within - start) / length)
+                break
+            start += length
+    return float(within / bar), group_phase, float(bar), 1.0, grouping_known
+
+
+class MeterPhaseIndex:
+    """Exact bar/group phase for absolute beats, invariant across spans.
+
+    Unknown meter returns a fixed four-beat prior anchored at absolute beat
+    zero together with ``meter_known = 0``. That prior is a smooth positional
+    basis, not a meter assertion; the flag lets a model learn how far to trust
+    it. It is deliberately *not* anchored at a span start, so the same musical
+    position always receives the same coordinate.
+    """
+
+    __slots__ = ("meters", "_beats", "_window")
+
+    def __init__(self, meters: Iterable[MeterChange | Mapping[str, Any]] | None = None) -> None:
+        values = [item if isinstance(item, MeterChange) else MeterChange.from_dict(item)
+                  for item in (meters or ())]
+        self.meters = sorted(values, key=lambda meter: Fraction(meter.beat))
+        self._beats = [Fraction(meter.beat) for meter in self.meters]
+        self._window: tuple[Fraction, Fraction | None, MeterChange] | None = None
+
+    def __bool__(self) -> bool:
+        return bool(self.meters)
+
+    def phase(self, beat: Fraction | int | str) -> tuple[float, float, float, float, float]:
+        value = _beat(beat)
+        window = self._window
+        if window is not None and window[0] <= value < (window[1] if window[1] is not None else value + 1):
+            return meter_phase(window[2], value)
+        index = bisect_right(self._beats, value) - 1
+        if index < 0:
+            prior = value % 4
+            return float(prior / 4), 0.0, 4.0, 0.0, 0.0
+        meter = self.meters[index]
+        stop = self._beats[index + 1] if index + 1 < len(self._beats) else None
+        # A trailing ``None`` upper bound means "the final meter runs to the
+        # end"; the guard above treats it as unbounded above. Geometry rows are
+        # built per token, so caching this case matters more than caching the
+        # bounded ones.
+        self._window = (self._beats[index], stop, meter)
+        return meter_phase(meter, value)
+
+
 def metrical_features(
     beats: Iterable[Fraction | int | str],
     meters: Iterable[MeterChange | Mapping[str, Any]] | None = None,

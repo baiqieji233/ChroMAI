@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import torch
 from torch import nn
 
+from maichart.form.rhythm_geometry import GEOMETRY_DIM, GEOMETRY_DIM_V2, GEOMETRY_PROFILES
+
 
 @dataclass(slots=True)
 class FormConfig:
@@ -37,8 +39,15 @@ class FormConfig:
             raise ValueError("d_model must be divisible by nhead.")
         if not 0 <= self.dropout < 1:
             raise ValueError("dropout must be in [0, 1).")
-        if self.rhythm_geometry_profile not in {'none','exact_fraction_v1'}:
+        if self.rhythm_geometry_profile not in GEOMETRY_PROFILES:
             raise ValueError('Unknown rhythm geometry profile')
+
+    @property
+    def geometry_dim(self) -> int:
+        """Channel count of the exact-geometry contract; zero when disabled."""
+        if self.rhythm_geometry_profile == 'none':
+            return 0
+        return GEOMETRY_DIM_V2 if self.rhythm_geometry_profile == 'exact_fraction_v2' else GEOMETRY_DIM
 
 
 class FormTransformer(nn.Module):
@@ -102,8 +111,8 @@ class FormTransformer(nn.Module):
         self.output_head = nn.Linear(width, config.vocab_size)
         self.relation_head = nn.Linear(width, 2)
         if config.rhythm_geometry_profile != 'none':
-            self.time_geometry_projection = nn.Linear(8,width,bias=False)
-            self.decoder_geometry_projection = nn.Linear(8,width,bias=False)
+            self.time_geometry_projection = nn.Linear(config.geometry_dim,width,bias=False)
+            self.decoder_geometry_projection = nn.Linear(config.geometry_dim,width,bias=False)
             self.interval_head = nn.Linear(width,3)
             # A migrated model initially retains its learned main-branch
             # computation; timing geometry becomes effective during finetune.
@@ -208,7 +217,7 @@ class FormTransformer(nn.Module):
                     if geometry_key not in batch:
                         raise ValueError(f'Exact geometry memory requires {geometry_key}')
                     geometry=batch[geometry_key].to(device=device,dtype=values.dtype)
-                    if geometry.shape != (*values.shape[:2],8):
+                    if geometry.shape != (*values.shape[:2],self.config.geometry_dim):
                         raise ValueError(f'{geometry_key} shape differs from its memory branch')
                     self._finite(geometry,geometry_key)
                     values=values+self.time_geometry_projection(geometry)
@@ -376,8 +385,8 @@ class FormTransformer(nn.Module):
         positions = torch.arange(length, device=ids.device).unsqueeze(0)
         target = self.token_embedding(ids) + self.position_embedding(positions)
         if self.config.rhythm_geometry_profile != 'none':
-            if timing_features is None or timing_features.shape != (*ids.shape,8):
-                raise ValueError('Exact geometry decoding needs causal decoder_geometry [B,L,8]')
+            if timing_features is None or timing_features.shape != (*ids.shape,self.config.geometry_dim):
+                raise ValueError(f'Exact geometry decoding needs causal decoder_geometry [B,L,{self.config.geometry_dim}]')
             self._finite(timing_features,'decoder_geometry')
             target=target+self.decoder_geometry_projection(timing_features.to(target))
         causal_mask = torch.triu(
@@ -405,8 +414,9 @@ class FormTransformer(nn.Module):
         hidden = self.token_embedding(token) + self.position_embedding(
             torch.tensor([position],device=token.device)).unsqueeze(0)
         if self.config.rhythm_geometry_profile != 'none':
-            if timing_features is None or timing_features.shape != (*token.shape,8):
-                raise ValueError('Exact geometry cached decoding needs causal timing_features [B,1,8]')
+            if timing_features is None or timing_features.shape != (*token.shape,self.config.geometry_dim):
+                raise ValueError('Exact geometry cached decoding needs causal timing_features '
+                                 f'[B,1,{self.config.geometry_dim}]')
             hidden=hidden+self.decoder_geometry_projection(timing_features.to(hidden))
         caches=caches or []
         updated=[]

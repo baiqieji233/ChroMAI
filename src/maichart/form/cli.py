@@ -61,6 +61,8 @@ def parser():
                    help='v2 near-common-grid cleanup tolerance in milliseconds; 0 preserves decoder Fractions exactly')
     p.add_argument('--rational-grid-divisions',default=None,
                    help='v2 near-common-grid candidates, comma-separated; this is not a denominator whitelist')
+    p.add_argument('--physical-feasibility-strength',type=float,default=None,
+                   help='v2 causal hold/slide occupancy and hand-travel soft bias; 0 disables, never removes candidates')
     p.add_argument('--start');p.add_argument('--end')
     p.add_argument('--bpm',type=float);p.add_argument('--first',type=float,default=0.)
     p.add_argument('--meter-map');p.add_argument('--tempo-map');p.add_argument('--structure-file')
@@ -103,9 +105,14 @@ def _resolve_carried_generation_options(args, condition_data):
                           ('position_complexity', .2), ('position_beam_size', 1), ('early_eos_penalty', 0.),
                           ('position_max_denominator',96), ('interval_max_denominator',96),
                           ('rational_min_spacing_ms',20.), ('rational_grid_snap_ms',8.),
-                          ('rational_grid_divisions','4,6,8,12,16,24,32,48,64,96')):
+                          ('rational_grid_divisions','4,6,8,12,16,24,32,48,64,96'),
+                          ('physical_feasibility_strength',0.)):
         if getattr(args, name) is None:
-            setattr(args, name, carried.get(name, default))
+            # An explicit null in a carried payload means "not chosen", the same
+            # as an absent key. A plain ``get(name, default)`` would return None
+            # and let a later validator fail with a bare TypeError.
+            carried_value = carried.get(name)
+            setattr(args, name, default if carried_value is None else carried_value)
 
 
 def analysis_report(song):
@@ -129,6 +136,9 @@ def main(argv=None):
     validate_strength(args.planner_type_strength,'planner_type_strength')
     validate_strength(args.style_balance_strength,'style_balance_strength')
     args.local_chord_strength = validate_strength(args.local_chord_strength,'local_chord_strength')
+    from maichart.form.physical_guard import validate_physical_strength
+    args.physical_feasibility_strength = validate_physical_strength(
+        args.physical_feasibility_strength,'physical_feasibility_strength')
     from maichart.form.onset_selection import merge_close_onsets
     merge_close_onsets([], args.onset_merge_ms)
     from maichart.form.rhythm_snap import validate_snap_ms, validate_source_ms, normalize_divisions
@@ -252,6 +262,7 @@ def main(argv=None):
              rational_min_spacing_ms=args.rational_min_spacing_ms,
             rational_grid_snap_ms=args.rational_grid_snap_ms,
             rational_grid_divisions=list(rational_grid_divisions),
+            physical_feasibility_strength=args.physical_feasibility_strength,
             time_representation='direct_canonical_fraction',audio_profile=song.audio_profile)
     intensity_curve = None
     curve_condition_warnings = []
@@ -297,7 +308,8 @@ def main(argv=None):
                  'max_interval_denominator':args.interval_max_denominator,
                  'min_spacing_ms':args.rational_min_spacing_ms,
                  'rational_grid_snap_ms':args.rational_grid_snap_ms,
-                 'rational_grid_divisions':list(rational_grid_divisions)} if rational else {}))
+                 'rational_grid_divisions':list(rational_grid_divisions),
+                 'physical_strength':args.physical_feasibility_strength} if rational else {}))
         report.update(generated)
     else:
         points,revision=revise_chart(model,codec,song,chart.points,condition,payload['atom_catalog'],

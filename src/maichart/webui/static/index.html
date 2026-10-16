@@ -281,7 +281,7 @@
 <label class="field">模型宽度 d_model<input id="formDModel" type="number" min="16" max="2048" step="1" value="256"></label>
 <label class="field" data-training-family="song_form_v2">前馈层宽度<input id="formDimFeedforward" type="number" min="0" max="32768" step="1" value="0"><small>0 自动采用 3 × 模型宽度；可独立增加容量，无需同时把所有层扩到 512。</small></label>
 <label class="field" data-training-family="song_form_v2">Planner 宽度<input id="formPlannerWidth" type="number" min="16" max="2048" step="4" value="128"><small>独立于配置模型，必须能被 4 整除；规划全曲负荷与段落条件。</small></label>
-<label class="field" data-training-family="song_form_v2">精确节奏几何<select id="formRhythmGeometryProfileSelect"><option value="auto" selected>自动（fresh 推荐）</option><option value="none">关闭数值几何辅助</option><option value="exact_fraction_v1">exact_fraction_v1</option></select><small id="formRhythmGeometryProfileHelp">fresh 的自动模式启用精确拍位数值坐标与间隔辅助监督；不吸附固定分音，也不使用固定帧率。生成仍保留拍位字符预算与分母资源上限。</small></label>
+<label class="field" data-training-family="song_form_v2">精确节奏几何<select id="formRhythmGeometryProfileSelect"><option value="auto" selected>自动（fresh 推荐）</option><option value="none">关闭数值几何辅助</option><option value="exact_fraction_v1">exact_fraction_v1（分段相对拍位）</option><option value="exact_fraction_v2">exact_fraction_v2（小节相位，推荐）</option></select><small id="formRhythmGeometryProfileHelp">fresh 的自动模式启用小节相位数值坐标与间隔辅助监督；不吸附固定分音，也不使用固定帧率。生成仍保留拍位字符预算与分母资源上限。</small></label>
 <p class="workflow-hint span-4" data-training-family="song_form_v2">默认 256 维、4 层、前馈 768、Planner 128：约 760 万参数。保留等级、Radar / Style、难度曲线、段落参考和持续动作；增加宽度不会自动提高采音时间精度。从其他模型族迁入须从头训练；已有 v2 可通过 finetune 显式升级精确节奏几何，旧 checkpoint 仍可按原合同生成。</p>
 <label class="field">Transformer 层数<input id="formLayers" type="number" min="1" max="32" value="4"></label>
 <label class="field">注意力头数 nhead<input id="formNhead" type="number" min="1" max="64" value="8"><small>必须整除 d_model。</small></label>
@@ -388,7 +388,8 @@
 <label class="field">条件随机省略概率<input id="formConditionDropout" type="number" min="0" max="1" step="0.05" value="0.15"><small>训练中随机不提供 Radar / Style，以显式空条件标记学习缺省控制；等级、音频和局部负荷曲线输入仍保留。此概率不遮罩曲线输入或目标；曲线预测监督由下方单独的损失权重控制。</small></label>
 <label class="field">全曲规划损失权重<input id="formBlueprintLossWeight" type="number" min="0" step="0.1" value="1"><small>缩放所选模型族的规划目标：v1 含起音目标，v2 为全曲负荷曲线；过低可能使规划器学不足。</small></label>
 <label class="field" data-training-family="song_form_v2">续写与结束学习权重<input id="formEventDecisionLossWeight" type="number" min="0" max="10" step="0.05" value="0.25"><small>默认 0.25：在原 token 损失外，单独监督 AT（继续写）与 EOS（结束），减少短空段的结束监督相对长非空段过强。0 关闭；不是强制填满歌曲，真实休止仍参与学习。旧检查点 resume 继承原值（未记录为 0）；要启用新目标请用加强训练 finetune 并选新输出目录。</small></label>
-<label class="field" data-training-family="song_form_v2">节奏几何辅助损失权重<input id="formRhythmLossWeight" type="number" min="0" max="10" step="0.01" placeholder="自动"><small>留空自动：新的 exact_fraction_v1 训练为 0.1，旧几何合同为 0。监督精确拍位坐标与相邻间隔，不把输出拍位固定到常见分音，也不改变采样帧率。</small></label>
+<label class="field" data-training-family="song_form_v2">节奏几何辅助损失权重<input id="formRhythmLossWeight" type="number" min="0" max="10" step="0.01" placeholder="自动"><small>留空自动：新的精确节奏几何训练为 0.1，旧几何合同为 0。监督精确拍位坐标与相邻间隔，不把输出拍位固定到常见分音，也不改变采样帧率。</small></label>
+<label class="field" data-training-family="song_form_v2">拍位均衡损失权重<input id="formPositionEventLossWeight" type="number" min="0" max="10" step="0.05" value="0.25"><small>默认 0.25：先对每个事件的分数拍位拼写取平均，再对事件取平均。原 token 损失按字符计权，一个长分母（如 123/128）会被监督得比一位整数重好几倍，训练会偏向拼写长的事件；这项让一个事件算一份监督。只重组拍位拼写，音符文本仍按原 token 损失学习。0 关闭；旧检查点 resume 继承原值（未记录为 0）。</small></label>
 <label class="field">局部负荷预测损失权重<input id="formCurveLossWeight" type="number" min="0" step="0.1" value="0.2"><small>单独缩放局部负荷曲线目标的监督损失；不由上方 Radar / Style 条件省略概率控制。设为 0 会关闭这项损失，不等于遮罩曲线输入。</small></label>
 <label class="field">段落关联辅助损失权重<input id="formRelationLossWeight" type="number" min="0" step="0.05" value="0.1"><small>学习相似段落中配置的呼应关系；不会把参考谱面直接复制进输出。</small></label>
 </div>
@@ -839,6 +840,7 @@
   <label class="field">最小有理事件间隔（毫秒）<input id="formRationalMinSpacingMs" type="number" min="0" max="50" step="0.1" value="20"><small>默认 20 ms，按实际时间差防止扎堆；跨 BPM 变化仍按毫秒生效。同刻多押仍写在一个事件中，不受此间隔拆散。0 关闭；高速超细节奏可调低，不是固定帧率或采音格点。</small></label>
   <label class="field">近似常见分音容差（毫秒）<input id="formRationalGridSnapMs" type="number" min="0" max="50" step="0.1" value="8"><small>只处理接近常见节奏网格的复杂 Fraction。默认 8 ms；0 保留模型原始拍位。它不会把所有拍位限制为白名单，孤立的 5/7、7/9 等特殊节奏会保留。</small></label>
   <label class="field">近似分音候选<input id="formRationalGridDivisions" type="text" value="4,6,8,12,16,24,32,48,64,96" placeholder="例如 4,6,8,12,16,24,32,48,64,96"><small>仅用于近似输出拍位，允许 1–768 的任意整数，最多 32 项；不会限制模型可表达的原始有理拍。</small></label>
+  <label class="field">物理可行性软约束<input id="formPhysicalFeasibilityStrength" type="number" min="0" max="3" step="0.1" value="0"><small>解码期因果约束：Hold / Slide 在其时长内占用对应键位，且双手必须在间隔时间内移动到下一个键位；对违反的候选按键加有界惩罚。0 关闭。建议先用 1.0，无理多可提到 2.0–3.0。它只加惩罚、从不删除候选，因此不会造成空候选或硬失败；过大会压制合理的密集双手交错。触摸无实体按键，不参与此约束。</small></label>
   <label class="field">每个计算段最多事件数<input id="formMaxEventsPerSpan" type="number" min="0" max="512" step="1" value="0"><small>0 由 Planner 负荷给出初始预算，触顶后最多扩展 3 次（上限 768）。手动正数是硬上限；触顶会保留已生成事件，并在日志和报告中标记覆盖不完整。正常模型建议保持 0。</small></label>
 </div>
 <p data-generation-family="song_form_v1" id="formTimingResolutionHelp" class="workflow-hint">当前音频特征与 Planner 每 20 毫秒一帧（50 Hz）；下面的误差参数控制生成后的时间规整，不会提高模型输入分辨率。Simai 拍位仍用精确分数表示。相邻起音先合并，再做分音规整；勾选 48/64 无法找回已被合并或未形成独立峰的音。快速段可先减小合并范围，但不要仅为消除偏差而不断放大移动容差。</p>

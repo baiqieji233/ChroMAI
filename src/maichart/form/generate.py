@@ -247,7 +247,10 @@ def arrange_span(model,codec,example,onsets,atoms,*,origin,temperature=.7,seed=0
         memory,mask=model.encode(batch)
         cache=None;consumed=0
         from maichart.form.rhythm_decode import DecodeGeometry
-        geometry=DecodeGeometry(model,codec,origin)
+        # The meter map must match the one the training example used, or a v2
+        # model receives unmetered coordinates and its bar-phase channels go
+        # silently wrong instead of failing loudly.
+        geometry=DecodeGeometry(model,codec,origin,meters=example.get('_meters'))
         def next_logits():
             nonlocal cache,consumed
             while consumed < len(ids):

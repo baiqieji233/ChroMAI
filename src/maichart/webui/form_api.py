@@ -19,7 +19,7 @@ RESUME_ARGUMENT_KEYS = ('batch_size', 'grad_accumulation', 'seed', 'weight_decay
                        'condition_drop_prob', 'blueprint_loss_weight',
                        'load_curve_loss_weight', 'relation_loss_weight',
                        'quality_enabled', 'max_steps', 'blueprint_batch_size','event_decision_loss_weight',
-                       'rhythm_loss_weight', *QUALITY_TRAINING_DEFAULTS)
+                       'rhythm_loss_weight', 'position_event_loss_weight', *QUALITY_TRAINING_DEFAULTS)
 
 
 def form_resume_settings(payload):
@@ -50,23 +50,28 @@ def isolated_form_output(requested, task_id):
 
 def resolve_rhythm_geometry_training_options(payload, *, family, mode, inspected):
     """Resolve browser intent without changing a saved resume contract."""
+    from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
     requested = str(payload.get('rhythm_geometry_profile', 'auto')).lower()
-    if requested not in {'auto', 'none', 'exact_fraction_v1'}:
-        raise ValueError('rhythm_geometry_profile must be auto, none, or exact_fraction_v1')
+    if requested not in {'auto', 'none', *GEOMETRY_PROFILES}:
+        raise ValueError('rhythm_geometry_profile must be auto, none, exact_fraction_v1, or exact_fraction_v2')
     config = (inspected or {}).get('model_config') or {}
     stored_profile = str(config.get('rhythm_geometry_profile', 'none'))
-    if stored_profile not in {'none', 'exact_fraction_v1'}:
+    if stored_profile not in GEOMETRY_PROFILES:
         raise ValueError('checkpoint has an unknown rhythm geometry profile')
     saved = (inspected or {}).get('args') or {}
     if family != 'song_form_v2':
         profile = 'none'
     elif mode == 'resume':
+        # Resume always inherits: changing the geometry width would invalidate
+        # the optimizer state the run was saved with.
         profile = stored_profile
     elif mode == 'finetune':
         # Old checkpoints migrate only after the user explicitly asks for it.
-        profile = 'exact_fraction_v1' if requested == 'exact_fraction_v1' else stored_profile
+        # A v1 checkpoint may migrate to v2, which carries its learned sub-beat
+        # channels across; anything else keeps the stored profile.
+        profile = requested if requested in GEOMETRY_PROFILES else stored_profile
     else:
-        profile = 'exact_fraction_v1' if requested == 'auto' else requested
+        profile = 'exact_fraction_v2' if requested == 'auto' else requested
 
     raw_weight = payload.get('rhythm_loss_weight')
     if mode == 'resume':
@@ -77,7 +82,7 @@ def resolve_rhythm_geometry_training_options(payload, *, family, mode, inspected
         if mode == 'finetune' and profile == stored_profile:
             weight = saved.get('rhythm_loss_weight', 0.)
         else:
-            weight = .1 if profile == 'exact_fraction_v1' else 0.
+            weight = .1 if profile != 'none' else 0.
     else:
         if isinstance(raw_weight, bool):
             raise ValueError('rhythm_loss_weight must be numeric')
@@ -148,7 +153,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics','form_cache_index'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics','form_cache_index','form_muri_audit'}:
         return
     try:
         value = json.loads(body)
@@ -158,6 +163,8 @@ def update_form_progress(task, line):
         return
     if prefix == 'form_rational_diagnostics':
         task.result['rational_diagnostics'] = value
+    elif prefix == 'form_muri_audit':
+        task.result['muri_audit'] = value
     elif prefix == 'form_cache_index':
         task.result['cache_index_progress'] = value
     elif prefix == 'form_prepare':
@@ -349,6 +356,14 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         values['blueprint_prefetch'] = number('blueprint_prefetch',8,1,64,True)
         if (inspected or {}).get('family',payload.get('model_family',FAMILY))=='song_form_v2':
             values['event_decision_loss_weight']=number('event_decision_loss_weight',.25,0,10)
+            # Resolved the same way the trainer resolves it: a resume keeps the
+            # objective its optimizer state was built against, everything else
+            # gets the fresh default.
+            saved = (inspected or {}).get('args') or {}
+            if mode == 'resume':
+                values['position_event_loss_weight'] = float(saved.get('position_event_loss_weight', 0.))
+            else:
+                values['position_event_loss_weight']=number('position_event_loss_weight',.25,0,10)
         values['quality_enabled'] = bool(payload.get('quality_enabled', True))
         if values['audio_cache_mode'] not in {'lru','resident'}:
             raise ValueError('audio_cache_mode must be lru or resident')
@@ -432,7 +447,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                    '--max-events-per-span',str(number('max_events_per_span',0,0,512,True)),
                    '--rational-min-spacing-ms',str(number('rational_min_spacing_ms',20,0,50)),
                    '--rational-grid-snap-ms',str(number('rational_grid_snap_ms',8,0,50)),
-                   '--rational-grid-divisions',','.join(map(str,rational_grid_divisions))]
+                   '--rational-grid-divisions',','.join(map(str,rational_grid_divisions)),
+                   '--physical-feasibility-strength',str(number('physical_feasibility_strength',0,0,3))]
         if bpm is not None: args += ['--bpm',str(bpm)]
         args += ['--first',str(first)]
         if initial: args+=['--checkpoint',str(initial)]

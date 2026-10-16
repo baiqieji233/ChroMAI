@@ -26,6 +26,13 @@ from maichart.form.training_runtime import (
     resolve_precision, restore_rng, validate_cpu_batch,
 )
 
+# The token vocabulary is fixed by the rational schema, so the per-event
+# position objective can share one codec instance instead of rebuilding it for
+# every batch.
+from maichart.form.codec import RationalCodec as _RationalCodec
+
+_CODEC_FOR_LOSS = _RationalCodec()
+
 # Keep the rational Planner's training evidence distribution identical to
 # curve prediction and generation.  The contract lives with rational audio so
 # every caller uses one source of truth.
@@ -80,10 +87,14 @@ def parser():
     p.add_argument('--relation-loss-weight', type=float, default=.1)
     p.add_argument('--event-decision-loss-weight',type=float,default=None,
                    help='v2 auxiliary AT/EOS objective; fresh/finetune default .25, old strict resume retains 0')
-    p.add_argument('--rhythm-geometry-profile', choices=('auto','none','exact_fraction_v1'), default='auto',
+    p.add_argument('--rhythm-geometry-profile', choices=('auto','none','exact_fraction_v1','exact_fraction_v2'), default='auto',
                    help='checkpointed v2 numeric Fraction geometry contract; enable only for fresh/finetune')
     p.add_argument('--rhythm-loss-weight', type=float, default=None,
                    help='masked next-event Fraction gap/phase loss; fresh exact profile defaults to .1')
+    p.add_argument('--position-event-loss-weight', type=float, default=None,
+                   help='average each event Fraction spelling before averaging events, so a long '
+                        'denominator is not supervised harder than a one-digit integer; '
+                        'fresh v2 defaults to .25, resume inherits')
     p.add_argument('--quality-enabled', dest='quality_enabled', action='store_true', default=True)
     p.add_argument('--no-quality-enabled', dest='quality_enabled', action='store_false')
     p.add_argument('--max-memory-tokens', type=int, default=512)
@@ -156,11 +167,14 @@ def _validate(args):
     if args.event_decision_loss_weight is not None and (not math.isfinite(args.event_decision_loss_weight)
             or not 0<=args.event_decision_loss_weight<=10):
         raise ValueError('event_decision_loss_weight must be between 0 and 10')
-    if args.rhythm_geometry_profile not in {'auto','none','exact_fraction_v1'}:
+    if args.rhythm_geometry_profile not in {'auto','none','exact_fraction_v1','exact_fraction_v2'}:
         raise ValueError('Unknown rhythm_geometry_profile')
     if args.rhythm_loss_weight is not None and (not math.isfinite(args.rhythm_loss_weight)
             or not 0 <= args.rhythm_loss_weight <= 10):
         raise ValueError('rhythm_loss_weight must be between 0 and 10')
+    if args.position_event_loss_weight is not None and (not math.isfinite(args.position_event_loss_weight)
+            or not 0 <= args.position_event_loss_weight <= 10):
+        raise ValueError('position_event_loss_weight must be between 0 and 10')
     if not math.isfinite(args.condition_drop_prob) or not 0 <= args.condition_drop_prob <= 1:
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
@@ -180,7 +194,7 @@ def fresh_model_configs(args):
     ff=getattr(args,'dim_feedforward',0) or (3 if rational else 4)*args.d_model
     profile = getattr(args, 'rhythm_geometry_profile', 'none')
     if profile == 'auto':
-        profile = 'exact_fraction_v1' if rational else 'none'
+        profile = 'exact_fraction_v2' if rational else 'none'
     config = FormConfig(vocab_size=len(RationalCodec()), d_model=args.d_model, nhead=args.nhead,
         dropout=args.dropout, layers=args.layers, dim_feedforward=ff,
         max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens,
@@ -209,21 +223,21 @@ def resolve_rhythm_geometry_settings(args, old=None, model=None):
     elif old:
         args.rhythm_geometry_profile = (saved_profile if requested_profile == 'auto' else requested_profile)
     else:
-        args.rhythm_geometry_profile = ('exact_fraction_v1' if requested_profile == 'auto' else requested_profile)
+        args.rhythm_geometry_profile = ('exact_fraction_v2' if requested_profile == 'auto' else requested_profile)
     if args.rhythm_loss_weight is None:
         if getattr(args, 'resume', None):
             args.rhythm_loss_weight = float((old.get('args') or {}).get('rhythm_loss_weight', 0.))
         else:
-            args.rhythm_loss_weight = .1 if args.rhythm_geometry_profile == 'exact_fraction_v1' else 0.
+            args.rhythm_loss_weight = .1 if args.rhythm_geometry_profile != 'none' else 0.
     if old and getattr(args, 'init_checkpoint', None) and saved_profile == 'exact_fraction_v1' and args.rhythm_geometry_profile == 'none':
         raise ValueError('finetune cannot remove the checkpoint rhythm_geometry_profile')
     if args.rhythm_geometry_profile=='none' and args.rhythm_loss_weight:
-        raise ValueError('rhythm_loss_weight requires rhythm_geometry_profile=exact_fraction_v1')
+        raise ValueError('rhythm_loss_weight requires an exact geometry profile')
     return args.rhythm_geometry_profile, args.rhythm_loss_weight
 
 
 def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rhythm_loss_weight=0.,
-                repetition_penalty_weight=0., diversity_weight=0.):
+                repetition_penalty_weight=0., diversity_weight=0., position_event_weight=0.):
     """Per-example objectives. Their sum can be accumulated across batch sizes."""
     logits = prediction['logits'].float()
     valid = batch['target'] != 0
@@ -259,9 +273,21 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
     if rhythm_loss_weight:
         from maichart.form.rhythm_geometry import numeric_timing_loss
         if 'timing_prediction' not in prediction or 'timing_labels' not in batch or 'timing_mask' not in batch:
-            raise ValueError('numeric timing objective requires exact_fraction_v1 model and dataset labels')
+            raise ValueError('numeric timing objective requires an exact geometry model and dataset labels')
         numeric_timing = numeric_timing_loss(prediction['timing_prediction'], batch['timing_labels'], batch['timing_mask'], reduction='none') * weights
         loss_sum = loss_sum + rhythm_loss_weight * numeric_timing.sum()
+    position_event = None
+    if position_event_weight:
+        # Token CE weights an event by its spelling length.  A Fraction costs
+        # one digit per character, so a long denominator is supervised several
+        # times as hard as a one-digit integer and the objective drifts toward
+        # whichever events happen to spell long.  Average each event's position
+        # spelling first so one event is one unit of supervision, then weight
+        # by the same per-example weight the token objective uses.
+        from maichart.form.rhythm_geometry import position_event_loss
+        position_event = position_event_loss(logits, batch['target'], batch['decoder_input'],
+                                             _CODEC_FOR_LOSS, reduction='none',token_ce=ce) * weights
+        loss_sum = loss_sum + position_event_weight * position_event.sum()
     correct = ((logits.detach().argmax(-1) == batch['target']) & valid).sum()
     if 'decoder_input' in batch and 'task' in batch:
         diagnostic_values, diagnostic_counts = layout_diagnostics(
@@ -271,6 +297,7 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
                       **({'diversity_loss': diversity_loss.detach().mean()} if diversity_weight else {}),
                       **({'event_decision_aux_loss':auxiliary.detach().mean()} if auxiliary is not None else {}),
+                      **({'position_event_aux_loss':position_event.detach().mean()} if position_event is not None else {}),
                       **({'numeric_timing_aux_loss':numeric_timing.detach().mean()} if numeric_timing is not None else {}),
                       'loss': loss_sum.detach() / len(weights),
                       'token_accuracy': correct.float() / valid.sum().clamp_min(1),
@@ -371,7 +398,7 @@ def _train(args):
             for name in ('seed', 'weight_decay', 'grad_accumulation', 'condition_drop_prob',
                          'blueprint_loss_weight', 'load_curve_loss_weight', 'relation_loss_weight',
                           'quality_enabled', 'max_region_seconds', 'limit_charts', 'batch_size', 'max_steps',
-                          'rhythm_loss_weight'):
+                          'rhythm_loss_weight', 'position_event_loss_weight'):
                 if name in saved_args:
                     setattr(args, name, saved_args[name])
             from maichart.form.training_input_perturbation import QUALITY_TRAINING_DEFAULTS
@@ -396,11 +423,24 @@ def _train(args):
             args.event_decision_loss_weight=(old.get('args') or {}).get('event_decision_loss_weight',0.)
         elif args.event_decision_loss_weight is None:
             args.event_decision_loss_weight=.25
+        if args.position_event_loss_weight is None:
+            if args.resume:
+                # A resumed run keeps the objective it was trained with; adding
+                # a new term mid-run would change the loss scale the optimizer
+                # state was built against.
+                args.position_event_loss_weight = float(
+                    (old.get('args') or {}).get('position_event_loss_weight', 0.))
+            else:
+                args.position_event_loss_weight = .25
         saved_blueprint_batch_size = (old.get('args') or {}).get('blueprint_batch_size', 1) if args.resume else 4
         args.blueprint_batch_size = ((saved_blueprint_batch_size or 1) if args.resume
                                     else args.blueprint_batch_size or saved_blueprint_batch_size or 1)
     else:
         args.event_decision_loss_weight=0.
+        # The per-event position objective groups rational Fraction spellings,
+        # which only exist in the v2 codec. Resolve it to an explicit 0 so the
+        # training loop never compares None.
+        args.position_event_loss_weight = 0.
         args.blueprint_batch_size = 1
     planner_objective_enabled = (args.blueprint_loss_weight > 0
         and (args.model_family != 'song_form_v2' or args.load_curve_loss_weight > 0))
@@ -438,6 +478,7 @@ def _train(args):
          event_decision_loss_weight=args.event_decision_loss_weight,
          rhythm_geometry_profile=args.rhythm_geometry_profile,
          rhythm_loss_weight=args.rhythm_loss_weight,
+         position_event_loss_weight=args.position_event_loss_weight,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
@@ -780,6 +821,7 @@ def _train(args):
         pending_tasks = Counter()
         pending_cap_tasks = Counter()
         pending_rhythm_count = None
+        pending_position_event_count = None
         # A per-batch finiteness test would make the host wait for each forward
         # pass before queueing its backward or preparing the next batch. Keep
         # the flag on the device and test it once before the optimizer update.
@@ -805,7 +847,8 @@ def _train(args):
                 event_decision_weight=args.event_decision_loss_weight,
                 rhythm_loss_weight=args.rhythm_loss_weight,
                 repetition_penalty_weight=args.repetition_penalty_weight,
-                diversity_weight=args.diversity_loss_weight)
+                diversity_weight=args.diversity_loss_weight,
+                position_event_weight=args.position_event_loss_weight)
             diagnostics = parts.pop('diagnostics')
             finite = torch.isfinite(loss_sum.detach())
             pending_finite = finite if pending_finite is None else pending_finite & finite
@@ -824,6 +867,15 @@ def _train(args):
                     valid_rhythm = timing_mask.any(dim=1) & (batch['weight'] > 0)
                     count = valid_rhythm.sum()
                     pending_rhythm_count = count if pending_rhythm_count is None else pending_rhythm_count + count
+            if args.position_event_loss_weight > 0:
+                # Count supervised events, not tokens: that is exactly the unit
+                # the per-event objective averages over.
+                boundary = ((batch['decoder_input'] == _CODEC_FOR_LOSS.bos_id)
+                            | (batch['decoder_input'] == _CODEC_FOR_LOSS.end_id))
+                event_count = (boundary & (batch['target'] == _CODEC_FOR_LOSS.at_id)
+                               & (batch['weight'] > 0).unsqueeze(1)).sum()
+                pending_position_event_count = (event_count if pending_position_event_count is None
+                                                else pending_position_event_count + event_count)
             update = None
             if engine.microbatches >= args.grad_accumulation or batch_index+1 == layout_total:
                 if not bool(pending_finite):
@@ -840,9 +892,12 @@ def _train(args):
                             increment_cap(name, conditioned_count, 'form_condition_v2')
                     if pending_rhythm_count is not None and bool(pending_rhythm_count.item()):
                         increment_cap('rhythm_geometry', int(pending_rhythm_count.item()), args.rhythm_geometry_profile)
+                    if pending_position_event_count is not None and bool(pending_position_event_count.item()):
+                        increment_cap('position_event', int(pending_position_event_count.item()), 'per_event_fraction_v1')
                 else:
                     emit('form_warning', message='AMP overflow: accumulated layout update skipped', epoch=epoch, batch=batch_index+1)
                 pending_tasks.clear(); pending_cap_tasks.clear(); pending_rhythm_count = None
+                pending_position_event_count = None
             progress.timing['compute_sec'] += time.perf_counter()-tick
             progress.phase_samples += batch_size
             progress.phase_tokens += tokens

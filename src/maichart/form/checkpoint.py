@@ -29,6 +29,51 @@ RATIONAL_GEOMETRY_INPUT_CONTRACT = {**RATIONAL_INPUT_CONTRACT,
     'rhythm_geometry':'exact_fraction_v1',
     'audio_feature_policy':'native_measured_v2',
     'decoder':'joint_rational_events_v3_exact_geometry'}
+# v2 replaces the span-anchored four-beat harmonic with bar/group phase taken
+# from the song's meter map, so the same musical position receives the same
+# coordinate in every span. The decoder contract changes because the geometry
+# width changes: a v1 model cannot consume v2 coordinates without migration.
+RATIONAL_METER_GEOMETRY_INPUT_CONTRACT = {**RATIONAL_INPUT_CONTRACT,
+    'version':'song_form_inputs_v4',
+    'rhythm_geometry':'exact_fraction_v2',
+    'audio_feature_policy':'native_measured_v2',
+    'decoder':'joint_rational_events_v4_meter_geometry'}
+
+
+def _geometry_contract(profile):
+    if profile == 'exact_fraction_v2':
+        return RATIONAL_METER_GEOMETRY_INPUT_CONTRACT
+    if profile == 'exact_fraction_v1':
+        return RATIONAL_GEOMETRY_INPUT_CONTRACT
+    return RATIONAL_INPUT_CONTRACT
+
+
+# ``exact_fraction_v1`` -> ``exact_fraction_v2`` channel correspondence. Only
+# channels that mean the same thing are carried across; the new bar/group phase
+# channels start at zero so finetuning learns them without disturbing the
+# transferable sub-beat behaviour.
+V1_TO_V2_CHANNELS = ((0, 0), (1, 1), (3, 2), (4, 3), (5, 4))
+
+
+def migrate_geometry_projection(state, source_profile, target_profile, width):
+    """Return a v2 geometry projection initialised from a v1 checkpoint.
+
+    ``time_geometry_projection`` and ``decoder_geometry_projection`` are
+    ``Linear(dim, width, bias=False)``, so migrating means copying the weight
+    rows whose channel semantics are unchanged and leaving the rest at zero.
+    """
+    from maichart.form.rhythm_geometry import geometry_dim
+    source_dim, target_dim = geometry_dim(source_profile), geometry_dim(target_profile)
+    migrated = {}
+    for name in ('time_geometry_projection.weight', 'decoder_geometry_projection.weight'):
+        weight = state.get(name)
+        if weight is None or tuple(weight.shape) != (width, source_dim):
+            raise ValueError(f'Checkpoint geometry parameter {name} has an unexpected shape')
+        target = weight.new_zeros((width, target_dim))
+        for source_channel, target_channel in V1_TO_V2_CHANNELS:
+            target[:, target_channel] = weight[:, source_channel]
+        migrated[name] = target
+    return migrated
 
 
 def planner_is_ready(payload):
@@ -85,9 +130,8 @@ def load(path, *, device='cpu', inference=False, task='draft', record_identity=F
         raise ValueError('This is not a song_form_v1 model; old event checkpoints use their original generator.')
     contract=payload.get('input_contract')
     legacy_contract=contract==LEGACY_INPUT_CONTRACT
-    expected_rational = (RATIONAL_GEOMETRY_INPUT_CONTRACT
-                         if payload.get('model_config',{}).get('rhythm_geometry_profile') == 'exact_fraction_v1'
-                         else RATIONAL_INPUT_CONTRACT)
+    expected_rational = _geometry_contract(
+        payload.get('model_config',{}).get('rhythm_geometry_profile', 'none'))
     if contract!=(expected_rational if rational else INPUT_CONTRACT) and not legacy_contract:
         raise ValueError('Song-form input contract mismatch')
     codec=RationalCodec.from_dict(payload['codec'])
@@ -117,23 +161,41 @@ def load(path, *, device='cpu', inference=False, task='draft', record_identity=F
 
 
 def load_finetune_model(path, config: FormConfig, *, device='cpu') -> FormTransformer:
-    """Load a none -> exact-geometry finetune migration without altering old weights.
+    """Load a geometry finetune migration without altering transferable weights.
 
     The ordinary loader first validates the source checkpoint against its own
-    contract.  Only the three newly introduced geometry modules may be absent
-    from the source state; every pre-existing parameter remains strict.
+    contract. Only the geometry modules introduced by the target profile may
+    be absent, and only their channels may differ:
+
+    ``none`` -> ``exact_fraction_v1``/``exact_fraction_v2``
+        Every geometry parameter is new and starts at its zero/random init.
+    ``exact_fraction_v1`` -> ``exact_fraction_v2``
+        The projections keep their learned sub-beat channels and gain zero
+        bar/group phase channels, so a trained checkpoint transfers rather
+        than restarting.
     """
+    from maichart.form.rhythm_geometry import geometry_dim
     source, _planner, _codec, payload = load(path, device='cpu')
     old_profile = getattr(source.config, 'rhythm_geometry_profile', 'none')
-    if old_profile != 'none' or config.rhythm_geometry_profile != 'exact_fraction_v1':
-        raise ValueError('Only none -> exact_fraction_v1 finetune migration is supported')
+    new_profile = config.rhythm_geometry_profile
+    if old_profile == new_profile:
+        raise ValueError('Finetune migration requires a different rhythm geometry profile')
+    if new_profile not in ('exact_fraction_v1', 'exact_fraction_v2'):
+        raise ValueError('Finetune migration targets exact_fraction_v1 or exact_fraction_v2')
+    if geometry_dim(new_profile) < geometry_dim(old_profile):
+        raise ValueError('Finetune migration cannot shrink a geometry contract')
+    state = dict(payload['model_state_dict'])
+    if old_profile == 'none':
+        allowed_missing = {
+            'time_geometry_projection.weight', 'decoder_geometry_projection.weight',
+            'interval_head.weight', 'interval_head.bias',
+        }
+    else:
+        state.update(migrate_geometry_projection(state, old_profile, new_profile, config.d_model))
+        allowed_missing = set()
     model = FormTransformer(config).to(device)
-    missing, unexpected = model.load_state_dict(payload['model_state_dict'], strict=False)
-    allowed = {
-        'time_geometry_projection.weight', 'decoder_geometry_projection.weight',
-        'interval_head.weight', 'interval_head.bias',
-    }
-    if unexpected or set(missing) != allowed:
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected or set(missing) != allowed_missing:
         raise ValueError('Geometry finetune migration parameter contract mismatch')
     return model
 
@@ -143,9 +205,8 @@ def payload(model,planner,codec,**metadata):
     rational=isinstance(planner,RationalPlanner)
     return {'schema':RATIONAL_CHECKPOINT_SCHEMA if rational else CHECKPOINT_SCHEMA,
         'family':RATIONAL_FAMILY if rational else FAMILY,
-        'input_contract':(RATIONAL_GEOMETRY_INPUT_CONTRACT if rational
-                           and getattr(model.config,'rhythm_geometry_profile','none') == 'exact_fraction_v1'
-                           else RATIONAL_INPUT_CONTRACT if rational else INPUT_CONTRACT),
+        'input_contract':(_geometry_contract(getattr(model.config,'rhythm_geometry_profile','none'))
+                          if rational else INPUT_CONTRACT),
         'model_config':asdict(model.config),'model_state_dict':model.state_dict(),
         'blueprint_config':asdict(planner.config),'blueprint_state_dict':planner.state_dict(),
         'codec':codec.to_dict(),**metadata}

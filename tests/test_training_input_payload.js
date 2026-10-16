@@ -134,7 +134,7 @@ test("main song-form generation payload forwards the onset merge range", () => {
   assert.ok(begin >= 0 && end > begin);
   const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
     "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
-    "const currentGenerationFamily=()=> 'song_form_v1';\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
+    "const currentGenerationFamily=()=> 'song_form_v1';const songFormRationalGridDivisions=()=>[4,6,8,12,16,24,32,48,64,96];\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
   const payload = build((selector, fallback) => ({"#formOnsetMergeMs": "0", "#temperature": "0.2", "#seed": ""}[selector] ?? fallback),
     (_selector, fallback) => fallback, () => ({}), () => "auto", () => null, () => null, () => [4, 8, 12, 16, 24, 32]);
   assert.equal(payload.onset_merge_ms, 0);
@@ -148,7 +148,7 @@ test("main song-form generation payload forwards both type guidance strengths", 
   const end = source.indexOf("function generationPayload()", begin);
   const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
     "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
-    "const currentGenerationFamily=()=> 'song_form_v1';\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
+    "const currentGenerationFamily=()=> 'song_form_v1';const songFormRationalGridDivisions=()=>[4,6,8,12,16,24,32,48,64,96];\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
   const payload = build((selector, fallback) => ({
     "#formPlannerTypeStrength": "2.4", "#formStyleBalanceStrength": "0", "#formLocalChordStrength": "0",
   }[selector] ?? fallback), (_selector, fallback) => fallback, () => ({}), () => "auto",
@@ -227,7 +227,7 @@ test("main song-form rhythm snapping defaults off and forwards its tolerance", (
   const end = source.indexOf("function generationPayload()", begin);
   const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
     "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
-    "const currentGenerationFamily=()=> 'song_form_v1';\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
+    "const currentGenerationFamily=()=> 'song_form_v1';const songFormRationalGridDivisions=()=>[4,6,8,12,16,24,32,48,64,96];\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
   const payload = build((selector, fallback) => ({"#formRhythmDivisionCustom": "20,40"}[selector] ?? fallback),
     (selector, fallback) => selector === "#formRhythmSnapEnabled" || selector === "#formRhythmDivision48" ? true : fallback,
     () => ({}), () => "cpu", () => null, () => null,
@@ -246,7 +246,7 @@ test("main song-form generation forwards selected rhythm snapping mode even when
   const end = source.indexOf("function generationPayload()", begin);
   const build = new Function("valueOrDefault", "checkedOrDefault", "collectCondition",
     "formDevice", "parseTempoMap", "intensityCurvePayload", "songFormRhythmSnapDivisions",
-    "const currentGenerationFamily=()=> 'song_form_v1';\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
+    "const currentGenerationFamily=()=> 'song_form_v1';const songFormRationalGridDivisions=()=>[4,6,8,12,16,24,32,48,64,96];\n"+source.slice(begin, end) + "; return songFormGenerationPayload();");
   const payload = build((selector, fallback) => ({"#formRhythmSnapMode": "point", "#formRhythmSnapSourceMs": "20"}[selector] ?? fallback),
     (_selector, fallback) => fallback, () => ({}), () => "auto", () => null, () => null,
     () => [4, 8, 12, 16, 24, 32]);

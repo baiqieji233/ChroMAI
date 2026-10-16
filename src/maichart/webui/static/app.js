@@ -1411,16 +1411,25 @@ function songFormRationalGridDivisions() {
 }
 
 function songFormRhythmGeometryUiState(mode, requested, checkpointProfile = "none") {
-  const profile = ["none", "exact_fraction_v1"].includes(checkpointProfile) ? checkpointProfile : "none";
+  const rank = {none: 0, exact_fraction_v1: 1, exact_fraction_v2: 2};
+  const known = Object.keys(rank);
+  const profile = known.includes(checkpointProfile) ? checkpointProfile : "none";
   if (mode === "resume") return { effective: profile, locked: true, upgradeNeedsExplicitChoice: false };
-  if (mode === "finetune" && profile === "exact_fraction_v1") {
-    return { effective: profile, locked: true, upgradeNeedsExplicitChoice: false };
+  const explicit = known.includes(requested) && requested !== "none";
+  if (mode === "finetune" && profile !== "none") {
+    // A checkpoint that already carries geometry keeps it unless the user
+    // explicitly asks for a wider contract (v1 -> v2). Narrowing would discard
+    // learned channels, so it stays on the stored profile.
+    const migrate = explicit && rank[requested] > rank[profile];
+    return { effective: migrate ? requested : profile, locked: false, upgradeNeedsExplicitChoice: false };
   }
   if (mode === "finetune") {
-    return { effective: requested === "exact_fraction_v1" ? "exact_fraction_v1" : "none",
-      locked: false, upgradeNeedsExplicitChoice: requested !== "exact_fraction_v1" };
+    // No stored contract: auto and none both keep the old path, so an explicit
+    // choice is required before any geometry training happens.
+    return { effective: explicit ? requested : "none", locked: false,
+      upgradeNeedsExplicitChoice: !explicit };
   }
-  return { effective: requested === "auto" ? "exact_fraction_v1" : requested,
+  return { effective: requested === "auto" ? "exact_fraction_v2" : requested,
     locked: false, upgradeNeedsExplicitChoice: false };
 }
 
@@ -1435,16 +1444,18 @@ function updateSongFormRhythmGeometryControls() {
   const state = songFormRhythmGeometryUiState(currentTrainingMode(), selector.value, checkpointProfile);
   selector.disabled = currentModelFamily() !== "song_form_v2" || state.locked;
   if (loss) loss.disabled = currentModelFamily() !== "song_form_v2"
-    || currentTrainingMode() === "resume" || state.effective !== "exact_fraction_v1";
+    || currentTrainingMode() === "resume" || state.effective === "none";
   if (!help) return;
   if (currentModelFamily() !== "song_form_v2") {
     help.textContent = "仅 song_form_v2 支持精确节奏几何训练。";
   } else if (currentTrainingMode() === "resume") {
     help.textContent = `resume 严格继承 checkpoint 的 ${state.effective} 几何合同与辅助损失设置。`;
-  } else if (currentTrainingMode() === "finetune" && state.upgradeNeedsExplicitChoice) {
-    help.textContent = "当前 checkpoint 没有数值几何合同；选择 exact_fraction_v1 才会迁移。自动与 none 都保持旧路径。";
+  } else if (state.upgradeNeedsExplicitChoice) {
+    help.textContent = "当前 checkpoint 没有数值几何合同；选择 exact_fraction_v1 或 exact_fraction_v2 才会迁移。自动与 none 都保持旧路径。";
+  } else if (state.effective === "exact_fraction_v2") {
+    help.textContent = "拍位坐标以小节与分组相位为基准，同一音乐位置在任何分段内取值一致；24 分在拍 1 与拍 2 因此是两个类别。小节相位来自拍号表，未提供拍号时退化为绝对拍位的四拍平滑基并标记为未知。";
   } else if (state.effective === "exact_fraction_v1") {
-    help.textContent = "使用精确拍位数值坐标与相邻间隔辅助监督；不吸附固定分音，也不使用固定帧率。生成仍保留现有拍位字符预算与分母资源上限。";
+    help.textContent = "使用分段内相对拍位的数值坐标与相邻间隔辅助监督；不吸附固定分音，也不使用固定帧率。";
   } else {
     help.textContent = "关闭数值几何辅助，保持旧输入合同。";
   }
@@ -1489,11 +1500,15 @@ function songFormTrainingPayload(options = {}) {
   const mode = currentTrainingMode(); const source = trainingSourcePaths(options); const manifests = selectedTrainingManifests();
   const selectedFamily = typeof currentModelFamily === "function" ? currentModelFamily() : "song_form_v1";
   const rhythmGeometryProfile = valueOrDefault("#formRhythmGeometryProfileSelect", "auto");
-  if (!["auto", "none", "exact_fraction_v1"].includes(rhythmGeometryProfile)) throw new Error("节奏几何训练方案无效。");
+  if (!["auto", "none", "exact_fraction_v1", "exact_fraction_v2"].includes(rhythmGeometryProfile)) throw new Error("节奏几何训练方案无效。");
   const rawRhythmLossWeight = valueOrDefault("#formRhythmLossWeight", "").trim();
   const rhythmLossWeight = rawRhythmLossWeight === "" ? null : Number(rawRhythmLossWeight);
   if (rhythmLossWeight !== null && (!Number.isFinite(rhythmLossWeight) || rhythmLossWeight < 0 || rhythmLossWeight > 10)) {
     throw new Error("节奏几何辅助损失权重必须在 0–10 之间。");
+  }
+  const positionEventLossWeight = Number(valueOrDefault("#formPositionEventLossWeight", .25));
+  if (!Number.isFinite(positionEventLossWeight) || positionEventLossWeight < 0 || positionEventLossWeight > 10) {
+    throw new Error("拍位均衡损失权重必须在 0–10 之间。");
   }
   const qualityFields = [
     ["perturb_apply_prob", "#formPerturbApplyProb", .5, 1, "扰动应用概率"],
@@ -1539,6 +1554,7 @@ function songFormTrainingPayload(options = {}) {
     sample_cache_mb: Number(valueOrDefault("#formSampleCacheMb", 256)),
     control_profile: valueOrDefault("#formControlProfile", "auto"), condition_drop_prob: Number(valueOrDefault("#formConditionDropout", .15)),
     event_decision_loss_weight: Number(valueOrDefault("#formEventDecisionLossWeight", .25)),
+    position_event_loss_weight: positionEventLossWeight,
     rhythm_geometry_profile: rhythmGeometryProfile, rhythm_loss_weight: rhythmLossWeight,
     dropout: Number(valueOrDefault("#formDropout", .1)), blueprint_loss_weight: Number(valueOrDefault("#formBlueprintLossWeight", 1)),
     load_curve_loss_weight: Number(valueOrDefault("#formCurveLossWeight", .2)), relation_loss_weight: Number(valueOrDefault("#formRelationLossWeight", .1)),
@@ -1656,7 +1672,8 @@ function songFormGenerationPayload() {
     interval_max_denominator: Number(valueOrDefault("#formIntervalMaxDenominator", 96)),
     rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 20)),
     rational_grid_snap_ms: Number(valueOrDefault("#formRationalGridSnapMs", 8)),
-    rational_grid_divisions: songFormRationalGridDivisions()}};
+    rational_grid_divisions: songFormRationalGridDivisions(),
+    physical_feasibility_strength: Number(valueOrDefault("#formPhysicalFeasibilityStrength", 0))}};
   return { model_family: currentGenerationFamily(), checkpoint: valueOrDefault("#checkpointPath", "").trim(), audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
     level: Number(valueOrDefault("#level", 13.3)), condition, bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)), first: Number(valueOrDefault("#first", 0)), tempo_map: parseTempoMap(), device: formDevice("#generationDevice"),
     max_region_seconds: Number(valueOrDefault("#formGenerationMaxRegionSeconds", 14)), intensity_curve_enabled: checkedOrDefault("#intensityCurveEnabled", false), intensity_curve: intensityCurvePayload(),
@@ -1680,6 +1697,7 @@ function songFormGenerationPayload() {
      rational_min_spacing_ms: Number(valueOrDefault("#formRationalMinSpacingMs", 20)),
     rational_grid_snap_ms: Number(valueOrDefault("#formRationalGridSnapMs", 8)),
     rational_grid_divisions: songFormRationalGridDivisions(),
+    physical_feasibility_strength: Number(valueOrDefault("#formPhysicalFeasibilityStrength", 0)),
     style_balance_strength: Number(valueOrDefault("#formStyleBalanceStrength", 1.0)),
     local_chord_strength: localChordStrength,
     temperature: Number(valueOrDefault("#temperature", .65)), seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)), repair: checkedOrDefault("#formRepair", false), max_checks: Number(valueOrDefault("#formMaxChecks", 24)), max_edits: Number(valueOrDefault("#formMaxEdits", 4)), deadline_seconds: Number(valueOrDefault("#formDeadlineSeconds", 10)) };
@@ -2832,8 +2850,13 @@ function applySongFormCheckpointConfig(data, mode) {
   const plannerWidth=element("#formPlannerWidth");
   if (plannerWidth) { if (locked && data?.blueprint_config?.width != null) plannerWidth.value=String(data.blueprint_config.width); plannerWidth.disabled=locked; }
   const geometryProfile = element("#formRhythmGeometryProfileSelect");
-  if (geometryProfile && locked && (mode === "resume" || data?.model_config?.rhythm_geometry_profile === "exact_fraction_v1")) {
-    geometryProfile.value = data?.model_config?.rhythm_geometry_profile === "exact_fraction_v1" ? "exact_fraction_v1" : "none";
+  if (geometryProfile && locked) {
+    const stored = data?.model_config?.rhythm_geometry_profile;
+    // Resume inherits the saved contract exactly. Finetune keeps the selector
+    // editable so a v1 checkpoint can migrate forward to v2.
+    if (mode === "resume") geometryProfile.value = stored === "exact_fraction_v1" ? "exact_fraction_v1"
+      : stored === "exact_fraction_v2" ? "exact_fraction_v2" : "none";
+    else if (stored) geometryProfile.value = stored;
   }
   const inherited = [["#learningRate", "lr"], ["#batchSize", "batch_size"], ["#gradAccumulation", "grad_accumulation"],
     ["#trainingSeed", "seed"], ["#weightDecay", "weight_decay"], ["#formConditionDropout", "condition_drop_prob"],
@@ -2842,6 +2865,7 @@ function applySongFormCheckpointConfig(data, mode) {
     ["#maxSteps", "max_steps"], ["#formLimitCharts", "limit_charts"], ["#formPrecision", "precision"],
     ["#formMaxRegionSeconds", "max_region_seconds"], ["#formBlueprintBatchSize", "blueprint_batch_size"],
     ["#formEventDecisionLossWeight", "event_decision_loss_weight"], ["#formRhythmLossWeight", "rhythm_loss_weight"],
+    ["#formPositionEventLossWeight", "position_event_loss_weight"],
     ["#formPerturbApplyProb", "perturb_apply_prob"], ["#formPerturbCurveNoiseStd", "perturb_curve_noise_std"],
     ["#formPerturbCurveDropoutProb", "perturb_curve_dropout_prob"], ["#formPerturbHistoryCorruptionProb", "perturb_history_corruption_prob"],
     ["#formPerturbOnsetDropProb", "perturb_onset_drop_prob"], ["#formPerturbOnsetAddProb", "perturb_onset_add_prob"],
@@ -2860,6 +2884,9 @@ function applySongFormCheckpointConfig(data, mode) {
     settings.event_decision_loss_weight = 0;
   }
   if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.rhythm_loss_weight == null) settings.rhythm_loss_weight = 0;
+  if ((data?.model_family || currentModelFamily()) === "song_form_v2" && settings.position_event_loss_weight == null) {
+    settings.position_event_loss_weight = 0;
+  }
   if (settings.max_region_seconds == null && data?.dataset_contract?.max_region_seconds != null) {
     settings.max_region_seconds = data.dataset_contract.max_region_seconds;
   }

@@ -230,7 +230,7 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
         memory,mask = model.encode(batch)
         cache=None;consumed=0
         from maichart.form.rhythm_decode import DecodeGeometry
-        geometry=DecodeGeometry(model,codec,origin)
+        geometry=DecodeGeometry(model,codec,origin,meters=example.get('_meters'))
         def logits():
             nonlocal cache,consumed
             while consumed<len(ids):
@@ -271,6 +271,13 @@ def compose_span(model,codec,example,atoms,*,origin,end,condition=None,temperatu
         def event_bias(beat):
             if type_guidance is None:
                 return None
+            if type_guidance.physical is not None:
+                # The physical guard needs the song second for a beat to expire
+                # finished Holds/Slides and to measure hand travel time. Register
+                # it on the same causal path the local-chord cues already use.
+                type_guidance.physical.register(beat,
+                    float(seconds_at_beat(beat,example['_tempo'],example['_first'])),
+                    example['_tempo'],example['_first'])
             if type_guidance.local_chords is not None:
                 second=float(seconds_at_beat(beat,example['_tempo'],example['_first']))
                 profile=example.get('_curve_profile');factor=1.
@@ -424,6 +431,7 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
         min_spacing_ms=20.0,position_complexity=.2,early_eos_penalty=0.,position_beam_size=1,
         max_beat_denominator=96,max_interval_denominator=96,
         rational_grid_snap_ms=8.0,rational_grid_divisions=(4,6,8,12,16,24,32,48,64,96),
+        physical_strength=0.0,
         **unused_legacy_options):
     from maichart.form.type_guidance import TypeGuidance
     from maichart.generation.event_quality import assess_event_chart
@@ -454,7 +462,8 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
             prediction['load_curve'][0].sigmoid().cpu().numpy(),bins)
     local_strength=unused_legacy_options.get('local_chord_strength',1.)
     guidance=TypeGuidance(atoms,condition,[],planner_strength=0,style_strength=style_balance_strength,
-        local_chord_strength=local_strength) if style_balance_strength or local_strength else None
+        local_chord_strength=local_strength,physical_strength=physical_strength
+        ) if style_balance_strength or local_strength or physical_strength else None
     accepted=[];records=[];grid_simplification=[]
     offset=song.first if intensity_curve is not None and intensity_curve.get('time_axis','chart_relative_v1')=='chart_relative_v1' else 0
     rests=[(r['start_sec']+offset,r['end_sec']+offset) for r in (intensity_curve or {}).get('rest_regions',[])]
@@ -595,6 +604,39 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
         'span_records': grid_simplification[-32:],
     }
     print('form_rational_diagnostics '+json.dumps(diagnostics),flush=True)
+    # Let the reference player model run the chart the decoder just wrote. The
+    # MiaCode action/slide simulator already ships with this project; running it
+    # here is what turns "the notes exist" into evidence about whether a player
+    # can actually perform them. Advisory only: it never edits the chart.
+    muri = {'applied': False, 'reason': 'disabled'}
+    try:
+        from maichart.generation.event_compile import compile_event_points
+        from maichart.generation.miacode_python import analyze_maidata
+        audit_text, _ = compile_event_points(
+            accepted, tempo_changes=song.tempo, first=song.first,
+            end_beat=song.spans[-1].end, difficulty=5)
+        audit = analyze_maidata(audit_text, difficulty=5)
+        summary = audit.get('summary', {})
+        muri = {'applied': True, 'engine': audit.get('engine'),
+                'reference_commit': audit.get('reference_commit'),
+                'playable_verified': False,
+                'diagnostic_count': summary.get('diagnostic_count', 0),
+                'counts_by_kind': summary.get('counts_by_kind', {}),
+                'static_reference_count': summary.get('static_reference_count', 0),
+                'static_reference_counts_by_kind': summary.get('static_reference_counts_by_kind', {}),
+                'parse_ok': audit.get('parse', {}).get('ok'),
+                'parse_error_count': audit.get('parse', {}).get('error_count', 0),
+                'elapsed_sec': audit.get('elapsed_sec'),
+                'interpretation': ('Reference simulator findings. They describe physical '
+                                   'difficulty and overlap risk on this draft, not a '
+                                   'player-verified certification.')}
+        print('form_muri_audit '+json.dumps({k: muri[k] for k in (
+            'diagnostic_count', 'counts_by_kind', 'static_reference_count', 'parse_error_count')}),flush=True)
+    except Exception as error:  # Never fail a generation over an advisory audit.
+        muri = {'applied': False, 'reason': f'{type(error).__name__}: {error}'}
+        print('form_warning '+json.dumps(dict(
+            message='无理模拟器审计未能完成；本次生成结果仍然有效，报告仅缺少该项。',
+            error=f'{type(error).__name__}: {error}'), ensure_ascii=False),flush=True)
     blueprint={'schema':'maichart-rational-event-plan-v1','onsets':[dict(beat=str(p.beat),second=seconds_at_beat(p.beat,song.tempo,song.first)) for p in accepted],
                'selection':{'algorithm':'joint_exact_fraction_events_v1','frame_seconds':None,'candidate_position_whitelist':False,
                          'onset_threshold_used':False,'rhythm_snap_used':False,
@@ -603,6 +645,6 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
                             'incomplete_spans':incomplete},'musical_units':'exact_quarter_fraction'}
     print('form_onsets '+json.dumps(blueprint['selection']),flush=True)
     return accepted,dict(blueprint=blueprint,arrangement=records,quality=quality,decoder_fallbacks=0,
-                         rational_diagnostics=diagnostics,
+                         rational_diagnostics=diagnostics,muri_audit=muri,
                          memory_strength=memory_strength,type_guidance=guidance.report() if guidance else None,
                          intensity_curve={'applied':intensity_curve is not None,'guidance':'event-decoder local curve condition and explicit rests'})

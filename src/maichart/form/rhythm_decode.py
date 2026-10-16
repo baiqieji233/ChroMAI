@@ -7,12 +7,23 @@ from maichart.form.rhythm_geometry import CausalGeometry
 
 
 class DecodeGeometry:
-    def __init__(self, model, codec, origin=Fraction(0)):
-        self.enabled = getattr(model.config, 'rhythm_geometry_profile', 'none') != 'none'
+    def __init__(self, model, codec, origin=Fraction(0), meters=None):
+        config = model.config
+        self.profile = getattr(config, 'rhythm_geometry_profile', 'none')
+        self.enabled = self.profile != 'none'
         self.codec, self.origin = codec, Fraction(origin)
-        self.state = CausalGeometry(codec, origin=self.origin)
+        # One caller may decode several spans of the same song. The meter map
+        # is song-level, so keep a single phase index rather than rebuilding it
+        # per geometry state; it caches the active meter window internally.
+        from maichart.form.timing import MeterPhaseIndex
+        self.meters = meters if isinstance(meters, MeterPhaseIndex) else MeterPhaseIndex(meters)
+        self.state = self._state()
         self.consumed = 0
         self.last = None
+
+    def _state(self):
+        return CausalGeometry(self.codec, origin=self.origin, profile=self.profile,
+                              meters=self.meters)
 
     def kwargs(self, ids, index, device):
         if not self.enabled:
@@ -21,7 +32,7 @@ class DecodeGeometry:
             # Canonical Fraction replacement, search backtracking and note
             # fallback all rewind the KV cache. Replay the retained *actual*
             # token prefix so the numeric state agrees with that same cache.
-            self.state = CausalGeometry(self.codec, origin=self.origin)
+            self.state = self._state()
             for token in ids[:index]:
                 self.state.consume(token)
         self.last = self.state.consume(ids[index])

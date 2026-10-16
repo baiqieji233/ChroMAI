@@ -10,7 +10,7 @@ const app = fs.readFileSync(path.join(root, "src/maichart/webui/static/app.js"),
 const html = fs.readFileSync(path.join(root, "src/maichart/webui/static/index.html"), "utf8");
 
 test("rhythm geometry UI exposes auto, legacy, and exact profiles without a grid selector", () => {
-  assert.match(html, /id="formRhythmGeometryProfileSelect"[\s\S]*?value="auto" selected[\s\S]*?value="none"[\s\S]*?value="exact_fraction_v1"/);
+  assert.match(html, /id="formRhythmGeometryProfileSelect"[\s\S]*?value="auto" selected[\s\S]*?value="none"[\s\S]*?value="exact_fraction_v1"[\s\S]*?value="exact_fraction_v2"/);
   assert.match(html, /id="formRhythmLossWeight"[^>]*placeholder="自动"/);
   assert.match(html, /精确拍位/);
   assert.match(app, /不吸附固定分音，也不使用固定帧率/);
@@ -22,11 +22,21 @@ test("geometry profile state preserves resume and requires explicit finetune mig
   assert.ok(begin >= 0 && end > begin);
   const resolve = new Function(`${app.slice(begin, end)}; return songFormRhythmGeometryUiState;`)();
 
-  assert.deepEqual(resolve("fresh", "auto"), {effective:"exact_fraction_v1", locked:false, upgradeNeedsExplicitChoice:false});
+  // Fresh auto selects the bar-phase contract that fixes the span-anchored
+  // 24th-note class collision.
+  assert.deepEqual(resolve("fresh", "auto"), {effective:"exact_fraction_v2", locked:false, upgradeNeedsExplicitChoice:false});
+  assert.deepEqual(resolve("fresh", "exact_fraction_v1"), {effective:"exact_fraction_v1", locked:false, upgradeNeedsExplicitChoice:false});
   assert.deepEqual(resolve("resume", "exact_fraction_v1", "none"), {effective:"none", locked:true, upgradeNeedsExplicitChoice:false});
+  assert.deepEqual(resolve("resume", "auto", "exact_fraction_v2"), {effective:"exact_fraction_v2", locked:true, upgradeNeedsExplicitChoice:false});
   assert.deepEqual(resolve("finetune", "auto", "none"), {effective:"none", locked:false, upgradeNeedsExplicitChoice:true});
   assert.deepEqual(resolve("finetune", "exact_fraction_v1", "none"), {effective:"exact_fraction_v1", locked:false, upgradeNeedsExplicitChoice:false});
-  assert.deepEqual(resolve("finetune", "none", "exact_fraction_v1"), {effective:"exact_fraction_v1", locked:true, upgradeNeedsExplicitChoice:false});
+  // A stored contract is kept by default...
+  assert.deepEqual(resolve("finetune", "none", "exact_fraction_v1"), {effective:"exact_fraction_v1", locked:false, upgradeNeedsExplicitChoice:false});
+  assert.deepEqual(resolve("finetune", "auto", "exact_fraction_v1"), {effective:"exact_fraction_v1", locked:false, upgradeNeedsExplicitChoice:false});
+  // ...an explicit wider request migrates forward...
+  assert.deepEqual(resolve("finetune", "exact_fraction_v2", "exact_fraction_v1"), {effective:"exact_fraction_v2", locked:false, upgradeNeedsExplicitChoice:false});
+  // ...and narrowing stays on the stored profile instead of dropping channels.
+  assert.deepEqual(resolve("finetune", "exact_fraction_v1", "exact_fraction_v2"), {effective:"exact_fraction_v2", locked:false, upgradeNeedsExplicitChoice:false});
 });
 
 test("song-form training payload forwards profile intent and optional loss", () => {

@@ -44,17 +44,16 @@ class ModelFamily(Enum):
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
     if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:
-        from maichart.form.checkpoint import (INPUT_CONTRACT, LEGACY_INPUT_CONTRACT,
-            RATIONAL_INPUT_CONTRACT, RATIONAL_GEOMETRY_INPUT_CONTRACT)
+        from maichart.form.checkpoint import INPUT_CONTRACT, LEGACY_INPUT_CONTRACT, _geometry_contract
         rational=checkpoint_data.get('schema')=='maichart-song-form-checkpoint-v2'
         family='song_form_v2' if rational else 'song_form_v1'
         errors=[]
         if checkpoint_data.get("family") != family: errors.append("新架构模型族声明不一致")
         profile=(checkpoint_data.get('model_config') or {}).get('rhythm_geometry_profile','none')
-        expected=(RATIONAL_GEOMETRY_INPUT_CONTRACT if profile=='exact_fraction_v1'
-                  else RATIONAL_INPUT_CONTRACT) if rational else INPUT_CONTRACT
+        expected=(_geometry_contract(profile) if rational else INPUT_CONTRACT)
         contract=checkpoint_data.get('input_contract')
-        if profile not in {'none','exact_fraction_v1'} or (not rational and profile!='none'):
+        from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
+        if profile not in GEOMETRY_PROFILES or (not rational and profile!='none'):
             errors.append('新架构节奏几何合同不匹配')
         if contract!=expected and not (not rational and contract==LEGACY_INPUT_CONTRACT):
             errors.append("新架构输入合同不匹配")

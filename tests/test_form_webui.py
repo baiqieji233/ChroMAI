@@ -97,7 +97,7 @@ def test_rhythm_geometry_controls_reach_form_training_cli_with_fresh_auto_defaul
     assert status == 200, result
     from maichart.form.train import parser
     args = parser().parse_args(calls[0][2:])
-    assert args.rhythm_geometry_profile == 'exact_fraction_v1'
+    assert args.rhythm_geometry_profile == 'exact_fraction_v2'
     assert args.rhythm_loss_weight == .1
 
 
