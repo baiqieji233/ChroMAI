@@ -10,13 +10,11 @@ loop knows the button is held.
 This module supplies the missing causal half.  It stores only already committed
 events, so it can answer at every decoder step without knowing the future.
 
-Two constraints are modelled.  Both are physics rather than stylistic
-preference, which is what makes them safe to steer decoding with:
+Two conservative heuristics are modelled:
 
-* **Occupancy** -- a Hold occupies its button, and a Slide occupies its head and
-  target buttons, for the whole declared duration.  A later note striking one of
-  those buttons inside that window cannot be pressed; the native checker reports
-  this family as ``Overlap`` / ``TapOnSlide``.
+* **Occupancy** -- a Hold occupies its button until the reference parser's end
+  time. Slide proximity follows the reference moving path, only after its wait;
+  its head and endpoint are never reserved for the whole Slide duration.
 * **Travel** -- the hands must reach the next buttons in the elapsed time.  Two
   hand positions are tracked through the chart, and the required speed is
   bounded by ``MAX_HAND_SPEED`` in the same normalised cabinet units as
@@ -36,14 +34,15 @@ from __future__ import annotations
 
 from collections import deque
 from fractions import Fraction
+from functools import lru_cache
 import math
 
 import numpy as np
 
-from maichart.event_timing import seconds_at_beat
 from maichart.generation.judgment_system import pad_center
-from maichart.notes import parse_timing_point_notes
-from maichart.timing import RawTimingPoint
+from maichart.generation.muri.model import CENTERS, RADII, has_head
+from maichart.generation.muri.parser import parse_markers
+from maichart.generation.muri.runtime import build_actions
 
 LANES = 8
 # Normalised cabinet units per second.  Crossing the whole cabinet (2.0 units)
@@ -59,12 +58,15 @@ MAX_HAND_SPAN = 0.90
 # Bounded additive logit penalties.  A collision is the stronger signal: the
 # note is not merely difficult, it is impossible.
 OCCUPANCY_PENALTY = 8.0
+# A moving Slide can share judged sensors with other actions. Geometric
+# proximity is weaker evidence than a held button, not a hard collision.
+SLIDE_PROXIMITY_PENALTY = 2.0
 TRAVEL_PENALTY = 4.0
 MAX_PHYSICAL_PENALTY = 12.0
+MAX_HAND_STATES = 16
 # Above this many simultaneous buttons the exhaustive two-hand split is
 # skipped; a hand cannot hold that many anyway and the split is arbitrary.
 MAX_EXACT_CHORD = 6
-SUSTAIN_TYPES = ("hold", "slide")
 EPS = 1e-9
 
 _PAD_CENTERS = np.asarray([pad_center(lane) for lane in range(1, LANES + 1)], dtype=np.float64)
@@ -165,32 +167,24 @@ def assign_hands(hands, lanes, span=MAX_HAND_SPAN):
     return ((_medoid(group_a) if group_a else left), (_medoid(group_b) if group_b else right)), rank[1]
 
 
-def _sustain_window(note, *, start_second, tempo, first, beat):
-    """Return ``(end_second, lanes)`` for a sustained note, else None."""
-    if note.note_type not in SUSTAIN_TYPES:
-        return None
-    duration = note.duration_beats
-    if duration is None or float(duration) <= 0:
-        return None
-    end_second = float(seconds_at_beat(Fraction(beat) + Fraction(duration), tempo, first))
-    if end_second <= start_second + EPS:
-        return None
-    lanes = set()
-    head = _lane(note.position)
-    if head is not None:
-        lanes.add(head)
-    if note.note_type == "slide":
-        tail = _lane(getattr(note, "end_position", None))
-        if tail is not None:
-            lanes.add(tail)
-        for segment in (getattr(note, "slide_segments", None) or ()):
-            for key in ("position", "end_position"):
-                lane = _lane(segment.get(key))
-                if lane is not None:
-                    lanes.add(lane)
-    if not lanes:
-        return None
-    return end_second, frozenset(lanes)
+@lru_cache(maxsize=256)
+def _lane_splits(lanes):
+    values = tuple(sorted(set(lanes)))
+    splits = []
+    for bits in range(1 << len(values)):
+        groups = (tuple(lane for index, lane in enumerate(values) if (bits >> index) & 1),
+                  tuple(lane for index, lane in enumerate(values) if not (bits >> index) & 1))
+        if all(_span_ok(group) for group in groups):
+            splits.append(groups)
+    return tuple(splits)
+
+
+def _hand_excess(hands, seconds, groups, when, speed):
+    """Minimum speed excess uses each hand's own previous action time."""
+    return max((max(0.0, _group_travel(hand, group) /
+                    max(MIN_TRAVEL_SECONDS, when - previous) / speed - 1.0)
+                if hand is not None and previous is not None and group else 0.0)
+               for hand, previous, group in zip(hands, seconds, groups))
 
 
 class PhysicalEvent:
@@ -221,13 +215,21 @@ class PhysicalFeasibilityGuard:
         self.first = 0.0
         self._cues = {}
         self._sustains = deque()
+        self._slide_actions = []
         self._hands = (None, None)
+        self._hand_seconds = (None, None)
+        # Preserve alternative feasible assignments instead of committing a
+        # greedy left/right choice that can falsely constrain the next event.
+        self._hand_states = [(self._hands, self._hand_seconds, 0.0)]
         self._last_second = None
         self._lane_set_cache = {}
+        self._travel_cache = {}
         self.events = 0
         self.occupancy_blocks = 0
         self.travel_blocks = 0
         self.committed_collisions = 0
+        self.slide_proximity_events = 0
+        self.parse_failures = 0
         self.max_penalty = 0.0
         self.diagnostics = deque(maxlen=64)
 
@@ -248,15 +250,32 @@ class PhysicalFeasibilityGuard:
 
     # -- committed state -------------------------------------------------
     def _prune(self, second):
-        while self._sustains and self._sustains[0][0] <= second + EPS:
-            self._sustains.popleft()
+        # Notes are committed by onset; their ends need not be sorted.
+        self._sustains = deque((end, held) for end, held in self._sustains
+                               if end > second + EPS)
+        self._slide_actions = [action for action in self._slide_actions
+                               if action.end > second + EPS]
 
     def occupied_mask(self, second):
+        """Definite held-button occupancy; moving Slides use a separate bias."""
         mask = np.zeros(LANES, dtype=bool)
         for end_second, held in self._sustains:
             if float(second) < end_second - EPS:
                 mask |= held
         return mask
+
+    def slide_proximity_mask(self, second):
+        """Reference path footprints at this instant, excluding Slide wait."""
+        result = np.zeros(LANES, dtype=bool)
+        for action in self._slide_actions:
+            sampled = action.sample(float(second))
+            if sampled is None:
+                continue
+            position, _tangent = sampled
+            for index in range(LANES):
+                if math.dist(position, CENTERS[f'A{index + 1}']) <= action.radius + RADII['A'] + EPS:
+                    result[index] = True
+        return result
 
     # -- scoring ---------------------------------------------------------
     def _raw_penalty(self, matrix, second):
@@ -270,18 +289,21 @@ class PhysicalFeasibilityGuard:
         occupied = self.occupied_mask(second)
         if occupied.any():
             values += OCCUPANCY_PENALTY * matrix[:, occupied].sum(1)
+        slide = self.slide_proximity_mask(second) & ~occupied
+        if slide.any():
+            values += SLIDE_PROXIMITY_PENALTY * matrix[:, slide].sum(1)
         if self._last_second is not None:
-            gap = max(MIN_TRAVEL_SECONDS, float(second) - self._last_second)
             # Each distinct candidate lane-set is scored once: the grammar
             # repeats cells heavily, so the same chord arrives many times.
             sets = self._lane_sets(matrix)
             costs = {}
             for lanes in sets:
                 if lanes not in costs:
-                    costs[lanes] = self._travel_cost(lanes)
-            travel = np.asarray([costs[lanes] for lanes in sets], dtype=np.float64)
-            speed = travel / gap
-            excess = np.maximum(0.0, speed / self.max_hand_speed - 1.0)
+                    key = (lanes, float(second))
+                    if key not in self._travel_cache:
+                        self._travel_cache[key] = self._travel_excess(lanes, float(second))
+                    costs[lanes] = self._travel_cache[key]
+            excess = np.asarray([costs[lanes] for lanes in sets], dtype=np.float64)
             values += np.minimum(TRAVEL_PENALTY * 2.0, TRAVEL_PENALTY * excess)
         return np.minimum(MAX_PHYSICAL_PENALTY, values) * self.strength
 
@@ -297,32 +319,43 @@ class PhysicalFeasibilityGuard:
             result.append(lanes)
         return result
 
-    def _travel_cost(self, lanes):
-        """Least distance any hand must cover to press exactly ``lanes``.
-
-        ``math.inf`` means no two-hand assignment can cover the chord at all:
-        one hand would have to span more than one palm, or a lane is beyond
-        reach.  Only the already placed hands are considered; an unplaced hand
-        contributes no distance, which keeps the guard silent until the chart
-        has given it something to track.
-        """
+    def _travel_excess(self, lanes, second):
+        """Best plausible two-hand speed excess over a bounded assignment beam."""
         if not lanes:
             return 0.0
-        values = sorted(lanes)
-        if len(values) > 10:
-            # Beyond two hands regardless of timing; the exact split is moot.
-            return math.inf
-        left, right = self._hands
-        best = math.inf
-        for mask in range(1 << len(values)):
-            first = tuple(lane for index, lane in enumerate(values) if (mask >> index) & 1)
-            second = tuple(lane for index, lane in enumerate(values) if not (mask >> index) & 1)
-            if not _span_ok(first) or not _span_ok(second):
-                continue
-            cost = max(_group_travel(left, first), _group_travel(right, second))
-            if cost < best:
-                best = cost
-        return best
+        splits = _lane_splits(tuple(sorted(lanes)))
+        return min((cost + _hand_excess(hands, times, groups, second, self.max_hand_speed)
+                    for hands, times, cost in self._hand_states for groups in splits),
+                   default=math.inf)
+
+    def _commit_hands(self, lanes, second):
+        if not lanes:
+            return
+        next_states = {}
+        for hands, times, previous_cost in self._hand_states:
+            for groups in _lane_splits(tuple(sorted(lanes))):
+                excess = _hand_excess(hands, times, groups, second, self.max_hand_speed)
+                new_hands = tuple(_medoid(group) if group else hand
+                                  for group, hand in zip(groups, hands))
+                new_times = tuple(second if group else previous
+                                  for group, previous in zip(groups, times))
+                # Hands have no intrinsic identity here. Canonicalize mirrored
+                # assignments to use the bounded beam for distinct histories.
+                key = tuple(sorted(zip(new_hands, new_times),
+                                   key=lambda item: (item[0] or 0,
+                                                     -math.inf if item[1] is None else item[1])))
+                candidate = (tuple(item[0] for item in key), tuple(item[1] for item in key),
+                             previous_cost + excess)
+                if key not in next_states or candidate[2] < next_states[key][2]:
+                    next_states[key] = candidate
+        if not next_states:
+            # A questionable chord must not overwrite the last plausible hand
+            # histories and manufacture further impossible travel constraints.
+            return
+        ordered = sorted(next_states.values(), key=lambda state: state[2])[:MAX_HAND_STATES]
+        minimum = ordered[0][2]
+        self._hand_states = [(hands, times, cost - minimum) for hands, times, cost in ordered]
+        self._hands, self._hand_seconds, _ = self._hand_states[0]
 
     def matrix_penalty(self, matrix, second):
         values = self._raw_penalty(matrix, second)
@@ -352,26 +385,41 @@ class PhysicalFeasibilityGuard:
             return
         second = float(second)
         self._prune(second)
+        bpm = 120.0
+        if self.tempo:
+            # The reference fixes each duration from the BPM at its head;
+            # later tempo changes move later heads, not an already shot Slide.
+            bpm = float(self.tempo[0].bpm)
+            for change in self.tempo:
+                if Fraction(change.beat) > beat:
+                    break
+                bpm = float(change.bpm)
         try:
-            parsed = parse_timing_point_notes(RawTimingPoint(
-                index=0, raw=text, note_text=text, beat=beat, tick=0,
-                time_sec=second, division=4, bpm=120.0))
-        except Exception:
+            markers, errors, _warnings = parse_markers(f'({bpm}){{4}}{text},', first=second)
+        except (ValueError, TypeError, KeyError, OverflowError):
+            self.parse_failures += 1
             return
-        if parsed.unknown_tokens and not parsed.notes:
+        if errors:
+            self.parse_failures += 1
+            self.diagnostics.append({'beat': str(beat), 'second': second, 'text': text,
+                                     'reason': 'reference_parse_failed', 'errors': errors[:3]})
             return
         occupied = self.occupied_mask(second)
+        slide_proximity = self.slide_proximity_mask(second)
         lanes = set()
-        for note in parsed.notes:
-            head = _lane(note.position)
-            if head is not None:
+        for marker in markers:
+            if marker.get('is_mine') or marker.get('head_mine'):
+                continue
+            kind = marker['type']
+            head = _lane(marker.get('lane'))
+            if head is not None and (kind in {'tap', 'hold'} or has_head(marker)):
                 lanes.add(head)
-            if self.tempo is not None:
-                window = _sustain_window(note, start_second=second, tempo=self.tempo,
-                                         first=self.first, beat=beat)
-                if window is not None:
-                    end_second, held = window
-                    self._sustains.append((end_second, lane_mask(held)))
+            end = float(marker.get('end_second', second))
+            if kind == 'hold' and head is not None and end > second + EPS:
+                self._sustains.append((end, lane_mask([head])))
+        # build_actions uses the same cached reference paths as MiaCode, with
+        # the parser's exact wait, segment timing and seconds/BPM overrides.
+        self._slide_actions.extend(build_actions(markers, []))
         mask = lane_mask(lanes)
         collisions = mask & occupied
         if collisions.any():
@@ -384,21 +432,21 @@ class PhysicalFeasibilityGuard:
                 "colliding_lanes": [int(index) + 1 for index in np.nonzero(collisions)[0]],
                 "reason": "committed_on_active_sustain",
             })
+        if (mask & slide_proximity).any():
+            self.slide_proximity_events += 1
         if self._last_second is not None and lanes:
             # Use the same cost model the candidate penalty uses, so this count
             # describes exactly what the guard was steering against.
-            travel_cost = self._travel_cost(sorted(lanes))
-            if math.isfinite(travel_cost) and travel_cost > 0:
-                gap = max(MIN_TRAVEL_SECONDS, second - self._last_second)
-                if travel_cost / gap > self.max_hand_speed:
-                    self.travel_blocks += 1
-        self._hands, _ = assign_hands(self._hands, lanes)
+            if self._travel_excess(lanes, second) > 0:
+                self.travel_blocks += 1
+        self._commit_hands(lanes, second)
+        self._travel_cache.clear()
         self._last_second = second
         self.events += 1
 
     def report(self):
         return {
-            "schema": "song_form_physical_feasibility_v1",
+            "schema": "song_form_physical_feasibility_v2",
             "enabled": self.strength > 0,
             "strength": self.strength,
             "applied": self.strength > 0,
@@ -409,20 +457,28 @@ class PhysicalFeasibilityGuard:
             "penalty_bound": MAX_PHYSICAL_PENALTY * self.strength,
             "events": self.events,
             "active_sustains": len(self._sustains),
+            "active_slide_actions": len(self._slide_actions),
             "occupancy_blocks": self.occupancy_blocks,
             "travel_blocks": self.travel_blocks,
             "committed_collisions": self.committed_collisions,
+            "slide_proximity_events": self.slide_proximity_events,
+            "reference_parse_failures": self.parse_failures,
             "max_observed_penalty": self.max_penalty,
             "hand_positions": [int(hand) if hand is not None else None for hand in self._hands],
+            "hand_last_seconds": list(self._hand_seconds),
+            "hand_hypotheses": len(self._hand_states),
+            "duration_semantics": "miacode_head_bpm_v1",
+            "slide_proximity_penalty": SLIDE_PROXIMITY_PENALTY * self.strength,
             "diagnostics": list(self.diagnostics),
             "feedback_scope": "causal_committed_prefix_only",
             "removes_candidates": False,
             "touch_excluded": True,
             "limitations": [
                 "Soft logit bias only; it never removes a candidate token.",
-                "Slide occupancy uses head and target lanes for the declared duration; "
-                "the exact swept path stays with the post-generation MiaCode checker.",
-                "Hand positions are representative lanes, not a body simulation.",
+                "Slide proximity samples the reference moving footprint after its wait; "
+                "it is a weak bias, not a claim of an impossible collision.",
+                "Hand travel keeps bounded alternative assignments and independent clocks; "
+                "it does not simulate sustained hand availability or the player's body.",
                 "Cabinet units follow the pinned MiaCode reference geometry, not a player model.",
             ],
         }

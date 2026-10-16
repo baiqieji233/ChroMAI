@@ -8,19 +8,23 @@ Event inputs only need ``beat`` and ``note_text`` attributes. Tempo inputs need
 from __future__ import annotations
 
 import math
+import re
 from bisect import bisect_right
 from collections import Counter, defaultdict
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from decimal import Decimal
 from fractions import Fraction
 from typing import Any
 
 from maichart.generation.conditions import GenerationCondition
+from maichart.duration import DurationExpr, parse_duration_expr
 from maichart.notes import (
     BASIC_COMPACT_CHORD_RE,
     ParsedNote,
     ParsedTimingPointNotes,
     parse_timing_point_notes,
+    _split_top_level_slashes,
 )
 from maichart.timing import RawTimingPoint, TICKS_PER_BEAT
 
@@ -29,6 +33,99 @@ PEAK_WINDOW_SEC = 1.0
 DENSITY_REFERENCE_NPS = 16.0
 PEAK_REFERENCE_NPS = 32.0
 JACK_WINDOW_SEC = 0.5
+LEGACY_DURATION_SEMANTICS = "legacy_tempo_integrated_v1"
+MIACODE_DURATION_SEMANTICS = "miacode_head_bpm_v1"
+DURATION_SEMANTICS = (LEGACY_DURATION_SEMANTICS, MIACODE_DURATION_SEMANTICS)
+
+
+def _validate_duration_semantics(value: str) -> str:
+    if value not in DURATION_SEMANTICS:
+        raise ValueError(f"duration_semantics must be one of {DURATION_SEMANTICS}")
+    return value
+
+
+def _reference_timing_point(point: RawTimingPoint) -> ParsedTimingPointNotes:
+    """Use reference wait/duration rules without changing the authored tokens.
+
+    The generic note parser predates temporary-BPM duration signatures. Feed it
+    equivalent explicit seconds, then restore the original duration metadata.
+    Reference duration parsing is numeric only; no path tables are loaded.
+    """
+    from maichart.generation.muri.parser import _duration
+
+    records = {}
+    normalized = []
+    for token in _split_top_level_slashes(point.note_text):
+        token = ''.join(token.split())
+        outside = re.sub(r'\[[^\]]*\]', '', token)
+        slide = bool(outside and outside[0] in '12345678' and
+                     any(char in outside[1:] for char in '-^v<>VpqszwW'))
+        timings = []
+
+        def convert(match):
+            raw = match.group(0)
+            timed = _duration(raw[1:-1], point.bpm, slide=slide)
+            if timed is None:
+                return raw
+            wait, seconds = timed
+            timings.append((raw, wait, seconds))
+            # DurationExpr deliberately accepts decimal notation only. Tiny
+            # authored seconds must not turn into unsupported 1e-07 syntax.
+            wait_text, seconds_text = (format(Decimal(str(value)), 'f') for value in timed)
+            return f'[{wait_text}##{seconds_text}]' if slide else f'[#{seconds_text}]'
+
+        canonical = re.sub(r'\[[^\]]*\]', convert, token)
+        records.setdefault(canonical, []).append((token, timings, slide))
+        normalized.append(canonical)
+    canonical_text = '/'.join(normalized)
+    parsed = parse_timing_point_notes(replace(point, raw=canonical_text, note_text=canonical_text))
+    for unknown in parsed.unknown_tokens:
+        record = records.get(''.join(unknown.raw.split()))
+        if record:
+            unknown.raw = record[0][0]
+    consumed = Counter()
+    for note in parsed.notes:
+        key = ''.join(note.raw.split())
+        entries = records.get(key)
+        if not entries:
+            continue
+        original, timings, slide = entries[min(consumed[key], len(entries) - 1)]
+        consumed[key] += 1
+        note.raw = original
+        if not timings:
+            continue
+        resolved = []
+        for raw, wait, seconds in timings:
+            duration = parse_duration_expr(raw, point.bpm)
+            if duration.kind == 'unknown':
+                duration = DurationExpr(raw=raw, kind='miacode_duration',
+                                        beats=Fraction(str(seconds)) * Fraction(str(point.bpm)) / 60,
+                                        seconds=seconds)
+            else:
+                duration = replace(duration, seconds=seconds)
+            resolved.append(duration)
+        if slide:
+            original_segments = original.split('*')
+            for index, (segment, duration, (_raw, wait, seconds)) in enumerate(
+                    zip(note.slide_segments, resolved, timings)):
+                segment.update(duration=duration, duration_sec=seconds,
+                               duration_beats=duration.beats, duration_ticks=duration.ticks,
+                               wait_sec=wait)
+                if index < len(original_segments):
+                    segment['raw'] = original_segments[index]
+            note.duration_sec = max(seconds for _raw, _wait, seconds in timings)
+            note.modifiers['reference_end_offset_sec'] = max(wait + seconds
+                                                             for _raw, wait, seconds in timings)
+            note.duration = (resolved[0] if len(resolved) == 1 else
+                             DurationExpr(raw=original, kind='compound',
+                                          seconds=note.duration_sec))
+        else:
+            note.duration = resolved[0]
+            note.duration_sec = resolved[0].seconds
+        note.duration_beats = note.duration.beats
+        note.duration_ticks = note.duration.ticks
+    parsed.raw, parsed.note_text = point.raw, point.note_text
+    return parsed
 
 
 @dataclass(slots=True)
@@ -120,6 +217,7 @@ class _TempoMap:
 
 def parse_event_notes(
     points: Iterable[Any], tempo_changes: Iterable[Any], first: float = 0.0,
+    *, duration_semantics: str = LEGACY_DURATION_SEMANTICS,
 ) -> EventNoteParse:
     """Parse complete raw tokens without quantization or silent repair.
 
@@ -129,6 +227,7 @@ def parse_event_notes(
     placeholder, never a quantized event coordinate. Duplicates are checked
     across *all* input points at the same exact beat.
     """
+    duration_semantics = _validate_duration_semantics(duration_semantics)
     result = EventNoteParse()
     try:
         tempo = _TempoMap(tempo_changes, first)
@@ -152,7 +251,9 @@ def parse_event_notes(
             time_sec=tempo.time(beat), division=4, bpm=tempo.bpm(beat),
         )
         try:
-            parsed = parse_timing_point_notes(raw_point)
+            parsed = (_reference_timing_point(raw_point)
+                      if duration_semantics == MIACODE_DURATION_SEMANTICS
+                      else parse_timing_point_notes(raw_point))
         except (ValueError, TypeError, OverflowError, ZeroDivisionError) as exc:
             issue = {"code": "note_parse_error", "point_index": index,
                      "beat": str(beat), "raw": text, "message": str(exc)}
@@ -226,15 +327,17 @@ def parse_event_notes(
                         "beat": str(beat), "raw": note.raw,
                         "message": "Note duration must be finite.",
                     })
-            # Grid durations cross BPM boundaries; explicit seconds do not.
-            for segment in note.slide_segments:
-                duration = segment.get("duration")
-                if duration is not None and duration.kind == "grid_fraction":
-                    segment["duration_sec"] = tempo.time(beat + duration.beats) - tempo.time(beat)
-            if note.slide_segments:
-                note.duration_sec = max(segment["duration_sec"] for segment in note.slide_segments)
-            elif note.duration is not None and note.duration.kind == "grid_fraction":
-                note.duration_sec = tempo.time(beat + note.duration.beats) - tempo.time(beat)
+            if duration_semantics == LEGACY_DURATION_SEMANTICS:
+                # Preserve the original conditioning contract for existing
+                # checkpoints; newly versioned training opts into head BPM.
+                for segment in note.slide_segments:
+                    duration = segment.get("duration")
+                    if duration is not None and duration.kind == "grid_fraction":
+                        segment["duration_sec"] = tempo.time(beat + duration.beats) - tempo.time(beat)
+                if note.slide_segments:
+                    note.duration_sec = max(segment["duration_sec"] for segment in note.slide_segments)
+                elif note.duration is not None and note.duration.kind == "grid_fraction":
+                    note.duration_sec = tempo.time(beat + note.duration.beats) - tempo.time(beat)
     for beat, buttons in sorted(heads.items()):
         for button, count in sorted(buttons.items()):
             if count > 1:
@@ -438,7 +541,8 @@ def _audio_proxy(parsed: EventNoteParse, audio: Any, *, first: float | None = No
 
 
 def _condition(stats: dict[str, Any], *, level: float, melody: float = 0.0,
-               melody_metadata: dict[str, Any] | None = None) -> EventGenerationCondition:
+               melody_metadata: dict[str, Any] | None = None,
+               duration_semantics: str = LEGACY_DURATION_SEMANTICS) -> EventGenerationCondition:
     ratios, slides = stats["type_ratios"], stats["slides"]
     return EventGenerationCondition(
         level=level,
@@ -459,13 +563,19 @@ def _condition(stats: dict[str, Any], *, level: float, melody: float = 0.0,
                   "normalization": {"note_density_reference_nps": DENSITY_REFERENCE_NPS,
                                     "peak_reference_nps": PEAK_REFERENCE_NPS},
                   "melody_following": melody_metadata or _audio_proxy(EventNoteParse(), None)[1],
-                  "duration_semantics": "Grid durations integrate the tempo map from the head; explicit seconds stay seconds. Slide wait/gameplay semantics are not verified."},
+                  "duration_semantics_profile": duration_semantics,
+                  "duration_semantics": (
+                      "Durations use the head BPM or authored seconds/temporary BPM. "
+                      "Slide wait uses MiaCode semantics; branch duration statistics exclude wait."
+                      if duration_semantics == MIACODE_DURATION_SEMANTICS else
+                      "Grid durations integrate the tempo map from the head; explicit seconds stay seconds. Slide wait/gameplay semantics are not verified.")},
     )
 
 
 def condition_from_events(
     points: Iterable[Any], tempo_changes: Iterable[Any], *, level: float,
     duration_sec: float, audio: Any = None, audio_first: float | None = None,
+    duration_semantics: str = LEGACY_DURATION_SEMANTICS,
 ) -> GenerationCondition:
     """Compute training controls dynamically from exact events.
 
@@ -480,18 +590,20 @@ def condition_from_events(
     duration = float(duration_sec)
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("duration_sec must be finite and positive.")
-    parsed = parse_event_notes(points, tempo_changes)
+    parsed = parse_event_notes(points, tempo_changes, duration_semantics=duration_semantics)
     if not parsed.syntax_valid:
         raise EventNoteError(parsed)
     melody, metadata = _audio_proxy(parsed, audio, first=audio_first)
     return _condition(_statistics(parsed, duration), level=level,
-                      melody=melody, melody_metadata=metadata)
+                      melody=melody, melody_metadata=metadata,
+                      duration_semantics=duration_semantics)
 
 
 def assess_event_chart(
     points: Iterable[Any], tempo_changes: Iterable[Any], *, first: float = 0.0,
     duration_sec: float | None = None,
     target_condition: GenerationCondition | Mapping[str, Any] | None = None,
+    duration_semantics: str = LEGACY_DURATION_SEMANTICS,
 ) -> dict[str, Any]:
     """Return JSON diagnostics, never a claim of verified playability.
 
@@ -500,7 +612,7 @@ def assess_event_chart(
     single-position charts are labeled degenerate. Other charts need review.
     """
     changes = list(tempo_changes)
-    parsed = parse_event_notes(points, changes, first)
+    parsed = parse_event_notes(points, changes, first, duration_semantics=duration_semantics)
     duration_source = "provided"
     if duration_sec is None:
         duration_source = "inferred_extent_with_one_beat_after_last_head"
@@ -512,7 +624,8 @@ def assess_event_chart(
             if not explicit_end:
                 for note in parsed.notes:
                     duration = max(duration, float(note.time_sec) - first + (
-                        note.duration_sec if note.duration_sec is not None else 60 / tempo.bpm(note.beat)))
+                        note.modifiers.get('reference_end_offset_sec', note.duration_sec)
+                        if note.duration_sec is not None else 60 / tempo.bpm(note.beat)))
             else:
                 duration_source = "explicit_empty_end_point"
     else:
@@ -530,7 +643,8 @@ def assess_event_chart(
         reasons.append("all_taps_single_position")
     requested = (target_condition if isinstance(target_condition, GenerationCondition)
                  else GenerationCondition.from_dict(dict(target_condition)) if target_condition is not None else None)
-    actual = _condition(stats, level=requested.level if requested else 13.0) if parsed.syntax_valid else None
+    actual = (_condition(stats, level=requested.level if requested else 13.0,
+                         duration_semantics=duration_semantics) if parsed.syntax_valid else None)
     deltas = None
     if actual is not None and requested is not None:
         deltas = {section: {key: getattr(actual, section)[key] - getattr(requested, section)[key]
@@ -543,6 +657,7 @@ def assess_event_chart(
             "unsupported": parsed.unsupported, "fatal_errors": parsed.fatal_errors,
             "statistics_partial": not parsed.syntax_valid,
             **stats, "duration_source": duration_source,
+            "duration_semantics_profile": duration_semantics,
             "control": {"actual": actual.to_dict() if actual else None,
                         "requested": requested.to_dict() if requested else None,
                         "actual_minus_requested": deltas, "level_estimated": False,
