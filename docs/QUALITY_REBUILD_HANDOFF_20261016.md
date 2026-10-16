@@ -17,12 +17,13 @@
 4. `balanced_evidence_v1` 按时间覆盖与 attack/chroma/detail/dynamics 多路保留证据；不再让全曲最强 attack 占满预算。原始/查询缓存与旧合同分离；原匹配描述不改，额外 8 维保留全曲相对动态。37 项 CPU 定向通过，10 万候选筛到 8192 约 0.031 秒。
 5. `musical_evidence_v1` 数据合同接入精确查询时间、段拍长/秒长、512 维布局描述及位置辅助标签。查询节点构造完全不读取谱面目标；不匹配的官谱事件不强制对齐错误的最近节点。新数据与缓存 11 项、旧相关 24 项、first 对齐 13 项通过。
 
-## 正在集成
+## 集成与提交状态
 
-- 主代理：train.py、blueprint_batch.py、质量训练默认值/日志/能力计数，端到端探针、文档、提交。
-- fix_ui_curve_contract：checkpoint.py、model_compatibility.py，新旧合同验证及显式 finetune 权重迁移。
-- fix_timing_motif：CLI / rational_generate / revision 的质量合同、Planner 时间输入及曲线密度单位。
-- fix_physical_semantics：alignment.py / model.py / rational_planner.py 的 masked-safe 边界与辅助目标定向测试。
+- 上述所有接线已完成：train/变长 Planner batch、checkpoint 严格校验和显式迁移、CLI/修订、曲线单位、masked-safe 辅助目标及真实时间邻域。
+- `bd80919`：物理时值、双手状态、统计时值版本化；GOAL 与交接入口。
+- `3e08f9d`：音频覆盖、动态描述、精确位置辅助、Planner 时间汇聚、曲线与缓存合同、生成/迁移，以及相应回归。
+- `8463d93`：主 WebUI 控件、曲线插点、拍号与质量身份、resume/finetune 行为及指标。
+- 最终报告与证据：`QUALITY_REBUILD_RESULTS_20261017.md`、`evidence/QUALITY_REBUILD_20261017.json`。等待最终文档提交及推送核对。
 
 ## 新合同的边界
 
@@ -33,8 +34,14 @@
 - 额外辅助头规模小；尚无充分训练的实际音乐质量提升证据。测试只能证明合同、数值与流程可用。
 - 未知拍号仍标记 unknown，重复段关联不能通过盲目降阈值强造。
 
-## 后续验收与发布
+## 验收与运行状态
 
-完成接口后运行相关 CPU/Node 测试，必要时一次全项目回归；只对失败或后续修改追加测试。独立 scratch 目录做小型官谱 GPU 训练→保存→加载→生成；不把短跑模型认定为可玩或高质量。检查实际主 WebUI 的 fresh/resume/finetune 与新旧曲线流程，然后记录最终提交、测试数和启动状态并推送。
+Python 全套 2223 passed、12 skipped（145.12 秒），Node 全套 94 passed；收尾新增修改再运行定向 68 passed。真实两张官谱 GPU 新合同训练保存成功，52 个事件受到位置辅助监督，模型曲线和基础目录生成/编译回读通过。四步短跑完整目录仍耗尽配置文本预算；工程通过不等于音乐性通过。
+
+结构准备和 Blueprint 缓存暖启动均 2/2 命中，未因本轮增强反复重建同一合同。真实旧 Prism_Re_v6 checkpoint 加载通过；同规模新合同仅多 181,505 参数（约 0.57%）。
+
+7860 主 WebUI 已启动，Python PID 28020，页面与 `/api/status` 正常，实际浏览器无 JS 异常。fresh 自动增强；finetune 显式升级恢复新默认并保留手调；resume 继承锁定；7 个曲线/设备/tempo 控件实际可见。7861 保持停止；没有启动正式训练。
+
+下一次训练可选择主界面 song_form_v2 + fresh 自动增强，或旧 v2 + finetune 显式“增强音乐证据”并使用新目录。resume 不会升级旧模型。实际音乐收益和辅助权重仍需用户充分训练后评估；不得用短跑语法通过替代质量验收。
 
 临时浏览器 profile 清理被工具自动审批阻止：`C:\Users\mywor\AppData\Local\Temp\maichart-ui-audit-af9f5111dcf04e3f915c7f237af0ef22`。浏览器已关闭；未绕过策略，不影响功能。
