@@ -300,7 +300,7 @@
 <div class="form-grid">
 <label class="field">数值精度<select id="formPrecision"><option value="auto">自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16，CPU 使用 FP32。</small></label>
 <label class="field">数据加载 worker<input id="formLoaderWorkers" type="number" min="0" max="64" value="0"><small>0 表示主进程加载；增加 worker 可并行读取批次。</small></label>
-<label class="field">预取批次数<input id="formPrefetchFactor" type="number" min="1" max="16" value="2"><small>每个 worker 预先准备的 batch 数。</small></label>
+<label class="field">预取批次数<input id="formPrefetchFactor" type="number" min="1" max="16" value="2"><small>数据加载 worker=0 时，以单个后台线程提前准备这些 batch，共享音频内存；worker&gt;0 时为每个 worker 的预取数量。默认2，增大只增加准备余量和内存，不会启动更多线程。</small></label>
 <label class="field">进度日志间隔（秒）<input id="formLogInterval" type="number" min="0.1" max="3600" step="0.5" value="10"><small>按时间输出阶段进度、损失和速度。</small></label>
 <label class="field">按优化器步保存<input id="formCheckpointIntervalSteps" type="number" min="0" max="1000000" value="500"><small>每 N 次参数更新额外保存；0 关闭。</small></label>
 <label class="field">音频读取方式<select id="formAudioCacheMode"><option value="lru" selected>按预算缓存（默认）</option><option value="resident">全量驻留内存</option></select><small>全量驻留要求数据加载 worker=0，且音频缓存上限足以容纳所需音频；否则训练启动前会拒绝。缓存上限是全量驻留硬预算，并非无限。</small></label>

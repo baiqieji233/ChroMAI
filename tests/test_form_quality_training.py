@@ -77,7 +77,8 @@ def test_enhanced_mid_epoch_resume_matches_uninterrupted_updates(source, tmp_pat
                   '--perturb-curve-noise-std', '.03', '--perturb-history-corruption-prob', '.02',
                   '--perturb-apply-prob', '.5']
         complete_dir = tmp_path/'complete'
-        assert train.main(common + ['--checkpoint-dir', str(complete_dir)]) == 0
+        assert train.main(common + ['--checkpoint-dir', str(complete_dir),
+                                   '--layout-prefetch-batches', '0']) == 0
         complete = torch.load(complete_dir/'form_last.pt', weights_only=False)
         atomic_save = train._atomic_save
 
@@ -90,7 +91,7 @@ def test_enhanced_mid_epoch_resume_matches_uninterrupted_updates(source, tmp_pat
         partial_dir = tmp_path/'partial'
         monkeypatch.setattr(train, '_atomic_save', interrupt_after_update)
         with pytest.raises(InterruptedError, match='accumulation group'):
-            train.main(common + ['--checkpoint-dir', str(partial_dir)])
+            train.main(common + ['--checkpoint-dir', str(partial_dir), '--layout-prefetch-batches', '2'])
         monkeypatch.setattr(train, '_atomic_save', atomic_save)
         resumed_dir = tmp_path/'resumed'
         assert train.main(common + ['--checkpoint-dir', str(resumed_dir),

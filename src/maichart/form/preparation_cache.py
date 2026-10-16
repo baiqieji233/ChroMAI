@@ -59,6 +59,63 @@ def _json_bytes(value):
                       separators=(',', ':')).encode('utf-8')
 
 
+def _read_index_identity(path):
+    """Read the small identity prefix without materializing cached chart data.
+
+    Our sorted JSON writer places ``arrays_sha256`` and ``identity`` before
+    the much larger ``result``. Only this known ordering takes the fast path;
+    legacy orderings, oversized identities and incomplete prefixes retain the
+    original full JSON parser. This is only a candidate-discovery hint: load()
+    still parses the selected file in full and verifies its schema, identity
+    and array checksum before any cached chart is accepted.
+    """
+    decoder = json.JSONDecoder()
+    chunk_size, prefix_limit = 4096, 64 * 1024
+    with Path(path).open('r', encoding='utf-8') as source:
+        prefix = source.read(chunk_size)
+
+        def whitespace(position):
+            while position < len(prefix) and prefix[position] in ' \t\r\n':
+                position += 1
+            return position
+
+        def decode(position):
+            nonlocal prefix
+            while True:
+                try:
+                    return decoder.raw_decode(prefix, position)
+                except json.JSONDecodeError:
+                    if len(prefix) >= prefix_limit:
+                        raise
+                    chunk = source.read(min(chunk_size, prefix_limit-len(prefix)))
+                    if not chunk:
+                        raise
+                    prefix += chunk
+
+        try:
+            position = whitespace(0)
+            if position >= len(prefix) or prefix[position] != '{':
+                raise ValueError('Noncanonical preparation index')
+            position += 1
+            for expected in ('arrays_sha256', 'identity'):
+                key, position = decode(whitespace(position))
+                if key != expected:
+                    raise ValueError('Legacy preparation index ordering')
+                position = whitespace(position)
+                if position >= len(prefix) or prefix[position] != ':':
+                    raise ValueError('Incomplete preparation index prefix')
+                value, position = decode(whitespace(position+1))
+                if expected == 'identity':
+                    return value
+                position = whitespace(position)
+                if position >= len(prefix) or prefix[position] != ',':
+                    raise ValueError('Incomplete preparation index prefix')
+                position += 1
+        except (ValueError, TypeError):
+            pass
+    return json.loads(Path(path).read_text(encoding='utf-8')).get('identity')
+
+
 class PreparationCache:
     def __init__(self, cache_dir):
         self.root = Path(cache_dir) / 'song_form_prepare' / 'v1'
@@ -139,8 +196,7 @@ class PreparationCache:
             for root in self._legacy_roots():
                 for candidate in root.glob('*.index.json'):
                     try:
-                        probe = json.loads(candidate.read_text(encoding='utf-8'))
-                        normalized = self._normalized_identity(probe.get('identity'))
+                        normalized = self._normalized_identity(_read_index_identity(candidate))
                         index.setdefault(normalized, []).append(candidate)
                         scanned += 1
                     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):

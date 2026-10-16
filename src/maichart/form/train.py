@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
+from contextlib import nullcontext
 import json
 import math
 import os
@@ -121,6 +122,9 @@ def parser():
     p.add_argument('--precision', choices=('auto', 'fp32', 'bf16', 'fp16'), default='auto')
     p.add_argument('--loader-workers', type=int, default=0)
     p.add_argument('--prefetch-factor', type=int, default=2)
+    p.add_argument('--layout-prefetch-batches', type=int, default=None,
+                   help='in-process single-thread CPU batch lookahead for loader-workers=0; '
+                        'default uses prefetch-factor, 0 disables for comparison')
     p.add_argument('--audio-cache-gb', type=float, default=1.)
     p.add_argument('--audio-cache-mode', choices=('lru', 'resident'), default='lru')
     p.add_argument('--sample-cache-mb', type=int, default=256)
@@ -178,6 +182,9 @@ def _validate(args):
         raise ValueError('blueprint_batch_size must be positive')
     if args.blueprint_workers > 4:
         raise ValueError('blueprint_workers cannot exceed 4')
+    if args.layout_prefetch_batches is not None and (isinstance(args.layout_prefetch_batches, bool)
+            or not 0 <= args.layout_prefetch_batches <= 16):
+        raise ValueError('layout_prefetch_batches must be between 0 and 16')
     if args.event_decision_loss_weight is not None and (not math.isfinite(args.event_decision_loss_weight)
             or not 0<=args.event_decision_loss_weight<=10):
         raise ValueError('event_decision_loss_weight must be between 0 and 10')
@@ -620,6 +627,8 @@ def _train(args):
          planner_context_seconds=args.planner_context_seconds, curve_bin_seconds=args.curve_bin_seconds,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
+         layout_prefetch_batches=(args.layout_prefetch_batches if args.layout_prefetch_batches is not None
+                                  else min(args.prefetch_factor, 16)) if not args.loader_workers else 0,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
          audio_cache_mode=args.audio_cache_mode,
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
@@ -978,7 +987,13 @@ def _train(args):
             loader_options['prefetch_factor'] = args.prefetch_factor
             loader_options['multiprocessing_context'] = 'spawn'
         loader = DataLoader(dataset, **loader_options)
-        iterator = iter(loader)
+        layout_prefetch_depth = ((args.layout_prefetch_batches if args.layout_prefetch_batches is not None
+                                  else min(args.prefetch_factor, 16)) if not args.loader_workers else 0)
+        if layout_prefetch_depth:
+            from maichart.form.layout_prefetch import LayoutBatchPrefetch
+            batch_stream = LayoutBatchPrefetch(loader, depth=layout_prefetch_depth)
+        else:
+            batch_stream = nullcontext(iter(loader))
         pending_tasks = Counter()
         pending_cap_tasks = Counter()
         pending_rhythm_count = None
@@ -989,104 +1004,106 @@ def _train(args):
         # the flag on the device and test it once before the optimizer update.
         pending_finite = None
         last_update = {}
-        for batch_index in range(layout_start, layout_total):
-            tick = time.perf_counter()
-            batch = next(iterator)
-            validate_cpu_batch(batch)
-            batch_size = len(batch['task'])
-            tokens = int((batch['target'] != 0).sum())
-            task_counts = Counter(batch['task'].tolist())
-            progress.timing['data_wait_sec'] += time.perf_counter()-tick
-            tick = time.perf_counter()
-            batch = {k:v.to(device, non_blocking=device.type=='cuda') if isinstance(v,torch.Tensor) else v for k,v in batch.items()}
-            progress.timing['h2d_sec'] += time.perf_counter()-tick
-            tick = time.perf_counter()
-            if args.condition_drop_prob:
-                batch['condition_null'] = torch.rand(batch_size, device=device) < args.condition_drop_prob
-            with engine.autocast():
-                prediction = model(batch)
-            loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight,
-                event_decision_weight=args.event_decision_loss_weight,
-                rhythm_loss_weight=args.rhythm_loss_weight,
-                repetition_penalty_weight=args.repetition_penalty_weight,
-                diversity_weight=args.diversity_loss_weight,
-                position_event_weight=args.position_event_loss_weight,
-                position_alignment_weight=args.position_alignment_loss_weight)
-            diagnostics = parts.pop('diagnostics')
-            finite = torch.isfinite(loss_sum.detach())
-            pending_finite = finite if pending_finite is None else pending_finite & finite
-            engine.backward(loss_sum, batch_size)
-            pending_tasks.update(task_counts)
-            for task_id in (0, 1):
-                mask = (batch['task'] == task_id) & ~batch['condition_null'] & (batch['weight'] > 0)
-                pending_cap_tasks[task_id] += mask.sum().detach()
-            if args.rhythm_geometry_profile != 'none' and args.rhythm_loss_weight > 0:
-                timing_mask = batch.get('timing_mask')
-                if timing_mask is not None:
-                    # Keep this on-device through the accumulation group. A
-                    # row contributes only when it has a valid timing label
-                    # and positive chart/region weight; null conditioning is
-                    # still legitimate auxiliary supervision.
-                    valid_rhythm = timing_mask.any(dim=1) & (batch['weight'] > 0)
-                    count = valid_rhythm.sum()
-                    pending_rhythm_count = count if pending_rhythm_count is None else pending_rhythm_count + count
-            if args.position_event_loss_weight > 0:
-                # Count supervised events, not tokens: that is exactly the unit
-                # the per-event objective averages over.
-                boundary = ((batch['decoder_input'] == _CODEC_FOR_LOSS.bos_id)
-                            | (batch['decoder_input'] == _CODEC_FOR_LOSS.end_id))
-                event_count = (boundary & (batch['target'] == _CODEC_FOR_LOSS.at_id)
-                               & (batch['weight'] > 0).unsqueeze(1)).sum()
-                pending_position_event_count = (event_count if pending_position_event_count is None
-                                                else pending_position_event_count + event_count)
-            if args.position_alignment_loss_weight > 0:
-                aligned = (batch['alignment_event_mask']
-                           & ((batch['weight'] > 0) & (batch['task'] == 0)).unsqueeze(1)).sum()
-                pending_alignment_count = (aligned if pending_alignment_count is None
-                                           else pending_alignment_count + aligned)
-            update = None
-            if engine.microbatches >= args.grad_accumulation or batch_index+1 == layout_total:
-                if not bool(pending_finite):
-                    raise ValueError('Nonfinite layout loss')
-                pending_finite = None
-                update = engine.step()
-                last_update = update
-                if update['applied']:
-                    steps += 1
-                    for task_id, name in ((0, 'draft'), (1, 'revision')):
-                        task_training[name] = task_training.get(name, 0) + pending_tasks[task_id]
-                        conditioned_count = int(pending_cap_tasks[task_id])
-                        if conditioned_count:
-                            increment_cap(name, conditioned_count, 'form_condition_v2')
-                    if pending_rhythm_count is not None and bool(pending_rhythm_count.item()):
-                        increment_cap('rhythm_geometry', int(pending_rhythm_count.item()), args.rhythm_geometry_profile)
-                    if pending_position_event_count is not None and bool(pending_position_event_count.item()):
-                        increment_cap('position_event', int(pending_position_event_count.item()), 'per_event_fraction_v1')
-                    if pending_alignment_count is not None and bool(pending_alignment_count.item()):
-                        increment_cap('position_alignment', int(pending_alignment_count.item()), 'authored_audio_queries_v1')
-                else:
-                    emit('form_warning', message='AMP overflow: accumulated layout update skipped', epoch=epoch, batch=batch_index+1)
-                pending_tasks.clear(); pending_cap_tasks.clear(); pending_rhythm_count = None
-                pending_position_event_count = None
-                pending_alignment_count = None
-            progress.timing['compute_sec'] += time.perf_counter()-tick
-            progress.phase_samples += batch_size
-            progress.phase_tokens += tokens
-            progress.add(parts, batch_size, weights={'token_accuracy': tokens})
-            progress.add(diagnostics['values'], weights=diagnostics['counts'])
-            for key, value in diagnostics['values'].items():
-                count = diagnostics['counts'][key]
-                layout_metric_sums[key] = layout_metric_sums.get(key, 0.) + value.detach() * count
-                layout_metric_counts[key] = layout_metric_counts.get(key, 0) + count
-            phase_loss_sums['layout_loss'] += parts['loss']*batch_size
-            phase_counts['layout_loss'] += batch_size
-            if update and args.checkpoint_interval_steps and steps+plan_steps-last_save_steps >= args.checkpoint_interval_steps:
-                save(epoch, 'layout_revision', batch_index+1)
-            progress.log(batch_index+1, layout_total, optimizer_steps=steps, blueprint_steps=plan_steps,
-                         accumulation_pending=engine.microbatches, grad_accumulation=args.grad_accumulation,
-                         lr=optimizer.param_groups[0]['lr'], cache=dataset.cache_stats(),
-                         cache_scope='main_process_only' if args.loader_workers else 'training_process',
-                         grad_norm=last_update.get('grad_norm'), amp_scale=last_update.get('amp_scale'))
+        with batch_stream as iterator:
+            for batch_index in range(layout_start, layout_total):
+                tick = time.perf_counter()
+                batch = next(iterator)
+                validate_cpu_batch(batch)
+                batch_size = len(batch['task'])
+                tokens = int((batch['target'] != 0).sum())
+                task_counts = Counter(batch['task'].tolist())
+                progress.timing['data_wait_sec'] += time.perf_counter()-tick
+                tick = time.perf_counter()
+                batch = {k:v.to(device, non_blocking=device.type=='cuda') if isinstance(v,torch.Tensor) else v for k,v in batch.items()}
+                progress.timing['h2d_sec'] += time.perf_counter()-tick
+                tick = time.perf_counter()
+                if args.condition_drop_prob:
+                    batch['condition_null'] = torch.rand(batch_size, device=device) < args.condition_drop_prob
+                with engine.autocast():
+                    prediction = model(batch)
+                loss_sum, parts = layout_loss(prediction, batch, args.relation_loss_weight,
+                    event_decision_weight=args.event_decision_loss_weight,
+                    rhythm_loss_weight=args.rhythm_loss_weight,
+                    repetition_penalty_weight=args.repetition_penalty_weight,
+                    diversity_weight=args.diversity_loss_weight,
+                    position_event_weight=args.position_event_loss_weight,
+                    position_alignment_weight=args.position_alignment_loss_weight)
+                diagnostics = parts.pop('diagnostics')
+                finite = torch.isfinite(loss_sum.detach())
+                pending_finite = finite if pending_finite is None else pending_finite & finite
+                engine.backward(loss_sum, batch_size)
+                pending_tasks.update(task_counts)
+                for task_id in (0, 1):
+                    mask = (batch['task'] == task_id) & ~batch['condition_null'] & (batch['weight'] > 0)
+                    pending_cap_tasks[task_id] += mask.sum().detach()
+                if args.rhythm_geometry_profile != 'none' and args.rhythm_loss_weight > 0:
+                    timing_mask = batch.get('timing_mask')
+                    if timing_mask is not None:
+                        # Keep this on-device through the accumulation group. A
+                        # row contributes only when it has a valid timing label
+                        # and positive chart/region weight; null conditioning is
+                        # still legitimate auxiliary supervision.
+                        valid_rhythm = timing_mask.any(dim=1) & (batch['weight'] > 0)
+                        count = valid_rhythm.sum()
+                        pending_rhythm_count = count if pending_rhythm_count is None else pending_rhythm_count + count
+                if args.position_event_loss_weight > 0:
+                    # Count supervised events, not tokens: that is exactly the unit
+                    # the per-event objective averages over.
+                    boundary = ((batch['decoder_input'] == _CODEC_FOR_LOSS.bos_id)
+                                | (batch['decoder_input'] == _CODEC_FOR_LOSS.end_id))
+                    event_count = (boundary & (batch['target'] == _CODEC_FOR_LOSS.at_id)
+                                   & (batch['weight'] > 0).unsqueeze(1)).sum()
+                    pending_position_event_count = (event_count if pending_position_event_count is None
+                                                    else pending_position_event_count + event_count)
+                if args.position_alignment_loss_weight > 0:
+                    aligned = (batch['alignment_event_mask']
+                               & ((batch['weight'] > 0) & (batch['task'] == 0)).unsqueeze(1)).sum()
+                    pending_alignment_count = (aligned if pending_alignment_count is None
+                                               else pending_alignment_count + aligned)
+                update = None
+                if engine.microbatches >= args.grad_accumulation or batch_index+1 == layout_total:
+                    if not bool(pending_finite):
+                        raise ValueError('Nonfinite layout loss')
+                    pending_finite = None
+                    update = engine.step()
+                    last_update = update
+                    if update['applied']:
+                        steps += 1
+                        for task_id, name in ((0, 'draft'), (1, 'revision')):
+                            task_training[name] = task_training.get(name, 0) + pending_tasks[task_id]
+                            conditioned_count = int(pending_cap_tasks[task_id])
+                            if conditioned_count:
+                                increment_cap(name, conditioned_count, 'form_condition_v2')
+                        if pending_rhythm_count is not None and bool(pending_rhythm_count.item()):
+                            increment_cap('rhythm_geometry', int(pending_rhythm_count.item()), args.rhythm_geometry_profile)
+                        if pending_position_event_count is not None and bool(pending_position_event_count.item()):
+                            increment_cap('position_event', int(pending_position_event_count.item()), 'per_event_fraction_v1')
+                        if pending_alignment_count is not None and bool(pending_alignment_count.item()):
+                            increment_cap('position_alignment', int(pending_alignment_count.item()), 'authored_audio_queries_v1')
+                    else:
+                        emit('form_warning', message='AMP overflow: accumulated layout update skipped', epoch=epoch, batch=batch_index+1)
+                    pending_tasks.clear(); pending_cap_tasks.clear(); pending_rhythm_count = None
+                    pending_position_event_count = None
+                    pending_alignment_count = None
+                progress.timing['compute_sec'] += time.perf_counter()-tick
+                progress.phase_samples += batch_size
+                progress.phase_tokens += tokens
+                progress.add(parts, batch_size, weights={'token_accuracy': tokens})
+                progress.add(diagnostics['values'], weights=diagnostics['counts'])
+                for key, value in diagnostics['values'].items():
+                    count = diagnostics['counts'][key]
+                    layout_metric_sums[key] = layout_metric_sums.get(key, 0.) + value.detach() * count
+                    layout_metric_counts[key] = layout_metric_counts.get(key, 0) + count
+                phase_loss_sums['layout_loss'] += parts['loss']*batch_size
+                phase_counts['layout_loss'] += batch_size
+                if update and args.checkpoint_interval_steps and steps+plan_steps-last_save_steps >= args.checkpoint_interval_steps:
+                    save(epoch, 'layout_revision', batch_index+1)
+                progress.log(batch_index+1, layout_total, optimizer_steps=steps, blueprint_steps=plan_steps,
+                             accumulation_pending=engine.microbatches, grad_accumulation=args.grad_accumulation,
+                             lr=optimizer.param_groups[0]['lr'], cache=dataset.cache_stats(),
+                             cache_scope='main_process_only' if args.loader_workers else 'training_process',
+                             layout_prefetch=iterator.stats() if layout_prefetch_depth else {'mode': 'synchronous'},
+                             grad_norm=last_update.get('grad_norm'), amp_scale=last_update.get('amp_scale'))
         del iterator, loader
         metrics = {'epoch':epoch,
                    'draft_revision_loss':float(phase_loss_sums['layout_loss'])/max(1,phase_counts['layout_loss']),

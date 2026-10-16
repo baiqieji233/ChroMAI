@@ -5,6 +5,7 @@ does not simulate a player's body or certify that a chart is playable.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from fractions import Fraction
 import math
 from typing import Any, Iterable
@@ -122,6 +123,7 @@ class SustainStateIndex:
             raise ValueError(f"MiaCode sustain input contains unsupported notes: {detail}")
         self.markers = [m for m in self.markers if m["type"] in _TYPE_OFFSETS]
         self._references: dict[str, Any] | None = None
+        self._release_index = None
 
     def at(self, start_beat: Fraction | int | str | float) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         beat = _as_beat(start_beat)
@@ -134,10 +136,16 @@ class SustainStateIndex:
             onset = float(marker.get("second", 0.0))
             if onset >= boundary - _EPS:
                 continue
-            release = self._release_for(marker, boundary)
             end = float(marker.get("end_second", -1.0))
             if not math.isfinite(end):
                 raise ValueError(f"MiaCode marker has no end time: {marker.get('raw', '')}")
+            # A causal following head can only shorten the release to zero.
+            # Once even its maximum release expired, scanning possible heads
+            # cannot change the selected state. Most authored actions are in
+            # this category at later training boundaries.
+            if end + RELEASE <= boundary + _EPS:
+                continue
+            release = self._release_for(marker, boundary)
             deadline = end + release
             trace = float(marker.get("slide_trace_second", -1.0))
             waiting = kind in {"slide", "wifi"} and trace > boundary + _EPS
@@ -195,10 +203,30 @@ class SustainStateIndex:
         # Only already-authored heads can affect this causal boundary snapshot.
         lane = marker.get("lane") if marker["type"] in {"hold", "touch_hold"} else marker.get("end_lane")
         end = marker["end_second"]
-        for following in self.markers:
+        # Preparation caches restore markers with __new__, so build lazily
+        # rather than requiring a new serialized cache/checkpoint contract.
+        # The marker list is immutable during normal use. Detect replacement
+        # or append as well, for callers rebuilding the parsed chart.
+        signature = (id(self.markers), len(self.markers))
+        cached = getattr(self, '_release_index', None)
+        if cached is None or cached[0] != signature:
+            by_lane: dict[Any, list[dict[str, Any]]] = {}
+            for following in self.markers:
+                if (following["type"] in {"slide", "wifi"}
+                        and math.isfinite(following["slide_trace_second"])):
+                    by_lane.setdefault(following["lane"], []).append(following)
+            index = {}
+            for source_lane, values in by_lane.items():
+                values.sort(key=lambda item: item['slide_trace_second'])
+                index[source_lane] = ([item['slide_trace_second'] for item in values], values)
+            cached = self._release_index = (signature, index)
+        traces, following_markers = cached[1].get(lane, ((), ()))
+        radius = 1/180
+        lo, hi = bisect_left(traces, end-radius), bisect_right(traces, end+radius)
+        for following in following_markers[lo:hi]:
             if (following["key"] != marker["key"] and following["type"] in {"slide", "wifi"}
                     and following["second"] < boundary - _EPS and following["lane"] == lane
-                    and abs(following["slide_trace_second"] - end) < 1/180):
+                    and abs(following["slide_trace_second"] - end) < radius):
                 return 0.0
         return RELEASE
 
