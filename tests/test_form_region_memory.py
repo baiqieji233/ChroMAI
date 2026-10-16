@@ -93,3 +93,29 @@ def test_context_report_counts_actual_retained_history_and_keeps_older_sustain_s
     assert example['meta']['history_tokens']==example['history'].numel()<=20
     assert example['meta']['history_coverage_seconds'] == float((F(12)-retained[0].beat)/2)
     assert example['meta']['state_count']==1
+
+
+def test_late_compute_span_retains_overlapping_long_region_motif():
+    from maichart.form.recurrence import DESCRIPTOR_DIM, Relation, SongRelations
+    from maichart.form.timing import MetricSpan
+
+    def span(index, start, end):
+        return MetricSpan(index, F(start), F(end), 4, 4, (), F(4), (), False, 1., 'test')
+
+    regions = [span(0, 0, 40), span(1, 80, 120)]
+    spans = [span(0, 0, 40), span(1, 80, 110), span(2, 110, 120)]
+    relations = SongRelations(tuple(regions), np.zeros((2, DESCRIPTOR_DIM), dtype=np.float32),
+        [Relation(0, 1, .95, .8, 1.)], layout_descriptors=np.zeros((2, 512), dtype=np.float32))
+    audio = EventAudio(np.zeros((61, ACOUSTIC_DIM), dtype=np.float32),
+        np.arange(61, dtype=np.float32), 60., 120.)
+    song = FormSong(audio, [EventTempo(F(0), 120)], 0., [], spans, relations, {},
+        regions=regions, span_region_indices=[0, 1, 1], quality_profile='musical_evidence_v1')
+    history = [EventPoint(F(index, 10), '1') for index in range(400)]
+    codec = RationalCodec()
+    example = input_example(song, 2, history, codec=codec, max_memory_tokens=2048)
+    motif = codec.decode(example['motif'].tolist(), origin=F(110))
+
+    assert example['meta']['reference_source'] == 0
+    assert len(motif) == 100
+    assert motif[0].beat == 110
+    assert motif[-1].beat == F(1199, 10)

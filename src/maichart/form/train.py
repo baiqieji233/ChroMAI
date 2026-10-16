@@ -21,6 +21,10 @@ from maichart.form.data import FormDataset, collate_form, form_audio
 from maichart.form.model import FormConfig, FormTransformer
 from maichart.form.layout_metrics import layout_diagnostics
 from maichart.form import checkpoint
+from maichart.form.quality_profile import (
+    LEGACY, MUSICAL_EVIDENCE, DEFAULT_ALIGNMENT_WEIGHT,
+    DEFAULT_ALIGNMENT_TOLERANCE_MS, descriptor_dim, enhanced,
+)
 from maichart.form.training_runtime import (
     TRAINING_SEMANTICS, EpochBatches, Progress, UpdateEngine, capture_rng, emit,
     resolve_precision, restore_rng, validate_cpu_batch,
@@ -95,6 +99,16 @@ def parser():
                    help='average each event Fraction spelling before averaging events, so a long '
                         'denominator is not supervised harder than a one-digit integer; '
                         'fresh v2 defaults to .25, resume inherits')
+    p.add_argument('--quality-profile', choices=('auto', LEGACY, MUSICAL_EVIDENCE), default='auto',
+                   help='fresh v2 uses balanced musical evidence; resume inherits; finetune upgrades only explicitly')
+    p.add_argument('--position-alignment-loss-weight', type=float, default=None,
+                   help='authored event/audio correspondence auxiliary objective; enhanced default .15')
+    p.add_argument('--position-alignment-tolerance-ms', type=float, default=None,
+                   help='maximum authored event/query labeling uncertainty; never an output timing grid')
+    p.add_argument('--planner-context-seconds', type=float, default=None,
+                   help='left/right audio neighborhoods on actual query timestamps; enhanced default 1 second')
+    p.add_argument('--curve-bin-seconds', type=float, default=None,
+                   help='training workload bin duration, independent of curve editor display resolution')
     p.add_argument('--quality-enabled', dest='quality_enabled', action='store_true', default=True)
     p.add_argument('--no-quality-enabled', dest='quality_enabled', action='store_false')
     p.add_argument('--max-memory-tokens', type=int, default=512)
@@ -175,6 +189,16 @@ def _validate(args):
     if args.position_event_loss_weight is not None and (not math.isfinite(args.position_event_loss_weight)
             or not 0 <= args.position_event_loss_weight <= 10):
         raise ValueError('position_event_loss_weight must be between 0 and 10')
+    if args.quality_profile not in ('auto', LEGACY, MUSICAL_EVIDENCE):
+        raise ValueError('Unknown quality_profile')
+    for name, minimum, maximum in (
+            ('position_alignment_loss_weight', 0., 10.),
+            ('position_alignment_tolerance_ms', 1., 100.),
+            ('planner_context_seconds', 0., 30.), ('curve_bin_seconds', .01, 30.)):
+        value = getattr(args, name, None)
+        if value is not None and (isinstance(value, bool) or not math.isfinite(float(value))
+                                  or not minimum <= float(value) <= maximum):
+            raise ValueError(f'{name} must be between {minimum} and {maximum}')
     if not math.isfinite(args.condition_drop_prob) or not 0 <= args.condition_drop_prob <= 1:
         raise ValueError('condition_drop_prob must be in [0, 1]')
     if args.resume and args.init_checkpoint:
@@ -191,6 +215,7 @@ def fresh_model_configs(args):
     from maichart.form.blueprint import BlueprintConfig
     from maichart.form.codec import RationalCodec
     rational=getattr(args,'model_family','song_form_v1')=='song_form_v2'
+    resolve_quality_training_settings(args)
     ff=getattr(args,'dim_feedforward',0) or (3 if rational else 4)*args.d_model
     profile = getattr(args, 'rhythm_geometry_profile', 'none')
     if profile == 'auto':
@@ -198,13 +223,88 @@ def fresh_model_configs(args):
     config = FormConfig(vocab_size=len(RationalCodec()), d_model=args.d_model, nhead=args.nhead,
         dropout=args.dropout, layers=args.layers, dim_feedforward=ff,
         max_tokens=args.max_tokens, max_memory_tokens=args.max_memory_tokens,
-        rhythm_geometry_profile=profile)
+        rhythm_geometry_profile=profile, quality_profile=args.quality_profile,
+        descriptor_dim=descriptor_dim(args.quality_profile), curve_bin_seconds=args.curve_bin_seconds,
+        position_alignment_tolerance_ms=args.position_alignment_tolerance_ms)
     if rational:
         from maichart.form.rational_planner import RationalPlannerConfig
-        planner_config=RationalPlannerConfig(width=getattr(args,'planner_width',128))
+        planner_config=RationalPlannerConfig(width=getattr(args,'planner_width',128),
+            quality_profile=args.quality_profile, descriptor_dim=descriptor_dim(args.quality_profile),
+            context_seconds=args.planner_context_seconds)
     else:
         planner_config = BlueprintConfig(width=max(16, args.d_model//2))
     return config, planner_config
+
+
+def resolve_quality_training_settings(args, old=None, model=None, planner=None):
+    """Resolve one versioned input/target contract before data or optimizers.
+
+    Config-only namespaces are accepted so WebUI preflight uses these same
+    defaults. Resume always restores saved values, including when a browser
+    still contains values from another model.
+    """
+    saved_args = (old or {}).get('args') or {}
+    config = getattr(model, 'config', None)
+    planner_config = getattr(planner, 'config', None)
+    saved_config = (old or {}).get('model_config') or {}
+    saved_planner_config = (old or {}).get('blueprint_config') or {}
+    saved_profile = getattr(config, 'quality_profile', saved_config.get('quality_profile', LEGACY))
+    requested = getattr(args, 'quality_profile', 'auto')
+    resume = bool(getattr(args, 'resume', None))
+    if requested not in ('auto', LEGACY, MUSICAL_EVIDENCE):
+        raise ValueError('quality_profile must be auto, legacy, or musical_evidence_v1')
+    if resume:
+        profile = saved_profile
+    elif getattr(args, 'model_family', 'song_form_v1') == 'song_form_v1':
+        if requested not in ('auto', LEGACY):
+            raise ValueError('song_form_v1 requires quality_profile=legacy')
+        profile = LEGACY
+    elif old:
+        profile = saved_profile if requested == 'auto' else requested
+        if enhanced(saved_profile) and profile == LEGACY:
+            raise ValueError('quality_profile cannot be downgraded during finetune')
+    else:
+        profile = MUSICAL_EVIDENCE if requested == 'auto' else requested
+    is_enhanced = enhanced(profile)
+    same_contract = bool(old and profile == saved_profile)
+    defaults = {
+        'position_alignment_loss_weight': DEFAULT_ALIGNMENT_WEIGHT if is_enhanced else 0.,
+        'position_alignment_tolerance_ms': DEFAULT_ALIGNMENT_TOLERANCE_MS,
+        'planner_context_seconds': 1. if is_enhanced else 0.,
+        'curve_bin_seconds': 1. if is_enhanced else 2.,
+    }
+    saved = {
+        'position_alignment_loss_weight': saved_args.get('position_alignment_loss_weight', 0.),
+        'position_alignment_tolerance_ms': getattr(config, 'position_alignment_tolerance_ms',
+            saved_config.get('position_alignment_tolerance_ms',
+                saved_args.get('position_alignment_tolerance_ms', DEFAULT_ALIGNMENT_TOLERANCE_MS))),
+        'planner_context_seconds': getattr(planner_config, 'context_seconds',
+                                           saved_planner_config.get('context_seconds', 0.)),
+        'curve_bin_seconds': getattr(config, 'curve_bin_seconds', saved_config.get('curve_bin_seconds', 2.)),
+    }
+    for name, default in defaults.items():
+        value = saved[name] if resume else getattr(args, name, None)
+        if value is None:
+            value = saved[name] if same_contract else default
+        limits = {'position_alignment_loss_weight': (0., 10.),
+                  'position_alignment_tolerance_ms': (1., 100.),
+                  'planner_context_seconds': (0., 30.), 'curve_bin_seconds': (.01, 30.)}
+        minimum, maximum = limits[name]
+        if isinstance(value, bool):
+            raise ValueError(f'{name} must be a number')
+        try:
+            value = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f'{name} must be a number') from exc
+        if not math.isfinite(value) or not minimum <= value <= maximum:
+            raise ValueError(f'{name} must be between {minimum} and {maximum}')
+        setattr(args, name, value)
+    if not is_enhanced:
+        if args.position_alignment_loss_weight or args.planner_context_seconds or args.curve_bin_seconds != 2.:
+            raise ValueError('quality_profile=legacy requires position_alignment_loss_weight=0, '
+                             'planner_context_seconds=0, curve_bin_seconds=2')
+    args.quality_profile = profile
+    return args
 
 
 def resolve_rhythm_geometry_settings(args, old=None, model=None):
@@ -237,7 +337,8 @@ def resolve_rhythm_geometry_settings(args, old=None, model=None):
 
 
 def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rhythm_loss_weight=0.,
-                repetition_penalty_weight=0., diversity_weight=0., position_event_weight=0.):
+                repetition_penalty_weight=0., diversity_weight=0., position_event_weight=0.,
+                position_alignment_weight=0.):
     """Per-example objectives. Their sum can be accumulated across batch sizes."""
     logits = prediction['logits'].float()
     valid = batch['target'] != 0
@@ -288,12 +389,32 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
         position_event = position_event_loss(logits, batch['target'], batch['decoder_input'],
                                              _CODEC_FOR_LOSS, reduction='none',token_ce=ce) * weights
         loss_sum = loss_sum + position_event_weight * position_event.sum()
+    alignment = None
+    alignment_metrics = {}
+    if position_alignment_weight:
+        from maichart.form.alignment import position_alignment_loss
+        alignment_per_row, alignment_metrics = position_alignment_loss(prediction, batch)
+        alignment = alignment_per_row * weights
+        loss_sum = loss_sum + position_alignment_weight * alignment.sum()
     correct = ((logits.detach().argmax(-1) == batch['target']) & valid).sum()
     if 'decoder_input' in batch and 'task' in batch:
         diagnostic_values, diagnostic_counts = layout_diagnostics(
             logits, batch['target'], batch['decoder_input'], batch['task'], ce)
     else:
         diagnostic_values, diagnostic_counts = {}, {}
+    if alignment is not None:
+        draft_rows = (batch['task'] == 0) & (weights > 0)
+        active_events = batch['alignment_event_mask'].any(1) & draft_rows
+        authored_events = batch['alignment_event_indices'].ne(-1).any(1) & draft_rows
+        active_queries = batch['position_alignment_mask'].any(1) & draft_rows
+        rows_by_metric = {'position_alignment_event_accuracy': active_events,
+                          'position_alignment_coverage': authored_events,
+                          'position_alignment_loss': active_queries}
+        for key, row_mask in rows_by_metric.items():
+            values = alignment.detach() if key == 'position_alignment_loss' else alignment_metrics[key]
+            count = row_mask.sum()
+            diagnostic_values[key] = values.masked_fill(~row_mask, 0).sum()/count.clamp_min(1)
+            diagnostic_counts[key] = count
     return loss_sum, {'token_loss': token.detach().mean(), 'relation_loss': relation.detach().mean(),
                       **({'diversity_loss': diversity_loss.detach().mean()} if diversity_weight else {}),
                       **({'event_decision_aux_loss':auxiliary.detach().mean()} if auxiliary is not None else {}),
@@ -330,6 +451,8 @@ def _blueprint_input(dataset, index):
         from maichart.form.data import _form_descriptor
         inputs={'audio':audio[None],'form':torch.from_numpy(_form_descriptor(song,0))[None],
                 'condition':condition.to_vector()[None]}
+        if enhanced(getattr(song, 'quality_profile', LEGACY)):
+            inputs['audio_times_sec'] = torch.as_tensor(times, dtype=torch.float64)[None]
         targets={'load_curve_target':torch.from_numpy(curve)[None],
                  'load_curve_mask':torch.ones((1,len(times),4),dtype=torch.bool),
                  'frame_weight':torch.from_numpy(weights)[None]}
@@ -413,10 +536,22 @@ def _train(args):
     # The profile is architectural. Resume always inherits it; finetune only
     # migrates when the user explicitly requests exact_fraction_v1.
     saved_profile = getattr(model.config, 'rhythm_geometry_profile', 'none') if old else 'none'
+    saved_quality = getattr(model.config, 'quality_profile', LEGACY) if old else LEGACY
     resolve_rhythm_geometry_settings(args, old, model if old else None)
-    semantics=(('song_form_training_v5_exact_geometry' if args.rhythm_geometry_profile!='none'
+    resolve_quality_training_settings(args, old, model if old else None, blueprint if old else None)
+    quality_changed = bool(old and saved_quality != args.quality_profile)
+    planner_contract_changed = bool(old and (quality_changed
+        or float(getattr(model.config, 'curve_bin_seconds', 2.)) != args.curve_bin_seconds
+        or float(getattr(blueprint.config, 'context_seconds', 0.)) != args.planner_context_seconds))
+    alignment_contract_changed = bool(old and (quality_changed
+        or float(getattr(model.config, 'position_alignment_tolerance_ms', 15.))
+           != args.position_alignment_tolerance_ms))
+    layout_contract_changed = bool(old and (quality_changed or planner_contract_changed
+        or saved_profile != args.rhythm_geometry_profile))
+    semantics=('song_form_training_v6_musical_evidence' if enhanced(args.quality_profile) else
+               (('song_form_training_v5_exact_geometry' if args.rhythm_geometry_profile!='none'
                 else 'song_form_training_v5_rational_inputs')
-               if args.model_family=='song_form_v2' else TRAINING_SEMANTICS)
+               if args.model_family=='song_form_v2' else TRAINING_SEMANTICS))
     _validate(args)
     if args.model_family=='song_form_v2':
         if args.resume:
@@ -479,6 +614,10 @@ def _train(args):
          rhythm_geometry_profile=args.rhythm_geometry_profile,
          rhythm_loss_weight=args.rhythm_loss_weight,
          position_event_loss_weight=args.position_event_loss_weight,
+         quality_profile=args.quality_profile,
+         position_alignment_loss_weight=args.position_alignment_loss_weight,
+         position_alignment_tolerance_ms=args.position_alignment_tolerance_ms,
+         planner_context_seconds=args.planner_context_seconds, curve_bin_seconds=args.curve_bin_seconds,
          effective_batch_size=args.batch_size*args.grad_accumulation, loader_workers=args.loader_workers,
          prepare_workers=args.prepare_workers, prefetch_factor=args.prefetch_factor,
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
@@ -526,6 +665,8 @@ def _train(args):
                           audio_cache_gb=args.audio_cache_gb, sample_cache_mb=args.sample_cache_mb,
                           audio_profile='rational_audio_queries_v1' if args.model_family=='song_form_v2' else 'legacy_50hz',
                           rhythm_geometry_profile=args.rhythm_geometry_profile,
+                          quality_profile=args.quality_profile, curve_bin_seconds=args.curve_bin_seconds,
+                          position_alignment_tolerance_ms=args.position_alignment_tolerance_ms,
                           perturbation_config=perturbation_config)
     contract = {**current_header, 'charts': dataset.audit['charts']}
     migration = None
@@ -556,13 +697,22 @@ def _train(args):
             blueprint = RationalPlanner(planner_config)
         else:
             blueprint = SongBlueprint(planner_config)
-    elif args.init_checkpoint and args.rhythm_geometry_profile != saved_profile:
-        # The only supported finetune architecture migration adds zero-started
-        # geometry projections and the interval head.  Old learned branches
-        # are copied exactly; missing keys are checked in checkpoint.load.
+    elif args.init_checkpoint:
         from dataclasses import replace
-        migrated_config = replace(model.config, rhythm_geometry_profile=args.rhythm_geometry_profile)
-        model = checkpoint.load_finetune_model(args.init_checkpoint, migrated_config, device='cpu')
+        migrated_config = replace(model.config, rhythm_geometry_profile=args.rhythm_geometry_profile,
+            quality_profile=args.quality_profile, descriptor_dim=descriptor_dim(args.quality_profile),
+            curve_bin_seconds=args.curve_bin_seconds,
+            position_alignment_tolerance_ms=args.position_alignment_tolerance_ms)
+        if migrated_config != model.config:
+            model = checkpoint.load_finetune_model(args.init_checkpoint, migrated_config, device='cpu')
+        if args.model_family == 'song_form_v2':
+            migrated_planner_config = replace(blueprint.config, quality_profile=args.quality_profile,
+                descriptor_dim=descriptor_dim(args.quality_profile), context_seconds=args.planner_context_seconds)
+            if migrated_planner_config != blueprint.config:
+                blueprint = checkpoint.load_finetune_planner(args.init_checkpoint, migrated_planner_config, device='cpu')
+        if quality_changed:
+            emit('form_quality_migration', source_profile=saved_quality, target_profile=args.quality_profile,
+                 message='新音频证据、曲线密度与辅助目标需要微调；保留来源权重，规划能力将重新计数。')
     model.to(device); blueprint.to(device)
     # Inputs are checked on CPU before copying. Shapes are always checked in
     # the model; avoid per-forward GPU -> host scalar synchronizations.
@@ -582,9 +732,18 @@ def _train(args):
     steps = int(old.get('optimizer_steps', 0)) if old else 0
     plan_steps = int(old.get('blueprint_steps', 0)) if old else 0
     planner_effective_steps = (int(old.get('planner_effective_steps', plan_steps))
-                               if old and checkpoint.planner_is_ready(old) else 0)
+                               if old and not planner_contract_changed and checkpoint.planner_is_ready(old) else 0)
     task_training = dict(old.get('task_training', {})) if old else {'draft': 0, 'revision': 0}
     capabilities = dict(old.get('capabilities', {})) if old and old.get('training_semantics') == semantics else {}
+    if layout_contract_changed:
+        # Old lifetime task counts do not establish that newly added input
+        # branches have received even one layout update in the new contract.
+        for task_name in ('draft', 'revision'):
+            capabilities[task_name] = {'steps': 0, 'contract': 'form_condition_v2'}
+    if planner_contract_changed:
+        capabilities.pop('load_curve', None)
+    if alignment_contract_changed:
+        capabilities.pop('position_alignment', None)
     history = list(old.get('training_history', [])) if args.resume else []
     start_epoch = int(old.get('epoch', 0)) if args.resume else 0
     cursor = dict(old.get('training_position') or {}) if args.resume else {}
@@ -742,9 +901,11 @@ def _train(args):
                 with engine.autocast():
                     if args.model_family=='song_form_v2':
                         null=torch.rand(inputs['condition'].shape[0],device=device)<args.condition_drop_prob
+                        planner_kwargs = ({'audio_times_sec': inputs['audio_times_sec']}
+                                          if enhanced(args.quality_profile) else {})
                         prediction=blueprint(inputs['audio'],inputs['form'],inputs['condition'],
                             audio_padding_mask=inputs['audio_padding_mask'],
-                            form_padding_mask=inputs['form_padding_mask'],condition_null=null)
+                            form_padding_mask=inputs['form_padding_mask'],condition_null=null, **planner_kwargs)
                     else:
                         prediction = blueprint(inputs['audio'], inputs['form'], inputs['condition'])
                 if args.model_family=='song_form_v2':
@@ -822,6 +983,7 @@ def _train(args):
         pending_cap_tasks = Counter()
         pending_rhythm_count = None
         pending_position_event_count = None
+        pending_alignment_count = None
         # A per-batch finiteness test would make the host wait for each forward
         # pass before queueing its backward or preparing the next batch. Keep
         # the flag on the device and test it once before the optimizer update.
@@ -848,7 +1010,8 @@ def _train(args):
                 rhythm_loss_weight=args.rhythm_loss_weight,
                 repetition_penalty_weight=args.repetition_penalty_weight,
                 diversity_weight=args.diversity_loss_weight,
-                position_event_weight=args.position_event_loss_weight)
+                position_event_weight=args.position_event_loss_weight,
+                position_alignment_weight=args.position_alignment_loss_weight)
             diagnostics = parts.pop('diagnostics')
             finite = torch.isfinite(loss_sum.detach())
             pending_finite = finite if pending_finite is None else pending_finite & finite
@@ -876,6 +1039,11 @@ def _train(args):
                                & (batch['weight'] > 0).unsqueeze(1)).sum()
                 pending_position_event_count = (event_count if pending_position_event_count is None
                                                 else pending_position_event_count + event_count)
+            if args.position_alignment_loss_weight > 0:
+                aligned = (batch['alignment_event_mask']
+                           & ((batch['weight'] > 0) & (batch['task'] == 0)).unsqueeze(1)).sum()
+                pending_alignment_count = (aligned if pending_alignment_count is None
+                                           else pending_alignment_count + aligned)
             update = None
             if engine.microbatches >= args.grad_accumulation or batch_index+1 == layout_total:
                 if not bool(pending_finite):
@@ -894,10 +1062,13 @@ def _train(args):
                         increment_cap('rhythm_geometry', int(pending_rhythm_count.item()), args.rhythm_geometry_profile)
                     if pending_position_event_count is not None and bool(pending_position_event_count.item()):
                         increment_cap('position_event', int(pending_position_event_count.item()), 'per_event_fraction_v1')
+                    if pending_alignment_count is not None and bool(pending_alignment_count.item()):
+                        increment_cap('position_alignment', int(pending_alignment_count.item()), 'authored_audio_queries_v1')
                 else:
                     emit('form_warning', message='AMP overflow: accumulated layout update skipped', epoch=epoch, batch=batch_index+1)
                 pending_tasks.clear(); pending_cap_tasks.clear(); pending_rhythm_count = None
                 pending_position_event_count = None
+                pending_alignment_count = None
             progress.timing['compute_sec'] += time.perf_counter()-tick
             progress.phase_samples += batch_size
             progress.phase_tokens += tokens

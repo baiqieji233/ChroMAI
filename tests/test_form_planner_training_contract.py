@@ -57,7 +57,7 @@ def _tiny_run(tmp_path, monkeypatch):
     audio = fixture_audio(3)
     monkeypatch.setattr(train, 'FormDataset', lambda *a, **kw: real_dataset(
         *a, **kw, audio_loader=lambda *a, **kw: audio))
-    common = ['--manifest', str(manifest), '--cache-dir', str(tmp_path / 'cache'),
+    common = ['--quality-profile', 'legacy', '--manifest', str(manifest), '--cache-dir', str(tmp_path / 'cache'),
         '--model-family', 'song_form_v2', '--rhythm-geometry-profile', 'none',
         '--epochs', '1', '--batch-size', '1', '--max-steps', '1', '--d-model', '16',
         '--nhead', '2', '--layers', '1', '--dropout', '0', '--max-tokens', '128',

@@ -143,3 +143,90 @@ def test_optional_eos_penalty_can_continue_without_forcing_explicit_rests():
 def test_generation_corrections_validate_settings(settings):
     with pytest.raises(ValueError):
         generation.compose_span(object(), RationalCodec(), example(), ['1'], origin=F(0), end=F(1), **settings)
+
+
+def _generation_song(bounds, *, bpm=185):
+    import numpy as np
+    from maichart.event_timing import EventTempo
+    from maichart.form.data import FormSong
+    from maichart.form.recurrence import DESCRIPTOR_DIM, SongRelations
+    from maichart.form.timing import MetricSpan
+    from maichart.generation.event_audio import ACOUSTIC_DIM, EventAudio
+
+    spans = [MetricSpan(index, F(start), F(end), 4, 4, (), F(4), (), False, 1., 'test')
+             for index, (start, end) in enumerate(bounds)]
+    duration = float(spans[-1].end) * 60 / bpm
+    times = np.linspace(0, duration, 100, dtype=np.float32)
+    audio = EventAudio(np.zeros((len(times), ACOUSTIC_DIM), dtype=np.float32), times, duration, bpm)
+    relations = SongRelations(tuple(spans), np.zeros((len(spans), DESCRIPTOR_DIM)), [])
+    return FormSong(audio, [EventTempo(F(0), bpm)], 0., [], spans, relations, {},
+        load_curve_times_sec=np.array([duration / 2], dtype=np.float32),
+        load_curve=np.zeros((1, 4), dtype=np.float32))
+
+
+def test_generation_cleanup_keeps_history_before_next_span(monkeypatch):
+    import numpy as np
+    from maichart.generation.conditions import GenerationCondition
+
+    song = _generation_song([(0, 3), (3, 6)])
+    monkeypatch.setattr('maichart.form.rational_audio.planner_audio_queries',
+        lambda song: (torch.zeros(1, 120), np.zeros(1), []))
+    calls = []
+
+    def compose(*args, **kwargs):
+        calls.append(kwargs)
+        if kwargs['origin'] == 0:
+            return [EventPoint(F(2), '1'), EventPoint(F(287, 96), '2')], {
+                'closed': True, 'reason': 'eos', 'tokens': 20}
+        assert kwargs['history_last'] == F(287, 96)
+        assert args[2]['meta']['history_events_available'] == 2
+        return [EventPoint(F(4), '1')], {'closed': True, 'reason': 'eos', 'tokens': 10}
+
+    monkeypatch.setattr(generation, 'compose_span', compose)
+    model = SimpleNamespace(config=SimpleNamespace(max_memory_tokens=256))
+    planner = lambda audio, *args: {'load_curve': torch.zeros((*audio.shape[:2], 4))}
+    points, report = generation.generate_rational_chart(model, planner, RationalCodec(), song,
+        GenerationCondition(), ['1', '2'], style_balance_strength=0, local_chord_strength=0)
+
+    assert len(calls) == 2
+    assert points[1].beat == F(287, 96)
+    assert report['rational_diagnostics']['near_grid_simplification']['changed'] == 0
+
+
+def test_generation_replays_guidance_after_actual_time_change(monkeypatch):
+    import numpy as np
+    from maichart.generation.conditions import GenerationCondition
+
+    song = _generation_song([(0, 36), (36, 40)], bpm=130)
+    monkeypatch.setattr('maichart.form.rational_audio.planner_audio_queries',
+        lambda song: (torch.zeros(1, 120), np.zeros(1), []))
+    replays = []
+
+    class Guidance:
+        def __init__(self, *args, **kwargs):
+            pass
+        def replay(self, points, tempo, first, curve_factor=None):
+            replays.append(tuple(points))
+            assert curve_factor(0.) == 1.
+        def report(self):
+            return {}
+
+    monkeypatch.setattr('maichart.form.type_guidance.TypeGuidance', Guidance)
+
+    def compose(*args, **kwargs):
+        if kwargs['origin'] == 0:
+            return [EventPoint(F(35), '1'), EventPoint(F(3313, 94), '2')], {
+                'closed': True, 'reason': 'eos', 'tokens': 20}
+        assert replays == [(EventPoint(F(35), '1'), EventPoint(F(141, 4), '2'))]
+        assert kwargs['history_last'] == F(141, 4)
+        return [EventPoint(F(37), '1')], {'closed': True, 'reason': 'eos', 'tokens': 10}
+
+    monkeypatch.setattr(generation, 'compose_span', compose)
+    model = SimpleNamespace(config=SimpleNamespace(max_memory_tokens=256))
+    planner = lambda audio, *args: {'load_curve': torch.zeros((*audio.shape[:2], 4))}
+    points, report = generation.generate_rational_chart(model, planner, RationalCodec(), song,
+        GenerationCondition(), ['1', '2'], style_balance_strength=1., local_chord_strength=0)
+
+    assert len(replays) == 1
+    assert points[1].beat == F(141, 4)
+    assert report['rational_diagnostics']['near_grid_simplification']['changed'] == 1

@@ -19,6 +19,10 @@ import numpy as np
 from maichart.event_timing import EventPoint, EventTempo
 from maichart.form.recurrence import Relation, SongRelations
 from maichart.form.timing import MeterChange, MetricSpan, normalize_meter_map
+from maichart.form.quality_profile import (
+    enhanced, evidence_profile, density_profile, duration_semantics, descriptor_dim,
+    default_curve_bin_seconds,
+)
 from maichart.generation.conditions import GenerationCondition
 from maichart.generation.event_audio import _feature_config
 from maichart.generation.sustain_state import SustainStateIndex
@@ -173,6 +177,17 @@ class PreparationCache:
                          'max_region_seconds': options['max_region_seconds'],
                          'reconstruction': options['reconstruction'], 'meter_map': meters},
         }
+        profile = options.get('quality_profile', 'legacy')
+        width = float(options.get('curve_bin_seconds', default_curve_bin_seconds(profile)))
+        if enhanced(profile):
+            identity['semantics'] = 'song_form_preparation_musical_evidence_v1'
+            identity['settings'].update(quality_profile=profile, curve_bin_seconds=width,
+                audio_evidence_profile=evidence_profile(profile), density_profile=density_profile(profile),
+                duration_semantics=duration_semantics(profile), form_descriptor_dim=descriptor_dim(profile),
+                position_alignment_tolerance_ms=float(options.get('position_alignment_tolerance_ms', 15.)))
+        elif width != 2.:
+            # Original legacy defaults retain byte-for-byte identity fields.
+            identity['settings']['curve_bin_seconds'] = width
         # Cache keys describe semantic inputs. Implementation code changes
         # are kept in metadata for diagnostics but do not force a full rebuild.
         return hashlib.sha256(self._normalized_identity(identity)).hexdigest(), identity
@@ -276,6 +291,8 @@ def _encode(result):
                     state_markers=state.markers,
                     song={'tempo': tempo, 'first': song.first, 'audio_profile': song.audio_profile,
                           'rhythm_geometry_profile': song.rhythm_geometry_profile,
+                          'quality_profile': song.quality_profile,
+                          'curve_bin_seconds': song.curve_bin_seconds,
                           'meters': [m.to_dict() for m in song.meters],
                           'spans': [s.to_dict() for s in song.spans],
                           'regions': [s.to_dict() for s in song.regions],
@@ -285,6 +302,9 @@ def _encode(result):
                           'relation_audit': song.relations.audit})
     arrays = {'descriptors': song.relations.descriptors,
               'load_curve_times_sec': song.load_curve_times_sec, 'load_curve': song.load_curve}
+    layout = getattr(song.relations, 'layout_descriptors', None)
+    if layout is not None:
+        arrays['layout_descriptors'] = layout
     return metadata, arrays
 
 
@@ -303,11 +323,21 @@ def _decode(metadata, arrays):
     relations = SongRelations(tuple(MetricSpan.from_dict(s) for s in values['relation_spans']),
                               descriptors, [Relation(**link) for link in values['relation_links']],
                               values['relation_audit'])
+    profile = values.get('quality_profile', 'legacy')
+    if 'layout_descriptors' in arrays:
+        layout = arrays['layout_descriptors'].copy()
+        if (layout.shape != (len(descriptors), descriptor_dim(profile))
+                or not np.isfinite(layout).all()):
+            raise ValueError('Preparation layout descriptors are invalid')
+        relations.layout_descriptors = layout
+    elif enhanced(profile):
+        raise ValueError('Musical evidence preparation lacks layout descriptors')
     song = FormSong(None, tempo, values['first'], [MeterChange.from_dict(m) for m in values['meters']],
                     [MetricSpan.from_dict(s) for s in values['spans']], relations, values['audit'],
                     [MetricSpan.from_dict(s) for s in values['regions']], values['span_region_indices'],
                     times, curve, values.get('audio_profile','legacy_50hz'),
-                    values.get('rhythm_geometry_profile', 'none'))
+                    values.get('rhythm_geometry_profile', 'none'), profile,
+                    values.get('curve_bin_seconds', default_curve_bin_seconds(profile)))
     # Restore parsed markers instead of recompiling and parsing the same chart.
     # Its code/reference digest participates in the cache identity above.
     state = SustainStateIndex.__new__(SustainStateIndex)

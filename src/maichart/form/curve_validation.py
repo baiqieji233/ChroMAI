@@ -4,6 +4,7 @@ from __future__ import annotations
 from fractions import Fraction
 from pathlib import Path
 
+from maichart.form.timing import normalize_meter_map
 from maichart.generation.music_intensity import audio_sha256
 from maichart.generation.timeline import normalize_tempo_map, tempo_map_fingerprint
 
@@ -31,7 +32,8 @@ def _tempo_maps_match(left, right) -> bool:
 def validate_saved_curve(profile: dict, *, audio_path, checkpoint_path,
                          checkpoint_identity: dict, first: float,
                          tempo_map, bpm_input: float | None,
-                         condition: dict, resolved_tempo_map=None,
+                         condition: dict, resolved_tempo_map=None, meter_map=None,
+                         quality_profile: str | None = None,
                          check_tempo_inputs: bool = True) -> list[str]:
     """Validate immutable curve provenance and report reusable condition changes."""
     from maichart.form.clock import curve_axis
@@ -87,6 +89,26 @@ def validate_saved_curve(profile: dict, *, audio_path, checkpoint_path,
             raise ValueError("Saved song-form curve has invalid resolved tempo changes; regenerate the curve") from exc
         if not _tempo_maps_match(saved_resolved_tempo, resolved_tempo_map):
             raise ValueError("Saved song-form curve resolves to another tempo map; regenerate the curve")
+    try:
+        # Compare the clock-relevant fields, not display metadata such as the
+        # annotation source. Missing old metadata denotes unknown meter, never
+        # an inferred four-beat signature.
+        meter_signature = lambda values: [
+            (meter.beat, meter.numerator, meter.denominator, meter.grouping)
+            for meter in normalize_meter_map(values)
+        ]
+        saved_meters = meter_signature(profile.get("meter_map"))
+        current_meters = meter_signature(meter_map)
+    except (TypeError, ValueError, KeyError) as exc:
+        raise ValueError("Saved song-form curve has invalid meter map metadata; regenerate the curve") from exc
+    if saved_meters != current_meters:
+        raise ValueError("Saved song-form curve uses another meter map; regenerate the curve")
+    if quality_profile is not None:
+        from maichart.form.quality_profile import validate_quality_profile
+        expected_quality = validate_quality_profile(quality_profile)
+        saved_quality = validate_quality_profile(profile.get("quality_profile", "legacy"))
+        if saved_quality != expected_quality:
+            raise ValueError("Saved song-form curve uses another musical-evidence contract; regenerate the curve")
     if not isinstance(profile["condition"], dict):
         raise ValueError("Saved song-form curve has invalid condition metadata; regenerate the curve")
     if profile["condition"] != condition:

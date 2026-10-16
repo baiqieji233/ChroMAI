@@ -7,6 +7,7 @@ import math
 
 import numpy as np
 
+from maichart.event_timing import seconds_at_beat
 from maichart.generation.conditions import GENERATION_DEFAULTS
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.notes import parse_timing_point_notes
@@ -72,6 +73,7 @@ class TypeGuidance:
         self.planner_strength = validate_strength(planner_strength, 'planner_type_strength')
         self.style_strength = validate_strength(style_strength, 'style_balance_strength')
         self.local_chord_strength = validate_strength(local_chord_strength, 'local_chord_strength')
+        self._condition = condition
         from maichart.form.physical_guard import validate_physical_strength
         self.physical_strength = validate_physical_strength(physical_strength)
         self.grammar = _NoteGrammar.from_atoms(atoms)
@@ -171,6 +173,28 @@ class TypeGuidance:
             self.argmax_counts[PLANNER_TYPES[index]] += 1
             self.argmax_matches += int(index == int(_primary(counts)))
             self.cue_events += 1
+
+    def replay(self, points, tempo, first, curve_factor=None):
+        """Rebuild causal clocks after accepted timing edits, retaining decode diagnostics."""
+        if self.local_chords is not None:
+            from maichart.form.local_load import LocalChordGuard
+            self.local_chords = LocalChordGuard([], target_chord_ratio=self._condition.style['chord_bias'],
+                strength=self.local_chord_strength, window_seconds=self.local_chords.window_seconds)
+        if self.physical is not None:
+            from maichart.form.physical_guard import PhysicalFeasibilityGuard
+            self.physical = PhysicalFeasibilityGuard(self.physical_strength,
+                max_hand_speed=self.physical.max_hand_speed)
+        self.counts = np.zeros(5, dtype=np.float64)
+        self.cue_events = self.argmax_matches = 0
+        self.argmax_counts.clear()
+        for point in points:
+            second = float(seconds_at_beat(point.beat, tempo, first))
+            if self.local_chords is not None:
+                self.local_chords.cues[Fraction(point.beat)] = (
+                    second, float(curve_factor(second)) if curve_factor else 1.0)
+            if self.physical is not None:
+                self.physical.register(point.beat, second, tempo, first)
+            self.commit(point.note_text, point.beat)
 
     def report(self):
         from maichart.form.physical_guard import MAX_PHYSICAL_PENALTY

@@ -174,6 +174,21 @@ class BlueprintInputCache:
             'max_memory_tokens': getattr(dataset, 'max_memory_tokens', None),
             'max_region_seconds': max_region_seconds,
         }
+        from maichart.form.quality_profile import enhanced, evidence_profile, density_profile, duration_semantics
+        quality_profile = getattr(song, 'quality_profile', 'legacy')
+        width = float(getattr(song, 'curve_bin_seconds', 2.))
+        if enhanced(quality_profile):
+            effective.update(semantics='song_form_blueprint_musical_evidence_v1',
+                quality_profile=quality_profile, curve_bin_seconds=width,
+                audio_evidence_profile=evidence_profile(quality_profile),
+                density_profile=density_profile(quality_profile),
+                duration_semantics=duration_semantics(quality_profile),
+                position_alignment_tolerance_ms=float(getattr(dataset, 'position_alignment_tolerance_ms', 15.)),
+                form_descriptor_sha256=array_hash(song.relations.layout_descriptors))
+            effective['audio_feature_config'] = {**audio_feature_config,
+                                                'evidence_profile': evidence_profile(quality_profile)}
+        elif width != 2.:
+            effective['curve_bin_seconds'] = width
         return self.identity(chart, **effective)
 
     def stats(self):

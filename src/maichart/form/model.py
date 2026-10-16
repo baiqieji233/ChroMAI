@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 
 import torch
 from torch import nn
@@ -25,6 +26,9 @@ class FormConfig:
     max_audio_tokens: int = 1024
     max_memory_tokens: int = 512
     rhythm_geometry_profile: str = 'none'
+    quality_profile: str = 'legacy'
+    curve_bin_seconds: float = 2.0
+    position_alignment_tolerance_ms: float = 15.0
 
     def __post_init__(self) -> None:
         for name in (
@@ -41,6 +45,12 @@ class FormConfig:
             raise ValueError("dropout must be in [0, 1).")
         if self.rhythm_geometry_profile not in GEOMETRY_PROFILES:
             raise ValueError('Unknown rhythm geometry profile')
+        from maichart.form.quality_profile import validate_quality_profile
+        validate_quality_profile(self.quality_profile)
+        if not math.isfinite(self.curve_bin_seconds) or not .01 <= self.curve_bin_seconds <= 30:
+            raise ValueError('curve_bin_seconds must be in [.01, 30]')
+        if not math.isfinite(self.position_alignment_tolerance_ms) or not 1 <= self.position_alignment_tolerance_ms <= 100:
+            raise ValueError('position_alignment_tolerance_ms must be in [1, 100]')
 
     @property
     def geometry_dim(self) -> int:
@@ -71,7 +81,7 @@ class FormTransformer(nn.Module):
             max(config.max_tokens, config.max_audio_tokens, config.max_memory_tokens, 131),
             width,
         )
-        self.branch_embedding = nn.Embedding(11, width)
+        self.branch_embedding = nn.Embedding(13 if config.quality_profile != 'legacy' else 11, width)
         self.audio_projection = nn.Linear(config.audio_dim, width)
         self.form_projection = nn.Linear(config.descriptor_dim + 3, width)
         self.action_projection = nn.Linear(50, width)
@@ -110,6 +120,13 @@ class FormTransformer(nn.Module):
         self.decoder_norm = nn.LayerNorm(width)
         self.output_head = nn.Linear(width, config.vocab_size)
         self.relation_head = nn.Linear(width, 2)
+        if config.quality_profile != 'legacy':
+            self.span_projection = nn.Linear(2, width)
+            alignment_width = min(64, width)
+            self.alignment_query = nn.Linear(width, alignment_width, bias=False)
+            self.alignment_key = nn.Linear(width, alignment_width, bias=False)
+            self.position_alignment_head = nn.Sequential(nn.LayerNorm(width),
+                nn.Linear(width, max(8, width//2)), nn.GELU(), nn.Linear(max(8, width//2), 1))
         if config.rhythm_geometry_profile != 'none':
             self.time_geometry_projection = nn.Linear(config.geometry_dim,width,bias=False)
             self.decoder_geometry_projection = nn.Linear(config.geometry_dim,width,bias=False)
@@ -133,6 +150,31 @@ class FormTransformer(nn.Module):
         }
         if self.config.rhythm_geometry_profile != 'none':
             result['timing_prediction']=self.interval_head(hidden)
+        if self.config.quality_profile != 'legacy' and 'alignment_event_indices' in batch:
+            audio = self.audio_projection(batch['audio'])
+            if self.config.rhythm_geometry_profile != 'none':
+                audio = audio + self.time_geometry_projection(batch['audio_geometry'].to(audio))
+            raw_indices = batch['alignment_event_indices']
+            if raw_indices.ndim != 2 or raw_indices.size(0) != hidden.size(0):
+                raise ValueError('alignment_event_indices must have shape [B,E]')
+            if self.validate_inputs and torch.any((raw_indices < -1) | (raw_indices >= hidden.size(1))):
+                raise ValueError('Alignment decoder indices lie outside the causal prefix')
+            indices = raw_indices.to(device=hidden.device, dtype=torch.long).clamp_min(0)
+            queries = hidden.gather(1, indices[..., None].expand(-1, -1, hidden.size(-1)))
+            key, query = self.alignment_key(audio), self.alignment_query(queries)
+            result['alignment_event_logits'] = (query @ key.transpose(1, 2)) / math.sqrt(key.size(-1))
+            padding = batch.get('audio_padding_mask')
+            if padding is not None:
+                result['alignment_event_logits'] = result['alignment_event_logits'].masked_fill(
+                    padding[:, None], -1e4)
+            # Audio-only head cannot copy draft/right/history or future chart
+            # positions. The event head above directly supervises the decoder.
+            condition = batch['condition'].clone()
+            null = batch.get('condition_null')
+            if null is not None:
+                condition[:, 1:] = torch.where(null.reshape(-1, 1).bool(), .5, condition[:, 1:])
+            result['position_alignment_logits'] = self.position_alignment_head(
+                audio + self.condition_projection(condition)[:, None]).squeeze(-1)
         return result
 
     def encode(self, batch: dict[str, torch.Tensor]) -> tuple[torch.Tensor, torch.Tensor]:
@@ -328,7 +370,15 @@ class FormTransformer(nn.Module):
                 raise ValueError("skeleton exceeds max_memory_tokens")
             # Unlike a completed right context this branch is valid for draft
             # and revise tasks; the input builder validates its mask-only cells.
-            add(self.token_embedding(skeleton), skeleton == 0, 10)
+            add(self.token_embedding(skeleton), skeleton == 0, 11 if self.config.quality_profile != 'legacy' else 10)
+
+        if self.config.quality_profile != 'legacy':
+            bounds = batch.get('span_bounds')
+            if bounds is None or bounds.shape != (batch_size, 2):
+                raise ValueError('Musical evidence requires explicit span_bounds [B,2]')
+            self._finite(bounds, 'span_bounds')
+            add(self.span_projection(bounds)[:, None],
+                torch.zeros((batch_size, 1), dtype=torch.bool, device=device), 12)
 
         condition_token = self.condition_projection(effective_condition) + condition_null[:, None].to(audio.dtype) * self.condition_null_embedding
         global_tokens = torch.stack(

@@ -44,25 +44,44 @@ class ModelFamily(Enum):
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
     if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:
-        from maichart.form.checkpoint import INPUT_CONTRACT, LEGACY_INPUT_CONTRACT, _geometry_contract
+        from maichart.form.checkpoint import LEGACY_INPUT_CONTRACT, input_contract_for_configs
         rational=checkpoint_data.get('schema')=='maichart-song-form-checkpoint-v2'
         family='song_form_v2' if rational else 'song_form_v1'
         errors=[]
         if checkpoint_data.get("family") != family: errors.append("新架构模型族声明不一致")
-        profile=(checkpoint_data.get('model_config') or {}).get('rhythm_geometry_profile','none')
-        expected=(_geometry_contract(profile) if rational else INPUT_CONTRACT)
+        config = checkpoint_data.get('model_config') or {}
+        planner_config = checkpoint_data.get('blueprint_config') or {}
+        profile=config.get('rhythm_geometry_profile','none')
+        quality=config.get('quality_profile','legacy')
+        try:
+            expected = input_contract_for_configs(config, planner_config, rational=rational)
+        except (ValueError, TypeError, KeyError) as error:
+            expected = None
+            errors.append(str(error))
         contract=checkpoint_data.get('input_contract')
         from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
         if profile not in GEOMETRY_PROFILES or (not rational and profile!='none'):
             errors.append('新架构节奏几何合同不匹配')
         if contract!=expected and not (not rational and contract==LEGACY_INPUT_CONTRACT):
             errors.append("新架构输入合同不匹配")
-        return {"model_family":family,"planner_profile":"musical_query_workload_v1" if rational else "whole_song_blueprint_v1",
+        alignment_capability = (checkpoint_data.get('capabilities') or {}).get('position_alignment') or {}
+        alignment_available = quality == 'musical_evidence_v1' and not errors
+        return {"model_family":family,"planner_profile":("musical_query_workload_temporal_v2"
+                    if rational and quality != 'legacy' else "musical_query_workload_v1" if rational else "whole_song_blueprint_v1"),
                 "valid":not errors,"errors":errors,"experimental":True,
                 "conflict_detection":True,"conflict_repair":True,"fine_note_strength":False,
                 "onset_profile":"none","local_onset_guidance":False,"rhythm_bias":False,
                 "action_state_profile":"sustain_state_v1","sustained_action_memory":False,
-                "rhythm_geometry_profile":profile,"generation_entry":"/"}
+                "rhythm_geometry_profile":profile,"generation_entry":"/",
+                "quality_profile":quality,"descriptor_dim":config.get('descriptor_dim',504),
+                "curve_bin_seconds":config.get('curve_bin_seconds',2.),
+                "planner_context_seconds":planner_config.get('context_seconds',0.),
+                "audio_evidence_profile":"balanced_evidence_v1" if quality != 'legacy' else 'legacy',
+                "position_alignment_supervision":alignment_available,
+                "position_alignment_trained":bool(alignment_available
+                    and alignment_capability.get('contract') == 'authored_audio_queries_v1'
+                    and alignment_capability.get('steps',0) > 0),
+                "position_alignment_tolerance_ms":config.get('position_alignment_tolerance_ms',15.)}
     contract = checkpoint_data.get("data_contract") or {}
     if not isinstance(contract, dict):
         contract = {}

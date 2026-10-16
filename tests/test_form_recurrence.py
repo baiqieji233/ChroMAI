@@ -271,3 +271,35 @@ def test_phase_aligned_relation_shifts_chart_points_and_clips_without_wrapping()
     # The first point crosses the left edge and is dropped instead of wrapped.
     assert [point.beat for point in reference.points] == [Fraction(11), Fraction(33, 2)]
     assert [point.note_text for point in reference.points] == ["inside", "late"]
+
+
+def test_long_motif_is_clipped_to_compute_window_before_event_budget():
+    spans = [_span(0, 0, 40), _span(1, 80, 120)]
+    relation = Relation(0, 1, 0.95, 0.8, 1.0)
+    relations = SongRelations(tuple(spans), np.zeros((2, DESCRIPTOR_DIM)), [relation])
+    memory = CausalMotifMemory(spans)
+    memory.commit(0, [EventPoint(Fraction(index, 10), '1') for index in range(400)])
+
+    whole = memory.reference(1, relations)
+    assert len(whole.points) == 256
+    assert whole.points[-1].beat < 110
+    later = memory.reference(1, relations, target_start=Fraction(110), target_end=Fraction(120))
+    assert len(later.points) == 100
+    assert later.source == whole.source == 0
+    assert later.points[0].beat == 110
+    assert later.points[-1].beat == Fraction(1199, 10)
+    limited = memory.reference(1, relations, max_events=7,
+        target_start=Fraction(110), target_end=Fraction(120))
+    assert limited.points == later.points[:7]
+
+
+def test_motif_range_applies_after_phase_projection_and_rejects_outside_region():
+    spans = [_span(0, 0, 8), _span(1, 10, 18)]
+    relation = Relation(0, 1, 0.95, 0.8, 1.0, phase_shift_bins=3, phase_bins=24)
+    relations = SongRelations(tuple(spans), np.zeros((2, DESCRIPTOR_DIM)), [relation])
+    memory = CausalMotifMemory(spans)
+    memory.commit(0, [EventPoint(Fraction(2), '1'), EventPoint(Fraction(15, 2), '2')])
+    later = memory.reference(1, relations, target_start=Fraction(12), target_end=Fraction(18))
+    assert later.points == (EventPoint(Fraction(33, 2), '2'),)
+    with pytest.raises(ValueError, match='within its musical region'):
+        memory.reference(1, relations, target_start=Fraction(9))

@@ -36,7 +36,8 @@ def normalize_rational_grid_divisions(values):
     return result
 
 
-def _near_grid_candidates(beat, tempo, first, divisions, tolerance_sec, *, end_beat=None):
+def _near_grid_candidates(beat, tempo, first, divisions, tolerance_sec, *,
+                          start_beat=None, end_beat=None):
     """Return (shift_seconds, division, candidate_beat) near ``beat``."""
     result = []
     for division in divisions:
@@ -44,7 +45,8 @@ def _near_grid_candidates(beat, tempo, first, divisions, tolerance_sec, *, end_b
         cell = beat // step
         for index in (cell - 1, cell, cell + 1, cell + 2):
             candidate = index * step
-            if candidate < 0 or (end_beat is not None and candidate >= end_beat):
+            if (candidate < 0 or (start_beat is not None and candidate < start_beat)
+                    or (end_beat is not None and candidate >= end_beat)):
                 continue
             shift = abs(float(seconds_at_beat(candidate, tempo, first) -
                              seconds_at_beat(beat, tempo, first)))
@@ -63,7 +65,8 @@ def _near_grid_candidates(beat, tempo, first, divisions, tolerance_sec, *, end_b
 
 def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
                              divisions=DEFAULT_DIVISIONS, min_spacing_ms=0.0,
-                             end_beat=None, valid_position=None):
+                             start_beat=None, end_beat=None, valid_position=None,
+                             immutable_prefix=0):
     """Move only locally-supported, near-grid Fraction positions.
 
     The original note text and event count are preserved.  A position is a
@@ -72,7 +75,10 @@ def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
     denominator timings.  At least one
     adjacent event must also be on a common grid or have a compatible nearby
     candidate.  All moves are checked for monotonicity, rests/boundaries and
-    the configured physical minimum spacing.
+    the configured physical minimum spacing. ``immutable_prefix`` freezes that
+    many leading events while retaining them as spacing and rhythm evidence.
+    ``start_beat`` is inclusive and ``end_beat`` is exclusive, so cleanup never
+    moves a newly decoded event into a neighboring compute span.
     """
     tolerance_ms = float(tolerance_ms)
     if not math.isfinite(tolerance_ms) or not 0 <= tolerance_ms <= 50:
@@ -83,6 +89,13 @@ def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
     divisions = normalize_rational_grid_divisions(divisions)
     values = [EventPoint(Fraction(point.beat), point.note_text) for point in points]
     values.sort(key=lambda point: point.beat)
+    if (isinstance(immutable_prefix, bool) or not isinstance(immutable_prefix, int)
+            or not 0 <= immutable_prefix <= len(values)):
+        raise ValueError('immutable_prefix must be an event count within points')
+    start_beat = Fraction(start_beat) if start_beat is not None else None
+    end_beat = Fraction(end_beat) if end_beat is not None else None
+    if start_beat is not None and end_beat is not None and start_beat >= end_beat:
+        raise ValueError('Rational grid bounds must have positive duration')
     if any(a.beat >= b.beat for a, b in zip(values, values[1:])):
         raise ValueError('Rational grid simplification requires sorted, unique beats')
     stats = {
@@ -91,6 +104,7 @@ def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
         'tolerance_ms': tolerance_ms,
         'divisions': list(divisions),
         'min_spacing_ms': min_spacing_ms,
+        'immutable_prefix': immutable_prefix,
         'changed': 0,
         'isolated_complex_skipped': 0,
         'collision_blocked': 0,
@@ -110,9 +124,16 @@ def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
     tolerance_sec = tolerance_ms / 1000.0
     minimum_sec = min_spacing_ms / 1000.0
     candidates = []
-    for point in values:
+    for index, point in enumerate(values):
+        # Only the final two frozen neighbors can support a mutable event.
+        # Avoid recomputing tempo/grid queries over the entire song prefix on
+        # every resource pass while keeping the exact same local evidence.
+        if index < immutable_prefix - 2:
+            candidates.append([])
+            continue
         candidates.append(_near_grid_candidates(point.beat, tempo, first, divisions,
-                                                 tolerance_sec, end_beat=end_beat))
+                                                 tolerance_sec, start_beat=start_beat,
+                                                 end_beat=end_beat))
 
     # Keep support local.  This avoids moving an isolated intentional 1/7 or
     # 1/11 rhythm merely because a nearby common grid happens to be within a
@@ -138,7 +159,7 @@ def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
     occupied = set()
     for index, point in enumerate(values):
         chosen = point.beat
-        if point.beat.denominator >= complex_denominator_min:
+        if index >= immutable_prefix and point.beat.denominator >= complex_denominator_min:
             if not supported[index] or not candidates[index]:
                 stats['isolated_complex_skipped'] += 1
             else:
@@ -162,9 +183,10 @@ def simplify_rational_events(points, tempo, first, *, tolerance_ms=8.0,
                         stats['collision_blocked'] += 1
                         continue
                     chosen = candidate
-                    stats['changed'] += 1
-                    stats['changed_indices'].append(index)
-                    stats['maximum_shift_ms'] = max(stats['maximum_shift_ms'], shift * 1000.0)
+                    if chosen != point.beat:
+                        stats['changed'] += 1
+                        stats['changed_indices'].append(index)
+                        stats['maximum_shift_ms'] = max(stats['maximum_shift_ms'], shift * 1000.0)
                     break
         occupied.add(chosen)
         output.append(EventPoint(chosen, point.note_text))

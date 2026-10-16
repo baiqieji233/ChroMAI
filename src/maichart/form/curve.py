@@ -8,10 +8,44 @@ import numpy as np
 
 from maichart.event_timing import seconds_at_beat
 from maichart.form.clock import AUDIO_CURVE_AXIS
+from maichart.form.quality_profile import (
+    validate_quality_profile, enhanced, density_profile, duration_semantics,
+    default_curve_bin_seconds, evidence_profile,
+)
 
 
 LOAD_CURVE_CHANNELS = ("event_density", "tap", "sustain", "slide_touch")
 LOAD_CURVE_BIN_SECONDS = 2.0
+
+
+def _density_profile(profile):
+    if profile in ('legacy', 'musical_evidence_v1'):
+        return density_profile(profile)
+    if profile not in ('legacy_linear_v1', 'musical_log_v1'):
+        raise ValueError('Unknown density profile')
+    return profile
+
+
+def encode_density(nps, profile='legacy_linear_v1'):
+    """Encode heads/second with the checkpoint's versioned density scale.
+
+    musical_log_v1 is the historical contract name for nps/(nps+8), a
+    monotonic rational transform. Unlike the legacy linear scale it does not
+    collapse every density above eight heads/second to one.
+    """
+    values = np.asarray(nps, dtype=np.float64)
+    if not np.isfinite(values).all() or np.any(values < 0):
+        raise ValueError('nps must be finite and nonnegative')
+    return (values / (values + 8.) if _density_profile(profile) == 'musical_log_v1'
+            else np.minimum(values / 8., 1.))
+
+
+def decode_density(value, profile='legacy_linear_v1'):
+    values = np.asarray(value, dtype=np.float64)
+    if not np.isfinite(values).all() or np.any(values < 0) or np.any(values > 1):
+        raise ValueError('density values must be finite and in 0..1')
+    return (8. * values / np.maximum(1. - values, 1e-6)
+            if _density_profile(profile) == 'musical_log_v1' else values * 8.)
 
 
 def load_curve_bin_centers(duration_sec, bin_seconds=LOAD_CURVE_BIN_SECONDS):
@@ -24,15 +58,16 @@ def load_curve_bin_centers(duration_sec, bin_seconds=LOAD_CURVE_BIN_SECONDS):
     return (starts + np.minimum(duration, starts + width)) * .5
 
 
-def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CURVE_BIN_SECONDS):
-    """Build legacy chart-relative workload bins for compatible model inputs.
+def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=None, quality_profile='legacy'):
+    """Build versioned chart-relative workload bins for compatible model inputs.
 
     Bin coordinates are seconds from chart beat zero, not raw audio seconds.
     The training frame clock converts with audio_second - first. Public editor
     profiles use a separately versioned absolute-audio time axis.
     """
     duration = float(duration_sec)
-    width = float(bin_seconds)
+    quality_profile = validate_quality_profile(quality_profile)
+    width = float(default_curve_bin_seconds(quality_profile) if bin_seconds is None else bin_seconds)
     first = float(first)
     if not math.isfinite(duration) or duration <= 0:
         raise ValueError("duration_sec must be finite and positive")
@@ -43,7 +78,8 @@ def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CUR
 
     from maichart.generation.event_quality import parse_event_notes
 
-    parsed = parse_event_notes(points, tempo, first=first)
+    parsed = parse_event_notes(points, tempo, first=first,
+                               duration_semantics=duration_semantics(quality_profile))
     if not parsed.syntax_valid:
         raise ValueError("cannot build load curve from invalid chart events: " +
                          "; ".join(issue["message"] for issue in parsed.fatal_errors[:3]))
@@ -84,7 +120,7 @@ def build_load_curve(points, tempo, first, duration_sec, *, bin_seconds=LOAD_CUR
     active = totals > 0
     if np.any(active):
         bin_widths = np.minimum(chart_duration, (np.arange(count) + 1) * width) - np.arange(count) * width
-        values[active, 0] = np.minimum(totals[active] / bin_widths[active] / 8.0, 1.0)
+        values[active, 0] = encode_density(totals[active] / bin_widths[active], density_profile(quality_profile))
         values[active, 1] = np.minimum(taps[active] / totals[active], 1.0)
         values[active, 2] = np.minimum(sustains[active] / totals[active], 1.0)
         values[active, 3] = np.minimum(slide_touches[active] / totals[active], 1.0)
@@ -141,13 +177,18 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     device = torch.device(device)
     identity_before = _file_identity(checkpoint_path)
     model, planner, _, payload = load_form_checkpoint(checkpoint_path, device=device, inference=False)
+    config = getattr(model, 'config', None)
+    quality_profile = validate_quality_profile(getattr(config, 'quality_profile', 'legacy'))
+    bin_seconds = float(getattr(config, 'curve_bin_seconds', default_curve_bin_seconds(quality_profile)))
     _curve_capability(payload)
     if int(payload.get("optimizer_steps", 0)) <= 0 or int(payload.get("blueprint_steps", 0)) <= 0:
         raise ValueError("song_form draft and whole-song blueprint must be trained before curve inference")
     rational=payload.get('family','song_form_v1')=='song_form_v2'
     if rational:
         from maichart.form.rational_audio import extract_rational_audio
-        audio=extract_rational_audio(audio_path,cache_dir=Path(checkpoint_path).resolve().parent/'curve_audio_cache')
+        evidence_options = ({'evidence_profile': evidence_profile(quality_profile)} if enhanced(quality_profile) else {})
+        audio=extract_rational_audio(audio_path,cache_dir=Path(checkpoint_path).resolve().parent/'curve_audio_cache',
+                                     **evidence_options)
     else:
         audio = extract_event_audio(audio_path, cache_dir=Path(checkpoint_path).resolve().parent / "curve_audio_cache")
     bpm_input = float(bpm) if bpm is not None else None
@@ -163,7 +204,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     condition = GenerationCondition.from_dict(condition) if isinstance(condition, dict) else condition
     condition = condition or GenerationCondition(level=13.3, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
     song = organize_song(audio, tempo, first, meters=meter_map,
-        rhythm_geometry_profile=getattr(getattr(model,'config',None),'rhythm_geometry_profile','none'))
+        rhythm_geometry_profile=getattr(config,'rhythm_geometry_profile','none'),
+        quality_profile=quality_profile, curve_bin_seconds=bin_seconds)
     if not song.spans:
         raise ValueError("Audio is too short to predict a song-form workload curve")
     from maichart.form.data import input_example
@@ -181,7 +223,9 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     form_values = torch.as_tensor(example["form"], dtype=torch.float32, device=device).unsqueeze(0)
     condition_values = condition.to_vector(device=device).unsqueeze(0)
     with torch.inference_mode():
-        prediction = planner(audio_values, form_values, condition_values)
+        clock = ({'audio_times_sec': torch.as_tensor(planner_times, dtype=torch.float64, device=device)[None]}
+                 if rational and enhanced(quality_profile) else {})
+        prediction = planner(audio_values, form_values, condition_values, **clock)
     if "load_curve" not in prediction:
         raise ValueError("song_form blueprint has no load-curve output head")
     frame_start = float(seconds_at_beat(song.spans[0].start, tempo, first))
@@ -201,7 +245,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     # silence must not inherit an extrapolated nonzero model prediction.
     valid_bins = (points_times >= max(0.,float(first))) & (points_times < float(audio.duration_sec))
     profile_values[~valid_bins] = 0
-    density = profile_values[:, 0]
+    density = decode_density(profile_values[:, 0], density_profile(quality_profile))
     positive = density[density > 1e-6]
     reference = float(np.mean(positive)) if len(positive) else 1.0
     intensity = np.clip(0.5 * density / max(reference, 1e-6), 0.0, 1.0)
@@ -227,6 +271,9 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
     profile = {
         "schema": "maichart-intensity-curve-v1", "method": "learned_song_form_v2" if rational else "learned_song_form_v1",
         "model_family":payload.get('family','song_form_v1'),
+        "quality_profile": quality_profile,
+        "density_profile": density_profile(quality_profile),
+        "curve_bin_seconds": bin_seconds,
         "time_axis": AUDIO_CURVE_AXIS,
         "duration_sec": float(audio.duration_sec),
         "points": [{"time_sec": float(t), "intensity": float(v)}
@@ -248,7 +295,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=LOAD
         "curve_resolution_sec": resolution, "action_state_context": "none_before_chart_generation",
         "limitations": [
             "The profile is a trained chart-workload prediction, not a musical quality guarantee.",
-            "Its training bins are two seconds; editor interpolation adds no training resolution.",
+            f"Its training bins are {bin_seconds:g} seconds; editor interpolation adds no training resolution.",
         ],
     }
     return validate_intensity_profile(profile)

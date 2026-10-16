@@ -16,6 +16,11 @@ def collate_blueprint(samples):
         'form': pad_sequence([item['form'][0] for item in inputs], batch_first=True),
         'condition': torch.cat([item['condition'] for item in inputs]),
     }
+    if any('audio_times_sec' in item for item in inputs):
+        if not all('audio_times_sec' in item for item in inputs):
+            raise ValueError('Cannot mix Planner input clocks within one batch')
+        batch['audio_times_sec'] = pad_sequence(
+            [item['audio_times_sec'][0] for item in inputs], batch_first=True)
     batch['audio_padding_mask'] = torch.arange(batch['audio'].shape[1])[None] >= audio_lengths[:, None]
     batch['form_padding_mask'] = torch.arange(batch['form'].shape[1])[None] >= form_lengths[:, None]
     target = {

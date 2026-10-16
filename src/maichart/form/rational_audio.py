@@ -25,6 +25,9 @@ PROFILE = "rational_audio_queries_v1"
 LEGACY_FEATURE_POLICY = "legacy_sparse_v1"
 NATIVE_FEATURE_POLICY = "native_measured_v2"
 FEATURE_POLICIES = (LEGACY_FEATURE_POLICY, NATIVE_FEATURE_POLICY)
+LEGACY_EVIDENCE_PROFILE = 'legacy'
+BALANCED_EVIDENCE_PROFILE = 'balanced_evidence_v1'
+EVIDENCE_PROFILES = (LEGACY_EVIDENCE_PROFILE, BALANCED_EVIDENCE_PROFILE)
 ACOUSTIC_DIM = 98
 INPUT_DIM = 120
 MAX_EVIDENCE_NODES = 8192
@@ -307,22 +310,140 @@ def query_spectra(signal, sr, seconds, *, sample_offset=0):
     return result
 
 
-def attack_samples(signal, sr):
+def _validate_evidence_profile(profile):
+    if profile not in EVIDENCE_PROFILES:
+        raise ValueError('evidence_profile must be legacy or balanced_evidence_v1')
+    return profile
+
+
+def _balanced_indices(times, scores, budget, *, start_sec=None, end_sec=None):
+    """Select evidence by real-time strata and alternating acoustic criteria.
+
+    Each occupied stratum gets one choice before any receives a second. Four
+    successive rounds rotate the selection criterion, so neither a loud early
+    section nor an attack-only ranking can consume the entire memory budget.
+    No observation outside ``times`` is invented and this is not an event grid.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    scores = np.asarray(scores, dtype=np.float64)
+    budget = max(0, int(budget))
+    if not budget or not len(times):
+        return np.zeros(0, dtype=np.int64)
+    if len(times) <= budget:
+        return np.arange(len(times), dtype=np.int64)
+    if scores.ndim == 1:
+        scores = scores[:, None]
+    if scores.ndim != 2 or scores.shape[0] != len(times) or not scores.shape[1]:
+        raise ValueError('Evidence scores must have one nonempty row per time')
+    low = float(times.min()) if start_sec is None else float(start_sec)
+    high = float(times.max()) if end_sec is None else float(end_sec)
+    strata = max(1, min(len(times), math.ceil(budget / scores.shape[1])))
+    cells = np.minimum(np.maximum(((times-low)/max(high-low, 1e-9)*strata).astype(int), 0), strata-1)
+    groups = []
+    grouped = np.argsort(cells, kind='stable')
+    edges = np.r_[0, np.flatnonzero(np.diff(cells[grouped]))+1, len(grouped)]
+    for lower, upper in zip(edges[:-1], edges[1:]):
+        indices = grouped[lower:upper]
+        # Ranking each criterion locally also preserves quieter observations;
+        # multiplying one musical section's amplitude cannot evict another.
+        orders = [indices[np.argsort(-scores[indices, column], kind='stable')]
+                  for column in range(scores.shape[1])]
+        groups.append((orders, [0]*scores.shape[1]))
+    selected = set()
+    round_index = 0
+    while len(selected) < budget:
+        progress = False
+        column = round_index % scores.shape[1]
+        for orders, cursors in groups:
+            order = orders[column]
+            while cursors[column] < len(order) and int(order[cursors[column]]) in selected:
+                cursors[column] += 1
+            if cursors[column] < len(order):
+                selected.add(int(order[cursors[column]]))
+                cursors[column] += 1
+                progress = True
+            if len(selected) == budget:
+                break
+        if not progress:
+            break
+        round_index += 1
+    return np.asarray(sorted(selected), dtype=np.int64)
+
+
+def _evidence_scores(features):
+    """Independent attack, harmonic, spectral and dynamics evidence."""
+    values = np.asarray(features, dtype=np.float64)
+    if not len(values):
+        return np.zeros((0, 4), dtype=np.float64)
+    chroma = values[:, 80:92]
+    chroma = chroma / np.maximum(np.linalg.norm(chroma, axis=1, keepdims=True), 1e-8)
+    mel = values[:, :80]
+    mel = mel / np.maximum(np.linalg.norm(mel, axis=1, keepdims=True), 1e-8)
+    harmonic = np.r_[0., np.linalg.norm(np.diff(chroma, axis=0), axis=1)]
+    spectral = np.r_[0., np.linalg.norm(np.diff(mel, axis=0), axis=1)]
+    rms = np.maximum(values[:, 93], 0.)
+    dynamics = np.r_[0., np.abs(np.diff(rms))]
+    return np.column_stack((np.maximum(values[:, 92], 0.),
+        harmonic+np.maximum(values[:, 97], 0.),
+        spectral+np.maximum(values[:, 94], 0.),
+        dynamics+np.abs(values[:, 96])))
+
+
+def attack_samples(signal, sr, *, evidence_profile=LEGACY_EVIDENCE_PROFILE):
     """Find irregular acoustic evidence directly on the native sample clock."""
     from scipy.ndimage import uniform_filter1d
     from scipy.signal import find_peaks
+    profile = _validate_evidence_profile(evidence_profile)
     if len(signal) < 2 or not np.any(signal):
         return np.zeros(0, dtype=np.int64)
     energy = uniform_filter1d(signal.astype(np.float64)**2, max(1, round(sr*.003)))
     previous = np.roll(energy, max(1, round(sr*.004)))
     previous[:max(1, round(sr*.004))] = 0
     novelty = np.maximum(energy-previous, 0)
-    height = max(float(np.percentile(novelty, 85)), float(novelty.max())*.002, 1e-12)
+    if profile == BALANCED_EVIDENCE_PROFILE:
+        height = max(float(novelty.max())*1e-8, 1e-12)
+    else:
+        height = max(float(np.percentile(novelty, 85)), float(novelty.max())*.002, 1e-12)
     peaks, props = find_peaks(novelty, height=height, distance=max(1, round(sr*.006)))
+    if profile == BALANCED_EVIDENCE_PROFILE and len(peaks):
+        # Estimate a local amplitude floor on sparse candidates, not with an
+        # additional full-song float64 envelope in every preparation worker.
+        cells = peaks//max(1, round(sr*.4))
+        local_maximum = np.zeros(int(cells[-1])+1, dtype=np.float64)
+        np.maximum.at(local_maximum, cells, props['peak_heights'])
+        keep = props['peak_heights'] >= local_maximum[cells]*.002
+        peaks = peaks[keep]
+        props['peak_heights'] = props['peak_heights'][keep]
     if len(peaks) > MAX_EVIDENCE_NODES:
-        chosen = np.argsort(props["peak_heights"], kind="stable")[-MAX_EVIDENCE_NODES:]
+        if profile == BALANCED_EVIDENCE_PROFILE:
+            chosen = _balanced_indices(peaks/sr, props['peak_heights'], MAX_EVIDENCE_NODES,
+                start_sec=0., end_sec=len(signal)/sr)
+        else:
+            chosen = np.argsort(props["peak_heights"], kind="stable")[-MAX_EVIDENCE_NODES:]
         peaks = np.sort(peaks[chosen])
     return peaks.astype(np.int64)
+
+
+def _spectral_evidence(signal, sr):
+    """Find non-percussive spectral changes using bounded native-sample probes.
+
+    Probe windows are analysis observations only. Only local acoustic maxima
+    become evidence nodes; neither these centers nor their spacing constrain
+    chart positions. The probe budget is bounded independently of file length.
+    """
+    from scipy.signal import find_peaks
+    count = min(MAX_EVIDENCE_NODES, max(2, math.ceil(len(signal)/sr/.04)))
+    samples = np.unique(np.linspace(0, max(0, len(signal)-1), count, dtype=np.int64))
+    features = query_spectra(signal, sr, samples/sr)
+    scores = _evidence_scores(features)
+    selected = set()
+    for column in (1, 2, 3):
+        values = scores[:, column]
+        threshold = max(float(values.max(initial=0.))*1e-6, 1e-10)
+        peaks, _ = find_peaks(values, height=threshold)
+        selected.update(map(int, peaks))
+    indices = np.asarray(sorted(selected), dtype=np.int64)
+    return samples[indices], features[indices]
 
 
 def _tempo_hint(signal, sr):
@@ -355,18 +476,26 @@ def _tempo_hint(signal, sr):
     return 120.0
 
 
-def cache_path(path, cache_dir, sha256=None):
+def cache_path(path, cache_dir, sha256=None, *, evidence_profile=LEGACY_EVIDENCE_PROFILE):
+    evidence_profile = _validate_evidence_profile(evidence_profile)
     if cache_dir is None: return None
-    return Path(cache_dir) / PROFILE / ((sha256 or _source_digest(path,cache_dir))+".npz")
+    suffix = '' if evidence_profile == LEGACY_EVIDENCE_PROFILE else '.'+evidence_profile
+    return Path(cache_dir) / PROFILE / ((sha256 or _source_digest(path,cache_dir))+suffix+".npz")
 
 
-def _cache_candidates(path, cache_dir, sha256=None):
+def _cache_candidates(path, cache_dir, sha256=None, *, evidence_profile=LEGACY_EVIDENCE_PROFILE):
     """Current and legacy feature-cache locations for one content hash."""
+    evidence_profile = _validate_evidence_profile(evidence_profile)
     if cache_dir is None:
         return []
     path = Path(path).resolve()
     digest = sha256 or _source_digest(path,cache_dir)
     current = Path(cache_dir).resolve()
+    if evidence_profile != LEGACY_EVIDENCE_PROFILE:
+        from maichart.form.cache_support import cache_roots
+        roots = [current, *cache_roots(str(current))]
+        return list(dict.fromkeys(root / PROFILE / (digest+'.'+evidence_profile+'.npz')
+                                  for root in roots))
     candidates = [current / PROFILE / (digest + '.npz')]
     # Legacy key included the absolute source path.
     legacy_identity = {'profile': PROFILE, 'source': str(path), 'audio_sha256': digest}
@@ -399,12 +528,14 @@ class RationalAudio:
     tempo_changes: list = field(default_factory=list)
     _views: OrderedDict = field(default_factory=OrderedDict, repr=False)
     feature_policy: str = LEGACY_FEATURE_POLICY
+    evidence_profile: str = LEGACY_EVIDENCE_PROFILE
 
     def __post_init__(self):
         policy = self.feature_policy or (self.metadata or {}).get("feature_policy", LEGACY_FEATURE_POLICY)
         if policy not in FEATURE_POLICIES:
             raise ValueError(f"Unknown rational audio feature policy: {policy}")
         self.feature_policy = policy
+        self.evidence_profile = _validate_evidence_profile(self.evidence_profile)
         # Backward-compatible direct constructors may pass an ordinary
         # OrderedDict.  Replace it before any query cache interaction.
         if not isinstance(self._views, _QueryViewRefs):
@@ -425,20 +556,24 @@ def load_rational_audio(path, *, source=None, cache_dir=None):
         meta['cache_dir'] = str(cache_dir)
     return RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta,
                          meta["source"], meta.get("cache_dir"),
-                         feature_policy=meta.get("feature_policy", LEGACY_FEATURE_POLICY))
+                         feature_policy=meta.get("feature_policy", LEGACY_FEATURE_POLICY),
+                         evidence_profile=meta.get('evidence_profile', LEGACY_EVIDENCE_PROFILE))
 
 
-def extract_rational_audio(path, cache_dir=None):
+def extract_rational_audio(path, cache_dir=None, *, evidence_profile=LEGACY_EVIDENCE_PROFILE):
+    evidence_profile = _validate_evidence_profile(evidence_profile)
     path = Path(path).resolve()
     content_sha256 = _source_digest(path,cache_dir)
-    cached = cache_path(path, cache_dir, content_sha256)
-    for candidate in _cache_candidates(path, cache_dir, content_sha256):
+    cached = cache_path(path, cache_dir, content_sha256, evidence_profile=evidence_profile)
+    for candidate in _cache_candidates(path, cache_dir, content_sha256, evidence_profile=evidence_profile):
         if not candidate.is_file():
             continue
         try:
             audio = load_rational_audio(candidate,source=path,cache_dir=cache_dir)
             if audio.metadata.get('audio_sha256') != content_sha256:
                 raise ValueError('Rational audio cache content mismatch')
+            if audio.evidence_profile != evidence_profile:
+                raise ValueError('Rational audio cache evidence profile mismatch')
             break
         except (OSError, ValueError, KeyError):
             audio = None
@@ -448,9 +583,28 @@ def extract_rational_audio(path, cache_dir=None):
         return audio
     from maichart.form.waveform_cache import mapped_waveform
     signal, sr = mapped_waveform(path,content_sha256,cache_dir)
-    samples = np.unique(np.r_[0, attack_samples(signal, sr), max(0, len(signal)-1)])
-    times = samples.astype(np.float64) / sr
-    features = query_spectra(signal, sr, times)
+    if evidence_profile == BALANCED_EVIDENCE_PROFILE:
+        attacks = attack_samples(signal, sr, evidence_profile=evidence_profile)
+        spectral_samples, spectral_features = _spectral_evidence(signal, sr)
+        samples = np.unique(np.r_[0, attacks, spectral_samples, max(0, len(signal)-1)])
+        features = np.zeros((len(samples), ACOUSTIC_DIM), dtype=np.float32)
+        known = np.searchsorted(samples, spectral_samples)
+        features[known] = spectral_features
+        missing = np.ones(len(samples), dtype=bool)
+        missing[known] = False
+        features[missing] = query_spectra(signal, sr, samples[missing]/sr)
+        if len(samples) > MAX_EVIDENCE_NODES:
+            required = {0, len(samples)-1}
+            optional = np.asarray(sorted(set(range(len(samples)))-required), dtype=np.int64)
+            selected = _balanced_indices(samples[optional]/sr, _evidence_scores(features)[optional],
+                MAX_EVIDENCE_NODES-len(required), start_sec=0., end_sec=len(signal)/sr)
+            keep = np.asarray(sorted(required | set(map(int, optional[selected]))), dtype=np.int64)
+            samples, features = samples[keep], features[keep]
+        times = samples.astype(np.float64)/sr
+    else:
+        samples = np.unique(np.r_[0, attack_samples(signal, sr), max(0, len(signal)-1)])
+        times = samples.astype(np.float64) / sr
+        features = query_spectra(signal, sr, times)
     scale = np.maximum(np.percentile(features[:, :95], 95, axis=0), 1e-5)
     features[:, :95] /= scale
     rms = features[:, 93]
@@ -463,8 +617,11 @@ def extract_rational_audio(path, cache_dir=None):
                 normalization_scale=scale.tolist(), cache_dir=str(cache_dir) if cache_dir is not None else None,
                 timing="native_sample_attacks_and_exact_fraction_queries", feature_rate_hz=None)
     meta["feature_policy"] = LEGACY_FEATURE_POLICY
+    if evidence_profile != LEGACY_EVIDENCE_PROFILE:
+        meta['evidence_profile'] = evidence_profile
+        meta['evidence_selection'] = 'time_strata_acoustic_diversity_v1'
     audio = RationalAudio(features, times, meta["duration_sec"], meta["tempo_bpm"], meta, str(path), meta["cache_dir"],
-                          feature_policy=LEGACY_FEATURE_POLICY)
+                          feature_policy=LEGACY_FEATURE_POLICY, evidence_profile=evidence_profile)
     if cached is not None:
         cached.parent.mkdir(parents=True, exist_ok=True)
         with tempfile.NamedTemporaryFile(dir=cached.parent, suffix=".tmp", delete=False) as stream:
@@ -549,9 +706,14 @@ def audio_queries(song, start, end, *, max_nodes=None):
     policy = getattr(audio, "feature_policy", LEGACY_FEATURE_POLICY)
     if policy not in FEATURE_POLICIES:
         raise ValueError(f"Unknown rational audio feature policy: {policy}")
+    evidence_profile = _validate_evidence_profile(
+        getattr(audio, 'evidence_profile', LEGACY_EVIDENCE_PROFILE))
     identity = dict(start=str(start), end=str(end), first=song.first, max_nodes=max_nodes,
                     tempo=[(str(t.beat), t.bpm) for t in song.tempo],
                     meter=[m.to_dict() for m in song.meters], profile=PROFILE)
+    if evidence_profile != LEGACY_EVIDENCE_PROFILE:
+        identity['evidence_profile'] = evidence_profile
+        identity['evidence_selection'] = 'time_strata_acoustic_diversity_v1'
     if policy != LEGACY_FEATURE_POLICY:
         identity["feature_policy"] = policy
         identity['anchor_budget_policy'] = 'bounded_long_song_v1'
@@ -595,7 +757,10 @@ def audio_queries(song, start, end, *, max_nodes=None):
         positions.update(Fraction(i) for i in range(math.ceil(start), math.ceil(end)))
         positions.update(Fraction(t.beat) for t in song.tempo if start <= t.beat < end)
         positions.update(Fraction(m.beat) for m in song.meters if start <= m.beat < end)
-        if max_nodes is not None and len(positions) > max_nodes and policy == NATIVE_FEATURE_POLICY:
+        omitted_anchors = []
+        if (max_nodes is not None and
+                ((evidence_profile == BALANCED_EVIDENCE_PROFILE and len(positions) > max_nodes//2)
+                 or (len(positions) > max_nodes and policy == NATIVE_FEATURE_POLICY))):
             # Full-song queries can exceed 1024 quarter beats on long/fast
             # music. Keep exact tempo/meter boundaries and distributed beat
             # evidence, leaving room for transients. These are memory nodes,
@@ -609,18 +774,32 @@ def audio_queries(song, start, end, *, max_nodes=None):
             count = min(len(optional), max(0, max(max_nodes // 2, len(required)) - len(required)))
             chosen = np.linspace(0, len(optional) - 1, count, dtype=int) if count else []
             positions = required | {optional[i] for i in chosen}
+            if evidence_profile == BALANCED_EVIDENCE_PROFILE:
+                omitted_anchors = sorted(set(optional)-positions)
         lo, hi = seconds_at_beat(start,song.tempo,song.first), seconds_at_beat(end,song.tempo,song.first)
         sr = audio.metadata["sample_rate"]
         selected=np.flatnonzero((audio.times >= lo) & (audio.times < hi))
         if max_nodes is not None and len(selected)+len(positions)>max_nodes:
             available=max_nodes-len(positions)
             if available<0: raise ValueError('Musical anchor count exceeds audio memory budget; reduce the resource span')
-            chosen=np.argsort(audio.features[selected,92],kind='stable')[-available:] if available else []
+            if evidence_profile == BALANCED_EVIDENCE_PROFILE:
+                # Score before clipping so harmonic/level transitions at the
+                # query boundary keep their evidence from the prior sample.
+                scores = _evidence_scores(audio.features)[selected]
+                chosen = _balanced_indices(audio.times[selected], scores, available,
+                    start_sec=lo, end_sec=hi)
+            else:
+                chosen=np.argsort(audio.features[selected,92],kind='stable')[-available:] if available else []
             selected=selected[chosen]
         for time in audio.times[selected]:
             sample = round(float(time)*sr)
             beat = beat_at_second(Fraction(sample,sr),song.tempo,song.first)
             if start <= beat < end: positions.add(beat)
+        if omitted_anchors and max_nodes is not None and len(positions) < max_nodes:
+            optional = [beat for beat in omitted_anchors if beat not in positions]
+            count = min(len(optional), max_nodes-len(positions))
+            chosen = np.linspace(0, len(optional)-1, count, dtype=int) if count else []
+            positions.update(optional[index] for index in chosen)
         beats = tuple(sorted(positions))
         times = np.asarray([seconds_at_beat(b,song.tempo,song.first) for b in beats],dtype=np.float64)
         if policy == LEGACY_FEATURE_POLICY:

@@ -10,6 +10,10 @@ from pathlib import Path
 
 from maichart.event_timing import EventTempo, parse_event_chart, seconds_at_beat
 from maichart.form.data import organize_song
+from maichart.form.quality_profile import (
+    validate_quality_profile, enhanced, evidence_profile, duration_semantics,
+    default_curve_bin_seconds,
+)
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
 from maichart.generation.event_audio import extract_event_audio
 from maichart.generation.event_compile import compile_event_points
@@ -165,6 +169,9 @@ def main(argv=None):
         if args.model_family!='auto' and args.model_family!=payload['family']:
             raise ValueError('Selected model family differs from checkpoint; inspect the model and use its detected family')
     rational=(payload or {}).get('family',args.model_family)=='song_form_v2' or (args.operation=='analyze' and args.model_family=='auto')
+    model_config = getattr(model, 'config', None)
+    quality_profile = validate_quality_profile(getattr(model_config, 'quality_profile', 'legacy'))
+    curve_bin_seconds = float(getattr(model_config, 'curve_bin_seconds', default_curve_bin_seconds(quality_profile)))
     if rational:
         for name in ('position_max_denominator','interval_max_denominator'):
             value=getattr(args,name)
@@ -177,7 +184,8 @@ def main(argv=None):
         from maichart.form.rational_grid import normalize_rational_grid_divisions
         rational_grid_divisions = normalize_rational_grid_divisions(args.rational_grid_divisions)
         from maichart.form.rational_audio import extract_rational_audio
-        audio=extract_rational_audio(args.audio,cache_dir=args.cache_dir)
+        evidence_options = ({'evidence_profile': evidence_profile(quality_profile)} if enhanced(quality_profile) else {})
+        audio=extract_rational_audio(args.audio,cache_dir=args.cache_dir,**evidence_options)
     else:
         audio=extract_event_audio(args.audio,cache_dir=args.cache_dir)
     structure=_json(args.structure_file) or {}
@@ -196,10 +204,15 @@ def main(argv=None):
         chart=parse_event_chart(args.maidata,args.difficulty,strict_notes=True)
         tempo,first=chart.tempo_changes,chart.audio_first
     song=organize_song(audio,tempo,first,meters=meters,max_seconds=args.max_region_seconds,
-        rhythm_geometry_profile=getattr(getattr(model,'config',None),'rhythm_geometry_profile','none'))
+        rhythm_geometry_profile=getattr(model_config,'rhythm_geometry_profile','none'),
+        **({'quality_profile':quality_profile,'curve_bin_seconds':curve_bin_seconds}
+           if enhanced(quality_profile) else {}))
     if not song.spans: raise ValueError('No audio interval available')
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
     report=analysis_report(song)
+    if enhanced(quality_profile):
+        report.update(quality_profile=quality_profile,audio_evidence_profile=evidence_profile(quality_profile),
+                      curve_bin_seconds=curve_bin_seconds)
     if args.operation=='analyze':
         output.write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
         print(f'form_analysis regions={len(song.audit.get("musical_regions",[]))} compute_spans={len(song.spans)} links={len(song.relations.links)} report={output}',flush=True)
@@ -264,6 +277,9 @@ def main(argv=None):
             rational_grid_divisions=list(rational_grid_divisions),
             physical_feasibility_strength=args.physical_feasibility_strength,
             time_representation='direct_canonical_fraction',audio_profile=song.audio_profile)
+        if enhanced(quality_profile):
+            report['effective_generation_settings'].update(quality_profile=quality_profile,
+                audio_evidence_profile=evidence_profile(quality_profile),curve_bin_seconds=curve_bin_seconds)
     intensity_curve = None
     curve_condition_warnings = []
     if args.intensity_curve_file:
@@ -276,7 +292,7 @@ def main(argv=None):
             intensity_curve, audio_path=args.audio, checkpoint_path=args.checkpoint,
             checkpoint_identity=payload['source_checkpoint_identity'], first=first,
             tempo_map=explicit_tempo, bpm_input=args.bpm, condition=condition.to_dict(),
-            resolved_tempo_map=tempo)
+            resolved_tempo_map=tempo,meter_map=song.meters,quality_profile=quality_profile)
         if curve_condition_warnings:
             report['curve_condition_warnings'] = curve_condition_warnings
         if not 0.0 <= args.intensity_curve_strength <= 1.0:
@@ -328,7 +344,8 @@ def main(argv=None):
             'coverage_status','budget_exhausted')}),flush=True)
     from maichart.generation.event_quality import assess_event_chart
     if 'quality' in report: report['draft_quality']=report.pop('quality')
-    report['quality']=assess_event_chart(points,tempo,first=first,duration_sec=audio.duration_sec,target_condition=condition)
+    report['quality']=assess_event_chart(points,tempo,first=first,duration_sec=audio.duration_sec,target_condition=condition,
+        **({'duration_semantics':duration_semantics(quality_profile)} if enhanced(quality_profile) else {}))
     from maichart.form.local_load import local_load_statistics
     report['quality']['local_load'] = local_load_statistics(points,tempo,first,
         target_chord_ratio=condition.style['chord_bias'])

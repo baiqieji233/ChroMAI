@@ -65,6 +65,7 @@ def _manifest(tmp_path):
 
 def _common(manifest, tmp_path):
     return [
+        "--quality-profile", "legacy",
         "--manifest", str(manifest), "--cache-dir", str(tmp_path / "cache"),
         "--epochs", "1", "--batch-size", "1", "--grad-accumulation", "1",
         "--d-model", "16", "--nhead", "2", "--layers", "1",

@@ -25,7 +25,8 @@ def _curve(audio, checkpoint):
 
 
 def _validate(profile, audio, checkpoint, condition=None, *, first=-0.5,
-              tempo_map=None, bpm_input=120.0, resolved_tempo_map=None):
+              tempo_map=None, bpm_input=120.0, resolved_tempo_map=None,
+              meter_map=None, quality_profile=None):
     return validate_saved_curve(
         profile, audio_path=audio, checkpoint_path=checkpoint,
         checkpoint_identity=_file_identity(checkpoint), first=first,
@@ -33,6 +34,7 @@ def _validate(profile, audio, checkpoint, condition=None, *, first=-0.5,
         resolved_tempo_map=(resolved_tempo_map if resolved_tempo_map is not None
                             else [{"beat": "0/1", "bpm": 120}]),
         condition=condition or profile["condition"],
+        meter_map=meter_map, quality_profile=quality_profile,
     )
 
 
@@ -195,3 +197,49 @@ def test_real_resolved_bpm_change_is_rejected(tmp_path):
     with pytest.raises(ValueError, match="resolves to another tempo map"):
         _validate(profile, audio, checkpoint,
                   resolved_tempo_map=[{"beat": "0", "bpm": 120.001}])
+
+
+def test_saved_curve_meter_identity_is_semantic_and_unknown_is_not_four_four(tmp_path):
+    audio = tmp_path / "song.wav"; audio.write_bytes(b"audio")
+    checkpoint = tmp_path / "form.pt"; checkpoint.write_bytes(b"weights")
+    profile = _curve(audio, checkpoint)
+    assert _validate(profile, audio, checkpoint, meter_map=[]) == []
+    three = [{"beat": "0", "numerator": 3, "denominator": 4, "grouping": [3]}]
+    with pytest.raises(ValueError, match="another meter map"):
+        _validate(profile, audio, checkpoint, meter_map=three)
+    profile["meter_map"] = three
+    equivalent = [{"beat": "0/1", "numerator": 3, "denominator": 4,
+                   "grouping": [3], "source": "verified-manual", "confidence": .8}]
+    assert _validate(profile, audio, checkpoint, meter_map=equivalent) == []
+    with pytest.raises(ValueError, match="another meter map"):
+        _validate(profile, audio, checkpoint)
+    with pytest.raises(ValueError, match="another meter map"):
+        _validate(profile, audio, checkpoint, meter_map=[{"beat": "0", "numerator": 4, "denominator": 4}])
+    with pytest.raises(ValueError, match="another meter map"):
+        _validate(profile, audio, checkpoint, meter_map=[{"beat": "0", "numerator": 3, "denominator": 4, "grouping": [1, 2]}])
+
+
+def test_saved_curve_profile_identity_does_not_turn_style_changes_into_errors(tmp_path):
+    audio = tmp_path / "song.wav"; audio.write_bytes(b"audio")
+    checkpoint = tmp_path / "form.pt"; checkpoint.write_bytes(b"weights")
+    profile = _curve(audio, checkpoint)
+    assert _validate(profile, audio, checkpoint, quality_profile="legacy") == []
+    with pytest.raises(ValueError, match="musical-evidence contract"):
+        _validate(profile, audio, checkpoint, quality_profile="musical_evidence_v1")
+    profile["quality_profile"] = "musical_evidence_v1"
+    assert _validate(profile, audio, checkpoint, quality_profile="musical_evidence_v1") == []
+    warnings = _validate(profile, audio, checkpoint,
+                         {"level": 14, "radar": {}, "style": {"chord_bias": .4}},
+                         quality_profile="musical_evidence_v1")
+    assert warnings and "沿用原曲线" in warnings[0]
+
+
+@pytest.mark.parametrize("meters", ["invalid", [{"beat": "0", "numerator": 0, "denominator": 4}],
+                                   [{"beat": "1", "numerator": 3, "denominator": 4}]])
+def test_invalid_saved_meter_metadata_has_a_readable_error(tmp_path, meters):
+    audio = tmp_path / "song.wav"; audio.write_bytes(b"audio")
+    checkpoint = tmp_path / "form.pt"; checkpoint.write_bytes(b"weights")
+    profile = _curve(audio, checkpoint)
+    profile["meter_map"] = meters
+    with pytest.raises(ValueError, match="invalid meter map metadata"):
+        _validate(profile, audio, checkpoint)

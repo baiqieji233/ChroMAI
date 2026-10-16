@@ -39,6 +39,7 @@ class SongRelations:
     descriptors: np.ndarray
     links: list[Relation] = field(default_factory=list)
     audit: dict[str, object] = field(default_factory=dict)
+    layout_descriptors: np.ndarray | None = None
 
     def prior_links(self, target: int) -> list[Relation]:
         """Return only relations whose source is wholly before ``target``."""
@@ -170,6 +171,34 @@ def _describe(samples: np.ndarray, bins: int) -> tuple[np.ndarray, bool]:
     return descriptor.astype(np.float32), temporal_evidence and bool(np.linalg.norm(descriptor) > 1e-8)
 
 
+LAYOUT_DYNAMICS_CHANNELS = (
+    'rms_mean', 'rms_p90', 'attack_mean', 'attack_p90',
+    'spectral_detail_mean', 'spectral_change_mean', 'chroma_change_mean', 'rms_change_mean',
+)
+
+
+def _layout_dynamics(samples):
+    """Eight non-centered summaries; normalize across the song, not per span."""
+    samples = np.asarray(samples, dtype=np.float64)
+    if not len(samples):
+        return np.zeros(len(LAYOUT_DYNAMICS_CHANNELS), dtype=np.float64)
+    rms = np.maximum(samples[:, 93], 0.)
+    attack = np.maximum(samples[:, 92], 0.)
+    mel = samples[:, :80]
+    chroma = samples[:, 80:92]
+    mel = mel/np.maximum(np.linalg.norm(mel, axis=1, keepdims=True), 1e-8)
+    chroma = chroma/np.maximum(np.linalg.norm(chroma, axis=1, keepdims=True), 1e-8)
+    def change(values):
+        if len(values) < 2:
+            return 0.
+        differences = np.diff(values, axis=0)
+        return float(np.linalg.norm(differences, axis=1).mean() if differences.ndim == 2
+                     else np.abs(differences).mean())
+    return np.asarray((rms.mean(), np.percentile(rms, 90),
+        attack.mean(), np.percentile(attack, 90),
+        np.maximum(samples[:, 94], 0.).mean(), change(mel), change(chroma), change(rms)))
+
+
 def analyze_recurrence(
     audio: EventAudio,
     spans: Sequence[MetricSpan],
@@ -179,9 +208,12 @@ def analyze_recurrence(
     top_k: int = 3,
     min_similarity: float = 0.75,
     min_separation: int = 1,
+    quality_profile: str = 'legacy',
 ) -> SongRelations:
     """Compare beat-normalized audio spans without accessing chart events."""
 
+    from maichart.form.quality_profile import enhanced
+    use_dynamics = enhanced(quality_profile)
     if bins <= 0 or top_k < 0 or min_separation < 0:
         raise ValueError("bins must be positive; top_k and min_separation must be nonnegative")
     if not math.isfinite(min_similarity) or not -1 <= min_similarity <= 1:
@@ -190,6 +222,7 @@ def analyze_recurrence(
     ordered = tuple(sorted(spans, key=lambda span: (span.start, span.end, span.index)))
     descriptors = np.zeros((len(ordered), bins * DESCRIPTOR_CHANNELS), dtype=np.float32)
     valid = np.zeros(len(ordered), dtype=bool)
+    dynamics = np.zeros((len(ordered), len(LAYOUT_DYNAMICS_CHANNELS)), dtype=np.float64)
     durations: list[float] = []
     for row, span in enumerate(ordered):
         if span.end <= span.start:
@@ -198,7 +231,10 @@ def analyze_recurrence(
         durations.append(duration)
         beats = [span.start + (span.end - span.start) * Fraction(2 * i + 1, 2 * bins) for i in range(bins)]
         stamps = np.asarray([seconds_at_beat(beat, tempo, first) for beat in beats], dtype=np.float64)
-        descriptors[row], valid[row] = _describe(_sample(audio, stamps), bins)
+        samples = _sample(audio, stamps)
+        descriptors[row], valid[row] = _describe(samples, bins)
+        if use_dynamics:
+            dynamics[row] = _layout_dynamics(samples)
 
     links: list[Relation] = []
     candidate_count = 0
@@ -232,7 +268,14 @@ def analyze_recurrence(
             ))
         links.extend(sorted(candidates, key=lambda item: (-item.similarity, item.source))[:top_k])
 
-    return SongRelations(
+    layout_descriptors = None
+    if use_dynamics:
+        # A single scale per channel across all regions retains the quiet/loud
+        # contrast deliberately removed from recurrence matching descriptors.
+        scales = np.maximum(np.percentile(np.abs(dynamics), 95, axis=0), 1e-8) if len(dynamics) else np.ones(8)
+        normalized = np.clip(dynamics/scales, 0., 4.).astype(np.float32)
+        layout_descriptors = np.concatenate((descriptors, normalized), axis=1)
+    result = SongRelations(
         spans=ordered,
         descriptors=descriptors,
         links=links,
@@ -251,7 +294,13 @@ def analyze_recurrence(
                 "below_similarity_threshold"
             ),
         },
+        layout_descriptors=layout_descriptors,
     )
+    if use_dynamics:
+        result.audit.update(layout_descriptor_policy='song_relative_dynamics_v1',
+            layout_dynamics_channels=list(LAYOUT_DYNAMICS_CHANNELS),
+            layout_descriptor_dim=int(layout_descriptors.shape[1]))
+    return result
 
 
 class CausalMotifMemory:
@@ -270,10 +319,23 @@ class CausalMotifMemory:
         self._committed[index] = normalized
         self._pending_sources.pop(index, None)
 
-    def reference(self, index: int, relations: SongRelations, max_events: int = 256) -> MotifReference:
+    def reference(self, index: int, relations: SongRelations, max_events: int = 256, *,
+                  target_start: Fraction | None = None,
+                  target_end: Fraction | None = None) -> MotifReference:
+        """Project a prior motif, filtering the requested target range first.
+
+        A musical region can span many decoder compute windows. Applying the
+        event budget before this filter would permanently hide the later part
+        of a long motif from all later windows. Omitted bounds preserve the
+        original whole-region API.
+        """
         if max_events < 0:
             raise ValueError("max_events must be nonnegative")
         target = self._span(index)
+        lower = target.start if target_start is None else Fraction(target_start)
+        upper = target.end if target_end is None else Fraction(target_end)
+        if not target.start <= lower <= upper <= target.end:
+            raise ValueError("Motif target range must lie within its musical region")
         for relation in relations.prior_links(index):
             source = self._span(relation.source)
             source_points = self._committed.get(relation.source)
@@ -285,7 +347,7 @@ class CausalMotifMemory:
             if max_events:
                 for point in source_points:
                     target_beat = target.start + (point.beat - source.start) * scale - offset
-                    if target.start <= target_beat < target.end:
+                    if lower <= target_beat < upper:
                         projected_points.append(EventPoint(target_beat, point.note_text))
                         if len(projected_points) >= max_events:
                             break

@@ -105,7 +105,7 @@ def _fixture_training(tmp_path, monkeypatch):
     original_dataset = data.FormDataset
     monkeypatch.setattr(train, 'FormDataset',
                         lambda *a, **kw: original_dataset(*a, **kw, audio_loader=lambda *a, **kw: audio))
-    return train, ['--manifest', str(manifest), '--cache-dir', str(tmp_path/'cache'), '--epochs', '1',
+    return train, ['--quality-profile', 'legacy', '--manifest', str(manifest), '--cache-dir', str(tmp_path/'cache'), '--epochs', '1',
                    '--batch-size', '1', '--grad-accumulation', '2', '--d-model', '16', '--nhead', '2',
                    '--layers', '1', '--max-tokens', '256', '--max-memory-tokens', '64',
                    '--max-region-seconds', '2', '--checkpoint-interval-steps', '1', '--precision', 'fp32',

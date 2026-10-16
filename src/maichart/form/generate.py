@@ -18,6 +18,7 @@ from maichart.form.onset_selection import (
     odds_modulate_probabilities, onset_gap_diagnostics,
 )
 from maichart.form.clock import profile_seconds, chart_curve_to_audio
+from maichart.form.quality_profile import enhanced, density_profile, duration_semantics
 from maichart.generation.event_audio import FEATURE_RATE_HZ, segment_frame_times, _normalize_tempo_map, _time_to_beat
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_quality import assess_event_chart
@@ -62,9 +63,12 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
     """Return span-local four-channel load values and availability mask."""
     if profile is None:
         return None, None, None
-    from maichart.form.curve import LOAD_CURVE_CHANNELS, load_curve_bin_centers
+    from maichart.form.curve import LOAD_CURVE_CHANNELS, load_curve_bin_centers, decode_density, encode_density
     import torch
-    resolution = float(profile.get('curve_resolution_sec', 2.0))
+    quality_profile = getattr(song, 'quality_profile', 'legacy')
+    musical = enhanced(quality_profile)
+    resolution = (float(song.curve_bin_seconds) if musical
+                  else float(profile.get('curve_resolution_sec', 2.0)))
     duration = float(song.audio.duration_sec)
     low = float(seconds_at_beat(span.start, song.tempo, song.first))-float(song.first)
     high = float(seconds_at_beat(span.end, song.tempo, song.first))-float(song.first)
@@ -78,19 +82,39 @@ def _curve_condition(song, span, profile, *, strength=1.0, span_limit=0.5, mode=
     scalar_times = np.asarray([float(point['time_sec']) for point in profile['points']], dtype=np.float32)
     values = np.zeros((len(times), 4), dtype=np.float32)
     mask = np.zeros((len(times), 4), dtype=np.bool_)
+    baseline = None
+    if musical and getattr(song, 'load_curve', None) is not None:
+        from maichart.form.curve import resample_load_curve
+        baseline = resample_load_curve(song.load_curve_times_sec, song.load_curve, times)
+    if musical and 'event_density' in components and profile.get(
+            'density_profile', density_profile(quality_profile)) != density_profile(quality_profile):
+        raise ValueError('Curve density profile differs from the current checkpoint contract')
     for channel, name in enumerate(LOAD_CURVE_CHANNELS):
         if name in components:
             raw = np.asarray(components[name], dtype=np.float32)
             source_times = np.asarray([float(point['time_sec']) for point in profile['points']], dtype=np.float32)
             values[:, channel] = np.interp(source_clock, source_times, raw)
             mask[:, channel] = True
+        elif musical:
+            if baseline is not None:
+                # A scalar editor intensity is a relative control, not an
+                # encoded density. Keep Planner predictions as its baseline.
+                values[:, channel] = baseline[:, channel]
+                mask[:, channel] = True
+            elif channel == 0:
+                raise ValueError('A scalar-only musical curve requires predicted song workload as its baseline')
         else:
             values[:, channel] = np.interp(source_clock, scalar_times, scalar)
             mask[:, channel] = channel == 0
     for index, time in enumerate(source_clock):
         # Only channel zero is a density. The other channels are proportions
         # of note heads, so intensity scaling must not change their units.
-        values[index, 0] *= np.float32(_curve_factor(profile, time, strength=strength, span=span_limit, mode=mode))
+        factor = _curve_factor(profile, time, strength=strength, span=span_limit, mode=mode)
+        if musical:
+            nps = decode_density(values[index, 0], density_profile(quality_profile))
+            values[index, 0] = encode_density(nps*factor, density_profile(quality_profile))
+        else:
+            values[index, 0] *= np.float32(factor)
     values[(absolute_times < 0)|(absolute_times >= duration)] = 0
     values = np.clip(values, 0.0, 1.0)
     selected = (times >= low) & (times < high)
@@ -380,7 +404,8 @@ def generate_chart(model,planner,codec,song,condition,atoms,*,threshold=.5,memor
                         'decoder_fallbacks':span_fallbacks,'contexts':context_records})
         print('form_arrange '+json.dumps(records[-1]),flush=True)
     if not accepted: raise ValueError('Whole-song planner selected no onsets; inspect the plan before adjusting threshold')
-    quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
+    quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition,
+        **({'duration_semantics':duration_semantics(song.quality_profile)} if enhanced(getattr(song,'quality_profile','legacy')) else {}))
     from maichart.form.local_load import local_load_statistics
     quality['local_load'] = local_load_statistics(accepted,song.tempo,song.first,
                                                  target_chord_ratio=condition.style['chord_bias'])
@@ -426,14 +451,17 @@ def revise_chart(model,codec,song,points,condition,atoms,*,start,end,device='cpu
     # has the same authored draft available, so retain that input at inference
     # instead of silently dropping the entire load-curve branch.
     from maichart.form.curve import build_load_curve
-    curve_times,curve_values=(build_load_curve(points,song.tempo,song.first,song.audio.duration_sec)
-        if song.rhythm_geometry_profile!='none' else (song.load_curve_times_sec,song.load_curve))
+    musical = enhanced(getattr(song, 'quality_profile', 'legacy'))
+    curve_times,curve_values=(build_load_curve(points,song.tempo,song.first,song.audio.duration_sec,
+        **({'quality_profile':song.quality_profile,'bin_seconds':song.curve_bin_seconds} if musical else {}))
+        if song.rhythm_geometry_profile!='none' or musical else (song.load_curve_times_sec,song.load_curve))
     # Keep the original whole-song audio graph and reference identities. An
     # edit is a local compute query, not a new truncated song with new motifs.
     editing=FormSong(song.audio,song.tempo,song.first,song.meters,[edit],song.relations,song.audit,
                      song.regions,[region_index],audio_profile=song.audio_profile,
                      load_curve_times_sec=curve_times,load_curve=curve_values,
-                     rhythm_geometry_profile=song.rhythm_geometry_profile)
+                     rhythm_geometry_profile=song.rhythm_geometry_profile,
+                     **({'quality_profile':song.quality_profile,'curve_bin_seconds':song.curve_bin_seconds} if musical else {}))
     example=input_example(editing,0,history,condition=condition,codec=codec,task=1,
         draft=region,right=right,max_memory_tokens=model.config.max_memory_tokens,memory_strength=memory_strength)
     from maichart.form.revision import DraftPoint

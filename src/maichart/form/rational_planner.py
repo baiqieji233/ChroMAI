@@ -1,5 +1,6 @@
 """Song workload planning over musical queries, without a frame-onset head."""
 from dataclasses import dataclass
+import math
 import torch
 from torch import nn
 from torch.nn import functional as F
@@ -16,12 +17,23 @@ class RationalPlannerConfig:
     dropout: float = .1
     max_form_steps: int = 128
     load_curve_channels: int = 4
+    quality_profile: str = 'legacy'
+    context_seconds: float = 0.0
 
     def __post_init__(self):
+        for name in ('audio_dim', 'descriptor_dim', 'condition_dim', 'width', 'form_heads',
+                     'form_layers', 'max_form_steps', 'load_curve_channels'):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f'{name} must be a positive integer')
         if self.width < 16 or self.width % self.form_heads or self.form_layers < 1:
             raise ValueError('Invalid rational planner width/heads/layers')
         if self.audio_dim != 120 or self.load_curve_channels != 4 or not 0 <= self.dropout < 1:
             raise ValueError('Invalid rational planner input/curve/dropout contract')
+        from maichart.form.quality_profile import validate_quality_profile
+        validate_quality_profile(self.quality_profile)
+        if not math.isfinite(self.context_seconds) or not 0 <= self.context_seconds <= 30:
+            raise ValueError('planner context_seconds must be in [0, 30]')
 
 
 class RationalPlanner(nn.Module):
@@ -46,34 +58,79 @@ class RationalPlanner(nn.Module):
         self.region_attention = nn.MultiheadAttention(w,config.form_heads,dropout=config.dropout,batch_first=True)
         self.norm = nn.LayerNorm(w)
         self.output = nn.Sequential(nn.Linear(w,w*2),nn.GELU(),nn.Dropout(config.dropout),nn.Linear(w*2,4))
+        if config.quality_profile != 'legacy':
+            self.temporal_projection = nn.Linear(w*2, w, bias=False)
+            # Migration starts with the original function; fine-tuning learns
+            # how to use real-time neighboring evidence without a frame clock.
+            nn.init.zeros_(self.temporal_projection.weight)
 
-    def forward(self,audio,form,condition,audio_padding_mask=None,form_padding_mask=None,condition_null=None):
-        if audio.ndim != 3 or audio.shape[-1] != self.config.audio_dim or form.ndim != 3 or form.shape[-1] != self.config.descriptor_dim+3:
+    def forward(self,audio,form,condition,audio_padding_mask=None,form_padding_mask=None,condition_null=None,
+                audio_times_sec=None):
+        if (audio.ndim != 3 or audio.shape[-1] != self.config.audio_dim or form.ndim != 3
+                or form.shape[0] != audio.shape[0] or form.shape[-1] != self.config.descriptor_dim+3):
             raise ValueError('Rational planner input shape mismatch')
         if form.shape[1] > self.config.max_form_steps or condition.shape != (audio.shape[0],self.config.condition_dim):
             raise ValueError('Rational planner condition/region shape mismatch')
+        audio_mask = (torch.zeros(audio.shape[:2], dtype=torch.bool, device=audio.device)
+                      if audio_padding_mask is None else audio_padding_mask.to(device=audio.device, dtype=torch.bool))
+        form_mask = (torch.zeros(form.shape[:2], dtype=torch.bool, device=form.device)
+                     if form_padding_mask is None else form_padding_mask.to(device=form.device, dtype=torch.bool))
+        if audio_mask.shape != audio.shape[:2] or form_mask.shape != form.shape[:2]:
+            raise ValueError('Rational planner padding mask shape mismatch')
+        audio = audio.masked_fill(audio_mask[..., None], 0.)
+        form = form.masked_fill(form_mask[..., None], 0.)
         if self.validate_inputs and not all(torch.isfinite(value).all() for value in (audio,form,condition)):
             raise ValueError('Nonfinite rational planner input')
         c = condition.clone()
         null = torch.zeros(audio.shape[0],dtype=torch.bool,device=audio.device) if condition_null is None else condition_null.reshape(-1).bool()
+        if null.shape != (audio.shape[0],):
+            raise ValueError('Rational planner condition_null must have shape [B]')
+        null = null.to(device=audio.device)
         c[:,1:] = torch.where(null[:,None],.5,c[:,1:])
         global_condition = self.condition_projection(c)+null[:,None]*self.condition_null_embedding
-        positions = torch.arange(form.shape[1],device=form.device)
-        regions = self.form_projection(form)+self.form_position(positions)[None]
-        regions = self.form_encoder(regions,src_key_padding_mask=form_padding_mask)
+        has_regions = (~form_mask).any(1)
+        if form.size(1):
+            positions = torch.arange(form.shape[1],device=form.device)
+            regions = self.form_projection(form)+self.form_position(positions)[None]
+            safe_form_mask = None
+            if form_padding_mask is not None:
+                safe_form_mask = form_mask.clone()
+                # Attention over all-masked keys is undefined. A zero-effect
+                # dummy token permits finite attention; remove its context.
+                safe_form_mask[:, 0] &= has_regions
+            regions = self.form_encoder(regions,src_key_padding_mask=safe_form_mask)
+        else:
+            regions = audio.new_zeros((audio.size(0), 1, self.config.width))
+            safe_form_mask = torch.zeros((audio.size(0), 1), dtype=torch.bool, device=audio.device)
         hidden = self.audio_projection(audio)+global_condition[:,None]
-        context,_ = self.region_attention(hidden,regions,regions,key_padding_mask=form_padding_mask,need_weights=False)
+        if self.config.quality_profile != 'legacy':
+            if audio_times_sec is None:
+                raise ValueError('Musical Planner requires actual audio_times_sec')
+            from maichart.form.alignment import temporal_neighbors
+            context = temporal_neighbors(hidden, audio_times_sec, audio_mask,
+                seconds=self.config.context_seconds, validate_inputs=self.validate_inputs)
+            hidden = hidden + self.temporal_projection(context)
+        context,_ = self.region_attention(hidden,regions,regions,key_padding_mask=safe_form_mask,need_weights=False)
+        context = context.masked_fill(~has_regions[:, None, None], 0.)
         values = self.output(self.norm(hidden+context))
-        if audio_padding_mask is not None: values = values.masked_fill(audio_padding_mask[...,None],0)
+        values = values.masked_fill(audio_mask[...,None],0)
         return {'load_curve':values}
 
 
 def rational_planner_loss(outputs,targets,*,load_curve_weight=1.,reduction='mean'):
-    values = outputs['load_curve'].float().sigmoid()
-    target = targets['load_curve_target'].to(values)
-    weights = targets['frame_weight'].to(values)[...,None]
-    mask = targets['load_curve_mask'].to(values)
+    logits = outputs['load_curve'].float()
+    target = targets['load_curve_target'].to(logits)
+    weights = targets['frame_weight'].to(logits)[...,None]
+    mask = targets['load_curve_mask'].to(logits)
+    if target.shape != logits.shape or mask.shape != logits.shape or weights.shape != (*logits.shape[:2], 1):
+        raise ValueError('Rational planner loss target/mask shapes differ')
     effective = weights*mask
+    active = effective > 0
+    # Mask before sigmoid and Huber: multiplying NaN loss by zero is still NaN,
+    # and masking only after sigmoid can leave NaN gradients on padded logits.
+    values = logits.masked_fill(~active, 0.).sigmoid()
+    target = target.masked_fill(~active, 0.)
+    effective = effective.masked_fill(~active, 0.)
     errors = F.smooth_l1_loss(values,target,reduction='none')*effective
     if reduction == 'none':
         loss = errors.sum((1,2))/effective.sum((1,2)).clamp_min(1)

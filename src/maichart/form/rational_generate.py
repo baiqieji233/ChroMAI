@@ -11,6 +11,7 @@ import torch
 from maichart.event_timing import EventPoint, seconds_at_beat
 from maichart.form.data import collate_form, input_example
 from maichart.form.generate import MAX_NOTE_CHARACTERS, _curve_condition, to_device
+from maichart.form.quality_profile import enhanced, density_profile, duration_semantics
 from maichart.generation.event_cli import _NoteGrammar
 
 
@@ -436,7 +437,7 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
     from maichart.form.type_guidance import TypeGuidance
     from maichart.generation.event_quality import assess_event_chart
     from maichart.form.local_load import local_load_statistics
-    from maichart.form.curve import resample_load_curve, load_curve_bin_centers
+    from maichart.form.curve import resample_load_curve, load_curve_bin_centers, decode_density
     from maichart.form.rational_audio import planner_audio_queries, beat_at_second
     from maichart.form.data import _form_descriptor
     from maichart.form.rational_grid import (normalize_rational_grid_divisions,
@@ -448,15 +449,21 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
     # budget as training.  Passing every transient in a long song (often many
     # thousands of MP3 decoder peaks) makes each tiny autoregressive decoder
     # step attend to an enormous memory and leaves CUDA under-occupied.  This
-    # selects the strongest native attacks; it does not quantize or whitelist
-    # the Fraction positions the decoder may emit.
+    # bounds evidence only. The checkpoint's evidence profile decides between
+    # legacy attack ranking and balanced temporal/acoustic coverage; neither
+    # quantizes or whitelists the Fraction positions the decoder may emit.
+    quality_profile = getattr(song, 'quality_profile', 'legacy')
+    musical = enhanced(quality_profile)
     audio,times,_ = planner_audio_queries(song)
     with torch.inference_mode():
-        prediction=planner(audio[None].to(device),torch.from_numpy(_form_descriptor(song,0))[None].to(device),condition.to_vector(device=device)[None])
+        clock = ({'audio_times_sec':torch.as_tensor(times,dtype=torch.float64,device=device)[None]}
+                 if musical else {})
+        prediction=planner(audio[None].to(device),torch.from_numpy(_form_descriptor(song,0))[None].to(device),condition.to_vector(device=device)[None],**clock)
     if song.load_curve is None:
         # Match the workload-bin clock used by layout training. Acoustic query
         # density must not change the number or time meaning of curve tokens.
-        bins=load_curve_bin_centers(max(0.,song.audio.duration_sec-song.first))
+        bins=load_curve_bin_centers(max(0.,song.audio.duration_sec-song.first),
+            **({'bin_seconds':song.curve_bin_seconds} if musical else {}))
         song.load_curve_times_sec=bins.astype(np.float32)
         song.load_curve=resample_load_curve(times-song.first,
             prediction['load_curve'][0].sigmoid().cpu().numpy(),bins)
@@ -481,8 +488,8 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
         second=seconds_at_beat(beat,song.tempo,song.first)
         return 0<=second<song.audio.duration_sec and not any(lo<=second<hi for lo,hi in rests)
     for span in song.spans:
-        # Planner channel zero is a normalized head density (heads / second
-        # divided by eight).  Use it as a soft resource guard only: the model
+        # Decode channel zero with the checkpoint's density contract. Use
+        # physical heads/second as a soft resource guard only: the model
         # still chooses every exact Fraction, but an under-trained checkpoint
         # cannot emit hundreds of self-invented events and monopolize the GPU.
         span_start_sec = float(seconds_at_beat(span.start,song.tempo,song.first)-song.first)
@@ -497,7 +504,28 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
                 curve_clock,np.asarray(song.load_curve)[:,0])
             clock_samples = np.linspace(span_start_sec,span_end_sec,len(density))
             integrate = getattr(np,'trapezoid',np.trapz)
-            expected = float(integrate(np.maximum(density,0),clock_samples)*8.0)
+            if musical:
+                if intensity_curve is not None:
+                    from maichart.form.clock import profile_seconds
+                    from maichart.form.generate import _curve_factor
+                    profile_clock = profile_seconds(intensity_curve,clock_samples+song.first,song.first)
+                    components = intensity_curve.get('components') or {}
+                    if 'event_density' in components:
+                        density = np.interp(profile_clock,
+                            [point['time_sec'] for point in intensity_curve['points']],
+                            components['event_density'])
+                    factors = np.asarray([_curve_factor(intensity_curve,float(second),
+                        strength=intensity_curve_strength,span=intensity_curve_span,
+                        mode=intensity_curve_mode) for second in profile_clock])
+                else:
+                    factors = 1.
+                head_rate = decode_density(np.clip(density,0.,1.),density_profile(quality_profile))*factors
+                # A malformed/uncalibrated sigmoid near one must not turn its
+                # inverse into millions of heads/second. This only bounds a
+                # generous resource estimate; it does not move or force notes.
+                expected = float(integrate(np.clip(head_rate,0.,64.),clock_samples))
+            else:
+                expected = float(integrate(np.maximum(density,0),clock_samples)*8.0)
             span_event_budget = max(8,int(math.ceil(expected*3.0+4.0)))
             span_event_budget = min(span_event_budget,192)
         else:
@@ -538,6 +566,7 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
                     position_beam_size=position_beam_size,
                     max_beat_denominator=max_beat_denominator,max_interval_denominator=max_interval_denominator)
             finally: song.spans=source_spans
+            immutable_prefix=len(accepted)
             accepted.extend(points);passes+=1
             # Apply the optional near-grid cleanup before the next span uses
             # this history.  It does not restrict arbitrary Fractions: only
@@ -549,9 +578,23 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
                     tolerance_ms=rational_grid_snap_ms,
                     divisions=rational_grid_divisions,
                     min_spacing_ms=min_spacing_ms,
-                    end_beat=song.spans[-1].end,
-                    valid_position=valid)
+                    start_beat=current.start,end_beat=current.end,
+                    valid_position=valid,immutable_prefix=immutable_prefix)
                 grid_simplification.append(dict(span=span.index, **grid_stats))
+                if grid_stats['changed'] and guidance is not None:
+                    # compose_span's cache ends with this resource pass. Its
+                    # next pass rebuilds model history from accepted. Keep the
+                    # causal soft guards on the same accepted event times.
+                    def curve_factor(second):
+                        if intensity_curve is None:
+                            return 1.
+                        from maichart.form.generate import _curve_factor
+                        clock=(second-song.first if intensity_curve.get(
+                            'time_axis','chart_relative_v1')=='chart_relative_v1' else second)
+                        return _curve_factor(intensity_curve,clock,
+                            strength=intensity_curve_strength,span=intensity_curve_span,
+                            mode=intensity_curve_mode)
+                    guidance.replay(accepted,song.tempo,song.first,curve_factor=curve_factor)
             if status['closed']: break
             if status['reason']=='event_budget':
                 if max_events_per_span or budget_expansions >= 3 or span_event_budget >= 768:
@@ -589,7 +632,8 @@ def generate_rational_chart(model,planner,codec,song,condition,atoms,*,temperatu
                 span=span.index,reason=status['reason'],budget_policy=status.get('budget_policy')),
                 ensure_ascii=False),flush=True)
     if not accepted and permitted: raise ValueError('Exact event decoder emitted an empty chart; inspect event training rather than changing a frame threshold')
-    quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition)
+    quality=assess_event_chart(accepted,song.tempo,first=song.first,duration_sec=song.audio.duration_sec,target_condition=condition,
+        **({'duration_semantics':duration_semantics(quality_profile)} if musical else {}))
     quality['local_load']=local_load_statistics(accepted,song.tempo,song.first,target_chord_ratio=condition.style['chord_bias'])
     if not quality.get('syntax_valid'): raise ValueError('Exact event output failed syntax verification')
     incomplete=[record['span'] for record in records if record['status'].get('incomplete')]
