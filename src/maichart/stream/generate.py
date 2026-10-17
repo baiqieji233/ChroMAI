@@ -9,7 +9,7 @@ from pathlib import Path
 import torch
 import numpy as np
 
-from maichart.event_timing import EventPoint, EventTempo
+from maichart.event_timing import EventPoint, EventTempo, seconds_at_beat
 from maichart.form.codec import RationalCodec
 from maichart.form.data import organize_song, _form_descriptor
 from maichart.form.rational_audio import extract_rational_audio, planner_audio_queries, beat_at_second
@@ -18,6 +18,7 @@ from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAU
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.sustain_state import SustainStateIndex
+from maichart.form.type_guidance import TypeGuidance
 from .memory import StreamMemoryBank
 from maichart.generation.timeline import normalize_tempo_map
 from .checkpoint import load
@@ -31,7 +32,11 @@ def parser():
     p.add_argument('--position-temperature',type=float,default=.15);p.add_argument('--max-events',type=int,default=0)
     p.add_argument('--max-denominator',type=int,default=384);p.add_argument('--max-interval-denominator',type=int,default=96)
     p.add_argument('--min-spacing-ms',type=float,default=20.);p.add_argument('--seed',type=int,default=0);p.add_argument('--device',default='cpu')
-    p.add_argument('--condition-file'); return p
+    p.add_argument('--condition-file')
+    p.add_argument('--style-balance-strength',type=float,default=.5)
+    p.add_argument('--local-chord-strength',type=float,default=0.)
+    p.add_argument('--physical-feasibility-strength',type=float,default=0.)
+    return p
 
 
 def _allowed_note(codec,grammar,text):
@@ -82,6 +87,11 @@ def generate(args):
     memory,memory_mask=refresh_memory()
     cache=None; consumed=0
     note_grammar=_NoteGrammar.from_atoms(payload.get('atom_catalog') or ['1','2','3','4','5','6','7','8'])
+    event_bias = None
+    guidance=TypeGuidance(payload.get('atom_catalog') or ['1','2','3','4','5','6','7','8'], condition, [],
+        planner_strength=0., style_strength=args.style_balance_strength,
+        local_chord_strength=args.local_chord_strength,
+        physical_strength=args.physical_feasibility_strength)
     rng=torch.Generator(device=args.device).manual_seed(args.seed)
     audio_end=beat_at_second(audio.duration_sec,song.tempo,song.first)
     while len(points) < (args.max_events or 100000):
@@ -136,15 +146,23 @@ def generate(args):
             ids.append(token)
             if token==codec.note_id:
                 position=Fraction(text); points.append(EventPoint(position,'')); previous=position; state='note'; text=''
+                if guidance.local_chords is not None:
+                    guidance.local_chords.cues[position] = (
+                        float(seconds_at_beat(position, song.tempo, song.first)), 1.0)
+                event_bias=guidance.event(position)
             else: text += codec.tokens[token][2:]
             continue
         allowed=_allowed_note(codec,note_grammar,text)
         if not allowed: raise ValueError(f'No valid note continuation for {text!r}')
-        scores=logits[allowed]
+        hints=(event_bias.biases(text, [None if t==codec.end_id else codec.tokens[t][2:] for t in allowed])
+               if event_bias is not None else [0.]*len(allowed))
+        scores=logits[allowed] + torch.as_tensor(hints,device=logits.device,dtype=logits.dtype)
         token=allowed[int(torch.multinomial(torch.softmax(scores/args.temperature,dim=-1),1,generator=rng))]
         ids.append(token)
         if token==codec.end_id:
-            points[-1]=EventPoint(points[-1].beat,text); state='event'; text=''
+            completed_text=text
+            points[-1]=EventPoint(points[-1].beat,completed_text); state='event'; text=''
+            guidance.commit(completed_text, points[-1].beat)
             with torch.inference_mode():
                 event_tokens=torch.tensor([codec.encode([points[-1]])],dtype=torch.long,device=args.device)
                 event_vector=model.token_embedding(event_tokens).mean(1)[0]
@@ -173,6 +191,10 @@ def generate(args):
     report={'schema':'maichart-chart-stream-generation-v1','family':'chart_stream_v1','event_count':len(points),
             'audio_duration':audio.duration_sec,'audio_end_beat':str(audio_end),'stream_continuity':True,
             'checkpoint':str(Path(args.checkpoint).resolve()),
+            'generation_controls': {'style_balance_strength': args.style_balance_strength,
+                                    'local_chord_strength_requested': args.local_chord_strength,
+                                    'local_chord_strength_effective': args.local_chord_strength,
+                                    'physical_feasibility_strength': args.physical_feasibility_strength},
             'limitations':['Model quality requires fresh chart_stream training.']}
     output.with_suffix('.stream.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     return report

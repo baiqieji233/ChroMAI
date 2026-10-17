@@ -1921,6 +1921,9 @@ function chartStreamGenerationPayload() {
     bpm: valueOrDefault("#bpm", "").trim() === "" ? 120 : Number(valueOrDefault("#bpm", 120)),
     first: Number(valueOrDefault("#first", 0)), level: Number(valueOrDefault("#level", 13.3)),
     temperature: Number(valueOrDefault("#temperature", .7)), device: formDevice("#generationDevice"),
+    style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", .5)),
+    local_chord_strength: Number(valueOrDefault("#streamLocalChordStrength", 0)),
+    physical_feasibility_strength: Number(valueOrDefault("#streamPhysicalStrength", 0)),
     condition: collectCondition() };
 }
 

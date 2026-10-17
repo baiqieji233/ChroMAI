@@ -62,6 +62,9 @@ def start(handler, operation, payload, *, runtime):
               '--output',str(output),'--bpm',str(payload.get('bpm',120)),'--first',str(payload.get('first',0)),
               '--level',str(payload.get('level',13)),'--temperature',str(payload.get('temperature',.7)),
               '--device',str(payload.get('device','cpu'))]
+        args += ['--style-balance-strength', str(payload.get('style_balance_strength', .5)),
+                 '--local-chord-strength', str(payload.get('local_chord_strength', 0.)),
+                 '--physical-feasibility-strength', str(payload.get('physical_feasibility_strength', 0.))]
         condition = payload.get('condition')
         if condition:
             condition_path = runtime.WEBUI_ROOT / 'conditions' / f'chart_stream_{checkpoint.stem}.json'

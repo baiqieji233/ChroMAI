@@ -9,7 +9,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from maichart.event_timing import EventPoint
+from maichart.event_timing import EventPoint, seconds_at_beat
 from maichart.form.codec import RationalCodec
 from maichart.form.data import FormDataset, _form_descriptor
 from maichart.form.rational_audio import planner_audio_queries
@@ -30,14 +30,14 @@ class StreamChunk:
     start_event: int
 
 
-def _plan_for_event(point, previous, text):
+def _plan_for_event(point, previous, text, density=0.):
     delta = max(Fraction(point.beat) - Fraction(previous), Fraction(0))
     chars = str(text)
     return (min(float(delta), 8.) / 8.,
             math.sin(float(point.beat) * math.pi), math.cos(float(point.beat) * math.pi),
             float('/' in chars), float('-' in chars or '>' in chars or '<' in chars),
             float('h' in chars), float(len(chars.split('/')) > 1),
-            min(float(delta), 4.) / 4.)
+            float(np.clip(density, 0., 1.)))
 
 
 class StreamDataset(Dataset):
@@ -97,7 +97,10 @@ class StreamDataset(Dataset):
                         event_index = ids[:global_index].count(self.codec.at_id)
                         point = points[min(len(points) - 1, event_index)]
                         previous = Fraction(0) if event_index == 0 else points[event_index - 1].beat
-                        labels.append(_plan_for_event(point, previous, point.note_text))
+                        event_second = float(seconds_at_beat(point.beat, song.tempo, song.first) - song.first)
+                        density = float(np.interp(event_second, song.load_curve_times_sec,
+                            song.load_curve[:, 0], left=0., right=0.))
+                        labels.append(_plan_for_event(point, previous, point.note_text, density))
                         masks.append(True)
                     else:
                         labels.append((0.,)*8); masks.append(False)

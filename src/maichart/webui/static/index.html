@@ -894,7 +894,10 @@
 </details>
 <details id="chartStreamGenerationControls" class="settings-section song-form-only" data-generation-family="chart_stream_v1" hidden>
 <summary><span>连续整曲生成</span><small>不按片段结束；持续动作和历史会随事件更新</small></summary>
-<div class="settings-content"><p class="workflow-hint">chart_stream_v1 会持续写到真实音频结束，再决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p></div>
+<div class="settings-content"><p class="workflow-hint">chart_stream_v1 会持续写到真实音频结束，再决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p>
+<div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0.5"><small>软性偏向请求的 Tap / Hold / Slide / Touch 组成；0 关闭，不是硬比例。</small></label>
+<label class="field">局部多押强度<input id="streamLocalChordStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性控制局部多押倾向；只影响配置候选，不强制填满同时发生。</small></label>
+<label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label></div></div>
 </details>
 <section id="generationTimingGroup" class="workflow-group" >
 <div class="workflow-group-heading"><span class="step">03</span>
