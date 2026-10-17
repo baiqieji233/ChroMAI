@@ -9,6 +9,7 @@ from maichart.form.clock import AUDIO_CURVE_AXIS
 from maichart.form.curve import load_curve_bin_centers, resample_load_curve, decode_density
 from maichart.form.data import organize_song
 from maichart.form.rational_audio import extract_rational_audio, planner_audio_queries
+from maichart.generation.music_intensity import audio_sha256
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
 from maichart.generation.timeline import normalize_tempo_map
 from .checkpoint import load
@@ -56,4 +57,4 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., 
                            'sustain': editor_components[:,2].tolist(),
                            'slide_touch': editor_components[:,3].tolist()},
             'component_times_sec':[float(t) for t in editor_times], 'rest_regions':[],
-            'checkpoint':str(checkpoint_path)}
+            'checkpoint':str(checkpoint_path), 'audio_sha256':audio_sha256(audio_path)}
