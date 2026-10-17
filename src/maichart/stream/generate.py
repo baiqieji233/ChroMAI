@@ -47,6 +47,8 @@ def _allowed_note(codec,grammar,text):
 
 
 def generate(args):
+    if args.device == 'auto':
+        args.device = 'cuda' if torch.cuda.is_available() else 'cpu'
     model,payload=load(args.checkpoint,args.device); model.eval()
     codec=RationalCodec(); audio=extract_rational_audio(args.audio,cache_dir=Path(args.checkpoint).parent/'audio_cache')
     tempo=[EventTempo(Fraction(0),args.bpm)]
