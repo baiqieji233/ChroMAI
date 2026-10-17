@@ -75,7 +75,33 @@ class ChartStreamTransformer(nn.Module):
 
     def encode(self, audio, condition, *, audio_padding_mask=None,
                condition_null=None, stream_memory=None, action_state=None,
-               action_state_padding_mask=None, return_curve=False):
+               action_state_padding_mask=None, return_curve=False, encoded_audio=None):
+        values, mask, curve_prediction, route = (self.encode_audio(audio, condition,
+            audio_padding_mask=audio_padding_mask, condition_null=condition_null)
+            if encoded_audio is None else encoded_audio)
+        batch = values.size(0)
+        if action_state is not None:
+            if action_state.ndim != 3 or action_state.shape[0] != batch or action_state.size(-1) != self.config.action_dim:
+                raise ValueError('stream action_state shape mismatch')
+            action_mask = (action_state_padding_mask.bool() if action_state_padding_mask is not None
+                           else torch.zeros(action_state.shape[:2], dtype=torch.bool, device=values.device))
+            if action_mask.shape != action_state.shape[:2]:
+                raise ValueError('stream action_state mask shape mismatch')
+            action = self.action_projection(action_state.to(values)).masked_fill(action_mask[..., None], 0.)
+            action = action * route[:, None, 1:2]
+            values = torch.cat((action, values), dim=1)
+            memory_mask = torch.cat((action_mask, mask), dim=1)
+        else:
+            memory_mask = mask
+        if stream_memory is not None:
+            if stream_memory.ndim != 3 or stream_memory.shape[0] != batch or stream_memory.size(-1) != self.config.d_model:
+                raise ValueError('stream memory shape mismatch')
+            values = torch.cat((stream_memory.to(values) * route[:, None, 2:3], values), dim=1)
+            memory_mask = torch.cat((torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device), memory_mask), dim=1)
+        return (values, memory_mask, curve_prediction) if return_curve else (values, memory_mask)
+
+    def encode_audio(self, audio, condition, *, audio_padding_mask=None, condition_null=None):
+        """Encode immutable song evidence once, retaining the checkpoint math."""
         if audio.ndim != 3 or audio.size(-1) != self.config.audio_dim:
             raise ValueError('stream audio shape mismatch')
         batch = audio.size(0)
@@ -101,25 +127,20 @@ class ChartStreamTransformer(nn.Module):
         route = torch.softmax(self.context_router(global_token + audio_summary), dim=-1)
         values = values * route[:, None, 0:1]
         curve_prediction = self.curve_head(values)
-        if action_state is not None:
-            if action_state.ndim != 3 or action_state.shape[0] != batch or action_state.size(-1) != self.config.action_dim:
-                raise ValueError('stream action_state shape mismatch')
-            action_mask = (action_state_padding_mask.bool() if action_state_padding_mask is not None
-                           else torch.zeros(action_state.shape[:2], dtype=torch.bool, device=audio.device))
-            if action_mask.shape != action_state.shape[:2]:
-                raise ValueError('stream action_state mask shape mismatch')
-            action = self.action_projection(action_state.to(values)).masked_fill(action_mask[..., None], 0.)
-            action = action * route[:, None, 1:2]
-            values = torch.cat((action, values), dim=1)
-            memory_mask = torch.cat((action_mask, mask), dim=1)
-        else:
-            memory_mask = mask
-        if stream_memory is not None:
-            if stream_memory.ndim != 3 or stream_memory.shape[0] != batch or stream_memory.size(-1) != self.config.d_model:
-                raise ValueError('stream memory shape mismatch')
-            values = torch.cat((stream_memory.to(values) * route[:, None, 2:3], values), dim=1)
-            memory_mask = torch.cat((torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device), memory_mask), dim=1)
-        return (values, memory_mask, curve_prediction) if return_curve else (values, memory_mask)
+        return values, mask, curve_prediction, route
+
+    def prepare_decode_memory(self, memory, memory_mask, *, history=None, history_padding_mask=None):
+        """Use identical history embeddings in full and cached generation."""
+        if history is None or history.size(1) == 0:
+            return memory, memory_mask
+        if history.ndim != 2 or history.size(0) != memory.size(0) or history.size(1) > self.config.max_history_tokens:
+            raise ValueError('stream history shape mismatch')
+        positions = torch.arange(history.size(1), device=history.device)[None]
+        values = self.token_embedding(history) + self.position_embedding(positions)
+        padding = history == 0 if history_padding_mask is None else history_padding_mask.bool()
+        if padding.shape != history.shape:
+            raise ValueError('stream history mask shape mismatch')
+        return torch.cat((values.to(memory), memory), 1), torch.cat((padding, memory_mask), 1)
 
     def decode(self, decoder_input, memory, memory_mask, *, history=None, history_padding_mask=None):
         if decoder_input.ndim != 2 or decoder_input.size(1) == 0:
@@ -127,17 +148,8 @@ class ChartStreamTransformer(nn.Module):
         batch, length = decoder_input.shape
         positions = torch.arange(length, device=decoder_input.device)[None]
         target = self.token_embedding(decoder_input) + self.position_embedding(positions)
-        if history is not None:
-            if history.ndim != 2 or history.shape[0] != batch or history.size(1) > self.config.max_history_tokens:
-                raise ValueError('stream history shape mismatch')
-            hist_pos = torch.arange(history.size(1), device=history.device)[None]
-            hist = self.token_embedding(history) + self.position_embedding(hist_pos)
-            hmask = (history_padding_mask.bool() if history_padding_mask is not None
-                     else history == 0)
-            if hmask.shape != history.shape:
-                raise ValueError('stream history mask shape mismatch')
-            memory = torch.cat((hist, memory), dim=1)
-            memory_mask = torch.cat((hmask, memory_mask), dim=1)
+        memory, memory_mask = self.prepare_decode_memory(memory, memory_mask,
+            history=history, history_padding_mask=history_padding_mask)
         causal = torch.triu(torch.ones((length, length), dtype=torch.bool, device=target.device), diagonal=1)
         hidden = self.decoder(target, memory, tgt_mask=causal,
                               memory_key_padding_mask=memory_mask)
@@ -146,7 +158,9 @@ class ChartStreamTransformer(nn.Module):
 
     def decode_step(self, token, position, memory, memory_mask, caches=None):
         """Incremental one-token decode with cached self/cross attention."""
-        if token.ndim != 2 or token.size(1) != 1 or position < 0:
+        if self.training:
+            raise ValueError('Cached decoding requires eval mode')
+        if token.ndim != 2 or token.size(1) != 1 or not 0 <= position < self.position_embedding.num_embeddings:
             raise ValueError('decode_step expects [B,1] and nonnegative position')
         from maichart.generation.event_model import _cached_decoder_layer_with_cross_cache
         hidden = self.token_embedding(token) + self.position_embedding(

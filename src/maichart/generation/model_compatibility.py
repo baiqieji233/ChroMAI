@@ -49,14 +49,15 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
         config = checkpoint_data.get('model_config') or {}
         valid = checkpoint_data.get('family') == 'chart_stream_v1' and checkpoint_data.get('input_contract') == 'chart_stream_inputs_v1_exact_fraction'
         return {'model_family':'chart_stream_v1','valid':bool(valid),'errors':[] if valid else ['chart_stream checkpoint contract mismatch'],
-                'experimental':True,'conflict_detection':True,'conflict_repair':True,
+                'continuous_stream':bool(valid), 'rational_event_positions':bool(valid),
+                'experimental':True,'conflict_detection':False,'conflict_repair':False,
                 'fine_note_strength':False,'onset_profile':'continuous_event_stream',
                 'local_onset_guidance':False,'rhythm_bias':False,'action_state_profile':'sustain_state_v1',
                 'sustained_action_memory':True,'rhythm_geometry_profile':'exact_fraction_stream_v1',
                 'generation_entry':'/chart-stream','quality_profile':'musical_evidence_v1',
                 'descriptor_dim':0,'curve_bin_seconds':1.,'planner_context_seconds':0.,
-                'audio_evidence_profile':'balanced_evidence_v1','position_alignment_supervision':True,
-                'position_alignment_trained':True}
+                'audio_evidence_profile':'balanced_evidence_v1','position_alignment_supervision':False,
+                'position_alignment_trained':False}
     if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:
         from maichart.form.checkpoint import LEGACY_INPUT_CONTRACT, input_contract_for_configs
         rational=checkpoint_data.get('schema')=='maichart-song-form-checkpoint-v2'

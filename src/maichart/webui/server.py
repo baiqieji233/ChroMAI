@@ -2252,6 +2252,8 @@ def _checkpoint_inspection(
     if detected_family == 'chart_stream_v1':
         result = {'valid':bool(capabilities.get('valid')), 'path':str(checkpoint_path),
                   'schema':payload.get('schema'), 'model_family':'chart_stream_v1',
+                  'epoch':payload.get('epoch'), 'args':payload.get('args') or {},
+                  'optimizer_steps':payload.get('optimizer_steps', 0),
                   'model_config':payload.get('model_config') or {}, 'data_contract':payload.get('input_contract'),
                   'can_resume':bool(capabilities.get('valid')), 'can_init':bool(capabilities.get('valid')),
                   'generation_entry':'/chart-stream', 'generation_capabilities':capabilities}

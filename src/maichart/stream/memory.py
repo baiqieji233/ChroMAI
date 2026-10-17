@@ -19,8 +19,8 @@ class StreamMemoryBank:
     def __init__(self, *, max_entries=256, max_retrieval=8):
         if isinstance(max_entries, bool) or not 1 <= int(max_entries) <= 4096:
             raise ValueError('max_entries must be in [1, 4096]')
-        if isinstance(max_retrieval, bool) or not 1 <= int(max_retrieval) <= 64:
-            raise ValueError('max_retrieval must be in [1, 64]')
+        if isinstance(max_retrieval, bool) or not 1 <= int(max_retrieval) <= 4096:
+            raise ValueError('max_retrieval must be in [1, 4096]')
         self.max_entries, self.max_retrieval = int(max_entries), int(max_retrieval)
         self.entries: list[MemoryEntry] = []
 

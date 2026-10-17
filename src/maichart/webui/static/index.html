@@ -767,6 +767,14 @@
             <input id="checkpointFile" type="file" accept=".pt,.pth">
             <small id="checkpointUploadStatus">只加载自己训练或来源可信的 .pt；checkpoint 加载可能执行代码。</small>
             <textarea id="checkpointPath" class="path-input" rows="3" placeholder="上传后自动填写，或粘贴 event_best.pt / event_last.pt 的完整路径"></textarea>
+          </label>
+<label class="field span-2">生成设备 device
+            <select id="generationDevice">
+              <option value="auto" selected>自动（有 CUDA 则用 GPU）</option>
+              <option value="cuda">CUDA GPU</option>
+              <option value="cpu">CPU</option>
+            </select>
+            <small>适用于所有模型族。选择 CPU 可让生成使用主机内存；CUDA 使用显卡加速。</small>
           </label></div>
 <div class="checkpoint-actions span-4">
             <button id="generationInspectButton" class="secondary-button" type="button">检查生成 checkpoint 类型</button>
@@ -775,19 +783,11 @@
             <p class="notice" id="generationCapabilityNotice" hidden></p>
             <p class="notice" id="generationCheckpointNotice">选择模型时结合保存轮数、选择指标和实际生成效果，不根据文件名或轮数单独判断好坏。跨窗口布局自动继承 checkpoint，生成页不使用训练页的布局参数。</p>
           </div>
-<details id="generationInputAdvanced" class="settings-section" data-advanced >
-<summary><span>设备与旧模型输入</span><small>需要切换 CPU / GPU 或使用旧固定帧模型时调整</small>
+<details id="generationInputAdvanced" class="settings-section" data-generation-family="legacy_frame_v2" data-advanced >
+<summary><span>旧模型输入</span><small>旧固定帧模型的音频特征文件</small>
 </summary>
 <div class="settings-content">
 <div class="form-grid">
-<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2 song_form_v1 song_form_v2">生成设备 device
-            <select id="generationDevice">
-              <option value="auto" selected>自动（有 CUDA 则用 GPU）</option>
-              <option value="cuda">CUDA GPU</option>
-              <option value="cpu">CPU</option>
-            </select>
-            <small><code>auto</code> 会在 CUDA 可用时使用 GPU；训练同时占用显卡时选择 <code>cpu</code> 可避免生成抢占 GPU 显存与计算资源，但生成会更慢。</small>
-          </label>
 <label class="field span-2" data-generation-family="legacy_frame_v2" hidden>旧基线 audio_features JSON（可选）
             <input id="featureFile" type="file" accept=".json">
             <small id="featureUploadStatus">不填写则直接分析音频</small>
@@ -895,7 +895,7 @@
 </details>
 <details id="chartStreamGenerationControls" class="settings-section song-form-only" data-generation-family="chart_stream_v1" hidden>
 <summary><span>连续整曲生成</span><small>不按片段结束；持续动作和历史会随事件更新</small></summary>
-<div class="settings-content"><p class="workflow-hint">chart_stream_v1 会持续写到真实音频结束，再决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p>
+<div class="settings-content"><p class="workflow-hint">chart_stream_v1 连续生成整曲事件，由模型决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p>
 <div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0.5"><small>软性偏向请求的 Tap / Hold / Slide / Touch 组成；0 关闭，不是硬比例。</small></label>
 <label class="field">局部多押强度<input id="streamLocalChordStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性控制局部多押倾向；只影响配置候选，不强制填满同时发生。</small></label>
 <label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label></div></div>
@@ -926,7 +926,7 @@
               一旦某个变速点判错，<strong>它之后的所有音符都会错位</strong>。仅在确认歌曲确实变速时使用。手动 tempo map 优先于此选项。
             </small>
           </label>
-<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2 song_form_v1 song_form_v2">手动 tempo map JSON（可选）
+<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2 song_form_v1 song_form_v2 chart_stream_v1">手动 tempo map JSON（可选）
             <textarea id="tempoMap" class="code-input" rows="4" spellcheck="false" placeholder='[{"beat":"0","bpm":180},{"beat":"32","bpm":150}]'></textarea>
             <small>输入从 beat 0 开始、拍位严格递增的变速点。填写后覆盖 BPM 与 tempo mode；留空继续使用 BPM/tempo mode 和自动检测。beat 是谱面拍，不是秒数。此设置同时用于强度曲线预测和生成。</small>
           </label>
@@ -1044,10 +1044,10 @@
             <small><strong>后端对应 sample / greedy 解码开关。</strong>勾选时从经过语法约束的概率分布抽样；取消时每步取最高概率 token（greedy），结果确定但可能更容易重复。
             它改变随机性，不会补足模型没学会的音符类型或配置。</small>
           </label>
-<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2">Temperature（配置采样温度）
+<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2 chart_stream_v1">Temperature（配置采样温度）
             <input id="temperature" type="number" min="0" step="0.05" value="0.65">
             <small data-generation-family="event_v1"><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。较低值会让抽样更集中，较高值会保留更多不确定性。</small>
-            <small data-generation-family="song_form_v1 song_form_v2" hidden>控制配置解码随机性，不改变全曲起音数或条件目标；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
+            <small data-generation-family="song_form_v1 song_form_v2 chart_stream_v1" hidden>控制配置解码随机性；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
           </label>
 <label class="field" data-generation-family="song_form_v1">规划类型指导强度
             <input id="formPlannerTypeStrength" type="number" min="0" max="3" step="0.1" value="1.0">

@@ -3,6 +3,9 @@ from __future__ import annotations
 
 from pathlib import Path
 import json
+import math
+import re
+import secrets
 
 from maichart.stream import FAMILY, CHECKPOINT_SCHEMA
 
@@ -20,7 +23,7 @@ def inspect(path):
 
 def start(handler, operation, payload, *, runtime):
     if operation == 'inspect':
-        path=runtime._required_path(payload.get('checkpoint'),'chart_stream checkpoint',must_exist=True)
+        path=runtime._required_path(payload.get('checkpoint') or payload.get('checkpoint_path'),'chart_stream checkpoint',must_exist=True)
         return handler._json_response(inspect(path))
     if payload.get('model_family',FAMILY) != FAMILY:
         raise ValueError('chart stream endpoint requires model_family=chart_stream_v1')
@@ -56,24 +59,66 @@ def start(handler, operation, payload, *, runtime):
         task.result.update({'model_family':FAMILY,'checkpoint_dir':str(output),'experimental':True})
         return handler._json_response({'task_id':task.task_id})
     if operation == 'generate':
+        from maichart.stream.generate import parser as generation_parser
+        from maichart.stream.decoding import validate_options
+        from maichart.form.timing import normalize_meter_map
+        from maichart.generation.timeline import serialize_tempo_map
         audio=runtime._required_path(payload.get('audio'),'audio',must_exist=True)
         checkpoint=runtime._required_path(payload.get('checkpoint'),'chart_stream checkpoint',must_exist=True)
-        output=runtime._resolve_path(payload.get('output') or str(runtime.GENERATED_ROOT/'chart_stream_maidata.txt'))
+        requested_output=runtime._resolve_path(payload.get('output') or str(runtime.GENERATED_ROOT/'chart_stream_maidata.txt'))
+        device = str(payload.get('device') or 'auto').strip().lower()
+        if device not in {'auto', 'cpu', 'cuda'} and not re.fullmatch(r'cuda:\d+', device):
+            raise ValueError('生成设备必须为 auto、cpu 或 cuda[:编号]')
+        raw_seed = payload.get('seed')
+        if raw_seed is None or raw_seed == '':
+            seed = secrets.randbits(31)
+        else:
+            if isinstance(raw_seed, bool):
+                raise ValueError('seed 必须为非负整数')
+            try:
+                number = float(raw_seed)
+                if not math.isfinite(number) or number != int(raw_seed):
+                    raise ValueError('seed 必须为非负整数')
+                seed = int(raw_seed)
+            except (TypeError, OverflowError, ValueError) as exc:
+                raise ValueError('seed 必须为非负整数') from exc
         args=['-m','maichart.stream.generate','--audio',str(audio),'--checkpoint',str(checkpoint),
-              '--output',str(output),'--bpm',str(payload.get('bpm',120)),'--first',str(payload.get('first',0)),
+              '--output',str(requested_output),'--first',str(payload.get('first',0)),
               '--level',str(payload.get('level',13)),'--temperature',str(payload.get('temperature',.7)),
-              '--device',str(payload.get('device','cpu'))]
+              '--device',device, '--seed',str(seed)]
+        if payload.get('bpm') not in {None, ''}:
+            args += ['--bpm', str(payload['bpm'])]
+        for key, default in (('position_temperature', .15), ('max_events', 0),
+                             ('max_denominator', 384), ('max_interval_denominator', 96),
+                             ('min_spacing_ms', 20.)):
+            args += ['--'+key.replace('_', '-'), str(payload.get(key, default))]
         args += ['--style-balance-strength', str(payload.get('style_balance_strength', .5)),
                  '--local-chord-strength', str(payload.get('local_chord_strength', 0.)),
                  '--physical-feasibility-strength', str(payload.get('physical_feasibility_strength', 0.))]
-        condition = payload.get('condition')
-        if condition:
-            condition_path = runtime.WEBUI_ROOT / 'conditions' / f'chart_stream_{checkpoint.stem}.json'
-            condition_path.parent.mkdir(parents=True, exist_ok=True)
-            condition_path.write_text(json.dumps(condition, ensure_ascii=False), encoding='utf-8')
-            args += ['--condition-file', str(condition_path)]
+        try:
+            options = generation_parser().parse_args(args[2:])
+            validate_options(options)
+        except SystemExit as exc:
+            raise ValueError('连续生成参数无效，请检查数值与整数范围') from exc
+        tempo = serialize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') is not None else None
+        meters = [m.to_dict() for m in normalize_meter_map(payload.get('meter_map'))]
         task=runtime._create_task('chart_stream_generate')
+        output=requested_output.parent/task.task_id/requested_output.name
+        args[args.index('--output')+1]=str(output)
+        task_directory=runtime.WEBUI_ROOT/'plans'/task.task_id
+        condition = payload.get('condition')
+        for flag, name, value in (('--condition-file','condition.json',condition),
+                                  ('--tempo-map','tempo.json',tempo), ('--meter-map','meter.json',meters)):
+            if value is not None and value != []:
+                task_directory.mkdir(parents=True, exist_ok=True)
+                file_path=task_directory/name
+                file_path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding='utf-8')
+                args += [flag,str(file_path)]
+        options = generation_parser().parse_args(args[2:])
+        task.result.update({'model_family':FAMILY,'experimental':True,'output':str(output),
+                            'requested_output':str(requested_output),'actual_output':str(output),
+                            'seed':seed,'device':device,
+                            'effective_settings':{**vars(options),'output':str(output)}})
         runtime._run_subprocess_task(task,args,expected_epoch=None,result_paths=[output,output.with_suffix('.stream.json')])
-        task.result.update({'model_family':FAMILY,'experimental':True,'output':str(output)})
         return handler._json_response({'task_id':task.task_id})
     raise ValueError('unknown chart stream operation')

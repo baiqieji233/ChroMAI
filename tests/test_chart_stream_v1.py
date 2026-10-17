@@ -62,6 +62,11 @@ def test_stream_checkpoint_is_independent(tmp_path):
     assert restored.config == model.config
     caps = checkpoint_capabilities(payload)
     assert caps['model_family'] == 'chart_stream_v1' and caps['valid']
+    assert caps['continuous_stream'] and caps['rational_event_positions']
+    # Soft physical guidance and token CE are distinct from the old automatic
+    # conflict repair pipeline and an independently trained alignment head.
+    assert not caps['conflict_detection'] and not caps['conflict_repair']
+    assert not caps['position_alignment_supervision'] and not caps['position_alignment_trained']
 
 
 def test_stream_checkpoint_load_accepts_auto_device(tmp_path):

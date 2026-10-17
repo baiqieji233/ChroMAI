@@ -11,6 +11,7 @@ import torch
 from . import CHECKPOINT_SCHEMA, FAMILY, INPUT_CONTRACT
 from .model import ChartStreamTransformer, StreamConfig
 from maichart.form.codec import RationalCodec
+from .runtime import resolve_device
 
 
 def _identity(path):
@@ -40,16 +41,25 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
 
 
 def load(path, device='cpu'):
-    if device in (None, 'auto'):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    payload = torch.load(path, map_location=device, weights_only=False)
+    device = resolve_device(device)
+    # A training checkpoint includes two Adam moments per parameter. Loading
+    # the entire payload on CUDA wastes VRAM during inference. Restore on CPU
+    # and transfer only the model's live parameters to the selected device.
+    payload = torch.load(path, map_location='cpu', weights_only=False)
     if payload.get('schema') != CHECKPOINT_SCHEMA or payload.get('family') != FAMILY:
         raise ValueError('Not a chart_stream_v1 checkpoint')
+    if payload.get('input_contract') != INPUT_CONTRACT:
+        raise ValueError('Chart-stream checkpoint 输入合同不兼容')
     config = StreamConfig(**payload['model_config'])
-    model = ChartStreamTransformer(config).to(device)
-    incompatible = model.load_state_dict(payload['model_state_dict'], strict=False)
-    if incompatible.missing_keys:
-        raise ValueError('Chart-stream checkpoint is missing required parameters: '
-                         + ', '.join(incompatible.missing_keys[:8]))
+    model = ChartStreamTransformer(config)
+    obsolete = {'memory_projection.weight', 'memory_projection.bias',
+                'plan_projection.weight', 'plan_projection.bias',
+                'event_gate.weight', 'event_gate.bias'}
+    state = {key: value for key, value in payload['model_state_dict'].items() if key not in obsolete}
+    try:
+        model.load_state_dict(state, strict=True)
+    except RuntimeError as exc:
+        raise ValueError(f'Chart-stream checkpoint 参数不兼容：{exc}') from exc
+    model.to(device)
     return model, payload
 

@@ -1919,7 +1919,9 @@ function generationPayload() {
 function chartStreamGenerationPayload() {
   return { model_family: "chart_stream_v1", checkpoint: valueOrDefault("#checkpointPath", "").trim(),
     audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
-    bpm: valueOrDefault("#bpm", "").trim() === "" ? 120 : Number(valueOrDefault("#bpm", 120)),
+    bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)),
+    tempo_map: parseTempoMap(),
+    seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)),
     first: Number(valueOrDefault("#first", 0)), level: Number(valueOrDefault("#level", 13.3)),
     temperature: Number(valueOrDefault("#temperature", .7)), device: formDevice("#generationDevice"),
     style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", .5)),
@@ -3283,10 +3285,13 @@ async function inspectGenerationCheckpoint() {
   if (!checkpointPath) throw new Error("请先上传或填写生成使用的 checkpoint 路径");
   const request = ++generationInspectRequest;
   setGenerationStatus("正在检查生成 checkpoint...");
-  if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) {
-    const data = await api("/api/form/inspect", { checkpoint: checkpointPath, operation: "generate", mode: "fresh" });
-    if (request !== generationInspectRequest) return null;
-    generationInspection = { path: checkpointPath, data }; updateFamilyFields();
+  // Generation follows the checkpoint's own schema, independently of the
+  // training-family selection. The common inspector delegates form models.
+  const data = await api("/api/checkpoint/inspect", { checkpoint_path: checkpointPath, mode: "generate" });
+  if (request !== generationInspectRequest) return null;
+  generationInspection = { path: checkpointPath, data };
+  updateFamilyFields();
+  if (["song_form_v1", "song_form_v2"].includes(data.model_family)) {
     const conditionNote = data.condition_controls_trained ? "Radar / Style 条件监督已训练" : "Radar / Style 仍是未校准条件，请先做 A/B 验证";
     const curveNote = data.load_curve_trained ? "song_form 强度曲线已训练" : "song_form 强度曲线尚未训练";
     const curveBox = element("#formCurveCapability"); if (curveBox) { curveBox.hidden = false; curveBox.textContent = `${curveNote}；${conditionNote}。`; curveBox.classList.toggle("warn", !data.load_curve_trained); }
@@ -3296,10 +3301,6 @@ async function inspectGenerationCheckpoint() {
     setGenerationStatus(data.valid && data.can_generate ? `模型族：${data.model_family}；epoch ${data.epoch ?? 0}；全曲规划 ${data.blueprint_steps || 0} 次；生成可用；${conditionNote}；${curveNote}` : ((data.errors || []).join("；") || unreadyNote), data.valid && data.can_generate ? "good" : "warn");
     return data;
   }
-  const data = await api("/api/checkpoint/inspect", { checkpoint_path: checkpointPath, mode: "generate" });
-  if (request !== generationInspectRequest) return null;
-  generationInspection = { path: checkpointPath, data };
-  updateFamilyFields();
   const family = data.model_family_label || data.model_family || "未知";
   const genCaps = data.generation_capabilities || {};
   if (data.model_family === "chart_stream_v1") {
@@ -3307,7 +3308,7 @@ async function inspectGenerationCheckpoint() {
       && genCaps.rational_event_positions === true;
     const streamStatus = element("#generationPlannerStatus");
     if (streamStatus) streamStatus.textContent = streamReady
-      ? "当前为 chart_stream_v1：生成会连续写到整曲结束；计算块不产生乐句边界，音符位置使用精确有理拍。"
+      ? "当前为 chart_stream_v1：连续生成有理拍事件，由模型决定整曲结束；计算块不产生乐句边界。"
       : "当前 chart_stream_v1 checkpoint 未通过连续整曲能力检查，请先处理 checkpoint 检查结果。";
     const streamNotice = element("#generationCapabilityNotice");
     if (streamNotice) {

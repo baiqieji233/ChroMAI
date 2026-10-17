@@ -13,13 +13,18 @@ from maichart.generation.music_intensity import audio_sha256
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
 from maichart.generation.timeline import normalize_tempo_map
 from .checkpoint import load
+from .runtime import resolve_device
 
 
 def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., condition=None,
                              bpm=120., first=0., tempo_map=None, meter_map=None, device='cpu'):
+    device = resolve_device(device)
     model, payload = load(checkpoint_path, device=device)
+    del payload
     model.eval()
-    audio = extract_rational_audio(audio_path, cache_dir=str(__import__('pathlib').Path(checkpoint_path).parent/'curve_audio_cache'))
+    audio = extract_rational_audio(audio_path,
+        cache_dir=str(__import__('pathlib').Path(checkpoint_path).parent/'curve_audio_cache'),
+        evidence_profile='balanced_evidence_v1')
     tempo = normalize_tempo_map(tempo_map) if tempo_map is not None else [EventTempo(0, float(bpm))]
     song = organize_song(audio, tempo, first, meters=meter_map, max_seconds=999., quality_profile='musical_evidence_v1')
     values, times, _ = planner_audio_queries(song)
@@ -50,6 +55,8 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., 
               for t, v in zip(editor_times, editor_values)]
     return {'schema':'maichart-intensity-curve-v1', 'method':'learned_chart_stream_v1',
             'model_family':'chart_stream_v1', 'time_axis':AUDIO_CURVE_AXIS,
+            'device':str(device), 'audio_evidence_profile':audio.evidence_profile,
+            'audio_feature_policy':audio.feature_policy,
             'duration_sec':float(audio.duration_sec), 'curve_bin_seconds':float(resolution_sec),
             'density_profile':'musical_log_v1', 'points':points,
             'components': {'event_density': editor_components[:,0].tolist(),
