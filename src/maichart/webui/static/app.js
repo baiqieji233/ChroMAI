@@ -443,10 +443,11 @@ function trainingEpochStatus(task) {
       .filter((key) => Number.isFinite(Number(detail.timing[key])))
       .map((key) => `${({data_wait_sec: "数据", h2d_sec: "传输", compute_sec: "计算", checkpoint_sec: "保存"})[key]} ${Number(detail.timing[key]).toFixed(1)}s`) : [];
     if (timing.length) parts.push(`主机累计计时（非 GPU 计时）：${timing.join(" / ")}`);
-    const memory = detail.memory && typeof detail.memory === "object" ? ["allocated_gib", "reserved_gib", "peak_allocated_gib"]
+    const memory = detail.memory && typeof detail.memory === "object" ? ["allocated_gib", "reserved_gib", "peak_allocated_gib", "inactive_cached_gib", "device_free_gib"]
       .filter((key) => Number.isFinite(Number(detail.memory[key])))
-      .map((key) => `${({allocated_gib: "已分配", reserved_gib: "已保留", peak_allocated_gib: "峰值已分配"})[key]} ${Number(detail.memory[key]).toFixed(2)} GiB`) : [];
+      .map((key) => `${({allocated_gib: "已分配", reserved_gib: "已保留", peak_allocated_gib: "峰值已分配", inactive_cached_gib: "闲置缓存", device_free_gib: "设备可用"})[key]} ${Number(detail.memory[key]).toFixed(2)} GiB`) : [];
     if (memory.length) parts.push(`CUDA 显存：${memory.join(" / ")}`);
+    if (detail.cuda_cache_guard?.enabled) parts.push(`显存缓存保护：阈值 ${Number(detail.cuda_cache_guard.reserved_high_water_gib).toFixed(2)} GiB · 已回收 ${detail.cuda_cache_guard.trim_count ?? 0} 次`);
     const cache = detail.cache && typeof detail.cache === "object" ? ["audio", "samples"].flatMap((name) => {
       const stat = detail.cache[name];
       if (!stat || typeof stat !== "object") return [];

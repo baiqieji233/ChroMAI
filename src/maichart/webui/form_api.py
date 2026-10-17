@@ -218,7 +218,7 @@ def update_form_progress(task, line):
     if not task.kind.startswith('form_'):
         return
     prefix, _, body = line.partition(' ')
-    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics','form_cache_index','form_muri_audit'}:
+    if prefix not in {'form_prepare','form_progress','form_epoch','form_arrange','form_checkpoint','form_audio_cache','form_repair','form_onsets','form_local_load','form_model_summary','form_rational_diagnostics','form_cache_index','form_muri_audit','form_cuda_cache'}:
         return
     try:
         value = json.loads(body)
@@ -228,6 +228,8 @@ def update_form_progress(task, line):
         return
     if prefix == 'form_rational_diagnostics':
         task.result['rational_diagnostics'] = value
+    elif prefix == 'form_cuda_cache':
+        task.result['cuda_cache_guard'] = value
     elif prefix == 'form_muri_audit':
         task.result['muri_audit'] = value
     elif prefix == 'form_cache_index':

@@ -54,3 +54,16 @@ test("legacy running task before its first epoch still reports an unknown target
   assert.equal(result.knownTarget, false);
   assert.match(result.text, /目标未知/);
 });
+
+test("song form separates live tensors, idle cache and device headroom", () => {
+  const result = trainingEpochStatus({kind: "form_train", status: "running", progress: .1,
+    result: {epoch_target: 30, phase: "layout_revision", progress_detail: {
+      epoch: 1, phase: "layout_revision", completed: 4000, total: 14069,
+      memory: {allocated_gib: .4, reserved_gib: 6.5, peak_allocated_gib: 6.,
+        inactive_cached_gib: 6.1, device_free_gib: 3.8},
+      cuda_cache_guard: {enabled: true, reserved_high_water_gib: 7.2, trim_count: 2},
+    }}});
+  assert.match(result.text, /闲置缓存 6\.10 GiB/);
+  assert.match(result.text, /设备可用 3\.80 GiB/);
+  assert.match(result.text, /显存缓存保护：阈值 7\.20 GiB · 已回收 2 次/);
+});

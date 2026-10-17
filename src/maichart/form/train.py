@@ -522,6 +522,19 @@ def _train(args):
             # abort an otherwise valid training run. Keep the requested value
             # visible and explain the fallback in the structured log.
             cuda_budget_error = str(exc)
+    from maichart.form.cuda_memory import CudaCacheGuard
+    cuda_cache_guard = CudaCacheGuard(device, cuda_budget_gib)
+    last_cuda_cache_trim = None
+
+    def trim_idle_cuda_cache(phase, epoch):
+        nonlocal last_cuda_cache_trim
+        started_trim = time.perf_counter()
+        event = cuda_cache_guard.check()
+        if event is not None:
+            event['elapsed_sec'] = round(time.perf_counter()-started_trim, 4)
+            last_cuda_cache_trim = event
+            emit('form_cuda_cache', phase=phase, epoch=epoch, **event)
+
     meters = json.loads(Path(args.meter_map).read_text(encoding='utf-8-sig')) if args.meter_map else None
     if args.resume or args.init_checkpoint:
         model, blueprint, codec, old = checkpoint.load(args.resume or args.init_checkpoint, device='cpu')
@@ -618,6 +631,7 @@ def _train(args):
          cache_dir=str(Path(args.cache_dir).resolve()),max_region_seconds=args.max_region_seconds,
          cuda_memory_budget_gb=round(cuda_budget_gib, 3), cuda_memory_budget_requested_gb=float(args.cuda_memory_budget_gb),
          cuda_memory_budget_error=cuda_budget_error,
+         cuda_cache_guard=cuda_cache_guard.policy(),
          batch_size=args.batch_size, grad_accumulation=args.grad_accumulation,
          blueprint_batch_size=args.blueprint_batch_size,
          planner_objective_enabled=planner_objective_enabled,
@@ -956,6 +970,7 @@ def _train(args):
                 if planner_objective_enabled and update_samples:
                     engine.backward(loss, update_samples)
                     update = engine.step()
+                    trim_idle_cuda_cache('blueprint', epoch)
                     if update['applied']:
                         plan_steps += 1
                         planner_effective_steps += 1
@@ -1074,6 +1089,7 @@ def _train(args):
                         raise ValueError('Nonfinite layout loss')
                     pending_finite = None
                     update = engine.step()
+                    trim_idle_cuda_cache('layout_revision', epoch)
                     last_update = update
                     if update['applied']:
                         steps += 1
@@ -1111,6 +1127,8 @@ def _train(args):
                              lr=optimizer.param_groups[0]['lr'], cache=dataset.cache_stats(),
                              cache_scope='main_process_only' if args.loader_workers else 'training_process',
                              layout_prefetch=iterator.stats() if layout_prefetch_depth else {'mode': 'synchronous'},
+                             cuda_cache_guard={**cuda_cache_guard.policy(),
+                                 'trim_count':cuda_cache_guard.trim_count,'last_trim':last_cuda_cache_trim},
                              grad_norm=last_update.get('grad_norm'), amp_scale=last_update.get('amp_scale'))
         del iterator, loader
         metrics = {'epoch':epoch,

@@ -134,9 +134,14 @@ def memory_snapshot(device):
     if device.type != 'cuda':
         return {}
     gib = 1024 ** 3
+    free, total = torch.cuda.mem_get_info(device)
+    allocated = torch.cuda.memory_allocated(device)
+    reserved = torch.cuda.memory_reserved(device)
     return {key: round(value / gib, 3) for key, value in {
-        'allocated_gib': torch.cuda.memory_allocated(device),
-        'reserved_gib': torch.cuda.memory_reserved(device),
+        'allocated_gib': allocated,
+        'reserved_gib': reserved,
+        'inactive_cached_gib': max(0, reserved-allocated),
+        'device_free_gib': free, 'device_total_gib': total,
         'peak_allocated_gib': torch.cuda.max_memory_allocated(device),
     }.items()}
 
