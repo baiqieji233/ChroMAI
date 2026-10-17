@@ -316,6 +316,7 @@
 <label class="field">训练谱面数量上限<input id="streamLimitCharts" type="number" min="0" step="1" value="0"><small>0 使用全部合格谱面；短跑验证时可填写较小数量。</small></label>
 <label class="field">训练缓存目录<textarea id="streamCacheDir" class="path-input" rows="2">cache/chart_stream_v1</textarea><small>保存有理音频与整曲事件准备缓存；不同数据合同请使用不同目录。</small></label>
 <label class="field">日志间隔（batch）<input id="streamLogInterval" type="number" min="1" step="1" value="25"><small>控制训练日志频率，不影响梯度或模型结果。</small></label>
+<label class="field">checkpoint 保存间隔（更新步）<input id="streamCheckpointIntervalSteps" type="number" min="0" step="50" value="500"><small>0 只在 epoch 结束保存；默认每 500 次优化器更新保存 `stream_last.pt` 和步骤 checkpoint。</small></label>
 </div></section>
 <section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>

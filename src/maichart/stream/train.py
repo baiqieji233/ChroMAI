@@ -34,6 +34,7 @@ def parser():
     p.add_argument('--log-interval',type=int,default=25); p.add_argument('--seed',type=int,default=0)
     p.add_argument('--max-region-seconds',type=float,default=15.)
     p.add_argument('--plan-loss-weight',type=float,default=.15)
+    p.add_argument('--checkpoint-interval-steps',type=int,default=500)
     return p
 
 
@@ -93,7 +94,7 @@ def main(argv=None):
         for point in record[1]:
             # Keep the same atomic split used by the legacy event vocabulary.
             atom_catalog.extend(str(point.note_text).split('/'))
-    global_step=0
+    global_step=int(old.get('optimizer_steps', 0)) if args.resume and old else 0
     start_epoch = int(old.get('epoch', 0)) if args.resume and old else 0
     for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         totals={}; optimizer.zero_grad(set_to_none=True); pending=0
@@ -104,11 +105,22 @@ def main(argv=None):
             (loss/args.grad_accumulation).backward(); pending+=1
             if pending>=args.grad_accumulation or index==len(loader):
                 torch.nn.utils.clip_grad_norm_(model.parameters(),1.0); optimizer.step(); optimizer.zero_grad(set_to_none=True); pending=0; global_step+=1
+                if args.checkpoint_interval_steps and global_step % args.checkpoint_interval_steps == 0:
+                    state = {'epoch':epoch, 'chunk':index, 'total_chunks':len(loader)}
+                    save(out/'stream_last.pt', model, optimizer, epoch=epoch, args=vars(args),
+                         manifest=args.manifest, metrics=totals, atom_catalog=atom_catalog,
+                         optimizer_steps=global_step, training_position=state)
+                    save(out/f'stream_step_{global_step:08d}.pt', model, optimizer, epoch=epoch,
+                         args=vars(args), manifest=args.manifest, metrics=totals,
+                         atom_catalog=atom_catalog, optimizer_steps=global_step,
+                         training_position=state)
             for key,value in metrics.items(): totals[key]=totals.get(key,0.)+float(value)
             if index%args.log_interval==0 or index==len(loader):
                 average={k:v/index for k,v in totals.items()}
                 print('stream_progress '+json.dumps({'family':'chart_stream_v1','epoch':epoch,'chunk':index,'total':len(loader),'optimizer_steps':global_step,**average}),flush=True)
-        save(out/'stream_last.pt',model,optimizer,epoch=epoch,args=vars(args),manifest=args.manifest,metrics=totals,atom_catalog=atom_catalog)
+        save(out/'stream_last.pt',model,optimizer,epoch=epoch,args=vars(args),manifest=args.manifest,
+             metrics=totals,atom_catalog=atom_catalog,optimizer_steps=global_step,
+             training_position={'epoch':epoch, 'chunk':len(loader), 'total_chunks':len(loader), 'complete':True})
     return 0
 
 

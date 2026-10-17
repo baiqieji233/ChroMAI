@@ -42,7 +42,8 @@ def start(handler, operation, payload, *, runtime):
               '--prepare-workers',str(payload.get('prepare_workers',4)),
               '--max-region-seconds',str(payload.get('max_region_seconds',15)),
               '--limit-charts',str(payload.get('limit_charts',0)),
-              '--log-interval',str(payload.get('log_interval',25))]
+              '--log-interval',str(payload.get('log_interval',25)),
+              '--checkpoint-interval-steps',str(payload.get('checkpoint_interval_steps',500))]
         if mode == 'resume':
             if not checkpoint: raise ValueError('resume requires checkpoint path')
             args += ['--resume',str(runtime._required_path(checkpoint,'resume checkpoint',must_exist=True))]

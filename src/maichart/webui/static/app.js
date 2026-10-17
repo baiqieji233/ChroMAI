@@ -1759,6 +1759,7 @@ function chartStreamTrainingPayload(options = {}) {
     max_region_seconds: Number(valueOrDefault("#streamMaxRegionSeconds", 15)),
     limit_charts: Number(valueOrDefault("#streamLimitCharts", 0)),
     log_interval: Number(valueOrDefault("#streamLogInterval", 25)),
+    checkpoint_interval_steps: Number(valueOrDefault("#streamCheckpointIntervalSteps", 500)),
     cache_dir: valueOrDefault("#streamCacheDir", "cache/chart_stream_v1"),
   };
 }
@@ -3036,6 +3037,7 @@ function applyChartStreamCheckpointConfig(data, mode) {
     "#streamMaxRegionSeconds": args.max_region_seconds,
     "#streamLimitCharts": args.limit_charts,
     "#streamLogInterval": args.log_interval,
+    "#streamCheckpointIntervalSteps": args.checkpoint_interval_steps,
     "#streamCacheDir": args.cache_dir,
   };
   Object.entries(mapping).forEach(([selector, value]) => {

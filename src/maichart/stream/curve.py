@@ -40,12 +40,20 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., 
     positive = density[density > 1e-6]
     reference = float(np.mean(positive)) if len(positive) else 1.
     intensity = np.clip(.5 * density / max(reference, 1e-6), 0., 1.)
-    points = [{'time_sec': float(t), 'intensity': float(v)} for t, v in zip(bins, intensity)]
+    editor_times = np.unique(np.concatenate(([0.0], np.asarray(bins, dtype=np.float64),
+                                              [float(audio.duration_sec)])))
+    editor_values = np.interp(editor_times, bins, intensity)
+    editor_components = resample_load_curve(
+        np.asarray(bins, dtype=np.float64), values, editor_times)
+    points = [{'time_sec': float(t), 'intensity': float(v)}
+              for t, v in zip(editor_times, editor_values)]
     return {'schema':'maichart-intensity-curve-v1', 'method':'learned_chart_stream_v1',
             'model_family':'chart_stream_v1', 'time_axis':AUDIO_CURVE_AXIS,
             'duration_sec':float(audio.duration_sec), 'curve_bin_seconds':float(resolution_sec),
             'density_profile':'musical_log_v1', 'points':points,
-            'components': {'event_density': values[:,0].tolist(), 'tap': values[:,1].tolist(),
-                           'sustain': values[:,2].tolist(), 'slide_touch': values[:,3].tolist()},
-            'component_times_sec':[float(t) for t in bins], 'rest_regions':[],
+            'components': {'event_density': editor_components[:,0].tolist(),
+                           'tap': editor_components[:,1].tolist(),
+                           'sustain': editor_components[:,2].tolist(),
+                           'slide_touch': editor_components[:,3].tolist()},
+            'component_times_sec':[float(t) for t in editor_times], 'rest_regions':[],
             'checkpoint':str(checkpoint_path)}

@@ -21,12 +21,14 @@ def _identity(path):
             'sha256': hashlib.sha256(data).hexdigest()}
 
 
-def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_catalog=()):
+def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_catalog=(),
+         optimizer_steps=0, training_position=None):
     payload = {
         'schema': CHECKPOINT_SCHEMA, 'family': FAMILY, 'input_contract': INPUT_CONTRACT,
         'model_config': asdict(model.config), 'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
-        'epoch': int(epoch), 'args': dict(args), 'manifest': _identity(manifest),
+        'epoch': int(epoch), 'optimizer_steps': int(optimizer_steps),
+        'training_position': training_position or {}, 'args': dict(args), 'manifest': _identity(manifest),
         'codec': {'schema': 'rational-events-v1', 'tokens': RationalCodec().tokens},
         'atom_catalog': sorted(set(atom_catalog)),
         'metrics': metrics or {}, 'architecture': model.architecture,
@@ -43,6 +45,9 @@ def load(path, device='cpu'):
         raise ValueError('Not a chart_stream_v1 checkpoint')
     config = StreamConfig(**payload['model_config'])
     model = ChartStreamTransformer(config).to(device)
-    model.load_state_dict(payload['model_state_dict'])
+    incompatible = model.load_state_dict(payload['model_state_dict'], strict=False)
+    if incompatible.missing_keys:
+        raise ValueError('Chart-stream checkpoint is missing required parameters: '
+                         + ', '.join(incompatible.missing_keys[:8]))
     return model, payload
 
