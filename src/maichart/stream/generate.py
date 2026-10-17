@@ -70,7 +70,8 @@ def generate(args):
         decoder=torch.tensor([ids],dtype=torch.long,device=args.device)
         history = (torch.tensor([history_tokens],dtype=torch.long,device=args.device)
                    if history_tokens else None)
-        output=model.decode(decoder,memory,memory_mask,history=history)
+        with torch.inference_mode():
+            output=model.decode(decoder,memory,memory_mask,history=history)
         logits=output['logits'][0,-1].float()
         if state=='event':
             allowed=[codec.at_id]
@@ -99,7 +100,10 @@ def generate(args):
             allowed=grammar.allowed(text,codec)
             if not allowed: raise ValueError(f'No exact continuation after {previous}')
             scores=logits[allowed]
-            token=allowed[int(torch.multinomial(torch.softmax(scores/args.position_temperature,dim=-1),1,generator=rng))]
+            if args.position_temperature <= 0:
+                token = allowed[int(scores.argmax())]
+            else:
+                token=allowed[int(torch.multinomial(torch.softmax(scores/args.position_temperature,dim=-1),1,generator=rng))]
             ids.append(token)
             if token==codec.note_id:
                 position=Fraction(text); points.append(EventPoint(position,'')); previous=position; state='note'; text=''
@@ -137,7 +141,8 @@ def generate(args):
     output=Path(args.output); output.parent.mkdir(parents=True,exist_ok=True); output.write_text(text_out,encoding='utf-8')
     report={'schema':'maichart-chart-stream-generation-v1','family':'chart_stream_v1','event_count':len(points),
             'audio_duration':audio.duration_sec,'audio_end_beat':str(audio_end),'stream_continuity':True,
-            'checkpoint':payload.get('manifest'), 'limitations':['Model quality requires fresh chart_stream training.']}
+            'checkpoint':str(Path(args.checkpoint).resolve()),
+            'limitations':['Model quality requires fresh chart_stream training.']}
     output.with_suffix('.stream.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     return report
 

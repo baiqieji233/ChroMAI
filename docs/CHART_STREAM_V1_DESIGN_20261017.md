@@ -46,6 +46,8 @@ checkpoint：`maichart-chart-stream-checkpoint-v1`
 
 第三阶段集中验证：Python `79 passed`，Node `36 passed`；覆盖 chart stream、旧 form API、checkpoint、generation settings、pipeline 与前端 payload/lifecycle。只进行了 CPU/语法/夹具测试，没有启动正式训练或 GPU 生成。
 
+第四阶段端到端夹具：使用 4 秒 WAV、1 张简化官谱，在 CPU 上 fresh 训练 1 epoch（3 个 continuation chunk），保存 `stream_last.pt`；随后加载该 checkpoint 连续生成并成功编译回 Simai，报告 `stream_continuity=true`。未把随机初始化后的 3 个事件当作质量证据；该夹具只证明训练→checkpoint→生成→编译链路贯通。期间修复了 inference tensor 解码和 position temperature=0 的生成边界。
+
 ## 研究依据与边界
 
 Transformer-XL 的 segment-level recurrence、Music Transformer 的相对时间建模、Museformer 的细粒度/粗粒度注意力支持长程音乐上下文的可行性。它们不证明舞萌谱面质量会自动提升，首版必须以固定歌曲的边界连续性、静音区、节奏稳定性、前后呼应和 MiaCode 检查进行后续对照。
