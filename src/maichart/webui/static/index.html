@@ -305,6 +305,7 @@
 <label class="field">Transformer 层数<input id="streamLayers" type="number" min="1" max="16" step="1" value="4"></label>
 <label class="field">注意力头数<input id="streamNhead" type="number" min="1" max="16" step="1" value="8"></label>
 <label class="field">前馈层宽度<input id="streamDimFeedforward" type="number" min="128" max="4096" step="64" value="768"></label>
+<label class="field">连续写作计划辅助权重<input id="streamPlanLossWeight" type="number" min="0" max="2" step="0.01" value="0.15"><small>监督节奏间隔、配置类型和持续动作倾向；不把 Planner 当作硬起音骨架。</small></label>
 </div></section>
 <section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>
@@ -880,6 +881,10 @@
 </div>
 <details class="settings-section"><summary>生成后有限修订</summary><div class="settings-content"><label class="checkbox-field"><input id="formRepair" type="checkbox"><span>生成后运行有界修订</span><small>从单 note/来源动作开始尝试，预算耗尽保留最佳结果并报告剩余问题。</small></label><div class="form-grid two-col"><label class="field">最多检查次数<input id="formMaxChecks" type="number" min="1" value="24"></label><label class="field">最多编辑数<input id="formMaxEdits" type="number" min="0" value="4"></label><label class="field">修订时限（秒）<input id="formDeadlineSeconds" type="number" min="0" value="10"></label></div></div></details>
 <p class="workflow-hint">音频上限按秒分配计算资源，不规定乐句必须多少拍。起音阈值先选择声音事件；曲线再调整局部负荷趋势，二者不同。</p>
+</details>
+<details id="chartStreamGenerationControls" class="settings-section song-form-only" data-generation-family="chart_stream_v1" hidden>
+<summary><span>连续整曲生成</span><small>不按片段结束；持续动作和历史会随事件更新</small></summary>
+<div class="settings-content"><p class="workflow-hint">chart_stream_v1 会持续写到真实音频结束，再决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p></div>
 </details>
 <section id="generationTimingGroup" class="workflow-group" >
 <div class="workflow-group-heading"><span class="step">03</span>

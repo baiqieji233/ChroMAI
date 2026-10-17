@@ -44,3 +44,28 @@ def test_stream_checkpoint_is_independent(tmp_path):
     assert restored.config == model.config
     caps = checkpoint_capabilities(payload)
     assert caps['model_family'] == 'chart_stream_v1' and caps['valid']
+
+
+def test_stream_dataset_builds_continuation_chunks_without_chunk_eos(tmp_path, monkeypatch):
+    import json
+    import soundfile as sf
+    import numpy as np
+    from maichart.stream.data import StreamDataset
+
+    song = tmp_path / 'song'; song.mkdir()
+    sr = 22050
+    signal = np.zeros(sr * 3, dtype=np.float32)
+    sf.write(song / 'track.wav', signal, sr)
+    (song / 'maidata.txt').write_text(
+        '&wholebpm=120\n&lv_5=13\n&inote_5=(120)' + ''.join('{8}1,2,3,4,' for _ in range(20)) + 'E\n',
+        encoding='utf-8')
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'songs': [dict(song_id='stream', maidata_path='song/maidata.txt',
+        audio_path='song/track.wav', difficulties=[dict(difficulty_index=5, level_raw='13')])]}), encoding='utf-8')
+    dataset = StreamDataset(manifest, cache_dir=tmp_path / 'cache', max_tokens=32,
+        max_history_tokens=8, max_region_seconds=15, preparation_workers=1, audio_cache_gb=.2)
+    assert len(dataset) > 1
+    assert all(not (chunk.final is False and chunk.target[-1] == dataset.codec.eos_id)
+               for chunk in dataset.chunks)
+    item = dataset[0]
+    assert item['action_state'].shape[-1] == 50

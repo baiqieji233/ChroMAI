@@ -33,6 +33,7 @@ def parser():
     p.add_argument('--limit-charts',type=int,default=0); p.add_argument('--resume'); p.add_argument('--init-checkpoint')
     p.add_argument('--log-interval',type=int,default=25); p.add_argument('--seed',type=int,default=0)
     p.add_argument('--max-region-seconds',type=float,default=15.)
+    p.add_argument('--plan-loss-weight',type=float,default=.15)
     return p
 
 
@@ -44,15 +45,15 @@ def _precision(value,device):
     return value
 
 
-def _loss(output,batch):
+def _loss(output,batch,plan_weight=.15):
     logits=output['logits'].float(); target=batch['target']; mask=~batch['target_padding_mask']
     ce=F.cross_entropy(logits.transpose(1,2),target,ignore_index=0,reduction='none')
     token=(ce*mask).sum()/mask.sum().clamp_min(1)
     plan_mask=batch['plan_mask'] & ~batch['plan_mask_padding_mask']
     plan=F.smooth_l1_loss(output['plan'].float(),batch['plan_labels'].float(),reduction='none').mean(-1)
     plan=(plan*plan_mask).sum()/plan_mask.sum().clamp_min(1)
-    return token + .15*plan, {'token_loss':token.detach(),'plan_loss':plan.detach(),
-                               'loss':(token+.15*plan).detach(),
+    return token + plan_weight*plan, {'token_loss':token.detach(),'plan_loss':plan.detach(),
+                               'loss':(token+plan_weight*plan).detach(),
                                'token_accuracy':((logits.argmax(-1)==target)&mask).sum().float()/mask.sum().clamp_min(1)}
 
 
@@ -88,12 +89,13 @@ def main(argv=None):
             # Keep the same atomic split used by the legacy event vocabulary.
             atom_catalog.extend(str(point.note_text).split('/'))
     global_step=0
-    for epoch in range(1,args.epochs+1):
+    start_epoch = int(old.get('epoch', 0)) if args.resume and old else 0
+    for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         totals={}; optimizer.zero_grad(set_to_none=True); pending=0
         for index,batch in enumerate(loader,1):
             tensors={k:v.to(device,non_blocking=device.type=='cuda') if torch.is_tensor(v) else v for k,v in batch.items()}
             with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,enabled=precision in {'bf16','fp16'}):
-                output=model(tensors); loss,metrics=_loss(output,tensors)
+                output=model(tensors); loss,metrics=_loss(output,tensors,args.plan_loss_weight)
             (loss/args.grad_accumulation).backward(); pending+=1
             if pending>=args.grad_accumulation or index==len(loader):
                 torch.nn.utils.clip_grad_norm_(model.parameters(),1.0); optimizer.step(); optimizer.zero_grad(set_to_none=True); pending=0; global_step+=1

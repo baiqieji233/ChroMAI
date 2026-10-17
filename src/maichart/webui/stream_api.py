@@ -35,7 +35,8 @@ def start(handler, operation, payload, *, runtime):
               '--dim-feedforward',str(payload.get('dim_feedforward',768)),'--max-tokens',str(payload.get('max_tokens',1024)),
               '--max-history-tokens',str(payload.get('max_history_tokens',256)),'--max-stream-memory',str(payload.get('max_stream_memory',32)),
               '--lr',str(payload.get('lr',2e-4)),'--device',str(payload.get('device','auto')),
-              '--precision',str(payload.get('precision','auto')),'--cache-dir',str(payload.get('cache_dir','cache/chart_stream_v1'))]
+              '--precision',str(payload.get('precision','auto')),'--cache-dir',str(payload.get('cache_dir','cache/chart_stream_v1')),
+              '--plan-loss-weight',str(payload.get('plan_loss_weight',.15))]
         if mode == 'resume':
             if not checkpoint: raise ValueError('resume requires checkpoint path')
             args += ['--resume',str(runtime._required_path(checkpoint,'resume checkpoint',must_exist=True))]
@@ -55,6 +56,12 @@ def start(handler, operation, payload, *, runtime):
               '--output',str(output),'--bpm',str(payload.get('bpm',120)),'--first',str(payload.get('first',0)),
               '--level',str(payload.get('level',13)),'--temperature',str(payload.get('temperature',.7)),
               '--device',str(payload.get('device','cpu'))]
+        condition = payload.get('condition')
+        if condition:
+            condition_path = runtime.WEBUI_ROOT / 'conditions' / f'chart_stream_{checkpoint.stem}.json'
+            condition_path.parent.mkdir(parents=True, exist_ok=True)
+            condition_path.write_text(json.dumps(condition, ensure_ascii=False), encoding='utf-8')
+            args += ['--condition-file', str(condition_path)]
         task=runtime._create_task('chart_stream_generate')
         runtime._run_subprocess_task(task,args,expected_epoch=None,result_paths=[output,output.with_suffix('.stream.json')])
         task.result.update({'model_family':FAMILY,'experimental':True,'output':str(output)})

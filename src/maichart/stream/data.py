@@ -45,7 +45,10 @@ class StreamDataset(Dataset):
                  max_region_seconds=15., preparation_workers=1, audio_cache_gb=1.,
                  limit_charts=0, quality_profile=MUSICAL_EVIDENCE):
         self.codec = RationalCodec()
-        self.base = FormDataset(manifest, cache_dir=cache_dir, max_tokens=16384,
+        # The base preparer only uses max_tokens to reject a target before we
+        # split it. A stream must retain long songs, so this is deliberately a
+        # preparation ceiling rather than a decoder context limit.
+        self.base = FormDataset(manifest, cache_dir=cache_dir, max_tokens=1_000_000,
             max_memory_tokens=max_history_tokens, max_region_seconds=max_region_seconds,
             preparation_workers=preparation_workers, audio_cache_gb=audio_cache_gb,
             audio_profile='rational_audio_queries_v1', quality_profile=quality_profile,

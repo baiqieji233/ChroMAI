@@ -1285,6 +1285,7 @@ function updateFamilyFields() {
     target.hidden = !familyFieldVisible(target.dataset.generationFamily, currentGenerationFamily());
   });
   const songTraining = ["song_form_v1", "song_form_v2"].includes(currentModelFamily());
+  const streamTraining = currentModelFamily() === "chart_stream_v1";
   ["#dModel", "#nhead", "#numLayers", "#dimFeedforward", "#trainMaxTokens", "#segmentBeats", "#maxAudioTokens",
    "#conditionMaskProb", "#conditionDefault", "#conditionDropout", "#contextDropout", "#dropout", "#weightDecay",
    "#plannerProfile", "#planLossWeight", "#planTeacherMix", "#onsetProfile", "#onsetLossWeight", "#actionStateProfile",
@@ -1293,12 +1294,12 @@ function updateFamilyFields() {
    "#fineRhythmRatioThreshold", "#contextBeats", "#audioMarginBeats", "#contextTokens", "#overlapBeats",
    "#preferenceEnabled", "#preferenceWeight", "#preferenceMaxPairs"].forEach((selector) => {
     const node = element(selector); const field = node?.closest(".field, .checkbox-field");
-    if (field && songTraining && !field.dataset.trainingFamily) field.hidden = true;
-    else if (field && !songTraining && !field.dataset.trainingFamily) field.hidden = false;
+    if (field && (songTraining || streamTraining) && !field.dataset.trainingFamily) field.hidden = true;
+    else if (field && !songTraining && !streamTraining && !field.dataset.trainingFamily) field.hidden = false;
   });
   const songHint = element("#songFormTrainingControls"); if (songHint) songHint.hidden = !songTraining;
   const songGenerationHint = element("#songFormGenerationControls"); if (songGenerationHint) songGenerationHint.hidden = !["song_form_v1", "song_form_v2"].includes(currentGenerationFamily());
-  if (songTraining) {
+  if (songTraining || streamTraining) {
     element("#trainingArchitecture")?.setAttribute("open", "");
     element("#trainingLearning")?.setAttribute("open", "");
   }
@@ -1311,7 +1312,9 @@ function updateFamilyFields() {
   const family = currentModelFamily();
   const familyHelp = element("#modelFamilyHelp");
   if (familyHelp) {
-    familyHelp.textContent = family === "song_form_v2"
+    familyHelp.textContent = family === "chart_stream_v1"
+      ? "chart_stream_v1：整曲连续事件流；计算块只管理显存，不产生音乐边界。音频、近期谱面、持续动作和远期摘要由动态路由共同参与。"
+      : family === "song_form_v2"
       ? "song_form_v2：直接联合生成精确有理数拍位与配置，音频按节拍/音乐事件查询。保留 Planner、段落关联、Radar / Style、负荷曲线和修订；旧 checkpoint 自动使用原生成方式。"
       : ["song_form_v1", "song_form_v2"].includes(family)
       ? "song_form_v1：全曲 blueprint、段落关联与草稿修订模型。Radar / Style 由 event_derived_radar_style_v1 条件监督提供；强度曲线需完成独立训练接入后才会成为真实生成约束。"
@@ -1323,7 +1326,9 @@ function updateFamilyFields() {
   }
   const dirHelp = element("#checkpointDirHelp");
   if (dirHelp) {
-    dirHelp.textContent = ["song_form_v1", "song_form_v2"].includes(family)
+    dirHelp.textContent = family === "chart_stream_v1"
+      ? "chart_stream_v1 产物为 stream_last.pt；与 event / song_form checkpoint 不兼容。"
+      : ["song_form_v1", "song_form_v2"].includes(family)
       ? "song-form 产物为 form_last.pt；resume 严格继承合同，finetune 请使用新的输出目录。"
       : family === "legacy_frame_v2"
         ? "旧基线输出 generator_last.pt / generator_epoch_NNN.pt，不能作为 event checkpoint 使用。"
@@ -1336,7 +1341,9 @@ function updateFamilyFields() {
       : "未填 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外使用高置信度变速点。填写 tempo map 后，其 beat 0 BPM 与变速点优先。";
   }
   const preprocessHelp = element("#preprocessFamilyStatus");
-  if (preprocessHelp) preprocessHelp.textContent = ["song_form_v1", "song_form_v2"].includes(family)
+  if (preprocessHelp) preprocessHelp.textContent = family === "chart_stream_v1"
+    ? "chart_stream_v1 复用 event source manifest 和有理音频缓存，但训练目标是整曲连续事件流；不生成分段 EOS 或 fixed-frame labels。"
+    : ["song_form_v1", "song_form_v2"].includes(family)
     ? "song-form 使用 event source manifest：解析 maidata、音频特征和精确时间缓存；不生成旧 fixed-frame labels/alignment。已有 event manifest 可直接复用。"
     : family === "legacy_frame_v2"
       ? "旧固定帧模型才使用 legacy preprocess build、division、frame labels 和 alignment。"
@@ -1744,6 +1751,7 @@ function chartStreamTrainingPayload(options = {}) {
     nhead: Number(valueOrDefault("#streamNhead", 8)), dim_feedforward: Number(valueOrDefault("#streamDimFeedforward", 768)),
     max_tokens: Number(valueOrDefault("#streamMaxTokens", 1024)), max_history_tokens: Number(valueOrDefault("#streamMaxHistoryTokens", 256)),
     max_stream_memory: Number(valueOrDefault("#streamMemoryTokens", 32)),
+    plan_loss_weight: Number(valueOrDefault("#streamPlanLossWeight", .15)),
     lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
     device: formDevice("#device"), precision: valueOrDefault("#formPrecision", "auto"),
     cache_dir: valueOrDefault("#formCacheDir", "cache/chart_stream_v1"),
@@ -1907,7 +1915,8 @@ function chartStreamGenerationPayload() {
     audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
     bpm: valueOrDefault("#bpm", "").trim() === "" ? 120 : Number(valueOrDefault("#bpm", 120)),
     first: Number(valueOrDefault("#first", 0)), level: Number(valueOrDefault("#level", 13.3)),
-    temperature: Number(valueOrDefault("#temperature", .7)), device: formDevice("#generationDevice") };
+    temperature: Number(valueOrDefault("#temperature", .7)), device: formDevice("#generationDevice"),
+    condition: collectCondition() };
 }
 
 function intensityCurvePayload() {
@@ -1997,7 +2006,7 @@ function setTrainingModeDefaults() {
 }
 
 function updateTrainingModeHelp(mode = currentTrainingMode()) {
-  const songForm = ["song_form_v1", "song_form_v2"].includes(element("#modelFamily")?.value);
+  const songForm = ["song_form_v1", "song_form_v2", "chart_stream_v1"].includes(element("#modelFamily")?.value);
   const restartEpoch = songForm && element("#formResumeDataPolicy")?.value === "restart_epoch";
   const modeHelp = element("#trainingModeHelp");
   if (modeHelp) {
@@ -2055,7 +2064,7 @@ function updateTrainingControls() {
   updateTrainingModeHelp();
   const resume = currentTrainingMode() === "resume";
   const resumePolicy = element("#formResumeDataPolicyGroup");
-  if (resumePolicy) resumePolicy.hidden = !resume || !["song_form_v1", "song_form_v2"].includes(currentModelFamily());
+  if (resumePolicy) resumePolicy.hidden = !resume || !["song_form_v1", "song_form_v2", "chart_stream_v1"].includes(currentModelFamily());
   ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy", "#actionStateProfile"].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = resume;

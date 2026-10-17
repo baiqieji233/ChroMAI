@@ -1056,7 +1056,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def _start_train(self, payload: dict[str, Any]) -> None:
         if payload.get('model_family') == 'chart_stream_v1':
             from maichart.webui.stream_api import start
-            form_payload=dict(payload); form_payload.setdefault('mode',payload.get('training_mode','fresh'))
+            form_payload=dict(payload)
+            if payload.get('manifests') and hasattr(self, '_prepare_training_sources'):
+                form_payload, selection = self._prepare_training_sources(form_payload)
+                form_payload['dataset_selection'] = selection
+            form_payload.setdefault('mode',payload.get('training_mode','fresh'))
             form_payload.setdefault('init_checkpoint',payload.get('training_checkpoint'))
             return start(self,'train',form_payload,runtime=sys.modules[__name__])
         if payload.get("model_family") in {"song_form_v1", "song_form_v2"}:
