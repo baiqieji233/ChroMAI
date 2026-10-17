@@ -121,6 +121,9 @@ class TaskState:
             if self.kind.startswith('form_'):
                 from maichart.webui.form_api import update_form_progress
                 update_form_progress(self, line)
+            elif self.kind == 'chart_stream_train':
+                from maichart.webui.stream_api import update_stream_progress
+                update_stream_progress(self, line)
             epoch_match = re.search(r"epoch=(\d+)", line)
             if epoch_match:
                 current_epoch = int(epoch_match.group(1))
@@ -361,7 +364,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         from maichart.stream.curve import generate_learned_profile
                         profile = generate_learned_profile(
                             audio, checkpoint_path, resolution_sec=resolution,
-                            condition=payload.get("condition"), bpm=payload.get("bpm") or 120.,
+                            condition=payload.get("condition"), bpm=payload.get("bpm") or None,
                             first=first, tempo_map=explicit_tempo_map,
                             meter_map=meter_map, device="cpu")
                         condition_source = checkpoint_family or requested_family

@@ -33,7 +33,7 @@ class StreamConfig:
     def __post_init__(self):
         for name in ('vocab_size','d_model','nhead','layers','dim_feedforward',
                      'audio_dim','condition_dim','max_audio_tokens',
-                     'max_history_tokens','max_stream_memory','max_tokens','plan_dim'):
+                     'max_history_tokens','max_stream_memory','max_tokens','plan_dim','action_dim'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f'{name} must be a positive integer')
@@ -74,7 +74,7 @@ class ChartStreamTransformer(nn.Module):
         self.curve_head = nn.Linear(w, 4)
 
     def encode(self, audio, condition, *, audio_padding_mask=None,
-               condition_null=None, stream_memory=None, action_state=None,
+               condition_null=None, stream_memory=None, stream_memory_padding_mask=None, action_state=None,
                action_state_padding_mask=None, return_curve=False, encoded_audio=None):
         values, mask, curve_prediction, route = (self.encode_audio(audio, condition,
             audio_padding_mask=audio_padding_mask, condition_null=condition_null)
@@ -96,8 +96,13 @@ class ChartStreamTransformer(nn.Module):
         if stream_memory is not None:
             if stream_memory.ndim != 3 or stream_memory.shape[0] != batch or stream_memory.size(-1) != self.config.d_model:
                 raise ValueError('stream memory shape mismatch')
-            values = torch.cat((stream_memory.to(values) * route[:, None, 2:3], values), dim=1)
-            memory_mask = torch.cat((torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device), memory_mask), dim=1)
+            summary_mask = (torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device)
+                            if stream_memory_padding_mask is None else stream_memory_padding_mask.to(values.device).bool())
+            if summary_mask.shape != stream_memory.shape[:2]:
+                raise ValueError('stream summary padding shape mismatch')
+            summary = stream_memory.to(values).masked_fill(summary_mask[..., None], 0.)
+            values = torch.cat((summary * route[:, None, 2:3], values), dim=1)
+            memory_mask = torch.cat((summary_mask, memory_mask), dim=1)
         return (values, memory_mask, curve_prediction) if return_curve else (values, memory_mask)
 
     def encode_audio(self, audio, condition, *, audio_padding_mask=None, condition_null=None):
@@ -183,12 +188,15 @@ class ChartStreamTransformer(nn.Module):
 
     def forward(self, batch):
         stream_memory = batch.get('stream_memory')
+        summary_mask = batch.get('stream_memory_padding_mask')
         if stream_memory is None and batch.get('history') is not None:
-            stream_memory = self.summarize_tokens(batch['history'], batch.get('history_padding_mask'))
+            stream_memory, summary_mask = self.summarize_tokens(batch['history'],
+                batch.get('history_padding_mask'), return_padding_mask=True)
         memory, memory_mask, curve = self.encode(batch['audio'], batch['condition'],
             audio_padding_mask=batch.get('audio_padding_mask'),
             condition_null=batch.get('condition_null'),
-            stream_memory=stream_memory, action_state=batch.get('action_state'),
+            stream_memory=stream_memory, stream_memory_padding_mask=summary_mask,
+            action_state=batch.get('action_state'),
             action_state_padding_mask=batch.get('action_state_padding_mask'), return_curve=True)
         result = self.decode(batch['decoder_input'], memory, memory_mask,
                            history=batch.get('history'), history_padding_mask=batch.get('history_padding_mask'))
@@ -206,21 +214,30 @@ class ChartStreamTransformer(nn.Module):
         rows = [hidden[:, i:i+stride].mean(1) for i in range(0, hidden.size(1), stride)]
         return torch.stack(rows, 1)[:, :slots]
 
-    def summarize_tokens(self, tokens, padding_mask=None, *, slots=None):
+    def summarize_tokens(self, tokens, padding_mask=None, *, slots=None, return_padding_mask=False):
         """Deterministic train/generate-compatible long-history summary."""
         if tokens.ndim != 2:
             raise ValueError('tokens must be [B,L]')
         slots = self.config.max_stream_memory if slots is None else int(slots)
+        if slots < 1:
+            raise ValueError('summary slots must be positive')
         values = self.token_embedding(tokens)
         mask = (tokens == 0 if padding_mask is None else padding_mask.bool())
+        if mask.shape != tokens.shape:
+            raise ValueError('summary mask shape mismatch')
         values = values.masked_fill(mask[..., None], 0.)
-        if values.size(1) <= slots:
-            return values
-        stride = math.ceil(values.size(1) / slots)
-        rows=[]
-        for i in range(0, values.size(1), stride):
-            local = values[:, i:i+stride]
-            local_mask = mask[:, i:i+stride]
-            rows.append(local.sum(1) / (~local_mask).sum(1).clamp_min(1)[:, None])
-        return torch.stack(rows, 1)[:, :slots]
+        # Each row uses its own true history length, independent of the other
+        # songs in the batch. Scatter pooling avoids a per-row CUDA sync.
+        count = min(tokens.size(1), slots)
+        lengths = (~mask).sum(1)
+        stride = ((lengths + slots - 1) // slots).clamp_min(1)
+        group = ((~mask).long().cumsum(1)-1).clamp_min(0) // stride[:, None]
+        group = group.clamp_max(max(0, count-1))
+        sums = values.new_zeros((tokens.size(0), count, values.size(-1)))
+        counts = values.new_zeros((tokens.size(0), count))
+        sums.scatter_add_(1, group[..., None].expand_as(values), values)
+        counts.scatter_add_(1, group, (~mask).to(values.dtype))
+        result = sums / counts.clamp_min(1)[..., None]
+        padding = counts == 0
+        return (result, padding) if return_padding_mask else result
 

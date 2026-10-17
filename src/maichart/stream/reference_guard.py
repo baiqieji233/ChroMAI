@@ -46,17 +46,22 @@ class ReferenceCandidateGuard:
                 (earliest is not None and float(seconds_at_beat(p.beat,self.tempo,self.first))>=earliest-.2)]
 
     @staticmethod
-    def _signatures(report):
+    def _diagnostic_signatures(report):
         markers={m['key']:m for m in report['markers']}
         for marker in report['markers']:
             if has_head(marker): markers[head_key(marker)]=marker
-        signatures=set()
+        signatures=[]
         for item in report['diagnostics']:
             if item.get('alert_level')!='Muri': continue
             marker=markers.get(item.get('marker_key'),item.get('affected') or item)
-            signatures.add((item['kind'],round(float(marker.get('second',0.)),8),
-                marker.get('type',marker.get('marker_type')),marker.get('lane'),marker.get('raw')))
+            signature=(item['kind'],round(float(marker.get('second',0.)),8),
+                marker.get('type',marker.get('marker_type')),marker.get('lane'),marker.get('raw'))
+            signatures.append((item,signature))
         return signatures
+
+    @classmethod
+    def _signatures(cls,report):
+        return {signature for _,signature in cls._diagnostic_signatures(report)}
 
     def _baseline(self, points):
         if not points: return set()
@@ -90,23 +95,21 @@ class ReferenceCandidateGuard:
     def check(self, point):
         second,markers = self._markers(point)
         relevant = [p for p,until in self._relevant(second)]
-        if not relevant and not any(m['type'] in {'slide','wifi'} for m in markers):
+        if not relevant and len(markers)==1 and markers[0]['type'] in {'tap','touch','hold','touch_hold'}:
             self.fast_accepts += 1
             return True,[]
         text,_ = compile_event_points([*relevant,point],tempo_changes=self.tempo,first=self.first)
         report = analyze_maidata(text)
         baseline=self._baseline(relevant)
-        current_signatures=self._signatures(report)
-        introduced=current_signatures-baseline
         keys = set()
         for marker in report['markers']:
             if abs(marker['second']-second) <= 1e-5:
                 keys.add(marker['key'])
                 if has_head(marker): keys.add(head_key(marker))
         self.checks += 1
-        errors = [item for item in report['diagnostics']
+        errors = [item for item,signature in self._diagnostic_signatures(report)
             if item.get('kind') in HARD_KINDS and item.get('alert_level') == 'Muri'
-            and (_involves_current(item,second,keys) or introduced)]
+            and (_involves_current(item,second,keys) or signature not in baseline)]
         if errors:
             self.rejections += 1
             self.last_errors = [{'kind':e['kind'],'second':e['second'],'detail':e.get('detail','')}

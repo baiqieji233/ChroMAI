@@ -234,6 +234,11 @@ class PreparationCache:
                          'reconstruction': options['reconstruction'], 'meter_map': meters},
         }
         profile = options.get('quality_profile', 'legacy')
+        # Only annotated exclusions change preparation. Unannotated stream
+        # songs can reuse their existing prepared artifacts unchanged.
+        if options.get('preserve_excluded_context') and any(
+                float(region.get('weight', 1)) <= 0 for region in (record or {}).get('regions', [])):
+            identity['settings']['excluded_context'] = 'retain_original_events_v1'
         width = float(options.get('curve_bin_seconds', default_curve_bin_seconds(profile)))
         if enhanced(profile):
             identity['semantics'] = 'song_form_preparation_musical_evidence_v1'

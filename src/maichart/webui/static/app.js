@@ -195,6 +195,27 @@ function renderTaskTrainingMetrics(task) {
   const groups = element("#taskTrainingMetricsGroups");
   if (!panel || !groups) return;
   groups.replaceChildren();
+  if (task?.kind === "chart_stream_train") {
+    const metrics = task.result?.stream_metrics;
+    panel.hidden = !metrics;
+    if (source) source.textContent = metrics ? `连续谱面训练 · epoch ${metrics.epoch} · 本轮累计 batch 均值；不代表自由生成质量` : "等待训练指标";
+    if (!metrics) return;
+    const list = document.createElement("dl"); list.className = "training-metric-list";
+    for (const [key, label] of [["loss","总 loss"],["token_loss","事件 token loss"],
+      ["token_accuracy","token 准确率"],["plan_loss","连续写作计划 loss"],
+      ["event_decision_loss","续写与结束 loss"],["curve_loss","强度曲线 loss"],
+      ["batches_per_sec","batch / 秒"],["optimizer_steps","参数更新步"]]) {
+      const value = trainingMetricNumber(metrics,key);
+      if (value === null) continue;
+      const term=document.createElement("dt"), definition=document.createElement("dd");
+      term.textContent=label;
+      definition.textContent=key === "token_accuracy" ? `${(value*100).toFixed(2)}%`
+        : key === "optimizer_steps" ? String(value) : value.toFixed(4);
+      list.append(term,definition);
+    }
+    groups.append(list);
+    return;
+  }
   if (task?.kind !== "form_train") {
     panel.hidden = true;
     return;
@@ -372,6 +393,9 @@ function renderTaskTrainingMetrics(task) {
 
 function trainingEpochStatus(task) {
   if (!task) return null;
+  if (task.kind === "chart_stream_train") {
+    return {knownTarget:!!task.result?.epoch_target,progress:task.progress||0,text:task.message||"等待连续流训练进度"};
+  }
   if (task.kind === "form_train") {
     const result = task.result || {};
     const detail = result.progress_detail || {};
@@ -1320,7 +1344,7 @@ function updateFamilyFields() {
   const familyHelp = element("#modelFamilyHelp");
   if (familyHelp) {
     familyHelp.textContent = family === "chart_stream_v1"
-      ? "chart_stream_v1：整曲连续事件流；计算块只管理显存，不产生音乐边界。音频、近期谱面、持续动作和远期摘要由动态路由共同参与。"
+      ? "chart_stream_v1：整曲连续事件流；计算块只管理显存，不产生音乐边界。音频、近期谱面、持续动作和近期历史摘要共同参与。"
       : family === "song_form_v2"
       ? "song_form_v2：直接联合生成精确有理数拍位与配置，音频按节拍/音乐事件查询。保留 Planner、段落关联、Radar / Style、负荷曲线和修订；旧 checkpoint 自动使用原生成方式。"
       : ["song_form_v1", "song_form_v2"].includes(family)
@@ -1758,6 +1782,8 @@ function chartStreamTrainingPayload(options = {}) {
     nhead: Number(valueOrDefault("#streamNhead", 8)), dim_feedforward: Number(valueOrDefault("#streamDimFeedforward", 768)),
     max_tokens: Number(valueOrDefault("#streamMaxTokens", 1024)), max_history_tokens: Number(valueOrDefault("#streamMaxHistoryTokens", 256)),
     max_stream_memory: Number(valueOrDefault("#streamMemoryTokens", 32)),
+    dropout: Number(valueOrDefault("#streamDropout", .1)), seed: Number(valueOrDefault("#streamSeed", 0)),
+    quality_enabled: checkedOrDefault("#qualityEnabled", false),
     plan_loss_weight: Number(valueOrDefault("#streamPlanLossWeight", .15)),
     event_decision_loss_weight: Number(valueOrDefault("#streamEventDecisionLossWeight",.25)),
     lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#streamWeightDecay", .01)),
@@ -2103,7 +2129,7 @@ function updateTrainingControls() {
   });
   if (currentModelFamily() === "chart_stream_v1" && currentTrainingMode() === "fresh") {
     ["#streamDModel", "#streamLayers", "#streamNhead", "#streamDimFeedforward",
-      "#streamMaxTokens", "#streamMaxHistoryTokens", "#streamMemoryTokens"].forEach((selector) => {
+      "#streamMaxTokens", "#streamMaxHistoryTokens", "#streamMemoryTokens", "#streamDropout"].forEach((selector) => {
       const target = element(selector); if (target) target.disabled = false;
     });
   }
@@ -2117,6 +2143,7 @@ function updateTrainingControls() {
 // Task handling
 // ---------------------------------------------------------------------------
 const TASK_KIND_LABEL = {
+  chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
   preprocess: "预处理", train: "训练", generate: "生成", form_train: "song-form 训练", form_generate: "song-form 生成", form_analyze: "song-form 分析", form_revise: "song-form 修订", intensity: "强度曲线", gold: "金标集", acceptance: "验收",
 };
 const taskWatchers = new Map();
@@ -3062,6 +3089,8 @@ function applyChartStreamCheckpointConfig(data, mode) {
     "#streamMaxTokens": config.max_tokens,
     "#streamMaxHistoryTokens": config.max_history_tokens,
     "#streamMemoryTokens": config.max_stream_memory,
+    "#streamDropout": config.dropout,
+    "#streamSeed": args.seed,
     "#streamPlanLossWeight": args.plan_loss_weight,
     "#streamEventDecisionLossWeight": args.event_decision_loss_weight,
     "#streamPrecision": args.precision,
@@ -3074,6 +3103,9 @@ function applyChartStreamCheckpointConfig(data, mode) {
     "#streamCheckpointIntervalSteps": args.checkpoint_interval_steps,
     "#streamCacheDir": args.cache_dir,
   };
+  if (element("#qualityEnabled") && typeof args.quality_enabled === "boolean") {
+    element("#qualityEnabled").checked=args.quality_enabled;
+  }
   Object.entries(mapping).forEach(([selector, value]) => {
     const target = element(selector);
     if (!target || value === undefined || value === null) return;
@@ -3081,7 +3113,7 @@ function applyChartStreamCheckpointConfig(data, mode) {
   });
   const locked = mode !== "fresh";
   ["#streamDModel", "#streamLayers", "#streamNhead", "#streamDimFeedforward",
-    "#streamMaxTokens", "#streamMaxHistoryTokens", "#streamMemoryTokens"].forEach((selector) => {
+    "#streamMaxTokens", "#streamMaxHistoryTokens", "#streamMemoryTokens", "#streamDropout"].forEach((selector) => {
     const target = element(selector);
     if (target) target.disabled = locked;
   });
@@ -4739,6 +4771,7 @@ on("#modelFamily", "change", () => {
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_stream_v1") {
     for (const [id, v] of Object.entries({streamDModel:256, streamLayers:4, streamNhead:8, streamDimFeedforward:768,
       streamMaxTokens:1024, streamMaxHistoryTokens:256, streamMemoryTokens:32, streamPlanLossWeight:.15,
+      streamDropout:.1, streamSeed:0,
       streamPrecision:"auto", streamWeightDecay:.01, streamAudioCacheGb:8, streamPrepareWorkers:4,
       streamMaxRegionSeconds:15, streamLimitCharts:0, streamLogInterval:25, streamCacheDir:"cache/chart_stream_v1"})) {
       const node = element("#" + id); if (node) node.value = String(v);

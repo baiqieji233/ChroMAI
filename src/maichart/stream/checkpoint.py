@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from pathlib import Path
 from dataclasses import asdict
 
@@ -23,11 +25,13 @@ def _identity(path):
 
 
 def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_catalog=(),
-         optimizer_steps=0, training_position=None):
+         optimizer_steps=0, training_position=None, scaler=None, dataset_fingerprint=None):
     payload = {
         'schema': CHECKPOINT_SCHEMA, 'family': FAMILY, 'input_contract': INPUT_CONTRACT,
         'model_config': asdict(model.config), 'model_state_dict': model.state_dict(),
         'optimizer_state_dict': optimizer.state_dict() if optimizer is not None else None,
+        'scaler_state_dict': scaler.state_dict() if scaler is not None else None,
+        'dataset_fingerprint': dataset_fingerprint,
         'epoch': int(epoch), 'optimizer_steps': int(optimizer_steps),
         'training_position': training_position or {}, 'args': dict(args), 'manifest': _identity(manifest),
         'codec': {'schema': 'rational-events-v1', 'tokens': RationalCodec().tokens},
@@ -36,22 +40,39 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
         'metrics_aggregation': 'batch_mean',
     }
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
-    temp = path.with_suffix(path.suffix + '.tmp')
-    torch.save(payload, temp); temp.replace(path)
+    fd, name = tempfile.mkstemp(prefix=path.name+'.', suffix='.tmp', dir=path.parent)
+    os.close(fd)
+    temp = Path(name)
+    try:
+        torch.save(payload, temp)
+        temp.replace(path)
+    finally:
+        temp.unlink(missing_ok=True)
     return payload
 
 
-def load(path, device='cpu'):
-    device = resolve_device(device)
-    # A training checkpoint includes two Adam moments per parameter. Loading
-    # the entire payload on CUDA wastes VRAM during inference. Restore on CPU
-    # and transfer only the model's live parameters to the selected device.
-    payload = torch.load(path, map_location='cpu', weights_only=False)
+def validate_contract(payload):
     if payload.get('schema') != CHECKPOINT_SCHEMA or payload.get('family') != FAMILY:
         raise ValueError('Not a chart_stream_v1 checkpoint')
     if payload.get('input_contract') != INPUT_CONTRACT:
         raise ValueError('Chart-stream checkpoint 输入合同不兼容')
+    expected = RationalCodec().to_dict()
+    codec = payload.get('codec') or {}
+    if codec.get('schema') != expected['schema'] or list(codec.get('tokens', ())) != expected['tokens']:
+        raise ValueError('Chart-stream checkpoint codec token 顺序不兼容')
     config = StreamConfig(**payload['model_config'])
+    if (config.audio_dim, config.condition_dim, config.action_dim, config.plan_dim) != (120, 16, 50, 8):
+        raise ValueError('Chart-stream checkpoint 输入/规划维度不兼容')
+    if config.vocab_size != len(expected['tokens']):
+        raise ValueError('Chart-stream checkpoint codec vocabulary size 不兼容')
+    return config
+
+
+def load(path, device='cpu'):
+    device = resolve_device(device)
+    # Keep saved optimizer tensors on CPU during inference.
+    payload = torch.load(path, map_location='cpu', weights_only=False)
+    config = validate_contract(payload)
     model = ChartStreamTransformer(config)
     obsolete = {'memory_projection.weight', 'memory_projection.bias',
                 'plan_projection.weight', 'plan_projection.bias',

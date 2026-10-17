@@ -132,14 +132,15 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             states, padding, _ = prefix_action_state(index, points, len(points))
             action, action_mask = states[None].to(device), padding[None].to(device)
         history = torch.tensor([history_tokens], dtype=torch.long, device=device) if history_tokens else None
-        summary = model.summarize_tokens(history) if history is not None else None
+        summary, summary_mask = (model.summarize_tokens(history, return_padding_mask=True)
+                                 if history is not None else (None, None))
         # Training supplies summarize_tokens(history) only. The old retrieval
         # vectors (raw token embedding + audio projection) were never trained as
         # decoder memory and could replace that summary entirely after a roll.
         # Keep the causal archive for diagnostics, but use the trained summary.
         memory, padding = model.encode(audio, control, audio_padding_mask=audio_mask,
             action_state=action, action_state_padding_mask=action_mask,
-            stream_memory=summary, encoded_audio=encoded_audio)
+            stream_memory=summary, stream_memory_padding_mask=summary_mask, encoded_audio=encoded_audio)
         return model.prepare_decode_memory(memory, padding, history=history)
 
     def retry_note():
@@ -178,7 +179,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             needs_search_space = (args.position_beam_size > 1
                 and len(ids) + characters + 2 > model.config.max_tokens)
             if points and len(ids) > 1 and (len(ids) >= model.config.max_tokens - 1 or needs_search_space):
-                history_tokens = (history_tokens + ids)[-model.config.max_history_tokens:]
+                history_tokens = (history_tokens + (ids if rotations == 0 else ids[1:]))[-model.config.max_history_tokens:]
                 memory, memory_mask = refresh_context()
                 ids, cache, consumed = [codec.bos_id], None, 0
                 rotations += 1
@@ -206,7 +207,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             # or making a resource limit act as a musical ending.
             if header_start <= 1:
                 raise ValueError('单个配置超过流上下文 token 上限；请增大「流上下文 token 上限」后重试。')
-            history_tokens = (history_tokens + ids[:header_start])[-model.config.max_history_tokens:]
+            history_tokens = (history_tokens + ids[0 if rotations == 0 else 1:header_start])[-model.config.max_history_tokens:]
             pending = ids[header_start:]
             memory, memory_mask = refresh_context()
             ids, cache, consumed, header_start = [codec.bos_id] + pending, None, 0, 1
@@ -255,7 +256,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                         # A search may lack space for a whole fraction in the
                         # remaining compute context. Retry at its exact saved
                         # event boundary with the same musical lower bound.
-                        history_tokens = (history_tokens + ids[:header_start])[-model.config.max_history_tokens:]
+                        history_tokens = (history_tokens + ids[0 if rotations == 0 else 1:header_start])[-model.config.max_history_tokens:]
                         memory, memory_mask = refresh_context()
                         ids, cache, consumed, header_start = [codec.bos_id, codec.at_id], None, 0, 1
                         rotations += 1

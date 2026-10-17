@@ -595,9 +595,12 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
                                  curve_bin_seconds=options.get('curve_bin_seconds'))
             excluded = [(float(region['start_sec']), float(region['end_sec']))
                         for region in (record or {}).get('regions', []) if float(region.get('weight', 1)) <= 0]
-            points = [p for p in chart.points if not any(
+            selected_points = [p for p in chart.points if not any(
                 lo <= seconds_at_beat(p.beat, chart.tempo_changes, chart.audio_first) < hi for lo, hi in excluded)]
-            condition = condition_from_events(points, chart.tempo_changes, level=level,
+            # Continuous streams keep the original causal prefix. Their loss
+            # masks excluded targets instead of teaching the deletion as rest.
+            points = list(chart.points) if options.get('preserve_excluded_context') else selected_points
+            condition = condition_from_events(selected_points, chart.tempo_changes, level=level,
                 duration_sec=max(float(audio.duration_sec), 1e-3), audio=audio, audio_first=chart.audio_first,
                 duration_semantics=duration_semantics(song.quality_profile))
             from maichart.form.curve import build_load_curve
@@ -730,7 +733,8 @@ class FormDataset(Dataset):
                  max_region_seconds=14., quality_enabled=True, audio_loader=extract_event_audio,
                  preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz',
                  rhythm_geometry_profile='none', perturbation_config=None, quality_profile='legacy',
-                 curve_bin_seconds=None, position_alignment_tolerance_ms=15.):
+                 curve_bin_seconds=None, position_alignment_tolerance_ms=15.,
+                 preserve_excluded_context=False):
         from maichart.form.rational_audio import PROFILE, extract_rational_audio
         from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
         if rhythm_geometry_profile not in GEOMETRY_PROFILES:
@@ -809,7 +813,8 @@ class FormDataset(Dataset):
             audio_profile=audio_profile,
             rhythm_geometry_profile=rhythm_geometry_profile, quality_profile=quality_profile,
             curve_bin_seconds=self.curve_bin_seconds,
-            position_alignment_tolerance_ms=self.position_alignment_tolerance_ms)
+            position_alignment_tolerance_ms=self.position_alignment_tolerance_ms,
+            preserve_excluded_context=bool(preserve_excluded_context))
         started = time.monotonic()
         print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,
             'total_songs':len(entries),'completed_songs':0,'charts':0,
@@ -859,7 +864,8 @@ class FormDataset(Dataset):
         print('form_prepare '+json.dumps({'stage':'ready','charts':len(self.songs),'examples':len(self.items),
             'preparation_cache':self.preparation_cache_stats,
             'elapsed_sec':round(time.monotonic()-started,2)},ensure_ascii=False),flush=True)
-        if not self.items: raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
+        if not self.items and not (preserve_excluded_context and self.songs):
+            raise ValueError(f'No usable song-form examples: {self.audit["skipped"][:4]}')
 
     def __len__(self): return len(self.items)
 

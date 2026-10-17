@@ -184,7 +184,8 @@ def test_old_checkpoint_stays_generatable_but_ui_rejects_strict_resume(tmp_path)
     assert old['valid'] and not old['can_resume'] and old['can_init']
     assert old['generation_capabilities']['continuous_stream']
     assert old['warnings']
-    save(path, model, None, epoch=1, args={'training_semantics': TRAINING_SEMANTICS}, manifest=manifest)
+    save(path, model, torch.optim.AdamW(model.parameters()), epoch=1,
+         args={'training_semantics': TRAINING_SEMANTICS}, manifest=manifest, dataset_fingerprint='fixture')
     current = inspect(path)
     assert current['valid'] and current['can_resume'] and not current['warnings']
 

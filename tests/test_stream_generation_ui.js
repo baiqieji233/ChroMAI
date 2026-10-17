@@ -91,6 +91,20 @@ test('stream timing controls are visible in its family panel and forwarded', () 
   assert.equal(result.early_eos_penalty, .5);
 });
 
+test('stream training forwards visible dropout and seed including zero', () => {
+  const values = {'#streamDropout':'0', '#streamSeed':'173', '#streamWeightDecay':'0.02'};
+  const context = vm.createContext({valueOrDefault:(key, fallback)=>values[key] ?? fallback,
+    checkedOrDefault:()=>true,
+    currentTrainingMode:()=> 'fresh', trainingSourcePaths:()=>({}),
+    selectedTrainingManifests:()=>[], selectedDatasetItems:()=>[], formDevice:()=> 'cpu'});
+  install(context, 'chartStreamTrainingPayload', 'collectValues');
+  const result=context.chartStreamTrainingPayload();
+  assert.equal(result.dropout,0); assert.equal(result.seed,173);
+  assert.equal(result.weight_decay,.02);
+  assert.equal(result.quality_enabled,true);
+  for (const id of ['streamDropout','streamSeed']) assert.ok(html.includes(`id="${id}"`));
+});
+
 for (const family of ['chart_stream_v1', 'song_form_v2']) {
   test(`checkpoint inspection detects ${family} independently of training selection`, async () => {
     const calls = [], messages = [];

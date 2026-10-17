@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 import torch
+import math
 
 from maichart.event_timing import EventTempo
 from maichart.form.clock import AUDIO_CURVE_AXIS
@@ -17,7 +18,11 @@ from .runtime import resolve_device
 
 
 def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., condition=None,
-                             bpm=120., first=0., tempo_map=None, meter_map=None, device='cpu'):
+                             bpm=None, first=0., tempo_map=None, meter_map=None, device='cpu'):
+    if not math.isfinite(float(first)) or not math.isfinite(float(resolution_sec)) or float(resolution_sec)<=0:
+        raise ValueError('Curve first/resolution must be finite with positive resolution')
+    if bpm not in (None,'') and (not math.isfinite(float(bpm)) or float(bpm)<=0):
+        raise ValueError('Curve BPM must be finite and positive')
     device = resolve_device(device)
     model, payload = load(checkpoint_path, device=device)
     del payload
@@ -25,7 +30,9 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., 
     audio = extract_rational_audio(audio_path,
         cache_dir=str(__import__('pathlib').Path(checkpoint_path).parent/'curve_audio_cache'),
         evidence_profile='balanced_evidence_v1')
-    tempo = normalize_tempo_map(tempo_map) if tempo_map is not None else [EventTempo(0, float(bpm))]
+    audio.feature_policy = 'native_measured_v2'
+    tempo = normalize_tempo_map(tempo_map) if tempo_map is not None else [EventTempo(0,
+        float(audio.tempo_bpm if bpm in (None,'') else bpm))]
     song = organize_song(audio, tempo, first, meters=meter_map, max_seconds=999., quality_profile='musical_evidence_v1')
     values, times, _ = planner_audio_queries(song)
     condition = GenerationCondition.from_dict(condition) if isinstance(condition, dict) else condition
@@ -56,6 +63,7 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., 
     return {'schema':'maichart-intensity-curve-v1', 'method':'learned_chart_stream_v1',
             'model_family':'chart_stream_v1', 'time_axis':AUDIO_CURVE_AXIS,
             'device':str(device), 'audio_evidence_profile':audio.evidence_profile,
+            'bpm':float(tempo[0].bpm), 'first':float(first),
             'audio_feature_policy':audio.feature_policy,
             'duration_sec':float(audio.duration_sec), 'curve_bin_seconds':float(resolution_sec),
             'density_profile':'musical_log_v1', 'points':points,

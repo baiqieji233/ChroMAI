@@ -52,6 +52,13 @@ def compose(monkeypatch, points, *, max_tokens=32, options_override=None, target
     committed = []
     original = model.audio_encoder.forward
     original_append = StreamMemoryBank.append
+    original_memory = model.prepare_decode_memory
+
+    def prepare(memory,mask,*,history=None,history_padding_mask=None):
+        if history is not None:
+            expected=codec.encode([EventPoint(beat,text) for beat,text in committed])[:-1]
+            assert history[0].tolist()==expected[-model.config.max_history_tokens:], 'Synthetic BOS polluted history'
+        return original_memory(memory,mask,history=history,history_padding_mask=history_padding_mask)
 
     def append(bank, beat, text, vector):
         committed.append((beat, text))
@@ -90,6 +97,7 @@ def compose(monkeypatch, points, *, max_tokens=32, options_override=None, target
 
     monkeypatch.setattr(model.audio_encoder, 'forward', encoder)
     monkeypatch.setattr(model, 'decode_step', step)
+    monkeypatch.setattr(model, 'prepare_decode_memory', prepare)
     monkeypatch.setattr(StreamMemoryBank, 'append', append)
     song = SimpleNamespace(audio=SimpleNamespace(duration_sec=1.),
                            tempo=[EventTempo(F(0), 120.)], first=0.)
@@ -304,3 +312,24 @@ def test_http_old_training_resume_is_rejected_before_any_job_starts(webui_api, t
     status, reply = webui_api('/api/chart-stream/train',{
         'model_family':'chart_stream_v1','manifest':str(manifest),'mode':'resume','init_checkpoint':str(path)})
     assert status == 400 and 'finetune' in reply['error']
+
+
+def test_http_training_honors_selected_sources_quality_seed_and_dropout(webui_api,tmp_path,monkeypatch):
+    from maichart.stream.train import parser as train_parser
+    original=tmp_path/'original.json';original.write_text('{}')
+    combined=tmp_path/'combined.json';combined.write_text('{}')
+    seen=[];calls=[]
+    def prepare(payload):
+        seen.append(payload['manifests'])
+        return {**payload,'manifest':str(combined),'cache_dir':str(tmp_path/'cache')},{'sources':['a','b']}
+    monkeypatch.setattr(webui,'_prepare_training_sources',prepare)
+    monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append((task,args)))
+    status,reply=webui_api('/api/chart-stream/train',{'model_family':'chart_stream_v1','mode':'fresh',
+        'manifest':str(original),'manifests':['a','b'],'checkpoint_dir':str(tmp_path/'output'),
+        'seed':173,'dropout':0.,'quality_enabled':False})
+    assert status==200,reply
+    task,args=calls[0];parsed=train_parser().parse_args(args[2:])
+    assert seen==[['a','b']] and parsed.manifest==str(combined)
+    assert not parsed.quality_enabled and parsed.seed==173 and parsed.dropout==0.
+    assert task.result['dataset_selection']=={'sources':['a','b']}
+    assert task.result['effective_manifest']==str(combined)

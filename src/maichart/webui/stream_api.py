@@ -10,6 +10,49 @@ import secrets
 from maichart.stream import FAMILY, CHECKPOINT_SCHEMA
 
 
+def update_stream_progress(task,line):
+    prefix,_,body=line.partition(' ')
+    if prefix not in {'form_prepare','stream_prepare','stream_dataset','stream_runtime',
+                      'stream_progress','stream_epoch','stream_checkpoint'}:
+        return
+    try:
+        value=json.loads(body)
+    except (ValueError,TypeError):
+        return
+    if not isinstance(value,dict):
+        return
+    if prefix in {'form_prepare','stream_prepare'}:
+        task.result.update(phase='prepare',progress_known=False,progress_detail=value)
+        done=value.get('completed',value.get('completed_songs',0))
+        total=value.get('total',value.get('total_songs','?'))
+        task.message=f'准备连续流训练数据 · {done}/{total} · 谱面 {value.get("charts", "?")} · 计算块 {value.get("chunks", "?")}'
+    elif prefix=='stream_dataset':
+        task.result['stream_dataset']=value
+        task.message=f'数据准备完成 · 谱面 {value.get("charts")} · 计算块 {value.get("chunks")}'
+    elif prefix=='stream_runtime':
+        task.result.update(stream_runtime=value,epoch_target=value.get('end_epoch'))
+    elif prefix=='stream_checkpoint':
+        task.result['last_checkpoint']=value
+        task.message=f'已保存 checkpoint · 更新 {value.get("optimizer_steps")} 步'
+    else:
+        task.result.update(phase='stream',progress_known=True,last_epoch=value.get('epoch'),stream_metrics=value)
+        if prefix=='stream_progress':
+            task.result['progress_detail']=value
+            fraction=float(value['chunk'])/max(1,int(value['total']))
+            task.message=(f'连续谱面训练 · epoch {value["epoch"]}/{task.result.get("epoch_target", "?")} · '
+                f'batch {value["chunk"]}/{value["total"]} · loss {value["loss"]:.4f} · '
+                f'token准确率 {value["token_accuracy"]:.1%} · {value.get("batches_per_sec",0):.2f} batch/秒')
+        else:
+            fraction=1.
+            history=task.result.setdefault('stream_metric_history',[])
+            history.append(value); del history[:-80]
+            task.message=f'第 {value["epoch"]} 轮已保存 · loss {value["loss"]:.4f}'
+        runtime=task.result.get('stream_runtime',{})
+        start=int(runtime.get('start_epoch',1))
+        count=max(1,int(runtime.get('end_epoch',value['epoch']))-start+1)
+        task.progress=min(.99,max(0.,(int(value['epoch'])-start+fraction)/count))
+
+
 def inspect(path):
     import torch
     payload=torch.load(path,map_location='cpu',weights_only=False)
@@ -21,8 +64,20 @@ def inspect_payload(payload):
     from maichart.generation.model_compatibility import checkpoint_capabilities
     capabilities = checkpoint_capabilities(payload)
     valid=bool(capabilities.get('valid'))
-    can_resume = valid and (payload.get('args') or {}).get('training_semantics') == TRAINING_SEMANTICS
-    warnings=[] if can_resume else ['旧训练的持续动作时钟使用了未知的目标时间；生成仍兼容，继续训练请选择 finetune 和新输出目录。']
+    errors=[]
+    try:
+        from maichart.stream.checkpoint import validate_contract
+        validate_contract(payload)
+    except (ValueError,KeyError,TypeError) as exc:
+        valid=False
+        errors.append(str(exc))
+    current = (payload.get('args') or {}).get('training_semantics') == TRAINING_SEMANTICS
+    can_resume = bool(valid and current and payload.get('optimizer_state_dict') and payload.get('dataset_fingerprint'))
+    warnings=[]
+    if not current:
+        warnings.append('旧训练监督合同与当前版本不同（历史遮罩、质量权重或持续动作时钟）；生成仍兼容，继续训练请选择 finetune 和新输出目录。')
+    elif not can_resume:
+        warnings.append('此权重缺少续训所需的优化器状态或数据身份；请选择 finetune 和新输出目录。')
     if can_resume and payload.get('training_position') and payload['training_position'].get('complete') is not True:
         warnings.append('此权重保存在未完成轮次；resume 保留优化器状态并重跑该轮，避免跳过剩余目标。')
     return {'valid':valid,'model_family':FAMILY,'schema':payload.get('schema'),
@@ -32,6 +87,7 @@ def inspect_payload(payload):
             'training_position':payload.get('training_position',{}),
             'can_resume':can_resume, 'can_init':valid,
             'warnings':warnings,
+            'errors':errors,
             'generation_capabilities':capabilities}
 
 
@@ -42,18 +98,22 @@ def start(handler, operation, payload, *, runtime):
     if payload.get('model_family',FAMILY) != FAMILY:
         raise ValueError('chart stream endpoint requires model_family=chart_stream_v1')
     if operation == 'train':
+        dataset_selection=None
+        if payload.get('manifests'):
+            payload,dataset_selection=runtime._prepare_training_sources(payload)
         manifest=runtime._required_path(payload.get('manifest'),'manifest',must_exist=True)
         output=runtime._resolve_path(payload.get('checkpoint_dir') or 'checkpoints/chart_stream_v1')
         mode=payload.get('mode','fresh'); checkpoint=payload.get('init_checkpoint') or payload.get('training_checkpoint')
         if mode not in {'fresh', 'resume', 'finetune'}:
             raise ValueError('训练模式必须是 fresh、resume 或 finetune')
         if mode == 'resume' and checkpoint and not inspect(checkpoint).get('can_resume'):
-            raise ValueError('持续动作时钟监督已修复；请使用 finetune 和新输出目录，不能直接 resume 旧训练。')
+            raise ValueError('训练监督合同已更新；请使用 finetune 和新输出目录，不能直接 resume 旧训练。')
         args=['-m','maichart.stream.train','--manifest',str(manifest),'--checkpoint-dir',str(output),
               '--epochs',str(payload.get('epochs',10)),'--batch-size',str(payload.get('batch_size',1)),
               '--grad-accumulation',str(payload.get('grad_accumulation',1)),'--d-model',str(payload.get('d_model',256)),
               '--layers',str(payload.get('layers',4)),'--nhead',str(payload.get('nhead',8)),
               '--dim-feedforward',str(payload.get('dim_feedforward',768)),'--max-tokens',str(payload.get('max_tokens',1024)),
+              '--dropout',str(payload.get('dropout',.1)),'--seed',str(payload.get('seed',0)),
               '--max-history-tokens',str(payload.get('max_history_tokens',256)),'--max-stream-memory',str(payload.get('max_stream_memory',32)),
               '--lr',str(payload.get('lr',2e-4)),'--device',str(payload.get('device','auto')),
               '--precision',str(payload.get('precision','auto')),'--cache-dir',str(payload.get('cache_dir','cache/chart_stream_v1')),
@@ -66,16 +126,25 @@ def start(handler, operation, payload, *, runtime):
               '--limit-charts',str(payload.get('limit_charts',0)),
               '--log-interval',str(payload.get('log_interval',25)),
               '--checkpoint-interval-steps',str(payload.get('checkpoint_interval_steps',500))]
+        if type(payload.get('quality_enabled',True)) is not bool:
+            raise ValueError('quality_enabled 必须是布尔值')
+        args += ['--quality-enabled' if payload.get('quality_enabled',True) else '--no-quality-enabled']
         if mode == 'resume':
             if not checkpoint: raise ValueError('resume requires checkpoint path')
             args += ['--resume',str(runtime._required_path(checkpoint,'resume checkpoint',must_exist=True))]
         elif mode == 'finetune':
             if not checkpoint: raise ValueError('finetune requires checkpoint path')
             args += ['--init-checkpoint',str(runtime._required_path(checkpoint,'init checkpoint',must_exist=True))]
+        from maichart.stream.train import parser as training_parser, validate_training_args, validate_output_directory
+        parsed=training_parser().parse_args(args[2:])
+        validate_training_args(parsed)
+        validate_output_directory(parsed)
         task=runtime._create_task('chart_stream_train')
         report=output/'stream_last.pt'
         runtime._run_subprocess_task(task,args,expected_epoch=None,result_paths=[report])
-        task.result.update({'model_family':FAMILY,'checkpoint_dir':str(output),'experimental':True})
+        task.result.update({'model_family':FAMILY,'checkpoint_dir':str(output),'experimental':True,
+                           'dataset_selection':dataset_selection,'effective_manifest':str(manifest),
+                           'quality_enabled':parsed.quality_enabled})
         return handler._json_response({'task_id':task.task_id})
     if operation == 'generate':
         from maichart.stream.generate import parser as generation_parser

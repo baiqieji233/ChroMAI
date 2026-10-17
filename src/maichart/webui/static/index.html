@@ -255,6 +255,7 @@
 <div><span class="step">QUALITY</span><h3>质量加权与反面案例</h3></div><span class="muted">只对已保存的素材标注生效</span></div>
           <p class="param-intro">质量标注保存在当前 manifest 对应的素材记录中。优秀谱面权重较高，普通谱面保持基准，减权谱面仍参与训练但影响较小，排除项不进入正向训练。反面案例默认只从正向示范中排除；只有提供同音频、同目标下的修正版，才会进入偏好训练。修改质量权重请使用 <strong>finetune</strong>；<strong>resume</strong> 用于严格延续同一训练合同。</p>
           <p data-training-family="song_form_v1 song_form_v2" class="workflow-hint" hidden>沿用“训练素材”中的整谱与局部权重；启用后读取保存的优秀、减权和排除标注。反例标注先用于排除；没有修正版偏好训练模块的模型不会假装学到了 DPO。改变资料或权重请使用 finetune。</p>
+          <p data-training-family="chart_stream_v1" class="workflow-hint" hidden>连续流使用整谱及局部权重。局部排除区域保留原事件作为已知上下文，但不学习该区域及跨越它的续写跳转；不会把删除的音符学成休止。未启用时忽略已保存的质量标注。</p>
 <div class="quality-training-grid">
             <label class="checkbox-field"><input id="qualityEnabled" type="checkbox"><span>启用质量加权训练</span><small>开始训练时读取「训练素材」中已经保存的标注。没有保存标注时不会改变训练。</small></label>
             <div class="quality-summary-inline"><strong id="qualityTrainingSummary">尚未载入素材摘要</strong><button id="openQualityWorkspaceButton" class="secondary-button" type="button">打开素材管理</button></div>
@@ -300,20 +301,22 @@
 <div class="form-grid">
 <label class="field">流上下文 token 上限<input id="streamMaxTokens" type="number" min="128" max="8192" step="64" value="1024"><small>每个计算块可直接看到的事件 token 数。</small></label>
 <label class="field">近期历史 token<input id="streamMaxHistoryTokens" type="number" min="32" max="2048" step="32" value="256"><small>跨块回看的详细历史，不会改变谱面时间边界。</small></label>
-<label class="field">流记忆槽<input id="streamMemoryTokens" type="number" min="4" max="128" step="4" value="32"><small>长期记忆摘要槽；后续用于动态注意力与段落呼应。</small></label>
+<label class="field">流记忆槽<input id="streamMemoryTokens" type="number" min="4" max="128" step="4" value="32"><small>将近期历史压缩为摘要槽，与详细历史一同输入；当前不会检索已超出近期历史范围的整曲配置。</small></label>
 <label class="field">模型宽度<input id="streamDModel" type="number" min="64" max="1024" step="32" value="256"></label>
 <label class="field">Transformer 层数<input id="streamLayers" type="number" min="1" max="16" step="1" value="4"></label>
 <label class="field">注意力头数<input id="streamNhead" type="number" min="1" max="16" step="1" value="8"></label>
 <label class="field">前馈层宽度<input id="streamDimFeedforward" type="number" min="128" max="4096" step="64" value="768"></label>
+<label class="field">模型内部 Dropout<input id="streamDropout" type="number" min="0" max="0.99" step="0.01" value="0.1"><small>训练时随机丢弃；生成时关闭。继续训练沿用权重中的模型设置。</small></label>
+<label class="field">训练随机种子<input id="streamSeed" type="number" min="0" max="4294967295" step="1" value="0"><small>控制参数初始化和样本打乱；未完成轮次的 resume 会重跑该轮。</small></label>
 <label class="field">连续写作计划辅助权重<input id="streamPlanLossWeight" type="number" min="0" max="2" step="0.01" value="0.15"><small>监督节奏间隔、配置类型和持续动作倾向；不把 Planner 当作硬起音骨架。</small></label>
 <label class="field">整曲续写与结束学习权重<input id="streamEventDecisionLossWeight" type="number" min="0" max="10" step="0.05" value="0.25"><small>额外监督真实事件边界的 AT / EOS，减少结束决策被长字符序列稀释。0 关闭；真实 EOS 仍只来自谱面末尾，不把计算块当成音乐结束。旧模型需 finetune 才能学习。</small></label>
 </div>
 <div class="form-grid">
 <label class="field">数值精度<select id="streamPrecision"><option value="auto" selected>自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16；CPU 只能使用 FP32。</small></label>
 <label class="field">权重衰减<input id="streamWeightDecay" type="number" min="0" max="1" step="0.001" value="0.01"><small>AdamW 的 weight decay；resume 仍以 checkpoint 的优化器状态为准。</small></label>
-<label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>训练进程的音频特征缓存上限；提高可减少重复读盘，但会增加内存占用。</small></label>
+<label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>75% 用于音频特征，25% 用于整曲查询；同曲同时间轴的不同难度共享查询。另有最多 64 MB 的公共查询缓存，不包含模型和训练样本内存。</small></label>
 <label class="field">准备线程<input id="streamPrepareWorkers" type="number" min="0" max="16" step="1" value="4"><small>并行准备独立歌曲；0 表示按后端默认值处理。</small></label>
-<label class="field">单次区域上限（秒）<input id="streamMaxRegionSeconds" type="number" min="2" max="60" step="1" value="15"><small>只控制训练样本的计算范围，不创建音乐分段，也不添加片段 EOS。</small></label>
+<label class="field">单次区域上限（秒）<input id="streamMaxRegionSeconds" type="number" min="2" max="60" step="1" value="15"><small>用于共用音频准备器的区域组织；连续流训练块由 token 上限划分，不按此秒数截断目标，也不添加片段 EOS。</small></label>
 <label class="field">训练谱面数量上限<input id="streamLimitCharts" type="number" min="0" step="1" value="0"><small>0 使用全部合格谱面；短跑验证时可填写较小数量。</small></label>
 <label class="field">训练缓存目录<textarea id="streamCacheDir" class="path-input" rows="2">cache/chart_stream_v1</textarea><small>保存有理音频与整曲事件准备缓存；不同数据合同请使用不同目录。</small></label>
 <label class="field">日志间隔（batch）<input id="streamLogInterval" type="number" min="1" step="1" value="25"><small>控制训练日志频率，不影响梯度或模型结果。</small></label>
@@ -1422,7 +1425,7 @@
           <h3>训练指标</h3>
           <p id="taskTrainingMetricsSource" class="muted"></p>
           <div id="taskTrainingMetricsGroups" class="task-training-metrics-grid"></div>
-          <p class="task-training-metrics-note">阶段损失是该阶段截至当前的累计均值，会在阶段切换时重置，且样本顺序会打乱；它不是单个 batch 总损失。草稿与修订、Planner 使用不同目标，损失不可直接横比。趋势只比较同一指标的完整 epoch；部分 epoch 不计入完成度，也没有通用的“练好百分比”。</p>
+          <p class="task-training-metrics-note">连续流指标是本轮累计 batch 均值；song-form 指标按阶段累计。样本顺序会打乱，不同辅助目标的 loss 不能直接横比。趋势只比较同一指标和合同的完整 epoch；训练 loss 与 token 准确率不等于自由生成质量，也没有通用的“练好百分比”。</p>
         </section>
         <p id="taskLogPath" class="inline-status" hidden></p>
         <pre id="taskLogs" class="logs">暂无日志</pre>
