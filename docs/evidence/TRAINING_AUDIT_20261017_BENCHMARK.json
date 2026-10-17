@@ -1,0 +1,120 @@
+{
+  "checkpoint": "E:\\simai_transformer\\checkpoints\\Prism_Re_v7\\form_last.pt",
+  "training_position": {
+    "epoch": 2,
+    "phase": "layout_revision",
+    "completed": 4400,
+    "layout_total": 14069,
+    "plan_total": 2114,
+    "batch_size": 8,
+    "blueprint_batch_size": 4,
+    "max_steps": 0
+  },
+  "model_config": {
+    "vocab_size": 55,
+    "d_model": 384,
+    "nhead": 8,
+    "layers": 8,
+    "dim_feedforward": 1280,
+    "dropout": 0.1,
+    "audio_dim": 120,
+    "descriptor_dim": 512,
+    "condition_dim": 16,
+    "max_tokens": 2048,
+    "max_audio_tokens": 1024,
+    "max_memory_tokens": 640,
+    "rhythm_geometry_profile": "exact_fraction_v2",
+    "quality_profile": "musical_evidence_v1",
+    "curve_bin_seconds": 1.0,
+    "position_alignment_tolerance_ms": 15.0
+  },
+  "torch_version": "2.7.0+cu128",
+  "original_cpu_threads": 16,
+  "scope": "same weights and samples; forward/backward only; no formal checkpoint writes",
+  "validation": {
+    "original_seconds_per_batch": [
+      0.0018041250004898757,
+      0.0013926749961683527,
+      0.0013500749919330701
+    ],
+    "numpy_seconds_per_batch": [
+      0.00041354999120812863,
+      0.00027187500381842256,
+      0.00023342500207945704
+    ]
+  },
+  "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+  "batch_memory": [
+    {
+      "dense_tokens": 2550,
+      "packed_tokens": 2113,
+      "valid_tokens": 9599
+    },
+    {
+      "dense_tokens": 1965,
+      "packed_tokens": 1661,
+      "valid_tokens": 10788
+    },
+    {
+      "dense_tokens": 2041,
+      "packed_tokens": 1770,
+      "valid_tokens": 9099
+    },
+    {
+      "dense_tokens": 2041,
+      "packed_tokens": 1710,
+      "valid_tokens": 10398
+    }
+  ],
+  "runs": [
+    {
+      "mode": "dense",
+      "seconds": [
+        0.41784470004495233,
+        0.32855599996400997,
+        0.2918709999648854,
+        0.29474199999822304
+      ],
+      "samples_per_sec": 24.005754780067498,
+      "peak_allocated_gib": 3.7097363471984863
+    },
+    {
+      "mode": "compact",
+      "seconds": [
+        0.34209930000361055,
+        0.21986239997204393,
+        0.2511333000147715,
+        0.24843029998010024
+      ],
+      "samples_per_sec": 30.145301295116088,
+      "peak_allocated_gib": 3.2609682083129883
+    },
+    {
+      "mode": "compact",
+      "seconds": [
+        0.33732599997892976,
+        0.25140160002047196,
+        0.25304270000196993,
+        0.2373617000412196
+      ],
+      "samples_per_sec": 29.653462225878783,
+      "peak_allocated_gib": 3.2544116973876953
+    },
+    {
+      "mode": "dense",
+      "seconds": [
+        0.437554000003729,
+        0.29182779998518527,
+        0.3061472999979742,
+        0.317044600029476
+      ],
+      "samples_per_sec": 23.658599897079796,
+      "peak_allocated_gib": 3.7060604095458984
+    }
+  ],
+  "median_samples_per_sec": {
+    "dense": 23.832177338573647,
+    "compact": 29.899381760497434
+  },
+  "checkpoint_unchanged": true
+}

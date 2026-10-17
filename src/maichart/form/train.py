@@ -128,6 +128,8 @@ def parser():
     p.add_argument('--layout-prepare-threads', type=int, default=4,
                    help='CPU layout sample preparation threads sharing audio; '
                         'same-source samples stay serialized, 1 preserves a single producer')
+    p.add_argument('--attention-padding', choices=('compact', 'dense'), default='compact',
+                   help='remove masked encoder padding before attention; keeps every visible context token')
     p.add_argument('--audio-cache-gb', type=float, default=1.)
     p.add_argument('--audio-cache-mode', choices=('lru', 'resident'), default='lru')
     p.add_argument('--sample-cache-mb', type=int, default=256)
@@ -408,10 +410,12 @@ def layout_loss(prediction, batch, relation_weight, event_decision_weight=0., rh
         alignment_per_row, alignment_metrics = position_alignment_loss(prediction, batch)
         alignment = alignment_per_row * weights
         loss_sum = loss_sum + position_alignment_weight * alignment.sum()
-    correct = ((logits.detach().argmax(-1) == batch['target']) & valid).sum()
+    predicted_tokens = logits.detach().argmax(-1)
+    correct = ((predicted_tokens == batch['target']) & valid).sum()
     if 'decoder_input' in batch and 'task' in batch:
         diagnostic_values, diagnostic_counts = layout_diagnostics(
-            logits, batch['target'], batch['decoder_input'], batch['task'], ce)
+            logits, batch['target'], batch['decoder_input'], batch['task'], ce,
+            predictions=predicted_tokens)
     else:
         diagnostic_values, diagnostic_counts = {}, {}
     if alignment is not None:
@@ -650,6 +654,7 @@ def _train(args):
                                   else min(args.prefetch_factor, 16)) if not args.loader_workers else 0,
          layout_prepare_threads=(args.layout_prepare_threads if not args.loader_workers
                                  and args.layout_prefetch_batches != 0 else 0),
+         attention_padding=args.attention_padding, input_validation='cpu_collate_numpy',
          cache_budget_scope='per_process', audio_cache_gb=args.audio_cache_gb,
          audio_cache_mode=args.audio_cache_mode,
          sample_cache_mb=args.sample_cache_mb, checkpoint_interval_steps=args.checkpoint_interval_steps)
@@ -955,10 +960,10 @@ def _train(args):
                     planner_target_density = targets['load_curve_target'][..., 0].to(
                         planner_density)
                     parts['planner_density_prediction'] = (
-                        planner_density.masked_select(planner_valid).sum()
+                        planner_density.masked_fill(~planner_valid, 0.).sum()
                         / planner_denominator)
                     parts['planner_density_target'] = (
-                        planner_target_density.masked_select(planner_valid).sum()
+                        planner_target_density.masked_fill(~planner_valid, 0.).sum()
                         / planner_denominator)
                     parts = {key:value.mean() for key,value in parts.items()}
                 else:
@@ -1003,7 +1008,9 @@ def _train(args):
             save(epoch, 'layout_revision', 0, reason='blueprint_complete')
         progress.begin('layout_revision', layout_start)
         sampler = EpochBatches(len(dataset), args.batch_size, args.seed, epoch, start=layout_start, limit=args.max_steps)
-        loader_options = dict(batch_sampler=sampler, collate_fn=collate_form, num_workers=args.loader_workers,
+        from maichart.form.training_batch import TrainingCollator, transfer_layout_batch
+        loader_options = dict(batch_sampler=sampler,
+                              collate_fn=TrainingCollator(len(dataset.codec), args.attention_padding), num_workers=args.loader_workers,
                               pin_memory=device.type=='cuda', generator=torch.Generator().manual_seed(args.seed+epoch))
         if args.loader_workers:
             loader_options['prefetch_factor'] = args.prefetch_factor
@@ -1031,13 +1038,12 @@ def _train(args):
             for batch_index in range(layout_start, layout_total):
                 tick = time.perf_counter()
                 batch = next(iterator)
-                validate_cpu_batch(batch)
                 batch_size = len(batch['task'])
                 tokens = int((batch['target'] != 0).sum())
                 task_counts = Counter(batch['task'].tolist())
                 progress.timing['data_wait_sec'] += time.perf_counter()-tick
                 tick = time.perf_counter()
-                batch = {k:v.to(device, non_blocking=device.type=='cuda') if isinstance(v,torch.Tensor) else v for k,v in batch.items()}
+                batch = transfer_layout_batch(batch, device)
                 progress.timing['h2d_sec'] += time.perf_counter()-tick
                 tick = time.perf_counter()
                 if args.condition_drop_prob:
@@ -1127,6 +1133,7 @@ def _train(args):
                              lr=optimizer.param_groups[0]['lr'], cache=dataset.cache_stats(),
                              cache_scope='main_process_only' if args.loader_workers else 'training_process',
                              layout_prefetch=iterator.stats() if layout_prefetch_depth else {'mode': 'synchronous'},
+                             attention_memory=batch.get('memory_packing', {'mode': 'dense'}),
                              cuda_cache_guard={**cuda_cache_guard.policy(),
                                  'trim_count':cuda_cache_guard.trim_count,'last_trim':last_cuda_cache_trim},
                              grad_norm=last_update.get('grad_norm'), amp_scale=last_update.get('amp_scale'))

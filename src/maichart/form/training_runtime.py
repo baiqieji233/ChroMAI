@@ -117,16 +117,33 @@ class EpochBatches:
             yield order[batch * self.batch_size:(batch + 1) * self.batch_size]
 
 
-def validate_cpu_batch(batch):
+def validate_cpu_batch(batch, *, vocab_size=None):
     """Catch corrupt source tensors before H2D without GPU host syncs."""
+    import numpy as np
     for key, value in batch.items():
-        if isinstance(value, torch.Tensor) and value.is_floating_point() and not torch.isfinite(value).all():
-            raise ValueError(f'Nonfinite training input: {key}')
+        if not isinstance(value, torch.Tensor):
+            continue
+        if value.device.type != 'cpu':
+            raise ValueError(f'Training input must be validated before transfer: {key}')
+        if value.is_floating_point():
+            # Tiny CPU checks otherwise repeatedly enter PyTorch's intra-op
+            # thread pool, contending with sample preparation and GPU dispatch.
+            checked = value.detach().float() if value.dtype == torch.bfloat16 else value.detach()
+            if not np.isfinite(checked.numpy()).all():
+                raise ValueError(f'Nonfinite training input: {key}')
+        if vocab_size is not None and key in ('history', 'motif', 'draft', 'right',
+                                              'skeleton', 'decoder_input', 'target'):
+            ids = value.detach().numpy()
+            if ids.dtype.kind not in 'iu' or np.any(ids < 0) or np.any(ids >= vocab_size):
+                raise ValueError(f'Training token ids outside vocabulary: {key}')
     task = batch.get('task')
     if task is not None:
+        tasks = task.detach().numpy()
+        if tasks.ndim != 1 or np.any((tasks != 0) & (tasks != 1)):
+            raise ValueError('Training task must be [B], with 0=draft or 1=revision')
         for key in ('draft', 'right'):
             ids = batch.get(key)
-            if ids is not None and torch.any((task == 0)[:, None] & (ids != 0)):
+            if ids is not None and np.any((tasks == 0)[:, None] & (ids.detach().numpy() != 0)):
                 raise ValueError(f'{key} targets cannot appear in draft task input')
 
 

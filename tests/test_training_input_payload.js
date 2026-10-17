@@ -63,6 +63,7 @@ test("song form submits every selected source for backend composition", () => {
     assert.equal(payload.model_family, "song_form_v1");
     assert.equal(payload.quality_enabled, qualityEnabled);
     assert.equal(payload.layout_prepare_threads, 3);
+    assert.equal(payload.attention_padding, "compact");
     assert.equal(payload.segment_beats, undefined);
     assert.deepEqual([payload.precision, payload.loader_workers, payload.prefetch_factor,
       payload.log_interval, payload.checkpoint_interval_steps, payload.audio_cache_gb,

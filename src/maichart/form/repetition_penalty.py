@@ -148,7 +148,10 @@ def apply_repetition_penalty_sampling(
     for token_id, count in token_counts.items():
         if count >= 2:  # Only penalize if appeared multiple times
             penalty = penalty_strength ** count
-            penalized_logits[token_id] = penalized_logits[token_id] / penalty
+            value = penalized_logits[token_id]
+            # Dividing negative logits moves them toward zero and would
+            # encourage the very token this helper promises to discourage.
+            penalized_logits[token_id] = torch.where(value < 0, value * penalty, value / penalty)
 
     return penalized_logits
 
@@ -175,15 +178,16 @@ def compute_pattern_diversity_loss(
         raise ValueError('diversity reduction must be mean or none')
     if segment_size < 1:
         raise ValueError('segment_size must be positive')
-    losses = hidden_states.float().sum((1, 2)) * 0
+    mask = (torch.ones((batch_size, seq_len), dtype=torch.bool, device=hidden_states.device)
+            if valid_mask is None else valid_mask.to(device=hidden_states.device, dtype=torch.bool))
+    if mask.shape != hidden_states.shape[:2]:
+        raise ValueError('diversity valid_mask must match token dimensions')
+    safe_hidden = hidden_states.float().masked_fill(~mask[..., None], 0.)
+    losses = safe_hidden.sum((1, 2)) * 0
     if diversity_weight > 0 and seq_len >= segment_size * 2:
-        mask = (torch.ones((batch_size, seq_len), dtype=torch.bool, device=hidden_states.device)
-                if valid_mask is None else valid_mask.to(device=hidden_states.device, dtype=torch.bool))
-        if mask.shape != hidden_states.shape[:2]:
-            raise ValueError('diversity valid_mask must match token dimensions')
         num_segments = seq_len // segment_size
         length = num_segments * segment_size
-        segments = hidden_states[:, :length].float().reshape(batch_size, num_segments, segment_size, d_model)
+        segments = safe_hidden[:, :length].reshape(batch_size, num_segments, segment_size, d_model)
         mask = mask[:, :length].reshape(batch_size, num_segments, segment_size)
         counts = mask.sum(2)
         reps = (segments * mask[..., None]).sum(2) / counts.clamp_min(1)[..., None]

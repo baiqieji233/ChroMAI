@@ -31,6 +31,7 @@ def test_quality_options_reach_cli_and_effective_settings(webui_api, monkeypatch
     assert status == 200, result
     task, command = calls[0]
     options = train.parser().parse_args(command[2:])
+    assert options.attention_padding == 'compact'
     for name, value in values.items():
         assert getattr(options, name) == value
         assert task.result['effective_settings'][name] == value
@@ -40,6 +41,18 @@ def test_quality_resume_settings_have_explicit_legacy_defaults():
     options = form_api.form_resume_settings({'args': {'perturb_curve_noise_std': .04}})
     for name, default in QUALITY_TRAINING_DEFAULTS.items():
         assert options[name] == (.04 if name == 'perturb_curve_noise_std' else default)
+
+
+@pytest.mark.parametrize('mode', ['dense', 'compact'])
+def test_attention_padding_api_reaches_cli(webui_api, monkeypatch, tmp_path, mode):
+    manifest = tmp_path/'manifest.json'; manifest.write_text('{}')
+    calls = []
+    monkeypatch.setattr(webui, '_run_subprocess_task', lambda task, args, **kw: calls.append(args))
+    status, result = webui_api('/api/form/train', {'manifest': str(manifest),
+        'checkpoint_dir': str(tmp_path/'out'), 'model_family': 'song_form_v2',
+        'mode': 'fresh', 'attention_padding': mode})
+    assert status == 200, result
+    assert train.parser().parse_args(calls[0][2:]).attention_padding == mode
 
 
 def test_api_rejects_repetition_penalty_for_new_runs(webui_api, monkeypatch, tmp_path):

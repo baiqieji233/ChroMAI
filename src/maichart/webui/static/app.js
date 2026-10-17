@@ -264,6 +264,7 @@ function renderTaskTrainingMetrics(task) {
   const draftRows = [["draft_note_configuration_loss", "音符字符交叉熵（越低越好）", "loss"],
     ["draft_note_configuration_accuracy", "音符字符准确率", "accuracy"],
     ["draft_first_head_accuracy", "首个音符选择", "accuracy"],
+    ["draft_configuration_exact_accuracy", "完整配置匹配（给定正确前缀）", "accuracy"],
     ["draft_position_fraction_exact_accuracy", "完整分数拍位匹配（给定正确前缀）", "accuracy"],
     ["position_alignment_loss", "音频—拍位辅助损失（草稿）", "loss"],
     ["position_alignment_event_accuracy", "音频位置匹配准确率（给定正确前缀）", "accuracy"],
@@ -272,6 +273,7 @@ function renderTaskTrainingMetrics(task) {
     ["draft_event_terminate_accuracy", "该结束时选择结束", "accuracy"]];
   const revisionRows = [["revision_note_configuration_loss", "音符字符交叉熵", "loss"],
     ["revision_note_configuration_accuracy", "音符字符准确率", "accuracy"],
+    ["revision_configuration_exact_accuracy", "完整配置匹配（给定正确前缀）", "accuracy"],
     ["revision_first_head_accuracy", "首个音符选择", "accuracy"]];
   const totalRows = [["loss", "阶段累计配置损失", "loss"], ["draft_revision_loss", "草稿 + 修订累计损失", "loss"]];
   const totalDetails = document.createElement("details"); totalDetails.className = "training-metric-advanced";
@@ -431,6 +433,10 @@ function trainingEpochStatus(task) {
     if (Number.isFinite(speed) && speed >= 0) parts.push(`${speed.toFixed(2)} ${unit}/秒`);
     const samplesSpeed = Number(detail.samples_per_sec), tokensSpeed = Number(detail.tokens_per_sec);
     if (Number.isFinite(samplesSpeed) && samplesSpeed >= 0) parts.push(`${samplesSpeed.toFixed(1)} 样本/秒`);
+    const memoryPacking = detail.attention_memory;
+    if (memoryPacking?.dense_tokens > 0 && memoryPacking?.packed_tokens > 0) {
+      parts.push(`注意力空位压紧：${memoryPacking.dense_tokens} → ${memoryPacking.packed_tokens} token（当前 batch）`);
+    }
     if (Number.isFinite(tokensSpeed) && tokensSpeed >= 0) parts.push(`${tokensSpeed.toFixed(0)} token/秒`);
     const elapsed = Number(detail.elapsed_sec), phaseElapsed = Number(detail.phase_elapsed_sec);
     const duration = (seconds) => seconds >= 3600 ? `${Math.floor(seconds / 3600)}小时${Math.floor(seconds % 3600 / 60)}分` : seconds >= 60 ? `${Math.floor(seconds / 60)}分${Math.floor(seconds % 60)}秒` : `${Math.floor(seconds)}秒`;
@@ -1628,6 +1634,7 @@ function songFormTrainingPayload(options = {}) {
     loader_workers: Number(valueOrDefault("#formLoaderWorkers", 0)),
     prefetch_factor: Number(valueOrDefault("#formPrefetchFactor", 2)),
     layout_prepare_threads: Number(valueOrDefault("#formLayoutPrepareThreads", 4)),
+    attention_padding: valueOrDefault("#formAttentionPadding", "compact"),
     log_interval: Number(valueOrDefault("#formLogInterval", 10)),
     checkpoint_interval_steps: Number(valueOrDefault("#formCheckpointIntervalSteps", 500)),
     audio_cache_gb: Number(valueOrDefault("#formAudioCacheGb", 1)),

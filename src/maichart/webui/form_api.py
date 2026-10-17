@@ -393,6 +393,7 @@ def start_form_task(handler,operation,payload,*,runtime=None):
                 'loader_workers':number('loader_workers',0,0,64,True),
                 'prefetch_factor':number('prefetch_factor',2,1,16,True),
                 'layout_prepare_threads':number('layout_prepare_threads',4,1,8,True),
+                'attention_padding':str(payload.get('attention_padding', 'compact')),
                 'log_interval':number('log_interval',10,0.1,3600),
                 'audio_cache_gb':number('audio_cache_gb',1,0,1024),
                 'audio_cache_mode':str(payload.get('audio_cache_mode','lru')).lower(),
@@ -438,6 +439,8 @@ def start_form_task(handler,operation,payload,*,runtime=None):
         values['quality_enabled'] = bool(payload.get('quality_enabled', True))
         if values['audio_cache_mode'] not in {'lru','resident'}:
             raise ValueError('audio_cache_mode must be lru or resident')
+        if values['attention_padding'] not in {'compact', 'dense'}:
+            raise ValueError('attention_padding must be compact or dense')
         if values['audio_cache_mode'] == 'resident':
             if values['loader_workers'] != 0:
                 raise ValueError('全量驻留内存要求数据加载 worker=0，以避免多进程复制音频缓存。')

@@ -29,7 +29,8 @@ def _token_tables(codec, device):
     return tables
 
 
-def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_CODEC):
+@torch.no_grad()
+def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_CODEC, *, predictions=None):
     """Return task-split token and event diagnostics under teacher forcing.
 
     Configuration decisions are note characters plus event termination. Position
@@ -40,7 +41,7 @@ def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_C
     BOS or ``<end>``.  Direct generation does not necessarily supply position
     headers, so these metrics must not be read as generation-time guarantees.
     """
-    predictions = logits.detach().argmax(dim=-1)
+    predictions = logits.detach().argmax(dim=-1) if predictions is None else predictions
     target = targets
     if (predictions.shape != target.shape or decoder_input.shape != target.shape
             or token_ce.shape != target.shape):
@@ -68,6 +69,14 @@ def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_C
                                 p_mismatch.to(torch.float32),
                                 reduce="amax", include_self=True)
     fraction_exact_at = at & (event_slots.gather(1, event_ids.clamp_min(0)) == 0)
+    # A high character accuracy can hide a wrong button/path in almost every
+    # cell. Count a whole configuration only when every N character and END
+    # is correct. This remains teacher-forced, not free-generation quality.
+    configuration_slots = torch.zeros_like(target, dtype=torch.float32)
+    configuration_slots.scatter_reduce_(1, event_ids.clamp_min(0),
+        (configuration & (predictions != target)).to(torch.float32),
+        reduce='amax', include_self=True)
+    configuration_exact_at = at & (configuration_slots.gather(1, event_ids.clamp_min(0)) == 0)
     # AT/EOS is only a decision at the start of a new event (BOS) or after a
     # committed cell (<end>).  Keep the masks explicit so accidental EOS in a
     # note body is not counted as a valid termination decision.
@@ -97,16 +106,19 @@ def layout_diagnostics(logits, targets, decoder_input, tasks, token_ce, codec=_C
                 counts[f"{prefix}_{name}_loss"] = count
 
         for name, selected in (("position_fraction_exact", at & task_mask),
+                               ("configuration_exact", at & task_mask),
                                ("event_decision", event_decision & task_mask),
                                ("event_continue", continue_decision & task_mask),
                                ("event_terminate", terminate_decision & task_mask)):
             count = selected.sum()
-            correct = ((fraction_exact_at if name == "position_fraction_exact"
-                        else (predictions == target)) & selected).sum()
+            correctness = (fraction_exact_at if name == 'position_fraction_exact'
+                           else configuration_exact_at if name == 'configuration_exact'
+                           else predictions == target)
+            correct = (correctness & selected).sum()
             count_float = count.to(dtype=torch.float32).clamp_min(1.0)
             values[f"{prefix}_{name}_accuracy"] = correct.to(dtype=torch.float32) / count_float
             counts[f"{prefix}_{name}_accuracy"] = count
-            if name != "position_fraction_exact":
+            if name not in ('position_fraction_exact', 'configuration_exact'):
                 values[f"{prefix}_{name}_loss"] = (
                     (token_ce.detach() * selected).sum()
                     / count.to(dtype=token_ce.dtype).clamp_min(1.0)

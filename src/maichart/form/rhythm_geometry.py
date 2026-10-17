@@ -334,7 +334,16 @@ def position_event_loss(logits: torch.Tensor, target: torch.Tensor, decoder_inpu
 
 def numeric_timing_loss(prediction: torch.Tensor, labels: torch.Tensor, mask: torch.Tensor, *, reduction="mean") -> torch.Tensor:
     """Masked Smooth-L1 loss for ``[log1p(gap), sin(phase), cos(phase)]``."""
-    values = torch.nn.functional.smooth_l1_loss(prediction.float(), labels.float(), reduction="none").mean(-1)
+    if prediction.shape != labels.shape or mask.shape != prediction.shape[:-1]:
+        raise ValueError('Timing prediction, labels and mask shapes differ')
+    if reduction not in ('mean', 'none'):
+        raise ValueError('Timing reduction must be mean or none')
+    mask = mask.bool()
+    # Ignore unsupervised spellings/padding *before* the nonlinear objective.
+    # NaN * 0 is still NaN, and masking afterwards can poison valid gradients.
+    values = torch.nn.functional.smooth_l1_loss(
+        prediction.float().masked_fill(~mask[..., None], 0.),
+        labels.float().masked_fill(~mask[..., None], 0.), reduction="none").mean(-1)
     per_row = (values * mask.to(values.dtype)).sum(-1) / mask.sum(-1).clamp_min(1)
     return per_row.mean() if reduction == "mean" else per_row
 

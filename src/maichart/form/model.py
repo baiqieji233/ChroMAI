@@ -406,6 +406,17 @@ class FormTransformer(nn.Module):
 
         memory = torch.cat(branches, dim=1)
         memory_mask = torch.cat(masks, dim=1)
+        gather = batch.get('memory_gather_index')
+        if gather is not None:
+            padding = batch.get('memory_gather_padding_mask')
+            if (batch.get('memory_source_length') != memory.size(1)
+                    or gather.ndim != 2 or gather.size(0) != batch_size
+                    or padding is None or padding.shape != gather.shape):
+                raise ValueError('Packed memory does not match encoder branch layout')
+            # Branch-local positions and exact musical coordinates are already
+            # embedded. Removing masked keys preserves all visible evidence.
+            memory = memory.gather(1, gather[..., None].expand(-1, -1, memory.size(-1)))
+            memory_mask = memory_mask.gather(1, gather) | padding
         memory = self.memory_norm(self.memory_encoder(memory, src_key_padding_mask=memory_mask))
         return memory, memory_mask
 
