@@ -40,6 +40,8 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
 
 
 def load(path, device='cpu'):
+    if device in (None, 'auto'):
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
     payload = torch.load(path, map_location=device, weights_only=False)
     if payload.get('schema') != CHECKPOINT_SCHEMA or payload.get('family') != FAMILY:
         raise ValueError('Not a chart_stream_v1 checkpoint')

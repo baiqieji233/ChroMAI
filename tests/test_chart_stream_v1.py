@@ -64,6 +64,17 @@ def test_stream_checkpoint_is_independent(tmp_path):
     assert caps['model_family'] == 'chart_stream_v1' and caps['valid']
 
 
+def test_stream_checkpoint_load_accepts_auto_device(tmp_path):
+    model = ChartStreamTransformer(StreamConfig(vocab_size=55, d_model=16, nhead=2,
+        layers=1, dim_feedforward=32))
+    optimizer = torch.optim.AdamW(model.parameters(), lr=1e-3)
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    path = tmp_path / 'stream_last.pt'
+    save(path, model, optimizer, epoch=1, args={}, manifest=manifest)
+    restored, _ = load(path, device='auto')
+    assert restored.config.vocab_size == 55
+
+
 def test_stream_dataset_builds_continuation_chunks_without_chunk_eos(tmp_path, monkeypatch):
     import json
     import soundfile as sf
