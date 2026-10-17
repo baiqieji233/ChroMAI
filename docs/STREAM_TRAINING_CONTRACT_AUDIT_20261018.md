@@ -1,6 +1,6 @@
 # Continuous stream follow-up audit — 2026-10-18
 
-Status: fixes implemented and focused CPU/browser verification passed; production fresh launch pending below.
+Status: fixes implemented, CPU/browser verification passed, authorized production fresh training running.
 
 ## Scope and evidence
 
@@ -109,7 +109,25 @@ After verification, launch fresh via 7860, inheriting latest effective settings:
 8 heads, FFN 768, context 1024, history 256, memory 32, batch 4, accumulation 8, 80 epochs, lr 2e-4,
 dropout .1, weight decay .01, plan .15, AT/EOS auxiliary .25, audio budget 8 GiB, preparation workers 4,
 save every 500 optimizer updates. Use a new `Prism_stream_v3_fresh_20261018` output directory.
-Actual task ID and startup evidence will be appended after launch.
+Launched from the actual 7860 training button: task `2c409ed196c8`, trainer PID 55304,
+server PID 61684; idle 7861 server PID 76076. Source: `E:\全量官谱\training_manifest.json`.
+Output: `E:\simai_transformer\checkpoints\Prism_stream_v3_fresh_20261018`.
+Runtime confirms CUDA:0/BF16, 18,349,894 parameters, enabled saved quality annotations, v4 semantics,
+and the requested 384/6/4×8 settings. At 2026-10-18 07:45:49 (Asia/Shanghai): epoch 1/80,
+100/2710 batches, 12 optimizer updates, finite loss 3.1495, token accuracy 23.5%,
+startup throughput 5.71 batch/s. These are startup observations, not a convergence or full-epoch speed claim.
+GPU snapshot: RTX 5070 Ti Laptop, 4197/12227 MiB, 75% utilization.
+
+Second startup observation: 425/2710 batches, 53 optimizer updates, 58.22 s of training,
+7.30 batch/s, finite loss 2.2046. Dataset: 1,787 charts / 10,838 chunks / 10,127,145 target tokens.
+All target tokens in this run remain supervised, so the local-exclusion fix is not being exercised by
+its current selected annotations. Preparation reused 1,787 cached charts, rebuilt 0, invalid 0;
+one miss did not produce a usable chart. Preparation took 27.56 s, then stream target construction
+completed before GPU training began. Startup is verified; no need to wait for all 80 epochs.
+
+Recorded request, launch, and live task status:
+`.scratch/stream_contract_20261018/production_request.json`, `production_launch.json`, `production_status.json`.
+Code commit: `85309a1` on `codex/chart-stream-v1`. No GitHub push this round. `.workbuddy/` untouched.
 
 Musical quality remains an empirical question: corrected masks/losses and valid output do not prove
 good rhythm selection, configuration expression, or convergence.
