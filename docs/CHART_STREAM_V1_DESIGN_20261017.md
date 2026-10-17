@@ -58,6 +58,10 @@ WebUI 收尾：主训练页切换到 `chart_stream_v1` 时显示独立的上下�
 
 第七阶段复用旧架构中有价值但不绑定分段的能力：增量 `SustainStateIndex`、有界物理/语法检查、Radar/Style 条件、动态负荷曲线头和 Python MiaCode 兼容报告。曲线头只做连续负荷和类型组成辅助，不把响度设为硬门限；已提交谱面优先作为监督，创新由动态上下文路由决定，低相关历史不会强制复用。
 
+最终阶段验证：`tests/test_chart_stream_v1.py`、`tests/test_webui_fields.py`、`tests/test_webui.py` 合计 **71 passed**；Node 前端回归 **36 passed**；核心 Python 与 WebUI 语法检查通过。4 秒真实 WAV 夹具完成 CPU fresh 训练 1 epoch、stream checkpoint 保存、连续生成和 Simai 编译回读；独立曲线推理返回 `learned_chart_stream_v1` profile。该夹具只证明工程链路，不证明音乐质量。
+
+当前效率边界：生成使用增量 KV cache，96 token CPU 短测约 14.9 倍于完整前缀重算；训练缓存整曲有理音频查询，避免每个 continuation chunk 重建相同查询，但每个 chunk 仍会执行音频 Encoder，这是保守且可控的首版实现。若后续全量训练表明 Encoder 成为主瓶颈，再按歌曲分组做安全复用。
+
 ## 研究依据与边界
 
 Transformer-XL 的 segment-level recurrence、Music Transformer 的相对时间建模、Museformer 的细粒度/粗粒度注意力支持长程音乐上下文的可行性。它们不证明舞萌谱面质量会自动提升，首版必须以固定歌曲的边界连续性、静音区、节奏稳定性、前后呼应和 MiaCode 检查进行后续对照。
