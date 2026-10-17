@@ -237,6 +237,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 from maichart.webui.form_api import start_form_task
                 return start_form_task(self, parsed.path.rsplit("/",1)[-1], self._json_body(),
                                        runtime=sys.modules[__name__])
+            if parsed.path.startswith('/api/chart-stream/'):
+                from maichart.webui.stream_api import start
+                return start(self, parsed.path.rsplit('/', 1)[-1], self._json_body(), runtime=sys.modules[__name__])
             if parsed.path == "/api/upload":
                 return self._upload()
             if parsed.path == "/api/generate":
@@ -483,6 +486,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint = _required_path(payload.get("checkpoint"), "checkpoint", must_exist=True)
         checkpoint_payload = _load_checkpoint_payload(checkpoint)
         model_family = _checkpoint_model_family(checkpoint_payload)
+        if model_family == 'chart_stream_v1':
+            from maichart.webui.stream_api import start
+            form_payload = dict(payload); form_payload['model_family'] = model_family
+            return start(self, 'generate', form_payload, runtime=sys.modules[__name__])
         if model_family in {"song_form_v1", "song_form_v2"}:
             from maichart.webui.form_api import start_form_task
             form_payload = dict(payload)
@@ -1047,6 +1054,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _start_train(self, payload: dict[str, Any]) -> None:
+        if payload.get('model_family') == 'chart_stream_v1':
+            from maichart.webui.stream_api import start
+            form_payload=dict(payload); form_payload.setdefault('mode',payload.get('training_mode','fresh'))
+            form_payload.setdefault('init_checkpoint',payload.get('training_checkpoint'))
+            return start(self,'train',form_payload,runtime=sys.modules[__name__])
         if payload.get("model_family") in {"song_form_v1", "song_form_v2"}:
             from maichart.webui.form_api import start_form_task
             form_payload = dict(payload)
@@ -1410,6 +1422,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     detected_payload = _load_checkpoint_payload(candidate)
                 except (OSError, ValueError, RuntimeError, EOFError):
                     detected_payload = None
+                if detected_payload is not None and _checkpoint_model_family(detected_payload) == 'chart_stream_v1':
+                    from maichart.webui.stream_api import inspect
+                    result = inspect(candidate)
+                    result.update({'can_resume':bool(result.get('valid')), 'can_init':bool(result.get('valid')),
+                                   'generation_entry':'/chart-stream'})
+                    return self._json_response(result)
                 if detected_payload is not None and _checkpoint_model_family(detected_payload) in {"song_form_v1", "song_form_v2"}:
                     from maichart.webui.form_api import inspect_form_checkpoint
                     result = inspect_form_checkpoint(candidate)
@@ -1419,6 +1437,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                    "data_contract":result.get("input_contract",{}),
                                    "generation_entry":"/"})
                     return self._json_response(result)
+        if payload.get('model_family') == 'chart_stream_v1':
+            from maichart.webui.stream_api import start
+            return start(self, 'inspect', payload, runtime=sys.modules[__name__])
         if payload.get("model_family") in {"song_form_v1", "song_form_v2"}:
             from maichart.webui.form_api import start_form_task
             form_payload = dict(payload)
@@ -2155,8 +2176,8 @@ def _is_event_family(family: str | None) -> bool:
 
 def _requested_model_family(payload: dict[str, Any]) -> str:
     family = str(payload.get("model_family", EVENT_MODEL_FAMILY)).strip().lower()
-    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1", "song_form_v2"}:
-        raise ValueError("model family 只能是 song_form_v2、song_form_v1、event_v1、event_ctx_v1（跨窗口）或 legacy_frame_v2（旧固定帧基线）")
+    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1", "song_form_v2", "chart_stream_v1"}:
+        raise ValueError("model family 只能是 chart_stream_v1、song_form_v2、song_form_v1、event_v1、event_ctx_v1 或 legacy_frame_v2")
     return family
 
 
@@ -2215,6 +2236,13 @@ def _checkpoint_inspection(
 
     detected_family = _checkpoint_model_family(payload)
     capabilities = checkpoint_capabilities(payload)
+    if detected_family == 'chart_stream_v1':
+        result = {'valid':bool(capabilities.get('valid')), 'path':str(checkpoint_path),
+                  'schema':payload.get('schema'), 'model_family':'chart_stream_v1',
+                  'model_config':payload.get('model_config') or {}, 'data_contract':payload.get('input_contract'),
+                  'can_resume':bool(capabilities.get('valid')), 'can_init':bool(capabilities.get('valid')),
+                  'generation_entry':'/chart-stream', 'generation_capabilities':capabilities}
+        return result
     if detected_family in {"song_form_v1", "song_form_v2"}:
         from maichart.webui.form_api import inspect_form_checkpoint
         result = inspect_form_checkpoint(checkpoint_path)
@@ -2537,7 +2565,7 @@ def _preprocess_args(payload: dict[str, Any], *, raw_root: Path, cache_dir: Path
                      model_family: str) -> list[str]:
     """Arguments for the preprocessing stage, shared by the two entry points."""
 
-    if _is_event_family(model_family) or model_family in {"song_form_v1", "song_form_v2"}:
+    if _is_event_family(model_family) or model_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"}:
         # song_form consumes the event source manifest and exact chart/audio
         # caches. It must never invoke the legacy fixed-frame builder.
         args = [

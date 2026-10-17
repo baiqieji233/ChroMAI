@@ -1653,6 +1653,7 @@ function songFormTrainingPayload(options = {}) {
 }
 // Shared by "开始训练" and the one-click button, so both send the same settings.
 function trainingPayload(options = {}) {
+  if (currentModelFamily() === "chart_stream_v1") return chartStreamTrainingPayload(options);
   if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) return songFormTrainingPayload(options);
   const mode = currentTrainingMode();
   // planner_profile values: "auto", "music_structure_v3", "music_structure_v2",
@@ -1725,6 +1726,27 @@ function trainingPayload(options = {}) {
       context_budget_policy: "auto",
       chart_filter_policy: "auto",
     }),
+  };
+}
+
+function chartStreamTrainingPayload(options = {}) {
+  const mode = currentTrainingMode();
+  return {
+    ...trainingSourcePaths(options), manifests: selectedTrainingManifests(),
+    dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
+    model_family: "chart_stream_v1", mode,
+    manifest: valueOrDefault("#manifestPath", "").trim(),
+    checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
+    init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(),
+    epochs: Number(valueOrDefault("#epochs", 10)), batch_size: Number(valueOrDefault("#batchSize", 1)),
+    grad_accumulation: Number(valueOrDefault("#gradAccumulation", 1)),
+    d_model: Number(valueOrDefault("#streamDModel", 256)), layers: Number(valueOrDefault("#streamLayers", 4)),
+    nhead: Number(valueOrDefault("#streamNhead", 8)), dim_feedforward: Number(valueOrDefault("#streamDimFeedforward", 768)),
+    max_tokens: Number(valueOrDefault("#streamMaxTokens", 1024)), max_history_tokens: Number(valueOrDefault("#streamMaxHistoryTokens", 256)),
+    max_stream_memory: Number(valueOrDefault("#streamMemoryTokens", 32)),
+    lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
+    device: formDevice("#device"), precision: valueOrDefault("#formPrecision", "auto"),
+    cache_dir: valueOrDefault("#formCacheDir", "cache/chart_stream_v1"),
   };
 }
 
@@ -1803,6 +1825,7 @@ function uniqueSongFormOutputPath(requested) {
   return `${directory}.task-${nonce}${separator}${filename}`;
 }
 function generationPayload() {
+  if (currentGenerationFamily() === "chart_stream_v1") return chartStreamGenerationPayload();
   if (["song_form_v1", "song_form_v2"].includes(currentGenerationFamily())) return songFormGenerationPayload();
   const condition = collectCondition();
   return {
@@ -1877,6 +1900,14 @@ function generationPayload() {
     local_onset_bias_strength: element("#localOnsetBiasStrength")?.disabled
       ? 0 : Number(valueOrDefault("#localOnsetBiasStrength", 0)),
   };
+}
+
+function chartStreamGenerationPayload() {
+  return { model_family: "chart_stream_v1", checkpoint: valueOrDefault("#checkpointPath", "").trim(),
+    audio: valueOrDefault("#audioPath", "").trim(), output: valueOrDefault("#outputPath", "").trim() || null,
+    bpm: valueOrDefault("#bpm", "").trim() === "" ? 120 : Number(valueOrDefault("#bpm", 120)),
+    first: Number(valueOrDefault("#first", 0)), level: Number(valueOrDefault("#level", 13.3)),
+    temperature: Number(valueOrDefault("#temperature", .7)), device: formDevice("#generationDevice") };
 }
 
 function intensityCurvePayload() {
@@ -3340,6 +3371,14 @@ async function submitTrain(options = {}) {
     }
   }
   const payload = { ...trainingPayload({ autoPreprocess: !!options.autoPreprocess }), auto_preprocess: !!options.autoPreprocess };
+  if (payload.model_family === "chart_stream_v1") {
+    if (options.autoPreprocess) throw new Error("chart_stream_v1 请先完成训练素材预处理，再从已准备 manifest 开始训练。");
+    if (!payload.manifest) throw new Error("请先填写已准备的 manifest");
+    trainingStarting = true; updateDatasetButtons();
+    try { const data = await api("/api/chart-stream/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
+    catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
+    return;
+  }
   if (["song_form_v1", "song_form_v2"].includes(payload.model_family)) {
     if (options.autoPreprocess) throw new Error("song-form 请先在训练素材页完成预处理，再从已准备 manifest 开始训练。");
     if (!payload.manifest) throw new Error("请先在训练素材中选择或填写已准备的 manifest");
@@ -4193,6 +4232,11 @@ async function submitGenerate() {
   const payload = generationPayload();
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
+  if (payload.model_family === "chart_stream_v1") {
+    const data = await api("/api/chart-stream/generate", payload);
+    watchTask(data.task_id, (task) => { if (task.status === "completed") setAcceptanceStatus("chart_stream_v1 连续整曲生成完成；请检查连续性、静音区和谱面可玩性。", "good"); });
+    return;
+  }
   if (["song_form_v1", "song_form_v2"].includes(payload.model_family)) {
     payload.requested_output = payload.output;
     payload.output = uniqueSongFormOutputPath(payload.output);

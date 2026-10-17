@@ -9,6 +9,7 @@ from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM
 
 
 EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
+STREAM_CHECKPOINT_SCHEMA = "maichart-chart-stream-checkpoint-v1"
 EVENT_FAMILIES = {"event_v1", "event_ctx_v1"}
 LEGACY_CHECKPOINT_SCHEMAS = {
     "legacy-state-dict",
@@ -36,6 +37,7 @@ class ModelFamily(Enum):
     EVENT_V1 = "event_v1"
     EVENT_CTX_V1 = "event_ctx_v1"
     LEGACY_FRAME_V2 = "legacy_frame_v2"
+    CHART_STREAM_V1 = "chart_stream_v1"
     # Deprecated compatibility alias. Capability is determined from checkpoint
     # contents, never from a separate "extended" family label.
     EVENT_CTX_V1_EXTENDED = "event_ctx_v1"
@@ -43,6 +45,18 @@ class ModelFamily(Enum):
 
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
+    if checkpoint_data.get('schema') == STREAM_CHECKPOINT_SCHEMA:
+        config = checkpoint_data.get('model_config') or {}
+        valid = checkpoint_data.get('family') == 'chart_stream_v1' and checkpoint_data.get('input_contract') == 'chart_stream_inputs_v1_exact_fraction'
+        return {'model_family':'chart_stream_v1','valid':bool(valid),'errors':[] if valid else ['chart_stream checkpoint contract mismatch'],
+                'experimental':True,'conflict_detection':True,'conflict_repair':True,
+                'fine_note_strength':False,'onset_profile':'continuous_event_stream',
+                'local_onset_guidance':False,'rhythm_bias':False,'action_state_profile':'sustain_state_v1',
+                'sustained_action_memory':True,'rhythm_geometry_profile':'exact_fraction_stream_v1',
+                'generation_entry':'/chart-stream','quality_profile':'musical_evidence_v1',
+                'descriptor_dim':0,'curve_bin_seconds':1.,'planner_context_seconds':0.,
+                'audio_evidence_profile':'balanced_evidence_v1','position_alignment_supervision':True,
+                'position_alignment_trained':True}
     if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:
         from maichart.form.checkpoint import LEGACY_INPUT_CONTRACT, input_contract_for_configs
         rational=checkpoint_data.get('schema')=='maichart-song-form-checkpoint-v2'

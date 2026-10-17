@@ -137,9 +137,10 @@
           </label></div>
 <p class="workflow-hint">首次建立模型选“从头训练”；延续同一次实验选“从断点继续”；更换精选数据或调整采样策略选“已有模型加强训练”。</p>
 <div class="form-grid"><label class="field span-4">模型族 / Model family
-<select id="modelFamily"><option value="song_form_v2" selected>song_form_v2（精确有理数事件，推荐）</option>
+<select id="modelFamily"><option value="song_form_v2" selected>song_form_v2（精确有理数事件）</option>
+              <option value="chart_stream_v1">chart_stream_v1（连续整曲事件流，新架构）</option>
               <option value="song_form_v1">song_form_v1 全曲结构模型（全曲规划与段落关联）</option><option value="event_ctx_v1">event_ctx_v1 跨窗口事件模型（旧模型兼容路径）</option><option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option><option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option></select>
-<small id="modelFamilyHelp">song_form_v2 是当前主架构：联合生成精确有理数拍位与配置；切换模型族后，本页显示对应专属参数。</small></label></div>
+<small id="modelFamilyHelp">chart_stream_v1 按整曲连续事件流生成，计算块不代表音乐边界；song_form_v2 保留现有全曲规划与配置流程。切换模型族后，本页显示对应专属参数。</small></label></div>
 <div id="trainingCheckpointGroup">
 <div id="formResumeDataPolicyGroup" class="form-grid" hidden>
 <label class="field span-4">续训数据变化处理
@@ -294,6 +295,17 @@
 <label class="field" data-training-family="song_form_v2">规划预取谱面数<input id="formBlueprintPrefetch" type="number" min="1" max="64" value="8"><small>最多同时准备或排队的整曲输入数量。提高可隐藏数据准备等待，但会增加内存占用。</small></label>
 </div><p class="workflow-hint">fresh 可以调整全部结构参数；resume 严格继承 checkpoint 合同；finetune 复用权重并在新输出目录调整训练数据与学习率。</p>
 </section>
+<section id="chartStreamTrainingControls" class="song-form-only" data-training-family="chart_stream_v1" hidden>
+<div class="workflow-group-heading"><span class="step">03A</span><div><h3>连续整曲事件流参数</h3><p>计算块只用于显存管理，不表示音乐边界；整曲结束才允许 EOS。</p></div></div>
+<div class="form-grid">
+<label class="field">流上下文 token 上限<input id="streamMaxTokens" type="number" min="128" max="8192" step="64" value="1024"><small>每个计算块可直接看到的事件 token 数。</small></label>
+<label class="field">近期历史 token<input id="streamMaxHistoryTokens" type="number" min="32" max="2048" step="32" value="256"><small>跨块回看的详细历史，不会改变谱面时间边界。</small></label>
+<label class="field">流记忆槽<input id="streamMemoryTokens" type="number" min="4" max="128" step="4" value="32"><small>长期记忆摘要槽；后续用于动态注意力与段落呼应。</small></label>
+<label class="field">模型宽度<input id="streamDModel" type="number" min="64" max="1024" step="32" value="256"></label>
+<label class="field">Transformer 层数<input id="streamLayers" type="number" min="1" max="16" step="1" value="4"></label>
+<label class="field">注意力头数<input id="streamNhead" type="number" min="1" max="16" step="1" value="8"></label>
+<label class="field">前馈层宽度<input id="streamDimFeedforward" type="number" min="128" max="4096" step="64" value="768"></label>
+</div></section>
 <section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>
 <p class="workflow-hint">谱面准备结果会自动缓存到磁盘，重启后可复用。修改谱面、音频、质量标注或分段设置后会重新构建；下方缓存上限仅控制运行中的内存。</p>
