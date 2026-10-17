@@ -15,6 +15,7 @@ from maichart.form.data import FormDataset, _form_descriptor
 from maichart.form.rational_audio import planner_audio_queries
 from maichart.form.curve import resample_load_curve
 from maichart.form.quality_profile import MUSICAL_EVIDENCE
+from .context import prefix_action_state
 
 
 @dataclass(frozen=True)
@@ -30,7 +31,7 @@ class StreamChunk:
     start_event: int
 
 
-TRAINING_SEMANTICS = 'chart_stream_training_v2_contiguous_targets'
+TRAINING_SEMANTICS = 'chart_stream_training_v3_prefix_clock'
 
 
 def _target_ranges(ids, max_tokens, at_id, eos_id):
@@ -131,9 +132,7 @@ class StreamDataset(Dataset):
         if chunk.chart_index not in self._audio_queries:
             self._audio_queries[chunk.chart_index] = planner_audio_queries(song)
         audio, times, _ = self._audio_queries[chunk.chart_index]
-        boundary = (points[chunk.start_event].beat if chunk.start_event < len(points)
-                    else points[-1].beat+Fraction(1, 1_000_000)) if points else Fraction(0)
-        action, action_mask, _ = state.at(boundary)
+        action, action_mask, _ = prefix_action_state(state, points, chunk.start_event)
         return {'audio': audio, 'audio_times_sec': torch.as_tensor(times, dtype=torch.float64),
                 'form': torch.from_numpy(_form_descriptor(song, 0)),
                 'curve_target': torch.from_numpy(resample_load_curve(

@@ -14,6 +14,7 @@ from maichart.stream import checkpoint
 from maichart.stream.decoding import compose_stream
 from maichart.stream.generate import parser
 from maichart.stream.memory import StreamMemoryBank
+from maichart.stream.reference_guard import ReferenceCandidateGuard
 from maichart.stream.model import ChartStreamTransformer, StreamConfig
 from maichart.stream.runtime import resolve_device
 from test_webui import webui_api
@@ -34,12 +35,15 @@ def options(**kwargs):
                                 '--temperature', '0', '--position-temperature', '0'])
     args.position_beam_size = 1  # Exercise the character-compatible loop here.
     args.position_interval_strength = 0
+    args.max_button_heads = 0
+    args.hold_protection = 'off'
+    args.reference_check_attempts = 0
     for key, value in kwargs.items():
         setattr(args, key, value)
     return args
 
 
-def compose(monkeypatch, points, *, max_tokens=32, options_override=None, targets=None):
+def compose(monkeypatch, points, *, max_tokens=32, options_override=None, targets=None, atom_catalog=None):
     codec = RationalCodec()
     model = ChartStreamTransformer(StreamConfig(len(codec), d_model=16, nhead=2, layers=1,
         dim_feedforward=32, dropout=0, max_tokens=max_tokens, max_history_tokens=8)).eval()
@@ -92,11 +96,34 @@ def compose(monkeypatch, points, *, max_tokens=32, options_override=None, target
     values = torch.randn(8, 120)
     times = np.linspace(0., .99, 8)
     condition = GenerationCondition(level=13., radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
-    atoms = ['1', '2', '1h[4:1]']
+    atoms = atom_catalog or ['1', '2', '1h[4:1]']
     result, status = compose_stream(model, codec, song, values, times, condition, atoms,
                                     options(**(options_override or {})))
     assert len(encoder_calls) == 1
     return result, status, calls
+
+
+def test_actual_stream_loop_never_offers_a_third_button_head(monkeypatch):
+    proposed = [EventPoint(F(0), '1/2/3')]
+    result, status, _ = compose(monkeypatch, proposed, atom_catalog=['1', '2', '3'],
+        options_override={'max_button_heads': 2, 'max_events': 1})
+    assert result == [EventPoint(F(0), '1/2')]
+    assert status['basic_constraints']['blocked_token_choices'] > 0
+
+
+def test_rejected_reference_candidate_replays_only_the_current_configuration(monkeypatch):
+    checked = []
+    def check(_guard,point):
+        checked.append(point)
+        return (len(checked) != 2, [])
+    monkeypatch.setattr(ReferenceCandidateGuard,'check',check)
+    expected = [EventPoint(F(0),'1'),EventPoint(F(1),'2/3')]
+    result,status,_ = compose(monkeypatch,expected,max_tokens=32,
+        atom_catalog=['1','2','3'],options_override={'reference_check_attempts':8})
+    assert len(checked) >= 3 and checked[1] == expected[1]
+    assert result[0] == expected[0] and result[1].beat == F(1)
+    assert result[1].note_text != checked[1].note_text
+    assert status['reason'] == 'eos'
 
 
 def test_zero_temperature_and_first_beat_zero_commit_a_whole_cell(monkeypatch):
@@ -227,6 +254,7 @@ def test_http_generation_preserves_device_seed_and_zero_temperature(webui_api, m
     request = {'model_family': 'chart_stream_v1', 'audio': str(audio), 'checkpoint': str(path),
                'device': device, 'temperature': 0., 'position_temperature': 0., 'seed': 123,
                'position_beam_size': 8, 'position_complexity': .7, 'early_eos_penalty': 0.,
+               'max_button_heads': 2, 'hold_protection': 'on',
                'output': str(tmp_path/'maidata.txt'), 'condition': {'level': 13.6}}
     status, reply = webui_api('/api/chart-stream/generate', request)
     assert status == 200, reply
@@ -234,6 +262,7 @@ def test_http_generation_preserves_device_seed_and_zero_temperature(webui_api, m
     parsed = parser().parse_args(args[2:])
     assert (parsed.device, parsed.seed, parsed.temperature, parsed.position_temperature) == (device, 123, 0., 0.)
     assert (parsed.position_beam_size, parsed.position_complexity, parsed.early_eos_penalty) == (8, .7, 0.)
+    assert (parsed.max_button_heads, parsed.hold_protection) == (2, 'on')
     assert task.result['seed'] == 123
     assert task.result['effective_settings']['condition_file'] == parsed.condition_file
     assert json.loads(__import__('pathlib').Path(parsed.condition_file).read_text()) == request['condition']
@@ -262,3 +291,16 @@ def test_stream_task_collects_incomplete_status_and_gap_diagnostics(tmp_path):
     assert task.result['generation_status'] == 'incomplete'
     assert task.result['stream_report'] == report
     assert task.result['timing_diagnostics']['max_gap_sec'] == 12.
+
+
+def test_http_old_training_resume_is_rejected_before_any_job_starts(webui_api, tmp_path, monkeypatch):
+    manifest = tmp_path/'manifest.json';manifest.write_text('{}')
+    path = tmp_path/'old.pt'
+    model = ChartStreamTransformer(StreamConfig(55,d_model=16,nhead=2,layers=1,dim_feedforward=32))
+    checkpoint.save(path,model,None,epoch=1,args={},manifest=manifest)
+    status, inspected = webui_api('/api/checkpoint/inspect',{'checkpoint_path':str(path),'mode':'resume'})
+    assert status == 200 and not inspected['can_resume'] and inspected['can_init']
+    monkeypatch.setattr(webui,'_run_subprocess_task',lambda *_a,**_kw:pytest.fail('Started incompatible resume'))
+    status, reply = webui_api('/api/chart-stream/train',{
+        'model_family':'chart_stream_v1','manifest':str(manifest),'mode':'resume','init_checkpoint':str(path)})
+    assert status == 400 and 'finetune' in reply['error']

@@ -18,6 +18,9 @@ from .checkpoint import load
 from .decoding import compose_stream, validate_options
 from .runtime import resolve_device
 from .timing import export_end_timing, timing_diagnostics
+from .reference_guard import summarize_reference
+from maichart.generation.miacode_python import analyze_maidata
+from .audio_bounds import generation_bounds
 
 
 def parser():
@@ -46,6 +49,11 @@ def parser():
     p.add_argument('--style-balance-strength', type=float, default=.5)
     p.add_argument('--local-chord-strength', type=float, default=0.)
     p.add_argument('--physical-feasibility-strength', type=float, default=0.)
+    p.add_argument('--max-button-heads', type=int, default=2)
+    p.add_argument('--hold-protection', choices=('on', 'off'), default='on')
+    p.add_argument('--reference-check-attempts', type=int, default=8)
+    p.add_argument('--generation-end-sec',type=float)
+    p.add_argument('--trim-exact-silence',choices=('on','off'),default='on')
     return p
 
 
@@ -58,6 +66,8 @@ def generate(args):
     # Optimizer tensors stay on CPU when loading, then can be released entirely
     # during inference. Only immutable model metadata is needed in the report.
     model_config = asdict(model.config)
+    checkpoint_training = {key: payload.get(key) for key in ('epoch', 'optimizer_steps', 'training_position')}
+    checkpoint_training['training_semantics'] = (payload.get('args') or {}).get('training_semantics', 'legacy')
     del payload
     audio = extract_rational_audio(args.audio, cache_dir=Path(args.checkpoint).parent/'audio_cache',
                                    evidence_profile='balanced_evidence_v1')
@@ -72,34 +82,45 @@ def generate(args):
     if not song.spans:
         raise ValueError('当前 first/BPM 设置下没有可生成的音频范围')
     values, times, _ = planner_audio_queries(song)
+    bounds = generation_bounds(audio,requested_end=args.generation_end_sec,
+                               trim_exact_silence=args.trim_exact_silence == 'on')
+    args.effective_end_sec = bounds['effective_end_sec']
     condition = GenerationCondition(level=args.level, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
     if args.condition_file:
         condition = GenerationCondition.from_dict(json.loads(Path(args.condition_file).read_text(encoding='utf-8-sig')))
     print('stream_runtime '+json.dumps({'device': str(device), 'seed': args.seed,
         'max_tokens': model.config.max_tokens, 'max_history_tokens': model.config.max_history_tokens}), flush=True)
     points, status = compose_stream(model, RationalCodec(), song, values, times, condition, atoms, args)
-    audio_end = beat_at_second(audio.duration_sec, song.tempo, song.first)
+    audio_end = beat_at_second(bounds['effective_end_sec'], song.tempo, song.first)
     export_end, export_timing = export_end_timing(audio_end, song.tempo, song.first)
     text, _ = compile_event_points(points, tempo_changes=song.tempo, bpm=song.tempo[0].bpm,
         first=args.first, end_beat=export_end, level=str(condition.level))
     output = Path(args.output)
     output.parent.mkdir(parents=True, exist_ok=True)
+    reference = summarize_reference(analyze_maidata(text))
+    review_needed = bool(reference['runtime_hard_count'] or not reference['parse_ok'])
     report = {'schema': 'maichart-chart-stream-generation-v1', 'family': 'chart_stream_v1',
         'event_count': len(points), 'audio_duration': audio.duration_sec,
+        'audio_bounds':bounds,
         'audio_end_beat': str(audio_end), 'stream_continuity': True,
         'checkpoint': str(Path(args.checkpoint).resolve()), 'model_config': model_config,
+        'checkpoint_training': checkpoint_training,
         'device': str(device), 'seed': args.seed, 'status': status,
         'audio_evidence_profile': audio.evidence_profile, 'audio_feature_policy': audio.feature_policy,
-        'generation_status': 'incomplete' if status['incomplete'] else 'completed',
+        'generation_status': ('incomplete' if status['incomplete'] else 'needs_review' if review_needed else 'completed'),
+        'reference_playability':reference,
         'first': args.first, 'tempo_map': [{'beat': str(t.beat), 'bpm': t.bpm} for t in song.tempo],
         'export_timing': export_timing,
-        'timing_diagnostics': timing_diagnostics(points, song.tempo, song.first, audio.duration_sec, text),
+        'timing_diagnostics': timing_diagnostics(points, song.tempo, song.first, bounds['effective_end_sec'], text),
         'generation_controls': {'style_balance_strength': args.style_balance_strength,
             'position_beam_size': args.position_beam_size, 'position_complexity': args.position_complexity,
             'position_interval_strength': args.position_interval_strength,
             'position_temperature': args.position_temperature, 'early_eos_penalty': args.early_eos_penalty,
             'max_denominator': args.max_denominator, 'max_interval_denominator': args.max_interval_denominator,
             'min_spacing_ms': args.min_spacing_ms,
+            'interval_consistency_policy': 'censored_log_ratio_v1',
+            'max_button_heads': args.max_button_heads, 'hold_protection': args.hold_protection,
+            'reference_check_attempts':args.reference_check_attempts,
             'local_chord_strength_requested': args.local_chord_strength,
             'local_chord_strength_effective': args.local_chord_strength,
             'physical_feasibility_strength': args.physical_feasibility_strength},

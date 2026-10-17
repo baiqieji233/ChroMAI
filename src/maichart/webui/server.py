@@ -1436,10 +1436,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 except (OSError, ValueError, RuntimeError, EOFError):
                     detected_payload = None
                 if detected_payload is not None and _checkpoint_model_family(detected_payload) == 'chart_stream_v1':
-                    from maichart.webui.stream_api import inspect
-                    result = inspect(candidate)
-                    result.update({'can_resume':bool(result.get('valid')), 'can_init':bool(result.get('valid')),
-                                   'generation_entry':'/chart-stream'})
+                    from maichart.webui.stream_api import inspect_payload
+                    result = inspect_payload(detected_payload)
+                    result.update({'generation_entry':'/chart-stream'})
                     return self._json_response(result)
                 if detected_payload is not None and _checkpoint_model_family(detected_payload) in {"song_form_v1", "song_form_v2"}:
                     from maichart.webui.form_api import inspect_form_checkpoint
@@ -2261,13 +2260,9 @@ def _checkpoint_inspection(
     detected_family = _checkpoint_model_family(payload)
     capabilities = checkpoint_capabilities(payload)
     if detected_family == 'chart_stream_v1':
-        result = {'valid':bool(capabilities.get('valid')), 'path':str(checkpoint_path),
-                  'schema':payload.get('schema'), 'model_family':'chart_stream_v1',
-                  'epoch':payload.get('epoch'), 'args':payload.get('args') or {},
-                  'optimizer_steps':payload.get('optimizer_steps', 0),
-                  'model_config':payload.get('model_config') or {}, 'data_contract':payload.get('input_contract'),
-                  'can_resume':bool(capabilities.get('valid')), 'can_init':bool(capabilities.get('valid')),
-                  'generation_entry':'/chart-stream', 'generation_capabilities':capabilities}
+        from maichart.webui.stream_api import inspect_payload
+        result = inspect_payload(payload)
+        result.update(path=str(checkpoint_path), data_contract=payload.get('input_contract'), generation_entry='/chart-stream')
         return result
     if detected_family in {"song_form_v1", "song_form_v2"}:
         from maichart.webui.form_api import inspect_form_checkpoint

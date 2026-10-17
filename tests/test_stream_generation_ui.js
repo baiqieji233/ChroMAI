@@ -58,6 +58,9 @@ for (const device of ["auto", "cuda", "cpu"]) {
     assert.equal(result.position_complexity, .35);
     assert.equal(result.position_interval_strength, 1);
     assert.equal(result.early_eos_penalty, 0);
+    assert.equal(result.max_button_heads, 2);
+    assert.equal(result.hold_protection, 'on');
+    assert.equal(result.reference_check_attempts, 8);
   });
 }
 

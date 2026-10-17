@@ -26,7 +26,7 @@ def _select_cache(caches, indices):
 def search_position(model, codec, grammar, root_logits, root_cache, memory, mask, *,
                     consumed, width=4, complexity=.2, timing_features=None,
                     temperature=0., generator=None, canonical_only=False, adaptive=False,
-                    candidate_cost=None):
+                    candidate_cost=None, proposals=()):
     initial_width, expansions = width, 0
     while True:
         value, status = _search_position(model, codec, grammar, root_logits, root_cache,
@@ -43,6 +43,26 @@ def search_position(model, codec, grammar, root_logits, root_cache, memory, mask
             break
         width = min(32, width*2)
     ranked = status['candidates']
+    # Low-probability numerical carry prefixes can vanish even in a wide
+    # beam. When its pruning bound is still unresolved, explicitly score a
+    # few causal proposals supplied by the caller. These remain candidates,
+    # never an allowed-position list or a snapping operation.
+    proposal_expansions = 0
+    if adaptive and proposals and (best is None or (bound is not None and bound > best-12*temperature)):
+        strings = list(dict.fromkeys(str(Fraction(value)) for value in proposals
+                                     if grammar.complete(str(Fraction(value)))))[:16]
+        scored, proposal_expansions = _score_proposals(model, codec, strings, root_logits,
+            root_cache, memory, mask, consumed=consumed, timing_features=timing_features)
+        merged = {row['beat']:row for row in ranked}
+        for text, probability in scored.items():
+            penalty = complexity*position_complexity_cost(text,grammar.lower)
+            if candidate_cost is not None: penalty += float(candidate_cost(Fraction(text)))
+            merged[text] = {'beat':text,'score':probability-penalty,'log_probability':probability}
+        ranked = sorted(merged.values(),key=lambda row:row['score'],reverse=True)
+        if ranked:
+            value, best = ranked[0]['beat'], ranked[0]['score']
+            status.update(best_complete_score=best, complete_score=best,
+                          selected_log_probability=ranked[0]['log_probability'])
     if ranked and temperature > 0:
         weights = torch.tensor([row['score'] for row in ranked], device=memory.device)
         choice = int(torch.multinomial(torch.softmax((weights-weights.max())/temperature, 0),
@@ -51,10 +71,45 @@ def search_position(model, codec, grammar, root_logits, root_cache, memory, mask
         value = selected['beat']
         status['complete_score'] = selected['score']
         status['selected_log_probability'] = selected['log_probability']
-    status.update(initial_beam_width=initial_width, expanded_hypotheses=expansions,
+    status.update(initial_beam_width=initial_width, expanded_hypotheses=expansions+proposal_expansions,
+                  proposal_expansions=proposal_expansions,
                   search_certified=bound is None or (best is not None and bound <= best),
-                  candidates=status['candidates'][:8])
+                  candidates=ranked[:8])
     return value, status
+
+
+def _score_proposals(model, codec, texts, logits, caches, memory, mask, *, consumed, timing_features):
+    if not texts:
+        return {}, 0
+    sequences = [[codec.ids['P:'+c] for c in text]+[codec.note_id] for text in texts]
+    rows, scores = list(range(len(texts))), [0.]*len(texts)
+    indices = torch.zeros(len(rows), dtype=torch.long, device=memory.device)
+    caches = _select_cache(caches, indices)
+    logits = logits[None].expand(len(rows), -1)
+    complete, expanded = {}, 0
+    for depth in range(max(map(len,sequences))):
+        logp = logits.float().log_softmax(-1)
+        targets = torch.tensor([sequences[row][depth] for row in rows], device=memory.device)
+        probabilities = logp.gather(1,targets[:,None])[:,0].detach().cpu().tolist()
+        keep, tokens = [], []
+        for local, (row, probability) in enumerate(zip(rows, probabilities)):
+            scores[row] += probability
+            if depth+1 == len(sequences[row]):
+                complete[texts[row]] = scores[row]
+            else:
+                keep.append(local);tokens.append(sequences[row][depth])
+        if not keep or consumed+depth >= model.config.max_tokens:
+            break
+        indices = torch.tensor(keep, device=memory.device)
+        caches = _select_cache(caches,indices)
+        rows = [rows[index] for index in keep]
+        token_batch = torch.tensor(tokens,device=memory.device)[:,None]
+        kwargs = {'timing_features':timing_features.expand(len(rows),-1,-1)} if timing_features is not None else {}
+        prediction,caches = model.decode_step(token_batch,consumed+depth,
+            memory.expand(len(rows),-1,-1),None if mask is None else mask.expand(len(rows),-1),caches,**kwargs)
+        logits = (prediction['logits'] if isinstance(prediction,dict) else prediction)[:,-1]
+        expanded += len(rows)
+    return complete, expanded
 
 
 def _search_position(model, codec, grammar, root_logits, root_cache, memory, mask, *,

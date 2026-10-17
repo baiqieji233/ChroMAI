@@ -125,7 +125,7 @@ class SustainStateIndex:
         self._references: dict[str, Any] | None = None
         self._release_index = None
 
-    def at(self, start_beat: Fraction | int | str | float) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    def at(self, start_beat: Fraction | int | str | float, *, include_current=False) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         beat = _as_beat(start_beat)
         boundary = float(seconds_at_beat(beat, self.tempo_changes, self.first))
         selected: list[tuple[float, int, dict[str, Any], float, bool]] = []
@@ -134,7 +134,7 @@ class SustainStateIndex:
             if kind not in _TYPE_OFFSETS or marker.get("is_mine") or marker.get("track_mine"):
                 continue
             onset = float(marker.get("second", 0.0))
-            if onset >= boundary - _EPS:
+            if (onset > boundary if include_current else onset >= boundary - _EPS):
                 continue
             end = float(marker.get("end_second", -1.0))
             if not math.isfinite(end):

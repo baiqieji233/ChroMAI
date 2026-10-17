@@ -33,6 +33,7 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
         'codec': {'schema': 'rational-events-v1', 'tokens': RationalCodec().tokens},
         'atom_catalog': sorted(set(atom_catalog)),
         'metrics': metrics or {}, 'architecture': model.architecture,
+        'metrics_aggregation': 'batch_mean',
     }
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     temp = path.with_suffix(path.suffix + '.tmp')

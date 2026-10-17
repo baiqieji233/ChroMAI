@@ -561,6 +561,9 @@ const GENERATION_PARAM_FIELDS = [
   "formPositionComplexity", "formPositionBeamSize", "formEarlyEosPenalty",
   "streamPositionTemperature", "streamPositionBeamSize", "streamPositionComplexity", "streamEarlyEosPenalty",
   "streamPositionIntervalStrength",
+  "streamMaxButtonHeads", "streamHoldProtection",
+  "streamReferenceChecks",
+  "streamTrimExactSilence",
   "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
   "streamStyleBalanceStrength", "streamLocalChordStrength", "streamPhysicalStrength",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
@@ -1756,6 +1759,7 @@ function chartStreamTrainingPayload(options = {}) {
     max_tokens: Number(valueOrDefault("#streamMaxTokens", 1024)), max_history_tokens: Number(valueOrDefault("#streamMaxHistoryTokens", 256)),
     max_stream_memory: Number(valueOrDefault("#streamMemoryTokens", 32)),
     plan_loss_weight: Number(valueOrDefault("#streamPlanLossWeight", .15)),
+    event_decision_loss_weight: Number(valueOrDefault("#streamEventDecisionLossWeight",.25)),
     lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#streamWeightDecay", .01)),
     device: formDevice("#device"), precision: valueOrDefault("#streamPrecision", "auto"),
     audio_cache_gb: Number(valueOrDefault("#streamAudioCacheGb", 8)),
@@ -1939,6 +1943,11 @@ function chartStreamGenerationPayload() {
     style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", .5)),
     local_chord_strength: Number(valueOrDefault("#streamLocalChordStrength", 0)),
     physical_feasibility_strength: Number(valueOrDefault("#streamPhysicalStrength", 0)),
+    max_button_heads: Number(valueOrDefault("#streamMaxButtonHeads", 2)),
+    hold_protection: valueOrDefault("#streamHoldProtection", "on"),
+    reference_check_attempts: Number(valueOrDefault("#streamReferenceChecks",8)),
+    generation_end_sec: valueOrDefault("#streamGenerationEndSec","").trim() === "" ? null : Number(valueOrDefault("#streamGenerationEndSec",0)),
+    trim_exact_silence: valueOrDefault("#streamTrimExactSilence","on"),
     condition: collectCondition() };
 }
 
@@ -2343,6 +2352,8 @@ function renderTaskResults(task) {
     const notice = document.createElement("p");
     notice.className = "inline-status";
     notice.textContent = `${report.generation_status === "incomplete" ? "生成未完成" : "生成已结束"}：${report.status?.reason || "未知"}；${report.event_count ?? 0} 个起音；最长起音空白 ${Number(timing.max_gap_sec || 0).toFixed(2)} 秒；最大导出分音 {${timing.max_export_division ?? "未知"}}。空白可能是合理休止，具体位置与候选概率见 stream.json。`;
+    if (report.reference_playability) notice.textContent += ` MiaCode 参考运行时硬冲突 ${report.reference_playability.runtime_hard_count ?? "未知"} 项；不构成可玩认证。`;
+    if (report.checkpoint_training) notice.textContent += ` 本次权重：保存 epoch ${report.checkpoint_training.epoch ?? "未知"}，宽度 ${report.model_config?.d_model ?? "未知"}。`;
     container.appendChild(notice);
   }
   if (task.kind === "form_generate") {
@@ -3052,6 +3063,7 @@ function applyChartStreamCheckpointConfig(data, mode) {
     "#streamMaxHistoryTokens": config.max_history_tokens,
     "#streamMemoryTokens": config.max_stream_memory,
     "#streamPlanLossWeight": args.plan_loss_weight,
+    "#streamEventDecisionLossWeight": args.event_decision_loss_weight,
     "#streamPrecision": args.precision,
     "#streamWeightDecay": args.weight_decay,
     "#streamAudioCacheGb": args.audio_cache_gb,
@@ -3090,6 +3102,7 @@ function renderChartStreamCheckpointInspection(data) {
     `连续上下文：${config.max_tokens ?? "未记录"} token；近期历史 ${config.max_history_tokens ?? "未记录"} token；记忆槽 ${config.max_stream_memory ?? "未记录"}`,
     `训练参数：precision=${args.precision ?? "未记录"}；lr=${args.lr ?? "未记录"}；weight_decay=${args.weight_decay ?? "未记录"}；plan_loss_weight=${args.plan_loss_weight ?? "未记录"}`,
     `生成能力：连续整曲=${caps.continuous_stream ? "可用" : "不可用"}；精确有理事件=${caps.rational_event_positions ? "可用" : "不可用"}；持续动作记忆=${caps.sustained_action_memory ? "可用" : "不可用"}`,
+    "连续整曲、有理事件和持续动作能力按 checkpoint 合同检查；语法可用不等于音乐质量或可玩性合格。",
     "计算块只用于显存管理，不代表音乐边界；旧 event / song-form checkpoint 不能互载。",
     data?.warnings?.length ? `警告：\n${formatList(data.warnings)}` : "",
     data?.errors?.length ? `错误：\n${formatList(data.errors)}` : "",
@@ -3097,7 +3110,9 @@ function renderChartStreamCheckpointInspection(data) {
   const box = element("#checkpointDetails");
   if (box) { box.hidden = false; box.textContent = details; }
   setCheckpointStatus(valid
-    ? `chart_stream_v1 checkpoint 可用；epoch ${data.epoch ?? 0}；连续整曲、有理事件和持续动作能力已${caps.continuous_stream ? "记录" : "检查"}`
+    ? (data.can_resume === false && currentTrainingMode() === "resume"
+      ? "此 checkpoint 可生成、可 finetune；持续动作时钟监督已升级，请改选加强训练并使用新输出目录。"
+      : `chart_stream_v1 checkpoint 可用；epoch ${data.epoch ?? 0}；模型宽度 ${config.d_model ?? "未知"}；优化器更新 ${data.optimizer_steps ?? "未记录"} 步`)
     : ((data.errors || []).join("；") || "chart_stream_v1 checkpoint 不可用"), valid ? "good" : "warn");
 }
 
@@ -3339,7 +3354,7 @@ async function inspectGenerationCheckpoint() {
       streamNotice.classList.toggle("warn", !streamReady);
     }
     setGenerationStatus(streamReady
-      ? `模型族：chart_stream_v1；schema：${data.schema || "未记录"}；epoch ${data.epoch ?? 0}；连续整曲生成可用；精确有理事件${genCaps.rational_event_positions ? "可用" : "不可用"}`
+      ? `模型族：chart_stream_v1；保存 epoch ${data.epoch ?? 0}；宽度 ${data.model_config?.d_model ?? "未知"}；更新 ${data.optimizer_steps ?? "未记录"} 步；连续整曲生成可用；精确有理事件${genCaps.rational_event_positions ? "可用" : "不可用"}`
       : ((data.errors || []).join("；") || "chart_stream_v1 checkpoint 不可用于连续整曲生成"), streamReady ? "good" : "warn");
     updateGenerationCapabilityControls();
     return data;
@@ -4383,8 +4398,10 @@ async function submitGenerate() {
     const data = await api("/api/chart-stream/generate", payload);
     watchTask(data.task_id, (task) => { if (task.status === "completed") {
       const incomplete = task.result?.generation_status === "incomplete";
-      setAcceptanceStatus(incomplete ? "chart_stream_v1 生成未完成；请查看搜索／事件预算原因及报告，已保存完整事件。"
-        : "chart_stream_v1 连续整曲生成已结束；请检查连续性、休止和谱面可玩性。", incomplete ? "warn" : "good");
+      const review = task.result?.generation_status === "needs_review";
+      setAcceptanceStatus(incomplete ? "chart_stream_v1 生成未完成；请查看搜索／事件／约束预算原因及报告，已保存完整事件。"
+        : review ? "chart_stream_v1 已结束，但参考检查仍发现硬冲突；请查看报告并复核。"
+        : "chart_stream_v1 连续整曲生成已结束；请检查连续性、休止和谱面可玩性。", incomplete || review ? "warn" : "good");
     }});
     return;
   }

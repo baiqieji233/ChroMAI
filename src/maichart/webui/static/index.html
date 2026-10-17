@@ -306,6 +306,7 @@
 <label class="field">注意力头数<input id="streamNhead" type="number" min="1" max="16" step="1" value="8"></label>
 <label class="field">前馈层宽度<input id="streamDimFeedforward" type="number" min="128" max="4096" step="64" value="768"></label>
 <label class="field">连续写作计划辅助权重<input id="streamPlanLossWeight" type="number" min="0" max="2" step="0.01" value="0.15"><small>监督节奏间隔、配置类型和持续动作倾向；不把 Planner 当作硬起音骨架。</small></label>
+<label class="field">整曲续写与结束学习权重<input id="streamEventDecisionLossWeight" type="number" min="0" max="10" step="0.05" value="0.25"><small>额外监督真实事件边界的 AT / EOS，减少结束决策被长字符序列稀释。0 关闭；真实 EOS 仍只来自谱面末尾，不把计算块当成音乐结束。旧模型需 finetune 才能学习。</small></label>
 </div>
 <div class="form-grid">
 <label class="field">数值精度<select id="streamPrecision"><option value="auto" selected>自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16；CPU 只能使用 FP32。</small></label>
@@ -902,7 +903,12 @@
 <label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较整个 Fraction 的模型概率；搜索尚不确定时自动扩大，最多 32 路。1 使用原逐字符路径；更大更慢。</small></label>
 <label class="field">拍位候选温度<input id="streamPositionTemperature" type="number" min="0" max="3" step="0.05" value="0.15"><small>候选宽度大于 1 时，对完整拍位候选采样；0 选最高分。与配置温度独立。</small></label>
 <label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>完整候选的软惩罚，同时考虑拍位和相邻间隔的分母；0 关闭。允许非二进制分音，不会就近移动已生成的音符。宽度 1 时不生效。</small></label>
-<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>使用已训练的下一事件间隔头，对明显偏离模型意图的候选作有界软惩罚。0 关闭；不限制最长休止，不补音。首个起音不应用。宽度 1 时不生效。</small></label>
+<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>按间隔比例惩罚偏离已训练意图的候选，避免 9 拍与 161 拍被当成同样偏差。预测达到 8 拍上限时表示“8 拍或更长”，允许长休止。0 关闭；首个起音和宽度 1 不应用。</small></label>
+<label class="field">同拍按键头数上限<input id="streamMaxButtonHeads" type="number" min="0" max="8" step="1" value="2"><small>硬约束：默认最多 2 个按键头，包含 Tap、Hold、带头 Slide；Touch 不计入此项。0 不限。不保证完整可玩性。</small></label>
+<label class="field">Hold 占用保护<select id="streamHoldProtection"><option value="on" selected>开启</option><option value="off">关闭</option></select><small>硬约束：已写出的 Hold / Touch Hold 尚未结束时，不允许在同一位置新增敲击头；不把整条 Slide 当作静态占用。</small></label>
+<label class="field">每个起音的参考检查预算<input id="streamReferenceChecks" type="number" min="0" max="32" step="1" value="8"><small>默认最多尝试 8 个完整配置；MiaCode 运行时检查确认硬冲突时重新采样当前配置，保留此前事件和精确拍位。耗尽预算报告未完成。0 关闭生成中检查；最终仍报告静态提示与运行时审计。</small></label>
+<label class="field">生成结束时间 / 秒（可选）<input id="streamGenerationEndSec" type="number" min="0.01" step="0.01" placeholder="留空由模型决定，受音频范围限制"><small>按原音频时间限制起音与持续动作终点，适用于乐曲结束后仍有混响或文件留白。不裁剪原音频，不改 BPM 或 first。</small></label>
+<label class="field">裁掉尾部全零数字静音<select id="streamTrimExactSilence"><option value="on" selected>开启</option><option value="off">关闭</option></select><small>只识别连续至少 50ms 的精确零采样，不使用响度阈值。非零弱音、淡出和混响保留，不能代替模型学习音乐结束。</small></label>
 <label class="field">拍位分母上限<input id="streamMaxDenominator" type="number" min="1" max="4096" step="1" value="384"><small>精确 Fraction 拍位的分母，不是 Simai 的 {分音}；例如 1/8 拍对应 {32}。允许上限内任意分母。</small></label>
 <label class="field">相邻间隔分母上限<input id="streamMaxIntervalDenominator" type="number" min="0" max="4096" step="1" value="96"><small>限制相邻两个音符的精确拍差；0 不限制。96 可能导出到 {384}，并不代表只允许 {96}。</small></label>
 <label class="field">最小起音间隔 / ms<input id="streamMinSpacingMs" type="number" min="0" max="1000" step="1" value="20"><small>防止毫秒级起音扎堆；同拍多押仍保留为一个完整配置。过大会排除快歌细分。</small></label>

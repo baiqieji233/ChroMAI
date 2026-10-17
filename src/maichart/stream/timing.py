@@ -17,11 +17,30 @@ class CanonicalPositionGrammar(PositionGrammar):
         return str(Fraction(text)) == text
 
 
+def interval_consistency_cost(delta, prediction, strength):
+    """Compare exact delta to the censored interval head without capping delta.
+
+    The training label saturates at eight beats. A saturated prediction means
+    'eight or more', so arbitrarily long rests remain unpenalized in that case.
+    Below saturation, a 161-beat jump cannot cost the same as a nine-beat one.
+    """
+    if not strength or prediction is None or not math.isfinite(prediction):
+        return 0.
+    target = max(0., min(1., float(prediction))) * 8.
+    actual = max(0., float(delta))
+    if target >= 8. and actual >= 8.:
+        return 0.
+    # One quarter beat prevents an unstable relative error at a near-zero
+    # prediction. It is a score scale, never an output grid or allowed gap.
+    difference = math.log((actual+.25)/(target+.25))
+    return float(strength) * .5 * difference * difference
+
+
 def export_end_timing(audio_end, tempo, first):
     # E is not a played event. Using a separately approximated 1/960 beat
     # here multiplied the last note's denominator (78 -> {49920}). An integer
     # terminal beat cannot introduce a new factor; all note times stay exact.
-    end = Fraction(math.ceil(audio_end))
+    end = max(Fraction(0),Fraction(math.ceil(audio_end)))
     return end, {'audio_end_beat': str(audio_end), 'export_end_beat': str(end),
         'end_extension_sec': float(seconds_at_beat(end, tempo, first)
                                    - seconds_at_beat(audio_end, tempo, first)),

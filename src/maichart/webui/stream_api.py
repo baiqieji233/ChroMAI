@@ -13,12 +13,26 @@ from maichart.stream import FAMILY, CHECKPOINT_SCHEMA
 def inspect(path):
     import torch
     payload=torch.load(path,map_location='cpu',weights_only=False)
-    valid=payload.get('schema')==CHECKPOINT_SCHEMA and payload.get('family')==FAMILY
+    return inspect_payload(payload)
+
+
+def inspect_payload(payload):
+    from maichart.stream.data import TRAINING_SEMANTICS
+    from maichart.generation.model_compatibility import checkpoint_capabilities
+    capabilities = checkpoint_capabilities(payload)
+    valid=bool(capabilities.get('valid'))
+    can_resume = valid and (payload.get('args') or {}).get('training_semantics') == TRAINING_SEMANTICS
+    warnings=[] if can_resume else ['旧训练的持续动作时钟使用了未知的目标时间；生成仍兼容，继续训练请选择 finetune 和新输出目录。']
+    if can_resume and payload.get('training_position') and payload['training_position'].get('complete') is not True:
+        warnings.append('此权重保存在未完成轮次；resume 保留优化器状态并重跑该轮，避免跳过剩余目标。')
     return {'valid':valid,'model_family':FAMILY,'schema':payload.get('schema'),
             'model_config':payload.get('model_config'), 'epoch':payload.get('epoch'),
             'args':payload.get('args',{}), 'input_contract':payload.get('input_contract'),
-            'generation_capabilities':{'continuous_stream':valid,'rational_event_positions':valid,
-                                       'sustained_action_memory':valid}}
+            'optimizer_steps':payload.get('optimizer_steps',0),
+            'training_position':payload.get('training_position',{}),
+            'can_resume':can_resume, 'can_init':valid,
+            'warnings':warnings,
+            'generation_capabilities':capabilities}
 
 
 def start(handler, operation, payload, *, runtime):
@@ -31,6 +45,10 @@ def start(handler, operation, payload, *, runtime):
         manifest=runtime._required_path(payload.get('manifest'),'manifest',must_exist=True)
         output=runtime._resolve_path(payload.get('checkpoint_dir') or 'checkpoints/chart_stream_v1')
         mode=payload.get('mode','fresh'); checkpoint=payload.get('init_checkpoint') or payload.get('training_checkpoint')
+        if mode not in {'fresh', 'resume', 'finetune'}:
+            raise ValueError('训练模式必须是 fresh、resume 或 finetune')
+        if mode == 'resume' and checkpoint and not inspect(checkpoint).get('can_resume'):
+            raise ValueError('持续动作时钟监督已修复；请使用 finetune 和新输出目录，不能直接 resume 旧训练。')
         args=['-m','maichart.stream.train','--manifest',str(manifest),'--checkpoint-dir',str(output),
               '--epochs',str(payload.get('epochs',10)),'--batch-size',str(payload.get('batch_size',1)),
               '--grad-accumulation',str(payload.get('grad_accumulation',1)),'--d-model',str(payload.get('d_model',256)),
@@ -40,6 +58,7 @@ def start(handler, operation, payload, *, runtime):
               '--lr',str(payload.get('lr',2e-4)),'--device',str(payload.get('device','auto')),
               '--precision',str(payload.get('precision','auto')),'--cache-dir',str(payload.get('cache_dir','cache/chart_stream_v1')),
               '--plan-loss-weight',str(payload.get('plan_loss_weight',.15)),
+              '--event-decision-loss-weight',str(payload.get('event_decision_loss_weight',.25)),
               '--weight-decay',str(payload.get('weight_decay',.01)),
               '--audio-cache-gb',str(payload.get('audio_cache_gb',8)),
               '--prepare-workers',str(payload.get('prepare_workers',4)),
@@ -97,7 +116,13 @@ def start(handler, operation, payload, *, runtime):
             args += ['--'+key.replace('_', '-'), str(payload.get(key, default))]
         args += ['--style-balance-strength', str(payload.get('style_balance_strength', .5)),
                  '--local-chord-strength', str(payload.get('local_chord_strength', 0.)),
-                 '--physical-feasibility-strength', str(payload.get('physical_feasibility_strength', 0.))]
+                 '--physical-feasibility-strength', str(payload.get('physical_feasibility_strength', 0.)),
+                 '--max-button-heads', str(payload.get('max_button_heads', 2)),
+                 '--hold-protection', str(payload.get('hold_protection', 'on')),
+                 '--reference-check-attempts', str(payload.get('reference_check_attempts',8)),
+                 '--trim-exact-silence',str(payload.get('trim_exact_silence','on'))]
+        if payload.get('generation_end_sec') is not None:
+            args += ['--generation-end-sec',str(payload['generation_end_sec'])]
         try:
             options = generation_parser().parse_args(args[2:])
             validate_options(options)

@@ -16,7 +16,10 @@ from maichart.form.rational_position_search import search_position
 from maichart.form.type_guidance import TypeGuidance
 from maichart.generation.sustain_state import SustainStateIndex
 from .memory import StreamMemoryBank
-from .timing import CanonicalPositionGrammar
+from .timing import CanonicalPositionGrammar, interval_consistency_cost
+from .context import prefix_action_state
+from .constraints import BasicConfigurationGuard
+from .reference_guard import ReferenceCandidateGuard
 
 
 def validate_options(args):
@@ -36,6 +39,16 @@ def validate_options(args):
         value = getattr(args, name)
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise ValueError(f'{name} 必须是 {low}–{high} 的整数')
+    if isinstance(args.reference_check_attempts,bool) or not isinstance(args.reference_check_attempts,int) or not 0 <= args.reference_check_attempts <= 32:
+        raise ValueError('reference_check_attempts 必须是 0–32 的整数')
+    if isinstance(args.max_button_heads, bool) or not isinstance(args.max_button_heads, int) or not 0 <= args.max_button_heads <= 8:
+        raise ValueError('max_button_heads 必须是 0–8 的整数')
+    if args.hold_protection not in {'on', 'off'}:
+        raise ValueError('hold_protection 必须为 on 或 off')
+    if args.trim_exact_silence not in {'on','off'}:
+        raise ValueError('trim_exact_silence 必须为 on 或 off')
+    if args.generation_end_sec is not None and (not math.isfinite(args.generation_end_sec) or args.generation_end_sec <= 0):
+        raise ValueError('generation_end_sec 必须是正的有限秒数')
     if not math.isfinite(args.min_spacing_ms) or not 0 <= args.min_spacing_ms <= 1000:
         raise ValueError('min_spacing_ms 必须是 0–1000 的有限数值')
     for name in ('style_balance_strength', 'local_chord_strength', 'physical_feasibility_strength'):
@@ -81,11 +94,18 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         style_strength=args.style_balance_strength, local_chord_strength=args.local_chord_strength,
         physical_strength=args.physical_feasibility_strength)
     grammar = guidance.grammar
+    hard_guard = BasicConfigurationGuard(grammar, song.tempo, song.first,
+        max_button_heads=args.max_button_heads, protect_holds=args.hold_protection == 'on',
+        max_action_end=getattr(args,'effective_end_sec',song.audio.duration_sec))
+    cell_grammar = None
+    reference_guard = ReferenceCandidateGuard(song.tempo,song.first) if args.reference_check_attempts else None
+    note_bans,note_choices = {},[]
+    note_attempts = 0
     chars = [(index, text[2:]) for index, text in enumerate(codec.tokens) if text.startswith('N:')]
     points, ids, history_tokens = [], [codec.bos_id], []
     previous = Fraction(-1)
     origin = max(Fraction(0), beat_at_second(0., song.tempo, song.first))
-    end = beat_at_second(song.audio.duration_sec, song.tempo, song.first)
+    end = beat_at_second(getattr(args,'effective_end_sec',song.audio.duration_sec), song.tempo, song.first)
     rng = torch.Generator(device=device).manual_seed(args.seed)
     position = None
     state, spelling, header_start = 'event', '', 0
@@ -108,22 +128,42 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         action = audio.new_zeros((1, 1, 50))
         action_mask = torch.ones((1, 1), dtype=torch.bool, device=device)
         if points:
-            # Include the last committed head; at(head) itself is strictly
-            # causal and would still hide a Hold started at exactly that beat.
             index = SustainStateIndex(points, song.tempo, song.first)
-            states, padding, _ = index.at(points[-1].beat + Fraction(1, 1_000_000))
+            states, padding, _ = prefix_action_state(index, points, len(points))
             action, action_mask = states[None].to(device), padding[None].to(device)
         history = torch.tensor([history_tokens], dtype=torch.long, device=device) if history_tokens else None
         summary = model.summarize_tokens(history) if history is not None else None
-        archive = bank.tensor(base_projection[audio_index(previous)], current_beat=previous)
-        if archive is not None:
-            archive = archive[None].to(device)
-            summary = archive if summary is None else torch.cat((summary, archive), 1)
-            summary = summary[:, -model.config.max_stream_memory:]
+        # Training supplies summarize_tokens(history) only. The old retrieval
+        # vectors (raw token embedding + audio projection) were never trained as
+        # decoder memory and could replace that summary entirely after a roll.
+        # Keep the causal archive for diagnostics, but use the trained summary.
         memory, padding = model.encode(audio, control, audio_padding_mask=audio_mask,
             action_state=action, action_state_padding_mask=action_mask,
             stream_memory=summary, encoded_audio=encoded_audio)
         return model.prepare_decode_memory(memory, padding, history=history)
+
+    def retry_note():
+        nonlocal ids,cache,consumed,spelling,note_choices,note_attempts
+        if note_attempts >= args.reference_check_attempts:
+            return False
+        # Ban one uncertain decision from this rejected candidate. All earlier
+        # committed events and the sampled Fraction stay intact.
+        choices = [(margin,prefix,token) for margin,prefix,token in note_choices
+                   if token not in note_bans.get(prefix,set())]
+        if not choices:
+            return False
+        _,prefix,token = min(choices,key=lambda choice:choice[0])
+        note_bans.setdefault(prefix,set()).add(token)
+        body = header_start+len(codec.position(position))
+        ids = ids[:body]
+        # Retain speculative cross K/V, rewinding self K/V to before NOTE.
+        if isinstance(cache,list):
+            cache = [(k[:,:body-1],v[:,:body-1],*rest) for k,v,*rest in cache]
+            consumed = body-1
+        else:
+            cache,consumed = None,0
+        spelling,note_choices = '',[]
+        return True
 
     memory, memory_mask = refresh_context()
     note_prefix_cache = {}
@@ -197,18 +237,15 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         elif state == 'position':
             if not spelling and args.position_beam_size > 1:
                 def interval_cost(beat):
-                    if interval_prediction is None or not math.isfinite(interval_prediction):
-                        return 0.
-                    # The head is trained on clip(delta, 0, 8)/8. Score in
-                    # precisely that scale. This bounded soft cost cannot ban
-                    # a rest, cap its duration, or create additional notes.
-                    target = min(1., max(0., interval_prediction))
-                    actual = min(8., max(0., float(beat-previous)))/8.
-                    return .5*args.position_interval_strength*(actual-target)**2
+                    return interval_consistency_cost(beat-previous, interval_prediction,
+                                                     args.position_interval_strength)
                 chosen, info = search_position(model, codec, position_grammar, logits, cache,
                     memory, memory_mask, consumed=consumed, width=args.position_beam_size,
                     complexity=args.position_complexity, temperature=args.position_temperature,
-                    generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost)
+                    generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost,
+                    proposals=([Fraction(math.floor(previous)+1)] + [previous+(b.beat-a.beat)
+                        for a,b in reversed(list(zip(points[-33:],points[-33:][1:])))]
+                        if previous >= 0 else []))
                 info['interval_prediction_beats_clipped_8'] = (None if interval_prediction is None
                     else min(1., max(0., interval_prediction))*8.)
                 searches += 1
@@ -251,31 +288,56 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 if guidance.physical is not None:
                     guidance.physical.register(position, second, song.tempo, song.first)
                 event_bias = guidance.event(position)
+                cell_grammar = hard_guard.event(position,button_capacity=(
+                    reference_guard.button_capacity(position) if reference_guard is not None else None))
+                note_bans,note_choices,note_attempts = {},[],0
                 state, spelling = 'note', ''
             else:
                 spelling += codec.tokens[selected][2:]
         else:
-            allowed = note_prefix_cache.get(spelling)
+            prefix_key = (spelling,cell_grammar.forbidden,cell_grammar.button_capacity,
+                          cell_grammar.held_buttons,cell_grammar.second)
+            allowed = note_prefix_cache.get(prefix_key)
             if allowed is None:
-                allowed = [index for index, char in chars if grammar.can_continue(spelling+char)]
-                if grammar.is_complete(spelling):
+                base_allowed = [index for index, char in chars if grammar.can_continue(spelling+char)]
+                allowed = [index for index in base_allowed if cell_grammar.can_continue(spelling+codec.tokens[index][2:])]
+                hard_guard.blocked_token_choices += len(base_allowed)-len(allowed)
+                if cell_grammar.is_complete(spelling):
                     allowed.append(codec.end_id)
                 if len(note_prefix_cache) >= 4096:
                     note_prefix_cache.clear()
-                note_prefix_cache[spelling] = allowed
+                note_prefix_cache[prefix_key] = allowed
+            allowed = [token for token in allowed if token not in note_bans.get(spelling,set())]
             if not allowed:
-                raise ValueError(f'No valid note continuation for {spelling!r}')
+                if reference_guard is not None:
+                    note_attempts += 1
+                    if retry_note(): continue
+                reason, incomplete = 'configuration_constraints_exhausted', True
+                break
             continuations = [None if token == codec.end_id else codec.tokens[token][2:] for token in allowed]
             hints = event_bias.biases(spelling, continuations)
             scores = logits.clone()
             scores[allowed] += torch.as_tensor(hints, device=device, dtype=logits.dtype)
             selected = sample_token(scores, allowed, args.temperature, rng)
+            if reference_guard is not None and len(allowed)>1:
+                alternatives = [token for token in allowed if token != selected]
+                margin = float(scores[selected]-scores[alternatives].max())
+                note_choices.append((margin,spelling,selected))
             ids.append(selected); emitted_tokens += 1
             if selected == codec.end_id:
                 point = EventPoint(position, spelling)
+                if reference_guard is not None:
+                    note_attempts += 1
+                    accepted,_ = reference_guard.check(point)
+                    if not accepted:
+                        if retry_note(): continue
+                        reason,incomplete = 'reference_constraints_exhausted',True
+                        break
                 points.append(point)
                 previous = position
                 guidance.commit(spelling, position)
+                hard_guard.commit(point)
+                if reference_guard is not None: reference_guard.commit(point)
                 vector = model.token_embedding(torch.tensor(codec.cell(point), device=device)).mean(0)
                 bank.append(position, spelling, vector + base_projection[audio_index(position)])
                 if len(points) % 32 == 0:
@@ -291,6 +353,9 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'resource_rotations': rotations, 'tokens': emitted_tokens,
                     'equivalent_fraction_normalizations': canonicalizations,
                     'audio_encoder_calls': 1, 'guidance': guidance.report(),
+                    'memory_policy': 'training_history_summary_v1',
+                    'basic_constraints': hard_guard.report(),
+                    'reference_constraints': reference_guard.report() if reference_guard is not None else {'enabled':False},
                     'position_search': {'mode': 'whole_fraction' if args.position_beam_size > 1 else 'character',
                         'searches': searches, 'expanded_hypotheses': search_expansions,
                         'trace_first_64': search_trace}, 'event_decisions_first_64': event_trace}
