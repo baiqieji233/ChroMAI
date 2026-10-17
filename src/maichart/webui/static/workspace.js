@@ -126,16 +126,22 @@
     const sources = typeof selectedDatasetItems === "function" ? selectedDatasetItems() : [];
     const modeLabel = {fresh: "从头训练", resume: "从断点追加训练", finetune: "已有模型加强训练"}[mode];
     const limits = Number(value("maxSteps", 0));
-    const formFamily = value("modelFamily") === "song_form_v1";
+    const selectedFamily = value("modelFamily");
+    const formFamily = ["song_form_v1", "song_form_v2"].includes(selectedFamily);
+    const streamFamily = selectedFamily === "chart_stream_v1";
     const chartLimit = Number(value("formLimitCharts", 0));
     list("trainingRunSummary", [
       `起点：${modeLabel}${mode !== "fresh" ? ` · ${value("trainingCheckpointPath").trim() || "尚未选择 checkpoint"}` : ""}`,
       sources.length ? `素材：${sources.map((item) => item.name || item.path).join("、")}` : `素材：当前单份清单 · ${value("manifestPath").trim() || "尚未准备"}`,
-      `${mode === "resume" ? "追加" : "本阶段"} ${value("epochs")} 轮 · ${formFamily
+      `${mode === "resume" ? "追加" : "本阶段"} ${value("epochs")} 轮 · ${streamFamily
+        ? `${chartLimit > 0 ? `最多 ${chartLimit} 张谱面` : "全部合格谱面"}${limits > 0 ? ` · continuation batch 上限 ${limits}` : " · 不限 continuation batch"}`
+        : formFamily
         ? `${chartLimit > 0 ? `最多 ${chartLimit} 张谱面` : "全部合格谱面"}${limits > 0 ? ` · 配置 batch 上限 ${limits}` : " · 不限配置 batch"}`
         : `每轮${limits > 0 ? `最多 ${limits} 个训练 batch（短跑）` : "完整训练集"}`}`,
       `学习率 ${value("learningRate")} · batch ${value("batchSize")} × 累积 ${value("gradAccumulation")} ≈ 每次更新 ${Number(value("batchSize")) * Number(value("gradAccumulation"))} 个片段`,
-      ...(formFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("weightDecay")} · 条件省略 ${value("formConditionDropout")}`,
+      ...(streamFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("streamWeightDecay")} · 精度 ${nameOf("streamPrecision")}`,
+        `连续上下文 ${value("streamMaxTokens")} token · 近期历史 ${value("streamMaxHistoryTokens")} token · 记忆槽 ${value("streamMemoryTokens")}`,
+        `计划辅助 ${value("streamPlanLossWeight")} · 音频缓存 ${value("streamAudioCacheGb")} GB · 准备线程 ${value("streamPrepareWorkers")}`] : formFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("weightDecay")} · 条件省略 ${value("formConditionDropout")}`,
         `全曲规划损失 ${value("formBlueprintLossWeight")} · 负荷损失 ${value("formCurveLossWeight")} · 段落关联损失 ${value("formRelationLossWeight")} · 质量加权${checked("qualityEnabled") ? "开启" : "关闭"}`,
         `精度 ${nameOf("formPrecision")} · 单次音频上限 ${value("formMaxRegionSeconds")} 秒 · 隐藏层 ${value("formDModel")} / ${value("formLayers")} 层 / ${value("formNhead")} 头`] : []),
       `验证：${value("validationManifestPath").trim() ? "使用独立验证集" : "不使用；best 按训练 loss 保存"}`,
