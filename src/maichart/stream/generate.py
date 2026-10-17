@@ -8,7 +8,6 @@ import json
 from pathlib import Path
 
 from maichart.event_timing import EventTempo
-from maichart.form.cli import _export_end_timing
 from maichart.form.codec import RationalCodec
 from maichart.form.data import organize_song
 from maichart.form.rational_audio import extract_rational_audio, planner_audio_queries, beat_at_second
@@ -18,6 +17,7 @@ from maichart.generation.timeline import normalize_tempo_map
 from .checkpoint import load
 from .decoding import compose_stream, validate_options
 from .runtime import resolve_device
+from .timing import export_end_timing, timing_diagnostics
 
 
 def parser():
@@ -30,6 +30,10 @@ def parser():
     p.add_argument('--level', type=float, default=13.)
     p.add_argument('--temperature', type=float, default=.7)
     p.add_argument('--position-temperature', type=float, default=.15)
+    p.add_argument('--position-beam-size', type=int, default=4)
+    p.add_argument('--position-complexity', type=float, default=.35)
+    p.add_argument('--position-interval-strength', type=float, default=1.)
+    p.add_argument('--early-eos-penalty', type=float, default=0.)
     p.add_argument('--max-events', type=int, default=0)
     p.add_argument('--max-denominator', type=int, default=384)
     p.add_argument('--max-interval-denominator', type=int, default=96)
@@ -75,7 +79,7 @@ def generate(args):
         'max_tokens': model.config.max_tokens, 'max_history_tokens': model.config.max_history_tokens}), flush=True)
     points, status = compose_stream(model, RationalCodec(), song, values, times, condition, atoms, args)
     audio_end = beat_at_second(audio.duration_sec, song.tempo, song.first)
-    export_end, export_timing = _export_end_timing(audio_end, song.tempo, song.first)
+    export_end, export_timing = export_end_timing(audio_end, song.tempo, song.first)
     text, _ = compile_event_points(points, tempo_changes=song.tempo, bpm=song.tempo[0].bpm,
         first=args.first, end_beat=export_end, level=str(condition.level))
     output = Path(args.output)
@@ -89,7 +93,13 @@ def generate(args):
         'generation_status': 'incomplete' if status['incomplete'] else 'completed',
         'first': args.first, 'tempo_map': [{'beat': str(t.beat), 'bpm': t.bpm} for t in song.tempo],
         'export_timing': export_timing,
+        'timing_diagnostics': timing_diagnostics(points, song.tempo, song.first, audio.duration_sec, text),
         'generation_controls': {'style_balance_strength': args.style_balance_strength,
+            'position_beam_size': args.position_beam_size, 'position_complexity': args.position_complexity,
+            'position_interval_strength': args.position_interval_strength,
+            'position_temperature': args.position_temperature, 'early_eos_penalty': args.early_eos_penalty,
+            'max_denominator': args.max_denominator, 'max_interval_denominator': args.max_interval_denominator,
+            'min_spacing_ms': args.min_spacing_ms,
             'local_chord_strength_requested': args.local_chord_strength,
             'local_chord_strength_effective': args.local_chord_strength,
             'physical_feasibility_strength': args.physical_feasibility_strength},

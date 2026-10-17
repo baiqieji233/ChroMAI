@@ -89,6 +89,9 @@ def start(handler, operation, payload, *, runtime):
         if payload.get('bpm') not in {None, ''}:
             args += ['--bpm', str(payload['bpm'])]
         for key, default in (('position_temperature', .15), ('max_events', 0),
+                             ('position_beam_size', 4), ('position_complexity', .35),
+                             ('position_interval_strength', 1.),
+                             ('early_eos_penalty', 0.),
                              ('max_denominator', 384), ('max_interval_denominator', 96),
                              ('min_spacing_ms', 20.)):
             args += ['--'+key.replace('_', '-'), str(payload.get(key, default))]

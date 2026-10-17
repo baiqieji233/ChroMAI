@@ -559,6 +559,10 @@ const GENERATION_PARAM_FIELDS = [
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
   "generationDevice",                                       // 生成运行设备
   "formPositionComplexity", "formPositionBeamSize", "formEarlyEosPenalty",
+  "streamPositionTemperature", "streamPositionBeamSize", "streamPositionComplexity", "streamEarlyEosPenalty",
+  "streamPositionIntervalStrength",
+  "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
+  "streamStyleBalanceStrength", "streamLocalChordStrength", "streamPhysicalStrength",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
   "topP", "repetitionPenalty", "repetitionWindow", "maxTokens",
   "intensityFollow", "intensityFollowSpan",                  // 逐窗口强度跟随
@@ -1924,6 +1928,14 @@ function chartStreamGenerationPayload() {
     seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)),
     first: Number(valueOrDefault("#first", 0)), level: Number(valueOrDefault("#level", 13.3)),
     temperature: Number(valueOrDefault("#temperature", .7)), device: formDevice("#generationDevice"),
+    position_temperature: Number(valueOrDefault("#streamPositionTemperature", .15)),
+    position_beam_size: Number(valueOrDefault("#streamPositionBeamSize", 4)),
+    position_complexity: Number(valueOrDefault("#streamPositionComplexity", .35)),
+    position_interval_strength: Number(valueOrDefault("#streamPositionIntervalStrength", 1)),
+    early_eos_penalty: Number(valueOrDefault("#streamEarlyEosPenalty", 0)),
+    max_denominator: Number(valueOrDefault("#streamMaxDenominator", 384)),
+    max_interval_denominator: Number(valueOrDefault("#streamMaxIntervalDenominator", 96)),
+    min_spacing_ms: Number(valueOrDefault("#streamMinSpacingMs", 20)),
     style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", .5)),
     local_chord_strength: Number(valueOrDefault("#streamLocalChordStrength", 0)),
     physical_feasibility_strength: Number(valueOrDefault("#streamPhysicalStrength", 0)),
@@ -2325,6 +2337,14 @@ function renderTaskResults(task) {
     }
   }
   renderTaskOnsetDiagnostics(task);
+  if (task.kind === "chart_stream_generate" && task.result?.stream_report) {
+    const report = task.result.stream_report;
+    const timing = report.timing_diagnostics || {};
+    const notice = document.createElement("p");
+    notice.className = "inline-status";
+    notice.textContent = `${report.generation_status === "incomplete" ? "生成未完成" : "生成已结束"}：${report.status?.reason || "未知"}；${report.event_count ?? 0} 个起音；最长起音空白 ${Number(timing.max_gap_sec || 0).toFixed(2)} 秒；最大导出分音 {${timing.max_export_division ?? "未知"}}。空白可能是合理休止，具体位置与候选概率见 stream.json。`;
+    container.appendChild(notice);
+  }
   if (task.kind === "form_generate") {
     let load = task.result?.local_load_summary;
     if (!load) for (const line of [...(task.logs || [])].reverse()) {
@@ -4361,7 +4381,11 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
     const data = await api("/api/chart-stream/generate", payload);
-    watchTask(data.task_id, (task) => { if (task.status === "completed") setAcceptanceStatus("chart_stream_v1 连续整曲生成完成；请检查连续性、静音区和谱面可玩性。", "good"); });
+    watchTask(data.task_id, (task) => { if (task.status === "completed") {
+      const incomplete = task.result?.generation_status === "incomplete";
+      setAcceptanceStatus(incomplete ? "chart_stream_v1 生成未完成；请查看搜索／事件预算原因及报告，已保存完整事件。"
+        : "chart_stream_v1 连续整曲生成已结束；请检查连续性、休止和谱面可玩性。", incomplete ? "warn" : "good");
+    }});
     return;
   }
   if (["song_form_v1", "song_form_v2"].includes(payload.model_family)) {

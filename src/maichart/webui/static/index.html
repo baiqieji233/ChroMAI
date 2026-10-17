@@ -898,7 +898,15 @@
 <div class="settings-content"><p class="workflow-hint">chart_stream_v1 连续生成整曲事件，由模型决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p>
 <div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0.5"><small>软性偏向请求的 Tap / Hold / Slide / Touch 组成；0 关闭，不是硬比例。</small></label>
 <label class="field">局部多押强度<input id="streamLocalChordStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性控制局部多押倾向；只影响配置候选，不强制填满同时发生。</small></label>
-<label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label></div></div>
+<label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label>
+<label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较整个 Fraction 的模型概率；搜索尚不确定时自动扩大，最多 32 路。1 使用原逐字符路径；更大更慢。</small></label>
+<label class="field">拍位候选温度<input id="streamPositionTemperature" type="number" min="0" max="3" step="0.05" value="0.15"><small>候选宽度大于 1 时，对完整拍位候选采样；0 选最高分。与配置温度独立。</small></label>
+<label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>完整候选的软惩罚，同时考虑拍位和相邻间隔的分母；0 关闭。允许非二进制分音，不会就近移动已生成的音符。宽度 1 时不生效。</small></label>
+<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>使用已训练的下一事件间隔头，对明显偏离模型意图的候选作有界软惩罚。0 关闭；不限制最长休止，不补音。首个起音不应用。宽度 1 时不生效。</small></label>
+<label class="field">拍位分母上限<input id="streamMaxDenominator" type="number" min="1" max="4096" step="1" value="384"><small>精确 Fraction 拍位的分母，不是 Simai 的 {分音}；例如 1/8 拍对应 {32}。允许上限内任意分母。</small></label>
+<label class="field">相邻间隔分母上限<input id="streamMaxIntervalDenominator" type="number" min="0" max="4096" step="1" value="96"><small>限制相邻两个音符的精确拍差；0 不限制。96 可能导出到 {384}，并不代表只允许 {96}。</small></label>
+<label class="field">最小起音间隔 / ms<input id="streamMinSpacingMs" type="number" min="0" max="1000" step="1" value="20"><small>防止毫秒级起音扎堆；同拍多押仍保留为一个完整配置。过大会排除快歌细分。</small></label>
+<label class="field">提前结束抑制<input id="streamEarlyEosPenalty" type="number" min="0" max="8" step="0.1" value="0"><small>默认 0 尊重模型 EOS。只在报告确认提前 EOS 后小幅尝试；它不能修复跳拍型空白，调高可能强迫尾部补音。</small></label></div></div>
 </details>
 <section id="generationTimingGroup" class="workflow-group" >
 <div class="workflow-group-heading"><span class="step">03</span>

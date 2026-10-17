@@ -30,6 +30,34 @@ class StreamChunk:
     start_event: int
 
 
+TRAINING_SEMANTICS = 'chart_stream_training_v2_contiguous_targets'
+
+
+def _target_ranges(ids, max_tokens, at_id, eos_id):
+    """Partition every target once, without splitting a cell or inventing EOS.
+
+    BOS is input only. EOS is its own final unit, so an exact-fit last cell
+    cannot silently lose its end-of-song target.
+    """
+    if max_tokens < 1 or ids[-1] != eos_id:
+        raise ValueError('Invalid continuous stream target or token budget')
+    boundaries = [i for i, token in enumerate(ids) if token == at_id]
+    boundaries += [len(ids)-1, len(ids)]
+    if not boundaries or boundaries[0] != 1:
+        raise ValueError('Continuous stream targets must start with an event')
+    ranges = []
+    start = end = 1
+    for left, right in zip(boundaries, boundaries[1:]):
+        if right-left > max_tokens:
+            raise ValueError(f'单个配置需要 {right-left} token，超过流上下文上限 {max_tokens}')
+        if right-start > max_tokens:
+            ranges.append((start, end))
+            start = left
+        end = right
+    ranges.append((start, end))
+    return ranges
+
+
 def _plan_for_event(point, previous, text, density=0.):
     delta = max(Fraction(point.beat) - Fraction(previous), Fraction(0))
     chars = str(text)
@@ -58,43 +86,29 @@ class StreamDataset(Dataset):
         self.max_history_tokens = int(max_history_tokens)
         self.songs = []
         self.chunks = []
+        self.training_semantics = TRAINING_SEMANTICS
         self._audio_queries = {}
         for index, record in enumerate(self.base.songs):
             song, points, level, weight, state, condition, excluded, annotation = record
             if not points or weight <= 0:
                 continue
             ids = self.codec.encode(points, origin=Fraction(0))
-            # Start later chunks at an event boundary so a configuration is not
-            # cut in half. The carried token history still makes the stream causal.
-            starts = [0]
-            cursor = self.max_tokens
-            at_id = self.codec.at_id
-            while cursor < len(ids):
-                candidates = [i for i in range(cursor, max(1, cursor-self.max_tokens//4), -1)
-                              if ids[i] == at_id]
-                start = min(candidates) if candidates else cursor
-                starts.append(start); cursor = start + self.max_tokens
-            for chunk_index, start in enumerate(starts):
-                end = min(len(ids), start + self.max_tokens)
-                if end < len(ids):
-                    candidates = [i for i in range(end, start, -1) if ids[i] == at_id]
-                    if candidates: end = max(candidates)
-                if end <= start + 1: continue
-                if start:
-                    decoder = [self.codec.bos_id] + ids[start:end-1]
-                    target = ids[start:end]
-                else:
-                    decoder = ids[:end-1]
-                    target = ids[1:end]
+            event_at = {position: event for event, position in enumerate(
+                i for i, token in enumerate(ids) if token == self.codec.at_id)}
+            event_before = 0
+            for chunk_index, (start, end) in enumerate(_target_ranges(
+                    ids, self.max_tokens, self.codec.at_id, self.codec.eos_id)):
+                decoder = [self.codec.bos_id] + ids[start:end-1]
+                target = ids[start:end]
                 history_start = max(0, start-self.max_history_tokens)
-                history = ids[history_start:start]
+                history = ids[history_start:start] if start > 1 else []
                 # Map event starts to local target rows. Labels supervise the
                 # next-event intent, not every character in a configuration.
                 labels=[]; masks=[]
                 for row, token in enumerate(target):
                     if token == self.codec.at_id:
-                        global_index = (start + row) if start else (1 + row)
-                        event_index = ids[:global_index].count(self.codec.at_id)
+                        global_index = start + row
+                        event_index = event_at[global_index]
                         point = points[min(len(points) - 1, event_index)]
                         previous = Fraction(0) if event_index == 0 else points[event_index - 1].beat
                         event_second = float(seconds_at_beat(point.beat, song.tempo, song.first) - song.first)
@@ -104,9 +118,10 @@ class StreamDataset(Dataset):
                         masks.append(True)
                     else:
                         labels.append((0.,)*8); masks.append(False)
-                start_event = ids[:start].count(self.codec.at_id)
+                start_event = event_before
                 self.chunks.append(StreamChunk(index, chunk_index, tuple(decoder), tuple(target),
                     tuple(history), tuple(labels), tuple(masks), end >= len(ids), start_event))
+                event_before += target.count(self.codec.at_id)
             self.songs.append(record)
 
     def __len__(self): return len(self.chunks)
@@ -116,7 +131,8 @@ class StreamDataset(Dataset):
         if chunk.chart_index not in self._audio_queries:
             self._audio_queries[chunk.chart_index] = planner_audio_queries(song)
         audio, times, _ = self._audio_queries[chunk.chart_index]
-        boundary = points[min(chunk.start_event, len(points)-1)].beat if points else Fraction(0)
+        boundary = (points[chunk.start_event].beat if chunk.start_event < len(points)
+                    else points[-1].beat+Fraction(1, 1_000_000)) if points else Fraction(0)
         action, action_mask, _ = state.at(boundary)
         return {'audio': audio, 'audio_times_sec': torch.as_tensor(times, dtype=torch.float64),
                 'form': torch.from_numpy(_form_descriptor(song, 0)),

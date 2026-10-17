@@ -2,7 +2,9 @@
 from __future__ import annotations
 
 from fractions import Fraction
+import json
 import math
+import time
 
 import numpy as np
 import torch
@@ -10,9 +12,11 @@ import torch
 from maichart.event_timing import EventPoint, seconds_at_beat
 from maichart.form.rational_audio import beat_at_second
 from maichart.form.rational_generate import PositionGrammar, _spacing_beat_gap
+from maichart.form.rational_position_search import search_position
 from maichart.form.type_guidance import TypeGuidance
 from maichart.generation.sustain_state import SustainStateIndex
 from .memory import StreamMemoryBank
+from .timing import CanonicalPositionGrammar
 
 
 def validate_options(args):
@@ -27,7 +31,8 @@ def validate_options(args):
         raise ValueError('BPM 必须是正的有限数值')
     for name, low, high in (('max_denominator', 1, 4096),
                             ('max_interval_denominator', 0, 4096),
-                            ('max_events', 0, 1_000_000), ('seed', 0, 2**63-1)):
+                            ('max_events', 0, 1_000_000), ('seed', 0, 2**63-1),
+                            ('position_beam_size', 1, 8)):
         value = getattr(args, name)
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise ValueError(f'{name} 必须是 {low}–{high} 的整数')
@@ -37,6 +42,11 @@ def validate_options(args):
         value = getattr(args, name)
         if not math.isfinite(value) or not 0 <= value <= 3:
             raise ValueError(f'{name} 必须是 0–3 的有限数值')
+    for name, high in (('position_complexity', 2.), ('early_eos_penalty', 8.),
+                       ('position_interval_strength', 8.)):
+        value = getattr(args, name)
+        if not math.isfinite(value) or not 0 <= value <= high:
+            raise ValueError(f'{name} 必须是 0–{high:g} 的有限数值')
 
 
 def sample_token(logits, allowed, temperature, generator):
@@ -82,6 +92,11 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     cache, consumed = None, 0
     rotations = emitted_tokens = canonicalizations = 0
     event_bias = None
+    interval_prediction = None
+    searches, search_expansions, search_trace, event_trace = 0, 0, [], []
+    started = time.perf_counter()
+    characters = max(4, len(str(math.ceil(end*args.max_denominator)))
+                     + 1 + len(str(args.max_denominator)))
 
     def audio_index(beat):
         second = float(seconds_at_beat(max(Fraction(0), beat), song.tempo, song.first))
@@ -120,14 +135,19 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             if args.max_events and len(points) >= args.max_events:
                 reason, incomplete = 'event_budget', True
                 break
-            if len(ids) >= model.config.max_tokens - 1 and points:
+            needs_search_space = (args.position_beam_size > 1
+                and len(ids) + characters + 2 > model.config.max_tokens)
+            if points and len(ids) > 1 and (len(ids) >= model.config.max_tokens - 1 or needs_search_space):
                 history_tokens = (history_tokens + ids)[-model.config.max_history_tokens:]
                 memory, memory_mask = refresh_context()
                 ids, cache, consumed = [codec.bos_id], None, 0
                 rotations += 1
             gap = (_spacing_beat_gap(previous, song.tempo, args.min_spacing_ms / 1000.)
                    if previous >= 0 else Fraction(0))
-            position_grammar = PositionGrammar(previous, end, characters=40,
+            # Every admissible fraction fits this spelling budget; 40 digits
+            # only made impossible numerical branches expensive to explore.
+            grammar_type = CanonicalPositionGrammar if args.position_beam_size > 1 else PositionGrammar
+            position_grammar = grammar_type(previous, end, characters=characters,
                 max_denominator=args.max_denominator,
                 max_delta_denominator=args.max_interval_denominator or None,
                 delta_reference=previous if previous >= 0 else Fraction(0),
@@ -161,20 +181,61 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         if state == 'event':
             allowed = [codec.eos_id, codec.at_id]
             scores = logits.clone()
-            if points:
-                # Preserve the existing bounded anti-early-EOS heuristic.
-                scores[codec.eos_id] -= min(8., max(0., float(end-previous)) / 8.)
+            scores[codec.eos_id] -= args.early_eos_penalty
+            if len(event_trace) < 64:
+                event_trace.append({'after_beat': str(previous) if points else None,
+                    'raw_eos_minus_at': float(logits[codec.eos_id]-logits[codec.at_id])})
             selected = sample_token(scores, allowed, args.position_temperature, rng)
             ids.append(selected); emitted_tokens += 1
             if selected == codec.eos_id:
                 reason, incomplete = 'eos', False
                 break
             header_start = len(ids)-1
+            interval_prediction = (float(output['plan'][0, -1, 0])
+                if previous >= 0 and args.position_interval_strength else None)
             state, spelling = 'position', ''
         elif state == 'position':
-            allowed = position_grammar.allowed(spelling, codec)
-            selected = sample_token(logits, allowed, args.position_temperature, rng)
-            ids.append(selected); emitted_tokens += 1
+            if not spelling and args.position_beam_size > 1:
+                def interval_cost(beat):
+                    if interval_prediction is None or not math.isfinite(interval_prediction):
+                        return 0.
+                    # The head is trained on clip(delta, 0, 8)/8. Score in
+                    # precisely that scale. This bounded soft cost cannot ban
+                    # a rest, cap its duration, or create additional notes.
+                    target = min(1., max(0., interval_prediction))
+                    actual = min(8., max(0., float(beat-previous)))/8.
+                    return .5*args.position_interval_strength*(actual-target)**2
+                chosen, info = search_position(model, codec, position_grammar, logits, cache,
+                    memory, memory_mask, consumed=consumed, width=args.position_beam_size,
+                    complexity=args.position_complexity, temperature=args.position_temperature,
+                    generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost)
+                info['interval_prediction_beats_clipped_8'] = (None if interval_prediction is None
+                    else min(1., max(0., interval_prediction))*8.)
+                searches += 1
+                search_expansions += info['expanded_hypotheses']
+                if chosen is None:
+                    if header_start > 1:
+                        # A search may lack space for a whole fraction in the
+                        # remaining compute context. Retry at its exact saved
+                        # event boundary with the same musical lower bound.
+                        history_tokens = (history_tokens + ids[:header_start])[-model.config.max_history_tokens:]
+                        memory, memory_mask = refresh_context()
+                        ids, cache, consumed, header_start = [codec.bos_id, codec.at_id], None, 0, 1
+                        rotations += 1
+                        continue
+                    reason, incomplete = 'position_search_exhausted', True
+                    break
+                if len(search_trace) < 64 or (previous >= 0 and float(seconds_at_beat(Fraction(chosen), song.tempo, song.first)
+                        - seconds_at_beat(previous, song.tempo, song.first)) >= 4.):
+                    search_trace.append({'previous_beat': str(previous), 'chosen_beat': chosen, **info})
+                spelling = chosen
+                selected = codec.note_id
+                ids.extend(codec.position(Fraction(chosen))[1:])
+                emitted_tokens += len(codec.position(Fraction(chosen)))-1
+            else:
+                allowed = position_grammar.allowed(spelling, codec)
+                selected = sample_token(logits, allowed, args.position_temperature, rng)
+                ids.append(selected); emitted_tokens += 1
             if selected == codec.note_id:
                 position = Fraction(spelling)
                 canonical = codec.position(position)
@@ -217,10 +278,19 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 guidance.commit(spelling, position)
                 vector = model.token_embedding(torch.tensor(codec.cell(point), device=device)).mean(0)
                 bank.append(position, spelling, vector + base_projection[audio_index(position)])
+                if len(points) % 32 == 0:
+                    print('stream_arrange_progress '+json.dumps({'events': len(points),
+                        'beat': str(position), 'audio_second': float(seconds_at_beat(position, song.tempo, song.first)),
+                        'audio_duration_sec': song.audio.duration_sec,
+                        'elapsed_sec': round(time.perf_counter()-started, 2),
+                        'resource_rotations': rotations, 'search_expansions': search_expansions}), flush=True)
                 state, spelling = 'event', ''
             else:
                 spelling += codec.tokens[selected][2:]
     return points, {'closed': not incomplete, 'incomplete': incomplete, 'reason': reason,
                     'resource_rotations': rotations, 'tokens': emitted_tokens,
                     'equivalent_fraction_normalizations': canonicalizations,
-                    'audio_encoder_calls': 1, 'guidance': guidance.report()}
+                    'audio_encoder_calls': 1, 'guidance': guidance.report(),
+                    'position_search': {'mode': 'whole_fraction' if args.position_beam_size > 1 else 'character',
+                        'searches': searches, 'expanded_hypotheses': search_expansions,
+                        'trace_first_64': search_trace}, 'event_decisions_first_64': event_trace}

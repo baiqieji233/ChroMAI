@@ -54,6 +54,10 @@ for (const device of ["auto", "cuda", "cpu"]) {
     assert.equal(result.temperature, 0);
     assert.equal(result.seed, 42);
     assert.equal(result.bpm, 130);
+    assert.equal(result.position_beam_size, 4);
+    assert.equal(result.position_complexity, .35);
+    assert.equal(result.position_interval_strength, 1);
+    assert.equal(result.early_eos_penalty, 0);
   });
 }
 
@@ -64,6 +68,24 @@ test("empty seed and BPM delegate to server random seed and audio tempo", () => 
   const result = context.chartStreamGenerationPayload();
   assert.equal(result.seed, null);
   assert.equal(result.bpm, null);
+});
+
+test('stream timing controls are visible in its family panel and forwarded', () => {
+  const values = {'#streamPositionBeamSize':'8', '#streamPositionTemperature':'0',
+    '#streamPositionComplexity':'1.2', '#streamMaxDenominator':'96',
+    '#streamMaxIntervalDenominator':'24', '#streamMinSpacingMs':'30', '#streamEarlyEosPenalty':'0.5'};
+  const context = vm.createContext({valueOrDefault: (key, fallback) => values[key] ?? fallback,
+    collectCondition: () => ({}), parseTempoMap: () => null, formDevice: () => 'cpu'});
+  install(context, 'chartStreamGenerationPayload', 'intensityCurvePayload');
+  const result = context.chartStreamGenerationPayload();
+  for (const id of Object.keys(values)) assert.ok(html.includes(`id="${id.slice(1)}"`));
+  assert.equal(result.position_beam_size, 8);
+  assert.equal(result.position_temperature, 0);
+  assert.equal(result.position_complexity, 1.2);
+  assert.equal(result.max_denominator, 96);
+  assert.equal(result.max_interval_denominator, 24);
+  assert.equal(result.min_spacing_ms, 30);
+  assert.equal(result.early_eos_penalty, .5);
 });
 
 for (const family of ['chart_stream_v1', 'song_form_v2']) {

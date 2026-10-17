@@ -1943,6 +1943,17 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
         f"/api/download?path={quote(str(path))}" if _is_relative_to(path.resolve(), PROJECT_ROOT) else None
         for path in existing
     ]
+    if task.kind == 'chart_stream_generate':
+        report_path = next((path for path in existing if path.name.endswith('.stream.json')), None)
+        if report_path is not None:
+            try:
+                report = json.loads(report_path.read_text(encoding='utf-8-sig'))
+                task.result.update(stream_report=report,
+                    generation_status=report.get('generation_status'),
+                    timing_diagnostics=report.get('timing_diagnostics', {}))
+            except (OSError, ValueError) as exc:
+                task.result['stream_report_error'] = str(exc)
+        return
     if task.kind == "acceptance":
         # Hand the report straight to the interface; the panel draws it.
         report_path = Path(str(task.result.get("report", "")))

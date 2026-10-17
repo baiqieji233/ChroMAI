@@ -32,6 +32,8 @@ def options(**kwargs):
     args = parser().parse_args(['--audio', 'unused.wav', '--checkpoint', 'unused.pt',
                                 '--output', 'unused.txt', '--device', 'cpu',
                                 '--temperature', '0', '--position-temperature', '0'])
+    args.position_beam_size = 1  # Exercise the character-compatible loop here.
+    args.position_interval_strength = 0
     for key, value in kwargs.items():
         setattr(args, key, value)
     return args
@@ -224,12 +226,14 @@ def test_http_generation_preserves_device_seed_and_zero_temperature(webui_api, m
     monkeypatch.setattr(webui, '_run_subprocess_task', lambda task, args, **kwargs: calls.append((task, args)))
     request = {'model_family': 'chart_stream_v1', 'audio': str(audio), 'checkpoint': str(path),
                'device': device, 'temperature': 0., 'position_temperature': 0., 'seed': 123,
+               'position_beam_size': 8, 'position_complexity': .7, 'early_eos_penalty': 0.,
                'output': str(tmp_path/'maidata.txt'), 'condition': {'level': 13.6}}
     status, reply = webui_api('/api/chart-stream/generate', request)
     assert status == 200, reply
     task, args = calls[0]
     parsed = parser().parse_args(args[2:])
     assert (parsed.device, parsed.seed, parsed.temperature, parsed.position_temperature) == (device, 123, 0., 0.)
+    assert (parsed.position_beam_size, parsed.position_complexity, parsed.early_eos_penalty) == (8, .7, 0.)
     assert task.result['seed'] == 123
     assert task.result['effective_settings']['condition_file'] == parsed.condition_file
     assert json.loads(__import__('pathlib').Path(parsed.condition_file).read_text()) == request['condition']
@@ -246,3 +250,15 @@ def test_invalid_device_and_nan_fail_in_api_before_starting_job(webui_api, monke
     for bad in ({'device': 'auto-bad'}, {'temperature': -1}, {'first': 'nan'}, {'seed': -1}):
         status, _ = webui_api('/api/chart-stream/generate', {'audio': str(path), 'checkpoint': str(path), **bad})
         assert status == 400
+
+
+def test_stream_task_collects_incomplete_status_and_gap_diagnostics(tmp_path):
+    report = {'generation_status': 'incomplete', 'status': {'reason': 'position_search_exhausted'},
+              'timing_diagnostics': {'max_gap_sec': 12.}, 'event_count': 3}
+    path = tmp_path/'maidata.stream.json'
+    path.write_text(json.dumps(report))
+    task = webui.TaskState('timing-test', 'chart_stream_generate')
+    webui._collect_task_results(task, [path])
+    assert task.result['generation_status'] == 'incomplete'
+    assert task.result['stream_report'] == report
+    assert task.result['timing_diagnostics']['max_gap_sec'] == 12.

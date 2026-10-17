@@ -13,7 +13,7 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader
 
 from maichart.form.quality_profile import MUSICAL_EVIDENCE
-from .data import StreamDataset, collate_stream
+from .data import StreamDataset, collate_stream, TRAINING_SEMANTICS
 from .model import ChartStreamTransformer, StreamConfig
 from .checkpoint import save, load
 
@@ -65,6 +65,7 @@ def _loss(output,batch,plan_weight=.15):
 
 def main(argv=None):
     args=parser().parse_args(argv)
+    args.training_semantics = TRAINING_SEMANTICS
     device=torch.device('cuda' if args.device=='auto' and torch.cuda.is_available() else ('cpu' if args.device=='auto' else args.device))
     precision=_precision(args.precision,device); random.seed(args.seed); np.random.seed(args.seed); torch.manual_seed(args.seed)
     old=None
@@ -80,6 +81,10 @@ def main(argv=None):
     dataset=StreamDataset(args.manifest,cache_dir=args.cache_dir,max_tokens=args.max_tokens,
         max_history_tokens=args.max_history_tokens,max_region_seconds=args.max_region_seconds,
         preparation_workers=args.prepare_workers,audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts)
+    print('stream_dataset '+json.dumps({'training_semantics': TRAINING_SEMANTICS,
+        'charts': len(dataset.songs), 'chunks': len(dataset),
+        'targets': sum(len(chunk.target) for chunk in dataset.chunks),
+        'eos_targets': sum(chunk.target.count(dataset.codec.eos_id) for chunk in dataset.chunks)}),flush=True)
     if old is None:
         model=ChartStreamTransformer(StreamConfig(vocab_size=len(dataset.codec),d_model=args.d_model,
             nhead=args.nhead,layers=args.layers,dim_feedforward=args.dim_feedforward,dropout=args.dropout,
