@@ -54,8 +54,6 @@ class ChartStreamTransformer(nn.Module):
         self.position_embedding = nn.Embedding(max(config.max_tokens, config.max_history_tokens) + 4, w)
         self.audio_projection = nn.Linear(config.audio_dim, w)
         self.condition_projection = nn.Linear(config.condition_dim, w)
-        self.memory_projection = nn.Linear(w, w)
-        self.plan_projection = nn.Linear(config.plan_dim, w)
         self.action_projection = nn.Linear(config.action_dim, w)
         self.context_router = nn.Sequential(nn.Linear(w, max(16, w // 2)), nn.GELU(), nn.Linear(max(16, w // 2), 3))
         nn.init.zeros_(self.context_router[-1].weight)
@@ -73,7 +71,6 @@ class ChartStreamTransformer(nn.Module):
         self.decoder_norm = nn.LayerNorm(w)
         self.output = nn.Linear(w, config.vocab_size)
         self.plan_head = nn.Linear(w, config.plan_dim)
-        self.event_gate = nn.Linear(w, 1)
         self.curve_head = nn.Linear(w, 4)
 
     def encode(self, audio, condition, *, audio_padding_mask=None,
@@ -145,8 +142,7 @@ class ChartStreamTransformer(nn.Module):
         hidden = self.decoder(target, memory, tgt_mask=causal,
                               memory_key_padding_mask=memory_mask)
         hidden = self.decoder_norm(hidden)
-        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden),
-                'event_gate': self.event_gate(hidden).squeeze(-1), 'hidden': hidden}
+        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden), 'hidden': hidden}
 
     def decode_step(self, token, position, memory, memory_mask, caches=None):
         """Incremental one-token decode with cached self/cross attention."""
@@ -169,8 +165,7 @@ class ChartStreamTransformer(nn.Module):
                 layer, hidden, memory, *values, memory_mask)
             updated.append(present)
         hidden = self.decoder_norm(hidden)
-        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden),
-                'event_gate': self.event_gate(hidden).squeeze(-1), 'hidden': hidden}, updated
+        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden), 'hidden': hidden}, updated
 
     def forward(self, batch):
         stream_memory = batch.get('stream_memory')
