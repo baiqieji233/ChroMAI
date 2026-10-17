@@ -26,6 +26,7 @@ class StreamChunk:
     plan_labels: tuple[tuple[float, ...], ...]
     plan_mask: tuple[bool, ...]
     final: bool
+    start_event: int
 
 
 def _plan_for_event(point, previous, text):
@@ -91,8 +92,9 @@ class StreamDataset(Dataset):
                         masks.append(True)
                     else:
                         labels.append((0.,)*8); masks.append(False)
+                start_event = ids[:start].count(self.codec.at_id)
                 self.chunks.append(StreamChunk(index, chunk_index, tuple(decoder), tuple(target),
-                    tuple(history), tuple(labels), tuple(masks), end >= len(ids)))
+                    tuple(history), tuple(labels), tuple(masks), end >= len(ids), start_event))
             self.songs.append(record)
 
     def __len__(self): return len(self.chunks)
@@ -100,6 +102,8 @@ class StreamDataset(Dataset):
         chunk = self.chunks[index]
         song, points, level, weight, state, condition, excluded, annotation = self.base.songs[chunk.chart_index]
         audio, times, _ = planner_audio_queries(song)
+        boundary = points[min(chunk.start_event, len(points)-1)].beat if points else Fraction(0)
+        action, action_mask, _ = state.at(boundary)
         return {'audio': audio, 'audio_times_sec': torch.as_tensor(times, dtype=torch.float64),
                 'form': torch.from_numpy(_form_descriptor(song, 0)),
                 'condition': condition.to_vector(),
@@ -108,6 +112,7 @@ class StreamDataset(Dataset):
                 'history': torch.tensor(chunk.history, dtype=torch.long),
                 'plan_labels': torch.tensor(chunk.plan_labels, dtype=torch.float32),
                 'plan_mask': torch.tensor(chunk.plan_mask, dtype=torch.bool),
+                'action_state': action, 'action_state_padding_mask': action_mask,
                 'final': torch.tensor(chunk.final), 'chart_index': chunk.chart_index,
                 'chunk_index': chunk.chunk_index}
 
@@ -115,7 +120,7 @@ class StreamDataset(Dataset):
 def collate_stream(items):
     from torch.nn.utils.rnn import pad_sequence
     result={}
-    for key in ('audio','decoder_input','target','history','plan_labels','plan_mask'):
+    for key in ('audio','decoder_input','target','history','plan_labels','plan_mask','action_state'):
         values=[item[key] for item in items]
         result[key]=pad_sequence(values,batch_first=True,padding_value=0)
         result[key+'_padding_mask']=torch.arange(result[key].size(1))[None] >= torch.tensor([len(v) for v in values])[:,None]
@@ -123,4 +128,5 @@ def collate_stream(items):
         result[key]=torch.stack([item[key] if torch.is_tensor(item[key]) else torch.tensor(item[key]) for item in items])
     result['audio_times_sec']=pad_sequence([item['audio_times_sec'] for item in items],batch_first=True)
     result['audio_padding_mask']=torch.arange(result['audio'].size(1))[None] >= torch.tensor([len(v['audio']) for v in items])[:,None]
+    result['action_state_padding_mask']=pad_sequence([item['action_state_padding_mask'] for item in items],batch_first=True,padding_value=True)
     return result

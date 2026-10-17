@@ -16,6 +16,7 @@ from maichart.form.rational_generate import PositionGrammar
 from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_compile import compile_event_points
+from maichart.generation.sustain_state import SustainStateIndex
 from maichart.generation.timeline import normalize_tempo_map
 from .checkpoint import load
 
@@ -49,9 +50,18 @@ def generate(args):
     if condition_file and condition_file.is_file(): condition=GenerationCondition.from_dict(json.loads(condition_file.read_text(encoding='utf-8')))
     batch={'audio':values[None], 'condition':condition.to_vector()[None],
            'audio_padding_mask':torch.zeros((1,len(values)),dtype=torch.bool),
-           'condition_null':torch.zeros(1,dtype=torch.bool)}
+           'condition_null':torch.zeros(1,dtype=torch.bool),
+           'action_state':torch.zeros((1,1,50)),
+           'action_state_padding_mask':torch.ones((1,1),dtype=torch.bool)}
     batch={k:v.to(args.device) for k,v in batch.items()}
-    with torch.inference_mode(): memory,memory_mask=model.encode(batch['audio'],batch['condition'],audio_padding_mask=batch['audio_padding_mask'],condition_null=batch['condition_null'])
+    memory = memory_mask = None
+    def refresh_memory(summary=None):
+        with torch.inference_mode():
+            return model.encode(batch['audio'],batch['condition'],
+                audio_padding_mask=batch['audio_padding_mask'],condition_null=batch['condition_null'],
+                action_state=batch['action_state'],action_state_padding_mask=batch['action_state_padding_mask'],
+                stream_memory=summary)
+    memory,memory_mask=refresh_memory()
     ids=[codec.bos_id]; history_tokens=None; points=[]; previous=Fraction(-1); state='event'; text=''; position=None
     note_grammar=_NoteGrammar.from_atoms(payload.get('atom_catalog') or ['1','2','3','4','5','6','7','8'])
     rng=torch.Generator(device=args.device).manual_seed(args.seed)
@@ -102,15 +112,23 @@ def generate(args):
         ids.append(token)
         if token==codec.end_id:
             points[-1]=EventPoint(points[-1].beat,text); state='event'; text=''
+            try:
+                state_index=SustainStateIndex(points, song.tempo, song.first)
+                action, action_mask, _=state_index.at(points[-1].beat)
+                batch['action_state']=action[None].to(args.device)
+                batch['action_state_padding_mask']=action_mask[None].to(args.device)
+                memory,memory_mask=refresh_memory()
+            except (ValueError, KeyError):
+                # Keep the neutral state if an unfinished/generated syntax is
+                # not yet accepted by the MiaCode state parser.
+                pass
             if len(ids) >= model.config.max_tokens:
                 # A compute boundary carries a summary and recent authored
                 # history; it never emits EOS or moves the musical clock.
                 with torch.inference_mode():
                     summary=model.summarize_tokens(torch.tensor([ids],dtype=torch.long,device=args.device),
                         slots=model.config.max_stream_memory)
-                    memory,memory_mask=model.encode(batch['audio'],batch['condition'],
-                        audio_padding_mask=batch['audio_padding_mask'],condition_null=batch['condition_null'],
-                        stream_memory=summary)
+                    memory,memory_mask=refresh_memory(summary)
                 history_tokens=ids[-model.config.max_history_tokens:]
                 ids=[codec.bos_id]
         else: text += codec.tokens[token][2:]

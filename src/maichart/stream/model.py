@@ -28,6 +28,7 @@ class StreamConfig:
     max_stream_memory: int = 32
     max_tokens: int = 1024
     plan_dim: int = 8
+    action_dim: int = 50
 
     def __post_init__(self):
         for name in ('vocab_size','d_model','nhead','layers','dim_feedforward',
@@ -55,6 +56,10 @@ class ChartStreamTransformer(nn.Module):
         self.condition_projection = nn.Linear(config.condition_dim, w)
         self.memory_projection = nn.Linear(w, w)
         self.plan_projection = nn.Linear(config.plan_dim, w)
+        self.action_projection = nn.Linear(config.action_dim, w)
+        self.context_router = nn.Sequential(nn.Linear(w, max(16, w // 2)), nn.GELU(), nn.Linear(max(16, w // 2), 3))
+        nn.init.zeros_(self.context_router[-1].weight)
+        nn.init.zeros_(self.context_router[-1].bias)
         self.null_condition = nn.Parameter(torch.zeros(w))
         self.audio_norm = nn.LayerNorm(w)
         encoder_layer = nn.TransformerEncoderLayer(
@@ -71,7 +76,8 @@ class ChartStreamTransformer(nn.Module):
         self.event_gate = nn.Linear(w, 1)
 
     def encode(self, audio, condition, *, audio_padding_mask=None,
-               condition_null=None, stream_memory=None):
+               condition_null=None, stream_memory=None, action_state=None,
+               action_state_padding_mask=None):
         if audio.ndim != 3 or audio.size(-1) != self.config.audio_dim:
             raise ValueError('stream audio shape mismatch')
         batch = audio.size(0)
@@ -93,13 +99,27 @@ class ChartStreamTransformer(nn.Module):
         values = self.audio_norm(values)
         values = self.audio_encoder(values, src_key_padding_mask=mask)
         values = values.masked_fill(mask[..., None], 0.)
+        audio_summary = values.masked_fill(mask[..., None], 0.).sum(1) / (~mask).sum(1).clamp_min(1)[:, None]
+        route = torch.softmax(self.context_router(global_token + audio_summary), dim=-1)
+        values = values * route[:, None, 0:1]
+        if action_state is not None:
+            if action_state.ndim != 3 or action_state.shape[0] != batch or action_state.size(-1) != self.config.action_dim:
+                raise ValueError('stream action_state shape mismatch')
+            action_mask = (action_state_padding_mask.bool() if action_state_padding_mask is not None
+                           else torch.zeros(action_state.shape[:2], dtype=torch.bool, device=audio.device))
+            if action_mask.shape != action_state.shape[:2]:
+                raise ValueError('stream action_state mask shape mismatch')
+            action = self.action_projection(action_state.to(values)).masked_fill(action_mask[..., None], 0.)
+            action = action * route[:, None, 1:2]
+            values = torch.cat((action, values), dim=1)
+            memory_mask = torch.cat((action_mask, mask), dim=1)
+        else:
+            memory_mask = mask
         if stream_memory is not None:
             if stream_memory.ndim != 3 or stream_memory.shape[0] != batch or stream_memory.size(-1) != self.config.d_model:
                 raise ValueError('stream memory shape mismatch')
-            values = torch.cat((stream_memory.to(values), values), dim=1)
-            memory_mask = torch.cat((torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device), mask), dim=1)
-        else:
-            memory_mask = mask
+            values = torch.cat((stream_memory.to(values) * route[:, None, 2:3], values), dim=1)
+            memory_mask = torch.cat((torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device), memory_mask), dim=1)
         return values, memory_mask
 
     def decode(self, decoder_input, memory, memory_mask, *, history=None, history_padding_mask=None):
@@ -133,7 +153,8 @@ class ChartStreamTransformer(nn.Module):
         memory, memory_mask = self.encode(batch['audio'], batch['condition'],
             audio_padding_mask=batch.get('audio_padding_mask'),
             condition_null=batch.get('condition_null'),
-            stream_memory=stream_memory)
+            stream_memory=stream_memory, action_state=batch.get('action_state'),
+            action_state_padding_mask=batch.get('action_state_padding_mask'))
         return self.decode(batch['decoder_input'], memory, memory_mask,
                            history=batch.get('history'), history_padding_mask=batch.get('history_padding_mask'))
 

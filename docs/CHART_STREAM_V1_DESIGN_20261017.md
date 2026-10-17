@@ -40,6 +40,8 @@ checkpoint：`maichart-chart-stream-checkpoint-v1`
 6. 训练数据：当前 chunk continuation 目标已经避免 chunk EOS，但计划标签仍是首版弱标签；需要按真实 event index、谱师选音和持续状态生成完整监督。
 7. WebUI：新增控件已经接入 payload，但 checkpoint inspect 的 chart-stream 专属展示、曲线来源和生成报告摘要仍需完善。
 
+第二阶段已实现：动态上下文路由（当前音频／持续动作／远期流记忆）、`SustainStateIndex` 生成侧更新、跨计算块近期历史摘要、chunk 级非 EOS 续写。阶段回归 `3 passed`，Python/JavaScript 语法检查通过；没有真实训练或 GPU 测试。
+
 ## 研究依据与边界
 
 Transformer-XL 的 segment-level recurrence、Music Transformer 的相对时间建模、Museformer 的细粒度/粗粒度注意力支持长程音乐上下文的可行性。它们不证明舞萌谱面质量会自动提升，首版必须以固定歌曲的边界连续性、静音区、节奏稳定性、前后呼应和 MiaCode 检查进行后续对照。
