@@ -351,13 +351,22 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     checkpoint_data = _load_checkpoint_payload(checkpoint_path) if checkpoint_path else {}
                     checkpoint_family = _checkpoint_model_family(checkpoint_data) if checkpoint_path else None
                     profile_name = checkpoint_data.get("model_config", {}).get("planner_profile") if checkpoint_path else None
-                    selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2"} or is_music_structure(str(profile_name or ""))
+                    selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"} or is_music_structure(str(profile_name or ""))
                                        else "audio")
                 if selected_source == "model":
                     requested_family = str(payload.get("model_family", ""))
                     checkpoint_family = (_checkpoint_model_family(_load_checkpoint_payload(checkpoint_path))
                                          if checkpoint_path else None)
-                    if requested_family in {"song_form_v1", "song_form_v2"} or checkpoint_family in {"song_form_v1", "song_form_v2"}:
+                    if requested_family == 'chart_stream_v1' or checkpoint_family == 'chart_stream_v1':
+                        from maichart.stream.curve import generate_learned_profile
+                        profile = generate_learned_profile(
+                            audio, checkpoint_path, resolution_sec=resolution,
+                            condition=payload.get("condition"), bpm=payload.get("bpm") or 120.,
+                            first=first, tempo_map=explicit_tempo_map,
+                            meter_map=meter_map, device="cpu")
+                        condition_source = checkpoint_family or requested_family
+                        task.result["condition_source"] = condition_source
+                    elif requested_family in {"song_form_v1", "song_form_v2"} or checkpoint_family in {"song_form_v1", "song_form_v2"}:
                         from maichart.form.curve import generate_learned_profile
                         profile = generate_learned_profile(
                             audio, checkpoint_path, resolution_sec=resolution,

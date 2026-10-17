@@ -74,10 +74,11 @@ class ChartStreamTransformer(nn.Module):
         self.output = nn.Linear(w, config.vocab_size)
         self.plan_head = nn.Linear(w, config.plan_dim)
         self.event_gate = nn.Linear(w, 1)
+        self.curve_head = nn.Linear(w, 4)
 
     def encode(self, audio, condition, *, audio_padding_mask=None,
                condition_null=None, stream_memory=None, action_state=None,
-               action_state_padding_mask=None):
+               action_state_padding_mask=None, return_curve=False):
         if audio.ndim != 3 or audio.size(-1) != self.config.audio_dim:
             raise ValueError('stream audio shape mismatch')
         batch = audio.size(0)
@@ -102,6 +103,7 @@ class ChartStreamTransformer(nn.Module):
         audio_summary = values.masked_fill(mask[..., None], 0.).sum(1) / (~mask).sum(1).clamp_min(1)[:, None]
         route = torch.softmax(self.context_router(global_token + audio_summary), dim=-1)
         values = values * route[:, None, 0:1]
+        curve_prediction = self.curve_head(values)
         if action_state is not None:
             if action_state.ndim != 3 or action_state.shape[0] != batch or action_state.size(-1) != self.config.action_dim:
                 raise ValueError('stream action_state shape mismatch')
@@ -120,7 +122,7 @@ class ChartStreamTransformer(nn.Module):
                 raise ValueError('stream memory shape mismatch')
             values = torch.cat((stream_memory.to(values) * route[:, None, 2:3], values), dim=1)
             memory_mask = torch.cat((torch.zeros(stream_memory.shape[:2], dtype=torch.bool, device=values.device), memory_mask), dim=1)
-        return values, memory_mask
+        return (values, memory_mask, curve_prediction) if return_curve else (values, memory_mask)
 
     def decode(self, decoder_input, memory, memory_mask, *, history=None, history_padding_mask=None):
         if decoder_input.ndim != 2 or decoder_input.size(1) == 0:
@@ -146,17 +148,43 @@ class ChartStreamTransformer(nn.Module):
         return {'logits': self.output(hidden), 'plan': self.plan_head(hidden),
                 'event_gate': self.event_gate(hidden).squeeze(-1), 'hidden': hidden}
 
+    def decode_step(self, token, position, memory, memory_mask, caches=None):
+        """Incremental one-token decode with cached self/cross attention."""
+        if token.ndim != 2 or token.size(1) != 1 or position < 0:
+            raise ValueError('decode_step expects [B,1] and nonnegative position')
+        from maichart.generation.event_model import _cached_decoder_layer_with_cross_cache
+        hidden = self.token_embedding(token) + self.position_embedding(
+            torch.tensor([position], device=token.device)).unsqueeze(0)
+        caches = caches or []
+        updated=[]
+        for index, layer in enumerate(self.decoder.layers):
+            previous = caches[index] if index < len(caches) else None
+            if previous is None:
+                values = (None, None, None, None)
+            elif len(previous) == 2:
+                values = (*previous, None, None)
+            else:
+                values = previous
+            hidden, present = _cached_decoder_layer_with_cross_cache(
+                layer, hidden, memory, *values, memory_mask)
+            updated.append(present)
+        hidden = self.decoder_norm(hidden)
+        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden),
+                'event_gate': self.event_gate(hidden).squeeze(-1), 'hidden': hidden}, updated
+
     def forward(self, batch):
         stream_memory = batch.get('stream_memory')
         if stream_memory is None and batch.get('history') is not None:
             stream_memory = self.summarize_tokens(batch['history'], batch.get('history_padding_mask'))
-        memory, memory_mask = self.encode(batch['audio'], batch['condition'],
+        memory, memory_mask, curve = self.encode(batch['audio'], batch['condition'],
             audio_padding_mask=batch.get('audio_padding_mask'),
             condition_null=batch.get('condition_null'),
             stream_memory=stream_memory, action_state=batch.get('action_state'),
-            action_state_padding_mask=batch.get('action_state_padding_mask'))
-        return self.decode(batch['decoder_input'], memory, memory_mask,
+            action_state_padding_mask=batch.get('action_state_padding_mask'), return_curve=True)
+        result = self.decode(batch['decoder_input'], memory, memory_mask,
                            history=batch.get('history'), history_padding_mask=batch.get('history_padding_mask'))
+        result['curve'] = curve
+        return result
 
     @torch.no_grad()
     def summarize(self, hidden, *, slots=None):

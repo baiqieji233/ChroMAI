@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 import torch
+import numpy as np
 
 from maichart.event_timing import EventPoint, EventTempo
 from maichart.form.codec import RationalCodec
@@ -17,6 +18,7 @@ from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAU
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.sustain_state import SustainStateIndex
+from .memory import StreamMemoryBank
 from maichart.generation.timeline import normalize_tempo_map
 from .checkpoint import load
 
@@ -55,14 +57,30 @@ def generate(args):
            'action_state_padding_mask':torch.ones((1,1),dtype=torch.bool)}
     batch={k:v.to(args.device) for k,v in batch.items()}
     memory = memory_mask = None
+    ids=[codec.bos_id]; history_tokens=None; points=[]; previous=Fraction(-1); state='event'; text=''; position=None
+    memory_bank = StreamMemoryBank(max_entries=256, max_retrieval=model.config.max_stream_memory)
     def refresh_memory(summary=None):
+        with torch.inference_mode():
+            if previous < 0:
+                query_index = 0
+            else:
+                query_second = float(__import__('maichart.event_timing', fromlist=['seconds_at_beat']).seconds_at_beat(
+                    previous, song.tempo, song.first))
+                query_index = int(np.searchsorted(times, query_second, side='left'))
+                query_index = max(0, min(query_index, len(values) - 1))
+            query_vector=model.audio_projection(batch['audio'][:, query_index])[0]
+        archive=memory_bank.tensor(query_vector, current_beat=previous)
+        if archive is not None:
+            archive=archive.to(args.device)[None]
+            summary=archive if summary is None else torch.cat((summary,archive),1)
+            summary=summary[:,-model.config.max_stream_memory:]
         with torch.inference_mode():
             return model.encode(batch['audio'],batch['condition'],
                 audio_padding_mask=batch['audio_padding_mask'],condition_null=batch['condition_null'],
                 action_state=batch['action_state'],action_state_padding_mask=batch['action_state_padding_mask'],
                 stream_memory=summary)
     memory,memory_mask=refresh_memory()
-    ids=[codec.bos_id]; history_tokens=None; points=[]; previous=Fraction(-1); state='event'; text=''; position=None
+    cache=None; consumed=0
     note_grammar=_NoteGrammar.from_atoms(payload.get('atom_catalog') or ['1','2','3','4','5','6','7','8'])
     rng=torch.Generator(device=args.device).manual_seed(args.seed)
     audio_end=beat_at_second(audio.duration_sec,song.tempo,song.first)
@@ -70,8 +88,19 @@ def generate(args):
         decoder=torch.tensor([ids],dtype=torch.long,device=args.device)
         history = (torch.tensor([history_tokens],dtype=torch.long,device=args.device)
                    if history_tokens else None)
+        if history is not None and cache is None:
+            # History is a static memory branch. Prefix it once before the
+            # cached decoder starts; subsequent tokens only update self-K/V.
+            history_values=model.token_embedding(history)
+            memory_for_decode=torch.cat((history_values,memory),dim=1)
+            history_mask=(history==0)
+            memory_mask_for_decode=torch.cat((history_mask,memory_mask),dim=1)
+        else:
+            memory_for_decode, memory_mask_for_decode=memory, memory_mask
+        token=torch.tensor([[ids[-1]]],dtype=torch.long,device=args.device)
         with torch.inference_mode():
-            output=model.decode(decoder,memory,memory_mask,history=history)
+            output,cache=model.decode_step(token, len(ids)-1, memory_for_decode,
+                                           memory_mask_for_decode, cache)
         logits=output['logits'][0,-1].float()
         if state=='event':
             allowed=[codec.at_id]
@@ -116,23 +145,25 @@ def generate(args):
         ids.append(token)
         if token==codec.end_id:
             points[-1]=EventPoint(points[-1].beat,text); state='event'; text=''
-            try:
-                state_index=SustainStateIndex(points, song.tempo, song.first)
-                action, action_mask, _=state_index.at(points[-1].beat)
-                batch['action_state']=action[None].to(args.device)
-                batch['action_state_padding_mask']=action_mask[None].to(args.device)
-                memory,memory_mask=refresh_memory()
-            except (ValueError, KeyError):
-                # Keep the neutral state if an unfinished/generated syntax is
-                # not yet accepted by the MiaCode state parser.
-                pass
+            with torch.inference_mode():
+                event_tokens=torch.tensor([codec.encode([points[-1]])],dtype=torch.long,device=args.device)
+                event_vector=model.token_embedding(event_tokens).mean(1)[0]
+                acoustic_vector=model.audio_projection(batch['audio'].mean(1))[0]
+            memory_bank.append(points[-1].beat, points[-1].note_text, event_vector+acoustic_vector)
             if len(ids) >= model.config.max_tokens:
                 # A compute boundary carries a summary and recent authored
                 # history; it never emits EOS or moves the musical clock.
                 with torch.inference_mode():
                     summary=model.summarize_tokens(torch.tensor([ids],dtype=torch.long,device=args.device),
                         slots=model.config.max_stream_memory)
-                    memory,memory_mask=refresh_memory(summary)
+                    try:
+                        state_index=SustainStateIndex(points, song.tempo, song.first)
+                        action, action_mask, _=state_index.at(points[-1].beat)
+                        batch['action_state']=action[None].to(args.device)
+                        batch['action_state_padding_mask']=action_mask[None].to(args.device)
+                    except (ValueError, KeyError):
+                        pass
+                    memory,memory_mask=refresh_memory(summary); cache=None
                 history_tokens=ids[-model.config.max_history_tokens:]
                 ids=[codec.bos_id]
         else: text += codec.tokens[token][2:]

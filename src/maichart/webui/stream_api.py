@@ -36,7 +36,13 @@ def start(handler, operation, payload, *, runtime):
               '--max-history-tokens',str(payload.get('max_history_tokens',256)),'--max-stream-memory',str(payload.get('max_stream_memory',32)),
               '--lr',str(payload.get('lr',2e-4)),'--device',str(payload.get('device','auto')),
               '--precision',str(payload.get('precision','auto')),'--cache-dir',str(payload.get('cache_dir','cache/chart_stream_v1')),
-              '--plan-loss-weight',str(payload.get('plan_loss_weight',.15))]
+              '--plan-loss-weight',str(payload.get('plan_loss_weight',.15)),
+              '--weight-decay',str(payload.get('weight_decay',.01)),
+              '--audio-cache-gb',str(payload.get('audio_cache_gb',8)),
+              '--prepare-workers',str(payload.get('prepare_workers',4)),
+              '--max-region-seconds',str(payload.get('max_region_seconds',15)),
+              '--limit-charts',str(payload.get('limit_charts',0)),
+              '--log-interval',str(payload.get('log_interval',25))]
         if mode == 'resume':
             if not checkpoint: raise ValueError('resume requires checkpoint path')
             args += ['--resume',str(runtime._required_path(checkpoint,'resume checkpoint',must_exist=True))]

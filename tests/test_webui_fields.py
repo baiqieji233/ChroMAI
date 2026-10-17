@@ -115,6 +115,33 @@ def test_family_visibility_accepts_several_families():
         "the cross-window family still inherits every event_v1 field"
 
 
+def test_chart_stream_controls_and_checkpoint_copy_are_exposed():
+    """The continuous family must expose its own runtime contract in the main page."""
+
+    for field_id in (
+        "streamMaxTokens", "streamMaxHistoryTokens", "streamMemoryTokens",
+        "streamDModel", "streamLayers", "streamNhead", "streamDimFeedforward",
+        "streamPlanLossWeight", "streamPrecision", "streamWeightDecay",
+        "streamAudioCacheGb", "streamPrepareWorkers", "streamMaxRegionSeconds",
+        "streamLimitCharts", "streamCacheDir", "streamLogInterval",
+    ):
+        assert f'id="{field_id}"' in INDEX
+    assert 'id="chartStreamTrainingControls"' in INDEX
+    assert 'data-training-family="chart_stream_v1"' in INDEX
+    for key in (
+        "streamPrecision", "streamWeightDecay", "streamAudioCacheGb",
+        "streamPrepareWorkers", "streamMaxRegionSeconds", "streamLimitCharts",
+        "streamCacheDir", "streamLogInterval",
+    ):
+        assert f'#{key}' in APP_JS
+    stream_api = (ROOT / "src/maichart/webui/stream_api.py").read_text(encoding="utf-8")
+    for flag in ("--weight-decay", "--audio-cache-gb", "--prepare-workers",
+                 "--max-region-seconds", "--limit-charts", "--log-interval"):
+        assert flag in stream_api
+    assert "renderChartStreamCheckpointInspection" in APP_JS
+    assert "连续整曲、有理事件和持续动作能力" in APP_JS
+
+
 def test_global_frames_stays_cli_only_by_decision():
     """Global memory frames has no UI control: its default is the推荐 value.
 

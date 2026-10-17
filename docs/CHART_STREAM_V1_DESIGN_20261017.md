@@ -48,6 +48,16 @@ checkpoint：`maichart-chart-stream-checkpoint-v1`
 
 第四阶段端到端夹具：使用 4 秒 WAV、1 张简化官谱，在 CPU 上 fresh 训练 1 epoch（3 个 continuation chunk），保存 `stream_last.pt`；随后加载该 checkpoint 连续生成并成功编译回 Simai，报告 `stream_continuity=true`。未把随机初始化后的 3 个事件当作质量证据；该夹具只证明训练→checkpoint→生成→编译链路贯通。期间修复了 inference tensor 解码和 position temperature=0 的生成边界。
 
+第五阶段增加 `StreamMemoryBank`：保存有界的已提交事件向量，按当前音频投影检索相似历史，仅作为动态注意力证据，不强制复制。新增记忆回归后，stream 测试为 `5 passed`；核心 Python/前端语法检查通过。WebUI 视觉分组、checkpoint 详情文字和前端模型族回归交由 Luna 子代理收尾。
+
+第六阶段完成生成性能修复：`ChartStreamTransformer.decode_step` 复用 self-attention 与 cross-attention KV；音频编码只在上下文变化时重建，持续动作与远期记忆在计算块边界更新。相同随机模型、96 token、64 音频节点、2 层 CPU 短测中，完整前缀重算约 `0.8222s`，增量 cache 约 `0.0551s`，约 **14.9 倍**；这是算法路径对照，不是消费级设备整曲保证。训练仍按 continuation chunk 并行，数据查询使用已有磁盘/进程缓存；真正全量训练速度需结合显存和歌曲长度实测。
+
+WebUI 收尾：主训练页切换到 `chart_stream_v1` 时显示独立的上下文、记忆、精度、缓存、准备线程、区域上限和日志参数；这些字段会进入现有 stream API，不再借用隐藏的 song-form 控件。resume/finetune 检查会按 checkpoint 回填并锁定模型结构参数。checkpoint 详情明确显示连续整曲、有理事件和持续动作能力；生成检查会单独提示连续整曲状态，避免把 stream checkpoint 套用旧 event/song-form 文案。
+
+已确认的效率边界：首版训练每个 chunk 仍会把同歌曲的音频记忆送入 batch，适合先验证质量合同；若全量训练显示音频编码成为瓶颈，下一步应做“按歌曲分组的编码复用”或有限 LRU，而不是把整曲所有编码永久驻留内存。生成路径已经避免了每 token 的整段音频重编码和前缀平方重算。
+
+第七阶段复用旧架构中有价值但不绑定分段的能力：增量 `SustainStateIndex`、有界物理/语法检查、Radar/Style 条件、动态负荷曲线头和 Python MiaCode 兼容报告。曲线头只做连续负荷和类型组成辅助，不把响度设为硬门限；已提交谱面优先作为监督，创新由动态上下文路由决定，低相关历史不会强制复用。
+
 ## 研究依据与边界
 
 Transformer-XL 的 segment-level recurrence、Music Transformer 的相对时间建模、Museformer 的细粒度/粗粒度注意力支持长程音乐上下文的可行性。它们不证明舞萌谱面质量会自动提升，首版必须以固定歌曲的边界连续性、静音区、节奏稳定性、前后呼应和 MiaCode 检查进行后续对照。

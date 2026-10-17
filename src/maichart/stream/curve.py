@@ -1,0 +1,51 @@
+"""Learned load-curve inference for chart_stream_v1."""
+from __future__ import annotations
+
+import numpy as np
+import torch
+
+from maichart.event_timing import EventTempo
+from maichart.form.clock import AUDIO_CURVE_AXIS
+from maichart.form.curve import load_curve_bin_centers, resample_load_curve, decode_density
+from maichart.form.data import organize_song
+from maichart.form.rational_audio import extract_rational_audio, planner_audio_queries
+from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
+from maichart.generation.timeline import normalize_tempo_map
+from .checkpoint import load
+
+
+def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=1., condition=None,
+                             bpm=120., first=0., tempo_map=None, meter_map=None, device='cpu'):
+    model, payload = load(checkpoint_path, device=device)
+    model.eval()
+    audio = extract_rational_audio(audio_path, cache_dir=str(__import__('pathlib').Path(checkpoint_path).parent/'curve_audio_cache'))
+    tempo = normalize_tempo_map(tempo_map) if tempo_map is not None else [EventTempo(0, float(bpm))]
+    song = organize_song(audio, tempo, first, meters=meter_map, max_seconds=999., quality_profile='musical_evidence_v1')
+    values, times, _ = planner_audio_queries(song)
+    condition = GenerationCondition.from_dict(condition) if isinstance(condition, dict) else condition
+    condition = condition or GenerationCondition(level=13.3, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
+    batch = {'audio': values[None].to(device), 'condition': condition.to_vector(device=device)[None],
+             'audio_padding_mask': torch.zeros((1, len(values)), dtype=torch.bool, device=device),
+             'condition_null': torch.zeros(1, dtype=torch.bool, device=device)}
+    with torch.inference_mode():
+        _, _, prediction = model.encode(batch['audio'], batch['condition'],
+            audio_padding_mask=batch['audio_padding_mask'], condition_null=batch['condition_null'],
+            return_curve=True)
+    predicted = prediction[0].sigmoid().float().cpu().numpy()
+    bins = load_curve_bin_centers(audio.duration_sec, resolution_sec)
+    values = resample_load_curve(np.asarray(times, dtype=np.float64) - float(first), predicted,
+                                 np.asarray(bins, dtype=np.float64) - float(first))
+    values = np.clip(values, 0., 1.)
+    density = decode_density(values[:, 0], 'musical_log_v1')
+    positive = density[density > 1e-6]
+    reference = float(np.mean(positive)) if len(positive) else 1.
+    intensity = np.clip(.5 * density / max(reference, 1e-6), 0., 1.)
+    points = [{'time_sec': float(t), 'intensity': float(v)} for t, v in zip(bins, intensity)]
+    return {'schema':'maichart-intensity-curve-v1', 'method':'learned_chart_stream_v1',
+            'model_family':'chart_stream_v1', 'time_axis':AUDIO_CURVE_AXIS,
+            'duration_sec':float(audio.duration_sec), 'curve_bin_seconds':float(resolution_sec),
+            'density_profile':'musical_log_v1', 'points':points,
+            'components': {'event_density': values[:,0].tolist(), 'tap': values[:,1].tolist(),
+                           'sustain': values[:,2].tolist(), 'slide_touch': values[:,3].tolist()},
+            'component_times_sec':[float(t) for t in bins], 'rest_regions':[],
+            'checkpoint':str(checkpoint_path)}

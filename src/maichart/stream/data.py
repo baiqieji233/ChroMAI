@@ -13,6 +13,7 @@ from maichart.event_timing import EventPoint
 from maichart.form.codec import RationalCodec
 from maichart.form.data import FormDataset, _form_descriptor
 from maichart.form.rational_audio import planner_audio_queries
+from maichart.form.curve import resample_load_curve
 from maichart.form.quality_profile import MUSICAL_EVIDENCE
 
 
@@ -57,6 +58,7 @@ class StreamDataset(Dataset):
         self.max_history_tokens = int(max_history_tokens)
         self.songs = []
         self.chunks = []
+        self._audio_queries = {}
         for index, record in enumerate(self.base.songs):
             song, points, level, weight, state, condition, excluded, annotation = record
             if not points or weight <= 0:
@@ -78,8 +80,12 @@ class StreamDataset(Dataset):
                     candidates = [i for i in range(end, start, -1) if ids[i] == at_id]
                     if candidates: end = max(candidates)
                 if end <= start + 1: continue
-                decoder = ids[start:end-1] if start else ids[:end-1]
-                target = ids[start+1:end] if start else ids[1:end]
+                if start:
+                    decoder = [self.codec.bos_id] + ids[start:end-1]
+                    target = ids[start:end]
+                else:
+                    decoder = ids[:end-1]
+                    target = ids[1:end]
                 history_start = max(0, start-self.max_history_tokens)
                 history = ids[history_start:start]
                 # Map event starts to local target rows. Labels supervise the
@@ -87,7 +93,7 @@ class StreamDataset(Dataset):
                 labels=[]; masks=[]
                 for row, token in enumerate(target):
                     if token == self.codec.at_id:
-                        global_index = start + 1 + row
+                        global_index = (start + row) if start else (1 + row)
                         event_index = ids[:global_index].count(self.codec.at_id)
                         point = points[min(len(points) - 1, event_index)]
                         previous = Fraction(0) if event_index == 0 else points[event_index - 1].beat
@@ -104,11 +110,16 @@ class StreamDataset(Dataset):
     def __getitem__(self, index):
         chunk = self.chunks[index]
         song, points, level, weight, state, condition, excluded, annotation = self.base.songs[chunk.chart_index]
-        audio, times, _ = planner_audio_queries(song)
+        if chunk.chart_index not in self._audio_queries:
+            self._audio_queries[chunk.chart_index] = planner_audio_queries(song)
+        audio, times, _ = self._audio_queries[chunk.chart_index]
         boundary = points[min(chunk.start_event, len(points)-1)].beat if points else Fraction(0)
         action, action_mask, _ = state.at(boundary)
         return {'audio': audio, 'audio_times_sec': torch.as_tensor(times, dtype=torch.float64),
                 'form': torch.from_numpy(_form_descriptor(song, 0)),
+                'curve_target': torch.from_numpy(resample_load_curve(
+                    song.load_curve_times_sec, song.load_curve,
+                    np.asarray(times, dtype=np.float64) - float(song.first))),
                 'condition': condition.to_vector(),
                 'decoder_input': torch.tensor(chunk.decoder_input, dtype=torch.long),
                 'target': torch.tensor(chunk.target, dtype=torch.long),
@@ -123,7 +134,7 @@ class StreamDataset(Dataset):
 def collate_stream(items):
     from torch.nn.utils.rnn import pad_sequence
     result={}
-    for key in ('audio','decoder_input','target','history','plan_labels','plan_mask','action_state'):
+    for key in ('audio','decoder_input','target','history','plan_labels','plan_mask','action_state','curve_target'):
         values=[item[key] for item in items]
         result[key]=pad_sequence(values,batch_first=True,padding_value=0)
         result[key+'_padding_mask']=torch.arange(result[key].size(1))[None] >= torch.tensor([len(v) for v in values])[:,None]

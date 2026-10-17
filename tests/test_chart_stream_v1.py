@@ -7,6 +7,7 @@ from maichart.event_timing import EventPoint, event_points_to_joint_tokens, join
 from maichart.stream.model import ChartStreamTransformer, StreamConfig
 from maichart.stream.checkpoint import save, load
 from maichart.generation.model_compatibility import checkpoint_capabilities
+from maichart.stream.memory import StreamMemoryBank
 
 
 def test_stream_forward_and_history_summary_are_finite():
@@ -23,6 +24,23 @@ def test_stream_forward_and_history_summary_are_finite():
     assert output['logits'].shape == (2, 12, 55)
     assert torch.isfinite(output['logits']).all()
     (output['logits'].square().mean() + output['plan'].square().mean()).backward()
+
+
+def test_stream_incremental_decode_matches_full_decode():
+    torch.manual_seed(7)
+    model = ChartStreamTransformer(StreamConfig(vocab_size=55, d_model=32, nhead=4,
+        layers=1, dim_feedforward=64, max_tokens=32)).eval()
+    audio = torch.randn(1, 6, 120); condition = torch.randn(1, 16)
+    with torch.inference_mode():
+        memory, mask = model.encode(audio, condition)
+        ids = torch.randint(0, 55, (1, 9))
+        expected = model.decode(ids, memory, mask)['logits']
+        cache=None; rows=[]
+        for position in range(ids.size(1)):
+            output, cache = model.decode_step(ids[:, position:position+1], position, memory, mask, cache)
+            rows.append(output['logits'])
+        actual = torch.cat(rows, 1)
+    torch.testing.assert_close(actual, expected, rtol=1e-5, atol=1e-5)
 
 
 def test_stream_event_tokens_preserve_fraction_and_configuration():
@@ -69,3 +87,22 @@ def test_stream_dataset_builds_continuation_chunks_without_chunk_eos(tmp_path, m
                for chunk in dataset.chunks)
     item = dataset[0]
     assert item['action_state'].shape[-1] == 50
+
+
+def test_stream_memory_retrieval_is_bounded_and_nonbinding():
+    bank = StreamMemoryBank(max_entries=3, max_retrieval=2)
+    bank.append(Fraction(0), '1', torch.tensor([1., 0., 0.]))
+    bank.append(Fraction(1), '2', torch.tensor([0., 1., 0.]))
+    bank.append(Fraction(2), '3', torch.tensor([0., 0., 1.]))
+    bank.append(Fraction(3), '4', torch.tensor([1., 0., 0.]))
+    result = bank.retrieve(torch.tensor([1., 0., 0.]), top_k=2)
+    assert len(result) == 2 and len(bank.entries) == 3 and result[0].note_text == '4'
+    assert bank.tensor(torch.tensor([0., 1., 0.]), top_k=1).shape == (1, 3)
+
+
+def test_stream_curve_head_is_available_for_inference():
+    model = ChartStreamTransformer(StreamConfig(vocab_size=55, d_model=16, nhead=2,
+        layers=1, dim_feedforward=32))
+    with torch.inference_mode():
+        _, _, curve = model.encode(torch.randn(1, 4, 120), torch.randn(1, 16), return_curve=True)
+    assert curve.shape == (1, 4, 4) and torch.isfinite(curve).all()

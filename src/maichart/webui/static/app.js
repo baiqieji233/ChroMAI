@@ -1752,9 +1752,14 @@ function chartStreamTrainingPayload(options = {}) {
     max_tokens: Number(valueOrDefault("#streamMaxTokens", 1024)), max_history_tokens: Number(valueOrDefault("#streamMaxHistoryTokens", 256)),
     max_stream_memory: Number(valueOrDefault("#streamMemoryTokens", 32)),
     plan_loss_weight: Number(valueOrDefault("#streamPlanLossWeight", .15)),
-    lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#weightDecay", .01)),
-    device: formDevice("#device"), precision: valueOrDefault("#formPrecision", "auto"),
-    cache_dir: valueOrDefault("#formCacheDir", "cache/chart_stream_v1"),
+    lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#streamWeightDecay", .01)),
+    device: formDevice("#device"), precision: valueOrDefault("#streamPrecision", "auto"),
+    audio_cache_gb: Number(valueOrDefault("#streamAudioCacheGb", 8)),
+    prepare_workers: Number(valueOrDefault("#streamPrepareWorkers", 4)),
+    max_region_seconds: Number(valueOrDefault("#streamMaxRegionSeconds", 15)),
+    limit_charts: Number(valueOrDefault("#streamLimitCharts", 0)),
+    log_interval: Number(valueOrDefault("#streamLogInterval", 25)),
+    cache_dir: valueOrDefault("#streamCacheDir", "cache/chart_stream_v1"),
   };
 }
 
@@ -2069,6 +2074,12 @@ function updateTrainingControls() {
     const target = element(selector);
     if (target) target.disabled = resume;
   });
+  if (currentModelFamily() === "chart_stream_v1" && currentTrainingMode() === "fresh") {
+    ["#streamDModel", "#streamLayers", "#streamNhead", "#streamDimFeedforward",
+      "#streamMaxTokens", "#streamMaxHistoryTokens", "#streamMemoryTokens"].forEach((selector) => {
+      const target = element(selector); if (target) target.disabled = false;
+    });
+  }
   updateSongFormRhythmGeometryControls();
   updateSongFormQualityControls();
   if (typeof updateSongFormQualityProfileControls === "function") updateSongFormQualityProfileControls();
@@ -3003,6 +3014,66 @@ function renderCheckpointInspection(data) {
   setCheckpointStatus(state + conditionHint + (data.warnings?.length ? `；警告 ${data.warnings.length} 条` : ""), valid ? "good" : "warn");
 }
 
+function applyChartStreamCheckpointConfig(data, mode) {
+  const config = data?.model_config || {};
+  const args = data?.args || {};
+  const mapping = {
+    "#streamDModel": config.d_model,
+    "#streamLayers": config.layers,
+    "#streamNhead": config.nhead,
+    "#streamDimFeedforward": config.dim_feedforward,
+    "#streamMaxTokens": config.max_tokens,
+    "#streamMaxHistoryTokens": config.max_history_tokens,
+    "#streamMemoryTokens": config.max_stream_memory,
+    "#streamPlanLossWeight": args.plan_loss_weight,
+    "#streamPrecision": args.precision,
+    "#streamWeightDecay": args.weight_decay,
+    "#streamAudioCacheGb": args.audio_cache_gb,
+    "#streamPrepareWorkers": args.prepare_workers,
+    "#streamMaxRegionSeconds": args.max_region_seconds,
+    "#streamLimitCharts": args.limit_charts,
+    "#streamLogInterval": args.log_interval,
+    "#streamCacheDir": args.cache_dir,
+  };
+  Object.entries(mapping).forEach(([selector, value]) => {
+    const target = element(selector);
+    if (!target || value === undefined || value === null) return;
+    target.value = String(value);
+  });
+  const locked = mode !== "fresh";
+  ["#streamDModel", "#streamLayers", "#streamNhead", "#streamDimFeedforward",
+    "#streamMaxTokens", "#streamMaxHistoryTokens", "#streamMemoryTokens"].forEach((selector) => {
+    const target = element(selector);
+    if (target) target.disabled = locked;
+  });
+}
+
+function renderChartStreamCheckpointInspection(data) {
+  const valid = data?.valid === true;
+  const config = data?.model_config || {};
+  const args = data?.args || {};
+  const caps = data?.generation_capabilities || {};
+  const state = valid ? "chart_stream_v1 checkpoint 可用" : "chart_stream_v1 checkpoint 不可用";
+  const details = [
+    `状态：${state}`,
+    "模型族：chart_stream_v1（连续整曲事件流）",
+    `schema：${data?.schema || "未记录"}`,
+    data?.epoch !== undefined ? `保存 epoch：${data.epoch}` : "保存 epoch：未记录",
+    `模型结构：d_model=${config.d_model ?? "未记录"}；layers=${config.layers ?? "未记录"}；nhead=${config.nhead ?? "未记录"}；FFN=${config.dim_feedforward ?? "未记录"}`,
+    `连续上下文：${config.max_tokens ?? "未记录"} token；近期历史 ${config.max_history_tokens ?? "未记录"} token；记忆槽 ${config.max_stream_memory ?? "未记录"}`,
+    `训练参数：precision=${args.precision ?? "未记录"}；lr=${args.lr ?? "未记录"}；weight_decay=${args.weight_decay ?? "未记录"}；plan_loss_weight=${args.plan_loss_weight ?? "未记录"}`,
+    `生成能力：连续整曲=${caps.continuous_stream ? "可用" : "不可用"}；精确有理事件=${caps.rational_event_positions ? "可用" : "不可用"}；持续动作记忆=${caps.sustained_action_memory ? "可用" : "不可用"}`,
+    "计算块只用于显存管理，不代表音乐边界；旧 event / song-form checkpoint 不能互载。",
+    data?.warnings?.length ? `警告：\n${formatList(data.warnings)}` : "",
+    data?.errors?.length ? `错误：\n${formatList(data.errors)}` : "",
+  ].filter(Boolean).join("\n");
+  const box = element("#checkpointDetails");
+  if (box) { box.hidden = false; box.textContent = details; }
+  setCheckpointStatus(valid
+    ? `chart_stream_v1 checkpoint 可用；epoch ${data.epoch ?? 0}；连续整曲、有理事件和持续动作能力已${caps.continuous_stream ? "记录" : "检查"}`
+    : ((data.errors || []).join("；") || "chart_stream_v1 checkpoint 不可用"), valid ? "good" : "warn");
+}
+
 function applySongFormCheckpointConfig(data, mode) {
   const config = data?.model_config || {}, locked = mode !== "fresh";
   const structure = [["#formDModel", "d_model"], ["#formLayers", "layers"], ["#formNhead", "nhead"], ["#formMaxTokens", "max_tokens"], ["#formMaxMemoryTokens", "max_memory_tokens"], ["#formDropout", "dropout"], ["#formDimFeedforward", "dim_feedforward"]];
@@ -3152,6 +3223,26 @@ async function inspectCheckpoint({ autoPreprocess = false, preserveEditableConfi
     else setCheckpointStatus((data.errors || []).join("；") || "song-form checkpoint 不可用于当前模式", "warn");
     updateTrainingControls(); return data;
   }
+  if (currentModelFamily() === "chart_stream_v1") {
+    if (!checkpointPath) throw new Error("请先填写已有 chart_stream_v1 checkpoint 路径");
+    const request = ++checkpointInspectRequest;
+    const key = currentCheckpointKey();
+    setCheckpointStatus("正在检查 chart_stream_v1 checkpoint…");
+    const box = element("#checkpointDetails");
+    if (box) box.hidden = true;
+    const data = await api("/api/checkpoint/inspect", {
+      checkpoint_path: checkpointPath, model_family: "chart_stream_v1", mode,
+      manifest, auto_preprocess: autoPreprocess,
+      manifests: selectedTrainingManifests(), dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
+    });
+    if (request !== checkpointInspectRequest || key !== currentCheckpointKey()
+        || currentModelFamily() !== "chart_stream_v1") return null;
+    checkpointInspection = { key, data };
+    if (data.valid === true) applyChartStreamCheckpointConfig(data, mode);
+    renderChartStreamCheckpointInspection(data);
+    updateTrainingControls();
+    return data;
+  }
   if (!checkpointPath) throw new Error("请先上传或填写已有模型 checkpoint 路径");
   const manifest = trainingSourcePaths({ autoPreprocess }).manifest;
   if (!manifest && !selectedTrainingManifests().length) throw new Error("请先选择训练数据集");
@@ -3206,6 +3297,27 @@ async function inspectGenerationCheckpoint() {
   updateFamilyFields();
   const family = data.model_family_label || data.model_family || "未知";
   const genCaps = data.generation_capabilities || {};
+  if (data.model_family === "chart_stream_v1") {
+    const streamReady = data.valid === true && genCaps.continuous_stream === true
+      && genCaps.rational_event_positions === true;
+    const streamStatus = element("#generationPlannerStatus");
+    if (streamStatus) streamStatus.textContent = streamReady
+      ? "当前为 chart_stream_v1：生成会连续写到整曲结束；计算块不产生乐句边界，音符位置使用精确有理拍。"
+      : "当前 chart_stream_v1 checkpoint 未通过连续整曲能力检查，请先处理 checkpoint 检查结果。";
+    const streamNotice = element("#generationCapabilityNotice");
+    if (streamNotice) {
+      streamNotice.hidden = false;
+      streamNotice.textContent = streamReady
+        ? "连续整曲、有理事件位置和持续动作记忆可用；Radar / Style 作为软条件参与生成。"
+        : "连续整曲生成能力未就绪；请使用 chart_stream_v1 自己的 checkpoint。";
+      streamNotice.classList.toggle("warn", !streamReady);
+    }
+    setGenerationStatus(streamReady
+      ? `模型族：chart_stream_v1；schema：${data.schema || "未记录"}；epoch ${data.epoch ?? 0}；连续整曲生成可用；精确有理事件${genCaps.rational_event_positions ? "可用" : "不可用"}`
+      : ((data.errors || []).join("；") || "chart_stream_v1 checkpoint 不可用于连续整曲生成"), streamReady ? "good" : "warn");
+    updateGenerationCapabilityControls();
+    return data;
+  }
   const actionStatus = element("#generationActionStateStatus");
   if (actionStatus) actionStatus.textContent = genCaps.sustained_action_memory
     ? "此模型已训练持续动作摘要：生成时自动读取前段仍未结束的动作，修复或回溯后会按新谱面重建。"
@@ -4196,7 +4308,7 @@ function invalidateIntensityForAudio() {
 
 function invalidateLearnedCurveForTiming() {
   const profile = intensityCurveState.profile;
-  if (!profile || !/^(learned_music_structure_|learned_song_form_)/.test(String(profile.method || ""))) return;
+  if (!profile || !/^(learned_music_structure_|learned_song_form_|learned_chart_stream_)/.test(String(profile.method || ""))) return;
   intensityCurveState.saved = false;
   intensityCurveState.contextStale = true;
   saveIntensityCurveState();
@@ -4206,7 +4318,7 @@ function invalidateLearnedCurveForTiming() {
 
 function invalidateLearnedCurveForCondition() {
   const profile = intensityCurveState.profile;
-  if (!profile || !/^(learned_music_structure_|learned_song_form_)/.test(String(profile.method || ""))) return;
+  if (!profile || !/^(learned_music_structure_|learned_song_form_|learned_chart_stream_)/.test(String(profile.method || ""))) return;
   intensityCurveState.conditionChanged = true;
   saveIntensityCurveState();
   updateIntensityButtons();
@@ -4568,7 +4680,26 @@ on("#tapOnSlideThresholdMs", "change", () => {
 });
 
 // Training panel
-on("#modelFamily", "change", () => { generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null }; applySongFormCheckpointConfig({valid: false}, "fresh"); if (currentModelFamily()==="song_form_v2" && currentTrainingMode()==="fresh") { for (const [id,v] of Object.entries({formDModel:256,formLayers:4,formNhead:8,formDimFeedforward:0,formPlannerWidth:128})) { const node=element("#"+id);if(node)node.value=String(v); } } updateTrainingControls(); updateFamilyFields(); saveSettings(); });
+on("#modelFamily", "change", () => {
+  generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null };
+  applySongFormCheckpointConfig({valid: false}, "fresh");
+  if (currentTrainingMode() === "fresh" && currentModelFamily() === "song_form_v2") {
+    for (const [id, v] of Object.entries({formDModel:256, formLayers:4, formNhead:8, formDimFeedforward:0, formPlannerWidth:128})) {
+      const node = element("#" + id); if (node) node.value = String(v);
+    }
+    if (element("#checkpointDir")?.value === "checkpoints/chart_stream_v1") element("#checkpointDir").value = "checkpoints/song_form_v2";
+  }
+  if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_stream_v1") {
+    for (const [id, v] of Object.entries({streamDModel:256, streamLayers:4, streamNhead:8, streamDimFeedforward:768,
+      streamMaxTokens:1024, streamMaxHistoryTokens:256, streamMemoryTokens:32, streamPlanLossWeight:.15,
+      streamPrecision:"auto", streamWeightDecay:.01, streamAudioCacheGb:8, streamPrepareWorkers:4,
+      streamMaxRegionSeconds:15, streamLimitCharts:0, streamLogInterval:25, streamCacheDir:"cache/chart_stream_v1"})) {
+      const node = element("#" + id); if (node) node.value = String(v);
+    }
+    if (!element("#checkpointDir")?.value || element("#checkpointDir")?.value === "checkpoints/song_form_v2") element("#checkpointDir").value = "checkpoints/chart_stream_v1";
+  }
+  updateTrainingControls(); updateFamilyFields(); saveSettings();
+});
 on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
 on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });
 on("#formQualityApplyRecipe", "click", applySongFormQualityRecipe);

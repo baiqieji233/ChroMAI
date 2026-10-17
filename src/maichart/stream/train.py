@@ -52,8 +52,13 @@ def _loss(output,batch,plan_weight=.15):
     plan_mask=batch['plan_mask'] & ~batch['plan_mask_padding_mask']
     plan=F.smooth_l1_loss(output['plan'].float(),batch['plan_labels'].float(),reduction='none').mean(-1)
     plan=(plan*plan_mask).sum()/plan_mask.sum().clamp_min(1)
-    return token + plan_weight*plan, {'token_loss':token.detach(),'plan_loss':plan.detach(),
-                               'loss':(token+plan_weight*plan).detach(),
+    curve_mask=~batch['curve_target_padding_mask'] & ~batch['audio_padding_mask']
+    curve_target=batch['curve_target'].to(output['curve'])
+    curve=F.smooth_l1_loss(output['curve'].float().sigmoid(),curve_target.float(),reduction='none').mean(-1)
+    curve=(curve*curve_mask).sum()/curve_mask.sum().clamp_min(1)
+    total=token + plan_weight*plan + .2*curve
+    return total, {'token_loss':token.detach(),'plan_loss':plan.detach(),'curve_loss':curve.detach(),
+                               'loss':total.detach(),
                                'token_accuracy':((logits.argmax(-1)==target)&mask).sum().float()/mask.sum().clamp_min(1)}
 
 
