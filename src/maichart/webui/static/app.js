@@ -204,6 +204,10 @@ function renderTaskTrainingMetrics(task) {
     for (const [key, label] of [["loss","总 loss"],["token_loss","事件 token loss"],
       ["token_accuracy","token 准确率"],["plan_loss","连续写作计划 loss"],
       ["position_accuracy","拍位字符准确率"],["note_accuracy","配置字符准确率"],
+      ["whole_position_accuracy","完整拍位准确率"],["whole_configuration_accuracy","完整配置准确率"],
+      ["whole_event_accuracy","完整事件准确率"],["event_balance_loss","事件均衡 loss"],
+      ["alignment_loss","谱师选音关联 loss"],["alignment_accuracy","音频关联节点准确率"],
+      ["alignment_coverage","选音监督覆盖率"],
       ["eos_accuracy","整曲结束准确率"],["eos_targets","已见真实结束目标"],["eos_token_loss","整曲结束 token loss"],
       ["event_decision_loss","续写与结束 loss"],["curve_loss","强度曲线 loss"],
       ["batches_per_sec","batch / 秒"],["optimizer_steps","参数更新步"]]) {
@@ -211,7 +215,7 @@ function renderTaskTrainingMetrics(task) {
       if (value === null) continue;
       const term=document.createElement("dt"), definition=document.createElement("dd");
       term.textContent=label;
-      definition.textContent=key.endsWith("accuracy") ? `${(value*100).toFixed(2)}%`
+      definition.textContent=(key.endsWith("accuracy") || key.endsWith("coverage")) ? `${(value*100).toFixed(2)}%`
         : key === "optimizer_steps" || key.endsWith("targets") ? String(value) : value.toFixed(4);
       list.append(term,definition);
     }
@@ -593,6 +597,7 @@ const GENERATION_PARAM_FIELDS = [
   "streamTrimExactSilence",
   "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
   "streamStyleBalanceStrength", "streamLocalChordStrength", "streamPhysicalStrength",
+  "streamConfigurationCandidates",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
   "topP", "repetitionPenalty", "repetitionWindow", "maxTokens",
   "intensityFollow", "intensityFollowSpan",                  // 逐窗口强度跟随
@@ -1770,12 +1775,24 @@ function trainingPayload(options = {}) {
   };
 }
 
+const STREAM_GROUNDING_FIELDS = [
+  ['streamGroundingProfile','grounding_profile','auto'],
+  ['streamDetailAudioNodes','detail_audio_nodes',8192], ['streamLocalAudioNeighbors','local_audio_neighbors',32],
+  ['streamLocalAudioSeconds','local_audio_seconds',2], ['streamArchiveEvents','archive_events',4096],
+  ['streamArchiveRetrievals','archive_retrievals',8], ['streamArchiveMinSimilarity','archive_min_similarity',.5],
+  ['streamHistoryNoteDropout','history_note_dropout',.15], ['streamPrefixNoteDropout','prefix_note_dropout',.1],
+  ['streamAlignmentLossWeight','alignment_loss_weight',.15], ['streamAlignmentToleranceMs','alignment_tolerance_ms',15],
+  ['streamEventBalanceLossWeight','event_balance_loss_weight',.2],
+];
+
 function chartStreamTrainingPayload(options = {}) {
   const mode = currentTrainingMode();
   return {
     ...trainingSourcePaths(options), manifests: selectedTrainingManifests(),
     dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     model_family: "chart_stream_v1", mode,
+    ...Object.fromEntries(STREAM_GROUNDING_FIELDS.map(([id,key,fallback]) =>
+      [key, typeof fallback === 'string' ? valueOrDefault('#'+id,fallback) : Number(valueOrDefault('#'+id,fallback))])),
     manifest: valueOrDefault("#manifestPath", "").trim(),
     checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
     init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(),
@@ -1793,6 +1810,7 @@ function chartStreamTrainingPayload(options = {}) {
     device: formDevice("#device"), precision: valueOrDefault("#streamPrecision", "auto"),
     audio_cache_gb: Number(valueOrDefault("#streamAudioCacheGb", 8)),
     prepare_workers: Number(valueOrDefault("#streamPrepareWorkers", 4)),
+    prefetch_batches: Number(valueOrDefault("#streamPrefetchBatches", 2)),
     max_region_seconds: Number(valueOrDefault("#streamMaxRegionSeconds", 15)),
     limit_charts: Number(valueOrDefault("#streamLimitCharts", 0)),
     log_interval: Number(valueOrDefault("#streamLogInterval", 25)),
@@ -1973,7 +1991,8 @@ function chartStreamGenerationPayload() {
     max_denominator: Number(valueOrDefault("#streamMaxDenominator", 384)),
     max_interval_denominator: Number(valueOrDefault("#streamMaxIntervalDenominator", 96)),
     min_spacing_ms: Number(valueOrDefault("#streamMinSpacingMs", 20)),
-    style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", .5)),
+    style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", 0)),
+    configuration_candidates: Number(valueOrDefault("#streamConfigurationCandidates",4)),
     local_chord_strength: Number(valueOrDefault("#streamLocalChordStrength", 0)),
     physical_feasibility_strength: Number(valueOrDefault("#streamPhysicalStrength", 0)),
     max_button_heads: Number(valueOrDefault("#streamMaxButtonHeads", 2)),
@@ -2128,6 +2147,7 @@ function updateTrainingControls() {
   updateDatasetButtons();
   updateTrainingModeHelp();
   const resume = currentTrainingMode() === "resume";
+  STREAM_GROUNDING_FIELDS.forEach(([id])=>{ const target=element('#'+id); if(target) target.disabled=resume; });
   const resumePolicy = element("#formResumeDataPolicyGroup");
   if (resumePolicy) resumePolicy.hidden = !resume || !["song_form_v1", "song_form_v2", "chart_stream_v1"].includes(currentModelFamily());
   ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy", "#actionStateProfile"].forEach((selector) => {
@@ -3085,9 +3105,14 @@ function renderCheckpointInspection(data) {
   setCheckpointStatus(state + conditionHint + (data.warnings?.length ? `；警告 ${data.warnings.length} 条` : ""), valid ? "good" : "warn");
 }
 
-function applyChartStreamCheckpointConfig(data, mode) {
+function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) {
   const config = data?.model_config || {};
   const args = data?.args || {};
+  STREAM_GROUNDING_FIELDS.forEach(([id,key,fallback])=>{
+    const target=element('#'+id); if(!target) return;
+    if (!(preserveEditable && mode==='finetune')) target.value=String(config[key] ?? args[key] ?? (key==='grounding_profile'?'none':fallback));
+    target.disabled=mode==='resume';
+  });
   const mapping = {
     "#streamDModel": config.d_model,
     "#streamLayers": config.layers,
@@ -3104,18 +3129,21 @@ function applyChartStreamCheckpointConfig(data, mode) {
     "#streamWeightDecay": args.weight_decay,
     "#streamAudioCacheGb": args.audio_cache_gb,
     "#streamPrepareWorkers": args.prepare_workers,
+    "#streamPrefetchBatches": args.prefetch_batches,
     "#streamMaxRegionSeconds": args.max_region_seconds,
     "#streamLimitCharts": args.limit_charts,
     "#streamLogInterval": args.log_interval,
     "#streamCheckpointIntervalSteps": args.checkpoint_interval_steps,
     "#streamCacheDir": args.cache_dir,
   };
-  if (element("#qualityEnabled") && typeof args.quality_enabled === "boolean") {
+  if (!(preserveEditable && mode==='finetune') && element("#qualityEnabled") && typeof args.quality_enabled === "boolean") {
     element("#qualityEnabled").checked=args.quality_enabled;
   }
   Object.entries(mapping).forEach(([selector, value]) => {
     const target = element(selector);
     if (!target || value === undefined || value === null) return;
+    if (preserveEditable && mode==='finetune' && !['#streamDModel','#streamLayers','#streamNhead',
+        '#streamDimFeedforward','#streamMaxTokens','#streamMaxHistoryTokens','#streamMemoryTokens','#streamDropout'].includes(selector)) return;
     target.value = String(value);
   });
   const locked = mode !== "fresh";
@@ -3139,6 +3167,7 @@ function renderChartStreamCheckpointInspection(data) {
     data?.epoch !== undefined ? `保存 epoch：${data.epoch}` : "保存 epoch：未记录",
     `模型结构：d_model=${config.d_model ?? "未记录"}；layers=${config.layers ?? "未记录"}；nhead=${config.nhead ?? "未记录"}；FFN=${config.dim_feedforward ?? "未记录"}`,
     `连续上下文：${config.max_tokens ?? "未记录"} token；近期历史 ${config.max_history_tokens ?? "未记录"} token；记忆槽 ${config.max_stream_memory ?? "未记录"}`,
+    `关联输入：${caps.grounding_profile ?? 'none'}；数值时钟=${caps.causal_numeric_clock?'启用':'未启用'}；局部音频与远期记忆=${caps.native_local_audio?'启用':'未启用'}；选音关联监督=${caps.position_alignment_trained?'已有训练记录':'尚无训练记录'}`,
     `训练参数：precision=${args.precision ?? "未记录"}；lr=${args.lr ?? "未记录"}；weight_decay=${args.weight_decay ?? "未记录"}；plan_loss_weight=${args.plan_loss_weight ?? "未记录"}`,
     `生成能力：连续整曲=${caps.continuous_stream ? "可用" : "不可用"}；精确有理事件=${caps.rational_event_positions ? "可用" : "不可用"}；持续动作记忆=${caps.sustained_action_memory ? "可用" : "不可用"}`,
     "连续整曲、有理事件和持续动作能力按 checkpoint 合同检查；语法可用不等于音乐质量或可玩性合格。",
@@ -3284,6 +3313,7 @@ async function inspectCheckpoint({ autoPreprocess = false, preserveEditableConfi
     return null;
   }
   const checkpointPath = valueOrDefault("#trainingCheckpointPath", "").trim();
+  const manifest = trainingSourcePaths({ autoPreprocess }).manifest;
   if (["song_form_v1", "song_form_v2"].includes(currentModelFamily())) {
     if (!checkpointPath) throw new Error("请先填写已有 song-form checkpoint 路径");
     const request = ++checkpointInspectRequest; setCheckpointStatus("正在检查 song-form checkpoint…");
@@ -3319,13 +3349,12 @@ async function inspectCheckpoint({ autoPreprocess = false, preserveEditableConfi
     if (request !== checkpointInspectRequest || key !== currentCheckpointKey()
         || currentModelFamily() !== "chart_stream_v1") return null;
     checkpointInspection = { key, data };
-    if (data.valid === true) applyChartStreamCheckpointConfig(data, mode);
+    if (data.valid === true) applyChartStreamCheckpointConfig(data, mode, preserveEditableConfig);
     renderChartStreamCheckpointInspection(data);
     updateTrainingControls();
     return data;
   }
   if (!checkpointPath) throw new Error("请先上传或填写已有模型 checkpoint 路径");
-  const manifest = trainingSourcePaths({ autoPreprocess }).manifest;
   if (!manifest && !selectedTrainingManifests().length) throw new Error("请先选择训练数据集");
   const request = ++checkpointInspectRequest;
   const key = currentCheckpointKey();
@@ -3575,6 +3604,9 @@ async function submitTrain(options = {}) {
   if (payload.model_family === "chart_stream_v1") {
     if (options.autoPreprocess) throw new Error("chart_stream_v1 请先完成训练素材预处理，再从已准备 manifest 开始训练。");
     if (!payload.manifest) throw new Error("请先填写已准备的 manifest");
+    const backend=await api('/api/status');
+    if (backend.training_capabilities?.stream_grounded_context !== 'causal_audio_v1')
+      throw new Error('当前后端尚未加载连续流关联训练参数，请重启 WebUI 后再训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/chart-stream/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -4435,7 +4467,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
     const status = await api("/api/status");
-    if (status.stream_generation_contract !== "chart_stream_quality_controls_v2") {
+    if (status.stream_generation_contract !== "chart_stream_quality_controls_v3") {
       throw new Error("当前服务尚未加载连续流质量控制。请使用已更新的 WebUI 服务；若此端口正在训练，请等训练结束后重启，避免新参数被旧后端忽略。");
     }
     const data = await api("/api/chart-stream/generate", payload);

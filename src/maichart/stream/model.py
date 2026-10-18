@@ -29,11 +29,20 @@ class StreamConfig:
     max_tokens: int = 1024
     plan_dim: int = 8
     action_dim: int = 50
+    grounding_profile: str = 'none'
+    detail_audio_nodes: int = 8192
+    local_audio_neighbors: int = 32
+    local_audio_seconds: float = 2.
+    archive_events: int = 4096
+    archive_retrievals: int = 8
+    archive_min_similarity: float = .5
+    alignment_tolerance_ms: float = 15.
 
     def __post_init__(self):
         for name in ('vocab_size','d_model','nhead','layers','dim_feedforward',
                      'audio_dim','condition_dim','max_audio_tokens',
-                     'max_history_tokens','max_stream_memory','max_tokens','plan_dim','action_dim'):
+                     'max_history_tokens','max_stream_memory','max_tokens','plan_dim','action_dim',
+                     'detail_audio_nodes','local_audio_neighbors','archive_events','archive_retrievals'):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f'{name} must be a positive integer')
@@ -41,6 +50,14 @@ class StreamConfig:
             raise ValueError('d_model must be divisible by nhead')
         if not 0 <= self.dropout < 1:
             raise ValueError('dropout must be in [0, 1)')
+        if self.grounding_profile not in {'none','causal_audio_v1'}:
+            raise ValueError('Unknown stream grounding_profile')
+        if not math.isfinite(self.local_audio_seconds) or not .05<=self.local_audio_seconds<=30:
+            raise ValueError('local_audio_seconds must be in [.05,30]')
+        if not math.isfinite(self.archive_min_similarity) or not -1<=self.archive_min_similarity<=1:
+            raise ValueError('archive_min_similarity must be in [-1,1]')
+        if not math.isfinite(self.alignment_tolerance_ms) or not 1<=self.alignment_tolerance_ms<=100:
+            raise ValueError('alignment_tolerance_ms must be in [1,100]')
 
 
 class ChartStreamTransformer(nn.Module):
@@ -72,6 +89,9 @@ class ChartStreamTransformer(nn.Module):
         self.output = nn.Linear(w, config.vocab_size)
         self.plan_head = nn.Linear(w, config.plan_dim)
         self.curve_head = nn.Linear(w, 4)
+        if config.grounding_profile!='none':
+            from .grounded_model import GroundedContext
+            self.grounding=GroundedContext(config)
 
     def encode(self, audio, condition, *, audio_padding_mask=None,
                condition_null=None, stream_memory=None, stream_memory_padding_mask=None, action_state=None,
@@ -134,7 +154,7 @@ class ChartStreamTransformer(nn.Module):
         curve_prediction = self.curve_head(values)
         return values, mask, curve_prediction, route
 
-    def prepare_decode_memory(self, memory, memory_mask, *, history=None, history_padding_mask=None):
+    def prepare_decode_memory(self, memory, memory_mask, *, history=None, history_padding_mask=None,history_clock=None):
         """Use identical history embeddings in full and cached generation."""
         if history is None or history.size(1) == 0:
             return memory, memory_mask
@@ -142,26 +162,46 @@ class ChartStreamTransformer(nn.Module):
             raise ValueError('stream history shape mismatch')
         positions = torch.arange(history.size(1), device=history.device)[None]
         values = self.token_embedding(history) + self.position_embedding(positions)
+        if hasattr(self,'grounding'):
+            if history_clock is None or history_clock.shape!=(*history.shape,20):
+                raise ValueError('Grounded history requires causal clock features')
+            values=values+self.grounding.clock_projection(history_clock.to(values))
         padding = history == 0 if history_padding_mask is None else history_padding_mask.bool()
         if padding.shape != history.shape:
             raise ValueError('stream history mask shape mismatch')
         return torch.cat((values.to(memory), memory), 1), torch.cat((padding, memory_mask), 1)
 
-    def decode(self, decoder_input, memory, memory_mask, *, history=None, history_padding_mask=None):
+    def decode(self, decoder_input, memory, memory_mask, *, history=None, history_padding_mask=None,
+               history_clock=None,timing_features=None,grounding_context=None):
         if decoder_input.ndim != 2 or decoder_input.size(1) == 0:
             raise ValueError('stream decoder_input must be nonempty [B,L]')
         batch, length = decoder_input.shape
         positions = torch.arange(length, device=decoder_input.device)[None]
         target = self.token_embedding(decoder_input) + self.position_embedding(positions)
+        if hasattr(self,'grounding'):
+            if timing_features is None or grounding_context is None:
+                raise ValueError('Grounded decoding requires causal clock and acoustic queries')
+            target=self.grounding.input(target,timing_features,grounding_context['local']+grounding_context['action'])
         memory, memory_mask = self.prepare_decode_memory(memory, memory_mask,
-            history=history, history_padding_mask=history_padding_mask)
+            history=history, history_padding_mask=history_padding_mask,history_clock=history_clock)
         causal = torch.triu(torch.ones((length, length), dtype=torch.bool, device=target.device), diagonal=1)
         hidden = self.decoder(target, memory, tgt_mask=causal,
                               memory_key_padding_mask=memory_mask)
         hidden = self.decoder_norm(hidden)
-        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden), 'hidden': hidden}
+        routes=None
+        if hasattr(self,'grounding'):
+            hidden,routes=self.grounding.fuse(hidden,timing_features,grounding_context['local'],
+                grounding_context['archive'],grounding_context['global'],grounding_context['action'])
+        plan=self.plan_head(hidden)
+        if hasattr(self,'grounding'):
+            positions=torch.arange(length,device=decoder_input.device)[None].expand(batch,-1)
+            boundaries=(decoder_input==1)|(decoder_input==5)
+            active=positions.masked_fill(~boundaries,0).cummax(1).values
+            intent=plan.gather(1,active[...,None].expand(-1,-1,plan.size(-1)))
+            hidden=hidden+self.grounding.intent_projection(intent)
+        return {'logits': self.output(hidden), 'plan':plan,'hidden':hidden,'routes':routes}
 
-    def decode_step(self, token, position, memory, memory_mask, caches=None):
+    def decode_step(self, token, position, memory, memory_mask, caches=None,*,timing_features=None,grounding_context=None):
         """Incremental one-token decode with cached self/cross attention."""
         if self.training:
             raise ValueError('Cached decoding requires eval mode')
@@ -170,6 +210,10 @@ class ChartStreamTransformer(nn.Module):
         from maichart.generation.event_model import _cached_decoder_layer_with_cross_cache
         hidden = self.token_embedding(token) + self.position_embedding(
             torch.tensor([position], device=token.device)).unsqueeze(0)
+        if hasattr(self,'grounding'):
+            if timing_features is None or grounding_context is None:
+                raise ValueError('Grounded cached decoding requires causal queries')
+            hidden=self.grounding.input(hidden,timing_features,grounding_context['local']+grounding_context['action'])
         caches = caches or []
         updated=[]
         for index, layer in enumerate(self.decoder.layers):
@@ -184,7 +228,19 @@ class ChartStreamTransformer(nn.Module):
                 layer, hidden, memory, *values, memory_mask)
             updated.append(present)
         hidden = self.decoder_norm(hidden)
-        return {'logits': self.output(hidden), 'plan': self.plan_head(hidden), 'hidden': hidden}, updated
+        routes=None
+        if hasattr(self,'grounding'):
+            hidden,routes=self.grounding.fuse(hidden,timing_features,grounding_context['local'],
+                grounding_context['archive'],grounding_context['global'],grounding_context['action'])
+        plan=self.plan_head(hidden)
+        if hasattr(self,'grounding'):
+            previous=(caches[len(self.decoder.layers)][0] if len(caches)>len(self.decoder.layers) else None)
+            active=plan if previous is None or previous.size(1)==0 else torch.where(
+                ((token==1)|(token==5))[...,None],plan,previous[:,-1:])
+            hidden=hidden+self.grounding.intent_projection(active)
+            history=active if previous is None else torch.cat((previous,active),1)
+            updated.append((history,history,None,None))
+        return {'logits': self.output(hidden), 'plan':plan,'hidden':hidden,'routes':routes},updated
 
     def forward(self, batch):
         stream_memory = batch.get('stream_memory')
@@ -192,14 +248,33 @@ class ChartStreamTransformer(nn.Module):
         if stream_memory is None and batch.get('history') is not None:
             stream_memory, summary_mask = self.summarize_tokens(batch['history'],
                 batch.get('history_padding_mask'), return_padding_mask=True)
+        encoded=self.encode_audio(batch['audio'],batch['condition'],
+            audio_padding_mask=batch.get('audio_padding_mask'),condition_null=batch.get('condition_null'))
         memory, memory_mask, curve = self.encode(batch['audio'], batch['condition'],
             audio_padding_mask=batch.get('audio_padding_mask'),
             condition_null=batch.get('condition_null'),
             stream_memory=stream_memory, stream_memory_padding_mask=summary_mask,
             action_state=batch.get('action_state'),
-            action_state_padding_mask=batch.get('action_state_padding_mask'), return_curve=True)
+            action_state_padding_mask=batch.get('action_state_padding_mask'), return_curve=True,encoded_audio=encoded)
+        context=None
+        if hasattr(self,'grounding'):
+            bank=self.grounding.prepare_bank(batch['detail_audio'],batch['detail_times_sec'],batch['detail_audio_padding_mask'])
+            archive={'embeddings':self.grounding.archive_embeddings(batch,self.token_embedding),
+                'audio':batch['archive_audio'],'padding':batch['archive_padding_mask'],
+                'beats':batch['archive_beats'],'seconds':batch['archive_seconds'],'event_index':batch['archive_event_index']}
+            queries=self.grounding.contexts(batch['query_clock'],batch['query_seconds'],batch['query_audio'],bank,archive)
+            queries['action']=self.grounding.action_value(batch['query_actions'])*batch['query_actions'][...,-1:].gt(0)
+            indices=batch['decoder_query_index'].clamp_min(0)
+            context={key:queries[key].gather(1,indices[...,None].expand(-1,-1,self.config.d_model))
+                     for key in ('local','archive','action')}
+            padding=encoded[1]
+            context['global']=encoded[0].sum(1)/(~padding).sum(1).clamp_min(1)[:,None]
         result = self.decode(batch['decoder_input'], memory, memory_mask,
-                           history=batch.get('history'), history_padding_mask=batch.get('history_padding_mask'))
+                           history=batch.get('history'), history_padding_mask=batch.get('history_padding_mask'),
+                           history_clock=batch.get('history_clock'),timing_features=batch.get('decoder_clock'),
+                           grounding_context=context)
+        if hasattr(self,'grounding') and 'alignment_event_indices' in batch:
+            result.update(self.grounding.alignment(result['hidden'],batch,bank))
         result['curve'] = curve
         return result
 

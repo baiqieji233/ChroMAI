@@ -301,7 +301,7 @@
 <div class="form-grid">
 <label class="field">流上下文 token 上限<input id="streamMaxTokens" type="number" min="128" max="8192" step="64" value="1024"><small>每个计算块可直接看到的事件 token 数。</small></label>
 <label class="field">近期历史 token<input id="streamMaxHistoryTokens" type="number" min="32" max="2048" step="32" value="256"><small>跨块回看的详细历史，不会改变谱面时间边界。</small></label>
-<label class="field">流记忆槽<input id="streamMemoryTokens" type="number" min="4" max="128" step="4" value="32"><small>将近期历史压缩为摘要槽，与详细历史一同输入；当前不会检索已超出近期历史范围的整曲配置。</small></label>
+<label class="field">流记忆槽<input id="streamMemoryTokens" type="number" min="4" max="128" step="4" value="32"><small>将近期历史压缩为摘要槽，与详细历史一同输入；下方新关联模块另提供较早配置的因果检索。</small></label>
 <label class="field">模型宽度<input id="streamDModel" type="number" min="64" max="1024" step="32" value="256"></label>
 <label class="field">Transformer 层数<input id="streamLayers" type="number" min="1" max="16" step="1" value="4"></label>
 <label class="field">注意力头数<input id="streamNhead" type="number" min="1" max="16" step="1" value="8"></label>
@@ -311,11 +311,26 @@
 <label class="field">连续写作计划辅助权重<input id="streamPlanLossWeight" type="number" min="0" max="2" step="0.01" value="0.15"><small>监督节奏间隔、配置类型和持续动作倾向；不把 Planner 当作硬起音骨架。</small></label>
 <label class="field">整曲续写与结束学习权重<input id="streamEventDecisionLossWeight" type="number" min="0" max="10" step="0.05" value="0.25"><small>额外监督真实事件边界的 AT / EOS，减少结束决策被长字符序列稀释。0 关闭；真实 EOS 仍只来自谱面末尾，不把计算块当成音乐结束。旧模型需 finetune 才能学习。</small></label>
 </div>
+<details class="settings-section" open><summary><span>音频与历史关联训练</span><small>保留精确有理拍；增加当前音频证据与可放弃的远期记忆</small></summary><div class="settings-content"><div class="form-grid">
+<label class="field">关联输入方案<select id="streamGroundingProfile"><option value="auto" selected>自动（fresh 启用新方案；继续训练继承）</option><option value="causal_audio_v1">因果音频与历史关联</option><option value="none">原连续流输入</option></select><small>旧权重若要增加新模块，请在 finetune 中显式选择新方案，并使用新输出目录。resume 严格继承。</small></label>
+<label class="field">细节音频节点上限<input id="streamDetailAudioNodes" type="number" min="1" max="65536" step="256" value="8192"><small>非均匀证据库容量，不限定输出拍位。增加可保留更多细节，也增加准备、显存和训练开销。</small></label>
+<label class="field">局部音频邻居数<input id="streamLocalAudioNeighbors" type="number" min="1" max="65536" step="8" value="32"><small>每个已知时钟最多读取的附近节点，另有精确拍位的原生音频查询。</small></label>
+<label class="field">局部证据半径 / 秒<input id="streamLocalAudioSeconds" type="number" min="0.05" max="30" step="0.05" value="2"><small>限制局部查询范围；全曲视图仍可查看后续音乐，不限制长休止。</small></label>
+<label class="field">远期档案候选上限<input id="streamArchiveEvents" type="number" min="1" max="65536" step="128" value="4096"><small>详细历史之外的已写事件；超过容量按顺序均匀选取，原谱面仍完整保存。</small></label>
+<label class="field">远期检索数量<input id="streamArchiveRetrievals" type="number" min="1" max="65536" step="1" value="8"><small>按音频相似度检索旧配置，并允许模型选择不引用。</small></label>
+<label class="field">远期相似度下限<input id="streamArchiveMinSimilarity" type="number" min="-1" max="1" step="0.05" value="0.5"><small>低相关的旧配置不会注入；数值越高，引用越谨慎。</small></label>
+<label class="field">历史配置遮罩概率<input id="streamHistoryNoteDropout" type="number" min="0" max="0.8" step="0.01" value="0.15"><small>只遮住已知配置内容，保留位置和时钟，训练在历史不完整时继续写作。</small></label>
+<label class="field">当前前缀配置遮罩概率<input id="streamPrefixNoteDropout" type="number" min="0" max="0.8" step="0.01" value="0.1"><small>被遮配置自身不参与监督，后续真实答案保留；不会伪造错误配置与答案。</small></label>
+<label class="field">谱师选音关联权重<input id="streamAlignmentLossWeight" type="number" min="0" max="3" step="0.01" value="0.15"><small>监督原谱选中的声音与事件位置关联，不要求每个音频瞬态都写 note。</small></label>
+<label class="field">选音监督容差 / ms<input id="streamAlignmentToleranceMs" type="number" min="1" max="100" step="1" value="15"><small>音频证据与原谱起音的标签容差，不会量化或移动生成的拍位。</small></label>
+<label class="field">完整事件均衡权重<input id="streamEventBalanceLossWeight" type="number" min="0" max="3" step="0.01" value="0.2"><small>按事件分别平均拍位与配置损失，避免长字符配置淹没短事件；原 token 监督仍保留。</small></label>
+</div></div></details>
 <div class="form-grid">
 <label class="field">数值精度<select id="streamPrecision"><option value="auto" selected>自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16；CPU 只能使用 FP32。</small></label>
 <label class="field">权重衰减<input id="streamWeightDecay" type="number" min="0" max="1" step="0.001" value="0.01"><small>AdamW 的 weight decay；resume 仍以 checkpoint 的优化器状态为准。</small></label>
-<label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>75% 用于音频特征，25% 用于整曲查询；同曲同时间轴的不同难度共享查询。另有最多 64 MB 的公共查询缓存，不包含模型和训练样本内存。</small></label>
+<label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>新关联方案将 75% 用于查询、25% 用于基础特征；原方案比例相反。同曲同时间轴共享音频证据，原生拍位探针另外按内容缓存。另有最多 64 MB 公共查询缓存，不含模型和训练样本。</small></label>
 <label class="field">准备线程<input id="streamPrepareWorkers" type="number" min="0" max="16" step="1" value="4"><small>并行准备独立歌曲；0 表示按后端默认值处理。</small></label>
+<label class="field">训练预取批次数<input id="streamPrefetchBatches" type="number" min="0" max="16" step="1" value="2"><small>单个后台线程共享内存并提前准备 CPU 数据，与训练计算重叠。0 同步读取；提高数量增加排队内存，不增加音频副本或改变样本顺序。</small></label>
 <label class="field">单次区域上限（秒）<input id="streamMaxRegionSeconds" type="number" min="2" max="60" step="1" value="15"><small>用于共用音频准备器的区域组织；连续流训练块由 token 上限划分，不按此秒数截断目标，也不添加片段 EOS。</small></label>
 <label class="field">训练谱面数量上限<input id="streamLimitCharts" type="number" min="0" step="1" value="0"><small>0 使用全部合格谱面；短跑验证时可填写较小数量。</small></label>
 <label class="field">训练缓存目录<textarea id="streamCacheDir" class="path-input" rows="2">cache/chart_stream_v1</textarea><small>保存有理音频与整曲事件准备缓存；不同数据合同请使用不同目录。</small></label>
@@ -900,7 +915,8 @@
 <details id="chartStreamGenerationControls" class="settings-section song-form-only" data-generation-family="chart_stream_v1" hidden>
 <summary><span>连续整曲生成</span><small>不按片段结束；持续动作和历史会随事件更新</small></summary>
 <div class="settings-content"><p class="workflow-hint">chart_stream_v1 连续生成整曲事件，由模型决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p>
-<div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0.5"><small>软性偏向请求的 Tap / Hold / Slide / Touch 组成；0 关闭，不是硬比例。</small></label>
+<div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0"><small>默认 0，关闭额外比例反馈；模型仍读取全部 Style 条件。大于 0 按完整配置软性偏向请求比例，可能强化已有重复，建议对照生成后小幅调整；不是硬比例。</small></label>
+<label class="field">完整配置候选数<input id="streamConfigurationCandidates" type="number" min="1" max="16" step="1" value="4"><small>先由模型提出完整配置，再按 Style／局部多押／手感偏好采样。默认 4；越大越慢。1 或配置温度为 0 时不作候选间偏好；所有额外强度为 0 时自动跳过多候选。</small></label>
 <label class="field">局部多押强度<input id="streamLocalChordStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性控制局部多押倾向；只影响配置候选，不强制填满同时发生。</small></label>
 <label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label>
 <label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较整个 Fraction 的模型概率；搜索尚不确定时自动扩大，最多 32 路。1 使用原逐字符路径；更大更慢。</small></label>

@@ -87,7 +87,10 @@ def test_low_probability_configuration_reconsiders_uncommitted_event_time(monkey
     actual,status,_=compose(monkeypatch,proposed,max_tokens=64,
         atom_catalog=['1','1h[8:1]'],options_override={'position_beam_size':4,
         'hold_protection':'on','constraint_min_probability':.05})
-    assert actual==[proposed[0],EventPoint(F(1,2),'1')]
+    # After retiming, the stub has equal logits for legal continuations. The
+    # timing contract must not depend on extra Style breaking that tie to Tap.
+    assert actual[0]==proposed[0] and actual[1].beat==F(1,2)
+    assert actual[1].note_text in {'1','1h[8:1]'}
     assert status['reason']=='eos'
     retries=status['event_reconsideration']['retries']
     assert len(retries)==1 and retries[0]['beat']=='1/4'

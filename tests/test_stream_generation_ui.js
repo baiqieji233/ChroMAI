@@ -8,6 +8,12 @@ const source = fs.readFileSync(path.join(__dirname, "../src/maichart/webui/stati
 const html = fs.readFileSync(path.join(__dirname, "../src/maichart/webui/static/index.html"), "utf8");
 
 function install(context, name, next) {
+  if (!context.__streamGroundingInstalled) {
+    const a=source.indexOf('const STREAM_GROUNDING_FIELDS =');
+    const b=source.indexOf('function chartStreamTrainingPayload(',a);
+    vm.runInContext(source.slice(a,b),context);
+    context.__streamGroundingInstalled=true;
+  }
   const start = source.indexOf(`function ${name}(`);
   const end = source.indexOf(`function ${next}(`, start);
   assert.ok(start >= 0 && end > start);
@@ -106,7 +112,47 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.dropout,0); assert.equal(result.seed,173);
   assert.equal(result.weight_decay,.02);
   assert.equal(result.quality_enabled,true);
+  assert.equal(result.grounding_profile,'auto');
+  assert.equal(result.detail_audio_nodes,8192);
+  assert.equal(result.prefetch_batches,2);
   for (const id of ['streamDropout','streamSeed']) assert.ok(html.includes(`id="${id}"`));
+});
+
+test('finetune reinspection preserves explicit grounding upgrade and training settings', () => {
+  const nodes={};
+  for (const match of html.matchAll(/id="(stream[^"]+)"/g)) nodes['#'+match[1]]={value:'',disabled:false};
+  nodes['#qualityEnabled']={checked:false};
+  nodes['#streamGroundingProfile'].value='causal_audio_v1';
+  nodes['#streamAlignmentLossWeight'].value='0.24';
+  nodes['#streamPrefetchBatches'].value='4';
+  const context=vm.createContext({element:id=>nodes[id]});
+  install(context,'applyChartStreamCheckpointConfig','renderChartStreamCheckpointInspection');
+  const data={model_config:{d_model:256,grounding_profile:'none'},
+    args:{alignment_loss_weight:0,prefetch_batches:0,quality_enabled:true}};
+  context.applyChartStreamCheckpointConfig(data,'finetune',true);
+  assert.equal(nodes['#streamGroundingProfile'].value,'causal_audio_v1');
+  assert.equal(nodes['#streamAlignmentLossWeight'].value,'0.24');
+  assert.equal(nodes['#streamPrefetchBatches'].value,'4');
+  assert.equal(nodes['#streamDModel'].value,'256');
+  assert.equal(nodes['#qualityEnabled'].checked,false);
+  context.applyChartStreamCheckpointConfig(data,'resume',true);
+  assert.equal(nodes['#streamGroundingProfile'].value,'none');
+  assert.equal(nodes['#streamGroundingProfile'].disabled,true);
+});
+
+test('stream checkpoint inspection resolves its manifest before sending the request', async () => {
+  const calls=[];
+  const context=vm.createContext({currentTrainingMode:()=> 'finetune',currentModelFamily:()=> 'chart_stream_v1',
+    element:()=>null,assertTrainingSelection(){},assertDatasetBackend:async()=>{},
+    valueOrDefault:()=> 'old.pt',trainingSourcePaths:()=>({manifest:'source.json'}),
+    checkpointInspectRequest:0,currentCheckpointKey:()=> 'same',setCheckpointStatus(){},
+    selectedTrainingManifests:()=>[],selectedDatasetItems:()=>[],
+    api:async(url,payload)=>{calls.push(payload);return {valid:true};},
+    applyChartStreamCheckpointConfig(){},renderChartStreamCheckpointInspection(){},updateTrainingControls(){}});
+  const start=source.indexOf('async function inspectCheckpoint('),end=source.indexOf('async function inspectGenerationCheckpoint(',start);
+  vm.runInContext(source.slice(start,end),context);
+  await context.inspectCheckpoint();
+  assert.equal(calls[0].manifest,'source.json');
 });
 
 for (const family of ['chart_stream_v1', 'song_form_v2']) {

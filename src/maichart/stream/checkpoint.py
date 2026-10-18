@@ -6,7 +6,7 @@ import json
 import os
 import tempfile
 from pathlib import Path
-from dataclasses import asdict
+from dataclasses import asdict,replace
 
 import torch
 
@@ -38,6 +38,10 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
         'atom_catalog': sorted(set(atom_catalog)),
         'metrics': metrics or {}, 'architecture': model.architecture,
         'metrics_aggregation': 'batch_mean',
+        'grounding_training': {'profile':model.config.grounding_profile,
+            'optimizer_steps':int(optimizer_steps),
+            'alignment_supervised':bool(model.config.grounding_profile!='none' and optimizer_steps>0
+                and args.get('alignment_loss_weight',0)>0 and (metrics or {}).get('alignment_targets',0)>0)},
     }
     path = Path(path); path.parent.mkdir(parents=True, exist_ok=True)
     fd, name = tempfile.mkstemp(prefix=path.name+'.', suffix='.tmp', dir=path.parent)
@@ -84,4 +88,13 @@ def load(path, device='cpu'):
         raise ValueError(f'Chart-stream checkpoint 参数不兼容：{exc}') from exc
     model.to(device)
     return model, payload
+
+
+def upgrade_grounding(model,**settings):
+    """Explicit finetune migration; no old checkpoint is rewritten."""
+    target=ChartStreamTransformer(replace(model.config,**settings))
+    result=target.load_state_dict(model.state_dict(),strict=False)
+    if result.unexpected_keys or any(not key.startswith('grounding.') for key in result.missing_keys):
+        raise ValueError('Unsupported stream migration outside grounding branches')
+    return target
 

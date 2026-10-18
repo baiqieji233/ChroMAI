@@ -75,7 +75,7 @@ def inspect_payload(payload):
     can_resume = bool(valid and current and payload.get('optimizer_state_dict') and payload.get('dataset_fingerprint'))
     warnings=[]
     if not current:
-        warnings.append('旧训练监督合同与当前版本不同（历史遮罩、质量权重或持续动作时钟）；生成仍兼容，继续训练请选择 finetune 和新输出目录。')
+        warnings.append('训练合同已更新（因果数值时钟、局部音频、谱师选音关联、事件均衡）；生成仍兼容。继续训练请用 finetune 和新输出目录；要启用新模块，请显式选择「因果音频与历史关联」。')
     elif not can_resume:
         warnings.append('此权重缺少续训所需的优化器状态或数据身份；请选择 finetune 和新输出目录。')
     if can_resume and payload.get('training_position') and payload['training_position'].get('complete') is not True:
@@ -126,6 +126,12 @@ def start(handler, operation, payload, *, runtime):
               '--limit-charts',str(payload.get('limit_charts',0)),
               '--log-interval',str(payload.get('log_interval',25)),
               '--checkpoint-interval-steps',str(payload.get('checkpoint_interval_steps',500))]
+        for key,default in (('grounding_profile','auto'),('detail_audio_nodes',8192),
+                ('local_audio_neighbors',32),('local_audio_seconds',2.),('archive_events',4096),
+                ('archive_retrievals',8),('archive_min_similarity',.5),('history_note_dropout',.15),
+                ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
+                ('event_balance_loss_weight',.2),('prefetch_batches',2)):
+            args += ['--'+key.replace('_','-'),str(payload.get(key,default))]
         if type(payload.get('quality_enabled',True)) is not bool:
             raise ValueError('quality_enabled 必须是布尔值')
         args += ['--quality-enabled' if payload.get('quality_enabled',True) else '--no-quality-enabled']
@@ -136,7 +142,10 @@ def start(handler, operation, payload, *, runtime):
             if not checkpoint: raise ValueError('finetune requires checkpoint path')
             args += ['--init-checkpoint',str(runtime._required_path(checkpoint,'init checkpoint',must_exist=True))]
         from maichart.stream.train import parser as training_parser, validate_training_args, validate_output_directory
-        parsed=training_parser().parse_args(args[2:])
+        try:
+            parsed=training_parser().parse_args(args[2:])
+        except SystemExit as exc:
+            raise ValueError('连续流训练参数无效，请检查整数、数值范围与关联输入方案') from exc
         validate_training_args(parsed)
         validate_output_directory(parsed)
         task=runtime._create_task('chart_stream_train')
@@ -185,7 +194,8 @@ def start(handler, operation, payload, *, runtime):
                              ('max_denominator', 384), ('max_interval_denominator', 96),
                              ('min_spacing_ms', 20.)):
             args += ['--'+key.replace('_', '-'), str(payload.get(key, default))]
-        args += ['--style-balance-strength', str(payload.get('style_balance_strength', .5)),
+        args += ['--style-balance-strength', str(payload.get('style_balance_strength', 0.)),
+                 '--configuration-candidates',str(payload.get('configuration_candidates',4)),
                  '--local-chord-strength', str(payload.get('local_chord_strength', 0.)),
                  '--physical-feasibility-strength', str(payload.get('physical_feasibility_strength', 0.)),
                  '--max-button-heads', str(payload.get('max_button_heads', 2)),

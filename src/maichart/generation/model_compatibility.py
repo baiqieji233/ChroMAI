@@ -48,6 +48,9 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     if checkpoint_data.get('schema') == STREAM_CHECKPOINT_SCHEMA:
         config = checkpoint_data.get('model_config') or {}
         valid = checkpoint_data.get('family') == 'chart_stream_v1' and checkpoint_data.get('input_contract') == 'chart_stream_inputs_v1_exact_fraction'
+        grounding=config.get('grounding_profile','none')
+        grounded=valid and grounding=='causal_audio_v1'
+        training=checkpoint_data.get('grounding_training') or {}
         return {'model_family':'chart_stream_v1','valid':bool(valid),'errors':[] if valid else ['chart_stream checkpoint contract mismatch'],
                 'continuous_stream':bool(valid), 'rational_event_positions':bool(valid),
                 'experimental':True,'conflict_detection':False,'conflict_repair':False,
@@ -56,8 +59,12 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
                 'sustained_action_memory':True,'rhythm_geometry_profile':'exact_fraction_stream_v1',
                 'generation_entry':'/chart-stream','quality_profile':'musical_evidence_v1',
                 'descriptor_dim':0,'curve_bin_seconds':1.,'planner_context_seconds':0.,
-                'audio_evidence_profile':'balanced_evidence_v1','position_alignment_supervision':False,
-                'position_alignment_trained':False}
+                'audio_evidence_profile':'balanced_evidence_v1','position_alignment_supervision':bool(grounded),
+                'grounding_profile':grounding,'causal_numeric_clock':bool(grounded),
+                'native_local_audio':bool(grounded),'causal_archive_retrieval':bool(grounded),
+                'dynamic_intent_routing':bool(grounded),
+                'position_alignment_trained':bool(grounded and training.get('profile')==grounding
+                    and training.get('alignment_supervised') is True and training.get('optimizer_steps',0)>0)}
     if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:
         from maichart.form.checkpoint import LEGACY_INPUT_CONTRACT, input_contract_for_configs
         rational=checkpoint_data.get('schema')=='maichart-song-form-checkpoint-v2'

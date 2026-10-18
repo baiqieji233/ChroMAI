@@ -7,6 +7,7 @@ import json
 import math
 import random
 import time
+from contextlib import nullcontext
 
 import numpy as np
 import torch
@@ -16,7 +17,7 @@ from torch.utils.data import DataLoader
 from maichart.form.quality_profile import MUSICAL_EVIDENCE
 from .data import StreamDataset, collate_stream, TRAINING_SEMANTICS
 from .model import ChartStreamTransformer, StreamConfig
-from .checkpoint import save, load
+from .checkpoint import save, load, upgrade_grounding
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.form.codec import RationalCodec
 from maichart.form.output_guard import training_output_guard
@@ -42,6 +43,19 @@ def parser():
     p.add_argument('--event-decision-loss-weight',type=float,default=.25)
     p.add_argument('--checkpoint-interval-steps',type=int,default=500)
     p.add_argument('--quality-enabled',action=argparse.BooleanOptionalAction,default=True)
+    p.add_argument('--grounding-profile',choices=('auto','none','causal_audio_v1'),default='auto')
+    p.add_argument('--detail-audio-nodes',type=int,default=8192)
+    p.add_argument('--local-audio-neighbors',type=int,default=32)
+    p.add_argument('--local-audio-seconds',type=float,default=2.)
+    p.add_argument('--archive-events',type=int,default=4096)
+    p.add_argument('--archive-retrievals',type=int,default=8)
+    p.add_argument('--archive-min-similarity',type=float,default=.5)
+    p.add_argument('--history-note-dropout',type=float,default=.15)
+    p.add_argument('--prefix-note-dropout',type=float,default=.1)
+    p.add_argument('--alignment-loss-weight',type=float,default=.15)
+    p.add_argument('--alignment-tolerance-ms',type=float,default=15.)
+    p.add_argument('--event-balance-loss-weight',type=float,default=.2)
+    p.add_argument('--prefetch-batches',type=int,default=2)
     return p
 
 
@@ -53,7 +67,7 @@ def _precision(value,device):
     return value
 
 
-def _loss(output,batch,plan_weight=.15,event_weight=.25):
+def _loss(output,batch,plan_weight=.15,event_weight=.25,alignment_weight=.15,event_balance_weight=.2):
     logits=output['logits'].float(); target=batch['target']; mask=~batch['target_padding_mask']
     local = batch.get('target_quality', torch.ones_like(target, dtype=torch.float32))
     quality = batch.get('quality_weight', logits.new_ones(logits.size(0)))[:, None]
@@ -71,7 +85,11 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25):
     curve_target=batch['curve_target'].to(output['curve'])
     curve=F.smooth_l1_loss(output['curve'].float().sigmoid(),curve_target.float(),reduction='none').mean(-1)
     curve_quality=batch.get('curve_quality', torch.ones_like(curve))
-    curve=reduce(curve, curve_mask & (curve_quality > 0), curve_quality)
+    if 'curve_time_weight' in batch:
+        time_weight=batch['curve_time_weight']*curve_mask*(curve_quality>0)
+        curve=((curve*time_weight*curve_quality).sum(1)/time_weight.sum(1).clamp_min(1e-9)
+               *quality[:,0]*batch['curve_example_weight']).mean()
+    else:curve=reduce(curve, curve_mask & (curve_quality > 0), curve_quality)
     codec=RationalCodec()
     decision_mask=mask & ((batch['decoder_input']==codec.bos_id) | (batch['decoder_input']==codec.end_id))
     decision_mask &= (target==codec.at_id) | (target==codec.eos_id)
@@ -82,8 +100,14 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25):
     eos_mask=mask & (target==codec.eos_id)
     position_mask=mask & (target>=codec.ids['P:0']) & (target<=codec.ids['P:/'])
     note_mask=mask & (target>=codec.ids['N:1'])
-    total=token + plan_weight*plan + .2*curve + event_weight*decision
-    return total, {'token_loss':token.detach(),'plan_loss':plan.detach(),'curve_loss':curve.detach(),
+    from .objectives import event_balanced_loss,alignment_loss
+    balanced,extra=event_balanced_loss(ce,logits,batch,codec)
+    alignment=logits.sum()*0
+    if 'alignment_event_logits' in output:
+        alignment,metrics=alignment_loss(output,batch);extra.update(metrics)
+    total=token + plan_weight*plan + .2*curve + event_weight*decision + event_balance_weight*balanced + alignment_weight*alignment
+    return total, {**extra,'token_loss':token.detach(),'plan_loss':plan.detach(),'curve_loss':curve.detach(),
+                               'event_balance_loss':balanced.detach(),'alignment_loss':alignment.detach(),
                                'event_decision_loss':decision.detach(),
                                'loss':total.detach(),
                                'token_accuracy':((prediction==target)&mask).sum().float()/mask.sum().clamp_min(1),
@@ -118,7 +142,7 @@ def _mean_metrics(totals, batches):
     values=torch.stack([torch.as_tensor(value) for value in totals.values()]).detach().float().cpu().tolist()
     raw=dict(zip(totals,values))
     result={key:value/max(1,batches) for key,value in raw.items() if not key.startswith('_')}
-    for prefix in ('eos','position','note'):
+    for prefix in ('eos','position','note','whole_position','whole_configuration','whole_event','alignment'):
         count=raw.get('_'+prefix+'_count')
         if count is not None:
             result[prefix+'_targets']=int(count)
@@ -163,6 +187,22 @@ def validate_training_args(args):
         raise ValueError('d_model 必须能被 nhead 整除')
     if args.resume and args.init_checkpoint:
         raise ValueError('resume 和 init-checkpoint 不能同时使用')
+    for key in ('detail_audio_nodes','local_audio_neighbors','archive_events','archive_retrievals'):
+        value=getattr(args,key)
+        if not 1<=value<=65536:raise ValueError(f'{key} 必须是1–65536整数')
+    for key in ('history_note_dropout','prefix_note_dropout'):
+        value=getattr(args,key)
+        if not math.isfinite(value) or not 0<=value<=.8:raise ValueError(f'{key} 必须为0–0.8')
+    for key in ('alignment_loss_weight','event_balance_loss_weight'):
+        value=getattr(args,key)
+        if not math.isfinite(value) or not 0<=value<=3:raise ValueError(f'{key} 必须为0–3')
+    if not math.isfinite(args.local_audio_seconds) or not .05<=args.local_audio_seconds<=30:
+        raise ValueError('local_audio_seconds 必须为0.05–30')
+    if not math.isfinite(args.archive_min_similarity) or not -1<=args.archive_min_similarity<=1:
+        raise ValueError('archive_min_similarity 必须为-1–1')
+    if not math.isfinite(args.alignment_tolerance_ms) or not 1<=args.alignment_tolerance_ms<=100:
+        raise ValueError('alignment_tolerance_ms 必须为1–100')
+    if not 0<=args.prefetch_batches<=16:raise ValueError('prefetch_batches 必须为0–16')
 
 
 def validate_output_directory(args):
@@ -195,9 +235,10 @@ def _train(args):
     if args.resume or args.init_checkpoint:
         model,old=load(args.resume or args.init_checkpoint,device='cpu')
         if args.resume and (old.get('args') or {}).get('training_semantics') != TRAINING_SEMANTICS:
-            raise ValueError('训练监督合同已更新（历史遮罩、质量权重与持续动作时钟）；旧训练请使用 finetune / --init-checkpoint 和新输出目录，不能直接 resume。')
+            raise ValueError('训练合同已更新为因果时钟/局部音频/位置关联；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
         if args.resume:
-            for name in ('event_decision_loss_weight','plan_loss_weight'):
+            for name in ('event_decision_loss_weight','plan_loss_weight','alignment_loss_weight','event_balance_loss_weight',
+                         'history_note_dropout','prefix_note_dropout'):
                 setattr(args,name,(old.get('args') or {}).get(name,getattr(args,name)))
             if not old.get('optimizer_state_dict'):
                 raise ValueError('Resume checkpoint 缺少 optimizer 状态；请使用 finetune。')
@@ -207,10 +248,27 @@ def _train(args):
         args.dim_feedforward=model.config.dim_feedforward; args.dropout=model.config.dropout
         args.max_tokens=model.config.max_tokens; args.max_history_tokens=model.config.max_history_tokens
         args.max_stream_memory=model.config.max_stream_memory
+    grounding_keys=('grounding_profile','detail_audio_nodes','local_audio_neighbors','local_audio_seconds',
+                    'archive_events','archive_retrievals','archive_min_similarity','alignment_tolerance_ms')
+    if args.resume:
+        for key in grounding_keys:setattr(args,key,getattr(model.config,key))
+    else:
+        if args.grounding_profile=='auto':args.grounding_profile=model.config.grounding_profile if old is not None else 'causal_audio_v1'
+        if old is not None:
+            if model.config.grounding_profile!='none' and args.grounding_profile=='none':
+                raise ValueError('已有音频接地模块不能在finetune中静默删除')
+            model=upgrade_grounding(model,**{key:getattr(args,key) for key in grounding_keys})
+    if args.grounding_profile=='none':
+        args.history_note_dropout=args.prefix_note_dropout=args.alignment_loss_weight=0.
+    config=(model.config if old is not None else StreamConfig(vocab_size=len(RationalCodec()),d_model=args.d_model,
+        nhead=args.nhead,layers=args.layers,dim_feedforward=args.dim_feedforward,dropout=args.dropout,
+        max_tokens=args.max_tokens,max_history_tokens=args.max_history_tokens,max_stream_memory=args.max_stream_memory,
+        **{key:getattr(args,key) for key in grounding_keys}))
     dataset=StreamDataset(args.manifest,cache_dir=args.cache_dir,max_tokens=args.max_tokens,
         max_history_tokens=args.max_history_tokens,max_region_seconds=args.max_region_seconds,
         preparation_workers=args.prepare_workers,audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,
-        quality_enabled=args.quality_enabled)
+        quality_enabled=args.quality_enabled,grounding_config=config,
+        history_note_dropout=args.history_note_dropout,prefix_note_dropout=args.prefix_note_dropout,seed=args.seed)
     if not len(dataset):
         raise ValueError('没有可监督的连续流训练样本；请检查质量排除标注和数据集。')
     if args.resume:
@@ -222,9 +280,7 @@ def _train(args):
         'supervised_tokens': sum(sum(w>0 for w in chunk.target_quality) for chunk in dataset.chunks),
         'dataset_fingerprint': dataset.fingerprint}),flush=True)
     if old is None:
-        model=ChartStreamTransformer(StreamConfig(vocab_size=len(dataset.codec),d_model=args.d_model,
-            nhead=args.nhead,layers=args.layers,dim_feedforward=args.dim_feedforward,dropout=args.dropout,
-            max_tokens=args.max_tokens,max_history_tokens=args.max_history_tokens,max_stream_memory=args.max_stream_memory))
+        model=ChartStreamTransformer(config)
     model.to(device); model.train()
     optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=args.weight_decay)
     scaler=torch.amp.GradScaler('cuda',enabled=precision=='fp16')
@@ -236,7 +292,7 @@ def _train(args):
     if old is not None:
         old.pop('optimizer_state_dict',None); old.pop('model_state_dict',None)
     loader=DataLoader(dataset,batch_size=args.batch_size,shuffle=True,collate_fn=collate_stream,
-                      num_workers=0,pin_memory=device.type=='cuda')
+                      num_workers=0,pin_memory=device.type=='cuda',generator=torch.Generator().manual_seed(args.seed))
     out=Path(args.checkpoint_dir); out.mkdir(parents=True,exist_ok=True)
     atom_catalog=[]
     for record in dataset.base.songs:
@@ -254,38 +310,48 @@ def _train(args):
         'grad_accumulation':args.grad_accumulation,'event_decision_loss_weight':args.event_decision_loss_weight,
         'plan_loss_weight':args.plan_loss_weight,'parameters':sum(p.numel() for p in model.parameters()),
         'audio_cache_budget_gb':args.audio_cache_gb,'quality_enabled':args.quality_enabled,'start_epoch':start_epoch+1,
+        'grounding_profile':args.grounding_profile,'detail_audio_nodes':args.detail_audio_nodes,
+        'alignment_loss_weight':args.alignment_loss_weight,'event_balance_loss_weight':args.event_balance_loss_weight,
+        'history_note_dropout':args.history_note_dropout,'prefix_note_dropout':args.prefix_note_dropout,
+        'prefetch_batches':args.prefetch_batches,'cache_query_fraction':.75 if dataset.grounded else .25,
         'end_epoch':start_epoch+args.epochs}),flush=True)
     for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
+        dataset.set_epoch(epoch)
         totals={}; optimizer.zero_grad(set_to_none=True); pending=0
         started=time.monotonic()
-        for index,batch in enumerate(loader,1):
-            tensors={k:v.to(device,non_blocking=device.type=='cuda') if torch.is_tensor(v) else v for k,v in batch.items()}
-            with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,enabled=precision in {'bf16','fp16'}):
-                output=model(tensors); loss,metrics=_loss(output,tensors,args.plan_loss_weight,args.event_decision_loss_weight)
-            scaler.scale(loss/args.grad_accumulation).backward(); pending+=1
-            for key,value in metrics.items(): totals[key]=totals.get(key,0.)+value.detach()
-            if pending>=args.grad_accumulation or index==len(loader):
-                stepped = _finish_accumulation(model,optimizer,scaler,pending,args.grad_accumulation)
-                pending=0
-                if stepped: global_step+=1
-                if stepped and args.checkpoint_interval_steps and global_step % args.checkpoint_interval_steps == 0:
-                    state = {'epoch':epoch, 'chunk':index, 'total_chunks':len(loader)}
-                    save(out/'stream_last.pt', model, optimizer, epoch=epoch, args=vars(args),
-                         manifest=args.manifest, metrics=_mean_metrics(totals,index), atom_catalog=atom_catalog,
-                         optimizer_steps=global_step, training_position=state, scaler=scaler,
-                         dataset_fingerprint=dataset.fingerprint)
-                    save(out/f'stream_step_{global_step:08d}.pt', model, optimizer, epoch=epoch,
-                         args=vars(args), manifest=args.manifest, metrics=_mean_metrics(totals,index),
-                         atom_catalog=atom_catalog, optimizer_steps=global_step,
-                         training_position=state, scaler=scaler, dataset_fingerprint=dataset.fingerprint)
-                    print('stream_checkpoint '+json.dumps({'epoch':epoch,'optimizer_steps':global_step,
-                        'path':str(out/f'stream_step_{global_step:08d}.pt')}),flush=True)
-            if index%args.log_interval==0 or index==len(loader):
-                average=_mean_metrics(totals,index)
-                elapsed=time.monotonic()-started
-                print('stream_progress '+json.dumps({'family':'chart_stream_v1','epoch':epoch,'chunk':index,
-                    'total':len(loader),'optimizer_steps':global_step,'elapsed_sec':elapsed,
-                    'batches_per_sec':index/max(elapsed,1e-6),'cache':dataset.cache_stats(),**average}),flush=True)
+        from maichart.form.layout_prefetch import LayoutBatchPrefetch
+        loader.generator.manual_seed(args.seed+epoch)
+        batch_source=(LayoutBatchPrefetch(loader,depth=args.prefetch_batches) if args.prefetch_batches else nullcontext(loader))
+        with batch_source as batches:
+            for index,batch in enumerate(batches,1):
+                tensors={k:v.to(device,non_blocking=device.type=='cuda') if torch.is_tensor(v) else v for k,v in batch.items()}
+                with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,enabled=precision in {'bf16','fp16'}):
+                    output=model(tensors); loss,metrics=_loss(output,tensors,args.plan_loss_weight,args.event_decision_loss_weight,
+                        args.alignment_loss_weight,args.event_balance_loss_weight)
+                scaler.scale(loss/args.grad_accumulation).backward(); pending+=1
+                for key,value in metrics.items(): totals[key]=totals.get(key,0.)+value.detach()
+                if pending>=args.grad_accumulation or index==len(loader):
+                    stepped = _finish_accumulation(model,optimizer,scaler,pending,args.grad_accumulation)
+                    pending=0
+                    if stepped: global_step+=1
+                    if stepped and args.checkpoint_interval_steps and global_step % args.checkpoint_interval_steps == 0:
+                        state = {'epoch':epoch, 'chunk':index, 'total_chunks':len(loader)}
+                        save(out/'stream_last.pt', model, optimizer, epoch=epoch, args=vars(args),
+                             manifest=args.manifest, metrics=_mean_metrics(totals,index), atom_catalog=atom_catalog,
+                             optimizer_steps=global_step, training_position=state, scaler=scaler,
+                             dataset_fingerprint=dataset.fingerprint)
+                        save(out/f'stream_step_{global_step:08d}.pt', model, optimizer, epoch=epoch,
+                             args=vars(args), manifest=args.manifest, metrics=_mean_metrics(totals,index),
+                             atom_catalog=atom_catalog, optimizer_steps=global_step,
+                             training_position=state, scaler=scaler, dataset_fingerprint=dataset.fingerprint)
+                        print('stream_checkpoint '+json.dumps({'epoch':epoch,'optimizer_steps':global_step,
+                            'path':str(out/f'stream_step_{global_step:08d}.pt')}),flush=True)
+                if index%args.log_interval==0 or index==len(loader):
+                    average=_mean_metrics(totals,index)
+                    elapsed=time.monotonic()-started
+                    print('stream_progress '+json.dumps({'family':'chart_stream_v1','epoch':epoch,'chunk':index,
+                        'total':len(loader),'optimizer_steps':global_step,'elapsed_sec':elapsed,
+                        'batches_per_sec':index/max(elapsed,1e-6),'cache':dataset.cache_stats(),**average}),flush=True)
         save(out/'stream_last.pt',model,optimizer,epoch=epoch,args=vars(args),manifest=args.manifest,
              metrics=_mean_metrics(totals,len(loader)),atom_catalog=atom_catalog,optimizer_steps=global_step,
              training_position={'epoch':epoch, 'chunk':len(loader), 'total_chunks':len(loader), 'complete':True},

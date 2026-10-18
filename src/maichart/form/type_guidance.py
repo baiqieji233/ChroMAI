@@ -262,6 +262,16 @@ class _EventBias:
         counts = self._completed(self.owner.grammar._split_slashes(text))
         return float(self._score(counts)) if counts is not None else 0.0
 
+    def terminal_score(self, text):
+        """One preference for a fully written cell, independent of its spelling.
+
+        Stream sampling uses this instead of prefix differences: local softmax
+        normalizers prevent those differences from telescoping into a true
+        sequence preference. Legacy form decoding retains its existing API.
+        """
+        return (self.complete(text) + self._local_potential(text, complete=True)
+                + self._physical_potential(text, complete=True))
+
     def potential(self, text):
         if text in self._potential_cache:
             return self._potential_cache[text]

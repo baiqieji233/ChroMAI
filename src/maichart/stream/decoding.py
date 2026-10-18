@@ -21,6 +21,7 @@ from .context import prefix_action_state
 from .constraints import BasicConfigurationGuard
 from .reference_guard import ReferenceCandidateGuard
 from .ending import LearnedEnding
+from .configuration_search import propose_configurations
 
 
 def validate_options(args):
@@ -41,6 +42,9 @@ def validate_options(args):
         value = getattr(args, name)
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise ValueError(f'{name} 必须是 {low}–{high} 的整数')
+    candidates=getattr(args,'configuration_candidates',4)
+    if isinstance(candidates,bool) or not isinstance(candidates,int) or not 1<=candidates<=16:
+        raise ValueError('configuration_candidates 必须是 1–16 的整数')
     if isinstance(args.reference_check_attempts,bool) or not isinstance(args.reference_check_attempts,int) or not 0 <= args.reference_check_attempts <= 32:
         raise ValueError('reference_check_attempts 必须是 0–32 的整数')
     if isinstance(args.max_button_heads, bool) or not isinstance(args.max_button_heads, int) or not 0 <= args.max_button_heads <= 8:
@@ -98,7 +102,12 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     control = condition.to_vector(device=device)[None]
     audio_mask = torch.zeros(audio.shape[:2], dtype=torch.bool, device=device)
     encoded_audio = model.encode_audio(audio, control, audio_padding_mask=audio_mask)
-    base_projection = model.audio_projection(audio)[0]
+    grounded=None
+    if model.config.grounding_profile!='none':
+        from .grounded_inference import GroundedInference
+        grounded=GroundedInference(model,codec,song,encoded_audio)
+        model=grounded
+    base_projection = model.audio_projection(audio)[0] if grounded is None else None
     bank = StreamMemoryBank(max_entries=max(256, model.config.max_stream_memory),
                             max_retrieval=model.config.max_stream_memory)
     guidance = TypeGuidance(atoms, condition, [], planner_strength=0.,
@@ -121,6 +130,10 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                           getattr(args,'effective_end_sec',song.audio.duration_sec),args.learned_ending_strength)
             if float(getattr(args,'effective_end_sec',song.audio.duration_sec))>0 else None)
     rng = torch.Generator(device=device).manual_seed(args.seed)
+    proposal_rng = torch.Generator(device=device).manual_seed((args.seed+104729)%(2**63-1))
+    terminal_guidance=bool(args.temperature>0 and getattr(args,'configuration_candidates',4)>1
+        and (args.style_balance_strength or args.local_chord_strength or args.physical_feasibility_strength))
+    proposal_events=proposal_tokens=proposal_count=0
     position = None
     state, spelling, header_start = 'event', '', 0
     cache, consumed = None, 0
@@ -145,10 +158,11 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         return min(choices, key=lambda i: abs(float(audio_times[i])-second)) if choices else 0
 
     def refresh_context():
+        if grounded is not None:grounded.begin_context(points,history_tokens)
         action = audio.new_zeros((1, 1, 50))
         action_mask = torch.ones((1, 1), dtype=torch.bool, device=device)
         if points:
-            index = SustainStateIndex(points, song.tempo, song.first)
+            index = grounded.state if grounded is not None else SustainStateIndex(points, song.tempo, song.first)
             states, padding, _ = prefix_action_state(index, points, len(points))
             action, action_mask = states[None].to(device), padding[None].to(device)
         history = torch.tensor([history_tokens], dtype=torch.long, device=device) if history_tokens else None
@@ -161,7 +175,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         memory, padding = model.encode(audio, control, audio_padding_mask=audio_mask,
             action_state=action, action_state_padding_mask=action_mask,
             stream_memory=summary, stream_memory_padding_mask=summary_mask, encoded_audio=encoded_audio)
-        return model.prepare_decode_memory(memory, padding, history=history)
+        kwargs={'history_clock':grounded.history_clock} if grounded is not None else {}
+        return model.prepare_decode_memory(memory, padding, history=history,**kwargs)
 
     def retry_note():
         nonlocal ids,cache,consumed,spelling,note_choices,note_attempts
@@ -259,6 +274,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 raise ValueError('单个配置超过流上下文 token 上限；请增大「流上下文 token 上限」后重试。')
         while consumed < len(ids):
             token = torch.tensor([[ids[consumed]]], dtype=torch.long, device=device)
+            if grounded is not None:grounded.set_prefix(ids)
             output, cache = model.decode_step(token, consumed, memory, memory_mask, cache)
             consumed += 1
         logits = output['logits'][0, -1].float()
@@ -293,6 +309,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     memory, memory_mask, consumed=consumed, width=args.position_beam_size,
                     complexity=args.position_complexity, temperature=args.position_temperature,
                     complexity_floor=args.position_complexity_floor,
+                    timing_features=grounded.timing_features if grounded is not None else None,
                     generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost,
                     proposals=([Fraction(math.floor(previous)+1)] + [previous+(b.beat-a.beat)
                         for a,b in reversed(list(zip(points[-33:],points[-33:][1:])))]
@@ -349,49 +366,79 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             else:
                 spelling += codec.tokens[selected][2:]
         else:
-            prefix_key = (spelling,cell_grammar.forbidden,cell_grammar.button_capacity,
-                          cell_grammar.held_buttons,cell_grammar.second)
-            cached_allowed = note_prefix_cache.get(prefix_key)
-            if cached_allowed is None:
-                base_allowed = [index for index, char in chars if grammar.can_continue(spelling+char)]
-                allowed = [index for index in base_allowed if cell_grammar.can_continue(spelling+codec.tokens[index][2:])]
-                hard_guard.blocked_token_choices += len(base_allowed)-len(allowed)
-                if grammar.is_complete(spelling):base_allowed.append(codec.end_id)
-                if cell_grammar.is_complete(spelling):
-                    allowed.append(codec.end_id)
-                if len(note_prefix_cache) >= 4096:
-                    note_prefix_cache.clear()
-                note_prefix_cache[prefix_key] = (allowed,base_allowed)
-            else:
-                allowed,base_allowed=cached_allowed
-            if args.constraint_min_probability and base_allowed and len(allowed)<len(base_allowed):
-                kept=(float(torch.exp(torch.logsumexp(logits[allowed],0)-torch.logsumexp(logits[base_allowed],0)))
-                      if allowed else 0.)
-                if kept<args.constraint_min_probability:
-                    if retry_event('hard_mask_discarded_likely_configuration',kept):continue
-                    reason,incomplete='low_probability_configuration_constraints',True
+            if terminal_guidance and not spelling:
+                def check_configuration(text):
+                    nonlocal note_attempts
+                    if reference_guard is not None:note_attempts+=1
+                    return reference_guard.check(EventPoint(position,text))[0] if reference_guard is not None else True
+                candidate_budget=getattr(args,'configuration_candidates',4)
+                if reference_guard is not None:candidate_budget=min(candidate_budget,max(1,args.reference_check_attempts-note_attempts))
+                picked,search=propose_configurations(model,codec,logits,cache,memory,memory_mask,
+                    consumed=consumed,max_tokens=model.config.max_tokens,grammar=grammar,restricted=cell_grammar,
+                    event_bias=event_bias,temperature=args.temperature,candidates=candidate_budget,
+                    generator=proposal_rng,minimum_mass=args.constraint_min_probability,
+                    timing_features=grounded.timing_features if grounded is not None else None,
+                    check=check_configuration)
+                proposal_events+=1;proposal_tokens+=search['expanded_tokens'];proposal_count+=search['proposals']
+                if search['reason']=='context_space':
+                    if header_start<=1:
+                        raise ValueError('完整配置候选超过流上下文 token 上限；请增大「流上下文 token 上限」。')
+                    history_tokens=(history_tokens+ids[0 if rotations==0 else 1:header_start])[-model.config.max_history_tokens:]
+                    pending=ids[header_start:]
+                    memory,memory_mask=refresh_context()
+                    ids,cache,consumed,header_start=[codec.bos_id]+pending,None,0,1
+                    rotations+=1
+                    continue
+                if picked is None:
+                    if (reference_guard is not None and search['reason']=='reference_constraints_exhausted'
+                            and note_attempts<args.reference_check_attempts):continue
+                    if retry_event(search['reason']):continue
+                    reason,incomplete=search['reason'],True
                     break
-            allowed = [token for token in allowed if token not in note_bans.get(spelling,set())]
-            if not allowed:
-                if reference_guard is not None:
-                    note_attempts += 1
-                    if retry_note(): continue
-                if retry_event('configuration_constraints_exhausted'):continue
-                reason, incomplete = 'configuration_constraints_exhausted', True
-                break
-            continuations = [None if token == codec.end_id else codec.tokens[token][2:] for token in allowed]
-            hints = event_bias.biases(spelling, continuations)
-            scores = logits.clone()
-            scores[allowed] += torch.as_tensor(hints, device=device, dtype=logits.dtype)
-            selected = sample_token(scores, allowed, args.temperature, rng)
-            if reference_guard is not None and len(allowed)>1:
-                alternatives = [token for token in allowed if token != selected]
-                margin = float(scores[selected]-scores[alternatives].max())
-                note_choices.append((margin,spelling,selected))
-            ids.append(selected); emitted_tokens += 1
+                spelling=picked['text'];ids.extend(picked['tokens'])
+                cache,consumed=picked['cache'],picked['consumed']
+                emitted_tokens+=len(picked['tokens'])
+                selected=codec.end_id
+            else:
+                selected=None
+            if selected is None:
+                prefix_key = (spelling,cell_grammar.forbidden,cell_grammar.button_capacity,
+                              cell_grammar.held_buttons,cell_grammar.second)
+                cached_allowed = note_prefix_cache.get(prefix_key)
+                if cached_allowed is None:
+                    base_allowed = [index for index, char in chars if grammar.can_continue(spelling+char)]
+                    allowed = [index for index in base_allowed if cell_grammar.can_continue(spelling+codec.tokens[index][2:])]
+                    hard_guard.blocked_token_choices += len(base_allowed)-len(allowed)
+                    if grammar.is_complete(spelling):base_allowed.append(codec.end_id)
+                    if cell_grammar.is_complete(spelling):allowed.append(codec.end_id)
+                    if len(note_prefix_cache) >= 4096:note_prefix_cache.clear()
+                    note_prefix_cache[prefix_key] = (allowed,base_allowed)
+                else:
+                    allowed,base_allowed=cached_allowed
+                if args.constraint_min_probability and base_allowed and len(allowed)<len(base_allowed):
+                    kept=(float(torch.exp(torch.logsumexp(logits[allowed],0)-torch.logsumexp(logits[base_allowed],0)))
+                          if allowed else 0.)
+                    if kept<args.constraint_min_probability:
+                        if retry_event('hard_mask_discarded_likely_configuration',kept):continue
+                        reason,incomplete='low_probability_configuration_constraints',True
+                        break
+                allowed = [token for token in allowed if token not in note_bans.get(spelling,set())]
+                if not allowed:
+                    if reference_guard is not None:
+                        note_attempts += 1
+                        if retry_note(): continue
+                    if retry_event('configuration_constraints_exhausted'):continue
+                    reason, incomplete = 'configuration_constraints_exhausted', True
+                    break
+                selected = sample_token(logits, allowed, args.temperature, rng)
+                if reference_guard is not None and len(allowed)>1:
+                    alternatives = [token for token in allowed if token != selected]
+                    margin = float(logits[selected]-logits[alternatives].max())
+                    note_choices.append((margin,spelling,selected))
+                ids.append(selected); emitted_tokens += 1
             if selected == codec.end_id:
                 point = EventPoint(position, spelling)
-                if reference_guard is not None:
+                if reference_guard is not None and not terminal_guidance:
                     note_attempts += 1
                     accepted,_ = reference_guard.check(point)
                     if not accepted:
@@ -404,9 +451,11 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 guidance.commit(spelling, position)
                 hard_guard.commit(point)
                 if reference_guard is not None: reference_guard.commit(point)
+                if grounded is not None:grounded.commit(point)
                 rejected_positions.clear();event_retry_count=0
-                vector = model.token_embedding(torch.tensor(codec.cell(point), device=device)).mean(0)
-                bank.append(position, spelling, vector + base_projection[audio_index(position)])
+                if grounded is None:
+                    vector = model.token_embedding(torch.tensor(codec.cell(point), device=device)).mean(0)
+                    bank.append(position, spelling, vector + base_projection[audio_index(position)])
                 if len(points) % 32 == 0:
                     print('stream_arrange_progress '+json.dumps({'events': len(points),
                         'beat': str(position), 'audio_second': float(seconds_at_beat(position, song.tempo, song.first)),
@@ -420,6 +469,11 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'resource_rotations': rotations, 'tokens': emitted_tokens,
                     'equivalent_fraction_normalizations': canonicalizations,
                     'audio_encoder_calls': 1, 'guidance': guidance.report(),
+                    'configuration_search':{'mode':'complete_cell_importance_resampling',
+                        'candidate_budget':getattr(args,'configuration_candidates',4),
+                        'guided_events':proposal_events,'proposals':proposal_count,'expanded_tokens':proposal_tokens,
+                        'prefix_style_bias':False,'greedy_terminal_guidance':False},
+                    'grounding':grounded.report() if grounded is not None else {'profile':'none'},
                     'memory_policy': 'training_history_summary_v1',
                     'basic_constraints': hard_guard.report(),
                     'reference_constraints': reference_guard.report() if reference_guard is not None else {'enabled':False},
