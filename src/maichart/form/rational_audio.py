@@ -719,6 +719,8 @@ def audio_queries(song, start, end, *, max_nodes=None):
     """Return nonuniform evidence and a clock made entirely of Fraction beats."""
     import torch
     from maichart.form.timing import metrical_features
+    from maichart.tempo_clock import TempoClock
+    clock=TempoClock(song.tempo,song.first)
     start, end = Fraction(start), Fraction(end)
     if end <= start:
         raise ValueError('Musical audio query range must have end > start')
@@ -769,7 +771,7 @@ def audio_queries(song, start, end, *, max_nodes=None):
                     or any(not start<=beat<end for beat in beats)
                     or any(b<=a for a,b in zip(beats,beats[1:]))
                     or (max_nodes is not None and len(beats)>max_nodes)
-                    or not np.allclose(times,[seconds_at_beat(b,song.tempo,song.first) for b in beats],
+                    or not np.allclose(times,[clock.at(b) for b in beats],
                                        rtol=1e-12,atol=1e-10)):
                 raise ValueError("Invalid musical query cache")
         except (OSError, ValueError, KeyError):
@@ -799,7 +801,7 @@ def audio_queries(song, start, end, *, max_nodes=None):
             positions = required | {optional[i] for i in chosen}
             if evidence_profile == BALANCED_EVIDENCE_PROFILE:
                 omitted_anchors = sorted(set(optional)-positions)
-        lo, hi = seconds_at_beat(start,song.tempo,song.first), seconds_at_beat(end,song.tempo,song.first)
+        lo, hi = clock.at(start), clock.at(end)
         sr = audio.metadata["sample_rate"]
         selected=np.flatnonzero((audio.times >= lo) & (audio.times < hi))
         if max_nodes is not None and len(selected)+len(positions)>max_nodes:
@@ -824,7 +826,7 @@ def audio_queries(song, start, end, *, max_nodes=None):
             chosen = np.linspace(0, len(optional)-1, count, dtype=int) if count else []
             positions.update(optional[index] for index in chosen)
         beats = tuple(sorted(positions))
-        times = np.asarray([seconds_at_beat(b,song.tempo,song.first) for b in beats],dtype=np.float64)
+        times = np.asarray([clock.at(b) for b in beats],dtype=np.float64)
         if policy == LEGACY_FEATURE_POLICY:
             acoustic = acoustic_at_times(audio, times, derived_policy=policy)
         else:

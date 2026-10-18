@@ -117,6 +117,9 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.prefetch_batches,2);
   assert.equal(result.data_workers,4);
   assert.equal(result.cpu_threads,0);
+  assert.equal(result.input_cache_mode,'mapped');
+  assert.equal(result.structure_cache_mb,256);
+  assert.equal(result.optimizer_implementation,'auto');
   for (const id of ['streamDropout','streamSeed']) assert.ok(html.includes(`id="${id}"`));
 });
 

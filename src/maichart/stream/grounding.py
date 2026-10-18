@@ -17,6 +17,7 @@ from maichart.event_timing import seconds_at_beat
 from maichart.form.rhythm_geometry import CausalGeometry
 from maichart.form.rational_audio import acoustic_at_times, audio_queries
 from maichart.form.timing import metrical_features
+from maichart.tempo_clock import TempoClock
 
 PROFILE = 'causal_audio_v1'
 PROFILES = ('none', PROFILE)
@@ -30,10 +31,11 @@ class CausalClock:
         self.geometry=CausalGeometry(codec,profile='exact_fraction_v2',meters=meters)
         self.geometry.current=Fraction(previous)
         self.tempo,self.first,self.duration=tempo,float(first),float(duration)
+        self.timeline=TempoClock(tempo,first)
         self.committed=int(committed)
         before=Fraction(previous if previous_previous is None else previous_previous)
         self.delta=float(Fraction(previous)-before)
-        self.delta_sec=float(seconds_at_beat(previous,tempo,first)-seconds_at_beat(before,tempo,first))
+        self.delta_sec=self.timeline.at(previous)-self.timeline.at(before)
         self._key=None;self._features=None
 
     @property
@@ -43,19 +45,19 @@ class CausalClock:
     def pending(self):return self.geometry.state=='note'
 
     @property
-    def second(self):return float(seconds_at_beat(self.beat,self.tempo,self.first))
+    def second(self):return self.timeline.at(self.beat)
 
     def consume(self,token):
         old=self.beat;state=self.geometry.state
         row=self.geometry.consume(int(token))
         if token==self.geometry.codec.note_id and self.geometry.state=='note':
             self.delta=float(self.beat-old)
-            self.delta_sec=float(seconds_at_beat(self.beat,self.tempo,self.first)-seconds_at_beat(old,self.tempo,self.first))
+            self.delta_sec=self.timeline.at(self.beat)-self.timeline.at(old)
         if token==self.geometry.codec.end_id and state=='note':self.committed+=1
         key=(self.beat,self.delta,self.committed,self.pending)
         if key!=self._key:
             second=self.second
-            bpm=next(t.bpm for t in reversed(self.tempo) if t.beat<=self.beat)
+            bpm=self.timeline.bpm(self.beat)
             self._features=np.asarray((*row,second/120.,second/max(self.duration,1e-6),
                 math.log1p(max(0.,self.delta))/math.log(65),
                 math.log1p(max(0.,self.delta_sec))/math.log(21),

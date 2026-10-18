@@ -58,6 +58,9 @@ def parser():
     p.add_argument('--prefetch-batches',type=int,default=2)
     p.add_argument('--data-workers',type=int,default=4)
     p.add_argument('--cpu-threads',type=int,default=0)
+    p.add_argument('--input-cache-mode',choices=('mapped','legacy'),default='mapped')
+    p.add_argument('--structure-cache-mb',type=int,default=256)
+    p.add_argument('--optimizer-implementation',choices=('auto','standard','fused'),default='auto')
     return p
 
 
@@ -78,7 +81,7 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25,alignment_weight=.15,eve
         # Quality is a gradient multiplier, including batch_size=1. Never
         # borrow another objective's denominator or divide by a zero weight.
         return (values * valid * local_weight * quality).sum()/valid.sum().clamp_min(1)
-    ce=F.cross_entropy(logits.transpose(1,2),target,ignore_index=0,reduction='none')
+    ce=F.cross_entropy(logits.reshape(-1,logits.size(-1)),target.reshape(-1),ignore_index=0,reduction='none').reshape_as(target)
     token=reduce(ce, mask, local)
     plan_mask=batch['plan_mask'] & ~batch['plan_mask_padding_mask'] & mask
     plan=F.smooth_l1_loss(output['plan'].float(),batch['plan_labels'].float(),reduction='none').mean(-1)
@@ -96,14 +99,14 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25,alignment_weight=.15,eve
     decision_mask=mask & ((batch['decoder_input']==codec.bos_id) | (batch['decoder_input']==codec.end_id))
     decision_mask &= (target==codec.at_id) | (target==codec.eos_id)
     choices=torch.stack((logits[...,codec.at_id],logits[...,codec.eos_id]),-1)
-    decision_values=F.cross_entropy(choices.transpose(1,2),(target==codec.eos_id).long(),reduction='none')
+    decision_values=F.cross_entropy(choices.reshape(-1,2),(target==codec.eos_id).long().reshape(-1),reduction='none').reshape_as(target)
     decision=reduce(decision_values,decision_mask,local)
     prediction=logits.argmax(-1)
     eos_mask=mask & (target==codec.eos_id)
     position_mask=mask & (target>=codec.ids['P:0']) & (target<=codec.ids['P:/'])
     note_mask=mask & (target>=codec.ids['N:1'])
     from .objectives import event_balanced_loss,alignment_loss
-    balanced,extra=event_balanced_loss(ce,logits,batch,codec)
+    balanced,extra=event_balanced_loss(ce,logits,batch,codec,predicted=prediction)
     alignment=logits.sum()*0
     if 'alignment_event_logits' in output:
         alignment,metrics=alignment_loss(output,batch);extra.update(metrics)
@@ -207,6 +210,7 @@ def validate_training_args(args):
     if not 0<=args.prefetch_batches<=16:raise ValueError('prefetch_batches 必须为0–16')
     if not 1<=args.data_workers<=8:raise ValueError('data_workers 必须为1–8')
     if not 0<=args.cpu_threads<=64:raise ValueError('cpu_threads 必须为0–64')
+    if not 0<=args.structure_cache_mb<=8192:raise ValueError('structure_cache_mb 必须为0–8192')
 
 
 def validate_output_directory(args):
@@ -274,7 +278,8 @@ def _train(args):
         max_history_tokens=args.max_history_tokens,max_region_seconds=args.max_region_seconds,
         preparation_workers=args.prepare_workers,audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,
         quality_enabled=args.quality_enabled,grounding_config=config,
-        history_note_dropout=args.history_note_dropout,prefix_note_dropout=args.prefix_note_dropout,seed=args.seed)
+        history_note_dropout=args.history_note_dropout,prefix_note_dropout=args.prefix_note_dropout,seed=args.seed,
+        input_cache_mode=args.input_cache_mode,structure_cache_mb=args.structure_cache_mb)
     if not len(dataset):
         raise ValueError('没有可监督的连续流训练样本；请检查质量排除标注和数据集。')
     if args.resume:
@@ -288,9 +293,12 @@ def _train(args):
     if old is None:
         model=ChartStreamTransformer(config)
     model.to(device); model.train()
-    optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=args.weight_decay)
+    fused=args.optimizer_implementation=='fused' or (args.optimizer_implementation=='auto' and device.type=='cuda')
+    if fused and device.type!='cuda':raise ValueError('融合优化器需要CUDA；CPU请选择auto或standard')
+    optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=args.weight_decay,fused=fused)
     scaler=torch.amp.GradScaler('cuda',enabled=precision=='fp16')
     if args.resume and old.get('optimizer_state_dict'): optimizer.load_state_dict(old['optimizer_state_dict'])
+    for group in optimizer.param_groups:group['fused']=fused;group['foreach']=False if fused else None
     if args.resume and old.get('scaler_state_dict') and scaler.is_enabled():
         scaler.load_state_dict(old['scaler_state_dict'])
     # Release CPU optimizer/model copies before training. Adam's live state is
@@ -320,7 +328,9 @@ def _train(args):
         'alignment_loss_weight':args.alignment_loss_weight,'event_balance_loss_weight':args.event_balance_loss_weight,
         'history_note_dropout':args.history_note_dropout,'prefix_note_dropout':args.prefix_note_dropout,
         'prefetch_batches':args.prefetch_batches,'cache_query_fraction':.75 if dataset.grounded else .25,
-        'data_workers':min(args.data_workers,args.batch_size) if args.prefetch_batches else 1,
+        'data_workers':args.data_workers if args.prefetch_batches else 1,
+        'input_cache_mode':args.input_cache_mode,'structure_cache_mb':args.structure_cache_mb,
+        'optimizer_implementation':'fused' if fused else 'standard',
         'cpu_budget':args.cpu_budget,
         'end_epoch':start_epoch+args.epochs}),flush=True)
     for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
@@ -329,14 +339,15 @@ def _train(args):
         started=time.monotonic()
         waited=transfer=compute=saving=0.;previous_end=started
         last_log_time=started;last_log_batch=0
-        from maichart.form.layout_prefetch import LayoutBatchPrefetch
+        from .prefetch import StreamBatchPrefetch
+        from .training_batch import transfer_batch
         loader.generator.manual_seed(args.seed+epoch)
-        batch_source=(LayoutBatchPrefetch(loader,depth=args.prefetch_batches,
-            sample_workers=min(args.data_workers,args.batch_size)) if args.prefetch_batches else nullcontext(loader))
+        batch_source=(StreamBatchPrefetch(loader,depth=args.prefetch_batches,
+            workers=args.data_workers) if args.prefetch_batches else nullcontext(loader))
         with batch_source as batches:
             for index,batch in enumerate(batches,1):
                 data_ready=time.monotonic();waited+=data_ready-previous_end
-                tensors={k:v.to(device,non_blocking=device.type=='cuda') if torch.is_tensor(v) else v for k,v in batch.items()}
+                tensors=transfer_batch(batch,device)
                 transferred=time.monotonic();transfer+=transferred-data_ready
                 with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,enabled=precision in {'bf16','fp16'}):
                     output=model(tensors); loss,metrics=_loss(output,tensors,args.plan_loss_weight,args.event_decision_loss_weight,
@@ -354,11 +365,7 @@ def _train(args):
                         save(out/'stream_last.pt', model, optimizer, epoch=epoch, args=vars(args),
                              manifest=args.manifest, metrics=_mean_metrics(totals,index), atom_catalog=atom_catalog,
                              optimizer_steps=global_step, training_position=state, scaler=scaler,
-                             dataset_fingerprint=dataset.fingerprint)
-                        save(out/f'stream_step_{global_step:08d}.pt', model, optimizer, epoch=epoch,
-                             args=vars(args), manifest=args.manifest, metrics=_mean_metrics(totals,index),
-                             atom_catalog=atom_catalog, optimizer_steps=global_step,
-                             training_position=state, scaler=scaler, dataset_fingerprint=dataset.fingerprint)
+                             dataset_fingerprint=dataset.fingerprint,aliases=(out/f'stream_step_{global_step:08d}.pt',))
                         print('stream_checkpoint '+json.dumps({'epoch':epoch,'optimizer_steps':global_step,
                             'path':str(out/f'stream_step_{global_step:08d}.pt')}),flush=True)
                         saving+=time.monotonic()-save_started

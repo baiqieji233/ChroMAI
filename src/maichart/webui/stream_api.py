@@ -133,7 +133,8 @@ def start(handler, operation, payload, *, runtime):
                 ('local_audio_neighbors',32),('local_audio_seconds',2.),('archive_events',4096),
                 ('archive_retrievals',8),('archive_min_similarity',.5),('history_note_dropout',.15),
                 ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
-                ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0)):
+                ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0),
+                ('input_cache_mode','mapped'),('structure_cache_mb',256),('optimizer_implementation','auto')):
             args += ['--'+key.replace('_','-'),str(payload.get(key,default))]
         if type(payload.get('quality_enabled',True)) is not bool:
             raise ValueError('quality_enabled 必须是布尔值')

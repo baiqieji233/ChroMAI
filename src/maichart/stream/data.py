@@ -11,6 +11,7 @@ import math
 import time
 import random
 import threading
+from types import SimpleNamespace
 from collections import Counter
 from bisect import bisect_left
 
@@ -93,13 +94,21 @@ class StreamDataset(Dataset):
     def __init__(self, manifest, *, cache_dir, max_tokens=1024, max_history_tokens=256,
                  max_region_seconds=15., preparation_workers=1, audio_cache_gb=1.,
                  limit_charts=0, quality_profile=MUSICAL_EVIDENCE, quality_enabled=True,
-                 grounding_config=None,history_note_dropout=0.,prefix_note_dropout=0.,seed=0):
+                 grounding_config=None,history_note_dropout=0.,prefix_note_dropout=0.,seed=0,
+                 input_cache_mode='mapped',structure_cache_mb=256):
         self.codec = RationalCodec()
         self.grounding_config=grounding_config
         self.grounded=bool(grounding_config is not None and grounding_config.grounding_profile!='none')
         self.history_note_dropout=float(history_note_dropout);self.prefix_note_dropout=float(prefix_note_dropout)
         self.seed,self.epoch=int(seed),0
         self.cache_dir=cache_dir
+        if input_cache_mode not in {'mapped','legacy'}:raise ValueError('Unknown input_cache_mode')
+        from .input_cache import MappedInputCache,fingerprint
+        self.input_cache=MappedInputCache(cache_dir) if input_cache_mode=='mapped' else None
+        self._durations={};self._chart_identities=[]
+        self._structures=OrderedDict();self.structure_bytes=0
+        self.structure_budget=int(structure_cache_mb*1024**2)
+        self.structure_hits=self.structure_misses=0
         # Split the user budget between acoustic features and final queries.
         # The shared query builder also has its own fixed bounded scratch LRU.
         query_fraction=.75 if self.grounded else .25
@@ -125,6 +134,7 @@ class StreamDataset(Dataset):
         self.query_bytes = self.query_hits = self.query_misses = 0
         self._query_keys = []
         self._chart_ids=[];self._chart_positions=[];self._probe_beats=[];self._probe_indices=[]
+        self._point_seconds=[];self._point_values=[];self._event_note_ids=[]
         started=time.monotonic()
         print('stream_prepare '+json.dumps({'stage':'targets','completed':0,'total':len(self.base.songs)}),flush=True)
         for index, record in enumerate(self.base.songs):
@@ -133,6 +143,11 @@ class StreamDataset(Dataset):
             ids=self.codec.encode(points,origin=Fraction(0)) if points else [self.codec.bos_id,self.codec.eos_id]
             positions=[i for i,t in enumerate(ids) if t==self.codec.at_id]
             self._chart_ids.append(ids);self._chart_positions.append(positions)
+            from maichart.tempo_clock import TempoClock
+            timeline=TempoClock(song.tempo,song.first)
+            self._point_seconds.append(np.asarray([timeline.at(p.beat) for p in points],dtype=np.float64))
+            self._point_values.append(np.asarray([float(p.beat) for p in points],dtype=np.float64))
+            self._event_note_ids.append([tuple(self.codec.ids['N:'+c] for c in p.note_text) for p in points])
             probes=sorted({Fraction(0),*(p.beat for p in points)})
             self._probe_beats.append(probes);self._probe_indices.append({b:i for i,b in enumerate(probes)})
             # Different difficulties share queries only with identical clocks
@@ -143,12 +158,15 @@ class StreamDataset(Dataset):
                 'meters': [m.to_dict() for m in song.meters],
                 'start': str(song.spans[0].start), 'end': str(song.spans[-1].end),
                 'quality_profile': song.quality_profile}, sort_keys=True))
+            self._chart_identities.append(fingerprint({'semantics':TRAINING_SEMANTICS,
+                'query':self._query_keys[-1],'chart':chart,'annotation':annotation,
+                'events':[(str(p.beat),p.note_text) for p in points]}))
             if not points or weight <= 0:
                 continue
             event_at = {position: event for event, position in enumerate(
                 i for i, token in enumerate(ids) if token == self.codec.at_id)}
             event_before = 0
-            seconds = [float(seconds_at_beat(p.beat, song.tempo, song.first)) for p in points]
+            seconds = self._point_seconds[index]
             event_weights = [event_weight(float(song.first) if i == 0 else seconds[i-1], second, annotation)
                              for i, second in enumerate(seconds)]
             intent_quality = curve_weights(song, seconds, annotation)
@@ -235,32 +253,82 @@ class StreamDataset(Dataset):
 
     def _queries(self, index, song):
         key = self._query_keys[index]
-        return self._cached_query(key,lambda:planner_audio_queries(song))
+        return self._cached_query(key,lambda:self._mapped_query(index,'planner',1024,
+            lambda:planner_audio_queries(self._source_song(index)))) if getattr(self,'input_cache',None) else self._cached_query(key,lambda:planner_audio_queries(song))
+
+    def _source_song(self,index):
+        from maichart.form.data import _LazyAudio
+        song=self.base.songs[index][0]
+        return replace(song,audio=song.audio.store.get(song.audio.path)) if isinstance(song.audio,_LazyAudio) else song
+
+    def _mapped_query(self,index,kind,settings,builder):
+        from .input_cache import LazyBeats
+        if self.input_cache is None:return builder()
+        identity={'type':kind,'settings':settings,'query':self._query_keys[index],
+            'features':self.base.audio_store.feature_policy+'_'+self.base.audio_store.evidence_profile}
+        if kind in {'probes','alignment'}:identity['chart']=self._chart_identities[index]
+        def build():
+            values,times,beats=builder()
+            duration=self._durations.get(index)
+            if duration is None:duration=float(self.base.songs[index][0].audio.duration_sec)
+            return {'values':values,'times':torch.as_tensor(times)}, {'beats':list(map(str,beats)),'duration':duration}
+        tensors,extra=self.input_cache.get(identity,build)
+        self._durations[index]=extra['duration']
+        return tensors['values'],tensors['times'].numpy(),LazyBeats(extra['beats'])
+
+    def _structure(self,chunk,song,points):
+        """Cache prefix-only geometry before any epoch-dependent masking."""
+        from .grounding import clock_inputs,history_clock,action_summaries
+        from .input_cache import tensor_bytes
+        key=(chunk.chart_index,chunk.chunk_index)
+        with self._query_lock:
+            if key in self._structures:
+                self.structure_hits+=1;self._structures.move_to_end(key)
+                return self._structures[key][0]
+            self.structure_misses+=1
+        def build():
+            previous=points[chunk.start_event-1].beat if chunk.start_event else Fraction(0)
+            before=points[chunk.start_event-2].beat if chunk.start_event>1 else Fraction(0)
+            rows=clock_inputs(chunk.decoder_input,self.codec,song,previous=previous,previous_previous=before,committed=chunk.start_event)
+            beats=rows.pop('query_beats');pending=rows.pop('query_pending')
+            rows['probe_index']=torch.tensor([self._probe_indices[chunk.chart_index][b] for b in beats],dtype=torch.long)
+            rows['query_actions']=action_summaries(self.base.songs[chunk.chart_index][4],beats,pending,rows['query_committed'])
+            action,mask,_=prefix_action_state(self.base.songs[chunk.chart_index][4],points,chunk.start_event)
+            rows['action_state'],rows['action_state_padding_mask']=action,mask
+            positions=self._chart_positions[chunk.chart_index]
+            start=positions[chunk.start_event] if chunk.start_event<len(points) else len(self._chart_ids[chunk.chart_index])-1
+            rows['history_clock']=(history_clock(self._chart_ids[chunk.chart_index],max(0,start-self.max_history_tokens),
+                start,positions,points,self.codec,song) if chunk.history else torch.zeros(0,20))
+            return rows,{}
+        identity={'type':'causal_structure_v1','chart':self._chart_identities[chunk.chart_index],
+            'chunk':chunk.chunk_index,'tokens':self.max_tokens,'history':self.max_history_tokens}
+        rows,_=self.input_cache.get(identity,build) if self.input_cache is not None else build()
+        size=tensor_bytes(rows)
+        with self._query_lock:
+            if size<=self.structure_budget:
+                while self._structures and self.structure_bytes+size>self.structure_budget:
+                    _,(_,removed)=self._structures.popitem(last=False);self.structure_bytes-=removed
+                self._structures[key]=(rows,size);self.structure_bytes+=size
+        return rows
 
     def _grounded_item(self,chunk,item,song,points,annotation,rng):
         from .grounding import clock_inputs,history_clock,exact_probe_cache,detail_queries,time_cell_weights,masked_note_inputs,action_summaries
         from maichart.form.alignment import build_alignment_targets
-        from maichart.form.data import _LazyAudio
-        if isinstance(song.audio,_LazyAudio):song=replace(song,audio=song.audio.store.get(song.audio.path))
         cfg=self.grounding_config;index=chunk.chart_index
         detail,times,beats=self._cached_query(('detail',self._query_keys[index],cfg.detail_audio_nodes),
-            lambda:detail_queries(song,cfg.detail_audio_nodes))
+            lambda:self._mapped_query(index,'detail',cfg.detail_audio_nodes,lambda:detail_queries(self._source_song(index),cfg.detail_audio_nodes)))
         probes=self._probe_beats[index]
         def probe_builder():
-            values,_=exact_probe_cache(song,probes,self.cache_dir)
+            values,_=exact_probe_cache(self._source_song(index),probes,self.cache_dir)
             return values,np.asarray([seconds_at_beat(b,song.tempo,song.first) for b in probes],dtype=np.float64),tuple(probes)
-        exact,_,_=self._cached_query(('probes',index),probe_builder)
-        prior=points[chunk.start_event-1].beat if chunk.start_event else Fraction(0)
-        before=points[chunk.start_event-2].beat if chunk.start_event>1 else Fraction(0)
-        clocks=clock_inputs(chunk.decoder_input,self.codec,song,previous=prior,previous_previous=before,committed=chunk.start_event)
-        query_beats=clocks.pop('query_beats');pending=clocks.pop('query_pending')
-        item.update(clocks)
-        item['query_actions']=action_summaries(self.base.songs[index][4],query_beats,pending,clocks['query_committed'])
-        item['query_audio']=exact[[self._probe_indices[index][b] for b in query_beats]]
+        exact,_,_=self._cached_query(('probes',index),lambda:self._mapped_query(index,'probes',None,probe_builder))
+        if index in self._durations:song=replace(song,audio=SimpleNamespace(duration_sec=self._durations[index]))
+        structure=self._structure(chunk,song,points)
+        item.update({k:v for k,v in structure.items() if k!='probe_index'})
+        item['query_audio']=exact[structure['probe_index']]
         positions=self._chart_positions[index]
         token_start=positions[chunk.start_event] if chunk.start_event<len(points) else len(self._chart_ids[index])-1
         history_start=max(0,token_start-self.max_history_tokens)
-        item['history_clock']=history_clock(self._chart_ids[index],history_start,token_start,positions,points,self.codec,song) if chunk.history else torch.zeros(0,20)
         item.update(detail_audio=detail,detail_times_sec=torch.as_tensor(times,dtype=torch.float64),
             detail_audio_padding_mask=torch.as_tensor((times<0)|(times>=song.audio.duration_sec)),
             detail_time_weight=time_cell_weights(times,max(0.,song.first),song.audio.duration_sec),
@@ -271,10 +339,10 @@ class StreamDataset(Dataset):
         selected=list(range(archive_count))
         if len(selected)>cfg.archive_events:
             selected=np.linspace(0,len(selected)-1,cfg.archive_events,dtype=int).tolist()
-        item['archive_cells']=[[self.codec.ids['N:'+c] for c in points[i].note_text] for i in selected]
+        item['archive_cells']=[list(self._event_note_ids[index][i]) for i in selected]
         item['archive_audio']=exact[[self._probe_indices[index][points[i].beat] for i in selected]]
-        item['archive_beats']=torch.tensor([float(points[i].beat) for i in selected],dtype=torch.float64)
-        item['archive_seconds']=torch.tensor([float(seconds_at_beat(points[i].beat,song.tempo,song.first)) for i in selected],dtype=torch.float64)
+        item['archive_beats']=torch.from_numpy(self._point_values[index][selected])
+        item['archive_seconds']=torch.from_numpy(self._point_seconds[index][selected])
         item['archive_event_index']=torch.tensor(selected,dtype=torch.long)
         item['archive_padding_mask']=torch.zeros(len(selected),dtype=torch.bool)
         # Unknown history is explicit MASK, never invented wrong configurations.
@@ -288,7 +356,7 @@ class StreamDataset(Dataset):
         item['target_quality']=torch.tensor(quality,dtype=torch.float32)
         event_rows=[i for i,t in enumerate(chunk.target) if t==self.codec.at_id]
         event_points=points[chunk.start_event:chunk.start_event+len(event_rows)]
-        stamps=np.asarray([seconds_at_beat(p.beat,song.tempo,song.first) for p in event_points],dtype=np.float64)
+        stamps=self._point_seconds[index][chunk.start_event:chunk.start_event+len(event_rows)]
         right=np.searchsorted(times,stamps).clip(0,len(times)-1);left=(right-1).clip(0)
         nearest=np.where(abs(times[left]-stamps)<=abs(times[right]-stamps),left,right)
         item['alignment_event_indices']=torch.tensor(event_rows,dtype=torch.long)
@@ -308,7 +376,8 @@ class StreamDataset(Dataset):
                     weights[np.abs(times-second)<=cfg.alignment_tolerance_ms/1000.]=0.
             values=torch.stack((alignment['labels'],alignment['mask'].float(),torch.from_numpy(weights)),1)
             return values,np.empty(0,dtype=np.float64),()
-        supervised,_,_=self._cached_query(('alignment',index,cfg.detail_audio_nodes,cfg.alignment_tolerance_ms),supervision_builder)
+        supervised,_,_=self._cached_query(('alignment',index,cfg.detail_audio_nodes,cfg.alignment_tolerance_ms),
+            lambda:self._mapped_query(index,'alignment',(cfg.detail_audio_nodes,cfg.alignment_tolerance_ms),supervision_builder))
         item['position_alignment_target']=supervised[:,0]
         item['alignment_audio_quality']=supervised[:,2]
         item['position_alignment_mask']=supervised[:,1].bool()&~item['detail_audio_padding_mask']&(supervised[:,2]>0)
@@ -319,14 +388,22 @@ class StreamDataset(Dataset):
             queries={'bytes':self.query_bytes,'budget_bytes':self.query_budget,'entries':len(self._audio_queries),
                 'hits':self.query_hits,'misses':self.query_misses,
                 'prepare_seconds':dict(self.query_prepare_seconds),'prepare_counts':dict(self.query_prepare_counts)}
-        return {'audio':self.base.audio_store.stats(),'stream_queries':queries}
+        return {'audio':self.base.audio_store.stats(),'stream_queries':queries,
+            'mapped_inputs':self.input_cache.stats() if self.input_cache else {'enabled':False},
+            'structures':{'hits':self.structure_hits,'misses':self.structure_misses,
+                'bytes':self.structure_bytes,'budget_bytes':self.structure_budget}}
 
     def __len__(self): return len(self.chunks)
     def __getitem__(self, index):
         chunk = self.chunks[index]
         song, points, level, weight, state, condition, excluded, annotation = self.base.songs[chunk.chart_index]
         audio, times, _ = self._queries(chunk.chart_index, song)
-        action, action_mask, _ = prefix_action_state(state, points, chunk.start_event)
+        if self.grounded:
+            clock_song=(replace(song,audio=SimpleNamespace(duration_sec=self._durations[chunk.chart_index]))
+                        if chunk.chart_index in self._durations else song)
+            structure=self._structure(chunk,clock_song,points)
+            action,action_mask=structure['action_state'],structure['action_state_padding_mask']
+        else:action, action_mask, _ = prefix_action_state(state, points, chunk.start_event)
         item={'audio': audio, 'audio_times_sec': torch.as_tensor(times, dtype=torch.float64),
                 'curve_target': torch.from_numpy(resample_load_curve(
                     song.load_curve_times_sec, song.load_curve,

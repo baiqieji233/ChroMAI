@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 import tempfile
+import shutil
 from pathlib import Path
 from dataclasses import asdict,replace
 
@@ -25,7 +26,7 @@ def _identity(path):
 
 
 def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_catalog=(),
-         optimizer_steps=0, training_position=None, scaler=None, dataset_fingerprint=None):
+         optimizer_steps=0, training_position=None, scaler=None, dataset_fingerprint=None,aliases=()):
     payload = {
         'schema': CHECKPOINT_SCHEMA, 'family': FAMILY, 'input_contract': INPUT_CONTRACT,
         'model_config': asdict(model.config), 'model_state_dict': model.state_dict(),
@@ -50,6 +51,19 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
     try:
         torch.save(payload, temp)
         temp.replace(path)
+        # Step and last snapshots have identical contents. Serialize CUDA
+        # tensors once; publish independent immutable names atomically.
+        for alias in aliases:
+            alias=Path(alias)
+            if alias.resolve()==path.resolve():continue
+            alias.parent.mkdir(parents=True,exist_ok=True)
+            fd,name=tempfile.mkstemp(prefix=alias.name+'.',suffix='.tmp',dir=alias.parent)
+            os.close(fd);alias_temp=Path(name);alias_temp.unlink()
+            try:
+                try:os.link(path,alias_temp)
+                except OSError:shutil.copyfile(path,alias_temp)
+                alias_temp.replace(alias)
+            finally:alias_temp.unlink(missing_ok=True)
     finally:
         temp.unlink(missing_ok=True)
     return payload

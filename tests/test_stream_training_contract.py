@@ -125,7 +125,7 @@ def test_preparation_preserves_ignored_events_only_for_stream_and_versions_cache
     assert len(disabled.songs[0][1])==len(stream.songs[0][1])
 
 
-def test_stream_targets_keep_full_prefix_but_mask_ignored_event(monkeypatch):
+def test_stream_targets_keep_full_prefix_but_mask_ignored_event(monkeypatch,tmp_path):
     from maichart.generation.conditions import GenerationCondition
     from maichart.generation.sustain_state import SustainStateIndex
     tempo=[EventTempo(F(0),120.)]
@@ -140,7 +140,7 @@ def test_stream_targets_keep_full_prefix_but_mask_ignored_event(monkeypatch):
         return SimpleNamespace(songs=[record],audit={'charts':[{'audio_sha256':'fixture'}]})
     monkeypatch.setattr(data,'FormDataset',prepared)
     monkeypatch.setattr(data,'planner_audio_queries',lambda *_:(torch.zeros(3,120),np.array([.5,1.5,2.5]),(F(1),F(3),F(5))))
-    ds=data.StreamDataset('unused',cache_dir='unused',max_tokens=64)
+    ds=data.StreamDataset('unused',cache_dir=tmp_path,max_tokens=64,input_cache_mode='legacy')
     chunk=ds.chunks[0]; codec=ds.codec
     assert list(chunk.target)==codec.encode(points)[1:]
     at=[i for i,t in enumerate(chunk.target) if t==codec.at_id]

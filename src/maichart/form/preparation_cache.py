@@ -193,15 +193,18 @@ class PreparationCache:
             started = time.monotonic()
             scanned = 0
             print('form_cache_index '+json.dumps(dict(family='preparation',stage='scan',path=str(self.root))),flush=True)
+            from maichart.form.discovery_index import DiscoveryIndex
+            discovery=DiscoveryIndex(self.root/'candidate_discovery.sqlite3')
             for root in self._legacy_roots():
                 for candidate in root.glob('*.index.json'):
                     try:
-                        normalized = self._normalized_identity(_read_index_identity(candidate))
+                        normalized = self._normalized_identity(discovery.read(candidate,_read_index_identity))
                         index.setdefault(normalized, []).append(candidate)
                         scanned += 1
                     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                         continue
             self._legacy_index = index
+            discovery.close()
             print('form_cache_index '+json.dumps(dict(family='preparation',stage='ready',entries=scanned,
                 elapsed_sec=round(time.monotonic()-started,2))),flush=True)
             return index

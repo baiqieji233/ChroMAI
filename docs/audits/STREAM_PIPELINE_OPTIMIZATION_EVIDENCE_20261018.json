@@ -1,0 +1,844 @@
+{
+  "baseline_commit": "d1abc29",
+  "old_production": {
+    "family": "chart_stream_v1",
+    "epoch": 1,
+    "chunk": 125,
+    "total": 2710,
+    "optimizer_steps": 15,
+    "elapsed_sec": 97.53200000000652,
+    "batches_per_sec": 1.281630644301272,
+    "recent_batches_per_sec": 1.559381237524316,
+    "data_wait_sec": 62.360000000102445,
+    "transfer_host_sec": 0.34400000027380884,
+    "compute_host_sec": 34.670999999623746,
+    "save_sec": 0.0,
+    "timing_scope": "host_wall_not_cuda_kernel",
+    "prefetch": {
+      "mode": "shared_audio_ordered_batches",
+      "depth": 2,
+      "sample_workers": 4,
+      "prepared_batches": 125,
+      "prepare_sec": 97.381,
+      "consumer_wait_sec": 62.314,
+      "buffered_tensor_bytes": 0,
+      "max_buffered_tensor_bytes": 21610464
+    },
+    "cache": {
+      "audio": {
+        "hits": 3549,
+        "misses": 435,
+        "loads": 435,
+        "evictions": 0,
+        "entries": 435,
+        "bytes": 1425408000,
+        "budget_bytes": 2147483648,
+        "disk_loads": 435,
+        "source_resolutions": 435
+      },
+      "stream_queries": {
+        "bytes": 2381060112,
+        "budget_bytes": 6442450944,
+        "entries": 1778,
+        "hits": 226,
+        "misses": 1782,
+        "prepare_seconds": {
+          "planner": 60.66143170022406,
+          "detail": 107.68909560004249,
+          "probes": 32.02246859902516,
+          "alignment": 9.960130700026639
+        },
+        "prepare_counts": {
+          "planner": 435,
+          "detail": 431,
+          "probes": 456,
+          "alignment": 456
+        }
+      }
+    },
+    "alignment_coverage": 0.899369873046875,
+    "token_loss": 3.03389599609375,
+    "plan_loss": 0.16613662719726563,
+    "curve_loss": 0.04432287979125977,
+    "event_balance_loss": 2.946408203125,
+    "alignment_loss": 9.2462021484375,
+    "event_decision_loss": 0.052597099304199216,
+    "loss": 5.0570439453125,
+    "token_accuracy": 0.24278684997558594,
+    "eos_targets": 87,
+    "eos_accuracy": 0.0,
+    "position_targets": 154851,
+    "position_accuracy": 0.0751819490994569,
+    "note_targets": 145716,
+    "note_accuracy": 0.05514837080348074,
+    "whole_position_targets": 39614,
+    "whole_position_accuracy": 5.0487201494421164e-05,
+    "whole_configuration_targets": 39614,
+    "whole_configuration_accuracy": 0.01903367496339678,
+    "whole_event_targets": 39614,
+    "whole_event_accuracy": 0.0,
+    "alignment_targets": 39543,
+    "alignment_accuracy": 0.0002276003338138229,
+    "eos_token_loss": 7.9647560558099855
+  },
+  "full_benchmark": {
+    "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "batches": 125,
+    "samples": 500,
+    "unique_charts": 456,
+    "tokens": 465748,
+    "elapsed_sec": 24.219496099976823,
+    "data_wait_sec": 0.34389790042769164,
+    "batches_per_sec": 5.161131325111245,
+    "peak_allocated_gib": 1.6246047019958496,
+    "prepare_sec": 61.62934420001693,
+    "dataset_fingerprint": "9b66ff36c378210e7c2f2e148e1ca396f1a53b7cf4d188561b6da7e43f1e2f2e",
+    "cache": {
+      "audio": {
+        "hits": 0,
+        "misses": 0,
+        "loads": 0,
+        "evictions": 0,
+        "entries": 0,
+        "bytes": 0,
+        "budget_bytes": 2147483648,
+        "disk_loads": 0,
+        "source_resolutions": 0
+      },
+      "stream_queries": {
+        "bytes": 2423030052,
+        "budget_bytes": 6442450944,
+        "entries": 1808,
+        "hits": 228,
+        "misses": 1808,
+        "prepare_seconds": {
+          "planner": 9.745327999466099,
+          "detail": 23.973322300589643,
+          "probes": 10.342450000578538,
+          "alignment": 8.544681801227853
+        },
+        "prepare_counts": {
+          "planner": 439,
+          "detail": 439,
+          "probes": 465,
+          "alignment": 465
+        }
+      },
+      "mapped_inputs": {
+        "hits": 2317,
+        "rebuilt": 0,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+      },
+      "structures": {
+        "hits": 509,
+        "misses": 509,
+        "bytes": 78175849,
+        "budget_bytes": 268435456
+      }
+    },
+    "prefetch": {
+      "mode": "ordered_cross_batch_samples",
+      "depth": 2,
+      "sample_workers": 4,
+      "prepared_batches": 127,
+      "sample_prepare_sec": 68.241,
+      "consumer_wait_sec": 0.229,
+      "buffered_tensor_bytes": 42386844,
+      "max_buffered_tensor_bytes": 43040664
+    },
+    "metrics": {
+      "alignment_coverage": 0.899369873046875,
+      "token_loss": 3.0340234375,
+      "plan_loss": 0.166129638671875,
+      "curve_loss": 0.04432475662231445,
+      "event_balance_loss": 2.946532958984375,
+      "alignment_loss": 9.2462421875,
+      "event_decision_loss": 0.052597240447998045,
+      "loss": 5.05719970703125,
+      "token_accuracy": 0.2427071533203125,
+      "eos_targets": 87,
+      "eos_accuracy": 0.0,
+      "position_targets": 154851,
+      "position_accuracy": 0.07511737089201878,
+      "note_targets": 145716,
+      "note_accuracy": 0.05508660682423344,
+      "whole_position_targets": 39614,
+      "whole_position_accuracy": 5.0487201494421164e-05,
+      "whole_configuration_targets": 39614,
+      "whole_configuration_accuracy": 0.01900843136264957,
+      "whole_event_targets": 39614,
+      "whole_event_accuracy": 0.0,
+      "alignment_targets": 39543,
+      "alignment_accuracy": 0.00020231140783450927,
+      "eos_token_loss": 7.964802358342313
+    },
+    "official_training_started": false
+  },
+  "speedup_125_batches": 4.027003683206268,
+  "wait_reduction_fraction": 0.9944852806217587,
+  "target_counts_unchanged": true,
+  "preparation": {
+    "elapsed_sec": 1107.810711500002,
+    "sources": 1405,
+    "charts": 1787,
+    "chunks": 10838,
+    "dataset_fingerprint": "9b66ff36c378210e7c2f2e148e1ca396f1a53b7cf4d188561b6da7e43f1e2f2e",
+    "cache": {
+      "audio": {
+        "hits": 5301,
+        "misses": 1391,
+        "loads": 1391,
+        "evictions": 1310,
+        "entries": 81,
+        "bytes": 265420800,
+        "budget_bytes": 268435456,
+        "disk_loads": 1391,
+        "source_resolutions": 1391
+      },
+      "stream_queries": {
+        "bytes": 803132472,
+        "budget_bytes": 805306368,
+        "entries": 626,
+        "hits": 36948,
+        "misses": 6404,
+        "prepare_seconds": {
+          "planner": 172.7200101999333,
+          "detail": 1306.97522770043,
+          "probes": 246.67111300188117,
+          "alignment": 108.38375340006314
+        },
+        "prepare_counts": {
+          "planner": 1415,
+          "detail": 1415,
+          "probes": 1787,
+          "alignment": 1787
+        }
+      },
+      "mapped_inputs": {
+        "hits": 146,
+        "rebuilt": 17096,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+      },
+      "structures": {
+        "hits": 10838,
+        "misses": 10838,
+        "bytes": 134065333,
+        "budget_bytes": 134217728
+      }
+    },
+    "mapped_disk_bytes": 9048618562,
+    "mapped_files": 17242
+  },
+  "mapped_disk_gib": 8.427182735875249,
+  "subset_comparison": {
+    "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "scenarios": [
+      {
+        "mode": "old_disk_warm",
+        "samples": 64,
+        "batches": 16,
+        "elapsed_sec": 6.623986800084822,
+        "batches_per_sec": 2.415463750591278,
+        "data_wait_sec": 0.8949460000731051,
+        "prefetch": {
+          "mode": "shared_audio_ordered_batches",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 16,
+          "prepare_sec": 6.262,
+          "consumer_wait_sec": 0.711,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 41898176
+        },
+        "cache": {
+          "audio": {
+            "hits": 191,
+            "misses": 18,
+            "loads": 18,
+            "evictions": 0,
+            "entries": 18,
+            "bytes": 58982400,
+            "budget_bytes": 80530636,
+            "disk_loads": 18,
+            "source_resolutions": 18
+          },
+          "stream_queries": {
+            "bytes": 100649136,
+            "budget_bytes": 241591910,
+            "entries": 82,
+            "hits": 178,
+            "misses": 82,
+            "prepare_seconds": {
+              "planner": 1.7860299998428673,
+              "detail": 2.80771460023243,
+              "probes": 0.5783120996784419,
+              "alignment": 0.35586289991624653
+            },
+            "prepare_counts": {
+              "planner": 18,
+              "detail": 18,
+              "probes": 23,
+              "alignment": 23
+            }
+          }
+        }
+      },
+      {
+        "mode": "mapped_reopened",
+        "samples": 64,
+        "batches": 16,
+        "elapsed_sec": 2.1867714999243617,
+        "batches_per_sec": 7.316722392144504,
+        "data_wait_sec": 0.1395947999553755,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 16,
+          "sample_prepare_sec": 3.455,
+          "consumer_wait_sec": 0.039,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 42545700
+        },
+        "cache": {
+          "audio": {
+            "hits": 0,
+            "misses": 0,
+            "loads": 0,
+            "evictions": 0,
+            "entries": 0,
+            "bytes": 0,
+            "budget_bytes": 80530636,
+            "disk_loads": 0,
+            "source_resolutions": 0
+          },
+          "stream_queries": {
+            "bytes": 100649136,
+            "budget_bytes": 241591910,
+            "entries": 82,
+            "hits": 178,
+            "misses": 82,
+            "prepare_seconds": {
+              "planner": 0.31083399965427816,
+              "detail": 0.6373524002265185,
+              "probes": 0.3491526999277994,
+              "alignment": 0.2901467999909073
+            },
+            "prepare_counts": {
+              "planner": 18,
+              "detail": 18,
+              "probes": 23,
+              "alignment": 23
+            }
+          },
+          "mapped_inputs": {
+            "hits": 146,
+            "rebuilt": 0,
+            "invalid": 0,
+            "write_errors": 0,
+            "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+          },
+          "structures": {
+            "hits": 66,
+            "misses": 64,
+            "bytes": 10017714,
+            "budget_bytes": 268435456
+          }
+        }
+      },
+      {
+        "mode": "mapped_memory_warm",
+        "samples": 64,
+        "batches": 16,
+        "elapsed_sec": 1.7789577000075951,
+        "batches_per_sec": 8.994030605635924,
+        "data_wait_sec": 0.1624806998297572,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 16,
+          "sample_prepare_sec": 0.545,
+          "consumer_wait_sec": 0.0,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 42545700
+        },
+        "cache": {
+          "audio": {
+            "hits": 0,
+            "misses": 0,
+            "loads": 0,
+            "evictions": 0,
+            "entries": 0,
+            "bytes": 0,
+            "budget_bytes": 80530636,
+            "disk_loads": 0,
+            "source_resolutions": 0
+          },
+          "stream_queries": {
+            "bytes": 100649136,
+            "budget_bytes": 241591910,
+            "entries": 82,
+            "hits": 434,
+            "misses": 82,
+            "prepare_seconds": {
+              "planner": 0.05304829974193126,
+              "detail": 0.271820200025104,
+              "probes": 0.04836010001599789,
+              "alignment": 0.031029399833641946
+            },
+            "prepare_counts": {
+              "planner": 18,
+              "detail": 18,
+              "probes": 23,
+              "alignment": 23
+            }
+          },
+          "mapped_inputs": {
+            "hits": 146,
+            "rebuilt": 0,
+            "invalid": 0,
+            "write_errors": 0,
+            "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+          },
+          "structures": {
+            "hits": 194,
+            "misses": 64,
+            "bytes": 10017714,
+            "budget_bytes": 268435456
+          }
+        }
+      }
+    ],
+    "mapped_first_prepare_sec": 11.937532700016163,
+    "mapped_first_cache": {
+      "audio": {
+        "hits": 73,
+        "misses": 18,
+        "loads": 18,
+        "evictions": 0,
+        "entries": 18,
+        "bytes": 58982400,
+        "budget_bytes": 80530636,
+        "disk_loads": 18,
+        "source_resolutions": 18
+      },
+      "stream_queries": {
+        "bytes": 100649136,
+        "budget_bytes": 241591910,
+        "entries": 82,
+        "hits": 174,
+        "misses": 82,
+        "prepare_seconds": {
+          "planner": 0.7699067998910323,
+          "detail": 7.313206500024535,
+          "probes": 0.5465071001090109,
+          "alignment": 0.5671968999085948
+        },
+        "prepare_counts": {
+          "planner": 18,
+          "detail": 18,
+          "probes": 23,
+          "alignment": 23
+        }
+      },
+      "mapped_inputs": {
+        "hits": 0,
+        "rebuilt": 146,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+      },
+      "structures": {
+        "hits": 64,
+        "misses": 64,
+        "bytes": 10017714,
+        "budget_bytes": 268435456
+      }
+    },
+    "old_gpu_step_sec": 0.12129516000859439,
+    "new_gpu_step_sec": 0.10051700000185519
+  },
+  "intermediate_edge_comparison": {
+    "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "scenarios": [
+      {
+        "mode": "mapped_empty",
+        "samples": 64,
+        "batches": 16,
+        "elapsed_sec": 7.344710999983363,
+        "batches_per_sec": 2.1784383347467644,
+        "data_wait_sec": 0.8906521002063528,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 16,
+          "sample_prepare_sec": 24.17,
+          "consumer_wait_sec": 0.659,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 42047188
+        },
+        "cache": {
+          "audio": {
+            "hits": 73,
+            "misses": 18,
+            "loads": 18,
+            "evictions": 0,
+            "entries": 18,
+            "bytes": 58982400,
+            "budget_bytes": 80530636,
+            "disk_loads": 18,
+            "source_resolutions": 18
+          },
+          "stream_queries": {
+            "bytes": 100649136,
+            "budget_bytes": 241591910,
+            "entries": 82,
+            "hits": 178,
+            "misses": 82,
+            "prepare_seconds": {
+              "planner": 1.8471646001562476,
+              "detail": 3.1794406997505575,
+              "probes": 1.0090001998469234,
+              "alignment": 0.8127503000432625
+            },
+            "prepare_counts": {
+              "planner": 18,
+              "detail": 18,
+              "probes": 23,
+              "alignment": 23
+            }
+          },
+          "mapped_inputs": {
+            "hits": 0,
+            "rebuilt": 146,
+            "invalid": 0,
+            "write_errors": 0,
+            "path": "E:\\simai_transformer\\.scratch\\stream_efficiency_20261018\\cold_transport_1792305901324726000\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+          },
+          "structures": {
+            "hits": 66,
+            "misses": 64,
+            "bytes": 10017714,
+            "budget_bytes": 268435456
+          }
+        }
+      },
+      {
+        "mode": "mapped_evicted",
+        "samples": 64,
+        "batches": 16,
+        "elapsed_sec": 3.2741978999692947,
+        "batches_per_sec": 4.886693012707035,
+        "data_wait_sec": 0.30182309984229505,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 16,
+          "sample_prepare_sec": 7.355,
+          "consumer_wait_sec": 0.0,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 42545700
+        },
+        "cache": {
+          "audio": {
+            "hits": 0,
+            "misses": 0,
+            "loads": 0,
+            "evictions": 0,
+            "entries": 0,
+            "bytes": 0,
+            "budget_bytes": 80530636,
+            "disk_loads": 0,
+            "source_resolutions": 0
+          },
+          "stream_queries": {
+            "bytes": 0,
+            "budget_bytes": 1,
+            "entries": 0,
+            "hits": 0,
+            "misses": 260,
+            "prepare_seconds": {
+              "planner": 0.6434465993661433,
+              "detail": 2.213446900132112,
+              "probes": 0.9887087001698092,
+              "alignment": 0.39424420008435845
+            },
+            "prepare_counts": {
+              "planner": 65,
+              "detail": 65,
+              "probes": 65,
+              "alignment": 65
+            }
+          },
+          "mapped_inputs": {
+            "hits": 390,
+            "rebuilt": 0,
+            "invalid": 0,
+            "write_errors": 0,
+            "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+          },
+          "structures": {
+            "hits": 0,
+            "misses": 130,
+            "bytes": 0,
+            "budget_bytes": 0
+          }
+        }
+      }
+    ],
+    "mapped_first_prepare_sec": 0.6456589999143034,
+    "mapped_first_cache": {
+      "audio": {
+        "hits": 0,
+        "misses": 0,
+        "loads": 0,
+        "evictions": 0,
+        "entries": 0,
+        "bytes": 0,
+        "budget_bytes": 80530636,
+        "disk_loads": 0,
+        "source_resolutions": 0
+      },
+      "stream_queries": {
+        "bytes": 100649136,
+        "budget_bytes": 241591910,
+        "entries": 82,
+        "hits": 174,
+        "misses": 82,
+        "prepare_seconds": {
+          "planner": 0.061709499917924404,
+          "detail": 0.2878387999953702,
+          "probes": 0.05593130027409643,
+          "alignment": 0.03213640011381358
+        },
+        "prepare_counts": {
+          "planner": 18,
+          "detail": 18,
+          "probes": 23,
+          "alignment": 23
+        }
+      },
+      "mapped_inputs": {
+        "hits": 146,
+        "rebuilt": 0,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+      },
+      "structures": {
+        "hits": 64,
+        "misses": 64,
+        "bytes": 10017714,
+        "budget_bytes": 268435456
+      }
+    }
+  },
+  "cpu_chain": {
+    "case": "E:\\simai_transformer\\.scratch\\stream_efficiency_20261018\\cpu_chain_1792306448399231000",
+    "fresh_steps": 1,
+    "resume_steps": 2,
+    "finetune_epoch": 1,
+    "prefetch_identical_weights": true,
+    "changed_source_resume": "rejected",
+    "generation_events": 0,
+    "generation_status": "completed",
+    "curve_points": 6,
+    "capabilities": {
+      "model_family": "chart_stream_v1",
+      "valid": true,
+      "errors": [],
+      "continuous_stream": true,
+      "rational_event_positions": true,
+      "experimental": true,
+      "conflict_detection": false,
+      "conflict_repair": false,
+      "fine_note_strength": false,
+      "onset_profile": "continuous_event_stream",
+      "local_onset_guidance": false,
+      "rhythm_bias": false,
+      "action_state_profile": "sustain_state_v1",
+      "sustained_action_memory": true,
+      "rhythm_geometry_profile": "exact_fraction_stream_v1",
+      "generation_entry": "/chart-stream",
+      "quality_profile": "musical_evidence_v1",
+      "descriptor_dim": 0,
+      "curve_bin_seconds": 1.0,
+      "planner_context_seconds": 0.0,
+      "audio_evidence_profile": "balanced_evidence_v1",
+      "position_alignment_supervision": true,
+      "grounding_profile": "causal_audio_v1",
+      "causal_numeric_clock": true,
+      "native_local_audio": true,
+      "causal_archive_retrieval": true,
+      "dynamic_intent_routing": true,
+      "position_alignment_trained": true
+    }
+  },
+  "browser": {
+    "url": "http://127.0.0.1:7860",
+    "runs": [
+      {
+        "id": "f5227a960fab",
+        "status": "completed",
+        "runtime": {
+          "training_semantics": "chart_stream_training_v5_grounded_context",
+          "device": "cpu",
+          "precision": "fp32",
+          "lr": 0.0002,
+          "weight_decay": 0.01,
+          "batch_size": 2,
+          "grad_accumulation": 1,
+          "event_decision_loss_weight": 0.25,
+          "plan_loss_weight": 0.15,
+          "parameters": 170700,
+          "audio_cache_budget_gb": 0.05,
+          "quality_enabled": false,
+          "start_epoch": 1,
+          "grounding_profile": "causal_audio_v1",
+          "detail_audio_nodes": 512,
+          "alignment_loss_weight": 0.15,
+          "event_balance_loss_weight": 0.2,
+          "history_note_dropout": 0.15,
+          "prefix_note_dropout": 0.1,
+          "prefetch_batches": 2,
+          "cache_query_fraction": 0.75,
+          "data_workers": 4,
+          "input_cache_mode": "mapped",
+          "structure_cache_mb": 64,
+          "optimizer_implementation": "standard",
+          "cpu_budget": {
+            "torch_threads": 1,
+            "blas_threads": 1
+          },
+          "end_epoch": 1
+        },
+        "metrics": {
+          "epoch": 1,
+          "optimizer_steps": 1,
+          "elapsed_sec": 0.1720000000204891,
+          "alignment_coverage": 0.375,
+          "token_loss": 4.2221550941467285,
+          "plan_loss": 0.27866214513778687,
+          "curve_loss": 0.10023188591003418,
+          "event_balance_loss": 4.231729507446289,
+          "alignment_loss": 2.8975234031677246,
+          "event_decision_loss": 0.5939719080924988,
+          "loss": 5.713468074798584,
+          "token_accuracy": 0.007518797181546688,
+          "eos_targets": 1,
+          "eos_accuracy": 0,
+          "position_targets": 48,
+          "position_accuracy": 0,
+          "note_targets": 21,
+          "note_accuracy": 0,
+          "whole_position_targets": 21,
+          "whole_position_accuracy": 0,
+          "whole_configuration_targets": 21,
+          "whole_configuration_accuracy": 0,
+          "whole_event_targets": 21,
+          "whole_event_accuracy": 0,
+          "alignment_targets": 9,
+          "alignment_accuracy": 0,
+          "eos_token_loss": 3.525681257247925
+        },
+        "checkpoint": {
+          "epoch": 1,
+          "optimizer_steps": 1,
+          "path": "E:\\simai_transformer\\.scratch\\stream_efficiency_20261018\\browser_fresh_1792306446156\\stream_step_00000001.pt"
+        }
+      },
+      {
+        "id": "8c16afd6466f",
+        "status": "completed",
+        "runtime": {
+          "training_semantics": "chart_stream_training_v5_grounded_context",
+          "device": "cpu",
+          "precision": "fp32",
+          "lr": 2e-05,
+          "weight_decay": 0.01,
+          "batch_size": 2,
+          "grad_accumulation": 1,
+          "event_decision_loss_weight": 0.25,
+          "plan_loss_weight": 0.15,
+          "parameters": 22428,
+          "audio_cache_budget_gb": 0.2,
+          "quality_enabled": false,
+          "start_epoch": 1,
+          "grounding_profile": "causal_audio_v1",
+          "detail_audio_nodes": 512,
+          "alignment_loss_weight": 0.22,
+          "event_balance_loss_weight": 0.2,
+          "history_note_dropout": 0.15,
+          "prefix_note_dropout": 0.1,
+          "prefetch_batches": 3,
+          "cache_query_fraction": 0.75,
+          "data_workers": 4,
+          "input_cache_mode": "mapped",
+          "structure_cache_mb": 64,
+          "optimizer_implementation": "standard",
+          "cpu_budget": {
+            "torch_threads": 1,
+            "blas_threads": 1
+          },
+          "end_epoch": 1
+        },
+        "metrics": {
+          "epoch": 1,
+          "optimizer_steps": 2,
+          "elapsed_sec": 0.2029999999795109,
+          "alignment_coverage": 0.2631579041481018,
+          "token_loss": 4.152074813842773,
+          "plan_loss": 0.2578318119049072,
+          "curve_loss": 0.10482621937990189,
+          "event_balance_loss": 4.204679489135742,
+          "alignment_loss": 1.521140456199646,
+          "event_decision_loss": 0.563454270362854,
+          "loss": 5.528164863586426,
+          "token_accuracy": 0.03680351749062538,
+          "eos_targets": 1,
+          "eos_accuracy": 0,
+          "position_targets": 52,
+          "position_accuracy": 0,
+          "note_targets": 22,
+          "note_accuracy": 0,
+          "whole_position_targets": 22,
+          "whole_position_accuracy": 0,
+          "whole_configuration_targets": 22,
+          "whole_configuration_accuracy": 0,
+          "whole_event_targets": 22,
+          "whole_event_accuracy": 0,
+          "alignment_targets": 10,
+          "alignment_accuracy": 0,
+          "eos_token_loss": 4.2707839012146
+        },
+        "checkpoint": {
+          "epoch": 1,
+          "optimizer_steps": 2,
+          "path": "E:\\simai_transformer\\.scratch\\stream_efficiency_20261018\\browser_finetune_1792306464768\\stream_step_00000002.pt"
+        }
+      }
+    ],
+    "errors": []
+  },
+  "tests": {
+    "main_python": 140,
+    "boundary_python": 39,
+    "javascript": 11,
+    "sets_overlap": true
+  },
+  "limits": [
+    "New mapped input preparation is a one-time cost reported separately, not included in the 125-batch speedup.",
+    "The full-dataset random-order benchmark covers 500 samples / 456 charts, not a complete production epoch.",
+    "No new long-run convergence or musical quality claim; features, supervision and gradients were checked for equivalence.",
+    "Fused optimizer and operation ordering can change final floating-point bits.",
+    "Intermediate cold-conversion results precede the last bulk-tempo validation optimization.",
+    "Formal training remains stopped."
+  ]
+}

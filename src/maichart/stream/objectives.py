@@ -3,25 +3,27 @@ import torch
 from torch.nn import functional as F
 
 
-def event_balanced_loss(ce,logits,batch,codec):
+def event_balanced_loss(ce,logits,batch,codec,*,predicted=None):
     target=batch['target'];valid=~batch['target_padding_mask']
     local=batch.get('target_quality',torch.ones_like(ce))
     valid&=(local>0)&(target!=codec.eos_id)
     group=(target==codec.at_id).long().cumsum(1)
     quality=batch.get('quality_weight',ce.new_ones(ce.size(0)))[:,None]
     groups=target.size(1)+1
-    predicted=logits.argmax(-1)
-    def grouped(mask):
+    predicted=logits.argmax(-1) if predicted is None else predicted
+    def grouped(mask,with_loss=True):
         counts=ce.new_zeros(ce.size(0),groups).scatter_add(1,group,mask.to(ce))
-        losses=ce.new_zeros(ce.size(0),groups).scatter_add(1,group,ce*mask*local*quality)
         active=counts>0
-        loss=(losses/counts.clamp_min(1)*active).sum()/active.sum().clamp_min(1)
+        if with_loss:
+            losses=ce.new_zeros(ce.size(0),groups).scatter_add(1,group,ce*mask*local*quality)
+            loss=(losses/counts.clamp_min(1)*active).sum()/active.sum().clamp_min(1)
+        else:loss=None
         wrong=ce.new_zeros(ce.size(0),groups).scatter_add(1,group,((predicted!=target)&mask).to(ce))
         return loss,active.sum().detach(),((wrong==0)&active).sum().detach()
     position=valid&(((target>=7)&(target<18))|(target==codec.at_id)|(target==codec.note_id))
     configuration=valid&((target>=18)|(target==codec.end_id))
     pos,pn,pc=grouped(position);note,nn,nc=grouped(configuration)
-    _,en,ec=grouped(valid)
+    _,en,ec=grouped(valid,False)
     return .5*(pos+note),{'_whole_position_count':pn,'_whole_position_correct':pc,
         '_whole_configuration_count':nn,'_whole_configuration_correct':nc,
         '_whole_event_count':en,'_whole_event_correct':ec}
@@ -35,7 +37,7 @@ def alignment_loss(output,batch):
     if logits.size(1):
         eligible=mask&~batch['detail_audio_padding_mask'].gather(1,labels)
         safe=logits.masked_fill(~eligible[...,None],0.)
-        ce=F.cross_entropy(safe.transpose(1,2),labels,reduction='none')
+        ce=F.cross_entropy(safe.reshape(-1,safe.size(-1)),labels.reshape(-1),reduction='none').reshape_as(labels)
         event=(ce*eligible*batch['alignment_event_weight']*quality[:,None]).sum()/eligible.sum().clamp_min(1)
         correct=((safe.argmax(-1)==labels)&eligible).sum().detach()
         count=eligible.sum().detach()
