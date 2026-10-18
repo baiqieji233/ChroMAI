@@ -1819,6 +1819,10 @@ function chartStreamTrainingPayload(options = {}) {
     input_cache_mode: valueOrDefault("#streamInputCacheMode", 'mapped'),
     structure_cache_mb: Number(valueOrDefault("#streamStructureCacheMb",256)),
     optimizer_implementation: valueOrDefault("#streamOptimizerImplementation",'auto'),
+    input_residency: valueOrDefault("#streamInputResidency",'auto'),
+    resident_cache_gb: Number(valueOrDefault("#streamResidentCacheGb",0)),
+    resident_memory_reserve_gb: Number(valueOrDefault("#streamResidentMemoryReserveGb",0)),
+    cache_validation_records: Number(valueOrDefault("#streamCacheValidationRecords",0)),
     max_region_seconds: Number(valueOrDefault("#streamMaxRegionSeconds", 15)),
     limit_charts: Number(valueOrDefault("#streamLimitCharts", 0)),
     log_interval: Number(valueOrDefault("#streamLogInterval", 25)),
@@ -3143,6 +3147,10 @@ function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) 
     "#streamInputCacheMode": args.input_cache_mode,
     "#streamStructureCacheMb": args.structure_cache_mb,
     "#streamOptimizerImplementation": args.optimizer_implementation,
+    "#streamInputResidency": args.input_residency,
+    "#streamResidentCacheGb": args.resident_cache_gb,
+    "#streamResidentMemoryReserveGb": args.resident_memory_reserve_gb,
+    "#streamCacheValidationRecords": args.cache_validation_records,
     "#streamMaxRegionSeconds": args.max_region_seconds,
     "#streamLimitCharts": args.limit_charts,
     "#streamLogInterval": args.log_interval,
@@ -3620,8 +3628,8 @@ async function submitTrain(options = {}) {
     const backend=await api('/api/status');
     if (backend.training_capabilities?.stream_grounded_context !== 'causal_audio_v1')
       throw new Error('当前后端尚未加载连续流关联训练参数，请重启 WebUI 后再训练。');
-    if (backend.training_capabilities?.stream_training_runtime !== 'mapped_pipeline_v2')
-      throw new Error('当前后端尚未加载连续流映射缓存和跨批次预取，请重启 WebUI 后再训练。');
+    if (backend.training_capabilities?.stream_training_runtime !== 'resident_pipeline_v3')
+      throw new Error('当前后端尚未加载连续流输入驻留设置，请重启 WebUI 后再训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/chart-stream/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }

@@ -174,9 +174,10 @@
           </label>
 <label class="field">batch size
             <input id="batchSize" type="number" min="1" value="4">
-            <small><strong>影响训练速度与显存。</strong>一次并行多少片段。批会按本批最长样本补齐，批越小每批峰值显存越低。
+            <small data-training-family="event_v1 event_ctx_v1 song_form_v1 song_form_v2 legacy_frame_v2"><strong>影响训练速度与显存。</strong>一次并行多少片段。批会按本批最长样本补齐，批越小每批峰值显存越低。
             所需显存还取决于模型层数、宽度、音频长度和上下文，默认 16 不保证适合所有 checkpoint。当前 full v3 实验使用 batch 8、梯度累积 4；加大 batch 前先检查日志中的 <code>cuda_memory</code> 峰值和速度。
             训练已内置显存硬上限（默认 60% 设备显存）：宁可报 OOM 提示你降批，也不会静默溢出。</small>
+            <small data-training-family="chart_stream_v1">一次并行的连续流计算块数量。增大batch能减少每样本调度开销，也增加显存和预取内存；受显存不足限制时会报错。当前12GiB设备可先试8，配合累积4维持约32样本/更新；实际以本机日志为准。</small>
           </label>
 <label class="field">梯度累积
             <input id="gradAccumulation" type="number" min="1" value="2">
@@ -328,12 +329,16 @@
 <div class="form-grid">
 <label class="field">数值精度<select id="streamPrecision"><option value="auto" selected>自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16；CPU 只能使用 FP32。</small></label>
 <label class="field">权重衰减<input id="streamWeightDecay" type="number" min="0" max="1" step="0.001" value="0.01"><small>AdamW 的 weight decay；resume 仍以 checkpoint 的优化器状态为准。</small></label>
-<label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>新关联方案将 75% 用于查询、25% 用于基础特征；原方案比例相反。同曲同时间轴共享音频证据，原生拍位探针另外按内容缓存。另有最多 64 MB 公共查询缓存，不含模型和训练样本。</small></label>
+<label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>控制未驻留输入的后备缓存。驻留上限填0时，与结构缓存预算合并用于驻留，不再给未使用的基础特征另留25%。驻留输入与查询缓存共享同一份张量，不额外复制一份。数值按GiB计算。</small></label>
 <label class="field">准备线程<input id="streamPrepareWorkers" type="number" min="0" max="16" step="1" value="4"><small>并行准备独立歌曲；0 表示按后端默认值处理。</small></label>
 <label class="field">训练预取批次数<input id="streamPrefetchBatches" type="number" min="0" max="16" step="1" value="2"><small>提前准备 CPU 批次，与训练计算重叠；批次内的并行度由下方数据准备线程控制。0 同步读取；提高数量增加排队内存，不改变样本顺序。</small></label>
 <label class="field">训练数据准备线程<input id="streamDataWorkers" type="number" min="1" max="8" step="1" value="4"><small>跨预取批次并行处理不同歌曲，同一歌曲串行并共享缓存。默认4，不受单个batch大小限制；1保留单线程。采样顺序不改变。</small></label>
 <label class="field">CPU算子线程<input id="streamCpuThreads" type="number" min="0" max="64" step="1" value="0"><small>0自动：CUDA训练用2，CPU训练最多4。限制Torch及可用BLAS线程池，避免每个数据线程各自抢占大量CPU；不限制GPU计算。</small></label>
 <label class="field">训练输入缓存<select id="streamInputCacheMode"><option value="mapped" selected>内存映射（推荐）</option><option value="legacy">原压缩查询（对照）</option></select><small>首次从原缓存转换，之后直接读取完整精度张量，复用时钟和动作摘要；随机遮罩仍每轮生成。额外占用磁盘，保留原缓存；可删除训练缓存目录内的 stream_training_inputs 后重建。</small></label>
+<label class="field">输入驻留方式<select id="streamInputResidency"><option value="auto" selected>自动驻留（内存不足时部分驻留）</option><option value="resident">全部驻留（不足时提示调整）</option><option value="mapped">仅映射（不预载到内存）</option></select><small>映射文件页仍可能读盘。驻留会在训练前校验并复制到普通CPU内存；整批驻留成功后，取样不再打开输入缓存文件。缺失的输入仍需先建立缓存。</small></label>
+<label class="field">输入驻留内存上限（GiB）<input id="streamResidentCacheGb" type="number" min="0" max="1024" step="0.5" value="0"><small>0继承音频＋结构预算，填正数直接设置总驻留上限。当前全量数据建议10；这是上限，实际按数据占用，不会预先占满10GiB。</small></label>
+<label class="field">系统预留内存（GiB）<input id="streamResidentMemoryReserveGb" type="number" min="0" max="1024" step="0.5" value="0"><small>0自动取总内存10%且至少2GiB。32GiB设备专用于训练时可设4；同时开浏览器和IDE建议6。此预留在加载时检查，后续模型、驱动和批次仍需内存，自动模式不足时会部分驻留。</small></label>
+<label class="field">缓存校验记录上限<input id="streamCacheValidationRecords" type="number" min="0" max="1000000" step="1024" value="0"><small>0按当前数据集自动设置，避免旧版4096条上限造成反复扫描。这里只保存校验元数据，不保存另一份音频；调小会增加复查和文件访问。</small></label>
 <label class="field">时钟与状态内存缓存 / MB<input id="streamStructureCacheMb" type="number" min="0" max="8192" step="64" value="256"><small>缓存与epoch无关的因果结构，独立于音频预算。0关闭内存驻留；启用映射缓存时仍可直接读磁盘映射。</small></label>
 <label class="field">优化器实现<select id="streamOptimizerImplementation"><option value="auto" selected>自动（CUDA融合，CPU标准）</option><option value="standard">标准 AdamW</option><option value="fused">融合 AdamW（CUDA）</option></select><small>保留学习率、权重衰减与优化器状态；融合减少逐参数启动开销。浮点归约次序可能变化，不保证权重逐位相同。</small></label>
 <label class="field">单次区域上限（秒）<input id="streamMaxRegionSeconds" type="number" min="2" max="60" step="1" value="15"><small>用于共用音频准备器的区域组织；连续流训练块由 token 上限划分，不按此秒数截断目标，也不添加片段 EOS。</small></label>

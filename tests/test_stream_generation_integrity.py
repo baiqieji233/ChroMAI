@@ -334,12 +334,14 @@ def test_http_training_honors_selected_sources_quality_seed_and_dropout(webui_ap
     status,reply=webui_api('/api/chart-stream/train',{'model_family':'chart_stream_v1','mode':'fresh',
         'manifest':str(original),'manifests':['a','b'],'checkpoint_dir':str(tmp_path/'output'),
         'seed':173,'dropout':0.,'quality_enabled':False,'data_workers':3,'cpu_threads':2,
-        'input_cache_mode':'legacy','structure_cache_mb':64,'optimizer_implementation':'standard'})
+        'input_cache_mode':'legacy','structure_cache_mb':64,'optimizer_implementation':'standard',
+        'input_residency':'mapped','resident_cache_gb':10,'resident_memory_reserve_gb':4,'cache_validation_records':32768})
     assert status==200,reply
     task,args=calls[0];parsed=train_parser().parse_args(args[2:])
     assert seen==[['a','b']] and parsed.manifest==str(combined)
     assert not parsed.quality_enabled and parsed.seed==173 and parsed.dropout==0.
     assert parsed.data_workers==3 and parsed.cpu_threads==2
     assert (parsed.input_cache_mode,parsed.structure_cache_mb,parsed.optimizer_implementation)==('legacy',64,'standard')
+    assert (parsed.input_residency,parsed.resident_cache_gb,parsed.resident_memory_reserve_gb,parsed.cache_validation_records)==('mapped',10,4,32768)
     assert task.result['dataset_selection']=={'sources':['a','b']}
     assert task.result['effective_manifest']==str(combined)

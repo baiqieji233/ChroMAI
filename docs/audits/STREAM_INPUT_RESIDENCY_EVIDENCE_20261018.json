@@ -1,0 +1,327 @@
+{
+  "baseline_commit": "c856e7c",
+  "latest_production_metrics": {
+    "family": "chart_stream_v1",
+    "epoch": 1,
+    "chunk": 1225,
+    "total": 2710,
+    "optimizer_steps": 153,
+    "elapsed_sec": 175.90599999995902,
+    "batches_per_sec": 6.963946653327831,
+    "recent_batches_per_sec": 8.122157245018329,
+    "data_wait_sec": 1.6440000009024516,
+    "transfer_host_sec": 3.8410000008298084,
+    "compute_host_sec": 168.84499999834225,
+    "save_sec": 0.0,
+    "timing_scope": "host_wall_not_cuda_kernel",
+    "prefetch": {
+      "mode": "ordered_cross_batch_samples",
+      "depth": 2,
+      "sample_workers": 4,
+      "prepared_batches": 1227,
+      "sample_prepare_sec": 288.453,
+      "consumer_wait_sec": 0.313,
+      "buffered_tensor_bytes": 41891220,
+      "max_buffered_tensor_bytes": 43970108
+    },
+    "cache": {
+      "audio": {
+        "hits": 0,
+        "misses": 0,
+        "loads": 0,
+        "evictions": 0,
+        "entries": 0,
+        "bytes": 0,
+        "budget_bytes": 2147483648,
+        "disk_loads": 0,
+        "source_resolutions": 0
+      },
+      "stream_queries": {
+        "bytes": 6439393512,
+        "budget_bytes": 6442450944,
+        "entries": 5111,
+        "hits": 12382,
+        "misses": 7250,
+        "prepare_seconds": {
+          "planner": 27.87749519746285,
+          "detail": 70.57962339906953,
+          "probes": 33.57600400224328,
+          "alignment": 26.542861502151936
+        },
+        "prepare_counts": {
+          "planner": 1593,
+          "detail": 1593,
+          "probes": 2032,
+          "alignment": 2032
+        }
+      },
+      "mapped_inputs": {
+        "hits": 12158,
+        "rebuilt": 0,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1"
+      },
+      "structures": {
+        "hits": 4908,
+        "misses": 4908,
+        "bytes": 268338031,
+        "budget_bytes": 268435456
+      }
+    },
+    "alignment_coverage": 0.8982748724489796,
+    "token_loss": 1.8480755739795918,
+    "plan_loss": 0.1188917385801977,
+    "curve_loss": 0.03867216149154974,
+    "event_balance_loss": 1.8047608418367347,
+    "alignment_loss": 8.8703125,
+    "event_decision_loss": 0.022162545651805643,
+    "loss": 3.570681600765306,
+    "token_accuracy": 0.43039236886160714,
+    "eos_targets": 838,
+    "eos_accuracy": 0.0,
+    "position_targets": 1501768,
+    "position_accuracy": 0.23933723451292077,
+    "note_targets": 1433123,
+    "note_accuracy": 0.2737497060615174,
+    "whole_position_targets": 386457,
+    "whole_position_accuracy": 9.832918021927407e-05,
+    "whole_configuration_targets": 386457,
+    "whole_configuration_accuracy": 0.04845558496805596,
+    "whole_event_targets": 386457,
+    "whole_event_accuracy": 5.175220011540741e-06,
+    "alignment_targets": 385758,
+    "alignment_accuracy": 0.0006117825164999818,
+    "eos_token_loss": 6.924203367392601
+  },
+  "inventory": {
+    "counts": {
+      "alignment": 1787,
+      "planner_or_probes": 3195,
+      "structure": 10838,
+      "detail_or_probes": 1422
+    },
+    "bytes": {
+      "alignment": 175567248,
+      "planner_or_probes": 1167168144,
+      "structure": 1666397860,
+      "detail_or_probes": 5657544064
+    },
+    "total_tensor_bytes": 8666677316,
+    "elapsed_sec": 102.87546789995395
+  },
+  "benchmark": {
+    "device": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "cases": [
+      {
+        "batch_size": 4,
+        "grad_accumulation": 8,
+        "data_workers": 1,
+        "samples": 512,
+        "elapsed_sec": 14.064382900018245,
+        "samples_per_sec": 36.40401456926602,
+        "batches_per_sec": 9.101003642316504,
+        "data_wait_sec": 0.27548050007317215,
+        "peak_vram_gib": 1.6245818138122559,
+        "input_file_reads": 106,
+        "input_validation_bytes": 0,
+        "resident_hits": 2248,
+        "process_read_bytes": 7573738,
+        "process_read_calls": 1785,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 1,
+          "prepared_batches": 130,
+          "sample_prepare_sec": 1.623,
+          "consumer_wait_sec": 0.041,
+          "buffered_tensor_bytes": 41983352,
+          "max_buffered_tensor_bytes": 43040664
+        }
+      },
+      {
+        "batch_size": 4,
+        "grad_accumulation": 8,
+        "data_workers": 2,
+        "samples": 512,
+        "elapsed_sec": 13.740802299929783,
+        "samples_per_sec": 37.26128859321529,
+        "batches_per_sec": 9.315322148303823,
+        "data_wait_sec": 0.7549576994497329,
+        "peak_vram_gib": 1.6254844665527344,
+        "input_file_reads": 0,
+        "input_validation_bytes": 0,
+        "resident_hits": 0,
+        "process_read_bytes": 0,
+        "process_read_calls": 0,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 2,
+          "prepared_batches": 130,
+          "sample_prepare_sec": 2.416,
+          "consumer_wait_sec": 0.026,
+          "buffered_tensor_bytes": 41983352,
+          "max_buffered_tensor_bytes": 43040664
+        }
+      },
+      {
+        "batch_size": 4,
+        "grad_accumulation": 8,
+        "data_workers": 4,
+        "samples": 512,
+        "elapsed_sec": 13.94366380001884,
+        "samples_per_sec": 36.719187104848885,
+        "batches_per_sec": 9.179796776212221,
+        "data_wait_sec": 1.32263729989063,
+        "peak_vram_gib": 1.62031888961792,
+        "input_file_reads": 0,
+        "input_validation_bytes": 0,
+        "resident_hits": 0,
+        "process_read_bytes": 0,
+        "process_read_calls": 0,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 130,
+          "sample_prepare_sec": 4.915,
+          "consumer_wait_sec": 0.023,
+          "buffered_tensor_bytes": 41983352,
+          "max_buffered_tensor_bytes": 43040664
+        }
+      },
+      {
+        "batch_size": 8,
+        "grad_accumulation": 4,
+        "data_workers": 2,
+        "samples": 512,
+        "elapsed_sec": 11.981941399979405,
+        "samples_per_sec": 42.730971794009946,
+        "batches_per_sec": 5.341371474251243,
+        "data_wait_sec": 0.47556199983228,
+        "peak_vram_gib": 2.844386577606201,
+        "input_file_reads": 2,
+        "input_validation_bytes": 0,
+        "resident_hits": 26,
+        "process_read_bytes": 147450,
+        "process_read_calls": 34,
+        "prefetch": {
+          "mode": "ordered_cross_batch_samples",
+          "depth": 2,
+          "sample_workers": 2,
+          "prepared_batches": 66,
+          "sample_prepare_sec": 2.754,
+          "consumer_wait_sec": 0.064,
+          "buffered_tensor_bytes": 85117208,
+          "max_buffered_tensor_bytes": 86218464
+        }
+      }
+    ],
+    "residency": {
+      "mode": "partial_resident",
+      "loaded": 14649,
+      "total": 17242,
+      "bytes": 8375625789,
+      "budget_bytes": 10737418240,
+      "missing": 0,
+      "capacity_skips": 0,
+      "memory_skips": 2593,
+      "memory_reserve_bytes": 4294967296,
+      "validation_records": 17242
+    },
+    "residency_seconds": 215.29373550007585,
+    "memory_after_preload": {
+      "total": 33518583808,
+      "available": 4223660032,
+      "percent": 87.4,
+      "used": 29294923776,
+      "free": 4223660032
+    },
+    "process_after_preload": {
+      "rss": 11654885376,
+      "vms": 13514702848,
+      "num_page_faults": 5031068,
+      "peak_wset": 11656269824,
+      "wset": 11654885376,
+      "peak_paged_pool": 10600440,
+      "paged_pool": 10599728,
+      "peak_nonpaged_pool": 243080,
+      "nonpaged_pool": 242200,
+      "pagefile": 13514702848,
+      "peak_pagefile": 13516124160,
+      "private": 13514702848
+    },
+    "cache": {
+      "audio": {
+        "hits": 0,
+        "misses": 0,
+        "loads": 0,
+        "evictions": 0,
+        "entries": 0,
+        "bytes": 0,
+        "budget_bytes": 2147483648,
+        "disk_loads": 0,
+        "source_resolutions": 0
+      },
+      "stream_queries": {
+        "bytes": 2489147400,
+        "budget_bytes": 6442450944,
+        "entries": 1858,
+        "hits": 6510,
+        "misses": 1858,
+        "prepare_seconds": {
+          "planner": 0.030043899547308683,
+          "detail": 0.01997519948054105,
+          "probes": 0.012063399190083146,
+          "alignment": 0.027268298319540918
+        },
+        "prepare_counts": {
+          "planner": 451,
+          "detail": 451,
+          "probes": 478,
+          "alignment": 478
+        }
+      },
+      "mapped_inputs": {
+        "hits": 2387,
+        "rebuilt": 0,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\stream_training_inputs\\chart_stream_mapped_inputs_v1",
+        "file_reads": 17350,
+        "validation_bytes": 8555132780,
+        "resident_hits": 2279,
+        "resident_entries": 14649,
+        "resident_bytes": 8375625789,
+        "resident_budget_bytes": 10737418240,
+        "validation_records": 17242,
+        "source_fingerprints": {
+          "hits": 17242,
+          "full_reads": 0,
+          "bytes_hashed": 0
+        }
+      },
+      "structures": {
+        "hits": 3655,
+        "misses": 529,
+        "bytes": 81006921,
+        "budget_bytes": 268435456
+      }
+    },
+    "dataset_fingerprint": "9b66ff36c378210e7c2f2e148e1ca396f1a53b7cf4d188561b6da7e43f1e2f2e"
+  },
+  "tests": {
+    "related_python_passed": 66,
+    "javascript_passed": 11
+  },
+  "limits": [
+    "Only requested focused validation performed; no full test suite or full production epoch.",
+    "Benchmark resident preload is partial due actual available system RAM and configured reserve.",
+    "Preloading takes 215 seconds and reads input files once; it is not counted in per-case throughput.",
+    "Cases run sequentially on the same 512 sample prefix, so later zero-I/O cases also benefit from query/structure LRUs.",
+    "Input file open counters differ from physical device reads. Process I/O may be served from OS cache.",
+    "No current training process existed when inspected; paging during the cancelled production job was not measured.",
+    "New server on 7862; existing 7860/7861 services remain unchanged. Formal training remains stopped."
+  ]
+}

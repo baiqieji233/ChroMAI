@@ -264,9 +264,7 @@ class StreamDataset(Dataset):
     def _mapped_query(self,index,kind,settings,builder):
         from .input_cache import LazyBeats
         if self.input_cache is None:return builder()
-        identity={'type':kind,'settings':settings,'query':self._query_keys[index],
-            'features':self.base.audio_store.feature_policy+'_'+self.base.audio_store.evidence_profile}
-        if kind in {'probes','alignment'}:identity['chart']=self._chart_identities[index]
+        identity=self._query_identity(index,kind,settings)
         def build():
             values,times,beats=builder()
             duration=self._durations.get(index)
@@ -275,6 +273,34 @@ class StreamDataset(Dataset):
         tensors,extra=self.input_cache.get(identity,build)
         self._durations[index]=extra['duration']
         return tensors['values'],tensors['times'].numpy(),LazyBeats(extra['beats'])
+
+    def _query_identity(self,index,kind,settings):
+        identity={'type':kind,'settings':settings,'query':self._query_keys[index],
+            'features':self.base.audio_store.feature_policy+'_'+self.base.audio_store.evidence_profile}
+        if kind in {'probes','alignment'}:identity['chart']=self._chart_identities[index]
+        return identity
+
+    def _structure_identity(self,chunk):
+        return {'type':'causal_structure_v1','chart':self._chart_identities[chunk.chart_index],
+            'chunk':chunk.chunk_index,'tokens':self.max_tokens,'history':self.max_history_tokens}
+
+    def prepare_residency(self,*,policy='auto',budget_bytes=None,reserve_bytes=0,validation_records=0,
+                          report=lambda **_:None):
+        if self.input_cache is None:return {'mode':'legacy'}
+        identities=[]
+        for index in sorted({c.chart_index for c in self.chunks}):
+            identities.append(self._query_identity(index,'planner',1024))
+            if self.grounded:
+                cfg=self.grounding_config
+                for kind,setting in (('detail',cfg.detail_audio_nodes),('probes',None),
+                        ('alignment',(cfg.detail_audio_nodes,cfg.alignment_tolerance_ms))):
+                    identities.append(self._query_identity(index,kind,setting))
+        if self.grounded:identities.extend(self._structure_identity(c) for c in self.chunks)
+        if budget_bytes is None:
+            budget_bytes=self.query_budget+self.base.audio_store.budget+self.structure_budget
+        self.residency=self.input_cache.preload(identities,budget_bytes=budget_bytes,policy=policy,
+            reserve_bytes=reserve_bytes,validation_records=validation_records,report=report)
+        return self.residency
 
     def _structure(self,chunk,song,points):
         """Cache prefix-only geometry before any epoch-dependent masking."""
@@ -300,8 +326,7 @@ class StreamDataset(Dataset):
             rows['history_clock']=(history_clock(self._chart_ids[chunk.chart_index],max(0,start-self.max_history_tokens),
                 start,positions,points,self.codec,song) if chunk.history else torch.zeros(0,20))
             return rows,{}
-        identity={'type':'causal_structure_v1','chart':self._chart_identities[chunk.chart_index],
-            'chunk':chunk.chunk_index,'tokens':self.max_tokens,'history':self.max_history_tokens}
+        identity=self._structure_identity(chunk)
         rows,_=self.input_cache.get(identity,build) if self.input_cache is not None else build()
         size=tensor_bytes(rows)
         with self._query_lock:

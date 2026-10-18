@@ -26,6 +26,9 @@ def update_stream_progress(task,line):
         done=value.get('completed',value.get('completed_songs',0))
         total=value.get('total',value.get('total_songs','?'))
         task.message=f'准备连续流训练数据 · {done}/{total} · 谱面 {value.get("charts", "?")} · 计算块 {value.get("chunks", "?")}'
+        if value.get('stage')=='residency':
+            task.message=(f'训练输入驻留 · {done}/{total} · 已载入 {value.get("loaded",done)} 项 · '
+                f'{value.get("bytes",0)/1024**3:.2f} / {value.get("budget_bytes",0)/1024**3:.2f} GiB')
     elif prefix=='stream_dataset':
         task.result['stream_dataset']=value
         task.message=f'数据准备完成 · 谱面 {value.get("charts")} · 计算块 {value.get("chunks")}'
@@ -134,7 +137,9 @@ def start(handler, operation, payload, *, runtime):
                 ('archive_retrievals',8),('archive_min_similarity',.5),('history_note_dropout',.15),
                 ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
                 ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0),
-                ('input_cache_mode','mapped'),('structure_cache_mb',256),('optimizer_implementation','auto')):
+                ('input_cache_mode','mapped'),('structure_cache_mb',256),('optimizer_implementation','auto'),
+                ('input_residency','auto'),('resident_cache_gb',0.),('resident_memory_reserve_gb',0.),
+                ('cache_validation_records',0)):
             args += ['--'+key.replace('_','-'),str(payload.get(key,default))]
         if type(payload.get('quality_enabled',True)) is not bool:
             raise ValueError('quality_enabled 必须是布尔值')

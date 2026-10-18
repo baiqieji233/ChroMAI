@@ -61,6 +61,10 @@ def parser():
     p.add_argument('--input-cache-mode',choices=('mapped','legacy'),default='mapped')
     p.add_argument('--structure-cache-mb',type=int,default=256)
     p.add_argument('--optimizer-implementation',choices=('auto','standard','fused'),default='auto')
+    p.add_argument('--input-residency',choices=('auto','mapped','resident'),default='auto')
+    p.add_argument('--resident-cache-gb',type=float,default=0.)
+    p.add_argument('--resident-memory-reserve-gb',type=float,default=0.)
+    p.add_argument('--cache-validation-records',type=int,default=0)
     return p
 
 
@@ -211,6 +215,11 @@ def validate_training_args(args):
     if not 1<=args.data_workers<=8:raise ValueError('data_workers 必须为1–8')
     if not 0<=args.cpu_threads<=64:raise ValueError('cpu_threads 必须为0–64')
     if not 0<=args.structure_cache_mb<=8192:raise ValueError('structure_cache_mb 必须为0–8192')
+    for name in ('resident_cache_gb','resident_memory_reserve_gb'):
+        if not math.isfinite(getattr(args,name)) or not 0<=getattr(args,name)<=1024:
+            raise ValueError(f'{name} 必须为0–1024的有限数值')
+    if not 0<=args.cache_validation_records<=1_000_000:
+        raise ValueError('cache_validation_records 必须为0–1000000')
 
 
 def validate_output_directory(args):
@@ -290,6 +299,11 @@ def _train(args):
         'eos_targets': sum(chunk.target.count(dataset.codec.eos_id) for chunk in dataset.chunks),
         'supervised_tokens': sum(sum(w>0 for w in chunk.target_quality) for chunk in dataset.chunks),
         'dataset_fingerprint': dataset.fingerprint}),flush=True)
+    residency=dataset.prepare_residency(policy=args.input_residency,
+        budget_bytes=int(args.resident_cache_gb*1024**3) if args.resident_cache_gb else None,
+        reserve_bytes=int(args.resident_memory_reserve_gb*1024**3),
+        validation_records=args.cache_validation_records,
+        report=lambda **value:print('stream_prepare '+json.dumps(value),flush=True))
     if old is None:
         model=ChartStreamTransformer(config)
     model.to(device); model.train()
@@ -331,6 +345,7 @@ def _train(args):
         'data_workers':args.data_workers if args.prefetch_batches else 1,
         'input_cache_mode':args.input_cache_mode,'structure_cache_mb':args.structure_cache_mb,
         'optimizer_implementation':'fused' if fused else 'standard',
+        'input_residency':residency,
         'cpu_budget':args.cpu_budget,
         'end_epoch':start_epoch+args.epochs}),flush=True)
     for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):

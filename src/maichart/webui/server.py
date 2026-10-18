@@ -197,7 +197,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "stream_generation_contract": "chart_stream_quality_controls_v3",
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "stream_grounded_context": "causal_audio_v1",
-                                              "stream_training_runtime": "mapped_pipeline_v2",
+                                              "stream_training_runtime": "resident_pipeline_v3",
                                               "versioned_input_policies": True,
                                               "sustained_action_training": True,
                                               "fine_rhythm_oversample": True,
