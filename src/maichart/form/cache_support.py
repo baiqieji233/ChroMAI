@@ -20,6 +20,12 @@ def cache_roots(cache_dir):
     nested = base / 'audio'
     if nested.is_dir() and nested not in roots:
         roots.append(nested)
+    # The stream UI originally defaulted to cache/chart_stream_v1. Moving
+    # to a dataset cache must still discover those exact content identities.
+    # Consumers validate hashes/settings; this is discovery, not a relaxed key.
+    project=Path(__file__).resolve().parents[3]
+    for candidate in (project/'cache'/'chart_stream_v1',project/'webui_workspace'/'cache'/'song_form_shared'):
+        if candidate.is_dir() and candidate not in roots:roots.append(candidate)
     if base.name.lower() != 'cache':
         return tuple(roots)
     try:

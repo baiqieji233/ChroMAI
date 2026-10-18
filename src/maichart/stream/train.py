@@ -21,7 +21,7 @@ from .checkpoint import save, load, upgrade_grounding
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.form.codec import RationalCodec
 from maichart.form.output_guard import training_output_guard
-from .runtime import resolve_device
+from .runtime import resolve_device,training_cpu_budget
 
 
 def parser():
@@ -56,6 +56,8 @@ def parser():
     p.add_argument('--alignment-tolerance-ms',type=float,default=15.)
     p.add_argument('--event-balance-loss-weight',type=float,default=.2)
     p.add_argument('--prefetch-batches',type=int,default=2)
+    p.add_argument('--data-workers',type=int,default=4)
+    p.add_argument('--cpu-threads',type=int,default=0)
     return p
 
 
@@ -203,6 +205,8 @@ def validate_training_args(args):
     if not math.isfinite(args.alignment_tolerance_ms) or not 1<=args.alignment_tolerance_ms<=100:
         raise ValueError('alignment_tolerance_ms 必须为1–100')
     if not 0<=args.prefetch_batches<=16:raise ValueError('prefetch_batches 必须为0–16')
+    if not 1<=args.data_workers<=8:raise ValueError('data_workers 必须为1–8')
+    if not 0<=args.cpu_threads<=64:raise ValueError('cpu_threads 必须为0–64')
 
 
 def validate_output_directory(args):
@@ -224,7 +228,9 @@ def main(argv=None):
     validate_training_args(args)
     with training_output_guard(args.checkpoint_dir):
         validate_output_directory(args)
-        return _train(args)
+        with training_cpu_budget(args.cpu_threads,resolve_device(args.device)) as budget:
+            args.cpu_budget=budget
+            return _train(args)
 
 
 def _train(args):
@@ -314,17 +320,24 @@ def _train(args):
         'alignment_loss_weight':args.alignment_loss_weight,'event_balance_loss_weight':args.event_balance_loss_weight,
         'history_note_dropout':args.history_note_dropout,'prefix_note_dropout':args.prefix_note_dropout,
         'prefetch_batches':args.prefetch_batches,'cache_query_fraction':.75 if dataset.grounded else .25,
+        'data_workers':min(args.data_workers,args.batch_size) if args.prefetch_batches else 1,
+        'cpu_budget':args.cpu_budget,
         'end_epoch':start_epoch+args.epochs}),flush=True)
     for epoch in range(start_epoch + 1, start_epoch + args.epochs + 1):
         dataset.set_epoch(epoch)
         totals={}; optimizer.zero_grad(set_to_none=True); pending=0
         started=time.monotonic()
+        waited=transfer=compute=saving=0.;previous_end=started
+        last_log_time=started;last_log_batch=0
         from maichart.form.layout_prefetch import LayoutBatchPrefetch
         loader.generator.manual_seed(args.seed+epoch)
-        batch_source=(LayoutBatchPrefetch(loader,depth=args.prefetch_batches) if args.prefetch_batches else nullcontext(loader))
+        batch_source=(LayoutBatchPrefetch(loader,depth=args.prefetch_batches,
+            sample_workers=min(args.data_workers,args.batch_size)) if args.prefetch_batches else nullcontext(loader))
         with batch_source as batches:
             for index,batch in enumerate(batches,1):
+                data_ready=time.monotonic();waited+=data_ready-previous_end
                 tensors={k:v.to(device,non_blocking=device.type=='cuda') if torch.is_tensor(v) else v for k,v in batch.items()}
+                transferred=time.monotonic();transfer+=transferred-data_ready
                 with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,enabled=precision in {'bf16','fp16'}):
                     output=model(tensors); loss,metrics=_loss(output,tensors,args.plan_loss_weight,args.event_decision_loss_weight,
                         args.alignment_loss_weight,args.event_balance_loss_weight)
@@ -334,7 +347,9 @@ def _train(args):
                     stepped = _finish_accumulation(model,optimizer,scaler,pending,args.grad_accumulation)
                     pending=0
                     if stepped: global_step+=1
+                    compute+=time.monotonic()-transferred
                     if stepped and args.checkpoint_interval_steps and global_step % args.checkpoint_interval_steps == 0:
+                        save_started=time.monotonic()
                         state = {'epoch':epoch, 'chunk':index, 'total_chunks':len(loader)}
                         save(out/'stream_last.pt', model, optimizer, epoch=epoch, args=vars(args),
                              manifest=args.manifest, metrics=_mean_metrics(totals,index), atom_catalog=atom_catalog,
@@ -346,12 +361,21 @@ def _train(args):
                              training_position=state, scaler=scaler, dataset_fingerprint=dataset.fingerprint)
                         print('stream_checkpoint '+json.dumps({'epoch':epoch,'optimizer_steps':global_step,
                             'path':str(out/f'stream_step_{global_step:08d}.pt')}),flush=True)
+                        saving+=time.monotonic()-save_started
+                else:compute+=time.monotonic()-transferred
                 if index%args.log_interval==0 or index==len(loader):
                     average=_mean_metrics(totals,index)
-                    elapsed=time.monotonic()-started
+                    now=time.monotonic();elapsed=now-started
+                    recent=(index-last_log_batch)/max(now-last_log_time,1e-6)
+                    last_log_time,last_log_batch=now,index
                     print('stream_progress '+json.dumps({'family':'chart_stream_v1','epoch':epoch,'chunk':index,
                         'total':len(loader),'optimizer_steps':global_step,'elapsed_sec':elapsed,
-                        'batches_per_sec':index/max(elapsed,1e-6),'cache':dataset.cache_stats(),**average}),flush=True)
+                        'batches_per_sec':index/max(elapsed,1e-6),'recent_batches_per_sec':recent,
+                        'data_wait_sec':waited,'transfer_host_sec':transfer,'compute_host_sec':compute,'save_sec':saving,
+                        'timing_scope':'host_wall_not_cuda_kernel',
+                        'prefetch':batches.stats() if args.prefetch_batches else {'mode':'synchronous'},
+                        'cache':dataset.cache_stats(),**average}),flush=True)
+                previous_end=time.monotonic()
         save(out/'stream_last.pt',model,optimizer,epoch=epoch,args=vars(args),manifest=args.manifest,
              metrics=_mean_metrics(totals,len(loader)),atom_catalog=atom_catalog,optimizer_steps=global_step,
              training_position={'epoch':epoch, 'chunk':len(loader), 'total_chunks':len(loader), 'complete':True},

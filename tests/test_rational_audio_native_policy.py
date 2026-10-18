@@ -138,7 +138,7 @@ def test_native_queries_read_a_bounded_waveform_window(monkeypatch, tmp_path):
     calls = []
     monkeypatch.setattr(waveform_cache, 'mapped_waveform',
         lambda *args: (np.zeros(30000,dtype=np.float32),1000))
-    def spectra(signal, sr, times, *, sample_offset):
+    def spectra(signal, sr, times, *, sample_offset, component='all'):
         calls.append((len(signal),sample_offset,times.copy()))
         return np.ones((len(times),rational_audio.ACOUSTIC_DIM),dtype=np.float32)
     monkeypatch.setattr(

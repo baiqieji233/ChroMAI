@@ -210,7 +210,10 @@ function renderTaskTrainingMetrics(task) {
       ["alignment_coverage","选音监督覆盖率"],
       ["eos_accuracy","整曲结束准确率"],["eos_targets","已见真实结束目标"],["eos_token_loss","整曲结束 token loss"],
       ["event_decision_loss","续写与结束 loss"],["curve_loss","强度曲线 loss"],
-      ["batches_per_sec","batch / 秒"],["optimizer_steps","参数更新步"]]) {
+      ["batches_per_sec","本轮 batch / 秒"],["recent_batches_per_sec","近期 batch / 秒"],
+      ["data_wait_sec","等待数据 / 秒"],["transfer_host_sec","传输提交 / 秒"],
+      ["compute_host_sec","主机计算计时 / 秒"],["save_sec","保存 / 秒"],
+      ["optimizer_steps","参数更新步"]]) {
       const value = trainingMetricNumber(metrics,key);
       if (value === null) continue;
       const term=document.createElement("dt"), definition=document.createElement("dd");
@@ -1811,6 +1814,8 @@ function chartStreamTrainingPayload(options = {}) {
     audio_cache_gb: Number(valueOrDefault("#streamAudioCacheGb", 8)),
     prepare_workers: Number(valueOrDefault("#streamPrepareWorkers", 4)),
     prefetch_batches: Number(valueOrDefault("#streamPrefetchBatches", 2)),
+    data_workers: Number(valueOrDefault("#streamDataWorkers", 4)),
+    cpu_threads: Number(valueOrDefault("#streamCpuThreads", 0)),
     max_region_seconds: Number(valueOrDefault("#streamMaxRegionSeconds", 15)),
     limit_charts: Number(valueOrDefault("#streamLimitCharts", 0)),
     log_interval: Number(valueOrDefault("#streamLogInterval", 25)),
@@ -3130,6 +3135,8 @@ function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) 
     "#streamAudioCacheGb": args.audio_cache_gb,
     "#streamPrepareWorkers": args.prepare_workers,
     "#streamPrefetchBatches": args.prefetch_batches,
+    "#streamDataWorkers": args.data_workers,
+    "#streamCpuThreads": args.cpu_threads,
     "#streamMaxRegionSeconds": args.max_region_seconds,
     "#streamLimitCharts": args.limit_charts,
     "#streamLogInterval": args.log_interval,
@@ -3607,6 +3614,8 @@ async function submitTrain(options = {}) {
     const backend=await api('/api/status');
     if (backend.training_capabilities?.stream_grounded_context !== 'causal_audio_v1')
       throw new Error('当前后端尚未加载连续流关联训练参数，请重启 WebUI 后再训练。');
+    if (backend.training_capabilities?.stream_training_runtime !== 'parallel_queries_v1')
+      throw new Error('当前后端尚未加载连续流并行数据准备参数，请重启 WebUI 后再训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/chart-stream/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }

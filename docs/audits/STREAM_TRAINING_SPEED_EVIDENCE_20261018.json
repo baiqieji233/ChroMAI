@@ -1,0 +1,337 @@
+{
+  "root_cause": "Serial cold native audio detail queries, including unused spectral components; changed cache root.",
+  "live_profile": {
+    "pid": 30332,
+    "duration_sec": 20,
+    "sample_rate_hz": 25,
+    "active_prefetch_sec": 19.12,
+    "detail_queries_active_sec": 17.2,
+    "main_thread_active_sec": 0.2,
+    "errors": 0,
+    "scope": "Active Python/native stacks; sleeping threads omitted, not CUDA timing."
+  },
+  "four_song_acoustic_and_cache_benchmark": {
+    "full_bank_old_serial_sec": 8.19090240006335,
+    "full_bank_selective_serial_sec": 5.39634869992733,
+    "full_bank_selective_parallel_sec": 3.4974084000568837,
+    "max_feature_error": 0.0,
+    "node_counts": [
+      8191,
+      8191,
+      8188,
+      8191
+    ],
+    "disk_warm_batch": {
+      "1": {
+        "sec": 0.5091787000419572,
+        "stats": {
+          "mode": "shared_audio_ordered_batches",
+          "depth": 2,
+          "sample_workers": 1,
+          "prepared_batches": 1,
+          "prepare_sec": 0.508,
+          "consumer_wait_sec": 0.507,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 19897980
+        }
+      },
+      "4": {
+        "sec": 0.4606130999745801,
+        "stats": {
+          "mode": "shared_audio_ordered_batches",
+          "depth": 2,
+          "sample_workers": 4,
+          "prepared_batches": 1,
+          "prepare_sec": 0.459,
+          "consumer_wait_sec": 0.459,
+          "buffered_tensor_bytes": 0,
+          "max_buffered_tensor_bytes": 19897980
+        }
+      }
+    },
+    "memory_warm_batch_sec": 0.05507839994970709,
+    "cache": {
+      "audio": {
+        "hits": 112,
+        "misses": 4,
+        "loads": 4,
+        "evictions": 0,
+        "entries": 4,
+        "bytes": 13107200,
+        "budget_bytes": 53687091,
+        "disk_loads": 4,
+        "source_resolutions": 4
+      },
+      "stream_queries": {
+        "bytes": 21865932,
+        "budget_bytes": 161061273,
+        "entries": 16,
+        "hits": 16,
+        "misses": 48,
+        "prepare_seconds": {
+          "planner": 0.3307876995531842,
+          "detail": 8.22395749995485,
+          "probes": 0.33758610009681433,
+          "alignment": 0.1718003002461046
+        },
+        "prepare_counts": {
+          "planner": 12,
+          "detail": 12,
+          "probes": 12,
+          "alignment": 12
+        }
+      }
+    }
+  },
+  "production": {
+    "old_task": "9d281b7a9802",
+    "new_task": "2ad53680779c",
+    "port": 7860,
+    "old_first_150": {
+      "family": "chart_stream_v1",
+      "epoch": 1,
+      "chunk": 150,
+      "total": 2710,
+      "optimizer_steps": 18,
+      "elapsed_sec": 1368.265000000014,
+      "batches_per_sec": 0.10962788641089151,
+      "cache": {
+        "audio": {
+          "hits": 4074,
+          "misses": 496,
+          "loads": 496,
+          "evictions": 0,
+          "entries": 496,
+          "bytes": 1625292800,
+          "budget_bytes": 2147483648,
+          "disk_loads": 496,
+          "source_resolutions": 496
+        },
+        "stream_queries": {
+          "bytes": 2740684584,
+          "budget_bytes": 6442450944,
+          "entries": 2062,
+          "hits": 344,
+          "misses": 2063
+        }
+      },
+      "alignment_coverage": 0.8994793701171875,
+      "token_loss": 2.9072499593098957,
+      "plan_loss": 0.1616738764444987,
+      "curve_loss": 0.044701738357543944,
+      "event_balance_loss": 2.8184804280598956,
+      "alignment_loss": 9.217029622395833,
+      "event_decision_loss": 0.048310041427612305,
+      "loss": 4.89876953125,
+      "token_accuracy": 0.2712280527750651,
+      "eos_targets": 103,
+      "eos_accuracy": 0.0,
+      "position_targets": 185332,
+      "position_accuracy": 0.10120756264433557,
+      "note_targets": 173685,
+      "note_accuracy": 0.0813599332124248,
+      "whole_position_targets": 47431,
+      "whole_position_accuracy": 4.2166515569985876e-05,
+      "whole_configuration_targets": 47431,
+      "whole_configuration_accuracy": 0.023275916594632202,
+      "whole_event_targets": 47431,
+      "whole_event_accuracy": 0.0,
+      "alignment_targets": 47351,
+      "alignment_accuracy": 0.00027454541614749424,
+      "eos_token_loss": 8.30518526243932
+    },
+    "new_first_150": {
+      "family": "chart_stream_v1",
+      "epoch": 1,
+      "chunk": 150,
+      "total": 2710,
+      "optimizer_steps": 18,
+      "elapsed_sec": 117.92200000002049,
+      "batches_per_sec": 1.2720272722644963,
+      "recent_batches_per_sec": 1.2403254614035932,
+      "data_wait_sec": 77.76399999996647,
+      "transfer_host_sec": 0.3589999999385327,
+      "compute_host_sec": 39.75200000021141,
+      "save_sec": 0.0,
+      "timing_scope": "host_wall_not_cuda_kernel",
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 4,
+        "prepared_batches": 150,
+        "prepare_sec": 117.538,
+        "consumer_wait_sec": 77.57,
+        "buffered_tensor_bytes": 0,
+        "max_buffered_tensor_bytes": 21752172
+      },
+      "cache": {
+        "audio": {
+          "hits": 4083,
+          "misses": 497,
+          "loads": 497,
+          "evictions": 0,
+          "entries": 497,
+          "bytes": 1628569600,
+          "budget_bytes": 2147483648,
+          "disk_loads": 497,
+          "source_resolutions": 497
+        },
+        "stream_queries": {
+          "bytes": 2746335432,
+          "budget_bytes": 6442450944,
+          "entries": 2067,
+          "hits": 348,
+          "misses": 2067,
+          "prepare_seconds": {
+            "planner": 63.81967429968063,
+            "detail": 148.65009010001086,
+            "probes": 39.706494100391865,
+            "alignment": 11.135147400083952
+          },
+          "prepare_counts": {
+            "planner": 497,
+            "detail": 497,
+            "probes": 537,
+            "alignment": 536
+          }
+        }
+      },
+      "alignment_coverage": 0.8994793701171875,
+      "token_loss": 2.9072532145182293,
+      "plan_loss": 0.1616652552286784,
+      "curve_loss": 0.04470289866129557,
+      "event_balance_loss": 2.818478597005208,
+      "alignment_loss": 9.217006022135417,
+      "event_decision_loss": 0.04831625938415527,
+      "loss": 4.898771158854166,
+      "token_accuracy": 0.27124104817708333,
+      "eos_targets": 103,
+      "eos_accuracy": 0.0,
+      "position_targets": 185332,
+      "position_accuracy": 0.10123454125569249,
+      "note_targets": 173685,
+      "note_accuracy": 0.081348418113251,
+      "whole_position_targets": 47431,
+      "whole_position_accuracy": 4.2166515569985876e-05,
+      "whole_configuration_targets": 47431,
+      "whole_configuration_accuracy": 0.023318083110202188,
+      "whole_event_targets": 47431,
+      "whole_event_accuracy": 0.0,
+      "alignment_targets": 47351,
+      "alignment_accuracy": 0.00027454541614749424,
+      "eos_token_loss": 8.307474969660195
+    },
+    "elapsed_speedup_first_150": 11.603135971233325,
+    "fingerprint_unchanged": true,
+    "runtime": {
+      "training_semantics": "chart_stream_training_v5_grounded_context",
+      "device": "cuda:0",
+      "precision": "bf16",
+      "lr": 0.0002,
+      "weight_decay": 0.01,
+      "batch_size": 4,
+      "grad_accumulation": 8,
+      "event_decision_loss_weight": 0.25,
+      "plan_loss_weight": 0.15,
+      "parameters": 19088844,
+      "audio_cache_budget_gb": 8.0,
+      "quality_enabled": true,
+      "start_epoch": 1,
+      "grounding_profile": "causal_audio_v1",
+      "detail_audio_nodes": 8192,
+      "alignment_loss_weight": 0.15,
+      "event_balance_loss_weight": 0.2,
+      "history_note_dropout": 0.15,
+      "prefix_note_dropout": 0.1,
+      "prefetch_batches": 2,
+      "cache_query_fraction": 0.75,
+      "data_workers": 4,
+      "cpu_budget": {
+        "torch_threads": 2,
+        "blas_threads": 2
+      },
+      "end_epoch": 80
+    },
+    "old_preparation": {
+      "stage": "ready",
+      "charts": 1787,
+      "examples": 94153,
+      "preparation_cache": {
+        "hits": 0,
+        "misses": 1788,
+        "rebuilt": 1787,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\song_form_prepare\\v1",
+        "source_hashes": {
+          "hits": 6386,
+          "full_reads": 0,
+          "bytes_hashed": 0
+        }
+      },
+      "elapsed_sec": 789.33
+    },
+    "new_preparation": {
+      "stage": "ready",
+      "charts": 1787,
+      "examples": 94153,
+      "preparation_cache": {
+        "hits": 1787,
+        "misses": 1,
+        "rebuilt": 0,
+        "invalid": 0,
+        "write_errors": 0,
+        "path": "E:\\全量官谱\\cache\\song_form_prepare\\v1",
+        "source_hashes": {
+          "hits": 3580,
+          "full_reads": 1783,
+          "bytes_hashed": 175367377
+        }
+      },
+      "elapsed_sec": 75.44
+    },
+    "same_target_counts_first_150": true
+  },
+  "gpu_smoke_epoch": {
+    "epoch": 1,
+    "optimizer_steps": 3,
+    "elapsed_sec": 5.812999999965541,
+    "alignment_coverage": 0.895349899927775,
+    "token_loss": 3.784846623738607,
+    "plan_loss": 0.2187113563219706,
+    "curve_loss": 0.05498495697975159,
+    "event_balance_loss": 3.7080135345458984,
+    "alignment_loss": 9.440775553385416,
+    "event_decision_loss": 0.17006109158198038,
+    "loss": 6.0288848876953125,
+    "token_accuracy": 0.06864717602729797,
+    "eos_targets": 4,
+    "eos_accuracy": 0.0,
+    "position_targets": 6949,
+    "position_accuracy": 0.007770902288099007,
+    "note_targets": 7184,
+    "note_accuracy": 0.007099109131403118,
+    "whole_position_targets": 1826,
+    "whole_position_accuracy": 0.0,
+    "whole_configuration_targets": 1826,
+    "whole_configuration_accuracy": 0.0,
+    "whole_event_targets": 1826,
+    "whole_event_accuracy": 0.0,
+    "alignment_targets": 1825,
+    "alignment_accuracy": 0.0,
+    "eos_token_loss": 6.424014091491699
+  },
+  "validation": {
+    "main_python_passed": 115,
+    "cache_additional_passed": 13,
+    "javascript_passed": 11,
+    "note": "Cache set overlaps with main set; not additive."
+  },
+  "limits": [
+    "Production before/after includes the benefit of caches built by the cancelled task.",
+    "Four-song acoustic benchmark isolates recomputation, equal inputs; max absolute output difference 0.",
+    "Production measurement covers first 150 batches, not a complete epoch or long-run cache eviction.",
+    "7860 server restart rejected by automatic policy; retained server launched updated training subprocess with defaults 4 workers and 2 operator threads.",
+    "New runtime controls are in source but custom values need a service restart; do not restart the live training service now."
+  ]
+}

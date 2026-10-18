@@ -333,10 +333,11 @@ def test_http_training_honors_selected_sources_quality_seed_and_dropout(webui_ap
     monkeypatch.setattr(webui,'_run_subprocess_task',lambda task,args,**kwargs:calls.append((task,args)))
     status,reply=webui_api('/api/chart-stream/train',{'model_family':'chart_stream_v1','mode':'fresh',
         'manifest':str(original),'manifests':['a','b'],'checkpoint_dir':str(tmp_path/'output'),
-        'seed':173,'dropout':0.,'quality_enabled':False})
+        'seed':173,'dropout':0.,'quality_enabled':False,'data_workers':3,'cpu_threads':2})
     assert status==200,reply
     task,args=calls[0];parsed=train_parser().parse_args(args[2:])
     assert seen==[['a','b']] and parsed.manifest==str(combined)
     assert not parsed.quality_enabled and parsed.seed==173 and parsed.dropout==0.
+    assert parsed.data_workers==3 and parsed.cpu_threads==2
     assert task.result['dataset_selection']=={'sources':['a','b']}
     assert task.result['effective_manifest']==str(combined)

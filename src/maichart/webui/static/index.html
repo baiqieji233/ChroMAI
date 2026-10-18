@@ -330,7 +330,9 @@
 <label class="field">权重衰减<input id="streamWeightDecay" type="number" min="0" max="1" step="0.001" value="0.01"><small>AdamW 的 weight decay；resume 仍以 checkpoint 的优化器状态为准。</small></label>
 <label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>新关联方案将 75% 用于查询、25% 用于基础特征；原方案比例相反。同曲同时间轴共享音频证据，原生拍位探针另外按内容缓存。另有最多 64 MB 公共查询缓存，不含模型和训练样本。</small></label>
 <label class="field">准备线程<input id="streamPrepareWorkers" type="number" min="0" max="16" step="1" value="4"><small>并行准备独立歌曲；0 表示按后端默认值处理。</small></label>
-<label class="field">训练预取批次数<input id="streamPrefetchBatches" type="number" min="0" max="16" step="1" value="2"><small>单个后台线程共享内存并提前准备 CPU 数据，与训练计算重叠。0 同步读取；提高数量增加排队内存，不增加音频副本或改变样本顺序。</small></label>
+<label class="field">训练预取批次数<input id="streamPrefetchBatches" type="number" min="0" max="16" step="1" value="2"><small>提前准备 CPU 批次，与训练计算重叠；批次内的并行度由下方数据准备线程控制。0 同步读取；提高数量增加排队内存，不改变样本顺序。</small></label>
+<label class="field">训练数据准备线程<input id="streamDataWorkers" type="number" min="1" max="8" step="1" value="4"><small>预取开启时并行处理不同歌曲，同一歌曲串行并共享缓存。默认4，最多使用batch内样本数；1保留单线程。首轮细节音频缓存构建尤其受此项影响。</small></label>
+<label class="field">CPU算子线程<input id="streamCpuThreads" type="number" min="0" max="64" step="1" value="0"><small>0自动：CUDA训练用2，CPU训练最多4。限制Torch及可用BLAS线程池，避免每个数据线程各自抢占大量CPU；不限制GPU计算。</small></label>
 <label class="field">单次区域上限（秒）<input id="streamMaxRegionSeconds" type="number" min="2" max="60" step="1" value="15"><small>用于共用音频准备器的区域组织；连续流训练块由 token 上限划分，不按此秒数截断目标，也不添加片段 EOS。</small></label>
 <label class="field">训练谱面数量上限<input id="streamLimitCharts" type="number" min="0" step="1" value="0"><small>0 使用全部合格谱面；短跑验证时可填写较小数量。</small></label>
 <label class="field">训练缓存目录<textarea id="streamCacheDir" class="path-input" rows="2">cache/chart_stream_v1</textarea><small>保存有理音频与整曲事件准备缓存；不同数据合同请使用不同目录。</small></label>

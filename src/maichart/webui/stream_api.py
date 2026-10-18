@@ -42,6 +42,9 @@ def update_stream_progress(task,line):
             task.message=(f'连续谱面训练 · epoch {value["epoch"]}/{task.result.get("epoch_target", "?")} · '
                 f'batch {value["chunk"]}/{value["total"]} · loss {value["loss"]:.4f} · '
                 f'token准确率 {value["token_accuracy"]:.1%} · {value.get("batches_per_sec",0):.2f} batch/秒')
+            if 'recent_batches_per_sec' in value:
+                task.message+=(f' · 近期 {value["recent_batches_per_sec"]:.2f} batch/秒'
+                    f' · 主机计时：等数据 {value.get("data_wait_sec",0):.1f}s / 计算 {value.get("compute_host_sec",0):.1f}s')
         else:
             fraction=1.
             history=task.result.setdefault('stream_metric_history',[])
@@ -130,7 +133,7 @@ def start(handler, operation, payload, *, runtime):
                 ('local_audio_neighbors',32),('local_audio_seconds',2.),('archive_events',4096),
                 ('archive_retrievals',8),('archive_min_similarity',.5),('history_note_dropout',.15),
                 ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
-                ('event_balance_loss_weight',.2),('prefetch_batches',2)):
+                ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0)):
             args += ['--'+key.replace('_','-'),str(payload.get(key,default))]
         if type(payload.get('quality_enabled',True)) is not bool:
             raise ValueError('quality_enabled 必须是布尔值')

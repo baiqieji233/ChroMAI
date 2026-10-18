@@ -263,8 +263,18 @@ def _query_waveform_spectra(audio, seconds, offsets):
         stop = min(len(full_signal), math.ceil((float(seconds[selected].max()) + padding) * sr))
         signal = full_signal[sample_offset:stop]
         times = (seconds[selected, None] + offsets).reshape(-1)
-        measured = query_spectra(signal, sr, times, sample_offset=sample_offset)
-        result[selected] = measured.reshape(len(selected), len(offsets), ACOUSTIC_DIM)
+        if np.array_equal(offsets, [0., -.04, .04, -.01, .01]):
+            # Native v2 consumes all center columns, RMS at +/-40ms and
+            # chroma at +/-10ms. Computing 5 full mel spectra discarded four
+            # mel projections and two FFTs for every evidence node.
+            shaped=times.reshape(len(selected),len(offsets))
+            for columns,component in (([0],'all'),([1,2],'rms'),([3,4],'chroma')):
+                measured=query_spectra(signal,sr,shaped[:,columns].reshape(-1),
+                    sample_offset=sample_offset,component=component)
+                result[np.ix_(selected,columns)]=measured.reshape(len(selected),len(columns),ACOUSTIC_DIM)
+        else:
+            measured = query_spectra(signal, sr, times, sample_offset=sample_offset)
+            result[selected] = measured.reshape(len(selected), len(offsets), ACOUSTIC_DIM)
     return result
 
 
@@ -275,12 +285,16 @@ def _filters(sr, size):
             librosa.filters.chroma(sr=sr, n_fft=size, n_chroma=12))
 
 
-def query_spectra(signal, sr, seconds, *, sample_offset=0):
+def query_spectra(signal, sr, seconds, *, sample_offset=0, component='all'):
     """Measure spectra at requested centers, including a short transient view.
 
     Long and short analysis windows share a musical center; neither establishes
     a periodic output clock. Beyond-file centers are explicit silence.
     """
+    if component not in {'all','rms','chroma'}:raise ValueError('Unknown acoustic component')
+    # Keep mmap storage shared, without propagating the memmap subclass into
+    # thousands of temporary advanced-index and arithmetic arrays.
+    signal=np.asarray(signal)
     seconds = np.asarray(seconds, dtype=np.float64)
     result = np.zeros((len(seconds), ACOUSTIC_DIM), dtype=np.float32)
     size = 2048
@@ -293,10 +307,19 @@ def query_spectra(signal, sr, seconds, *, sample_offset=0):
         indices = centers[:, None] + offsets[None]
         inside = (indices >= 0) & (indices < len(signal))
         samples = signal[np.clip(indices, 0, max(0, len(signal) - 1))] * inside if len(signal) else np.zeros_like(indices, dtype=np.float32)
+        if component=='rms':
+            values=np.sqrt(np.mean(samples**2,axis=1))
+            values[(centers<0)|(centers>=len(signal))]=0
+            result[start:start+len(samples),93]=values
+            continue
         spectrum = np.abs(np.fft.rfft(samples * window, axis=1)) ** 2
-        mel = np.log1p(spectrum @ mel_filter.T)
+        if component=='all':mel = np.log1p(spectrum @ mel_filter.T)
         chroma = spectrum @ chroma_filter.T
         chroma /= np.maximum(chroma.sum(axis=1, keepdims=True), 1e-8)
+        if component=='chroma':
+            chroma[(centers<0)|(centers>=len(signal))]=0
+            result[start:start+len(samples),80:92]=chroma
+            continue
         rms = np.sqrt(np.mean(samples ** 2, axis=1))
         middle = size // 2
         left = samples[:, max(0, middle-short_size):middle]

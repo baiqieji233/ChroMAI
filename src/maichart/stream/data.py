@@ -10,6 +10,7 @@ import json
 import math
 import time
 import random
+import threading
 from collections import Counter
 from bisect import bisect_left
 
@@ -118,6 +119,9 @@ class StreamDataset(Dataset):
         self.chunks = []
         self.training_semantics = TRAINING_SEMANTICS
         self._audio_queries = OrderedDict()
+        self._query_lock=threading.RLock()
+        self._query_build_locks=[threading.Lock() for _ in range(64)]
+        self.query_prepare_seconds=Counter();self.query_prepare_counts=Counter()
         self.query_bytes = self.query_hits = self.query_misses = 0
         self._query_keys = []
         self._chart_ids=[];self._chart_positions=[];self._probe_beats=[];self._probe_indices=[]
@@ -201,17 +205,33 @@ class StreamDataset(Dataset):
 
     def set_epoch(self,epoch):self.epoch=int(epoch)
 
+    def prepare_concurrency_key(self,index):
+        # Difficulties sharing one source serialize mutable audio-view and
+        # sustain caches; independent songs can prepare on separate threads.
+        return str(self.base.songs[self.chunks[index].chart_index][0].audio.path)
+
     def _cached_query(self,key,builder):
-        if key in self._audio_queries:
-            self.query_hits+=1;self._audio_queries.move_to_end(key)
-            return self._audio_queries[key][0]
-        self.query_misses+=1;query=builder()
-        size=query[0].numel()*query[0].element_size()+query[1].nbytes+len(query[2])*64
-        if size<=self.query_budget:
-            while self._audio_queries and self.query_bytes+size>self.query_budget:
-                _,(_,removed)=self._audio_queries.popitem(last=False);self.query_bytes-=removed
-            self._audio_queries[key]=(query,size);self.query_bytes+=size
-        return query
+        # Test/legacy lightweight dataset constructors may omit runtime locks.
+        from contextlib import nullcontext
+        lock=getattr(self,'_query_lock',nullcontext())
+        build_locks=getattr(self,'_query_build_locks',())
+        with build_locks[hash(key)%len(build_locks)] if build_locks else nullcontext():
+            with lock:
+                if key in self._audio_queries:
+                    self.query_hits+=1;self._audio_queries.move_to_end(key)
+                    return self._audio_queries[key][0]
+                self.query_misses+=1
+            started=time.perf_counter();query=builder();elapsed=time.perf_counter()-started
+            size=query[0].numel()*query[0].element_size()+query[1].nbytes+len(query[2])*64
+            with lock:
+                if hasattr(self,'query_prepare_seconds'):
+                    family=key[0] if isinstance(key,tuple) else 'planner'
+                    self.query_prepare_seconds[family]+=elapsed;self.query_prepare_counts[family]+=1
+                if size<=self.query_budget:
+                    while self._audio_queries and self.query_bytes+size>self.query_budget:
+                        _,(_,removed)=self._audio_queries.popitem(last=False);self.query_bytes-=removed
+                    self._audio_queries[key]=(query,size);self.query_bytes+=size
+            return query
 
     def _queries(self, index, song):
         key = self._query_keys[index]
@@ -295,9 +315,11 @@ class StreamDataset(Dataset):
         return item
 
     def cache_stats(self):
-        return {'audio': self.base.audio_store.stats(), 'stream_queries': {
-            'bytes': self.query_bytes, 'budget_bytes': self.query_budget,
-            'entries': len(self._audio_queries), 'hits': self.query_hits, 'misses': self.query_misses}}
+        with self._query_lock:
+            queries={'bytes':self.query_bytes,'budget_bytes':self.query_budget,'entries':len(self._audio_queries),
+                'hits':self.query_hits,'misses':self.query_misses,
+                'prepare_seconds':dict(self.query_prepare_seconds),'prepare_counts':dict(self.query_prepare_counts)}
+        return {'audio':self.base.audio_store.stats(),'stream_queries':queries}
 
     def __len__(self): return len(self.chunks)
     def __getitem__(self, index):
