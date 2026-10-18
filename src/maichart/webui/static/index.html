@@ -905,7 +905,11 @@
 <label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label>
 <label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较整个 Fraction 的模型概率；搜索尚不确定时自动扩大，最多 32 路。1 使用原逐字符路径；更大更慢。</small></label>
 <label class="field">拍位候选温度<input id="streamPositionTemperature" type="number" min="0" max="3" step="0.05" value="0.15"><small>候选宽度大于 1 时，对完整拍位候选采样；0 选最高分。与配置温度独立。</small></label>
-<label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>完整候选的软惩罚，同时考虑拍位和相邻间隔的分母；0 关闭。允许非二进制分音，不会就近移动已生成的音符。宽度 1 时不生效。</small></label>
+<label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>只惩罚超过下方起点的分母复杂度；0 关闭。允许非二进制分音，不会移动已生成的音符。宽度 1 时不生效。</small></label>
+<label class="field">分母惩罚起点<input id="streamPositionComplexityFloor" type="number" min="1" max="4096" step="1" value="8"><small>按四分音符为一拍的 Fraction 分母计算。默认 8：四分至三十二分，以及分母不超过 8 的任意连音不受简洁惩罚；不是允许列表。1 恢复旧偏好。</small></label>
+<label class="field">学得结尾引导强度<input id="streamLearnedEndingStrength" type="number" min="0" max="3" step="0.1" value="1"><small>根据模型曲线预测的剩余音符量，为结束决策提供软证据；不按音量切尾。预测不准时可能早停或晚停；0 关闭。明确结束位置仍可手动指定。</small></label>
+<label class="field">约束后最低候选概率<input id="streamConstraintMinProbability" type="number" min="0" max="1" step="0.01" value="0.05"><small>硬保护仅剩低概率配置时，重选当前事件拍位，避免双 Slide 启动时硬凑大片 Touch。0 关闭；重选耗尽会明确报告未完成。</small></label>
+<label class="field">当前事件重选次数<input id="streamEventReconsiderAttempts" type="number" min="0" max="16" step="1" value="4"><small>仅回退尚未提交的当前事件，已生成内容保持不变；次数越高可能越慢。</small></label>
 <label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>按间隔比例惩罚偏离已训练意图的候选，避免 9 拍与 161 拍被当成同样偏差。预测达到 8 拍上限时表示“8 拍或更长”，允许长休止。0 关闭；首个起音和宽度 1 不应用。</small></label>
 <label class="field">同拍按键头数上限<input id="streamMaxButtonHeads" type="number" min="0" max="8" step="1" value="2"><small>硬约束：默认最多 2 个按键头，包含 Tap、Hold、带头 Slide；Touch 不计入此项。0 不限。不保证完整可玩性。</small></label>
 <label class="field">Hold 占用保护<select id="streamHoldProtection"><option value="on" selected>开启</option><option value="off">关闭</option></select><small>硬约束：已写出的 Hold / Touch Hold 尚未结束时，不允许在同一位置新增敲击头；不把整条 Slide 当作静态占用。</small></label>

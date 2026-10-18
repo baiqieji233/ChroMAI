@@ -178,6 +178,8 @@ def start(handler, operation, payload, *, runtime):
             args += ['--bpm', str(payload['bpm'])]
         for key, default in (('position_temperature', .15), ('max_events', 0),
                              ('position_beam_size', 4), ('position_complexity', .35),
+                             ('position_complexity_floor',8),('learned_ending_strength',1.),
+                             ('constraint_min_probability',.05),('event_reconsider_attempts',4),
                              ('position_interval_strength', 1.),
                              ('early_eos_penalty', 0.),
                              ('max_denominator', 384), ('max_interval_denominator', 96),

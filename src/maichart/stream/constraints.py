@@ -110,8 +110,10 @@ class BasicConfigurationGuard:
 
     def event(self, beat, *, button_capacity=None):
         second = float(seconds_at_beat(beat, self.tempo, self.first))
-        self.held_until = {head: end for head, end in self.held_until.items() if end > second+1e-8}
-        forbidden = frozenset(self.held_until) if self.protect_holds else frozenset()
+        # Queries are speculative: a rejected later position may be followed
+        # by an earlier alternative. Only commit may discard expired actions.
+        active = {head for head,end in self.held_until.items() if end > second+1e-8}
+        forbidden = frozenset(active) if self.protect_holds else frozenset()
         held_buttons = frozenset(head for head in forbidden if len(head)==1 and head in '12345678')
         # Button 4 and Touch A4 refer to the same physical pad.
         aliases = set(forbidden)
@@ -122,6 +124,7 @@ class BasicConfigurationGuard:
 
     def commit(self, point):
         when = float(seconds_at_beat(point.beat, self.tempo, self.first))
+        self.held_until = {head:end for head,end in self.held_until.items() if end>when+1e-8}
         bpm = next(change.bpm for change in reversed(self.tempo) if change.beat <= point.beat)
         markers, errors, _ = parse_markers(f'({bpm}){{4}}{point.note_text},', first=when)
         if errors:

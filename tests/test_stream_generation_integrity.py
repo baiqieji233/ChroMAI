@@ -38,6 +38,8 @@ def options(**kwargs):
     args.max_button_heads = 0
     args.hold_protection = 'off'
     args.reference_check_attempts = 0
+    args.learned_ending_strength = 0
+    args.constraint_min_probability = 0
     for key, value in kwargs.items():
         setattr(args, key, value)
     return args
@@ -156,7 +158,8 @@ def test_file_tail_with_no_space_for_another_event_is_reported(monkeypatch):
     expected = [EventPoint(F(63, 32), '1')]
     actual, status, _ = compose(monkeypatch, expected)
     assert actual == expected
-    assert status['reason'] == 'audio_range_exhausted' and not status['incomplete']
+    # EOF no longer prevents evaluating the model's actual EOS decision.
+    assert status['reason'] == 'eos' and not status['incomplete']
 
 
 def test_configuration_crossing_context_boundary_is_replayed_without_losing_decisions(monkeypatch):
@@ -262,6 +265,8 @@ def test_http_generation_preserves_device_seed_and_zero_temperature(webui_api, m
     request = {'model_family': 'chart_stream_v1', 'audio': str(audio), 'checkpoint': str(path),
                'device': device, 'temperature': 0., 'position_temperature': 0., 'seed': 123,
                'position_beam_size': 8, 'position_complexity': .7, 'early_eos_penalty': 0.,
+               'position_complexity_floor':16,'learned_ending_strength':.7,
+               'constraint_min_probability':.03,'event_reconsider_attempts':6,
                'max_button_heads': 2, 'hold_protection': 'on',
                'output': str(tmp_path/'maidata.txt'), 'condition': {'level': 13.6}}
     status, reply = webui_api('/api/chart-stream/generate', request)
@@ -271,6 +276,8 @@ def test_http_generation_preserves_device_seed_and_zero_temperature(webui_api, m
     assert (parsed.device, parsed.seed, parsed.temperature, parsed.position_temperature) == (device, 123, 0., 0.)
     assert (parsed.position_beam_size, parsed.position_complexity, parsed.early_eos_penalty) == (8, .7, 0.)
     assert (parsed.max_button_heads, parsed.hold_protection) == (2, 'on')
+    assert (parsed.position_complexity_floor,parsed.learned_ending_strength,
+            parsed.constraint_min_probability,parsed.event_reconsider_attempts)==(16,.7,.03,6)
     assert task.result['seed'] == 123
     assert task.result['effective_settings']['condition_file'] == parsed.condition_file
     assert json.loads(__import__('pathlib').Path(parsed.condition_file).read_text()) == request['condition']

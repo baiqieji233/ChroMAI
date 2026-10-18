@@ -245,7 +245,8 @@ class PhysicalFeasibilityGuard:
         second = self._cues.get(Fraction(beat))
         if second is None:
             return None
-        self._prune(second)
+        # Speculative candidate times may be evaluated out of order. Pruning
+        # here loses held actions if a later candidate is rejected.
         return PhysicalEvent(self, second)
 
     # -- committed state -------------------------------------------------

@@ -35,8 +35,12 @@ def parser():
     p.add_argument('--position-temperature', type=float, default=.15)
     p.add_argument('--position-beam-size', type=int, default=4)
     p.add_argument('--position-complexity', type=float, default=.35)
+    p.add_argument('--position-complexity-floor',type=int,default=8)
     p.add_argument('--position-interval-strength', type=float, default=1.)
     p.add_argument('--early-eos-penalty', type=float, default=0.)
+    p.add_argument('--learned-ending-strength',type=float,default=1.)
+    p.add_argument('--constraint-min-probability',type=float,default=.05)
+    p.add_argument('--event-reconsider-attempts',type=int,default=4)
     p.add_argument('--max-events', type=int, default=0)
     p.add_argument('--max-denominator', type=int, default=384)
     p.add_argument('--max-interval-denominator', type=int, default=96)
@@ -113,6 +117,10 @@ def generate(args):
         'export_timing': export_timing,
         'timing_diagnostics': timing_diagnostics(points, song.tempo, song.first, bounds['effective_end_sec'], text),
         'generation_controls': {'style_balance_strength': args.style_balance_strength,
+            'position_complexity_floor':args.position_complexity_floor,
+            'learned_ending_strength':args.learned_ending_strength,
+            'constraint_min_probability':args.constraint_min_probability,
+            'event_reconsider_attempts':args.event_reconsider_attempts,
             'position_beam_size': args.position_beam_size, 'position_complexity': args.position_complexity,
             'position_interval_strength': args.position_interval_strength,
             'position_temperature': args.position_temperature, 'early_eos_penalty': args.early_eos_penalty,

@@ -7,11 +7,12 @@ import math
 import torch
 
 
-def position_complexity_cost(text, lower):
+def position_complexity_cost(text, lower, floor=1):
     try:
         value = Fraction(text)
         delta = value - lower
-        return min(12., math.log2(value.denominator) + .5 * math.log2(delta.denominator))
+        return min(12., max(0.,math.log2(value.denominator/floor))
+                   + .5*max(0.,math.log2(delta.denominator/floor)))
     except (ValueError, ZeroDivisionError):
         return 0.
 
@@ -26,13 +27,15 @@ def _select_cache(caches, indices):
 def search_position(model, codec, grammar, root_logits, root_cache, memory, mask, *,
                     consumed, width=4, complexity=.2, timing_features=None,
                     temperature=0., generator=None, canonical_only=False, adaptive=False,
-                    candidate_cost=None, proposals=()):
+                    candidate_cost=None, proposals=(), complexity_floor=1):
+    if not math.isfinite(complexity_floor) or complexity_floor<1:
+        raise ValueError('complexity_floor must be finite and at least one')
     initial_width, expansions = width, 0
     while True:
         value, status = _search_position(model, codec, grammar, root_logits, root_cache,
             memory, mask, consumed=consumed, width=width, complexity=complexity,
             timing_features=timing_features, temperature=temperature, generator=None,
-            canonical_only=canonical_only, candidate_cost=candidate_cost)
+            canonical_only=canonical_only, candidate_cost=candidate_cost,complexity_floor=complexity_floor)
         expansions += status['expanded_hypotheses']
         bound = status['discarded_prefix_score_bound']
         best = status['best_complete_score']
@@ -55,7 +58,7 @@ def search_position(model, codec, grammar, root_logits, root_cache, memory, mask
             root_cache, memory, mask, consumed=consumed, timing_features=timing_features)
         merged = {row['beat']:row for row in ranked}
         for text, probability in scored.items():
-            penalty = complexity*position_complexity_cost(text,grammar.lower)
+            penalty = complexity*position_complexity_cost(text,grammar.lower,complexity_floor)
             if candidate_cost is not None: penalty += float(candidate_cost(Fraction(text)))
             merged[text] = {'beat':text,'score':probability-penalty,'log_probability':probability}
         ranked = sorted(merged.values(),key=lambda row:row['score'],reverse=True)
@@ -114,7 +117,7 @@ def _score_proposals(model, codec, texts, logits, caches, memory, mask, *, consu
 
 def _search_position(model, codec, grammar, root_logits, root_cache, memory, mask, *,
                      consumed, width, complexity, timing_features,
-                     temperature, generator, canonical_only, candidate_cost):
+                     temperature, generator, canonical_only, candidate_cost,complexity_floor=1):
     """Return the best complete Fraction, never a nearest musical grid.
 
     Score full token probabilities before grammar renormalization: forcing a
@@ -144,7 +147,7 @@ def _search_position(model, codec, grammar, root_logits, root_cache, memory, mas
                 if token == codec.note_id:
                     if canonical_only and str(Fraction(prefix)) != prefix:
                         continue
-                    rank = cumulative - complexity * position_complexity_cost(prefix, grammar.lower)
+                    rank = cumulative - complexity * position_complexity_cost(prefix, grammar.lower,complexity_floor)
                     if candidate_cost is not None:
                         penalty = float(candidate_cost(Fraction(prefix)))
                         if not math.isfinite(penalty) or penalty < 0:

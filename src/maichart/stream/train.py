@@ -78,11 +78,22 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25):
     choices=torch.stack((logits[...,codec.at_id],logits[...,codec.eos_id]),-1)
     decision_values=F.cross_entropy(choices.transpose(1,2),(target==codec.eos_id).long(),reduction='none')
     decision=reduce(decision_values,decision_mask,local)
+    prediction=logits.argmax(-1)
+    eos_mask=mask & (target==codec.eos_id)
+    position_mask=mask & (target>=codec.ids['P:0']) & (target<=codec.ids['P:/'])
+    note_mask=mask & (target>=codec.ids['N:1'])
     total=token + plan_weight*plan + .2*curve + event_weight*decision
     return total, {'token_loss':token.detach(),'plan_loss':plan.detach(),'curve_loss':curve.detach(),
                                'event_decision_loss':decision.detach(),
                                'loss':total.detach(),
-                               'token_accuracy':((logits.argmax(-1)==target)&mask).sum().float()/mask.sum().clamp_min(1)}
+                               'token_accuracy':((prediction==target)&mask).sum().float()/mask.sum().clamp_min(1),
+                               '_eos_count':eos_mask.sum().detach(),
+                               '_eos_correct':((prediction==target)&eos_mask).sum().detach(),
+                               '_eos_loss_sum':(ce*eos_mask).sum().detach(),
+                               '_position_count':position_mask.sum().detach(),
+                               '_position_correct':((prediction==target)&position_mask).sum().detach(),
+                               '_note_count':note_mask.sum().detach(),
+                               '_note_correct':((prediction==target)&note_mask).sum().detach()}
 
 
 def _finish_accumulation(model, optimizer, scaler, pending, accumulation):
@@ -105,7 +116,16 @@ def _mean_metrics(totals, batches):
     if not totals:
         return {}
     values=torch.stack([torch.as_tensor(value) for value in totals.values()]).detach().float().cpu().tolist()
-    return {key: value/max(1,batches) for key,value in zip(totals, values)}
+    raw=dict(zip(totals,values))
+    result={key:value/max(1,batches) for key,value in raw.items() if not key.startswith('_')}
+    for prefix in ('eos','position','note'):
+        count=raw.get('_'+prefix+'_count')
+        if count is not None:
+            result[prefix+'_targets']=int(count)
+            result[prefix+'_accuracy']=raw['_'+prefix+'_correct']/count if count else None
+    if '_eos_count' in raw:
+        result['eos_token_loss']=raw['_eos_loss_sum']/raw['_eos_count'] if raw['_eos_count'] else None
+    return result
 
 
 def _resume_start_epoch(checkpoint):

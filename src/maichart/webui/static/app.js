@@ -203,14 +203,16 @@ function renderTaskTrainingMetrics(task) {
     const list = document.createElement("dl"); list.className = "training-metric-list";
     for (const [key, label] of [["loss","总 loss"],["token_loss","事件 token loss"],
       ["token_accuracy","token 准确率"],["plan_loss","连续写作计划 loss"],
+      ["position_accuracy","拍位字符准确率"],["note_accuracy","配置字符准确率"],
+      ["eos_accuracy","整曲结束准确率"],["eos_targets","已见真实结束目标"],["eos_token_loss","整曲结束 token loss"],
       ["event_decision_loss","续写与结束 loss"],["curve_loss","强度曲线 loss"],
       ["batches_per_sec","batch / 秒"],["optimizer_steps","参数更新步"]]) {
       const value = trainingMetricNumber(metrics,key);
       if (value === null) continue;
       const term=document.createElement("dt"), definition=document.createElement("dd");
       term.textContent=label;
-      definition.textContent=key === "token_accuracy" ? `${(value*100).toFixed(2)}%`
-        : key === "optimizer_steps" ? String(value) : value.toFixed(4);
+      definition.textContent=key.endsWith("accuracy") ? `${(value*100).toFixed(2)}%`
+        : key === "optimizer_steps" || key.endsWith("targets") ? String(value) : value.toFixed(4);
       list.append(term,definition);
     }
     groups.append(list);
@@ -585,6 +587,7 @@ const GENERATION_PARAM_FIELDS = [
   "formPositionComplexity", "formPositionBeamSize", "formEarlyEosPenalty",
   "streamPositionTemperature", "streamPositionBeamSize", "streamPositionComplexity", "streamEarlyEosPenalty",
   "streamPositionIntervalStrength",
+  "streamPositionComplexityFloor", "streamLearnedEndingStrength", "streamConstraintMinProbability", "streamEventReconsiderAttempts",
   "streamMaxButtonHeads", "streamHoldProtection",
   "streamReferenceChecks",
   "streamTrimExactSilence",
@@ -1961,6 +1964,10 @@ function chartStreamGenerationPayload() {
     position_temperature: Number(valueOrDefault("#streamPositionTemperature", .15)),
     position_beam_size: Number(valueOrDefault("#streamPositionBeamSize", 4)),
     position_complexity: Number(valueOrDefault("#streamPositionComplexity", .35)),
+    position_complexity_floor: Number(valueOrDefault("#streamPositionComplexityFloor", 8)),
+    learned_ending_strength: Number(valueOrDefault("#streamLearnedEndingStrength", 1)),
+    constraint_min_probability: Number(valueOrDefault("#streamConstraintMinProbability", .05)),
+    event_reconsider_attempts: Number(valueOrDefault("#streamEventReconsiderAttempts", 4)),
     position_interval_strength: Number(valueOrDefault("#streamPositionIntervalStrength", 1)),
     early_eos_penalty: Number(valueOrDefault("#streamEarlyEosPenalty", 0)),
     max_denominator: Number(valueOrDefault("#streamMaxDenominator", 384)),
@@ -4427,6 +4434,10 @@ async function submitGenerate() {
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
+    const status = await api("/api/status");
+    if (status.stream_generation_contract !== "chart_stream_quality_controls_v2") {
+      throw new Error("当前服务尚未加载连续流质量控制。请使用已更新的 WebUI 服务；若此端口正在训练，请等训练结束后重启，避免新参数被旧后端忽略。");
+    }
     const data = await api("/api/chart-stream/generate", payload);
     watchTask(data.task_id, (task) => { if (task.status === "completed") {
       const incomplete = task.result?.generation_status === "incomplete";

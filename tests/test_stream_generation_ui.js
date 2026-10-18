@@ -57,6 +57,10 @@ for (const device of ["auto", "cuda", "cpu"]) {
     assert.equal(result.position_beam_size, 4);
     assert.equal(result.position_complexity, .35);
     assert.equal(result.position_interval_strength, 1);
+    assert.equal(result.position_complexity_floor,8);
+    assert.equal(result.learned_ending_strength,1);
+    assert.equal(result.constraint_min_probability,.05);
+    assert.equal(result.event_reconsider_attempts,4);
     assert.equal(result.early_eos_penalty, 0);
     assert.equal(result.max_button_heads, 2);
     assert.equal(result.hold_protection, 'on');

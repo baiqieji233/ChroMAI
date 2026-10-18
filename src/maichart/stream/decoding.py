@@ -20,6 +20,7 @@ from .timing import CanonicalPositionGrammar, interval_consistency_cost
 from .context import prefix_action_state
 from .constraints import BasicConfigurationGuard
 from .reference_guard import ReferenceCandidateGuard
+from .ending import LearnedEnding
 
 
 def validate_options(args):
@@ -35,7 +36,8 @@ def validate_options(args):
     for name, low, high in (('max_denominator', 1, 4096),
                             ('max_interval_denominator', 0, 4096),
                             ('max_events', 0, 1_000_000), ('seed', 0, 2**63-1),
-                            ('position_beam_size', 1, 8)):
+                            ('position_beam_size', 1, 8),('position_complexity_floor',1,4096),
+                            ('event_reconsider_attempts',0,16)):
         value = getattr(args, name)
         if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
             raise ValueError(f'{name} 必须是 {low}–{high} 的整数')
@@ -51,10 +53,12 @@ def validate_options(args):
         raise ValueError('generation_end_sec 必须是正的有限秒数')
     if not math.isfinite(args.min_spacing_ms) or not 0 <= args.min_spacing_ms <= 1000:
         raise ValueError('min_spacing_ms 必须是 0–1000 的有限数值')
-    for name in ('style_balance_strength', 'local_chord_strength', 'physical_feasibility_strength'):
+    for name in ('style_balance_strength', 'local_chord_strength', 'physical_feasibility_strength','learned_ending_strength'):
         value = getattr(args, name)
         if not math.isfinite(value) or not 0 <= value <= 3:
             raise ValueError(f'{name} 必须是 0–3 的有限数值')
+    if not math.isfinite(args.constraint_min_probability) or not 0<=args.constraint_min_probability<=1:
+        raise ValueError('constraint_min_probability 必须为 0–1 的有限数值')
     for name, high in (('position_complexity', 2.), ('early_eos_penalty', 8.),
                        ('position_interval_strength', 8.)):
         value = getattr(args, name)
@@ -71,6 +75,13 @@ def sample_token(logits, allowed, temperature, generator):
         return allowed[int(values.argmax())]
     index = int(torch.multinomial(torch.softmax(values/temperature, dim=-1), 1, generator=generator))
     return allowed[index]
+
+
+def rewind_decoder_cache(cache, prefix_length):
+    """Discard speculative self attention, retain immutable cross attention."""
+    if not isinstance(cache,list):
+        return None,0
+    return [(k[:,:prefix_length],v[:,:prefix_length],*rest) for k,v,*rest in cache],prefix_length
 
 
 @torch.inference_mode()
@@ -106,6 +117,9 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     previous = Fraction(-1)
     origin = max(Fraction(0), beat_at_second(0., song.tempo, song.first))
     end = beat_at_second(getattr(args,'effective_end_sec',song.audio.duration_sec), song.tempo, song.first)
+    ending=(LearnedEnding(audio_times,encoded_audio[2][0,:,0].sigmoid().float().cpu().numpy(),
+                          getattr(args,'effective_end_sec',song.audio.duration_sec),args.learned_ending_strength)
+            if float(getattr(args,'effective_end_sec',song.audio.duration_sec))>0 else None)
     rng = torch.Generator(device=device).manual_seed(args.seed)
     position = None
     state, spelling, header_start = 'event', '', 0
@@ -114,8 +128,14 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     event_bias = None
     interval_prediction = None
     searches, search_expansions, search_trace, event_trace = 0, 0, [], []
+    rejected_positions,event_retries,event_retry_count = set(),[],0
+    event_trace_tail=[]
     started = time.perf_counter()
-    characters = max(4, len(str(math.ceil(end*args.max_denominator)))
+    # Search just beyond the file as a stop alternative. Otherwise the grammar
+    # turns an intended next whole beat beyond EOF into a tiny legal fraction
+    # in the last milliseconds. Such a position is never emitted as a note.
+    search_end=end+8
+    characters = max(4, len(str(math.ceil(search_end*args.max_denominator)))
                      + 1 + len(str(args.max_denominator)))
 
     def audio_index(beat):
@@ -166,6 +186,28 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         spelling,note_choices = '',[]
         return True
 
+    def retry_event(cause,probability=None):
+        nonlocal ids,cache,consumed,state,spelling,event_retry_count
+        if position is None or event_retry_count>=args.event_reconsider_attempts:
+            return False
+        rejected_positions.add(position)
+        event_retry_count+=1
+        event_retries.append({'beat':str(position),'reason':cause,'retained_model_mass':probability,
+                              'attempt':event_retry_count})
+        # Rewind the complete speculative event, not any committed music.
+        # Cross memory still belongs to this resource context; no rejected
+        # action, style count or archive item has been committed yet.
+        ids=ids[:header_start]
+        # Keep the prefix K/V and reconsume its final token to recover the
+        # next-event distribution. Replaying an entire 1024-token block on
+        # every failed candidate dominated generation time in the real audit.
+        cache,consumed=rewind_decoder_cache(cache,header_start-1)
+        # Local/physical helpers may have evaluated the rejected future time;
+        # rebuild them from authored points before trying an earlier proposal.
+        guidance.replay(points,song.tempo,song.first)
+        state,spelling='event',''
+        return True
+
     memory, memory_mask = refresh_context()
     note_prefix_cache = {}
     if end <= origin:
@@ -188,11 +230,12 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             # Every admissible fraction fits this spelling budget; 40 digits
             # only made impossible numerical branches expensive to explore.
             grammar_type = CanonicalPositionGrammar if args.position_beam_size > 1 else PositionGrammar
-            position_grammar = grammar_type(previous, end, characters=characters,
+            position_grammar = grammar_type(previous, search_end, characters=characters,
                 max_denominator=args.max_denominator,
                 max_delta_denominator=args.max_interval_denominator or None,
                 delta_reference=previous if previous >= 0 else Fraction(0),
-                min_spacing=gap, allowed_ranges=((origin, end),))
+                min_spacing=gap, allowed_ranges=((origin, search_end),),
+                valid_position=lambda value:value not in rejected_positions)
             possible = position_grammar.allowed('', codec)
             if not possible:
                 tail = float(seconds_at_beat(end, song.tempo, song.first)
@@ -223,9 +266,15 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             allowed = [codec.eos_id, codec.at_id]
             scores = logits.clone()
             scores[codec.eos_id] -= args.early_eos_penalty
-            if len(event_trace) < 64:
-                event_trace.append({'after_beat': str(previous) if points else None,
-                    'raw_eos_minus_at': float(logits[codec.eos_id]-logits[codec.at_id])})
+            raw_margin=float(scores[codec.eos_id]-scores[codec.at_id])
+            if ending is not None and ending.strength:
+                clock=float(seconds_at_beat(previous,song.tempo,song.first)) if points else 0.
+                scores[codec.eos_id]=scores[codec.at_id]+ending.eos_logit(raw_margin,clock)
+            decision={'after_beat':str(previous) if points else None,
+                'raw_eos_minus_at':float(logits[codec.eos_id]-logits[codec.at_id]),
+                'guided_eos_minus_at':float(scores[codec.eos_id]-scores[codec.at_id])}
+            if len(event_trace)<64:event_trace.append(decision)
+            event_trace_tail.append(decision);del event_trace_tail[:-32]
             selected = sample_token(scores, allowed, args.position_temperature, rng)
             ids.append(selected); emitted_tokens += 1
             if selected == codec.eos_id:
@@ -243,6 +292,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 chosen, info = search_position(model, codec, position_grammar, logits, cache,
                     memory, memory_mask, consumed=consumed, width=args.position_beam_size,
                     complexity=args.position_complexity, temperature=args.position_temperature,
+                    complexity_floor=args.position_complexity_floor,
                     generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost,
                     proposals=([Fraction(math.floor(previous)+1)] + [previous+(b.beat-a.beat)
                         for a,b in reversed(list(zip(points[-33:],points[-33:][1:])))]
@@ -276,6 +326,9 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 ids.append(selected); emitted_tokens += 1
             if selected == codec.note_id:
                 position = Fraction(spelling)
+                if position>=end:
+                    reason,incomplete='predicted_position_after_audio_end',False
+                    break
                 canonical = codec.position(position)
                 if ids[header_start:] != canonical:
                     ids[header_start:] = canonical
@@ -298,21 +351,32 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         else:
             prefix_key = (spelling,cell_grammar.forbidden,cell_grammar.button_capacity,
                           cell_grammar.held_buttons,cell_grammar.second)
-            allowed = note_prefix_cache.get(prefix_key)
-            if allowed is None:
+            cached_allowed = note_prefix_cache.get(prefix_key)
+            if cached_allowed is None:
                 base_allowed = [index for index, char in chars if grammar.can_continue(spelling+char)]
                 allowed = [index for index in base_allowed if cell_grammar.can_continue(spelling+codec.tokens[index][2:])]
                 hard_guard.blocked_token_choices += len(base_allowed)-len(allowed)
+                if grammar.is_complete(spelling):base_allowed.append(codec.end_id)
                 if cell_grammar.is_complete(spelling):
                     allowed.append(codec.end_id)
                 if len(note_prefix_cache) >= 4096:
                     note_prefix_cache.clear()
-                note_prefix_cache[prefix_key] = allowed
+                note_prefix_cache[prefix_key] = (allowed,base_allowed)
+            else:
+                allowed,base_allowed=cached_allowed
+            if args.constraint_min_probability and base_allowed and len(allowed)<len(base_allowed):
+                kept=(float(torch.exp(torch.logsumexp(logits[allowed],0)-torch.logsumexp(logits[base_allowed],0)))
+                      if allowed else 0.)
+                if kept<args.constraint_min_probability:
+                    if retry_event('hard_mask_discarded_likely_configuration',kept):continue
+                    reason,incomplete='low_probability_configuration_constraints',True
+                    break
             allowed = [token for token in allowed if token not in note_bans.get(spelling,set())]
             if not allowed:
                 if reference_guard is not None:
                     note_attempts += 1
                     if retry_note(): continue
+                if retry_event('configuration_constraints_exhausted'):continue
                 reason, incomplete = 'configuration_constraints_exhausted', True
                 break
             continuations = [None if token == codec.end_id else codec.tokens[token][2:] for token in allowed]
@@ -332,6 +396,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     accepted,_ = reference_guard.check(point)
                     if not accepted:
                         if retry_note(): continue
+                        if retry_event('reference_constraints_exhausted'):continue
                         reason,incomplete = 'reference_constraints_exhausted',True
                         break
                 points.append(point)
@@ -339,6 +404,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 guidance.commit(spelling, position)
                 hard_guard.commit(point)
                 if reference_guard is not None: reference_guard.commit(point)
+                rejected_positions.clear();event_retry_count=0
                 vector = model.token_embedding(torch.tensor(codec.cell(point), device=device)).mean(0)
                 bank.append(position, spelling, vector + base_projection[audio_index(position)])
                 if len(points) % 32 == 0:
@@ -357,6 +423,11 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'memory_policy': 'training_history_summary_v1',
                     'basic_constraints': hard_guard.report(),
                     'reference_constraints': reference_guard.report() if reference_guard is not None else {'enabled':False},
+                    'learned_ending':ending.report() if ending is not None else {'enabled':False},
+                    'event_reconsideration':{'retries':event_retries,'total_retries':len(event_retries),
+                        'minimum_retained_probability':args.constraint_min_probability,
+                        'budget_per_event':args.event_reconsider_attempts},
                     'position_search': {'mode': 'whole_fraction' if args.position_beam_size > 1 else 'character',
                         'searches': searches, 'expanded_hypotheses': search_expansions,
-                        'trace_first_64': search_trace}, 'event_decisions_first_64': event_trace}
+                        'trace_first_64': search_trace}, 'event_decisions_first_64': event_trace,
+                    'event_decisions_last_32':event_trace_tail}
