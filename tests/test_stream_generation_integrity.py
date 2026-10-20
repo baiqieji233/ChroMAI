@@ -33,7 +33,7 @@ def options(**kwargs):
     args = parser().parse_args(['--audio', 'unused.wav', '--checkpoint', 'unused.pt',
                                 '--output', 'unused.txt', '--device', 'cpu',
                                 '--temperature', '0', '--position-temperature', '0'])
-    args.position_beam_size = 1  # Exercise the character-compatible loop here.
+    args.position_beam_size = 1  # Smallest full-Fraction search workspace.
     args.position_interval_strength = 0
     args.max_button_heads = 0
     args.hold_protection = 'off'
@@ -71,31 +71,32 @@ def compose(monkeypatch, points, *, max_tokens=32, options_override=None, target
         return original(*args, **kwargs)
 
     def step(token, position, memory, mask, caches=None):
-        index = len(calls)
-        prefix = [] if caches is None else list(caches['prefix'])
-        prefix.append(int(token[0, 0]))
+        count = token.size(0)
+        previous = (caches[0][0] if caches is not None else
+                    torch.empty(count, 0, 1, dtype=torch.long))
+        assert previous.size(1) == position
         if caches is not None:
-            assert caches['position'] + 1 == position
-            assert torch.equal(caches['mask'], mask), 'Cross-cache and history mask diverged'
-            assert torch.equal(caches['memory'], memory), 'Cross-cache and history memory diverged'
-        calls.append((int(token[0, 0]), position))
-        if targets is not None:
-            assert index < len(targets), 'Unexpected extra decoding after completion'
-            selected = targets[index]
-        elif codec.at_id not in prefix or prefix[-1] == codec.end_id:
-            selected = codec.eos_id if len(committed) == len(cells) else codec.at_id
-        else:
-            current = prefix[max(i for i, value in enumerate(prefix) if value == codec.at_id):]
-            # A replay consumes earlier cells too. Their intermediate logits
-            # are irrelevant; the final current-cell prefix determines the
-            # next scripted token, independently of the number of replays.
-            ordered = cells[len(committed):] + cells[:len(committed)]
-            matching = next((cell for cell in ordered if cell[:len(current)] == current), None)
-            selected = matching[len(current)] if matching is not None and len(current) < len(matching) else codec.at_id
-        logits = torch.full((1, 1, len(codec)), -100.)
-        logits[0, 0, selected] = 100.
-        return {'logits': logits, 'hidden': torch.zeros(1, 1, 16)}, {
-            'position': position, 'mask': mask.clone(), 'memory': memory.clone(), 'prefix': prefix}
+            assert torch.equal(caches[0][3], mask), 'Cross-cache and history mask diverged'
+            assert torch.equal(caches[0][2], memory), 'Cross-cache and history memory diverged'
+        present = torch.cat((previous, token[..., None]), 1)
+        logits = torch.full((count, 1, len(codec)), -100.)
+        for row in range(count):
+            prefix = present[row, :, 0].tolist()
+            index = len(calls)
+            calls.append((int(token[row, 0]), position))
+            if targets is not None:
+                assert index < len(targets), 'Unexpected extra decoding after completion'
+                selected = targets[index]
+            elif codec.at_id not in prefix or prefix[-1] == codec.end_id:
+                selected = codec.eos_id if len(committed) == len(cells) else codec.at_id
+            else:
+                current = prefix[max(i for i, value in enumerate(prefix) if value == codec.at_id):]
+                ordered = cells[len(committed):] + cells[:len(committed)]
+                matching = next((cell for cell in ordered if cell[:len(current)] == current), None)
+                selected = matching[len(current)] if matching is not None and len(current) < len(matching) else codec.at_id
+            logits[row, 0, selected] = 100.
+        return {'logits': logits, 'hidden': torch.zeros(count, 1, 16)}, [
+            (present, present, memory.clone(), mask.clone())]
 
     monkeypatch.setattr(model.audio_encoder, 'forward', encoder)
     monkeypatch.setattr(model, 'decode_step', step)
@@ -174,20 +175,34 @@ def test_single_configuration_exceeding_context_has_clear_error(monkeypatch):
         compose(monkeypatch, [EventPoint(F(0), '1h[4:1]')], max_tokens=4)
 
 
-def test_fraction_canonicalization_replays_only_actual_committed_spelling(monkeypatch):
-    codec = RationalCodec()
-    # Sample 2/4, normalize to 1/2, then replay the canonical BOS+header before
-    # predicting the body. Intermediate replay predictions are ignored.
-    sampled = [codec.at_id, *(codec.ids['P:'+c] for c in '2/4'), codec.note_id]
-    replay = [codec.pad_id] * len(codec.position(F(1, 2)))
-    schedule = sampled + replay + [codec.ids['N:1'], codec.end_id]
+def test_width_one_uses_canonical_fraction_search_and_reconsumes_selected_header(monkeypatch):
     expected = [EventPoint(F(1, 2), '1')]
     actual, status, calls = compose(monkeypatch, expected,
-        options_override={'max_events': 1}, targets=schedule)
+        options_override={'max_events': 1})
     assert actual == expected
-    assert status['equivalent_fraction_normalizations'] == 1
-    replayed = [token for token, _ in calls[len(sampled):]]
-    assert replayed[:1+len(codec.position(F(1, 2)))] == [codec.bos_id, *codec.position(F(1, 2))]
+    assert status['position_search']['mode'] == 'whole_fraction'
+    assert status['position_search']['searches'] == 1
+    assert status['position_search']['trace_first_64'][0]['beam_width'] == 1
+    assert status['equivalent_fraction_normalizations'] == 0
+
+
+def test_memory_downgrade_retains_full_fraction_search_in_actual_loop(monkeypatch):
+    import maichart.stream.decoding as module
+    limits = module.search_workspace_limits
+    assert limits(4, 4, 3.954) == (1, 1)
+    assert limits(4, 4, 5.) == (2, 1)
+    assert limits(4, 4, 8.) == (4, 4)
+    # Inject just the measured memory condition; all tensors remain on CPU.
+    monkeypatch.setattr(module, 'search_workspace_limits',
+                        lambda beam, candidates, _free: limits(beam, candidates, 3.954))
+    expected = [EventPoint(F(0), '1'), EventPoint(F(1, 2), '2')]
+    actual, status, _ = compose(monkeypatch, expected, max_tokens=32,
+        options_override={'position_beam_size': 4})
+    assert actual == expected and status['reason'] == 'eos'
+    assert status['memory_guard_events'][0]['beam'] == 1
+    assert status['position_search']['mode'] == 'whole_fraction'
+    assert status['position_search']['searches'] == len(expected)
+    assert all(item['beam_width'] == 1 for item in status['position_search']['trace_first_64'])
 
 
 def test_physical_guidance_receives_the_actual_song_clock(monkeypatch):
@@ -335,12 +350,16 @@ def test_http_training_honors_selected_sources_quality_seed_and_dropout(webui_ap
         'manifest':str(original),'manifests':['a','b'],'checkpoint_dir':str(tmp_path/'output'),
         'seed':173,'dropout':0.,'quality_enabled':False,'data_workers':3,'cpu_threads':2,
         'input_cache_mode':'legacy','structure_cache_mb':64,'optimizer_implementation':'standard',
-        'input_residency':'mapped','resident_cache_gb':10,'resident_memory_reserve_gb':4,'cache_validation_records':32768})
+        'input_residency':'mapped','resident_cache_gb':10,'resident_memory_reserve_gb':4,'cache_validation_records':32768,
+        'continuation_profile':'overlap_v1','context_replay_tokens':192,'prefix_mask_span_events':6,
+        'cycle_exit_loss_weight':.2,'symmetry_augmentation':'none'})
     assert status==200,reply
     task,args=calls[0];parsed=train_parser().parse_args(args[2:])
     assert seen==[['a','b']] and parsed.manifest==str(combined)
     assert not parsed.quality_enabled and parsed.seed==173 and parsed.dropout==0.
     assert parsed.data_workers==3 and parsed.cpu_threads==2
+    assert (parsed.continuation_profile,parsed.context_replay_tokens,parsed.prefix_mask_span_events,
+            parsed.cycle_exit_loss_weight,parsed.symmetry_augmentation)==('overlap_v1',192,6,.2,'none')
     assert (parsed.input_cache_mode,parsed.structure_cache_mb,parsed.optimizer_implementation)==('legacy',64,'standard')
     assert (parsed.input_residency,parsed.resident_cache_gb,parsed.resident_memory_reserve_gb,parsed.cache_validation_records)==('mapped',10,4,32768)
     assert task.result['dataset_selection']=={'sources':['a','b']}

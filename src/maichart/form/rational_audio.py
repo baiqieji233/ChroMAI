@@ -603,6 +603,19 @@ def extract_rational_audio(path, cache_dir=None, *, evidence_profile=LEGACY_EVID
     else:
         audio = None
     if audio is not None:
+        if round(float(audio.tempo_bpm), 4) != float(audio.tempo_bpm) and path.is_file():
+            from maichart.form.waveform_cache import mapped_waveform
+            signal, sr = mapped_waveform(path, content_sha256, cache_dir)
+            audio.tempo_bpm = _tempo_hint(signal, sr)
+            audio.metadata['tempo_bpm'] = audio.tempo_bpm
+            target = cached if cached is not None else candidate
+            if target is not None:
+                target.parent.mkdir(parents=True, exist_ok=True)
+                with tempfile.NamedTemporaryFile(dir=target.parent, suffix=".tmp", delete=False) as stream:
+                    temporary = Path(stream.name)
+                    np.savez_compressed(stream, features=audio.features, times=audio.times,
+                                        metadata=json.dumps(audio.metadata))
+                temporary.replace(target)
         return audio
     from maichart.form.waveform_cache import mapped_waveform
     signal, sr = mapped_waveform(path,content_sha256,cache_dir)
@@ -720,13 +733,13 @@ def audio_queries(song, start, end, *, max_nodes=None):
     import torch
     from maichart.form.timing import metrical_features
     from maichart.tempo_clock import TempoClock
-    clock=TempoClock(song.tempo,song.first)
     start, end = Fraction(start), Fraction(end)
     if end <= start:
         raise ValueError('Musical audio query range must have end > start')
     if max_nodes is not None and (isinstance(max_nodes, bool)
             or not isinstance(max_nodes, int) or max_nodes < 1):
         raise ValueError('max_nodes must be a positive integer or None')
+    clock=TempoClock(song.tempo,song.first)
     audio = song.audio
     policy = getattr(audio, "feature_policy", LEGACY_FEATURE_POLICY)
     if policy not in FEATURE_POLICIES:

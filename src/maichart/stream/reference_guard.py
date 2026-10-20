@@ -38,6 +38,7 @@ class ReferenceCandidateGuard:
         self.actions = []
         self._baseline_cache = {}
         self._live_slide_heads = []
+        self._slide_launch_lanes = []
 
     def _relevant(self,second):
         starts=[start for start,until in self._live_slide_heads if until>=second-1e-8]
@@ -85,6 +86,12 @@ class ReferenceCandidateGuard:
             else: static.add((position,self.actions[i].radius))
         return max(0,2-len(static)-moving)
 
+    def slide_launch_buttons(self, beat):
+        """Buttons where a committed Slide starts moving at this beat (MiaCode slide_head)."""
+        second = float(seconds_at_beat(beat,self.tempo,self.first))
+        return frozenset(lane for trace_second,lane in self._slide_launch_lanes
+                         if abs(second-trace_second) <= 1.0/180.0+1e-8)
+
     def _markers(self, point):
         second = float(seconds_at_beat(point.beat,self.tempo,self.first))
         bpm = next(t.bpm for t in reversed(self.tempo) if t.beat <= point.beat)
@@ -119,6 +126,7 @@ class ReferenceCandidateGuard:
     def commit(self, point):
         second,markers = self._markers(point)
         self._live_slide_heads=[(start,end) for start,end in self._live_slide_heads if end>=second-1e-8]
+        self._slide_launch_lanes=[(t,lane) for t,lane in self._slide_launch_lanes if t>=second-.02]
         self.records = self._relevant(second)
         # Retain a past head through its judge window; sustained/Slide actions
         # remain until their actual end. This is only the detector's context,
@@ -127,6 +135,9 @@ class ReferenceCandidateGuard:
         self.records.append((point,until))
         if any(m['type'] in {'slide','wifi'} for m in markers):
             self._live_slide_heads.append((second,until))
+        for m in markers:
+            if m['type'] in {'slide','wifi'} and m.get('lane') in range(1,9) and m.get('slide_trace_second') is not None:
+                self._slide_launch_lanes.append((float(m['slide_trace_second']),str(m['lane'])))
         notes,_ = simple_notes(markers)
         self.actions = [action for action in self.actions if action.end >= second-1e-8]
         self.actions.extend(build_actions(markers,notes))

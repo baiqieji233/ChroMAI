@@ -27,7 +27,7 @@ class StreamConfig:
     max_history_tokens: int = 256
     max_stream_memory: int = 32
     max_tokens: int = 1024
-    plan_dim: int = 8
+    plan_dim: int = 10
     action_dim: int = 50
     grounding_profile: str = 'none'
     detail_audio_nodes: int = 8192
@@ -37,8 +37,16 @@ class StreamConfig:
     archive_retrievals: int = 8
     archive_min_similarity: float = .5
     alignment_tolerance_ms: float = 15.
+    continuation_profile: str = 'reset_v1'
+    context_replay_tokens: int = 256
 
     def __post_init__(self):
+        if self.continuation_profile not in {'reset_v1','overlap_v1'}:
+            raise ValueError('Unknown continuation_profile')
+        if isinstance(self.context_replay_tokens,bool) or not isinstance(self.context_replay_tokens,int) or self.context_replay_tokens<1:
+            raise ValueError('context_replay_tokens must be a positive integer')
+        if self.continuation_profile=='overlap_v1' and self.grounding_profile=='none':
+            raise ValueError('Overlap continuation requires causal audio grounding')
         for name in ('vocab_size','d_model','nhead','layers','dim_feedforward',
                      'audio_dim','condition_dim','max_audio_tokens',
                      'max_history_tokens','max_stream_memory','max_tokens','plan_dim','action_dim',
@@ -146,7 +154,9 @@ class ChartStreamTransformer(nn.Module):
         global_token = self.condition_projection(c) + null[:, None].to(audio.dtype) * self.null_condition
         values = self.audio_projection(audio) + global_token[:, None]
         values = self.audio_norm(values)
-        values = self.audio_encoder(values, src_key_padding_mask=mask)
+        execution = getattr(self, '_training_graph_runner', None)
+        values = (self.audio_encoder(values, src_key_padding_mask=mask) if execution is None
+                  else execution.encoder(self.audio_encoder, values, mask))
         values = values.masked_fill(mask[..., None], 0.)
         audio_summary = values.masked_fill(mask[..., None], 0.).sum(1) / (~mask).sum(1).clamp_min(1)[:, None]
         route = torch.softmax(self.context_router(global_token + audio_summary), dim=-1)
@@ -184,14 +194,20 @@ class ChartStreamTransformer(nn.Module):
             target=self.grounding.input(target,timing_features,grounding_context['local']+grounding_context['action'])
         memory, memory_mask = self.prepare_decode_memory(memory, memory_mask,
             history=history, history_padding_mask=history_padding_mask,history_clock=history_clock)
-        causal = torch.triu(torch.ones((length, length), dtype=torch.bool, device=target.device), diagonal=1)
-        hidden = self.decoder(target, memory, tgt_mask=causal,
-                              memory_key_padding_mask=memory_mask)
+        execution = getattr(self, '_training_graph_runner', None)
+        if execution is None:
+            causal = torch.triu(torch.ones((length, length), dtype=torch.bool, device=target.device), diagonal=1)
+            hidden = self.decoder(target, memory, tgt_mask=causal,
+                                  memory_key_padding_mask=memory_mask, tgt_is_causal=True)
+        else:
+            hidden = execution.decoder(self.decoder, target, memory, memory_mask)
         hidden = self.decoder_norm(hidden)
         routes=None
         if hasattr(self,'grounding'):
             hidden,routes=self.grounding.fuse(hidden,timing_features,grounding_context['local'],
                 grounding_context['archive'],grounding_context['global'],grounding_context['action'])
+            boundary=((decoder_input==1)|(decoder_input==5)).to(hidden.dtype)[...,None]
+            hidden=hidden+boundary*self.grounding.boundary_audio(grounding_context['local']).to(hidden.dtype)
         plan=self.plan_head(hidden)
         if hasattr(self,'grounding'):
             positions=torch.arange(length,device=decoder_input.device)[None].expand(batch,-1)
@@ -207,7 +223,7 @@ class ChartStreamTransformer(nn.Module):
             raise ValueError('Cached decoding requires eval mode')
         if token.ndim != 2 or token.size(1) != 1 or not 0 <= position < self.position_embedding.num_embeddings:
             raise ValueError('decode_step expects [B,1] and nonnegative position')
-        from maichart.generation.event_model import _cached_decoder_layer_with_cross_cache
+        from .attention import cached_decoder_layer
         hidden = self.token_embedding(token) + self.position_embedding(
             torch.tensor([position], device=token.device)).unsqueeze(0)
         if hasattr(self,'grounding'):
@@ -216,6 +232,8 @@ class ChartStreamTransformer(nn.Module):
             hidden=self.grounding.input(hidden,timing_features,grounding_context['local']+grounding_context['action'])
         caches = caches or []
         updated=[]
+        additive_mask=(None if memory_mask is None else
+            torch.zeros(memory_mask.shape,device=hidden.device,dtype=hidden.dtype).masked_fill(memory_mask,float('-inf')))
         for index, layer in enumerate(self.decoder.layers):
             previous = caches[index] if index < len(caches) else None
             if previous is None:
@@ -224,19 +242,20 @@ class ChartStreamTransformer(nn.Module):
                 values = (*previous, None, None)
             else:
                 values = previous
-            hidden, present = _cached_decoder_layer_with_cross_cache(
-                layer, hidden, memory, *values, memory_mask)
+            hidden, present = cached_decoder_layer(
+                layer, hidden, memory, *values, additive_mask)
             updated.append(present)
         hidden = self.decoder_norm(hidden)
         routes=None
         if hasattr(self,'grounding'):
             hidden,routes=self.grounding.fuse(hidden,timing_features,grounding_context['local'],
                 grounding_context['archive'],grounding_context['global'],grounding_context['action'])
+            boundary=((token==1)|(token==5)).to(hidden.dtype)[...,None]
+            hidden=hidden+boundary*self.grounding.boundary_audio(grounding_context['local']).to(hidden.dtype)
         plan=self.plan_head(hidden)
         if hasattr(self,'grounding'):
             previous=(caches[len(self.decoder.layers)][0] if len(caches)>len(self.decoder.layers) else None)
-            active=plan if previous is None or previous.size(1)==0 else torch.where(
-                ((token==1)|(token==5))[...,None],plan,previous[:,-1:])
+            active=plan if previous is None or previous.size(1)==0 else torch.where(((token==1)|(token==5))[...,None],plan,previous[:,-1:])
             hidden=hidden+self.grounding.intent_projection(active)
             history=active if previous is None else torch.cat((previous,active),1)
             updated.append((history,history,None,None))
@@ -263,7 +282,14 @@ class ChartStreamTransformer(nn.Module):
                 'audio':batch['archive_audio'],'padding':batch['archive_padding_mask'],
                 'beats':batch['archive_beats'],'seconds':batch['archive_seconds'],'event_index':batch['archive_event_index']}
             queries=self.grounding.contexts(batch['query_clock'],batch['query_seconds'],batch['query_audio'],bank,archive)
+            # Section energy: the planner's own audio-derived load curve,
+            # pooled around each query. Detached, and computed identically in
+            # generation, so no authored density leaks into decoding.
+            queries['local']=queries['local']+self.grounding.phrase(curve,batch['audio_times_sec'],
+                encoded[1],batch['query_seconds']).to(queries['local'].dtype)
             queries['action']=self.grounding.action_value(batch['query_actions'])*batch['query_actions'][...,-1:].gt(0)
+            if batch.get('query_kinematics') is not None:
+                queries['action']=queries['action']+self.grounding.kinematics(batch['query_kinematics']).to(queries['action'].dtype)
             indices=batch['decoder_query_index'].clamp_min(0)
             context={key:queries[key].gather(1,indices[...,None].expand(-1,-1,self.config.d_model))
                      for key in ('local','archive','action')}

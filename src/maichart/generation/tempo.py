@@ -180,7 +180,7 @@ def detect_global_bpm(
         raise ValueError("bpm range must be positive and increasing.")
 
     acf = onset_autocorrelation(envelope)
-    grid = np.arange(bpm_min, bpm_max, resolution)
+    grid = np.round(np.arange(bpm_min, bpm_max, resolution), 4)
     log_prior = -0.5 * ((np.log2(grid) - math.log2(prior_center)) / prior_width) ** 2
     scores = np.array([harmonic_sum(acf, float(bpm), fps) for bpm in grid])
     scores = np.log1p(np.maximum(scores - float(np.min(scores)), 0.0)) + log_prior
@@ -205,11 +205,14 @@ def detect_global_bpm(
     # Refine each candidate on a fine local grid, then re-rank by combining the
     # grid fit with the prior.  Both terms are normalized before mixing so
     # neither scale dominates.
+    fine_step = min(float(resolution), 0.05)
     measured: list[tuple[float, float, float]] = []
     for bpm in shortlist:
-        best_bpm, best_score = bpm, comb_response(envelope, bpm, fps)
-        for delta in np.arange(-2.0, 2.0 + 1e-9, 0.25):
-            trial = bpm + delta
+        best_bpm, best_score = round(bpm, 4), comb_response(envelope, bpm, fps)
+        low = max(bpm_min, math.floor((bpm - 2.0) / fine_step) * fine_step)
+        high = min(bpm_max, math.ceil((bpm + 2.0) / fine_step) * fine_step)
+        for trial in np.round(np.arange(low, high + 1e-9, fine_step), 4):
+            trial = float(trial)
             if not bpm_min <= trial <= bpm_max:
                 continue
             score = comb_response(envelope, trial, fps)
@@ -233,7 +236,7 @@ def detect_global_bpm(
     others = [value for index, value in enumerate(combined) if index != winner_index]
     runner_up = max(others) if others else 0.0
     margin = (combined[winner_index] - runner_up) / max(combined[winner_index], 1e-9)
-    return float(winner), float(max(0.0, min(1.0, margin)))
+    return float(round(winner, 4)), float(max(0.0, min(1.0, margin)))
 
 
 def tempo_change_candidates(

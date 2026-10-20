@@ -7,6 +7,58 @@ from contextlib import contextmanager, nullcontext
 
 
 @contextmanager
+def attention_backend(requested, device):
+    """Optional SDPA priority, with safe supported-kernel fallbacks.
+
+    Windows PyTorch wheels may omit Flash Attention entirely. cuDNN can be
+    faster there; keep the choice explicit because hardware/builds differ.
+    """
+    original=requested
+    if requested == 'auto':
+        # Tested on the Windows Blackwell/cuDNN 9.7 wheel which ships no
+        # Flash kernels. Default SDPA ranks the slower CUTLASS path first.
+        prefer_cudnn=(device.type=='cuda' and os.name=='nt'
+            and torch.cuda.get_device_capability(device)[0]>=10
+            and (torch.backends.cudnn.version() or 0)>=90700
+            and not getattr(torch.backends.cuda,'is_flash_attention_available',lambda:True)())
+        if not prefer_cudnn:
+            yield {'requested':'auto','policy':'pytorch_default'}
+            return
+        requested='cudnn'
+    if requested not in {'cudnn','efficient'} or device.type != 'cuda':
+        raise ValueError('指定注意力后端需要 CUDA；CPU 请选择自动')
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+    import inspect
+    if 'set_priority' not in inspect.signature(sdpa_kernel).parameters:
+        if original=='auto':
+            yield {'requested':'auto','policy':'pytorch_default'}
+            return
+        raise ValueError('此 PyTorch 不支持注意力后端优先级；请选择自动或升级 PyTorch')
+    first=SDPBackend.CUDNN_ATTENTION if requested=='cudnn' else SDPBackend.EFFICIENT_ATTENTION
+    choices=list(dict.fromkeys((first,SDPBackend.FLASH_ATTENTION,
+        SDPBackend.EFFICIENT_ATTENTION,SDPBackend.CUDNN_ATTENTION,SDPBackend.MATH)))
+    with sdpa_kernel(choices,set_priority=True):
+        yield {'requested':original,'preferred':requested,'policy':'priority_with_fallback'}
+
+
+class CudaBatchTimer:
+    """One sampled batch per log interval; no per-batch synchronization."""
+    def __init__(self):
+        self.events=[torch.cuda.Event(enable_timing=True) for _ in range(3)]
+        self.events[0].record()
+
+    def transferred(self):self.events[1].record()
+
+    def computed(self):self.events[2].record()
+
+    def metrics(self):
+        self.events[-1].synchronize()
+        return {'sample_cuda_transfer_ms':self.events[0].elapsed_time(self.events[1]),
+                'sample_cuda_forward_backward_ms':self.events[1].elapsed_time(self.events[2]),
+                'cuda_timing_scope':'sampled_batch_stream_elapsed_not_kernel_busy'}
+
+
+@contextmanager
 def training_cpu_budget(requested, device):
     """Bound nested CPU pools while independent songs prepare in threads.
 

@@ -222,3 +222,69 @@ def test_reference_rejects_indirect_damage_to_an_earlier_slide():
     reference.commit(EventPoint(F(141),'3<6[2:1]/7-3[2:1]'))
     accepted,errors=reference.check(EventPoint(F(142),'C'))
     assert not accepted and any(e['kind']=='SlideTooFast' for e in errors)
+
+
+def test_slide_launch_taps_are_allowed_while_unrelated_buttons_and_holds_stay_blocked():
+    owner = guard(['1', '2', '8', '1h[4:1]', '1-4[8:1]', '8-5[8:1]', '1w5[8:1]'])
+    reference = ReferenceCandidateGuard(TEMPO, 0.)
+    # Commit twin slides at beat 0: wait is 1 beat (0.5s), launch at beat 1 (0.5s).
+    twin = EventPoint(F(0), '1-4[8:1]/8-5[8:1]')
+    owner.commit(twin)
+    reference.commit(twin)
+    assert reference.button_capacity(F(1)) == 0
+    assert reference.slide_launch_buttons(F(1)) == frozenset({'1', '8'})
+    cell = owner.event(F(1), button_capacity=reference.button_capacity(F(1)),
+                       slide_launch_buttons=reference.slide_launch_buttons(F(1)))
+    # Twin slide-launch taps {4}1-4[8:1]/8-5[8:1],1/8, are legal in both guards.
+    assert cell.can_continue('1/') and cell.is_complete('1/8') and cell.is_complete('1')
+    assert reference.check(EventPoint(F(1), '1/8'))[0]
+    # Non-launching button 2 or a Hold on launching button 1 would require an extra hand.
+    assert not cell.is_complete('1/2') and not cell.can_continue('1/2')
+    assert not cell.is_complete('1h[4:1]') and not cell.can_continue('1h')
+
+
+def test_single_slide_and_wifi_expose_launch_buttons_consistently_with_reference_guard():
+    owner = guard(['1', '2', '8', '1-4[8:1]', '1w5[8:1]'])
+    # Single normal slide: 1 moving hand (button_capacity=1) + launch button '1' allows 1/8, blocks 2/8.
+    ref_slide = ReferenceCandidateGuard(TEMPO, 0.)
+    ref_slide.commit(EventPoint(F(0), '1-4[8:1]'))
+    assert ref_slide.button_capacity(F(1)) == 1
+    assert ref_slide.slide_launch_buttons(F(1)) == frozenset({'1'})
+    cell_slide = owner.event(F(1), button_capacity=ref_slide.button_capacity(F(1)),
+                             slide_launch_buttons=ref_slide.slide_launch_buttons(F(1)))
+    assert cell_slide.is_complete('1/8') and ref_slide.check(EventPoint(F(1), '1/8'))[0]
+    assert not cell_slide.is_complete('2/8')
+    # Single WiFi slide: 2 wing actions (button_capacity=0) + launch button '1' allows launch tap '1'.
+    ref_wifi = ReferenceCandidateGuard(TEMPO, 0.)
+    ref_wifi.commit(EventPoint(F(0), '1w5[8:1]'))
+    assert ref_wifi.button_capacity(F(1)) == 0
+    assert ref_wifi.slide_launch_buttons(F(1)) == frozenset({'1'})
+    cell_wifi = owner.event(F(1), button_capacity=ref_wifi.button_capacity(F(1)),
+                            slide_launch_buttons=ref_wifi.slide_launch_buttons(F(1)))
+    assert cell_wifi.is_complete('1') and ref_wifi.check(EventPoint(F(1), '1'))[0]
+    assert not cell_wifi.is_complete('1/8') and not ref_wifi.check(EventPoint(F(1), '1/8'))[0]
+
+
+def test_unplanned_gap_penalty_is_optional_and_spares_planned_rests():
+    from maichart.stream.generate import parser as gen_parser
+    from maichart.stream.decoding import validate_options
+
+    base = interval_consistency_cost(F(48), 1.5 / 8., 1., gap_penalty_strength=0.)
+    penalized = interval_consistency_cost(F(48), 1.5 / 8., 1., gap_penalty_strength=1.)
+    assert penalized > base + 10.
+    # Normal intervals within max(2*target, target+4) are unaffected by gap_penalty_strength.
+    assert interval_consistency_cost(F(4), 1.5 / 8., 1., gap_penalty_strength=1.) == pytest.approx(
+        interval_consistency_cost(F(4), 1.5 / 8., 1., gap_penalty_strength=0.)
+    )
+    # Saturated >=8 beat rest predictions are never penalized by gap_penalty_strength.
+    assert interval_consistency_cost(F(64), 1., 1., gap_penalty_strength=1.5) == 0.
+
+    parsed = gen_parser().parse_args([
+        '--audio', 'a.wav', '--checkpoint', 'c.pt', '--output', 'o.txt',
+        '--unplanned-gap-penalty-strength', '1.2',
+    ])
+    assert parsed.unplanned_gap_penalty_strength == pytest.approx(1.2)
+    validate_options(parsed)
+    parsed.unplanned_gap_penalty_strength = 3.5
+    with pytest.raises(ValueError, match='unplanned_gap_penalty_strength'):
+        validate_options(parsed)

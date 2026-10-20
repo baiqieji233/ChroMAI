@@ -31,11 +31,17 @@ def event_balanced_loss(ce,logits,batch,codec,*,predicted=None):
 
 def alignment_loss(output,batch):
     logits=output['alignment_event_logits'].float()
-    labels=batch['alignment_audio_index'].clamp_min(0)
+    labels=output.get('alignment_event_labels')
+    if labels is None:labels=batch['alignment_audio_index'].clamp_min(0)
     mask=batch['alignment_event_mask']&(batch['alignment_event_indices']>=0)
     quality=batch['quality_weight'].float()
     if logits.size(1):
-        eligible=mask&~batch['detail_audio_padding_mask'].gather(1,labels)
+        if 'alignment_event_labels' in output:
+            eligible=mask&(labels>=0)
+            labels=labels.clamp_min(0)
+            eligible=eligible&(logits.gather(-1,labels[...,None]).squeeze(-1)>-1e3)
+        else:
+            eligible=mask&~batch['detail_audio_padding_mask'].gather(1,labels)
         safe=logits.masked_fill(~eligible[...,None],0.)
         ce=F.cross_entropy(safe.reshape(-1,safe.size(-1)),labels.reshape(-1),reduction='none').reshape_as(labels)
         event=(ce*eligible*batch['alignment_event_weight']*quality[:,None]).sum()/eligible.sum().clamp_min(1)
@@ -54,4 +60,4 @@ def alignment_loss(output,batch):
     selection=((ce*weights*batch['alignment_audio_quality']).sum(1)/weights.sum(1).clamp_min(1e-9)
                *quality*batch['curve_example_weight']).mean()
     return event+.25*selection,{'_alignment_count':count,'_alignment_correct':correct,
-        'alignment_coverage':mask.sum().float()/(batch['alignment_event_indices']>=0).sum().clamp_min(1)}
+        'alignment_coverage':count.float()/(batch['alignment_event_indices']>=0).sum().clamp_min(1)}

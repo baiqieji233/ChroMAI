@@ -27,16 +27,18 @@ class IncrementalState(SustainStateIndex):
         # Queries never precede the last committed head. Expired actions can
         # be discarded without affecting retries of uncommitted events.
         self.markers=[m for m in self.markers if float(m.get('end_second',-1))+RELEASE>=second]
+        added=[]
         for marker in markers:
             if marker['type'] in _TYPE_OFFSETS:
                 marker['key']=f'stream:{len(self.points)}:{marker["key"]}'
-                self.markers.append(marker)
+                self.markers.append(marker);added.append(marker)
         self.points.append(point);self._release_index=None
         self._stream_query_summaries=OrderedDict()
+        return added
 
 
 class GroundedInference:
-    def __init__(self,model,codec,song,encoded_audio):
+    def __init__(self,model,codec,song,encoded_audio,audio_times=None):
         self.model,self.codec,self.song=model,codec,song
         self.device=next(model.parameters()).device
         detail,times,_=detail_queries(song,model.config.detail_audio_nodes)
@@ -44,10 +46,22 @@ class GroundedInference:
             torch.as_tensor(times,dtype=torch.float64,device=self.device)[None],
             torch.as_tensor((times<0)|(times>=song.audio.duration_sec),device=self.device)[None])
         self.global_context=encoded_audio[0].sum(1)/(~encoded_audio[1]).sum(1).clamp_min(1)[:,None]
+        # The planner curve and its clock, for the same phrase pooling used in training.
+        self.curve=encoded_audio[2] if audio_times is not None else None
+        self.curve_mask=encoded_audio[1]
+        self.audio_times=(torch.as_tensor(np.asarray(audio_times,dtype=np.float64),device=self.device)[None]
+                          if audio_times is not None else None)
+        from .grounded_model import prepare_phrase_bank
+        self.phrase_bank=(prepare_phrase_bank(self.curve.detach().sigmoid(),self.audio_times,self.curve_mask)
+                          if self.curve is not None else None)
+        self.lane_sets=[];self.point_seconds=[];self.trajectory_sets=[]
         self.state=IncrementalState(song.tempo,song.first)
         self.points=[];self.archive_values=[];self.archive_audio=[]
+        self.archive_event_indices=[]
         self.centers=OrderedDict();self.context_cache=OrderedDict()
         self.prefix=[];self.clock_position=0;self.clock=None;self.archive=None
+        self._timing_source=self._timing_tensor=None
+        self.replay_state=None
         self.probes=self.query_hits=self.archive_queries=0
         self.routes_sum=torch.zeros(5,device=self.device);self.route_count=0
 
@@ -69,6 +83,10 @@ class GroundedInference:
 
     def begin_context(self,points,history):
         self.context_events=len(points);self.clock=self._new_clock();self.clock_position=0
+        # Replay queries precede the most recent committed event. Incremental
+        # state has pruned older actions, so use the complete causal prefix.
+        self.replay_state=(SustainStateIndex(self.points,self.song.tempo,self.song.first)
+                           if len(points)<len(self.points) else None)
         self.context_cache.clear()
         full=self.codec.encode(points)[:-1] if points else [self.codec.bos_id]
         if history:
@@ -78,22 +96,34 @@ class GroundedInference:
             self.history_clock=geometry[None].to(self.device)
         else:self.history_clock=None
         count=max(0,len(points)-history.count(self.codec.at_id))
-        selected=list(range(count))
-        if count>self.config.archive_events:
-            selected=np.linspace(0,count-1,self.config.archive_events,dtype=int).tolist()
+        candidate_slots=[slot for slot,event_index in enumerate(self.archive_event_indices) if event_index < count]
+        if len(candidate_slots)>self.config.archive_events:
+            selected=[candidate_slots[index] for index in np.linspace(
+                0,len(candidate_slots)-1,self.config.archive_events,dtype=int).tolist()]
+        else:
+            selected=candidate_slots
+        selected_events=[self.archive_event_indices[index] for index in selected]
         self.archive={
             'embeddings':torch.stack([self.archive_values[i] for i in selected])[None] if selected else self.global_context.new_zeros(1,0,self.config.d_model),
             'audio':torch.stack([self.archive_audio[i] for i in selected])[None] if selected else self.bank['values'].new_zeros(1,0,120),
             'padding':torch.zeros(1,len(selected),dtype=torch.bool,device=self.device),
-            'beats':torch.tensor([[float(points[i].beat) for i in selected]],device=self.device,dtype=torch.float64),
-            'seconds':torch.tensor([[seconds_at_beat(points[i].beat,self.song.tempo,self.song.first) for i in selected]],device=self.device,dtype=torch.float64),
-            'event_index':torch.tensor([selected],device=self.device,dtype=torch.long)}
+            'beats':torch.tensor([[float(points[i].beat) for i in selected_events]],device=self.device,dtype=torch.float64),
+            'seconds':torch.tensor([[seconds_at_beat(points[i].beat,self.song.tempo,self.song.first) for i in selected_events]],device=self.device,dtype=torch.float64),
+            'event_index':torch.tensor([selected_events],device=self.device,dtype=torch.long)}
 
     def set_prefix(self,ids):self.prefix=ids
 
     @property
     def timing_features(self):
-        return torch.as_tensor(self.clock._features,device=self.device)[None,None]
+        return self._feature_tensor(self.clock._features)
+
+    def _feature_tensor(self,features):
+        # CausalClock reuses its numpy row until beat/delta/commit/pending
+        # changes. Most position digits and note characters share this row.
+        if features is not self._timing_source:
+            self._timing_source=features
+            self._timing_tensor=torch.as_tensor(features,device=self.device)[None,None]
+        return self._timing_tensor
 
     def _context(self,features):
         key=(self.clock.beat,self.clock.committed,self.clock.pending)
@@ -101,8 +131,16 @@ class GroundedInference:
             center=self.center(self.clock.beat)[None,None]
             seconds=torch.tensor([[self.clock.second]],device=self.device,dtype=torch.float64)
             context=self.grounding.contexts(features[:1],seconds,center,self.bank,self.archive)
-            actions=action_summaries(self.state,[self.clock.beat],[self.clock.pending],[self.clock.committed])[None].to(self.device)
+            if self.curve is not None:
+                context['local']=context['local']+self.grounding.phrase_from_bank(
+                    self.phrase_bank,seconds).to(context['local'].dtype)
+            state=self.replay_state if self.replay_state is not None and self.clock.committed<len(self.points) else self.state
+            actions=action_summaries(state,[self.clock.beat],[self.clock.pending],[self.clock.committed])[None].to(self.device)
             context['action']=self.grounding.action_value(actions)*actions[...,-1:].gt(0)
+            from .symmetry import kinematic_rows
+            kinematics=kinematic_rows(self.lane_sets,self.point_seconds,[self.clock.committed],[self.clock.second],
+                                      trajectories=self.trajectory_sets)
+            context['action']=context['action']+self.grounding.kinematics(kinematics[None].to(self.device)).to(context['action'].dtype)
             context['global']=self.global_context
             self.context_cache[key]=context;self.archive_queries+=1
             if len(self.context_cache)>2048:self.context_cache.popitem(last=False)
@@ -116,9 +154,12 @@ class GroundedInference:
             if position!=self.clock_position:
                 self.clock=self._new_clock()
                 for item in self.prefix[:position]:self.clock.consume(item)
-            features=self.clock.consume(int(token[0,0]))
+            # Normal generation already owns this exact token on the CPU.
+            # Reading it back from CUDA would synchronize every decoder step.
+            item=self.prefix[position] if position<len(self.prefix) else int(token[0,0])
+            features=self.clock.consume(item)
             self.clock_position=position+1
-            timing_features=torch.as_tensor(features,device=self.device)[None,None]
+            timing_features=self._feature_tensor(features)
         context=self._context(timing_features)
         output,caches=self.model.decode_step(token,position,memory,mask,caches,
             timing_features=timing_features,grounding_context=context)
@@ -127,7 +168,11 @@ class GroundedInference:
         return output,caches
 
     def commit(self,point):
-        self.points.append(point);self.state.append(point)
+        self.points.append(point);added=self.state.append(point)
+        from .symmetry import event_lanes,sustain_trajectories
+        self.lane_sets.append(event_lanes(point.note_text))
+        self.point_seconds.append(float(seconds_at_beat(point.beat,self.song.tempo,self.song.first)))
+        self.trajectory_sets.extend(sustain_trajectories(added or (),[self.point_seconds[-1]]))
         cell=[self.codec.ids['N:'+c] for c in point.note_text];n=len(cell)
         batch={'archive_padding_mask':torch.zeros(1,1,dtype=torch.bool,device=self.device),
             'archive_flat_tokens':torch.tensor(cell,device=self.device),
@@ -136,6 +181,13 @@ class GroundedInference:
             'archive_token_inverse_length':torch.full((n,),1/n,device=self.device)}
         self.archive_values.append(self.grounding.archive_embeddings(batch,self.token_embedding)[0,0])
         self.archive_audio.append(self.center(point.beat))
+        self.archive_event_indices.append(len(self.points)-1)
+        limit=max(1,int(self.config.archive_events))
+        if len(self.archive_values)>2*limit:
+            keep=np.linspace(0,len(self.archive_values)-1,limit,dtype=int).tolist()
+            self.archive_values=[self.archive_values[index] for index in keep]
+            self.archive_audio=[self.archive_audio[index] for index in keep]
+            self.archive_event_indices=[self.archive_event_indices[index] for index in keep]
         # The same clock after END now includes this newly committed action.
         self.context_cache.clear()
 

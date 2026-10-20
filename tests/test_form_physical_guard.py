@@ -207,7 +207,7 @@ def test_alternating_hands_keep_independent_movement_clocks():
     guard.commit('1', F(4, 5), 0.4)
     # One hand can stay on 1; the other has had 450 ms to move from 5 to 3.
     assert guard.lane_penalty([3], 0.45) == 0
-    assert any(0.0 in times and 0.4 in times for _hands, times, _cost in guard._hand_states)
+    assert any(0.0 in times and 0.4 in times for _hands, times, _tracks, _cost in guard._hand_states)
 
 
 def test_hand_alternatives_stay_bounded_and_touch_does_not_move_them():
@@ -238,3 +238,98 @@ def test_reference_parse_failure_is_reported_without_fabricating_state():
     guard.commit('1h[not-a-duration]', F(0), 0)
     assert guard.report()['reference_parse_failures'] == 1
     assert not guard.occupied_mask(0).any()
+
+
+def test_slide_hand_ends_on_end_button_one_stroke_flow():
+    # 1-5[4:1] at 120 BPM: wait 0.5 s, trace 0.5..1.0 s, ends on button 5.
+    guard = PhysicalFeasibilityGuard(1.0)
+    guard.register(F(0), 0.0, TEMPO, 0.0)
+    guard.commit('1-5[4:1]', F(0), 0.0)
+    # Only one hand has a history, so the other (unknown) hand is free; pin
+    # it far away on 3 with a just-struck tap to isolate the slide hand.
+    guard.commit('3', F(2, 1), 1.0)
+    # Right after the slide ends, a Tap at its end (5) or a neighbour (4/6) is
+    # a natural follow-through; going back to the head (1) is a long jump.
+    end_penalty = guard.lane_penalty([5], 1.06)
+    neighbour = guard.lane_penalty([6], 1.08)
+    head_penalty = guard.lane_penalty([1], 1.06)
+    assert end_penalty == 0.0
+    assert neighbour == 0.0
+    assert head_penalty > end_penalty
+
+
+def test_hold_pins_its_hand_until_release():
+    guard = PhysicalFeasibilityGuard(1.0)
+    guard.register(F(0), 0.0, TEMPO, 0.0)
+    guard.commit('1h[4:4]/5', F(0), 0.0)          # Hold 1 for 2.0 s, Tap 5
+    # While holding 1, a fast far Tap on 4 must come from the hand near 5,
+    # not from the holding hand; 4 is adjacent to 5, so this stays cheap ...
+    assert guard.lane_penalty([4], 0.1) == 0.0
+    # ... but two far Taps at once (8 next to 1 and 4 next to 5) would need
+    # the holding hand to leave its Hold.
+    held = guard.lane_penalty([8, 4], 0.1)
+    guard_free = PhysicalFeasibilityGuard(1.0)
+    guard_free.register(F(0), 0.0, TEMPO, 0.0)
+    guard_free.commit('1/5', F(0), 0.0)
+    free = guard_free.lane_penalty([8, 4], 0.1)
+    assert held >= free
+    # After release the hand is free on 1 again.
+    assert guard.lane_penalty([8, 4], 2.5) == 0.0
+
+
+def test_double_star_binds_one_hand_per_slide():
+    guard = PhysicalFeasibilityGuard(1.0)
+    guard.register(F(0), 0.0, TEMPO, 0.0)
+    guard.commit('1-4[8:1]/8-5[8:1]', F(0), 0.0)
+    assert guard.report()['tracked_sustain_heads'] == 2
+    tracks = guard._hand_states[0][2]
+    assert all(track is not None for track in tracks)
+
+
+def _with_abandonment(monkeypatch, value):
+    from maichart.form import physical_guard
+    monkeypatch.setattr(physical_guard, 'ABANDON_EXCESS', value)
+
+
+def _two_slides():
+    guard = PhysicalFeasibilityGuard(1.0)
+    guard.register(F(0), 0.0, TEMPO, 0.0)
+    # Both hands are bound: 1-5 and 8-4 each trace 0.5..1.0 s.
+    guard.commit('1-5[4:1]/8-4[4:1]', F(0), 0.0)
+    return guard
+
+
+def test_slide_abandonment_arithmetic(monkeypatch):
+    from maichart.form.physical_guard import ABANDON_EXCESS, _SustainTrack
+    track = _SustainTrack('slide', 1, 5, 0.5, 1.0)         # waits until 0.5 s, then traces to lane 5 at 1.0 s
+    assert track.abandon_cost((3,), 0.8) == pytest.approx(ABANDON_EXCESS * .4)    # 40% of the path left
+    assert track.abandon_cost((3,), 0.5) == pytest.approx(ABANDON_EXCESS)          # launch instant: all of it
+    assert track.abandon_cost((3,), 0.2) == pytest.approx(ABANDON_EXCESS * .5)    # still waiting: half
+    assert track.abandon_cost((5,), 0.8) == 0.0           # tap where the Slide is heading: a hand-off
+    assert track.abandon_cost((1,), 0.5) == 0.0           # launch tap on its own head
+    assert track.abandon_cost((1,), 0.5, rebinding=True) == pytest.approx(ABANDON_EXCESS)   # new Slide: really drops it
+    assert track.abandon_cost((3,), 1.0) == 0.0           # finished
+    assert _SustainTrack('hold', 1, 1, 0.0, 2.0).abandon_cost((3,), 0.5) == 0.0   # holds use the occupancy term
+
+
+def test_a_free_second_hand_takes_the_note_without_abandonment(monkeypatch):
+    def single():
+        guard = PhysicalFeasibilityGuard(1.0)
+        guard.register(F(0), 0.0, TEMPO, 0.0)
+        guard.commit('1-5[4:1]', F(0), 0.0)
+        return guard
+    _with_abandonment(monkeypatch, 0.0)
+    free = single().lane_penalty([3], 0.8)
+    _with_abandonment(monkeypatch, 0.6)
+    assert single().lane_penalty([3], 0.8) == free   # figures with alternating hands stay unpenalised
+
+
+def test_re_binding_a_hand_to_a_new_slide_drops_the_old_one_even_at_launch(monkeypatch):
+    _with_abandonment(monkeypatch, 0.6)
+    guard = _two_slides()
+    guard.register(F(1), 0.5, TEMPO, 0.0)
+    # A new Slide on lane 1 at the launch instant (0.5 s) of 1-5: it needs a hand, and both hands follow Slides.
+    guard.commit('1-3[4:1]', F(1), 0.5)
+    hands, times, tracks, cost = guard._hand_states[0]
+    ends = sorted(track.end_lane for track in tracks if track is not None)
+    assert len(ends) == 2 and 3 in ends and ends != [4, 5]    # one earlier Slide is dropped

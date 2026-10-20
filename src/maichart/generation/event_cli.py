@@ -263,6 +263,10 @@ class _NoteGrammar:
 
     atoms: frozenset[str]
     prefixes: frozenset[str]
+    # A same-head ``*`` chain is one Slide note, but an unbounded number of
+    # branches is not a useful decode target.  Keep the cap in the grammar so
+    # disallowed atoms never contribute prefixes that can lead to a dead end.
+    max_star_slides: int | None = None
     # Buttons each atom strikes, keyed by the atom text, precomputed once so the
     # decode loop never has to re-parse.  Positions are stored as strings because
     # touch notes use "A4"/"B7"/"C" while taps and slide heads use "1".."8".
@@ -280,10 +284,33 @@ class _NoteGrammar:
     longer_head_closure: dict[str, frozenset[str]] = field(default_factory=dict, compare=False)
 
     @classmethod
-    def from_atoms(cls, values: list[str] | tuple[str, ...] | None) -> "_NoteGrammar | None":
-        atoms = frozenset("".join(str(value).split()) for value in (values or ()) if str(value).strip())
-        if not atoms:
+    @staticmethod
+    def _star_slide_count(text: str) -> int:
+        """Count same-head Slide branches, ignoring ``*`` inside brackets."""
+        depth = 0
+        stars = 0
+        for char in text:
+            if char == "[":
+                depth += 1
+            elif char == "]":
+                depth = max(0, depth - 1)
+            elif char == "*" and depth == 0:
+                stars += 1
+        return stars + 1
+
+    @classmethod
+    def from_atoms(cls, values: list[str] | tuple[str, ...] | None,
+                   *, max_star_slides: int | None = None) -> "_NoteGrammar | None":
+        if (max_star_slides is not None and
+                (isinstance(max_star_slides, bool) or not isinstance(max_star_slides, int)
+                 or max_star_slides < 1)):
+            raise ValueError("max_star_slides must be a positive integer when provided")
+        all_atoms = frozenset("".join(str(value).split()) for value in (values or ()) if str(value).strip())
+        if not all_atoms:
             return None
+        atoms = (frozenset(atom for atom in all_atoms
+                           if cls._star_slide_count(atom) <= max_star_slides)
+                 if max_star_slides is not None else all_atoms)
         prefixes = frozenset(prefix for atom in atoms for length in range(1, len(atom) + 1)
                              for prefix in (atom[:length],))
         heads = {atom: _atom_heads(atom) for atom in atoms}
@@ -299,7 +326,8 @@ class _NoteGrammar:
                     longer_buckets.setdefault(prefix, set()).update(atom_heads)
         closure = {prefix: frozenset(values_) for prefix, values_ in buckets.items()}
         longer = {prefix: frozenset(values_) for prefix, values_ in longer_buckets.items()}
-        return cls(atoms=atoms, prefixes=prefixes, heads=heads, head_closure=closure,
+        return cls(atoms=atoms, prefixes=prefixes, max_star_slides=max_star_slides,
+                   heads=heads, head_closure=closure,
                    longer_head_closure=longer)
 
     def _parts_strike_distinct_buttons(self, parts: list[str]) -> bool:
@@ -511,6 +539,7 @@ def _apply_repetition_penalty(logits: torch.Tensor, generated_ids: list[int], pe
 def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_tokens, temperature,
             sample, seed, guidance_scale=1.0, top_p: float = 0.0, repetition_penalty: float = 1.0,
             repetition_window: int = 128, atom_catalog=None, allow_truncated=False,
+            max_star_slides: int | None = None,
             prefix_ids: list[int] | None = None, position_offset: Fraction = Fraction(0), condition_default: float = 0.5,
             plan_override=None, plan_controls=None, plan_audio_mask=None, density_feedback=None,
             position_end: Fraction | None = None, onset_context: dict | None = None,
@@ -566,7 +595,7 @@ def _decode(model, vocabulary, audio, global_audio, condition, device, *, max_to
     last_beat: Fraction | None = None
     note_text = ""
     eos_rerolls = 0
-    note_grammar = _NoteGrammar.from_atoms(atom_catalog)
+    note_grammar = _NoteGrammar.from_atoms(atom_catalog, max_star_slides=max_star_slides)
     finished = False
     # Index of the first token of the newest completed event.  A truncated
     # decode can only be salvaged up to this point, because a half-emitted
@@ -1134,7 +1163,7 @@ def _trim_sequence(sequence: EventSequence, start: Fraction, *, tempo_changes, f
 def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *, windows, tempo_changes,
                     first, song_duration, bpm, max_tokens, temperature, sample, seed, guidance_scale=1.0,
                     top_p: float = 0.0, repetition_penalty: float = 1.0, repetition_window: int = 128,
-                    atom_catalog=None, min_window_sec=0.25, context_beats=0, audio_margin_beats=0,
+                    atom_catalog=None, max_star_slides: int | None = None, min_window_sec=0.25, context_beats=0, audio_margin_beats=0,
                     context_tokens=0, intensity_follow: bool = False, intensity_span: float = 0.5,
                     intensity_mode: str = "loudness", intensity_curve=None,
                     intensity_curve_strength: float = 1.0,
@@ -1420,7 +1449,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     sample=sample, seed=generation_seed + attempt * 1000003, guidance_scale=guidance_scale,
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
-                    atom_catalog=atom_catalog, prefix_ids=prefix_ids, position_offset=offset, condition_default=condition_default,
+                    atom_catalog=atom_catalog, max_star_slides=max_star_slides,
+                    prefix_ids=prefix_ids, position_offset=offset, condition_default=condition_default,
                     position_end=offset + end - start,
                     **planner_kwargs,
                 )
@@ -1446,7 +1476,8 @@ def _decode_windows(model, vocabulary, audio, global_audio, condition, device, *
                     sample=sample, seed=generation_seed + attempt * 1000003, guidance_scale=guidance_scale,
                     top_p=top_p, repetition_penalty=repetition_penalty,
                     repetition_window=repetition_window,
-                    atom_catalog=atom_catalog, allow_truncated=True, prefix_ids=prefix_ids,
+                    atom_catalog=atom_catalog, max_star_slides=max_star_slides,
+                    allow_truncated=True, prefix_ids=prefix_ids,
                     position_offset=offset, condition_default=condition_default,
                     position_end=offset + end - start,
                     **planner_kwargs,
@@ -1987,6 +2018,8 @@ def build_parser() -> argparse.ArgumentParser:
                              "prefix (up to --context-tokens=320) plus the window itself (measured p50=155, "
                              "p100=444 tokens), which is 320+444=764, so 768 is the smallest safe value; "
                              "raise it if --context-tokens is raised.")
+    parser.add_argument("--max-star-slides", type=int, default=0,
+                        help="Maximum same-head '*' Slide branches in one note cell; 0 keeps legacy atom behavior.")
     parser.add_argument("--sample-rate", type=int, default=22050)
     parser.add_argument("--intensity-follow", dest="intensity_follow", action="store_true",
                         default=GENERATION_SAMPLING_DEFAULTS["intensity_follow"],
@@ -2123,6 +2156,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    if isinstance(args.max_star_slides, bool) or args.max_star_slides < 0:
+        raise ValueError("max-star-slides must be a nonnegative integer")
+    max_star_slides = args.max_star_slides or None
     if not math.isfinite(args.fine_note_strength) or not 0 <= args.fine_note_strength <= 1:
         raise ValueError("fine-note-strength must be finite in 0..1")
     if not math.isfinite(args.local_onset_bias_strength) or not 0 <= args.local_onset_bias_strength <= 1:
@@ -2309,6 +2345,7 @@ def main(argv=None) -> int:
                 top_p=args.top_p, repetition_penalty=args.repetition_penalty,
                 repetition_window=args.repetition_window,
                 atom_catalog=checkpoint.get("atom_catalog"),
+                max_star_slides=max_star_slides,
                 context_beats=args.context_beats, audio_margin_beats=args.audio_margin_beats,
                 context_tokens=args.context_tokens,
                 intensity_follow=args.intensity_follow,
@@ -2527,6 +2564,7 @@ def main(argv=None) -> int:
                 "top_p": float(args.top_p),
                 "repetition_penalty": float(args.repetition_penalty),
                 "repetition_window": int(args.repetition_window),
+                "max_star_slides": int(args.max_star_slides),
                 "guidance_scale": float(args.guidance_scale),
                 "model_family": str((checkpoint.get("data_contract", {}) or {}).get("target_schema") or "event_v1"),
                 "planner_profile": str(getattr(model, "planner_profile", "legacy_v1")),

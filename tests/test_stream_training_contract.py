@@ -81,6 +81,77 @@ def test_quality_scales_all_gradients_even_at_batch_size_one():
         torch.testing.assert_close(b,a*.25)
 
 
+@pytest.mark.parametrize('semantics,migrate',[
+    ('chart_stream_training_v11_attribute_plan',True),
+    ('chart_stream_training_v12_relative_plan_geometry',False),
+    ('chart_stream_training_v13_bounded_cycle_exit',False),
+    ('',True)])
+def test_plan_semantic_migration_preserves_relative_motion_weights(semantics,migrate):
+    model=small_model()
+    model.grounding=torch.nn.Module()
+    model.grounding.intent_projection=torch.nn.Linear(model.config.plan_dim,16,bias=False)
+    with torch.no_grad():
+        model.plan_head.weight.fill_(.2);model.plan_head.bias.fill_(.3)
+        model.grounding.intent_projection.weight.fill_(.4)
+    before={key:value.clone() for key,value in model.state_dict().items()}
+    assert train._migrate_plan_semantics(model,{'args':{'training_semantics':semantics}}) is migrate
+    expected={key:value.clone() for key,value in before.items()}
+    if migrate:
+        expected['plan_head.weight'][1:3]=0.
+        expected['plan_head.bias'][1:3]=0.
+        expected['grounding.intent_projection.weight'][:,1:3]=0.
+    for key,value in model.state_dict().items():
+        torch.testing.assert_close(value,expected[key],rtol=0,atol=0)
+
+
+def test_loss_rejects_plan_dimension_mismatch_instead_of_truncating():
+    output, batch = loss_inputs()
+    output['plan'] = torch.randn(1, 3, 10, requires_grad=True)
+    with pytest.raises(ValueError, match='stream plan shape mismatch'):
+        train._loss(output, batch)
+
+
+@pytest.mark.parametrize('length',[3,61])
+@pytest.mark.parametrize('marked_count',[0,1,2])
+def test_cycle_exit_weight_is_bounded_per_token_even_for_sparse_exits(length,marked_count):
+    codec=RationalCodec()
+    output,batch=loss_inputs()
+    output['logits']=torch.randn(1,length,len(codec),requires_grad=True)
+    output['plan']=torch.zeros(1,length,8,requires_grad=True)
+    batch.update(decoder_input=torch.full((1,length),codec.note_id),
+        target=torch.full((1,length),codec.ids['N:1']),
+        target_padding_mask=torch.zeros(1,length,dtype=torch.bool),
+        plan_mask=torch.zeros(1,length,dtype=torch.bool),
+        plan_mask_padding_mask=torch.zeros(1,length,dtype=torch.bool),
+        plan_labels=torch.zeros(1,length,8),
+        target_quality=torch.ones(1,length),quality_weight=torch.tensor([.4]),
+        cycle_exit_mask=torch.zeros(1,length,dtype=torch.bool))
+    batch['target_quality'][0,1]=.25
+    batch['target_quality'][0,-1]=0.
+    batch['cycle_exit_mask'][0,:marked_count]=True
+    # Even a marked excluded target must contribute no auxiliary gradient.
+    batch['cycle_exit_mask'][0,-1]=True
+    plain,_=train._loss(output,batch,event_weight=0.,event_balance_weight=0.)
+    boosted,metrics=train._loss(output,batch,event_weight=0.,event_balance_weight=0.,cycle_exit_weight=.25)
+    main_grad=torch.autograd.grad(plain,output['logits'],retain_graph=True)[0]
+    extra_grad=torch.autograd.grad(boosted-plain,output['logits'])[0]
+    expected=main_grad*batch['cycle_exit_mask'][...,None]*.25
+    torch.testing.assert_close(extra_grad,expected,rtol=1e-5,atol=1e-7)
+    assert train._mean_metrics(metrics,1)['cycle_exit_targets']==marked_count
+
+
+def test_curve_slope_loss_is_finite_and_optional():
+    output, batch = loss_inputs()
+    output['curve'] = torch.tensor([[[0., 0., 0., 0.], [2., 0., 0., 0.]]], requires_grad=True)
+    batch['curve_target'] = torch.tensor([[[0., 0., 0., 0.], [1., 0., 0., 0.]]])
+    batch['audio_times_sec'] = torch.tensor([[0., 1.]])
+    batch['curve_quality'] = torch.ones(1, 2)
+    _, metrics = train._loss(output, batch, curve_slope_weight=.5)
+    assert torch.isfinite(metrics['curve_slope_loss']) and metrics['curve_slope_loss'] > 0
+    _, disabled = train._loss(output, batch, curve_slope_weight=0.)
+    assert disabled['curve_slope_loss'] == 0
+
+
 def test_excluded_targets_have_zero_gradients_in_all_objectives():
     output,batch=loss_inputs()
     batch.update(target_quality=torch.tensor([[0.,1.,0.]]),curve_quality=torch.tensor([[0.,1.]]))
@@ -150,13 +221,16 @@ def test_stream_targets_keep_full_prefix_but_mask_ignored_event(monkeypatch,tmp_
     assert len(chunk.target_quality)==len(chunk.target)
 
 
-@pytest.mark.parametrize('text,slide,hold,chord',[
-    ('1p5[4:1]',1,0,0),('1q5[4:1]',1,0,0),('1w5[4:1]',1,0,0),
-    ('1s5[4:1]',1,0,0),('1h[4:1]',0,1,0),('Ch[4:1]',0,1,0),
-    ('1/2',0,0,1),('1h[4:1]/2p6[4:1]',1,1,1)])
-def test_planner_uses_parsed_heads(text,slide,hold,chord):
+@pytest.mark.parametrize('text,slide,hold,chord,touch',[
+    ('1p5[4:1]',1,0,0,0),('1q5[4:1]',1,0,0,0),('1w5[4:1]',1,0,0,0),
+    ('1s5[4:1]',1,0,0,0),('1h[4:1]',0,1,0,0),('Ch[4:1]',0,1,0,1),
+    ('1/2',0,0,1,0),('1h[4:1]/2p6[4:1]',1,1,1,0),
+    ('A1',0,0,0,1),('A1/D2',0,0,1,1),('1/A1',0,0,1,1)])
+def test_planner_uses_parsed_heads(text,slide,hold,chord,touch):
     label=data._plan_for_event(EventPoint(F(1),text),F(0),text)
-    assert (label[4],label[5],label[3],label[6])==(slide,hold,chord,chord)
+    # Layout: interval, relative motion sin/cos, chord, slide, hold-like,
+    # touch-like, density, Break, EX.
+    assert (label[4],label[5],label[3],label[6])==(slide,hold,chord,touch)
 
 
 def test_query_cache_reuses_song_keys_and_obeys_budget(monkeypatch):

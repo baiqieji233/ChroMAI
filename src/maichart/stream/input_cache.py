@@ -111,23 +111,30 @@ class MappedInputCache:
                 'memory_reserve_bytes':reserve,'validation_records':self.validation_capacity}
         report(stage='residency',completed=0,total=len(unique),bytes=0,budget_bytes=self.resident_budget)
         for i,key in enumerate(unique,1):
-            try:tensors,extra=self._read(key)
-            except FileNotFoundError:missing+=1;continue
-            except (OSError,ValueError,KeyError,TypeError,RuntimeError,EOFError,pickle.UnpicklingError):
-                self._count('invalid');missing+=1;continue
-            extra=dict(extra)
-            if extra.get('beats'):extra['beats']=CompactBeatText(extra['beats'])
-            size=tensor_bytes(tensors)+1024+128*len(tensors)
-            if isinstance(extra.get('beats'),CompactBeatText):size+=len(extra['beats'].data)
-            if self.resident_bytes+size>self.resident_budget:
-                capacity_skips+=1;continue
-            available=memory()
-            if available and available[1]<size+reserve:
-                memory_skips+=1;continue
-            # clone() gives ordinary heap storage; retaining an mmap alone
-            # cannot prevent the OS from fetching its pages from disk again.
-            owned={name:value.clone(memory_format=torch.contiguous_format) for name,value in tensors.items()}
-            with self._guard:self._resident[key]=(owned,extra);self.resident_bytes+=size
+            if self.resident_bytes>=self.resident_budget:
+                capacity_skips+=1
+            elif (available:=memory()) and available[1]<=reserve:
+                memory_skips+=1
+            else:
+                try:tensors,extra=self._read(key)
+                except FileNotFoundError:missing+=1
+                except (OSError,ValueError,KeyError,TypeError,RuntimeError,EOFError,pickle.UnpicklingError):
+                    self._count('invalid');missing+=1
+                else:
+                    raw_beats=extra.get('beats')
+                    compact_beats=CompactBeatText(raw_beats) if raw_beats else None
+                    size=tensor_bytes(tensors)+1024+128*len(tensors)+(len(compact_beats.data) if compact_beats is not None else 0)
+                    if self.resident_bytes+size>self.resident_budget:
+                        capacity_skips+=1
+                    elif available and available[1]<size+reserve:
+                        memory_skips+=1
+                    else:
+                        extra=dict(extra)
+                        if compact_beats is not None:extra['beats']=compact_beats
+                        # clone() gives ordinary heap storage; retaining an mmap alone
+                        # cannot prevent the OS from fetching its pages from disk again.
+                        owned={name:value.clone(memory_format=torch.contiguous_format) for name,value in tensors.items()}
+                        with self._guard:self._resident[key]=(owned,extra);self.resident_bytes+=size
             if i%100==0 or i==len(unique):
                 report(stage='residency',completed=i,total=len(unique),loaded=len(self._resident),
                     bytes=self.resident_bytes,budget_bytes=self.resident_budget)
@@ -143,6 +150,21 @@ class MappedInputCache:
 
     def _count(self,key):
         with self._guard:self.counts[key]+=1
+
+    def validate_existing(self,identity):
+        """Preflight persisted inputs with the same checks as a real read.
+
+        Do not build epoch-dependent dataset samples just to discover that
+        their immutable inputs were already prepared. Failed validation is
+        left to get()'s normal rebuild path, preserving its error accounting.
+        """
+        key=self.key(identity)
+        with self._locks[int(key[:8],16)%len(self._locks)]:
+            with self._guard:
+                if key in self._resident:return True
+            try:self._read(key)
+            except (OSError,ValueError,KeyError,TypeError,RuntimeError,EOFError,pickle.UnpicklingError):return False
+        return True
 
     def get(self,identity,builder):
         key=self.key(identity)

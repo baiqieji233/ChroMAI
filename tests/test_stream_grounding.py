@@ -11,7 +11,7 @@ import torch
 
 from maichart.form.codec import RationalCodec
 from maichart.event_timing import EventPoint,EventTempo,seconds_at_beat
-from maichart.stream.grounding import CausalClock,clock_inputs,features_at_beats,masked_note_inputs,time_cell_weights
+from maichart.stream.grounding import CausalClock,clock_inputs,features_at_beats,masked_note_inputs,time_cell_weights,action_summaries
 from maichart.stream.model import StreamConfig,ChartStreamTransformer
 from maichart.stream.data import StreamDataset,collate_stream
 from maichart.stream.checkpoint import upgrade_grounding,save,load
@@ -56,7 +56,8 @@ def dataset(source):
 
 def activate_residuals(model):
     for layer in (model.grounding.clock_projection,model.grounding.local_input,
-                  model.grounding.fusion,model.grounding.intent_projection):
+                  model.grounding.fusion,model.grounding.intent_projection,
+                  model.grounding.kinematic_projection):
         torch.nn.init.normal_(layer.weight,std=.03)
     return model.eval()
 
@@ -78,7 +79,10 @@ def test_masked_prefix_preserves_numeric_positions_and_masks_only_its_own_target
     targets=ids[1:];decoder=ids[:-1]
     corrupted,quality=masked_note_inputs(decoder,codec,random.Random(1),1.,targets=targets,quality=[1.]*len(targets))
     assert [t for t in corrupted if codec.tokens[t].startswith('P:')]==[t for t in decoder if codec.tokens[t].startswith('P:')]
-    assert codec.mask_id in corrupted and quality[-1]==1. and sum(quality)==1.
+    assert codec.mask_id in corrupted and quality[-1]==1.
+    assert [i for i,w in enumerate(quality) if w==0.]==[i for i,t in enumerate(corrupted) if t==codec.mask_id]
+    # Position and <at> targets of fully masked events are still supervised.
+    assert all(quality[i]==1. for i,t in enumerate(targets) if t==codec.at_id or codec.tokens[t].startswith('P:'))
     assert targets[-1]==codec.eos_id
 
 
@@ -138,6 +142,32 @@ def test_full_forward_equals_native_cached_queries_archive_and_intent(dataset):
     torch.testing.assert_close(actual,expected,rtol=1e-4,atol=1e-4)
 
 
+def test_grounded_proposal_microbatches_preserve_scores_and_causal_clock(dataset):
+    from maichart.form.rational_position_search import _score_proposals
+    torch.manual_seed(23)
+    model=activate_residuals(ChartStreamTransformer(config()))
+    codec=dataset.codec
+    item=collate_stream([dataset[0]])
+    song=dataset.base.songs[0][0]
+    with torch.inference_mode():
+        encoded=model.encode_audio(item['audio'],item['condition'],audio_padding_mask=item['audio_padding_mask'])
+        session=GroundedInference(model,codec,song,encoded)
+        session.begin_context([],[])
+        memory,mask=model.encode(item['audio'],item['condition'],encoded_audio=encoded)
+        session.set_prefix([codec.bos_id,codec.at_id])
+        cache=None
+        for position,token in enumerate(session.prefix):
+            root,cache=session.decode_step(torch.tensor([[token]]),position,memory,mask,cache)
+        texts=['1/2','1','37/997']
+        before=(session.clock.beat,session.clock.committed,session.clock_position)
+        parallel,_=_score_proposals(session,codec,texts,root['logits'][0,-1],cache,memory,mask,
+            consumed=2,timing_features=session.timing_features)
+        serial,_=_score_proposals(session,codec,texts,root['logits'][0,-1],cache,memory,mask,
+            consumed=2,timing_features=session.timing_features,max_batch_size=1)
+        assert serial==pytest.approx(parallel,abs=1e-5)
+        assert (session.clock.beat,session.clock.committed,session.clock_position)==before
+
+
 def test_migration_starts_at_legacy_logits_and_preserves_old_checkpoint(source,dataset):
     torch.manual_seed(4);old=ChartStreamTransformer(replace(config(),grounding_profile='none')).eval()
     new=upgrade_grounding(old,grounding_profile='causal_audio_v1').eval()
@@ -147,6 +177,26 @@ def test_migration_starts_at_legacy_logits_and_preserves_old_checkpoint(source,d
     save(path,old,None,epoch=1,args={},manifest=manifest)
     restored,_=load(path)
     assert restored.config.grounding_profile=='none'
+
+
+def test_older_width_checkpoint_loads_with_zero_padded_kinematics(source,dataset):
+    torch.manual_seed(5);model=ChartStreamTransformer(config()).eval()
+    with torch.no_grad():
+        model.grounding.kinematic_projection.weight[:,:44].normal_(std=.05)
+    root,manifest=source;path=root/'v10_width.pt'
+    save(path,model,None,epoch=1,args={},manifest=manifest)
+    payload=torch.load(path,map_location='cpu',weights_only=False)
+    state=payload['model_state_dict']
+    state['grounding.kinematic_projection.weight']=state['grounding.kinematic_projection.weight'][:,:44].clone()
+    state['grounding.blueprint_head.weight']=torch.zeros(23,16)
+    torch.save(payload,path)
+    restored,_=load(path)
+    assert restored.grounding.kinematic_projection.weight.shape[1]>44
+    assert not restored.grounding.kinematic_projection.weight[:,44:].any()
+    batch=collate_stream([dataset[-1]])
+    batch['query_kinematics'][...,44:]=0.
+    with torch.inference_mode():
+        torch.testing.assert_close(model(batch)['logits'],restored.eval()(batch)['logits'],rtol=1e-5,atol=1e-5)
 
 
 def test_grounded_losses_have_finite_independent_gradients(dataset):
@@ -160,6 +210,32 @@ def test_grounded_losses_have_finite_independent_gradients(dataset):
         assert grad is not None and torch.isfinite(grad).all()
     values=_mean_metrics(metrics,1)
     assert 'whole_configuration_accuracy' in values and 'alignment_accuracy' in values
+
+
+def test_in_flight_kinematics_and_effective_lanes_preserve_chained_and_masked_slides():
+    from maichart.stream.symmetry import _effective_lanes,kinematic_rows,SLIDE
+    chained=((SLIDE,1,5,.1,.5),(SLIDE,5,2,.1,.5))
+    assert _effective_lanes((1,5),chained)==(2,5)
+    # Event 0: Slide 1-5 starting at 0.0, tracing at 0.5, ending at 1.5.
+    # Event 1: Tap 5 at 1.5 (one-stroke hand-off).
+    lanes=[(1,),(5,)]
+    trajs=[((SLIDE,1,5,.5,1.5),),()]
+    # Query at t=0.25 (star wait) and t=1.0 (sliding) after committing event 0;
+    # and at t=1.6 after committing event 1.
+    rows=kinematic_rows(lanes,[0.,1.5],[1,1,2],[.25,1.0,1.6],trajectories=trajs)
+    assert rows.shape==(3,65)
+    # While in flight, destination lane 5 (index 44+4=48) is active and grows as arrival nears.
+    assert .5 < float(rows[0,48]) < float(rows[1,48]) < 1.
+    # Origin lane 1 (index 52+0=52) is 1.0 during star wait and 0.5 while sliding.
+    assert float(rows[0,52])==pytest.approx(1.) and float(rows[1,52])==pytest.approx(.5)
+    assert float(rows[0,60])==pytest.approx(.25) and float(rows[0,61])>float(rows[1,61])>0.
+    # After Slide finishes at 1.5 and event 1 strikes lane 5, effective step (1-5 -> 5) has 0 angle (sin=0, cos=1).
+    assert float(rows[2,48])==0. and float(rows[2,36+4])>0.
+    assert float(rows[2,62])==pytest.approx(0.,abs=1e-6) and float(rows[2,63])==pytest.approx(1.,abs=1e-6)
+    # Masking event 0 via note dropout hides both its head lane and in-flight Slide trajectory.
+    masked_rows=kinematic_rows([(),(5,)],[0.,1.5],[1,2],[1.0,1.6],trajectories=[(),()])
+    assert float(masked_rows[0,:16].abs().sum())==0. and float(masked_rows[0,36:].abs().sum())==0.
+    assert float(masked_rows[1,64])==0.
 
 
 def test_incremental_action_state_matches_causal_full_reference():
@@ -183,6 +259,38 @@ def test_initial_hold_at_beat_zero_cannot_leak_before_first_note_is_committed():
     assert unseen.abs().sum()==0
     seen=action_summaries(state,[F(0)],[False],[1])
     assert seen[0,-1]>0
+
+
+def test_overlap_dataset_preserves_single_supervision_and_cached_clock_contract(source):
+    root,manifest=source
+    cfg=replace(config(),continuation_profile='overlap_v1',context_replay_tokens=12)
+    ds=StreamDataset(manifest,cache_dir=root/'overlap_cache',max_tokens=32,max_history_tokens=12,
+        preparation_workers=1,audio_cache_gb=.1,grounding_config=cfg)
+    original=ds.codec.encode(ds.base.songs[0][1])[1:]
+    supervised=[t for chunk in ds.chunks for t,w in zip(chunk.target,chunk.target_quality) if w>0]
+    assert supervised==original
+    assert any(chunk.target_quality[0]==0 for chunk in ds.chunks[1:])
+    test_full_forward_equals_native_cached_queries_archive_and_intent(ds)
+
+
+def test_replayed_action_queries_recover_pruned_holds_without_future_leakage(dataset):
+    model=activate_residuals(ChartStreamTransformer(config()))
+    torch.nn.init.zeros_(model.grounding.kinematic_projection.weight)   # isolate the action-state path
+    song=dataset.base.songs[0][0];codec=dataset.codec
+    points=[EventPoint(F(0),'1h[4:2]'),EventPoint(F(1),'3'),EventPoint(F(4),'5h[4:2]')]
+    batch=collate_stream([dataset[0]])
+    with torch.inference_mode():
+        encoded=model.encode_audio(batch['audio'],batch['condition'],audio_padding_mask=batch['audio_padding_mask'])
+        session=GroundedInference(model,codec,song,encoded)
+        for point in points:session.commit(point)
+        session.begin_context([],[])
+        assert session.replay_state is not None
+        assert session._context(torch.zeros(1,1,20))['action'].abs().sum()==0
+        for token in codec.cell(points[0]):session.clock.consume(token)
+        features=torch.as_tensor(session.clock._features)[None,None]
+        actual=session._context(features)['action']
+        expected=action_summaries(SustainStateIndex(points[:1],song.tempo,song.first),[F(0)],[False],[1])[None]
+        torch.testing.assert_close(actual,model.grounding.action_value(expected)*expected[...,-1:].gt(0))
 
 
 def test_time_quadrature_conserves_duration_and_excludes_outside_nodes():

@@ -68,10 +68,74 @@ MAX_HAND_STATES = 16
 # skipped; a hand cannot hold that many anyway and the split is arbitrary.
 MAX_EXACT_CHORD = 6
 EPS = 1e-9
+# Speed-excess equivalent of dropping a Slide with all of its path still to go
+# (TRAVEL_PENALTY * this * strength logits). Deliberately modest: a figure that
+# repeats Slides from one button with alternating hands is legitimate.
+ABANDON_EXCESS = 0.6
+# Slide launch taps are judged within this many seconds of the launch (1/90 s).
+LAUNCH_WINDOW = 1.0 / 90.0
 
 _PAD_CENTERS = np.asarray([pad_center(lane) for lane in range(1, LANES + 1)], dtype=np.float64)
 # Distance between every pair of hand lanes, in cabinet units.
 LANE_DISTANCE = np.linalg.norm(_PAD_CENTERS[:, None, :] - _PAD_CENTERS[None, :, :], axis=-1)
+# MiaCode reference paths use screen pixels with +y downwards; cabinet units
+# put the A ring at radius 1.0 with +y upwards.
+_CABINET_SCALE = 1.0 / math.hypot(*CENTERS['A1'])
+
+
+def _to_cabinet(point):
+    return (float(point[0]) * _CABINET_SCALE, -float(point[1]) * _CABINET_SCALE)
+
+
+class _SustainTrack:
+    """The hand that struck a Hold or Slide head stays bound to that action.
+
+    * Hold: the hand is pinned on its button until release.
+    * Slide/Wifi: during the star wait the hand rests on the head as before;
+      while tracing it follows the reference path; at the end it is on the
+      end button, free from the end time onward. This is what makes a Tap
+      next to a Slide's end ("一笔画") cheap and a Tap back at its head costly.
+    Identity hashing is intentional: tracks are per committed action.
+    """
+    __slots__ = ('kind', 'lane', 'end_lane', 'trace', 'end', 'actions')
+
+    def __init__(self, kind, lane, end_lane, trace, end, actions=()):
+        self.kind, self.lane, self.end_lane = kind, lane, end_lane
+        self.trace, self.end, self.actions = float(trace), float(end), tuple(actions)
+
+    def resolve(self, when, hand, previous):
+        if when >= self.end - EPS:
+            return self.end_lane, self.end
+        if self.kind == 'hold':
+            return self.lane, when
+        if when < self.trace - EPS:
+            return hand, previous
+        samples = [action.sample(when) for action in self.actions]
+        samples = [_to_cabinet(sample[0]) for sample in samples if sample is not None]
+        if not samples:
+            return self.end_lane, when
+        return (sum(p[0] for p in samples) / len(samples), sum(p[1] for p in samples) / len(samples)), when
+
+    def abandon_cost(self, group, when, rebinding=False):
+        """Speed-excess equivalent of pulling this hand off an unfinished Slide.
+
+        A plain tap is free when it is where the Slide is going anyway (its end
+        lane: a one-stroke hand-off) or is the launch tap on its own head. A hand
+        that is re-bound to a new Slide or Hold head (``rebinding``) really
+        drops this Slide, so those exemptions do not apply. Holds are free
+        (their button is pinned by the occupancy term). Otherwise the cost is
+        proportional to the path still to travel, halved while the star waits.
+        A second hand taking the note costs nothing, so legitimate two-hand
+        figures, including repeated same-head Slides, are not penalised.
+        """
+        if self.kind == 'hold' or when >= self.end - EPS:
+            return 0.0
+        if not rebinding and (self.end_lane in group
+                              or (self.lane in group and abs(when - self.trace) <= LAUNCH_WINDOW + EPS)):
+            return 0.0
+        if when < self.trace - EPS:
+            return ABANDON_EXCESS * .5
+        return ABANDON_EXCESS * min(1.0, max(0.0, (self.end - when) / max(self.end - self.trace, EPS)))
 
 
 def validate_physical_strength(value, name="physical_feasibility_strength"):
@@ -111,6 +175,8 @@ def _group_travel(hand, group):
     """Largest distance this hand must cover to reach every lane in ``group``."""
     if not group or hand is None:
         return 0.0
+    if isinstance(hand, tuple):
+        return max(math.dist(hand, _PAD_CENTERS[lane - 1]) for lane in group)
     return max(float(LANE_DISTANCE[hand - 1, lane - 1]) for lane in group)
 
 
@@ -220,7 +286,9 @@ class PhysicalFeasibilityGuard:
         self._hand_seconds = (None, None)
         # Preserve alternative feasible assignments instead of committing a
         # greedy left/right choice that can falsely constrain the next event.
-        self._hand_states = [(self._hands, self._hand_seconds, 0.0)]
+        # (positions, last free seconds, bound sustain tracks, cost)
+        self._hand_states = [(self._hands, self._hand_seconds, (None, None), 0.0)]
+        self.tracked_sustains = 0
         self._last_second = None
         self._lane_set_cache = {}
         self._travel_cache = {}
@@ -320,43 +388,104 @@ class PhysicalFeasibilityGuard:
             result.append(lanes)
         return result
 
+    @staticmethod
+    def _resolve(hands, times, tracks, second):
+        """Effective (position, free-since) per hand at ``second``."""
+        resolved = [(hand, previous) if track is None else track.resolve(second, hand, previous)
+                    for hand, previous, track in zip(hands, times, tracks)]
+        return tuple(item[0] for item in resolved), tuple(item[1] for item in resolved)
+
+    @staticmethod
+    def _settle(hands, times, tracks, second):
+        """Materialise sustains that already ended: the hand is free at the end button."""
+        if all(track is None or track.end > second + EPS for track in tracks):
+            return hands, times, tracks
+        values = [((track.end_lane, track.end, None) if track is not None and track.end <= second + EPS
+                   else (hand, previous, track)) for hand, previous, track in zip(hands, times, tracks)]
+        return tuple(v[0] for v in values), tuple(v[1] for v in values), tuple(v[2] for v in values)
+
+    @staticmethod
+    def _abandonment(tracks, groups, second):
+        """Cost of pulling hands off unfinished Slides to strike ``groups``."""
+        return sum(track.abandon_cost(group, second) for track, group in zip(tracks, groups)
+                   if track is not None and group)
+
     def _travel_excess(self, lanes, second):
         """Best plausible two-hand speed excess over a bounded assignment beam."""
         if not lanes:
             return 0.0
         splits = _lane_splits(tuple(sorted(lanes)))
-        return min((cost + _hand_excess(hands, times, groups, second, self.max_hand_speed)
-                    for hands, times, cost in self._hand_states for groups in splits),
-                   default=math.inf)
+        best = math.inf
+        for hands, times, tracks, cost in self._hand_states:
+            positions, free = self._resolve(hands, times, tracks, second)
+            for groups in splits:
+                best = min(best, cost + _hand_excess(positions, free, groups, second, self.max_hand_speed)
+                           + self._abandonment(tracks, groups, second))
+        return best
 
-    def _commit_hands(self, lanes, second):
+    @staticmethod
+    def _group_track(group, heads):
+        """A hand striking a sustained head becomes bound to the longest such action."""
+        bound = [heads[lane] for lane in group if lane in heads]
+        return max(bound, key=lambda track: track.end) if bound else None
+
+    @staticmethod
+    def _overbound(group, heads):
+        """Extra cost when one hand would have to follow two moving sustains.
+
+        Two adjacent Holds under one palm are fine; two Slides, or a Slide
+        plus a Hold, cannot be followed by the same hand.
+        """
+        bound = [heads[lane] for lane in group if lane in heads]
+        if len(bound) < 2 or all(track.kind == 'hold' for track in bound):
+            return 0.0
+        return float(len(bound) - 1)
+
+    def _commit_hands(self, lanes, second, heads=None):
         if not lanes:
             return
+        heads = heads or {}
         next_states = {}
-        for hands, times, previous_cost in self._hand_states:
+        for hands, times, tracks, previous_cost in self._hand_states:
+            hands, times, tracks = self._settle(hands, times, tracks, second)
+            positions, free = self._resolve(hands, times, tracks, second)
             for groups in _lane_splits(tuple(sorted(lanes))):
-                excess = _hand_excess(hands, times, groups, second, self.max_hand_speed)
+                bound = tuple(self._group_track(group, heads) if group else None for group in groups)
+                excess = _hand_excess(positions, free, groups, second, self.max_hand_speed)
+                excess += sum(self._overbound(group, heads) for group in groups)
+                excess += sum(track.abandon_cost(group, second, rebinding=new is not None)
+                              for track, group, new in zip(tracks, groups, bound)
+                              if track is not None and group)
                 new_hands = tuple(_medoid(group) if group else hand
                                   for group, hand in zip(groups, hands))
                 new_times = tuple(second if group else previous
                                   for group, previous in zip(groups, times))
+                # A hand re-bound to a new sustained head releases its earlier
+                # Slide (charged above). A plain tap on that Slide's end lane or
+                # launch keeps the hand on it; any other tap leaves it free.
+                new_tracks = tuple(track if not group else new if new is not None
+                                   else track if (track is not None and track.kind != 'hold'
+                                                  and second < track.end - EPS
+                                                  and track.abandon_cost(group, second) == 0.0) else None
+                                   for group, track, new in zip(groups, tracks, bound))
                 # Hands have no intrinsic identity here. Canonicalize mirrored
                 # assignments to use the bounded beam for distinct histories.
-                key = tuple(sorted(zip(new_hands, new_times),
+                key = tuple(sorted(zip(new_hands, new_times, new_tracks),
                                    key=lambda item: (item[0] or 0,
-                                                     -math.inf if item[1] is None else item[1])))
+                                                     -math.inf if item[1] is None else item[1],
+                                                     0 if item[2] is None else id(item[2]))))
                 candidate = (tuple(item[0] for item in key), tuple(item[1] for item in key),
-                             previous_cost + excess)
-                if key not in next_states or candidate[2] < next_states[key][2]:
+                             tuple(item[2] for item in key), previous_cost + excess)
+                if key not in next_states or candidate[3] < next_states[key][3]:
                     next_states[key] = candidate
         if not next_states:
             # A questionable chord must not overwrite the last plausible hand
             # histories and manufacture further impossible travel constraints.
             return
-        ordered = sorted(next_states.values(), key=lambda state: state[2])[:MAX_HAND_STATES]
-        minimum = ordered[0][2]
-        self._hand_states = [(hands, times, cost - minimum) for hands, times, cost in ordered]
-        self._hands, self._hand_seconds, _ = self._hand_states[0]
+        ordered = sorted(next_states.values(), key=lambda state: state[3])[:MAX_HAND_STATES]
+        minimum = ordered[0][3]
+        self._hand_states = [(hands, times, tracks, cost - minimum) for hands, times, tracks, cost in ordered]
+        self._hands, self._hand_seconds, _, _ = self._hand_states[0]
 
     def matrix_penalty(self, matrix, second):
         values = self._raw_penalty(matrix, second)
@@ -408,19 +537,36 @@ class PhysicalFeasibilityGuard:
         occupied = self.occupied_mask(second)
         slide_proximity = self.slide_proximity_mask(second)
         lanes = set()
+        # build_actions uses the same cached reference paths as MiaCode, with
+        # the parser's exact wait, segment timing and seconds/BPM overrides.
+        actions = build_actions(markers, [])
+        heads = {}
         for marker in markers:
             if marker.get('is_mine') or marker.get('head_mine'):
                 continue
             kind = marker['type']
             head = _lane(marker.get('lane'))
-            if head is not None and (kind in {'tap', 'hold'} or has_head(marker)):
+            struck = head is not None and (kind in {'tap', 'hold'} or has_head(marker))
+            if struck:
                 lanes.add(head)
             end = float(marker.get('end_second', second))
             if kind == 'hold' and head is not None and end > second + EPS:
                 self._sustains.append((end, lane_mask([head])))
-        # build_actions uses the same cached reference paths as MiaCode, with
-        # the parser's exact wait, segment timing and seconds/BPM overrides.
-        self._slide_actions.extend(build_actions(markers, []))
+            # Only a struck head binds a hand; head-less slides stay unbound.
+            if struck and end > second + EPS and kind in {'hold', 'slide', 'wifi'}:
+                if kind == 'hold':
+                    track = _SustainTrack('hold', head, head, second, end)
+                else:
+                    end_lane = _lane(marker.get('end_lane'))
+                    trace = float(marker.get('slide_trace_second', second))
+                    if end_lane is None or not math.isfinite(trace):
+                        continue
+                    track = _SustainTrack(kind, head, end_lane, trace, end,
+                                          [action for action in actions if action.marker is marker])
+                if head not in heads or track.end > heads[head].end:
+                    heads[head] = track
+        self.tracked_sustains += len(heads)
+        self._slide_actions.extend(actions)
         mask = lane_mask(lanes)
         collisions = mask & occupied
         if collisions.any():
@@ -440,14 +586,14 @@ class PhysicalFeasibilityGuard:
             # describes exactly what the guard was steering against.
             if self._travel_excess(lanes, second) > 0:
                 self.travel_blocks += 1
-        self._commit_hands(lanes, second)
+        self._commit_hands(lanes, second, heads)
         self._travel_cache.clear()
         self._last_second = second
         self.events += 1
 
     def report(self):
         return {
-            "schema": "song_form_physical_feasibility_v2",
+            "schema": "song_form_physical_feasibility_v3",
             "enabled": self.strength > 0,
             "strength": self.strength,
             "applied": self.strength > 0,
@@ -468,6 +614,8 @@ class PhysicalFeasibilityGuard:
             "hand_positions": [int(hand) if hand is not None else None for hand in self._hands],
             "hand_last_seconds": list(self._hand_seconds),
             "hand_hypotheses": len(self._hand_states),
+            "tracked_sustain_heads": self.tracked_sustains,
+            "sustain_hand_model": "hold_pinned_slide_follows_path_ends_on_end_lane",
             "duration_semantics": "miacode_head_bpm_v1",
             "slide_proximity_penalty": SLIDE_PROXIMITY_PENALTY * self.strength,
             "diagnostics": list(self.diagnostics),
@@ -478,8 +626,11 @@ class PhysicalFeasibilityGuard:
                 "Soft logit bias only; it never removes a candidate token.",
                 "Slide proximity samples the reference moving footprint after its wait; "
                 "it is a weak bias, not a claim of an impossible collision.",
-                "Hand travel keeps bounded alternative assignments and independent clocks; "
-                "it does not simulate sustained hand availability or the player's body.",
+                "Hand travel keeps bounded alternative assignments and independent clocks. "
+                "A hand that struck a Hold stays on it, a Slide hand follows the reference "
+                "path and ends on the end button; there is no left/right body model.",
+                "Touch notes are deliberately excluded: authored Touch usage is too "
+                "free-form to be a reliable hand-position signal.",
                 "Cabinet units follow the pinned MiaCode reference geometry, not a player model.",
             ],
         }

@@ -310,6 +310,7 @@
 <label class="field">模型内部 Dropout<input id="streamDropout" type="number" min="0" max="0.99" step="0.01" value="0.1"><small>训练时随机丢弃；生成时关闭。继续训练沿用权重中的模型设置。</small></label>
 <label class="field">训练随机种子<input id="streamSeed" type="number" min="0" max="4294967295" step="1" value="0"><small>控制参数初始化和样本打乱；未完成轮次的 resume 会重跑该轮。</small></label>
 <label class="field">连续写作计划辅助权重<input id="streamPlanLossWeight" type="number" min="0" max="2" step="0.01" value="0.15"><small>监督节奏间隔、配置类型和持续动作倾向；不把 Planner 当作硬起音骨架。</small></label>
+<label class="field">Planner 曲线变化监督权重<input id="streamCurveSlopeLossWeight" type="number" min="0" max="1" step="0.01" value="0.05"><small>让相邻时间点的曲线变化跟随真实谱面负荷，保留真实峰值；0 关闭。权重过高会压平快速段落变化。</small></label>
 <label class="field">整曲续写与结束学习权重<input id="streamEventDecisionLossWeight" type="number" min="0" max="10" step="0.05" value="0.25"><small>额外监督真实事件边界的 AT / EOS，减少结束决策被长字符序列稀释。0 关闭；真实 EOS 仍只来自谱面末尾，不把计算块当成音乐结束。旧模型需 finetune 才能学习。</small></label>
 </div>
 <details class="settings-section" open><summary><span>音频与历史关联训练</span><small>保留精确有理拍；增加当前音频证据与可放弃的远期记忆</small></summary><div class="settings-content"><div class="form-grid">
@@ -322,12 +323,20 @@
 <label class="field">远期相似度下限<input id="streamArchiveMinSimilarity" type="number" min="-1" max="1" step="0.05" value="0.5"><small>低相关的旧配置不会注入；数值越高，引用越谨慎。</small></label>
 <label class="field">历史配置遮罩概率<input id="streamHistoryNoteDropout" type="number" min="0" max="0.8" step="0.01" value="0.15"><small>只遮住已知配置内容，保留位置和时钟，训练在历史不完整时继续写作。</small></label>
 <label class="field">当前前缀配置遮罩概率<input id="streamPrefixNoteDropout" type="number" min="0" max="0.8" step="0.01" value="0.1"><small>被遮配置自身不参与监督，后续真实答案保留；不会伪造错误配置与答案。</small></label>
+<label class="field">连续上下文方案<select id="streamContinuationProfile"><option value="auto" selected>自动（fresh 重叠续写；继续训练继承）</option><option value="overlap_v1">重叠事件续写</option><option value="reset_v1">原上下文重置</option></select><small>重叠方案让计算边界保留完整近期事件作为解码前缀。旧权重需要 finetune 并显式选择；不保证消除所有音乐性重复。</small></label>
+<label class="field">重叠重放 token 预算<input id="streamContextReplayTokens" type="number" min="1" max="65536" step="32" value="256"><small>按完整事件保留，实际最多为流上下文上限的一半；日志记录实际预算。增加会提高训练与重放开销。</small></label>
+<label class="field">前缀连续遮罩事件数<input id="streamPrefixMaskSpanEvents" type="number" min="1" max="64" step="1" value="8"><small>以连续事件组应用前缀遮罩，覆盖完整套路；组被遮的概率仍由当前前缀配置遮罩概率控制。1 为原逐事件方式。</small></label>
+<label class="field">原谱循环退出学习权重<input id="streamCycleExitLossWeight" type="number" min="0" max="1" step="0.05" value="0.25"><small>额外学习原谱在已有节奏或配置循环后选择变化的第一个字符；正常重复不处罚。0 关闭。这是训练引导，效果需要实际谱面比较。</small></label>
+<label class="field">街机几何对称增广<select id="streamSymmetryAugmentation"><option value="mirror_lr" selected>仅左右翻转（原方向 / 左右，推荐）</option><option value="mirror4">四向对称（原方向 / 左右 / 上下 / 180°）</option><option value="none">关闭（仅原方向）</option></select><small>默认仅左右翻转（对街机上下半区手感影响最小）；四向对称额外包含上下与 180° 镜像。自动同步翻转键位、滑键轨迹符号与持续状态。</small></label>
 <label class="field">谱师选音关联权重<input id="streamAlignmentLossWeight" type="number" min="0" max="3" step="0.01" value="0.15"><small>监督原谱选中的声音与事件位置关联，不要求每个音频瞬态都写 note。</small></label>
 <label class="field">选音监督容差 / ms<input id="streamAlignmentToleranceMs" type="number" min="1" max="100" step="1" value="15"><small>音频证据与原谱起音的标签容差，不会量化或移动生成的拍位。</small></label>
 <label class="field">完整事件均衡权重<input id="streamEventBalanceLossWeight" type="number" min="0" max="3" step="0.01" value="0.2"><small>按事件分别平均拍位与配置损失，避免长字符配置淹没短事件；原 token 监督仍保留。</small></label>
 </div></div></details>
 <div class="form-grid">
 <label class="field">数值精度<select id="streamPrecision"><option value="auto" selected>自动（优先 BF16）</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>auto 在 CUDA 优先 BF16；CPU 只能使用 FP32。</small></label>
+<label class="field">注意力计算后端<select id="streamAttentionBackend"><option value="auto" selected>自动（按设备选择）</option><option value="cudnn">优先 cuDNN（需要 CUDA）</option><option value="efficient">优先高效注意力（需要 CUDA）</option></select><small>只改变计算实现，保留模型结构、dropout 和训练目标。Windows Blackwell、cuDNN≥9.7 且缺少 Flash 内核时，自动优先 cuDNN；其余环境沿用 PyTorch 默认。CPU 请选择自动。</small></label>
+<label class="field">训练执行方式<select id="streamExecutionMode"><option value="auto" selected>自动（当前保留普通执行）</option><option value="eager">普通执行（对照／兼容）</option><option value="cuda_graph">CUDA Graph（需要 CUDA）</option></select><small>图回放可减少小算子调度，但本机短测没有稳定提速，默认不启用。首次捕获有短暂停顿；显存不足、形状变化或不支持时回退普通执行。目标与输入内容不变，随机数序列及浮点舍入可变化。</small></label>
+<label class="field">CUDA Graph 额外显存预算（GiB）<input id="streamCudaGraphBudgetGb" type="number" min="0" max="32" step="0.25" value="2"><small>只限制图缓存额外占用，不是模型显存总上限。默认 2；0 关闭图缓存。每个编码器／解码器最多缓存一种形状，避免缓存随歌曲无限增长。显存紧张可调小。</small></label>
 <label class="field">权重衰减<input id="streamWeightDecay" type="number" min="0" max="1" step="0.001" value="0.01"><small>AdamW 的 weight decay；resume 仍以 checkpoint 的优化器状态为准。</small></label>
 <label class="field">音频缓存上限（GB）<input id="streamAudioCacheGb" type="number" min="0" step="0.5" value="8"><small>控制未驻留输入的后备缓存。驻留上限填0时，与结构缓存预算合并用于驻留，不再给未使用的基础特征另留25%。驻留输入与查询缓存共享同一份张量，不额外复制一份。数值按GiB计算。</small></label>
 <label class="field">准备线程<input id="streamPrepareWorkers" type="number" min="0" max="16" step="1" value="4"><small>并行准备独立歌曲；0 表示按后端默认值处理。</small></label>
@@ -925,18 +934,22 @@
 <details id="chartStreamGenerationControls" class="settings-section song-form-only" data-generation-family="chart_stream_v1" hidden>
 <summary><span>连续整曲生成</span><small>不按片段结束；持续动作和历史会随事件更新</small></summary>
 <div class="settings-content"><p class="workflow-hint">chart_stream_v1 连续生成整曲事件，由模型决定整曲 EOS。它读取 Radar / Style 条件、近期配置、持续 Hold / Slide 状态和整曲有理音频证据；生成中的计算块不对应乐句，也不会为了填满块而补音。</p>
-<div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0"><small>默认 0，关闭额外比例反馈；模型仍读取全部 Style 条件。大于 0 按完整配置软性偏向请求比例，可能强化已有重复，建议对照生成后小幅调整；不是硬比例。</small></label>
+<div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0"><small>默认 0。大于 0 时，生成会对连续 Break 和双押 token 施加有界反馈，并在候选配置间平衡请求比例；不是硬比例。配置候选数为 1 时仍会启用 token 级反馈。</small></label>
+<label class="field">段落类型跟随强度<input id="streamSectionTypeStrength" type="number" min="0" max="3" step="0.05" value="1"><small>在启用 Style 配置平衡时，按编码器预测的局部段落负载曲线动态缩放 Tap / Hold / Slide / Touch 目标比例，恢复间奏与副歌的配置反差。0 退化为全曲恒定比例。</small></label>
+<label class="field">模型意图门控强度<input id="streamPlanIntentStrength" type="number" min="0" max="1" step="0.05" value="1"><small>在启用 Style 配置平衡时，用模型自己预测的下一事件意图（多押 / Slide / Hold / Touch / Break）调节比例反馈：模型认为此处不适合某类型时减弱对它的推动，认为适合时减弱对它的压制。只会削弱反馈、不会新增推力；0 关闭。旧检查点无 Break 意图通道，Break 不受门控。</small></label>
 <label class="field">完整配置候选数<input id="streamConfigurationCandidates" type="number" min="1" max="16" step="1" value="4"><small>先由模型提出完整配置，再按 Style／局部多押／手感偏好采样。默认 4；越大越慢。1 或配置温度为 0 时不作候选间偏好；所有额外强度为 0 时自动跳过多候选。</small></label>
 <label class="field">局部多押强度<input id="streamLocalChordStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性控制局部多押倾向；只影响配置候选，不强制填满同时发生。</small></label>
 <label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label>
-<label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较整个 Fraction 的模型概率；搜索尚不确定时自动扩大，最多 32 路。1 使用原逐字符路径；更大更慢。</small></label>
+<label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较完整 Fraction 的模型概率。1 仍保留完整拍位评分、间隔指导和必要候选复查。显存紧张时只缩小并行宽度，额外候选分批评估；增大更慢且显存峰值更高。</small></label>
 <label class="field">拍位候选温度<input id="streamPositionTemperature" type="number" min="0" max="3" step="0.05" value="0.15"><small>候选宽度大于 1 时，对完整拍位候选采样；0 选最高分。与配置温度独立。</small></label>
-<label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>只惩罚超过下方起点的分母复杂度；0 关闭。允许非二进制分音，不会移动已生成的音符。宽度 1 时不生效。</small></label>
+<label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>只惩罚超过下方起点的分母复杂度；0 关闭。允许非二进制分音，不会移动已生成的音符；宽度 1 同样生效。</small></label>
 <label class="field">分母惩罚起点<input id="streamPositionComplexityFloor" type="number" min="1" max="4096" step="1" value="8"><small>按四分音符为一拍的 Fraction 分母计算。默认 8：四分至三十二分，以及分母不超过 8 的任意连音不受简洁惩罚；不是允许列表。1 恢复旧偏好。</small></label>
 <label class="field">学得结尾引导强度<input id="streamLearnedEndingStrength" type="number" min="0" max="3" step="0.1" value="1"><small>根据模型曲线预测的剩余音符量，为结束决策提供软证据；不按音量切尾。预测不准时可能早停或晚停；0 关闭。明确结束位置仍可手动指定。</small></label>
 <label class="field">约束后最低候选概率<input id="streamConstraintMinProbability" type="number" min="0" max="1" step="0.01" value="0.05"><small>硬保护仅剩低概率配置时，重选当前事件拍位，避免双 Slide 启动时硬凑大片 Touch。0 关闭；重选耗尽会明确报告未完成。</small></label>
 <label class="field">当前事件重选次数<input id="streamEventReconsiderAttempts" type="number" min="0" max="16" step="1" value="4"><small>仅回退尚未提交的当前事件，已生成内容保持不变；次数越高可能越慢。</small></label>
-<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>按间隔比例惩罚偏离已训练意图的候选，避免 9 拍与 161 拍被当成同样偏差。预测达到 8 拍上限时表示“8 拍或更长”，允许长休止。0 关闭；首个起音和宽度 1 不应用。</small></label>
+<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>按间隔比例惩罚偏离已训练意图的候选。预测达到 8 拍上限时表示“8 拍或更长”，允许长休止。0 关闭；首个起音不应用，宽度 1 仍应用。</small></label>
+<label class="field">非预期长空白抑制强度<input id="streamUnplannedGapPenaltyStrength" type="number" min="0" max="3" step="0.05" value="0.5"><small>默认 0.5：计划头预测短间隔时，对远超计划的大跳追加线性软惩罚，并复查附近候选；宽度 1 也生效。0 关闭额外惩罚。预测达到 8 拍休止上限时不追加惩罚；计划预测错误仍可能压低合理长休止，可调低或关闭。浏览器以前保存的 0 会继续保留。</small></label>
+<label class="field">节奏循环破除强度<input id="streamRhythmDiversityStrength" type="number" min="0" max="3" step="0.05" value="0.6"><small>对连续重复超过两轮或两小节的复合节奏型施加有界惩罚，打破跨小节节奏死循环；恒定四分／八分／十六分流与两小节正常呼应不受惩罚。0 关闭。</small></label>
 <label class="field">同拍按键头数上限<input id="streamMaxButtonHeads" type="number" min="0" max="8" step="1" value="2"><small>硬约束：默认最多 2 个按键头，包含 Tap、Hold、带头 Slide；Touch 不计入此项。0 不限。不保证完整可玩性。</small></label>
 <label class="field">Hold 占用保护<select id="streamHoldProtection"><option value="on" selected>开启</option><option value="off">关闭</option></select><small>硬约束：已写出的 Hold / Touch Hold 尚未结束时，不允许在同一位置新增敲击头；不把整条 Slide 当作静态占用。</small></label>
 <label class="field">每个起音的参考检查预算<input id="streamReferenceChecks" type="number" min="0" max="32" step="1" value="8"><small>默认最多尝试 8 个完整配置；MiaCode 运行时检查确认硬冲突时重新采样当前配置，保留此前事件和精确拍位。耗尽预算报告未完成。0 关闭生成中检查；最终仍报告静态提示与运行时审计。</small></label>

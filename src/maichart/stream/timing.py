@@ -17,23 +17,78 @@ class CanonicalPositionGrammar(PositionGrammar):
         return str(Fraction(text)) == text
 
 
-def interval_consistency_cost(delta, prediction, strength):
+def interval_consistency_cost(delta, prediction, strength, gap_penalty_strength=0.):
     """Compare exact delta to the censored interval head without capping delta.
 
     The training label saturates at eight beats. A saturated prediction means
     'eight or more', so arbitrarily long rests remain unpenalized in that case.
     Below saturation, a 161-beat jump cannot cost the same as a nine-beat one.
     """
-    if not strength or prediction is None or not math.isfinite(prediction):
+    if prediction is None or not math.isfinite(prediction):
         return 0.
     target = max(0., min(1., float(prediction))) * 8.
     actual = max(0., float(delta))
     if target >= 8. and actual >= 8.:
         return 0.
-    # One quarter beat prevents an unstable relative error at a near-zero
-    # prediction. It is a score scale, never an output grid or allowed gap.
-    difference = math.log((actual+.25)/(target+.25))
-    return float(strength) * .5 * difference * difference
+    cost = 0.
+    if strength:
+        # One quarter beat prevents an unstable relative error at a near-zero
+        # prediction. It is a score scale, never an output grid or allowed gap.
+        difference = math.log((actual+.25)/(target+.25))
+        cost += float(strength) * .5 * difference * difference
+    if gap_penalty_strength and target < 8.:
+        threshold = max(target * 2., target + 4.)
+        if actual > threshold:
+            cost += float(gap_penalty_strength) * .35 * (actual - threshold)
+    return cost
+
+
+def rhythm_cycle_cost(beat, points, previous, strength, max_period=24):
+    """Penalize continuing a non-uniform rhythm loop past two full cycles.
+
+    Uniform subdivision streams (steady 4th/8th/16th runs where len(set(cycle))==1)
+    and two-phrase echoes remain unpenalized. Only composite multi-interval patterns
+    that have already repeated for at least two full periods or two 4-beat bars
+    incur a bounded nonnegative cost.
+    """
+    if not strength or previous is None or previous < 0 or len(points) < 4:
+        return 0.
+    strength = float(strength)
+    if not math.isfinite(strength) or strength <= 0:
+        return 0.
+    beat = Fraction(beat)
+    previous = Fraction(previous)
+    delta = beat - previous
+    if delta <= 0:
+        return 0.
+    recent = points[-max(72, 3 * max_period + 1):]
+    deltas = [b.beat - a.beat for a, b in zip(recent, recent[1:])]
+    best_reps = 0
+    limit = min(max_period, len(deltas) // 2)
+    for period in range(2, limit + 1):
+        cycle = deltas[-period:]
+        if delta != cycle[0] or len(set(cycle)) <= 1:
+            continue
+        if deltas[-2 * period:-period] != cycle:
+            continue
+        reps = 2
+        while (reps + 1) * period <= len(deltas) and deltas[-(reps + 1) * period:-reps * period] == cycle:
+            reps += 1
+        if reps > best_reps:
+            best_reps = reps
+    bar_reps = 0
+    bar_intervals = [d for p, d in zip(recent[1:], deltas) if p.beat > previous - 4]
+    if len(set(bar_intervals)) > 1:
+        delta_at = {b.beat: b.beat - a.beat for a, b in zip(recent, recent[1:])}
+        k = 1
+        while delta_at.get(beat - 4 * k) == delta:
+            bar_reps += 1
+            k += 1
+    if best_reps < 2 and bar_reps < 2:
+        return 0.
+    cost = .55 * max(0, best_reps - 1) + .45 * max(0, bar_reps - 1)
+    return strength * min(3.5, cost)
+
 
 
 def export_end_timing(audio_end, tempo, first):

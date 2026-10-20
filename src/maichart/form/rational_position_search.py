@@ -27,10 +27,13 @@ def _select_cache(caches, indices):
 def search_position(model, codec, grammar, root_logits, root_cache, memory, mask, *,
                     consumed, width=4, complexity=.2, timing_features=None,
                     temperature=0., generator=None, canonical_only=False, adaptive=False,
-                    candidate_cost=None, proposals=(), complexity_floor=1):
+                    candidate_cost=None, proposals=(), complexity_floor=1,
+                    max_width=None, proposal_trigger=None):
     if not math.isfinite(complexity_floor) or complexity_floor<1:
         raise ValueError('complexity_floor must be finite and at least one')
     initial_width, expansions = width, 0
+    if max_width is not None:
+        max_width=max(initial_width,int(max_width))
     while True:
         value, status = _search_position(model, codec, grammar, root_logits, root_cache,
             memory, mask, consumed=consumed, width=width, complexity=complexity,
@@ -42,24 +45,34 @@ def search_position(model, codec, grammar, root_logits, root_cache, memory, mask
         # A pruned prefix with a higher probability upper bound may beat the
         # completed fraction. Widen only these uncertain searches, never as a
         # function of gap size or audio loudness. Resource budget stays bounded.
-        if not adaptive or width >= 32 or bound is None or (best is not None and bound <= best-12*temperature):
+        limit = 32 if max_width is None else max_width
+        if not adaptive or width >= limit or bound is None or (best is not None and bound <= best-12*temperature):
             break
-        width = min(32, width*2)
+        width = min(limit, width*2)
     ranked = status['candidates']
     # Low-probability numerical carry prefixes can vanish even in a wide
     # beam. When its pruning bound is still unresolved, explicitly score a
     # few causal proposals supplied by the caller. These remain candidates,
     # never an allowed-position list or a snapping operation.
     proposal_expansions = 0
-    if adaptive and proposals and (best is None or (bound is not None and bound > best-12*temperature)):
+    margin = 12*temperature if temperature == 0 else max(3., 12*temperature)
+    proposal_requested = bool(value is not None and proposal_trigger is not None
+                              and proposal_trigger(Fraction(value)))
+    if adaptive and proposals and (best is None or (bound is not None and bound > best-margin)
+                                   or (temperature > 0 and len(ranked) < 2) or proposal_requested):
         strings = list(dict.fromkeys(str(Fraction(value)) for value in proposals
                                      if grammar.complete(str(Fraction(value)))))[:16]
         scored, proposal_expansions = _score_proposals(model, codec, strings, root_logits,
-            root_cache, memory, mask, consumed=consumed, timing_features=timing_features)
+            root_cache, memory, mask, consumed=consumed, timing_features=timing_features,
+            max_batch_size=max_width)
         merged = {row['beat']:row for row in ranked}
         for text, probability in scored.items():
             penalty = complexity*position_complexity_cost(text,grammar.lower,complexity_floor)
-            if candidate_cost is not None: penalty += float(candidate_cost(Fraction(text)))
+            if candidate_cost is not None:
+                extra = float(candidate_cost(Fraction(text)))
+                if not math.isfinite(extra) or extra < 0:
+                    raise ValueError('Position candidate cost must be finite and nonnegative')
+                penalty += extra
             merged[text] = {'beat':text,'score':probability-penalty,'log_probability':probability}
         ranked = sorted(merged.values(),key=lambda row:row['score'],reverse=True)
         if ranked:
@@ -76,14 +89,26 @@ def search_position(model, codec, grammar, root_logits, root_cache, memory, mask
         status['selected_log_probability'] = selected['log_probability']
     status.update(initial_beam_width=initial_width, expanded_hypotheses=expansions+proposal_expansions,
                   proposal_expansions=proposal_expansions,
+                  proposal_triggered=proposal_requested,
                   search_certified=bound is None or (best is not None and bound <= best),
                   candidates=ranked[:8])
     return value, status
 
 
-def _score_proposals(model, codec, texts, logits, caches, memory, mask, *, consumed, timing_features):
+def _score_proposals(model, codec, texts, logits, caches, memory, mask, *, consumed, timing_features,
+                     max_batch_size=None):
     if not texts:
         return {}, 0
+    if max_batch_size is not None:
+        if max_batch_size < 1:
+            raise ValueError('Proposal batch size must be positive')
+        if len(texts) > max_batch_size:
+            complete, expanded = {}, 0
+            for start in range(0, len(texts), max_batch_size):
+                scored, count = _score_proposals(model, codec, texts[start:start+max_batch_size],
+                    logits, caches, memory, mask, consumed=consumed, timing_features=timing_features)
+                complete.update(scored); expanded += count
+            return complete, expanded
     sequences = [[codec.ids['P:'+c] for c in text]+[codec.note_id] for text in texts]
     rows, scores = list(range(len(texts))), [0.]*len(texts)
     indices = torch.zeros(len(rows), dtype=torch.long, device=memory.device)

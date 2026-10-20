@@ -122,6 +122,36 @@ def test_grammar_without_atoms_is_not_built():
     assert _NoteGrammar.from_atoms(None) is None
 
 
+def test_same_head_slide_branch_cap_is_hard_but_configurable():
+    double = "1-4[8:1]*-6[8:1]"
+    triple = "1-4[8:1]*-6[8:1]*-8[8:1]"
+    capped = _NoteGrammar.from_atoms(["1", double, triple], max_star_slides=2)
+    assert capped is not None
+    assert triple not in capped.atoms
+    assert capped.can_continue("1-4[8:1]")
+    assert capped.can_continue(double)
+    assert not capped.can_continue(double + "*")
+    assert not capped.is_complete(triple)
+
+    only_over_cap = _NoteGrammar.from_atoms([triple], max_star_slides=2)
+    assert only_over_cap is not None
+    assert not only_over_cap.can_continue(triple)
+    assert not only_over_cap.is_complete(triple)
+
+    diagnostic = _NoteGrammar.from_atoms([triple], max_star_slides=3)
+    assert diagnostic is not None
+    assert triple in diagnostic.atoms
+    assert diagnostic.can_continue(triple)
+    assert diagnostic.is_complete(triple)
+
+
+def test_same_head_cap_does_not_change_slash_chords():
+    grammar_ = _NoteGrammar.from_atoms(["1", "2", "3", "1/2"])
+    assert grammar_ is not None
+    assert grammar_.can_continue("1/2")
+    assert grammar_.is_complete("1/2")
+
+
 def test_head_closures_cover_every_prefix():
     """The closures are consistent: each atom's own heads are reachable from it."""
 

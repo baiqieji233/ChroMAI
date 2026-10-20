@@ -1,11 +1,16 @@
 """Sample complete configurations before applying terminal style preferences.
 
-Proposals come from the grammar-constrained model, without prefix potentials.
-Importance resampling uses only the terminal preference, never the model
-probability a second time. Duplicate proposals retain their probability mass.
-This is a bounded approximation, not an exhaustive configuration search.
+Proposals come from the grammar-constrained model: one row from the model law
+alone, the others with bounded prefix potentials added. Importance resampling
+uses the terminal preference plus the exact log-ratio between the model law
+and the proposal mixture, so the model probability is never counted twice and
+guided rows only change which configurations are explored. Duplicate proposals
+retain their probability mass. This is a bounded approximation, not an
+exhaustive configuration search.
 """
 from __future__ import annotations
+
+import math
 
 import torch
 
@@ -42,6 +47,12 @@ def propose_configurations(model, codec, logits, cache, memory, memory_mask, *,
 Every branch has the same known NOTE clock. Nothing is committed here. A
 context overflow is reported separately so callers can replay the event at a
 resource boundary instead of silently preferring short configurations.
+
+Proposal law: row 0 samples the model alone; the other rows add the bounded
+prefix potentials of event_bias. When the model is nearly certain of a single
+Tap, guided rows still explore the Holds, Slides and chords the terminal
+preference needs to compare. Importance weights use the mixture density, so
+resampling targets exp(terminal) times the model law exactly as before.
 """
     count = candidates if temperature > 0 else 1
     device = logits.device
@@ -53,10 +64,14 @@ resource boundary instead of silently preferring short configurations.
         timing_features = timing_features.expand(count, *timing_features.shape[1:])
     chars = [(i, t[2:]) for i, t in enumerate(codec.tokens) if t.startswith('N:')]
     texts, tokens = ['']*count, [[] for _ in range(count)]
+    # A single proposal cannot be reweighted, so it is the guided one.
+    guided = [count == 1 or row > 0 for row in range(count)]
+    native_logp, guided_logp = [0.]*count, [0.]*count
     running, complete = set(range(count)), []
     choices_cache = {}
     rejected, expansions = [], 0
     position = consumed
+    scale = max(float(temperature), 1e-6)
     while running:
         if position >= max_tokens:
             return None, {'reason': 'context_space', 'proposals': count, 'expanded_tokens': expansions}
@@ -77,9 +92,20 @@ resource boundary instead of silently preferring short configurations.
                 running.remove(row)
                 rejected.append('low_probability_configuration_constraints' if allowed else 'configuration_constraints_exhausted')
                 continue
-            values = current[row, allowed]
-            index = (int(values.argmax()) if temperature == 0 else
-                     int(torch.multinomial((values/temperature).softmax(0), 1, generator=generator)))
+            token_text=[None if token==codec.end_id else codec.tokens[token][2:] for token in allowed]
+            native = current[row, allowed] + torch.as_tensor(event_bias.token_bias(text, token_text),device=device,dtype=current.dtype)
+            steering = torch.as_tensor(event_bias.biases(text, token_text), device=device, dtype=current.dtype)
+            nudged = native + steering
+            values = nudged if guided[row] else native
+            index = (values.argmax() if temperature == 0 else
+                     torch.multinomial((values/temperature).softmax(0), 1, generator=generator).squeeze(0))
+            # One readback instead of synchronizing the index and both law
+            # scores separately. Sampling law and RNG draws stay unchanged.
+            picked,native_score,guided_score=torch.stack((index.float(),
+                (native/scale).log_softmax(0)[index],(nudged/scale).log_softmax(0)[index])).cpu().tolist()
+            index=int(picked)
+            native_logp[row] += native_score
+            guided_logp[row] += guided_score
             token = allowed[index]
             tokens[row].append(token); expansions += 1
             if token == codec.end_id:
@@ -100,8 +126,22 @@ resource boundary instead of silently preferring short configurations.
     if not complete:
         return None, {'reason': rejected[-1] if rejected else 'configuration_constraints_exhausted',
                       'proposals': count, 'expanded_tokens': expansions}
-    chosen = resample_terminal([item[2] for item in complete], generator, device=device)
+    weights = [score + _mixture_correction(native_logp[row], guided_logp[row], count)
+               for row, _, score in complete]
+    chosen = resample_terminal(weights, generator, device=device)
     row, length, score = complete[chosen]
     return {'text': texts[row], 'tokens': tokens[row], 'cache': _select_cache(caches, row, length),
             'consumed': length}, {'reason': 'complete', 'proposals': count, 'accepted': len(complete),
-                                'expanded_tokens': expansions, 'terminal_score': score}
+                                'expanded_tokens': expansions, 'terminal_score': score,
+                                'guided_proposals': sum(guided), 'chosen_guided': bool(guided[row])}
+
+
+def _mixture_correction(native, guided, count):
+    """log p(cell) - log q_mix(cell) for one native row and count-1 guided rows."""
+    if count <= 1:
+        return 0.
+    native_share = math.log(1./count)
+    guided_share = math.log((count-1.)/count)
+    a, b = native_share+native, guided_share+guided
+    top = max(a, b)
+    return native-(top+math.log(math.exp(a-top)+math.exp(b-top)))

@@ -63,11 +63,13 @@ for (const device of ["auto", "cuda", "cpu"]) {
     assert.equal(result.position_beam_size, 4);
     assert.equal(result.position_complexity, .35);
     assert.equal(result.position_interval_strength, 1);
+    assert.equal(result.unplanned_gap_penalty_strength, .5);
     assert.equal(result.position_complexity_floor,8);
     assert.equal(result.learned_ending_strength,1);
     assert.equal(result.constraint_min_probability,.05);
     assert.equal(result.event_reconsider_attempts,4);
     assert.equal(result.early_eos_penalty, 0);
+    assert.equal(result.section_type_strength, 1);
     assert.equal(result.max_button_heads, 2);
     assert.equal(result.hold_protection, 'on');
     assert.equal(result.reference_check_attempts, 8);
@@ -86,7 +88,8 @@ test("empty seed and BPM delegate to server random seed and audio tempo", () => 
 test('stream timing controls are visible in its family panel and forwarded', () => {
   const values = {'#streamPositionBeamSize':'8', '#streamPositionTemperature':'0',
     '#streamPositionComplexity':'1.2', '#streamMaxDenominator':'96',
-    '#streamMaxIntervalDenominator':'24', '#streamMinSpacingMs':'30', '#streamEarlyEosPenalty':'0.5'};
+    '#streamMaxIntervalDenominator':'24', '#streamMinSpacingMs':'30', '#streamEarlyEosPenalty':'0.5',
+    '#streamSectionTypeStrength':'1.4', '#streamUnplannedGapPenaltyStrength':'1.1'};
   const context = vm.createContext({valueOrDefault: (key, fallback) => values[key] ?? fallback,
     collectCondition: () => ({}), parseTempoMap: () => null, formDevice: () => 'cpu'});
   install(context, 'chartStreamGenerationPayload', 'intensityCurvePayload');
@@ -99,6 +102,8 @@ test('stream timing controls are visible in its family panel and forwarded', () 
   assert.equal(result.max_interval_denominator, 24);
   assert.equal(result.min_spacing_ms, 30);
   assert.equal(result.early_eos_penalty, .5);
+  assert.equal(result.section_type_strength, 1.4);
+  assert.equal(result.unplanned_gap_penalty_strength, 1.1);
 });
 
 test('stream training forwards visible dropout and seed including zero', () => {
@@ -113,6 +118,11 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.weight_decay,.02);
   assert.equal(result.quality_enabled,true);
   assert.equal(result.grounding_profile,'auto');
+  assert.equal(result.continuation_profile,'auto');
+  assert.equal(result.context_replay_tokens,256);
+  assert.equal(result.prefix_mask_span_events,8);
+  assert.equal(result.cycle_exit_loss_weight,.25);
+  assert.equal(result.symmetry_augmentation,'mirror_lr');
   assert.equal(result.detail_audio_nodes,8192);
   assert.equal(result.prefetch_batches,2);
   assert.equal(result.data_workers,4);
@@ -120,11 +130,27 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.input_cache_mode,'mapped');
   assert.equal(result.structure_cache_mb,256);
   assert.equal(result.optimizer_implementation,'auto');
+  assert.equal(result.attention_backend,'auto');
+  assert.equal(result.execution_mode,'auto');
+  assert.equal(result.cuda_graph_budget_gb,2);
   assert.equal(result.input_residency,'auto');
   assert.equal(result.resident_cache_gb,0);
   assert.equal(result.resident_memory_reserve_gb,0);
   assert.equal(result.cache_validation_records,0);
-  for (const id of ['streamDropout','streamSeed']) assert.ok(html.includes(`id="${id}"`));
+  for (const id of ['streamDropout','streamSeed','streamSymmetryAugmentation','streamAttentionBackend',
+                    'streamExecutionMode','streamCudaGraphBudgetGb']) assert.ok(html.includes(`id="${id}"`));
+  const symSelect = html.slice(html.indexOf('id="streamSymmetryAugmentation"'));
+  const symOptions = [...symSelect.slice(0, symSelect.indexOf('</select>')).matchAll(/value="([^"]+)"/g)].map(m => m[1]);
+  assert.deepEqual(symOptions, ['mirror_lr', 'mirror4', 'none']);
+});
+
+test('stream attention backend selection is forwarded and old servers are rejected', () => {
+  const context = vm.createContext({valueOrDefault:(key, fallback)=>key==='#streamAttentionBackend'?'cudnn':fallback,
+    checkedOrDefault:()=>true,currentTrainingMode:()=> 'fresh',trainingSourcePaths:()=>({}),
+    selectedTrainingManifests:()=>[],selectedDatasetItems:()=>[],formDevice:()=> 'cuda'});
+  install(context,'chartStreamTrainingPayload','collectValues');
+  assert.equal(context.chartStreamTrainingPayload().attention_backend,'cudnn');
+  assert.ok(source.includes("stream_runtime_optimization !== 'bounded_training_graph_v2'"));
 });
 
 test('finetune reinspection preserves explicit grounding upgrade and training settings', () => {
@@ -132,20 +158,28 @@ test('finetune reinspection preserves explicit grounding upgrade and training se
   for (const match of html.matchAll(/id="(stream[^"]+)"/g)) nodes['#'+match[1]]={value:'',disabled:false};
   nodes['#qualityEnabled']={checked:false};
   nodes['#streamGroundingProfile'].value='causal_audio_v1';
+  nodes['#streamContinuationProfile'].value='overlap_v1';
+  nodes['#streamCycleExitLossWeight'].value='0.2';
+  nodes['#streamSymmetryAugmentation'].value='mirror4';
   nodes['#streamAlignmentLossWeight'].value='0.24';
   nodes['#streamPrefetchBatches'].value='4';
   const context=vm.createContext({element:id=>nodes[id]});
   install(context,'applyChartStreamCheckpointConfig','renderChartStreamCheckpointInspection');
   const data={model_config:{d_model:256,grounding_profile:'none'},
-    args:{alignment_loss_weight:0,prefetch_batches:0,quality_enabled:true}};
+    args:{alignment_loss_weight:0,prefetch_batches:0,quality_enabled:true,symmetry_augmentation:'none'}};
   context.applyChartStreamCheckpointConfig(data,'finetune',true);
   assert.equal(nodes['#streamGroundingProfile'].value,'causal_audio_v1');
+  assert.equal(nodes['#streamContinuationProfile'].value,'overlap_v1');
+  assert.equal(nodes['#streamCycleExitLossWeight'].value,'0.2');
+  assert.equal(nodes['#streamSymmetryAugmentation'].value,'mirror4');
   assert.equal(nodes['#streamAlignmentLossWeight'].value,'0.24');
   assert.equal(nodes['#streamPrefetchBatches'].value,'4');
   assert.equal(nodes['#streamDModel'].value,'256');
   assert.equal(nodes['#qualityEnabled'].checked,false);
   context.applyChartStreamCheckpointConfig(data,'resume',true);
   assert.equal(nodes['#streamGroundingProfile'].value,'none');
+  assert.equal(nodes['#streamContinuationProfile'].value,'reset_v1');
+  assert.equal(nodes['#streamSymmetryAugmentation'].value,'none');
   assert.equal(nodes['#streamGroundingProfile'].disabled,true);
 });
 

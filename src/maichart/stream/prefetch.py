@@ -6,11 +6,17 @@ import threading,time
 from maichart.form.layout_prefetch import _tensor_bytes
 
 
+def _batch_bytes(batch):
+    from .training_batch import PackedBatch
+    return batch.nbytes if isinstance(batch, PackedBatch) else _tensor_bytes(batch)
+
+
 class StreamBatchPrefetch:
-    def __init__(self,loader,*,depth=2,workers=4):
+    def __init__(self,loader,*,depth=2,workers=4,prepare_batch=None):
         if loader.num_workers or not 1<=depth<=16 or not 1<=workers<=8:
             raise ValueError('Invalid stream prefetch settings')
         self.loader,self.depth,self.workers=loader,depth,workers
+        self.prepare_batch=prepare_batch
         # Consume the same DataLoader base RNG seed as synchronous iteration.
         self.source=iter(loader);self.indices=iter(loader.batch_sampler)
         self.pending=deque();self.source_locks={};self.guard=threading.Lock()
@@ -28,10 +34,12 @@ class StreamBatchPrefetch:
 
     def _collate(self,futures):
         batch=self.loader.collate_fn([future.result() for future in futures])
-        if self.source._pin_memory:
+        if self.prepare_batch is not None:
+            batch=self.prepare_batch(batch)
+        elif self.source._pin_memory:
             from torch.utils.data._utils.pin_memory import pin_memory
             batch=pin_memory(batch,self.source._pin_memory_device)
-        size=_tensor_bytes(batch)
+        size=_batch_bytes(batch)
         with self.guard:
             self.prepared+=1;self.buffered_bytes+=size;self.peak_bytes=max(self.peak_bytes,self.buffered_bytes)
         return batch
@@ -53,7 +61,7 @@ class StreamBatchPrefetch:
         if not self.pending:raise StopIteration
         started=time.perf_counter();batch=self.pending.popleft().result()
         with self.guard:
-            self.wait_seconds+=time.perf_counter()-started;self.buffered_bytes-=_tensor_bytes(batch)
+            self.wait_seconds+=time.perf_counter()-started;self.buffered_bytes-=_batch_bytes(batch)
         self._fill();return batch
 
     def stats(self):

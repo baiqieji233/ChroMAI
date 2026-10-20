@@ -38,23 +38,40 @@ def setup():
     return codec,guidance,guard,ids,prefix,logits
 
 
-def test_complete_proposals_keep_selected_cache_and_never_call_prefix_bias():
+def test_complete_proposals_keep_selected_cache_and_explore_with_guided_rows():
     codec,guidance,guard,ids,prefix,logits=setup()
     bias=guidance.event(Fraction(0))
-    bias.biases=lambda *_:pytest.fail('Prefix Style bias must not be used')
-    seen=set()
+    seen=set();guided_choices=0
     for seed in range(12):
         picked,report=propose_configurations(CellModel(codec),codec,logits,[(prefix,prefix,None,None)],
             torch.zeros(1,2,3),torch.zeros(1,2,dtype=torch.bool),consumed=len(ids),max_tokens=64,
             grammar=guidance.grammar,restricted=guard.event(Fraction(0)),event_bias=bias,
             temperature=1.,candidates=4,generator=torch.Generator().manual_seed(seed))
         assert picked is not None and report['reason']=='complete'
+        assert report['guided_proposals']==3
+        guided_choices+=report['chosen_guided']
         assert picked['tokens'][-1]==codec.end_id
         expected=ids+picked['tokens'][:-1]
         assert picked['cache'][0][0][0,:,0].tolist()==expected
         assert picked['consumed']==len(expected)
         seen.add(picked['text'])
     assert seen=={'1','2h[4:1]'}
+
+
+def test_mixture_importance_weights_preserve_terminal_target_law():
+    from maichart.stream.configuration_search import _mixture_correction
+    import math
+    # Two cells, model law p=(.9,.1); guided proposal q=(.5,.5); terminal
+    # preferences t=(0, log 3). The target is p*exp(t) normalised = (.75,.25).
+    p=[.9,.1];q=[.5,.5];t=[0.,math.log(3.)];count=4
+    mixture=[(p[i]+(count-1)*q[i])/count for i in range(2)]
+    expected=[p[i]*math.exp(t[i]) for i in range(2)]
+    expected=[v/sum(expected) for v in expected]
+    implied=[mixture[i]*math.exp(t[i]+_mixture_correction(math.log(p[i]),math.log(q[i]),count)) for i in range(2)]
+    implied=[v/sum(implied) for v in implied]
+    assert implied==pytest.approx(expected)
+    assert _mixture_correction(-1.,-1.,4)==pytest.approx(0.)
+    assert _mixture_correction(-3.,-1.,1)==0.
 
 
 def test_context_overflow_does_not_silently_prefer_short_cells():
@@ -80,3 +97,13 @@ def test_same_types_receive_same_style_preference_regardless_of_button_or_path_s
     bias=guidance.event(Fraction(0))
     assert bias.terminal_score('1')==bias.terminal_score('8')
     assert bias.terminal_score('1-5[4:1]')==bias.terminal_score('8-4[8:2]')
+
+
+def test_stream_token_guidance_penalizes_break_and_chord_runs_causally():
+    condition=GenerationCondition(level=13,style={**GENERATION_DEFAULTS,'chord_bias':.2,'tap_bias':.7},radar=GENERATION_DEFAULTS)
+    guidance=TypeGuidance(['1','1b','1/2'],condition,[],planner_strength=0,style_strength=1)
+    for index in range(8): guidance.commit('1b' if index < 4 else '1/2',Fraction(index))
+    bias=guidance.event(Fraction(6))
+    values=bias.token_bias('1',['b','/',''])
+    assert values[0] < 0 and values[1] < 0
+    assert values[2] == 0

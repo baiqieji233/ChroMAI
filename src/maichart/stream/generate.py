@@ -37,6 +37,8 @@ def parser():
     p.add_argument('--position-complexity', type=float, default=.35)
     p.add_argument('--position-complexity-floor',type=int,default=8)
     p.add_argument('--position-interval-strength', type=float, default=1.)
+    p.add_argument('--unplanned-gap-penalty-strength', type=float, default=.5)
+    p.add_argument('--rhythm-diversity-strength', type=float, default=.6)
     p.add_argument('--early-eos-penalty', type=float, default=0.)
     p.add_argument('--learned-ending-strength',type=float,default=1.)
     p.add_argument('--constraint-min-probability',type=float,default=.05)
@@ -54,6 +56,8 @@ def parser():
     p.add_argument('--configuration-candidates', type=int, default=4)
     p.add_argument('--local-chord-strength', type=float, default=0.)
     p.add_argument('--physical-feasibility-strength', type=float, default=0.)
+    p.add_argument('--section-type-strength', type=float, default=1.)
+    p.add_argument('--plan-intent-strength', type=float, default=1.)
     p.add_argument('--max-button-heads', type=int, default=2)
     p.add_argument('--hold-protection', choices=('on', 'off'), default='on')
     p.add_argument('--reference-check-attempts', type=int, default=8)
@@ -124,6 +128,8 @@ def generate(args):
             'event_reconsider_attempts':args.event_reconsider_attempts,
             'position_beam_size': args.position_beam_size, 'position_complexity': args.position_complexity,
             'position_interval_strength': args.position_interval_strength,
+            'unplanned_gap_penalty_strength': args.unplanned_gap_penalty_strength,
+            'rhythm_diversity_strength': float(getattr(args, 'rhythm_diversity_strength', .6)),
             'position_temperature': args.position_temperature, 'early_eos_penalty': args.early_eos_penalty,
             'max_denominator': args.max_denominator, 'max_interval_denominator': args.max_interval_denominator,
             'min_spacing_ms': args.min_spacing_ms,
@@ -132,7 +138,9 @@ def generate(args):
             'reference_check_attempts':args.reference_check_attempts,
             'local_chord_strength_requested': args.local_chord_strength,
             'local_chord_strength_effective': args.local_chord_strength,
-            'physical_feasibility_strength': args.physical_feasibility_strength},
+            'physical_feasibility_strength': args.physical_feasibility_strength,
+            'section_type_strength': float(getattr(args, 'section_type_strength', 1.)),
+            'plan_intent_strength': float(getattr(args, 'plan_intent_strength', 1.))},
         'limitations': ['Model quality requires trained chart_stream weights.',
                         'Soft physical guidance does not certify playability.']}
     output.write_text(text, encoding='utf-8')

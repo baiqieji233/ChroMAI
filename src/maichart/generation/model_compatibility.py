@@ -63,6 +63,8 @@ def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
                 'grounding_profile':grounding,'causal_numeric_clock':bool(grounded),
                 'native_local_audio':bool(grounded),'causal_archive_retrieval':bool(grounded),
                 'dynamic_intent_routing':bool(grounded),
+                  'continuation_profile':config.get('continuation_profile','reset_v1'),
+                  'context_replay_tokens':config.get('context_replay_tokens',256),
                 'position_alignment_trained':bool(grounded and training.get('profile')==grounding
                     and training.get('alignment_supervised') is True and training.get('optimizer_steps',0)>0)}
     if checkpoint_data.get("schema") in {"maichart-song-form-checkpoint-v1","maichart-song-form-checkpoint-v2"}:

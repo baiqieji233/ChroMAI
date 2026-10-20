@@ -209,6 +209,7 @@ function renderTaskTrainingMetrics(task) {
       ["alignment_loss","谱师选音关联 loss"],["alignment_accuracy","音频关联节点准确率"],
       ["alignment_coverage","选音监督覆盖率"],
       ["eos_accuracy","整曲结束准确率"],["eos_targets","已见真实结束目标"],["eos_token_loss","整曲结束 token loss"],
+      ["cycle_exit_accuracy","原谱循环退出准确率"],["cycle_exit_targets","已见循环退出目标"],["cycle_exit_loss","循环退出 loss"],
       ["event_decision_loss","续写与结束 loss"],["curve_loss","强度曲线 loss"],
       ["batches_per_sec","本轮 batch / 秒"],["recent_batches_per_sec","近期 batch / 秒"],
       ["data_wait_sec","等待数据 / 秒"],["transfer_host_sec","传输提交 / 秒"],
@@ -593,13 +594,13 @@ const GENERATION_PARAM_FIELDS = [
   "generationDevice",                                       // 生成运行设备
   "formPositionComplexity", "formPositionBeamSize", "formEarlyEosPenalty",
   "streamPositionTemperature", "streamPositionBeamSize", "streamPositionComplexity", "streamEarlyEosPenalty",
-  "streamPositionIntervalStrength",
+  "streamPositionIntervalStrength", "streamUnplannedGapPenaltyStrength", "streamRhythmDiversityStrength",
   "streamPositionComplexityFloor", "streamLearnedEndingStrength", "streamConstraintMinProbability", "streamEventReconsiderAttempts",
   "streamMaxButtonHeads", "streamHoldProtection",
   "streamReferenceChecks",
   "streamTrimExactSilence",
   "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
-  "streamStyleBalanceStrength", "streamLocalChordStrength", "streamPhysicalStrength",
+  "streamStyleBalanceStrength", "streamSectionTypeStrength", "streamPlanIntentStrength", "streamLocalChordStrength", "streamPhysicalStrength",
   "streamConfigurationCandidates",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
   "topP", "repetitionPenalty", "repetitionWindow", "maxTokens",
@@ -1779,12 +1780,18 @@ function trainingPayload(options = {}) {
 }
 
 const STREAM_GROUNDING_FIELDS = [
+  ['streamContinuationProfile','continuation_profile','auto'],
+  ['streamContextReplayTokens','context_replay_tokens',256],
+  ['streamPrefixMaskSpanEvents','prefix_mask_span_events',8],
+  ['streamCycleExitLossWeight','cycle_exit_loss_weight',.25],
+  ['streamSymmetryAugmentation','symmetry_augmentation','mirror_lr'],
   ['streamGroundingProfile','grounding_profile','auto'],
   ['streamDetailAudioNodes','detail_audio_nodes',8192], ['streamLocalAudioNeighbors','local_audio_neighbors',32],
   ['streamLocalAudioSeconds','local_audio_seconds',2], ['streamArchiveEvents','archive_events',4096],
   ['streamArchiveRetrievals','archive_retrievals',8], ['streamArchiveMinSimilarity','archive_min_similarity',.5],
   ['streamHistoryNoteDropout','history_note_dropout',.15], ['streamPrefixNoteDropout','prefix_note_dropout',.1],
   ['streamAlignmentLossWeight','alignment_loss_weight',.15], ['streamAlignmentToleranceMs','alignment_tolerance_ms',15],
+  ['streamCurveSlopeLossWeight','curve_slope_loss_weight',.05],
   ['streamEventBalanceLossWeight','event_balance_loss_weight',.2],
 ];
 
@@ -1811,6 +1818,9 @@ function chartStreamTrainingPayload(options = {}) {
     event_decision_loss_weight: Number(valueOrDefault("#streamEventDecisionLossWeight",.25)),
     lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#streamWeightDecay", .01)),
     device: formDevice("#device"), precision: valueOrDefault("#streamPrecision", "auto"),
+    attention_backend: valueOrDefault("#streamAttentionBackend", "auto"),
+    execution_mode: valueOrDefault("#streamExecutionMode", "auto"),
+    cuda_graph_budget_gb: Number(valueOrDefault("#streamCudaGraphBudgetGb", 2)),
     audio_cache_gb: Number(valueOrDefault("#streamAudioCacheGb", 8)),
     prepare_workers: Number(valueOrDefault("#streamPrepareWorkers", 4)),
     prefetch_batches: Number(valueOrDefault("#streamPrefetchBatches", 2)),
@@ -1999,11 +2009,15 @@ function chartStreamGenerationPayload() {
     constraint_min_probability: Number(valueOrDefault("#streamConstraintMinProbability", .05)),
     event_reconsider_attempts: Number(valueOrDefault("#streamEventReconsiderAttempts", 4)),
     position_interval_strength: Number(valueOrDefault("#streamPositionIntervalStrength", 1)),
+    unplanned_gap_penalty_strength: Number(valueOrDefault("#streamUnplannedGapPenaltyStrength", .5)),
+    rhythm_diversity_strength: Number(valueOrDefault("#streamRhythmDiversityStrength", .6)),
     early_eos_penalty: Number(valueOrDefault("#streamEarlyEosPenalty", 0)),
     max_denominator: Number(valueOrDefault("#streamMaxDenominator", 384)),
     max_interval_denominator: Number(valueOrDefault("#streamMaxIntervalDenominator", 96)),
     min_spacing_ms: Number(valueOrDefault("#streamMinSpacingMs", 20)),
     style_balance_strength: Number(valueOrDefault("#streamStyleBalanceStrength", 0)),
+    section_type_strength: Number(valueOrDefault("#streamSectionTypeStrength", 1)),
+    plan_intent_strength: Number(valueOrDefault("#streamPlanIntentStrength", 1)),
     configuration_candidates: Number(valueOrDefault("#streamConfigurationCandidates",4)),
     local_chord_strength: Number(valueOrDefault("#streamLocalChordStrength", 0)),
     physical_feasibility_strength: Number(valueOrDefault("#streamPhysicalStrength", 0)),
@@ -3122,7 +3136,7 @@ function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) 
   const args = data?.args || {};
   STREAM_GROUNDING_FIELDS.forEach(([id,key,fallback])=>{
     const target=element('#'+id); if(!target) return;
-    if (!(preserveEditable && mode==='finetune')) target.value=String(config[key] ?? args[key] ?? (key==='grounding_profile'?'none':fallback));
+    if (!(preserveEditable && mode==='finetune')) target.value=String(config[key] ?? args[key] ?? (key==='grounding_profile'?'none':key==='continuation_profile'?'reset_v1':fallback));
     target.disabled=mode==='resume';
   });
   const mapping = {
@@ -3138,6 +3152,9 @@ function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) 
     "#streamPlanLossWeight": args.plan_loss_weight,
     "#streamEventDecisionLossWeight": args.event_decision_loss_weight,
     "#streamPrecision": args.precision,
+    "#streamAttentionBackend": args.attention_backend || "auto",
+    "#streamExecutionMode": args.execution_mode || "auto",
+    "#streamCudaGraphBudgetGb": args.cuda_graph_budget_gb ?? 2,
     "#streamWeightDecay": args.weight_decay,
     "#streamAudioCacheGb": args.audio_cache_gb,
     "#streamPrepareWorkers": args.prepare_workers,
@@ -3189,7 +3206,8 @@ function renderChartStreamCheckpointInspection(data) {
     `模型结构：d_model=${config.d_model ?? "未记录"}；layers=${config.layers ?? "未记录"}；nhead=${config.nhead ?? "未记录"}；FFN=${config.dim_feedforward ?? "未记录"}`,
     `连续上下文：${config.max_tokens ?? "未记录"} token；近期历史 ${config.max_history_tokens ?? "未记录"} token；记忆槽 ${config.max_stream_memory ?? "未记录"}`,
     `关联输入：${caps.grounding_profile ?? 'none'}；数值时钟=${caps.causal_numeric_clock?'启用':'未启用'}；局部音频与远期记忆=${caps.native_local_audio?'启用':'未启用'}；选音关联监督=${caps.position_alignment_trained?'已有训练记录':'尚无训练记录'}`,
-    `训练参数：precision=${args.precision ?? "未记录"}；lr=${args.lr ?? "未记录"}；weight_decay=${args.weight_decay ?? "未记录"}；plan_loss_weight=${args.plan_loss_weight ?? "未记录"}`,
+    `连续上下文：${caps.continuation_profile === 'overlap_v1' ? '重叠事件续写' : '原上下文重置'}；重放预算=${caps.context_replay_tokens ?? 256} token（重叠方案生效）`,
+    `训练参数：precision=${args.precision ?? "未记录"}；lr=${args.lr ?? "未记录"}；weight_decay=${args.weight_decay ?? "未记录"}；plan_loss_weight=${args.plan_loss_weight ?? "未记录"}；对称增广=${args.symmetry_augmentation ?? "none"}`,
     `生成能力：连续整曲=${caps.continuous_stream ? "可用" : "不可用"}；精确有理事件=${caps.rational_event_positions ? "可用" : "不可用"}；持续动作记忆=${caps.sustained_action_memory ? "可用" : "不可用"}`,
     "连续整曲、有理事件和持续动作能力按 checkpoint 合同检查；语法可用不等于音乐质量或可玩性合格。",
     "计算块只用于显存管理，不代表音乐边界；旧 event / song-form checkpoint 不能互载。",
@@ -3630,6 +3648,10 @@ async function submitTrain(options = {}) {
       throw new Error('当前后端尚未加载连续流关联训练参数，请重启 WebUI 后再训练。');
     if (backend.training_capabilities?.stream_training_runtime !== 'resident_pipeline_v3')
       throw new Error('当前后端尚未加载连续流输入驻留设置，请重启 WebUI 后再训练。');
+    if (backend.training_capabilities?.stream_cycle_exit_normalization !== 'main_valid_tokens_v1')
+      throw new Error('当前后端尚未加载有界循环退出监督，请在无活动任务时重启 WebUI 后再训练。');
+    if (backend.training_capabilities?.stream_runtime_optimization !== 'bounded_training_graph_v2')
+      throw new Error('当前后端尚未加载连续流速度优化和注意力后端设置，请在无活动任务时重启 WebUI 后再训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/chart-stream/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -4490,7 +4512,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
     const status = await api("/api/status");
-    if (status.stream_generation_contract !== "chart_stream_quality_controls_v3") {
+    if (status.stream_generation_contract !== "chart_stream_quality_controls_v4") {
       throw new Error("当前服务尚未加载连续流质量控制。请使用已更新的 WebUI 服务；若此端口正在训练，请等训练结束后重启，避免新参数被旧后端忽略。");
     }
     const data = await api("/api/chart-stream/generate", payload);
@@ -4838,7 +4860,8 @@ on("#modelFamily", "change", () => {
     for (const [id, v] of Object.entries({streamDModel:256, streamLayers:4, streamNhead:8, streamDimFeedforward:768,
       streamMaxTokens:1024, streamMaxHistoryTokens:256, streamMemoryTokens:32, streamPlanLossWeight:.15,
       streamDropout:.1, streamSeed:0,
-      streamPrecision:"auto", streamWeightDecay:.01, streamAudioCacheGb:8, streamPrepareWorkers:4,
+      streamPrecision:"auto", streamAttentionBackend:"auto", streamExecutionMode:"auto", streamCudaGraphBudgetGb:2,
+      streamWeightDecay:.01, streamAudioCacheGb:8, streamPrepareWorkers:4,
       streamMaxRegionSeconds:15, streamLimitCharts:0, streamLogInterval:25, streamCacheDir:"cache/chart_stream_v1"})) {
       const node = element("#" + id); if (node) node.value = String(v);
     }

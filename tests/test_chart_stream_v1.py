@@ -2,6 +2,7 @@ import json
 from fractions import Fraction
 
 import torch
+import pytest
 
 from maichart.event_timing import EventPoint, event_points_to_joint_tokens, joint_tokens_to_event_points
 from maichart.stream.model import ChartStreamTransformer, StreamConfig
@@ -78,6 +79,46 @@ def test_stream_checkpoint_load_accepts_auto_device(tmp_path):
     save(path, model, optimizer, epoch=1, args={}, manifest=manifest)
     restored, _ = load(path, device='auto')
     assert restored.config.vocab_size == 55
+
+
+def test_legacy_plan_checkpoint_migrates_heads_and_intent_projection(tmp_path):
+    config = StreamConfig(vocab_size=55, d_model=16, nhead=2, layers=1,
+        dim_feedforward=32, plan_dim=8, grounding_profile='causal_audio_v1')
+    model = ChartStreamTransformer(config)
+    with torch.no_grad():
+        model.plan_head.weight.copy_(torch.arange(8 * 16, dtype=torch.float32).reshape(8, 16))
+        model.plan_head.bias.copy_(torch.arange(8, dtype=torch.float32))
+        model.grounding.intent_projection.weight.copy_(
+            torch.arange(16 * 8, dtype=torch.float32).reshape(16, 8))
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    path = tmp_path / 'legacy_plan.pt'
+    save(path, model, None, epoch=1, args={}, manifest=manifest)
+
+    restored, payload = load(path)
+    assert restored.config.plan_dim == 10
+    torch.testing.assert_close(restored.plan_head.weight[:8], model.plan_head.weight)
+    torch.testing.assert_close(restored.plan_head.bias[:8], model.plan_head.bias)
+    torch.testing.assert_close(restored.grounding.intent_projection.weight[:, :8],
+                               model.grounding.intent_projection.weight)
+    assert not restored.plan_head.weight[8:].any()
+    assert not restored.plan_head.bias[8:].any()
+    assert not restored.grounding.intent_projection.weight[:, 8:].any()
+    assert payload['plan_dim_migration']['from'] == 8
+    assert payload['plan_dim_migration']['to'] == 10
+
+
+def test_legacy_plan_checkpoint_rejects_malformed_head(tmp_path):
+    config = StreamConfig(vocab_size=55, d_model=16, nhead=2, layers=1,
+        dim_feedforward=32, plan_dim=8)
+    model = ChartStreamTransformer(config)
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    path = tmp_path / 'legacy_plan_bad.pt'
+    save(path, model, None, epoch=1, args={}, manifest=manifest)
+    payload = torch.load(path, map_location='cpu', weights_only=False)
+    payload['model_state_dict']['plan_head.weight'] = torch.zeros(7, 16)
+    torch.save(payload, path)
+    with pytest.raises(ValueError, match='plan migration parameter plan_head.weight'):
+        load(path)
 
 
 def test_stream_dataset_builds_continuation_chunks_without_chunk_eos(tmp_path, monkeypatch):

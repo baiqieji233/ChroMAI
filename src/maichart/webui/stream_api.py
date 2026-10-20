@@ -13,7 +13,7 @@ from maichart.stream import FAMILY, CHECKPOINT_SCHEMA
 def update_stream_progress(task,line):
     prefix,_,body=line.partition(' ')
     if prefix not in {'form_prepare','stream_prepare','stream_dataset','stream_runtime',
-                      'stream_progress','stream_epoch','stream_checkpoint'}:
+                      'stream_progress','stream_epoch','stream_checkpoint','stream_execution'}:
         return
     try:
         value=json.loads(body)
@@ -34,6 +34,9 @@ def update_stream_progress(task,line):
         task.message=f'数据准备完成 · 谱面 {value.get("charts")} · 计算块 {value.get("chunks")}'
     elif prefix=='stream_runtime':
         task.result.update(stream_runtime=value,epoch_target=value.get('end_epoch'))
+    elif prefix=='stream_execution':
+        task.result.setdefault('stream_execution',{})[value.get('block','unknown')]=value
+        task.message=f'训练执行准备 · {value.get("block")} · {value.get("reason")}'
     elif prefix=='stream_checkpoint':
         task.result['last_checkpoint']=value
         task.message=f'已保存 checkpoint · 更新 {value.get("optimizer_steps")} 步'
@@ -48,6 +51,15 @@ def update_stream_progress(task,line):
             if 'recent_batches_per_sec' in value:
                 task.message+=(f' · 近期 {value["recent_batches_per_sec"]:.2f} batch/秒'
                     f' · 主机计时：等数据 {value.get("data_wait_sec",0):.1f}s / 计算 {value.get("compute_host_sec",0):.1f}s')
+            if 'sample_cuda_forward_backward_ms' in value:
+                task.message+=(f' · 抽样 batch CUDA 流：传输 {value.get("sample_cuda_transfer_ms",0):.1f}ms'
+                    f' / 前后向 {value["sample_cuda_forward_backward_ms"]:.1f}ms')
+            execution=value.get('execution') or {}
+            if execution.get('captured'):
+                task.message+=' · CUDA Graph '+','.join(execution['captured'])
+            memory=value.get('cuda_memory') or {}
+            if memory:
+                task.message+=f' · 显存 {memory.get("allocated_gib",0):.2f} GiB（峰值 {memory.get("peak_allocated_gib",0):.2f}）'
         else:
             fraction=1.
             history=task.result.setdefault('stream_metric_history',[])
@@ -81,7 +93,7 @@ def inspect_payload(payload):
     can_resume = bool(valid and current and payload.get('optimizer_state_dict') and payload.get('dataset_fingerprint'))
     warnings=[]
     if not current:
-        warnings.append('训练合同已更新（因果数值时钟、局部音频、谱师选音关联、事件均衡）；生成仍兼容。继续训练请用 finetune 和新输出目录；要启用新模块，请显式选择「因果音频与历史关联」。')
+        warnings.append('训练合同已更新为 v13（有界循环退出监督）；旧权重仍可生成，请用 finetune 和新输出目录迁移，不能直接 resume。')
     elif not can_resume:
         warnings.append('此权重缺少续训所需的优化器状态或数据身份；请选择 finetune 和新输出目录。')
     if can_resume and payload.get('training_position') and payload['training_position'].get('complete') is not True:
@@ -123,7 +135,8 @@ def start(handler, operation, payload, *, runtime):
               '--max-history-tokens',str(payload.get('max_history_tokens',256)),'--max-stream-memory',str(payload.get('max_stream_memory',32)),
               '--lr',str(payload.get('lr',2e-4)),'--device',str(payload.get('device','auto')),
               '--precision',str(payload.get('precision','auto')),'--cache-dir',str(payload.get('cache_dir','cache/chart_stream_v1')),
-              '--plan-loss-weight',str(payload.get('plan_loss_weight',.15)),
+               '--plan-loss-weight',str(payload.get('plan_loss_weight',.15)),
+               '--curve-slope-loss-weight',str(payload.get('curve_slope_loss_weight',.05)),
               '--event-decision-loss-weight',str(payload.get('event_decision_loss_weight',.25)),
               '--weight-decay',str(payload.get('weight_decay',.01)),
               '--audio-cache-gb',str(payload.get('audio_cache_gb',8)),
@@ -138,8 +151,11 @@ def start(handler, operation, payload, *, runtime):
                 ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
                 ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0),
                 ('input_cache_mode','mapped'),('structure_cache_mb',256),('optimizer_implementation','auto'),
+                ('attention_backend','auto'),
+                ('execution_mode','auto'),('cuda_graph_budget_gb',2.),
                 ('input_residency','auto'),('resident_cache_gb',0.),('resident_memory_reserve_gb',0.),
-                ('cache_validation_records',0)):
+                ('cache_validation_records',0),('continuation_profile','auto'),('context_replay_tokens',256),
+                ('prefix_mask_span_events',8),('cycle_exit_loss_weight',.25),('symmetry_augmentation','mirror_lr')):
             args += ['--'+key.replace('_','-'),str(payload.get(key,default))]
         if type(payload.get('quality_enabled',True)) is not bool:
             raise ValueError('quality_enabled 必须是布尔值')
@@ -198,7 +214,8 @@ def start(handler, operation, payload, *, runtime):
                              ('position_beam_size', 4), ('position_complexity', .35),
                              ('position_complexity_floor',8),('learned_ending_strength',1.),
                              ('constraint_min_probability',.05),('event_reconsider_attempts',4),
-                             ('position_interval_strength', 1.),
+                             ('position_interval_strength', 1.), ('unplanned_gap_penalty_strength', .5),
+                             ('rhythm_diversity_strength', .6),
                              ('early_eos_penalty', 0.),
                              ('max_denominator', 384), ('max_interval_denominator', 96),
                              ('min_spacing_ms', 20.)):
@@ -207,6 +224,8 @@ def start(handler, operation, payload, *, runtime):
                  '--configuration-candidates',str(payload.get('configuration_candidates',4)),
                  '--local-chord-strength', str(payload.get('local_chord_strength', 0.)),
                  '--physical-feasibility-strength', str(payload.get('physical_feasibility_strength', 0.)),
+                 '--section-type-strength', str(payload.get('section_type_strength', 1.)),
+                 '--plan-intent-strength', str(payload.get('plan_intent_strength', 1.)),
                  '--max-button-heads', str(payload.get('max_button_heads', 2)),
                  '--hold-protection', str(payload.get('hold_protection', 'on')),
                  '--reference-check-attempts', str(payload.get('reference_check_attempts',8)),

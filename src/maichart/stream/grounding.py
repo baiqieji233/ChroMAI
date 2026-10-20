@@ -180,19 +180,66 @@ def action_summaries(index,beats,pending,committed):
     return torch.stack(result) if result else torch.zeros(0,51)
 
 
-def masked_note_inputs(ids,codec,rng,probability,*,targets=None,quality=None):
-    """Hide complete authored cells; never teach false continuations in them."""
+def masked_note_inputs(ids,codec,rng,probability,*,targets=None,quality=None,span_events=1,return_events=False):
+    """Hide complete authored cells; never teach false continuations in them.
+
+    Only a target whose own decoder input is MASK is unsupervised: it would ask
+    for the next character of a cell the model cannot see. Timing tokens, the
+    first head after NOTE and every later event remain supervised, which is
+    precisely the recovery-after-unknown-prefix signal masking exists for.
+    """
     result=list(ids);quality=None if quality is None else list(quality)
     # A decoder input is shifted by one. Targets still identify full event
     # boundaries, including a final END absent from the input slice.
     source=list(targets) if targets is not None else list(ids)
     starts=[i for i,t in enumerate(source) if t==codec.at_id]
-    for left,right in zip(starts,starts[1:]+[len(source)]):
-        if rng.random()>=probability:continue
+    selected=False;hidden=[]
+    for event,(left,right) in enumerate(zip(starts,starts[1:]+[len(source)])):
+        if event%max(1,span_events)==0:selected=rng.random()<probability
+        if not selected:continue
+        hidden.append(event)
         for index in range(left,right):
             if source[index]==codec.eos_id:continue
-            if quality is not None:quality[index]=0.
             input_index=index+1 if targets is not None else index
             if input_index<len(result) and codec.tokens[result[input_index]].startswith('N:'):
                 result[input_index]=codec.mask_id
-    return result,quality
+                if quality is not None and input_index<len(quality):quality[input_index]=0.
+    return (result,quality,hidden) if return_events else (result,quality)
+
+
+def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
+                        query_clock=None,query_index=None,targets=None):
+    """Zero interval-echo channels (delta/delta_sec) on masked or dropped events.
+
+    CausalClock stores log1p(delta) and log1p(delta_sec) in columns 15:17 from an
+    event's <note> token until the next event's <note> token. Leaving those
+    columns visible on 100% of historical events lets self-attention copy
+    previous bar intervals directly from clock[..., 15:17] without consulting
+    audio. When note dropout is disabled, clocks are returned untouched.
+    """
+    hidden=set(hidden_events)
+    if not hidden and dropout<=0 or len(clock)==0:
+        return (clock,query_clock) if query_clock is not None else clock
+    source=list(targets) if targets is not None else list(ids)
+    starts=[i for i,t in enumerate(source) if t==codec.at_id]
+    notes=[]
+    for event,(left,right) in enumerate(zip(starts,starts[1:]+[len(source)])):
+        begin=left+1 if targets is not None else left
+        stop=min(len(ids),right+1 if targets is not None else right)
+        note=next((i for i in range(begin,stop) if ids[i]==codec.note_id),None)
+        notes.append((event,note))
+    spans=[]
+    for idx,(event,note) in enumerate(notes):
+        if note is None:continue
+        if event not in hidden and (dropout<=0 or rng.random()>=dropout):continue
+        end=next((n for _,n in notes[idx+1:] if n is not None),len(ids))
+        spans.append((note,end))
+    if not spans:
+        return (clock,query_clock) if query_clock is not None else clock
+    result=clock.clone()
+    q_result=None if query_clock is None else query_clock.clone()
+    for start,end in spans:
+        result[start:end,15:17]=0.
+        if q_result is not None and query_index is not None and start<end:
+            q_result[query_index[start:end],15:17]=0.
+    return (result,q_result) if q_result is not None else result

@@ -17,6 +17,39 @@ from maichart.form.codec import RationalCodec
 from .runtime import resolve_device
 
 
+LEGACY_PLAN_DIM = 8
+CURRENT_PLAN_DIM = 10
+
+
+def _migrate_plan_state(state, config):
+    """Expand the legacy planner heads without changing their trained prefix."""
+    if config.plan_dim != LEGACY_PLAN_DIM:
+        raise ValueError('Plan migration source must have plan_dim=8')
+    width = config.d_model
+    expected = {
+        'plan_head.weight': (LEGACY_PLAN_DIM, width),
+        'plan_head.bias': (LEGACY_PLAN_DIM,),
+    }
+    if config.grounding_profile != 'none':
+        expected['grounding.intent_projection.weight'] = (width, LEGACY_PLAN_DIM)
+    migrated = dict(state)
+    for name, shape in expected.items():
+        value = migrated.get(name)
+        if value is None or tuple(value.shape) != shape:
+            raise ValueError(f'Chart-stream plan migration parameter {name} has an unexpected shape')
+        if name.endswith('intent_projection.weight'):
+            target_shape = (width, CURRENT_PLAN_DIM)
+            expanded = value.new_zeros(target_shape)
+            expanded[:, :LEGACY_PLAN_DIM] = value
+        else:
+            target_shape = ((CURRENT_PLAN_DIM, width) if name.endswith('weight')
+                            else (CURRENT_PLAN_DIM,))
+            expanded = value.new_zeros(target_shape)
+            expanded[:LEGACY_PLAN_DIM] = value
+        migrated[name] = expanded
+    return migrated
+
+
 def _identity(path):
     path = Path(path).resolve()
     data = path.read_bytes()
@@ -79,7 +112,7 @@ def validate_contract(payload):
     if codec.get('schema') != expected['schema'] or list(codec.get('tokens', ())) != expected['tokens']:
         raise ValueError('Chart-stream checkpoint codec token 顺序不兼容')
     config = StreamConfig(**payload['model_config'])
-    if (config.audio_dim, config.condition_dim, config.action_dim, config.plan_dim) != (120, 16, 50, 8):
+    if (config.audio_dim, config.condition_dim, config.action_dim) != (120, 16, 50) or config.plan_dim not in (8, 10):
         raise ValueError('Chart-stream checkpoint 输入/规划维度不兼容')
     if config.vocab_size != len(expected['tokens']):
         raise ValueError('Chart-stream checkpoint codec vocabulary size 不兼容')
@@ -91,15 +124,44 @@ def load(path, device='cpu'):
     # Keep saved optimizer tensors on CPU during inference.
     payload = torch.load(path, map_location='cpu', weights_only=False)
     config = validate_contract(payload)
-    model = ChartStreamTransformer(config)
+    plan_migration = config.plan_dim == LEGACY_PLAN_DIM
+    model_config = replace(config, plan_dim=CURRENT_PLAN_DIM) if plan_migration else config
+    model = ChartStreamTransformer(model_config)
     obsolete = {'memory_projection.weight', 'memory_projection.bias',
                 'plan_projection.weight', 'plan_projection.bias',
-                'event_gate.weight', 'event_gate.bias'}
+                'event_gate.weight', 'event_gate.bias',
+                'grounding.blueprint_head.weight', 'grounding.blueprint_head.bias',
+                'grounding.blueprint_gate.0.weight', 'grounding.blueprint_gate.0.bias',
+                'grounding.blueprint_projection.weight'}
     state = {key: value for key, value in payload['model_state_dict'].items() if key not in obsolete}
+    if plan_migration:
+        state = _migrate_plan_state(state, config)
+    kinematic_key = 'grounding.kinematic_projection.weight'
+    if kinematic_key in state and hasattr(model, 'grounding'):
+        target_weight = model.grounding.kinematic_projection.weight
+        saved_weight = state[kinematic_key]
+        if saved_weight.ndim == 2 and saved_weight.size(0) == target_weight.size(0) and saved_weight.size(1) < target_weight.size(1):
+            padded = torch.zeros_like(target_weight, dtype=saved_weight.dtype, device=saved_weight.device)
+            padded[:, :saved_weight.size(1)] = saved_weight
+            state[kinematic_key] = padded
     try:
-        model.load_state_dict(state, strict=True)
+        result = model.load_state_dict(state, strict=False)
     except RuntimeError as exc:
         raise ValueError(f'Chart-stream checkpoint 参数不兼容：{exc}') from exc
+    from .grounded_model import UPGRADE_PARAMETERS
+    missing = [key for key in result.missing_keys if key not in UPGRADE_PARAMETERS]
+    if missing or result.unexpected_keys:
+        raise ValueError(f'Chart-stream checkpoint 参数不兼容：missing={missing[:8]} unexpected={result.unexpected_keys[:8]}')
+    # Registered upgrade branches are zero-initialised: an older checkpoint
+    # keeps exactly its trained function until it is finetuned.
+    payload['upgraded_parameters'] = sorted(set(result.missing_keys) & set(UPGRADE_PARAMETERS))
+    if plan_migration:
+        payload['plan_dim_migration'] = {
+            'from': LEGACY_PLAN_DIM, 'to': CURRENT_PLAN_DIM,
+            'zero_initialized': ('plan_head.weight[8:10]', 'plan_head.bias[8:10]',
+                                 'grounding.intent_projection.weight[:,8:10]'
+                                 if config.grounding_profile != 'none' else None),
+        }
     model.to(device)
     return model, payload
 

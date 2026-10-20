@@ -336,3 +336,23 @@ def test_tempo_candidate_helper_does_not_promote_129_to_132_drift():
 def test_event_audio_validation_rejects_wrong_shape():
     with pytest.raises(ValueError, match="98"):
         EventAudio(np.zeros((2, 7), dtype=np.float32), np.zeros(2), 1.0, 120.0)
+
+
+def test_detect_global_bpm_refines_190_bpm_without_subharmonic_or_float_drift():
+    from maichart.generation.tempo import detect_global_bpm
+
+    fps = 200.0
+    duration_sec = 90.0
+    envelope = np.zeros(int(duration_sec * fps), dtype=np.float64)
+    period = 60.0 * fps / 190.0
+    for beat in range(int(duration_sec * 190.0 / 60.0)):
+        center = beat * period
+        low = int(center)
+        frac = center - low
+        if low + 1 < len(envelope):
+            envelope[low] += 1.0 - frac
+            envelope[low + 1] += frac
+    bpm, confidence = detect_global_bpm(envelope, fps=fps)
+    assert bpm == 190.0
+    assert round(bpm, 4) == bpm
+    assert confidence > 0.0

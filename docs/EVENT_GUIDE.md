@@ -140,6 +140,10 @@ event checkpoint 如果包含训练时保存的 `atom_catalog`，生成器会将
 组合式生成能力。旧的、没有 `atom_catalog` 的 event checkpoint 会退回较宽松的
 字符约束，但生成失败仍不会被当成成功谱面。
 
+chart_stream 的 note grammar 会将同一 note cell 内的 `*` 同头 Slide 分支限制为最多 2 条；
+普通 event/song_form 路径默认保持旧 atom catalog 行为。普通 `/` 同拍多押不受此上限影响。
+需要诊断旧 event atom catalog 时，可在 CLI 显式使用正数 `--max-star-slides`。
+
 ## 质量报告与验收
 
 event 生成任务应产生输出谱面、ChartIR 和 sidecar `quality.json`。WebUI 会显示报告是否存在，并展示诊断字段；报告缺失时，任务不能被当作质量检查完成。

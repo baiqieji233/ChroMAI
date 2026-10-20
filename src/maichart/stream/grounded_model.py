@@ -7,6 +7,93 @@ from torch import nn
 from torch.nn import functional as F
 
 from .grounding import CLOCK_DIM
+from .symmetry import KINEMATIC_DIM
+
+RELATIVE_DIM = 9
+# Musical-load windows around a query, in seconds: the current beat region,
+# the coming phrase, the coming section and the section just played.
+PHRASE_WINDOWS = ((-1., 1.), (0., 4.), (0., 12.), (-12., 0.))
+PHRASE_DIM = 4*len(PHRASE_WINDOWS)
+ALIGNMENT_WINDOW = 128
+ALIGNMENT_BACK = 2
+# Parameters added after Prism_stream_v9. Each is zero-initialised, so an
+# older checkpoint loads with exactly its previous function.
+UPGRADE_PARAMETERS = ('grounding.local_distance_key.weight','grounding.local_distance_value.weight',
+                      'grounding.phrase_projection.weight','grounding.kinematic_projection.weight',
+                      'grounding.alignment_distance.weight','grounding.audio_boundary_projection.weight')
+
+
+def relative_features(delta_seconds, bpm, scale):
+    """Translation-invariant offsets: seconds, beats and sub-beat phase."""
+    beats = delta_seconds*bpm/60.
+    turn = 2*math.pi*beats
+    return torch.stack((delta_seconds/scale, delta_seconds.abs()/scale, (beats/16.).clamp(-1, 1),
+                        torch.sin(turn), torch.cos(turn), torch.sin(turn/2), torch.cos(turn/2),
+                        torch.sin(turn/4), torch.cos(turn/4)), -1)
+
+
+def prepare_phrase_bank(curve, times, padding):
+    """Immutable prefix integrals; reused by every query during generation."""
+    padding = padding.bool()
+    valid = ~padding & torch.isfinite(times)
+    # Keep the caller's clock precision. Training already transfers seconds
+    # as FP32; promoting them back to FP64 needlessly invokes slow laptop-GPU
+    # FP64 arithmetic. Native FP64 callers keep their previous precision.
+    times = times.contiguous() if times.dtype in (torch.float32,torch.float64) else times.double().contiguous()
+    values = curve.float().masked_fill(~valid[..., None], 0.)
+    batch, total, channels = values.shape
+    if total == 0:
+        return {'values':values,'times':times}
+    counts = valid.sum(1).long()
+    last_index = (counts - 1).clamp_min(0)
+    last_time = times.gather(1, last_index[:, None]).squeeze(1)
+    first_time = times[:, 0]
+    has_values = counts > 0
+    first_time = torch.where(has_values, first_time, first_time.new_zeros(()))
+    last_time = torch.where(has_values, last_time, last_time.new_zeros(()))
+    safe_times = torch.where(valid, times, last_time[:, None])
+    pair_valid = valid[:, :-1] & valid[:, 1:]
+    delta = (safe_times[:, 1:] - safe_times[:, :-1]).clamp_min(0.) * pair_valid
+    area = .5 * (values[:, :-1] + values[:, 1:]) * delta[..., None]
+    cumulative = torch.cat((values.new_zeros(batch, 1, channels), area.cumsum(1)), 1)
+    return dict(values=values,times=safe_times,first_time=first_time,last_time=last_time,
+                last_index=last_index,cumulative=cumulative)
+
+
+def query_phrase_bank(bank, seconds):
+    """Evaluate all eight window boundaries in one search/gather pipeline."""
+    values,times=bank['values'],bank['times']
+    batch,total,channels=values.shape
+    queries=seconds.size(1)
+    if total == 0:
+        return values.new_zeros(batch,queries,PHRASE_DIM)
+    if total == 1:
+        base=values[:,:1].expand(-1,queries,-1)
+        return torch.cat((base,base,base,base),-1)
+    seconds=seconds.to(times)
+    offsets=times.new_tensor(PHRASE_WINDOWS)
+    points=(seconds[...,None,None]+offsets).reshape(batch,-1).contiguous()
+    first,last=bank['first_time'][:,None],bank['last_time'][:,None]
+    indices=torch.searchsorted(times,points).clamp(1,total-1)
+    left=indices-1
+    t0,t1=times.gather(1,left),times.gather(1,indices)
+    c0=bank['cumulative'].gather(1,left[...,None].expand(-1,-1,channels))
+    c1=bank['cumulative'].gather(1,indices[...,None].expand(-1,-1,channels))
+    ratio=((points-t0)/(t1-t0).clamp_min(1e-12)).clamp(0.,1.)
+    interpolated=c0+(c1-c0)*ratio[...,None]
+    last_indices=bank['last_index'][:,None,None].expand(-1,1,channels)
+    final=bank['cumulative'].gather(1,last_indices)
+    final=final+(points-last).clamp_min(0.)[...,None]*values.gather(1,last_indices)
+    integral=torch.where((points<=first)[...,None],torch.zeros_like(interpolated),interpolated)
+    integral=torch.where((points>=last)[...,None],final,integral)
+    integral=integral.reshape(batch,queries,len(PHRASE_WINDOWS),2,channels)
+    duration=(offsets[:,1]-offsets[:,0])[None,None,:,None]
+    return ((integral[:,:,:,1]-integral[:,:,:,0])/duration).reshape(batch,queries,PHRASE_DIM)
+
+
+def phrase_features(curve, times, padding, seconds):
+    """Time-weighted pooling on the native nonuniform audio clock."""
+    return query_phrase_bank(prepare_phrase_bank(curve,times,padding),seconds)
 
 
 class GroundedContext(nn.Module):
@@ -27,15 +114,41 @@ class GroundedContext(nn.Module):
         self.alignment_query=nn.Linear(width,key,bias=False)
         self.alignment_key=nn.Linear(config.audio_dim,key,bias=False)
         self.selection_head=nn.Sequential(nn.Linear(width+config.condition_dim,key),nn.GELU(),nn.Linear(key,1))
+        self.local_distance_key=nn.Linear(RELATIVE_DIM,key,bias=False)
+        self.local_distance_value=nn.Linear(RELATIVE_DIM,width,bias=False)
+        self.phrase_projection=nn.Linear(PHRASE_DIM,width,bias=False)
+        self.kinematic_projection=nn.Linear(KINEMATIC_DIM,width,bias=False)
+        self.alignment_distance=nn.Linear(RELATIVE_DIM,key,bias=False)
+        # A direct event-boundary audio residual prevents the decoder from
+        # dropping every acoustic route through the learned router. It starts
+        # at zero so old checkpoints keep their exact function until finetuned.
+        self.audio_boundary_projection=nn.Linear(width,width,bias=False)
         # Explicit upgrades start from the old logits. New branches learn
         # through residual outputs, with unchanged legacy parameter shapes.
-        for layer in (self.clock_projection,self.local_input,self.fusion,self.intent_projection):
+        for layer in (self.clock_projection,self.local_input,self.fusion,self.intent_projection,
+                      self.local_distance_key,self.local_distance_value,self.phrase_projection,
+                      self.kinematic_projection,self.alignment_distance,
+                      self.audio_boundary_projection):
             nn.init.zeros_(layer.weight)
 
     def prepare_bank(self,values,times,padding):
         mask=padding.bool()
         return {'values':values,'times':times,'padding':mask,
-                'keys':self.local_key(values),'projected':self.local_value(values)}
+                'keys':self.local_key(values),'projected':self.local_value(values),
+                'audio_mean':(values[...,:98]*(~mask)[...,None]).sum(1)/(~mask).sum(1).clamp_min(1)[:,None]}
+
+    def phrase(self,curve,times,padding,seconds):
+        return self.phrase_projection(phrase_features(curve.detach().sigmoid(),times,padding.bool(),seconds).to(
+            self.phrase_projection.weight.dtype))
+
+    def phrase_from_bank(self,bank,seconds):
+        return self.phrase_projection(query_phrase_bank(bank,seconds).to(self.phrase_projection.weight.dtype))
+
+    def kinematics(self,values):
+        return self.kinematic_projection(values.to(self.kinematic_projection.weight.dtype))
+
+    def boundary_audio(self,local):
+        return self.audio_boundary_projection(local.to(self.audio_boundary_projection.weight.dtype))
 
     def local(self,clock,seconds,center,bank):
         values,times,padding=bank['values'],bank['times'],bank['padding']
@@ -44,8 +157,22 @@ class GroundedContext(nn.Module):
         # Leading pre-audio nodes must keep their sorted native times.
         searchable=times.contiguous()
         right=torch.searchsorted(searchable,seconds.contiguous())
-        offsets=torch.arange(width,device=times.device)-width//2
-        raw=right[...,None]+offsets
+        if width<=1:
+            raw=right[...,None]
+        else:
+            # Span [-0.25*radius, +radius] so dense detail grids still observe
+            # upcoming beats instead of collapsing to ~0.2s around `right`.
+            radius=float(self.config.local_audio_seconds)
+            back_count=max(1,width//4);fwd_count=width-back_count
+            low=torch.searchsorted(searchable,(seconds-.25*radius).contiguous())
+            high=(torch.searchsorted(searchable,(seconds+radius).contiguous(),right=True)-1).clamp_min(0)
+            back_excess=((right-low)-back_count).clamp_min(0)[...,None]
+            fwd_excess=((high-right)-max(1,fwd_count-1)).clamp_min(0)[...,None]
+            b=torch.arange(back_count,0,-1,device=times.device)
+            f=torch.arange(fwd_count,device=times.device)
+            back_offsets=-b-torch.round((b/max(1,back_count))**1.6*back_excess).long()
+            fwd_offsets=f+torch.round((f/max(1,fwd_count-1))**1.6*fwd_excess).long()
+            raw=right[...,None]+torch.cat((back_offsets,fwd_offsets),-1)
         indices=raw.clamp(0,max(0,total-1))
         rows=torch.arange(batch,device=times.device)[:,None,None]
         sample_times=times[rows,indices]
@@ -55,6 +182,14 @@ class GroundedContext(nn.Module):
         center_keys=self.local_key(center);center_values=self.local_value(center)
         keys=torch.cat((keys,center_keys[:,:,None]),2)
         features=torch.cat((features,center_values[:,:,None]),2)
+        # Signed offsets let the query tell the coming onset from the one a
+        # beat earlier; beat phase alone repeats every beat inside the window.
+        delta=torch.cat(((sample_times-seconds[...,None]).masked_fill(mask,0.),
+                         sample_times.new_zeros(batch,count,1)),2).float()
+        bpm=(clock[...,19].float()*300.).clamp_min(1.)[...,None]
+        relative=relative_features(delta,bpm,self.config.local_audio_seconds).to(keys.dtype)
+        keys=keys+self.local_distance_key(relative)
+        features=features+self.local_distance_value(relative).to(features.dtype)
         center_mask=(clock[...,14]<0)|(clock[...,14]>=1)
         mask=torch.cat((mask,center_mask[...,None]),2)
         # Always offer an explicit null observation, including before audio.
@@ -87,8 +222,10 @@ class GroundedContext(nn.Module):
         values=archive['embeddings'];count=values.size(1)
         if not count:
             return center.new_zeros(batch,queries,self.config.d_model),center.new_zeros(batch,queries)
-        valid=~bank['padding']
-        mean=(bank['values'][...,:98]*valid[...,None]).sum(1)/valid.sum(1).clamp_min(1)[:,None]
+        mean=bank.get('audio_mean')
+        if mean is None:
+            valid=~bank['padding']
+            mean=(bank['values'][...,:98]*valid[...,None]).sum(1)/valid.sum(1).clamp_min(1)[:,None]
         query=F.normalize((center[...,:98]-mean[:,None]).float(),dim=-1,eps=1e-6)
         keys=F.normalize((archive['audio'][...,:98]-mean[:,None]).float(),dim=-1,eps=1e-6)
         similarity=query@keys.transpose(1,2)
@@ -128,11 +265,33 @@ class GroundedContext(nn.Module):
         return hidden+self.fusion(evidence),routes
 
     def alignment(self,hidden,batch,bank=None):
+        """Next-onset pointer from the event boundary state.
+
+        A boundary row has consumed the previous event only; the label is the
+        detail node of the event about to be written. Candidates are the nodes
+        just after the current clock, keyed by their relative offset, which is
+        the decision the following position tokens actually make.
+        """
         indices=batch['alignment_event_indices'].clamp_min(0)
         query=self.alignment_query(hidden.gather(1,indices[...,None].expand(-1,-1,hidden.size(-1))))
-        keys=self.alignment_key(batch['detail_audio'])
-        scores=(query@keys.transpose(1,2))/math.sqrt(keys.size(-1))
-        scores=scores.masked_fill(batch['detail_audio_padding_mask'][:,None],-1e4)
+        rows=batch['decoder_query_index'].clamp_min(0).gather(1,indices)
+        seconds=batch['query_seconds'].gather(1,rows)
+        bpm=(batch['query_clock'][...,19].gather(1,rows).float()*300.).clamp_min(1.)
+        times=batch['detail_times_sec'];padding=batch['detail_audio_padding_mask'].bool()
+        total=times.size(1);width=min(ALIGNMENT_WINDOW,total)
+        start=(torch.searchsorted(times.contiguous(),seconds.contiguous())-ALIGNMENT_BACK).clamp(0,max(0,total-width))
+        candidates=start[...,None]+torch.arange(width,device=times.device)
+        batch_rows=torch.arange(times.size(0),device=times.device)[:,None,None]
+        full_keys=self.alignment_key(batch['detail_audio'])
+        keys=full_keys[batch_rows,candidates]
+        delta=(times[batch_rows,candidates]-seconds[...,None])
+        invalid=padding[batch_rows,candidates]
+        relative=relative_features(delta.masked_fill(invalid,0.).float(),bpm[...,None],4.).to(keys.dtype)
+        keys=keys+self.alignment_distance(relative)
+        scores=(query[:,:,None].float()*keys.float()).sum(-1)/math.sqrt(keys.size(-1))
+        scores=scores.masked_fill(invalid,-1e4)
+        labels=batch['alignment_audio_index']-start
+        labels=torch.where((labels>=0)&(labels<width),labels,torch.full_like(labels,-1))
         control=batch['condition'][:,None].expand(-1,batch['detail_audio'].size(1),-1)
         if batch.get('condition_null') is not None:
             control=control.clone()
@@ -141,4 +300,5 @@ class GroundedContext(nn.Module):
         # An isolated head on frozen input features would train only itself.
         evidence=bank['projected'] if bank is not None else self.local_value(batch['detail_audio'])
         selection=self.selection_head(torch.cat((evidence,control.to(evidence)),-1)).squeeze(-1)
-        return {'alignment_event_logits':scores,'position_alignment_logits':selection}
+        return {'alignment_event_logits':scores,'alignment_event_labels':labels,
+                'position_alignment_logits':selection}

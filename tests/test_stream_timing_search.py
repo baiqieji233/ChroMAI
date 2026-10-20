@@ -136,6 +136,7 @@ def test_default_stream_search_and_eos_policy_are_explicit():
     args = parser().parse_args(['--audio', 'a', '--checkpoint', 'b', '--output', 'c'])
     assert args.position_beam_size == 4 and args.early_eos_penalty == 0
     assert args.position_interval_strength == 1
+    assert args.unplanned_gap_penalty_strength == .5
 
 
 def test_bounded_learned_interval_cost_changes_ambiguous_choice_but_keeps_a_long_rest_legal():
@@ -152,3 +153,41 @@ def test_bounded_learned_interval_cost_changes_ambiguous_choice_but_keeps_a_long
         torch.zeros(1, 1, 1), None, consumed=0, width=4, canonical_only=True,
         adaptive=True, candidate_cost=costs)
     assert value == '100'
+
+
+def test_large_jump_forces_proposal_review_even_when_beam_is_certified():
+    from maichart.stream.timing import interval_consistency_cost
+    codec = RationalCodec()
+    model = ScriptedModel(codec, [('148', 6.), ('151/2', 2.)])
+    grammar = CanonicalPositionGrammar(F(75), F(400), max_denominator=384)
+    value, status = search_position(model, codec, grammar, model.logits([''])[0, 0], None,
+        torch.zeros(1, 1, 1), None, consumed=0, width=1, max_width=1,
+        complexity=0., canonical_only=True, adaptive=True,
+        candidate_cost=lambda beat: interval_consistency_cost(beat-75, .5/8, .35, .5),
+        proposals=[F(151, 2), F(76)], proposal_trigger=lambda beat: beat-75 > 8)
+    assert value == '151/2'
+    assert status['proposal_triggered'] and status['proposal_expansions'] > 0
+    assert max(model.batch_sizes) == 1
+    # The same large jump stays available when the plan explicitly predicts >=8 beats.
+    model = ScriptedModel(codec, [('148', 6.), ('151/2', 2.)])
+    value, _ = search_position(model, codec, grammar, model.logits([''])[0, 0], None,
+        torch.zeros(1, 1, 1), None, consumed=0, width=1, max_width=1,
+        complexity=0., canonical_only=True, adaptive=True,
+        candidate_cost=lambda beat: interval_consistency_cost(beat-75, 1., .35, .5),
+        proposals=[F(151, 2)], proposal_trigger=lambda beat: False)
+    assert value == '148'
+
+
+def test_proposal_batch_limit_preserves_probabilities_without_wide_cache_expansion():
+    from maichart.form.rational_position_search import _score_proposals
+    codec = RationalCodec()
+    texts = ['76', '151/2', '301/4', '601/8']
+    model = ScriptedModel(codec, [(text, float(i)) for i, text in enumerate(texts)])
+    root = model.logits([''])[0, 0]
+    complete, _ = _score_proposals(model, codec, texts, root, None,
+        torch.zeros(1, 1, 1), None, consumed=0, timing_features=None)
+    model.batch_sizes.clear()
+    bounded, _ = _score_proposals(model, codec, texts, root, None,
+        torch.zeros(1, 1, 1), None, consumed=0, timing_features=None, max_batch_size=1)
+    assert bounded == pytest.approx(complete)
+    assert max(model.batch_sizes) == 1

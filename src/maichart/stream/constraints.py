@@ -37,16 +37,28 @@ def _struck_heads(text):
 
 
 @lru_cache(maxsize=16384)
+def _hold_buttons(text):
+    markers, errors, _ = parse_markers(f'(120){{4}}{text},')
+    if errors:
+        return frozenset()
+    return frozenset(str(marker.get('lane')) for marker in markers
+                     if not (marker.get('is_mine') or marker.get('head_mine'))
+                     and marker.get('type') == 'hold' and marker.get('lane') in range(1, 9))
+
+
+@lru_cache(maxsize=16384)
 def _action_duration(text,bpm):
     markers,errors,_ = parse_markers(f'({bpm}){{4}}{text},')
     return None if errors else max([0.,*(float(marker.get('end_second',0.)) for marker in markers)])
 
 
 class RestrictedCell:
-    def __init__(self, owner, forbidden, button_capacity=None, held_buttons=frozenset(), *, beat=0):
+    def __init__(self, owner, forbidden, button_capacity=None, held_buttons=frozenset(),
+                 slide_launch_buttons=frozenset(), *, beat=0):
         self.owner, self.base, self.forbidden = owner, owner.grammar, forbidden
         self.button_capacity = button_capacity
         self.held_buttons = held_buttons
+        self.slide_launch_buttons = frozenset(slide_launch_buttons or ())
         self.second = float(seconds_at_beat(beat,owner.tempo,owner.first))
         self.bpm = next(change.bpm for change in reversed(owner.tempo) if change.beat <= beat)
 
@@ -55,12 +67,16 @@ class RestrictedCell:
         duration = _action_duration(text,self.bpm)
         return duration is not None and self.second+duration <= self.owner.max_action_end+1e-8
 
-    def _accept(self, heads):
+    def _accept(self, heads, hold_buttons=frozenset()):
         buttons = frozenset(head for head in (heads or ()) if len(head)==1 and head in '12345678')
+        # A non-Hold button head at a Slide's launch instant (slide_trace_second)
+        # is a MiaCode slide_head: the hand launching that Slide strikes it without
+        # requiring an additional free hand. Holds must stay put and still need capacity.
+        extra_buttons = (buttons - self.slide_launch_buttons) | (buttons & hold_buttons)
         held = self.held_buttons
         return (heads is not None and not heads & self.forbidden
                 and len({_pad(head) for head in heads}) == len(heads)
-                and (self.button_capacity is None or len(buttons) <= self.button_capacity)
+                and (self.button_capacity is None or len(extra_buttons) <= self.button_capacity)
                 and (not self.owner.max_button_heads or
                      len(buttons | held) <= self.owner.max_button_heads))
 
@@ -68,23 +84,28 @@ class RestrictedCell:
         if not self.base.can_continue(text):
             return False
         parts = self.base._split_slashes(text)
-        used, occupied = set(), set()
+        used, used_holds, occupied = set(), set(), set()
         for part in parts[:-1]:
             heads = _struck_heads(part)
             if heads is None:
                 return False
             if not self._duration_fits(part): return False
             used.update(heads)
+            used_holds.update(_hold_buttons(part))
             occupied.update(self.base.heads[part])
-        if not self._accept(frozenset(used)):
+        if not self._accept(frozenset(used), frozenset(used_holds)):
             return False
         for structure, heads,atom in self.owner.completions(parts[-1]):
-            if not structure & occupied and self._accept(frozenset(used) | heads) and self._duration_fits(atom):
+            if (not structure & occupied
+                    and self._accept(frozenset(used) | heads, frozenset(used_holds) | _hold_buttons(atom))
+                    and self._duration_fits(atom)):
                 return True
         return False
 
     def is_complete(self, text):
-        return self.base.is_complete(text) and self._accept(_struck_heads(text)) and self._duration_fits(text)
+        return (self.base.is_complete(text)
+                and self._accept(_struck_heads(text), _hold_buttons(text))
+                and self._duration_fits(text))
 
 
 class BasicConfigurationGuard:
@@ -108,7 +129,7 @@ class BasicConfigurationGuard:
             self._completions[prefix] = tuple(values)
         return self._completions[prefix]
 
-    def event(self, beat, *, button_capacity=None):
+    def event(self, beat, *, button_capacity=None, slide_launch_buttons=frozenset()):
         second = float(seconds_at_beat(beat, self.tempo, self.first))
         # Queries are speculative: a rejected later position may be followed
         # by an earlier alternative. Only commit may discard expired actions.
@@ -120,7 +141,8 @@ class BasicConfigurationGuard:
         for head in forbidden:
             if len(head)==1 and head in '12345678': aliases.add('A'+head)
             elif len(head)==2 and head[0]=='A' and head[1] in '12345678': aliases.add(head[1])
-        return RestrictedCell(self,frozenset(aliases),button_capacity,held_buttons,beat=beat)
+        return RestrictedCell(self,frozenset(aliases),button_capacity,held_buttons,
+                              slide_launch_buttons,beat=beat)
 
     def commit(self, point):
         when = float(seconds_at_beat(point.beat, self.tempo, self.first))

@@ -11,17 +11,18 @@ import torch
 
 from maichart.event_timing import EventPoint, seconds_at_beat
 from maichart.form.rational_audio import beat_at_second
-from maichart.form.rational_generate import PositionGrammar, _spacing_beat_gap
+from maichart.form.rational_generate import _spacing_beat_gap
 from maichart.form.rational_position_search import search_position
 from maichart.form.type_guidance import TypeGuidance
 from maichart.generation.sustain_state import SustainStateIndex
 from .memory import StreamMemoryBank
-from .timing import CanonicalPositionGrammar, interval_consistency_cost
+from .timing import CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost
 from .context import prefix_action_state
 from .constraints import BasicConfigurationGuard
 from .reference_guard import ReferenceCandidateGuard
 from .ending import LearnedEnding
 from .configuration_search import propose_configurations
+from .continuation import replay_budget,replay_start
 
 
 def validate_options(args):
@@ -61,6 +62,18 @@ def validate_options(args):
         value = getattr(args, name)
         if not math.isfinite(value) or not 0 <= value <= 3:
             raise ValueError(f'{name} 必须是 0–3 的有限数值')
+    section=getattr(args,'section_type_strength',1.0)
+    if not math.isfinite(section) or not 0<=section<=3:
+        raise ValueError('section_type_strength 必须是 0–3 的有限数值')
+    rhythm_diversity=float(getattr(args,'rhythm_diversity_strength',.6))
+    if not math.isfinite(rhythm_diversity) or not 0<=rhythm_diversity<=3:
+        raise ValueError('rhythm_diversity_strength 必须是 0–3 的有限数值')
+    gap_penalty=float(getattr(args,'unplanned_gap_penalty_strength',0.))
+    if not math.isfinite(gap_penalty) or not 0<=gap_penalty<=3:
+        raise ValueError('unplanned_gap_penalty_strength 必须是 0–3 的有限数值')
+    intent=getattr(args,'plan_intent_strength',1.0)
+    if not math.isfinite(intent) or not 0<=intent<=1:
+        raise ValueError('plan_intent_strength 必须是 0–1 的有限数值')
     if not math.isfinite(args.constraint_min_probability) or not 0<=args.constraint_min_probability<=1:
         raise ValueError('constraint_min_probability 必须为 0–1 的有限数值')
     for name, high in (('position_complexity', 2.), ('early_eos_penalty', 8.),
@@ -88,6 +101,15 @@ def rewind_decoder_cache(cache, prefix_length):
     return [(k[:,:prefix_length],v[:,:prefix_length],*rest) for k,v,*rest in cache],prefix_length
 
 
+def search_workspace_limits(beam, candidates, free_gib=None):
+    """Limit concurrent hypotheses, never disable Fraction scoring."""
+    if free_gib is not None and free_gib < 4.:
+        return 1, 1
+    if free_gib is not None and free_gib < 6.:
+        return min(2, beam), 1
+    return beam, candidates
+
+
 @torch.inference_mode()
 def compose_stream(model, codec, song, audio_values, audio_times, condition, atoms, args):
     """Return complete committed events plus an explicit termination status.
@@ -105,14 +127,24 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     grounded=None
     if model.config.grounding_profile!='none':
         from .grounded_inference import GroundedInference
-        grounded=GroundedInference(model,codec,song,encoded_audio)
+        grounded=GroundedInference(model,codec,song,encoded_audio,audio_times=audio_times)
         model=grounded
     base_projection = model.audio_projection(audio)[0] if grounded is None else None
     bank = StreamMemoryBank(max_entries=max(256, model.config.max_stream_memory),
                             max_retrieval=model.config.max_stream_memory)
+    section_strength=float(getattr(args,'section_type_strength',1.0))
+    section_profile=None
+    if (section_strength and args.style_balance_strength) or args.local_chord_strength:
+        from .section_profile import SectionTypeProfile
+        section_profile=SectionTypeProfile(encoded_audio[2][0].sigmoid().float().cpu().numpy(),audio_times)
+    plan_intent_strength=float(getattr(args,'plan_intent_strength',1.0))
     guidance = TypeGuidance(atoms, condition, [], planner_strength=0.,
         style_strength=args.style_balance_strength, local_chord_strength=args.local_chord_strength,
-        physical_strength=args.physical_feasibility_strength)
+        physical_strength=args.physical_feasibility_strength,
+        section_profile=section_profile if section_strength and args.style_balance_strength else None,
+        section_strength=section_strength if section_profile is not None and args.style_balance_strength else 0.,
+        plan_intent_strength=plan_intent_strength, max_star_slides=2)
+    plan_intent=None
     grammar = guidance.grammar
     hard_guard = BasicConfigurationGuard(grammar, song.tempo, song.first,
         max_button_heads=args.max_button_heads, protect_holds=args.hold_protection == 'on',
@@ -138,12 +170,27 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     state, spelling, header_start = 'event', '', 0
     cache, consumed = None, 0
     rotations = emitted_tokens = canonicalizations = 0
+    rotation_trace=[]
     event_bias = None
     interval_prediction = None
     searches, search_expansions, search_trace, event_trace = 0, 0, [], []
     rejected_positions,event_retries,event_retry_count = set(),[],0
     event_trace_tail=[]
+    memory_guard_events=[]
     started = time.perf_counter()
+    def workspace_limits():
+        beam=args.position_beam_size; candidates=getattr(args,'configuration_candidates',4)
+        free_gib=None
+        if device.type=='cuda':
+            free,_=torch.cuda.mem_get_info(device)
+            free_gib=float(free)/1024**3
+        beam,candidates=search_workspace_limits(beam,candidates,free_gib)
+        if beam!=args.position_beam_size or candidates!=getattr(args,'configuration_candidates',4):
+            if not memory_guard_events or memory_guard_events[-1]['beam']!=beam or memory_guard_events[-1]['candidates']!=candidates:
+                memory_guard_events.append({'free_gib':None if free_gib is None else round(free_gib,3),
+                    'beam':beam,'candidates':candidates,'position_policy':'whole_fraction',
+                    'events':len(points),'after_beat':str(previous) if points else None})
+        return beam,candidates
     # Search just beyond the file as a stop alternative. Otherwise the grammar
     # turns an intended next whole beat beyond EOF into a tiny legal fraction
     # in the last milliseconds. Such a position is never emitted as a note.
@@ -157,13 +204,15 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         choices = [i for i in (right-1, right) if 0 <= i < len(audio_times)]
         return min(choices, key=lambda i: abs(float(audio_times[i])-second)) if choices else 0
 
-    def refresh_context():
-        if grounded is not None:grounded.begin_context(points,history_tokens)
+    def refresh_context(context_points=None):
+        context_points=points if context_points is None else context_points
+        if grounded is not None:grounded.begin_context(context_points,history_tokens)
         action = audio.new_zeros((1, 1, 50))
         action_mask = torch.ones((1, 1), dtype=torch.bool, device=device)
-        if points:
-            index = grounded.state if grounded is not None else SustainStateIndex(points, song.tempo, song.first)
-            states, padding, _ = prefix_action_state(index, points, len(points))
+        if context_points:
+            index = ((grounded.replay_state or grounded.state) if grounded is not None
+                     else SustainStateIndex(context_points, song.tempo, song.first))
+            states, padding, _ = prefix_action_state(index, context_points, len(context_points))
             action, action_mask = states[None].to(device), padding[None].to(device)
         history = torch.tensor([history_tokens], dtype=torch.long, device=device) if history_tokens else None
         summary, summary_mask = (model.summarize_tokens(history, return_padding_mask=True)
@@ -177,6 +226,34 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             stream_memory=summary, stream_memory_padding_mask=summary_mask, encoded_audio=encoded_audio)
         kwargs={'history_clock':grounded.history_clock} if grounded is not None else {}
         return model.prepare_decode_memory(memory, padding, history=history,**kwargs)
+
+    def rotate_context(pending=(), *, space_failure=False):
+        nonlocal ids,history_tokens,memory,memory_mask,cache,consumed,header_start,rotations
+        budget=replay_budget(model.config)
+        if space_failure and rotation_trace and rotation_trace[-1]['events']==len(points):
+            budget=0  # A long cell must not cause endless replay retries.
+        full=codec.encode(points)[:-1]
+        warm=replay_start(full,len(full),min(budget,max(0,model.config.max_tokens-len(pending)-2)),codec.at_id)
+        count=sum(t==codec.at_id for t in full[:warm])
+        history_tokens=full[max(0,warm-model.config.max_history_tokens):warm]
+        # Release the old self/cross attention workspace before constructing
+        # the replacement context. Otherwise a rotation briefly holds both
+        # generations of KV tensors and can push Windows into shared memory.
+        cache=None; consumed=0
+        old_memory,old_mask=memory,memory_mask
+        memory=None; memory_mask=None
+        del old_memory,old_mask
+        memory,memory_mask=refresh_context(points[:count])
+        suffix=full[warm:]
+        ids=[codec.bos_id]+suffix+list(pending)
+        header_start=1+len(suffix)
+        rotations+=1
+        record={'events':len(points),'after_beat':str(previous),
+            'audio_second':float(seconds_at_beat(previous,song.tempo,song.first)),
+            'replayed_events':len(points)-count,'replayed_tokens':len(suffix),
+            'history_tokens':len(history_tokens),'reason':'space_retry' if space_failure else 'context_capacity'}
+        rotation_trace.append(record)
+        print('stream_context_rotation '+json.dumps(record),flush=True)
 
     def retry_note():
         nonlocal ids,cache,consumed,spelling,note_choices,note_attempts
@@ -219,7 +296,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         cache,consumed=rewind_decoder_cache(cache,header_start-1)
         # Local/physical helpers may have evaluated the rejected future time;
         # rebuild them from authored points before trying an earlier proposal.
-        guidance.replay(points,song.tempo,song.first)
+        guidance.replay(points,song.tempo,song.first,
+            curve_factor=section_profile.density_factor if section_profile is not None else None)
         state,spelling='event',''
         return True
 
@@ -230,22 +308,18 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'resource_rotations': 0, 'tokens': 0}
     while True:
         if state == 'event':
+            effective_beam,effective_candidates=workspace_limits()
             if args.max_events and len(points) >= args.max_events:
                 reason, incomplete = 'event_budget', True
                 break
-            needs_search_space = (args.position_beam_size > 1
-                and len(ids) + characters + 2 > model.config.max_tokens)
+            needs_search_space = len(ids) + characters + 2 > model.config.max_tokens
             if points and len(ids) > 1 and (len(ids) >= model.config.max_tokens - 1 or needs_search_space):
-                history_tokens = (history_tokens + (ids if rotations == 0 else ids[1:]))[-model.config.max_history_tokens:]
-                memory, memory_mask = refresh_context()
-                ids, cache, consumed = [codec.bos_id], None, 0
-                rotations += 1
+                rotate_context()
             gap = (_spacing_beat_gap(previous, song.tempo, args.min_spacing_ms / 1000.)
                    if previous >= 0 else Fraction(0))
             # Every admissible fraction fits this spelling budget; 40 digits
             # only made impossible numerical branches expensive to explore.
-            grammar_type = CanonicalPositionGrammar if args.position_beam_size > 1 else PositionGrammar
-            position_grammar = grammar_type(previous, search_end, characters=characters,
+            position_grammar = CanonicalPositionGrammar(previous, search_end, characters=characters,
                 max_denominator=args.max_denominator,
                 max_delta_denominator=args.max_interval_denominator or None,
                 delta_reference=previous if previous >= 0 else Fraction(0),
@@ -265,11 +339,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             # or making a resource limit act as a musical ending.
             if header_start <= 1:
                 raise ValueError('单个配置超过流上下文 token 上限；请增大「流上下文 token 上限」后重试。')
-            history_tokens = (history_tokens + ids[0 if rotations == 0 else 1:header_start])[-model.config.max_history_tokens:]
             pending = ids[header_start:]
-            memory, memory_mask = refresh_context()
-            ids, cache, consumed, header_start = [codec.bos_id] + pending, None, 0, 1
-            rotations += 1
+            rotate_context(pending,space_failure=True)
             if len(ids) > model.config.max_tokens:
                 raise ValueError('单个配置超过流上下文 token 上限；请增大「流上下文 token 上限」后重试。')
         while consumed < len(ids):
@@ -280,15 +351,23 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         logits = output['logits'][0, -1].float()
         if state == 'event':
             allowed = [codec.eos_id, codec.at_id]
+            # Read boundary diagnostics and the complete plan together. These
+            # CPU consumers used to synchronize CUDA separately six times.
+            plan=output.get('plan')
+            boundary_values=torch.cat((logits[allowed],plan[0,-1].float()
+                if plan is not None else logits.new_empty(0))).cpu().tolist()
             scores = logits.clone()
             scores[codec.eos_id] -= args.early_eos_penalty
-            raw_margin=float(scores[codec.eos_id]-scores[codec.at_id])
+            raw_eos_margin=boundary_values[0]-boundary_values[1]
+            raw_margin=raw_eos_margin-args.early_eos_penalty
+            guided_margin=raw_margin
             if ending is not None and ending.strength:
                 clock=float(seconds_at_beat(previous,song.tempo,song.first)) if points else 0.
-                scores[codec.eos_id]=scores[codec.at_id]+ending.eos_logit(raw_margin,clock)
+                guided_margin=ending.eos_logit(raw_margin,clock)
+                scores[codec.eos_id]=scores[codec.at_id]+guided_margin
             decision={'after_beat':str(previous) if points else None,
-                'raw_eos_minus_at':float(logits[codec.eos_id]-logits[codec.at_id]),
-                'guided_eos_minus_at':float(scores[codec.eos_id]-scores[codec.at_id])}
+                'raw_eos_minus_at':raw_eos_margin,
+                'guided_eos_minus_at':guided_margin}
             if len(event_trace)<64:event_trace.append(decision)
             event_trace_tail.append(decision);del event_trace_tail[:-32]
             selected = sample_token(scores, allowed, args.position_temperature, rng)
@@ -297,22 +376,37 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 reason, incomplete = 'eos', False
                 break
             header_start = len(ids)-1
-            interval_prediction = (float(output['plan'][0, -1, 0])
-                if previous >= 0 and args.position_interval_strength else None)
+            interval_prediction = (boundary_values[2]
+                if previous >= 0 and plan is not None and
+                (args.position_interval_strength or getattr(args,'unplanned_gap_penalty_strength',0.)) else None)
+            # Same row the plan target supervises: the next event's intent.
+            plan_intent = (np.asarray(boundary_values[5:],dtype=np.float32)
+                           if plan_intent_strength and plan is not None else None)
             state, spelling = 'position', ''
         elif state == 'position':
-            if not spelling and args.position_beam_size > 1:
+            effective_beam,effective_candidates=workspace_limits()
+            rhythm_diversity_strength=float(getattr(args,'rhythm_diversity_strength',.6))
+            gap_penalty_strength=float(getattr(args,'unplanned_gap_penalty_strength',0.))
+            if not spelling:
                 def interval_cost(beat):
-                    return interval_consistency_cost(beat-previous, interval_prediction,
-                                                     args.position_interval_strength)
+                    return (interval_consistency_cost(beat-previous, interval_prediction,
+                                                      args.position_interval_strength,
+                                                      gap_penalty_strength)
+                            + rhythm_cycle_cost(beat, points, previous, rhythm_diversity_strength))
                 chosen, info = search_position(model, codec, position_grammar, logits, cache,
-                    memory, memory_mask, consumed=consumed, width=args.position_beam_size,
+                    memory, memory_mask, consumed=consumed, width=effective_beam,
                     complexity=args.position_complexity, temperature=args.position_temperature,
                     complexity_floor=args.position_complexity_floor,
                     timing_features=grounded.timing_features if grounded is not None else None,
                     generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost,
-                    proposals=([Fraction(math.floor(previous)+1)] + [previous+(b.beat-a.beat)
-                        for a,b in reversed(list(zip(points[-33:],points[-33:][1:])))]
+                    max_width=effective_beam,
+                    proposal_trigger=lambda beat: (interval_prediction is not None
+                        and 0 <= interval_prediction < 1.
+                        and float(beat-previous) > max(interval_prediction*16.,interval_prediction*8.+4.)),
+                    proposals=([Fraction(math.floor(previous)+1)]
+                        + [previous+step for step in (Fraction(1,4),Fraction(1,2),Fraction(1,3),Fraction(3,4),
+                                                      Fraction(1,6),Fraction(1,8),Fraction(1),Fraction(2))]
+                        + [previous+(b.beat-a.beat) for a,b in reversed(list(zip(points[-17:],points[-17:][1:])))]
                         if previous >= 0 else []))
                 info['interval_prediction_beats_clipped_8'] = (None if interval_prediction is None
                     else min(1., max(0., interval_prediction))*8.)
@@ -323,14 +417,11 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                         # A search may lack space for a whole fraction in the
                         # remaining compute context. Retry at its exact saved
                         # event boundary with the same musical lower bound.
-                        history_tokens = (history_tokens + ids[0 if rotations == 0 else 1:header_start])[-model.config.max_history_tokens:]
-                        memory, memory_mask = refresh_context()
-                        ids, cache, consumed, header_start = [codec.bos_id, codec.at_id], None, 0, 1
-                        rotations += 1
+                        rotate_context([codec.at_id],space_failure=True)
                         continue
                     reason, incomplete = 'position_search_exhausted', True
                     break
-                if len(search_trace) < 64 or (previous >= 0 and float(seconds_at_beat(Fraction(chosen), song.tempo, song.first)
+                if len(search_trace) < 64 or info.get('proposal_triggered') or (previous >= 0 and float(seconds_at_beat(Fraction(chosen), song.tempo, song.first)
                         - seconds_at_beat(previous, song.tempo, song.first)) >= 4.):
                     search_trace.append({'previous_beat': str(previous), 'chosen_beat': chosen, **info})
                 spelling = chosen
@@ -355,12 +446,15 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     canonicalizations += 1
                 second = float(seconds_at_beat(position, song.tempo, song.first))
                 if guidance.local_chords is not None:
-                    guidance.local_chords.cues[position] = (second, 1.)
+                    guidance.local_chords.cues[position] = (
+                        second, section_profile.density_factor(second) if section_profile is not None else 1.)
                 if guidance.physical is not None:
                     guidance.physical.register(position, second, song.tempo, song.first)
-                event_bias = guidance.event(position)
-                cell_grammar = hard_guard.event(position,button_capacity=(
-                    reference_guard.button_capacity(position) if reference_guard is not None else None))
+                event_bias = guidance.event(position, second, intent=plan_intent)
+                cell_grammar = hard_guard.event(position,
+                    button_capacity=(reference_guard.button_capacity(position) if reference_guard is not None else None),
+                    slide_launch_buttons=(reference_guard.slide_launch_buttons(position)
+                                          if reference_guard is not None else frozenset()))
                 note_bans,note_choices,note_attempts = {},[],0
                 state, spelling = 'note', ''
             else:
@@ -371,7 +465,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     nonlocal note_attempts
                     if reference_guard is not None:note_attempts+=1
                     return reference_guard.check(EventPoint(position,text))[0] if reference_guard is not None else True
-                candidate_budget=getattr(args,'configuration_candidates',4)
+                candidate_budget=effective_candidates
                 if reference_guard is not None:candidate_budget=min(candidate_budget,max(1,args.reference_check_attempts-note_attempts))
                 picked,search=propose_configurations(model,codec,logits,cache,memory,memory_mask,
                     consumed=consumed,max_tokens=model.config.max_tokens,grammar=grammar,restricted=cell_grammar,
@@ -383,11 +477,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 if search['reason']=='context_space':
                     if header_start<=1:
                         raise ValueError('完整配置候选超过流上下文 token 上限；请增大「流上下文 token 上限」。')
-                    history_tokens=(history_tokens+ids[0 if rotations==0 else 1:header_start])[-model.config.max_history_tokens:]
                     pending=ids[header_start:]
-                    memory,memory_mask=refresh_context()
-                    ids,cache,consumed,header_start=[codec.bos_id]+pending,None,0,1
-                    rotations+=1
+                    rotate_context(pending,space_failure=True)
                     continue
                 if picked is None:
                     if (reference_guard is not None and search['reason']=='reference_constraints_exhausted'
@@ -403,7 +494,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 selected=None
             if selected is None:
                 prefix_key = (spelling,cell_grammar.forbidden,cell_grammar.button_capacity,
-                              cell_grammar.held_buttons,cell_grammar.second)
+                              cell_grammar.held_buttons,cell_grammar.slide_launch_buttons,cell_grammar.second)
                 cached_allowed = note_prefix_cache.get(prefix_key)
                 if cached_allowed is None:
                     base_allowed = [index for index, char in chars if grammar.can_continue(spelling+char)]
@@ -415,6 +506,17 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     note_prefix_cache[prefix_key] = (allowed,base_allowed)
                 else:
                     allowed,base_allowed=cached_allowed
+                if allowed:
+                    token_text=[None if token==codec.end_id else codec.tokens[token][2:] for token in allowed]
+                    values=event_bias.token_bias(spelling,token_text)
+                    # No terminal resampling here: use the bounded prefix
+                    # potentials so style, local-chord and physical guidance
+                    # still act instead of silently switching off.
+                    values=[a+b for a,b in zip(values,event_bias.biases(spelling,token_text))]
+                    bias=torch.as_tensor(values,device=logits.device,dtype=logits.dtype)
+                    scores=logits.clone();scores[allowed]+=bias
+                else:
+                    scores=logits
                 if args.constraint_min_probability and base_allowed and len(allowed)<len(base_allowed):
                     kept=(float(torch.exp(torch.logsumexp(logits[allowed],0)-torch.logsumexp(logits[base_allowed],0)))
                           if allowed else 0.)
@@ -430,7 +532,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     if retry_event('configuration_constraints_exhausted'):continue
                     reason, incomplete = 'configuration_constraints_exhausted', True
                     break
-                selected = sample_token(logits, allowed, args.temperature, rng)
+                selected = sample_token(scores, allowed, args.temperature, rng)
                 if reference_guard is not None and len(allowed)>1:
                     alternatives = [token for token in allowed if token != selected]
                     margin = float(logits[selected]-logits[alternatives].max())
@@ -467,6 +569,9 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 spelling += codec.tokens[selected][2:]
     return points, {'closed': not incomplete, 'incomplete': incomplete, 'reason': reason,
                     'resource_rotations': rotations, 'tokens': emitted_tokens,
+                    'context_rotations':rotation_trace,
+                    'memory_guard_events':memory_guard_events,
+                    'continuation_profile':getattr(model.config,'continuation_profile','reset_v1'),
                     'equivalent_fraction_normalizations': canonicalizations,
                     'audio_encoder_calls': 1, 'guidance': guidance.report(),
                     'configuration_search':{'mode':'complete_cell_importance_resampling',
@@ -481,7 +586,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'event_reconsideration':{'retries':event_retries,'total_retries':len(event_retries),
                         'minimum_retained_probability':args.constraint_min_probability,
                         'budget_per_event':args.event_reconsider_attempts},
-                    'position_search': {'mode': 'whole_fraction' if args.position_beam_size > 1 else 'character',
+                    'position_search': {'mode': 'whole_fraction',
                         'searches': searches, 'expanded_hypotheses': search_expansions,
                         'trace_first_64': search_trace}, 'event_decisions_first_64': event_trace,
                     'event_decisions_last_32':event_trace_tail}
