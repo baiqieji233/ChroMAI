@@ -77,6 +77,7 @@ def generate(args):
     model_config = asdict(model.config)
     checkpoint_training = {key: payload.get(key) for key in ('epoch', 'optimizer_steps', 'training_position')}
     checkpoint_training['training_semantics'] = (payload.get('args') or {}).get('training_semantics', 'legacy')
+    args.interval_metrics=payload.get('metrics') or {}
     del payload
     audio = extract_rational_audio(args.audio, cache_dir=Path(args.checkpoint).parent/'audio_cache',
                                    evidence_profile='balanced_evidence_v1')
@@ -133,7 +134,7 @@ def generate(args):
             'position_temperature': args.position_temperature, 'early_eos_penalty': args.early_eos_penalty,
             'max_denominator': args.max_denominator, 'max_interval_denominator': args.max_interval_denominator,
             'min_spacing_ms': args.min_spacing_ms,
-            'interval_consistency_policy': 'censored_log_ratio_v1',
+            'interval_consistency_policy': 'conservative_censored_log_ratio_v2',
             'max_button_heads': args.max_button_heads, 'hold_protection': args.hold_protection,
             'reference_check_attempts':args.reference_check_attempts,
             'local_chord_strength_requested': args.local_chord_strength,

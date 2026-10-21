@@ -353,3 +353,120 @@ def test_webui_exposes_rhythm_diversity_and_updated_cycle_exit_default():
     assert 'id="streamRhythmDiversityStrength"' in html
     assert 'streamRhythmDiversityStrength' in js
     assert 'rhythm_diversity_strength' in js
+
+
+
+def test_plan_head_is_detached_from_token_ce_through_intent_projection():
+    from maichart.form.codec import RationalCodec
+    from maichart.stream.model import ChartStreamTransformer, StreamConfig
+    from maichart.stream.timing import interval_consistency_cost
+    codec = RationalCodec()
+    cfg = StreamConfig(vocab_size=len(codec), d_model=32, nhead=4, layers=1, dim_feedforward=64,
+                       max_tokens=32, max_audio_tokens=16, max_history_tokens=8, max_stream_memory=4,
+                       grounding_profile='causal_audio_v1')
+    model = ChartStreamTransformer(cfg)
+    torch.nn.init.ones_(model.grounding.intent_projection.weight)
+    decoder_input = torch.tensor([[codec.bos_id, codec.at_id, codec.ids['P:1'], codec.note_id, codec.ids['N:2'], codec.end_id]])
+    memory = torch.randn(1, 8, cfg.d_model, requires_grad=True)
+    memory_mask = torch.zeros(1, 8, dtype=torch.bool)
+    timing_features = torch.zeros(1, 6, 20)
+    grounding_context = {
+        'local': torch.randn(1, 6, cfg.d_model),
+        'archive': torch.randn(1, 6, cfg.d_model),
+        'global': torch.randn(1, cfg.d_model),
+        'action': torch.randn(1, 6, cfg.d_model),
+    }
+    out = model.decode(decoder_input, memory, memory_mask, timing_features=timing_features,
+                       grounding_context=grounding_context)
+    grad_plan_from_logits, grad_intent_from_logits = torch.autograd.grad(
+        out['logits'].sum(), [model.plan_head.weight, model.grounding.intent_projection.weight],
+        retain_graph=True, allow_unused=True
+    )
+    assert grad_plan_from_logits is None
+    assert grad_intent_from_logits is not None and grad_intent_from_logits.abs().sum() > 0
+    grad_plan_from_plan, = torch.autograd.grad(out['plan'].sum(), [model.plan_head.weight])
+    assert grad_plan_from_plan.abs().sum() > 0
+    assert interval_consistency_cost(1., -.25, 1., gap_penalty_strength=1.) == 0.
+
+
+def test_kinematic_rows_masks_interval_echo_and_touch_flag_and_decays_consecutive_touch():
+    from maichart.stream.symmetry import kinematic_rows
+    masked = kinematic_rows([(), (3,)], [1., 2.], [1, 2], [2., 3.], masked_events={0})
+    assert np.allclose(masked[0, 16:18], 0.)
+    assert masked[0, 23] == 0.
+    assert masked[1, 16] > 0. and masked[1, 17] == 0.
+    touches = kinematic_rows([(), (), ()], [1., 2., 3.], [1, 2, 3], [1.5, 2.5, 3.5])
+    assert touches[0, 23] == pytest.approx(1.)
+    assert touches[1, 23] == pytest.approx(.5)
+    assert touches[2, 23] == pytest.approx(1. / 3.)
+
+
+def test_cycle_exit_targets_marks_duration_bracket_touch_cluster_and_confined_lane_exits():
+    from maichart.event_timing import EventPoint
+    from maichart.form.codec import RationalCodec
+    from maichart.stream.continuation import cycle_exit_targets
+    codec = RationalCodec()
+    dur_events = [EventPoint(F(0), '1-5[16:3]'), EventPoint(F(1), '2-6[16:3]'), EventPoint(F(2), '3-7[8:1]')]
+    dur_ids = codec.encode(dur_events)
+    dur_mask = cycle_exit_targets(dur_ids, codec)
+    marked_dur = [codec.tokens[t] for t, m in zip(dur_ids, dur_mask) if m]
+    assert 'N:8' in marked_dur
+
+    touch_events = [EventPoint(F(0), 'C'), EventPoint(F(1), 'E2'), EventPoint(F(2), '4')]
+    touch_ids = codec.encode(touch_events)
+    touch_mask = cycle_exit_targets(touch_ids, codec)
+    marked_touch = [codec.tokens[t] for t, m in zip(touch_ids, touch_mask) if m]
+    assert marked_touch == ['N:4']
+
+    confined_events = [EventPoint(F(i), lane) for i, lane in enumerate(['3', '4', '5', '6', '3', '5', '1'])]
+    confined_ids = codec.encode(confined_events)
+    confined_mask = cycle_exit_targets(confined_ids, codec)
+    marked_confined = [codec.tokens[t] for t, m in zip(confined_ids, confined_mask) if m]
+    assert 'N:1' in marked_confined
+
+
+def test_rhythm_cycle_cost_spares_steady_streams_including_long_authored_sweeps():
+    from types import SimpleNamespace
+    from maichart.stream.timing import rhythm_cycle_cost
+    steady_48 = [SimpleNamespace(beat=F(i, 2)) for i in range(49)]
+    assert rhythm_cycle_cost(F(49, 2), steady_48, F(48, 2), .6) == 0.
+    steady_64 = [SimpleNamespace(beat=F(i, 2)) for i in range(65)]
+    overrun_cost = rhythm_cycle_cost(F(65, 2), steady_64, F(64, 2), .6)
+    assert overrun_cost == 0.
+    assert rhythm_cycle_cost(F(66, 2), steady_64, F(64, 2), .6) == 0.
+
+
+def test_type_guidance_keeps_requested_proportions_without_unconditional_pattern_breaking():
+    from maichart.form.type_guidance import TypeGuidance
+    from maichart.generation.conditions import GenerationCondition, GENERATION_DEFAULTS
+    atoms = [f'{i}' for i in range(1, 9)] + ['C', 'E1', '1-5[16:3]', '2-6[16:3]', '3-7[8:1]', '4h[4:1]']
+    cues = [{'beat': str(i), 'second': i * .25} for i in range(20)]
+    cond = GenerationCondition(level=13., radar=GENERATION_DEFAULTS,
+                               style={**GENERATION_DEFAULTS, 'chord_bias': .35})
+    g = TypeGuidance(atoms, cond, cues, planner_strength=0., style_strength=1., local_chord_strength=1.)
+    for i in range(6):
+        g.commit('1/2' if i % 2 == 0 else '3', F(i))
+    bias_alt = g.event(F(6))
+    assert bias_alt.local_chords.pressure == 0.
+    assert bias_alt.token_bias('1', ['/', None])[0] <= 0.
+
+    g_touch = TypeGuidance(atoms, cond, [], planner_strength=0., style_strength=1.)
+    for i in range(4):
+        g_touch.commit('E1', F(i))
+    bias_touch = g_touch.event(F(4))
+    tb_touch = bias_touch.token_bias('', ['E', '1'])
+    assert tb_touch[0] == tb_touch[1] == 0.
+
+    g_dur = TypeGuidance(atoms, cond, [], planner_strength=0., style_strength=1.)
+    for i in range(5):
+        g_dur.commit('1-5[16:3]', F(i))
+    bias_dur = g_dur.event(F(5))
+    tb_dur = bias_dur.token_bias('1-5[', ['1', '8'])
+    assert tb_dur[0] == tb_dur[1] == 0.
+
+    g_lane = TypeGuidance(atoms, cond, [], planner_strength=0., style_strength=1.)
+    for i, lane in enumerate(['3', '4', '5', '6', '3', '4']):
+        g_lane.commit(lane, F(i))
+    bias_lane = g_lane.event(F(6))
+    tb_lane = bias_lane.token_bias('', ['3', '1'])
+    assert tb_lane[0] == tb_lane[1] == 0.

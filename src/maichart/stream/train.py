@@ -17,7 +17,7 @@ from torch.utils.data import DataLoader
 from maichart.form.quality_profile import MUSICAL_EVIDENCE
 from .data import StreamDataset, collate_stream, TRAINING_SEMANTICS
 from .model import ChartStreamTransformer, StreamConfig
-from .checkpoint import save, load, upgrade_grounding
+from .checkpoint import save, load, upgrade_grounding,TRAINING_OBJECTIVE_CONTRACT
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.form.codec import RationalCodec
 from maichart.form.output_guard import training_output_guard
@@ -46,6 +46,7 @@ def parser():
     p.add_argument('--checkpoint-interval-steps',type=int,default=500)
     p.add_argument('--quality-enabled',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--grounding-profile',choices=('auto','none','causal_audio_v1'),default='auto')
+    p.add_argument('--motor-profile',choices=('auto','legacy_v13','causal_hands_v1'),default='auto')
     p.add_argument('--detail-audio-nodes',type=int,default=8192)
     p.add_argument('--local-audio-neighbors',type=int,default=32)
     p.add_argument('--local-audio-seconds',type=float,default=2.)
@@ -147,6 +148,12 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25,alignment_weight=.15,eve
     # Share its valid-token denominator: averaging only over sparse exits
     # would multiply each marked token's gradient by valid_count/exit_count.
     cycle_exit=(ce*exit_mask*local*quality).sum()/mask.sum().clamp_min(1)
+    # Diagnostics only: supervise exactly the same plan labels/objective.
+    interval_pred=output['plan'][...,0].detach().float()*8.
+    interval_target=plan_labels[...,0]*8.
+    interval_valid=plan_mask & (interval_target<8.) & torch.isfinite(interval_pred)
+    safe_prediction=torch.nan_to_num(interval_pred,nan=0.,posinf=8.,neginf=0.).clamp(0.,8.)
+    interval_log=(torch.log((safe_prediction+.25)/(interval_target+.25))).abs()
     total=(token + plan_weight*plan + .2*curve + curve_slope_weight*curve_slope
            + event_weight*decision + event_balance_weight*balanced + alignment_weight*alignment
            + cycle_exit_weight*cycle_exit)
@@ -155,6 +162,10 @@ def _loss(output,batch,plan_weight=.15,event_weight=.25,alignment_weight=.15,eve
                                'event_decision_loss':decision.detach(),
                                'cycle_exit_loss':cycle_exit.detach(),
                                'curve_slope_loss':curve_slope.detach(),
+                               '_interval_count':interval_valid.sum().detach(),
+                               '_interval_abs_sum':((safe_prediction-interval_target).abs()*interval_valid).sum().detach(),
+                               '_interval_log_sum':(interval_log*interval_valid).sum().detach(),
+                               '_interval_invalid_count':((interval_pred<0)&plan_mask).sum().detach(),
                                '_cycle_exit_count':exit_mask.sum().detach(),
                                '_cycle_exit_correct':((prediction==target)&exit_mask).sum().detach(),
                                'loss':total.detach(),
@@ -199,6 +210,12 @@ def _mean_metrics(totals, batches):
             result[prefix+'_accuracy']=raw['_'+prefix+'_correct']/count if count else None
     if '_eos_count' in raw:
         result['eos_token_loss']=raw['_eos_loss_sum']/raw['_eos_count'] if raw['_eos_count'] else None
+    if '_interval_count' in raw:
+        count=raw['_interval_count']
+        result['interval_targets']=int(count)
+        result['interval_mae_beats']=raw['_interval_abs_sum']/count if count else None
+        result['interval_log_mae']=raw['_interval_log_sum']/count if count else None
+        result['interval_negative_predictions']=int(raw.get('_interval_invalid_count',0))
     return result
 
 
@@ -329,7 +346,9 @@ def _train(args):
         if args.resume and old.get('plan_dim_migration'):
             raise ValueError('plan_dim=8 checkpoint migration cannot resume its old optimizer; use --init-checkpoint with a new output directory.')
         if args.resume and (old.get('args') or {}).get('training_semantics') != TRAINING_SEMANTICS:
-            raise ValueError('训练合同已更新为有界循环退出监督；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
+            raise ValueError('训练合同已更新为 v14 因果遮罩与双手特征；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
+        if args.resume and old.get('training_objective_contract')!=TRAINING_OBJECTIVE_CONTRACT:
+            raise ValueError('Resume training objective contract 不兼容；请使用 finetune 和新目录。')
         if args.resume:
             for name in ('event_decision_loss_weight','plan_loss_weight','curve_slope_loss_weight',
                          'alignment_loss_weight','event_balance_loss_weight',
@@ -348,11 +367,12 @@ def _train(args):
             semantic_migration=_migrate_plan_semantics(model,old)
     grounding_keys=('grounding_profile','detail_audio_nodes','local_audio_neighbors','local_audio_seconds',
                     'archive_events','archive_retrievals','archive_min_similarity','alignment_tolerance_ms',
-                    'continuation_profile','context_replay_tokens')
+                    'continuation_profile','context_replay_tokens','motor_profile')
     if args.resume:
         for key in grounding_keys:setattr(args,key,getattr(model.config,key))
     else:
         if args.grounding_profile=='auto':args.grounding_profile=model.config.grounding_profile if old is not None else 'causal_audio_v1'
+        if args.motor_profile=='auto':args.motor_profile='causal_hands_v1'
         if args.continuation_profile=='auto':
             args.continuation_profile=(model.config.continuation_profile if old is not None
                 else 'overlap_v1' if args.grounding_profile!='none' else 'reset_v1')
@@ -434,6 +454,8 @@ def _train(args):
         'plan_loss_weight':args.plan_loss_weight,'parameters':sum(p.numel() for p in model.parameters()),
         'audio_cache_budget_gb':args.audio_cache_gb,'quality_enabled':args.quality_enabled,'start_epoch':start_epoch+1,
         'grounding_profile':args.grounding_profile,'detail_audio_nodes':args.detail_audio_nodes,
+        'motor_profile':config.motor_profile,
+        'training_objective_contract':TRAINING_OBJECTIVE_CONTRACT,
         'curve_slope_loss_weight':args.curve_slope_loss_weight,
         'alignment_loss_weight':args.alignment_loss_weight,'event_balance_loss_weight':args.event_balance_loss_weight,
         'history_note_dropout':args.history_note_dropout,'prefix_note_dropout':args.prefix_note_dropout,

@@ -208,7 +208,7 @@ def masked_note_inputs(ids,codec,rng,probability,*,targets=None,quality=None,spa
 
 
 def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
-                        query_clock=None,query_index=None,targets=None):
+                        query_clock=None,query_index=None,targets=None,return_interval_events=False):
     """Zero interval-echo channels (delta/delta_sec) on masked or dropped events.
 
     CausalClock stores log1p(delta) and log1p(delta_sec) in columns 15:17 from an
@@ -218,8 +218,13 @@ def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
     audio. When note dropout is disabled, clocks are returned untouched.
     """
     hidden=set(hidden_events)
+    def output(rows,queries,events):
+        value=(rows,queries) if query_clock is not None else rows
+        if return_interval_events:
+            return (*value,frozenset(events)) if isinstance(value,tuple) else (value,frozenset(events))
+        return value
     if not hidden and dropout<=0 or len(clock)==0:
-        return (clock,query_clock) if query_clock is not None else clock
+        return output(clock,query_clock,())
     source=list(targets) if targets is not None else list(ids)
     starts=[i for i,t in enumerate(source) if t==codec.at_id]
     notes=[]
@@ -228,18 +233,19 @@ def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
         stop=min(len(ids),right+1 if targets is not None else right)
         note=next((i for i in range(begin,stop) if ids[i]==codec.note_id),None)
         notes.append((event,note))
-    spans=[]
+    spans=[];selected=[]
     for idx,(event,note) in enumerate(notes):
         if note is None:continue
         if event not in hidden and (dropout<=0 or rng.random()>=dropout):continue
+        selected.append(event)
         end=next((n for _,n in notes[idx+1:] if n is not None),len(ids))
         spans.append((note,end))
     if not spans:
-        return (clock,query_clock) if query_clock is not None else clock
+        return output(clock,query_clock,())
     result=clock.clone()
     q_result=None if query_clock is None else query_clock.clone()
     for start,end in spans:
         result[start:end,15:17]=0.
         if q_result is not None and query_index is not None and start<end:
             q_result[query_index[start:end],15:17]=0.
-    return (result,q_result) if q_result is not None else result
+    return output(result,q_result,selected)

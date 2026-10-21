@@ -190,7 +190,8 @@ def _effective_lanes(lanes, trajectories):
     return tuple(sorted((set(lanes) - heads) | ends))
 
 
-def kinematic_rows(lane_sets, event_seconds, committed, seconds, *, horizon=16, trajectories=None):
+def kinematic_rows(lane_sets, event_seconds, committed, seconds, *, horizon=16, trajectories=None,
+                   masked_events=None,interval_hidden=None,pending=None,profile='legacy_v13'):
     """Causal hand features for queries; only committed events are read.
 
     Pure-Tap passages leave no sustained action, so this is the decoder's only
@@ -218,6 +219,12 @@ def kinematic_rows(lane_sets, event_seconds, committed, seconds, *, horizon=16, 
             durations[event]=max((max(0.,float(item[4])-onset)
                                   for item in trajectories[event]),default=0.)
         duration_prefix=np.r_[0.,np.maximum.accumulate(durations)]
+    masked_set = frozenset(masked_events) if masked_events else frozenset()
+    intervals=frozenset(interval_hidden or ())
+    causal=profile=='causal_hands_v1'
+    if profile not in {'legacy_v13','causal_hands_v1'}:raise ValueError('Unknown motor profile')
+    if causal and (pending is None or len(pending)!=len(committed)):
+        raise ValueError('Causal motor features require one pending flag per query')
     cache = {}
     for row, (count, now) in enumerate(zip(committed, seconds)):
         count = min(int(count), len(lane_sets), len(event_seconds))
@@ -235,14 +242,19 @@ def kinematic_rows(lane_sets, event_seconds, committed, seconds, *, horizon=16, 
         age = np.maximum(0., now - last_hit)
         values[:8] = np.where(np.isfinite(last_hit), np.exp(-age / .5), 0.)
         last = lane_sets[count - 1]
+        last_masked = (count - 1) in masked_set
         for lane in last:
             values[8 + lane - 1] = 1.
-        values[16] = math.log1p(max(0., now - event_seconds[count - 1])) / math.log(9.)
+        age_hidden=(bool(pending[row]) and count in intervals) if causal else last_masked
+        if not age_hidden:
+            values[16] = math.log1p(max(0., now - event_seconds[count - 1])) / math.log(9.)
         if count > 1:
             prev = lane_sets[count - 2]
             for lane in prev:
                 values[24 + lane - 1] = 1.
-            values[17] = math.log1p(max(0., event_seconds[count - 1] - event_seconds[count - 2])) / math.log(9.)
+            prior_hidden=(count-1 in intervals) if causal else (last_masked or (count-2) in masked_set)
+            if not prior_hidden:
+                values[17] = math.log1p(max(0., event_seconds[count - 1] - event_seconds[count - 2])) / math.log(9.)
             a, b = _angle(prev), _angle(last)
             if a is not None and b is not None:
                 step = b - a
@@ -260,7 +272,20 @@ def kinematic_rows(lane_sets, event_seconds, committed, seconds, *, horizon=16, 
                 break
         values[21] = min(run, 8) / 8.
         values[22] = min(len(last), 4) / 4.
-        values[23] = float(not last)
+        if last_masked:
+            values[23] = 0.
+        elif not last and causal:
+            values[23]=1.
+        elif not last:
+            touch_run = 0
+            for event in range(count - 1, start - 1, -1):
+                if not lane_sets[event] and event not in masked_set:
+                    touch_run += 1
+                else:
+                    break
+            values[23] = 1. / max(1, touch_run)
+        else:
+            values[23] = 0.
         sweep_dir = 0
         sweep_run = 0
         for event in range(count - 1, max(0, start), -1):

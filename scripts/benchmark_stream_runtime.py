@@ -64,6 +64,9 @@ def batch(config, batch_size, device):
         position_alignment_target=rand(b, nodes), position_alignment_mask=~zeros(b, nodes),
         detail_time_weight=torch.ones(b, nodes, device=device)/nodes, alignment_audio_quality=rand(b, nodes),
         cycle_exit_mask=(target == codec.at_id))
+    if config.motor_profile=='causal_hands_v1':
+        from maichart.stream.hand_tracking import HAND_DIM
+        result['query_hands']=rand(b,queries,HAND_DIM)
     return result
 
 

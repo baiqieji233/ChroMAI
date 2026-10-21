@@ -42,7 +42,9 @@ def test_cycle_exit_marks_actual_departure_and_preserves_legitimate_repetition()
     ids=c.encode([EventPoint(F(i),text) for i,text in enumerate(cells)])
     mask=cycle_exit_targets(ids,c)
     flagged=[c.tokens[t] for t,m in zip(ids,mask) if m]
-    assert flagged==['N:6','<end>','N:3']
+    # v14 also preserves authored exits from a confined lane set; these are
+    # weights on real departure targets, never a penalty on continuing a run.
+    assert flagged==['N:6','N:1','<end>','N:2','N:3']
     assert not mask[-1]
     shorter=c.encode([EventPoint(F(i),s) for i,s in enumerate(['1/2','1/2','1'])])
     assert [c.tokens[t] for t,m in zip(shorter,cycle_exit_targets(shorter,c)) if m]==['<end>']

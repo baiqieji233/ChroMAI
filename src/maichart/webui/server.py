@@ -194,11 +194,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 {
                     "workspace": str(WEBUI_ROOT),
                     "project_root": str(PROJECT_ROOT),
-                    "stream_generation_contract": "chart_stream_quality_controls_v4",
+                    "stream_generation_contract": "chart_stream_quality_controls_v5",
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "stream_grounded_context": "causal_audio_v1",
                                               "stream_training_runtime": "resident_pipeline_v3",
                                               "stream_cycle_exit_normalization": "main_valid_tokens_v1",
+                                              "stream_motor_contract": "causal_hands_v1",
                                               "stream_runtime_optimization": "bounded_training_graph_v2",
                                               "stream_continuation": "overlap_v1",
                                               "versioned_input_policies": True,

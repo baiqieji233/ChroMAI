@@ -8,6 +8,7 @@ from torch.nn import functional as F
 
 from .grounding import CLOCK_DIM
 from .symmetry import KINEMATIC_DIM
+from .hand_tracking import HAND_DIM
 
 RELATIVE_DIM = 9
 # Musical-load windows around a query, in seconds: the current beat region,
@@ -20,7 +21,8 @@ ALIGNMENT_BACK = 2
 # older checkpoint loads with exactly its previous function.
 UPGRADE_PARAMETERS = ('grounding.local_distance_key.weight','grounding.local_distance_value.weight',
                       'grounding.phrase_projection.weight','grounding.kinematic_projection.weight',
-                      'grounding.alignment_distance.weight','grounding.audio_boundary_projection.weight')
+                      'grounding.alignment_distance.weight','grounding.audio_boundary_projection.weight',
+                      'grounding.hand_projection.weight')
 
 
 def relative_features(delta_seconds, bpm, scale):
@@ -118,6 +120,7 @@ class GroundedContext(nn.Module):
         self.local_distance_value=nn.Linear(RELATIVE_DIM,width,bias=False)
         self.phrase_projection=nn.Linear(PHRASE_DIM,width,bias=False)
         self.kinematic_projection=nn.Linear(KINEMATIC_DIM,width,bias=False)
+        self.hand_projection=nn.Linear(HAND_DIM,width,bias=False)
         self.alignment_distance=nn.Linear(RELATIVE_DIM,key,bias=False)
         # A direct event-boundary audio residual prevents the decoder from
         # dropping every acoustic route through the learned router. It starts
@@ -128,7 +131,7 @@ class GroundedContext(nn.Module):
         for layer in (self.clock_projection,self.local_input,self.fusion,self.intent_projection,
                       self.local_distance_key,self.local_distance_value,self.phrase_projection,
                       self.kinematic_projection,self.alignment_distance,
-                      self.audio_boundary_projection):
+                      self.audio_boundary_projection,self.hand_projection):
             nn.init.zeros_(layer.weight)
 
     def prepare_bank(self,values,times,padding):
@@ -146,6 +149,9 @@ class GroundedContext(nn.Module):
 
     def kinematics(self,values):
         return self.kinematic_projection(values.to(self.kinematic_projection.weight.dtype))
+
+    def hands(self,values):
+        return self.hand_projection(values.to(self.hand_projection.weight.dtype))
 
     def boundary_audio(self,local):
         return self.audio_boundary_projection(local.to(self.audio_boundary_projection.weight.dtype))

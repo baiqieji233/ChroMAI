@@ -2173,7 +2173,7 @@ function updateTrainingControls() {
   updateDatasetButtons();
   updateTrainingModeHelp();
   const resume = currentTrainingMode() === "resume";
-  STREAM_GROUNDING_FIELDS.forEach(([id])=>{ const target=element('#'+id); if(target) target.disabled=resume; });
+  (typeof STREAM_GROUNDING_FIELDS !== "undefined" ? STREAM_GROUNDING_FIELDS : []).forEach(([id])=>{ const target=element('#'+id); if(target) target.disabled=resume; });
   const resumePolicy = element("#formResumeDataPolicyGroup");
   if (resumePolicy) resumePolicy.hidden = !resume || !["song_form_v1", "song_form_v2", "chart_stream_v1"].includes(currentModelFamily());
   ["#onsetProfile", "#onsetLossWeight", "#localPoolingPolicy", "#actionStateProfile"].forEach((selector) => {
@@ -3136,7 +3136,7 @@ function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) 
   const args = data?.args || {};
   STREAM_GROUNDING_FIELDS.forEach(([id,key,fallback])=>{
     const target=element('#'+id); if(!target) return;
-    if (!(preserveEditable && mode==='finetune')) target.value=String(config[key] ?? args[key] ?? (key==='grounding_profile'?'none':key==='continuation_profile'?'reset_v1':fallback));
+    if (mode==='fresh') { if (!preserveEditable) target.value=String(fallback); } else if (!(preserveEditable && mode==='finetune')) target.value=String(config[key] ?? args[key] ?? (key==='grounding_profile'?'none':key==='continuation_profile'?'reset_v1':fallback));
     target.disabled=mode==='resume';
   });
   const mapping = {
@@ -3650,6 +3650,8 @@ async function submitTrain(options = {}) {
       throw new Error('当前后端尚未加载连续流输入驻留设置，请重启 WebUI 后再训练。');
     if (backend.training_capabilities?.stream_cycle_exit_normalization !== 'main_valid_tokens_v1')
       throw new Error('当前后端尚未加载有界循环退出监督，请在无活动任务时重启 WebUI 后再训练。');
+    if (backend.training_capabilities?.stream_motor_contract !== 'causal_hands_v1')
+      throw new Error('当前后端尚未加载 v14 因果遮罩与双手特征，请在无活动任务时重启 WebUI。旧权重训练请选择 finetune 和新目录。');
     if (backend.training_capabilities?.stream_runtime_optimization !== 'bounded_training_graph_v2')
       throw new Error('当前后端尚未加载连续流速度优化和注意力后端设置，请在无活动任务时重启 WebUI 后再训练。');
     trainingStarting = true; updateDatasetButtons();
@@ -4512,7 +4514,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
     const status = await api("/api/status");
-    if (status.stream_generation_contract !== "chart_stream_quality_controls_v4") {
+    if (status.stream_generation_contract !== "chart_stream_quality_controls_v5") {
       throw new Error("当前服务尚未加载连续流质量控制。请使用已更新的 WebUI 服务；若此端口正在训练，请等训练结束后重启，避免新参数被旧后端忽略。");
     }
     const data = await api("/api/chart-stream/generate", payload);

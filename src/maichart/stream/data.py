@@ -64,7 +64,7 @@ class StreamChunk:
 # absolute song beat phase. Old v11 checkpoints remain generation-loadable but
 # must be finetuned under this new label contract rather than resumed.
 # v13 bounds the extra per-token cycle-exit weight by the main CE denominator.
-TRAINING_SEMANTICS = 'chart_stream_training_v13_bounded_cycle_exit'
+TRAINING_SEMANTICS = 'chart_stream_training_v14_causal_motor_masks'
 
 
 def _target_ranges(ids, max_tokens, at_id, eos_id):
@@ -328,6 +328,8 @@ class StreamDataset(Dataset):
         identity.update(history_note_dropout=self.history_note_dropout,prefix_note_dropout=self.prefix_note_dropout,
             replay_tokens=self.replay_tokens,prefix_mask_span_events=self.prefix_mask_span_events,
             symmetry_augmentation=self.symmetry_augmentation)
+        if self.grounded:
+            identity['motor_profile']=grounding_config.motor_profile
         self.fingerprint = hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
         self._chunk_counts=Counter(c.chart_index for c in self.chunks)
 
@@ -589,13 +591,13 @@ class StreamDataset(Dataset):
         item['decoder_input']=torch.tensor(decoder,dtype=torch.long)
         item['history']=torch.tensor(history,dtype=torch.long)
         item['target_quality']=torch.tensor(quality,dtype=torch.float32)
-        item['decoder_clock'],item['query_clock']=masked_clock_inputs(
+        item['decoder_clock'],item['query_clock'],prefix_intervals=masked_clock_inputs(
             structure['decoder_clock'],chunk.decoder_input,self.codec,rng,prefix_hidden,
             dropout=.5*self.prefix_note_dropout,query_clock=structure['query_clock'],
-            query_index=structure['decoder_query_index'],targets=chunk.target)
-        item['history_clock']=masked_clock_inputs(
+            query_index=structure['decoder_query_index'],targets=chunk.target,return_interval_events=True)
+        item['history_clock'],history_intervals=masked_clock_inputs(
             structure['history_clock'],chunk.history,self.codec,rng,history_hidden,
-            dropout=.5*self.history_note_dropout)
+            dropout=.5*self.history_note_dropout,return_interval_events=True)
         # Hand kinematics read only committed events (query_committed counts
         # complete cells), so pure-Tap passages are no longer an empty state.
         # Cells hidden by note dropout stay hidden here as well.
@@ -603,12 +605,41 @@ class StreamDataset(Dataset):
         stored_trajectories=self._trajectory_sets(index,transform)
         trajectories=list(stored_trajectories) if stored_trajectories is not None else None
         history_first=chunk.start_event-sum(1 for t in chunk.history if t==self.codec.at_id)
+        masked_events=set()
         for event in [history_first+e for e in history_hidden]+[chunk.start_event+e for e in prefix_hidden]:
             if 0<=event<len(lanes):
                 lanes[event]=()
+                masked_events.add(event)
                 if trajectories is not None:trajectories[event]=()
+        interval_hidden={chunk.start_event+e for e in prefix_intervals}|{history_first+e for e in history_intervals}
+        pending=structure['query_clock'][:,18].numpy()>0
+        if cfg.motor_profile=='causal_hands_v1':
+            owners=structure['query_committed'].numpy()-1+pending.astype(np.int64)
+            hidden_query=torch.tensor([int(owner) in interval_hidden for owner in owners],dtype=torch.bool)
+            item['query_clock']=item['query_clock'].clone()
+            item['query_clock'][hidden_query,15:17]=0.
+            item['decoder_clock']=item['decoder_clock'].clone()
+            item['decoder_clock'][hidden_query[structure['decoder_query_index']],15:17]=0.
         item['query_kinematics']=kinematic_rows(lanes,self._point_seconds[index],
-            structure['query_committed'].numpy(),structure['query_seconds'].numpy(),trajectories=trajectories)
+            structure['query_committed'].numpy(),structure['query_seconds'].numpy(),
+            trajectories=trajectories,masked_events=masked_events,interval_hidden=interval_hidden,
+            pending=pending,profile=cfg.motor_profile)
+        if cfg.motor_profile=='causal_hands_v1':
+            from .hand_tracking import HandHistory
+            histories=getattr(self,'_hand_histories',None)
+            if histories is None:histories=self._hand_histories={}
+            key=(index,transform)
+            if key not in histories:
+                histories[key]=HandHistory(self._lane_sets(index,transform),self._point_seconds[index],stored_trajectories,
+                                           stride=128,keep_recent=False)
+            counts=structure['query_committed'].numpy()
+            item['query_hands']=histories[key].rows(counts,structure['query_seconds'].numpy(),masked_events=masked_events)
+            # Hide explicit age echoes with the same interval decision. Position
+            # tokens and real sustain geometry remain causal and observable.
+            hidden_age=torch.tensor([((int(c) if p else int(c)-1) in interval_hidden
+                                     or int(c)-1 in interval_hidden) for c,p in zip(counts,pending)],dtype=torch.bool)
+            item['query_hands'][hidden_age,4]=0.
+            item['query_hands'][hidden_age,12]=0.
         event_rows=[i for i,t in enumerate(chunk.target)
                     if t==self.codec.at_id and i>=chunk.target_offset]
         event_points=points[chunk.supervised_event:chunk.supervised_event+len(event_rows)]
@@ -749,6 +780,9 @@ def collate_stream(items):
         for key in ('detail_audio_padding_mask','archive_padding_mask'):
             result[key]=pad_sequence([v[key] for v in items],batch_first=True,padding_value=True)
         result['curve_example_weight']=torch.stack([v['curve_example_weight'] for v in items])
+        if 'query_hands' in items[0]:
+            if any('query_hands' not in item for item in items):raise ValueError('Mixed stream motor profiles in one batch')
+            result['query_hands']=pad_sequence([item['query_hands'] for item in items],batch_first=True)
         # Keep the same ordered per-event moments, but construct repeated
         # owners and positions in NumPy instead of a Python loop per token.
         from itertools import chain

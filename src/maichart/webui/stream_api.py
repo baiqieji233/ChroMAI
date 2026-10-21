@@ -89,11 +89,13 @@ def inspect_payload(payload):
     except (ValueError,KeyError,TypeError) as exc:
         valid=False
         errors.append(str(exc))
-    current = (payload.get('args') or {}).get('training_semantics') == TRAINING_SEMANTICS
+    from maichart.stream.checkpoint import TRAINING_OBJECTIVE_CONTRACT
+    current = ((payload.get('args') or {}).get('training_semantics') == TRAINING_SEMANTICS
+               and payload.get('training_objective_contract')==TRAINING_OBJECTIVE_CONTRACT)
     can_resume = bool(valid and current and payload.get('optimizer_state_dict') and payload.get('dataset_fingerprint'))
     warnings=[]
     if not current:
-        warnings.append('训练合同已更新为 v13（有界循环退出监督）；旧权重仍可生成，请用 finetune 和新输出目录迁移，不能直接 resume。')
+        warnings.append('训练合同已更新为 v14（统一因果间隔遮罩与多假设双手特征）；旧权重仍可生成，请用 finetune 和新输出目录迁移，不能直接 resume。')
     elif not can_resume:
         warnings.append('此权重缺少续训所需的优化器状态或数据身份；请选择 finetune 和新输出目录。')
     if can_resume and payload.get('training_position') and payload['training_position'].get('complete') is not True:
@@ -151,7 +153,7 @@ def start(handler, operation, payload, *, runtime):
                 ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
                 ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0),
                 ('input_cache_mode','mapped'),('structure_cache_mb',256),('optimizer_implementation','auto'),
-                ('attention_backend','auto'),
+                ('attention_backend','auto'),('motor_profile','auto'),
                 ('execution_mode','auto'),('cuda_graph_budget_gb',2.),
                 ('input_residency','auto'),('resident_cache_gb',0.),('resident_memory_reserve_gb',0.),
                 ('cache_validation_records',0),('continuation_profile','auto'),('context_replay_tokens',256),

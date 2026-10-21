@@ -299,6 +299,7 @@
 </section>
 <section id="chartStreamTrainingControls" class="song-form-only" data-training-family="chart_stream_v1" hidden>
 <div class="workflow-group-heading"><span class="step">03A</span><div><h3>连续整曲事件流参数</h3><p>计算块只用于显存管理，不表示音乐边界；整曲结束才允许 EOS。</p></div></div>
+<p class="workflow-hint">新训练使用 v14 因果遮罩与双手特征：允许单手连续扫键，也允许双手交替，不按固定奇偶事件分手。旧权重仍可生成；迁移训练请选择 finetune 和新输出目录。</p>
 <div class="form-grid">
 <label class="field">流上下文 token 上限<input id="streamMaxTokens" type="number" min="128" max="8192" step="64" value="1024"><small>每个计算块可直接看到的事件 token 数。</small></label>
 <label class="field">近期历史 token<input id="streamMaxHistoryTokens" type="number" min="32" max="2048" step="32" value="256"><small>跨块回看的详细历史，不会改变谱面时间边界。</small></label>
@@ -947,7 +948,7 @@
 <label class="field">学得结尾引导强度<input id="streamLearnedEndingStrength" type="number" min="0" max="3" step="0.1" value="1"><small>根据模型曲线预测的剩余音符量，为结束决策提供软证据；不按音量切尾。预测不准时可能早停或晚停；0 关闭。明确结束位置仍可手动指定。</small></label>
 <label class="field">约束后最低候选概率<input id="streamConstraintMinProbability" type="number" min="0" max="1" step="0.01" value="0.05"><small>硬保护仅剩低概率配置时，重选当前事件拍位，避免双 Slide 启动时硬凑大片 Touch。0 关闭；重选耗尽会明确报告未完成。</small></label>
 <label class="field">当前事件重选次数<input id="streamEventReconsiderAttempts" type="number" min="0" max="16" step="1" value="4"><small>仅回退尚未提交的当前事件，已生成内容保持不变；次数越高可能越慢。</small></label>
-<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>按间隔比例惩罚偏离已训练意图的候选。预测达到 8 拍上限时表示“8 拍或更长”，允许长休止。0 关闭；首个起音不应用，宽度 1 仍应用。</small></label>
+<label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>辅助候选拍距评分，不限定分音。旧权重缺少间隔误差记录时仅使用弱引导，新权重按训练残差衰减；普通间隔项有上限，避免单个不稳定预测主导。达到 8 拍表示“8 拍或更长”，允许长休止。0 关闭；长空白抑制另行设置。</small></label>
 <label class="field">非预期长空白抑制强度<input id="streamUnplannedGapPenaltyStrength" type="number" min="0" max="3" step="0.05" value="0.5"><small>默认 0.5：计划头预测短间隔时，对远超计划的大跳追加线性软惩罚，并复查附近候选；宽度 1 也生效。0 关闭额外惩罚。预测达到 8 拍休止上限时不追加惩罚；计划预测错误仍可能压低合理长休止，可调低或关闭。浏览器以前保存的 0 会继续保留。</small></label>
 <label class="field">节奏循环破除强度<input id="streamRhythmDiversityStrength" type="number" min="0" max="3" step="0.05" value="0.6"><small>对连续重复超过两轮或两小节的复合节奏型施加有界惩罚，打破跨小节节奏死循环；恒定四分／八分／十六分流与两小节正常呼应不受惩罚。0 关闭。</small></label>
 <label class="field">同拍按键头数上限<input id="streamMaxButtonHeads" type="number" min="0" max="8" step="1" value="2"><small>硬约束：默认最多 2 个按键头，包含 Tap、Hold、带头 Slide；Touch 不计入此项。0 不限。不保证完整可玩性。</small></label>

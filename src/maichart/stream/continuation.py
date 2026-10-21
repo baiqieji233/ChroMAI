@@ -37,7 +37,7 @@ def cycle_exit_targets(ids, codec, max_period=24):
     from fractions import Fraction
     from .symmetry import event_lanes
     starts = [i for i,t in enumerate(ids) if t == codec.at_id]
-    cells=[];shapes=[];note_starts=[];classes=[];lanes=[];beats=[];deltas=[]
+    cells=[];shapes=[];note_starts=[];classes=[];lanes=[];beats=[];deltas=[];durations=[]
     for a,b in zip(starts, starts[1:]+[len(ids)-1]):
         note=ids.index(codec.note_id,a,b)+1
         beat_text=''.join(codec.tokens[t][2:] for t in ids[a+1:note-1] if codec.tokens[t].startswith('P:'))
@@ -45,6 +45,7 @@ def cycle_exit_targets(ids, codec, max_period=24):
         deltas.append(beats[-1]-beats[-2] if len(beats)>1 else None)
         cells.append(tuple(ids[note:b]));note_starts.append(note)
         classes.append(_structure_classes(ids[note:b],codec))
+        durations.append(tuple(t for t,k in zip(ids[note:b],classes[-1]) if k=='duration'))
         raw_text=''.join(codec.tokens[t][2:] for t in ids[note:b] if codec.tokens[t].startswith('N:'))
         lanes.append(event_lanes(raw_text))
         # Only note characters, never END ('<end>'[2:] contains '>', which
@@ -80,6 +81,26 @@ def cycle_exit_targets(ids, codec, max_period=24):
                 divergence=next((j for j,(a,b) in enumerate(zip(current,expected)) if a!=b),None)
                 if divergence is not None:
                     result[note_starts[i]+divergence]=True
+            if (durations[i-2*period:i-period] == durations[i-period:i]
+                and all(durations[i-period:i])
+                and durations[i] != durations[i-period]):
+                if durations[i]:
+                    our_dur_pos=[j for j,k in enumerate(classes[i]) if k=='duration']
+                    div_idx=next((our_dur_pos[idx] for idx,(a,b) in enumerate(zip(durations[i],durations[i-period])) if a!=b),
+                                 our_dur_pos[0] if our_dur_pos else None)
+                    if div_idx is not None:
+                        result[note_starts[i]+div_idx]=True
+        if i >= 2 and not lanes[i-1] and not lanes[i-2] and lanes[i] and current:
+            lane_pos=next((j for j,k in enumerate(classes[i]) if k=='lane'),0)
+            result[note_starts[i]+lane_pos]=True
+        if i >= 6 and all(lanes[i-6:i]) and lanes[i] and current:
+            confined=set().union(*lanes[i-6:i])
+            out_lanes=set(lanes[i])-confined
+            if 1 <= len(confined) <= 4 and out_lanes:
+                escape_pos=next((j for j,(t,k) in enumerate(zip(current,classes[i]))
+                                 if k=='lane' and int(codec.tokens[t][2:]) in out_lanes),None)
+                if escape_pos is not None:
+                    result[note_starts[i]+escape_pos]=True
         # Also supervise exits from repeated structural shapes when the exact
         # lane/modifier text differs. The repeated prefix itself stays valid.
         # Lane digits are compared as one class: comparing raw tokens would

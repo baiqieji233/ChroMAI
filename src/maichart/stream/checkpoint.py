@@ -16,6 +16,8 @@ from .model import ChartStreamTransformer, StreamConfig
 from maichart.form.codec import RationalCodec
 from .runtime import resolve_device
 
+TRAINING_OBJECTIVE_CONTRACT='causal_motor_objectives_v1'
+
 
 LEGACY_PLAN_DIM = 8
 CURRENT_PLAN_DIM = 10
@@ -72,7 +74,12 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
         'atom_catalog': sorted(set(atom_catalog)),
         'metrics': metrics or {}, 'architecture': model.architecture,
         'metrics_aggregation': 'batch_mean',
+        'training_objective_contract':(TRAINING_OBJECTIVE_CONTRACT if str(args.get('training_semantics','')).startswith(
+            'chart_stream_training_v14_') else None),
         'grounding_training': {'profile':model.config.grounding_profile,
+            'motor_profile':model.config.motor_profile,
+            'hand_features_trained':bool(model.config.grounding_profile!='none'
+                and model.config.motor_profile=='causal_hands_v1' and optimizer_steps>0),
             'optimizer_steps':int(optimizer_steps),
             'alignment_supervised':bool(model.config.grounding_profile!='none' and optimizer_steps>0
                 and args.get('alignment_loss_weight',0)>0 and (metrics or {}).get('alignment_targets',0)>0)},
@@ -116,6 +123,11 @@ def validate_contract(payload):
         raise ValueError('Chart-stream checkpoint 输入/规划维度不兼容')
     if config.vocab_size != len(expected['tokens']):
         raise ValueError('Chart-stream checkpoint codec vocabulary size 不兼容')
+    if config.grounding_profile!='none' and config.motor_profile=='causal_hands_v1':
+        from .hand_tracking import HAND_DIM
+        weight=(payload.get('model_state_dict') or {}).get('grounding.hand_projection.weight')
+        if not torch.is_tensor(weight) or tuple(weight.shape)!=(config.d_model,HAND_DIM):
+            raise ValueError('Checkpoint declares causal hands but its hand_projection is missing or incompatible')
     return config
 
 
@@ -169,8 +181,15 @@ def load(path, device='cpu'):
 def upgrade_grounding(model,**settings):
     """Explicit finetune migration; no old checkpoint is rewritten."""
     target=ChartStreamTransformer(replace(model.config,**settings))
+    if model.config.motor_profile=='causal_hands_v1' and target.config.motor_profile=='legacy_v13':
+        raise ValueError('Cannot silently remove trained hand features during finetune')
     result=target.load_state_dict(model.state_dict(),strict=False)
     if result.unexpected_keys or any(not key.startswith('grounding.') for key in result.missing_keys):
         raise ValueError('Unsupported stream migration outside grounding branches')
+    if (model.config.motor_profile!=target.config.motor_profile
+            and hasattr(target,'grounding')):
+        # Channel 23 changes from legacy run-dependent Touch decay to a true
+        # known buttonless-event indicator. Do not reuse its old calibration.
+        with torch.no_grad():target.grounding.kinematic_projection.weight[:,23].zero_()
     return target
 

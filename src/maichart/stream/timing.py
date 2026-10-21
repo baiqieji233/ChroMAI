@@ -17,15 +17,36 @@ class CanonicalPositionGrammar(PositionGrammar):
         return str(Fraction(text)) == text
 
 
-def interval_consistency_cost(delta, prediction, strength, gap_penalty_strength=0.):
+def interval_reliability(metrics=None):
+    """A conservative score multiplier, not a calibrated probability.
+
+    Old checkpoints have no interval residual telemetry. Keep their auxiliary
+    scalar weak. New training logs MAE in the very log-ratio space scored here.
+    Training residuals are optimistic; never let this single head dominate CE.
+    """
+    metrics=metrics or {}
+    error=metrics.get('interval_log_mae')
+    count=metrics.get('interval_targets',0)
+    if (not isinstance(error,(int,float)) or not math.isfinite(error) or error<0
+            or not isinstance(count,(int,float)) or count<32):
+        return {'multiplier':.25,'source':'legacy_or_insufficient_telemetry'}
+    return {'multiplier':min(.75,1./(1.+4.*error)),
+            'source':'teacher_forced_log_residual','log_mae':float(error),'targets':int(count)}
+
+
+def interval_consistency_cost(delta, prediction, strength, gap_penalty_strength=0.,*,reliability=1.,cap=None):
     """Compare exact delta to the censored interval head without capping delta.
 
     The training label saturates at eight beats. A saturated prediction means
     'eight or more', so arbitrarily long rests remain unpenalized in that case.
     Below saturation, a 161-beat jump cannot cost the same as a nine-beat one.
     """
-    if prediction is None or not math.isfinite(prediction):
+    if prediction is None or not math.isfinite(prediction) or float(prediction) < 0.:
         return 0.
+    if not math.isfinite(reliability) or not 0<=reliability<=1:
+        raise ValueError('Interval reliability must be in [0,1]')
+    if cap is not None and (not math.isfinite(cap) or cap<0):
+        raise ValueError('Interval shaping cap must be nonnegative')
     target = max(0., min(1., float(prediction))) * 8.
     actual = max(0., float(delta))
     if target >= 8. and actual >= 8.:
@@ -35,7 +56,12 @@ def interval_consistency_cost(delta, prediction, strength, gap_penalty_strength=
         # One quarter beat prevents an unstable relative error at a near-zero
         # prediction. It is a score scale, never an output grid or allowed gap.
         difference = math.log((actual+.25)/(target+.25))
-        cost += float(strength) * .5 * difference * difference
+        shape=.5*difference*difference
+        if cap is not None:shape=min(cap,shape)
+        # Predictions below a quarter beat are especially vulnerable to raw
+        # regression error. Attenuate, do not snap or prohibit fine rhythms.
+        confidence=reliability*(min(1.,target/.25) if cap is not None else 1.)
+        cost += float(strength)*confidence*shape
     if gap_penalty_strength and target < 8.:
         threshold = max(target * 2., target + 4.)
         if actual > threshold:

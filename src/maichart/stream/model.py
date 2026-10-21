@@ -39,8 +39,12 @@ class StreamConfig:
     alignment_tolerance_ms: float = 15.
     continuation_profile: str = 'reset_v1'
     context_replay_tokens: int = 256
+    # Missing in old checkpoint configs: preserve their original input path.
+    motor_profile: str = 'legacy_v13'
 
     def __post_init__(self):
+        if self.motor_profile not in {'legacy_v13','causal_hands_v1'}:
+            raise ValueError('Unknown stream motor_profile')
         if self.continuation_profile not in {'reset_v1','overlap_v1'}:
             raise ValueError('Unknown continuation_profile')
         if isinstance(self.context_replay_tokens,bool) or not isinstance(self.context_replay_tokens,int) or self.context_replay_tokens<1:
@@ -213,7 +217,7 @@ class ChartStreamTransformer(nn.Module):
             positions=torch.arange(length,device=decoder_input.device)[None].expand(batch,-1)
             boundaries=(decoder_input==1)|(decoder_input==5)
             active=positions.masked_fill(~boundaries,0).cummax(1).values
-            intent=plan.gather(1,active[...,None].expand(-1,-1,plan.size(-1)))
+            intent=plan.detach().gather(1,active[...,None].expand(-1,-1,plan.size(-1)))
             hidden=hidden+self.grounding.intent_projection(intent)
         return {'logits': self.output(hidden), 'plan':plan,'hidden':hidden,'routes':routes}
 
@@ -290,6 +294,10 @@ class ChartStreamTransformer(nn.Module):
             queries['action']=self.grounding.action_value(batch['query_actions'])*batch['query_actions'][...,-1:].gt(0)
             if batch.get('query_kinematics') is not None:
                 queries['action']=queries['action']+self.grounding.kinematics(batch['query_kinematics']).to(queries['action'].dtype)
+            if self.config.motor_profile=='causal_hands_v1':
+                if batch.get('query_hands') is None:
+                    raise ValueError('Causal hand profile requires query_hands; cannot silently train without it')
+                queries['action']=queries['action']+self.grounding.hands(batch['query_hands']).to(queries['action'].dtype)
             indices=batch['decoder_query_index'].clamp_min(0)
             context={key:queries[key].gather(1,indices[...,None].expand(-1,-1,self.config.d_model))
                      for key in ('local','archive','action')}

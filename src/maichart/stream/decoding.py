@@ -16,7 +16,7 @@ from maichart.form.rational_position_search import search_position
 from maichart.form.type_guidance import TypeGuidance
 from maichart.generation.sustain_state import SustainStateIndex
 from .memory import StreamMemoryBank
-from .timing import CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost
+from .timing import CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost,interval_reliability
 from .context import prefix_action_state
 from .constraints import BasicConfigurationGuard
 from .reference_guard import ReferenceCandidateGuard
@@ -173,6 +173,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     rotation_trace=[]
     event_bias = None
     interval_prediction = None
+    interval_policy=interval_reliability(getattr(args,'interval_metrics',None))
     searches, search_expansions, search_trace, event_trace = 0, 0, [], []
     rejected_positions,event_retries,event_retry_count = set(),[],0
     event_trace_tail=[]
@@ -391,7 +392,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 def interval_cost(beat):
                     return (interval_consistency_cost(beat-previous, interval_prediction,
                                                       args.position_interval_strength,
-                                                      gap_penalty_strength)
+                                                      gap_penalty_strength,
+                                                      reliability=interval_policy['multiplier'],cap=.5)
                             + rhythm_cycle_cost(beat, points, previous, rhythm_diversity_strength))
                 chosen, info = search_position(model, codec, position_grammar, logits, cache,
                     memory, memory_mask, consumed=consumed, width=effective_beam,
@@ -410,6 +412,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                         if previous >= 0 else []))
                 info['interval_prediction_beats_clipped_8'] = (None if interval_prediction is None
                     else min(1., max(0., interval_prediction))*8.)
+                info['interval_prediction_raw']=interval_prediction
+                info['interval_shaping_multiplier']=interval_policy['multiplier']
                 searches += 1
                 search_expansions += info['expanded_hypotheses']
                 if chosen is None:
@@ -572,6 +576,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'context_rotations':rotation_trace,
                     'memory_guard_events':memory_guard_events,
                     'continuation_profile':getattr(model.config,'continuation_profile','reset_v1'),
+                    'interval_guidance':{**interval_policy,'normal_shaping_cap':.5,
+                        'unplanned_gap_cost':'independent_user_control'},
                     'equivalent_fraction_normalizations': canonicalizations,
                     'audio_encoder_calls': 1, 'guidance': guidance.report(),
                     'configuration_search':{'mode':'complete_cell_importance_resampling',

@@ -55,6 +55,8 @@ class GroundedInference:
         self.phrase_bank=(prepare_phrase_bank(self.curve.detach().sigmoid(),self.audio_times,self.curve_mask)
                           if self.curve is not None else None)
         self.lane_sets=[];self.point_seconds=[];self.trajectory_sets=[]
+        from .hand_tracking import HandHistory
+        self.hand_history=HandHistory(self.lane_sets,self.point_seconds,self.trajectory_sets)
         self.state=IncrementalState(song.tempo,song.first)
         self.points=[];self.archive_values=[];self.archive_audio=[]
         self.archive_event_indices=[]
@@ -139,8 +141,11 @@ class GroundedInference:
             context['action']=self.grounding.action_value(actions)*actions[...,-1:].gt(0)
             from .symmetry import kinematic_rows
             kinematics=kinematic_rows(self.lane_sets,self.point_seconds,[self.clock.committed],[self.clock.second],
-                                      trajectories=self.trajectory_sets)
+                                      trajectories=self.trajectory_sets,pending=[self.clock.pending],profile=self.config.motor_profile)
             context['action']=context['action']+self.grounding.kinematics(kinematics[None].to(self.device)).to(context['action'].dtype)
+            if self.config.motor_profile=='causal_hands_v1':
+                hands=self.hand_history.rows([self.clock.committed],[self.clock.second])[None].to(self.device)
+                context['action']=context['action']+self.grounding.hands(hands).to(context['action'].dtype)
             context['global']=self.global_context
             self.context_cache[key]=context;self.archive_queries+=1
             if len(self.context_cache)>2048:self.context_cache.popitem(last=False)
@@ -193,6 +198,9 @@ class GroundedInference:
 
     def report(self):
         return {'profile':self.config.grounding_profile,'detail_audio_nodes':self.bank['values'].size(1),
+            'motor_profile':self.config.motor_profile,
+            'hand_assignment':('bounded_latent_strike_tracks_no_fixed_alternation'
+                if self.config.motor_profile=='causal_hands_v1' else 'legacy_features_only'),
             'native_center_probes':self.probes,'local_query_cache_hits':self.query_hits,
             'archive_events_committed':len(self.points),'archive_candidates':self.archive['embeddings'].size(1),
             'mean_routes':dict(zip(('local_audio','archive','global_audio','active_actions','innovation'),
