@@ -18,7 +18,8 @@ from maichart.event_timing import seconds_at_beat
 from maichart.generation.conditions import GenerationCondition
 from maichart.stream.context import prefix_action_state
 from .candidates import candidate_beats, candidate_features, candidate_index
-from .events import atom_catalog
+from .events import atom_catalog,structure_signature
+from maichart.form.type_guidance import _counts
 
 
 @dataclass(frozen=True, slots=True)
@@ -32,6 +33,8 @@ class ComposerSample:
     history: tuple[int, ...]
     action_state: tuple[float, ...]
     condition: tuple[float, ...]
+    future_target: tuple[float, ...]
+    previous_future: tuple[float, ...]
 
 
 class ComposerDataset(Dataset):
@@ -61,6 +64,24 @@ class ComposerDataset(Dataset):
             values,times,_=planner_audio_queries(self._source_song(song_index))
             values=np.asarray(values,dtype=np.float32);times=np.asarray(times,dtype=np.float64)
             previous=Fraction(0)
+            future_targets=[]
+            for future_index in range(len(points)):
+                window=points[future_index:min(len(points),future_index+4)]
+                if window:
+                    before_second=float(seconds_at_beat(points[future_index-1].beat,song.tempo,song.first)) if future_index else 0.
+                    gaps=[max(0.,float(seconds_at_beat(p.beat,song.tempo,song.first))-before_second) for p in window]
+                    texts=[str(p.note_text) for p in window]
+                    counts=[int((parsed.sum() if (parsed:=_counts(text)) is not None else 0.)) for text in texts]
+                    head_rate=float(sum(counts)/max(sum(gaps),1e-3))
+                    chord=sum(int('/' in t) for t in texts)/len(texts)
+                    slide=sum(int(any(c in t for c in '-<>^pqszvwV')) for t in texts)/len(texts)
+                    hold=sum(int('h' in t) for t in texts)/len(texts)
+                    touch=sum(int(any(c in t for c in 'ABCDE')) for t in texts)/len(texts)
+                    future_targets.append((min(1.,float(np.log1p(gaps[0])/np.log1p(8.))),
+                        min(1.,head_rate/16.),float(max(gaps)>1.),chord,slide,hold,touch,
+                        float(future_index>0 and structure_signature(str(points[future_index].note_text))!=
+                             structure_signature(str(points[future_index-1].note_text)))))
+                else:future_targets.append((0.,)*8)
             for event_index,point in enumerate(points):
                 candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,
                     audio_end_sec=float(song.audio.duration_sec),candidate_count=self.candidate_count,
@@ -74,7 +95,8 @@ class ComposerDataset(Dataset):
                 action_state=active.mean(0).tolist() if active.numel() else [0.]*50
                 self.samples.append(ComposerSample(song_index,event_index,previous,point.beat,
                     str(point.note_text),tuple(candidates),tuple(history),tuple(action_state),
-                    tuple(condition.to_vector().tolist())))
+                    tuple(condition.to_vector().tolist()),future_targets[event_index],
+                    future_targets[event_index-1] if event_index else (0.,)*8))
                 previous=Fraction(point.beat)
             self.songs.append(record)
         self._feature_cache={}
@@ -120,6 +142,8 @@ class ComposerDataset(Dataset):
                 'history':torch.tensor(sample.history,dtype=torch.long),
                 'action_state':torch.tensor(sample.action_state,dtype=torch.float32),
                 'condition':torch.tensor(sample.condition,dtype=torch.float32),
+                'future_target':torch.tensor(sample.future_target,dtype=torch.float32),
+                'future_state':torch.tensor(sample.previous_future,dtype=torch.float32),
                 'song_index':torch.tensor(sample.song_index),
                 'event_index':torch.tensor(sample.event_index)}
 
@@ -131,6 +155,8 @@ def collate_composer(items):
     result['candidate_target']=torch.stack([item['candidate_target'] for item in items])
     result['action_target']=torch.stack([item['action_target'] for item in items])
     result['action_state']=torch.stack([item['action_state'] for item in items])
+    result['future_target']=torch.stack([item['future_target'] for item in items])
+    result['future_state']=torch.stack([item['future_state'] for item in items])
     result['condition']=torch.stack([item['condition'] for item in items])
     result['history']=pad_sequence([item['history'] for item in items],batch_first=True,padding_value=0)
     result['history_padding_mask']=torch.arange(result['history'].size(1))[None]>=torch.tensor(

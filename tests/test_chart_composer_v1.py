@@ -56,3 +56,4 @@ def test_composer_dataset_builds_candidate_features_from_audio(tmp_path):
     item=dataset[0]
     assert len(dataset)>0 and item['candidate_features'].shape==(16,129)
     assert int(item['candidate_target'])>=0
+    assert item['future_target'].shape==(8,) and item['future_state'].shape==(8,)

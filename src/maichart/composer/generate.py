@@ -56,7 +56,8 @@ def generate(args):
     bounds=generation_bounds(audio,trim_exact_silence=True);end_sec=bounds['effective_end_sec']
     condition=GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
     if args.condition_file:condition=GenerationCondition.from_dict(json.loads(Path(args.condition_file).read_text(encoding='utf-8-sig')))
-    points=[];history=[];previous=Fraction(0);rng=random.Random(args.seed);max_events=args.max_events or 100000
+    points=[];history=[];previous=Fraction(0);future_state=torch.zeros(1,model.config.future_dim,device=device)
+    rng=random.Random(args.seed);max_events=args.max_events or 100000
     while len(points)<max_events:
         candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,audio_end_sec=end_sec,
             candidate_count=model.config.candidate_count)
@@ -64,7 +65,8 @@ def generate(args):
         feats=_interp_features(values,times,song,candidates,previous)[None].to(device)
         hist=torch.tensor([history[-model.config.history_events:]],dtype=torch.long,device=device)
         action=torch.zeros(1,50,device=device);control=condition.to_vector(device=device)[None]
-        output=model(feats,hist,control,action_state=action,candidate_mask=torch.zeros(1,len(candidates),dtype=torch.bool,device=device),
+        output=model(feats,hist,control,action_state=action,future_state=future_state,
+                     candidate_mask=torch.zeros(1,len(candidates),dtype=torch.bool,device=device),
                      history_padding_mask=torch.zeros_like(hist,dtype=torch.bool))
         logits=output['candidate_logits'][0].float()/max(args.temperature,1e-6)
         choice=int(torch.multinomial(logits.softmax(-1),1,generator=torch.Generator(device=device).manual_seed(args.seed+len(points)*104729)).item()) if args.temperature>0 else int(logits.argmax())
@@ -76,6 +78,7 @@ def generate(args):
             if atom>0 and atom<=len(atoms) and atoms[atom-1] not in selected:selected.append(atoms[atom-1])
         if not selected: selected=[atoms[0]]
         text='/'.join(selected)
+        future_state=output['future'].detach()
         points.append(EventPoint(beat,text));history.append(atoms.index(selected[0])+1 if selected[0] in atoms else 0);previous=beat
         if float(seconds_at_beat(beat,song.tempo,song.first))>=end_sec:break
     export_end=Fraction(int(np.ceil(float(max([p.beat for p in points],default=0))))+1)

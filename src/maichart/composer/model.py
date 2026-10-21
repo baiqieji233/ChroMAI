@@ -23,6 +23,7 @@ class ComposerConfig:
     candidate_count: int = 64
     action_slots: int = 8
     candidate_feature_dim: int = 129
+    future_dim: int = 8
 
     def to_dict(self): return asdict(self)
 
@@ -36,6 +37,7 @@ class ChartComposer(nn.Module):
         self.audio_projection=nn.Linear(config.audio_dim,width)
         self.condition_projection=nn.Linear(config.condition_dim,width)
         self.action_projection=nn.Linear(config.action_dim,width)
+        self.future_projection=nn.Linear(config.future_dim,width)
         self.time_projection=nn.Linear(config.candidate_feature_dim-config.audio_dim,width)
         self.event_embedding=nn.Embedding(config.atom_vocab_size,width)
         self.position_embedding=nn.Embedding(config.history_events+4,width)
@@ -49,7 +51,7 @@ class ChartComposer(nn.Module):
         self.action_head=nn.Linear(width,config.action_slots*config.atom_vocab_size)
         self.future_head=nn.Linear(width,8)
 
-    def forward(self, candidate_features, history, condition, action_state=None,
+    def forward(self, candidate_features, history, condition, action_state=None, future_state=None,
                 candidate_mask=None, history_padding_mask=None):
         batch=candidate_features.size(0)
         acoustic=candidate_features[...,:self.config.audio_dim]
@@ -68,6 +70,8 @@ class ChartComposer(nn.Module):
         context=self.norm(history_summary+audio_summary+self.condition_projection(condition))
         if action_state is not None:
             context=context+self.action_projection(action_state)
+        if future_state is not None:
+            context=context+self.future_projection(future_state)
         pointer=self.pointer(context[:,None,:]+candidate_hidden).squeeze(-1)
         if candidate_mask is not None:pointer=pointer.masked_fill(candidate_mask,-1e4)
         return {'candidate_logits':pointer,'write_logit':self.write_head(context).squeeze(-1),

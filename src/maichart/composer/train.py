@@ -44,8 +44,11 @@ def _loss(output,batch,atom_vocab_size):
     pointer=F.cross_entropy(output['candidate_logits'],batch['candidate_target'])
     action=F.cross_entropy(output['action_logits'].reshape(-1,atom_vocab_size),batch['action_target'].reshape(-1))
     write=F.binary_cross_entropy_with_logits(output['write_logit'],torch.ones_like(output['write_logit']))
-    return pointer+.6*action+.05*write,{'loss':(pointer+.6*action+.05*write).detach(),
+    future=F.smooth_l1_loss(output['future'],batch['future_target'])
+    total=pointer+.6*action+.05*write+.2*future
+    return total,{'loss':total.detach(),
         'pointer_loss':pointer.detach(),'action_loss':action.detach(),'write_loss':write.detach(),
+        'future_loss':future.detach(),
         'pointer_accuracy':(output['candidate_logits'].argmax(-1)==batch['candidate_target']).float().mean().detach()}
 
 
@@ -82,7 +85,7 @@ def main(argv=None):
             with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
                                 enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
                 output=model(tensors['candidate_features'],tensors['history'],tensors['condition'],
-                    action_state=tensors['action_state'],candidate_mask=tensors['candidate_padding_mask'],
+                    action_state=tensors['action_state'],future_state=tensors['future_state'],candidate_mask=tensors['candidate_padding_mask'],
                     history_padding_mask=tensors['history_padding_mask'])
                 loss,metrics=_loss(output,tensors,model.config.atom_vocab_size)
             loss.backward();torch.nn.utils.clip_grad_norm_(model.parameters(),1.);optimizer.step();optimizer.zero_grad(set_to_none=True);global_step+=1
