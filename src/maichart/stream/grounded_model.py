@@ -278,13 +278,18 @@ class GroundedContext(nn.Module):
         weights=scores.softmax(-1).to(retrieved.dtype)
         return (weights[...,None]*retrieved).sum(2),eligible.any(-1).float()
 
-    def contexts(self,clock,seconds,center,bank,archive,condition=None):
+    def contexts(self,clock,seconds,center,bank,archive,condition=None,condition_null=None):
         local=self.local(clock,seconds,center,bank)
         recalled,available=self.retrieve(clock,seconds,center,archive,bank)
         if condition is not None:
             # Keep difficulty/style as a secondary control. Audio and its
             # authored pointer remain the dominant local evidence path.
-            local=local+.25*self.local_condition(condition)[:,None]
+            control=condition
+            if condition_null is not None:
+                null=condition_null.reshape(-1).bool()
+                control=condition.clone()
+                control[...,1:]=torch.where(null[:,None],.5,control[...,1:])
+            local=local+.25*self.local_condition(control)[:,None]
         return {'local':local,'archive':recalled,'archive_available':available}
 
     def input(self,tokens,clock,local):

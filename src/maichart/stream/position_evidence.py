@@ -17,20 +17,22 @@ class PositionEvidence:
         self.times,self.scores=times[keep],scores[keep]
         selected=selection[keep]
         self.selection=selected
-        self.strength=float(strength);self.confidence=0.
+        self.strength=float(strength);self.confidence=0.;self.alignment_confidence=0.;self.selection_confidence=0.
         if len(self.scores)>1:
             p=np.exp(self.scores-self.scores.max());p/=p.sum()
             concentration=max(0.,1.+float((p*np.log(p.clip(1e-30))).sum())/math.log(len(p)))
             # Class-weighted selection training does not calibrate sigmoid.
             # Use relative contrast only, not a mandatory confidence threshold.
             contrast=min(1.,4.*float(np.ptp(selected)))
+            self.alignment_confidence=concentration
+            self.selection_confidence=contrast
             self.confidence=concentration*contrast
         self.queries=self.unsupported=0;self.max_cost=0.
 
     def cost(self,second):
         self.queries+=1;second=float(second)
         if (not len(self.times) or not self.times[0]<=second<=self.times[-1]
-                or not self.confidence or not self.strength):
+                or not self.strength or not (self.alignment_confidence or self.selection_confidence)):
             self.unsupported+=1;return 0.
         score=float(np.interp(second,self.times,self.scores))
         alignment_cost=min(2.,max(0.,float(self.scores.max())-score))
@@ -47,7 +49,12 @@ class PositionEvidence:
         low=float(np.quantile(nearby,.15)); high=float(np.quantile(nearby,.85))
         support=float(np.clip((selected-low)/(high-low+1e-6),0.,1.))
         selection_cost=(1.-support)*.65
-        value=self.strength*self.confidence*(alignment_cost+selection_cost)
+        # Keep the original conservative rule that alignment-only evidence is
+        # inactive when the authored selection head is flat, while allowing a
+        # clear selection signal to act even if the alignment pointer itself
+        # is diffuse.
+        value=self.strength*(self.alignment_confidence*self.selection_confidence*alignment_cost
+                             +self.selection_confidence*selection_cost)
         if value < 1e-12:
             value=0.
         self.max_cost=max(self.max_cost,value)
@@ -72,5 +79,7 @@ class PositionEvidence:
             'confidence_heuristic':self.confidence,'queries':self.queries,'unsupported':self.unsupported,
             'support_seconds':[float(self.times[0]),float(self.times[-1])] if len(self.times) else [],
             'max_cost':self.max_cost,'cost_bound':2.65*self.strength,
+            'alignment_confidence':self.alignment_confidence,
+            'selection_confidence':self.selection_confidence,
             'selection_local_relative':True,'selection_cost_bound':.65*self.strength,
             'not_a_calibrated_probability':True,'output_positions_quantized':False}

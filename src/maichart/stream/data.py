@@ -210,8 +210,8 @@ class StreamDataset(Dataset):
                  max_region_seconds=15., preparation_workers=1, audio_cache_gb=1.,
                  limit_charts=0, quality_profile=MUSICAL_EVIDENCE, quality_enabled=True,
                  grounding_config=None,history_note_dropout=0.,prefix_note_dropout=0.,
-                 history_position_dropout=.1,history_position_span_events=4,
-                 history_position_keep_events=2,condition_dropout=.1,seed=0,
+                 history_position_dropout=0.,history_position_span_events=4,
+                 history_position_keep_events=2,condition_dropout=0.,seed=0,
                  input_cache_mode='mapped',structure_cache_mb=256,prefix_mask_span_events=1,
                  symmetry_augmentation='none',hand_backend='python'):
         self.codec = RationalCodec()
@@ -659,12 +659,14 @@ class StreamDataset(Dataset):
             if rng.random()<self.history_note_dropout:cell[:]=[self.codec.mask_id]*len(cell)
         decoder,quality,prefix_hidden=masked_note_inputs(chunk.decoder_input,self.codec,rng,self.prefix_note_dropout,
             targets=chunk.target,quality=chunk.target_quality,span_events=self.prefix_mask_span_events,return_events=True)
-        # Do not hide P: tokens from decoder_input: those tokens belong to the
-        # event currently being teacher-forced and are the exact Fraction
-        # target's immediate causal context. Historical position masking is
-        # applied to chunk.history below, where it cannot corrupt the current
-        # event's spelling supervision.
-        prefix_position_hidden=[]
+        # Keep the serialized P: tokens for exact fraction teacher forcing, but
+        # sample a separate subset whose duplicate clock geometry is hidden.
+        # The last configured events remain complete anchors, and no token
+        # within the current Fraction spelling is replaced by MASK.
+        _,_,prefix_position_hidden=masked_position_inputs(
+            chunk.decoder_input,self.codec,rng,self.history_position_dropout,
+            span_events=self.history_position_span_events,
+            keep_recent=self.history_position_keep_events,return_events=True)
         item['decoder_input']=torch.tensor(decoder,dtype=torch.long)
         item['history']=torch.tensor(history,dtype=torch.long)
         item['target_quality']=torch.tensor(quality,dtype=torch.float32)

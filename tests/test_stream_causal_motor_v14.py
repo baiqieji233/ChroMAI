@@ -15,7 +15,7 @@ from maichart.generation.conditions import GenerationCondition,GENERATION_DEFAUL
 from maichart.stream.hand_tracking import HandHistory,HAND_DIM,Assignment,advance
 from maichart.stream.symmetry import kinematic_rows
 from maichart.stream.grounding import CausalClock,clock_inputs,masked_clock_inputs
-from maichart.stream.timing import interval_reliability,interval_consistency_cost,rhythm_cycle_cost
+from maichart.stream.timing import interval_reliability,interval_consistency_cost,rhythm_cycle_cost,density_interval_cost
 from maichart.stream.checkpoint import save,load,upgrade_grounding,TRAINING_OBJECTIVE_CONTRACT
 from maichart.stream.data import StreamDataset,collate_stream,TRAINING_SEMANTICS
 from maichart.stream.model import ChartStreamTransformer
@@ -33,6 +33,12 @@ def test_sixteenth_sweeps_and_trills_do_not_force_new_lanes_or_rhythm_changes(pa
     event=guide.event(F(80,4))
     assert event.token_bias('',list('12345678'))==[0.]*8
     assert rhythm_cycle_cost(F(80,4),points,points[-1].beat,.6)==0.
+
+
+def test_density_cost_penalizes_unsupported_short_intervals_more_than_supported_ones():
+    unsupported=density_interval_cost(.1,4.,0.,.12)
+    supported=density_interval_cost(.1,4.,1.,.12)
+    assert unsupported>supported>0
 
 
 def test_identical_durations_do_not_bias_digits_or_closing_brackets_even_across_types():
@@ -207,6 +213,18 @@ def test_history_interval_mask_also_covers_the_next_block_initial_query(source,t
     assert not item['query_clock'][0,15:17].any()
     assert not item['decoder_clock'][0,15:17].any()
     assert item['query_kinematics'][0,17]==0.
+
+
+def test_position_mask_reaches_the_main_decoder_clock_but_keeps_recent_anchor(source,tmp_path):
+    cfg=replace(config(),motor_profile='causal_hands_v1')
+    dataset=StreamDataset(source[1],cache_dir=tmp_path/'cache',max_tokens=32,max_history_tokens=12,
+        grounding_config=cfg,preparation_workers=1,audio_cache_gb=.1,
+        history_position_dropout=1.,history_position_span_events=1,history_position_keep_events=1)
+    item=dataset[0]
+    raw=dataset._structure(dataset.chunks[0],dataset.base.songs[0][0],dataset.base.songs[0][1])
+    changed=(item['decoder_clock'][:,:15]!=raw['decoder_clock'][:,:15]).any(-1)
+    assert changed.any()
+    assert torch.all(item['decoder_clock'][changed,:15]==0)
 
 
 def test_cpu_finetune_from_v13_completes_new_feature_training_and_checkpoint_contract(source,tmp_path):

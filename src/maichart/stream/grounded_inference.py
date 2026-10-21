@@ -154,7 +154,7 @@ class GroundedInference:
             center=self.center(self.clock.beat)[None,None]
             seconds=torch.tensor([[self.clock.second]],device=self.device,dtype=torch.float64)
             context=self.grounding.contexts(features[:1],seconds,center,self.bank,self.archive,
-                condition=self.condition)
+                condition=self.condition,condition_null=None)
             if self.curve is not None:
                 context['local']=context['local']+self.grounding.phrase_from_bank(
                     self.phrase_bank,seconds).to(context['local'].dtype)

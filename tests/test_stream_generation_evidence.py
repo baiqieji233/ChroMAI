@@ -41,7 +41,9 @@ def test_pointer_interpolates_without_quantizing_and_is_bounded_or_inactive_when
     assert pointer.cost(-1.)==pointer.cost(20.)==0  # no forced rest shortening
     assert pointer.cost(.25)!=pointer.cost(.3)  # not snapped to the nearest node
     flat=PositionEvidence([0.,.2,1.],[0.,0.,0.],[.1,.8,.1])
-    assert flat.cost(.5)==0
+    # Selection is an independent authored-position signal.  A flat alignment
+    # pointer no longer suppresses a clearly contrasted selection head.
+    assert flat.cost(.5)>0
     no_selection=PositionEvidence([0.,.2,1.],[-4.,0.,-4.],[.1,.1,.1])
     assert no_selection.cost(.5)==0
     invalid=PositionEvidence([-1.,0.,1.],[-1e4,-1e4,-1e4],[.5,.5,.5])

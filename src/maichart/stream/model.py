@@ -286,7 +286,7 @@ class ChartStreamTransformer(nn.Module):
                 'audio':batch['archive_audio'],'padding':batch['archive_padding_mask'],
                 'beats':batch['archive_beats'],'seconds':batch['archive_seconds'],'event_index':batch['archive_event_index']}
             queries=self.grounding.contexts(batch['query_clock'],batch['query_seconds'],batch['query_audio'],bank,archive,
-                condition=batch.get('condition'))
+                condition=batch.get('condition'),condition_null=batch.get('condition_null'))
             # Section energy: the planner's own audio-derived load curve,
             # pooled around each query. Detached, and computed identically in
             # generation, so no authored density leaks into decoding.

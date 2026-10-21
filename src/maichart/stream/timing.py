@@ -107,7 +107,10 @@ def density_interval_cost(delta_seconds, head_rate, selection_support=0.5, stren
         return 0.
     ratio=math.log((delta_seconds+.04)/(target+.04))
     shape=min(1.5,.25*ratio*ratio)
-    gate=max(0.,min(1.,support))
+    # This is a density suppression cost.  Weak authored-selection support
+    # should make an unexpectedly short interval more expensive; strong
+    # support may reduce the penalty, but never turns it into a reward.
+    gate=1.-.65*max(0.,min(1.,support))
     return strength*gate*shape
 
 
@@ -154,7 +157,21 @@ def rhythm_cycle_cost(beat, points, previous, strength, max_period=24, *,
             bar_reps += 1
             k += 1
     if best_reps < 2 and bar_reps < 2:
-        return 0.
+        # A uniform 16th stream is often a legitimate sweep or hand
+        # alternation.  Only apply fatigue after a long uninterrupted run in
+        # a locally quiet, weakly supported region; ordinary uniform rhythm is
+        # left untouched.
+        uniform_run=1
+        for left,right in zip(reversed(recent[:-1]),reversed(recent[1:])):
+            if right.beat-left.beat != delta:break
+            uniform_run+=1
+        if (uniform_run<12 or delta>Fraction(1,4)
+                or float(density_factor)>=.55 or float(selection_support)>=.35):
+            return 0.
+        fatigue=.12*min(2.5,(uniform_run-11)/4.)
+        quiet=max(0.,min(1.,(.55-float(density_factor))/.55))
+        unsupported=1.-max(0.,min(1.,float(selection_support)))
+        return strength*fatigue*max(quiet,unsupported)
     cost = .55 * max(0, best_reps - 1) + .45 * max(0, bar_reps - 1)
     # Repeated composite rhythms are common in authored charts.  Escalate
     # only when the local load is already below the song's normal level or the

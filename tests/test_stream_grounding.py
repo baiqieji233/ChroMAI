@@ -74,6 +74,18 @@ def test_clock_does_not_reveal_position_until_note_and_uses_actual_seconds():
     assert a[-1][13]*120==pytest.approx(seconds_at_beat(F(7,3),tempo,-.5),abs=1e-6)
 
 
+def test_condition_null_masks_local_grounding_condition(dataset):
+    batch=collate_stream([dataset[0]])
+    model=ChartStreamTransformer(config()).eval()
+    torch.nn.init.normal_(model.grounding.local_condition_projection.weight,std=.03)
+    batch['condition_null'][:]=True
+    changed={key:(value.clone() if torch.is_tensor(value) else value) for key,value in batch.items()}
+    changed['condition'][:,1:]=torch.linspace(0.,1.,changed['condition'].size(1)-1)
+    with torch.inference_mode():
+        first=model(batch)['logits']; second=model(changed)['logits']
+    torch.testing.assert_close(first,second,rtol=1e-5,atol=1e-5)
+
+
 def test_masked_prefix_preserves_numeric_positions_and_masks_only_its_own_targets():
     codec=RationalCodec();ids=codec.encode([EventPoint(F(1,17),'1/5'),EventPoint(F(3,7),'2h[4:1]')])
     targets=ids[1:];decoder=ids[:-1]
