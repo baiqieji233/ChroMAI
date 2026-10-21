@@ -41,7 +41,8 @@ def resample_terminal(scores, generator, *, device):
 @torch.inference_mode()
 def propose_configurations(model, codec, logits, cache, memory, memory_mask, *,
         consumed, max_tokens, grammar, restricted, event_bias, temperature,
-        candidates, generator, minimum_mass=0., timing_features=None, check=None):
+        candidates, generator, minimum_mass=0., timing_features=None, check=None,
+        exploration_temperature=0.):
     """Return one complete cell and its cache *before* consuming END.
 
 Every branch has the same known NOTE clock. Nothing is committed here. A
@@ -51,8 +52,10 @@ resource boundary instead of silently preferring short configurations.
 Proposal law: row 0 samples the model alone; the other rows add the bounded
 prefix potentials of event_bias. When the model is nearly certain of a single
 Tap, guided rows still explore the Holds, Slides and chords the terminal
-preference needs to compare. Importance weights use the mixture density, so
-resampling targets exp(terminal) times the model law exactly as before.
+preference needs to compare. With active repeat pressure, one guided row may
+use a higher exploration temperature; all paths are scored under all proposal
+laws. Importance weights use the actual mixture density, so resampling targets
+exp(terminal) times the model law exactly as before (finite candidate error remains).
 """
     count = candidates if temperature > 0 else 1
     device = logits.device
@@ -66,7 +69,11 @@ resampling targets exp(terminal) times the model law exactly as before.
     texts, tokens = ['']*count, [[] for _ in range(count)]
     # A single proposal cannot be reweighted, so it is the guided one.
     guided = [count == 1 or row > 0 for row in range(count)]
+    explore=bool(count>1 and exploration_temperature>temperature and
+                 getattr(event_bias,'exploration_requested',False))
+    explore_row=count-1 if explore else -1
     native_logp, guided_logp = [0.]*count, [0.]*count
+    exploration_logp=[0.]*count
     running, complete = set(range(count)), []
     choices_cache = {}
     rejected, expansions = [], 0
@@ -97,15 +104,19 @@ resampling targets exp(terminal) times the model law exactly as before.
             steering = torch.as_tensor(event_bias.biases(text, token_text), device=device, dtype=current.dtype)
             nudged = native + steering
             values = nudged if guided[row] else native
-            index = (values.argmax() if temperature == 0 else
-                     torch.multinomial((values/temperature).softmax(0), 1, generator=generator).squeeze(0))
+            row_temperature=exploration_temperature if row==explore_row else temperature
+            index = (values.argmax() if row_temperature == 0 else
+                     torch.multinomial((values/row_temperature).softmax(0), 1, generator=generator).squeeze(0))
             # One readback instead of synchronizing the index and both law
             # scores separately. Sampling law and RNG draws stay unchanged.
-            picked,native_score,guided_score=torch.stack((index.float(),
-                (native/scale).log_softmax(0)[index],(nudged/scale).log_softmax(0)[index])).cpu().tolist()
+            measures=[index.float(),(native/scale).log_softmax(0)[index],(nudged/scale).log_softmax(0)[index]]
+            if explore:measures.append((nudged/exploration_temperature).log_softmax(0)[index])
+            measured=torch.stack(measures).cpu().tolist()
+            picked,native_score,guided_score=measured[:3]
             index=int(picked)
             native_logp[row] += native_score
             guided_logp[row] += guided_score
+            if explore:exploration_logp[row]+=measured[3]
             token = allowed[index]
             tokens[row].append(token); expansions += 1
             if token == codec.end_id:
@@ -126,20 +137,33 @@ resampling targets exp(terminal) times the model law exactly as before.
     if not complete:
         return None, {'reason': rejected[-1] if rejected else 'configuration_constraints_exhausted',
                       'proposals': count, 'expanded_tokens': expansions}
-    weights = [score + _mixture_correction(native_logp[row], guided_logp[row], count)
+    weights = [score + _mixture_correction(native_logp[row], guided_logp[row], count,
+                   exploration_logp[row] if explore else None)
                for row, _, score in complete]
     chosen = resample_terminal(weights, generator, device=device)
     row, length, score = complete[chosen]
+    from .repetition import describe
+    structures={describe(texts[i])[0] for i,_,_ in complete if describe(texts[i]) is not None}
+    repeat_penalty=getattr(event_bias,'repeat_penalty',lambda text:0.)
+    all_repeated=bool(getattr(event_bias,'exploration_requested',False)
+                      and all(repeat_penalty(texts[i])>0 for i,_,_ in complete))
     return {'text': texts[row], 'tokens': tokens[row], 'cache': _select_cache(caches, row, length),
             'consumed': length}, {'reason': 'complete', 'proposals': count, 'accepted': len(complete),
                                 'expanded_tokens': expansions, 'terminal_score': score,
-                                'guided_proposals': sum(guided), 'chosen_guided': bool(guided[row])}
+                                'guided_proposals': sum(guided), 'chosen_guided': bool(guided[row]),
+                                'exploration_proposals':int(explore),'candidate_structures':len(structures),
+                                'all_candidates_repeat':all_repeated}
 
 
-def _mixture_correction(native, guided, count):
-    """log p(cell) - log q_mix(cell) for one native row and count-1 guided rows."""
+def _mixture_correction(native, guided, count, exploration=None):
+    """log p(cell)-log q_mix(cell), for two or three actual proposal laws."""
     if count <= 1:
         return 0.
+    if exploration is not None:
+        terms=[native-math.log(count),exploration-math.log(count)]
+        if count>2:terms.append(guided+math.log((count-2.)/count))
+        top=max(terms)
+        return native-(top+math.log(sum(math.exp(value-top) for value in terms)))
     native_share = math.log(1./count)
     guided_share = math.log((count-1.)/count)
     a, b = native_share+native, guided_share+guided

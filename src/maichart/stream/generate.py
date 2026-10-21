@@ -36,6 +36,8 @@ def parser():
     p.add_argument('--eos-temperature',type=float,default=1.)
     p.add_argument('--position-audio-strength',type=float,default=.25)
     p.add_argument('--repetition-strength',type=float,default=.6)
+    p.add_argument('--repetition-structure-strength',type=float,default=.6)
+    p.add_argument('--configuration-exploration-temperature',type=float,default=1.)
     p.add_argument('--repetition-min-seconds',type=float,default=4.)
     p.add_argument('--repetition-min-beats',type=float,default=8.)
     p.add_argument('--position-beam-size', type=int, default=4)
@@ -67,6 +69,7 @@ def parser():
     p.add_argument('--hold-protection', choices=('on', 'off'), default='on')
     p.add_argument('--reference-check-attempts', type=int, default=8)
     p.add_argument('--generation-end-sec',type=float)
+    p.add_argument('--sustain-end-sec',type=float)
     p.add_argument('--trim-exact-silence',choices=('on','off'),default='on')
     return p
 
@@ -101,6 +104,8 @@ def generate(args):
     values, times, _ = planner_audio_queries(song)
     bounds = generation_bounds(audio,requested_end=args.generation_end_sec,
                                trim_exact_silence=args.trim_exact_silence == 'on')
+    if args.sustain_end_sec is not None and args.sustain_end_sec>audio.duration_sec:
+        raise ValueError('持续动作结束时间不能超过音频文件时长')
     args.effective_end_sec = bounds['effective_end_sec']
     condition = GenerationCondition(level=args.level, radar=GENERATION_DEFAULTS, style=GENERATION_DEFAULTS)
     if args.condition_file:
@@ -126,12 +131,20 @@ def generate(args):
         'audio_evidence_profile': audio.evidence_profile, 'audio_feature_policy': audio.feature_policy,
         'generation_status': ('incomplete' if status['incomplete'] else 'needs_review' if review_needed else 'completed'),
         'reference_playability':reference,
+        'action_ending':{'last_head_sec':reference['max_note_head_sec'],
+            'last_action_end_sec':reference['max_action_end_sec'],'requested_sustain_end_sec':args.sustain_end_sec,
+            'action_tail_after_last_head_sec':max(0.,(reference['max_action_end_sec'] or 0.)-(reference['max_note_head_sec'] or 0.)),
+            'musical_action_end_automatically_verified':False,
+            'scope':'EOS stops new heads, not already committed sustained actions'},
         'first': args.first, 'tempo_map': [{'beat': str(t.beat), 'bpm': t.bpm} for t in song.tempo],
         'export_timing': export_timing,
         'timing_diagnostics': timing_diagnostics(points, song.tempo, song.first, bounds['effective_end_sec'], text),
         'generation_controls': {'style_balance_strength': args.style_balance_strength,
         'eos_temperature':args.eos_temperature,'position_audio_strength':args.position_audio_strength,
         'repetition_strength':args.repetition_strength,'repetition_min_seconds':args.repetition_min_seconds,
+        'repetition_structure_strength':args.repetition_structure_strength,
+        'configuration_exploration_temperature':args.configuration_exploration_temperature,
+        'sustain_end_sec':args.sustain_end_sec,
         'repetition_min_beats':args.repetition_min_beats,
             'position_complexity_floor':args.position_complexity_floor,
             'learned_ending_strength':args.learned_ending_strength,

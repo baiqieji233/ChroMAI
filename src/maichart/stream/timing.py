@@ -17,6 +17,19 @@ class CanonicalPositionGrammar(PositionGrammar):
         return str(Fraction(text)) == text
 
 
+def release_proposals(previous,second,tempo,first,points):
+    """Optional exact-rhythm proposals after a committed physical release.
+
+    These extend candidate coverage; all other admissible Fractions remain
+    available. They do not quantize a sampled event or create a new note.
+    """
+    from maichart.form.rational_audio import beat_at_second
+    boundary=beat_at_second(second,tempo,first)
+    steps=list(dict.fromkeys([b.beat-a.beat for a,b in zip(points[-9:],points[-9:][1:])
+                             if b.beat>a.beat]+[Fraction(1),Fraction(1,2),Fraction(1,4)]))
+    return list(dict.fromkeys(previous+math.ceil((boundary-previous)/step)*step for step in steps))
+
+
 def interval_reliability(metrics=None):
     """A conservative score multiplier, not a calibrated probability.
 

@@ -69,6 +69,9 @@ for (const device of ["auto", "cuda", "cpu"]) {
     assert.equal(result.eos_temperature,1);
     assert.equal(result.position_audio_strength,.25);
     assert.equal(result.repetition_strength,.6);
+    assert.equal(result.repetition_structure_strength,.6);
+    assert.equal(result.configuration_exploration_temperature,1);
+    assert.equal(result.sustain_end_sec,null);
     assert.equal(result.repetition_min_seconds,4);
     assert.equal(result.repetition_min_beats,8);
     assert.equal(result.constraint_min_probability,.05);
@@ -96,6 +99,8 @@ test('stream timing controls are visible in its family panel and forwarded', () 
     '#streamMaxIntervalDenominator':'24', '#streamMinSpacingMs':'30', '#streamEarlyEosPenalty':'0.5',
     '#streamSectionTypeStrength':'1.4', '#streamUnplannedGapPenaltyStrength':'1.1',
     '#streamEosTemperature':'0', '#streamPositionAudioStrength':'0', '#streamRepetitionStrength':'0',
+    '#streamRepetitionStructureStrength':'0', '#streamConfigurationExplorationTemperature':'0',
+    '#streamSustainEndSec':'157.5',
     '#streamRepetitionMinSeconds':'6', '#streamRepetitionMinBeats':'12'};
   const context = vm.createContext({valueOrDefault: (key, fallback) => values[key] ?? fallback,
     collectCondition: () => ({}), parseTempoMap: () => null, formDevice: () => 'cpu'});
@@ -114,6 +119,9 @@ test('stream timing controls are visible in its family panel and forwarded', () 
   assert.equal(result.eos_temperature,0);
   assert.equal(result.position_audio_strength,0);
   assert.equal(result.repetition_strength,0);
+  assert.equal(result.repetition_structure_strength,0);
+  assert.equal(result.configuration_exploration_temperature,0);
+  assert.equal(result.sustain_end_sec,157.5);
   assert.equal(result.repetition_min_seconds,6);
   assert.equal(result.repetition_min_beats,12);
 });
@@ -131,7 +139,7 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.quality_enabled,true);
   assert.equal(result.grounding_profile,'auto');
   assert.ok(source.includes("stream_motor_contract !== 'causal_hands_v1'"));
-  assert.ok(source.includes('chart_stream_quality_controls_v6'));
+  assert.ok(source.includes('chart_stream_quality_controls_v7'));
   assert.equal(result.continuation_profile,'auto');
   assert.equal(result.context_replay_tokens,256);
   assert.equal(result.prefix_mask_span_events,8);

@@ -76,6 +76,9 @@ class ReferenceCandidateGuard:
 
     def button_capacity(self, beat):
         second = float(seconds_at_beat(beat,self.tempo,self.first))
+        return self._button_capacity_at(second)
+
+    def _button_capacity_at(self,second):
         active = [i for i,action in enumerate(self.actions)
                   if action.marker['type'] not in {'touch','touch_hold'} and action.sample(second) is not None]
         points,_ = _merged_points(self.actions,active,second)
@@ -85,6 +88,17 @@ class ReferenceCandidateGuard:
             if self.actions[i].merge: moving += 1
             else: static.add((position,self.actions[i].radius))
         return max(0,2-len(static)-moving)
+
+    def next_button_release(self,second):
+        """First committed action endpoint with a free button hand.
+
+        Used only after an actual low-mass/invalid configuration at an occupied
+        position. This is detector state, not an acoustic onset or output grid.
+        """
+        for end in sorted({a.end for a in self.actions if a.end>second}):
+            query=end+2e-6
+            if self._button_capacity_at(query)>0:return query
+        return None
 
     def slide_launch_buttons(self, beat):
         """Buttons where a committed Slide starts moving at this beat (MiaCode slide_head)."""

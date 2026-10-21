@@ -52,6 +52,14 @@ def _action_duration(text,bpm):
     return None if errors else max([0.,*(float(marker.get('end_second',0.)) for marker in markers)])
 
 
+@lru_cache(maxsize=16384)
+def _sustain_duration(text,bpm):
+    markers,errors,_=parse_markers(f'({bpm}){{4}}{text},')
+    if errors:return None
+    return max([0.,*(float(marker.get('end_second',0.)) for marker in markers
+        if marker.get('type') in {'hold','touch_hold','slide','wifi'})])
+
+
 class RestrictedCell:
     def __init__(self, owner, forbidden, button_capacity=None, held_buttons=frozenset(),
                  slide_launch_buttons=frozenset(), *, beat=0):
@@ -63,9 +71,14 @@ class RestrictedCell:
         self.bpm = next(change.bpm for change in reversed(owner.tempo) if change.beat <= beat)
 
     def _duration_fits(self,text):
-        if self.owner.max_action_end is None: return True
-        duration = _action_duration(text,self.bpm)
-        return duration is not None and self.second+duration <= self.owner.max_action_end+1e-8
+        if self.owner.max_action_end is not None:
+            duration=_action_duration(text,self.bpm)
+            if duration is None or self.second+duration>self.owner.max_action_end+1e-8:return False
+        if self.owner.max_sustain_end is not None:
+            duration=_sustain_duration(text,self.bpm)
+            if duration is None:return False
+            if duration>0 and self.second+duration>self.owner.max_sustain_end+1e-8:return False
+        return True
 
     def _accept(self, heads, hold_buttons=frozenset()):
         buttons = frozenset(head for head in (heads or ()) if len(head)==1 and head in '12345678')
@@ -109,10 +122,12 @@ class RestrictedCell:
 
 
 class BasicConfigurationGuard:
-    def __init__(self, grammar, tempo, first, *, max_button_heads=2, protect_holds=True,max_action_end=None):
+    def __init__(self, grammar, tempo, first, *, max_button_heads=2, protect_holds=True,
+                 max_action_end=None,max_sustain_end=None):
         self.grammar, self.tempo, self.first = grammar, tempo, first
         self.max_button_heads, self.protect_holds = max_button_heads, protect_holds
         self.max_action_end = max_action_end
+        self.max_sustain_end=max_sustain_end
         self.held_until = {}
         self._completions = {}
         self.blocked_token_choices = 0
@@ -161,6 +176,7 @@ class BasicConfigurationGuard:
                 'protect_holds': self.protect_holds, 'committed_events': self.events,
                 'blocked_token_choices': self.blocked_token_choices,
                 'max_action_end_sec':self.max_action_end,
+                'max_sustain_end_sec':self.max_sustain_end,
                 'playable_verified': False,
                 'scope': ['simultaneous_button_head_count', 'head_on_active_hold'],
                 'limitations': ['No guarantee for Slide conflicts, travel or full playability.']}

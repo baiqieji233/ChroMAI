@@ -16,7 +16,7 @@ from maichart.form.rational_position_search import search_position
 from maichart.form.type_guidance import TypeGuidance
 from maichart.generation.sustain_state import SustainStateIndex
 from .memory import StreamMemoryBank
-from .timing import CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost,interval_reliability
+from .timing import CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost,interval_reliability,release_proposals
 from .context import prefix_action_state
 from .constraints import BasicConfigurationGuard
 from .reference_guard import ReferenceCandidateGuard
@@ -26,7 +26,8 @@ from .continuation import replay_budget,replay_start
 
 
 def validate_options(args):
-    for name,default in (('eos_temperature',1.),('position_audio_strength',.25),('repetition_strength',.6)):
+    for name,default in (('eos_temperature',1.),('position_audio_strength',.25),('repetition_strength',.6),
+                         ('repetition_structure_strength',.6),('configuration_exploration_temperature',1.)):
         value=float(getattr(args,name,default))
         if not math.isfinite(value) or not 0<=value<=3:
             raise ValueError(f'{name} 必须是 0–3 的有限数值')
@@ -64,6 +65,9 @@ def validate_options(args):
         raise ValueError('trim_exact_silence 必须为 on 或 off')
     if args.generation_end_sec is not None and (not math.isfinite(args.generation_end_sec) or args.generation_end_sec <= 0):
         raise ValueError('generation_end_sec 必须是正的有限秒数')
+    sustain_end=getattr(args,'sustain_end_sec',None)
+    if sustain_end is not None and (not math.isfinite(sustain_end) or sustain_end<=0):
+        raise ValueError('sustain_end_sec 必须是正的有限秒数')
     if not math.isfinite(args.min_spacing_ms) or not 0 <= args.min_spacing_ms <= 1000:
         raise ValueError('min_spacing_ms 必须是 0–1000 的有限数值')
     for name in ('style_balance_strength', 'local_chord_strength', 'physical_feasibility_strength','learned_ending_strength'):
@@ -149,7 +153,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     section_strength=float(getattr(args,'section_type_strength',1.0))
     section_profile=None
     if ((section_strength and args.style_balance_strength) or args.local_chord_strength
-            or getattr(args,'repetition_strength',.6)):
+            or getattr(args,'repetition_strength',.6) or getattr(args,'repetition_structure_strength',.6)):
         from .section_profile import SectionTypeProfile
         section_profile=SectionTypeProfile(encoded_audio[2][0].sigmoid().float().cpu().numpy(),audio_times)
     plan_intent_strength=float(getattr(args,'plan_intent_strength',1.0))
@@ -162,6 +166,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     plan_intent=None
     from .repetition import RepetitionGuard
     repetition=RepetitionGuard(section_profile,strength=getattr(args,'repetition_strength',.6),
+        structure_strength=getattr(args,'repetition_structure_strength',.6),
         min_seconds=getattr(args,'repetition_min_seconds',4.),min_beats=getattr(args,'repetition_min_beats',8.))
     position_audio_strength=float(getattr(args,'position_audio_strength',.25))
     position_audio_enabled=bool(position_audio_strength and grounded is not None
@@ -171,7 +176,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     grammar = guidance.grammar
     hard_guard = BasicConfigurationGuard(grammar, song.tempo, song.first,
         max_button_heads=args.max_button_heads, protect_holds=args.hold_protection == 'on',
-        max_action_end=getattr(args,'effective_end_sec',song.audio.duration_sec))
+        max_action_end=getattr(args,'effective_end_sec',song.audio.duration_sec),
+        max_sustain_end=getattr(args,'sustain_end_sec',None))
     cell_grammar = None
     reference_guard = ReferenceCandidateGuard(song.tempo,song.first) if args.reference_check_attempts else None
     note_bans,note_choices = {},[]
@@ -189,6 +195,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     terminal_guidance=bool(args.temperature>0 and getattr(args,'configuration_candidates',4)>1
         and (args.style_balance_strength or args.local_chord_strength or args.physical_feasibility_strength))
     proposal_events=proposal_tokens=proposal_count=0
+    exploration_proposals=structure_options_total=all_repeat_events=0
     position = None
     state, spelling, header_start = 'event', '', 0
     cache, consumed = None, 0
@@ -199,6 +206,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     interval_policy=interval_reliability(getattr(args,'interval_metrics',None))
     searches, search_expansions, search_trace, event_trace = 0, 0, [], []
     rejected_positions,event_retries,event_retry_count = set(),[],0
+    recovery_second=None
     event_trace_tail=[]
     memory_guard_events=[]
     started = time.perf_counter()
@@ -303,13 +311,19 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         return True
 
     def retry_event(cause,probability=None):
-        nonlocal ids,cache,consumed,state,spelling,event_retry_count
+        nonlocal ids,cache,consumed,state,spelling,event_retry_count,recovery_second
         if position is None or event_retry_count>=args.event_reconsider_attempts:
             return False
         rejected_positions.add(position)
+        if (reference_guard is not None and cause in {'low_probability_configuration_constraints',
+                'configuration_constraints_exhausted','reference_constraints_exhausted',
+                'hard_mask_discarded_likely_configuration'} and reference_guard.button_capacity(position)==0
+                and not reference_guard.slide_launch_buttons(position)):
+            release=reference_guard.next_button_release(seconds_at_beat(position,song.tempo,song.first))
+            if release is not None:recovery_second=max(recovery_second or release,release)
         event_retry_count+=1
         event_retries.append({'beat':str(position),'reason':cause,'retained_model_mass':probability,
-                              'attempt':event_retry_count})
+                              'attempt':event_retry_count,'committed_action_release_sec':recovery_second})
         # Rewind the complete speculative event, not any committed music.
         # Cross memory still belongs to this resource context; no rejected
         # action, style count or archive item has been committed yet.
@@ -347,7 +361,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 max_denominator=args.max_denominator,
                 max_delta_denominator=args.max_interval_denominator or None,
                 delta_reference=previous if previous >= 0 else Fraction(0),
-                min_spacing=gap, allowed_ranges=((origin, search_end),),
+                min_spacing=gap, allowed_ranges=((max(origin,beat_at_second(recovery_second,song.tempo,song.first))
+                    if recovery_second is not None else origin, search_end),),
                 valid_position=lambda value:value not in rejected_positions)
             possible = position_grammar.allowed('', codec)
             if not possible:
@@ -431,13 +446,15 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     timing_features=grounded.timing_features if grounded is not None else None,
                     generator=rng, canonical_only=True, adaptive=True, candidate_cost=interval_cost,
                     max_width=effective_beam,
-                    proposal_trigger=lambda beat: (interval_prediction is not None
+                    proposal_trigger=lambda beat: recovery_second is not None or (interval_prediction is not None
                         and 0 <= interval_prediction < 1.
                         and float(beat-previous) > max(interval_prediction*16.,interval_prediction*8.+4.)),
                     proposals=([Fraction(math.floor(previous)+1)]
                         + [previous+step for step in (Fraction(1,4),Fraction(1,2),Fraction(1,3),Fraction(3,4),
                                                       Fraction(1,6),Fraction(1,8),Fraction(1),Fraction(2))]
-                        + [previous+(b.beat-a.beat) for a,b in reversed(list(zip(points[-17:],points[-17:][1:])))]
+                         + (release_proposals(previous,recovery_second,song.tempo,song.first,points)
+                            if recovery_second is not None else [])
+                         + [previous+(b.beat-a.beat) for a,b in reversed(list(zip(points[-17:],points[-17:][1:])))]
                         if previous >= 0 else []))
                 info['interval_prediction_beats_clipped_8'] = (None if interval_prediction is None
                     else min(1., max(0., interval_prediction))*8.)
@@ -510,8 +527,12 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     event_bias=event_bias,temperature=args.temperature,candidates=candidate_budget,
                     generator=proposal_rng,minimum_mass=args.constraint_min_probability,
                     timing_features=grounded.timing_features if grounded is not None else None,
-                    check=check_configuration)
+                    check=check_configuration,
+                    exploration_temperature=getattr(args,'configuration_exploration_temperature',1.))
                 proposal_events+=1;proposal_tokens+=search['expanded_tokens'];proposal_count+=search['proposals']
+                exploration_proposals+=search.get('exploration_proposals',0)
+                structure_options_total+=search.get('candidate_structures',0)
+                all_repeat_events+=int(search.get('all_candidates_repeat',False))
                 if search['reason']=='context_space':
                     if header_start<=1:
                         raise ValueError('完整配置候选超过流上下文 token 上限；请增大「流上下文 token 上限」。')
@@ -594,6 +615,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 if reference_guard is not None: reference_guard.commit(point)
                 if grounded is not None:grounded.commit(point)
                 rejected_positions.clear();event_retry_count=0
+                recovery_second=None
                 if grounded is None:
                     vector = model.token_embedding(torch.tensor(codec.cell(point), device=device)).mean(0)
                     bank.append(position, spelling, vector + base_projection[audio_index(position)])
@@ -618,6 +640,9 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'configuration_search':{'mode':'complete_cell_importance_resampling',
                         'candidate_budget':getattr(args,'configuration_candidates',4),
                         'guided_events':proposal_events,'proposals':proposal_count,'expanded_tokens':proposal_tokens,
+                        'exploration_proposals':exploration_proposals,
+                        'mean_candidate_structures':structure_options_total/max(1,proposal_events),
+                        'all_candidates_repeat_events':all_repeat_events,
                         'prefix_style_bias':False,'greedy_terminal_guidance':False},
                     'grounding':grounded.report() if grounded is not None else {'profile':'none'},
                     'memory_policy': 'training_history_summary_v1',

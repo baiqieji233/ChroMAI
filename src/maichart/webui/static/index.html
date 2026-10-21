@@ -950,6 +950,8 @@
 <label class="field">结束决策温度<input id="streamEosTemperature" type="number" min="0" max="3" step="0.05" value="1"><small>独立控制“继续／结束”，默认1，不再随拍位温度0.15被一同锐化。0选择较高分；增大不保证更早结束，需结合报告中的实际结束概率评估。设成与拍位温度相同可对照旧行为。</small></label>
 <label class="field">谱师采音证据强度<input id="streamPositionAudioStrength" type="number" min="0" max="3" step="0.05" value="0.25"><small>用已训练的“下一事件音频位置”辅助完整Fraction评分；证据模糊时衰减，不按响度挑音、不限制输出网格。缺少已训练对齐头时自动关闭并报告原因；0关闭。</small></label>
 <label class="field">长重复负荷引导强度<input id="streamRepetitionStrength" type="number" min="0" max="3" step="0.05" value="0.6"><small>配置周期持续超过下方秒数和拍数，且实际音符头负荷明显高于模型预测时，温和压低继续同一周期的候选；不会禁止配置。0关闭。短交互、均匀节奏本身不受惩罚。</small></label>
+<label class="field">配置单调引导强度<input id="streamRepetitionStructureStrength" type="number" min="0" max="3" step="0.05" value="0.6"><small>与负荷超标分开：即使密度不高，也对持续很久的同键／同类组合周期施加有界软偏好。键位变化不能掩盖双Hold或双押交替的长期复用；普通单Tap类型本身不处罚。短交互受下方时间和拍数保护，高套路复用偏好会减弱此项。0关闭。</small></label>
+<label class="field">重复时候选探索温度<input id="streamConfigurationExplorationTemperature" type="number" min="0" max="3" step="0.05" value="1"><small>出现重复压力且候选数大于1时，一个候选以此温度探索合法替代配置；其余保留原采样，重采样按真实提案概率校正。不强迫换类型；低于配置温度或设0则关闭额外探索。报告会记录仍未找到替代类型的次数。</small></label>
 <label class="field">长重复最短秒数<input id="streamRepetitionMinSeconds" type="number" min="0.1" max="120" step="0.5" value="4"><small>与最短拍数同时满足后才逐渐介入，不按固定音符颗数截断。提高可保留更长定式。</small></label>
 <label class="field">长重复最短拍数<input id="streamRepetitionMinBeats" type="number" min="0.1" max="120" step="1" value="8"><small>四分音符为一拍；与最短秒数共同决定保护起点，不把计算块边界当乐句边界。</small></label>
 <label class="field">约束后最低候选概率<input id="streamConstraintMinProbability" type="number" min="0" max="1" step="0.01" value="0.05"><small>硬保护仅剩低概率配置时，重选当前事件拍位，避免双 Slide 启动时硬凑大片 Touch。0 关闭；重选耗尽会明确报告未完成。</small></label>
@@ -961,6 +963,7 @@
 <label class="field">Hold 占用保护<select id="streamHoldProtection"><option value="on" selected>开启</option><option value="off">关闭</option></select><small>硬约束：已写出的 Hold / Touch Hold 尚未结束时，不允许在同一位置新增敲击头；不把整条 Slide 当作静态占用。</small></label>
 <label class="field">每个起音的参考检查预算<input id="streamReferenceChecks" type="number" min="0" max="32" step="1" value="8"><small>默认最多尝试 8 个完整配置；MiaCode 运行时检查确认硬冲突时重新采样当前配置，保留此前事件和精确拍位。耗尽预算报告未完成。0 关闭生成中检查；最终仍报告静态提示与运行时审计。</small></label>
 <label class="field">生成结束时间 / 秒（可选）<input id="streamGenerationEndSec" type="number" min="0.01" step="0.01" placeholder="留空由模型决定，受音频范围限制"><small>按原音频时间限制起音与持续动作终点，适用于乐曲结束后仍有混响或文件留白。不裁剪原音频，不改 BPM 或 first。</small></label>
+<label class="field">持续动作结束时间 / 秒（可选）<input id="streamSustainEndSec" type="number" min="0.01" step="0.01" placeholder="留空仅受音频／生成结束时间限制"><small>明确限制正时长Hold、TouchHold、Slide的尾端，在候选生成前生效，不事后截短动作。EOS只停止新增头，不会结束已写出的动作；现有头密度曲线无法可靠推断持续终点，因此不自动填入响度阈值。与上方全局结束时间同时设置时，采用更严格约束。</small></label>
 <label class="field">裁掉尾部全零数字静音<select id="streamTrimExactSilence"><option value="on" selected>开启</option><option value="off">关闭</option></select><small>只识别连续至少 50ms 的精确零采样，不使用响度阈值。非零弱音、淡出和混响保留，不能代替模型学习音乐结束。</small></label>
 <label class="field">拍位分母上限<input id="streamMaxDenominator" type="number" min="1" max="4096" step="1" value="384"><small>精确 Fraction 拍位的分母，不是 Simai 的 {分音}；例如 1/8 拍对应 {32}。允许上限内任意分母。</small></label>
 <label class="field">相邻间隔分母上限<input id="streamMaxIntervalDenominator" type="number" min="0" max="4096" step="1" value="96"><small>限制相邻两个音符的精确拍差；0 不限制。96 可能导出到 {384}，并不代表只允许 {96}。</small></label>

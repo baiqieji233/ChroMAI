@@ -595,6 +595,7 @@ const GENERATION_PARAM_FIELDS = [
   "formPositionComplexity", "formPositionBeamSize", "formEarlyEosPenalty",
   "streamPositionTemperature", "streamPositionBeamSize", "streamPositionComplexity", "streamEarlyEosPenalty",
   "streamEosTemperature", "streamPositionAudioStrength", "streamRepetitionStrength",
+  "streamRepetitionStructureStrength", "streamConfigurationExplorationTemperature", "streamSustainEndSec",
   "streamRepetitionMinSeconds", "streamRepetitionMinBeats",
   "streamPositionIntervalStrength", "streamUnplannedGapPenaltyStrength", "streamRhythmDiversityStrength",
   "streamPositionComplexityFloor", "streamLearnedEndingStrength", "streamConstraintMinProbability", "streamEventReconsiderAttempts",
@@ -2008,6 +2009,9 @@ function chartStreamGenerationPayload() {
     eos_temperature: Number(valueOrDefault("#streamEosTemperature", 1)),
     position_audio_strength: Number(valueOrDefault("#streamPositionAudioStrength", .25)),
     repetition_strength: Number(valueOrDefault("#streamRepetitionStrength", .6)),
+    repetition_structure_strength: Number(valueOrDefault("#streamRepetitionStructureStrength", .6)),
+    configuration_exploration_temperature: Number(valueOrDefault("#streamConfigurationExplorationTemperature", 1)),
+    sustain_end_sec: valueOrDefault("#streamSustainEndSec","").trim() === "" ? null : Number(valueOrDefault("#streamSustainEndSec",0)),
     repetition_min_seconds: Number(valueOrDefault("#streamRepetitionMinSeconds", 4)),
     repetition_min_beats: Number(valueOrDefault("#streamRepetitionMinBeats", 8)),
     position_beam_size: Number(valueOrDefault("#streamPositionBeamSize", 4)),
@@ -4523,7 +4527,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
     const status = await api("/api/status");
-    if (status.stream_generation_contract !== "chart_stream_quality_controls_v6") {
+    if (status.stream_generation_contract !== "chart_stream_quality_controls_v7") {
       throw new Error("当前服务尚未加载连续流质量控制。请使用已更新的 WebUI 服务；若此端口正在训练，请等训练结束后重启，避免新参数被旧后端忽略。");
     }
     const data = await api("/api/chart-stream/generate", payload);

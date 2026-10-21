@@ -214,6 +214,7 @@ def start(handler, operation, payload, *, runtime):
             args += ['--bpm', str(payload['bpm'])]
         for key, default in (('position_temperature', .15), ('max_events', 0),
                              ('eos_temperature',1.),('position_audio_strength',.25),('repetition_strength',.6),
+                             ('repetition_structure_strength',.6),('configuration_exploration_temperature',1.),
                              ('repetition_min_seconds',4.),('repetition_min_beats',8.),
                              ('position_beam_size', 4), ('position_complexity', .35),
                              ('position_complexity_floor',8),('learned_ending_strength',1.),
@@ -236,6 +237,8 @@ def start(handler, operation, payload, *, runtime):
                  '--trim-exact-silence',str(payload.get('trim_exact_silence','on'))]
         if payload.get('generation_end_sec') is not None:
             args += ['--generation-end-sec',str(payload['generation_end_sec'])]
+        if payload.get('sustain_end_sec') is not None:
+            args += ['--sustain-end-sec',str(payload['sustain_end_sec'])]
         try:
             options = generation_parser().parse_args(args[2:])
             validate_options(options)
