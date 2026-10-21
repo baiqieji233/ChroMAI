@@ -157,7 +157,9 @@ def start(handler, operation, payload, *, runtime):
                 ('execution_mode','auto'),('cuda_graph_budget_gb',2.),
                 ('input_residency','auto'),('resident_cache_gb',0.),('resident_memory_reserve_gb',0.),
                 ('cache_validation_records',0),('continuation_profile','auto'),('context_replay_tokens',256),
-                ('prefix_mask_span_events',8),('cycle_exit_loss_weight',.25),('symmetry_augmentation','mirror_lr')):
+                ('prefix_mask_span_events',8),('cycle_exit_loss_weight',.25),('symmetry_augmentation','mirror_lr'),
+                ('history_position_dropout',.1),('history_position_span_events',4),
+                ('history_position_keep_events',2),('condition_dropout',.1)):
             args += ['--'+key.replace('_','-'),str(payload.get(key,default))]
         if type(payload.get('quality_enabled',True)) is not bool:
             raise ValueError('quality_enabled 必须是布尔值')
@@ -221,6 +223,7 @@ def start(handler, operation, payload, *, runtime):
                              ('constraint_min_probability',.05),('event_reconsider_attempts',4),
                              ('position_interval_strength', 1.), ('unplanned_gap_penalty_strength', .5),
                              ('rhythm_diversity_strength', .6),
+                             ('position_density_strength', .12), ('repetition_escape_attempts', 1),
                              ('early_eos_penalty', 0.),
                              ('max_denominator', 384), ('max_interval_denominator', 96),
                              ('min_spacing_ms', 20.)):

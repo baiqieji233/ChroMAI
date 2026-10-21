@@ -56,6 +56,10 @@ def parser():
     p.add_argument('--archive-min-similarity',type=float,default=.5)
     p.add_argument('--history-note-dropout',type=float,default=.15)
     p.add_argument('--prefix-note-dropout',type=float,default=.1)
+    p.add_argument('--history-position-dropout',type=float,default=.1)
+    p.add_argument('--history-position-span-events',type=int,default=4)
+    p.add_argument('--history-position-keep-events',type=int,default=2)
+    p.add_argument('--condition-dropout',type=float,default=.1)
     p.add_argument('--alignment-loss-weight',type=float,default=.15)
     p.add_argument('--alignment-tolerance-ms',type=float,default=15.)
     p.add_argument('--event-balance-loss-weight',type=float,default=.2)
@@ -274,6 +278,13 @@ def validate_training_args(args):
     for key in ('history_note_dropout','prefix_note_dropout'):
         value=getattr(args,key)
         if not math.isfinite(value) or not 0<=value<=.8:raise ValueError(f'{key} 必须为0–0.8')
+    if not math.isfinite(args.history_position_dropout) or not 0<=args.history_position_dropout<=.5:
+        raise ValueError('history_position_dropout 必须为0–0.5')
+    if not math.isfinite(args.condition_dropout) or not 0<=args.condition_dropout<=1:
+        raise ValueError('condition_dropout 必须为0–1')
+    for key,low,high in (('history_position_span_events',1,64),('history_position_keep_events',1,16)):
+        value=getattr(args,key)
+        if isinstance(value,bool) or not low<=value<=high:raise ValueError(f'{key} 必须为{low}–{high}')
     for key in ('alignment_loss_weight','event_balance_loss_weight'):
         value=getattr(args,key)
         if not math.isfinite(value) or not 0<=value<=3:raise ValueError(f'{key} 必须为0–3')
@@ -347,13 +358,14 @@ def _train(args):
         if args.resume and old.get('plan_dim_migration'):
             raise ValueError('plan_dim=8 checkpoint migration cannot resume its old optimizer; use --init-checkpoint with a new output directory.')
         if args.resume and (old.get('args') or {}).get('training_semantics') != TRAINING_SEMANTICS:
-            raise ValueError('训练合同已更新为 v14 因果遮罩与双手特征；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
+            raise ValueError('训练合同已更新为 v15 音频贴合与位置遮罩；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
         if args.resume and old.get('training_objective_contract')!=TRAINING_OBJECTIVE_CONTRACT:
             raise ValueError('Resume training objective contract 不兼容；请使用 finetune 和新目录。')
         if args.resume:
             for name in ('event_decision_loss_weight','plan_loss_weight','curve_slope_loss_weight',
                          'alignment_loss_weight','event_balance_loss_weight',
                          'history_note_dropout','prefix_note_dropout','prefix_mask_span_events','cycle_exit_loss_weight',
+                         'history_position_dropout','history_position_span_events','history_position_keep_events','condition_dropout',
                          'symmetry_augmentation'):
                 setattr(args,name,(old.get('args') or {}).get(name,getattr(args,name)))
             if not old.get('optimizer_state_dict'):
@@ -394,7 +406,11 @@ def _train(args):
         max_history_tokens=args.max_history_tokens,max_region_seconds=args.max_region_seconds,
         preparation_workers=args.prepare_workers,audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,
         quality_enabled=args.quality_enabled,grounding_config=config,prefix_mask_span_events=args.prefix_mask_span_events,
-        history_note_dropout=args.history_note_dropout,prefix_note_dropout=args.prefix_note_dropout,seed=args.seed,
+        history_note_dropout=args.history_note_dropout,prefix_note_dropout=args.prefix_note_dropout,
+        history_position_dropout=args.history_position_dropout,
+        history_position_span_events=args.history_position_span_events,
+        history_position_keep_events=args.history_position_keep_events,seed=args.seed,
+        condition_dropout=args.condition_dropout,
         input_cache_mode=args.input_cache_mode,structure_cache_mb=args.structure_cache_mb,
         symmetry_augmentation=getattr(args,'symmetry_augmentation','none'),hand_backend=hand_backend['effective'])
     if not len(dataset):
@@ -464,6 +480,10 @@ def _train(args):
         'curve_slope_loss_weight':args.curve_slope_loss_weight,
         'alignment_loss_weight':args.alignment_loss_weight,'event_balance_loss_weight':args.event_balance_loss_weight,
         'history_note_dropout':args.history_note_dropout,'prefix_note_dropout':args.prefix_note_dropout,
+        'history_position_dropout':args.history_position_dropout,
+        'history_position_span_events':args.history_position_span_events,
+        'history_position_keep_events':args.history_position_keep_events,
+        'condition_dropout':args.condition_dropout,
         'continuation_profile':config.continuation_profile,'context_replay_tokens_effective':dataset.replay_tokens,
         'prefix_mask_span_events':args.prefix_mask_span_events,'cycle_exit_loss_weight':args.cycle_exit_loss_weight,
         'symmetry_augmentation':args.symmetry_augmentation,

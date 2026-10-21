@@ -38,6 +38,7 @@ def test_structural_penalty_is_visible_at_slash_and_hold_before_terminal():
     assert value==pytest.approx(-.8-chord._prefix(''))
     assert chord.terminal_score('1/2')==pytest.approx(-.8)
     assert chord.terminal_score('1h[4:1]')==0.
+    assert chord.terminal_exploration_score('1h[4:1]')>chord.terminal_score('1h[4:1]')
 
 
 @pytest.mark.parametrize('count',[2,4,8])

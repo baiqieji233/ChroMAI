@@ -38,9 +38,10 @@ class IncrementalState(SustainStateIndex):
 
 
 class GroundedInference:
-    def __init__(self,model,codec,song,encoded_audio,audio_times=None):
+    def __init__(self,model,codec,song,encoded_audio,audio_times=None,condition=None):
         self.model,self.codec,self.song=model,codec,song
         self.device=next(model.parameters()).device
+        self.condition=condition
         detail,times,_=detail_queries(song,model.config.detail_audio_nodes)
         self.bank=model.grounding.prepare_bank(detail[None].to(self.device),
             torch.as_tensor(times,dtype=torch.float64,device=self.device)[None],
@@ -152,7 +153,8 @@ class GroundedInference:
         if key not in self.context_cache:
             center=self.center(self.clock.beat)[None,None]
             seconds=torch.tensor([[self.clock.second]],device=self.device,dtype=torch.float64)
-            context=self.grounding.contexts(features[:1],seconds,center,self.bank,self.archive)
+            context=self.grounding.contexts(features[:1],seconds,center,self.bank,self.archive,
+                condition=self.condition)
             if self.curve is not None:
                 context['local']=context['local']+self.grounding.phrase_from_bank(
                     self.phrase_bank,seconds).to(context['local'].dtype)

@@ -16,6 +16,7 @@ class PositionEvidence:
         keep=np.r_[True,np.diff(times)>0] if len(times) else np.zeros(0,dtype=bool)
         self.times,self.scores=times[keep],scores[keep]
         selected=selection[keep]
+        self.selection=selected
         self.strength=float(strength);self.confidence=0.
         if len(self.scores)>1:
             p=np.exp(self.scores-self.scores.max());p/=p.sum()
@@ -32,13 +33,44 @@ class PositionEvidence:
                 or not self.confidence or not self.strength):
             self.unsupported+=1;return 0.
         score=float(np.interp(second,self.times,self.scores))
-        value=self.strength*self.confidence*min(2.,max(0.,float(self.scores.max())-score))
+        alignment_cost=min(2.,max(0.,float(self.scores.max())-score))
+        # Selection is an authored-event likelihood proxy, not a calibrated
+        # probability.  Price a candidate by its local relative weakness so a
+        # whole quiet window is not shifted merely because its absolute score
+        # is low.  The bounded term changes candidate ranking without turning
+        # every acoustic peak into a mandatory note.
+        selected=float(np.interp(second,self.times,self.selection))
+        radius=max(.04,min(.35,(self.times[-1]-self.times[0])/32.))
+        nearby=self.selection[np.abs(self.times-second)<=radius]
+        if nearby.size < 2:
+            nearby=self.selection
+        low=float(np.quantile(nearby,.15)); high=float(np.quantile(nearby,.85))
+        support=float(np.clip((selected-low)/(high-low+1e-6),0.,1.))
+        selection_cost=(1.-support)*.65
+        value=self.strength*self.confidence*(alignment_cost+selection_cost)
+        if value < 1e-12:
+            value=0.
         self.max_cost=max(self.max_cost,value)
         return value
+
+    def support(self, second):
+        """Return bounded local authored-selection support for diagnostics/gating."""
+        if not len(self.times):
+            return 0.
+        second=float(second)
+        if second < float(self.times[0]) or second > float(self.times[-1]):
+            return 0.
+        selected=float(np.interp(second,self.times,self.selection))
+        radius=max(.04,min(.35,(self.times[-1]-self.times[0])/32.))
+        nearby=self.selection[np.abs(self.times-second)<=radius]
+        if nearby.size < 2: nearby=self.selection
+        low=float(np.quantile(nearby,.15)); high=float(np.quantile(nearby,.85))
+        return float(np.clip((selected-low)/(high-low+1e-6),0.,1.))
 
     def report(self):
         return {'source':'authored_next_event_pointer','strength':self.strength,
             'confidence_heuristic':self.confidence,'queries':self.queries,'unsupported':self.unsupported,
             'support_seconds':[float(self.times[0]),float(self.times[-1])] if len(self.times) else [],
-            'max_cost':self.max_cost,'cost_bound':2.*self.strength,
+            'max_cost':self.max_cost,'cost_bound':2.65*self.strength,
+            'selection_local_relative':True,'selection_cost_bound':.65*self.strength,
             'not_a_calibrated_probability':True,'output_positions_quantized':False}

@@ -16,7 +16,8 @@ from maichart.form.rational_position_search import search_position
 from maichart.form.type_guidance import TypeGuidance
 from maichart.generation.sustain_state import SustainStateIndex
 from .memory import StreamMemoryBank
-from .timing import CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost,interval_reliability,release_proposals
+from .timing import (CanonicalPositionGrammar, interval_consistency_cost, rhythm_cycle_cost,
+                     interval_reliability,release_proposals,density_interval_cost)
 from .context import prefix_action_state
 from .constraints import BasicConfigurationGuard
 from .reference_guard import ReferenceCandidateGuard
@@ -80,6 +81,12 @@ def validate_options(args):
     rhythm_diversity=float(getattr(args,'rhythm_diversity_strength',.6))
     if not math.isfinite(rhythm_diversity) or not 0<=rhythm_diversity<=3:
         raise ValueError('rhythm_diversity_strength 必须是 0–3 的有限数值')
+    density_strength=float(getattr(args,'position_density_strength',.12))
+    if not math.isfinite(density_strength) or not 0<=density_strength<=3:
+        raise ValueError('position_density_strength 必须是 0–3 的有限数值')
+    escape_attempts=getattr(args,'repetition_escape_attempts',1)
+    if isinstance(escape_attempts,bool) or not isinstance(escape_attempts,int) or not 0<=escape_attempts<=2:
+        raise ValueError('repetition_escape_attempts 必须是 0–2 的整数')
     gap_penalty=float(getattr(args,'unplanned_gap_penalty_strength',0.))
     if not math.isfinite(gap_penalty) or not 0<=gap_penalty<=3:
         raise ValueError('unplanned_gap_penalty_strength 必须是 0–3 的有限数值')
@@ -145,7 +152,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
     grounded=None
     if model.config.grounding_profile!='none':
         from .grounded_inference import GroundedInference
-        grounded=GroundedInference(model,codec,song,encoded_audio,audio_times=audio_times)
+        grounded=GroundedInference(model,codec,song,encoded_audio,audio_times=audio_times,condition=control)
         model=grounded
     base_projection = model.audio_projection(audio)[0] if grounded is None else None
     bank = StreamMemoryBank(max_entries=max(256, model.config.max_stream_memory),
@@ -432,11 +439,22 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
             gap_penalty_strength=float(getattr(args,'unplanned_gap_penalty_strength',0.))
             if not spelling:
                 def interval_cost(beat):
+                    second=float(seconds_at_beat(beat,song.tempo,song.first))
+                    support=(position_evidence.support(second)
+                             if position_evidence is not None else .5)
+                    density=(section_profile.density_factor(second)
+                             if section_profile is not None else 1.)
                     return (interval_consistency_cost(beat-previous, interval_prediction,
                                                       args.position_interval_strength,
                                                       gap_penalty_strength,
                                                       reliability=interval_policy['multiplier'],cap=.5)
-                            + rhythm_cycle_cost(beat, points, previous, rhythm_diversity_strength)
+                            + rhythm_cycle_cost(beat, points, previous, rhythm_diversity_strength,
+                                                density_factor=density,selection_support=support)
+                            + density_interval_cost(
+                                second-float(seconds_at_beat(previous,song.tempo,song.first)) if previous>=0 else second,
+                                (section_profile.head_rate(second) if section_profile is not None else 0.),
+                                support, strength=float(getattr(args,'position_density_strength',.12))
+                                if previous>=0 else 0.)
                             + (position_evidence.cost(seconds_at_beat(beat,song.tempo,song.first))
                                if position_evidence is not None else 0.))
                 chosen, info = search_position(model, codec, position_grammar, logits, cache,
@@ -529,10 +547,50 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     timing_features=grounded.timing_features if grounded is not None else None,
                     check=check_configuration,
                     exploration_temperature=getattr(args,'configuration_exploration_temperature',1.))
-                proposal_events+=1;proposal_tokens+=search['expanded_tokens'];proposal_count+=search['proposals']
-                exploration_proposals+=search.get('exploration_proposals',0)
-                structure_options_total+=search.get('candidate_structures',0)
-                all_repeat_events+=int(search.get('all_candidates_repeat',False))
+                attempted_searches=[search]
+                # If every bounded proposal still belongs to an active
+                # structural loop, spend one extra proposal batch at a higher
+                # exploration temperature.  Prefer a genuinely different
+                # chart structure when found; keep the model's first choice if
+                # the song-trained grammar exposes no viable escape.
+                has_structural_repeat=any(structural for _,structural,_ in getattr(event_bias,'cases',()))
+                if (picked is not None and search.get('all_candidates_repeat') and has_structural_repeat
+                        and args.temperature>0 and effective_candidates>1):
+                    remaining=(args.reference_check_attempts-note_attempts if reference_guard is not None
+                               else effective_candidates)
+                    retry_budget=min(effective_candidates,max(0,remaining))
+                    if retry_budget>0:
+                        retry_temperature=min(3.,max(float(getattr(args,'configuration_exploration_temperature',1.)),2.4))
+                        alternate=None;alternate_search={'reason':'escape_unavailable','expanded_tokens':0,'proposals':0}
+                        for _escape_index in range(int(getattr(args,'repetition_escape_attempts',1))):
+                            alternate,alternate_search=propose_configurations(model,codec,logits,cache,memory,memory_mask,
+                                consumed=consumed,max_tokens=model.config.max_tokens,grammar=grammar,restricted=cell_grammar,
+                                event_bias=event_bias,temperature=args.temperature,candidates=retry_budget,
+                                generator=proposal_rng,minimum_mass=args.constraint_min_probability,
+                                timing_features=grounded.timing_features if grounded is not None else None,
+                                check=check_configuration,exploration_temperature=retry_temperature)
+                            attempted_searches.append(alternate_search)
+                            if alternate is not None and not event_bias.repeat_penalty(alternate['text']):
+                                picked,search=alternate,alternate_search
+                                break
+                        escape_attempt_count=int(getattr(args,'repetition_escape_attempts',1))
+                        search['escape_retry_attempted']=escape_attempt_count>0
+                        search['escape_retry_attempt_count']=escape_attempt_count
+                        search['escape_retry_temperature']=retry_temperature
+                        search['escape_retry_found_novel_structure']=bool(
+                            alternate is not None and not event_bias.repeat_penalty(alternate['text']))
+                        search['escape_retry_found_candidate']=alternate is not None
+                        search['escape_retry_used']=bool(
+                            alternate is not None and not event_bias.repeat_penalty(alternate['text']))
+                        search['escape_retry_fallback']=bool(
+                            alternate is not None and event_bias.repeat_penalty(alternate['text'])>0)
+                        search['escape_retry_unavailable']=alternate is None
+                proposal_events+=len(attempted_searches)
+                proposal_tokens+=sum(item.get('expanded_tokens',0) for item in attempted_searches)
+                proposal_count+=sum(item.get('proposals',0) for item in attempted_searches)
+                exploration_proposals+=sum(item.get('exploration_proposals',0) for item in attempted_searches)
+                structure_options_total+=sum(item.get('candidate_structures',0) for item in attempted_searches)
+                all_repeat_events+=sum(int(item.get('all_candidates_repeat',False)) for item in attempted_searches)
                 if search['reason']=='context_space':
                     if header_start<=1:
                         raise ValueError('完整配置候选超过流上下文 token 上限；请增大「流上下文 token 上限」。')

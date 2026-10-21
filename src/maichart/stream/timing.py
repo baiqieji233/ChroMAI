@@ -82,7 +82,37 @@ def interval_consistency_cost(delta, prediction, strength, gap_penalty_strength=
     return cost
 
 
-def rhythm_cycle_cost(beat, points, previous, strength, max_period=24):
+def density_interval_cost(delta_seconds, head_rate, selection_support=0.5, strength=0.12):
+    """Weakly rank intervals against the locally predicted authored load.
+
+    This is deliberately a shaping term, not a metronome.  A low-rate region
+    makes a longer gap cheaper and a high-rate region makes a short gap cheaper,
+    while the selection support gates the effect so an unconfirmed acoustic
+    window never forces a note at every transient.
+    """
+    try:
+        delta_seconds=float(delta_seconds); rate=float(head_rate)
+        support=float(selection_support); strength=float(strength)
+    except (TypeError,ValueError):
+        return 0.
+    if not all(math.isfinite(v) for v in (delta_seconds,rate,support,strength)):
+        return 0.
+    if delta_seconds<=0 or rate<=0 or strength<=0:
+        return 0.
+    # One head per expected head-rate is a soft upper-density reference. Long
+    # rests are valid authored choices, so this term only suppresses intervals
+    # that are materially shorter than the local expected spacing.
+    target=1./max(rate,.25)
+    if delta_seconds >= target:
+        return 0.
+    ratio=math.log((delta_seconds+.04)/(target+.04))
+    shape=min(1.5,.25*ratio*ratio)
+    gate=max(0.,min(1.,support))
+    return strength*gate*shape
+
+
+def rhythm_cycle_cost(beat, points, previous, strength, max_period=24, *,
+                      density_factor=1., selection_support=.5):
     """Penalize continuing a non-uniform rhythm loop past two full cycles.
 
     Uniform subdivision streams (steady 4th/8th/16th runs where len(set(cycle))==1)
@@ -126,7 +156,14 @@ def rhythm_cycle_cost(beat, points, previous, strength, max_period=24):
     if best_reps < 2 and bar_reps < 2:
         return 0.
     cost = .55 * max(0, best_reps - 1) + .45 * max(0, bar_reps - 1)
-    return strength * min(3.5, cost)
+    # Repeated composite rhythms are common in authored charts.  Escalate
+    # only when the local load is already below the song's normal level or the
+    # acoustic selection evidence is weak; a supported chorus loop remains
+    # available to the model.
+    quiet=max(0.,min(1.,1.-(float(density_factor)-.5)/1.5))
+    unsupported=1.-max(0.,min(1.,float(selection_support)))
+    gate=.35+.65*max(quiet,unsupported)
+    return strength * min(3.5, cost) * gate
 
 
 

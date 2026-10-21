@@ -64,7 +64,7 @@ class StreamChunk:
 # absolute song beat phase. Old v11 checkpoints remain generation-loadable but
 # must be finetuned under this new label contract rather than resumed.
 # v13 bounds the extra per-token cycle-exit weight by the main CE denominator.
-TRAINING_SEMANTICS = 'chart_stream_training_v14_causal_motor_masks'
+TRAINING_SEMANTICS = 'chart_stream_training_v15_audio_fidelity_position_mask'
 
 
 def _target_ranges(ids, max_tokens, at_id, eos_id):
@@ -145,6 +145,37 @@ def _plan_for_event(point, previous, text, density=0., previous_text=None):
             *_attribute_labels(str(text)))
 
 
+def masked_position_inputs(ids,codec,rng,probability,*,targets=None,quality=None,
+                          span_events=8,keep_recent=2,return_events=False):
+    """Hide selected historical P: cells while retaining recent timing anchors.
+
+    At an event boundary the input clock already tells the true current beat.
+    The masking therefore targets only earlier serialized position tokens,
+    which otherwise allow a language-model shortcut to copy a repeating grid.
+    Targets and current-event positions are never changed.
+    """
+    result=list(ids);quality=None if quality is None else list(quality)
+    source=list(targets) if targets is not None else list(ids)
+    starts=[i for i,t in enumerate(source) if t==codec.at_id]
+    total=len(starts);hidden=[]
+    eligible=max(0,total-max(0,int(keep_recent)))
+    selected=False
+    for event,left in enumerate(starts[:eligible]):
+        if event%max(1,int(span_events))==0:
+            selected=rng.random()<probability
+        if not selected:continue
+        right=starts[event+1] if event+1<total else len(source)
+        hidden.append(event)
+        for index in range(left+1,right):
+            if not codec.tokens[source[index]].startswith('P:'):continue
+            input_index=index+1 if targets is not None else index
+            if input_index<len(result):
+                result[input_index]=codec.mask_id
+                if quality is not None and input_index<len(quality):quality[input_index]=0.
+    packed=(result,quality,hidden) if return_events else (result,quality)
+    return packed
+
+
 @lru_cache(maxsize=262144)
 def _mirror_ok(text, transform):
     from maichart.form.type_guidance import _counts
@@ -178,7 +209,9 @@ class StreamDataset(Dataset):
     def __init__(self, manifest, *, cache_dir, max_tokens=1024, max_history_tokens=256,
                  max_region_seconds=15., preparation_workers=1, audio_cache_gb=1.,
                  limit_charts=0, quality_profile=MUSICAL_EVIDENCE, quality_enabled=True,
-                 grounding_config=None,history_note_dropout=0.,prefix_note_dropout=0.,seed=0,
+                 grounding_config=None,history_note_dropout=0.,prefix_note_dropout=0.,
+                 history_position_dropout=.1,history_position_span_events=4,
+                 history_position_keep_events=2,condition_dropout=.1,seed=0,
                  input_cache_mode='mapped',structure_cache_mb=256,prefix_mask_span_events=1,
                  symmetry_augmentation='none',hand_backend='python'):
         self.codec = RationalCodec()
@@ -191,6 +224,10 @@ class StreamDataset(Dataset):
         self.grounding_config=grounding_config
         self.grounded=bool(grounding_config is not None and grounding_config.grounding_profile!='none')
         self.history_note_dropout=float(history_note_dropout);self.prefix_note_dropout=float(prefix_note_dropout)
+        self.history_position_dropout=float(history_position_dropout)
+        self.history_position_span_events=int(history_position_span_events)
+        self.history_position_keep_events=int(history_position_keep_events)
+        self.condition_dropout=float(condition_dropout)
         self.prefix_mask_span_events=int(prefix_mask_span_events)
         from .continuation import replay_budget
         self.replay_tokens=replay_budget(grounding_config) if grounding_config is not None else 0
@@ -330,6 +367,10 @@ class StreamDataset(Dataset):
             from dataclasses import asdict
             identity['grounding']={k:v for k,v in asdict(grounding_config).items() if k.startswith(('grounding','detail_','local_','archive_','alignment_'))}
         identity.update(history_note_dropout=self.history_note_dropout,prefix_note_dropout=self.prefix_note_dropout,
+            history_position_dropout=self.history_position_dropout,
+            history_position_span_events=self.history_position_span_events,
+            history_position_keep_events=self.history_position_keep_events,
+            condition_dropout=self.condition_dropout,
             replay_tokens=self.replay_tokens,prefix_mask_span_events=self.prefix_mask_span_events,
             symmetry_augmentation=self.symmetry_augmentation)
         if self.grounded:
@@ -464,7 +505,7 @@ class StreamDataset(Dataset):
         return identity
 
     def _structure_identity(self,chunk):
-        return {'type':'causal_structure_v1','chart':self._chart_identities[chunk.chart_index],
+        return {'type':'causal_structure_v2_audio_fidelity','chart':self._chart_identities[chunk.chart_index],
             'chunk':chunk.chunk_index,'tokens':self.max_tokens,'history':self.max_history_tokens,
             'replay_tokens':self.replay_tokens}
 
@@ -610,20 +651,32 @@ class StreamDataset(Dataset):
         item['archive_padding_mask']=torch.zeros(len(selected),dtype=torch.bool)
         # Unknown history is explicit MASK, never invented wrong configurations.
         history,_,history_hidden=masked_note_inputs(chunk.history,self.codec,rng,self.history_note_dropout,return_events=True)
+        history,_,history_position_hidden=masked_position_inputs(
+            history,self.codec,rng,self.history_position_dropout,
+            span_events=self.history_position_span_events,
+            keep_recent=self.history_position_keep_events,return_events=True)
         for cell in item['archive_cells']:
             if rng.random()<self.history_note_dropout:cell[:]=[self.codec.mask_id]*len(cell)
         decoder,quality,prefix_hidden=masked_note_inputs(chunk.decoder_input,self.codec,rng,self.prefix_note_dropout,
             targets=chunk.target,quality=chunk.target_quality,span_events=self.prefix_mask_span_events,return_events=True)
+        # Do not hide P: tokens from decoder_input: those tokens belong to the
+        # event currently being teacher-forced and are the exact Fraction
+        # target's immediate causal context. Historical position masking is
+        # applied to chunk.history below, where it cannot corrupt the current
+        # event's spelling supervision.
+        prefix_position_hidden=[]
         item['decoder_input']=torch.tensor(decoder,dtype=torch.long)
         item['history']=torch.tensor(history,dtype=torch.long)
         item['target_quality']=torch.tensor(quality,dtype=torch.float32)
         item['decoder_clock'],item['query_clock'],prefix_intervals=masked_clock_inputs(
             structure['decoder_clock'],chunk.decoder_input,self.codec,rng,prefix_hidden,
             dropout=.5*self.prefix_note_dropout,query_clock=structure['query_clock'],
-            query_index=structure['decoder_query_index'],targets=chunk.target,return_interval_events=True)
+            query_index=structure['decoder_query_index'],targets=chunk.target,return_interval_events=True,
+            mask_position_events=prefix_position_hidden)
         item['history_clock'],history_intervals=masked_clock_inputs(
             structure['history_clock'],chunk.history,self.codec,rng,history_hidden,
-            dropout=.5*self.history_note_dropout,return_interval_events=True)
+            dropout=.5*self.history_note_dropout,return_interval_events=True,
+            mask_position_events=history_position_hidden)
         # Hand kinematics read only committed events (query_committed counts
         # complete cells), so pure-Tap passages are no longer an empty state.
         # Cells hidden by note dropout stay hidden here as well.
@@ -632,12 +685,18 @@ class StreamDataset(Dataset):
         trajectories=list(stored_trajectories) if stored_trajectories is not None else None
         history_first=chunk.start_event-sum(1 for t in chunk.history if t==self.codec.at_id)
         masked_events=set()
-        for event in [history_first+e for e in history_hidden]+[chunk.start_event+e for e in prefix_hidden]:
+        for event in ([history_first+e for e in history_hidden]
+                      +[history_first+e for e in history_position_hidden]
+                      +[chunk.start_event+e for e in prefix_hidden]
+                      +[chunk.start_event+e for e in prefix_position_hidden]):
             if 0<=event<len(lanes):
                 lanes[event]=()
                 masked_events.add(event)
                 if trajectories is not None:trajectories[event]=()
-        interval_hidden={chunk.start_event+e for e in prefix_intervals}|{history_first+e for e in history_intervals}
+        interval_hidden=({chunk.start_event+e for e in prefix_intervals}
+                         |{history_first+e for e in history_intervals}
+                         |{chunk.start_event+e for e in prefix_position_hidden}
+                         |{history_first+e for e in history_position_hidden})
         pending=structure['query_clock'][:,18].numpy()>0
         if cfg.motor_profile=='causal_hands_v1':
             owners=structure['query_committed'].numpy()-1+pending.astype(np.int64)
@@ -731,6 +790,7 @@ class StreamDataset(Dataset):
                     song.load_curve_times_sec, song.load_curve,
                     np.asarray(times, dtype=np.float64) - float(song.first))),
                 'condition': condition.to_vector(),
+                'condition_null': torch.tensor(False),
                 'quality_weight': torch.tensor(float(weight)),
                 'target_quality': torch.tensor(chunk.target_quality, dtype=torch.float32),
                 'cycle_exit_mask':torch.tensor(chunk.cycle_exit_mask or (False,)*len(chunk.target)),
@@ -746,6 +806,8 @@ class StreamDataset(Dataset):
         if self.grounded:
             rng=random.Random(self.seed+self.epoch*1_000_003+index*7919)
             item=self._grounded_item(chunk,item,song,points,annotation,rng,source=source,transform=transform)
+        condition_rng=random.Random(self.seed+self.epoch*1_000_003+index*104729+17)
+        item['condition_null']=torch.tensor(condition_rng.random()<self.condition_dropout,dtype=torch.bool)
         return item
 
     def _lane_sets(self,chart_index,transform):
@@ -786,7 +848,7 @@ def collate_stream(items):
         values=[item[key] for item in items]
         result[key]=pad_sequence(values,batch_first=True,padding_value=0)
         result[key+'_padding_mask']=torch.arange(result[key].size(1))[None] >= torch.tensor([len(v) for v in values])[:,None]
-    for key in ('condition','final','chart_index','chunk_index','quality_weight'):
+    for key in ('condition','condition_null','final','chart_index','chunk_index','quality_weight'):
         result[key]=torch.stack([item[key] if torch.is_tensor(item[key]) else torch.tensor(item[key]) for item in items])
     result['audio_times_sec']=pad_sequence([item['audio_times_sec'] for item in items],batch_first=True)
     result['audio_padding_mask']=torch.arange(result['audio'].size(1))[None] >= torch.tensor([len(v['audio']) for v in items])[:,None]

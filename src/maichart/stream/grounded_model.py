@@ -22,7 +22,8 @@ ALIGNMENT_BACK = 2
 UPGRADE_PARAMETERS = ('grounding.local_distance_key.weight','grounding.local_distance_value.weight',
                       'grounding.phrase_projection.weight','grounding.kinematic_projection.weight',
                       'grounding.alignment_distance.weight','grounding.audio_boundary_projection.weight',
-                      'grounding.hand_projection.weight')
+                      'grounding.hand_projection.weight','grounding.dynamic_projection.weight',
+                      'grounding.local_condition_projection.weight')
 
 
 def relative_features(delta_seconds, bpm, scale):
@@ -126,18 +127,28 @@ class GroundedContext(nn.Module):
         # dropping every acoustic route through the learned router. It starts
         # at zero so old checkpoints keep their exact function until finetuned.
         self.audio_boundary_projection=nn.Linear(width,width,bias=False)
+        # Keep absolute dynamics available after the main audio LayerNorm.
+        # RMS, relative RMS, slope and novelty are already measured channels;
+        # this residual lets the decoder use them without undoing the stable
+        # normalized acoustic representation.
+        self.dynamic_projection=nn.Linear(4,width,bias=False)
+        # Local difficulty/style controls are a weak residual.  Zero init keeps
+        # old checkpoints behaviourally compatible until finetuned.
+        self.local_condition_projection=nn.Linear(config.condition_dim,width,bias=False)
         # Explicit upgrades start from the old logits. New branches learn
         # through residual outputs, with unchanged legacy parameter shapes.
         for layer in (self.clock_projection,self.local_input,self.fusion,self.intent_projection,
                       self.local_distance_key,self.local_distance_value,self.phrase_projection,
                       self.kinematic_projection,self.alignment_distance,
-                      self.audio_boundary_projection,self.hand_projection):
+                      self.audio_boundary_projection,self.hand_projection,
+                      self.dynamic_projection,self.local_condition_projection):
             nn.init.zeros_(layer.weight)
 
     def prepare_bank(self,values,times,padding):
         mask=padding.bool()
         return {'values':values,'times':times,'padding':mask,
                 'keys':self.local_key(values),'projected':self.local_value(values),
+                'dynamic':self.dynamic(values),
                 'audio_mean':(values[...,:98]*(~mask)[...,None]).sum(1)/(~mask).sum(1).clamp_min(1)[:,None]}
 
     def phrase(self,curve,times,padding,seconds):
@@ -155,6 +166,15 @@ class GroundedContext(nn.Module):
 
     def boundary_audio(self,local):
         return self.audio_boundary_projection(local.to(self.audio_boundary_projection.weight.dtype))
+
+    def dynamic(self,values):
+        if values.size(-1) < 98:
+            raise ValueError('Dynamic audio bypass requires the 98-column acoustic block')
+        dynamic=values[..., (93,95,96,97)]
+        return self.dynamic_projection(dynamic.to(self.dynamic_projection.weight.dtype))
+
+    def local_condition(self,condition):
+        return self.local_condition_projection(condition.to(self.local_condition_projection.weight.dtype))
 
     def local(self,clock,seconds,center,bank):
         values,times,padding=bank['values'],bank['times'],bank['padding']
@@ -185,9 +205,12 @@ class GroundedContext(nn.Module):
         mask=(raw<0)|(raw>=total)|padding[rows,indices]
         mask|=(sample_times-seconds[...,None]).abs()>self.config.local_audio_seconds
         keys=bank['keys'][rows,indices];features=bank['projected'][rows,indices]
+        dynamic=bank['dynamic'][rows,indices]
         center_keys=self.local_key(center);center_values=self.local_value(center)
+        center_dynamic=self.dynamic(center)
         keys=torch.cat((keys,center_keys[:,:,None]),2)
         features=torch.cat((features,center_values[:,:,None]),2)
+        dynamic=torch.cat((dynamic,center_dynamic[:,:,None]),2)
         # Signed offsets let the query tell the coming onset from the one a
         # beat earlier; beat phase alone repeats every beat inside the window.
         delta=torch.cat(((sample_times-seconds[...,None]).masked_fill(mask,0.),
@@ -201,12 +224,13 @@ class GroundedContext(nn.Module):
         # Always offer an explicit null observation, including before audio.
         keys=torch.cat((keys,keys.new_zeros(batch,count,1,keys.size(-1))),2)
         features=torch.cat((features,features.new_zeros(batch,count,1,features.size(-1))),2)
+        dynamic=torch.cat((dynamic,dynamic.new_zeros(batch,count,1,dynamic.size(-1))),2)
         mask=torch.cat((mask,mask.new_zeros(batch,count,1)),2)
         query=self.local_query(clock)
         scores=(query[:,:,None].float()*keys.float()).sum(-1)/math.sqrt(keys.size(-1))
         scores=scores.masked_fill(mask,-1e4)
         weights=scores.softmax(-1).to(features.dtype)
-        return (weights[...,None]*features).sum(2)
+        return (weights[...,None]*features).sum(2)+(weights[...,None]*dynamic).sum(2)
 
     def archive_embeddings(self,batch,embedding):
         shape=batch['archive_padding_mask'].shape
@@ -254,9 +278,13 @@ class GroundedContext(nn.Module):
         weights=scores.softmax(-1).to(retrieved.dtype)
         return (weights[...,None]*retrieved).sum(2),eligible.any(-1).float()
 
-    def contexts(self,clock,seconds,center,bank,archive):
+    def contexts(self,clock,seconds,center,bank,archive,condition=None):
         local=self.local(clock,seconds,center,bank)
         recalled,available=self.retrieve(clock,seconds,center,archive,bank)
+        if condition is not None:
+            # Keep difficulty/style as a secondary control. Audio and its
+            # authored pointer remain the dominant local evidence path.
+            local=local+.25*self.local_condition(condition)[:,None]
         return {'local':local,'archive':recalled,'archive_available':available}
 
     def input(self,tokens,clock,local):

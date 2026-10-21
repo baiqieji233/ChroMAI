@@ -137,7 +137,8 @@ exp(terminal) times the model law exactly as before (finite candidate error rema
     if not complete:
         return None, {'reason': rejected[-1] if rejected else 'configuration_constraints_exhausted',
                       'proposals': count, 'expanded_tokens': expansions}
-    weights = [score + _mixture_correction(native_logp[row], guided_logp[row], count,
+    exploration_score=getattr(event_bias,'terminal_exploration_score',event_bias.terminal_score)
+    weights = [exploration_score(texts[row]) + _mixture_correction(native_logp[row], guided_logp[row], count,
                    exploration_logp[row] if explore else None)
                for row, _, score in complete]
     chosen = resample_terminal(weights, generator, device=device)

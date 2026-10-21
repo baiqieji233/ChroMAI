@@ -46,6 +46,8 @@ def parser():
     p.add_argument('--position-interval-strength', type=float, default=1.)
     p.add_argument('--unplanned-gap-penalty-strength', type=float, default=.5)
     p.add_argument('--rhythm-diversity-strength', type=float, default=.6)
+    p.add_argument('--position-density-strength', type=float, default=.12)
+    p.add_argument('--repetition-escape-attempts', type=int, default=1)
     p.add_argument('--early-eos-penalty', type=float, default=0.)
     p.add_argument('--learned-ending-strength',type=float,default=1.)
     p.add_argument('--constraint-min-probability',type=float,default=.05)
@@ -154,6 +156,8 @@ def generate(args):
             'position_interval_strength': args.position_interval_strength,
             'unplanned_gap_penalty_strength': args.unplanned_gap_penalty_strength,
             'rhythm_diversity_strength': float(getattr(args, 'rhythm_diversity_strength', .6)),
+            'position_density_strength': float(getattr(args, 'position_density_strength', .12)),
+            'repetition_escape_attempts': int(getattr(args, 'repetition_escape_attempts', 1)),
             'position_temperature': args.position_temperature, 'early_eos_penalty': args.early_eos_penalty,
             'max_denominator': args.max_denominator, 'max_interval_denominator': args.max_interval_denominator,
             'min_spacing_ms': args.min_spacing_ms,

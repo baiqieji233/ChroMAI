@@ -208,7 +208,8 @@ def masked_note_inputs(ids,codec,rng,probability,*,targets=None,quality=None,spa
 
 
 def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
-                        query_clock=None,query_index=None,targets=None,return_interval_events=False):
+                        query_clock=None,query_index=None,targets=None,return_interval_events=False,
+                        mask_position_events=()):
     """Zero interval-echo channels (delta/delta_sec) on masked or dropped events.
 
     CausalClock stores log1p(delta) and log1p(delta_sec) in columns 15:17 from an
@@ -217,13 +218,13 @@ def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
     previous bar intervals directly from clock[..., 15:17] without consulting
     audio. When note dropout is disabled, clocks are returned untouched.
     """
-    hidden=set(hidden_events)
+    hidden=set(hidden_events);position_hidden=set(mask_position_events)
     def output(rows,queries,events):
         value=(rows,queries) if query_clock is not None else rows
         if return_interval_events:
             return (*value,frozenset(events)) if isinstance(value,tuple) else (value,frozenset(events))
         return value
-    if not hidden and dropout<=0 or len(clock)==0:
+    if not hidden and not position_hidden and dropout<=0 or len(clock)==0:
         return output(clock,query_clock,())
     source=list(targets) if targets is not None else list(ids)
     starts=[i for i,t in enumerate(source) if t==codec.at_id]
@@ -236,7 +237,7 @@ def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
     spans=[];selected=[]
     for idx,(event,note) in enumerate(notes):
         if note is None:continue
-        if event not in hidden and (dropout<=0 or rng.random()>=dropout):continue
+        if event not in hidden and event not in position_hidden and (dropout<=0 or rng.random()>=dropout):continue
         selected.append(event)
         end=next((n for _,n in notes[idx+1:] if n is not None),len(ids))
         spans.append((note,end))
@@ -248,4 +249,16 @@ def masked_clock_inputs(clock,ids,codec,rng,hidden_events=(),dropout=0.,*,
         result[start:end,15:17]=0.
         if q_result is not None and query_index is not None and start<end:
             q_result[query_index[start:end],15:17]=0.
+    # Exact beat/meter geometry and its audio-second projection otherwise
+    # remain parallel copies of masked P: tokens. Hide columns 0:15 for the
+    # same selected cells. The real query_seconds used to retrieve audio remain
+    # intact outside this token clock; committed/pending state and BPM also
+    # remain available to causal action tracking.
+    for index,(event,note) in enumerate(notes):
+        if note is None or event not in position_hidden:continue
+        left=starts[event]
+        end=next((next_note for _,next_note in notes[index+1:] if next_note is not None),len(ids))
+        result[left:end,:15]=0.
+        if q_result is not None and query_index is not None and left<end:
+            q_result[query_index[left:end],:15]=0.
     return output(result,q_result,selected)
