@@ -139,7 +139,7 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.quality_enabled,true);
   assert.equal(result.grounding_profile,'auto');
   assert.ok(source.includes("stream_motor_contract !== 'causal_hands_v1'"));
-  assert.ok(source.includes('chart_stream_quality_controls_v7'));
+  assert.ok(source.includes('chart_stream_quality_controls_v8'));
   assert.equal(result.continuation_profile,'auto');
   assert.equal(result.context_replay_tokens,256);
   assert.equal(result.prefix_mask_span_events,8);

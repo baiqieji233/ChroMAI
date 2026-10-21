@@ -4527,7 +4527,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_stream_v1") {
     const status = await api("/api/status");
-    if (status.stream_generation_contract !== "chart_stream_quality_controls_v7") {
+    if (status.stream_generation_contract !== "chart_stream_quality_controls_v8") {
       throw new Error("当前服务尚未加载连续流质量控制。请使用已更新的 WebUI 服务；若此端口正在训练，请等训练结束后重启，避免新参数被旧后端忽略。");
     }
     const data = await api("/api/chart-stream/generate", payload);
