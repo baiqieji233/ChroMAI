@@ -939,7 +939,7 @@
 <div class="form-grid"><label class="field">Style 配置平衡强度<input id="streamStyleBalanceStrength" type="number" min="0" max="3" step="0.05" value="0"><small>默认 0。大于 0 时，生成会对连续 Break 和双押 token 施加有界反馈，并在候选配置间平衡请求比例；不是硬比例。配置候选数为 1 时仍会启用 token 级反馈。</small></label>
 <label class="field">段落类型跟随强度<input id="streamSectionTypeStrength" type="number" min="0" max="3" step="0.05" value="1"><small>在启用 Style 配置平衡时，按编码器预测的局部段落负载曲线动态缩放 Tap / Hold / Slide / Touch 目标比例，恢复间奏与副歌的配置反差。0 退化为全曲恒定比例。</small></label>
 <label class="field">模型意图门控强度<input id="streamPlanIntentStrength" type="number" min="0" max="1" step="0.05" value="1"><small>在启用 Style 配置平衡时，用模型自己预测的下一事件意图（多押 / Slide / Hold / Touch / Break）调节比例反馈：模型认为此处不适合某类型时减弱对它的推动，认为适合时减弱对它的压制。只会削弱反馈、不会新增推力；0 关闭。旧检查点无 Break 意图通道，Break 不受门控。</small></label>
-<label class="field">完整配置候选数<input id="streamConfigurationCandidates" type="number" min="1" max="16" step="1" value="4"><small>先由模型提出完整配置，再按 Style／局部多押／手感偏好采样。默认 4；越大越慢。1 或配置温度为 0 时不作候选间偏好；所有额外强度为 0 时自动跳过多候选。</small></label>
+<label class="field">完整配置候选数<input id="streamConfigurationCandidates" type="number" min="1" max="16" step="1" value="4"><small>先由模型提出完整配置，再按 Style／局部多押／手感／长重复偏好采样。默认4；越大越慢。1或配置温度为0时使用前缀软引导；额外强度为0且没有重复压力时跳过多候选。</small></label>
 <label class="field">局部多押强度<input id="streamLocalChordStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性控制局部多押倾向；只影响配置候选，不强制填满同时发生。</small></label>
 <label class="field">手感可行性强度<input id="streamPhysicalStrength" type="number" min="0" max="3" step="0.05" value="0"><small>软性惩罚明显占用/移动冲突；0 关闭，仍需最终 MiaCode 检查。</small></label>
 <label class="field">拍位候选宽度<input id="streamPositionBeamSize" type="number" min="1" max="8" step="1" value="4"><small>默认 4：比较完整 Fraction 的模型概率。1 仍保留完整拍位评分、间隔指导和必要候选复查。显存紧张时只缩小并行宽度，额外候选分批评估；增大更慢且显存峰值更高。</small></label>
@@ -947,6 +947,11 @@
 <label class="field">拍位简洁偏好<input id="streamPositionComplexity" type="number" min="0" max="2" step="0.05" value="0.35"><small>只惩罚超过下方起点的分母复杂度；0 关闭。允许非二进制分音，不会移动已生成的音符；宽度 1 同样生效。</small></label>
 <label class="field">分母惩罚起点<input id="streamPositionComplexityFloor" type="number" min="1" max="4096" step="1" value="8"><small>按四分音符为一拍的 Fraction 分母计算。默认 8：四分至三十二分，以及分母不超过 8 的任意连音不受简洁惩罚；不是允许列表。1 恢复旧偏好。</small></label>
 <label class="field">学得结尾引导强度<input id="streamLearnedEndingStrength" type="number" min="0" max="3" step="0.1" value="1"><small>根据模型曲线预测的剩余音符量，为结束决策提供软证据；不按音量切尾。预测不准时可能早停或晚停；0 关闭。明确结束位置仍可手动指定。</small></label>
+<label class="field">结束决策温度<input id="streamEosTemperature" type="number" min="0" max="3" step="0.05" value="1"><small>独立控制“继续／结束”，默认1，不再随拍位温度0.15被一同锐化。0选择较高分；增大不保证更早结束，需结合报告中的实际结束概率评估。设成与拍位温度相同可对照旧行为。</small></label>
+<label class="field">谱师采音证据强度<input id="streamPositionAudioStrength" type="number" min="0" max="3" step="0.05" value="0.25"><small>用已训练的“下一事件音频位置”辅助完整Fraction评分；证据模糊时衰减，不按响度挑音、不限制输出网格。缺少已训练对齐头时自动关闭并报告原因；0关闭。</small></label>
+<label class="field">长重复负荷引导强度<input id="streamRepetitionStrength" type="number" min="0" max="3" step="0.05" value="0.6"><small>配置周期持续超过下方秒数和拍数，且实际音符头负荷明显高于模型预测时，温和压低继续同一周期的候选；不会禁止配置。0关闭。短交互、均匀节奏本身不受惩罚。</small></label>
+<label class="field">长重复最短秒数<input id="streamRepetitionMinSeconds" type="number" min="0.1" max="120" step="0.5" value="4"><small>与最短拍数同时满足后才逐渐介入，不按固定音符颗数截断。提高可保留更长定式。</small></label>
+<label class="field">长重复最短拍数<input id="streamRepetitionMinBeats" type="number" min="0.1" max="120" step="1" value="8"><small>四分音符为一拍；与最短秒数共同决定保护起点，不把计算块边界当乐句边界。</small></label>
 <label class="field">约束后最低候选概率<input id="streamConstraintMinProbability" type="number" min="0" max="1" step="0.01" value="0.05"><small>硬保护仅剩低概率配置时，重选当前事件拍位，避免双 Slide 启动时硬凑大片 Touch。0 关闭；重选耗尽会明确报告未完成。</small></label>
 <label class="field">当前事件重选次数<input id="streamEventReconsiderAttempts" type="number" min="0" max="16" step="1" value="4"><small>仅回退尚未提交的当前事件，已生成内容保持不变；次数越高可能越慢。</small></label>
 <label class="field">学得间隔引导强度<input id="streamPositionIntervalStrength" type="number" min="0" max="8" step="0.1" value="1"><small>辅助候选拍距评分，不限定分音。旧权重缺少间隔误差记录时仅使用弱引导，新权重按训练残差衰减；普通间隔项有上限，避免单个不稳定预测主导。达到 8 拍表示“8 拍或更长”，允许长休止。0 关闭；长空白抑制另行设置。</small></label>

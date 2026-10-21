@@ -64,6 +64,7 @@ class GroundedInference:
         self.prefix=[];self.clock_position=0;self.clock=None;self.archive=None
         self._timing_source=self._timing_tensor=None
         self.replay_state=None
+        self._position_bank=None
         self.probes=self.query_hits=self.archive_queries=0
         self.routes_sum=torch.zeros(5,device=self.device);self.route_count=0
 
@@ -114,6 +115,25 @@ class GroundedInference:
             'event_index':torch.tensor([selected_events],device=self.device,dtype=torch.long)}
 
     def set_prefix(self,ids):self.prefix=ids
+
+    def position_evidence(self,boundary,condition,*,strength):
+        """Use the same BOS/END boundary state as alignment supervision."""
+        from .position_evidence import PositionEvidence
+        module=self.grounding
+        if self._position_bank is None:
+            keys=module.alignment_key(self.bank['values'])
+            control=condition[:,None].expand(-1,self.bank['values'].size(1),-1)
+            selection=module.selection_head(torch.cat((self.bank['projected'],control.to(
+                self.bank['projected'])),-1)).squeeze(-1).float().sigmoid()
+            self._position_bank=keys,selection
+        keys,selection=self._position_bank
+        seconds=self.bank['times'].new_tensor([[self.clock.second]])
+        bpm=seconds.new_tensor([[self.clock.timeline.bpm(self.clock.beat)]])
+        scores,_,indices=module.alignment_window(boundary[:,-1:],seconds,bpm,
+            self.bank['values'],self.bank['times'],self.bank['padding'],full_keys=keys)
+        slots=indices[0,0]
+        values=torch.stack((self.bank['times'][0,slots],scores[0,0],selection[0,slots])).cpu().numpy()
+        return PositionEvidence(*values,strength=strength)
 
     @property
     def timing_features(self):

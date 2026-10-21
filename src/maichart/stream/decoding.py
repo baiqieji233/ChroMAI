@@ -26,6 +26,14 @@ from .continuation import replay_budget,replay_start
 
 
 def validate_options(args):
+    for name,default in (('eos_temperature',1.),('position_audio_strength',.25),('repetition_strength',.6)):
+        value=float(getattr(args,name,default))
+        if not math.isfinite(value) or not 0<=value<=3:
+            raise ValueError(f'{name} 必须是 0–3 的有限数值')
+    for name,default in (('repetition_min_seconds',4.),('repetition_min_beats',8.)):
+        value=float(getattr(args,name,default))
+        if not math.isfinite(value) or not 0<value<=120:
+            raise ValueError(f'{name} 必须大于0且不超过120')
     for name in ('temperature', 'position_temperature'):
         value = float(getattr(args, name))
         if not math.isfinite(value) or not 0 <= value <= 3:
@@ -94,6 +102,12 @@ def sample_token(logits, allowed, temperature, generator):
     return allowed[index]
 
 
+def eos_probability(margin,temperature):
+    """Actual two-token probability after the independent temperature."""
+    return (float(margin>=0) if temperature==0 else
+            math.exp(-float(np.logaddexp(0.,-float(margin)/temperature))))
+
+
 def rewind_decoder_cache(cache, prefix_length):
     """Discard speculative self attention, retain immutable cross attention."""
     if not isinstance(cache,list):
@@ -134,7 +148,8 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                             max_retrieval=model.config.max_stream_memory)
     section_strength=float(getattr(args,'section_type_strength',1.0))
     section_profile=None
-    if (section_strength and args.style_balance_strength) or args.local_chord_strength:
+    if ((section_strength and args.style_balance_strength) or args.local_chord_strength
+            or getattr(args,'repetition_strength',.6)):
         from .section_profile import SectionTypeProfile
         section_profile=SectionTypeProfile(encoded_audio[2][0].sigmoid().float().cpu().numpy(),audio_times)
     plan_intent_strength=float(getattr(args,'plan_intent_strength',1.0))
@@ -145,6 +160,14 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
         section_strength=section_strength if section_profile is not None and args.style_balance_strength else 0.,
         plan_intent_strength=plan_intent_strength, max_star_slides=2)
     plan_intent=None
+    from .repetition import RepetitionGuard
+    repetition=RepetitionGuard(section_profile,strength=getattr(args,'repetition_strength',.6),
+        min_seconds=getattr(args,'repetition_min_seconds',4.),min_beats=getattr(args,'repetition_min_beats',8.))
+    position_audio_strength=float(getattr(args,'position_audio_strength',.25))
+    position_audio_enabled=bool(position_audio_strength and grounded is not None
+        and getattr(args,'alignment_training_verified',False))
+    position_audio_events=0;position_evidence=None
+    eos_temperature=float(getattr(args,'eos_temperature',args.position_temperature))
     grammar = guidance.grammar
     hard_guard = BasicConfigurationGuard(grammar, song.tempo, song.first,
         max_button_heads=args.max_button_heads, protect_holds=args.hold_protection == 'on',
@@ -368,15 +391,19 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 scores[codec.eos_id]=scores[codec.at_id]+guided_margin
             decision={'after_beat':str(previous) if points else None,
                 'raw_eos_minus_at':raw_eos_margin,
-                'guided_eos_minus_at':guided_margin}
+                'guided_eos_minus_at':guided_margin,'eos_temperature':eos_temperature,
+                'eos_probability':eos_probability(guided_margin,eos_temperature)}
             if len(event_trace)<64:event_trace.append(decision)
             event_trace_tail.append(decision);del event_trace_tail[:-32]
-            selected = sample_token(scores, allowed, args.position_temperature, rng)
+            selected = sample_token(scores, allowed, eos_temperature, rng)
             ids.append(selected); emitted_tokens += 1
             if selected == codec.eos_id:
                 reason, incomplete = 'eos', False
                 break
             header_start = len(ids)-1
+            position_evidence=(grounded.position_evidence(output['hidden'],control,strength=position_audio_strength)
+                               if position_audio_enabled else None)
+            if position_evidence is not None:position_audio_events+=1
             interval_prediction = (boundary_values[2]
                 if previous >= 0 and plan is not None and
                 (args.position_interval_strength or getattr(args,'unplanned_gap_penalty_strength',0.)) else None)
@@ -394,7 +421,9 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                                                       args.position_interval_strength,
                                                       gap_penalty_strength,
                                                       reliability=interval_policy['multiplier'],cap=.5)
-                            + rhythm_cycle_cost(beat, points, previous, rhythm_diversity_strength))
+                            + rhythm_cycle_cost(beat, points, previous, rhythm_diversity_strength)
+                            + (position_evidence.cost(seconds_at_beat(beat,song.tempo,song.first))
+                               if position_evidence is not None else 0.))
                 chosen, info = search_position(model, codec, position_grammar, logits, cache,
                     memory, memory_mask, consumed=consumed, width=effective_beam,
                     complexity=args.position_complexity, temperature=args.position_temperature,
@@ -414,6 +443,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     else min(1., max(0., interval_prediction))*8.)
                 info['interval_prediction_raw']=interval_prediction
                 info['interval_shaping_multiplier']=interval_policy['multiplier']
+                if position_evidence is not None:info['audio_pointer']=position_evidence.report()
                 searches += 1
                 search_expansions += info['expanded_hypotheses']
                 if chosen is None:
@@ -455,6 +485,10 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 if guidance.physical is not None:
                     guidance.physical.register(position, second, song.tempo, song.first)
                 event_bias = guidance.event(position, second, intent=plan_intent)
+                event_bias = repetition.event(event_bias,position,second)
+                terminal_guidance=bool(args.temperature>0 and getattr(args,'configuration_candidates',4)>1
+                    and (args.style_balance_strength or args.local_chord_strength or args.physical_feasibility_strength
+                         or event_bias.cases))
                 cell_grammar = hard_guard.event(position,
                     button_capacity=(reference_guard.button_capacity(position) if reference_guard is not None else None),
                     slide_launch_buttons=(reference_guard.slide_launch_buttons(position)
@@ -555,6 +589,7 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                 points.append(point)
                 previous = position
                 guidance.commit(spelling, position)
+                repetition.commit(spelling,position,seconds_at_beat(position,song.tempo,song.first))
                 hard_guard.commit(point)
                 if reference_guard is not None: reference_guard.commit(point)
                 if grounded is not None:grounded.commit(point)
@@ -589,6 +624,12 @@ def compose_stream(model, codec, song, audio_values, audio_times, condition, ato
                     'basic_constraints': hard_guard.report(),
                     'reference_constraints': reference_guard.report() if reference_guard is not None else {'enabled':False},
                     'learned_ending':ending.report() if ending is not None else {'enabled':False},
+                    'eos_temperature':eos_temperature,'repetition':repetition.report(),
+                    'position_audio_guidance':{'enabled':position_audio_enabled,'requested_strength':position_audio_strength,
+                        'effective_strength':position_audio_strength if position_audio_enabled else 0.,
+                        'supervision_verified':bool(getattr(args,'alignment_training_verified',False)),
+                        'events':position_audio_events,'source':'authored_next_event_pointer',
+                        'fallback_reason':None if position_audio_enabled else 'disabled_or_no_verified_alignment_training'},
                     'event_reconsideration':{'retries':event_retries,'total_retries':len(event_retries),
                         'minimum_retained_probability':args.constraint_min_probability,
                         'budget_per_event':args.event_reconsider_attempts},

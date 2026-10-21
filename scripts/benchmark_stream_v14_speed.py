@@ -23,6 +23,7 @@ from torch.utils.data import DataLoader,RandomSampler
 
 from maichart.form.codec import RationalCodec
 from maichart.stream import data as data_module,hand_tracking
+from maichart.stream import grounded_model as grounding_module
 from maichart.stream.model import ChartStreamTransformer,StreamConfig
 from maichart.stream.prefetch import StreamBatchPrefetch
 from maichart.stream.runtime import attention_backend,training_cpu_budget
@@ -30,11 +31,11 @@ from maichart.stream.train import _loss,_finish_accumulation
 from maichart.stream.training_batch import pack_batch,transfer_batch
 
 
-def load_method(path,name):
+def load_method(path,name,*,class_name='StreamDataset',module=data_module):
     tree=ast.parse(path.read_text(encoding='utf-8-sig'))
-    cls=next(node for node in tree.body if isinstance(node,ast.ClassDef) and node.name=='StreamDataset')
+    cls=next(node for node in tree.body if isinstance(node,ast.ClassDef) and node.name==class_name)
     node=next(node for node in cls.body if isinstance(node,ast.FunctionDef) and node.name==name)
-    namespace=dict(vars(data_module))
+    namespace=dict(vars(module))
     exec(compile(ast.Module(body=[node],type_ignores=[]),str(path),'exec'),namespace)
     return namespace[name]
 
@@ -54,11 +55,15 @@ def main():
     parser.add_argument('--accumulation',type=int,default=2)
     parser.add_argument('--limit-charts',type=int,default=32)
     parser.add_argument('--batches',type=int,default=16)
+    parser.add_argument('--baseline-scope',choices=('hand','alignment'),default='hand')
     args=parser.parse_args()
     device=torch.device('cuda:0');torch.cuda.set_per_process_memory_fraction(.72,device)
     baseline=Path(args.snapshot)/'src/maichart/stream'
     original_hands=hand_tracking.HandHistory
     original_query=data_module.StreamDataset._mapped_query
+    original_alignment=grounding_module.GroundedContext.alignment
+    frozen_alignment=(load_method(baseline/'grounded_model.py','alignment',
+        class_name='GroundedContext',module=grounding_module) if args.baseline_scope=='alignment' else original_alignment)
     frozen_hands=load_hands(baseline/'hand_tracking.py').HandHistory
     frozen_query=load_method(baseline/'data.py','_mapped_query')
     from maichart.stream.hand_tracking import prepare_training_backend
@@ -71,7 +76,7 @@ def main():
         dropout=.1,grounding_profile='causal_audio_v1',motor_profile='causal_hands_v1')
     results={'device':torch.cuda.get_device_name(),'torch':torch.__version__,
         'batch_size':args.batch_size,'accumulation':args.accumulation,'limit_charts':args.limit_charts,
-        'hand_backend':native,'modes':{}}
+        'hand_backend':native,'baseline_scope':args.baseline_scope,'modes':{}}
     with training_cpu_budget(2,device),attention_backend('auto',device) as policy:
         results['attention_policy']=policy
         dataset=data_module.StreamDataset(args.manifest,cache_dir=args.cache_dir,max_tokens=1024,
@@ -87,9 +92,11 @@ def main():
         reference=None
         try:
             for mode,history,query in (('before',frozen_hands,frozen_query),('after',optimized_hands,original_query)):
+                if args.baseline_scope=='alignment':history,query=optimized_hands,original_query
                 hand_tracking.HandHistory=history;data_module.StreamDataset._mapped_query=query
+                grounding_module.GroundedContext.alignment=frozen_alignment if mode=='before' else original_alignment
                 dataset._hand_histories={}
-                dataset.hand_backend='python' if mode=='before' else native['effective']
+                dataset.hand_backend='python' if mode=='before' and args.baseline_scope=='hand' else native['effective']
                 dataset._audio_queries.clear();dataset.query_bytes=dataset.query_hits=dataset.query_misses=0
                 dataset._structures.clear();dataset.structure_bytes=dataset.structure_hits=dataset.structure_misses=0
                 dataset.query_prepare_seconds.clear();dataset.query_prepare_counts.clear()
@@ -140,6 +147,7 @@ def main():
                 gc.collect();torch.cuda.empty_cache()
         finally:
             hand_tracking.HandHistory=original_hands;data_module.StreamDataset._mapped_query=original_query
+            grounding_module.GroundedContext.alignment=original_alignment
     results['input_tensors_identical']=True
     Path(args.output).write_text(json.dumps(results,ensure_ascii=False,indent=2),encoding='utf-8')
     print(json.dumps({key:value for key,value in results.items() if key!='modes'},ensure_ascii=False,indent=2))

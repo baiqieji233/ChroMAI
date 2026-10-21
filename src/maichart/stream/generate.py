@@ -33,6 +33,11 @@ def parser():
     p.add_argument('--level', type=float, default=13.)
     p.add_argument('--temperature', type=float, default=.7)
     p.add_argument('--position-temperature', type=float, default=.15)
+    p.add_argument('--eos-temperature',type=float,default=1.)
+    p.add_argument('--position-audio-strength',type=float,default=.25)
+    p.add_argument('--repetition-strength',type=float,default=.6)
+    p.add_argument('--repetition-min-seconds',type=float,default=4.)
+    p.add_argument('--repetition-min-beats',type=float,default=8.)
     p.add_argument('--position-beam-size', type=int, default=4)
     p.add_argument('--position-complexity', type=float, default=.35)
     p.add_argument('--position-complexity-floor',type=int,default=8)
@@ -78,6 +83,8 @@ def generate(args):
     checkpoint_training = {key: payload.get(key) for key in ('epoch', 'optimizer_steps', 'training_position')}
     checkpoint_training['training_semantics'] = (payload.get('args') or {}).get('training_semantics', 'legacy')
     args.interval_metrics=payload.get('metrics') or {}
+    args.alignment_training_verified=bool((payload.get('grounding_training') or {}).get('alignment_supervised')
+        and payload.get('optimizer_steps',0)>0 and model.config.grounding_profile!='none')
     del payload
     audio = extract_rational_audio(args.audio, cache_dir=Path(args.checkpoint).parent/'audio_cache',
                                    evidence_profile='balanced_evidence_v1')
@@ -123,6 +130,9 @@ def generate(args):
         'export_timing': export_timing,
         'timing_diagnostics': timing_diagnostics(points, song.tempo, song.first, bounds['effective_end_sec'], text),
         'generation_controls': {'style_balance_strength': args.style_balance_strength,
+        'eos_temperature':args.eos_temperature,'position_audio_strength':args.position_audio_strength,
+        'repetition_strength':args.repetition_strength,'repetition_min_seconds':args.repetition_min_seconds,
+        'repetition_min_beats':args.repetition_min_beats,
             'position_complexity_floor':args.position_complexity_floor,
             'learned_ending_strength':args.learned_ending_strength,
             'constraint_min_probability':args.constraint_min_probability,

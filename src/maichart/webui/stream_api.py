@@ -213,6 +213,8 @@ def start(handler, operation, payload, *, runtime):
         if payload.get('bpm') not in {None, ''}:
             args += ['--bpm', str(payload['bpm'])]
         for key, default in (('position_temperature', .15), ('max_events', 0),
+                             ('eos_temperature',1.),('position_audio_strength',.25),('repetition_strength',.6),
+                             ('repetition_min_seconds',4.),('repetition_min_beats',8.),
                              ('position_beam_size', 4), ('position_complexity', .35),
                              ('position_complexity_floor',8),('learned_ending_strength',1.),
                              ('constraint_min_probability',.05),('event_reconsider_attempts',4),

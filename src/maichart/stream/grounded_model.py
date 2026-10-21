@@ -279,23 +279,13 @@ class GroundedContext(nn.Module):
         the decision the following position tokens actually make.
         """
         indices=batch['alignment_event_indices'].clamp_min(0)
-        query=self.alignment_query(hidden.gather(1,indices[...,None].expand(-1,-1,hidden.size(-1))))
+        boundary=hidden.gather(1,indices[...,None].expand(-1,-1,hidden.size(-1)))
         rows=batch['decoder_query_index'].clamp_min(0).gather(1,indices)
         seconds=batch['query_seconds'].gather(1,rows)
         bpm=(batch['query_clock'][...,19].gather(1,rows).float()*300.).clamp_min(1.)
-        times=batch['detail_times_sec'];padding=batch['detail_audio_padding_mask'].bool()
-        total=times.size(1);width=min(ALIGNMENT_WINDOW,total)
-        start=(torch.searchsorted(times.contiguous(),seconds.contiguous())-ALIGNMENT_BACK).clamp(0,max(0,total-width))
-        candidates=start[...,None]+torch.arange(width,device=times.device)
-        batch_rows=torch.arange(times.size(0),device=times.device)[:,None,None]
-        full_keys=self.alignment_key(batch['detail_audio'])
-        keys=full_keys[batch_rows,candidates]
-        delta=(times[batch_rows,candidates]-seconds[...,None])
-        invalid=padding[batch_rows,candidates]
-        relative=relative_features(delta.masked_fill(invalid,0.).float(),bpm[...,None],4.).to(keys.dtype)
-        keys=keys+self.alignment_distance(relative)
-        scores=(query[:,:,None].float()*keys.float()).sum(-1)/math.sqrt(keys.size(-1))
-        scores=scores.masked_fill(invalid,-1e4)
+        scores,start,_=self.alignment_window(boundary,seconds,bpm,batch['detail_audio'],
+            batch['detail_times_sec'],batch['detail_audio_padding_mask'].bool())
+        width=scores.size(-1)
         labels=batch['alignment_audio_index']-start
         labels=torch.where((labels>=0)&(labels<width),labels,torch.full_like(labels,-1))
         control=batch['condition'][:,None].expand(-1,batch['detail_audio'].size(1),-1)
@@ -303,8 +293,28 @@ class GroundedContext(nn.Module):
             control=control.clone()
             control[...,1:]=torch.where(batch['condition_null'][:,None,None],.5,control[...,1:])
         # Share the acoustic value encoder used by the actual continuation.
-        # An isolated head on frozen input features would train only itself.
         evidence=bank['projected'] if bank is not None else self.local_value(batch['detail_audio'])
         selection=self.selection_head(torch.cat((evidence,control.to(evidence)),-1)).squeeze(-1)
         return {'alignment_event_logits':scores,'alignment_event_labels':labels,
                 'position_alignment_logits':selection}
+
+    def alignment_window(self,boundary,seconds,bpm,values,times,padding,*,full_keys=None):
+        """The same trained boundary pointer for supervision and inference.
+
+        Inference must pass the previous END/BOS hidden row, before emitting AT;
+        substituting a hidden row after the candidate NOTE would know its label.
+        """
+        query=self.alignment_query(boundary)
+        total=times.size(1);width=min(ALIGNMENT_WINDOW,total)
+        start=(torch.searchsorted(times.contiguous(),seconds.contiguous())-ALIGNMENT_BACK).clamp(0,max(0,total-width))
+        candidates=start[...,None]+torch.arange(width,device=times.device)
+        batch_rows=torch.arange(times.size(0),device=times.device)[:,None,None]
+        if full_keys is None:full_keys=self.alignment_key(values)
+        keys=full_keys[batch_rows,candidates]
+        delta=(times[batch_rows,candidates]-seconds[...,None])
+        invalid=padding[batch_rows,candidates]
+        relative=relative_features(delta.masked_fill(invalid,0.).float(),bpm[...,None],4.).to(keys.dtype)
+        keys=keys+self.alignment_distance(relative)
+        scores=(query[:,:,None].float()*keys.float()).sum(-1)/math.sqrt(keys.size(-1))
+        scores=scores.masked_fill(invalid,-1e4)
+        return scores,start,candidates

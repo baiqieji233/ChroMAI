@@ -194,7 +194,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 {
                     "workspace": str(WEBUI_ROOT),
                     "project_root": str(PROJECT_ROOT),
-                    "stream_generation_contract": "chart_stream_quality_controls_v5",
+                    "stream_generation_contract": "chart_stream_quality_controls_v6",
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "stream_grounded_context": "causal_audio_v1",
                                               "stream_training_runtime": "resident_pipeline_v3",
