@@ -153,7 +153,7 @@ def start(handler, operation, payload, *, runtime):
                 ('prefix_note_dropout',.1),('alignment_loss_weight',.15),('alignment_tolerance_ms',15.),
                 ('event_balance_loss_weight',.2),('prefetch_batches',2),('data_workers',4),('cpu_threads',0),
                 ('input_cache_mode','mapped'),('structure_cache_mb',256),('optimizer_implementation','auto'),
-                ('attention_backend','auto'),('motor_profile','auto'),
+                ('attention_backend','auto'),('motor_profile','auto'),('hand_backend','auto'),
                 ('execution_mode','auto'),('cuda_graph_budget_gb',2.),
                 ('input_residency','auto'),('resident_cache_gb',0.),('resident_memory_reserve_gb',0.),
                 ('cache_validation_records',0),('continuation_profile','auto'),('context_replay_tokens',256),

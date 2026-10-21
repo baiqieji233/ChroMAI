@@ -133,6 +133,7 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.structure_cache_mb,256);
   assert.equal(result.optimizer_implementation,'auto');
   assert.equal(result.attention_backend,'auto');
+  assert.equal(result.hand_backend,'auto');
   assert.equal(result.execution_mode,'auto');
   assert.equal(result.cuda_graph_budget_gb,2);
   assert.equal(result.input_residency,'auto');
@@ -140,19 +141,21 @@ test('stream training forwards visible dropout and seed including zero', () => {
   assert.equal(result.resident_memory_reserve_gb,0);
   assert.equal(result.cache_validation_records,0);
   for (const id of ['streamDropout','streamSeed','streamSymmetryAugmentation','streamAttentionBackend',
-                    'streamExecutionMode','streamCudaGraphBudgetGb']) assert.ok(html.includes(`id="${id}"`));
+                    'streamHandBackend','streamExecutionMode','streamCudaGraphBudgetGb']) assert.ok(html.includes(`id="${id}"`));
   const symSelect = html.slice(html.indexOf('id="streamSymmetryAugmentation"'));
   const symOptions = [...symSelect.slice(0, symSelect.indexOf('</select>')).matchAll(/value="([^"]+)"/g)].map(m => m[1]);
   assert.deepEqual(symOptions, ['mirror_lr', 'mirror4', 'none']);
 });
 
 test('stream attention backend selection is forwarded and old servers are rejected', () => {
-  const context = vm.createContext({valueOrDefault:(key, fallback)=>key==='#streamAttentionBackend'?'cudnn':fallback,
+  const context = vm.createContext({valueOrDefault:(key, fallback)=>({
+    '#streamAttentionBackend':'cudnn','#streamHandBackend':'native'}[key]??fallback),
     checkedOrDefault:()=>true,currentTrainingMode:()=> 'fresh',trainingSourcePaths:()=>({}),
     selectedTrainingManifests:()=>[],selectedDatasetItems:()=>[],formDevice:()=> 'cuda'});
   install(context,'chartStreamTrainingPayload','collectValues');
   assert.equal(context.chartStreamTrainingPayload().attention_backend,'cudnn');
-  assert.ok(source.includes("stream_runtime_optimization !== 'bounded_training_graph_v2'"));
+  assert.equal(context.chartStreamTrainingPayload().hand_backend,'native');
+  assert.ok(source.includes("stream_runtime_optimization !== 'native_hand_pipeline_v3'"));
 });
 
 test('finetune reinspection preserves explicit grounding upgrade and training settings', () => {

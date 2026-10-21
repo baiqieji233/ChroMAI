@@ -125,6 +125,11 @@ def event_lanes(text):
 
 
 def _angle(lanes):
+    return _cached_angle(tuple(lanes))
+
+
+@lru_cache(maxsize=256)
+def _cached_angle(lanes):
     angles = [(lane - .5) * math.pi / 4 for lane in lanes]
     x = sum(math.sin(a) for a in angles); y = sum(math.cos(a) for a in angles)
     return math.atan2(x, y) if abs(x) + abs(y) > 1e-6 else None

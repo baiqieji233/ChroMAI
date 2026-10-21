@@ -97,7 +97,10 @@ class MappedInputCache:
         """
         if policy not in {'auto','mapped','resident'}:raise ValueError('Invalid residency policy')
         from maichart.form.audio_residency import physical_memory
-        memory=memory or physical_memory
+        # Heap clones need commit capacity as well as physical RAM on Windows.
+        # Otherwise a machine with free RAM but exhausted commit can thrash
+        # or fail even while the physical-only reserve still looks safe.
+        memory=memory or (lambda:physical_memory(include_commit=True))
         unique=list(dict.fromkeys(self.key(identity) for identity in identities))
         self.validation_capacity=int(validation_records) or max(1,len(unique))
         if policy=='mapped':return {'mode':'mapped','loaded':0,'budget_bytes':budget_bytes,
@@ -111,7 +114,10 @@ class MappedInputCache:
                 'memory_reserve_bytes':reserve,'validation_records':self.validation_capacity}
         report(stage='residency',completed=0,total=len(unique),bytes=0,budget_bytes=self.resident_budget)
         for i,key in enumerate(unique,1):
-            if self.resident_bytes>=self.resident_budget:
+            with self._guard:already_owned=key in self._resident
+            if already_owned:
+                pass  # repeated preparation must not clone or charge the same buffers twice
+            elif self.resident_bytes>=self.resident_budget:
                 capacity_skips+=1
             elif (available:=memory()) and available[1]<=reserve:
                 memory_skips+=1
@@ -150,6 +156,11 @@ class MappedInputCache:
 
     def _count(self,key):
         with self._guard:self.counts[key]+=1
+
+    def owns(self,identity):
+        """True when the persistent residency pool already owns these tensors."""
+        key=self.key(identity)
+        with self._guard:return key in self._resident
 
     def validate_existing(self,identity):
         """Preflight persisted inputs with the same checks as a real read.

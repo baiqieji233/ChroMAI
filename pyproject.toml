@@ -27,6 +27,9 @@ audio = [
 training = [
   "torch>=2.0"
 ]
+training-speed = [
+  "numba>=0.61"
+]
 
 [project.scripts]
 maichart = "maichart.cli:main"

@@ -47,6 +47,7 @@ def parser():
     p.add_argument('--quality-enabled',action=argparse.BooleanOptionalAction,default=True)
     p.add_argument('--grounding-profile',choices=('auto','none','causal_audio_v1'),default='auto')
     p.add_argument('--motor-profile',choices=('auto','legacy_v13','causal_hands_v1'),default='auto')
+    p.add_argument('--hand-backend',choices=('auto','python','native'),default='auto')
     p.add_argument('--detail-audio-nodes',type=int,default=8192)
     p.add_argument('--local-audio-neighbors',type=int,default=32)
     p.add_argument('--local-audio-seconds',type=float,default=2.)
@@ -386,13 +387,16 @@ def _train(args):
         nhead=args.nhead,layers=args.layers,dim_feedforward=args.dim_feedforward,dropout=args.dropout,
         max_tokens=args.max_tokens,max_history_tokens=args.max_history_tokens,max_stream_memory=args.max_stream_memory,
         **{key:getattr(args,key) for key in grounding_keys}))
+    from .hand_tracking import prepare_training_backend
+    hand_backend=prepare_training_backend(args.hand_backend,enabled=config.motor_profile=='causal_hands_v1')
+    print('stream_prepare '+json.dumps({'stage':'hand_backend',**hand_backend}),flush=True)
     dataset=StreamDataset(args.manifest,cache_dir=args.cache_dir,max_tokens=args.max_tokens,
         max_history_tokens=args.max_history_tokens,max_region_seconds=args.max_region_seconds,
         preparation_workers=args.prepare_workers,audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,
         quality_enabled=args.quality_enabled,grounding_config=config,prefix_mask_span_events=args.prefix_mask_span_events,
         history_note_dropout=args.history_note_dropout,prefix_note_dropout=args.prefix_note_dropout,seed=args.seed,
         input_cache_mode=args.input_cache_mode,structure_cache_mb=args.structure_cache_mb,
-        symmetry_augmentation=getattr(args,'symmetry_augmentation','none'))
+        symmetry_augmentation=getattr(args,'symmetry_augmentation','none'),hand_backend=hand_backend['effective'])
     if not len(dataset):
         raise ValueError('没有可监督的连续流训练样本；请检查质量排除标注和数据集。')
     if args.resume:
@@ -455,6 +459,7 @@ def _train(args):
         'audio_cache_budget_gb':args.audio_cache_gb,'quality_enabled':args.quality_enabled,'start_epoch':start_epoch+1,
         'grounding_profile':args.grounding_profile,'detail_audio_nodes':args.detail_audio_nodes,
         'motor_profile':config.motor_profile,
+        'hand_backend':hand_backend,
         'training_objective_contract':TRAINING_OBJECTIVE_CONTRACT,
         'curve_slope_loss_weight':args.curve_slope_loss_weight,
         'alignment_loss_weight':args.alignment_loss_weight,'event_balance_loss_weight':args.event_balance_loss_weight,

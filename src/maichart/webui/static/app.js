@@ -1819,6 +1819,7 @@ function chartStreamTrainingPayload(options = {}) {
     lr: Number(valueOrDefault("#learningRate", .0002)), weight_decay: Number(valueOrDefault("#streamWeightDecay", .01)),
     device: formDevice("#device"), precision: valueOrDefault("#streamPrecision", "auto"),
     attention_backend: valueOrDefault("#streamAttentionBackend", "auto"),
+    hand_backend: valueOrDefault("#streamHandBackend", "auto"),
     execution_mode: valueOrDefault("#streamExecutionMode", "auto"),
     cuda_graph_budget_gb: Number(valueOrDefault("#streamCudaGraphBudgetGb", 2)),
     audio_cache_gb: Number(valueOrDefault("#streamAudioCacheGb", 8)),
@@ -3153,6 +3154,7 @@ function applyChartStreamCheckpointConfig(data, mode, preserveEditable = false) 
     "#streamEventDecisionLossWeight": args.event_decision_loss_weight,
     "#streamPrecision": args.precision,
     "#streamAttentionBackend": args.attention_backend || "auto",
+    "#streamHandBackend": args.hand_backend || "auto",
     "#streamExecutionMode": args.execution_mode || "auto",
     "#streamCudaGraphBudgetGb": args.cuda_graph_budget_gb ?? 2,
     "#streamWeightDecay": args.weight_decay,
@@ -3652,7 +3654,7 @@ async function submitTrain(options = {}) {
       throw new Error('当前后端尚未加载有界循环退出监督，请在无活动任务时重启 WebUI 后再训练。');
     if (backend.training_capabilities?.stream_motor_contract !== 'causal_hands_v1')
       throw new Error('当前后端尚未加载 v14 因果遮罩与双手特征，请在无活动任务时重启 WebUI。旧权重训练请选择 finetune 和新目录。');
-    if (backend.training_capabilities?.stream_runtime_optimization !== 'bounded_training_graph_v2')
+    if (backend.training_capabilities?.stream_runtime_optimization !== 'native_hand_pipeline_v3')
       throw new Error('当前后端尚未加载连续流速度优化和注意力后端设置，请在无活动任务时重启 WebUI 后再训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/chart-stream/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
@@ -4862,7 +4864,7 @@ on("#modelFamily", "change", () => {
     for (const [id, v] of Object.entries({streamDModel:256, streamLayers:4, streamNhead:8, streamDimFeedforward:768,
       streamMaxTokens:1024, streamMaxHistoryTokens:256, streamMemoryTokens:32, streamPlanLossWeight:.15,
       streamDropout:.1, streamSeed:0,
-      streamPrecision:"auto", streamAttentionBackend:"auto", streamExecutionMode:"auto", streamCudaGraphBudgetGb:2,
+      streamPrecision:"auto", streamAttentionBackend:"auto", streamHandBackend:"auto", streamExecutionMode:"auto", streamCudaGraphBudgetGb:2,
       streamWeightDecay:.01, streamAudioCacheGb:8, streamPrepareWorkers:4,
       streamMaxRegionSeconds:15, streamLimitCharts:0, streamLogInterval:25, streamCacheDir:"cache/chart_stream_v1"})) {
       const node = element("#" + id); if (node) node.value = String(v);

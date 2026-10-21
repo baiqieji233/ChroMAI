@@ -180,8 +180,10 @@ class StreamDataset(Dataset):
                  limit_charts=0, quality_profile=MUSICAL_EVIDENCE, quality_enabled=True,
                  grounding_config=None,history_note_dropout=0.,prefix_note_dropout=0.,seed=0,
                  input_cache_mode='mapped',structure_cache_mb=256,prefix_mask_span_events=1,
-                 symmetry_augmentation='none'):
+                 symmetry_augmentation='none',hand_backend='python'):
         self.codec = RationalCodec()
+        if hand_backend not in {'python','native'}:raise ValueError('Resolve hand_backend before dataset creation')
+        self.hand_backend=hand_backend
         if symmetry_augmentation not in {'none','mirror_lr','mirror4'}:raise ValueError('Unknown symmetry_augmentation')
         self.symmetry_augmentation=symmetry_augmentation
         self._symmetries=[];self._event_lanes=[];self._event_trajectories=[];self._oriented_ids={}
@@ -205,6 +207,7 @@ class StreamDataset(Dataset):
         # The shared query builder also has its own fixed bounded scratch LRU.
         query_fraction=.75 if self.grounded else .25
         self.query_budget = int(float(audio_cache_gb)*1024**3*query_fraction)
+        self._configured_query_budget=self.query_budget
         # The base preparer only uses max_tokens to reject a target before we
         # split it. A stream must retain long songs, so this is deliberately a
         # preparation ceiling rather than a decoder context limit.
@@ -224,6 +227,7 @@ class StreamDataset(Dataset):
         self._query_build_locks=[threading.Lock() for _ in range(64)]
         self.query_prepare_seconds=Counter();self.query_prepare_counts=Counter()
         self.query_bytes = self.query_hits = self.query_misses = 0
+        self._hand_histories={}
         self._query_keys = []
         self._chart_ids=[];self._chart_positions=[];self._probe_beats=[];self._probe_indices=[]
         self._point_seconds=[];self._point_values=[];self._event_note_ids=[]
@@ -401,6 +405,9 @@ class StreamDataset(Dataset):
                 self.query_misses+=1
             started=time.perf_counter();query=builder();elapsed=time.perf_counter()-started
             size=query[0].numel()*query[0].element_size()+query[1].nbytes+len(query[2])*64
+            store=getattr(self,'input_cache',None)
+            if store is not None and store.owns(self._cache_query_identity(key)):
+                size=0  # pool owns these exact buffers; the LRU only aliases them
             with lock:
                 if hasattr(self,'query_prepare_seconds'):
                     family=key[0] if isinstance(key,tuple) else 'planner'
@@ -410,6 +417,19 @@ class StreamDataset(Dataset):
                         _,(_,removed)=self._audio_queries.popitem(last=False);self.query_bytes-=removed
                     self._audio_queries[key]=(query,size);self.query_bytes+=size
             return query
+
+    def _cache_query_identity(self,key):
+        """Resolve the same deterministic identity used by _mapped_query."""
+        if isinstance(key,str):
+            return {'type':'planner','settings':1024,'query':key,
+                'features':self.base.audio_store.feature_policy+'_'+self.base.audio_store.evidence_profile}
+        kind=key[0]
+        if kind=='detail':
+            return {'type':'detail','settings':key[2],'query':key[1],
+                'features':self.base.audio_store.feature_policy+'_'+self.base.audio_store.evidence_profile}
+        if kind=='probes':return self._query_identity(key[1],'probes',None)
+        if kind=='alignment':return self._query_identity(key[1],'alignment',(key[2],key[3]))
+        raise ValueError('Unknown stream query cache family')
 
     def _queries(self, index, song):
         key = self._query_keys[index]
@@ -422,7 +442,6 @@ class StreamDataset(Dataset):
         return replace(song,audio=song.audio.store.get(song.audio.path)) if isinstance(song.audio,_LazyAudio) else song
 
     def _mapped_query(self,index,kind,settings,builder):
-        from .input_cache import LazyBeats
         if self.input_cache is None:return builder()
         identity=self._query_identity(index,kind,settings)
         def build():
@@ -432,7 +451,11 @@ class StreamDataset(Dataset):
             return {'values':values,'times':torch.as_tensor(times)}, {'beats':list(map(str,beats)),'duration':duration}
         tensors,extra=self.input_cache.get(identity,build)
         self._durations[index]=extra['duration']
-        return tensors['values'],tensors['times'].numpy(),LazyBeats(extra['beats'])
+        # Musical geometry is already in values, and exact authored Fraction
+        # events/probes are retained separately. No training caller reads this
+        # query's beat text. Do not keep millions of unused deserialized strings
+        # alive in the audio-query LRU (the disk artifact is unchanged).
+        return tensors['values'],tensors['times'].numpy(),()
 
     def _query_identity(self,index,kind,settings):
         identity={'type':kind,'settings':settings,'query':self._query_keys[index],
@@ -458,7 +481,7 @@ class StreamDataset(Dataset):
                     identities.append(self._query_identity(index,kind,setting))
         if self.grounded:identities.extend(self._structure_identity(c) for c in self.chunks)
         if budget_bytes is None:
-            budget_bytes=self.query_budget+self.base.audio_store.budget+self.structure_budget
+            budget_bytes=self._configured_query_budget+self.base.audio_store.budget+self.structure_budget
         if policy in {'auto','resident'}:
             with self._query_lock:
                 self._audio_queries.clear();self.query_bytes=0
@@ -468,6 +491,8 @@ class StreamDataset(Dataset):
                 store.entries.clear();store.bytes=0
         self.residency=self.input_cache.preload(identities,budget_bytes=budget_bytes,policy=policy,
             reserve_bytes=reserve_bytes,validation_records=validation_records,report=report)
+        self.query_budget=max(0,self._configured_query_budget-self.input_cache.resident_bytes)
+        self.residency['fallback_query_budget_bytes']=self.query_budget
         return self.residency
 
     def warm_input_cache(self, report=lambda **_:None):
@@ -537,6 +562,7 @@ class StreamDataset(Dataset):
         identity=self._structure_identity(chunk)
         rows,_=self.input_cache.get(identity,build) if self.input_cache is not None else build()
         size=tensor_bytes(rows)
+        if self.input_cache is not None and self.input_cache.owns(identity):size=0
         with self._query_lock:
             if size<=self.structure_budget:
                 while self._structures and self.structure_bytes+size>self.structure_budget:
@@ -626,6 +652,8 @@ class StreamDataset(Dataset):
             pending=pending,profile=cfg.motor_profile)
         if cfg.motor_profile=='causal_hands_v1':
             from .hand_tracking import HandHistory
+            if self.hand_backend=='native':
+                from .native_hand_tracking import NativeHandHistory as HandHistory
             histories=getattr(self,'_hand_histories',None)
             if histories is None:histories=self._hand_histories={}
             key=(index,transform)
@@ -676,6 +704,7 @@ class StreamDataset(Dataset):
                 'hits':self.query_hits,'misses':self.query_misses,
                 'prepare_seconds':dict(self.query_prepare_seconds),'prepare_counts':dict(self.query_prepare_counts)}
         return {'audio':self.base.audio_store.stats(),'stream_queries':queries,
+            'hand_backend':self.hand_backend,
             'mapped_inputs':self.input_cache.stats() if self.input_cache else {'enabled':False},
             'structures':{'hits':self.structure_hits,'misses':self.structure_misses,
                 'bytes':self.structure_bytes,'budget_bytes':self.structure_budget}}

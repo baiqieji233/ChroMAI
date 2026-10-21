@@ -12,8 +12,8 @@ import numpy as np
 from maichart.generation.event_audio import ACOUSTIC_DIM
 
 
-def physical_memory():
-    """Return total/available physical bytes without a new dependency."""
+def physical_memory(*,include_commit=False):
+    """Return physical bytes, optionally bounded by Windows commit headroom."""
     if os.name == 'nt':
         class MemoryStatus(ctypes.Structure):
             _fields_ = [('length', ctypes.c_ulong), ('load', ctypes.c_ulong),
@@ -23,7 +23,9 @@ def physical_memory():
         status = MemoryStatus()
         status.length = ctypes.sizeof(status)
         if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
-            return int(status.total_phys), int(status.available_phys)
+            available=int(status.available_phys)
+            if include_commit:available=min(available,int(status.available_page))
+            return int(status.total_phys),available
     elif Path('/proc/meminfo').exists():
         fields = dict(line.split(':', 1) for line in Path('/proc/meminfo').read_text().splitlines())
         return int(fields['MemTotal'].split()[0])*1024, int(fields['MemAvailable'].split()[0])*1024

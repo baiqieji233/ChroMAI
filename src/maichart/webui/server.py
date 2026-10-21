@@ -200,7 +200,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "stream_training_runtime": "resident_pipeline_v3",
                                               "stream_cycle_exit_normalization": "main_valid_tokens_v1",
                                               "stream_motor_contract": "causal_hands_v1",
-                                              "stream_runtime_optimization": "bounded_training_graph_v2",
+                                              "stream_runtime_optimization": "native_hand_pipeline_v3",
                                               "stream_continuation": "overlap_v1",
                                               "versioned_input_policies": True,
                                               "sustained_action_training": True,
