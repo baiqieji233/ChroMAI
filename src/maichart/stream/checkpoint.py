@@ -75,7 +75,7 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, atom_ca
         'metrics': metrics or {}, 'architecture': model.architecture,
         'metrics_aggregation': 'batch_mean',
         'training_objective_contract':(TRAINING_OBJECTIVE_CONTRACT if str(args.get('training_semantics','')).startswith(
-            ('chart_stream_training_v14_','chart_stream_training_v15_')) else None),
+            ('chart_stream_training_v14_','chart_stream_training_v15_','chart_stream_training_v16_')) else None),
         'grounding_training': {'profile':model.config.grounding_profile,
             'motor_profile':model.config.motor_profile,
             'hand_features_trained':bool(model.config.grounding_profile!='none'

@@ -64,7 +64,7 @@ class StreamChunk:
 # absolute song beat phase. Old v11 checkpoints remain generation-loadable but
 # must be finetuned under this new label contract rather than resumed.
 # v13 bounds the extra per-token cycle-exit weight by the main CE denominator.
-TRAINING_SEMANTICS = 'chart_stream_training_v15_audio_fidelity_position_mask'
+TRAINING_SEMANTICS = 'chart_stream_training_v16_audio_fidelity_review_fixes'
 
 
 def _target_ranges(ids, max_tokens, at_id, eos_id):

@@ -358,7 +358,7 @@ def _train(args):
         if args.resume and old.get('plan_dim_migration'):
             raise ValueError('plan_dim=8 checkpoint migration cannot resume its old optimizer; use --init-checkpoint with a new output directory.')
         if args.resume and (old.get('args') or {}).get('training_semantics') != TRAINING_SEMANTICS:
-            raise ValueError('训练合同已更新为 v15 音频贴合与位置遮罩；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
+            raise ValueError('训练合同已更新为 v16 音频贴合、位置遮罩与条件路径；旧训练请使用 finetune / --init-checkpoint 和新输出目录。')
         if args.resume and old.get('training_objective_contract')!=TRAINING_OBJECTIVE_CONTRACT:
             raise ValueError('Resume training objective contract 不兼容；请使用 finetune 和新目录。')
         if args.resume:
