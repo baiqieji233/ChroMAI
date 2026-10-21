@@ -123,5 +123,5 @@ WebUI生成合同升级为v8，前端新字段、保存/恢复/重置、API/CLI�
 - `stream/configuration_search.py`：受控探索、实际混合概率、候选覆盖报告。
 - `stream/constraints.py`、`generate.py`、`decoding.py`：动作尾端硬上限及配置接线。
 - `stream/reference_guard.py`、`timing.py`：已提交动作释放时刻和精确节奏恢复提案。
-- `webui/server.py`、`stream_api.py`、`static/app.js/index.html`：v7和可见控件。
+- `webui/server.py`、`stream_api.py`、`static/app.js/index.html`：v8和可见控件。
 - `tests/test_stream_structural_repeat.py`、`test_stream_generation_ui.js`：新增回归。
