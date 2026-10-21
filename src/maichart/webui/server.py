@@ -186,8 +186,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._serve_static("index.html")
         if parsed.path == "/form-lab":
             return self._serve_static("form_lab.html")
+        if parsed.path == "/composer":
+            return self._serve_static("composer.html")
         if parsed.path in {"/app.js", "/styles.css", "/workspace.js", "/workspace.css",
-                           "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css"}:
+                           "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css",
+                           "/composer.js", "/composer.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
         if parsed.path == "/api/status":
             return self._json_response(
@@ -232,6 +235,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if task is None:
                 return self._json_response({"error": "任务不存在"}, HTTPStatus.NOT_FOUND)
             return self._json_response(task.to_dict())
+        if parsed.path.startswith("/api/tasks/"):
+            task_id = parsed.path.rsplit("/", 1)[-1]
+            task = _get_task(task_id)
+            if task is None:
+                return self._json_response({"error": "任务不存在"}, HTTPStatus.NOT_FOUND)
+            return self._json_response(task.to_dict())
         if parsed.path == "/api/download":
             return self._download(parse_qs(parsed.query).get("path", [""])[0])
         if parsed.path == "/api/intensity/audio":
@@ -243,6 +252,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlparse(self.path)
         try:
+            if parsed.path.startswith("/api/composer/"):
+                from maichart.webui import composer_api
+                operation = parsed.path.rsplit("/", 1)[-1]
+                payload = self._json_body()
+                if operation == "train":
+                    return composer_api.start_train(self, payload, runtime=sys.modules[__name__])
+                if operation == "generate":
+                    return composer_api.start_generate(self, payload, runtime=sys.modules[__name__])
+                if operation == "inspect":
+                    return composer_api.inspect(self, payload)
+                return self._json_response({"error": "未知 composer 操作"}, HTTPStatus.NOT_FOUND)
             if parsed.path.startswith("/api/form/"):
                 from maichart.webui.form_api import start_form_task
                 return start_form_task(self, parsed.path.rsplit("/",1)[-1], self._json_body(),

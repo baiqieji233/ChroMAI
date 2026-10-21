@@ -1,0 +1,58 @@
+from fractions import Fraction
+from pathlib import Path
+
+import json
+import numpy as np
+import soundfile as sf
+import torch
+
+from maichart.composer.candidates import candidate_beats, candidate_index
+from maichart.composer.checkpoint import inspect_payload, save, load
+from maichart.composer.model import ChartComposer, ComposerConfig
+from maichart.composer.data import ComposerDataset
+
+
+def test_candidate_set_keeps_authored_target_and_long_rest_choices():
+    tempo=[type('Tempo',(),{'beat':Fraction(0),'bpm':120.})()]
+    target=Fraction(37,997)
+    values=candidate_beats(Fraction(0),tempo=tempo,first=0.,audio_end_sec=12.,candidate_count=16,target=target)
+    assert candidate_index(target,values)>=0
+    assert any(value >= 2 for value in values)
+
+
+def test_composer_forward_shapes_and_checkpoint_roundtrip(tmp_path):
+    config=ComposerConfig(atom_vocab_size=9,candidate_feature_dim=129,d_model=24,nhead=4,
+                          layers=1,dim_feedforward=48,candidate_count=8,action_slots=3)
+    model=ChartComposer(config)
+    features=torch.randn(2,8,129)
+    history=torch.randint(0,9,(2,4))
+    condition=torch.randn(2,16)
+    action=torch.randn(2,50)
+    output=model(features,history,condition,action,
+                 candidate_mask=torch.zeros(2,8,dtype=torch.bool),
+                 history_padding_mask=torch.zeros(2,4,dtype=torch.bool))
+    assert output['candidate_logits'].shape==(2,8)
+    assert output['action_logits'].shape==(2,3,9)
+    optimizer=torch.optim.AdamW(model.parameters(),lr=1e-3)
+    path=tmp_path/'composer_last.pt'
+    save(path,model,optimizer,epoch=1,args={'training_semantics':'chart_composer_training_v1_event_pointer_actions'},
+         manifest=tmp_path/'manifest.json',atom_catalog=['1','2'],optimizer_steps=1)
+    restored,payload=load(path)
+    assert inspect_payload(payload)['valid']
+    assert restored.config.to_dict()==config.to_dict()
+
+
+def test_composer_dataset_builds_candidate_features_from_audio(tmp_path):
+    sr=8000;t=np.arange(sr*2)/sr
+    sf.write(tmp_path/'track.wav',(0.1*np.sin(2*np.pi*440*t)).astype(np.float32),sr)
+    (tmp_path/'maidata.txt').write_text(
+        '&wholebpm=120\n&lv_5=12\n&inote_5=(120){4}1,2,3,4,5,6,7,8,E\n',encoding='utf-8')
+    manifest=tmp_path/'manifest.json'
+    manifest.write_text(json.dumps({'songs':[{'song_id':'composer-fixture',
+        'maidata_path':str(tmp_path/'maidata.txt'),'audio_path':str(tmp_path/'track.wav'),
+        'difficulties':[{'difficulty_index':5,'level_raw':'12'}]}]}),encoding='utf-8')
+    dataset=ComposerDataset(manifest,cache_dir=tmp_path/'cache',candidate_count=16,
+        history_events=8,action_slots=4,preparation_workers=1,audio_cache_gb=.05)
+    item=dataset[0]
+    assert len(dataset)>0 and item['candidate_features'].shape==(16,129)
+    assert int(item['candidate_target'])>=0
