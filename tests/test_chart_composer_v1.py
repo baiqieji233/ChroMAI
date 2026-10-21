@@ -57,3 +57,47 @@ def test_composer_dataset_builds_candidate_features_from_audio(tmp_path):
     assert len(dataset)>0 and item['candidate_features'].shape==(16,129)
     assert int(item['candidate_target'])>=0
     assert item['future_target'].shape==(8,) and item['future_state'].shape==(8,)
+
+
+def test_composer_cpu_training_writes_checkpoint(tmp_path):
+    sr=8000;t=np.arange(sr*2)/sr
+    sf.write(tmp_path/'track.wav',(0.1*np.sin(2*np.pi*330*t)).astype(np.float32),sr)
+    (tmp_path/'maidata.txt').write_text(
+        '&wholebpm=120\n&lv_5=12\n&inote_5=(120){4}1,2,3,4,5,6,7,8,E\n',encoding='utf-8')
+    manifest=tmp_path/'manifest.json'
+    manifest.write_text(json.dumps({'songs':[{'song_id':'composer-train-fixture',
+        'maidata_path':str(tmp_path/'maidata.txt'),'audio_path':str(tmp_path/'track.wav'),
+        'difficulties':[{'difficulty_index':5,'level_raw':'12'}]}]}),encoding='utf-8')
+    from maichart.composer.train import main
+    assert main(['--manifest',str(manifest),'--checkpoint-dir',str(tmp_path/'out'),
+        '--cache-dir',str(tmp_path/'cache'),'--epochs','1','--batch-size','2',
+        '--d-model','24','--layers','1','--nhead','4','--dim-feedforward','48',
+        '--candidate-count','8','--action-slots','4','--device','cpu','--precision','fp32',
+        '--prepare-workers','1','--audio-cache-gb','.05','--checkpoint-interval-steps','1'])==0
+    assert (tmp_path/'out'/'composer_last.pt').is_file()
+
+
+def test_composer_generation_writes_chart_and_report(tmp_path):
+    sr=8000;t=np.arange(sr*2)/sr
+    audio_path=tmp_path/'track.wav';sf.write(audio_path,(0.1*np.sin(2*np.pi*220*t)).astype(np.float32),sr)
+    (tmp_path/'maidata.txt').write_text(
+        '&wholebpm=120\n&lv_5=12\n&inote_5=(120){4}1,2,3,4,5,6,7,8,E\n',encoding='utf-8')
+    manifest=tmp_path/'manifest.json'
+    manifest.write_text(json.dumps({'songs':[{'song_id':'composer-generate-fixture',
+        'maidata_path':str(tmp_path/'maidata.txt'),'audio_path':str(audio_path),
+        'difficulties':[{'difficulty_index':5,'level_raw':'12'}]}]}),encoding='utf-8')
+    dataset=ComposerDataset(manifest,cache_dir=tmp_path/'cache',candidate_count=8,
+        history_events=8,action_slots=4,preparation_workers=1,audio_cache_gb=.05)
+    model=ChartComposer(ComposerConfig(atom_vocab_size=len(dataset.codec_atoms)+1,d_model=24,nhead=4,
+        layers=1,dim_feedforward=48,candidate_count=8,action_slots=4))
+    optimizer=torch.optim.AdamW(model.parameters(),lr=1e-3)
+    checkpoint=tmp_path/'composer_last.pt'
+    save(checkpoint,model,optimizer,epoch=1,args={'training_semantics':'chart_composer_training_v1_event_pointer_actions'},
+        manifest=manifest,atom_catalog=dataset.codec_atoms)
+    from maichart.composer.generate import generate,parser
+    output=tmp_path/'generated.txt'
+    args=parser().parse_args(['--audio',str(audio_path),'--checkpoint',str(checkpoint),
+        '--output',str(output),'--bpm','120','--device','cpu','--max-events','2'])
+    report=generate(args)
+    assert output.is_file() and output.with_suffix('.composer.json').is_file()
+    assert report['family']=='chart_composer_v1'

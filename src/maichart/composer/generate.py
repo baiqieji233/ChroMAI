@@ -38,8 +38,11 @@ def _interp_features(values,times,song,candidates,previous):
     seconds=np.asarray([float(seconds_at_beat(b,song.tempo,song.first)) for b in candidates])
     acoustic=np.column_stack([np.interp(seconds,times,values[:,i],left=0.,right=0.) for i in range(values.shape[1])]).astype(np.float32)
     time_part=base_features(candidates,previous,song.tempo,song.first)
-    curve=np.asarray([resample_load_curve(song.load_curve_times_sec,song.load_curve,
-        np.asarray([second-float(song.first)]))[0] for second in seconds],dtype=np.float32)
+    if song.load_curve_times_sec is None or song.load_curve is None:
+        curve=np.zeros((len(seconds),4),dtype=np.float32)
+    else:
+        curve=np.asarray([resample_load_curve(song.load_curve_times_sec,song.load_curve,
+            np.asarray([second-float(song.first)]))[0] for second in seconds],dtype=np.float32)
     return torch.from_numpy(np.concatenate((acoustic,time_part,curve),axis=1))
 
 

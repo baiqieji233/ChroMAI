@@ -83,9 +83,15 @@ class ComposerDataset(Dataset):
                              structure_signature(str(points[future_index-1].note_text)))))
                 else:future_targets.append((0.,)*8)
             for event_index,point in enumerate(points):
+                if float(seconds_at_beat(point.beat,song.tempo,song.first)) >= float(song.audio.duration_sec):
+                    previous=Fraction(point.beat)
+                    continue
                 candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,
                     audio_end_sec=float(song.audio.duration_sec),candidate_count=self.candidate_count,
                     target=point.beat)
+                if not candidates:
+                    previous=Fraction(point.beat)
+                    continue
                 history=[]
                 for prior in points[max(0,event_index-self.history_events):event_index]:
                     atoms=str(prior.note_text).split('/')
@@ -124,20 +130,28 @@ class ComposerDataset(Dataset):
     def __getitem__(self,index):
         sample=self.samples[index];song=self.base.songs[sample.song_index][0]
         values,times=self._song_features(sample.song_index)
-        feature=candidate_features(sample.candidates,sample.previous,song.tempo,song.first)
-        seconds=np.asarray([float(seconds_at_beat(beat,song.tempo,song.first)) for beat in sample.candidates])
+        candidates=list(sample.candidates)
+        candidate_mask=np.zeros(self.candidate_count,dtype=bool)
+        if len(candidates)<self.candidate_count:
+            if not candidates:raise ValueError('Composer sample has no candidate beats')
+            candidate_mask[len(candidates):]=True
+            candidates.extend([candidates[-1]]*(self.candidate_count-len(candidates)))
+        else:candidates=candidates[:self.candidate_count]
+        feature=candidate_features(candidates,sample.previous,song.tempo,song.first)
+        seconds=np.asarray([float(seconds_at_beat(beat,song.tempo,song.first)) for beat in candidates])
         audio=np.column_stack([np.interp(seconds,times,values[:,column],left=0.,right=0.)
                                for column in range(values.shape[1])]).astype(np.float32)
         curve=np.asarray([resample_load_curve(song.load_curve_times_sec,song.load_curve,
             np.asarray([second-float(song.first)]))[0] for second in seconds],dtype=np.float32)
         features=np.concatenate((audio,feature,curve),axis=1)
-        target=candidate_index(sample.target,list(sample.candidates))
+        target=candidate_index(sample.target,list(candidates))
         if target<0:raise ValueError('Composer candidate generator missed an authored target')
         action=np.zeros(self.action_slots,dtype=np.int64)
         for slot,atom in enumerate(str(sample.note_text).split('/')[:self.action_slots]):
             action[slot]=self.atom_to_id.get(atom,0)
         return {'candidate_features':torch.from_numpy(features),
                 'candidate_target':torch.tensor(target,dtype=torch.long),
+                'candidate_mask':torch.from_numpy(candidate_mask),
                 'action_target':torch.from_numpy(action),
                 'history':torch.tensor(sample.history,dtype=torch.long),
                 'action_state':torch.tensor(sample.action_state,dtype=torch.float32),
@@ -161,7 +175,7 @@ def collate_composer(items):
     result['history']=pad_sequence([item['history'] for item in items],batch_first=True,padding_value=0)
     result['history_padding_mask']=torch.arange(result['history'].size(1))[None]>=torch.tensor(
         [len(item['history']) for item in items])[:,None]
-    result['candidate_padding_mask']=torch.zeros(result['candidate_features'].shape[:2],dtype=torch.bool)
+    result['candidate_padding_mask']=torch.stack([item['candidate_mask'] for item in items])
     result['song_index']=torch.stack([item['song_index'] for item in items])
     result['event_index']=torch.stack([item['event_index'] for item in items])
     return result
