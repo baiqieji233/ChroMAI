@@ -29,6 +29,7 @@ from .candidates import (
     interp_candidate_audio,
 )
 from .events import structure_signature
+from .runtime_memory import cache_capacity, host_memory
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.form.type_guidance import _counts
 
@@ -60,6 +61,8 @@ class ComposerDataset(Dataset):
         # The exposed budget covers both stores rather than granting each a
         # full independent budget. Parsed labels/history are separate CPU data.
         self._feature_cache_budget_bytes=int(max(0.,float(audio_cache_gb))*(1024**3)*.75)
+        self._feature_cache_effective_budget_bytes=self._feature_cache_budget_bytes
+        self._memory_checked_at=float('-inf')
         self._feature_cache_hits=0;self._feature_cache_misses=0
         self.base=FormDataset(manifest,cache_dir=cache_dir,max_tokens=1_000_000,
             max_memory_tokens=max(256,history_events),max_region_seconds=999.,
@@ -378,6 +381,7 @@ class ComposerDataset(Dataset):
         return (audio_key, float(song.first), tempo_key, meter_key, extent_key)
 
     def _song_features(self, song_index: int):
+        self._check_cache_headroom()
         key = self._song_feature_key(song_index)
         arrays = self._feature_cache.get(key)
         if arrays is None:
@@ -385,12 +389,12 @@ class ComposerDataset(Dataset):
             song = self._source_song(song_index, cache_in_base=False)
             arrays = composer_audio_nodes(song)
             item_bytes = int(arrays[0].nbytes + arrays[1].nbytes)
-            if item_bytes>self._feature_cache_budget_bytes:
+            if item_bytes>self._feature_cache_effective_budget_bytes:
                 return arrays
             self._feature_cache[key] = arrays
             self._feature_cache.move_to_end(key)
             self._feature_cache_bytes += item_bytes
-            while self._feature_cache_bytes > self._feature_cache_budget_bytes and len(self._feature_cache) > 1:
+            while self._feature_cache_bytes > self._feature_cache_effective_budget_bytes and self._feature_cache:
                 _, evicted = self._feature_cache.popitem(last=False)
                 self._feature_cache_bytes -= int(evicted[0].nbytes + evicted[1].nbytes)
         else:
@@ -398,9 +402,24 @@ class ComposerDataset(Dataset):
             self._feature_cache.move_to_end(key)
         return arrays
 
+    def _check_cache_headroom(self):
+        # The sole producer owns this LRU. Checking once per second avoids
+        # system calls for every event and retains the requested ceiling.
+        now=time.monotonic()
+        if now-self._memory_checked_at < 1.:
+            return
+        self._memory_checked_at=now
+        budget=cache_capacity(self._feature_cache_budget_bytes,
+                              self._feature_cache_bytes,host_memory())
+        self._feature_cache_effective_budget_bytes=budget
+        while self._feature_cache_bytes>budget and self._feature_cache:
+            _,evicted=self._feature_cache.popitem(last=False)
+            self._feature_cache_bytes-=int(evicted[0].nbytes+evicted[1].nbytes)
+
     def cache_stats(self):
         return {'hits':self._feature_cache_hits,'misses':self._feature_cache_misses,
                 'bytes':self._feature_cache_bytes,'budget_bytes':self._feature_cache_budget_bytes,
+                'effective_budget_bytes':self._feature_cache_effective_budget_bytes,
                 'entries':len(self._feature_cache),'scope':'composer_audio_bank'}
 
     def _source_song(self, index, *, cache_in_base=True):

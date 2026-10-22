@@ -1,7 +1,7 @@
 """Train chart_composer_v1 on structured authored events."""
 from __future__ import annotations
 import argparse,json,math,random,time
-from contextlib import nullcontext
+from contextlib import contextmanager,nullcontext
 from itertools import islice
 from pathlib import Path
 import numpy as np
@@ -14,13 +14,39 @@ from . import FAMILY,TRAINING_SEMANTICS
 from .data import ComposerDataset,collate_composer
 from .model import ChartComposer,ComposerConfig
 from .checkpoint import save,load
+from .runtime_memory import GIB,host_memory,memory_gib
 
 
 class RemainingBatches:
     """Skip consumed indices without loading their audio/history again."""
-    def __init__(self,batches,skip): self.batches,self.skip=batches,skip
-    def __iter__(self): return islice(iter(self.batches),self.skip,None)
-    def __len__(self): return max(0,len(self.batches)-self.skip)
+    def __init__(self,batches,skip,stop=None): self.batches,self.skip,self.stop=batches,skip,stop
+    def __iter__(self): return islice(iter(self.batches),self.skip,self.stop)
+    def __len__(self): return max(0,min(len(self.batches),self.stop if self.stop is not None else len(self.batches))-self.skip)
+
+
+def _cuda_failure_diagnostics(error,device):
+    """Read host state first; a failed CUDA context need not accept more work."""
+    info={'error':str(error),'host_memory':memory_gib(host_memory()),
+          'torch_version':torch.__version__,'cuda_build':torch.version.cuda}
+    try:
+        info['cuda_memory']={'allocated_gib':torch.cuda.memory_allocated(device)/1024**3,
+            'reserved_gib':torch.cuda.memory_reserved(device)/1024**3}
+    except RuntimeError:
+        pass
+    print('composer_cuda_failure '+json.dumps(info),flush=True)
+    return RuntimeError('Composer CUDA execution failed. See composer_cuda_failure for host commit and CUDA memory. '
+        'On Windows, free GPU memory alone does not rule out host memory pressure; close unused memory-heavy '
+        'processes or increase available system commit before restarting. No automatic precision/batch change was applied.')
+
+
+@contextmanager
+def _cuda_execution(device):
+    try:
+        yield
+    except RuntimeError as error:
+        if device.type=='cuda' and ('CUDA' in str(error) or 'CUBLAS' in str(error)):
+            raise _cuda_failure_diagnostics(error,device) from error
+        raise
 
 
 def parser():
@@ -145,6 +171,13 @@ def main(argv=None):
         if scaler is not None and resumed_state.get('scaler'):
             scaler.load_state_dict(resumed_state['scaler'])
     parameters=sum(p.numel() for p in model.parameters())
+    initial_host_memory=host_memory()
+    if initial_host_memory is not None and (initial_host_memory['free_commit']<4*GIB
+                                           or initial_host_memory['free_physical']<2*GIB):
+        print('composer_warning '+json.dumps({'message':
+            'Low Windows host memory headroom: the audio cache may shrink. Close unused memory-heavy processes; '
+            'available GPU memory alone is insufficient to diagnose allocation failures.',
+            'host_memory':memory_gib(initial_host_memory)}),flush=True)
     run_started=time.monotonic()
     timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.,save_sec=0.)
     print('composer_runtime '+json.dumps({'family':FAMILY,'training_semantics':TRAINING_SEMANTICS,
@@ -155,6 +188,7 @@ def main(argv=None):
         'batch_size':args.batch_size,'grad_accumulation':args.grad_accumulation,
         'start_epoch':start_epoch,'prefetch_batches':args.prefetch_batches,
         'candidate_count':args.candidate_count,'action_vocab_size':len(dataset.codec_atoms)+1,
+        'host_memory':memory_gib(initial_host_memory),
         'end_epoch':end_epoch,'candidate_misses':dataset.candidate_misses,
         'candidate_total':dataset.candidate_total,
         'candidate_miss_examples':dataset.candidate_miss_examples,
@@ -166,12 +200,12 @@ def main(argv=None):
         sampler=torch.utils.data.RandomSampler(dataset,generator=loader_generator)
         batch_sampler=torch.utils.data.BatchSampler(sampler,args.batch_size,drop_last=False)
         all_batches=len(batch_sampler)
-        loader=DataLoader(dataset,batch_sampler=RemainingBatches(batch_sampler,skip),
-            collate_fn=collate_composer,generator=loader_generator,pin_memory=device.type=='cuda')
         total_batches=min(all_batches,args.max_steps) if args.max_steps else all_batches
+        loader=DataLoader(dataset,batch_sampler=RemainingBatches(batch_sampler,skip,total_batches),
+            collate_fn=collate_composer,generator=loader_generator,pin_memory=device.type=='cuda')
         source=LayoutBatchPrefetch(loader,depth=args.prefetch_batches) if args.prefetch_batches else nullcontext(iter(loader))
         optimizer.zero_grad(set_to_none=True)
-        with source as batches:
+        with _cuda_execution(device), source as batches:
             for batch_index in range(skip+1,total_batches+1):
                 stamp=time.perf_counter();batch=next(batches)
                 timing['data_sec']+=time.perf_counter()-stamp
@@ -229,7 +263,8 @@ def main(argv=None):
                         'phase_elapsed_sec':elapsed,'batches_per_sec':(batch_index-skip)/max(elapsed,1e-6),
                         'samples_per_sec':seen/max(elapsed,1e-6),'eta_sec':(total_batches-batch_index)*elapsed/(batch_index-skip),
                         'metric_batches':batch_index-skip,'resume_skipped_batches':skip,
-                        'timing':dict(timing),'cache':dataset.cache_stats(),'cuda_memory':memory,**avg}),flush=True)
+                        'timing':dict(timing),'cache':dataset.cache_stats(),'cuda_memory':memory,
+                        'host_memory':memory_gib(host_memory()),**avg}),flush=True)
         stamp=time.perf_counter()
         common=dict(epoch=epoch,args=vars(args),manifest=args.manifest,
             metrics={key:float(value)/max(1,total_batches-skip) for key,value in totals.items()},optimizer_steps=global_step,
