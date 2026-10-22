@@ -5,7 +5,7 @@
 
 ## 已完成
 
-`chart_composer_v1` 已接入主 WebUI 工作台。模型族下拉框、训练参数区、生成参数区和 checkpoint 检查会根据当前族切换；主训练按钮调用 `/api/composer/train`，主生成按钮调用 `/api/composer/generate`，生成检查调用 `/api/composer/inspect`。
+`chart_composer_v1` 已接入主 WebUI 工作台。模型族下拉框、训练参数区、生成参数区和 checkpoint 检查会根据当前族切换；主训练按钮调用 `/api/composer/train`，主生成按钮调用 `/api/composer/generate`，生成检查调用 `/api/composer/inspect`。独立 `/composer` 页面仍作为隐藏兼容入口保留，主工作台不再显示它的导航链接。
 
 服务端现在能够从 Composer checkpoint schema 识别模型族，并在主 `/api/train`、`/api/generate` 和 `/api/checkpoint/inspect` 路由中转发到 Composer 适配器。多数据集选择先经过现有数据集合并器，Composer 使用合并后的 event source manifest，不再只取列表中的第一份清单。Composer 训练日志中的 JSON 进度会转换为主工作台任务进度和 epoch 状态；`composer_last.pt`、生成的 `.txt` 和 `.composer.json` 会进入任务产物列表。
 
