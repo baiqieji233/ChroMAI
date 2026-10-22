@@ -9,7 +9,7 @@ function fn(name) {
   const start = source.indexOf(`function ${name}(`);
   return source.slice(start, source.indexOf("\n}", start) + 2);
 }
-function setup() {
+function setup(family = "event_v1") {
   const nodes = { "#intensitySaveButton": {}, "#intensityCurveEnabled": { checked: true },
     "#intensityCurveConditionNotice": {}, "#intensityCurveStatus": {} };
   const profile = {schema:"maichart-intensity-curve-v1",method:"learned_music_structure_v3",audio_sha256:"a".repeat(64),
@@ -23,6 +23,7 @@ function setup() {
     intensityCurveStorageKey:"curve",localStorage:{setItem:(_,v)=>stored=JSON.parse(v),getItem:()=>JSON.stringify(stored)},
     element:key=>nodes[key] || null,checkedOrDefault:()=>true,updateIntensityViewControls(){},
     setWorkspaceMode(){},saveSettings(){},normalizeRestRegions:r=>r,
+    currentGenerationFamily:()=>family,
     normalizeIntensityProfile:p=>p,
   });
   vm.runInContext(["intensityProfileValid","updateIntensityButtons","updateCurveConditionNotice","setIntensityStatus",
@@ -30,6 +31,14 @@ function setup() {
     "invalidateLearnedCurveForCondition","invalidateLearnedCurveForTiming","saveIntensityCurveAndReturn"].map(fn).join("\n"), context);
   return {context,nodes,profile,stored:()=>stored};
 }
+
+test("Composer keeps analysis as a reference without enabling unsupported curve generation",()=>{
+  const {context,nodes}=setup('chart_composer_v1');
+  vm.runInContext('saveIntensityCurveAndReturn()',context);
+  assert.equal(context.intensityCurveState.saved,false);
+  assert.equal(nodes['#intensityCurveEnabled'].checked,false);
+  assert.match(nodes['#intensityCurveStatus'].textContent,/不会读取/);
+});
 
 test("changing controls keeps saved curve and original prediction metadata usable across reload",()=>{
   const {context,nodes,profile,stored}=setup();

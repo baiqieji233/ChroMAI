@@ -346,7 +346,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint_path = (_required_path(payload["checkpoint"], "曲线规划 checkpoint", must_exist=True)
                            if source != "audio" and payload.get("checkpoint") else None)
         if source == "model" and checkpoint_path is None:
-            raise ValueError("模型预测曲线需要选择 music_structure_v2/v3 checkpoint")
+            raise ValueError("模型预测曲线需要选择支持曲线预测的 event、song_form 或 chart_stream checkpoint")
         resolution = float(payload.get("resolution_sec", 2.0))
         context = float(payload.get("local_context_sec", 12.0))
         first = float(payload.get("first", 0.0))
@@ -383,26 +383,29 @@ class WebUIHandler(BaseHTTPRequestHandler):
             try:
                 from maichart.generation.music_intensity import generate_intensity_profile
                 selected_source = source
+                checkpoint_data = (_load_checkpoint_payload(checkpoint_path)
+                                   if checkpoint_path and source != 'audio' else {})
+                checkpoint_family = (_checkpoint_model_family(checkpoint_data)
+                                     if checkpoint_data else None)
                 if selected_source == "auto":
-                    checkpoint_data = _load_checkpoint_payload(checkpoint_path) if checkpoint_path else {}
-                    checkpoint_family = _checkpoint_model_family(checkpoint_data) if checkpoint_path else None
-                    profile_name = checkpoint_data.get("model_config", {}).get("planner_profile") if checkpoint_path else None
-                    selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"} or is_music_structure(str(profile_name or ""))
+                    profile_name = checkpoint_data.get("model_config", {}).get("planner_profile")
+                    selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"}
+                                       or (checkpoint_family in EVENT_FAMILIES and is_music_structure(str(profile_name or "")))
                                        else "audio")
                 if selected_source == "model":
-                    requested_family = str(payload.get("model_family", ""))
-                    checkpoint_family = (_checkpoint_model_family(_load_checkpoint_payload(checkpoint_path))
-                                         if checkpoint_path else None)
-                    if requested_family == 'chart_stream_v1' or checkpoint_family == 'chart_stream_v1':
+                    if checkpoint_family == COMPOSER_MODEL_FAMILY:
+                        raise ValueError('chart_composer_v1 没有独立的全曲 Planner 曲线头；'
+                                         '请选择 auto 或 audio 生成音频参考曲线。音频参考曲线当前不参与 Composer 生成。')
+                    if checkpoint_family == 'chart_stream_v1':
                         from maichart.stream.curve import generate_learned_profile
                         profile = generate_learned_profile(
                             audio, checkpoint_path, resolution_sec=resolution,
                             condition=payload.get("condition"), bpm=payload.get("bpm") or None,
                             first=first, tempo_map=explicit_tempo_map,
                             meter_map=meter_map, device="cpu")
-                        condition_source = checkpoint_family or requested_family
+                        condition_source = checkpoint_family
                         task.result["condition_source"] = condition_source
-                    elif requested_family in {"song_form_v1", "song_form_v2"} or checkpoint_family in {"song_form_v1", "song_form_v2"}:
+                    elif checkpoint_family in {"song_form_v1", "song_form_v2"}:
                         from maichart.form.curve import generate_learned_profile
                         profile = generate_learned_profile(
                             audio, checkpoint_path, resolution_sec=resolution,
@@ -410,17 +413,18 @@ class WebUIHandler(BaseHTTPRequestHandler):
                             bpm=payload.get("bpm") or None, first=first,
                             tempo_mode=tempo_mode, tempo_map=explicit_tempo_map,
                             meter_map=meter_map, device="cpu")
-                        condition_source = checkpoint_family or requested_family
+                        condition_source = checkpoint_family
                         task.result["condition_source"] = condition_source
                     else:
+                        if checkpoint_family not in EVENT_FAMILIES:
+                            raise ValueError(f'模型族 {checkpoint_family or "unknown"} 不支持模型强度曲线预测；请选择 audio 音频参考。')
                         from maichart.generation.learned_curve import generate_learned_profile
                         from maichart.generation.event_cli import resolve_generation_condition
-                        checkpoint_payload = _load_checkpoint_payload(checkpoint_path)
                         condition, condition_source = resolve_generation_condition(
                             level=float(payload.get("level", GENERATION_DEFAULTS["level"])),
                             condition_data=payload.get("condition"),
                             condition_profile=_resolve_condition_profile(payload),
-                            contract_params=(checkpoint_payload.get("data_contract", {}).get("condition_params") or {}),
+                            contract_params=(checkpoint_data.get("data_contract", {}).get("condition_params") or {}),
                         )
                         profile = generate_learned_profile(
                             audio, checkpoint_path, resolution_sec=resolution, local_context_sec=context,

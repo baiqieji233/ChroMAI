@@ -100,6 +100,7 @@ test("finetune preflight keeps an explicit upgrade, meter override and geometry 
     valueOrDefault:(id,fallback)=>id==="#trainingCheckpointPath"?"old.pt":nodes.get(id)?.value??fallback,
     checkpointInspection:{data:null},checkpointInspectRequest:0,currentCheckpointKey:()=>"key",
     assertTrainingSelection(){},assertDatasetBackend:async()=>{},setCheckpointStatus(){},updateTrainingControls(){},
+    trainingSourcePaths:()=>({manifest:'training_manifest.json'}),
     updateSongFormRhythmGeometryControls(){},api:async()=>inspection});
   vm.runInContext(["applySongFormCheckpointConfig"].map(fn).join("\n")+"\nasync "+fn("inspectCheckpoint"),context);
   await context.inspectCheckpoint({preserveEditableConfig:true});

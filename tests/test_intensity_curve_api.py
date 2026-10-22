@@ -87,6 +87,39 @@ def test_analysis_is_separate_and_returns_editable_profile(api, monkeypatch, tmp
     assert (webui.INTENSITY_ROOT / f"{started['task_id']}_automatic.json").exists()
 
 
+@pytest.mark.parametrize('source', ['auto', 'audio', 'model'])
+def test_composer_curve_sources_do_not_enter_event_checkpoint_loader(api, monkeypatch, tmp_path, source):
+    from maichart.generation import music_intensity, learned_curve
+    audio=tmp_path/'track.wav';audio.write_bytes(b'audio')
+    checkpoint=tmp_path/'composer.pt';checkpoint.write_bytes(b'checkpoint')
+    def load(_path):
+        assert source!='audio', 'Audio reference must not load model or optimizer weights'
+        return {'schema':'maichart-chart-composer-checkpoint-v2','family':'chart_composer_v1',
+            'input_contract':'chart_composer_inputs_v2_audio_only_history_state',
+            'model_config':{'planner_profile':'music_structure_v3'},'model_state_dict':{}}
+    def forbidden(*args,**kwargs):
+        raise AssertionError('Composer checkpoint was sent to the event curve loader')
+    monkeypatch.setattr(webui,'_load_checkpoint_payload',load)
+    monkeypatch.setattr(learned_curve,'generate_learned_profile',forbidden)
+    monkeypatch.setattr(music_intensity,'generate_intensity_profile',lambda *a,**kw:profile(audio))
+    status,started,_=api('/api/intensity/analyze',{'audio':str(audio),'checkpoint':str(checkpoint),
+        'curve_source':source,'model_family':'chart_stream_v1'})
+    assert status==200,started
+    deadline=time.monotonic()+4
+    while time.monotonic()<deadline:
+        _,result,_=api('/api/task?id='+started['task_id'])
+        if result['status'] not in {'queued','running'}:break
+        time.sleep(.02)
+    if source=='model':
+        assert result['status']=='failed'
+        assert '没有独立的全曲 Planner 曲线头' in result['error']
+        assert '旧固定帧' not in result['error']
+    else:
+        assert result['status']=='completed',result
+        assert result['result']['curve_source']=='audio'
+        assert result['result']['intensity_profile']['method']=='multifeature_v1'
+
+
 @pytest.mark.parametrize("values", [{"resolution_sec": 0}, {"resolution_sec": float("nan")},
                                   {"local_context_sec": 0}, {"local_context_sec": 500}])
 def test_analysis_rejects_bad_options(api, tmp_path, values):

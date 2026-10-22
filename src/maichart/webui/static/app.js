@@ -1371,6 +1371,7 @@ function familyFieldVisible(declared, current) {
 
 function updateSongFormGenerationOptions() {
   const isSongForm = ["song_form_v1", "song_form_v2"].includes(currentGenerationFamily());
+  const isComposer = currentGenerationFamily() === "chart_composer_v1";
   const curveMode = element("#intensityCurveMode");
   const legacyCurveModes = curveMode ? [...curveMode.options].filter((option) => ["soft", "strict"].includes(option.value)) : [];
   legacyCurveModes.forEach((option) => { option.disabled = isSongForm; });
@@ -1399,6 +1400,14 @@ function updateSongFormGenerationOptions() {
     songFormCurveModeBeforeRestriction = null;
     saveSettings();
   }
+  const modelCurveSource = curveSource?.querySelector('option[value="model"]');
+  if (modelCurveSource) modelCurveSource.disabled = isComposer;
+  if (isComposer && curveSource?.value === "model") {
+    curveSource.value = "audio";
+    saveSettings();
+  }
+  const curveSave = element("#intensitySaveButton");
+  if (curveSave) curveSave.textContent = isComposer ? "保留参考并返回" : "保存并返回生成页";
 }
 
 function updateFamilyFields() {
@@ -4655,10 +4664,13 @@ async function generateIntensityCurve() {
   const status = await api("/api/status");
   if (status.intensity_curve_capability !== true) throw new Error("当前后端尚未加载多维强度曲线分析能力，请重启 WebUI 服务后再试");
   const generation = generationPayload();
+  const family = generation.model_family || currentGenerationFamily();
+  const curveSource = family === "chart_composer_v1" ? "audio" : valueOrDefault("#intensityCurveSource", "auto");
   const data = await api("/api/intensity/analyze", {
     audio, resolution_sec: 2, local_context_sec: 12,
-    curve_source: valueOrDefault("#intensityCurveSource", "auto"),
-    checkpoint: generation.checkpoint || null,
+    curve_source: curveSource,
+    model_family: family,
+    checkpoint: curveSource === "audio" ? null : generation.checkpoint || null,
     condition: generation.condition, bpm: generation.bpm,
     first: generation.first, tempo_mode: generation.tempo_mode,
     tempo_map: generation.tempo_map,
@@ -4706,6 +4718,14 @@ function applyIntensitySection() {
 
 function saveIntensityCurveAndReturn() {
   if (!intensityProfileValid(intensityCurveState.profile)) throw new Error("请先生成强度曲线");
+  if (currentGenerationFamily() === "chart_composer_v1") {
+    intensityCurveState.saved = false;
+    const checkbox = element("#intensityCurveEnabled"); if (checkbox) checkbox.checked = false;
+    saveIntensityCurveState(); setWorkspaceMode("generation");
+    setIntensityStatus("音频参考已保留；Composer 当前不会读取这份曲线或其中的休止标记。", "warn");
+    updateCurveConditionNotice(); saveSettings();
+    return;
+  }
   if (intensityCurveState.contextStale) throw new Error("节拍设置已变化，请重新生成模型来源曲线后再保存");
   intensityCurveState.profile.edited = true; intensityCurveState.saved = true; saveIntensityCurveState();
   const checkbox = element("#intensityCurveEnabled"); if (checkbox) checkbox.checked = true;

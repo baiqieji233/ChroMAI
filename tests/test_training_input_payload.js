@@ -200,7 +200,8 @@ test("song-form curve restrictions reset unsupported saved values and restore ev
   const curveMode = {options: ["follow", "hard", "soft", "strict"].map(value => ({value, textContent: value})), value: "soft",
     querySelector: selector => selector.includes("hard") ? curveMode.options.find(option => option.value === "hard") : null};
   const audioOption = {disabled: false};
-  const curveSource = {value: "audio", querySelector: () => audioOption};
+  const modelOption = {disabled: false};
+  const curveSource = {value: "audio", querySelector: selector => selector.includes('"audio"') ? audioOption : modelOption};
   let family = "song_form_v1", saves = 0;
   const apply = new Function("currentGenerationFamily", "element", "saveSettings",
     "songFormCurveSourceBeforeRestriction", "songFormCurveModeBeforeRestriction", "songFormCurveRestrictionsActive",

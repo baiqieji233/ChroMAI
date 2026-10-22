@@ -1430,11 +1430,12 @@
           <button id="intensityBackToGeneration" class="small-button" type="button">返回生成页</button>
         </div>
         <label class="field">自动曲线来源
-          <select id="intensityCurveSource"><option value="auto" selected>自动（新模型优先 planner）</option><option value="audio">音频多维参考</option><option value="model">模型 planner</option></select>
+          <select id="intensityCurveSource"><option value="auto" selected>自动（支持时使用 planner）</option><option value="audio">音频多维参考</option><option value="model">模型 planner</option></select>
           <small data-generation-family="event_v1 legacy_frame_v2">auto 在 music_structure_v2/v3 模型可用时采用 planner，否则使用音频参考。model 需要新 planner checkpoint 与当前等级、条件、节拍设置；预测粒度由训练窗口决定。
           checkpoint 身份指具体权重文件和训练 epoch，不代表模型架构。训练中的 event_last.pt 会持续覆盖，建议选择固定的 event_epoch_NNN.pt 生成曲线。
           audio 只依赖歌曲的音频特征。等级、Radar 或 Style 改动只提醒，未重新预测时继续沿用已保存曲线；更换音频、checkpoint、BPM、first 或 tempo map 后仍需重新生成。</small>
           <small data-generation-family="song_form_v1 song_form_v2" hidden>song_form_v1 的 auto 会从已选 song_form checkpoint 预测曲线；model 也使用该 checkpoint。audio 曲线不是 learned_song_form_v1，不能用于 song_form 生成。</small>
+          <small data-generation-family="chart_composer_v1" hidden>Composer 当前提供音频参考分析，没有独立的全曲 Planner 曲线头；此处曲线仅供查看和编辑，当前不会传入 Composer 生成器。</small>
         </label>
         <div class="button-row">
           <button id="generateIntensityCurveButton" class="primary-button" type="button">生成强度曲线</button>
