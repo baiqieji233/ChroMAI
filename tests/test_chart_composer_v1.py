@@ -18,13 +18,19 @@ def test_candidate_set_uses_bounded_musical_grid_and_long_rest_choices():
     values=candidate_beats(Fraction(0),tempo=tempo,first=0.,audio_end_sec=12.,candidate_count=16,target=target)
     assert candidate_index(target,values)==-1
     assert any(value >= 2 for value in values)
-    assert all(value.denominator <= 96 for value in values)
-    assert all(value.denominator in {1,2,3,4,6,8,12,16} for value in values)
+    offsets={value for value in values}
+    assert all(value > 0 for value in offsets)
     first_values=candidate_beats(None,tempo=tempo,first=0.,audio_end_sec=12.,candidate_count=96)
     assert Fraction(0) in first_values
     assert Fraction(1,2) in first_values
     assert Fraction(9,4) in first_values
     assert Fraction(17,8) in first_values
+    fine={Fraction(index, denominator) for denominator in (1,2,3,4,6,8,12,16)
+          for index in range(1, denominator*2+1)}
+    assert fine.issubset({value for value in first_values if value > 0})
+    for count in range(1, 9):
+        small=candidate_beats(None,tempo=tempo,first=0.,audio_end_sec=100.,candidate_count=count)
+        assert len(small) <= count and small == sorted(set(small)) and small[0] == 0
 
 
 def test_active_heads_only_block_live_hold_sources(tmp_path):

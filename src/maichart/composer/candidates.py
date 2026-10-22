@@ -73,8 +73,8 @@ def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end
         by_offset={value-previous:value for value in values}
         far_offsets=[Fraction(2),Fraction(3),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]
         far=[by_offset[offset] for offset in far_offsets if offset in by_offset]
-        far_slots=min(len(far),max(1,count//4))
-        near_slots=max(1,count-far_slots)
+        far_slots=min(len(far),max(0,count//4))
+        near_slots=max(0,count-far_slots)
         selected=[by_offset[offset] for offset in priority_offsets if offset in by_offset][:near_slots]
         remaining_far=[value for value in far if value not in selected]
         if far_slots and remaining_far:
