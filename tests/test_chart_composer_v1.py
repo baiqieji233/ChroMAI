@@ -27,6 +27,17 @@ def test_candidate_set_uses_bounded_musical_grid_and_long_rest_choices():
     assert Fraction(17,8) in first_values
 
 
+def test_active_heads_only_block_live_hold_sources(tmp_path):
+    from maichart.composer.generate import _active_heads
+    tempo=[type('Tempo',(),{'beat':Fraction(0),'bpm':120.})()]
+    state=type('State',(),{'markers':[
+        {'type':'hold','second':0.,'end_second':1.,'lane':1},
+        {'type':'slide','second':0.,'end_second':1.,'lane':2},
+    ]})()
+    assert _active_heads(state,Fraction(2),tempo,0.) == set()
+    assert _active_heads(state,Fraction(1,2),tempo,0.) == {'A1'}
+
+
 def test_composer_forward_shapes_and_checkpoint_roundtrip(tmp_path):
     config=ComposerConfig(atom_vocab_size=3,candidate_feature_dim=125,d_model=24,nhead=4,
                           layers=1,dim_feedforward=48,candidate_count=8,action_slots=3)

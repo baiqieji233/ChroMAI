@@ -103,10 +103,10 @@ def _active_heads(state, beat, tempo, first):
     second=float(seconds_at_beat(beat,tempo,first)); result=set()
     for marker in getattr(state,'markers',()):
         onset=float(marker.get('second',0.)); end=float(marker.get('end_second',-1.))
-        if onset > second or end + .02 <= second:
+        if onset > second or end <= second + 1e-8:
             continue
         kind=marker.get('type')
-        if kind in {'hold','slide','wifi'}:
+        if kind == 'hold':
             lane=marker.get('lane')
             if lane is not None: result.add(f'A{int(lane)}')
         elif kind=='touch_hold' and marker.get('touch_pad'):

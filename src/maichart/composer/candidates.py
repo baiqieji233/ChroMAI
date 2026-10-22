@@ -61,12 +61,15 @@ def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end
               if float(seconds_at_beat(previous + offset, tempo, first)) < float(audio_end_sec)]
     count = int(candidate_count)
     if len(values) > count:
-        priority_offsets=([Fraction(0)] if first_event else [])+[Fraction(1,16),
-            Fraction(1,12),Fraction(1,8),Fraction(1,6),Fraction(1,4),Fraction(1,3),
-            Fraction(3,8),Fraction(1,2),Fraction(2,3),Fraction(3,4),Fraction(1),
-            Fraction(4,3),Fraction(3,2),Fraction(2),
+        fine_offsets=sorted({Fraction(index, denominator)
+            for denominator in (1,2,3,4,6,8,12,16)
+            for index in range(1, denominator*2+1)})
+        near_required=[Fraction(1,16),Fraction(1,12),Fraction(1,8),Fraction(1,6),Fraction(1,4),
+            Fraction(1,3),Fraction(3,8),Fraction(1,2),Fraction(2,3),Fraction(3,4),Fraction(1)]
+        priority_offsets=((([Fraction(0)] if first_event else [])+near_required+
+            [offset for offset in fine_offsets if offset not in near_required]+[
             Fraction(7,3),Fraction(9,4),Fraction(17,8),Fraction(5,2),Fraction(11,4),Fraction(3),
-            Fraction(13,4),Fraction(7,2),Fraction(15,4),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]
+            Fraction(13,4),Fraction(7,2),Fraction(15,4),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]))
         by_offset={value-previous:value for value in values}
         far_offsets=[Fraction(2),Fraction(3),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]
         far=[by_offset[offset] for offset in far_offsets if offset in by_offset]
