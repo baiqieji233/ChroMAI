@@ -5,11 +5,67 @@ import json
 import numpy as np
 import soundfile as sf
 import torch
+import copy
 
 from maichart.composer.candidates import candidate_beats, candidate_index
 from maichart.composer.checkpoint import inspect_payload, save, load
 from maichart.composer.model import ChartComposer, ComposerConfig
 from maichart.composer.data import ComposerDataset
+
+
+def test_selected_candidate_projection_preserves_loss_and_gradients():
+    from maichart.composer.train import _loss
+    torch.manual_seed(10)
+    config=ComposerConfig(atom_vocab_size=7,d_model=16,nhead=4,layers=1,dim_feedforward=32,
+        dropout=0.,history_events=8,action_slots=3)
+    full=ChartComposer(config).eval(); selected=copy.deepcopy(full)
+    features=torch.randn(2,6,125);history=torch.randint(0,7,(2,3,3))
+    control=torch.randn(2,16);targets=torch.tensor([1,4])
+    batch={'candidate_target':targets,'action_target':torch.tensor([[1,2,0],[3,0,0]]),
+        'future_target':torch.rand(2,8),'eos_target':torch.tensor([0.,1.])}
+    full_out=full(features,history,control)
+    chosen_out=selected(features,history,control,candidate_indices=targets)
+    assert chosen_out['action_logits'].shape==(2,3,7)
+    loss_full,_=_loss(full_out,batch,7);loss_chosen,_=_loss(chosen_out,batch,7)
+    torch.testing.assert_close(loss_full,loss_chosen)
+    loss_full.backward();loss_chosen.backward()
+    for (_,left),(_,right) in zip(full.named_parameters(),selected.named_parameters()):
+        if left.grad is not None:
+            torch.testing.assert_close(left.grad,right.grad,rtol=1e-4,atol=1e-6)
+    hidden=full(features,history,control,decode_actions=False)
+    assert 'action_logits' not in hidden
+    decoded=full.decode_candidate(hidden['candidate_context'],targets)
+    torch.testing.assert_close(decoded['action_logits'],chosen_out['action_logits'])
+
+
+def test_generation_history_gaps_use_true_window_predecessor_and_audio_first():
+    from maichart.composer.generate import _history_features
+    from maichart.event_timing import EventTempo
+    tempo=[EventTempo(Fraction(0),120.)]
+    full=[((1,0),Fraction(10)),((2,0),Fraction(11)),((1,0),Fraction(12))]
+    full_rows=_history_features(full,['1','2'],tempo,2.,2)
+    tail_rows=_history_features(full[1:],['1','2'],tempo,2.,2,preceding_beat=Fraction(10))
+    np.testing.assert_allclose(full_rows[1:],tail_rows)
+    zero=_history_features([((1,0),Fraction(0))],['1','2'],tempo,2.,2)
+    assert zero[0][0]==zero[0][1]==0.
+
+
+def test_inference_export_is_lossless_and_cannot_resume(tmp_path):
+    from maichart.composer.checkpoint import export_inference,read_payload
+    config=ComposerConfig(atom_vocab_size=3,d_model=16,nhead=4,layers=1,dim_feedforward=32)
+    model=ChartComposer(config);optimizer=torch.optim.AdamW(model.parameters())
+    for value in model.parameters():value.grad=torch.ones_like(value)
+    optimizer.step()
+    full=tmp_path/'composer_last.pt';inference=tmp_path/'composer_inference.pt'
+    save(full,model,optimizer,epoch=1,args={},manifest=tmp_path/'manifest.json',atom_catalog=['1','2'])
+    export_inference(full,inference)
+    original=read_payload(full);slim=read_payload(inference)
+    assert inspect_payload(original)['can_resume']
+    assert not inspect_payload(slim)['can_resume'] and inspect_payload(slim)['can_generate']
+    for key,value in original['model_state_dict'].items():
+        assert torch.equal(value,slim['model_state_dict'][key])
+    assert inference.stat().st_size<full.stat().st_size*.6
+    assert 'optimizer_state_dict' not in load(full)[1]
 
 
 def test_candidate_set_uses_bounded_musical_grid_and_long_rest_choices():
@@ -103,6 +159,9 @@ def test_composer_cpu_training_writes_checkpoint(tmp_path):
         '--candidate-count','16','--action-slots','4','--device','cpu','--precision','fp32',
         '--prepare-workers','1','--audio-cache-gb','.05','--checkpoint-interval-steps','1'])==0
     assert (tmp_path/'out'/'composer_last.pt').is_file()
+    assert (tmp_path/'out'/'composer_inference.pt').is_file()
+    payload=torch.load(tmp_path/'out'/'composer_last.pt',map_location='cpu',weights_only=False)
+    assert payload['training_state']['epoch_complete']
 
 
 def test_composer_generation_writes_chart_and_report(tmp_path):
@@ -129,3 +188,123 @@ def test_composer_generation_writes_chart_and_report(tmp_path):
     report=generate(args)
     assert output.is_file() and output.with_suffix('.composer.json').is_file()
     assert report['family']=='chart_composer_v1'
+
+
+def test_interp_candidate_audio_and_candidate_spec_match_reference():
+    from maichart.composer.candidates import candidate_spec, interp_candidate_audio
+    from maichart.tempo_clock import TempoClock
+    from maichart.event_timing import EventTempo
+
+    tempo=[EventTempo(Fraction(0),150.), EventTempo(Fraction(4),180.)]
+    clock=TempoClock(tempo,0.1)
+    for prev in (None, Fraction(0), Fraction(3,4), Fraction(15,2)):
+        for count in (8, 16, 65, 96):
+            beats=candidate_beats(prev,tempo=tempo,first=0.1,audio_end_sec=10.,candidate_count=count,clock=clock)
+            first_ev,prev_beat,hi,offsets,lookup,_=candidate_spec(
+                prev,tempo=tempo,first=0.1,audio_end_sec=10.,candidate_count=count,clock=clock)
+            reconstructed=[(Fraction(0) if first_ev else prev_beat)+off for off in offsets]
+            assert beats == reconstructed
+            for idx, b in enumerate(beats):
+                off = b if first_ev else b - prev_beat
+                assert lookup[off] == idx
+
+    rng=np.random.default_rng(42)
+    times=np.sort(rng.uniform(0.1, 10.0, size=256)).astype(np.float64)
+    values=rng.normal(size=(256, 120)).astype(np.float32)
+    queries=np.array([0.0, times[0], 0.5*(times[10]+times[11]), times[-1], 12.0], dtype=np.float64)
+    ref=np.column_stack([np.interp(queries, times, values[:, c], left=0., right=0.) for c in range(120)]).astype(np.float32)
+    got=interp_candidate_audio(values, times, queries)
+    np.testing.assert_allclose(got, ref, rtol=1e-6, atol=1e-6)
+
+
+def test_composer_generation_masks_candidates_during_double_hold(tmp_path):
+    sr=8000;t=np.arange(sr*4)/sr
+    audio_path=tmp_path/'track.wav';sf.write(audio_path,(0.1*np.sin(2*np.pi*220*t)).astype(np.float32),sr)
+    atoms=['1h[2:1]','2h[2:1]','3']
+    model=ChartComposer(ComposerConfig(atom_vocab_size=len(atoms)+1,d_model=24,nhead=4,
+        layers=1,dim_feedforward=48,candidate_count=16,action_slots=4))
+    with torch.no_grad():
+        model.eos_head.weight.zero_()
+        model.eos_head.bias.fill_(-50.)
+        model.action_head.weight.zero_()
+        model.action_head.bias.fill_(-50.)
+        bias = model.action_head.bias.view(4, len(atoms)+1)
+        bias[0, 1] = 50.  # slot 0 -> '1h[2:1]'
+        bias[1, 2] = 50.  # slot 1 -> '2h[2:1]'
+        bias[2, 0] = 50.  # slot 2 -> stop
+        bias[3, 0] = 50.  # slot 3 -> stop
+    optimizer=torch.optim.AdamW(model.parameters(),lr=1e-3)
+    checkpoint=tmp_path/'composer_last.pt'
+    save(checkpoint,model,optimizer,epoch=1,args={},manifest=tmp_path/'manifest.json',atom_catalog=atoms)
+    from maichart.composer.generate import generate,parser
+    output=tmp_path/'generated.txt'
+    args=parser().parse_args(['--audio',str(audio_path),'--checkpoint',str(checkpoint),
+        '--output',str(output),'--bpm','120','--temperature','0','--device','cpu','--max-events','3'])
+    report=generate(args)
+    assert report['event_count'] == 3
+
+
+def test_webui_composer_progress_handles_prepare_and_scan_events():
+    from maichart.webui.server import TaskState, _update_composer_progress
+    task = TaskState(task_id='t1', kind='composer_train')
+    _update_composer_progress(task, 'form_prepare {"stage": "ready", "charts": 1787}')
+    assert '1787' in task.message
+    _update_composer_progress(task, 'composer_prepare {"stage": "scanning", "completed": 500, "total": 1787, "samples": 275000}')
+    assert '500/1787' in task.message
+    _update_composer_progress(task, 'composer_prepare {"stage": "ready", "samples": 947683}')
+    assert task.result.get('samples') == 947683
+
+
+def test_composer_progress_keeps_metrics_and_resume_epoch_range():
+    from maichart.webui.server import TaskState,_update_composer_progress
+    task=TaskState(task_id='progress',kind='composer_train')
+    _update_composer_progress(task,'composer_runtime '+json.dumps({'start_epoch':8,'end_epoch':9,
+        'samples':100,'parameters':1000000,'candidate_recall':.99}))
+    payload={'epoch':8,'batch':50,'total':100,'loss':1.5,'pointer_accuracy':.7,
+        'samples_per_sec':123,'eta_sec':12,'timing':{'data_sec':1.}}
+    _update_composer_progress(task,'composer_progress '+json.dumps(payload))
+    assert task.progress==.25
+    assert task.result['composer_metrics']==payload
+    assert task.result['composer_metric_history'][-1]==payload
+    assert task.result['composer_runtime']['candidate_recall']==.99
+
+
+def test_mid_epoch_resume_restores_updates_without_reloading_consumed_examples(tmp_path,monkeypatch):
+    import pytest
+    from maichart.composer import train
+    class TinyDataset:
+        codec_atoms=['1','2'];fingerprint='tiny'
+        candidate_misses=0;candidate_total=4;candidate_miss_examples=[]
+        def __init__(self,*args,**kwargs):self.accessed=[]
+        def __len__(self):return 4
+        def set_epoch(self,epoch):pass
+        def cache_stats(self):return {}
+        def __getitem__(self,index):
+            self.accessed.append(index)
+            return {'candidate_features':torch.full((16,125),float(index)/10),
+                'candidate_target':torch.tensor(index),'candidate_mask':torch.zeros(16,dtype=torch.bool),
+                'action_target':torch.tensor([1,0]),'history':torch.zeros((0,2),dtype=torch.long),
+                'history_features':torch.zeros((0,8)),'action_state':torch.zeros(50),
+                'condition':torch.zeros(16),'future_target':torch.zeros(8),
+                'eos_target':torch.tensor(float(index==3)),'song_index':torch.tensor(0),
+                'event_index':torch.tensor(index)}
+    monkeypatch.setattr(train,'ComposerDataset',TinyDataset)
+    args=['--manifest','tiny.json','--epochs','1','--batch-size','2','--d-model','16',
+        '--layers','1','--nhead','4','--dim-feedforward','32','--action-slots','2',
+        '--device','cpu','--precision','fp32','--prefetch-batches','0','--checkpoint-interval-steps','1']
+    train.main(args+['--checkpoint-dir',str(tmp_path/'full')])
+    original_save=train.save
+    def interrupting_save(*a,**kw):
+        result=original_save(*a,**kw)
+        if kw.get('training_state',{}).get('batch_in_epoch')==1:raise InterruptedError('stopped')
+        return result
+    monkeypatch.setattr(train,'save',interrupting_save)
+    with pytest.raises(InterruptedError):train.main(args+['--checkpoint-dir',str(tmp_path/'partial')])
+    monkeypatch.setattr(train,'save',original_save)
+    train.main(args+['--checkpoint-dir',str(tmp_path/'resumed'),
+        '--resume',str(tmp_path/'partial'/'composer_last.pt')])
+    complete=torch.load(tmp_path/'full'/'composer_last.pt',weights_only=False,map_location='cpu')
+    resumed=torch.load(tmp_path/'resumed'/'composer_last.pt',weights_only=False,map_location='cpu')
+    assert resumed['optimizer_steps']==complete['optimizer_steps']==2
+    for key,value in complete['model_state_dict'].items():
+        torch.testing.assert_close(value,resumed['model_state_dict'][key],rtol=0,atol=0)

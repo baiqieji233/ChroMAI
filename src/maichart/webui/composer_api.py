@@ -99,6 +99,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args, "--cache-dir", cache_dir)
     for key, flag, default, minimum in (
         ("epochs", "--epochs", 10, 1), ("batch_size", "--batch-size", 4, 1),
+        ("grad_accumulation", "--grad-accumulation", 1, 1),
+        ("prefetch_batches", "--prefetch-batches", 2, 0),
+        ("log_interval", "--log-interval", 25, 1), ("max_steps", "--max-steps", 0, 0),
         ("d_model", "--d-model", d_model, 1), ("dim_feedforward", "--dim-feedforward", dim_feedforward, 1),
         ("layers", "--layers", 3, 1),
         ("nhead", "--nhead", nhead, 1), ("history_events", "--history-events", 128, 1),
@@ -112,6 +115,14 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args, "--device", _device(payload.get("device")))
     _arg(args, "--precision", _precision(payload.get("precision")))
     _arg(args, "--seed", _int(payload, "seed", 0, minimum=0))
+    implementation=str(payload.get('optimizer_implementation','auto'))
+    if implementation not in {'auto','standard','foreach','fused'}:
+        raise ValueError('optimizer_implementation must be auto, standard, foreach or fused')
+    _arg(args,'--optimizer-implementation',implementation)
+    if _int(payload,'prefetch_batches',2,minimum=0)>16:
+        raise ValueError('prefetch_batches cannot exceed 16')
+    if payload.get('export_inference') is False:
+        args.append('--no-export-inference')
     if mode == "resume":
         _arg(args, "--resume", parent_path)
     elif mode == "finetune":
@@ -121,8 +132,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     task.result.update({"family": FAMILY, "schema": SCHEMA, "mode": mode,
                         "manifest": str(manifest), "checkpoint_dir": str(checkpoint_dir),
                         "epoch_target": _int(payload, "epochs", 10, minimum=1)})
-    runtime._run_subprocess_task(task, args, expected_epoch=task.result["epoch_target"],
-                                 result_paths=[checkpoint_dir / "composer_last.pt"])
+    artifacts=[checkpoint_dir/'composer_last.pt']
+    if payload.get('export_inference') is not False: artifacts.append(checkpoint_dir/'composer_inference.pt')
+    runtime._run_subprocess_task(task, args, expected_epoch=task.result["epoch_target"],result_paths=artifacts)
     handler._json_response({"task_id": task.task_id, "family": FAMILY})
 
 
@@ -158,9 +170,8 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
 def inspect(handler, payload: dict[str, Any]) -> None:
     checkpoint = _path(payload.get("checkpoint"), "checkpoint", exists=True)
     try:
-        import torch
-        from maichart.composer.checkpoint import inspect_payload
-        data = torch.load(checkpoint, map_location="cpu", weights_only=False)
+        from maichart.composer.checkpoint import inspect_payload,read_payload
+        data = read_payload(checkpoint)
         if not isinstance(data, dict):
             raise ValueError("checkpoint payload 必须是对象")
         result = inspect_payload(data)
@@ -169,7 +180,7 @@ def inspect(handler, payload: dict[str, Any]) -> None:
     except Exception as exc:  # inspection must return a useful UI error
         result = {"valid": False, "path": str(checkpoint), "family": None,
                   "schema": None, "error": str(exc)}
-    result["can_resume"] = bool(result.get("valid"))
+    result.setdefault('can_resume',False)
     result["can_finetune"] = bool(result.get("valid"))
     result["can_generate"] = bool(result.get("valid"))
     handler._json_response(result)

@@ -379,8 +379,13 @@
 <label class="field">音频缓存上限（GB）<input id="composerAudioCacheGb" type="number" min="0" step="0.5" value="4"></label>
 <label class="field">训练缓存目录<textarea id="composerCacheDir" class="path-input" rows="2">cache/chart_composer_v1</textarea><small>与其他模型族的缓存目录分开。</small></label>
 <label class="field">checkpoint 保存间隔（更新步）<input id="composerCheckpointIntervalSteps" type="number" min="0" step="50" value="500"></label>
+<label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>共享内存的单个后台线程提前准备批次，0 关闭；默认 2。</small></label>
+<label class="field">日志间隔（batch）<input id="composerLogInterval" type="number" min="1" value="25"><small>更新吞吐、ETA、损失和缓存反馈；不改变训练目标。</small></label>
+<label class="field">每轮 batch 上限<input id="composerMaxSteps" type="number" min="0" value="0"><small>0 完整训练集；短跑限制仅用于流程检查。</small></label>
+<label class="field">优化器实现<select id="composerOptimizerImplementation"><option value="auto">自动（CUDA fused / CPU standard）</option><option value="standard">standard</option><option value="foreach">foreach</option><option value="fused">CUDA fused</option></select><small>保留 AdamW 目标；不同内核不保证浮点逐位相同。</small></label>
+<label class="checkbox-field"><input id="composerExportInference" type="checkbox" checked><span>每轮结束另外保存无损推理权重</span><small>composer_inference.pt 不含优化器，可生成和 finetune；resume 使用 composer_last.pt。</small></label>
 </div>
-<p class="workflow-hint">fresh 默认 192 维、3 层、6 头、历史 128、候选 64、动作槽位 8；resume 严格继承 checkpoint 结构，finetune 复用权重并使用新输出目录。</p>
+<p class="workflow-hint">fresh 默认 192 维、3 层、6 头、历史 128、候选 96、动作槽位 8。参数量还取决于训练集的动作词表；训练区的梯度累积会实际生效。音频预算分配为特征库 75% 与原始音频缓存 25%，不包含标签与历史表。</p>
 </section>
 <section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>

@@ -7,21 +7,50 @@ from . import CHECKPOINT_SCHEMA,FAMILY,INPUT_CONTRACT,TRAINING_SEMANTICS
 from .model import ChartComposer,ComposerConfig
 
 
+def _write_payload(path, payload):
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    fd,name=tempfile.mkstemp(prefix=path.name+'.',suffix='.tmp',dir=path.parent);os.close(fd)
+    temp=Path(name)
+    try: torch.save(payload,temp);temp.replace(path)
+    finally: temp.unlink(missing_ok=True)
+
+
 def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimizer_steps=0,
-         atom_catalog=(), dataset_fingerprint=None):
+         atom_catalog=(), dataset_fingerprint=None, training_state=None):
     payload={'schema':CHECKPOINT_SCHEMA,'family':FAMILY,'input_contract':INPUT_CONTRACT,
              'model_config':model.config.to_dict(),'model_state_dict':model.state_dict(),
              'optimizer_state_dict':optimizer.state_dict() if optimizer is not None else None,
              'epoch':int(epoch),'optimizer_steps':int(optimizer_steps),'args':dict(args),
              'manifest':str(Path(manifest).resolve()),'metrics':metrics or {},
              'training_semantics':TRAINING_SEMANTICS,'atom_catalog':sorted(set(atom_catalog)),
-             'dataset_fingerprint':dataset_fingerprint}
-    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
-    fd,name=tempfile.mkstemp(prefix=path.name+'.',suffix='.tmp',dir=path.parent);os.close(fd)
-    temp=Path(name)
-    try: torch.save(payload,temp);temp.replace(path)
-    finally: temp.unlink(missing_ok=True)
+             'dataset_fingerprint':dataset_fingerprint,
+             'training_state':(training_state or {}) if optimizer is not None else {},
+             'checkpoint_kind':'training' if optimizer is not None else 'inference'}
+    _write_payload(path,payload)
     return payload
+
+
+def export_inference(source, destination):
+    """Lossless FP32 weights export; retain the complete resumable source."""
+    if Path(source).resolve()==Path(destination).resolve():
+        raise ValueError('Inference export must not overwrite the training checkpoint')
+    payload=read_payload(source)
+    validate(payload)
+    payload.pop('optimizer_state_dict',None)
+    payload.pop('training_state',None)
+    payload['checkpoint_kind']='inference'
+    _write_payload(destination,payload)
+    return payload
+
+
+def read_payload(path):
+    # Lazy CPU mappings keep optimizer tensors out of RAM for inspect/generate.
+    # Torch's old non-ZIP serialization cannot be mapped; support those too.
+    try:
+        return torch.load(path,map_location='cpu',weights_only=False,mmap=True)
+    except RuntimeError as error:
+        if 'mmap' not in str(error).lower(): raise
+        return torch.load(path,map_location='cpu',weights_only=False)
 
 
 def validate(payload):
@@ -42,8 +71,15 @@ def validate(payload):
     return config
 
 
-def load(path,device='cpu'):
-    payload=torch.load(path,map_location='cpu',weights_only=False);config=validate(payload)
+def load(path,device='cpu',*,include_optimizer=False):
+    # A resumable optimizer owns and mutates CPU tensors for the entire run.
+    # Materialize those rather than retaining a mapping of a file that Windows
+    # must later replace at the same checkpoint path.
+    payload=(torch.load(path,map_location='cpu',weights_only=False) if include_optimizer else read_payload(path))
+    config=validate(payload)
+    if not include_optimizer:
+        payload.pop('optimizer_state_dict',None)
+        payload.pop('training_state',None)
     model=ChartComposer(config);model.load_state_dict(payload['model_state_dict']);model.to(device)
     return model,payload
 
@@ -54,4 +90,21 @@ def inspect_payload(payload):
     return {'valid':valid,'family':payload.get('family'),'schema':payload.get('schema'),
             'model_config':config.to_dict() if config else payload.get('model_config'),
             'epoch':payload.get('epoch'),'optimizer_steps':payload.get('optimizer_steps',0),
-            'training_semantics':payload.get('training_semantics'),'error':error}
+            'training_semantics':payload.get('training_semantics'),'error':error,
+            'args':payload.get('args',{}),
+            'can_resume':bool(valid and payload.get('optimizer_state_dict') is not None),
+            'can_init':valid,'can_train':valid,'can_generate':valid,
+            'parameters':sum(value.numel() for value in payload.get('model_state_dict',{}).values()
+                             if torch.is_tensor(value)),
+            'checkpoint_kind':payload.get('checkpoint_kind','training'),
+            'model_bytes':sum(value.numel()*value.element_size()
+                              for value in payload.get('model_state_dict',{}).values() if torch.is_tensor(value))}
+
+
+if __name__=='__main__':
+    import argparse
+    parser=argparse.ArgumentParser(description='Export lossless Composer inference weights')
+    parser.add_argument('source');parser.add_argument('destination')
+    options=parser.parse_args()
+    export_inference(options.source,options.destination)
+    print(str(Path(options.destination).resolve()),flush=True)

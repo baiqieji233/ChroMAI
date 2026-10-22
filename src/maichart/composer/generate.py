@@ -18,8 +18,9 @@ from maichart.generation.timeline import normalize_tempo_map
 from maichart.stream.audio_bounds import generation_bounds
 from maichart.stream.grounded_model import phrase_features
 from .checkpoint import load
-from .candidates import candidate_beats,candidate_features
+from .candidates import candidate_beats,candidate_features,composer_audio_nodes,interp_candidate_audio
 from .model import ChartComposer
+from maichart.tempo_clock import TempoClock
 
 
 def parser():
@@ -34,20 +35,21 @@ def parser():
 def _device(value):return torch.device('cuda' if value=='auto' and torch.cuda.is_available() else ('cpu' if value=='auto' else value))
 
 
-def _interp_features(values,times,song,candidates,previous):
-    from .candidates import candidate_features as base_features
-    seconds=np.asarray([float(seconds_at_beat(b,song.tempo,song.first)) for b in candidates])
-    acoustic=np.column_stack([np.interp(seconds,times,values[:,i],left=0.,right=0.) for i in range(values.shape[1])]).astype(np.float32)
-    time_part=base_features(candidates,previous,song.tempo,song.first)
+def _interp_features(values,times,song,candidates,previous,*,clock=None):
+    clock=clock or TempoClock(song.tempo,song.first)
+    seconds=np.asarray([clock.at(b) for b in candidates],dtype=np.float64)
+    acoustic=interp_candidate_audio(values,times,seconds)
+    time_part=candidate_features(candidates,previous,song.tempo,song.first,clock=clock,candidate_seconds=seconds)
     return torch.from_numpy(np.concatenate((acoustic,time_part),axis=1))
 
 
-def _history_features(history, atoms, tempo, first, action_slots):
-    rows=[]; previous_beat=Fraction(0); previous_second=0.
+def _history_features(history, atoms, tempo, first, action_slots, *, clock=None,preceding_beat=Fraction(0)):
+    rows=[];previous_beat=preceding_beat
+    previous_second=float(clock.at(previous_beat) if clock is not None else seconds_at_beat(previous_beat,tempo,first))
     for ids, point in history:
         text='/'.join(atoms[index-1] for index in ids if 0 < index <= len(atoms))
         atom_count=sum(1 for index in ids if index > 0)
-        second=float(seconds_at_beat(point,tempo,first))
+        second=float(clock.at(point) if clock is not None else seconds_at_beat(point,tempo,first))
         rows.append((min(1.,max(0.,float(point-previous_beat)/4.)),
             min(1.,max(0.,(second-previous_second)/2.)),min(1.,atom_count/4.),
             float('/' in text),float('h' in text),
@@ -93,14 +95,14 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
     return selected
 
 
-def _active_heads(state, beat, tempo, first):
+def _active_heads(state, beat, tempo, first, *, clock=None):
     """Return concrete source heads still occupied at the proposed beat.
 
     SustainStateIndex also exposes a hand-space pad coverage feature. That is
     useful as a soft model input but must not be treated as exact key
     ownership for a hard same-head filter.
     """
-    second=float(seconds_at_beat(beat,tempo,first)); result=set()
+    second=float(clock.at(beat) if clock is not None else seconds_at_beat(beat,tempo,first)); result=set()
     for marker in getattr(state,'markers',()):
         onset=float(marker.get('second',0.)); end=float(marker.get('end_second',-1.))
         if onset > second or end <= second + 1e-8:
@@ -123,7 +125,8 @@ def generate(args):
     tempo=(normalize_tempo_map(json.loads(Path(args.tempo_map).read_text(encoding='utf-8-sig')))
            if args.tempo_map else [EventTempo(Fraction(0),args.bpm or audio.tempo_bpm)])
     song=organize_song(audio,tempo,args.first,max_seconds=999.,quality_profile='musical_evidence_v1')
-    values,times,_=detail_queries(song,8192);values=values.detach().cpu().numpy().astype(np.float32,copy=False);times=np.asarray(times,dtype=np.float64)
+    clock=TempoClock(song.tempo,song.first)
+    values,times=composer_audio_nodes(song)
     bounds=generation_bounds(audio,trim_exact_silence=True);end_sec=bounds['effective_end_sec']
     condition=GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
     if args.condition_file:condition=GenerationCondition.from_dict(json.loads(Path(args.condition_file).read_text(encoding='utf-8-sig')))
@@ -133,13 +136,22 @@ def generate(args):
     rng=torch.Generator(device=device).manual_seed(args.seed)
     while len(points)<max_events:
         candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,audio_end_sec=end_sec,
-            candidate_count=model.config.candidate_count)
+            candidate_count=model.config.candidate_count,clock=clock)
         if not candidates:break
-        feats=_interp_features(values,times,song,candidates,previous)[None].to(device)
+        occupied_by_candidate=([_active_heads(action_index,cand,song.tempo,song.first,clock=clock) for cand in candidates]
+                               if getattr(action_index,'markers',None) else [set() for _ in candidates])
+        playable=[len(occ)<2 for occ in occupied_by_candidate]
+        if not any(playable):
+            previous=candidates[-1]
+            continue
+        cand_mask=torch.tensor([[not ok for ok in playable]],dtype=torch.bool,device=device)
+        feats=_interp_features(values,times,song,candidates,previous,clock=clock)[None].to(device)
         history_tail=history[-model.config.history_events:]
         if history_tail:
-            hist_atoms=torch.tensor([row for row,_ in history_tail],dtype=torch.long,device=device)
-            hist_features=torch.tensor(_history_features(history_tail,atoms,song.tempo,song.first,model.config.action_slots),dtype=torch.float32,device=device)[None]
+            hist_atoms=torch.tensor([row for row,_ in history_tail],dtype=torch.long,device=device)[None]
+            preceding_beat=history[-model.config.history_events-1][1] if len(history)>model.config.history_events else Fraction(0)
+            hist_features=torch.tensor(_history_features(history_tail,atoms,song.tempo,song.first,model.config.action_slots,
+                clock=clock,preceding_beat=preceding_beat),dtype=torch.float32,device=device)[None]
         else:
             hist_atoms=torch.zeros((1,0,model.config.action_slots),dtype=torch.long,device=device)
             hist_features=torch.zeros((1,0,8),dtype=torch.float32,device=device)
@@ -151,13 +163,18 @@ def generate(args):
             action=torch.zeros(50,device=device)
         control=condition.to_vector(device=device)[None]
         output=model(feats,hist_atoms,control,action_state=action[None],history_features=hist_features,
-                     candidate_mask=torch.zeros(1,len(candidates),dtype=torch.bool,device=device),
-                     history_padding_mask=torch.zeros((1,hist_atoms.size(1)),dtype=torch.bool,device=device))
+                     candidate_mask=cand_mask,
+                     history_padding_mask=torch.zeros((1,hist_atoms.size(1)),dtype=torch.bool,device=device),
+                     decode_actions=False)
         logits=output['candidate_logits'][0].float()/max(args.temperature,1e-6)
+        if not all(playable):
+            logits=logits.masked_fill(cand_mask[0],float('-inf'))
         choice=int(torch.multinomial(logits.softmax(-1),1,generator=rng).item()) if args.temperature>0 else int(logits.argmax())
         beat=candidates[choice]
-        occupied=_active_heads(action_index,beat,song.tempo,song.first)
-        selected=_sample_actions(output['action_logits'][0,choice],atoms,grammar,args.temperature,rng,occupied=occupied,max_heads=2)
+        decision=model.decode_candidate(output['candidate_context'],
+            torch.tensor([choice],dtype=torch.long,device=device))
+        occupied=occupied_by_candidate[choice]
+        selected=_sample_actions(decision['action_logits'][0],atoms,grammar,args.temperature,rng,occupied=occupied,max_heads=2)
         if not selected:
             for atom in atoms:
                 heads={f'A{head}' if str(head).isdigit() else str(head)
@@ -171,9 +188,9 @@ def generate(args):
         points.append(event); action_index.append(event)
         atom_ids=tuple([atoms.index(atom)+1 for atom in selected]+[0]*(model.config.action_slots-len(selected)))
         history.append((atom_ids,beat));previous=beat
-        eos_probability=float(output['eos_logits'][0,choice].sigmoid())
-        if float(seconds_at_beat(beat,song.tempo,song.first))>=end_sec or (
-                eos_probability>=.9 and float(seconds_at_beat(beat,song.tempo,song.first))>=max(0.,end_sec-2.)):
+        eos_probability=float(decision['eos_logits'][0].sigmoid())
+        beat_sec=float(clock.at(beat))
+        if beat_sec>=end_sec or (eos_probability>=.9 and beat_sec>=max(0.,end_sec-2.)):
             break
     export_end=Fraction(int(np.ceil(float(max([p.beat for p in points],default=0))))+1)
     text,_=compile_event_points(points,tempo_changes=song.tempo,first=args.first,end_beat=export_end,level=str(condition.level))

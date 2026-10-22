@@ -32,11 +32,13 @@
 - 历史位置编码改为相对当前事件的 recency；动作采样读取活动持续动作占用，默认限制新增事件最多两个独立按键；EOS 使用 batch 动态正例权重。
 - 持续动作硬过滤只使用 Hold/Slide/TouchHold 的具体起始键位，不把 MiaCode 的手部空间覆盖 pads 当作已占用键；候选召回率超过 5% miss 才阻断训练，低于该阈值会记录并继续。
 - Slide/Wifi 滑行不再被当作整段持续占用的起始键；精确 Hold 结束时刻允许释放后重新使用。候选优先级始终保留 2 拍内常用细分，再分配长休止锚点。
+- 全量数据准备与运行时优化：`candidate_spec` 与 `TempoClock` 预计算并二分裁剪候选偏移，避免逐事件枚举数百个 `Fraction`；`ComposerDataset` 将历史、动作目标、未来意图和持续动作状态改为按谱面惰性构建与 O(1) 切片，避免每样本复制 128 步嵌套元组；`composer_audio_nodes` 直接复用已缓存的 8192 节点 `RationalAudio` 特征并按音频与拍表键共享缓存，`interp_candidate_audio` 使用二维向量化插值替代 120 列 `np.interp` 循环。
+- 生成端修复：修复 `generate.py` 历史存在 2 个及以上事件时 `hist_atoms` 缺少 batch 维度的张量对齐问题；在采样候选拍位前对已有双押 Hold 持续占用（`len(occupied) >= 2`）的候选拍位执行掩码，避免采样到双手占满的拍点后因无合法新动作而提前中断生成。
 
 ## 初步验证
 
-- `tests/test_chart_composer_v1.py`：当前 6 项通过。
+- `tests/test_chart_composer_v1.py`：当前 9 项通过。
 - `python -m compileall -q src/maichart/composer src/maichart/webui`：通过。
-- 既有 Stream WebUI Node 定向测试：12 passed。
+- 全量 1,787 谱面（947,683 事件）实测：复用已构建 `song_form_prepare/v1` 缓存时，数据集初始化总耗时约 40~52 秒（其中 `composer_prepare` 扫描约 13~25 秒，召回率 99.47%），首個 32 曲跨歌 batch 约 1.4 秒，缓存命中后每 32 样本 batch 约 14 ms。
 
 下一阶段应使用固定歌曲和固定 seed 比较 Composer 与 Stream：候选召回率、真实休止跨度、密度曲线相关性、结构重复长度、运行时冲突和人工试玩结果。只有候选覆盖率稳定后，才适合继续把训练目标扩展为真正的负样本舍音学习。

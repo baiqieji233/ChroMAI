@@ -216,6 +216,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "event_learning_rate_control": True,
                                               "multi_dataset_training": True,
                                               "composer_training": True,
+                                              "composer_training_runtime": "selected_candidate_head_v1",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
                     "music_structure_capability": True,
@@ -1502,7 +1503,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     from maichart.composer.checkpoint import inspect_payload
                     result = inspect_payload(detected_payload)
                     result.update({"path": str(candidate), "model_family": COMPOSER_MODEL_FAMILY,
-                                   "can_resume": bool(result.get("valid")),
+                                   "can_resume": bool(result.get("can_resume",result.get("valid"))),
                                    "can_init": bool(result.get("valid")),
                                    "can_train": bool(result.get("valid")),
                                    "can_generate": bool(result.get("valid")),
@@ -1767,7 +1768,10 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     """Translate Composer's JSON progress records into the common task shape."""
 
     prefix, separator, raw = line.partition(" ")
-    if not separator or prefix not in {"composer_runtime", "composer_progress", "composer_epoch", "composer_checkpoint"}:
+    if not separator or prefix not in {
+        "form_prepare", "composer_prepare",
+        "composer_runtime", "composer_progress", "composer_epoch", "composer_checkpoint",
+    }:
         return
     try:
         data = json.loads(raw)
@@ -1775,10 +1779,47 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         return
     if not isinstance(data, dict):
         return
+    if prefix in {'form_prepare','composer_prepare'}:
+        task.result['composer_stage']='preparation'
+        task.result['composer_preparation']=dict(data)
+    elif prefix=='composer_runtime':
+        task.result['composer_stage']='training'
+        task.result['composer_runtime']=dict(data)
+    elif prefix=='composer_progress':
+        task.result['composer_stage']='training'
+        task.result['composer_metrics']=dict(data)
+        history=task.result.setdefault('composer_metric_history',[])
+        history.append(dict(data))
+        del history[:-200]
+    elif prefix=='composer_checkpoint':
+        task.result['composer_stage']='checkpoint'
+        task.result['composer_checkpoint']=dict(data)
+    elif prefix=='composer_epoch':
+        task.result['composer_stage']='epoch_complete'
     for key in ("epoch", "batch", "total", "optimizer_steps", "loss", "pointer_accuracy", "elapsed_sec", "path"):
         if key in data:
             task.result[key] = data[key]
-    if prefix == "composer_runtime":
+    if prefix == "form_prepare":
+        stage = str(data.get("stage") or "")
+        if stage in {"preparing","preparation","chart"}:
+            completed = int(data.get("completed_songs",data.get('completed')) or 0)
+            total = int(data.get("total_songs",data.get('total')) or 0)
+            task.message = f"Composer 准备歌曲 {completed}/{total}" if total else "Composer 准备音频与谱面"
+        elif stage == "ready":
+            charts = int(data.get("charts") or 0)
+            task.message = f"Composer 已准备 {charts} 张谱面"
+    elif prefix == "composer_prepare":
+        stage = str(data.get("stage") or "")
+        if stage == "scanning":
+            completed = int(data.get("completed") or 0)
+            total = int(data.get("total") or 0)
+            samples = int(data.get("samples") or 0)
+            task.message = f"Composer 扫描谱面 {completed}/{total} · {samples:,} 个事件"
+        elif stage == "ready":
+            samples = int(data.get("samples") or 0)
+            task.result["samples"] = samples
+            task.message = f"Composer 数据就绪 · {samples:,} 个事件"
+    elif prefix == "composer_runtime":
         if data.get("end_epoch") is not None:
             task.result["epoch_target"] = int(data["end_epoch"])
         if data.get("samples") is not None:
@@ -1791,14 +1832,17 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         epoch = int(data.get("epoch") or 0)
         epoch_target = int(task.result.get("epoch_target") or 0)
         batch_fraction = (batch / total) if total > 0 else 0.0
-        task.progress = min(1.0, ((max(0, epoch - 1) + batch_fraction) / epoch_target)
+        first_epoch=int(task.result.get('composer_runtime',{}).get('start_epoch') or 1)
+        run_epochs=max(1,epoch_target-first_epoch+1)
+        task.progress = min(1.0, ((max(0, epoch-first_epoch)+batch_fraction)/run_epochs)
                            if epoch_target > 0 else batch_fraction)
         task.message = f"Composer epoch {epoch} · batch {batch}/{total}" if total else f"Composer epoch {epoch}"
     elif prefix == "composer_epoch":
         epoch = int(data.get("epoch") or 0)
         epoch_target = int(task.result.get("epoch_target") or 0)
         if epoch_target > 0:
-            task.progress = min(1.0, epoch / epoch_target)
+            first_epoch=int(task.result.get('composer_runtime',{}).get('start_epoch') or 1)
+            task.progress = min(1.0, (epoch-first_epoch+1)/max(1,epoch_target-first_epoch+1))
         task.message = f"Composer epoch {epoch} 完成"
 
 
@@ -2380,7 +2424,7 @@ def _checkpoint_inspection(
         from maichart.composer.checkpoint import inspect_payload
         result = inspect_payload(payload)
         result.update({"path": str(checkpoint_path), "model_family": COMPOSER_MODEL_FAMILY,
-                       "can_resume": bool(result.get("valid")),
+                       "can_resume": bool(result.get("can_resume",result.get("valid"))),
                        "can_init": bool(result.get("valid")),
                        "can_train": bool(result.get("valid")),
                        "can_generate": bool(result.get("valid")),

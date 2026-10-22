@@ -44,8 +44,8 @@ class ChartComposer(nn.Module):
         self.history_feature_projection=nn.Linear(config.history_feature_dim,width)
         layer=nn.TransformerEncoderLayer(width,config.nhead,config.dim_feedforward,
                                          dropout=config.dropout,activation='gelu',batch_first=True,norm_first=True)
-        self.audio_encoder=nn.TransformerEncoder(layer,config.layers)
-        self.history_encoder=nn.TransformerEncoder(layer,config.layers)
+        self.audio_encoder=nn.TransformerEncoder(layer,config.layers,enable_nested_tensor=False)
+        self.history_encoder=nn.TransformerEncoder(layer,config.layers,enable_nested_tensor=False)
         self.norm=nn.LayerNorm(width)
         self.pointer=nn.Sequential(nn.Linear(width,width),nn.GELU(),nn.Linear(width,1))
         self.action_head=nn.Linear(width,config.action_slots*config.atom_vocab_size)
@@ -53,7 +53,8 @@ class ChartComposer(nn.Module):
         self.eos_head=nn.Linear(width,1)
 
     def forward(self, candidate_features, history, condition, action_state=None, future_state=None,
-                history_features=None, candidate_mask=None, history_padding_mask=None):
+                history_features=None, candidate_mask=None, history_padding_mask=None,
+                candidate_indices=None, decode_actions=True):
         batch=candidate_features.size(0)
         acoustic=candidate_features[...,:self.config.audio_dim]
         candidate_hidden=self.audio_projection(acoustic)+self.time_projection(candidate_features[...,self.config.audio_dim:])
@@ -80,11 +81,10 @@ class ChartComposer(nn.Module):
             safe_padding=history_padding_mask
             if safe_padding is not None:
                 empty=(~safe_padding).sum(1)==0
-                if empty.any():
-                    safe_padding=safe_padding.clone()
-                    history_hidden=history_hidden.clone()
-                    safe_padding[empty,0]=False
-                    history_hidden[empty,0]=0.
+                safe_padding=safe_padding.clone()
+                history_hidden=history_hidden.clone()
+                safe_padding[:,0]=safe_padding[:,0] & ~empty
+                history_hidden[:,0]=history_hidden[:,0].masked_fill(empty[:,None],0.)
             history_hidden=self.history_encoder(history_hidden,
                 src_key_padding_mask=safe_padding)
             if safe_padding is None:
@@ -107,9 +107,22 @@ class ChartComposer(nn.Module):
         candidate_context=context[:,None,:]+candidate_hidden
         pointer=self.pointer(candidate_context).squeeze(-1)
         if candidate_mask is not None:pointer=pointer.masked_fill(candidate_mask,-1e4)
-        return {'candidate_logits':pointer,
-                'action_logits':self.action_head(candidate_context).reshape(
-                    batch,candidate_hidden.size(1),self.config.action_slots,self.config.atom_vocab_size),
+        result={'candidate_logits':pointer,'candidate_context':candidate_context}
+        if decode_actions:
+            result.update(self.decode_candidate(candidate_context,candidate_indices))
+        return result
+
+    def decode_candidate(self, candidate_context, candidate_indices=None):
+        """Project only supervised/chosen candidates without changing the heads.
+
+        Pointer scores still use every candidate. The large action vocabulary
+        needs one projection per example during training and free generation,
+        rather than one projection for each of the 96 proposed positions.
+        """
+        if candidate_indices is not None:
+            rows=torch.arange(candidate_context.size(0),device=candidate_context.device)
+            candidate_context=candidate_context[rows,candidate_indices]
+        return {'action_logits':self.action_head(candidate_context).reshape(
+                    *candidate_context.shape[:-1],self.config.action_slots,self.config.atom_vocab_size),
                 'future':self.future_head(candidate_context),
-                'eos_logits':self.eos_head(candidate_context).squeeze(-1),
-                'candidate_context':candidate_context}
+                'eos_logits':self.eos_head(candidate_context).squeeze(-1)}

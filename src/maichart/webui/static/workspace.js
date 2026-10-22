@@ -131,24 +131,30 @@
     const selectedFamily = value("modelFamily");
     const formFamily = ["song_form_v1", "song_form_v2"].includes(selectedFamily);
     const streamFamily = selectedFamily === "chart_stream_v1";
-    const chartLimit = Number(value("formLimitCharts", 0));
+    const composerFamily = selectedFamily === 'chart_composer_v1';
+    const chartLimit = Number(value(composerFamily?'composerLimitCharts':'formLimitCharts', 0));
     list("trainingRunSummary", [
       `起点：${modeLabel}${mode !== "fresh" ? ` · ${value("trainingCheckpointPath").trim() || "尚未选择 checkpoint"}` : ""}`,
       sources.length ? `素材：${sources.map((item) => item.name || item.path).join("、")}` : `素材：当前单份清单 · ${value("manifestPath").trim() || "尚未准备"}`,
-      `${mode === "resume" ? "追加" : "本阶段"} ${value("epochs")} 轮 · ${streamFamily
+      `${mode === "resume" ? "追加" : "本阶段"} ${value("epochs")} 轮 · ${composerFamily
+        ? `${chartLimit>0?`最多 ${chartLimit} 张谱面`:'全部合格谱面'} · 每轮 ${Number(value('composerMaxSteps',0))||'全部'} batch`
+        : streamFamily
         ? `${chartLimit > 0 ? `最多 ${chartLimit} 张谱面` : "全部合格谱面"}${limits > 0 ? ` · continuation batch 上限 ${limits}` : " · 不限 continuation batch"}`
         : formFamily
         ? `${chartLimit > 0 ? `最多 ${chartLimit} 张谱面` : "全部合格谱面"}${limits > 0 ? ` · 配置 batch 上限 ${limits}` : " · 不限配置 batch"}`
         : `每轮${limits > 0 ? `最多 ${limits} 个训练 batch（短跑）` : "完整训练集"}`}`,
       `学习率 ${value("learningRate")} · batch ${value("batchSize")} × 累积 ${value("gradAccumulation")} ≈ 每次更新 ${Number(value("batchSize")) * Number(value("gradAccumulation"))} 个片段`,
-      ...(streamFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("streamWeightDecay")} · 精度 ${nameOf("streamPrecision")}`,
+      ...(composerFamily ? [`结构 ${value('composerDModel')} 维 / ${value('composerLayers')} 层 / FFN ${value('composerDimFeedforward')} · 动作槽位 ${value('composerActionSlots')}`,
+        `历史 ${value('composerHistoryEvents')} 个事件 · 候选 ${value('composerCandidateCount')} · 精度 ${nameOf('composerPrecision')}`,
+        `后台预取 ${value('composerPrefetchBatches')} batch · 音频预算 ${value('composerAudioCacheGb')} GiB · 日志每 ${value('composerLogInterval')} batch`,
+        `完整续训权重 composer_last.pt；额外推理权重${checked('composerExportInference')?'开启':'关闭'}`] : streamFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("streamWeightDecay")} · 精度 ${nameOf("streamPrecision")}`,
         `连续上下文 ${value("streamMaxTokens")} token · 近期历史 ${value("streamMaxHistoryTokens")} token · 记忆槽 ${value("streamMemoryTokens")}`,
         `计划辅助 ${value("streamPlanLossWeight")} · 音频缓存 ${value("streamAudioCacheGb")} GB · 准备线程 ${value("streamPrepareWorkers")}`] : formFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("weightDecay")} · 条件省略 ${value("formConditionDropout")}`,
         `全曲规划损失 ${value("formBlueprintLossWeight")} · 负荷损失 ${value("formCurveLossWeight")} · 段落关联损失 ${value("formRelationLossWeight")} · 质量加权${checked("qualityEnabled") ? "开启" : "关闭"}`,
         `精度 ${nameOf("formPrecision")} · 单次音频上限 ${value("formMaxRegionSeconds")} 秒 · 隐藏层 ${value("formDModel")} / ${value("formLayers")} 层 / ${value("formNhead")} 头`] : []),
-      `验证：${value("validationManifestPath").trim() ? "使用独立验证集" : "不使用；best 按训练 loss 保存"}`,
-      `质量加权${checked("qualityEnabled") ? "开启" : "关闭"} · 修正版偏好训练${checked("preferenceEnabled") ? "开启" : "关闭"}`,
-      `Slide / Touch / 细碎节奏倍率：${value("slideOversample")} / ${value("touchOversample")} / ${value("fineRhythmOversample")}`,
+      ...(!composerFamily ? [`验证：${value("validationManifestPath").trim() ? "使用独立验证集" : "不使用；best 按训练 loss 保存"}`,
+        `质量加权${checked("qualityEnabled") ? "开启" : "关闭"} · 修正版偏好训练${checked("preferenceEnabled") ? "开启" : "关闭"}`,
+        `Slide / Touch / 细碎节奏倍率：${value("slideOversample")} / ${value("touchOversample")} / ${value("fineRhythmOversample")}`] : []),
       `输出目录：${value("checkpointDir")}`,
     ]);
     const hint = $("#trainingRunHint");
@@ -244,8 +250,9 @@
   $("#taskSelector")?.addEventListener("change", (event) => { if (event.target.value) watchTask(event.target.value); });
   $("#refreshTaskSelector")?.addEventListener("click", async () => { try { renderTasks((await api("/api/status")).tasks || []); } catch (error) { reportError(error.message); } });
   $("#applyTrainingRunRecipe")?.addEventListener("click", () => {
-    if (value("trainingRunRecipe") === "smoke") applyValues({epochs: 1, maxSteps: 32, validationMaxSteps: 2}, "已应用短跑：1 轮、最多 32 个训练 batch、2 个验证 batch。没有启动训练。");
-    else applyValues({maxSteps: 0, validationMaxSteps: 0}, `已取消 batch 上限，训练轮数仍为 ${value("epochs")}；请按本次目标设置轮数。没有启动训练。`);
+    const composer=value('modelFamily')==='chart_composer_v1';
+    if (value("trainingRunRecipe") === "smoke") applyValues({epochs: 1, [composer?'composerMaxSteps':'maxSteps']:32, validationMaxSteps: 2}, "已应用短跑：1 轮、最多 32 个训练 batch。没有启动训练。");
+    else applyValues({[composer?'composerMaxSteps':'maxSteps']:0, validationMaxSteps: 0}, `已取消 batch 上限，训练轮数仍为 ${value("epochs")}；请按本次目标设置轮数。没有启动训练。`);
   });
   $("#applyTrainingBatchRecipe")?.addEventListener("click", () => {
     const [batchSize, gradAccumulation] = value("trainingBatchRecipe").split(",").map(Number);
