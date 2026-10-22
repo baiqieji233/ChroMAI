@@ -9,7 +9,7 @@ from typing import Any
 
 
 FAMILY = "chart_composer_v1"
-SCHEMA = "maichart-chart-composer-checkpoint-v1"
+SCHEMA = "maichart-chart-composer-checkpoint-v2"
 
 
 def _path(value: Any, label: str, *, exists: bool = False, directory: bool = False) -> Path:
@@ -102,7 +102,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         ("d_model", "--d-model", d_model, 1), ("dim_feedforward", "--dim-feedforward", dim_feedforward, 1),
         ("layers", "--layers", 3, 1),
         ("nhead", "--nhead", nhead, 1), ("history_events", "--history-events", 128, 1),
-        ("candidate_count", "--candidate-count", 64, 1), ("action_slots", "--action-slots", 8, 1),
+        ("candidate_count", "--candidate-count", 96, 16), ("action_slots", "--action-slots", 8, 1),
         ("checkpoint_interval_steps", "--checkpoint-interval-steps", 500, 0),
         ("limit_charts", "--limit-charts", 0, 0), ("prepare_workers", "--prepare-workers", 4, 0),
     ):

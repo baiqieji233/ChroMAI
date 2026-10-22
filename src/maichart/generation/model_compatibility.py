@@ -10,7 +10,10 @@ from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM
 
 EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 STREAM_CHECKPOINT_SCHEMA = "maichart-chart-stream-checkpoint-v1"
-COMPOSER_CHECKPOINT_SCHEMA = "maichart-chart-composer-checkpoint-v1"
+COMPOSER_CHECKPOINT_SCHEMAS = {
+    "maichart-chart-composer-checkpoint-v1",
+    "maichart-chart-composer-checkpoint-v2",
+}
 EVENT_FAMILIES = {"event_v1", "event_ctx_v1"}
 LEGACY_CHECKPOINT_SCHEMAS = {
     "legacy-state-dict",
@@ -47,12 +50,14 @@ class ModelFamily(Enum):
 
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
-    if checkpoint_data.get('schema') == COMPOSER_CHECKPOINT_SCHEMA:
-        valid = (checkpoint_data.get('family') == 'chart_composer_v1'
-                 and checkpoint_data.get('input_contract') == 'chart_composer_inputs_v1_event_candidates'
+    if checkpoint_data.get('schema') in COMPOSER_CHECKPOINT_SCHEMAS:
+        schema = checkpoint_data.get('schema')
+        valid = (schema == 'maichart-chart-composer-checkpoint-v2'
+                 and checkpoint_data.get('family') == 'chart_composer_v1'
+                 and checkpoint_data.get('input_contract') == 'chart_composer_inputs_v2_audio_only_history_state'
                  and isinstance(checkpoint_data.get('model_config'), dict)
                  and isinstance(checkpoint_data.get('model_state_dict'), dict))
-        errors = [] if valid else ['chart composer checkpoint contract mismatch']
+        errors = [] if valid else ['chart composer checkpoint is legacy or contract-mismatched; retrain with chart_composer_v2']
         return {
             'model_family': 'chart_composer_v1', 'valid': bool(valid), 'errors': errors,
             'experimental': True, 'structured_event_generation': bool(valid),

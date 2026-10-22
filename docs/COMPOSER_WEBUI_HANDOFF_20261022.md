@@ -2,7 +2,7 @@
 
 日期：2026-10-22
 
-本次新增独立入口 `/composer`，对应模型族 `chart_composer_v1` 和 checkpoint schema `maichart-chart-composer-checkpoint-v1`。入口页不依赖主工作台的 `app.js`，只使用现有 WebUI 的任务运行时和下载路由。
+本次新增独立入口 `/composer`，对应模型族 `chart_composer_v1` 和 checkpoint schema `maichart-chart-composer-checkpoint-v2`。入口页不依赖主工作台的 `app.js`，只使用现有 WebUI 的任务运行时和下载路由。
 
 ## 已实现
 

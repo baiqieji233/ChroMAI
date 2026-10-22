@@ -5,9 +5,9 @@
 ## 已实现
 
 - 新模型族：`chart_composer_v1`。
-- 独立 checkpoint schema：`maichart-chart-composer-checkpoint-v1`。
+- 独立 checkpoint schema：`maichart-chart-composer-checkpoint-v2`（旧 v1 合同含真实谱面负荷输入，禁止继续加载）。
 - 事件级候选选位：候选包含常见节奏、秒轴间隔和长休止，并支持训练时覆盖真实下一事件。
-- 结构化动作输出：模型预测固定数量动作槽位，每个槽位选择训练原子；生成器将去重后的原子拼成同拍动作集合。
+- 结构化动作输出：模型对每个候选拍点预测固定数量动作槽位，每个槽位选择训练原子；生成器按温度、STOP 和语法/按键合法性拼成同拍动作集合。
 - 未来意图状态：训练从后续四事件派生间隔、头密度、长休止、动作类型比例和结构变化；下一事件读取前一事件的意图状态，生成时读取模型自己的上一状态预测。
 - 复用现有 `FormDataset`、rational audio query、曲线、精确 Fraction 时间和 `compile_event_points`。
 - 训练 CLI：`python -m maichart.composer.train`。
@@ -19,6 +19,14 @@
 首版是事件级候选指针、动作槽位和单分支未来意图原型，尚未实现未来草稿分支、双向 Critic 修订、多解谱面边缘化、预训练音乐编码器或真实偏好学习。训练候选会显式保留真实下一事件，以保证原谱监督覆盖；训练和自由生成的候选覆盖率必须在后续报告中单独统计，不能把当前原型当成最终自主谱师。
 
 动作槽位目前以训练原子为词表，适合验证事件级训练链路；Slide 路径、时值和多事件动作短句的专门结构化编码仍是下一阶段工作。生成端只保留导出/语法级合法性边界，不宣称自动保证可玩性。
+
+## 2026-10-22 修复合同
+
+- 候选输入只包含音频查询和有理拍位特征，不再输入由真实谱面统计的 `load_curve`；旧 v1 checkpoint 禁止加载。
+- 候选拍位来自有界的音乐网格和长休止锚点，训练不会把真实下一拍偷偷注入候选集；未召回事件会计入 `candidate_misses`。
+- 动作头按候选拍点条件化；历史保留同拍多个 atom，并额外提供相隔拍数、相隔秒数和动作结构特征。
+- 生成维护已写入的 Hold/Slide 状态，动作按温度、STOP 和语法/重复按键检查采样；`write_logit` 改为候选条件化 EOS 监督。
+- 新合同为 `chart_composer_training_v2_audio_only_candidate_actions`，checkpoint schema 为 `maichart-chart-composer-checkpoint-v2`。
 
 ## 初步验证
 

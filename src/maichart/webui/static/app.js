@@ -1877,7 +1877,7 @@ function chartComposerTrainingPayload(options = {}) {
     layers: Number(valueOrDefault("#composerLayers", 3)),
     nhead: Number(valueOrDefault("#composerNhead", 6)),
     history_events: Number(valueOrDefault("#composerHistoryEvents", 128)),
-    candidate_count: Number(valueOrDefault("#composerCandidateCount", 64)),
+    candidate_count: Number(valueOrDefault("#composerCandidateCount", 96)),
     action_slots: Number(valueOrDefault("#composerActionSlots", 8)),
     device: formDevice("#device"),
     precision: valueOrDefault("#composerPrecision", "auto"),
@@ -5041,7 +5041,7 @@ on("#modelFamily", "change", () => {
   }
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_composer_v1") {
     for (const [id, v] of Object.entries({composerDModel:192, composerDimFeedforward:576, composerLayers:3, composerNhead:6,
-      composerHistoryEvents:128, composerCandidateCount:64, composerActionSlots:8,
+      composerHistoryEvents:128, composerCandidateCount:96, composerActionSlots:8,
       composerPrecision:"auto", composerSeed:0, composerLimitCharts:0, composerPrepareWorkers:4,
       composerAudioCacheGb:4, composerCacheDir:"cache/chart_composer_v1", composerCheckpointIntervalSteps:500})) {
       const node = element("#" + id); if (node) node.value = String(v);

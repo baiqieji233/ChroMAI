@@ -22,7 +22,8 @@ class ComposerConfig:
     history_events: int = 128
     candidate_count: int = 64
     action_slots: int = 8
-    candidate_feature_dim: int = 129
+    candidate_feature_dim: int = 125
+    history_feature_dim: int = 8
     future_dim: int = 8
 
     def to_dict(self): return asdict(self)
@@ -37,22 +38,22 @@ class ChartComposer(nn.Module):
         self.audio_projection=nn.Linear(config.audio_dim,width)
         self.condition_projection=nn.Linear(config.condition_dim,width)
         self.action_projection=nn.Linear(config.action_dim,width)
-        self.future_projection=nn.Linear(config.future_dim,width)
         self.time_projection=nn.Linear(config.candidate_feature_dim-config.audio_dim,width)
         self.event_embedding=nn.Embedding(config.atom_vocab_size,width)
         self.position_embedding=nn.Embedding(config.history_events+4,width)
+        self.history_feature_projection=nn.Linear(config.history_feature_dim,width)
         layer=nn.TransformerEncoderLayer(width,config.nhead,config.dim_feedforward,
                                          dropout=config.dropout,activation='gelu',batch_first=True,norm_first=True)
         self.audio_encoder=nn.TransformerEncoder(layer,config.layers)
         self.history_encoder=nn.TransformerEncoder(layer,config.layers)
         self.norm=nn.LayerNorm(width)
         self.pointer=nn.Sequential(nn.Linear(width,width),nn.GELU(),nn.Linear(width,1))
-        self.write_head=nn.Linear(width,1)
         self.action_head=nn.Linear(width,config.action_slots*config.atom_vocab_size)
         self.future_head=nn.Linear(width,8)
+        self.eos_head=nn.Linear(width,1)
 
     def forward(self, candidate_features, history, condition, action_state=None, future_state=None,
-                candidate_mask=None, history_padding_mask=None):
+                history_features=None, candidate_mask=None, history_padding_mask=None):
         batch=candidate_features.size(0)
         acoustic=candidate_features[...,:self.config.audio_dim]
         candidate_hidden=self.audio_projection(acoustic)+self.time_projection(candidate_features[...,self.config.audio_dim:])
@@ -63,17 +64,47 @@ class ChartComposer(nn.Module):
         if history is None or history.size(1)==0:
             history_summary=audio_summary
         else:
+            if history.ndim == 2:
+                history = history.unsqueeze(-1)
             positions=torch.arange(history.size(1),device=history.device)[None]
-            history_hidden=self.history_encoder(self.event_embedding(history)+self.position_embedding(positions),
-                src_key_padding_mask=history_padding_mask)
-            history_summary=history_hidden[:,-1]
+            event_embeddings=self.event_embedding(history)
+            event_embeddings=event_embeddings.masked_fill(history.eq(0).unsqueeze(-1),0.)
+            history_hidden=event_embeddings.sum(dim=2)+self.position_embedding(positions)
+            if history_features is not None:
+                history_hidden=history_hidden+self.history_feature_projection(history_features)
+            safe_padding=history_padding_mask
+            if safe_padding is not None:
+                empty=(~safe_padding).sum(1)==0
+                if empty.any():
+                    safe_padding=safe_padding.clone()
+                    history_hidden=history_hidden.clone()
+                    safe_padding[empty,0]=False
+                    history_hidden[empty,0]=0.
+            history_hidden=self.history_encoder(history_hidden,
+                src_key_padding_mask=safe_padding)
+            if safe_padding is None:
+                lengths=torch.full((history.size(0),),history.size(1)-1,device=history.device,dtype=torch.long)
+            else:
+                lengths=(~safe_padding).sum(1).clamp_min(1)-1
+            gathered=history_hidden[torch.arange(history.size(0),device=history.device),lengths]
+            if safe_padding is not None:
+                valid_rows=(~history_padding_mask).any(1)
+                history_summary=torch.where(valid_rows[:,None],gathered,audio_summary)
+            else:
+                history_summary=gathered
         context=self.norm(history_summary+audio_summary+self.condition_projection(condition))
         if action_state is not None:
             context=context+self.action_projection(action_state)
-        if future_state is not None:
-            context=context+self.future_projection(future_state)
-        pointer=self.pointer(context[:,None,:]+candidate_hidden).squeeze(-1)
+        # Future intent is an auxiliary prediction.  It is deliberately not
+        # fed back into the current decision: the old teacher-forced path used
+        # a target-derived previous state that included the current event,
+        # while free generation used the model's own prediction.
+        candidate_context=context[:,None,:]+candidate_hidden
+        pointer=self.pointer(candidate_context).squeeze(-1)
         if candidate_mask is not None:pointer=pointer.masked_fill(candidate_mask,-1e4)
-        return {'candidate_logits':pointer,'write_logit':self.write_head(context).squeeze(-1),
-                'action_logits':self.action_head(context).reshape(batch,self.config.action_slots,self.config.atom_vocab_size),
-                'future':self.future_head(context)}
+        return {'candidate_logits':pointer,
+                'action_logits':self.action_head(candidate_context).reshape(
+                    batch,candidate_hidden.size(1),self.config.action_slots,self.config.atom_vocab_size),
+                'future':self.future_head(candidate_context),
+                'eos_logits':self.eos_head(candidate_context).squeeze(-1),
+                'candidate_context':candidate_context}

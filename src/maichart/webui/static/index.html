@@ -370,7 +370,7 @@
 <label class="field">Transformer 层数<input id="composerLayers" type="number" min="1" step="1" value="3"></label>
 <label class="field">注意力头数 nhead<input id="composerNhead" type="number" min="1" step="1" value="6"><small>必须整除 d_model。</small></label>
 <label class="field">历史事件数<input id="composerHistoryEvents" type="number" min="1" step="1" value="128"><small>模型可回看的最近事件数量。</small></label>
-<label class="field">候选拍位数<input id="composerCandidateCount" type="number" min="1" step="1" value="64"><small>每步候选拍位数量。</small></label>
+<label class="field">候选拍位数<input id="composerCandidateCount" type="number" min="16" step="1" value="96"><small>至少 16；建议 96 以覆盖常见细分和长休止。</small></label>
 <label class="field">动作槽位数<input id="composerActionSlots" type="number" min="1" step="1" value="8"><small>每个事件最多预测的动作槽位。</small></label>
 <label class="field">数值精度<select id="composerPrecision"><option value="auto" selected>自动</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>CPU 只能使用 FP32。</small></label>
 <label class="field">训练随机种子<input id="composerSeed" type="number" min="0" step="1" value="0"></label>
