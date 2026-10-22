@@ -14,7 +14,7 @@ import torch
 from torch.utils.data import Dataset
 
 from maichart.form.data import FormDataset
-from maichart.form.rational_audio import planner_audio_queries
+from maichart.stream.grounding import detail_queries
 from maichart.event_timing import seconds_at_beat
 from maichart.generation.conditions import GenerationCondition
 from maichart.stream.context import prefix_action_state
@@ -29,7 +29,7 @@ from maichart.form.type_guidance import _counts
 class ComposerSample:
     song_index: int
     event_index: int
-    previous: Fraction
+    previous: Fraction | None
     target: Fraction
     note_text: str
     candidates: tuple[Fraction, ...]
@@ -51,6 +51,7 @@ class ComposerDataset(Dataset):
         if self.candidate_count < 16:
             raise ValueError('Composer candidate_count must be at least 16 for common onset and rest proposals')
         self.action_slots=int(action_slots);self.seed=int(seed);self.epoch=0
+        self._feature_cache_budget_bytes=int(max(64*1024**2,min(float(audio_cache_gb)*1024**3*.25,1024*1024**2)))
         self.base=FormDataset(manifest,cache_dir=cache_dir,max_tokens=1_000_000,
             max_memory_tokens=max(256,history_events),max_region_seconds=999.,
             preparation_workers=preparation_workers,audio_cache_gb=audio_cache_gb,
@@ -72,7 +73,7 @@ class ComposerDataset(Dataset):
             song_sample_start=len(self.samples)
             source_song=self._source_song(song_index)
             audio_end_sec=generation_bounds(source_song.audio,trim_exact_silence=True)['effective_end_sec']
-            previous=Fraction(-1,48)
+            previous=None
             future_targets=[]
             for future_index in range(len(points)):
                 window=points[future_index:min(len(points),future_index+4)]
@@ -138,12 +139,17 @@ class ComposerDataset(Dataset):
                 self.samples[last_index]=replace(self.samples[last_index],eos_target=1.)
             self.songs.append(record)
         self._feature_cache=OrderedDict()
-        self._feature_cache_limit=16
         manifest_path=Path(manifest)
         manifest_hash=hashlib.sha256(manifest_path.read_bytes()).hexdigest() if manifest_path.is_file() else None
         self.fingerprint=json.dumps({'manifest':str(manifest_path.resolve()),'manifest_sha256':manifest_hash,'candidate_count':self.candidate_count,
             'history_events':self.history_events,'action_slots':self.action_slots,'samples':len(self.samples),
             'candidate_total':self.candidate_total,'candidate_misses':self.candidate_misses},sort_keys=True)
+        if self.candidate_misses:
+            examples='; '.join(f"{item['target']} after {item['previous']}" for item in self.candidate_miss_examples)
+            raise ValueError(
+                f'Composer candidate coverage failed for {self.candidate_misses}/{self.candidate_total} '
+                f'authored events; increase candidate_count or extend the canonical grid. Examples: {examples}'
+            )
 
     def set_epoch(self,epoch):self.epoch=int(epoch)
 
@@ -152,10 +158,11 @@ class ComposerDataset(Dataset):
     def _song_features(self,song_index):
         if song_index not in self._feature_cache:
             song=self._source_song(song_index)
-            values,times,_=planner_audio_queries(song)
-            self._feature_cache[song_index]=(np.asarray(values,dtype=np.float32),np.asarray(times,dtype=np.float64))
+            values,times,_=detail_queries(song,8192)
+            arrays=(values.detach().cpu().numpy().astype(np.float32,copy=False),np.asarray(times,dtype=np.float64))
+            self._feature_cache[song_index]=arrays
             self._feature_cache.move_to_end(song_index)
-            while len(self._feature_cache)>self._feature_cache_limit:
+            while sum(int(value[0].nbytes+value[1].nbytes) for value in self._feature_cache.values())>self._feature_cache_budget_bytes:
                 self._feature_cache.popitem(last=False)
         else:
             self._feature_cache.move_to_end(song_index)

@@ -19,6 +19,10 @@ def test_candidate_set_uses_bounded_musical_grid_and_long_rest_choices():
     assert candidate_index(target,values)==-1
     assert any(value >= 2 for value in values)
     assert all(value.denominator <= 96 for value in values)
+    assert all(value.denominator in {1,2,3,4,6,8,12,16} for value in values)
+    first_values=candidate_beats(None,tempo=tempo,first=0.,audio_end_sec=12.,candidate_count=16)
+    assert Fraction(0) in first_values
+    assert Fraction(1,2) in first_values
 
 
 def test_composer_forward_shapes_and_checkpoint_roundtrip(tmp_path):

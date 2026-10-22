@@ -17,20 +17,22 @@ def _tempo_step_seconds(tempo, first, beat, fraction: Fraction) -> float:
 def _canonical_offsets(max_rest_beats: Fraction) -> list[Fraction]:
     """Return a bounded musical proposal grid shared by train and inference.
 
-    The fine grid is 1/48 beat, which covers the common 8th/12th/16th/24th
-    and 32nd-note subdivisions while keeping every denominator bounded.  A
-    small set of explicitly common triplet and rest offsets preserves phrase
-    movement without converting arbitrary wall-clock seconds into fractions.
+    The fine grid uses denominators supported by common maimai subdivisions.
+    It deliberately excludes arbitrary 1/48-beat steps, which would create
+    192nd-note proposals.  Coarser quarter/half-beat anchors preserve phrase
+    movement and long rests without converting wall-clock seconds into
+    fractions.
     """
-    fine = [Fraction(index, 48) for index in range(1, 73)]  # 1/48 .. 3/2
-    common = [Fraction(5, 3), Fraction(7, 4), Fraction(11, 6), Fraction(2),
-              Fraction(7, 3), Fraction(5, 2), Fraction(3), Fraction(4),
-              Fraction(6), Fraction(8), Fraction(1, 5), Fraction(2, 5),
-              Fraction(3, 5), Fraction(4, 5), Fraction(6, 5), Fraction(7, 5)]
-    return sorted({value for value in fine + common if value > 0 and value <= max_rest_beats})
+    fine = [Fraction(index, denominator) for denominator in (1,2,3,4,6,8,12,16)
+            for index in range(1, denominator*2+1)]
+    coarse = [Fraction(index, 2) for index in range(3, 33)]
+    common = [Fraction(5, 3), Fraction(7, 4), Fraction(11, 6), Fraction(7, 3),
+              Fraction(5, 2), Fraction(11, 4), Fraction(13, 4), Fraction(7, 2),
+              Fraction(15, 4), Fraction(4), Fraction(6), Fraction(8), Fraction(12), Fraction(16)]
+    return sorted({value for value in fine + coarse + common if value > 0 and value <= max_rest_beats})
 
 
-def candidate_beats(previous: Fraction, *, tempo, first: float, audio_end_sec: float,
+def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end_sec: float,
                    candidate_count: int = 96, max_rest_sec: float = 8.,
                    target: Fraction | None = None) -> list[Fraction]:
     """Return deterministic bounded-fraction candidates.
@@ -43,7 +45,8 @@ def candidate_beats(previous: Fraction, *, tempo, first: float, audio_end_sec: f
     positions themselves always come from the canonical musical grid.
     """
     del target
-    previous = Fraction(previous)
+    first_event=previous is None
+    previous = Fraction(0) if previous is None else Fraction(previous)
     if int(candidate_count) < 1:
         raise ValueError("candidate_count must be positive")
     max_rest_sec = max(0.0, float(max_rest_sec))
@@ -52,17 +55,25 @@ def candidate_beats(previous: Fraction, *, tempo, first: float, audio_end_sec: f
     max_rest_beats=beat_at_second(previous_second+max_rest_sec,tempo,first)-clock_previous
     max_rest_beats=max(Fraction(1,48),max_rest_beats)
     offsets = _canonical_offsets(max_rest_beats)
-    values = [previous + offset for offset in offsets
+    values = ([previous] if first_event else []) + [previous + offset for offset in offsets
               if float(seconds_at_beat(previous + offset, tempo, first)) < float(audio_end_sec)]
     count = int(candidate_count)
     if len(values) > count:
-        priority_offsets=[Fraction(1,48),Fraction(1,32),Fraction(1,24),Fraction(1,16),
+        priority_offsets=([Fraction(0)] if first_event else [])+[Fraction(1,16),
             Fraction(1,12),Fraction(1,8),Fraction(1,6),Fraction(1,4),Fraction(1,3),
             Fraction(3,8),Fraction(1,2),Fraction(2,3),Fraction(3,4),Fraction(1),
             Fraction(4,3),Fraction(3,2),Fraction(2),
             Fraction(7,3),Fraction(3),Fraction(4),Fraction(6),Fraction(8)]
         by_offset={value-previous:value for value in values}
-        selected=[by_offset[offset] for offset in priority_offsets if offset in by_offset][:count]
+        far_offsets=[Fraction(2),Fraction(3),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]
+        far=[by_offset[offset] for offset in far_offsets if offset in by_offset]
+        far_slots=min(len(far),max(1,count//4))
+        near_slots=max(1,count-far_slots)
+        selected=[by_offset[offset] for offset in priority_offsets if offset in by_offset][:near_slots]
+        remaining_far=[value for value in far if value not in selected]
+        if far_slots and remaining_far:
+            indices=sorted(set(round(i*(len(remaining_far)-1)/max(1,far_slots-1)) for i in range(far_slots)))
+            selected.extend(remaining_far[index] for index in indices)
         remaining=[value for value in values if value not in selected]
         slots=count-len(selected)
         if slots and remaining:
@@ -82,10 +93,11 @@ def candidate_features(candidates, previous, tempo, first, audio_times=None):
     """Numeric time features; audio probes are attached by the dataset/model."""
     import numpy as np
     rows=[]
-    previous_second=float(seconds_at_beat(max(Fraction(0),previous), tempo, first))
+    previous_beat=Fraction(0) if previous is None else max(Fraction(0),Fraction(previous))
+    previous_second=float(seconds_at_beat(previous_beat, tempo, first))
     for beat in candidates:
         second=float(seconds_at_beat(beat, tempo, first))
         delta=max(0., second-previous_second)
-        rows.append((float(beat-previous), delta, math.log1p(delta),
+        rows.append((float(beat-previous_beat), delta, math.log1p(delta),
                      math.sin(2*math.pi*float(beat)), math.cos(2*math.pi*float(beat))))
     return np.asarray(rows,dtype=np.float32)

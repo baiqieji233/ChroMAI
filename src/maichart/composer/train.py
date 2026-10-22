@@ -46,8 +46,17 @@ def _loss(output,batch,atom_vocab_size):
     action_logits=output['action_logits'][torch.arange(target.size(0),device=target.device),target]
     future=output['future'][torch.arange(target.size(0),device=target.device),target]
     eos=output['eos_logits'][torch.arange(target.size(0),device=target.device),target]
-    action=F.cross_entropy(action_logits.reshape(-1,atom_vocab_size),batch['action_target'].reshape(-1))
-    eos_loss=F.binary_cross_entropy_with_logits(eos,batch['eos_target'])
+    action_per_slot=F.cross_entropy(action_logits.reshape(-1,atom_vocab_size),
+        batch['action_target'].reshape(-1),reduction='none').reshape(action_logits.size(0),-1)
+    slot_weights=torch.ones(action_per_slot.size(1),device=action_per_slot.device)
+    if slot_weights.numel()>2:
+        slot_weights[2:]=.25
+    action=(action_per_slot*slot_weights[None]).sum()/slot_weights.sum().clamp_min(1e-6)/action_per_slot.size(0)
+    eos_target=batch['eos_target']
+    positives=eos_target.sum().clamp_min(1.)
+    negatives=(eos_target.numel()-eos_target.sum()).clamp_min(1.)
+    eos_loss=F.binary_cross_entropy_with_logits(eos,eos_target,
+        pos_weight=(negatives/positives).clamp(1.,64.))
     future_loss=F.smooth_l1_loss(future,batch['future_target'])
     total=pointer+.6*action+.05*eos_loss+.2*future_loss
     return total,{'loss':total.detach(),

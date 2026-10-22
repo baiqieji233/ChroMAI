@@ -8,11 +8,12 @@ import torch
 
 from maichart.event_timing import EventTempo,EventPoint,seconds_at_beat
 from maichart.form.data import organize_song
-from maichart.form.rational_audio import extract_rational_audio,planner_audio_queries
+from maichart.form.rational_audio import extract_rational_audio
 from maichart.generation.conditions import GenerationCondition,GENERATION_DEFAULTS
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.stream.grounded_inference import IncrementalState
+from maichart.stream.grounding import detail_queries
 from maichart.generation.timeline import normalize_tempo_map
 from maichart.stream.audio_bounds import generation_bounds
 from maichart.stream.grounded_model import phrase_features
@@ -56,8 +57,9 @@ def _history_features(history, atoms, tempo, first, action_slots):
     return rows
 
 
-def _sample_actions(logits, atoms, grammar, temperature, generator):
+def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), max_heads=2):
     selected=[]
+    used_buttons=set(occupied)
     for slot,row in enumerate(logits):
         allowed=[]
         for atom_id in range(0,len(atoms)+1):
@@ -68,8 +70,9 @@ def _sample_actions(logits, atoms, grammar, temperature, generator):
             atom=atoms[atom_id-1]
             if atom in selected:
                 continue
-            candidate=selected+[atom]
-            if grammar is not None and not grammar.is_complete('/'.join(candidate)):
+            atom_heads={f'A{head}' if str(head).isdigit() else str(head)
+                        for head in (grammar.heads.get(atom) or ())}
+            if atom_heads & used_buttons or len(used_buttons | atom_heads) > max_heads:
                 continue
             allowed.append(atom_id)
         if not allowed:
@@ -83,7 +86,10 @@ def _sample_actions(logits, atoms, grammar, temperature, generator):
             choice=int(mask.argmax().item())
         if choice == 0:
             break
-        selected.append(atoms[choice-1])
+        selected_atom=atoms[choice-1]
+        selected.append(selected_atom)
+        used_buttons.update(f'A{head}' if str(head).isdigit() else str(head)
+                            for head in (grammar.heads.get(selected_atom) or ()))
     return selected
 
 
@@ -96,11 +102,11 @@ def generate(args):
     tempo=(normalize_tempo_map(json.loads(Path(args.tempo_map).read_text(encoding='utf-8-sig')))
            if args.tempo_map else [EventTempo(Fraction(0),args.bpm or audio.tempo_bpm)])
     song=organize_song(audio,tempo,args.first,max_seconds=999.,quality_profile='musical_evidence_v1')
-    values,times,_=planner_audio_queries(song);values=np.asarray(values,dtype=np.float32);times=np.asarray(times,dtype=np.float64)
+    values,times,_=detail_queries(song,8192);values=values.detach().cpu().numpy().astype(np.float32,copy=False);times=np.asarray(times,dtype=np.float64)
     bounds=generation_bounds(audio,trim_exact_silence=True);end_sec=bounds['effective_end_sec']
     condition=GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
     if args.condition_file:condition=GenerationCondition.from_dict(json.loads(Path(args.condition_file).read_text(encoding='utf-8-sig')))
-    points=[];history=[];previous=Fraction(-1,48);max_events=args.max_events or 100000
+    points=[];history=[];previous=None;max_events=args.max_events or 100000
     action_index=IncrementalState(song.tempo,song.first)
     grammar=_NoteGrammar.from_atoms(atoms)
     rng=torch.Generator(device=device).manual_seed(args.seed)
@@ -117,11 +123,16 @@ def generate(args):
             hist_atoms=torch.zeros((1,0,model.config.action_slots),dtype=torch.long,device=device)
             hist_features=torch.zeros((1,0,8),dtype=torch.float32,device=device)
         try:
-            states,mask,_=action_index.at(max(Fraction(0),previous),include_current=True)
+            states,mask,metadata=action_index.at(Fraction(0) if previous is None else previous,include_current=True)
             active=states[~mask]
             action=active.mean(0).to(device) if active.numel() else torch.zeros(50,device=device)
+            occupied=set()
+            pads=(metadata.get('feature_layout') or {}).get('pads',[])
+            for row in active:
+                occupied.update(pads[index] for index in range(min(len(pads),row.numel()-4)) if float(row[4+index])>0.5)
         except Exception:
             action=torch.zeros(50,device=device)
+            occupied=set()
         control=condition.to_vector(device=device)[None]
         output=model(feats,hist_atoms,control,action_state=action[None],history_features=hist_features,
                      candidate_mask=torch.zeros(1,len(candidates),dtype=torch.bool,device=device),
@@ -129,8 +140,15 @@ def generate(args):
         logits=output['candidate_logits'][0].float()/max(args.temperature,1e-6)
         choice=int(torch.multinomial(logits.softmax(-1),1,generator=rng).item()) if args.temperature>0 else int(logits.argmax())
         beat=candidates[choice]
-        selected=_sample_actions(output['action_logits'][0,choice],atoms,grammar,args.temperature,rng)
-        if not selected: selected=[atoms[0]]
+        selected=_sample_actions(output['action_logits'][0,choice],atoms,grammar,args.temperature,rng,occupied=occupied,max_heads=2)
+        if not selected:
+            for atom in atoms:
+                heads={f'A{head}' if str(head).isdigit() else str(head)
+                       for head in (grammar.heads.get(atom) or ())}
+                if not (heads & occupied) and len(occupied | heads) <= 2:
+                    selected=[atom]; break
+        if not selected:
+            break
         text='/'.join(selected)
         event=EventPoint(beat,text)
         points.append(event); action_index.append(event)

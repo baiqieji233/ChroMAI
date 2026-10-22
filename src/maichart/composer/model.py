@@ -67,6 +67,11 @@ class ChartComposer(nn.Module):
             if history.ndim == 2:
                 history = history.unsqueeze(-1)
             positions=torch.arange(history.size(1),device=history.device)[None]
+            if history_padding_mask is None:
+                lengths=torch.full((history.size(0),),history.size(1),device=history.device,dtype=torch.long)
+            else:
+                lengths=(~history_padding_mask).sum(1)
+            positions=(lengths[:,None]-1-positions).clamp_min(0).clamp_max(self.config.history_events+3)
             event_embeddings=self.event_embedding(history)
             event_embeddings=event_embeddings.masked_fill(history.eq(0).unsqueeze(-1),0.)
             history_hidden=event_embeddings.sum(dim=2)+self.position_embedding(positions)
