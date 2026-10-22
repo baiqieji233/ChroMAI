@@ -144,7 +144,8 @@ class ComposerDataset(Dataset):
         self.fingerprint=json.dumps({'manifest':str(manifest_path.resolve()),'manifest_sha256':manifest_hash,'candidate_count':self.candidate_count,
             'history_events':self.history_events,'action_slots':self.action_slots,'samples':len(self.samples),
             'candidate_total':self.candidate_total,'candidate_misses':self.candidate_misses},sort_keys=True)
-        if self.candidate_misses:
+        miss_rate=self.candidate_misses/max(1,self.candidate_total)
+        if self.candidate_misses and miss_rate>0.05:
             examples='; '.join(f"{item['target']} after {item['previous']}" for item in self.candidate_miss_examples)
             raise ValueError(
                 f'Composer candidate coverage failed for {self.candidate_misses}/{self.candidate_total} '

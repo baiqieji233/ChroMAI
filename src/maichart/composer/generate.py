@@ -93,6 +93,27 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
     return selected
 
 
+def _active_heads(state, beat, tempo, first):
+    """Return concrete source heads still occupied at the proposed beat.
+
+    SustainStateIndex also exposes a hand-space pad coverage feature. That is
+    useful as a soft model input but must not be treated as exact key
+    ownership for a hard same-head filter.
+    """
+    second=float(seconds_at_beat(beat,tempo,first)); result=set()
+    for marker in getattr(state,'markers',()):
+        onset=float(marker.get('second',0.)); end=float(marker.get('end_second',-1.))
+        if onset > second or end + .02 <= second:
+            continue
+        kind=marker.get('type')
+        if kind in {'hold','slide','wifi'}:
+            lane=marker.get('lane')
+            if lane is not None: result.add(f'A{int(lane)}')
+        elif kind=='touch_hold' and marker.get('touch_pad'):
+            result.add(str(marker['touch_pad']))
+    return result
+
+
 @torch.inference_mode()
 def generate(args):
     device=_device(args.device);model,payload=load(args.checkpoint,device=device);model.eval()
@@ -126,13 +147,8 @@ def generate(args):
             states,mask,metadata=action_index.at(Fraction(0) if previous is None else previous,include_current=True)
             active=states[~mask]
             action=active.mean(0).to(device) if active.numel() else torch.zeros(50,device=device)
-            occupied=set()
-            pads=(metadata.get('feature_layout') or {}).get('pads',[])
-            for row in active:
-                occupied.update(pads[index] for index in range(min(len(pads),row.numel()-4)) if float(row[4+index])>0.5)
         except Exception:
             action=torch.zeros(50,device=device)
-            occupied=set()
         control=condition.to_vector(device=device)[None]
         output=model(feats,hist_atoms,control,action_state=action[None],history_features=hist_features,
                      candidate_mask=torch.zeros(1,len(candidates),dtype=torch.bool,device=device),
@@ -140,6 +156,7 @@ def generate(args):
         logits=output['candidate_logits'][0].float()/max(args.temperature,1e-6)
         choice=int(torch.multinomial(logits.softmax(-1),1,generator=rng).item()) if args.temperature>0 else int(logits.argmax())
         beat=candidates[choice]
+        occupied=_active_heads(action_index,beat,song.tempo,song.first)
         selected=_sample_actions(output['action_logits'][0,choice],atoms,grammar,args.temperature,rng,occupied=occupied,max_heads=2)
         if not selected:
             for atom in atoms:

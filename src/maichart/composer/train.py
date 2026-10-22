@@ -102,7 +102,8 @@ def main(argv=None):
         'candidate_count':args.candidate_count,'action_vocab_size':len(dataset.codec_atoms)+1,
         'end_epoch':end_epoch,'candidate_misses':dataset.candidate_misses,
         'candidate_total':dataset.candidate_total,
-        'candidate_miss_examples':dataset.candidate_miss_examples}),flush=True)
+        'candidate_miss_examples':dataset.candidate_miss_examples,
+        'candidate_recall':1.-dataset.candidate_misses/max(1,dataset.candidate_total)}),flush=True)
     for epoch in range(start_epoch,end_epoch+1):
         dataset.set_epoch(epoch);started=time.monotonic(); totals={};
         for batch_index,batch in enumerate(loader,1):

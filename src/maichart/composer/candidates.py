@@ -25,15 +25,17 @@ def _canonical_offsets(max_rest_beats: Fraction) -> list[Fraction]:
     """
     fine = [Fraction(index, denominator) for denominator in (1,2,3,4,6,8,12,16)
             for index in range(1, denominator*2+1)]
-    coarse = [Fraction(index, 2) for index in range(3, 33)]
+    coarse = [Fraction(index, 4) for index in range(6, 65)]
+    triplet = [Fraction(index, 3) for index in range(7, 49)]
     common = [Fraction(5, 3), Fraction(7, 4), Fraction(11, 6), Fraction(7, 3),
+              Fraction(17, 8), Fraction(19, 8), Fraction(23, 8), Fraction(25, 8),
               Fraction(5, 2), Fraction(11, 4), Fraction(13, 4), Fraction(7, 2),
               Fraction(15, 4), Fraction(4), Fraction(6), Fraction(8), Fraction(12), Fraction(16)]
-    return sorted({value for value in fine + coarse + common if value > 0 and value <= max_rest_beats})
+    return sorted({value for value in fine + coarse + triplet + common if value > 0 and value <= max_rest_beats})
 
 
 def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end_sec: float,
-                   candidate_count: int = 96, max_rest_sec: float = 8.,
+                   candidate_count: int = 96, max_rest_sec: float = 16.,
                    target: Fraction | None = None) -> list[Fraction]:
     """Return deterministic bounded-fraction candidates.
 
@@ -63,7 +65,8 @@ def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end
             Fraction(1,12),Fraction(1,8),Fraction(1,6),Fraction(1,4),Fraction(1,3),
             Fraction(3,8),Fraction(1,2),Fraction(2,3),Fraction(3,4),Fraction(1),
             Fraction(4,3),Fraction(3,2),Fraction(2),
-            Fraction(7,3),Fraction(3),Fraction(4),Fraction(6),Fraction(8)]
+            Fraction(7,3),Fraction(9,4),Fraction(17,8),Fraction(5,2),Fraction(11,4),Fraction(3),
+            Fraction(13,4),Fraction(7,2),Fraction(15,4),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]
         by_offset={value-previous:value for value in values}
         far_offsets=[Fraction(2),Fraction(3),Fraction(4),Fraction(6),Fraction(8),Fraction(12),Fraction(16)]
         far=[by_offset[offset] for offset in far_offsets if offset in by_offset]

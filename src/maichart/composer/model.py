@@ -20,7 +20,7 @@ class ComposerConfig:
     condition_dim: int = 16
     action_dim: int = 50
     history_events: int = 128
-    candidate_count: int = 64
+    candidate_count: int = 96
     action_slots: int = 8
     candidate_feature_dim: int = 125
     history_feature_dim: int = 8
