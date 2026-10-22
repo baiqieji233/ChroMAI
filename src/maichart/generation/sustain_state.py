@@ -129,7 +129,7 @@ class SustainStateIndex:
         beat = _as_beat(start_beat)
         boundary = float(seconds_at_beat(beat, self.tempo_changes, self.first))
         selected: list[tuple[float, int, dict[str, Any], float, bool]] = []
-        for marker in self.markers:
+        for marker in self._candidate_markers(boundary):
             kind = marker.get("type")
             if kind not in _TYPE_OFFSETS or marker.get("is_mine") or marker.get("track_mine"):
                 continue
@@ -197,6 +197,25 @@ class SustainStateIndex:
             ],
         }
         return states, mask, metadata
+
+    def _candidate_markers(self,boundary):
+        # Coarse buckets only prune impossible intervals. Exact onset,
+        # deadline, causal release and ordering checks remain in at().
+        signature=(id(self.markers),len(self.markers))
+        cached=getattr(self,'_active_marker_index',None)
+        if cached is None or cached[0]!=signature:
+            buckets={}
+            for marker in self.markers:
+                start=float(marker.get('second',0.))
+                end=float(marker.get('end_second',-1.))+RELEASE
+                if not math.isfinite(start) or not math.isfinite(end) or end-start>4096:
+                    # Preserve the original validation path for malformed or
+                    # extremely long intervals rather than allocating bins.
+                    return self.markers
+                for second in range(math.floor(start),math.floor(end)+1):
+                    buckets.setdefault(second,[]).append(marker)
+            cached=self._active_marker_index=(signature,buckets)
+        return cached[1].get(math.floor(boundary),())
 
     def _release_for(self, marker: dict[str, Any], boundary: float) -> float:
         # Postparse before-slide/tail flags may depend on *future* target heads.

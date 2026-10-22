@@ -185,6 +185,7 @@ def main(argv=None):
         'model_bytes':sum(p.numel()*p.element_size() for p in model.parameters()),
         'action_head_parameters':sum(p.numel() for p in model.action_head.parameters()),
         'selected_candidate_projection':True,'optimizer_implementation':implementation,
+        'audio_bank_mode':'lossless_mmap_v1',
         'batch_size':args.batch_size,'grad_accumulation':args.grad_accumulation,
         'start_epoch':start_epoch,'prefetch_batches':args.prefetch_batches,
         'candidate_count':args.candidate_count,'action_vocab_size':len(dataset.codec_atoms)+1,

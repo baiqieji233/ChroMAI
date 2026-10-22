@@ -30,6 +30,7 @@ from .candidates import (
 )
 from .events import structure_signature
 from .runtime_memory import cache_capacity, host_memory
+from .audio_bank import bank_path,load_bank,publish_bank
 from maichart.generation.event_cli import _NoteGrammar
 from maichart.form.type_guidance import _counts
 
@@ -64,6 +65,9 @@ class ComposerDataset(Dataset):
         self._feature_cache_effective_budget_bytes=self._feature_cache_budget_bytes
         self._memory_checked_at=float('-inf')
         self._feature_cache_hits=0;self._feature_cache_misses=0
+        self._feature_keys={};self._bank_paths={}
+        self._bank_hits=self._bank_builds=self._bank_write_errors=0
+        self._data_timing=dict(song_table_sec=0.,audio_lookup_sec=0.,action_state_sec=0.)
         self.base=FormDataset(manifest,cache_dir=cache_dir,max_tokens=1_000_000,
             max_memory_tokens=max(256,history_events),max_region_seconds=999.,
             preparation_workers=preparation_workers,audio_cache_gb=max(0.,float(audio_cache_gb))*.25,
@@ -367,6 +371,9 @@ class ComposerDataset(Dataset):
         return table['action_states'][event_index]
 
     def _song_feature_key(self, song_index: int):
+        cached=self._feature_keys.get(song_index)
+        if cached is not None:
+            return cached
         song = self.base.songs[song_index][0]
         audio = getattr(song, 'audio', None)
         audio_key = str(getattr(audio, 'path', None) or getattr(audio, 'source', None) or song_index)
@@ -378,7 +385,20 @@ class ComposerDataset(Dataset):
         regions = getattr(song, 'regions', None)
         spans = getattr(song, 'spans', None)
         extent_key = str(regions[-1].end if regions else (spans[-1].end if spans else 0))
-        return (audio_key, float(song.first), tempo_key, meter_key, extent_key)
+        key=(audio_key, float(song.first), tempo_key, meter_key, extent_key)
+        self._feature_keys[song_index]=key
+        return key
+
+    def _audio_bank_path(self,song_index,key):
+        if song_index not in self._bank_paths:
+            path=None
+            audio=self.base.songs[song_index][0].audio
+            if self.cache_dir and hasattr(audio,'store') and hasattr(audio,'path'):
+                source_cache=audio.store.disk_cache_path(audio.path)
+                if source_cache is not None and source_cache.is_file():
+                    path=bank_path(self.cache_dir,key,source_cache)
+            self._bank_paths[song_index]=path
+        return self._bank_paths[song_index]
 
     def _song_features(self, song_index: int):
         self._check_cache_headroom()
@@ -386,8 +406,19 @@ class ComposerDataset(Dataset):
         arrays = self._feature_cache.get(key)
         if arrays is None:
             self._feature_cache_misses+=1
-            song = self._source_song(song_index, cache_in_base=False)
-            arrays = composer_audio_nodes(song)
+            path=self._audio_bank_path(song_index,key)
+            arrays=load_bank(path) if path is not None else None
+            if arrays is not None:
+                self._bank_hits+=1
+            else:
+                song = self._source_song(song_index, cache_in_base=False)
+                arrays = composer_audio_nodes(song)
+                self._bank_builds+=1
+                if path is not None:
+                    try:
+                        arrays=publish_bank(path,arrays)
+                    except (OSError,ValueError):
+                        self._bank_write_errors+=1
             item_bytes = int(arrays[0].nbytes + arrays[1].nbytes)
             if item_bytes>self._feature_cache_effective_budget_bytes:
                 return arrays
@@ -420,6 +451,9 @@ class ComposerDataset(Dataset):
         return {'hits':self._feature_cache_hits,'misses':self._feature_cache_misses,
                 'bytes':self._feature_cache_bytes,'budget_bytes':self._feature_cache_budget_bytes,
                 'effective_budget_bytes':self._feature_cache_effective_budget_bytes,
+                'mapped_bank_hits':self._bank_hits,'bank_builds':self._bank_builds,
+                'bank_write_errors':self._bank_write_errors,
+                'cpu_timing':dict(self._data_timing),
                 'entries':len(self._feature_cache),'scope':'composer_audio_bank'}
 
     def _source_song(self, index, *, cache_in_base=True):
@@ -440,9 +474,13 @@ class ComposerDataset(Dataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         song = self.base.songs[sample.song_index][0]
+        stamp=time.perf_counter()
         table = self._song_table(sample.song_index)
+        self._data_timing['song_table_sec']+=time.perf_counter()-stamp
         clock = table['clock']
+        stamp=time.perf_counter()
         values, times = self._song_features(sample.song_index)
+        self._data_timing['audio_lookup_sec']+=time.perf_counter()-stamp
         offsets, _, valid_floats = _select_candidate_offsets(
             sample.previous is None, sample.valid_candidates, self.candidate_count
         )
@@ -483,6 +521,9 @@ class ComposerDataset(Dataset):
             raise ValueError('Composer candidate generator missed an authored target')
         ev = sample.event_index
         start = max(0, ev - self.history_events)
+        stamp=time.perf_counter()
+        action_state=self._action_state(sample.song_index,ev,table)
+        self._data_timing['action_state_sec']+=time.perf_counter()-stamp
         return {
             'candidate_features': torch.from_numpy(features),
             'candidate_target': torch.tensor(target, dtype=torch.long),
@@ -490,7 +531,7 @@ class ComposerDataset(Dataset):
             'action_target': table['atom_ids'][ev],
             'history': table['atom_ids'][start:ev],
             'history_features': table['history_features'][start:ev],
-            'action_state': self._action_state(sample.song_index, ev, table),
+            'action_state': action_state,
             'condition': table['condition'],
             'future_target': table['future_targets'][ev],
             'eos_target': torch.tensor(sample.eos_target, dtype=torch.float32),

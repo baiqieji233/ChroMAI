@@ -215,17 +215,22 @@ function composerTrainingView(task) {
     ['速度与等待',[
       ['batch / 秒',show(number(metrics,'batches_per_sec'))],['事件 / 秒',show(speed)],['本轮剩余',seconds(eta)],
       ['等待数据（累计）',seconds(number(timing,'data_sec'))],['传输提交（累计）',seconds(number(timing,'transfer_sec'))],
-      ['计算提交（累计）',seconds(number(timing,'compute_sec'))],['保存（累计）',seconds(number(timing,'save_sec'))]]],
+      ['计算提交（累计）',seconds(number(timing,'compute_sec'))],['保存（累计）',seconds(number(timing,'save_sec'))],
+      ['音频取数（后台累计）',seconds(number(cache.cpu_timing||{},'audio_lookup_sec'))],
+      ['标签表构建（后台累计）',seconds(number(cache.cpu_timing||{},'song_table_sec'))],
+      ['持续动作（后台累计）',seconds(number(cache.cpu_timing||{},'action_state_sec'))]]],
     ['缓存与显存',[
-      ['特征库命中 / 未命中',`${show(number(cache,'hits'),0)} / ${show(number(cache,'misses'),0)}`],
-      ['特征库 MiB / 预算',`${show(number(cache,'bytes')===null?null:Number(cache.bytes)/1024**2,0)} / ${show(number(cache,'budget_bytes')===null?null:Number(cache.budget_bytes)/1024**2,0)}`],
+      ['驻留缓存命中 / 未命中',`${show(number(cache,'hits'),0)} / ${show(number(cache,'misses'),0)}`],
+      ['映射库复用 / 新建',`${show(number(cache,'mapped_bank_hits'),0)} / ${show(number(cache,'bank_builds'),0)}`],
+      ['映射库写入失败',show(number(cache,'bank_write_errors'),0)],
+      ['逻辑特征 MiB / 有效预算',`${show(number(cache,'bytes')===null?null:Number(cache.bytes)/1024**2,0)} / ${show((number(cache,'effective_budget_bytes')??number(cache,'budget_bytes'))===null?null:Number(cache.effective_budget_bytes??cache.budget_bytes)/1024**2,0)}`],
       ['已分配 / 已保留 GiB',`${show(number(memory,'allocated_gib'))} / ${show(number(memory,'reserved_gib'))}`],
       ['峰值已分配 GiB',show(number(memory,'peak_allocated_gib'))]]]];
   const preparation=result.composer_preparation||{};
   if (result.composer_stage==='preparation') {
     status+=` · ${preparation.completed??preparation.completed_songs??0}/${preparation.total??preparation.total_songs??'?'} · 已收集 ${preparation.samples??preparation.charts??0} 项`;
   }
-  return {status,cards,note:'loss 与准确率为本轮已消费 batch 的累计均值；计时为主机累计计时，异步 CUDA 可把等待计入后续步骤，不能当作 GPU 内核耗时。'};
+  return {status,cards,note:'loss 与准确率为本轮已消费 batch 的累计均值；计时为主机累计计时，异步 CUDA 可把等待计入后续步骤，不能当作 GPU 内核耗时。后台 CPU 细分与等待时间有重叠，不能相加；映射库文件字节不是实际 RAM 占用。'};
 }
 
 function renderTaskTrainingMetrics(task) {

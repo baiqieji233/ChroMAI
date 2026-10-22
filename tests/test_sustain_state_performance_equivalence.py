@@ -105,3 +105,17 @@ def test_causal_head_filter_and_strict_trace_tolerance_are_unchanged():
     for delta in [-1/180-1e-12, -1/180, -1/180+1e-12, 1/180-1e-12, 1/180, 1/180+1e-12]:
         index.markers = [hold, dict(following, slide_trace_second=1.+delta)]
         assert index._release_for(hold, .75) == _reference_release(index, hold, .75)
+
+
+@pytest.mark.parametrize('include_current',[False,True])
+def test_bucket_pruning_matches_full_scan_including_exact_onsets(include_current):
+    points=[EventPoint(Fraction(0),'1h[4:80]')]+[
+        EventPoint(Fraction(i),f'{i%8+1}h[4:1]') for i in range(1,80)]
+    index=SustainStateIndex(points,[EventTempo(Fraction(0),120.)],-.25)
+    reference=copy.copy(index)
+    reference._candidate_markers=lambda boundary:reference.markers
+    for beat in [Fraction(i,8) for i in range(0,660,3)]:
+        a,am,meta=index.at(beat,include_current=include_current)
+        b,bm,other=reference.at(beat,include_current=include_current)
+        assert torch.equal(a,b) and torch.equal(am,bm) and meta==other
+    assert len(index._candidate_markers(10.))<len(index.markers)//5
