@@ -74,12 +74,21 @@ def _arg(args: list[str], name: str, value: Any) -> None:
 
 
 def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
+    requested_family = payload.get("model_family")
+    if requested_family not in {None, FAMILY}:
+        raise ValueError(f"Composer endpoint 只接受 model_family={FAMILY}")
     manifest = _manifest(payload)
     checkpoint_dir = _path(payload.get("checkpoint_dir"), "checkpoint-dir")
     cache_dir = _path(payload.get("cache_dir"), "cache-dir")
     mode = str(payload.get("mode", "fresh")).strip().lower()
     if mode not in {"fresh", "resume", "finetune"}:
         raise ValueError("训练模式只能是 fresh、resume 或 finetune")
+    d_model = _int(payload, "d_model", 192, minimum=1)
+    nhead = _int(payload, "nhead", 6, minimum=1)
+    if d_model % nhead:
+        raise ValueError("d_model 必须能被 nhead 整除")
+    if mode != "fresh" and not (payload.get("resume") or payload.get("init_checkpoint") or payload.get("checkpoint")):
+        raise ValueError("resume / finetune 模式必须提供 checkpoint")
     parent = payload.get("resume") or payload.get("init_checkpoint") or payload.get("checkpoint")
     parent_path = _path(parent, "checkpoint", exists=True) if mode != "fresh" else None
 
@@ -89,8 +98,8 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args, "--cache-dir", cache_dir)
     for key, flag, default, minimum in (
         ("epochs", "--epochs", 10, 1), ("batch_size", "--batch-size", 4, 1),
-        ("d_model", "--d-model", 192, 1), ("layers", "--layers", 3, 1),
-        ("nhead", "--nhead", 6, 1), ("history_events", "--history-events", 128, 1),
+        ("d_model", "--d-model", d_model, 1), ("layers", "--layers", 3, 1),
+        ("nhead", "--nhead", nhead, 1), ("history_events", "--history-events", 128, 1),
         ("candidate_count", "--candidate-count", 64, 1), ("action_slots", "--action-slots", 8, 1),
         ("checkpoint_interval_steps", "--checkpoint-interval-steps", 500, 0),
         ("limit_charts", "--limit-charts", 0, 0), ("prepare_workers", "--prepare-workers", 4, 0),
@@ -116,6 +125,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
 
 
 def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
+    requested_family = payload.get("model_family")
+    if requested_family not in {None, FAMILY}:
+        raise ValueError(f"Composer endpoint 只接受 model_family={FAMILY}")
     audio = _path(payload.get("audio"), "audio", exists=True)
     checkpoint = _path(payload.get("checkpoint"), "checkpoint", exists=True)
     output = _path(payload.get("output"), "output")

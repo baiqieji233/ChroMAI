@@ -10,6 +10,7 @@ from maichart.generation.music_plan import MUSIC_STRUCTURE_V3_PROFILE, PLAN_DIM
 
 EVENT_CHECKPOINT_SCHEMA = "maichart-event-generator-checkpoint-v1"
 STREAM_CHECKPOINT_SCHEMA = "maichart-chart-stream-checkpoint-v1"
+COMPOSER_CHECKPOINT_SCHEMA = "maichart-chart-composer-checkpoint-v1"
 EVENT_FAMILIES = {"event_v1", "event_ctx_v1"}
 LEGACY_CHECKPOINT_SCHEMAS = {
     "legacy-state-dict",
@@ -38,6 +39,7 @@ class ModelFamily(Enum):
     EVENT_CTX_V1 = "event_ctx_v1"
     LEGACY_FRAME_V2 = "legacy_frame_v2"
     CHART_STREAM_V1 = "chart_stream_v1"
+    CHART_COMPOSER_V1 = "chart_composer_v1"
     # Deprecated compatibility alias. Capability is determined from checkpoint
     # contents, never from a separate "extended" family label.
     EVENT_CTX_V1_EXTENDED = "event_ctx_v1"
@@ -45,6 +47,25 @@ class ModelFamily(Enum):
 
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
+    if checkpoint_data.get('schema') == COMPOSER_CHECKPOINT_SCHEMA:
+        valid = (checkpoint_data.get('family') == 'chart_composer_v1'
+                 and checkpoint_data.get('input_contract') == 'chart_composer_inputs_v1_event_candidates'
+                 and isinstance(checkpoint_data.get('model_config'), dict)
+                 and isinstance(checkpoint_data.get('model_state_dict'), dict))
+        errors = [] if valid else ['chart composer checkpoint contract mismatch']
+        return {
+            'model_family': 'chart_composer_v1', 'valid': bool(valid), 'errors': errors,
+            'experimental': True, 'structured_event_generation': bool(valid),
+            'continuous_stream': False, 'rational_event_positions': True,
+            'conflict_detection': False, 'conflict_repair': False,
+            'fine_note_strength': False, 'onset_profile': 'candidate_pointer',
+            'local_onset_guidance': False, 'rhythm_bias': False,
+            'action_state_profile': 'sustain_state_v1', 'sustained_action_memory': True,
+            'rhythm_geometry_profile': 'candidate_beats_v1',
+            'generation_entry': '/', 'quality_profile': 'musical_evidence_v1',
+            'position_alignment_supervision': bool(valid),
+            'position_alignment_trained': bool(valid and (checkpoint_data.get('optimizer_steps') or 0) > 0),
+        }
     if checkpoint_data.get('schema') == STREAM_CHECKPOINT_SCHEMA:
         config = checkpoint_data.get('model_config') or {}
         valid = checkpoint_data.get('family') == 'chart_stream_v1' and checkpoint_data.get('input_contract') == 'chart_stream_inputs_v1_exact_fraction'
@@ -278,6 +299,7 @@ class FeatureSupport:
             "rhythm_bias": False,
             "fine_note_strength": False,
             "local_onset_guidance": False,
+            "structured_event_generation": model_family is ModelFamily.CHART_COMPOSER_V1,
         }
 
 

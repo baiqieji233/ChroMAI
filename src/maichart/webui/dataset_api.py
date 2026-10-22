@@ -184,7 +184,7 @@ class DatasetAPI:
         family = payload.get("model_family")
         # song_form_v1 consumes the same event-preprocessed source contract;
         # composition must validate it as event audio, never as legacy frames.
-        if family in {"song_form_v1", "chart_stream_v1"}:
+        if family in {"song_form_v1", "chart_stream_v1", "chart_composer_v1"}:
             family = "event_v1"
         result = compose_datasets(manifests, self.workspace_root / "composed_manifests", family)
         return HTTPStatus.OK, result

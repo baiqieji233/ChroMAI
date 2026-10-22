@@ -13,7 +13,8 @@
   };
   const selectedMode = () => value("trainingMode", "fresh");
   const taskLabels = {preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
-    chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成"};
+    chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
+    composer_train: "chart_composer_v1 训练", composer_generate: "chart_composer_v1 生成"};
   const stateLabels = {queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已中断"};
 
   function reveal(target) {

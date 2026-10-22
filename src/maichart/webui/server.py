@@ -84,6 +84,7 @@ EVENT_CTX_MODEL_FAMILY = "event_ctx_v1"
 EVENT_FAMILIES = frozenset({EVENT_MODEL_FAMILY, EVENT_CTX_MODEL_FAMILY})
 ONSET_PROFILES = frozenset({"auto", "none", "chart_onsets_v1"})
 LEGACY_MODEL_FAMILY = "legacy_frame_v2"
+COMPOSER_MODEL_FAMILY = "chart_composer_v1"
 for _directory in (UPLOAD_ROOT, DATASET_ROOT, CONDITION_ROOT, GENERATED_ROOT):
     _directory.mkdir(parents=True, exist_ok=True)
 
@@ -124,6 +125,8 @@ class TaskState:
             elif self.kind == 'chart_stream_train':
                 from maichart.webui.stream_api import update_stream_progress
                 update_stream_progress(self, line)
+            elif self.kind.startswith('composer_'):
+                _update_composer_progress(self, line)
             epoch_match = re.search(r"epoch=(\d+)", line)
             if epoch_match:
                 current_epoch = int(epoch_match.group(1))
@@ -211,7 +214,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "quality_training_capability": True,
                                               "local_onset_training": True,
                                               "event_learning_rate_control": True,
-                                              "multi_dataset_training": True},
+                                              "multi_dataset_training": True,
+                                              "composer_training": True,
+                                              "composer_generation": True},
                     "intensity_curve_capability": True,
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
@@ -535,6 +540,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             form_payload.setdefault("checkpoint", str(checkpoint))
             form_payload["model_family"] = model_family
             return start_form_task(self, "generate", form_payload, runtime=sys.modules[__name__])
+        if model_family == COMPOSER_MODEL_FAMILY:
+            from maichart.webui import composer_api
+            composer_payload = dict(payload)
+            composer_payload["checkpoint"] = str(checkpoint)
+            composer_payload["model_family"] = COMPOSER_MODEL_FAMILY
+            return composer_api.start_generate(self, composer_payload, runtime=sys.modules[__name__])
         capabilities = checkpoint_capabilities(checkpoint_payload)
         if model_family == "unknown":
             raise ValueError(
@@ -1108,6 +1119,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
             form_payload.setdefault("init_checkpoint", payload.get("training_checkpoint"))
             form_payload.setdefault("mode", payload.get("training_mode", "fresh"))
             return start_form_task(self, "train", form_payload, runtime=sys.modules[__name__])
+        if payload.get("model_family") == COMPOSER_MODEL_FAMILY:
+            from maichart.webui import composer_api
+            composer_payload, dataset_selection = _prepare_training_sources(payload)
+            composer_payload.setdefault("mode", payload.get("training_mode", "fresh"))
+            composer_payload.setdefault("init_checkpoint", payload.get("training_checkpoint"))
+            if dataset_selection:
+                composer_payload["dataset_selection"] = dataset_selection
+            return composer_api.start_train(self, composer_payload, runtime=sys.modules[__name__])
         payload, dataset_selection = _prepare_training_sources(payload)
         model_family = _requested_model_family(payload)
         if model_family == LEGACY_MODEL_FAMILY and str(payload.get("feature_profile", "basic_v1")) != "basic_v1":
@@ -1479,6 +1498,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                    "data_contract":result.get("input_contract",{}),
                                    "generation_entry":"/"})
                     return self._json_response(result)
+                if detected_payload is not None and _checkpoint_model_family(detected_payload) == COMPOSER_MODEL_FAMILY:
+                    from maichart.composer.checkpoint import inspect_payload
+                    result = inspect_payload(detected_payload)
+                    result.update({"path": str(candidate), "model_family": COMPOSER_MODEL_FAMILY,
+                                   "can_resume": bool(result.get("valid")),
+                                   "can_init": bool(result.get("valid")),
+                                   "can_train": bool(result.get("valid")),
+                                   "can_generate": bool(result.get("valid")),
+                                   "generation_entry": "/"})
+                    return self._json_response(result)
         if payload.get('model_family') == 'chart_stream_v1':
             from maichart.webui.stream_api import start
             return start(self, 'inspect', payload, runtime=sys.modules[__name__])
@@ -1487,6 +1516,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
             form_payload = dict(payload)
             form_payload.setdefault("checkpoint", payload.get("checkpoint_path") or payload.get("checkpoint"))
             return start_form_task(self, "inspect", form_payload, runtime=sys.modules[__name__])
+        if payload.get("model_family") == COMPOSER_MODEL_FAMILY:
+            from maichart.webui import composer_api
+            return composer_api.inspect(self, {
+                "checkpoint": payload.get("checkpoint_path") or payload.get("checkpoint")
+            })
         payload, dataset_selection = _prepare_training_sources(payload)
         checkpoint_path = _required_path(
             payload.get("checkpoint_path") or payload.get("checkpoint"),
@@ -1727,6 +1761,45 @@ def _create_task(kind: str) -> TaskState:
             if old_id != task.task_id and old_task.status in {"completed", "failed", "cancelled"} and len(TASKS) > 20:
                 del TASKS[old_id]
     return task
+
+
+def _update_composer_progress(task: TaskState, line: str) -> None:
+    """Translate Composer's JSON progress records into the common task shape."""
+
+    prefix, separator, raw = line.partition(" ")
+    if not separator or prefix not in {"composer_runtime", "composer_progress", "composer_epoch", "composer_checkpoint"}:
+        return
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(data, dict):
+        return
+    for key in ("epoch", "batch", "total", "optimizer_steps", "loss", "pointer_accuracy", "elapsed_sec", "path"):
+        if key in data:
+            task.result[key] = data[key]
+    if prefix == "composer_runtime":
+        if data.get("end_epoch") is not None:
+            task.result["epoch_target"] = int(data["end_epoch"])
+        if data.get("samples") is not None:
+            task.result["samples"] = int(data["samples"])
+        if data.get("parameters") is not None:
+            task.result["parameters"] = int(data["parameters"])
+    elif prefix == "composer_progress":
+        total = int(data.get("total") or 0)
+        batch = int(data.get("batch") or 0)
+        epoch = int(data.get("epoch") or 0)
+        epoch_target = int(task.result.get("epoch_target") or 0)
+        batch_fraction = (batch / total) if total > 0 else 0.0
+        task.progress = min(1.0, ((max(0, epoch - 1) + batch_fraction) / epoch_target)
+                           if epoch_target > 0 else batch_fraction)
+        task.message = f"Composer epoch {epoch} · batch {batch}/{total}" if total else f"Composer epoch {epoch}"
+    elif prefix == "composer_epoch":
+        epoch = int(data.get("epoch") or 0)
+        epoch_target = int(task.result.get("epoch_target") or 0)
+        if epoch_target > 0:
+            task.progress = min(1.0, epoch / epoch_target)
+        task.message = f"Composer epoch {epoch} 完成"
 
 
 def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: int | None, result_paths: list[Path]) -> None:
@@ -2229,8 +2302,8 @@ def _is_event_family(family: str | None) -> bool:
 
 def _requested_model_family(payload: dict[str, Any]) -> str:
     family = str(payload.get("model_family", EVENT_MODEL_FAMILY)).strip().lower()
-    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1", "song_form_v2", "chart_stream_v1"}:
-        raise ValueError("model family 只能是 chart_stream_v1、song_form_v2、song_form_v1、event_v1、event_ctx_v1 或 legacy_frame_v2")
+    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1", "song_form_v2", "chart_stream_v1", COMPOSER_MODEL_FAMILY}:
+        raise ValueError("model family 只能是 chart_stream_v1、chart_composer_v1、song_form_v2、song_form_v1、event_v1、event_ctx_v1 或 legacy_frame_v2")
     return family
 
 
@@ -2302,6 +2375,16 @@ def _checkpoint_inspection(
                        "can_init":bool(result.get("valid")),
                        "data_contract":result.get("input_contract",{}),
                        "generation_entry":"/"})
+        return result
+    if detected_family == COMPOSER_MODEL_FAMILY:
+        from maichart.composer.checkpoint import inspect_payload
+        result = inspect_payload(payload)
+        result.update({"path": str(checkpoint_path), "model_family": COMPOSER_MODEL_FAMILY,
+                       "can_resume": bool(result.get("valid")),
+                       "can_init": bool(result.get("valid")),
+                       "can_train": bool(result.get("valid")),
+                       "can_generate": bool(result.get("valid")),
+                       "generation_entry": "/"})
         return result
     if detected_family == "unknown":
         init_errors = [
@@ -2616,7 +2699,7 @@ def _preprocess_args(payload: dict[str, Any], *, raw_root: Path, cache_dir: Path
                      model_family: str) -> list[str]:
     """Arguments for the preprocessing stage, shared by the two entry points."""
 
-    if _is_event_family(model_family) or model_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"}:
+    if _is_event_family(model_family) or model_family in {"song_form_v1", "song_form_v2", "chart_stream_v1", COMPOSER_MODEL_FAMILY}:
         # song_form consumes the event source manifest and exact chart/audio
         # caches. It must never invoke the legacy fixed-frame builder.
         args = [
