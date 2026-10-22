@@ -2065,6 +2065,8 @@ function chartComposerGenerationPayload() {
     bpm: valueOrDefault("#bpm", "").trim() === "" ? null : Number(valueOrDefault("#bpm", 120)),
     first: Number(valueOrDefault("#first", 0)),
     level: Number(valueOrDefault("#level", 13.3)),
+    condition: collectCondition(),
+    tempo_map: parseTempoMap(),
     temperature: Number(valueOrDefault("#temperature", .8)),
     seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)),
     max_events: Number(valueOrDefault("#composerMaxEvents", 0)),
@@ -2578,10 +2580,29 @@ function renderTask(task) {
   if (task.kind === "gold") renderGoldResult(task);
 }
 
+function composerGenerationSummary(task) {
+  if (task.kind !== "composer_generate") return null;
+  const result=task.result||{},report=result.composer_report||{},settings=result.effective_settings||{};
+  const condition=report.condition||settings.condition;
+  const seed=report.seed??result.seed??"未记录",temperature=report.temperature??settings.temperature;
+  const parts=[`实际 seed：${seed}；${temperature===0?"贪心解码，seed 不改变结果":`温度 ${temperature??"未记录"}`}`];
+  if (condition) parts.push(`实际等级 ${condition.level}；Style：Tap ${condition.style?.tap_bias??"—"} / Slide ${condition.style?.slide_bias??"—"} / Hold ${condition.style?.hold_bias??"—"} / Touch ${condition.style?.touch_bias??"—"}`);
+  if (settings.condition_source?.includes("file")) parts.push("条件文件中的明确字段已覆盖界面同名条件");
+  if (report.weights_sha256) parts.push(`权重 ${report.weights_sha256.slice(0,12)}；更新 ${report.optimizer_steps??"未记录"} 步`);
+  if (report.events_sha256) parts.push(`音符序列 ${report.events_sha256.slice(0,12)}`);
+  parts.push("每次任务独立保存；条件为软输入，接线生效不保证模型已学会服从");
+  return parts.join("。 ");
+}
+
 function renderTaskResults(task) {
   const container = element("#taskResults");
   if (!container) return;
   container.replaceChildren();
+  const composerSummary=composerGenerationSummary(task);
+  if (composerSummary) {
+    const notice=document.createElement("p");notice.className="inline-status";
+    notice.textContent=composerSummary;container.appendChild(notice);
+  }
   if (task.kind === "form_generate" && task.status === "completed" && task.artifacts_missing) {
     const notice = document.createElement("p");
     notice.className = "inline-status warn";
@@ -4801,6 +4822,10 @@ async function submitGenerate() {
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_composer_v1") {
+    const status = await api("/api/status");
+    if (status.composer_generation_contract !== "composer_generation_controls_v3") {
+      throw new Error("当前后端尚未加载 Composer 随机种子、Radar/Style 和独立输出修复。请在训练任务结束后重启 WebUI，再生成，避免控件被旧服务忽略。");
+    }
     const data = await api("/api/composer/generate", payload);
     watchTask(data.task_id, (task) => { if (task.status === "completed") setAcceptanceStatus("chart_composer_v1 生成完成；请查看 .composer.json 报告并进行人工试听与游玩检查。", "good"); });
     return;

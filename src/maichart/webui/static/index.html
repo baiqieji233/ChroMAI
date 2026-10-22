@@ -870,7 +870,7 @@
 <summary><span>Composer 生成参数</span><small>事件候选采样与可选条件文件</small></summary>
 <div class="settings-content"><div class="form-grid">
 <label class="field">最大事件数<input id="composerMaxEvents" type="number" min="0" step="1" value="0"><small>0 表示由音频边界自动结束。</small></label>
-<label class="field span-2">condition JSON（可选）<textarea id="composerConditionFile" class="path-input" rows="2" placeholder="可粘贴条件 JSON 文件路径"></textarea><small>留空使用等级条件；填写后传给 Composer 生成器。</small></label>
+<label class="field span-2">condition JSON（可选）<textarea id="composerConditionFile" class="path-input" rows="2" placeholder="可粘贴条件 JSON 文件路径"></textarea><small>留空使用界面的等级、Radar 与 Style。填写后仅覆盖文件中明确给出的字段；文件中的 level 优先于界面等级。任务和报告会记录最终条件。</small></label>
 </div></div>
 </details>
 <section id="generationTargetGroup" class="workflow-group" >
@@ -1034,7 +1034,7 @@
               一旦某个变速点判错，<strong>它之后的所有音符都会错位</strong>。仅在确认歌曲确实变速时使用。手动 tempo map 优先于此选项。
             </small>
           </label>
-<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2 song_form_v1 song_form_v2 chart_stream_v1">手动 tempo map JSON（可选）
+<label class="field span-2" data-generation-family="event_v1 legacy_frame_v2 song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1">手动 tempo map JSON（可选）
             <textarea id="tempoMap" class="code-input" rows="4" spellcheck="false" placeholder='[{"beat":"0","bpm":180},{"beat":"32","bpm":150}]'></textarea>
             <small>输入从 beat 0 开始、拍位严格递增的变速点。填写后覆盖 BPM 与 tempo mode；留空继续使用 BPM/tempo mode 和自动检测。beat 是谱面拍，不是秒数。此设置同时用于强度曲线预测和生成。</small>
           </label>
@@ -1145,6 +1145,7 @@
             <input id="seed" type="number" min="0" placeholder="留空 = 每次随机" value="">
             <small data-generation-family="event_v1 legacy_frame_v2"><strong>留空则每次生成都抽新种子</strong>，每次点生成都会得到不同谱面；填固定数字可复现同一份结果。用过的种子会写进 quality.json 的 seed / candidate_seed。</small>
             <small data-generation-family="song_form_v1 song_form_v2" hidden>留空时由服务随机生成 seed，并把实际值记入任务结果与生成报告；填固定整数可复现。</small>
+            <small data-generation-family="chart_composer_v1" hidden>留空每次使用新 seed，固定整数用于同权重、同条件的复现；温度为 0 时 seed 不改变贪心结果。实际 seed 写入任务与 .composer.json。</small>
           </label>
 <label class="checkbox-field" data-generation-family="event_v1">
             <input id="sampleEvents" type="checkbox" checked>
@@ -1152,10 +1153,11 @@
             <small><strong>后端对应 sample / greedy 解码开关。</strong>勾选时从经过语法约束的概率分布抽样；取消时每步取最高概率 token（greedy），结果确定但可能更容易重复。
             它改变随机性，不会补足模型没学会的音符类型或配置。</small>
           </label>
-<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2 chart_stream_v1">Temperature（配置采样温度）
+<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1">Temperature（配置采样温度）
             <input id="temperature" type="number" min="0" step="0.05" value="0.65">
             <small data-generation-family="event_v1"><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。较低值会让抽样更集中，较高值会保留更多不确定性。</small>
             <small data-generation-family="song_form_v1 song_form_v2 chart_stream_v1" hidden>控制配置解码随机性；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
+            <small data-generation-family="chart_composer_v1" hidden>同时控制候选拍位和动作槽位的采样。0 为贪心，大于 0 为温度采样；低温更容易复现高概率写法。提高温度增加差异，也可能增加错误，不能代替模型学习。</small>
           </label>
 <label class="field" data-generation-family="song_form_v1">规划类型指导强度
             <input id="formPlannerTypeStrength" type="number" min="0" max="3" step="0.1" value="1.0">

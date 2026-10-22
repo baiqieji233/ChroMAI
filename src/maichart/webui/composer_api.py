@@ -10,6 +10,7 @@ from typing import Any
 
 FAMILY = "chart_composer_v1"
 SCHEMA = "maichart-chart-composer-checkpoint-v2"
+GENERATION_CONTRACT = 'composer_generation_controls_v3'
 
 
 def _path(value: Any, label: str, *, exists: bool = False, directory: bool = False) -> Path:
@@ -144,27 +145,55 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         raise ValueError(f"Composer endpoint 只接受 model_family={FAMILY}")
     audio = _path(payload.get("audio"), "audio", exists=True)
     checkpoint = _path(payload.get("checkpoint"), "checkpoint", exists=True)
-    output = _path(payload.get("output"), "output")
-    output.parent.mkdir(parents=True, exist_ok=True)
+    requested_output = _path(payload.get("output") or 'webui_workspace/generated/maidata.txt', "output")
+    from maichart.composer.generation_settings import resolve_seed,resolve_condition
+    from maichart.generation.timeline import serialize_tempo_map
+    seed,seed_randomized=resolve_seed(payload.get('seed'))
+    level=_float(payload,'level',13.,minimum=1.)
+    condition_file=(_path(payload['condition_file'],'condition-file',exists=True)
+                    if payload.get('condition_file') else None)
+    condition,condition_source=resolve_condition(level,payload.get('condition'),condition_file)
+    tempo=serialize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') is not None else None
+    first=_float(payload,'first',0.)
+    temperature=_float(payload,'temperature',.8,minimum=0.)
+    max_events=_int(payload,'max_events',0,minimum=0)
+    device=_device(payload.get('device'))
+    bpm=None
+    if payload.get('bpm') not in (None,''):
+        bpm=_float(payload,'bpm',120.,minimum=0.)
+        if bpm<=0:raise ValueError('bpm 必须大于 0')
+    task = runtime._create_task("composer_generate")
+    output=requested_output.parent/task.task_id/requested_output.name
+    output.parent.mkdir(parents=True,exist_ok=True)
     args = ["-m", "maichart.composer.generate"]
     for flag, value in (("--audio", audio), ("--checkpoint", checkpoint), ("--output", output)):
         _arg(args, flag, value)
-    if payload.get("bpm") not in (None, ""):
-        _arg(args, "--bpm", _float(payload, "bpm", 120.0, minimum=0.0))
-    for key, flag, default, minimum in (("first", "--first", 0.0, None), ("level", "--level", 13.0, 0.0),
-                                        ("temperature", "--temperature", 0.8, 0.0), ("seed", "--seed", 0, 0),
-                                        ("max_events", "--max-events", 0, 0)):
-        value = _float(payload, key, default, minimum=minimum) if isinstance(default, float) else _int(payload, key, default, minimum=minimum)
-        _arg(args, flag, value)
-    _arg(args, "--device", _device(payload.get("device")))
-    condition = payload.get("condition_file")
-    if condition:
-        _arg(args, "--condition-file", _path(condition, "condition-file", exists=True))
+    if bpm is not None:_arg(args,'--bpm',bpm)
+    for flag,value in (('--first',first),('--level',condition.level),('--temperature',temperature),
+                       ('--seed',seed),('--max-events',max_events),('--device',device)):
+        _arg(args,flag,value)
+    if seed_randomized:args.append('--seed-randomized')
+    # Snapshot the effective condition so later UI/file edits cannot change
+    # an already queued task. Explicit file keys override the UI; sparse keys
+    # retain the UI values instead of silently resetting them to 0.5.
+    task_directory=output.parent
+    effective_file=task_directory/'condition.json'
+    effective_file.write_text(json.dumps(condition.to_dict(),ensure_ascii=False,allow_nan=False),encoding='utf-8')
+    _arg(args,'--condition-file',effective_file)
+    if tempo:
+        tempo_file=task_directory/'tempo.json'
+        tempo_file.write_text(json.dumps(tempo,ensure_ascii=False,allow_nan=False),encoding='utf-8')
+        _arg(args,'--tempo-map',tempo_file)
     sidecar = output.with_suffix(".composer.json")
-    task = runtime._create_task("composer_generate")
-    task.result.update({"family": FAMILY, "checkpoint": str(checkpoint), "output": str(output)})
+    task.result.update({"family": FAMILY, "checkpoint": str(checkpoint), "output": str(output),
+        'requested_output':str(requested_output),'seed':seed,'seed_randomized':seed_randomized,
+        'generation_contract':GENERATION_CONTRACT,'effective_settings':{
+            'temperature':temperature,'condition':condition.to_dict(),'condition_source':condition_source,
+            'seed':seed,'seed_randomized':seed_randomized,'bpm':bpm,'first':first,
+            'tempo_map':tempo,'max_events':max_events,'device':device}})
     runtime._run_subprocess_task(task, args, expected_epoch=None, result_paths=[output, sidecar])
-    handler._json_response({"task_id": task.task_id, "family": FAMILY})
+    handler._json_response({"task_id": task.task_id, "family": FAMILY,'seed':seed,
+        'seed_randomized':seed_randomized,'output':str(output)})
 
 
 def inspect(handler, payload: dict[str, Any]) -> None:

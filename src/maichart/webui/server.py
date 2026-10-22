@@ -219,6 +219,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_training_runtime": "selected_candidate_head_v1",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
+                    'composer_generation_contract':'composer_generation_controls_v3',
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
                     "playability_engine": engine_status(),
@@ -2103,6 +2104,14 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
                     timing_diagnostics=report.get('timing_diagnostics', {}))
             except (OSError, ValueError) as exc:
                 task.result['stream_report_error'] = str(exc)
+        return
+    if task.kind == 'composer_generate':
+        report_path=next((path for path in existing if path.name.endswith('.composer.json')),None)
+        if report_path is not None:
+            try:
+                task.result['composer_report']=json.loads(report_path.read_text(encoding='utf-8-sig'))
+            except (OSError,ValueError) as exc:
+                task.result['composer_report_error']=str(exc)
         return
     if task.kind == "acceptance":
         # Hand the report straight to the interface; the panel draws it.

@@ -1,6 +1,8 @@
 """Generate a structured event chart with chart_composer_v1."""
 from __future__ import annotations
-import argparse,json,random
+import argparse,hashlib,json,math
+from collections import Counter
+from itertools import groupby
 from fractions import Fraction
 from pathlib import Path
 import numpy as np
@@ -20,6 +22,7 @@ from maichart.stream.grounded_model import phrase_features
 from .checkpoint import load
 from .candidates import candidate_beats,candidate_features,composer_audio_nodes,interp_candidate_audio
 from .model import ChartComposer
+from .generation_settings import resolve_seed,resolve_condition
 from maichart.tempo_clock import TempoClock
 
 
@@ -27,9 +30,20 @@ def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--audio',required=True);p.add_argument('--checkpoint',required=True);p.add_argument('--output',required=True)
     p.add_argument('--bpm',type=float);p.add_argument('--first',type=float,default=0.);p.add_argument('--level',type=float,default=13.)
-    p.add_argument('--temperature',type=float,default=.8);p.add_argument('--seed',type=int,default=0);p.add_argument('--device',default='auto')
+    p.add_argument('--temperature',type=float,default=.8);p.add_argument('--seed',type=int,default=None,
+        help='omit for a new random seed; supply an integer for reproducibility');p.add_argument('--device',default='auto')
+    p.add_argument('--seed-randomized',action='store_true',help=argparse.SUPPRESS)
     p.add_argument('--max-events',type=int,default=0);p.add_argument('--condition-file');p.add_argument('--tempo-map')
     return p
+
+
+def _weight_fingerprint(state):
+    digest=hashlib.sha256()
+    for key,tensor in sorted(state.items()):
+        digest.update(key.encode());digest.update(str((tensor.dtype,tuple(tensor.shape))).encode())
+        values=tensor.detach().cpu().contiguous().reshape(-1).view(torch.uint8).numpy()
+        digest.update(memoryview(values))
+    return digest.hexdigest()
 
 
 def _device(value):return torch.device('cuda' if value=='auto' and torch.cuda.is_available() else ('cpu' if value=='auto' else value))
@@ -59,7 +73,7 @@ def _history_features(history, atoms, tempo, first, action_slots, *, clock=None,
     return rows
 
 
-def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), max_heads=2):
+def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), max_heads=2,diagnostics=None):
     selected=[]
     used_buttons=set(occupied)
     for slot,row in enumerate(logits):
@@ -80,10 +94,14 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
         if not allowed:
             break
         values=row.float().clone()
-        mask=torch.full_like(values,-1e4)
+        mask=torch.full_like(values,float('-inf'))
         mask[torch.tensor(allowed,device=values.device)]=values[torch.tensor(allowed,device=values.device)]
         if temperature > 0:
-            choice=int(torch.multinomial((mask/max(temperature,1e-6)).softmax(-1),1,generator=generator).item())
+            probabilities=(mask/max(temperature,1e-6)).softmax(-1)
+            if diagnostics is not None and slot==0:
+                diagnostics['action_top_probability_sum']+=probabilities.max().detach()
+                diagnostics['action_decisions']+=1
+            choice=int(torch.multinomial(probabilities,1,generator=generator).item())
         else:
             choice=int(mask.argmax().item())
         if choice == 0:
@@ -118,7 +136,16 @@ def _active_heads(state, beat, tempo, first, *, clock=None):
 
 @torch.inference_mode()
 def generate(args):
+    if not math.isfinite(args.temperature) or args.temperature<0:
+        raise ValueError('temperature 必须是非负有限值；0 为贪心解码')
+    seed,seed_randomized=resolve_seed(args.seed)
+    seed_randomized=seed_randomized or bool(getattr(args,'seed_randomized',False))
+    condition,condition_source=resolve_condition(args.level,condition_file=args.condition_file)
     device=_device(args.device);model,payload=load(args.checkpoint,device=device);model.eval()
+    weights_sha256=_weight_fingerprint(payload['model_state_dict'])
+    # The model owns copied parameters. Release file mappings now so Windows
+    # training can replace composer_last.pt while a generation is running.
+    payload.pop('model_state_dict',None)
     atoms=payload.get('atom_catalog') or []
     if not atoms: raise ValueError('Composer checkpoint has no atom catalog')
     audio=extract_rational_audio(args.audio,cache_dir=Path(args.checkpoint).parent/'audio_cache',evidence_profile='balanced_evidence_v1')
@@ -128,12 +155,18 @@ def generate(args):
     clock=TempoClock(song.tempo,song.first)
     values,times=composer_audio_nodes(song)
     bounds=generation_bounds(audio,trim_exact_silence=True);end_sec=bounds['effective_end_sec']
-    condition=GenerationCondition(level=args.level,radar=GENERATION_DEFAULTS,style=GENERATION_DEFAULTS)
-    if args.condition_file:condition=GenerationCondition.from_dict(json.loads(Path(args.condition_file).read_text(encoding='utf-8-sig')))
     points=[];history=[];previous=None;max_events=args.max_events or 100000
     action_index=IncrementalState(song.tempo,song.first)
     grammar=_NoteGrammar.from_atoms(atoms)
-    rng=torch.Generator(device=device).manual_seed(args.seed)
+    rng=torch.Generator(device=device).manual_seed(seed)
+    sampling={'pointer_top_probability_sum':torch.zeros((),device=device),
+              'action_top_probability_sum':torch.zeros((),device=device),'fallback_count':0,
+              'pointer_decisions':0,'action_decisions':0}
+    print('composer_generation_runtime '+json.dumps({'seed':seed,'seed_randomized':seed_randomized,
+        'temperature':args.temperature,'sampling_mode':'greedy' if args.temperature==0 else 'temperature',
+        'condition':condition.to_dict(),'condition_source':condition_source,
+        'checkpoint_epoch':payload.get('epoch'),'optimizer_steps':payload.get('optimizer_steps'),
+        'weights_sha256':weights_sha256}),flush=True)
     while len(points)<max_events:
         candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,audio_end_sec=end_sec,
             candidate_count=model.config.candidate_count,clock=clock)
@@ -169,13 +202,18 @@ def generate(args):
         logits=output['candidate_logits'][0].float()/max(args.temperature,1e-6)
         if not all(playable):
             logits=logits.masked_fill(cand_mask[0],float('-inf'))
+        if args.temperature>0:
+            sampling['pointer_top_probability_sum']+=logits.softmax(-1).max().detach()
+            sampling['pointer_decisions']+=1
         choice=int(torch.multinomial(logits.softmax(-1),1,generator=rng).item()) if args.temperature>0 else int(logits.argmax())
         beat=candidates[choice]
         decision=model.decode_candidate(output['candidate_context'],
             torch.tensor([choice],dtype=torch.long,device=device))
         occupied=occupied_by_candidate[choice]
-        selected=_sample_actions(decision['action_logits'][0],atoms,grammar,args.temperature,rng,occupied=occupied,max_heads=2)
+        selected=_sample_actions(decision['action_logits'][0],atoms,grammar,args.temperature,rng,
+            occupied=occupied,max_heads=2,diagnostics=sampling)
         if not selected:
+            sampling['fallback_count']+=1
             for atom in atoms:
                 heads={f'A{head}' if str(head).isdigit() else str(head)
                        for head in (grammar.heads.get(atom) or ())}
@@ -195,8 +233,21 @@ def generate(args):
     export_end=Fraction(int(np.ceil(float(max([p.beat for p in points],default=0))))+1)
     text,_=compile_event_points(points,tempo_changes=song.tempo,first=args.first,end_beat=export_end,level=str(condition.level))
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
+    configurations=Counter(point.note_text for point in points)
     report={'schema':'maichart-chart-composer-generation-v2','family':'chart_composer_v1','event_count':len(points),
-            'checkpoint':str(Path(args.checkpoint).resolve()),'device':str(device),'seed':args.seed,
+            'checkpoint':str(Path(args.checkpoint).resolve()),'device':str(device),'seed':seed,
+            'seed_randomized':seed_randomized,'temperature':args.temperature,
+            'condition':condition.to_dict(),'condition_source':condition_source,
+            'checkpoint_epoch':payload.get('epoch'),'optimizer_steps':payload.get('optimizer_steps'),
+            'weights_sha256':weights_sha256,'chart_sha256':hashlib.sha256(text.encode('utf-8')).hexdigest(),
+            'events_sha256':hashlib.sha256(json.dumps([(str(p.beat),p.note_text) for p in points],
+                ensure_ascii=False,separators=(',',':')).encode('utf-8')).hexdigest(),
+            'sampling_diagnostics':{'pointer_mean_top_probability':float(sampling['pointer_top_probability_sum'])/max(1,sampling['pointer_decisions']) if args.temperature>0 else None,
+                'action_mean_top_probability':float(sampling['action_top_probability_sum'])/max(1,sampling['action_decisions']) if args.temperature>0 else None,
+                'fallback_count':sampling['fallback_count']},
+            'configuration_observation':{'unique_texts':len(configurations),
+                'top_texts':configurations.most_common(5),
+                'max_consecutive_same_text':max((sum(1 for _ in group) for _,group in groupby(point.note_text for point in points)),default=0)},
             'audio_bounds':bounds,'structured_event_generation':True,'hard_constraints':'export_and_parser_only'}
     output.with_suffix('.composer.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     return report

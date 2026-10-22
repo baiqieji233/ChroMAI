@@ -1,14 +1,45 @@
 """Checkpoint contract for chart_composer_v1."""
 from __future__ import annotations
 from pathlib import Path
-import os, tempfile
+import copy,os,tempfile
 import torch
 from . import CHECKPOINT_SCHEMA,FAMILY,INPUT_CONTRACT,TRAINING_SEMANTICS
 from .model import ChartComposer,ComposerConfig
 
 
+def _cpu_snapshot(value,memo=None):
+    """Keep CUDA storage copying out of torch.save's storage serializer.
+
+    Bounded tensor copies avoid a single large storage.cpu() operation. The
+    training thread is paused during this snapshot, so parameters and optimizer
+    states represent the same update. CPU-only callers do not copy tensors.
+    """
+    memo={} if memo is None else memo
+    if torch.is_tensor(value):
+        if value.device.type=='cpu':return value
+        if id(value) in memo:return memo[id(value)]
+        source=value.detach().contiguous().reshape(-1)
+        result=torch.empty(value.shape,dtype=value.dtype,device='cpu')
+        target=result.reshape(-1)
+        chunk=max(1,(8*1024**2)//value.element_size())
+        for start in range(0,source.numel(),chunk):
+            target[start:start+chunk].copy_(source[start:start+chunk],non_blocking=False)
+        memo[id(value)]=result
+        return result
+    if isinstance(value,dict):
+        result=copy.copy(value)
+        for key,item in value.items():result[key]=_cpu_snapshot(item,memo)
+        return result
+    if isinstance(value,list):return [_cpu_snapshot(item,memo) for item in value]
+    if isinstance(value,tuple):return tuple(_cpu_snapshot(item,memo) for item in value)
+    return value
+
+
 def _write_payload(path, payload):
     path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    # Complete device transfers before opening the output file. A blocked
+    # transfer cannot leave a misleading partially written new checkpoint.
+    payload=_cpu_snapshot(payload)
     fd,name=tempfile.mkstemp(prefix=path.name+'.',suffix='.tmp',dir=path.parent);os.close(fd)
     temp=Path(name)
     try: torch.save(payload,temp);temp.replace(path)
