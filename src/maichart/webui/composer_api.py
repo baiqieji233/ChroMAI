@@ -84,6 +84,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     if mode not in {"fresh", "resume", "finetune"}:
         raise ValueError("训练模式只能是 fresh、resume 或 finetune")
     d_model = _int(payload, "d_model", 192, minimum=1)
+    dim_feedforward = _int(payload, "dim_feedforward", max(1, d_model * 3), minimum=1)
     nhead = _int(payload, "nhead", 6, minimum=1)
     if d_model % nhead:
         raise ValueError("d_model 必须能被 nhead 整除")
@@ -98,7 +99,8 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args, "--cache-dir", cache_dir)
     for key, flag, default, minimum in (
         ("epochs", "--epochs", 10, 1), ("batch_size", "--batch-size", 4, 1),
-        ("d_model", "--d-model", d_model, 1), ("layers", "--layers", 3, 1),
+        ("d_model", "--d-model", d_model, 1), ("dim_feedforward", "--dim-feedforward", dim_feedforward, 1),
+        ("layers", "--layers", 3, 1),
         ("nhead", "--nhead", nhead, 1), ("history_events", "--history-events", 128, 1),
         ("candidate_count", "--candidate-count", 64, 1), ("action_slots", "--action-slots", 8, 1),
         ("checkpoint_interval_steps", "--checkpoint-interval-steps", 500, 0),

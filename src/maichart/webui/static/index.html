@@ -366,6 +366,7 @@
 <div class="workflow-group-heading"><span class="step">COMPOSER</span><div><h3>事件候选与动作槽位参数</h3><p>独立的 chart_composer_v1 读取 Composer manifest，按候选拍位预测事件动作；与 event、song-form 和连续流 checkpoint 不兼容。</p></div></div>
 <div class="form-grid">
 <label class="field">模型宽度 d_model<input id="composerDModel" type="number" min="1" step="1" value="192"></label>
+<label class="field">前馈层宽度<input id="composerDimFeedforward" type="number" min="1" step="1" value="576"><small>建议约为 d_model 的 4 倍；384 维模型可设 1536。</small></label>
 <label class="field">Transformer 层数<input id="composerLayers" type="number" min="1" step="1" value="3"></label>
 <label class="field">注意力头数 nhead<input id="composerNhead" type="number" min="1" step="1" value="6"><small>必须整除 d_model。</small></label>
 <label class="field">历史事件数<input id="composerHistoryEvents" type="number" min="1" step="1" value="128"><small>模型可回看的最近事件数量。</small></label>

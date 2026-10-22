@@ -1873,6 +1873,7 @@ function chartComposerTrainingPayload(options = {}) {
     batch_size: Number(valueOrDefault("#batchSize", 4)),
     lr: Number(valueOrDefault("#learningRate", .0002)),
     d_model: Number(valueOrDefault("#composerDModel", 192)),
+    dim_feedforward: Number(valueOrDefault("#composerDimFeedforward", 576)),
     layers: Number(valueOrDefault("#composerLayers", 3)),
     nhead: Number(valueOrDefault("#composerNhead", 6)),
     history_events: Number(valueOrDefault("#composerHistoryEvents", 128)),
@@ -3211,6 +3212,7 @@ function applyChartComposerCheckpointConfig(data, mode) {
   const config = data?.model_config || {};
   const mapping = {
     "#composerDModel": config.d_model,
+    "#composerDimFeedforward": config.dim_feedforward,
     "#composerLayers": config.layers,
     "#composerNhead": config.nhead,
     "#composerHistoryEvents": config.history_events,
@@ -5038,7 +5040,7 @@ on("#modelFamily", "change", () => {
     if (!element("#checkpointDir")?.value || ["checkpoints/song_form_v2", "checkpoints/chart_composer_v1"].includes(element("#checkpointDir")?.value)) element("#checkpointDir").value = "checkpoints/chart_stream_v1";
   }
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_composer_v1") {
-    for (const [id, v] of Object.entries({composerDModel:192, composerLayers:3, composerNhead:6,
+    for (const [id, v] of Object.entries({composerDModel:192, composerDimFeedforward:576, composerLayers:3, composerNhead:6,
       composerHistoryEvents:128, composerCandidateCount:64, composerActionSlots:8,
       composerPrecision:"auto", composerSeed:0, composerLimitCharts:0, composerPrepareWorkers:4,
       composerAudioCacheGb:4, composerCacheDir:"cache/chart_composer_v1", composerCheckpointIntervalSteps:500})) {
