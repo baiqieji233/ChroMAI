@@ -142,6 +142,15 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args,'--dropout',dropout)
     _arg(args,'--history-anchor-policy',anchor_policy)
     grounded_settings = {'architecture_profile': architecture_profile,'dropout':dropout,'history_anchor_policy':anchor_policy}
+    cpu_default = (parent_args.get('cpu_threads') or 0) if mode == 'resume' else 0
+    cpu_raw = payload.get('cpu_threads', cpu_default)
+    if isinstance(cpu_raw, bool) or not isinstance(cpu_raw, (int, str)):
+        raise ValueError('cpu_threads 必须是整数')
+    cpu_threads = _int(payload, 'cpu_threads', cpu_default, minimum=0)
+    if cpu_threads > 256:
+        raise ValueError('cpu_threads cannot exceed 256')
+    _arg(args, '--cpu-threads', cpu_threads)
+    grounded_settings['cpu_threads'] = cpu_threads
     for key in COMPOSER_POLICY_FIELDS:
         value = resolve_composer_policy(key, payload.get(key, 'auto'), parent_config, resume=mode=='resume',architecture_profile=architecture_profile)
         grounded_settings[key] = value

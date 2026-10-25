@@ -210,6 +210,7 @@ function composerTrainingView(task) {
     ['动作词表（含 STOP）',show(number(runtime,'action_vocab_size'),0)],['候选召回率',percent(number(runtime,'candidate_recall'))],
     ['动作槽位（请求下限 / 数据需求 / 实际）',`${show(number(runtime,'action_slots_requested'),0)} / ${show(number(runtime,'max_required_action_slots'),0)} / ${show(number(runtime,'action_slots'),0)}`],
     ['设备 / 精度',`${runtime.device||'—'} / ${runtime.precision||'—'}`],
+    ['实际 CPU 算子线程',`${runtime.torch_cpu_threads??'—'}`],
     ['batch × 梯度累积',`${runtime.batch_size??'—'} × ${runtime.grad_accumulation??1}`]]],
     ['学习情况',[
       ['累计总 loss',show(number(metrics,'loss'),4)],['选位 loss',show(number(metrics,'pointer_loss'),4)],
@@ -2034,6 +2035,7 @@ function chartComposerTrainingPayload(options = {}) {
     dropout: Number(valueOrDefault('#composerDropout',.1)),
     prefetch_batches: Number(valueOrDefault('#composerPrefetchBatches',2)),
     sample_workers: Number(valueOrDefault('#composerSampleWorkers',4)),
+    cpu_threads: Number(valueOrDefault('#composerCpuThreads',0)),
     sample_locality: Number(valueOrDefault('#composerSampleLocality',4)),
     symbolic_dropout: Number(valueOrDefault('#composerSymbolicDropout',.15)),
     audio_pointer_weight: Number(valueOrDefault('#composerAudioPointerWeight',.15)),
@@ -2375,6 +2377,9 @@ function parseMeterMap(selector) {
 // ---------------------------------------------------------------------------
 function setTrainingModeDefaults() {
   const mode = currentTrainingMode();
+  if (mode === 'fresh' && currentModelFamily() === 'chart_composer_v1') {
+    const target = element('#composerCpuThreads'); if (target) target.value = '0';
+  }
   const learningRate = element("#learningRate");
   if (learningRate && learningRate.dataset.touched !== "1") {
     learningRate.value = mode === "finetune" ? "0.00002" : "0.0002";
@@ -3545,6 +3550,14 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
     if(target)target.disabled=mode==='resume';
   }
   const precision = element("#composerPrecision");
+  const cpuThreads = element('#composerCpuThreads');
+  if (cpuThreads) {
+    cpuThreads.disabled = false;
+    if (!preserveEditable) cpuThreads.value = String(mode === 'resume' ? (data?.args?.cpu_threads ?? 0) : 0);
+  }
+  const sampleWorkers = element('#composerSampleWorkers');
+  if (sampleWorkers && mode === 'resume' && !preserveEditable)
+    sampleWorkers.value = String(data?.args?.sample_workers ?? 4);
   if (precision && !preserveEditable && mode !== "fresh" && data?.args?.precision) precision.value = String(data.args.precision);
   for (const id of ['composerLensChunkSize','composerHistoryDropout','composerLedgerDropout',
     'composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
@@ -4162,7 +4175,7 @@ async function submitTrain(options = {}) {
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
-        || backend.training_capabilities?.composer_training_controls!=='causal_motif_controls_v3')
+        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v4')
       throw new Error('当前服务尚未加载 Composer 历史锚定等训练控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
@@ -5434,6 +5447,7 @@ on("#modelFamily", "change", () => {
       composerHistoryResidualBound:1,composerHistoryDropout:.3,composerLedgerDropout:.5,
       composerPlacementWeight:.15,composerPlannerWeight:.2,composerRecoveryInterval:100,
       composerRecoverySamples:2,composerRecoverySteps:2,composerRecoveryWeight:.1,
+      composerCpuThreads:0,
       composerPrecision:"auto", composerSeed:0, composerLimitCharts:0, composerPrepareWorkers:4,
       composerAudioCacheGb:4, composerCacheDir:"cache/chart_composer_v1", composerCheckpointIntervalSteps:500})) {
       const node = element("#" + id); if (node) node.value = String(v);

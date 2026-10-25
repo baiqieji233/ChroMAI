@@ -37,7 +37,7 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'recovery_interval': 100, 'recovery_samples': 2, 'recovery_steps': 2,
                 'recovery_weight': .1, 'action_state_policy':'committed_causal_v2',
                 'motif_memory_policy':'off','slide_factor_policy':'branch_joint_v2','motif_max_events':16,
-                'touch_layout_policy':'open'}
+                'touch_layout_policy':'open', 'cpu_threads': 0}
     assert task.result['effective_settings'] == expected
     for key, value in expected.items():
         flag = '--' + key.replace('_', '-')

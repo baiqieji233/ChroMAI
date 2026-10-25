@@ -490,6 +490,7 @@ class ComposerDataset(Dataset):
                 transition_weights[i] = 2.
         table = {
             'clock': clock,
+            'audio_duration': duration,
             'points': points,
             'state_index': _state if len(points)==len(_points) else SustainStateIndex(points, song.tempo, song.first),
             'atom_ids': torch.from_numpy(atom_ids),
@@ -742,7 +743,7 @@ class ComposerDataset(Dataset):
             if context is not None:
                 self._context_cache.move_to_end(context_key)
         if context is None:
-            context = AcousticContext(values, times, song.audio.duration_sec, validated_bank=True)
+            context = AcousticContext(values, times, table['audio_duration'], validated_bank=True)
             with self._feature_lock:
                 existing = self._context_cache.get(context_key)
                 if existing is None:
@@ -752,7 +753,7 @@ class ComposerDataset(Dataset):
                         self._context_cache.popitem(last=False)
                 else:
                     context = existing
-        duration = float(song.audio.duration_sec)
+        duration = table['audio_duration']
         # Uniform whole-song probes include silence and are independent of
         # event density; deterministic phases vary the centers across samples.
         uniform = (np.arange(16) + ((index % 31) + .5) / 31.) * duration / 16.
@@ -849,7 +850,7 @@ class ComposerDataset(Dataset):
         with self._feature_lock:context=self._context_cache.get(key)
         if context is None:
             values,times=self._song_features(song_index)
-            context=AcousticContext(values,times,song.audio.duration_sec,validated_bank=True)
+            context=AcousticContext(values,times,table['audio_duration'],validated_bank=True)
             with self._feature_lock:
                 self._context_cache[key]=context
                 while len(self._context_cache)>self._context_cache_limit:self._context_cache.popitem(last=False)
@@ -857,7 +858,7 @@ class ComposerDataset(Dataset):
         with lock:
             if not hasattr(context,'lens_bank'):
                 values,times=self._song_features(song_index)
-                context.lens_bank=LensBank(values,times,song.audio.duration_sec)
+                context.lens_bank=LensBank(values,times,table['audio_duration'])
             if 'planner_data' not in table:
                 table['planner_data']=PlanGrid(table['clock'],self._song_audio_ends[song_index],context,self.event_views[song_index])
                 table['placement_data']=PlacementTargets(table['points'],song.tempo,song.first,

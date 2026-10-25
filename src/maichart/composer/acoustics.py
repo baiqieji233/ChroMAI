@@ -136,10 +136,11 @@ class AcousticContext:
     def trailing(self, seconds):
         """Audio-only past 1s/4s views, aligned with the ledger's windows."""
         seconds = np.asarray(seconds, dtype=np.float64).reshape(-1)
-        end=self._integral(seconds)
+        integrals = self._integral(np.concatenate((seconds, seconds - 1., seconds - 4.)))
+        end, one, four = np.split(integrals, 3)
         return np.concatenate([
-            (end - self._integral(seconds - width)) / width
-            for width in (1., 4.)
+            (end - before) / width
+            for before, width in ((one, 1.), (four, 4.))
         ], axis=-1).astype(np.float32)
 
     def interval(self, committed_second, candidate_seconds):
@@ -152,12 +153,14 @@ class AcousticContext:
         seconds = np.asarray(candidate_seconds, dtype=np.float64).reshape(-1)
         start = np.clip(float(committed_second), 0., self.duration)
         stop = np.clip(seconds, start, self.duration)
-        area = self._integral(stop) - self._integral(np.array([start]))
+        integrals = self._integral(np.r_[stop, start])
+        area = integrals[:-1] - integrals[-1:]
         width = np.maximum(stop - start, 1e-6)
         mean = area[:, :14] / width[:, None]
         if len(self.times):
-            begin = np.array([np.interp(start, self.times, self.data[:, c]) for c in range(14, 26)])
-            end = np.column_stack([np.interp(stop, self.times, self.data[:, c]) for c in range(14, 26)])
+            endpoints = np.column_stack([
+                np.interp(np.r_[stop, start], self.times, self.data[:, c]) for c in range(14, 26)])
+            begin, end = endpoints[-1], endpoints[:-1]
             norm = np.linalg.norm(end, axis=-1) * np.linalg.norm(begin)
             novelty = np.where(norm > 1e-9, 1. - (end * begin).sum(-1) / np.maximum(norm, 1e-9), 0.)
         else:

@@ -208,6 +208,8 @@ def parser():
     p.add_argument('--prefetch-batches',type=int,choices=range(0,17),default=2)
     p.add_argument('--sample-workers',type=int,choices=range(1,9),default=4,
                    help='parallel CPU sample preparation threads; CUDA work stays on the main thread')
+    p.add_argument('--cpu-threads',type=int,default=0,
+                   help='PyTorch CPU threads, 0 keeps environment settings; CUDA runs can benchmark 2-4')
     p.add_argument('--sample-locality',type=int,choices=range(1,9),default=4,
                    help='songs interleaved per batch; fewer improves locality but increases same-song gradient correlation')
     p.add_argument('--log-interval',type=int,default=25)
@@ -355,8 +357,31 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
 def _nonfinite_tensors(mapping):
     items=[(key,value) for key,value in mapping.items() if torch.is_tensor(value)]
     if not items:return []
-    # One device-to-host synchronization, rather than one per tensor/layer.
-    flags=torch.stack([torch.isfinite(value).all() for _,value in items]).cpu().tolist()
+    # Infinity norms avoid the per-element isfinite temporaries and several
+    # small kernels per parameter. Unlike L2, this cannot overflow on large
+    # finite values. Keep the original predicate for unsupported inputs.
+    flags=[True]*len(items)
+    groups={}
+    pending={}
+    with torch.no_grad():
+        for index,(_,value) in enumerate(items):
+            if value.numel()==0:continue
+            if value.dtype in (torch.bool,torch.uint8,torch.int8,torch.int16,torch.int32,torch.int64):continue
+            if (value.device.type=='cuda' and value.layout==torch.strided
+                    and value.dtype in (torch.float16,torch.bfloat16,torch.float32,torch.float64)):
+                groups.setdefault((value.device,value.dtype),[]).append((index,value))
+            else:
+                pending.setdefault(value.device,[]).append((index,torch.isfinite(value).all()))
+        for (device,_),group in groups.items():
+            try:
+                norms=torch._foreach_norm([value for _,value in group],float('inf'))
+                checks=torch.isfinite(torch.stack(norms)).unbind()
+            except (RuntimeError,NotImplementedError):
+                checks=[torch.isfinite(value).all() for _,value in group]
+            pending.setdefault(device,[]).extend((index,check) for (index,_),check in zip(group,checks))
+        for checks in pending.values():
+            values=torch.stack([check for _,check in checks]).cpu().tolist()
+            for (index,_),finite in zip(checks,values):flags[index]=finite
     return [key for (key,_),finite in zip(items,flags) if not finite]
 
 
@@ -465,6 +490,7 @@ def main(argv=None):
 def _train(args,explicit_flags):
     import sys
     device=_device(args.device);precision=_precision(args.precision,device)
+    if not 0<=args.cpu_threads<=256:raise ValueError('cpu_threads must be in [0,256]')
     if args.rebatch_resume and (not args.resume or args.max_steps):
         raise ValueError('--rebatch-resume requires --resume and full epochs (max_steps=0)')
     if args.epochs<1 or args.batch_size<1 or args.grad_accumulation<1 or args.log_interval<1 or args.max_steps<0 or args.profile_steps<0:
@@ -508,6 +534,8 @@ def _train(args,explicit_flags):
                 setattr(args,key,int(getattr(model.config,key)))
         if args.resume:
             args.architecture_profile=model.config.architecture_profile
+            if '--cpu-threads' not in explicit_flags:
+                args.cpu_threads=int((old.get('args') or {}).get('cpu_threads',0))
             # Resume is an exact continuation: restore the saved contract
             # before dataset construction so CLI defaults do not conflict.
             for key in ('sample_locality','symbolic_dropout','audio_pointer_weight','placement_weight','planner_weight',
@@ -537,6 +565,8 @@ def _train(args,explicit_flags):
         raise ValueError('Resume inherits touch_layout_policy; use explicit finetune')
     from .model import validate_supported_context_policies
     validate_supported_context_policies(vars(args))
+    if not 0<=args.cpu_threads<=256:raise ValueError('cpu_threads must be in [0,256]')
+    if args.cpu_threads:torch.set_num_threads(args.cpu_threads)
     dataset=ComposerDataset(args.manifest,cache_dir=args.cache_dir,candidate_count=args.candidate_count,
         history_events=args.history_events,action_slots=args.action_slots,preparation_workers=args.prepare_workers,
         audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,seed=args.seed,architecture_profile=args.architecture_profile,

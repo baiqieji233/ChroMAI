@@ -400,6 +400,7 @@
 <label class="field">checkpoint 保存间隔（更新步）<input id="composerCheckpointIntervalSteps" type="number" min="0" step="50" value="500"></label>
 <label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>共享内存的单个后台线程提前准备批次，0 关闭；默认 2。</small></label>
 <label class="field">样本准备线程<input id="composerSampleWorkers" type="number" min="1" max="8" value="4"><small>并行准备音频样本；建议 4，内存紧张时降到 2。</small></label>
+<label class="field" title="小数组 GPU 供数可尝试 2–4；0 自动，保留环境或 PyTorch 设置。">CPU 算子线程<input id="composerCpuThreads" type="number" min="0" max="256" step="1" value="0"><small>0 保留环境 / PyTorch 设置；小数组 GPU 供数可尝试 2–4。续训时仍可调整。</small></label>
 <label class="field checkbox-field"><input id="composerRebatchResume" type="checkbox"><span>允许轮中重分 batch 续训</span><small>仅 resume 有效。先检查检查点，再调整单批和梯度累积，保持乘积不变（如96×4→64×6）；max_steps需为0。保留已保存样本顺序，不从头重训。</small></label>
 <label class="field">样本局部性<input id="composerSampleLocality" type="number" min="1" max="8" value="4"><small>每批交错的歌曲数；建议 4。1 提高缓存复用，也会增加同曲样本的梯度相关性。</small></label>
 <label class="field">历史模态遮挡概率<input id="composerSymbolicDropout" type="number" min="0" max="0.5" step="0.05" value="0.15"><small>统一隐藏模型读取的谱面历史、动作状态与 ledger，保留音频和真实监督；建议 0.15。</small></label>

@@ -224,7 +224,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "multi_dataset_training": True,
                                               "composer_training": True,
                                               "composer_training_runtime": "music_context_shared_slots_v2",
-                                              "composer_training_controls": "causal_motif_controls_v3",
+                                              "composer_training_controls": "causal_motif_runtime_controls_v4",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
             'composer_generation_contract':'composer_generation_controls_v10_touch_layout',
