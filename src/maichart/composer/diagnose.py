@@ -1,0 +1,268 @@
+"""Small read-only Composer interventions; no training or quality gates.
+
+python -m maichart.composer.diagnose --checkpoint ... --manifest ... --output ...
+"""
+from __future__ import annotations
+
+import argparse
+from fractions import Fraction
+import json
+from pathlib import Path
+
+import numpy as np
+import torch
+
+from .checkpoint import load
+from .data import ComposerDataset, collate_composer
+from .candidates import candidate_beats, candidate_features, interp_candidate_audio
+from .workload import prefix_ledger
+from .events import head_timing_features
+from .model import MUSIC_PROFILES,WORKLOAD_PROFILES,GROUNDED_PROFILE
+from .acoustics import AcousticContext
+
+
+def _js(left, right):
+    left=left.float().softmax(-1);right=right.float().softmax(-1)
+    mean=(left+right)*.5
+    return float((.5*(left*(left.clamp_min(1e-12).log()-mean.clamp_min(1e-12).log())).sum(-1)
+                  +.5*(right*(right.clamp_min(1e-12).log()-mean.clamp_min(1e-12).log())).sum(-1)).mean())
+
+
+def phase_recovery(previous, target, *, tempo, first, end_sec, count, policy, clock):
+    """Exact bounded geometry check; it does not certify learned recovery."""
+    values=candidate_beats(previous,tempo=tempo,first=first,audio_end_sec=end_sec,
+                          candidate_count=count,policy=policy,clock=clock)
+    if target in values: return 1
+    for value in values:
+        if value>=target: break
+        if target in candidate_beats(value,tempo=tempo,first=first,audio_end_sec=end_sec,
+                                     candidate_count=count,policy=policy,clock=clock):
+            return 2
+    return None
+
+
+def _inputs(batch, device):
+    mapping={'candidate_features':'candidate_features','history':'history','condition':'condition',
+        'action_state':'action_state','history_features':'history_features',
+        'candidate_mask':'candidate_padding_mask','history_padding_mask':'history_padding_mask',
+        'workload_audio':'workload_audio','ledger':'ledger','interval_audio':'interval_audio',
+        'trailing_audio':'trailing_audio','head_timing':'head_timing',
+        **{k:k for k in ('audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix')}}
+    return {key:batch[source].to(device) for key,source in mapping.items() if source in batch}
+
+
+@torch.inference_mode()
+def interventions(model, inputs):
+    """Hold audio/history/candidates fixed for workload interventions.
+
+    Oracle is a separate optional caller diagnostic, never a production input.
+    Layout JS is evaluated at the SAME base-selected candidate in every case.
+    """
+    model.eval()
+    base=model(**inputs,decode_actions=False)
+    choice=base['candidate_logits'].argmax(-1)
+    baseline=model.decode_candidate(base['candidate_context'],choice)['action_logits'][...,0,:]
+    workload=base.get('workload')
+    variants={}
+    valid=(~inputs['candidate_mask'] if 'candidate_mask' in inputs else
+           torch.ones(inputs['candidate_features'].shape[:2],dtype=torch.bool,device=choice.device))
+    reverse=torch.arange(valid.size(1),device=valid.device)[None].expand_as(valid).clone()
+    for row in range(valid.size(0)):
+        indices=torch.where(valid[row])[0]
+        reverse[row,indices]=indices.flip(0)
+    def reversed_candidates(tensor):
+        result=tensor.clone()
+        shape=(*reverse.shape,*([1]*(tensor.ndim-2)))
+        result[:,:valid.size(1)]=tensor[:,:valid.size(1)].gather(1,reverse.reshape(shape).expand(-1,-1,*tensor.shape[2:]))
+        return result
+    reversed_features=inputs['candidate_features'].clone()
+    # Columns 102:120 contain progress/tempo/meter, not acoustic evidence.
+    # Keep them and all 21 explicit timing columns fixed during this probe.
+    acoustic_columns=min(102,model.config.audio_dim)
+    reversed_features[...,:acoustic_columns]=reversed_candidates(reversed_features[...,:acoustic_columns])
+    acoustic_change={'candidate_features':reversed_features}
+    for key in ('workload_audio','interval_audio','trailing_audio','audio_lens','audio_lens_mask'):
+        if key in inputs:acoustic_change[key]=reversed_candidates(inputs[key])
+    variants['candidate_acoustics_reordered_fixed_timing_history']=acoustic_change
+    if workload is not None:
+        # Workload rows are [candidate positions, uniform whole-song probes].
+        # Keep the uniform branch fixed: this probe measures sensitivity to
+        # candidate-local workload evidence, rather than changing sampling
+        # coverage at the same time. Padded candidate rows stay untouched.
+        candidate_count=inputs['candidate_features'].size(1)
+        candidate_workload=workload[:, :candidate_count]
+        valid_candidate=(~inputs['candidate_mask'] if 'candidate_mask' in inputs else
+                         torch.ones(candidate_workload.shape[:2],dtype=torch.bool,
+                                    device=candidate_workload.device))
+        swapped=workload.clone()
+        valid_count=valid_candidate.sum(1).clamp_min(1)
+        for row in range(candidate_workload.size(0)):
+            indices=torch.where(valid_candidate[row])[0]
+            if indices.numel()>1:
+                swapped[row, indices]=candidate_workload[row, indices.flip(0)]
+        variants['workload_swapped']={'workload_override':swapped}
+        constant=workload.clone()
+        candidate_mean=(candidate_workload*valid_candidate[...,None]).sum(1)/valid_count[...,None]
+        constant_candidates=torch.where(valid_candidate[...,None],candidate_mean[:,None],candidate_workload)
+        constant[:, :candidate_count]=constant_candidates
+        variants['workload_constant']={'workload_override':constant}
+    if 'ledger' in inputs:
+        variants['ledger_zero']={'ledger':torch.zeros_like(inputs['ledger'])}
+    if model.config.architecture_profile in MUSIC_PROFILES:
+        variants['symbolic_unread']={'symbolic_keep':torch.zeros(inputs['candidate_features'].size(0),1,
+                                                                   device=inputs['candidate_features'].device)}
+    result={}
+    gaps=inputs['candidate_features'][...,model.config.audio_dim+1].float()
+    expected=(base['candidate_logits'].float().softmax(-1)*gaps).sum(-1)
+    for name,change in variants.items():
+        alternate=model(**{**inputs,**change},decode_actions=False)
+        action=model.decode_candidate(alternate['candidate_context'],choice)['action_logits'][...,0,:]
+        result[name]={'pointer_js':_js(base['candidate_logits'],alternate['candidate_logits']),
+            'first_atom_js_at_fixed_candidate':_js(baseline,action),
+            'expected_gap_change_sec':float(((alternate['candidate_logits'].float().softmax(-1)*gaps).sum(-1)-expected).mean())}
+    return result
+
+
+def workload_coverage(dataset):
+    """Per-second weights of the uniform probe branch, including masked gaps.
+
+    This audits training coverage, not whether the curve prediction is good.
+    Candidate-probe weights in old checkpoints are a separate branch.
+    """
+    result=[]
+    for song_index in sorted({sample.song_index for sample in dataset.samples}):
+        song=dataset.base.songs[song_index][0];duration=float(song.audio.duration_sec)
+        table=dataset._song_table(song_index)
+        count=max(1,int(np.ceil(duration)));raw=np.zeros(count);weighted=np.zeros(count)
+        for index,sample in enumerate(dataset.samples):
+            if sample.song_index!=song_index:continue
+            probes=(np.arange(16)+((index%31)+.5)/31.)*duration/16.
+            valid=table['workload_query'].weight_at(probes)
+            bins=np.minimum(probes.astype(int),count-1)
+            raw+=np.bincount(bins,minlength=count)
+            share=1. if dataset.architecture_profile in MUSIC_PROFILES else .5
+            weighted+=np.bincount(bins,weights=valid.astype(float)*sample.weight*share/16.,minlength=count)
+        result.append({'song_index':song_index,'seconds_bin_width':1.,'raw_uniform_counts':raw.tolist(),
+            'effective_uniform_weights':weighted.tolist(),'zero_weight_seconds_bins':np.flatnonzero(weighted==0).tolist(),
+            'excluded_regions_are_unknown':True,'candidate_probe_branch_included':False})
+    return result
+
+
+def _omit_last_prefix(dataset, sample, item, id_map):
+    """Remove one complete trailing event and recompute all causal inputs.
+
+    There is no suffix CE here: the authored next event is not assumed to be
+    the uniquely correct continuation of this altered prefix.
+    """
+    ev=sample.event_index-1
+    if ev<0:return None
+    song=dataset.base.songs[sample.song_index][0]
+    table=dataset._song_table(sample.song_index);clock=table['clock']
+    points=table['points']
+    previous=points[ev-1].beat if ev else None
+    candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,
+        audio_end_sec=dataset._song_audio_ends[sample.song_index],candidate_count=dataset.candidate_count,
+        policy=dataset.candidate_policy,clock=clock)
+    if not candidates:return None
+    actual=len(candidates);candidates+= [candidates[-1]]*(dataset.candidate_count-actual)
+    seconds=np.asarray([clock.at(x) for x in candidates])
+    values,times=dataset._song_features(sample.song_index)
+    key=dataset._song_feature_key(sample.song_index)
+    with dataset._feature_lock:
+        context=dataset._context_cache.get(key)
+    if context is None:
+        context=AcousticContext(values,times,song.audio.duration_sec,validated_bank=True)
+        with dataset._feature_lock:
+            dataset._context_cache[key]=context
+            dataset._context_cache.move_to_end(key)
+            while len(dataset._context_cache)>dataset._context_cache_limit:
+                dataset._context_cache.popitem(last=False)
+    start=max(0,ev-dataset.history_events)
+    result=dict(item,
+        candidate_features=torch.from_numpy(np.concatenate((interp_candidate_audio(values,times,seconds),
+            candidate_features(candidates,previous,song.tempo,song.first,clock=clock,candidate_seconds=seconds,rich_time=True)),axis=-1)),
+        candidate_mask=torch.from_numpy((np.arange(dataset.candidate_count)>=actual)
+            | (seconds < 0.) | (seconds >= dataset._song_audio_ends[sample.song_index])),
+        history=torch.from_numpy(id_map[table['atom_ids'][start:ev].numpy()]),
+        history_features=table['history_features'][start:ev],
+        action_state=dataset._action_state(sample.song_index,ev,table),
+        workload_audio=torch.from_numpy(context.at(seconds)),
+        ledger=torch.from_numpy(prefix_ledger(table['point_seconds'],table['head_prefix'],seconds,committed_count=ev)))
+    if dataset.architecture_profile in MUSIC_PROFILES:
+        result.update(interval_audio=torch.from_numpy(context.interval(float(clock.at(previous)) if previous is not None else 0.,seconds)),
+                      trailing_audio=torch.from_numpy(context.trailing(seconds)))
+    if ev<len(table['points']):
+        result['head_timing']=torch.from_numpy(head_timing_features(table['last_head_seconds'][ev],
+            table['last_head_beats'][ev],seconds,[float(x) for x in candidates]))
+    if dataset.architecture_profile==GROUNDED_PROFILE:
+        result.update(dataset._grounded_features(sample.song_index,seconds,seconds,table=table))
+    return result,seconds
+
+
+@torch.inference_mode()
+def diagnose(args):
+    device=torch.device('cuda' if args.device=='auto' and torch.cuda.is_available() else 'cpu' if args.device=='auto' else args.device)
+    model,payload=load(args.checkpoint,device=device);model.eval()
+    if model.config.architecture_profile not in WORKLOAD_PROFILES:
+        raise ValueError('These interventions require a Composer workload checkpoint')
+    dataset=ComposerDataset(args.manifest,cache_dir=args.cache_dir,limit_charts=args.limit_charts,
+        candidate_count=model.config.candidate_count,history_events=model.config.history_events,
+        action_slots=model.config.action_slots,architecture_profile=model.config.architecture_profile,
+        preparation_workers=1,audio_cache_gb=.25)
+    if dataset.action_slots != model.config.action_slots:
+        raise ValueError('Diagnostic dataset exceeds checkpoint action_slots; finetune an expanded model first')
+    catalog={text:i+1 for i,text in enumerate(payload['atom_catalog'])}
+    id_map=np.asarray([0]+[catalog.get(text,0) for text in dataset.codec_atoms],dtype=np.int64)
+    report={'schema':'composer_interventions_v1','checkpoint':str(args.checkpoint),'samples':[],
+        'scope':'fixed-state sensitivity, one-event omission and bounded geometric reachability; not a musical quality certification',
+        'workload_probe_scope':'candidate valid rows only; uniform whole-song rows fixed',
+        'candidate_misses':dataset.candidate_miss_categories}
+    report['workload_coverage']=workload_coverage(dataset)
+    selected=np.unique(np.linspace(0,len(dataset)-1,min(args.samples,len(dataset)),dtype=int))
+    for index in selected:
+        sample=dataset.samples[int(index)];item=dataset[int(index)]
+        if (id_map[item['history'].numpy()]==0).sum() > (item['history'].numpy()==0).sum(): continue
+        item['history']=torch.from_numpy(id_map[item['history'].numpy()])
+        batch=collate_composer([item]);inputs=_inputs(batch,device)
+        if not model.config.head_timing_dim:inputs.pop('head_timing',None)
+        result=interventions(model,inputs)
+        table=dataset._song_table(sample.song_index);song=dataset.base.songs[sample.song_index][0]
+        previous=sample.previous or Fraction(0)
+        recovery=[]
+        for offset in (Fraction(1,48),Fraction(1,12),Fraction(1,4)):
+            shifted=previous+offset
+            if shifted>=sample.target:continue
+            recovery.append({'previous':str(shifted),'target':str(sample.target),
+                'steps_within_two':phase_recovery(shifted,sample.target,tempo=song.tempo,first=song.first,
+                    end_sec=dataset._song_audio_ends[sample.song_index],count=dataset.candidate_count,
+                    policy=dataset.candidate_policy,clock=table['clock'])})
+        omitted=_omit_last_prefix(dataset,sample,item,id_map)
+        if omitted is not None:
+            changed,seconds=omitted
+            changed_inputs=_inputs(collate_composer([changed]),device)
+            if not model.config.head_timing_dim:changed_inputs.pop('head_timing',None)
+            probe=model(**changed_inputs,decode_actions=False)
+            probability=probe['candidate_logits'].float().softmax(-1)[0].cpu().numpy()
+            result['omit_last_committed_event']={'expected_next_second':float(probability@seconds),
+                'authored_next_second_reference_only':float(table['clock'].at(sample.target)),
+                'supervised_recovery_loss':None}
+        report['samples'].append({'song_index':sample.song_index,'event_index':sample.event_index,
+                                  'interventions':result,'phase_reachability':recovery})
+    output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
+    output.write_text(json.dumps(report,ensure_ascii=False,indent=2,allow_nan=False),encoding='utf-8')
+    return report
+
+
+def main(argv=None):
+    parser=argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--checkpoint',required=True);parser.add_argument('--manifest',required=True)
+    parser.add_argument('--output',required=True);parser.add_argument('--cache-dir',default='cache/chart_composer_v1')
+    parser.add_argument('--limit-charts',type=int,default=2);parser.add_argument('--samples',type=int,default=8)
+    parser.add_argument('--device',choices=('auto','cpu','cuda'),default='auto')
+    args=parser.parse_args(argv)
+    if args.samples<1 or args.limit_charts<1:parser.error('samples and limit-charts must be positive')
+    result=diagnose(args);print(json.dumps({'output':args.output,'samples':len(result['samples'])}),flush=True)
+    return 0
+
+
+if __name__=='__main__':raise SystemExit(main())

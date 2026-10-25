@@ -11,8 +11,8 @@ from maichart.composer.train import RemainingBatches,_cuda_execution
 def test_capacity_reserves_commit_and_physical_memory():
     assert cache_capacity(3*GIB,0,None)==3*GIB
     assert cache_capacity(3*GIB,0,{'free_commit':9*GIB,'free_physical':8*GIB})==3*GIB
-    assert cache_capacity(3*GIB,2*GIB,{'free_commit':3*GIB,'free_physical':8*GIB})==GIB
-    assert cache_capacity(3*GIB,2*GIB,{'free_commit':9*GIB,'free_physical':GIB})==GIB
+    assert cache_capacity(3*GIB,2*GIB,{'free_commit':3*GIB,'free_physical':8*GIB})==0
+    assert cache_capacity(3*GIB,2*GIB,{'free_commit':9*GIB,'free_physical':GIB})==0
     assert cache_capacity(3*GIB,GIB,{'free_commit':GIB,'free_physical':GIB})==0
 
 
@@ -24,6 +24,9 @@ def test_headroom_evicts_lru_without_changing_arrays(monkeypatch):
     arrays=(np.arange(8,dtype=np.float32),np.arange(8,dtype=np.float64))
     dataset._feature_cache=OrderedDict([(1,arrays)])
     dataset._feature_cache_bytes=sum(a.nbytes for a in arrays)
+    dataset._feature_lock=__import__('threading').RLock()
+    dataset._mapped_bank_cache=OrderedDict()
+    dataset._mapped_bank_cache_limit=768
     monkeypatch.setattr(data,'host_memory',lambda:{'free_commit':0,'free_physical':0})
     dataset._check_cache_headroom()
     assert dataset._feature_cache_bytes==0
@@ -38,6 +41,17 @@ def test_batch_limit_does_not_prefetch_past_training_stop():
     assert len(RemainingBatches(batches,2,5))==3
     assert list(RemainingBatches(batches,2))==list(range(2,10))
     assert len(RemainingBatches(batches,5,2))==0
+
+
+def test_song_local_batch_sampler_preserves_all_samples():
+    from types import SimpleNamespace
+    from maichart.composer.train import SongLocalBatchSampler
+    dataset=SimpleNamespace(samples=[SimpleNamespace(song_index=i//5) for i in range(23)])
+    sampler=SongLocalBatchSampler(dataset,4,torch.Generator().manual_seed(3),locality=3)
+    batches=list(sampler)
+    flat=[index for batch in batches for index in batch]
+    assert sorted(flat)==list(range(23))
+    assert len(batches)==6
 
 
 def test_cuda_failure_reports_host_memory_without_retry(monkeypatch,capsys):

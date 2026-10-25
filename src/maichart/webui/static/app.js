@@ -203,15 +203,28 @@ function composerTrainingView(task) {
   if (speed!==null) status+=` · ${show(speed)} 事件/秒`;
   if (eta!==null) status+=` · 本轮 ETA ${seconds(eta)}`;
   const timing=metrics.timing||{},cache=metrics.cache||{},memory=metrics.cuda_memory||{};
+  const gpu=metrics.gpu_timing||{},profiled=number(gpu,'samples')||0;
+  const gpuMean=key=>profiled?show(number(gpu,key)/profiled,2)+' ms':'未计时';
   const cards=[['模型与数据',[
     ['有效训练事件',show(number(runtime,'samples'),0)],['模型参数',`${show(number(runtime,'parameters')===null?null:Number(runtime.parameters)/1e6)} M`],
     ['动作词表（含 STOP）',show(number(runtime,'action_vocab_size'),0)],['候选召回率',percent(number(runtime,'candidate_recall'))],
+    ['动作槽位（请求下限 / 数据需求 / 实际）',`${show(number(runtime,'action_slots_requested'),0)} / ${show(number(runtime,'max_required_action_slots'),0)} / ${show(number(runtime,'action_slots'),0)}`],
     ['设备 / 精度',`${runtime.device||'—'} / ${runtime.precision||'—'}`],
     ['batch × 梯度累积',`${runtime.batch_size??'—'} × ${runtime.grad_accumulation??1}`]]],
     ['学习情况',[
-      ['总 loss',show(number(metrics,'loss'),4)],['选位 loss',show(number(metrics,'pointer_loss'),4)],
+      ['累计总 loss',show(number(metrics,'loss'),4)],['选位 loss',show(number(metrics,'pointer_loss'),4)],
       ['动作 loss',show(number(metrics,'action_loss'),4)],['结束 loss',show(number(metrics,'eos_loss'),4)],
-      ['未来意图 loss',show(number(metrics,'future_loss'),4)],['候选选位准确率',percent(number(metrics,'pointer_accuracy'))]]],
+      ['未来意图 loss',show(number(metrics,'future_loss'),4)],['候选选位准确率',percent(number(metrics,'pointer_accuracy'))],
+      ['负荷曲线监督 loss',show(number(metrics,'workload_loss'),4)],
+      ['负荷变化斜率 loss',show(number(metrics,'curve_slope_loss'),4)],
+      ['独立音频选位 loss',show(number(metrics,'audio_pointer_loss'),4)],
+      ['独立音频动作 loss',show(number(metrics,'audio_action_loss'),4)],
+      ['短窗占用监督 loss',show(number(metrics,'placement_loss'),4)],
+      ['四拍块规划 loss',show(number(metrics,'planner_loss'),4)],
+      ['最近恢复 loss（含权重）',show(number(result.composer_recovery||{},'loss'),4)],
+      ['最近恢复接受 / 尝试',`${result.composer_recovery?.outcomes?.accepted??'—'} / ${result.composer_recovery?Object.values(result.composer_recovery.outcomes||{}).reduce((a,b)=>a+Number(b),0):'—'}`],
+      ['历史窗口负荷 loss',show(number(metrics,'trailing_workload_loss'),4)],
+      ['密度 log1p 平均绝对误差',show(number(metrics,'workload_rate_mae'),4)]]],
     ['速度与等待',[
       ['batch / 秒',show(number(metrics,'batches_per_sec'))],['事件 / 秒',show(speed)],['本轮剩余',seconds(eta)],
       ['等待数据（累计）',seconds(number(timing,'data_sec'))],['传输提交（累计）',seconds(number(timing,'transfer_sec'))],
@@ -225,12 +238,54 @@ function composerTrainingView(task) {
       ['映射库写入失败',show(number(cache,'bank_write_errors'),0)],
       ['逻辑特征 MiB / 有效预算',`${show(number(cache,'bytes')===null?null:Number(cache.bytes)/1024**2,0)} / ${show((number(cache,'effective_budget_bytes')??number(cache,'budget_bytes'))===null?null:Number(cache.effective_budget_bytes??cache.budget_bytes)/1024**2,0)}`],
       ['已分配 / 已保留 GiB',`${show(number(memory,'allocated_gib'))} / ${show(number(memory,'reserved_gib'))}`],
-      ['峰值已分配 GiB',show(number(memory,'peak_allocated_gib'))]]]];
+      ['峰值已分配 GiB',show(number(memory,'peak_allocated_gib'))]]],
+    ['CUDA 分段计时',[
+      ['计时 batch',show(profiled,0)],['传输均值',gpuMean('h2d_ms')],
+      ['前向均值',gpuMean('forward_ms')],['反向均值',gpuMean('backward_ms')],['更新均值',gpuMean('update_ms')]]]];
   const preparation=result.composer_preparation||{};
+  const recent=composerRecentMetrics(result.composer_metric_history||[],metrics);
+  if (recent) cards.splice(2,0,[`最近 ${recent.batches} 个有效 batch`,[
+    ['窗口总 loss',show(recent.values.loss,4)],['窗口选位 loss',show(recent.values.pointer_loss,4)],
+    ['窗口动作 loss',show(recent.values.action_loss,4)],['窗口音频动作 loss',show(recent.values.audio_action_loss,4)]]]);
+  const effective=result.effective_settings||runtime;
+  if (effective.architecture_profile) {
+    cards.push(['音频锚定训练参数',[
+      ['架构',effective.architecture_profile],['短窗音频宽度 / 分块',`${effective.lens_width??'—'} / ${effective.lens_chunk_size??'—'}`],
+      ['普通 dropout',`${runtime.dropout??effective.dropout??'—'}`],
+      ['轮中重分 batch',runtime.rebatch_resume===undefined?(result.rebatch_resume_requested===undefined?'—':result.rebatch_resume_requested?'已请求，待运行确认':'未请求'):(runtime.rebatch_resume?'开启':'关闭')],
+      ['历史残差上限',`${effective.history_residual_bound??'—'}`],
+      ['历史 / 台账遮挡',`${effective.history_dropout??'—'} / ${effective.ledger_dropout??'—'}`],
+      ['占用 / 规划监督权重',`${effective.placement_weight??'—'} / ${effective.planner_weight??'—'}`],
+      ['恢复间隔 / 样本 / 步数',`${effective.recovery_interval??'—'} / ${effective.recovery_samples??'—'} / ${effective.recovery_steps??'—'}`],
+      ['恢复监督权重',`${effective.recovery_weight??'—'}`],
+      ['参数来源',result.settings_policy==='resume_inherited'?'继承 checkpoint':'当前请求']]]);
+  }
   if (result.composer_stage==='preparation') {
     status+=` · ${preparation.completed??preparation.completed_songs??0}/${preparation.total??preparation.total_songs??'?'} · 已收集 ${preparation.samples??preparation.charts??0} 项`;
   }
-  return {status,cards,note:'loss 与准确率为本轮已消费 batch 的累计均值；计时为主机累计计时，异步 CUDA 可把等待计入后续步骤，不能当作 GPU 内核耗时。后台 CPU 细分与等待时间有重叠，不能相加；映射库文件字节不是实际 RAM 占用。'};
+  return {status,cards,note:'学习情况中的 loss 与准确率为本轮、本次运行的累计均值；最近窗口单独列出，歌曲切换时可以波动。计时为主机累计计时，异步 CUDA 可把等待计入后续步骤，不能当作 GPU 内核耗时。后台 CPU 细分与等待时间有重叠，不能相加；映射库文件字节不是实际 RAM 占用。'};
+}
+
+function composerRecentMetrics(history,current,width=250) {
+  const count=trainingMetricNumber(current,'metric_batches');
+  if (count===null||count<=0) return null;
+  let base=null,baseCount=0;
+  if (count>width) {
+    for (const row of history) {
+      const n=trainingMetricNumber(row,'metric_batches');
+      if (n===null||n<0||n>=count||Number(row.epoch)!==Number(current.epoch)
+          ||Number(row.resume_skipped_batches??0)!==Number(current.resume_skipped_batches??0)) continue;
+      if (base===null||Math.abs(n-(count-width))<Math.abs(baseCount-(count-width))) {base=row;baseCount=n;}
+    }
+    if (base===null) return null;
+  }
+  const batches=count-baseCount,values={};
+  for (const key of ['loss','pointer_loss','action_loss','audio_action_loss']) {
+    const now=trainingMetricNumber(current,key),before=base?trainingMetricNumber(base,key):0;
+    const value=now===null||before===null?null:(now*count-before*baseCount)/batches;
+    values[key]=value!==null&&Number.isFinite(value)&&value>=-1e-3?Math.max(0,value):null;
+  }
+  return {batches,values};
 }
 
 function renderTaskTrainingMetrics(task) {
@@ -256,7 +311,7 @@ function renderTaskTrainingMetrics(task) {
     const history=(task.result?.composer_metric_history||[]).filter(row=>Number.isFinite(Number(row.loss)));
     if (history.length>1) {
       const card=document.createElement('section');card.className='training-metric-trends';
-      const heading=document.createElement('h4');heading.textContent='最近总 loss 走势（给定正确历史，不代表自由生成质量）';card.appendChild(heading);
+      const heading=document.createElement('h4');heading.textContent='累计总 loss 走势（每轮重新计均值，不代表自由生成质量）';card.appendChild(heading);
       const svg=document.createElementNS('http://www.w3.org/2000/svg','svg');
       svg.setAttribute('viewBox','0 0 300 64');svg.setAttribute('class','training-metric-sparkline');
       svg.setAttribute('role','img');svg.setAttribute('aria-label','最近训练总损失走势');
@@ -682,7 +737,8 @@ const GENERATION_PARAM_FIELDS = [
   "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
   "streamStyleBalanceStrength", "streamSectionTypeStrength", "streamPlanIntentStrength", "streamLocalChordStrength", "streamPhysicalStrength",
   "streamConfigurationCandidates",
-  "composerMaxEvents", "composerConditionFile",
+  "composerMaxEvents", "composerConditionFile", "composerCurveStrength", "composerPointerTemperature", "composerActionTemperature", "composerMinSameHeadMs", "composerPointerHistoryStrength",
+  "composerInterceptTapOnSlide", "composerTouchHistoryGuard", "composerTouchHistoryBound",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
   "topP", "repetitionPenalty", "repetitionWindow", "maxTokens",
   "intensityFollow", "intensityFollowSpan",                  // 逐窗口强度跟随
@@ -1951,6 +2007,7 @@ function chartComposerTrainingPayload(options = {}) {
   const manifests = selectedTrainingManifests();
   return {
     model_family: "chart_composer_v1", mode,
+    architecture_profile: valueOrDefault('#composerArchitectureProfile','audio_grounded_v3'),
     manifest: source.manifest || manifests[0] || "",
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
@@ -1959,7 +2016,25 @@ function chartComposerTrainingPayload(options = {}) {
     batch_size: Number(valueOrDefault("#batchSize", 4)),
     lr: Number(valueOrDefault("#learningRate", .0002)),
     grad_accumulation: Number(valueOrDefault('#gradAccumulation',1)),
+    rebatch_resume: mode === 'resume' && checkedOrDefault('#composerRebatchResume',false),
+    dropout: Number(valueOrDefault('#composerDropout',.1)),
     prefetch_batches: Number(valueOrDefault('#composerPrefetchBatches',2)),
+    sample_workers: Number(valueOrDefault('#composerSampleWorkers',4)),
+    sample_locality: Number(valueOrDefault('#composerSampleLocality',4)),
+    symbolic_dropout: Number(valueOrDefault('#composerSymbolicDropout',.15)),
+    audio_pointer_weight: Number(valueOrDefault('#composerAudioPointerWeight',.15)),
+    lens_width: Number(valueOrDefault('#composerLensWidth',64)),
+    lens_chunk_size: Number(valueOrDefault('#composerLensChunkSize',32)),
+    history_residual_bound: Number(valueOrDefault('#composerHistoryResidualBound',1)),
+    history_dropout: Number(valueOrDefault('#composerHistoryDropout',.3)),
+    ledger_dropout: Number(valueOrDefault('#composerLedgerDropout',.5)),
+    placement_weight: Number(valueOrDefault('#composerPlacementWeight',.15)),
+    planner_weight: Number(valueOrDefault('#composerPlannerWeight',.2)),
+    recovery_interval: Number(valueOrDefault('#composerRecoveryInterval',100)),
+    recovery_samples: Number(valueOrDefault('#composerRecoverySamples',2)),
+    recovery_steps: Number(valueOrDefault('#composerRecoverySteps',2)),
+    recovery_weight: Number(valueOrDefault('#composerRecoveryWeight',.1)),
+    profile_steps: Number(valueOrDefault('#composerProfileSteps',0)),
     log_interval: Number(valueOrDefault('#composerLogInterval',25)),
     max_steps: Number(valueOrDefault('#composerMaxSteps',0)),
     optimizer_implementation: valueOrDefault('#composerOptimizerImplementation','auto'),
@@ -2068,6 +2143,14 @@ function chartComposerGenerationPayload() {
     condition: collectCondition(),
     tempo_map: parseTempoMap(),
     temperature: Number(valueOrDefault("#temperature", .8)),
+    pointer_temperature: Number(valueOrDefault("#composerPointerTemperature", valueOrDefault("#temperature", .8))),
+    action_temperature: Number(valueOrDefault("#composerActionTemperature", valueOrDefault("#temperature", .8))),
+    curve_strength: Number(valueOrDefault("#composerCurveStrength", 1)),
+    pointer_history_strength: Number(valueOrDefault('#composerPointerHistoryStrength',1)),
+    min_same_head_ms: Number(valueOrDefault("#composerMinSameHeadMs", 50)),
+    intercept_tap_on_slide: checkedOrDefault("#composerInterceptTapOnSlide", false),
+    touch_history_guard: checkedOrDefault('#composerTouchHistoryGuard',true),
+    touch_history_bound: Number(valueOrDefault('#composerTouchHistoryBound',1)),
     seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)),
     max_events: Number(valueOrDefault("#composerMaxEvents", 0)),
     device: formDevice("#generationDevice"),
@@ -2303,7 +2386,9 @@ function updateTrainingModeHelp(mode = currentTrainingMode()) {
     epochsHelp.textContent = mode === "fresh"
       ? "本次从头训练的轮数。短跑可先限制 batch 数验证流程；正式训练轮数按数据量和实际生成效果选择。"
       : mode === "resume"
-        ? songForm
+        ? currentModelFamily()==='chart_composer_v1'
+          ? 'Composer 的 epochs 是本次继续的轮数，包含尚未完成的当前轮。第4轮中途恢复并希望到第20轮，应填17；第4轮已完成则填16。'
+          : songForm
           ? "本次继续训练的轮数，从 checkpoint 已完成轮次的下一轮开始；迁移时重跑未完成轮次，保留其中已学到的权重。"
           : "resume 的 epochs 是从断点额外训练的轮数；会从 checkpoint 的 epoch 接着计数，早停会按验证 loss 停止。"
         : "finetune 从新阶段 epoch 1 开始计数；epochs 是本次加强训练的轮数，早停会按验证 loss 停止。";
@@ -2358,10 +2443,30 @@ function updateTrainingControls() {
   }
   if (currentModelFamily()==='chart_composer_v1' && currentTrainingMode()==='fresh') {
     for (const id of ['composerDModel','composerDimFeedforward','composerLayers','composerNhead',
-      'composerHistoryEvents','composerCandidateCount','composerActionSlots']) {
+      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile',
+      'composerLensWidth','composerLensChunkSize','composerHistoryResidualBound','composerHistoryDropout',
+      'composerLedgerDropout','composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
+      'composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerDropout']) {
       const target=element('#'+id);if(target)target.disabled=false;
     }
   }
+  const composer = currentModelFamily() === 'chart_composer_v1';
+  const rebatch = element('#composerRebatchResume');
+  if (rebatch) {
+    rebatch.disabled = !composer || !resume;
+    if (!composer || !resume) rebatch.checked = false;
+  }
+  for (const id of ['batchSize','gradAccumulation']) {
+    const target=element('#'+id);
+    if (target) target.disabled=composer && resume && !rebatch?.checked;
+    if (target && composer && resume && !rebatch?.checked && checkpointInspection.key===currentCheckpointKey() && checkpointInspection.data?.valid===true) {
+      const key=id==='batchSize'?'batch_size':'grad_accumulation';
+      const saved=checkpointInspection.data.args?.[key];
+      if (saved!==undefined) target.value=String(saved);
+    }
+  }
+  const composerDropout=element('#composerDropout');
+  if (composerDropout) composerDropout.disabled=currentTrainingMode()!=='fresh';
   updateSongFormRhythmGeometryControls();
   updateSongFormQualityControls();
   if (typeof updateSongFormQualityProfileControls === "function") updateSongFormQualityProfileControls();
@@ -2585,11 +2690,40 @@ function composerGenerationSummary(task) {
   const result=task.result||{},report=result.composer_report||{},settings=result.effective_settings||{};
   const condition=report.condition||settings.condition;
   const seed=report.seed??result.seed??"未记录",temperature=report.temperature??settings.temperature;
-  const parts=[`实际 seed：${seed}；${temperature===0?"贪心解码，seed 不改变结果":`温度 ${temperature??"未记录"}`}`];
+  const pointerTemperature=report.pointer_temperature??settings.pointer_temperature??temperature;
+  const actionTemperature=report.action_temperature??settings.action_temperature??temperature;
+  const greedy=Number(pointerTemperature)===0 && Number(actionTemperature)===0;
+  const parts=[`实际 seed：${seed}；${greedy?"贪心解码，seed 不改变结果":`候选温度 ${pointerTemperature??"未记录"}；动作温度 ${actionTemperature??"未记录"}`}`];
+  const historyStrength=report.pointer_history_strength??settings.pointer_history_strength;
+  if (report.pointer_sampling_policy==='joint_t1_bin_mass_within_bin_temperature_v1') parts.push(Number(pointerTemperature)===0?'选时采用全体候选贪心':'选时保留模型预测的时间区间概率，温度只调整区间内部');
+  if (historyStrength!==undefined) parts.push(`选时历史权重 ${historyStrength}（1 为完整历史，0 为音频分支）`);
+  const touchRequested=report.touch_history_guard_requested??settings.touch_history_guard;
+  if (touchRequested!==undefined) {
+    const touchEffective=report.touch_history_guard;
+    const bound=report.touch_history_log_odds_bound??report.touch_history_bound_requested??settings.touch_history_bound;
+    parts.push(`Touch 历史保护：${touchEffective===true?'已生效':touchEffective===false?(touchRequested?'已请求，当前模型或动作温度不适用':'关闭'):(touchRequested?'已请求，待生成报告确认':'关闭')}；放大上限 ${bound??'未记录'}`);
+  }
   if (condition) parts.push(`实际等级 ${condition.level}；Style：Tap ${condition.style?.tap_bias??"—"} / Slide ${condition.style?.slide_bias??"—"} / Hold ${condition.style?.hold_bias??"—"} / Touch ${condition.style?.touch_bias??"—"}`);
   if (settings.condition_source?.includes("file")) parts.push("条件文件中的明确字段已覆盖界面同名条件");
   if (report.weights_sha256) parts.push(`权重 ${report.weights_sha256.slice(0,12)}；更新 ${report.optimizer_steps??"未记录"} 步`);
   if (report.events_sha256) parts.push(`音符序列 ${report.events_sha256.slice(0,12)}`);
+  const curve=report.learned_workload_curve,guard=report.guard||{},playability=report.playability||{};
+  if (curve && Array.isArray(curve.times_sec) && curve.times_sec.length) {
+    parts.push(`已预测学习负荷曲线：${curve.times_sec.length} 个时点；引导强度 ${report.curve_strength??settings.curve_strength??1}；完整曲线见 .composer.json`);
+  } else if (report.schema || task.status==='completed') {
+    parts.push('未提供学习负荷曲线；请核对检查点是否具备曲线能力');
+  }
+  if (guard.checks!==undefined || guard.rejections!==undefined || guard.skipped_candidates!==undefined) {
+    parts.push(`配置守卫检查 ${guard.checks??0} 次；拒绝 ${guard.rejections??0} 次；跳过候选 ${guard.skipped_candidates??0} 个`);
+  }
+  if (report.min_same_head_ms!==undefined) parts.push(`同键最短间隔 ${report.min_same_head_ms} ms；过密拒绝 ${guard.rejection_reasons?.repeated_head_too_soon??0} 次`);
+  if (report.intercept_tap_on_slide!==undefined || settings.intercept_tap_on_slide!==undefined) parts.push(`TapOnSlide 拦截：${(report.intercept_tap_on_slide??settings.intercept_tap_on_slide)?"开启":"关闭（仅报告）"}`);
+  const density=report.density_observation?.exported;
+  if (density?.min_same_head_interval_ms!=null) parts.push(`谱面最短同键间隔 ${Number(density.min_same_head_interval_ms).toFixed(1)} ms`);
+  if (Number.isFinite(Number(playability.remaining_hard)) && playability.remaining_hard!==null) {
+    parts.push(`MiaCode 未解决硬冲突 ${Number(playability.remaining_hard)} 项（可处理 ${playability.remaining_actionable_hard??'未记录'} 项）；仅报告的硬冲突仍计入总数`);
+  }
+  if (report.stop_reason) parts.push(`结束原因：${report.stop_reason}`);
   parts.push("每次任务独立保存；条件为软输入，接线生效不保证模型已学会服从");
   return parts.join("。 ");
 }
@@ -3327,7 +3461,7 @@ function renderCheckpointInspection(data) {
   setCheckpointStatus(state + conditionHint + (data.warnings?.length ? `；警告 ${data.warnings.length} 条` : ""), valid ? "good" : "warn");
 }
 
-function applyChartComposerCheckpointConfig(data, mode) {
+function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false) {
   const config = data?.model_config || {};
   const mapping = {
     "#composerDModel": config.d_model,
@@ -3337,19 +3471,47 @@ function applyChartComposerCheckpointConfig(data, mode) {
     "#composerHistoryEvents": config.history_events,
     "#composerCandidateCount": config.candidate_count,
     "#composerActionSlots": config.action_slots,
+    "#composerDropout": config.dropout,
+    "#composerArchitectureProfile": mode==='resume'?config.architecture_profile:undefined,
+    "#composerLensWidth": mode==='resume'?config.lens_width:undefined,
+    "#composerHistoryResidualBound": mode==='resume'?config.history_residual_bound:undefined,
   };
   Object.entries(mapping).forEach(([selector, value]) => {
     const target = element(selector);
     if (target && value !== undefined && value !== null) target.value = String(value);
-    if (target) target.disabled = mode !== "fresh";
+    if (target) target.disabled = ['#composerArchitectureProfile','#composerLensWidth','#composerHistoryResidualBound'].includes(selector)
+      ? mode==='resume' : mode !== "fresh";
   });
   const precision = element("#composerPrecision");
-  if (precision && mode !== "fresh" && data?.args?.precision) precision.value = String(data.args.precision);
+  if (precision && !preserveEditable && mode !== "fresh" && data?.args?.precision) precision.value = String(data.args.precision);
+  for (const id of ['composerLensChunkSize','composerHistoryDropout','composerLedgerDropout',
+    'composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
+    'composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight',
+    'composerSampleLocality','composerSymbolicDropout','composerAudioPointerWeight']) {
+    const target=element('#'+id);if(target) target.disabled=mode==='resume';
+  }
   if (mode==='resume') {
     const args=data?.args||{};
+    for (const [id,key] of [['composerLensChunkSize','lens_chunk_size'],['composerHistoryDropout','history_dropout'],
+      ['composerLedgerDropout','ledger_dropout'],['composerPlacementWeight','placement_weight'],['composerPlannerWeight','planner_weight'],
+      ['composerRecoveryInterval','recovery_interval'],['composerRecoverySamples','recovery_samples'],
+      ['composerRecoverySteps','recovery_steps'],['composerRecoveryWeight','recovery_weight']]) {
+      const target=element('#'+id),value=config[key]??args[key];
+      if (target && value!==undefined) target.value=String(value);
+      if (target) target.disabled=true;
+    }
+    for (const [id,key] of [['composerSampleLocality','sample_locality'],
+      ['composerSymbolicDropout','symbolic_dropout'],['composerAudioPointerWeight','audio_pointer_weight']]) {
+      const target=element('#'+id),value=config[key]??args[key];
+      if (target && value!==undefined) target.value=String(value);
+      if (target) target.disabled=true;
+    }
     for (const [id,key,fallback] of [['batchSize','batch_size'],['gradAccumulation','grad_accumulation',1],
       ['learningRate','lr'],['composerSeed','seed',0],['composerMaxSteps','max_steps',0]]) {
-      const target=element('#'+id),value=args[key]??fallback;
+      const target=element('#'+id),value=(key==='lr'?data.optimizer_lr:undefined)??args[key]??fallback;
+      if (['batch_size','grad_accumulation'].includes(key)) {
+        if (element('#composerRebatchResume')?.checked) continue;
+      } else if (preserveEditable) continue;
       if (target && value!==undefined) target.value=String(value);
     }
   }
@@ -3362,6 +3524,7 @@ function renderChartComposerCheckpointInspection(data) {
     `状态：${valid ? "chart_composer_v1 checkpoint 可用" : "chart_composer_v1 checkpoint 不可用"}`,
     "模型族：chart_composer_v1（事件候选与动作槽位）",
     `schema：${data?.schema || "未记录"}`,
+    `架构：${config.architecture_profile || "未记录"}`,
     data?.epoch !== undefined ? `保存 epoch：${data.epoch}` : "保存 epoch：未记录",
     data?.optimizer_steps !== undefined ? `优化器更新：${data.optimizer_steps}` : "",
     `模型结构：d_model=${config.d_model ?? "未记录"}；layers=${config.layers ?? "未记录"}；nhead=${config.nhead ?? "未记录"}；历史=${config.history_events ?? "未记录"}；候选=${config.candidate_count ?? "未记录"}；动作槽位=${config.action_slots ?? "未记录"}`,
@@ -3631,12 +3794,13 @@ async function inspectCheckpoint({ autoPreprocess = false, preserveEditableConfi
       data.valid = false; data.can_train = false;
       data.errors = [`该模型属于 ${data.model_family}，请切换对应模型族续训。`];
     }
+    const preserveComposerEdits=preserveEditableConfig && checkpointInspection.key===key && checkpointInspection.data?.valid===true;
     checkpointInspection = { key, data };
     if (mode==='resume' && data.can_resume!==true) {
-      data.valid=false;data.error=data.error||'该文件不含优化器状态；请选择完整训练 checkpoint 或改用 finetune。';
+      data.valid=false;data.error=data.error||data.training_migration||'该文件不含优化器状态；请选择完整训练 checkpoint 或改用 finetune。';
       data.errors=[data.error];
     }
-    if (data.valid === true) applyChartComposerCheckpointConfig(data, mode);
+    if (data.valid === true) applyChartComposerCheckpointConfig(data, mode, preserveComposerEdits);
     renderChartComposerCheckpointInspection(data);
     updateTrainingControls();
     return data;
@@ -3931,8 +4095,9 @@ async function submitTrain(options = {}) {
     if (options.autoPreprocess) throw new Error("chart_composer_v1 请先准备 Composer manifest，再开始训练。");
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
-    if (backend.training_capabilities?.composer_training_runtime!=='selected_candidate_head_v1')
-      throw new Error('当前 WebUI 后端尚未加载 Composer 速度优化与训练反馈，请重启此端口服务后开始训练。');
+    if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
+        || backend.training_capabilities?.composer_training_controls!=='rebatch_dropout_controls_v1')
+      throw new Error('当前服务尚未加载 Composer 重分批和 dropout 控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -4823,11 +4988,19 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_composer_v1") {
     const status = await api("/api/status");
-    if (status.composer_generation_contract !== "composer_generation_controls_v3") {
-      throw new Error("当前后端尚未加载 Composer 随机种子、Radar/Style 和独立输出修复。请在训练任务结束后重启 WebUI，再生成，避免控件被旧服务忽略。");
+    if (status.composer_generation_contract !== "composer_generation_controls_v9_touch_history") {
+      throw new Error("当前服务尚未加载 Composer Touch 控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。");
     }
     const data = await api("/api/composer/generate", payload);
-    watchTask(data.task_id, (task) => { if (task.status === "completed") setAcceptanceStatus("chart_composer_v1 生成完成；请查看 .composer.json 报告并进行人工试听与游玩检查。", "good"); });
+    watchTask(data.task_id, (task) => { if (task.status === "completed") {
+      const report=task.result?.composer_report||{},playability=report.playability||{};
+      const remainingHard=Number(playability.remaining_hard);
+      const hasHard=Number.isFinite(remainingHard)&&remainingHard>0;
+      const partial=playability.coverage?.status==='partial'||playability.status==='partial';
+      setAcceptanceStatus(hasHard?`chart_composer_v1 生成完成，仍有 ${remainingHard} 项硬冲突；请查看 .composer.json 并复核。`
+        :partial?'chart_composer_v1 生成完成，MiaCode 检测覆盖不完整；请查看 .composer.json 并复核。'
+        :'chart_composer_v1 生成完成；学习负荷曲线与检查结果见 .composer.json，仍需人工试听与游玩检查。',hasHard||partial?'warn':'good');
+    }});
     return;
   }
   if (payload.model_family === "chart_stream_v1") {
@@ -5191,6 +5364,10 @@ on("#modelFamily", "change", () => {
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_composer_v1") {
     for (const [id, v] of Object.entries({composerDModel:192, composerDimFeedforward:576, composerLayers:3, composerNhead:6,
       composerHistoryEvents:128, composerCandidateCount:96, composerActionSlots:8,
+      composerArchitectureProfile:'audio_grounded_v3',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
+      composerHistoryResidualBound:1,composerHistoryDropout:.3,composerLedgerDropout:.5,
+      composerPlacementWeight:.15,composerPlannerWeight:.2,composerRecoveryInterval:100,
+      composerRecoverySamples:2,composerRecoverySteps:2,composerRecoveryWeight:.1,
       composerPrecision:"auto", composerSeed:0, composerLimitCharts:0, composerPrepareWorkers:4,
       composerAudioCacheGb:4, composerCacheDir:"cache/chart_composer_v1", composerCheckpointIntervalSteps:500})) {
       const node = element("#" + id); if (node) node.value = String(v);
@@ -5202,6 +5379,7 @@ on("#modelFamily", "change", () => {
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
 on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
+on('#composerRebatchResume','change',()=>{updateTrainingControls();saveSettings();});
 on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });
 on("#formQualityApplyRecipe", "click", applySongFormQualityRecipe);
 for (const id of ["formPerturbApplyProb", "formPerturbCurveNoiseStd", "formPerturbCurveDropoutProb", "formPerturbHistoryCorruptionProb", "formPerturbOnsetDropProb", "formPerturbOnsetAddProb", "formPerturbOnsetShiftMs", "formDiversityLossWeight"]) {

@@ -66,13 +66,21 @@ def test_backend_generation_preserves_controls_and_isolates_outputs(tmp_path):
         _run_subprocess_task=lambda task,args,**kw:calls.append((task,args,kw)))
     handler=SimpleNamespace(_json_response=responses.append)
     payload={'audio':str(audio),'checkpoint':str(checkpoint),'output':str(tmp_path/'maidata.txt'),
-        'seed':0,'temperature':.91,'level':14.2,'condition':{'radar':{'note_density':.42},
+        'seed':0,'temperature':.91,'pointer_temperature':.42,'action_temperature':.73,'curve_strength':1.4,'pointer_history_strength':.4,'min_same_head_ms':65,'level':14.2,'condition':{'radar':{'note_density':.42},
         'style':{'hold_bias':.8}},'tempo_map':[{'beat':'0','bpm':150},{'beat':'8','bpm':180}]}
     api.start_generate(handler,payload,runtime=runtime)
     api.start_generate(handler,payload,runtime=runtime)
     first,args,kw=calls[0]
     assert args[args.index('--seed')+1]=='0'
     assert args[args.index('--temperature')+1]=='0.91'
+    assert args[args.index('--pointer-temperature')+1]=='0.42'
+    assert args[args.index('--action-temperature')+1]=='0.73'
+    assert args[args.index('--curve-strength')+1]=='1.4'
+    assert first.result['effective_settings']['curve_strength']==1.4
+    assert args[args.index('--pointer-history-strength')+1]=='0.4'
+    assert first.result['effective_settings']['pointer_history_strength']==.4
+    assert args[args.index('--min-same-head-ms')+1]=='65.0'
+    assert first.result['effective_settings']['min_same_head_ms']==65
     saved=json.loads(Path(args[args.index('--condition-file')+1]).read_text(encoding='utf8'))
     assert saved['radar']['note_density']==.42 and saved['style']['hold_bias']==.8
     assert json.loads(Path(args[args.index('--tempo-map')+1]).read_text())[1]['bpm']==180
@@ -97,6 +105,18 @@ def test_backend_resolves_blank_seed_before_launch(tmp_path,monkeypatch):
             {'audio':str(audio),'checkpoint':str(checkpoint),'output':str(tmp_path/'chart.txt'),'seed':seed},runtime=runtime)
     assert [call[0].result['seed'] for call in calls]==[432,876]
     assert all('--seed-randomized' in args for _,args in calls)
+    assert all(args[args.index('--curve-strength')+1]=='1.0' for _,args in calls)
+
+
+@pytest.mark.parametrize('strength', [-.1, 2.1, float('nan'), float('inf')])
+def test_backend_rejects_invalid_curve_strength_before_creating_task(tmp_path,strength):
+    from maichart.webui import composer_api as api
+    audio=tmp_path/'a.wav';audio.write_bytes(b'audio')
+    checkpoint=tmp_path/'cp.pt';checkpoint.write_bytes(b'checkpoint')
+    runtime=SimpleNamespace(_create_task=lambda _:pytest.fail('Invalid strength created a task'))
+    with pytest.raises(ValueError):
+        api.start_generate(SimpleNamespace(_json_response=lambda _:None),
+            {'audio':str(audio),'checkpoint':str(checkpoint),'curve_strength':strength},runtime=runtime)
 
 
 def test_collected_composer_report_exposes_actual_weight_and_output(tmp_path):

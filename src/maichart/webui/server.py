@@ -216,10 +216,11 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "event_learning_rate_control": True,
                                               "multi_dataset_training": True,
                                               "composer_training": True,
-                                              "composer_training_runtime": "selected_candidate_head_v1",
+                                              "composer_training_runtime": "music_context_shared_slots_v2",
+                                              "composer_training_controls": "rebatch_dropout_controls_v1",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
-                    'composer_generation_contract':'composer_generation_controls_v3',
+            'composer_generation_contract':'composer_generation_controls_v9_touch_history',
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
                     "playability_engine": engine_status(),
@@ -1509,8 +1510,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     result = inspect_payload(detected_payload)
                     result.update({"path": str(candidate), "model_family": COMPOSER_MODEL_FAMILY,
                                    "can_resume": bool(result.get("can_resume",result.get("valid"))),
-                                   "can_init": bool(result.get("valid")),
-                                   "can_train": bool(result.get("valid")),
+                                   "can_init": bool(result.get("can_init")),
+                                   "can_train": bool(result.get("can_train")),
                                    "can_generate": bool(result.get("valid")),
                                    "generation_entry": "/"})
                     return self._json_response(result)
@@ -1776,6 +1777,7 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     if not separator or prefix not in {
         "form_prepare", "composer_prepare",
         "composer_runtime", "composer_progress", "composer_epoch", "composer_checkpoint",
+        "composer_recovery",
     }:
         return
     try:
@@ -1801,6 +1803,8 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         task.result['composer_checkpoint']=dict(data)
     elif prefix=='composer_epoch':
         task.result['composer_stage']='epoch_complete'
+    elif prefix=='composer_recovery':
+        task.result['composer_recovery']=dict(data)
     for key in ("epoch", "batch", "total", "optimizer_steps", "loss", "pointer_accuracy", "elapsed_sec", "path"):
         if key in data:
             task.result[key] = data[key]
@@ -1866,11 +1870,11 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
         # blocktime remove the spin; both are user-overridable.
         env.setdefault("OMP_WAIT_POLICY", "PASSIVE")
         env.setdefault("KMP_BLOCKTIME", "0")
-        # With VRAM at 95% the caching allocator has no headroom, and its default
-        # block-splitting fragments what little is left; measured on this project's
-        # run that showed up as a saturated GPU with ~5% of peak throughput.
-        # Expandable segments let blocks grow and merge instead.
-        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+        # Windows PyTorch builds can reject expandable segments. Retained idle
+        # blocks also count against WDDM residency; use supported native cache
+        # collection there, keeping an explicit caller configuration intact.
+        env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.7"
+                       if os.name=="nt" else "expandable_segments:True")
         _open_task_log(task, args)
         try:
             process = subprocess.Popen(
@@ -2438,8 +2442,8 @@ def _checkpoint_inspection(
         result = inspect_payload(payload)
         result.update({"path": str(checkpoint_path), "model_family": COMPOSER_MODEL_FAMILY,
                        "can_resume": bool(result.get("can_resume",result.get("valid"))),
-                       "can_init": bool(result.get("valid")),
-                       "can_train": bool(result.get("valid")),
+                       "can_init": bool(result.get("can_init")),
+                       "can_train": bool(result.get("can_train")),
                        "can_generate": bool(result.get("valid")),
                        "generation_entry": "/"})
         return result

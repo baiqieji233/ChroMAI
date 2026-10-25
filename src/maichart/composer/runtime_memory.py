@@ -24,12 +24,15 @@ def host_memory():
 
 
 def cache_capacity(requested, resident, memory):
-    """Keep commit and physical headroom; never increase the user's budget."""
+    """Return an absolute cache budget with explicit host-memory reserves."""
     if memory is None:
         return requested
-    growth = min(memory['free_commit'] - 4 * GIB,
-                 memory['free_physical'] - 2 * GIB)
-    return max(0, min(requested, resident + growth))
+    # ``resident + growth`` allowed a cache that had already reached its
+    # requested size to remain there while free physical memory collapsed.
+    # Keep at least 2 GiB of physical and 4 GiB of commit headroom instead.
+    physical_budget = max(0, memory['free_physical'] - 2 * GIB)
+    commit_budget = max(0, memory['free_commit'] - 4 * GIB)
+    return min(requested, physical_budget, commit_budget)
 
 
 def memory_gib(memory):

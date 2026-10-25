@@ -366,12 +366,25 @@
 <div class="workflow-group-heading"><span class="step">COMPOSER</span><div><h3>事件候选与动作槽位参数</h3><p>独立的 chart_composer_v1 读取 Composer manifest，按候选拍位预测事件动作；与 event、song-form 和连续流 checkpoint 不兼容。</p></div></div>
 <div class="form-grid">
 <label class="field">模型宽度 d_model<input id="composerDModel" type="number" min="1" step="1" value="192"></label>
+<label class="field">训练架构<select id="composerArchitectureProfile"><option value="audio_grounded_v3" selected>audio_grounded_v3 音频锚定</option><option value="music_context_v2">music_context_v2 基线</option></select></label>
+<label class="field">普通 dropout<input id="composerDropout" type="number" min="0" max="1" step="0.05" value="0.1"><small>从头训练时可调，建议0–0.3；继续训练和微调继承检查点。与历史、台账遮挡概率不同。</small></label>
+<label class="field">局部音频宽度<input id="composerLensWidth" type="number" min="8" max="256" value="64"></label>
+<label class="field">局部音频分块候选数<input id="composerLensChunkSize" type="number" min="1" max="256" value="32"></label>
+<label class="field">历史残差幅度上限<input id="composerHistoryResidualBound" type="number" min="0.1" max="4" step="0.1" value="1"></label>
+<label class="field">历史分支遮挡概率<input id="composerHistoryDropout" type="number" min="0" max="0.9" step="0.05" value="0.3"></label>
+<label class="field">台账遮挡概率<input id="composerLedgerDropout" type="number" min="0" max="0.9" step="0.05" value="0.5"></label>
+<label class="field">占用监督权重<input id="composerPlacementWeight" type="number" min="0" max="1" step="0.05" value="0.15"></label>
+<label class="field">四拍块规划监督权重<input id="composerPlannerWeight" type="number" min="0" max="1" step="0.05" value="0.2"></label>
+<label class="field">恢复监督间隔（更新步）<input id="composerRecoveryInterval" type="number" min="0" value="100"></label>
+<label class="field">每次恢复样本数<input id="composerRecoverySamples" type="number" min="1" max="8" value="2"></label>
+<label class="field">恢复展开步数<input id="composerRecoverySteps" type="number" min="2" max="4" value="2"></label>
+<label class="field">恢复监督权重<input id="composerRecoveryWeight" type="number" min="0" max="1" step="0.05" value="0.1"></label>
 <label class="field">前馈层宽度<input id="composerDimFeedforward" type="number" min="1" step="1" value="576"><small>建议约为 d_model 的 4 倍；384 维模型可设 1536。</small></label>
 <label class="field">Transformer 层数<input id="composerLayers" type="number" min="1" step="1" value="3"></label>
 <label class="field">注意力头数 nhead<input id="composerNhead" type="number" min="1" step="1" value="6"><small>必须整除 d_model。</small></label>
 <label class="field">历史事件数<input id="composerHistoryEvents" type="number" min="1" step="1" value="128"><small>模型可回看的最近事件数量。</small></label>
 <label class="field">候选拍位数<input id="composerCandidateCount" type="number" min="16" step="1" value="96"><small>至少 16；建议 96 以覆盖常见细分和长休止。</small></label>
-<label class="field">动作槽位数<input id="composerActionSlots" type="number" min="1" step="1" value="8"><small>每个事件最多预测的动作槽位。</small></label>
+<label class="field">动作槽位数<input id="composerActionSlots" type="number" min="1" max="64" step="1" value="8"><small>训练容量下限；数据需要更多槽位时自动扩展。续训须与检查点容量一致。</small></label>
 <label class="field">数值精度<select id="composerPrecision"><option value="auto" selected>自动</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>CPU 只能使用 FP32。</small></label>
 <label class="field">训练随机种子<input id="composerSeed" type="number" min="0" step="1" value="0"></label>
 <label class="field">训练谱面数量上限<input id="composerLimitCharts" type="number" min="0" step="1" value="0"><small>0 使用 manifest 中全部谱面。</small></label>
@@ -380,12 +393,18 @@
 <label class="field">训练缓存目录<textarea id="composerCacheDir" class="path-input" rows="2">cache/chart_composer_v1</textarea><small>与其他模型族的缓存目录分开。</small></label>
 <label class="field">checkpoint 保存间隔（更新步）<input id="composerCheckpointIntervalSteps" type="number" min="0" step="50" value="500"></label>
 <label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>共享内存的单个后台线程提前准备批次，0 关闭；默认 2。</small></label>
+<label class="field">样本准备线程<input id="composerSampleWorkers" type="number" min="1" max="8" value="4"><small>并行准备音频样本；建议 4，内存紧张时降到 2。</small></label>
+<label class="field checkbox-field"><input id="composerRebatchResume" type="checkbox"><span>允许轮中重分 batch 续训</span><small>仅 resume 有效。先检查检查点，再调整单批和梯度累积，保持乘积不变（如96×4→64×6）；max_steps需为0。保留已保存样本顺序，不从头重训。</small></label>
+<label class="field">样本局部性<input id="composerSampleLocality" type="number" min="1" max="8" value="4"><small>每批交错的歌曲数；建议 4。1 提高缓存复用，也会增加同曲样本的梯度相关性。</small></label>
+<label class="field">历史模态遮挡概率<input id="composerSymbolicDropout" type="number" min="0" max="0.5" step="0.05" value="0.15"><small>统一隐藏模型读取的谱面历史、动作状态与 ledger，保留音频和真实监督；建议 0.15。</small></label>
+<label class="field">独立音频选位监督权重<input id="composerAudioPointerWeight" type="number" min="0" max="1" step="0.05" value="0.15"><small>让音频与难度条件单独学习谱师选位，减少仅靠历史复制节奏的捷径；建议 0.15。</small></label>
+<label class="field">CUDA 分段计时批数<input id="composerProfileSteps" type="number" min="0" value="0"><small>0 关闭；需要定位效率时可填 8，在日志中比较传输、前向、反向和更新耗时。</small></label>
 <label class="field">日志间隔（batch）<input id="composerLogInterval" type="number" min="1" value="25"><small>更新吞吐、ETA、损失和缓存反馈；不改变训练目标。</small></label>
 <label class="field">每轮 batch 上限<input id="composerMaxSteps" type="number" min="0" value="0"><small>0 完整训练集；短跑限制仅用于流程检查。</small></label>
 <label class="field">优化器实现<select id="composerOptimizerImplementation"><option value="auto">自动（CUDA fused / CPU standard）</option><option value="standard">standard</option><option value="foreach">foreach</option><option value="fused">CUDA fused</option></select><small>保留 AdamW 目标；不同内核不保证浮点逐位相同。</small></label>
 <label class="checkbox-field"><input id="composerExportInference" type="checkbox" checked><span>每轮结束另外保存无损推理权重</span><small>composer_inference.pt 不含优化器，可生成和 finetune；resume 使用 composer_last.pt。</small></label>
 </div>
-<p class="workflow-hint">fresh 默认 192 维、3 层、6 头、历史 128、候选 96、动作槽位 8。参数量还取决于训练集的动作词表；训练区的梯度累积会实际生效。音频预算分配为特征库 75% 与原始音频缓存 25%，不包含标签与历史表。</p>
+<p class="workflow-hint">fresh 默认 audio_grounded_v3，也可选择 music_context_v2 基线；resume 继承 checkpoint 架构。新架构能力需要重新训练，音乐性与可玩性尚需自由生成评估。默认 192 维、3 层、6 头、历史 128、候选 96、动作槽位 8。旧 workload v1 可生成，也可通过 finetune 显式迁移到新目录。音频缓存预算不包含标签与历史表。</p>
 </section>
 <section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>
@@ -870,6 +889,14 @@
 <summary><span>Composer 生成参数</span><small>事件候选采样与可选条件文件</small></summary>
 <div class="settings-content"><div class="form-grid">
 <label class="field">最大事件数<input id="composerMaxEvents" type="number" min="0" step="1" value="0"><small>0 表示由音频边界自动结束。</small></label>
+<label class="field">学习负荷曲线引导强度<input id="composerCurveStrength" type="number" min="0" max="2" step="0.1" value="1"></label>
+<label class="field checkbox-field"><input id="composerTouchHistoryGuard" type="checkbox" checked><span>抑制 Touch 历史自强化</span><small>默认开启。限制历史把Touch概率推得过高，并对改变后的提案额外检查新增hard冲突；仅audio_grounded_v3且动作温度大于0时生效。Touch目标占比仍在Style的“Touch倾向”中调整。</small></label>
+<label class="field">Touch 历史放大上限<input id="composerTouchHistoryBound" type="number" min="0" max="4" step="0.1" value="1"><small>默认1，越小保护越强；0禁止历史正向额外放大。1表示在温度和物理过滤前，Touch相对非Touch的赔率最多比纯音频分支额外放大约2.72倍，并非Touch百分比。关闭保护后不生效。</small></label>
+<label class="field">同键最短间隔（毫秒）<input id="composerMinSameHeadMs" type="number" min="0" max="200" step="5" value="50"></label>
+<label class="field checkbox-field"><input id="composerInterceptTapOnSlide" type="checkbox"><span>拦截 Slide 撞尾（TapOnSlide）</span><small>默认关闭（仅报告，不拦截也不删音符）；勾选后在生成与后处理中拦截 TapOnSlide。</small></label>
+<label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>适用于具备音频选位分支的模型：1 使用完整历史，0 使用音频分支；audio_grounded_v3 的历史残差已有幅度上限。</small></label>
+<label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" value="0.55"><small>audio_grounded_v3在正温度下保留模型预测的时间区间概率，只调整区间内部拍位的随机程度；0直接选择全体候选中最高分的拍位。</small></label>
+<label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" value="0.85"><small>仅控制按键、Hold、Slide 等动作采样；可独立保留配置多样性。</small></label>
 <label class="field span-2">condition JSON（可选）<textarea id="composerConditionFile" class="path-input" rows="2" placeholder="可粘贴条件 JSON 文件路径"></textarea><small>留空使用界面的等级、Radar 与 Style。填写后仅覆盖文件中明确给出的字段；文件中的 level 优先于界面等级。任务和报告会记录最终条件。</small></label>
 </div></div>
 </details>
@@ -1437,7 +1464,7 @@
           checkpoint 身份指具体权重文件和训练 epoch，不代表模型架构。训练中的 event_last.pt 会持续覆盖，建议选择固定的 event_epoch_NNN.pt 生成曲线。
           audio 只依赖歌曲的音频特征。等级、Radar 或 Style 改动只提醒，未重新预测时继续沿用已保存曲线；更换音频、checkpoint、BPM、first 或 tempo map 后仍需重新生成。</small>
           <small data-generation-family="song_form_v1 song_form_v2" hidden>song_form_v1 的 auto 会从已选 song_form checkpoint 预测曲线；model 也使用该 checkpoint。audio 曲线不是 learned_song_form_v1，不能用于 song_form 生成。</small>
-          <small data-generation-family="chart_composer_v1" hidden>Composer 当前提供音频参考分析，没有独立的全曲 Planner 曲线头；此处曲线仅供查看和编辑，当前不会传入 Composer 生成器。</small>
+          <small data-generation-family="chart_composer_v1" hidden>此处为音频参考分析，不会传入 Composer 生成器。支持学习负荷曲线的检查点会在生成报告 .composer.json 中记录曲线。</small>
         </label>
         <div class="button-row">
           <button id="generateIntensityCurveButton" class="primary-button" type="button">生成强度曲线</button>

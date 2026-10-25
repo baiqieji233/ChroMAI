@@ -10,7 +10,7 @@ from typing import Any
 
 FAMILY = "chart_composer_v1"
 SCHEMA = "maichart-chart-composer-checkpoint-v2"
-GENERATION_CONTRACT = 'composer_generation_controls_v3'
+GENERATION_CONTRACT = 'composer_generation_controls_v9_touch_history'
 
 
 def _path(value: Any, label: str, *, exists: bool = False, directory: bool = False) -> Path:
@@ -49,6 +49,12 @@ def _float(payload: dict[str, Any], key: str, default: float, *, minimum: float 
     return value
 
 
+def _bool(payload,key,default=False):
+    value=payload.get(key,default)
+    if not isinstance(value,bool):raise ValueError(f'{key} 必须是布尔值')
+    return value
+
+
 def _manifest(payload: dict[str, Any]) -> Path:
     value = payload.get("manifest")
     if isinstance(value, list):
@@ -84,20 +90,85 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     mode = str(payload.get("mode", "fresh")).strip().lower()
     if mode not in {"fresh", "resume", "finetune"}:
         raise ValueError("训练模式只能是 fresh、resume 或 finetune")
+    rebatch=payload.get('rebatch_resume',False)
+    if not isinstance(rebatch,bool) or (rebatch and mode!='resume'):
+        raise ValueError('rebatch_resume requires resume mode and a boolean value')
+    if rebatch and _int(payload,'max_steps',0,minimum=0):
+        raise ValueError('rebatch_resume requires max_steps=0')
     d_model = _int(payload, "d_model", 192, minimum=1)
     dim_feedforward = _int(payload, "dim_feedforward", max(1, d_model * 3), minimum=1)
     nhead = _int(payload, "nhead", 6, minimum=1)
-    if d_model % nhead:
-        raise ValueError("d_model 必须能被 nhead 整除")
     if mode != "fresh" and not (payload.get("resume") or payload.get("init_checkpoint") or payload.get("checkpoint")):
         raise ValueError("resume / finetune 模式必须提供 checkpoint")
     parent = payload.get("resume") or payload.get("init_checkpoint") or payload.get("checkpoint")
     parent_path = _path(parent, "checkpoint", exists=True) if mode != "fresh" else None
+    architecture_profile = str(payload.get('architecture_profile') or 'audio_grounded_v3').strip()
+    if architecture_profile not in {'music_context_v2', 'audio_grounded_v3'}:
+        raise ValueError('architecture_profile must be music_context_v2 or audio_grounded_v3')
+    parent_config = {}
+    parent_args = {}
+    if mode in {"resume", "finetune"}:
+        # Resume is only valid for the exact current training contract. Older
+        # workload/v5 checkpoints remain usable for generation and explicit
+        # finetune, but must never be silently treated as resumable.
+        from maichart.composer.checkpoint import inspect_payload, read_payload
+        inspection = inspect_payload(read_payload(parent_path))
+        parent_config = inspection.get('model_config') or {}
+        parent_args = inspection.get('args') or {}
+        if mode == 'resume':
+            architecture_profile = str(parent_config.get('architecture_profile') or 'music_context_v2')
+        if mode == 'resume' and not inspection.get("can_resume"):
+            detail = inspection.get("error") or inspection.get("training_migration") or "checkpoint contract is not resumable"
+            raise ValueError(f"Composer checkpoint cannot resume: {detail}; use finetune with a new output directory")
+        if mode == 'finetune' and not inspection.get('can_init'):
+            raise ValueError(f"Composer checkpoint cannot initialize finetune: {inspection.get('error') or inspection.get('training_migration')}")
+        d_model = _int(payload, 'd_model', parent_config.get('d_model', d_model), minimum=1)
+        dim_feedforward = _int(payload, 'dim_feedforward', parent_config.get('dim_feedforward', dim_feedforward), minimum=1)
+        nhead = _int(payload, 'nhead', parent_config.get('nhead', nhead), minimum=1)
+    if d_model % nhead:
+        raise ValueError("d_model 必须能被 nhead 整除")
+    dropout=_float(payload,'dropout',float(parent_config.get('dropout',.1)),minimum=0.)
+    if dropout>1.:raise ValueError('dropout 不能大于 1')
+    if mode!='fresh' and dropout!=float(parent_config.get('dropout',.1)):
+        raise ValueError('普通 dropout 继承已有模型；改变它需要 fresh 训练')
 
     args = ["-m", "maichart.composer.train"]
     _arg(args, "--manifest", manifest)
     _arg(args, "--checkpoint-dir", checkpoint_dir)
     _arg(args, "--cache-dir", cache_dir)
+    _arg(args, '--architecture-profile', architecture_profile)
+    _arg(args,'--dropout',dropout)
+    grounded_settings = {'architecture_profile': architecture_profile,'dropout':dropout}
+    for key, default, minimum, maximum in (
+        ('lens_width', 64, 8, 256), ('lens_chunk_size', 32, 1, 256),
+        ('recovery_interval', 100, 0, None), ('recovery_samples', 2, 1, 8),
+        ('recovery_steps', 2, 2, 4),
+    ):
+        value = _int(payload, key, default, minimum=minimum)
+        if maximum is not None and value > maximum:
+            raise ValueError(f'{key} cannot exceed {maximum}')
+        inherited = parent_config.get(key, parent_args.get(key)) if mode == 'resume' else None
+        if inherited is not None:
+            if key in payload and value != inherited:
+                raise ValueError(f'resume inherits {key}={inherited}; use finetune to change it')
+            value = inherited
+        grounded_settings[key] = value
+        _arg(args, '--' + key.replace('_', '-'), value)
+    for key, default, minimum, maximum in (
+        ('history_residual_bound', 1., .1, 4.), ('history_dropout', .3, 0., .9),
+        ('ledger_dropout', .5, 0., .9), ('placement_weight', .15, 0., 1.),
+        ('planner_weight', .2, 0., 1.), ('recovery_weight', .1, 0., 1.),
+    ):
+        value = _float(payload, key, default, minimum=minimum)
+        if value > maximum:
+            raise ValueError(f'{key} cannot exceed {maximum}')
+        inherited = parent_config.get(key, parent_args.get(key)) if mode == 'resume' else None
+        if inherited is not None:
+            if key in payload and value != inherited:
+                raise ValueError(f'resume inherits {key}={inherited}; use finetune to change it')
+            value = inherited
+        grounded_settings[key] = value
+        _arg(args, '--' + key.replace('_', '-'), value)
     for key, flag, default, minimum in (
         ("epochs", "--epochs", 10, 1), ("batch_size", "--batch-size", 4, 1),
         ("grad_accumulation", "--grad-accumulation", 1, 1),
@@ -109,10 +180,40 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         ("candidate_count", "--candidate-count", 96, 16), ("action_slots", "--action-slots", 8, 1),
         ("checkpoint_interval_steps", "--checkpoint-interval-steps", 500, 0),
         ("limit_charts", "--limit-charts", 0, 0), ("prepare_workers", "--prepare-workers", 4, 0),
+        ("sample_workers", "--sample-workers", 4, 1),
+        ("sample_locality", "--sample-locality", 4, 1),
+        ("profile_steps", "--profile-steps", 0, 0),
     ):
-        _arg(args, flag, _int(payload, key, default, minimum=minimum))
-    _arg(args, "--lr", _float(payload, "lr", 0.0002, minimum=0.0))
+        value = _int(payload, key, default, minimum=minimum)
+        if key == 'sample_locality' and value > 8:
+            raise ValueError('sample_locality cannot exceed 8')
+        if key == 'sample_locality' and mode == 'resume' and parent_args.get(key) is not None:
+            inherited = int(parent_args[key])
+            if key in payload and value != inherited:
+                raise ValueError(f'resume inherits sample_locality={inherited}; use finetune to change it')
+            value = inherited
+        if key == 'action_slots' and value > 64:
+            raise ValueError('action_slots cannot exceed 64')
+        if key in {'d_model','dim_feedforward','layers','nhead','history_events','candidate_count','action_slots'}:
+            inherited = parent_config.get(key) if mode in {'resume','finetune'} else None
+            if inherited is not None:
+                if mode == 'resume' and key in payload and value != inherited:
+                    raise ValueError(f'resume inherits {key}={inherited}; use finetune to change it')
+                if key not in payload or mode == 'resume':
+                    value = int(inherited)
+        _arg(args, flag, value)
+    if mode != 'resume' or 'lr' in payload:
+        _arg(args, "--lr", _float(payload, "lr", 0.0002, minimum=0.0))
     _arg(args, "--audio-cache-gb", _float(payload, "audio_cache_gb", 4.0, minimum=0.0))
+    for key,maximum,default in (('symbolic_dropout',.5,.15),('audio_pointer_weight',1.,.15)):
+        value=_float(payload,key,default,minimum=0.)
+        if value>maximum: raise ValueError(f'{key} cannot exceed {maximum}')
+        inherited = parent_args.get(key) if mode == 'resume' else None
+        if inherited is not None:
+            if key in payload and value != inherited:
+                raise ValueError(f'resume inherits {key}={inherited}; use finetune to change it')
+            value = float(inherited)
+        _arg(args,'--'+key.replace('_','-'),value)
     _arg(args, "--device", _device(payload.get("device")))
     _arg(args, "--precision", _precision(payload.get("precision")))
     _arg(args, "--seed", _int(payload, "seed", 0, minimum=0))
@@ -122,17 +223,25 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args,'--optimizer-implementation',implementation)
     if _int(payload,'prefetch_batches',2,minimum=0)>16:
         raise ValueError('prefetch_batches cannot exceed 16')
+    if _int(payload,'sample_workers',4,minimum=1)>8:
+        raise ValueError('sample_workers cannot exceed 8')
+    if _int(payload,'sample_locality',4,minimum=1)>8:
+        raise ValueError('sample_locality cannot exceed 8')
     if payload.get('export_inference') is False:
         args.append('--no-export-inference')
     if mode == "resume":
         _arg(args, "--resume", parent_path)
+        if rebatch:args.append('--rebatch-resume')
     elif mode == "finetune":
         _arg(args, "--init-checkpoint", parent_path)
 
     task = runtime._create_task("composer_train")
     task.result.update({"family": FAMILY, "schema": SCHEMA, "mode": mode,
                         "manifest": str(manifest), "checkpoint_dir": str(checkpoint_dir),
-                        "epoch_target": _int(payload, "epochs", 10, minimum=1)})
+                        "epoch_target": _int(payload, "epochs", 10, minimum=1),
+                        "rebatch_resume_requested": rebatch,
+                        "effective_settings": grounded_settings,
+                        "settings_policy": "resume_inherited" if mode == 'resume' else "requested"})
     artifacts=[checkpoint_dir/'composer_last.pt']
     if payload.get('export_inference') is not False: artifacts.append(checkpoint_dir/'composer_inference.pt')
     runtime._run_subprocess_task(task, args, expected_epoch=task.result["epoch_target"],result_paths=artifacts)
@@ -156,6 +265,21 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     tempo=serialize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') is not None else None
     first=_float(payload,'first',0.)
     temperature=_float(payload,'temperature',.8,minimum=0.)
+    pointer_temperature=_float(payload,'pointer_temperature',temperature,minimum=0.)
+    action_temperature=_float(payload,'action_temperature',temperature,minimum=0.)
+    curve_strength=_float(payload,'curve_strength',1.,minimum=0.)
+    if curve_strength>2.:
+        raise ValueError('curve_strength 不能大于 2')
+    pointer_history_strength = _float(payload, 'pointer_history_strength', 1., minimum=0.)
+    if pointer_history_strength > 1.:
+        raise ValueError('pointer_history_strength 不能大于 1')
+    min_same_head_ms=_float(payload,'min_same_head_ms',50.,minimum=0.)
+    if min_same_head_ms>200.:
+        raise ValueError('min_same_head_ms 不能大于 200')
+    intercept_tap_on_slide=bool(payload.get('intercept_tap_on_slide',False))
+    touch_history_guard=_bool(payload,'touch_history_guard',True)
+    touch_history_bound=_float(payload,'touch_history_bound',1.,minimum=0.)
+    if touch_history_bound>4.:raise ValueError('touch_history_bound 不能大于 4')
     max_events=_int(payload,'max_events',0,minimum=0)
     device=_device(payload.get('device'))
     bpm=None
@@ -170,8 +294,15 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         _arg(args, flag, value)
     if bpm is not None:_arg(args,'--bpm',bpm)
     for flag,value in (('--first',first),('--level',condition.level),('--temperature',temperature),
+                       ('--pointer-temperature',pointer_temperature),('--action-temperature',action_temperature),
+                       ('--curve-strength',curve_strength),
+                       ('--pointer-history-strength',pointer_history_strength),
+                       ('--touch-history-bound',touch_history_bound),
+                       ('--min-same-head-ms',min_same_head_ms),
                        ('--seed',seed),('--max-events',max_events),('--device',device)):
         _arg(args,flag,value)
+    if intercept_tap_on_slide:args.append('--intercept-tap-on-slide')
+    args.append('--touch-history-guard' if touch_history_guard else '--no-touch-history-guard')
     if seed_randomized:args.append('--seed-randomized')
     # Snapshot the effective condition so later UI/file edits cannot change
     # an already queued task. Explicit file keys override the UI; sparse keys
@@ -188,7 +319,12 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     task.result.update({"family": FAMILY, "checkpoint": str(checkpoint), "output": str(output),
         'requested_output':str(requested_output),'seed':seed,'seed_randomized':seed_randomized,
         'generation_contract':GENERATION_CONTRACT,'effective_settings':{
-            'temperature':temperature,'condition':condition.to_dict(),'condition_source':condition_source,
+            'temperature':temperature,'pointer_temperature':pointer_temperature,
+            'action_temperature':action_temperature,'curve_strength':curve_strength,
+            'pointer_history_strength':pointer_history_strength,
+            'touch_history_guard':touch_history_guard,'touch_history_bound':touch_history_bound,
+            'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,
+            'condition':condition.to_dict(),'condition_source':condition_source,
             'seed':seed,'seed_randomized':seed_randomized,'bpm':bpm,'first':first,
             'tempo_map':tempo,'max_events':max_events,'device':device}})
     runtime._run_subprocess_task(task, args, expected_epoch=None, result_paths=[output, sidecar])
@@ -204,12 +340,16 @@ def inspect(handler, payload: dict[str, Any]) -> None:
         if not isinstance(data, dict):
             raise ValueError("checkpoint payload 必须是对象")
         result = inspect_payload(data)
+        groups=(data.get('optimizer_state_dict') or {}).get('param_groups') or []
+        saved_lr=groups[0].get('lr') if groups else None
+        if saved_lr is not None and math.isfinite(float(saved_lr)):
+            result['optimizer_lr']=float(saved_lr)
         result.update({"path": str(checkpoint), "family": result.get("family") or data.get("family"),
                        "schema": result.get("schema") or data.get("schema")})
     except Exception as exc:  # inspection must return a useful UI error
         result = {"valid": False, "path": str(checkpoint), "family": None,
                   "schema": None, "error": str(exc)}
     result.setdefault('can_resume',False)
-    result["can_finetune"] = bool(result.get("valid"))
+    result["can_finetune"] = bool(result.get("can_init"))
     result["can_generate"] = bool(result.get("valid"))
     handler._json_response(result)

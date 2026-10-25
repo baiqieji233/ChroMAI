@@ -13,6 +13,17 @@ from maichart.event_timing import seconds_at_beat
 from maichart.tempo_clock import TempoClock
 
 
+# Composer feature policy is part of the training/inference contract.  The
+# attack-derived columns are confidence-weighted at candidate time so a sparse
+# evidence peak cannot become a full-width synthetic onset plateau.
+from .acoustics import FEATURE_POLICY as COMPOSER_AUDIO_FEATURE_POLICY
+
+CANDIDATE_POLICY = 'absolute_recovery_v4'
+MUSIC_CANDIDATE_POLICY = 'absolute_recovery_v5'
+MUSIC_CANDIDATE_POLICY_V6 = 'absolute_recovery_v6_phase_safe'
+_MIN_MUSIC_RECOVERY_GAP = Fraction(1, 16)
+
+
 _FINE_OFFSETS: tuple[Fraction, ...] = tuple(sorted({
     Fraction(index, denominator)
     for denominator in (1, 2, 3, 4, 6, 8, 12, 16)
@@ -46,6 +57,12 @@ _ALL_CANONICAL_OFFSETS: tuple[Fraction, ...] = tuple(sorted({
         ]
     ) if value > 0
 }))
+_LONG_REST_OFFSETS = tuple(Fraction(x) for x in (24,32,48,64,96,128))
+_MUSIC_OFFSETS = tuple(sorted(set(_ALL_CANONICAL_OFFSETS + _LONG_REST_OFFSETS)))
+
+
+def offset_universe(policy):
+    return _MUSIC_OFFSETS if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6} else _ALL_CANONICAL_OFFSETS
 
 
 def _tempo_step_seconds(tempo, first, beat, fraction: Fraction) -> float:
@@ -68,23 +85,64 @@ def _canonical_offsets(max_rest_beats: Fraction) -> list[Fraction]:
     return list(_ALL_CANONICAL_OFFSETS[:bisect_right(_ALL_CANONICAL_OFFSETS, max_rest_beats)])
 
 
-@lru_cache(maxsize=4096)
 def _select_candidate_offsets(
     first_event: bool,
     valid_len: int,
     count: int,
+    previous: Fraction | None = None,
+    policy: str = CANDIDATE_POLICY,
 ) -> tuple[tuple[Fraction, ...], dict[Fraction, int], np.ndarray]:
-    offsets = _ALL_CANONICAL_OFFSETS[:valid_len]
+    phase = Fraction(0) if previous is None else Fraction(previous) % 1
+    return _cached_candidate_offsets(first_event, valid_len, count, phase, policy)
+
+
+@lru_cache(maxsize=4096)
+def _cached_candidate_offsets(first_event, valid_len, count, phase, policy):
+    offsets = offset_universe(policy)[:valid_len]
     values = ([Fraction(0)] if first_event else []) + list(offsets)
+    recovery = []
+    if policy in {CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6} and offsets and phase:
+        # Include ways back to absolute grids instead of declaring mixed
+        # fractions illegal. This also makes an existing /48 phase escapable.
+        for denominator in (1, 2, 3, 4, 6, 8, 12, 16):
+            tick = phase * denominator
+            for step in (1, 2, 4):
+                delta = Fraction(tick.numerator // tick.denominator + step, denominator) - phase
+                if 0 < delta <= offsets[-1]:
+                    recovery.append(delta)
+        if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6}:
+            # Off-grid generation must also recover to later integer/half-
+            # beat anchors, not just the next few fine subdivisions. These
+            # are clock proposals, never compulsory chart events.
+            for denominator in (1, 2):
+                tick = phase * denominator
+                for step in (2, 4, 8, 16, 24, 32, 48, 64, 96, 128, 256):
+                    delta = Fraction(tick.numerator // tick.denominator + step, denominator) - phase
+                    if 0 < delta <= offsets[-1]: recovery.append(delta)
+        if policy == MUSIC_CANDIDATE_POLICY_V6:
+            # Switching between binary and ternary grids must not invent a
+            # tiny bridge event (e.g. 5/16 -> 1/3 is only 1/48 beat). Later
+            # anchors still permit recovery without forcing that bridge.
+            recovery = [delta for delta in recovery if delta >= _MIN_MUSIC_RECOVERY_GAP]
+        recovery = sorted(set(recovery))
+        values = sorted(set(values + recovery))
     if len(values) > count:
         priority_offsets = (
-            (([Fraction(0)] if first_event else []) + list(_NEAR_REQUIRED) + list(_PRIORITY_TAIL))
+            (([Fraction(0)] if first_event else []) + list(_NEAR_REQUIRED)
+             + recovery + list(_PRIORITY_TAIL))
         )
+        if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6}:
+            # Reserve a bounded recovery share, interleaving coarse and fine
+            # grids so pruning cannot remove every useful escape route.
+            coarse = [x for x in recovery if (phase+x).denominator <= 2]
+            recovery_priority = list(dict.fromkeys(coarse + recovery))[:max(2, count//4)]
+            priority_offsets = (([Fraction(0)] if first_event else []) + list(_NEAR_REQUIRED)
+                                + recovery_priority + list(_PRIORITY_TAIL) + recovery)
         by_offset = {value: value for value in values}
-        far = [by_offset[offset] for offset in _FAR_OFFSETS if offset in by_offset]
+        far = [by_offset[offset] for offset in (_FAR_OFFSETS+_LONG_REST_OFFSETS if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6} else _FAR_OFFSETS) if offset in by_offset]
         far_slots = min(len(far), max(0, count // 4))
         near_slots = max(0, count - far_slots)
-        selected = [by_offset[offset] for offset in priority_offsets if offset in by_offset][:near_slots]
+        selected = list(dict.fromkeys(by_offset[offset] for offset in priority_offsets if offset in by_offset))[:near_slots]
         remaining_far = [value for value in far if value not in selected]
         if far_slots and remaining_far:
             indices = sorted(set(
@@ -101,10 +159,37 @@ def _select_candidate_offsets(
             ))
             selected.extend(remaining[index] for index in indices)
         values = sorted(set(selected))
+    if policy == 'phase_v3':
+        filtered = [offset for offset in values if _phase_transition_allowed(phase, offset)]
+        values = filtered or values
     selected_tuple = tuple(values)
     lookup = {offset: idx for idx, offset in enumerate(selected_tuple)}
     floats = np.asarray([float(offset) for offset in selected_tuple], dtype=np.float64)
     return selected_tuple, lookup, floats
+
+
+def _mixed_denominator(value: Fraction) -> bool:
+    denominator = int(value.denominator)
+    return denominator % 2 == 0 and denominator % 3 == 0
+
+
+def _phase_transition_allowed(previous: Fraction, offset: Fraction) -> bool:
+    """Prevent a mixed binary/ternary phase from becoming persistent.
+
+    Direct fine candidates such as 1/12 or 1/16 remain available from an
+    aligned integer phase. Once a ternary phase is active, adding a binary
+    offset that creates a mixed denominator is rejected; if a mixed phase was
+    reached by an authored fine event, only candidates that escape it remain.
+    This blocks the observed /48 -> {192} lock without deleting valid grids.
+    """
+    candidate = previous + offset
+    if not _mixed_denominator(candidate):
+        return True
+    if _mixed_denominator(previous):
+        return False
+    previous_has_ternary = previous.denominator % 3 == 0
+    offset_has_binary = offset.denominator % 2 == 0
+    return not (previous_has_ternary and offset_has_binary)
 
 
 def candidate_spec(
@@ -114,45 +199,48 @@ def candidate_spec(
     first: float,
     audio_end_sec: float,
     candidate_count: int = 96,
-    max_rest_sec: float = 16.,
+    max_rest_sec: float | None = None,
     clock: TempoClock | None = None,
+    policy: str = CANDIDATE_POLICY,
 ) -> tuple[bool, Fraction, int, tuple[Fraction, ...], dict[Fraction, int], np.ndarray]:
     first_event = previous is None
     previous_beat = Fraction(0) if first_event else Fraction(previous)
     count = int(candidate_count)
     if count < 1:
         raise ValueError("candidate_count must be positive")
-    max_rest_sec = max(0.0, float(max_rest_sec))
+    max_rest_sec = max(0.0, float(max_rest_sec if max_rest_sec is not None else 64. if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6} else 16.))
+    universe=offset_universe(policy)
     timeline = clock if clock is not None else TempoClock(tempo, first)
     clock_previous = max(Fraction(0), previous_beat)
     previous_second = float(timeline.at(clock_previous))
-    max_canonical_last = _ALL_CANONICAL_OFFSETS[-1]
+    max_canonical_last = universe[-1]
     if float(timeline.at(clock_previous + max_canonical_last)) - previous_second <= max_rest_sec - 1e-12:
-        hi = len(_ALL_CANONICAL_OFFSETS)
+        hi = len(universe)
     else:
         max_rest_beats = beat_at_second(previous_second + max_rest_sec, tempo, first) - clock_previous
         max_rest_beats = max(Fraction(1, 48), max_rest_beats)
-        hi = bisect_right(_ALL_CANONICAL_OFFSETS, max_rest_beats)
+        hi = bisect_right(universe, max_rest_beats)
     end_sec = float(audio_end_sec)
-    if hi > 0 and float(timeline.at(previous_beat + _ALL_CANONICAL_OFFSETS[hi - 1])) >= end_sec:
-        if float(timeline.at(previous_beat + _ALL_CANONICAL_OFFSETS[0])) >= end_sec:
+    if hi > 0 and float(timeline.at(previous_beat + universe[hi - 1])) >= end_sec:
+        if float(timeline.at(previous_beat + universe[0])) >= end_sec:
             hi = 0
         else:
             lo = 0
             while lo < hi:
                 mid = (lo + hi) // 2
-                if float(timeline.at(previous_beat + _ALL_CANONICAL_OFFSETS[mid])) < end_sec:
+                if float(timeline.at(previous_beat + universe[mid])) < end_sec:
                     lo = mid + 1
                 else:
                     hi = mid
             hi = lo
-    selected, lookup, floats = _select_candidate_offsets(first_event, hi, count)
+    selected, lookup, floats = _select_candidate_offsets(first_event, hi, count, previous_beat, policy)
     return first_event, previous_beat, hi, selected, lookup, floats
 
 
 def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end_sec: float,
-                    candidate_count: int = 96, max_rest_sec: float = 16.,
-                    target: Fraction | None = None, clock: TempoClock | None = None) -> list[Fraction]:
+                    candidate_count: int = 96, max_rest_sec: float | None = None,
+                    target: Fraction | None = None, clock: TempoClock | None = None,
+                    policy: str = CANDIDATE_POLICY) -> list[Fraction]:
     """Return deterministic bounded-fraction candidates.
 
     ``target`` is accepted for API compatibility but is deliberately never
@@ -171,6 +259,7 @@ def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end
         candidate_count=candidate_count,
         max_rest_sec=max_rest_sec,
         clock=clock,
+        policy=policy,
     )
     if previous_beat == 0:
         return list(selected)
@@ -193,6 +282,7 @@ def candidate_features(
     clock: TempoClock | None = None,
     candidate_seconds: np.ndarray | None = None,
     beat_floats: np.ndarray | None = None,
+    rich_time: bool = False,
 ):
     """Numeric time features; audio probes are attached by the dataset/model."""
     del audio_times
@@ -218,10 +308,17 @@ def candidate_features(
     out[:, 2] = np.log1p(delta_sec)
     out[:, 3] = np.sin(angles)
     out[:, 4] = np.cos(angles)
-    return out
+    if not rich_time:
+        return out
+    harmonics = np.asarray((2, 3, 4, 6, 8, 12, 16), dtype=np.float64)
+    phases = angles[:, None] * harmonics[None]
+    extra = np.column_stack((np.sin(phases), np.cos(phases),
+        np.log1p(np.maximum(delta_beats, 0.)), np.log1p(1. / np.maximum(delta_beats, 1e-6))))
+    return np.concatenate((out, extra.astype(np.float32)), axis=1)
 
 
-def interp_candidate_audio(values: np.ndarray, times: np.ndarray, seconds: np.ndarray) -> np.ndarray:
+def interp_candidate_audio(values: np.ndarray, times: np.ndarray, seconds: np.ndarray,
+                           *, suppress_attack_bridges: bool = False) -> np.ndarray:
     """Vectorized 2D linear interpolation matching np.interp(..., left=0., right=0.)."""
     seconds = np.asarray(seconds, dtype=np.float64)
     n_queries = len(seconds)
@@ -247,15 +344,40 @@ def interp_candidate_audio(values: np.ndarray, times: np.ndarray, seconds: np.nd
     outside = (seconds < times[0]) | (seconds > times[-1])
     if outside.any():
         out[outside] = 0.0
-    return out
+    if suppress_attack_bridges and out.shape[1] >= 120 and len(times) > 1:
+        # The bank clock contains sparse evidence nodes.  Keep mel/RMS/chroma
+        # interpolation smooth, but attenuate only narrow attack-derived
+        # columns when a query is far from every evidence node.
+        nearest = np.minimum(
+            np.abs(seconds - times[np.clip(np.searchsorted(times, seconds, side='left'), 0, n_times - 1)]),
+            np.abs(seconds - times[np.clip(np.searchsorted(times, seconds, side='right') - 1, 0, n_times - 1)]),
+        )
+        confidence = np.clip(1.0 - nearest / 0.012, 0.0, 1.0).astype(np.float32)
+        for column in (92, 95, 96, 97, 98, 99):
+            out[:, column] *= confidence
+    return out.astype(np.float32, copy=False)
 
 
-def composer_audio_nodes(song) -> tuple[np.ndarray, np.ndarray]:
+def composer_audio_nodes(song, *, policy=COMPOSER_AUDIO_FEATURE_POLICY) -> tuple[np.ndarray, np.ndarray]:
     """Build the 120-dim composer feature bank directly from cached RationalAudio nodes."""
     from maichart.form.timing import normalize_meter_map
     audio = song.audio
     acoustic = np.asarray(audio.features, dtype=np.float32)
     times = np.asarray(audio.times, dtype=np.float64)
+    if policy == COMPOSER_AUDIO_FEATURE_POLICY:
+        from .acoustics import native_dynamics
+        # Sampling is an input analysis grid, never an output-note clock.
+        # 20ms is the existing Composer evidence resolution; native short
+        # windows still preserve attack measurements without multiplying the
+        # mapped bank to a 5ms full-song grid.
+        times = np.unique(np.r_[times, np.arange(0., audio.duration_sec, .02)])
+        acoustic = interp_candidate_audio(audio.features, audio.times, times)
+        measured = native_dynamics(audio, times)
+        acoustic[:, 92:95] = measured[:, :3]
+        reference = np.asarray(audio.features[:, 93])
+        median = max(float(np.median(reference[reference > 0])) if np.any(reference > 0) else 1., 1e-5)
+        acoustic[:, 95] = acoustic[:, 93] / median
+        acoustic[:, 96] = measured[:, 3]
     n = len(times)
     if n == 0:
         return np.zeros((0, 120), dtype=np.float32), times
