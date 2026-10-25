@@ -11,5 +11,6 @@ INPUT_CONTRACT = 'chart_composer_inputs_v2_audio_only_history_state'
 TRAINING_SEMANTICS = 'chart_composer_training_v6_unified_events_head_timing'
 GROUNDED_TRAINING_SEMANTICS = 'chart_composer_training_v11_history_relation_mask'
 ACTION_SAMPLING_POLICY = 'calibrated_kind_touch_rings_v2'
+MOTIF_TRAINING_POLICY = 'symbolic_masked_archive_v1'
 
-__all__ = ['FAMILY','CHECKPOINT_SCHEMA','INPUT_CONTRACT','TRAINING_SEMANTICS','GROUNDED_TRAINING_SEMANTICS','ACTION_SAMPLING_POLICY']
+__all__ = ['FAMILY','CHECKPOINT_SCHEMA','INPUT_CONTRACT','TRAINING_SEMANTICS','GROUNDED_TRAINING_SEMANTICS','ACTION_SAMPLING_POLICY','MOTIF_TRAINING_POLICY']

@@ -260,7 +260,8 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     elif mode == "finetune":
         _arg(args, "--init-checkpoint", parent_path)
 
-    task = runtime._create_task("composer_train")
+    reserve = getattr(runtime, '_reserve_composer_training_task', None)
+    task = reserve(checkpoint_dir) if reserve else runtime._create_task("composer_train")
     task.result.update({"family": FAMILY, "schema": SCHEMA, "mode": mode,
                         "manifest": str(manifest), "checkpoint_dir": str(checkpoint_dir),
                         "epoch_target": _int(payload, "epochs", 10, minimum=1),
@@ -269,7 +270,20 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                         "settings_policy": "resume_inherited" if mode == 'resume' else "requested"})
     artifacts=[checkpoint_dir/'composer_last.pt']
     if payload.get('export_inference') is not False: artifacts.append(checkpoint_dir/'composer_inference.pt')
-    runtime._run_subprocess_task(task, args, expected_epoch=task.result["epoch_target"],result_paths=artifacts)
+    try:
+        runtime._run_subprocess_task(task, args, expected_epoch=task.result["epoch_target"],result_paths=artifacts)
+    except Exception as exc:
+        # Thread creation can fail before the worker owns task finalization.
+        # Release the directory reservation by publishing a terminal state.
+        lock = getattr(task, 'lock', None)
+        if lock is not None:
+            with lock:
+                task.status = 'failed'
+                task.error = str(exc)
+                task.message = '任务启动失败'
+        else:
+            task.status = 'failed'
+        raise
     handler._json_response({"task_id": task.task_id, "family": FAMILY})
 
 

@@ -222,9 +222,11 @@ class SustainStateIndex:
     def _candidate_markers(self,boundary):
         # Coarse buckets only prune impossible intervals. Exact onset,
         # deadline, causal release and ordering checks remain in at().
-        signature=(id(self.markers),len(self.markers))
         cached=getattr(self,'_active_marker_index',None)
-        if cached is None or cached[0]!=signature:
+        if cached is None or cached[0] is not self.markers or cached[1]!=len(self.markers):
+            # Keep the actual list identity: integer ids can be recycled after
+            # replacement. Drop the previous cache even on the fallback path.
+            self._active_marker_index=None
             buckets={}
             for marker in self.markers:
                 start=float(marker.get('second',0.))
@@ -233,10 +235,13 @@ class SustainStateIndex:
                     # Preserve the original validation path for malformed or
                     # extremely long intervals rather than allocating bins.
                     return self.markers
-                for second in range(math.floor(start),math.floor(end)+1):
+                # causal_v2 accepts onsets up to EPS after the query clock.
+                # Include the preceding bin when roundoff straddles an integer
+                # second; at() still applies the exact visibility policy.
+                for second in range(math.floor(start-_EPS),math.floor(end)+1):
                     buckets.setdefault(second,[]).append(marker)
-            cached=self._active_marker_index=(signature,buckets)
-        return cached[1].get(math.floor(boundary),())
+            cached=self._active_marker_index=(self.markers,len(self.markers),buckets)
+        return cached[2].get(math.floor(boundary),())
 
     @staticmethod
     def _visible_before(marker, cutoff):
@@ -253,9 +258,8 @@ class SustainStateIndex:
         # rather than requiring a new serialized cache/checkpoint contract.
         # The marker list is immutable during normal use. Detect replacement
         # or append as well, for callers rebuilding the parsed chart.
-        signature = (id(self.markers), len(self.markers))
         cached = getattr(self, '_release_index', None)
-        if cached is None or cached[0] != signature:
+        if cached is None or cached[0] is not self.markers or cached[1] != len(self.markers):
             by_lane: dict[Any, list[dict[str, Any]]] = {}
             for following in self.markers:
                 if (following["type"] in {"slide", "wifi"}
@@ -265,8 +269,8 @@ class SustainStateIndex:
             for source_lane, values in by_lane.items():
                 values.sort(key=lambda item: item['slide_trace_second'])
                 index[source_lane] = ([item['slide_trace_second'] for item in values], values)
-            cached = self._release_index = (signature, index)
-        traces, following_markers = cached[1].get(lane, ((), ()))
+            cached = self._release_index = (self.markers, len(self.markers), index)
+        traces, following_markers = cached[2].get(lane, ((), ()))
         radius = 1/180
         lo, hi = bisect_left(traces, end-radius), bisect_right(traces, end+radius)
         for following in following_markers[lo:hi]:

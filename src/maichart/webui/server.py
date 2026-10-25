@@ -100,6 +100,8 @@ class TaskState:
     result: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
     cancel_requested: bool = False
+    cancel_pending: bool = False
+    cancel_error: str | None = None
     process: subprocess.Popen[str] | None = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Persistence: the full log lives on disk, the in-memory list stays a ring.
@@ -152,6 +154,9 @@ class TaskState:
                 "kind": self.kind,
                 "status": self.status,
                 "cancel_requested": self.cancel_requested,
+                "cancel_pending": self.cancel_pending,
+                "cancel_error": self.cancel_error,
+                "cancel_retryable": self.status == "cancelling" and bool(self.cancel_error) and not self.cancel_pending,
                 "progress": self.progress,
                 "message": self.message,
                 "logs": list(self.logs),
@@ -1667,14 +1672,28 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("任务不存在")
         with task.lock:
             process = None
-            if task.status not in {"completed", "failed", "cancelled"}:
+            if task.status not in {"completed", "failed", "cancelled"} and not task.cancel_pending:
                 task.cancel_requested = True
                 task.status = "cancelling"
                 task.message = "正在取消，等待当前阶段退出"
                 process = task.process
+                task.cancel_error = None
+                task.cancel_pending = process is not None
         if process is not None and process.poll() is None:
             from maichart.webui.subprocess_control import terminate_task_process
-            terminate_task_process(process)
+            try:
+                terminate_task_process(process)
+            except Exception as exc:
+                with task.lock:
+                    if task.status == "cancelling":
+                        task.cancel_error = str(exc)
+                        task.message = "取消失败，任务尚未确认停止；可重试取消"
+            finally:
+                with task.lock:
+                    task.cancel_pending = False
+        elif process is not None:
+            with task.lock:
+                task.cancel_pending = False
         self._json_response(task.to_dict())
 
     def _upload(self) -> None:
@@ -1776,14 +1795,34 @@ class WebUIHandler(BaseHTTPRequestHandler):
         return
 
 
-def _create_task(kind: str) -> TaskState:
+def _create_task(kind: str, *, checkpoint_dir: Path | None = None) -> TaskState:
     task = TaskState(task_id=uuid.uuid4().hex[:12], kind=kind)
     with TASKS_LOCK:
+        if checkpoint_dir is not None:
+            target = _canonical_checkpoint_dir(checkpoint_dir)
+            for existing in TASKS.values():
+                if (existing.kind == "composer_train"
+                        and existing.status in {"queued", "running", "cancelling"}
+                        and existing.result.get("checkpoint_dir")
+                        and _canonical_checkpoint_dir(existing.result["checkpoint_dir"]) == target):
+                    raise ValueError("这个 checkpoint 目录已有 Composer 训练正在运行或取消，请等待任务退出")
+            task.result["checkpoint_dir"] = str(checkpoint_dir)
         TASKS[task.task_id] = task
         for old_id, old_task in list(TASKS.items()):
             if old_id != task.task_id and old_task.status in {"completed", "failed", "cancelled"} and len(TASKS) > 20:
                 del TASKS[old_id]
     return task
+
+
+def _canonical_checkpoint_dir(path) -> str:
+    value = Path(path).expanduser()
+    if not value.is_absolute():
+        value = PROJECT_ROOT / value
+    return os.path.normcase(str(value.resolve()))
+
+
+def _reserve_composer_training_task(checkpoint_dir: Path) -> TaskState:
+    return _create_task("composer_train", checkpoint_dir=checkpoint_dir)
 
 
 def _update_composer_progress(task: TaskState, line: str) -> None:
@@ -1874,6 +1913,8 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
 def _finish_cancelled_unlocked(task: TaskState, *, exit_code=None) -> None:
     # Caller holds task.lock; workers mark terminal only after execution stops.
     task.status = "cancelled"
+    task.cancel_pending = False
+    task.cancel_error = None
     task.message = "任务已中断"
     _close_task_log(task, status="cancelled", exit_code=exit_code)
 
@@ -1910,8 +1951,8 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
         # collection there, keeping an explicit caller configuration intact.
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.7"
                        if os.name=="nt" else "expandable_segments:True")
-        _open_task_log(task, args)
         try:
+            _open_task_log(task, args)
             process = subprocess.Popen(
                 [sys.executable, *args],
                 cwd=PROJECT_ROOT,
@@ -1931,6 +1972,8 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 try:
                     terminate_task_process(process)
                 except Exception as exc:
+                    with task.lock:
+                        task.cancel_error = str(exc)
                     task.log(f"取消进程失败，等待进程退出: {exc}")
             assert process.stdout is not None
             for line in process.stdout:
@@ -2061,7 +2104,7 @@ def _close_task_log(task: TaskState, *, status: str, exit_code: int | None = Non
         finally:
             try:
                 handle.close()
-            except OSError:
+            except (OSError, ValueError):
                 pass
     task._handle = None
     task.ended_at = ended
@@ -2069,19 +2112,21 @@ def _close_task_log(task: TaskState, *, status: str, exit_code: int | None = Non
     path = task.log_path
     if path is None:
         return
-    meta = {
-        "task_id": task.task_id, "kind": task.kind, "status": status,
-        "started": task.started_at, "ended": ended, "exit_code": exit_code,
-        "argv": task.argv, "log": str(path),
-        "log_bytes": path.stat().st_size if path.is_file() else 0,
-        "error": (str(error) if error else "")[:2000],
-    }
     try:
+        meta = {
+            "task_id": task.task_id, "kind": task.kind, "status": status,
+            "started": task.started_at, "ended": ended, "exit_code": exit_code,
+            "argv": task.argv, "log": str(path),
+            "log_bytes": path.stat().st_size if path.is_file() else 0,
+            "error": (str(error) if error else "")[:2000],
+        }
         path.with_suffix(".meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
-    except OSError:
-        pass
-    _prune_logs()
+        _prune_logs()
+    except (OSError, ValueError) as exc:
+        # Log persistence/retention cannot turn a stopped child into a live
+        # task, or change a successful subprocess into a training failure.
+        task.result["log_close_error"] = str(exc)
 
 
 def _prune_logs(max_files: int | None = None, max_bytes: int | None = None) -> None:

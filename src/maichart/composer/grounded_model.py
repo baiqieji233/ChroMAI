@@ -166,11 +166,11 @@ class AudioGroundedComposer(ChartComposer):
             result.update(self.decode_candidate(action_context,candidate_indices,
                 action_targets=action_targets,audio_context=audio_action_context,
                 motif_ids=motif_ids,motif_relative_beats=motif_relative_beats,motif_mask=motif_mask,
-                motif_strength=motif_strength))
+                motif_strength=motif_strength,motif_keep=symbolic_keep))
         return result
 
     def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
-                         motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.):
+                         motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None):
         if candidate_indices is not None:
             rows=torch.arange(candidate_context.size(0),device=candidate_context.device)
             candidate_context=candidate_context[rows,candidate_indices]
@@ -182,8 +182,15 @@ class AudioGroundedComposer(ChartComposer):
         if hasattr(self,'motif_memory') and motif_ids is not None:
             if motif_relative_beats is None or motif_mask is None:
                 raise ValueError('Motif IDs require relative timing and visibility mask')
-            candidate_context=candidate_context+float(motif_strength)*self.motif_memory(
+            motif_residual=self.motif_memory(
                 candidate_context,self._embedding,motif_ids,motif_relative_beats,motif_mask)
+            # The archive is symbolic history too. Coherent history dropout
+            # must not leave a second token-history route into action decoding.
+            if motif_keep is not None:
+                keep=motif_keep.to(motif_residual)
+                while keep.ndim<motif_residual.ndim:keep=keep.unsqueeze(-2)
+                motif_residual=motif_residual*keep
+            candidate_context=candidate_context+float(motif_strength)*motif_residual
             result['action_context']=candidate_context
         if audio_context is not None:
             result['audio_action_context']=audio_context

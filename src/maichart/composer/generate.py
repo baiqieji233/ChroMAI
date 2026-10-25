@@ -333,12 +333,14 @@ def _candidate_has_capacity(occupied,blocked,touch_layout_policy,touch_heads=())
     return any(not (heads & unavailable) for heads in touch_heads)
 
 
-def density_observation(points, clock):
+def density_observation(points, clock, *, touch_layout_policy='legacy_two_heads'):
     seconds=np.asarray([clock.at(p.beat) for p in points], dtype=np.float64)
     intervals=np.diff(seconds)
     last={};same=[]
     for point,second in zip(points,seconds):
-        for pad in event_metadata(point.note_text).head_pad_indices:
+        meta=event_metadata(point.note_text)
+        pads=meta.head_pad_indices if touch_layout_policy=='legacy_two_heads' else meta.heads
+        for pad in pads:
             if pad in last: same.append(second-last[pad])
             last[pad]=second
     return {'min_event_interval_ms':float(intervals.min()*1000) if len(intervals) else None,
@@ -650,7 +652,7 @@ def generate(args):
                 and (learned or beat_sec>=max(0.,end_sec-2.))):
             stop_reason='learned_eos'
             break
-    raw_density=density_observation(points,clock)
+    raw_density=density_observation(points,clock,touch_layout_policy=touch_layout_policy)
     playability = process_chart_points(
         points, song.tempo, args.first,
         PostProcessConfig(
@@ -707,7 +709,7 @@ def generate(args):
             'touch_history_bound_requested':touch_history_bound,
             'touch_history_guidance_policy':TOUCH_HISTORY_GUIDANCE_POLICY if touch_history_guard else 'off',
             'touch_history_log_odds_bound':touch_history_bound if touch_history_guard else None,
-            'density_observation':{'before_postprocess':raw_density,'exported':density_observation(points,clock)},
+            'density_observation':{'before_postprocess':raw_density,'exported':density_observation(points,clock,touch_layout_policy=touch_layout_policy)},
             'curve_strength':curve_strength,'pointer_history_strength':pointer_history_strength,
             'audio_pointer_training_weight':payload.get('args',{}).get('audio_pointer_weight'),
             'pointer_route':'audio_plus_full_context_residual' if music_v2 else 'full_context',

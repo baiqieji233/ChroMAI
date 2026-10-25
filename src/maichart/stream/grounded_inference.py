@@ -34,6 +34,7 @@ class IncrementalState(SustainStateIndex):
                 marker['key']=f'stream:{len(self.points)}:{marker["key"]}'
                 self.markers.append(marker);added.append(marker)
         self.points.append(point);self._release_index=None
+        self._active_marker_index=None
         self._stream_query_summaries=OrderedDict()
         return added
 

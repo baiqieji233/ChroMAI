@@ -7,6 +7,12 @@ from . import CHECKPOINT_SCHEMA,FAMILY,INPUT_CONTRACT,TRAINING_SEMANTICS,GROUNDE
 from .model import ChartComposer,ComposerConfig,WORKLOAD_PROFILES,GROUNDED_PROFILE,build_model
 from .candidates import COMPOSER_AUDIO_FEATURE_POLICY, MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6
 from .events import HEAD_TIMING_DIM
+from . import MOTIF_TRAINING_POLICY
+
+
+def motif_training_compatible(payload):
+    return ((payload.get('model_config') or {}).get('motif_memory_policy','off')=='off'
+            or payload.get('motif_training_policy')==MOTIF_TRAINING_POLICY)
 
 
 _LEGACY_SEMANTICS = 'chart_composer_training_v2_audio_only_candidate_actions'
@@ -108,6 +114,8 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
             action_sampling_policy=ACTION_SAMPLING_POLICY,
             atom_catalog=list(atom_catalog),
             architecture_features='ordered_lens_interpolated_plan_banded_pointer_compositional_actions_v1')
+        if model.config.motif_memory_policy!='off':
+            payload['motif_training_policy']=MOTIF_TRAINING_POLICY
     _write_payload(path,payload)
     return payload
 
@@ -231,6 +239,8 @@ def inspect_payload(payload):
     if config is not None:
         if config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != GROUNDED_TRAINING_SEMANTICS:
             migration = 'Older grounded planning/recovery contracts require explicit finetune with a new output directory'
+        elif not motif_training_compatible(payload):
+            migration = 'Motif symbolic dropout contract changed; use explicit finetune with a new output directory'
         elif config.architecture_profile == 'music_context_v2' and payload.get('training_semantics') != TRAINING_SEMANTICS:
             migration = 'Existing music-context contracts require explicit finetune under the current training contract'
         elif config.architecture_profile not in {'music_context_v2',GROUNDED_PROFILE}:
@@ -239,6 +249,7 @@ def inspect_payload(payload):
             'model_config':config.to_dict() if config else payload.get('model_config'),
             'epoch':payload.get('epoch'),'optimizer_steps':payload.get('optimizer_steps',0),
             'training_semantics':payload.get('training_semantics'),'error':error,
+            'motif_training_policy':payload.get('motif_training_policy'),
             'audio_feature_policy':payload.get('audio_feature_policy','legacy'),
             'workload_curve_trained':bool(config and config.architecture_profile in WORKLOAD_PROFILES
                                          and payload.get('optimizer_steps',0)>0),
@@ -247,7 +258,7 @@ def inspect_payload(payload):
             'can_resume':bool(valid and config.architecture_profile in {'music_context_v2',GROUNDED_PROFILE}
                               and config.head_timing_dim==HEAD_TIMING_DIM
                               and payload.get('training_semantics')==(GROUNDED_TRAINING_SEMANTICS if config.architecture_profile==GROUNDED_PROFILE else TRAINING_SEMANTICS)
-                              and payload.get('optimizer_state_dict') is not None),
+                              and payload.get('optimizer_state_dict') is not None and motif_training_compatible(payload)),
             'can_init':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),
             'can_train':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),'can_generate':valid,
             'training_migration':migration,

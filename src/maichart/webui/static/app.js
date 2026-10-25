@@ -797,6 +797,8 @@ let datasetUploading = false;
 let preprocessStarting = false;
 let trainingStarting = false;
 let trainingPreflight = false;
+const liveComposerTrainingTasks = new Set();
+const pendingTaskCancellations = new Set();
 let generationSubmitting = false;
 let datasetVersion = 0;
 let manifestRequest = 0;
@@ -2410,7 +2412,7 @@ function updateTrainingModeHelp(mode = currentTrainingMode()) {
 }
 
 function updateDatasetButtons() {
-  const busy = datasetUploading || preprocessStarting || trainingStarting || trainingPreflight;
+  const busy = datasetUploading || preprocessStarting || trainingStarting || trainingPreflight || liveComposerTrainingTasks.size > 0;
   const mapping = {
     "#datasetComposeButton": busy || datasetWorkspaceState.applying,
     "#trainingDatasetApplyButton": busy || datasetWorkspaceState.applying,
@@ -2428,6 +2430,9 @@ function updateDatasetButtons() {
     const target = element(selector);
     if (target) target.disabled = disabled;
   });
+  const trainButton = element("#trainButton");
+  if (trainButton) trainButton.title = liveComposerTrainingTasks.size
+    ? "已有 Composer 训练正在运行或取消，等待任务退出后可继续提交。" : "";
   const needsCheckpoint = currentTrainingMode() !== "fresh";
   ["#trainingCheckpointFile", "#trainingCheckpointPath", "#checkpointInspectButton"].forEach((selector) => {
     const target = element(selector);
@@ -2626,6 +2631,7 @@ async function pollTask(taskId) {
   try {
     const task = await api(`/api/task?id=${encodeURIComponent(taskId)}`);
     watcher.task = task;
+    trackComposerTrainingTask(task);
     window.MaichartWorkflow?.recordTask(task);
     if (activeTaskId === taskId) renderTask(task);
     if (["queued", "running", "cancelling"].includes(task.status)) {
@@ -2655,6 +2661,13 @@ async function pollTask(taskId) {
   }
 }
 
+function trackComposerTrainingTask(task) {
+  if (task.kind !== "composer_train") return;
+  if (["queued", "running", "cancelling"].includes(task.status)) liveComposerTrainingTasks.add(task.task_id);
+  else liveComposerTrainingTasks.delete(task.task_id);
+  updateDatasetButtons();
+}
+
 function hasTaskArtifacts(task) {
   const result = task?.result || {};
   return [result.files, result.download_urls, result.paths].some((items) => Array.isArray(items) && items.length > 0);
@@ -2677,7 +2690,8 @@ function renderTask(task) {
       ? epochStatus.progress : task.progress || 0;
     progress.style.width = `${Math.round(amount * 100)}%`;
   }
-  if (message) message.textContent = task.error || task.message || "";
+  if (message) message.textContent = task.cancel_error
+    ? `取消失败，任务尚未确认停止；请重试取消：${task.cancel_error}` : task.error || task.message || "";
   if (epoch) {
     epoch.hidden = !epochStatus;
     if (epochStatus) epoch.textContent = epochStatus.text + (
@@ -2691,7 +2705,12 @@ function renderTask(task) {
   window.MaichartWorkflow?.recordTask(task);
 
   const cancel = element("#cancelButton");
-  if (cancel) cancel.disabled = !["queued", "running"].includes(task.status);
+  if (cancel) {
+    const retry = task.cancel_retryable === true;
+    cancel.disabled = pendingTaskCancellations.has(task.task_id) || task.cancel_pending
+      || (!["queued", "running"].includes(task.status) && !retry);
+    cancel.textContent = retry ? "重试取消" : "取消任务";
+  }
   const logPath = element("#taskLogPath");
   const path = task.result?.log_path;
   if (logPath) {
@@ -3237,6 +3256,12 @@ async function loadStatus() {
     && !String(task.kind || "").startsWith("intensity"));
   window.MaichartWorkflow?.renderTasks(state.tasks || []);
   window.MaichartWorkflow?.refresh();
+  const composerTraining = (state.tasks || []).filter(task => task.kind === "composer_train"
+    && ["queued", "running", "cancelling"].includes(task.status));
+  for (const task of composerTraining) trackComposerTrainingTask(task);
+  const selectedTaskId = activeTaskId;
+  for (const task of composerTraining) watchTask(task.task_id);
+  activeTaskId = selectedTaskId;
   if (running && !activeTaskId) {
     renderTask(running);
     watchTask(running.task_id);
@@ -4109,6 +4134,7 @@ function renderGoldResult(task) {
 // Training
 // ---------------------------------------------------------------------------
 async function startTrain(options = {}) {
+  if (liveComposerTrainingTasks.size) throw new Error("已有 Composer 训练正在运行或取消，请等待任务退出后再提交训练。");
   if (trainingStarting || trainingPreflight) return;
   trainingPreflight = true;
   updateDatasetButtons();
@@ -5706,8 +5732,20 @@ $("#resetSettingsButton").addEventListener("click", () => {
   location.reload();
 });
 on("#cancelButton", "click", async () => {
-  if (!activeTaskId) return;
-  renderTask(await api("/api/cancel", { task_id: activeTaskId }));
+  const taskId = activeTaskId;
+  if (!taskId || pendingTaskCancellations.has(taskId)) return;
+  pendingTaskCancellations.add(taskId);
+  const button = element("#cancelButton");
+  if (button) button.disabled = true;
+  let response;
+  try {
+    response = await api("/api/cancel", { task_id: taskId });
+  } finally {
+    pendingTaskCancellations.delete(taskId);
+    const task = response || taskWatchers.get(taskId)?.task;
+    if (activeTaskId === taskId && task) renderTask(task);
+    else if (activeTaskId === taskId && button) button.disabled = false;
+  }
 });
 
 // Initial server probe.  Failure must not disable the rest of the page.

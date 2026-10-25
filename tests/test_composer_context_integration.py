@@ -103,6 +103,36 @@ def test_candidate_state_shape_and_learned_motif_only_change_actions():
     assert not torch.equal(off['action_context'],on['action_context'])
 
 
+def test_symbolic_dropout_hides_the_motif_branch_per_sample_and_its_gradients():
+    model=migrate_audio_grounded(_model(),ATOMS,motif_memory_policy=MOTIF_POLICY).train()
+    with torch.no_grad():model.motif_memory.output.weight.normal_(0,.3)
+    data={**_inputs(),'symbolic_keep':torch.tensor([[0.],[1.]])}
+    a=_motif();b={**a,'motif_ids':torch.ones_like(a['motif_ids'])}
+    first=model(**data,**a);second=model(**data,**b)
+    torch.testing.assert_close(first['action_logits'][0],second['action_logits'][0],rtol=0,atol=0)
+    assert not torch.equal(first['action_logits'][1],second['action_logits'][1])
+    torch.testing.assert_close(first['candidate_logits'],second['candidate_logits'],rtol=0,atol=0)
+    first['action_logits'][0].square().sum().backward()
+    for parameter in model.motif_memory.parameters():
+        assert parameter.grad is None or not parameter.grad.any()
+    model.zero_grad(set_to_none=True)
+    second=model(**data,**a)
+    second['action_logits'][1].square().sum().backward()
+    assert model.motif_memory.output.weight.grad.abs().sum()>0
+
+
+def test_unmasked_forward_matches_standalone_motif_decode():
+    model=migrate_audio_grounded(_model(),ATOMS,motif_memory_policy=MOTIF_POLICY).eval()
+    with torch.no_grad():model.motif_memory.output.weight.normal_(0,.3)
+    data=_inputs()
+    with torch.no_grad():
+        output=model(**data,**_motif(),symbolic_keep=torch.ones(2,1))
+        base=model(**data,decode_actions=False,symbolic_keep=torch.ones(2,1))
+        standalone=model.decode_candidate(base['candidate_context'],data['candidate_indices'],
+            action_targets=data['action_targets'],audio_context=base['audio_action_context'],**_motif())
+    for key in standalone:torch.testing.assert_close(output[key],standalone[key],rtol=0,atol=0)
+
+
 def test_shared_context_matches_real_incremental_state_and_ignores_future_suffix():
     tempo = [EventTempo(F(0),137.),EventTempo(F(18),193.)]
     prefix = [EventPoint(F(0),'1h[1:16]'),EventPoint(F(8),'2'),EventPoint(F(20),'1')]

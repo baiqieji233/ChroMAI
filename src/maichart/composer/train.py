@@ -456,7 +456,15 @@ def main(argv=None):
     import sys
     arguments=list(sys.argv[1:] if argv is None else argv)
     explicit_flags={token.split('=',1)[0] for token in arguments if token.startswith('--')}
-    args=parser().parse_args(arguments);device=_device(args.device);precision=_precision(args.precision,device)
+    args=parser().parse_args(arguments)
+    from .training_lock import training_output_lock
+    with training_output_lock(args.checkpoint_dir):
+        return _train(args,explicit_flags)
+
+
+def _train(args,explicit_flags):
+    import sys
+    device=_device(args.device);precision=_precision(args.precision,device)
     if args.rebatch_resume and (not args.resume or args.max_steps):
         raise ValueError('--rebatch-resume requires --resume and full epochs (max_steps=0)')
     if args.epochs<1 or args.batch_size<1 or args.grad_accumulation<1 or args.log_interval<1 or args.max_steps<0 or args.profile_steps<0:
@@ -510,6 +518,10 @@ def main(argv=None):
         semantics=GROUNDED_TRAINING_SEMANTICS if args.architecture_profile==GROUNDED_PROFILE else TRAINING_SEMANTICS
         if args.resume and old.get('training_semantics')!=semantics:
             raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
+        if args.resume:
+            from .checkpoint import motif_training_compatible
+            if not motif_training_compatible(old):
+                raise ValueError('Motif symbolic dropout contract changed; use --init-checkpoint with a new output directory')
     if not (args.resume or args.init_checkpoint):
         args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy)
     for name in COMPOSER_POLICY_FIELDS:
