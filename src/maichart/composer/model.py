@@ -13,6 +13,52 @@ WORKLOAD_PROFILES = {'audio_workload_v1', 'music_context_v2'}
 GROUNDED_PROFILE = 'audio_grounded_v3'
 WORKLOAD_PROFILES.add(GROUNDED_PROFILE)
 MUSIC_PROFILES = {'music_context_v2', GROUNDED_PROFILE}
+HISTORY_ANCHOR_POLICIES = {'legacy_digit_v1', 'parsed_heads_v2', 'parsed_geometry_v3'}
+STATE_POLICIES = {'committed_legacy_v1', 'committed_causal_v2', 'candidate_prefix_v2'}
+MOTIF_POLICIES = {'off', 'audio_recurrence_archive_v1'}
+SLIDE_FACTOR_POLICIES = {'marginal_v1', 'branch_joint_v2'}
+COMPOSER_POLICY_FIELDS = {
+    'action_state_policy': (STATE_POLICIES, 'committed_legacy_v1', 'committed_causal_v2'),
+    'motif_memory_policy': (MOTIF_POLICIES, 'off', 'off'),
+    'slide_factor_policy': (SLIDE_FACTOR_POLICIES, 'marginal_v1', 'branch_joint_v2'),
+}
+
+
+def validate_supported_context_policies(config):
+    """Reject context policies that the selected architecture cannot execute."""
+    values=config if isinstance(config,dict) else config.to_dict()
+    if values.get('architecture_profile')==GROUNDED_PROFILE:return
+    unsupported = {
+        'motif_memory_policy': values.get('motif_memory_policy','off')!='off',
+        'action_state_policy': values.get('action_state_policy','committed_legacy_v1')=='candidate_prefix_v2',
+        'slide_factor_policy': values.get('slide_factor_policy','marginal_v1')!='marginal_v1',
+    }
+    for name, invalid in unsupported.items():
+        if invalid:raise ValueError(f'{name}={values[name]} requires audio_grounded_v3')
+
+
+def resolve_composer_policy(name, requested='auto', parent_config=None, *, resume=False, architecture_profile=GROUNDED_PROFILE):
+    choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
+    if not isinstance(requested,str) or requested not in {'auto', *choices}:
+        raise ValueError(f'Unknown {name}')
+    if name=='slide_factor_policy' and architecture_profile!=GROUNDED_PROFILE:fresh='marginal_v1'
+    inherited = parent_config.get(name, legacy) if parent_config else None
+    resolved = (inherited or fresh) if requested == 'auto' else requested
+    if resume and inherited is not None and resolved != inherited:
+        raise ValueError(f'Resume inherits {name}; use explicit finetune in a new directory')
+    return resolved
+
+
+def resolve_history_anchor_policy(requested='auto', parent_config=None, *, resume=False):
+    """Fresh models use parsed heads; continuation keeps the parent's meaning."""
+    if not isinstance(requested,str) or requested not in {'auto', *HISTORY_ANCHOR_POLICIES}:
+        raise ValueError('Unknown history_anchor_policy')
+    parent_config = parent_config or {}
+    inherited = parent_config.get('history_anchor_policy', 'legacy_digit_v1') if parent_config else None
+    resolved = (inherited or 'parsed_geometry_v3') if requested == 'auto' else requested
+    if resume and inherited is not None and resolved != inherited:
+        raise ValueError('Resume inherits history_anchor_policy; use explicit finetune in a new directory to change it')
+    return resolved
 
 
 @dataclass(slots=True)
@@ -40,8 +86,20 @@ class ComposerConfig:
     history_residual_bound: float = 1.
     history_dropout: float = .3
     ledger_dropout: float = .5
+    history_anchor_policy: str = 'parsed_geometry_v3'
+    action_state_policy: str = 'committed_causal_v2'
+    motif_memory_policy: str = 'off'
+    motif_max_events: int = 16
+    slide_factor_policy: str = 'marginal_v1'
 
     def __post_init__(self):
+        if self.history_anchor_policy not in HISTORY_ANCHOR_POLICIES:
+            raise ValueError('Unknown history_anchor_policy')
+        for name, (choices, _, _) in COMPOSER_POLICY_FIELDS.items():
+            if getattr(self, name) not in choices:
+                raise ValueError(f'Unknown {name}')
+        if isinstance(self.motif_max_events, bool) or not 1 <= self.motif_max_events <= 32:
+            raise ValueError('motif_max_events must be in [1,32]')
         if not 1 <= self.action_slots <= 64:
             raise ValueError('Composer action_slots must be in [1,64]')
         self.head_timing_dim = int(self.head_timing_dim)
@@ -64,6 +122,7 @@ class ComposerConfig:
 
 
 def build_model(config,atom_catalog=None):
+    validate_supported_context_policies(config)
     if config.architecture_profile==GROUNDED_PROFILE:
         from .grounded_model import AudioGroundedComposer
         if atom_catalog is None or len(atom_catalog)+1!=config.atom_vocab_size:
@@ -76,6 +135,9 @@ class ChartComposer(nn.Module):
     architecture = 'chart_composer_v1'
 
     def __init__(self, config: ComposerConfig):
+        # AudioGroundedComposer temporarily uses a music-context backbone,
+        # then installs the grounded implementations of these policies.
+        if type(self) is ChartComposer:validate_supported_context_policies(config)
         super().__init__(); self.config=config
         width=config.d_model
         self.audio_projection=nn.Linear(config.audio_dim,width)

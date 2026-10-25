@@ -31,11 +31,13 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
     composer_api.start_train(SimpleNamespace(_json_response=lambda _: None),
                              _payload(tmp_path), runtime=_runtime(calls))
     task, args = calls[0]
-    expected = {'architecture_profile': 'audio_grounded_v3', 'dropout': .1, 'lens_width': 64,
+    expected = {'architecture_profile': 'audio_grounded_v3', 'dropout': .1, 'history_anchor_policy':'parsed_geometry_v3', 'lens_width': 64,
                 'lens_chunk_size': 32, 'history_residual_bound': 1., 'history_dropout': .3,
                 'ledger_dropout': .5, 'placement_weight': .15, 'planner_weight': .2,
                 'recovery_interval': 100, 'recovery_samples': 2, 'recovery_steps': 2,
-                'recovery_weight': .1}
+                'recovery_weight': .1, 'action_state_policy':'committed_causal_v2',
+                'motif_memory_policy':'off','slide_factor_policy':'branch_joint_v2','motif_max_events':16,
+                'touch_layout_policy':'open'}
     assert task.result['effective_settings'] == expected
     for key, value in expected.items():
         flag = '--' + key.replace('_', '-')

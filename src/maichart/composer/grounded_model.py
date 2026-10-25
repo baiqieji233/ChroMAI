@@ -48,9 +48,12 @@ class AudioGroundedComposer(ChartComposer):
         self.history_bin=nn.Linear(width,1)
         nn.init.zeros_(self.history_pointer.weight);nn.init.zeros_(self.history_pointer.bias)
         nn.init.zeros_(self.history_bin.weight);nn.init.zeros_(self.history_bin.bias)
-        self.action_factors=CompositionalActions(list(atom_catalog),width)
+        self.action_factors=CompositionalActions(list(atom_catalog),width,config.history_anchor_policy,config.slide_factor_policy)
         self.action_relation=nn.Linear(8,width,bias=False)
         nn.init.zeros_(self.action_relation.weight)
+        if config.motif_memory_policy != 'off':
+            from .motif_memory import MotifMemoryAdapter
+            self.motif_memory=MotifMemoryAdapter(width)
         # A full ledger still describes valid causal state. Its direct and
         # discrepancy routes cannot write an unbounded pointer logit anymore.
 
@@ -63,7 +66,8 @@ class AudioGroundedComposer(ChartComposer):
                 curve_strength=1.,interval_audio=None,trailing_audio=None,workload_override=None,
                 symbolic_keep=None,audio_auxiliary=True,head_timing=None,audio_lens=None,
                 audio_lens_mask=None,planner_audio=None,planner_mask=None,planner_indices=None,
-                planner_mix=None,planner_override=None,lens_embeddings=None,**unused):
+                planner_mix=None,planner_override=None,lens_embeddings=None,
+                motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,**unused):
         if (audio_lens is None and lens_embeddings is None) or planner_audio is None or head_timing is None:
             raise ValueError('audio_grounded_v3 requires local audio, coarse plan audio and causal head timing')
         batch,count=candidate_features.shape[:2]
@@ -95,11 +99,11 @@ class AudioGroundedComposer(ChartComposer):
             padding=history_padding_mask if history_padding_mask is not None else torch.zeros(history.shape[:2],device=history.device,dtype=torch.bool)
             lengths=(~padding).sum(1)
             positions=(lengths[:,None]-1-torch.arange(history.size(1),device=history.device)[None]).clamp_min(0)
-            # Anchor history token embeddings to their physical button lane (1..8)
-            # while action_factors.embed(history) and history_features carry the
-            # note kind/modifier factors, preventing 18,454-ID Touch/EX copy lock.
-            lane_ids=self.action_factors._lane_anchor_ids[history]
-            hist_emb=(.75*self.event_embedding(lane_ids)+.25*self.event_embedding(history)+self.action_factors.embed(history))*history.ne(0)[...,None]
+            # The checkpoint policy selects historical digit anchors or parsed
+            # head angles. Factors and the original embedding retain note kinds,
+            # modifiers and touch rings; center Touch has no outer angle.
+            anchors=self.action_factors.history_anchor_embedding(history,self.event_embedding)
+            hist_emb=(.75*anchors+.25*self.event_embedding(history)+self.action_factors.embed(history))*history.ne(0)[...,None]
             memory=hist_emb.sum(-2)+self.position_embedding(positions.clamp_max(self.config.history_events+3))
             if history_features is not None:memory=memory+self.history_feature_projection(history_features)
             safe_padding=padding.clone()
@@ -120,7 +124,9 @@ class AudioGroundedComposer(ChartComposer):
             symbolic=symbolic+(tail[:,None]+self.history_gate.tanh()*attended)*lengths.gt(0)[:,None,None]
             last_ids=history[rows,(lengths-1).clamp_min(0)]
             last_heads=self.action_factors.atom_head_lanes[last_ids].any(-2).to(hidden)*tail_valid[:,None]
-        if action_state is not None:symbolic=symbolic+self.action_projection(action_state)[:,None]
+        if action_state is not None:
+            projected_state=self.action_projection(action_state)
+            symbolic=symbolic+(projected_state[:,None] if action_state.ndim==2 else projected_state)
         symbolic=symbolic+self.head_timing_projection(head_timing.to(hidden))
         trailing=self.predict_trailing(trailing_audio,condition) if trailing_audio is not None else None
         if ledger is not None:
@@ -158,16 +164,27 @@ class AudioGroundedComposer(ChartComposer):
         if trailing is not None:result['trailing_workload']=trailing
         if decode_actions:
             result.update(self.decode_candidate(action_context,candidate_indices,
-                action_targets=action_targets,audio_context=audio_action_context))
+                action_targets=action_targets,audio_context=audio_action_context,
+                motif_ids=motif_ids,motif_relative_beats=motif_relative_beats,motif_mask=motif_mask,
+                motif_strength=motif_strength))
         return result
 
-    def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None):
+    def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
+                         motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.):
         if candidate_indices is not None:
             rows=torch.arange(candidate_context.size(0),device=candidate_context.device)
             candidate_context=candidate_context[rows,candidate_indices]
             if audio_context is not None:
                 audio_context=audio_context[rows,candidate_indices]
         result={'future':self.future_head(candidate_context),'eos_logits':self.eos_head(candidate_context).squeeze(-1),'action_context':candidate_context}
+        # Motifs guide configurations only. The learned timing pointer, EOS,
+        # future summary and audio-only action reference retain their inputs.
+        if hasattr(self,'motif_memory') and motif_ids is not None:
+            if motif_relative_beats is None or motif_mask is None:
+                raise ValueError('Motif IDs require relative timing and visibility mask')
+            candidate_context=candidate_context+float(motif_strength)*self.motif_memory(
+                candidate_context,self._embedding,motif_ids,motif_relative_beats,motif_mask)
+            result['action_context']=candidate_context
         if audio_context is not None:
             result['audio_action_context']=audio_context
         if project_actions:

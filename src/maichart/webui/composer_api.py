@@ -10,7 +10,7 @@ from typing import Any
 
 FAMILY = "chart_composer_v1"
 SCHEMA = "maichart-chart-composer-checkpoint-v2"
-GENERATION_CONTRACT = 'composer_generation_controls_v9_touch_history'
+GENERATION_CONTRACT = 'composer_generation_controls_v10_touch_layout'
 
 
 def _path(value: Any, label: str, *, exists: bool = False, directory: bool = False) -> Path:
@@ -131,6 +131,8 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     if dropout>1.:raise ValueError('dropout 不能大于 1')
     if mode!='fresh' and dropout!=float(parent_config.get('dropout',.1)):
         raise ValueError('普通 dropout 继承已有模型；改变它需要 fresh 训练')
+    from maichart.composer.model import resolve_history_anchor_policy, resolve_composer_policy, COMPOSER_POLICY_FIELDS, validate_supported_context_policies
+    anchor_policy=resolve_history_anchor_policy(payload.get('history_anchor_policy','auto'),parent_config,resume=mode=='resume')
 
     args = ["-m", "maichart.composer.train"]
     _arg(args, "--manifest", manifest)
@@ -138,7 +140,30 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args, "--cache-dir", cache_dir)
     _arg(args, '--architecture-profile', architecture_profile)
     _arg(args,'--dropout',dropout)
-    grounded_settings = {'architecture_profile': architecture_profile,'dropout':dropout}
+    _arg(args,'--history-anchor-policy',anchor_policy)
+    grounded_settings = {'architecture_profile': architecture_profile,'dropout':dropout,'history_anchor_policy':anchor_policy}
+    for key in COMPOSER_POLICY_FIELDS:
+        value = resolve_composer_policy(key, payload.get(key, 'auto'), parent_config, resume=mode=='resume',architecture_profile=architecture_profile)
+        grounded_settings[key] = value
+        _arg(args, '--' + key.replace('_', '-'), value)
+    validate_supported_context_policies(grounded_settings)
+    motif_max = _int(payload, 'motif_max_events', int(parent_config.get('motif_max_events',16)), minimum=1)
+    if motif_max > 32:
+        raise ValueError('motif_max_events cannot exceed 32')
+    if mode == 'resume' and motif_max != int(parent_config.get('motif_max_events',16)):
+        raise ValueError('resume inherits motif_max_events; use finetune to change it')
+    grounded_settings['motif_max_events'] = motif_max
+    _arg(args, '--motif-max-events', motif_max)
+    touch_policy = str(payload.get('touch_layout_policy', 'auto'))
+    if touch_policy not in {'auto','open','legacy_two_heads'}:
+        raise ValueError('unknown touch_layout_policy')
+    inherited_touch = str(parent_args.get('touch_layout_policy', 'legacy_two_heads')) if mode!='fresh' else 'open'
+    if touch_policy == 'auto': touch_policy = inherited_touch
+    if mode=='resume' and touch_policy != inherited_touch:
+        raise ValueError('resume inherits touch_layout_policy; use finetune to change it')
+    grounded_settings['touch_layout_policy'] = touch_policy
+    _arg(args, '--touch-layout-policy', touch_policy)
+
     for key, default, minimum, maximum in (
         ('lens_width', 64, 8, 256), ('lens_chunk_size', 32, 1, 256),
         ('recovery_interval', 100, 0, None), ('recovery_samples', 2, 1, 8),
@@ -267,6 +292,11 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     temperature=_float(payload,'temperature',.8,minimum=0.)
     pointer_temperature=_float(payload,'pointer_temperature',temperature,minimum=0.)
     action_temperature=_float(payload,'action_temperature',temperature,minimum=0.)
+    touch_layout_policy=str(payload.get('touch_layout_policy','open'))
+    if touch_layout_policy not in {'open','legacy_two_heads'}:
+        raise ValueError('unknown touch_layout_policy')
+    motif_strength=_float(payload,'motif_strength',1.,minimum=0.)
+    if motif_strength>2.:raise ValueError('motif_strength cannot exceed 2')
     curve_strength=_float(payload,'curve_strength',1.,minimum=0.)
     if curve_strength>2.:
         raise ValueError('curve_strength 不能大于 2')
@@ -296,6 +326,7 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     for flag,value in (('--first',first),('--level',condition.level),('--temperature',temperature),
                        ('--pointer-temperature',pointer_temperature),('--action-temperature',action_temperature),
                        ('--curve-strength',curve_strength),
+                       ('--touch-layout-policy',touch_layout_policy),('--motif-strength',motif_strength),
                        ('--pointer-history-strength',pointer_history_strength),
                        ('--touch-history-bound',touch_history_bound),
                        ('--min-same-head-ms',min_same_head_ms),
@@ -321,6 +352,7 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         'generation_contract':GENERATION_CONTRACT,'effective_settings':{
             'temperature':temperature,'pointer_temperature':pointer_temperature,
             'action_temperature':action_temperature,'curve_strength':curve_strength,
+            'touch_layout_policy':touch_layout_policy,'motif_strength':motif_strength,
             'pointer_history_strength':pointer_history_strength,
             'touch_history_guard':touch_history_guard,'touch_history_bound':touch_history_bound,
             'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,

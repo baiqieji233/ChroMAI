@@ -85,7 +85,7 @@ function trainingMetricEvents(task) {
     ? reportedPhase : null;
   let phaseFromCurrentProgress = phase !== null
     && (result.phase === phase || result.progress_detail?.phase === phase);
-  if (!phase && ["queued", "running"].includes(task?.status)) {
+  if (!phase && ["queued", "running", "cancelling"].includes(task?.status)) {
     const candidates = Object.entries(phaseMetrics).filter(([, value]) => value);
     candidates.sort(([phaseA, valueA], [phaseB, valueB]) => {
       const epochA = trainingMetricNumber(valueA, "epoch") ?? -1;
@@ -252,6 +252,11 @@ function composerTrainingView(task) {
     cards.push(['音频锚定训练参数',[
       ['架构',effective.architecture_profile],['短窗音频宽度 / 分块',`${effective.lens_width??'—'} / ${effective.lens_chunk_size??'—'}`],
       ['普通 dropout',`${runtime.dropout??effective.dropout??'—'}`],
+      ['历史键位锚定',runtime.history_anchor_policy??effective.history_anchor_policy??'旧模型兼容'],
+      ['持续动作状态',runtime.action_state_policy??effective.action_state_policy??'committed_legacy_v1'],
+      ['动机记忆 / 事件上限',`${runtime.motif_memory_policy??effective.motif_memory_policy??'off'} / ${runtime.motif_max_events??effective.motif_max_events??16}`],
+      ['Slide分支因子',runtime.slide_factor_policy??effective.slide_factor_policy??'marginal_v1'],
+      ['恢复Touch布局',runtime.touch_layout_policy??effective.touch_layout_policy??'legacy_two_heads'],
       ['轮中重分 batch',runtime.rebatch_resume===undefined?(result.rebatch_resume_requested===undefined?'—':result.rebatch_resume_requested?'已请求，待运行确认':'未请求'):(runtime.rebatch_resume?'开启':'关闭')],
       ['历史残差上限',`${effective.history_residual_bound??'—'}`],
       ['历史 / 台账遮挡',`${effective.history_dropout??'—'} / ${effective.ledger_dropout??'—'}`],
@@ -361,7 +366,7 @@ function renderTaskTrainingMetrics(task) {
 
   const events = trainingMetricEvents(task);
   const livePhase = events.phase;
-  const live = ["queued", "running"].includes(task.status) && livePhase !== null;
+  const live = ["queued", "running", "cancelling"].includes(task.status) && livePhase !== null;
   const latestPhaseEpoch = trainingMetricNumber(events.phaseMetrics[livePhase], "epoch");
   const latestSummaryEpoch = trainingMetricNumber(events.epoch, "epoch");
   const archivedProgress = task.status === "archived" && livePhase !== null
@@ -648,7 +653,7 @@ function trainingEpochStatus(task) {
       text: `训练进度：已完成 epoch ${current} / ${target}；${semantics}`,
     };
   }
-  if (["queued", "running"].includes(task.status) || result.last_epoch !== undefined) {
+  if (["queued", "running", "cancelling"].includes(task.status) || result.last_epoch !== undefined) {
     const last = result.last_epoch !== undefined ? `已完成 epoch ${current}；` : "";
     return {
       knownTarget: false,
@@ -739,6 +744,7 @@ const GENERATION_PARAM_FIELDS = [
   "streamConfigurationCandidates",
   "composerMaxEvents", "composerConditionFile", "composerCurveStrength", "composerPointerTemperature", "composerActionTemperature", "composerMinSameHeadMs", "composerPointerHistoryStrength",
   "composerInterceptTapOnSlide", "composerTouchHistoryGuard", "composerTouchHistoryBound",
+  "composerTouchLayoutPolicy", "composerMotifStrength",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
   "topP", "repetitionPenalty", "repetitionWindow", "maxTokens",
   "intensityFollow", "intensityFollowSpan",                  // 逐窗口强度跟随
@@ -829,7 +835,7 @@ async function api(path, body) {
   try { data = text ? JSON.parse(text) : {}; } catch (_) { data = { error: text || `HTTP ${response.status}` }; }
   const taskStatusResponse = body === undefined && path.split("?", 1)[0] === "/api/task"
     && typeof data.task_id === "string"
-    && ["queued", "running", "completed", "failed", "cancelled"].includes(data.status);
+    && ["queued", "running", "cancelling", "completed", "failed", "cancelled"].includes(data.status);
   if (!response.ok || (!taskStatusResponse && data.error)) throw new Error(data.error || `HTTP ${response.status}`);
   return data;
 }
@@ -2008,6 +2014,12 @@ function chartComposerTrainingPayload(options = {}) {
   return {
     model_family: "chart_composer_v1", mode,
     architecture_profile: valueOrDefault('#composerArchitectureProfile','audio_grounded_v3'),
+    history_anchor_policy: valueOrDefault('#composerHistoryAnchorPolicy','auto'),
+    action_state_policy: valueOrDefault('#composerActionStatePolicy','auto'),
+    motif_memory_policy: valueOrDefault('#composerMotifMemoryPolicy','auto'),
+    slide_factor_policy: valueOrDefault('#composerSlideFactorPolicy','auto'),
+    motif_max_events: Number(valueOrDefault('#composerMotifMaxEvents',16)),
+    touch_layout_policy: valueOrDefault('#composerRecoveryTouchLayoutPolicy','auto'),
     manifest: source.manifest || manifests[0] || "",
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
@@ -2149,6 +2161,8 @@ function chartComposerGenerationPayload() {
     pointer_history_strength: Number(valueOrDefault('#composerPointerHistoryStrength',1)),
     min_same_head_ms: Number(valueOrDefault("#composerMinSameHeadMs", 50)),
     intercept_tap_on_slide: checkedOrDefault("#composerInterceptTapOnSlide", false),
+    touch_layout_policy: valueOrDefault('#composerTouchLayoutPolicy','open'),
+    motif_strength: Number(valueOrDefault('#composerMotifStrength',1)),
     touch_history_guard: checkedOrDefault('#composerTouchHistoryGuard',true),
     touch_history_bound: Number(valueOrDefault('#composerTouchHistoryBound',1)),
     seed: valueOrDefault("#seed", "").trim() === "" ? null : Number(valueOrDefault("#seed", 0)),
@@ -2443,7 +2457,8 @@ function updateTrainingControls() {
   }
   if (currentModelFamily()==='chart_composer_v1' && currentTrainingMode()==='fresh') {
     for (const id of ['composerDModel','composerDimFeedforward','composerLayers','composerNhead',
-      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile',
+      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerHistoryAnchorPolicy',
+      'composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy',
       'composerLensWidth','composerLensChunkSize','composerHistoryResidualBound','composerHistoryDropout',
       'composerLedgerDropout','composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
       'composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerDropout']) {
@@ -2466,6 +2481,11 @@ function updateTrainingControls() {
     }
   }
   const composerDropout=element('#composerDropout');
+  const composerAnchor=element('#composerHistoryAnchorPolicy');
+  if (composerAnchor) composerAnchor.disabled=composer && resume;
+  for (const id of ['composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy']) {
+    const target=element('#'+id); if(target)target.disabled=composer && resume;
+  }
   if (composerDropout) composerDropout.disabled=currentTrainingMode()!=='fresh';
   updateSongFormRhythmGeometryControls();
   updateSongFormQualityControls();
@@ -2608,7 +2628,7 @@ async function pollTask(taskId) {
     watcher.task = task;
     window.MaichartWorkflow?.recordTask(task);
     if (activeTaskId === taskId) renderTask(task);
-    if (["queued", "running"].includes(task.status)) {
+    if (["queued", "running", "cancelling"].includes(task.status)) {
       setTimeout(() => pollTask(taskId), 800);
     } else {
       const expectsArtifacts = task.kind === "form_generate"
@@ -2649,7 +2669,7 @@ function renderTask(task) {
   const logs = element("#taskLogs");
   const epochStatus = trainingEpochStatus(task);
   if (kind) kind.textContent = `${TASK_KIND_LABEL[task.kind] || task.kind} · ${task.task_id}`;
-  if (status) status.textContent = ({queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已中断", archived: "历史记录"})[task.status] || task.status;
+  if (status) status.textContent = ({queued: "排队中", running: "运行中", cancelling: "正在取消", completed: "已完成", failed: "失败", cancelled: "已中断", archived: "历史记录"})[task.status] || task.status;
   if (progress) {
     const unknownTrainingTarget = task.kind === "train" && !epochStatus?.knownTarget;
     if (progress.parentElement) progress.parentElement.hidden = unknownTrainingTarget || task.status === "archived";
@@ -2697,6 +2717,11 @@ function composerGenerationSummary(task) {
   const historyStrength=report.pointer_history_strength??settings.pointer_history_strength;
   if (report.pointer_sampling_policy==='joint_t1_bin_mass_within_bin_temperature_v1') parts.push(Number(pointerTemperature)===0?'选时采用全体候选贪心':'选时保留模型预测的时间区间概率，温度只调整区间内部');
   if (historyStrength!==undefined) parts.push(`选时历史权重 ${historyStrength}（1 为完整历史，0 为音频分支）`);
+  const layout=report.touch_layout_policy??settings.touch_layout_policy;
+  if(layout)parts.push(`Touch布局：${layout==='open'?'开放':'旧双头限制'}`);
+  const motifPolicy=report.motif_memory_policy;
+  const motifStrength=report.motif_strength??settings.motif_strength;
+  if(motifStrength!==undefined)parts.push(`动机记忆：${motifPolicy==='off'?'模型关闭，强度调整无效':motifPolicy??'待生成报告确认'}；请求强度 ${motifStrength}`);
   const touchRequested=report.touch_history_guard_requested??settings.touch_history_guard;
   if (touchRequested!==undefined) {
     const touchEffective=report.touch_history_guard;
@@ -3208,7 +3233,7 @@ async function loadStatus() {
   setStatus(`本地服务正常 · workspace: ${state.workspace}${intensityNotice}`, state.intensity_curve_capability === true);
   populateDatasets(state.datasets || []);
   await loadDatasetCatalog();
-  const running = (state.tasks || []).find((task) => ["queued", "running"].includes(task.status)
+  const running = (state.tasks || []).find((task) => ["queued", "running", "cancelling"].includes(task.status)
     && !String(task.kind || "").startsWith("intensity"));
   window.MaichartWorkflow?.renderTasks(state.tasks || []);
   window.MaichartWorkflow?.refresh();
@@ -3472,6 +3497,7 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
     "#composerCandidateCount": config.candidate_count,
     "#composerActionSlots": config.action_slots,
     "#composerDropout": config.dropout,
+    "#composerHistoryAnchorPolicy": mode==='resume'?(config.history_anchor_policy??'legacy_digit_v1'):undefined,
     "#composerArchitectureProfile": mode==='resume'?config.architecture_profile:undefined,
     "#composerLensWidth": mode==='resume'?config.lens_width:undefined,
     "#composerHistoryResidualBound": mode==='resume'?config.history_residual_bound:undefined,
@@ -3479,9 +3505,20 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
   Object.entries(mapping).forEach(([selector, value]) => {
     const target = element(selector);
     if (target && value !== undefined && value !== null) target.value = String(value);
-    if (target) target.disabled = ['#composerArchitectureProfile','#composerLensWidth','#composerHistoryResidualBound'].includes(selector)
+    if (target) target.disabled = ['#composerArchitectureProfile','#composerLensWidth','#composerHistoryResidualBound','#composerHistoryAnchorPolicy'].includes(selector)
       ? mode==='resume' : mode !== "fresh";
   });
+  for (const [id,key,fallback] of [
+    ['composerActionStatePolicy','action_state_policy','committed_legacy_v1'],
+    ['composerMotifMemoryPolicy','motif_memory_policy','off'],
+    ['composerSlideFactorPolicy','slide_factor_policy','marginal_v1'],
+    ['composerMotifMaxEvents','motif_max_events',16],
+    ['composerRecoveryTouchLayoutPolicy','touch_layout_policy','legacy_two_heads']]) {
+    const target=element('#'+id);
+    if(target && mode!=='fresh' && (mode==='resume' || !preserveEditable))
+      target.value=String(config[key]??data?.args?.[key]??fallback);
+    if(target)target.disabled=mode==='resume';
+  }
   const precision = element("#composerPrecision");
   if (precision && !preserveEditable && mode !== "fresh" && data?.args?.precision) precision.value = String(data.args.precision);
   for (const id of ['composerLensChunkSize','composerHistoryDropout','composerLedgerDropout',
@@ -3525,6 +3562,9 @@ function renderChartComposerCheckpointInspection(data) {
     "模型族：chart_composer_v1（事件候选与动作槽位）",
     `schema：${data?.schema || "未记录"}`,
     `架构：${config.architecture_profile || "未记录"}`,
+    `历史几何：${config.history_anchor_policy??'legacy_digit_v1'}；持续状态：${config.action_state_policy??'committed_legacy_v1'}`,
+    `动机记忆：${config.motif_memory_policy??'off'}；事件上限：${config.motif_max_events??16}；Slide因子：${config.slide_factor_policy??'marginal_v1'}`,
+    `恢复Touch布局：${data?.args?.touch_layout_policy??'legacy_two_heads'}`,
     data?.epoch !== undefined ? `保存 epoch：${data.epoch}` : "保存 epoch：未记录",
     data?.optimizer_steps !== undefined ? `优化器更新：${data.optimizer_steps}` : "",
     `模型结构：d_model=${config.d_model ?? "未记录"}；layers=${config.layers ?? "未记录"}；nhead=${config.nhead ?? "未记录"}；历史=${config.history_events ?? "未记录"}；候选=${config.candidate_count ?? "未记录"}；动作槽位=${config.action_slots ?? "未记录"}`,
@@ -4096,8 +4136,8 @@ async function submitTrain(options = {}) {
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
-        || backend.training_capabilities?.composer_training_controls!=='rebatch_dropout_controls_v1')
-      throw new Error('当前服务尚未加载 Composer 重分批和 dropout 控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。');
+        || backend.training_capabilities?.composer_training_controls!=='causal_motif_controls_v3')
+      throw new Error('当前服务尚未加载 Composer 历史锚定等训练控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -4834,7 +4874,7 @@ async function pollIntensityTask(taskId, sourcePath) {
   try {
     const task = await api(`/api/task?id=${encodeURIComponent(taskId)}`);
     if (intensityCurveState.taskId !== taskId) return;
-    if (["queued", "running"].includes(task.status)) { intensityCurveState.timer = setTimeout(() => pollIntensityTask(taskId, sourcePath), 800); return; }
+    if (["queued", "running", "cancelling"].includes(task.status)) { intensityCurveState.timer = setTimeout(() => pollIntensityTask(taskId, sourcePath), 800); return; }
     if (task.status !== "completed") throw new Error(task.error || "强度曲线分析失败");
     if (intensityAudioPath() !== sourcePath) { setIntensityStatus("分析已完成，但歌曲已更换；已丢弃旧曲线，请重新生成。", "warn"); return; }
     const result = task.result || {}; const profile = result.intensity_profile || result.profile;
@@ -4988,7 +5028,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_composer_v1") {
     const status = await api("/api/status");
-    if (status.composer_generation_contract !== "composer_generation_controls_v9_touch_history") {
+    if (status.composer_generation_contract !== "composer_generation_controls_v10_touch_layout") {
       throw new Error("当前服务尚未加载 Composer Touch 控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。");
     }
     const data = await api("/api/composer/generate", payload);
@@ -5364,7 +5404,7 @@ on("#modelFamily", "change", () => {
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_composer_v1") {
     for (const [id, v] of Object.entries({composerDModel:192, composerDimFeedforward:576, composerLayers:3, composerNhead:6,
       composerHistoryEvents:128, composerCandidateCount:96, composerActionSlots:8,
-      composerArchitectureProfile:'audio_grounded_v3',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
+      composerArchitectureProfile:'audio_grounded_v3',composerHistoryAnchorPolicy:'auto',composerActionStatePolicy:'auto',composerMotifMemoryPolicy:'auto',composerSlideFactorPolicy:'auto',composerMotifMaxEvents:16,composerRecoveryTouchLayoutPolicy:'auto',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
       composerHistoryResidualBound:1,composerHistoryDropout:.3,composerLedgerDropout:.5,
       composerPlacementWeight:.15,composerPlannerWeight:.2,composerRecoveryInterval:100,
       composerRecoverySamples:2,composerRecoverySteps:2,composerRecoveryWeight:.1,
@@ -5378,7 +5418,7 @@ on("#modelFamily", "change", () => {
   }
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
-on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); setTrainingModeDefaults(); updateTrainingControls(); });
+on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerHistoryAnchorPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerRecoveryTouchLayoutPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults(); updateTrainingControls(); });
 on('#composerRebatchResume','change',()=>{updateTrainingControls();saveSettings();});
 on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });
 on("#formQualityApplyRecipe", "click", applySongFormQualityRecipe);
@@ -5667,7 +5707,7 @@ $("#resetSettingsButton").addEventListener("click", () => {
 });
 on("#cancelButton", "click", async () => {
   if (!activeTaskId) return;
-  await api("/api/cancel", { task_id: activeTaskId });
+  renderTask(await api("/api/cancel", { task_id: activeTaskId }));
 });
 
 // Initial server probe.  Failure must not disable the rest of the page.

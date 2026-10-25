@@ -98,6 +98,10 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
              'training_state':(training_state or {}) if optimizer is not None else {},
              'checkpoint_kind':'training' if optimizer is not None else 'inference'}
     if model.config.architecture_profile==GROUNDED_PROFILE:
+        if model.config.history_anchor_policy != model.action_factors.history_anchor_policy:
+            raise ValueError('Save history_anchor_policy differs from the effective model representation')
+        if model.config.slide_factor_policy != model.action_factors.slide_factor_policy:
+            raise ValueError('Save slide_factor_policy differs from the effective model representation')
         if list(atom_catalog)!=list(model.action_factors.atom_catalog):
             raise ValueError('Save catalog order differs from the compositional action mapping')
         payload.update(training_semantics=GROUNDED_TRAINING_SEMANTICS,candidate_policy=MUSIC_CANDIDATE_POLICY_V6,
@@ -138,7 +142,13 @@ def validate(payload):
     values=dict(payload['model_config'])
     values.setdefault('architecture_profile','legacy_v2')
     values.setdefault('head_timing_dim',0)
+    values.setdefault('history_anchor_policy','legacy_digit_v1')
+    values.setdefault('action_state_policy','committed_legacy_v1')
+    values.setdefault('motif_memory_policy','off')
+    values.setdefault('slide_factor_policy','marginal_v1')
     config=ComposerConfig(**values)
+    from .model import validate_supported_context_policies
+    validate_supported_context_policies(config)
     if config.architecture_profile not in {'legacy_v2',*WORKLOAD_PROFILES}:
         raise ValueError('Unknown Composer architecture profile')
     contract=_PROFILE_POLICIES[config.architecture_profile]
@@ -257,7 +267,7 @@ def _expanded_slot_embedding(value, target):
     return result
 
 
-def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slots=None):
+def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slots=None, **policy_options):
     """Explicit approximate finetune migration, never an exact resume.
 
     Shared layers retain weights. Eight slot classifiers become one mean
@@ -269,13 +279,16 @@ def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slot
     slots = model.config.action_slots if action_slots is None else int(action_slots)
     if slots < model.config.action_slots:
         raise ValueError('Finetune migration cannot reduce action_slots')
-    if (model.config.architecture_profile == 'music_context_v2'
-            and model.config.head_timing_dim == HEAD_TIMING_DIM and slots == model.config.action_slots):
+    allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy'}
+    if set(policy_options)-allowed:raise ValueError('Unknown music-context migration option')
+    config=ComposerConfig(**{**model.config.to_dict(),**policy_options,'architecture_profile':'music_context_v2',
+                             'head_timing_dim':HEAD_TIMING_DIM,'action_slots':slots})
+    from .model import validate_supported_context_policies
+    validate_supported_context_policies(config)
+    if model.config.to_dict()==config.to_dict():
         return model
     if model.config.architecture_profile not in {'audio_workload_v1','music_context_v2'}:
         raise ValueError('Only workload v1 can migrate to music-context v2')
-    config=ComposerConfig(**{**model.config.to_dict(),'architecture_profile':'music_context_v2',
-                             'head_timing_dim':HEAD_TIMING_DIM,'action_slots':slots})
     upgraded=ChartComposer(config)
     old=model.state_dict(); new=upgraded.state_dict()
     for key,value in old.items():
@@ -308,6 +321,10 @@ def migrate_audio_grounded(model,atom_catalog,**options):
             current[key]=value.reshape(model.config.action_slots,config.atom_vocab_size,*value.shape[1:]).mean(0)
         elif key == 'slot_embedding.weight':
             current[key] = _expanded_slot_embedding(value, current[key])
+        elif key.startswith('action_factors.') and (key.endswith('catalog_fingerprint') or '.atom_' in key):
+            # The target policy owns its derived maps. Learned old factor rows
+            # transfer below; a new joint factor starts at zero.
+            continue
         elif key in current and torch.is_tensor(value) and torch.is_tensor(current[key]) and value.shape==current[key].shape:
             current[key]=value
     upgraded.load_state_dict(current)

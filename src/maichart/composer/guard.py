@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from fractions import Fraction
 from functools import lru_cache
+from copy import deepcopy
 import math
 from collections import Counter
 
@@ -14,11 +15,21 @@ from .events import event_metadata
 _EPS = 1e-9
 
 
+@lru_cache(maxsize=2048)
+def _cached_markers(text, bpm):
+    # Pure shared cache: keys never retain a guard or its chart prefix.
+    markers, errors, _ = parse_markers(f'({bpm}){{4}}{text},', first=0.)
+    return markers, errors
+
+
 class EventGuard:
-    def __init__(self, tempo, first, audio_end, *, min_same_head_sec=.05, intercept_tap_on_slide=False):
+    def __init__(self, tempo, first, audio_end, *, min_same_head_sec=.05, intercept_tap_on_slide=False, touch_layout_policy='legacy_two_heads'):
         min_same_head_sec = float(min_same_head_sec)
         if not math.isfinite(min_same_head_sec) or not 0. <= min_same_head_sec <= .2:
             raise ValueError('min_same_head_sec must be finite and between 0 and 0.2 seconds')
+        if touch_layout_policy not in {'open','legacy_two_heads'}:
+            raise ValueError('unknown touch_layout_policy')
+        self.touch_layout_policy=touch_layout_policy
         self.tempo, self.first, self.audio_end = tempo, first, float(audio_end)
         self.min_same_head_sec = min_same_head_sec
         self.intercept_tap_on_slide = bool(intercept_tap_on_slide)
@@ -31,11 +42,13 @@ class EventGuard:
                 'TapOnSlide':'enforce' if self.intercept_tap_on_slide else 'report',
                 'Overlap':'enforce','SlideHeadTap':'report','SlideTooFast':'report'})
         self.last_reason = None
+        self._before_cache = None
 
-    @lru_cache(maxsize=2048)
-    def _markers(self, text, bpm):
-        markers, errors, _ = parse_markers(f'({bpm}){{4}}{text},', first=0.)
-        return markers, errors
+    @staticmethod
+    def _markers(text, bpm):
+        # Parser output contains mutable nested dictionaries/lists. Never expose
+        # the cached object to callers, including other guard instances.
+        return deepcopy(_cached_markers(text, bpm))
 
     def _lifetime(self, point):
         second = float(seconds_at_beat(point.beat, self.tempo, self.first))
@@ -56,7 +69,7 @@ class EventGuard:
             # Check only actual onset heads. Parsed EventMetadata deduplicates
             # shared Slide branches, and deliberately excludes Slide endpoints.
             for head in event_metadata(point.note_text).heads:
-                pad = f'A{head}' if str(head).isdigit() else str(head)
+                pad = f'A{head}' if self.touch_layout_policy=='legacy_two_heads' and str(head).isdigit() else str(head)
                 prior = self.last_head_seconds.get(pad)
                 if prior is not None and second - prior < self.min_same_head_sec - _EPS:
                     self._reject('repeated_head_too_soon')
@@ -68,23 +81,32 @@ class EventGuard:
         # same native transaction as events containing sustained actions.
         context = [row[0] for row in active]
         self.checks += 1
-        before = detect_chart_conflicts(context, self.tempo, self.first, self.config) if context else None
-        after = detect_chart_conflicts(context + [point], self.tempo, self.first, self.config)
         def hard_keys(result, *, enforced_only=True):
-            if result is None: return set()
-            return {(issue.conflict_type, round(issue.time, 6),
+            if result is None: return frozenset()
+            return frozenset((issue.conflict_type, round(issue.time, 6),
                      tuple((str(n.beat), n.raw) for n in issue.notes))
                     for issue in result.conflicts_detected
                     if issue.severity == 'hard' and (not enforced_only or
                         (issue.action == 'enforce' and (issue.evidence.startswith('miacode_runtime:')
-                         or (self.intercept_tap_on_slide and issue.conflict_type == 'miacode_TapOnSlide'))))}
+                         or (self.intercept_tap_on_slide and issue.conflict_type == 'miacode_TapOnSlide')))))
+        # Candidate time can change the active window without a commit. Keep
+        # only an immutable summary of the exact latest context/configuration.
+        key = (tuple((p.beat, p.note_text) for p in context),
+               tuple((t.beat, t.bpm) for t in self.tempo), self.first,
+               repr(self.config), self.intercept_tap_on_slide)
+        if self._before_cache is None or self._before_cache[0] != key:
+            before = detect_chart_conflicts(context, self.tempo, self.first, self.config) if context else None
+            self._before_cache = (key, hard_keys(before), hard_keys(before, enforced_only=False),
+                                  bool(before and before.coverage.get('parse_errors')))
+        _, before_enforced, before_all, _ = self._before_cache
+        after = detect_chart_conflicts(context + [point], self.tempo, self.first, self.config)
         # Only an explicitly guided proposal requests this stronger check.
         # Keep configured report/enforce behavior unchanged for all other
         # generation proposals and for training recovery (the default call).
-        if protect_reported_hard and hard_keys(after,enforced_only=False)-hard_keys(before,enforced_only=False):
+        if protect_reported_hard and hard_keys(after,enforced_only=False)-before_all:
             self._reject('guided_proposal_new_reported_hard_conflict')
             return False
-        if after.coverage.get('parse_errors') or hard_keys(after) - hard_keys(before):
+        if after.coverage.get('parse_errors') or hard_keys(after) - before_enforced:
             self._reject('new_miacode_runtime_hard_conflict')
             return False
         return True
@@ -95,9 +117,10 @@ class EventGuard:
         self.reason_counts[reason] += 1
 
     def commit(self, point):
+        self._before_cache = None
         second, end, sustained, _ = self._lifetime(point)
         self.prefix = [row for row in self.prefix if row[2] >= second - .3 or row[1] >= second - .3]
         self.prefix.append((point, second, end, sustained))
         for head in event_metadata(point.note_text).heads:
-            pad = f'A{head}' if str(head).isdigit() else str(head)
+            pad = f'A{head}' if self.touch_layout_policy=='legacy_two_heads' and str(head).isdigit() else str(head)
             self.last_head_seconds[pad] = second

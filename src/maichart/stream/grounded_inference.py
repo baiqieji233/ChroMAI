@@ -30,6 +30,7 @@ class IncrementalState(SustainStateIndex):
         added=[]
         for marker in markers:
             if marker['type'] in _TYPE_OFFSETS:
+                marker['source_beat']=Fraction(point.beat)
                 marker['key']=f'stream:{len(self.points)}:{marker["key"]}'
                 self.markers.append(marker);added.append(marker)
         self.points.append(point);self._release_index=None

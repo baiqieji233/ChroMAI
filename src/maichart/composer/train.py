@@ -16,7 +16,8 @@ from maichart.form.training_runtime import memory_snapshot
 from . import FAMILY,TRAINING_SEMANTICS,GROUNDED_TRAINING_SEMANTICS
 from .data import ComposerDataset,collate_composer
 from .candidates import COMPOSER_AUDIO_FEATURE_POLICY
-from .model import ChartComposer,ComposerConfig,build_model,GROUNDED_PROFILE,WORKLOAD_PROFILES
+from .model import (ChartComposer,ComposerConfig,build_model,GROUNDED_PROFILE,WORKLOAD_PROFILES,
+                    resolve_history_anchor_policy,resolve_composer_policy,COMPOSER_POLICY_FIELDS,HISTORY_ANCHOR_POLICIES)
 from .events import HEAD_TIMING_DIM
 from .checkpoint import save,load,migrate_music_context,migrate_audio_grounded
 from .runtime_memory import GIB,host_memory,memory_gib
@@ -220,6 +221,12 @@ def parser():
     p.add_argument('--profile-steps',type=int,default=0,
                    help='record CUDA H2D/forward/backward/update timings for first N consumed batches; 0 disables')
     p.add_argument('--architecture-profile',choices=('music_context_v2',GROUNDED_PROFILE),default=GROUNDED_PROFILE)
+    p.add_argument('--history-anchor-policy',choices=('auto',*sorted(HISTORY_ANCHOR_POLICIES)),default='auto',
+                   help='auto inherits an existing model policy; fresh models use parser-backed angular history anchors')
+    for name,(choices,_,_) in COMPOSER_POLICY_FIELDS.items():
+        p.add_argument('--'+name.replace('_','-'),choices=('auto',*sorted(choices)),default='auto')
+    p.add_argument('--motif-max-events',type=int,default=16)
+    p.add_argument('--touch-layout-policy',choices=('auto','open','legacy_two_heads'),default='auto')
     p.add_argument('--lens-width',type=int,default=64)
     p.add_argument('--lens-chunk-size',type=int,default=32)
     p.add_argument('--history-residual-bound',type=float,default=1.)
@@ -361,7 +368,8 @@ def _assert_model_finite(model):
 
 def _forward_batch(model,tensors,*,decode_actions=True,**overrides):
     extra={key:tensors[key] for key in ('head_timing','workload_audio','ledger','interval_audio',
-        'trailing_audio','audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix') if key in tensors}
+        'trailing_audio','audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
+        'motif_ids','motif_relative_beats','motif_mask') if key in tensors}
     extra.update(overrides)
     return model(tensors['candidate_features'],tensors['history'],tensors['condition'],
         action_state=tensors['action_state'],history_features=tensors['history_features'],
@@ -371,19 +379,23 @@ def _forward_batch(model,tensors,*,decode_actions=True,**overrides):
 
 def recovery_batch(dataset,model,args,device,global_step):
     from .recovery import RecoveryBuilder
-    from .generate import _sample_actions,_head_metadata,_active_constraints,_truncate_probabilities
+    from .generate import (_sample_actions,_head_metadata,_active_constraints,_truncate_probabilities,
+                           _touch_head_sets,_candidate_has_capacity)
     from .events import event_metadata
     from maichart.generation.event_cli import _NoteGrammar
     from maichart.event_timing import EventPoint
     atoms=dataset.codec_atoms;grammar=dataset.action_grammar
-    metadata=_head_metadata(atoms,grammar)
+    touch_policy=getattr(args,'touch_layout_policy','legacy_two_heads')
+    metadata=_head_metadata(atoms,grammar,touch_policy)
+    touch_heads=_touch_head_sets(atoms,grammar)
     rng=torch.Generator(device=device).manual_seed(args.seed+global_step+191)
     planner_cache={}
     def propose(item,index):
         candidates=item['_candidate_beats']
         constraints=[_active_constraints(item['_action_index'],beat,item['_tempo'],item['_first'],
-            clock=item['_clock']) for beat in candidates]
-        item['candidate_mask']=item['candidate_mask'] | torch.tensor([len(held)>=2 for held,_,_ in constraints])
+            clock=item['_clock'],touch_layout_policy=touch_policy) for beat in candidates]
+        item['candidate_mask']=item['candidate_mask'] | torch.tensor([
+            not _candidate_has_capacity(held,blocked,touch_policy,touch_heads) for held,blocked,_ in constraints])
         if bool(item['candidate_mask'].all()):return None
         clean={k:v for k,v in item.items() if not k.startswith('_')}
         batch=collate_composer([clean])
@@ -406,6 +418,13 @@ def recovery_batch(dataset,model,args,device,global_step):
             cand_sec=float(item['_clock'].at(beat))
             context=result['candidate_context'][0,chosen]
             audio_ctx=result['audio_action_context'][0,chosen] if 'audio_action_context' in result else None
+            if '_motif_index' in item:
+                from .context_features import motif_tensors
+                memory=motif_tensors(item['_motif_index'],beat,len(item['_prefix_points']),
+                    model.config.history_events,model.config.motif_max_events)
+                decoded=model.decode_candidate(context[None],project_actions=False,
+                    **{k:v[None].to(device) for k,v in memory.items()})
+                context=decoded['action_context'][0]
             occupied,blocked,_=constraints[chosen]
             cooldown_blocked=set(blocked)|{pad for pad,prior in guard.last_head_seconds.items()
                 if cand_sec-prior<guard.min_same_head_sec-1e-9}
@@ -413,14 +432,15 @@ def recovery_batch(dataset,model,args,device,global_step):
             for _ in range(6):
                 selected=_sample_actions(context.new_zeros(model.config.action_slots,len(atoms)+1),atoms,grammar,.85,rng,
                     slot_decoder=lambda slot,prefix:model.action_slot(context,slot,[dataset.atom_to_id[x] for x in prefix],audio_context=audio_ctx),
-                    occupied=occupied,blocked=cooldown_blocked,blocked_first=blocked_first,head_metadata=metadata,canonical_order=True)
+                    occupied=occupied,blocked=cooldown_blocked,blocked_first=blocked_first,head_metadata=metadata,
+                    canonical_order=True,touch_layout_policy=touch_policy)
                 if selected:
                     point=EventPoint(candidates[chosen],'/'.join(selected))
                     if guard.accepts(point):return point
                     blocked_first.add(dataset.atom_to_id[selected[0]])
                     if guard.last_reason=='repeated_head_too_soon':
                         for head in event_metadata('/'.join(selected)).heads:
-                            cooldown_blocked.add(f'A{head}' if str(head).isdigit() else str(head))
+                            cooldown_blocked.add(f'A{head}' if touch_policy=='legacy_two_heads' and str(head).isdigit() else str(head))
             logits[chosen]=float('-inf')
         return None
     indices=np.random.default_rng(args.seed+global_step+991).integers(0,len(dataset),size=args.recovery_samples)
@@ -465,8 +485,11 @@ def main(argv=None):
             raise ValueError(f'Fresh/finetune output already contains {existing.name}; choose a new directory')
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     old=None;model=None
+    parent_anchor_config=None
     if args.resume or args.init_checkpoint:
         model,old=load(args.resume or args.init_checkpoint,device='cpu',include_optimizer=bool(args.resume))
+        parent_anchor_config=model.config.to_dict()
+        args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy,parent_anchor_config,resume=bool(args.resume))
         if '--dropout' in explicit_flags and args.dropout!=model.config.dropout:
             raise ValueError('dropout inherits the parent model; use fresh training to change it')
         args.dropout=float(model.config.dropout)
@@ -487,9 +510,27 @@ def main(argv=None):
         semantics=GROUNDED_TRAINING_SEMANTICS if args.architecture_profile==GROUNDED_PROFILE else TRAINING_SEMANTICS
         if args.resume and old.get('training_semantics')!=semantics:
             raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
+    if not (args.resume or args.init_checkpoint):
+        args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy)
+    for name in COMPOSER_POLICY_FIELDS:
+        setattr(args,name,resolve_composer_policy(name,getattr(args,name),parent_anchor_config,resume=bool(args.resume),architecture_profile=args.architecture_profile))
+    if parent_anchor_config and '--motif-max-events' not in explicit_flags:
+        args.motif_max_events=int(parent_anchor_config.get('motif_max_events',16))
+    if args.resume and args.motif_max_events!=int(parent_anchor_config.get('motif_max_events',16)):
+        raise ValueError('Resume inherits motif_max_events; use explicit finetune')
+    if not 1<=args.motif_max_events<=32:raise ValueError('motif_max_events must be in [1,32]')
+    inherited_touch=(old.get('args',{}).get('touch_layout_policy','legacy_two_heads') if old else 'open')
+    if args.touch_layout_policy=='auto':args.touch_layout_policy=inherited_touch
+    if args.resume and args.touch_layout_policy!=inherited_touch:
+        raise ValueError('Resume inherits touch_layout_policy; use explicit finetune')
+    from .model import validate_supported_context_policies
+    validate_supported_context_policies(vars(args))
     dataset=ComposerDataset(args.manifest,cache_dir=args.cache_dir,candidate_count=args.candidate_count,
         history_events=args.history_events,action_slots=args.action_slots,preparation_workers=args.prepare_workers,
-        audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,seed=args.seed,architecture_profile=args.architecture_profile)
+        audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,seed=args.seed,architecture_profile=args.architecture_profile,
+        action_state_policy=args.action_state_policy,motif_memory_policy=args.motif_memory_policy,
+        motif_max_events=args.motif_max_events)
+    dataset.touch_layout_policy=args.touch_layout_policy
     args.action_slots_requested = dataset.action_slots_requested
     args.action_slots = dataset.action_slots
     if args.resume and model.config.action_slots != args.action_slots:
@@ -503,8 +544,10 @@ def main(argv=None):
         if args.init_checkpoint:
             model=(migrate_audio_grounded(model,dataset.codec_atoms,action_slots=args.action_slots,lens_width=args.lens_width,
                 lens_chunk_size=args.lens_chunk_size,history_residual_bound=args.history_residual_bound,
-                history_dropout=args.history_dropout,ledger_dropout=args.ledger_dropout)
-                if args.architecture_profile==GROUNDED_PROFILE else migrate_music_context(model,action_slots=args.action_slots))
+                history_dropout=args.history_dropout,ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
+                motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS})
+                if args.architecture_profile==GROUNDED_PROFILE else migrate_music_context(model,action_slots=args.action_slots,history_anchor_policy=args.history_anchor_policy,
+                    motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}))
             model.config.symbolic_dropout=args.symbolic_dropout
         if list(old.get('atom_catalog') or []) != list(dataset.codec_atoms):
             raise ValueError('Composer atom catalog differs from checkpoint; use a matching manifest or retrain a new model')
@@ -520,7 +563,8 @@ def main(argv=None):
             architecture_profile=args.architecture_profile,symbolic_dropout=args.symbolic_dropout,
             head_timing_dim=HEAD_TIMING_DIM,lens_width=args.lens_width,lens_chunk_size=args.lens_chunk_size,
             history_residual_bound=args.history_residual_bound,history_dropout=args.history_dropout,
-            ledger_dropout=args.ledger_dropout),dataset.codec_atoms)
+            ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
+            motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}),dataset.codec_atoms)
     model.to(device).train()
     cuda_cache_guard=CudaCacheGuard(device,0.)
     if model.config.architecture_profile==GROUNDED_PROFILE:
@@ -601,6 +645,10 @@ def main(argv=None):
         'rebatch_resume':args.rebatch_resume,
         'torch_cpu_threads':torch.get_num_threads(),'python_switch_interval_sec':sys.getswitchinterval(),
         'architecture_profile':model.config.architecture_profile,'symbolic_dropout':model.config.symbolic_dropout,
+        'history_anchor_policy':model.config.history_anchor_policy,
+        'action_state_policy':model.config.action_state_policy,'motif_memory_policy':model.config.motif_memory_policy,
+        'slide_factor_policy':model.config.slide_factor_policy,'motif_max_events':model.config.motif_max_events,
+        'touch_layout_policy':args.touch_layout_policy,
         'dropout':model.config.dropout,
         **{key:getattr(args,key) for key in ('lens_width','lens_chunk_size','history_residual_bound',
             'history_dropout','ledger_dropout','placement_weight','planner_weight','recovery_interval',

@@ -367,9 +367,15 @@
 <div class="form-grid">
 <label class="field">模型宽度 d_model<input id="composerDModel" type="number" min="1" step="1" value="192"></label>
 <label class="field">训练架构<select id="composerArchitectureProfile"><option value="audio_grounded_v3" selected>audio_grounded_v3 音频锚定</option><option value="music_context_v2">music_context_v2 基线</option></select></label>
+<label class="field">历史键位锚定<select id="composerHistoryAnchorPolicy"><option value="auto" selected>自动（新训练用完整几何；已有模型继承）</option><option value="parsed_geometry_v3">完整头部、Touch与Slide几何（新默认）</option><option value="parsed_heads_v2">解析真实音符头（新策略）</option><option value="legacy_digit_v1">旧字符策略（保持旧模型行为）</option></select><small>仅audio_grounded_v3使用。完整几何策略解析Touch区域、Slide端点与轨迹；旧解析头策略平均多头角度，避免把中心TouchHold时值误当键位。已有模型切换策略须选择微调和新输出目录；继续训练固定继承，不会自动迁移。</small></label>
 <label class="field">普通 dropout<input id="composerDropout" type="number" min="0" max="1" step="0.05" value="0.1"><small>从头训练时可调，建议0–0.3；继续训练和微调继承检查点。与历史、台账遮挡概率不同。</small></label>
 <label class="field">局部音频宽度<input id="composerLensWidth" type="number" min="8" max="256" value="64"></label>
 <label class="field">局部音频分块候选数<input id="composerLensChunkSize" type="number" min="1" max="256" value="32"></label>
+<label class="field">持续动作状态<select id="composerActionStatePolicy"><option value="auto">自动（新训练使用因果边界；已有模型继承）</option><option value="committed_causal_v2">已提交事件的因果状态</option><option value="committed_legacy_v1">旧边界状态（兼容）</option><option value="candidate_prefix_v2">逐候选查询状态（实验）</option></select><small>逐候选状态可能增加CPU开销。旧检查点改变策略须显式微调到新目录，不能继续训练。</small></label>
+<label class="field">跨段动机记忆<select id="composerMotifMemoryPolicy"><option value="auto">自动（新训练关闭；已有模型继承）</option><option value="off">关闭</option><option value="audio_recurrence_archive_v1">音频复现检索档案（实验）</option></select><small>实验功能须显式选择微调开启；只检索已提交事件，保留局部音频决定差异。</small></label>
+<label class="field">动机记忆事件上限<input id="composerMotifMaxEvents" type="number" min="1" max="32" step="1" value="16"></label>
+<label class="field">Slide分支因子<select id="composerSlideFactorPolicy"><option value="auto">自动（新训练联合分支；已有模型继承）</option><option value="branch_joint_v2">分支内联合端点与轨迹</option><option value="marginal_v1">旧边际统计（兼容）</option></select></label>
+<label class="field">恢复采样Touch布局<select id="composerRecoveryTouchLayoutPolicy"><option value="auto">自动（新训练开放；已有模型继承）</option><option value="open">开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>仅控制训练恢复采样；继续训练继承原策略。</small></label>
 <label class="field">历史残差幅度上限<input id="composerHistoryResidualBound" type="number" min="0.1" max="4" step="0.1" value="1"></label>
 <label class="field">历史分支遮挡概率<input id="composerHistoryDropout" type="number" min="0" max="0.9" step="0.05" value="0.3"></label>
 <label class="field">台账遮挡概率<input id="composerLedgerDropout" type="number" min="0" max="0.9" step="0.05" value="0.5"></label>
@@ -896,6 +902,8 @@
 <label class="field checkbox-field"><input id="composerInterceptTapOnSlide" type="checkbox"><span>拦截 Slide 撞尾（TapOnSlide）</span><small>默认关闭（仅报告，不拦截也不删音符）；勾选后在生成与后处理中拦截 TapOnSlide。</small></label>
 <label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>适用于具备音频选位分支的模型：1 使用完整历史，0 使用音频分支；audio_grounded_v3 的历史残差已有幅度上限。</small></label>
 <label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" value="0.55"><small>audio_grounded_v3在正温度下保留模型预测的时间区间概率，只调整区间内部拍位的随机程度；0直接选择全体候选中最高分的拍位。</small></label>
+<label class="field">Touch布局<select id="composerTouchLayoutPolicy"><option value="open" selected>开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>开放模式不把全部Touch算作按钮双头；仍检查时序与物理硬冲突。</small></label>
+<label class="field">动机记忆强度<input id="composerMotifStrength" type="number" min="0" max="2" step="0.1" value="1"><small>默认1。仅已开启实验动机记忆的模型生效；off模型调整此值无效。</small></label>
 <label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" value="0.85"><small>仅控制按键、Hold、Slide 等动作采样；可独立保留配置多样性。</small></label>
 <label class="field span-2">condition JSON（可选）<textarea id="composerConditionFile" class="path-input" rows="2" placeholder="可粘贴条件 JSON 文件路径"></textarea><small>留空使用界面的等级、Radar 与 Style。填写后仅覆盖文件中明确给出的字段；文件中的 level 优先于界面等级。任务和报告会记录最终条件。</small></label>
 </div></div>
@@ -1180,11 +1188,10 @@
             <small><strong>后端对应 sample / greedy 解码开关。</strong>勾选时从经过语法约束的概率分布抽样；取消时每步取最高概率 token（greedy），结果确定但可能更容易重复。
             它改变随机性，不会补足模型没学会的音符类型或配置。</small>
           </label>
-<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1">Temperature（配置采样温度）
+<label class="field" data-generation-family="event_v1 song_form_v1 song_form_v2 chart_stream_v1">Temperature（配置采样温度）
             <input id="temperature" type="number" min="0" step="0.05" value="0.65">
             <small data-generation-family="event_v1"><strong>仅在启用随机采样时生效。</strong>后端先用温度缩放 token logits，再执行 top-p 截断和抽样。较低值会让抽样更集中，较高值会保留更多不确定性。</small>
             <small data-generation-family="song_form_v1 song_form_v2 chart_stream_v1" hidden>控制配置解码随机性；0 使用贪心解码，大于 0 使用温度采样。默认 0.65。</small>
-            <small data-generation-family="chart_composer_v1" hidden>同时控制候选拍位和动作槽位的采样。0 为贪心，大于 0 为温度采样；低温更容易复现高概率写法。提高温度增加差异，也可能增加错误，不能代替模型学习。</small>
           </label>
 <label class="field" data-generation-family="song_form_v1">规划类型指导强度
             <input id="formPlannerTypeStrength" type="number" min="0" max="3" step="0.1" value="1.0">

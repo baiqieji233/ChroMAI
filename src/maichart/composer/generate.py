@@ -44,6 +44,8 @@ def parser():
     p.add_argument('--temperature',type=float,default=.8);p.add_argument('--seed',type=int,default=None,
         help='omit for a new random seed; supply an integer for reproducibility');p.add_argument('--device',default='auto')
     p.add_argument('--pointer-temperature',type=float,default=None)
+    p.add_argument('--touch-layout-policy',choices=('open','legacy_two_heads'),default='open',
+        help='open separates Touch occupancy from the two-button budget; does not guarantee physical hand feasibility')
     p.add_argument('--touch-history-guard',action=argparse.BooleanOptionalAction,default=True,
         help='audio-grounded positive-temperature decoding: limit symbolic Touch probability feedback')
     p.add_argument('--touch-history-bound',type=float,default=TOUCH_HISTORY_LOG_ODDS_BOUND,
@@ -52,6 +54,7 @@ def parser():
     p.add_argument('--seed-randomized',action='store_true',help=argparse.SUPPRESS)
     p.add_argument('--max-events',type=int,default=0);p.add_argument('--condition-file');p.add_argument('--tempo-map')
     p.add_argument('--curve-strength',type=float,default=1.)
+    p.add_argument('--motif-strength',type=float,default=1.,help='trained optional configuration memory residual, [0,2]; 0 disables')
     p.add_argument('--pointer-history-strength',type=float,default=1.,
         help='pointer audio anchor: 1 preserves full-context route, 0 uses audio-only route')
     p.add_argument('--min-same-head-ms',type=float,default=50.,
@@ -95,13 +98,16 @@ def _history_features(history, atoms, tempo, first, action_slots, *, clock=None,
     return rows
 
 
-def _head_metadata(atoms,grammar):
-    pads=[f'{group}{lane}' for group in 'ABDE' for lane in range(1,9)]+['C']
+def _head_metadata(atoms,grammar,touch_layout_policy='legacy_two_heads'):
+    pads=[str(lane) for lane in range(1,9)]+[f'{group}{lane}' for group in 'ABDE' for lane in range(1,9)]+['C']
+    if touch_layout_policy=='legacy_two_heads': pads=pads[8:]
     pad_bits={pad:1<<i for i,pad in enumerate(pads)}
     def encode(heads):
         bits=0
         for head in heads:
-            head=str(head);bits |= pad_bits.get(f'A{head}' if head.isdigit() else head,0)
+            head=str(head)
+            if touch_layout_policy=='legacy_two_heads' and head.isdigit(): head=f'A{head}'
+            bits |= pad_bits.get(head,0)
         return bits
     bits=np.asarray([0]+[encode(grammar.heads.get(atom,())) for atom in atoms],dtype=np.uint64)
     sizes=np.asarray([int(value).bit_count() for value in bits])
@@ -233,18 +239,26 @@ def _compile_composer_chart(points, tempo, first, condition):
 
 
 def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), blocked=(), max_heads=2,diagnostics=None,
-                    slot_decoder=None,blocked_first=(),head_metadata=None,canonical_order=False):
+                    slot_decoder=None,blocked_first=(),head_metadata=None,canonical_order=False,touch_layout_policy='open'):
+    if touch_layout_policy not in {'open','legacy_two_heads'}:
+        raise ValueError('unknown touch_layout_policy')
     selected=[]
     used_buttons=set(occupied)
+    if head_metadata is None: head_metadata=_head_metadata(atoms,grammar,touch_layout_policy)
+    if len(head_metadata)==5:
+        bits,sizes,encode,lookup,groups=head_metadata
+    else:
+        bits,sizes,encode,lookup=head_metadata;groups=None
+    button_bits=np.uint64(encode(str(lane) for lane in range(1,9)))
+    button_sizes=np.asarray([int(value & button_bits).bit_count() for value in bits])
     for slot,row in enumerate(logits):
         if slot_decoder is not None: row=slot_decoder(slot,selected)
-        if head_metadata is None: head_metadata=_head_metadata(atoms,grammar)
-        if len(head_metadata)==5:
-            bits,sizes,encode,lookup,groups=head_metadata
-        else:
-            bits,sizes,encode,lookup=head_metadata;groups=None
         used=np.uint64(encode(used_buttons));blocked_bits=np.uint64(encode(blocked))
-        mask_np=((bits & (used|blocked_bits))==0)&(sizes+int(used).bit_count()<=max_heads)&(sizes>0)
+        if touch_layout_policy == 'legacy_two_heads':
+            budget_ok=sizes+int(used).bit_count()<=max_heads
+        else:
+            budget_ok=button_sizes+int(used & button_bits).bit_count()<=max_heads
+        mask_np=((bits & (used|blocked_bits))==0)&budget_ok&(sizes>0)
         mask_np[0]=slot>0
         if canonical_order and selected:
             mask_np[1:lookup[selected[-1]]+1]=False
@@ -268,12 +282,12 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
             break
         selected_atom=atoms[choice-1]
         selected.append(selected_atom)
-        used_buttons.update(f'A{head}' if str(head).isdigit() else str(head)
+        used_buttons.update(str(head)
                             for head in (grammar.heads.get(selected_atom) or ()))
     return selected
 
 
-def _active_constraints(state, beat, tempo, first, *, clock=None):
+def _active_constraints(state, beat, tempo, first, *, clock=None,touch_layout_policy='legacy_two_heads'):
     """Return concrete source heads still occupied at the proposed beat.
 
     SustainStateIndex also exposes a hand-space pad coverage feature. That is
@@ -289,7 +303,10 @@ def _active_constraints(state, beat, tempo, first, *, clock=None):
         if kind == 'hold':
             lane=marker.get('lane')
             if lane is not None:
-                result.add(f'A{int(lane)}'); blocked.update({str(int(lane)),f'A{int(lane)}'})
+                if touch_layout_policy=='legacy_two_heads':
+                    result.add(f'A{int(lane)}'); blocked.update({str(int(lane)),f'A{int(lane)}'})
+                else:
+                    result.add(str(int(lane))); blocked.add(str(int(lane)))
         elif kind=='touch_hold' and marker.get('touch_pad'):
             result.add(str(marker['touch_pad'])); blocked.add(str(marker['touch_pad']))
         # Slide paths and waiting intervals are not exclusive key ownership.
@@ -300,6 +317,20 @@ def _active_constraints(state, beat, tempo, first, *, clock=None):
 def _active_heads(state, beat, tempo, first, *, clock=None):
     """Backward-compatible view of currently held concrete heads."""
     return _active_constraints(state, beat, tempo, first, clock=clock)[0]
+
+
+def _touch_head_sets(atoms,grammar):
+    return tuple(frozenset(str(head) for head in grammar.heads[atom]) for atom in atoms
+        if grammar.heads.get(atom) and all(not str(head).isdigit() for head in grammar.heads[atom]))
+
+
+def _candidate_has_capacity(occupied,blocked,touch_layout_policy,touch_heads=()):
+    if touch_layout_policy=='legacy_two_heads':return len(occupied)<2
+    if sum(str(head).isdigit() for head in occupied)<2:return True
+    # Do not search unusable times in a button-only vocabulary. When both
+    # buttons are held, an actual unoccupied Touch action may still be chosen.
+    unavailable=set(occupied)|set(blocked)
+    return any(not (heads & unavailable) for heads in touch_heads)
 
 
 def density_observation(points, clock):
@@ -364,6 +395,12 @@ def generate(args):
     seed,seed_randomized=resolve_seed(args.seed)
     seed_randomized=seed_randomized or bool(getattr(args,'seed_randomized',False))
     condition,condition_source=resolve_condition(args.level,condition_file=args.condition_file)
+    touch_layout_policy=str(getattr(args,'touch_layout_policy','open'))
+    if touch_layout_policy not in {'open','legacy_two_heads'}:
+        raise ValueError('unknown touch_layout_policy')
+    motif_strength=float(getattr(args,'motif_strength',1.))
+    if not math.isfinite(motif_strength) or not 0<=motif_strength<=2:
+        raise ValueError('motif_strength must be finite and between 0 and 2')
     touch_history_bound=float(getattr(args,'touch_history_bound',TOUCH_HISTORY_LOG_ODDS_BOUND))
     if not math.isfinite(touch_history_bound) or not 0<=touch_history_bound<=4:
         raise ValueError('touch_history_bound must be finite and between 0 and 4')
@@ -399,6 +436,11 @@ def generate(args):
     bounds=generation_bounds(audio,trim_exact_silence=True);end_sec=bounds['effective_end_sec']
     points=[];history=[];previous=None;max_events=args.max_events or 100000
     action_index=IncrementalState(song.tempo,song.first)
+    motif_index=None
+    if model.config.motif_memory_policy!='off':
+        from .motif_memory import ComposerMotifIndex
+        motif_index=ComposerMotifIndex(getattr(song,'relations',None),[],np.zeros((0,model.config.action_slots),dtype=np.int64))
+    motif_queries=motif_matched_queries=0
     acoustic_context=AcousticContext(values,times,audio.duration_sec,validated_bank=learned) if learned else None
     if grounded:
         from .audio_lens import LensBank
@@ -411,13 +453,14 @@ def generate(args):
         lens_cache=OrderedDict()
         lens_cache_hits=lens_cache_misses=0
     intercept_tap_on_slide=bool(getattr(args,'intercept_tap_on_slide',False))
-    guard=EventGuard(song.tempo,song.first,end_sec,min_same_head_sec=min_same_head_ms/1000.,intercept_tap_on_slide=intercept_tap_on_slide)
+    guard=EventGuard(song.tempo,song.first,end_sec,min_same_head_sec=min_same_head_ms/1000.,intercept_tap_on_slide=intercept_tap_on_slide,touch_layout_policy=touch_layout_policy)
     last_head_seconds=np.full(len(HEAD_PADS),np.nan)
     last_head_beats=np.full(len(HEAD_PADS),np.nan)
     history_seconds=[];history_heads=[];head_prefix=[0.];skipped_candidates=0;stop_reason='audio_range_exhausted'
     context_coverage=[]
     grammar=_NoteGrammar.from_atoms(atoms)
-    head_metadata=_head_metadata(atoms,grammar)
+    head_metadata=_head_metadata(atoms,grammar,touch_layout_policy)
+    touch_heads=_touch_head_sets(atoms,grammar)
     touch_mask=torch.tensor([False]+[atom[0] in 'ABCDE' for atom in atoms],dtype=torch.bool,device=device)
     rng=torch.Generator(device=device).manual_seed(seed)
     sampling={'pointer_top_probability_sum':torch.zeros((),device=device),
@@ -435,7 +478,12 @@ def generate(args):
         'head_timing_dim':model.config.head_timing_dim,'candidate_policy':candidate_policy,
         'trained_candidate_policy':trained_candidate_policy,'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,
         'action_sampling_policy':ACTION_SAMPLING_POLICY,
+        'history_anchor_policy':getattr(model.config,'history_anchor_policy','legacy_digit_v1'),
+        'action_state_policy':model.config.action_state_policy,'slide_factor_policy':model.config.slide_factor_policy,
+        'motif_memory_policy':model.config.motif_memory_policy,'motif_strength':motif_strength,
         'pointer_sampling_policy':GROUNDED_POINTER_SAMPLING_POLICY if grounded else 'global_temperature_truncation_v1',
+        'touch_layout_policy':touch_layout_policy,
+        'touch_layout_hand_feasibility_guaranteed':False,
         'touch_history_guard':touch_history_guard,
         'touch_history_bound_requested':touch_history_bound,
         'touch_history_guidance_policy':TOUCH_HISTORY_GUIDANCE_POLICY if touch_history_guard else 'off',
@@ -446,9 +494,9 @@ def generate(args):
         candidates=candidate_beats(previous,tempo=song.tempo,first=song.first,audio_end_sec=end_sec,
             candidate_count=model.config.candidate_count,clock=clock,policy=candidate_policy)
         if not candidates:break
-        constraints=([_active_constraints(action_index,cand,song.tempo,song.first,clock=clock) for cand in candidates]
+        constraints=([_active_constraints(action_index,cand,song.tempo,song.first,clock=clock,touch_layout_policy=touch_layout_policy) for cand in candidates]
                       if getattr(action_index,'markers',None) else [(set(),set(),0) for _ in candidates])
-        base_playable=[len(held)<2 and 0.<=float(clock.at(beat))<end_sec
+        base_playable=[_candidate_has_capacity(held,_blocked,touch_layout_policy,touch_heads) and 0.<=float(clock.at(beat))<end_sec
                        for beat,(held,_blocked,_active_hands) in zip(candidates,constraints)]
         feature_previous=history[-1][1] if history else None
         playable=_candidate_playability(candidates,base_playable,feature_previous,candidate_policy)
@@ -500,9 +548,8 @@ def generate(args):
             hist_atoms=torch.zeros((1,0,model.config.action_slots),dtype=torch.long,device=device)
             hist_features=torch.zeros((1,0,8),dtype=torch.float32,device=device)
         committed_beat=history[-1][1] if history else Fraction(0)
-        states,mask,metadata=action_index.at(committed_beat,include_current=True)
-        active=states[~mask]
-        action=active.mean(0).to(device) if active.numel() else torch.zeros(50,device=device)
+        from .context_features import composer_action_state
+        action=composer_action_state(action_index,len(history),candidates,model.config.action_state_policy).to(device)
         output=model(feats,hist_atoms,control,action_state=action[None],history_features=hist_features,
                      candidate_mask=cand_mask,
                      history_padding_mask=torch.zeros((1,hist_atoms.size(1)),dtype=torch.bool,device=device),
@@ -531,8 +578,15 @@ def generate(args):
             choice=int(torch.multinomial(pointer_probs,1,generator=rng).item()) if pointer_temperature>0 else int(logits.argmax())
             beat=candidates[choice]
             cand_sec=float(clock.at(beat))
+            memory={}
+            if motif_index is not None:
+                from .context_features import motif_tensors
+                memory=motif_tensors(motif_index,beat,len(history),model.config.history_events,model.config.motif_max_events)
+                motif_queries+=1;motif_matched_queries+=int(memory['motif_mask'].any())
+                memory={k:v[None].to(device) for k,v in memory.items()}
             decision=model.decode_candidate(output['candidate_context'],torch.tensor([choice],device=device),
-                project_actions=not learned,audio_context=output.get('audio_action_context'))
+                 project_actions=not learned,audio_context=output.get('audio_action_context'),
+                 **({**memory,'motif_strength':motif_strength} if grounded else {}))
             occupied,blocked,_=constraints[choice]
             cooldown_blocked=set(blocked)|{pad for pad,prior in guard.last_head_seconds.items()
                 if cand_sec-prior<guard.min_same_head_sec-1e-9}
@@ -550,7 +604,7 @@ def generate(args):
                 proposed=_sample_actions(slot_rows,atoms,grammar,action_temperature,rng,
                     occupied=occupied,blocked=cooldown_blocked,max_heads=2,diagnostics=sampling,
                     slot_decoder=decoder,blocked_first=blocked_first,head_metadata=head_metadata,
-                    canonical_order=music_v2)
+                    canonical_order=music_v2,touch_layout_policy=touch_layout_policy)
                 if proposed:
                     guided=bool(decoder_diagnostics.get('applied'))
                     sampling['touch_guard_proposals']+=int(guided)
@@ -566,7 +620,7 @@ def generate(args):
                     blocked_first.add(atom_to_id[proposed[0]])
                     if guard.last_reason=='repeated_head_too_soon':
                         for head in event_metadata('/'.join(proposed)).heads:
-                            cooldown_blocked.add(f'A{head}' if str(head).isdigit() else str(head))
+                            cooldown_blocked.add(f'A{head}' if touch_layout_policy=='legacy_two_heads' and str(head).isdigit() else str(head))
             if selected: break
             logits[choice]=float('-inf')
         if not selected:
@@ -588,6 +642,7 @@ def generate(args):
         else:
             context_coverage.append((0.,0.))
         atom_ids=tuple([atom_to_id[atom] for atom in selected]+[0]*(model.config.action_slots-len(selected)))
+        if motif_index is not None:motif_index.append(beat,atom_ids)
         history.append((atom_ids,beat));previous=beat
         eos_probability=float(decision['eos_logits'][0].sigmoid())
         beat_sec=float(clock.at(beat))
@@ -639,7 +694,14 @@ def generate(args):
             'audio_feature_policy':feature_policy,'candidate_policy':candidate_policy,
             'trained_candidate_policy':trained_candidate_policy,'min_same_head_ms':min_same_head_ms,
             'action_sampling_policy':ACTION_SAMPLING_POLICY,
+            'history_anchor_policy':getattr(model.config,'history_anchor_policy','legacy_digit_v1'),
+            'action_state_policy':model.config.action_state_policy,'slide_factor_policy':model.config.slide_factor_policy,
+            'motif_memory_policy':model.config.motif_memory_policy,'motif_strength':motif_strength,
+            'motif_retrieval':{'queries':motif_queries,'matched_queries':motif_matched_queries,
+                'max_events':model.config.motif_max_events,'scope':'committed_archive_configuration_only'},
             'pointer_sampling_policy':GROUNDED_POINTER_SAMPLING_POLICY if grounded else 'global_temperature_truncation_v1',
+            'touch_layout_policy':touch_layout_policy,
+            'touch_layout_hand_feasibility_guaranteed':False,
             'touch_history_guard':touch_history_guard,
             'touch_history_guard_requested':touch_history_guard_requested,
             'touch_history_bound_requested':touch_history_bound,

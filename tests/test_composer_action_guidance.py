@@ -79,13 +79,13 @@ def test_decoder_uses_same_candidate_and_same_prefix_and_can_disable_guard():
 def test_guidance_reduces_runaway_touch_without_overriding_physical_masks():
     from maichart.composer.generate import _sample_actions,_head_metadata
     from maichart.generation.event_cli import _NoteGrammar
-    atoms=['1','E1'];grammar=_NoteGrammar.from_atoms(atoms);metadata=_head_metadata(atoms,grammar)
+    atoms=['1','E1'];grammar=_NoteGrammar.from_atoms(atoms);metadata=_head_metadata(atoms,grammar,touch_layout_policy='open')
     full=torch.tensor([0.,0.,8.]);audio=torch.tensor([0.,3.,-3.])
     corrected=constrain_touch_history(full,audio,torch.tensor([False,False,True]))
     rng=torch.Generator().manual_seed(717)
     samples=[_sample_actions(corrected[None],atoms,grammar,.9,rng,head_metadata=metadata)[0] for _ in range(200)]
     assert samples.count('E1')<10 and samples.count('1')>190
-    assert _sample_actions(corrected[None],atoms,grammar,.9,rng,blocked={'A1'},head_metadata=metadata)==['E1']
+    assert _sample_actions(corrected[None],atoms,grammar,.9,rng,blocked={'1'},head_metadata=metadata)==['E1']
 
 
 def test_cli_allows_replaying_previous_generation_policy():

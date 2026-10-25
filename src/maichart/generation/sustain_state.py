@@ -12,7 +12,7 @@ from typing import Any, Iterable
 
 import torch
 
-from maichart.event_timing import EventPoint, EventTempo, seconds_at_beat
+from maichart.event_timing import EventPoint, EventTempo, seconds_at_beat, tokenize_event_timing
 from maichart.generation.action_state_spec import MAX_STATES, PROFILE, STATE_DIM
 from maichart.generation.event_compile import compile_event_points
 from maichart.generation.muri.data import reference_data
@@ -121,11 +121,25 @@ class SustainStateIndex:
         if errors:
             detail = "; ".join(str(item.get("message", item)) for item in errors[:3])
             raise ValueError(f"MiaCode sustain input contains unsupported notes: {detail}")
+        # Bind parser locations to exact source beats, avoiding float onset
+        # comparisons for visibility. Compiler commas delimit timing groups.
+        timings = tokenize_event_timing(inote, first=self.first)
+        separators = [i for i, char in enumerate(inote) if char == ","]
+        line_offsets = [0]
+        line_offsets.extend(i + 1 for i, char in enumerate(inote) if char == "\n")
+        for marker in self.markers:
+            offset = line_offsets[int(marker["line"]) - 1] + int(marker["col"]) - 1
+            marker["source_beat"] = timings[bisect_left(separators, offset)].beat
         self.markers = [m for m in self.markers if m["type"] in _TYPE_OFFSETS]
         self._references: dict[str, Any] | None = None
         self._release_index = None
 
-    def at(self, start_beat: Fraction | int | str | float, *, include_current=False) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    def at(self, start_beat: Fraction | int | str | float, *, include_current=False, visible_before_beat=None, visibility_version="legacy_v1", max_states=MAX_STATES) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+        if visibility_version not in {"legacy_v1", "causal_v2"}:
+            raise ValueError("Unknown sustain visibility version")
+        if max_states is not None and max_states < 1:
+            raise ValueError("max_states must be positive or None")
+        cutoff = None if visible_before_beat is None else _as_beat(visible_before_beat)
         beat = _as_beat(start_beat)
         boundary = float(seconds_at_beat(beat, self.tempo_changes, self.first))
         selected: list[tuple[float, int, dict[str, Any], float, bool]] = []
@@ -133,8 +147,13 @@ class SustainStateIndex:
             kind = marker.get("type")
             if kind not in _TYPE_OFFSETS or marker.get("is_mine") or marker.get("track_mine"):
                 continue
+            if cutoff is not None and not self._visible_before(marker, cutoff):
+                continue
             onset = float(marker.get("second", 0.0))
-            if (onset > boundary if include_current else onset >= boundary - _EPS):
+            # v1 preserves old checkpoint inputs; v2 tolerates parser clock
+            # roundoff at include_current boundaries.
+            upper = boundary if visibility_version == "legacy_v1" else boundary + _EPS
+            if (onset > upper if include_current else onset >= boundary - _EPS):
                 continue
             end = float(marker.get("end_second", -1.0))
             if not math.isfinite(end):
@@ -145,7 +164,7 @@ class SustainStateIndex:
             # this category at later training boundaries.
             if end + RELEASE <= boundary + _EPS:
                 continue
-            release = self._release_for(marker, boundary)
+            release = self._release_for(marker, boundary, visible_before_beat=cutoff)
             deadline = end + release
             trace = float(marker.get("slide_trace_second", -1.0))
             waiting = kind in {"slide", "wifi"} and trace > boundary + _EPS
@@ -158,7 +177,7 @@ class SustainStateIndex:
         selected.sort(key=lambda item: (item[0], item[1], int(item[2].get("line", 0)),
                                         int(item[2].get("col", 0))))
         total = len(selected)
-        retained = selected[:MAX_STATES]
+        retained = selected if max_states is None else selected[:max_states]
         if not retained:
             states = torch.zeros((1, STATE_DIM), dtype=torch.float32)
             mask = torch.ones((1,), dtype=torch.bool)
@@ -169,6 +188,8 @@ class SustainStateIndex:
                 self._encode_state(states[row], marker, boundary, deadline, waiting)
 
         metadata = {
+            "visibility_version": visibility_version,
+            "visible_before_beat": None if cutoff is None else str(cutoff),
             "profile": PROFILE,
             "state_dim": STATE_DIM,
             "max_states": MAX_STATES,
@@ -217,7 +238,13 @@ class SustainStateIndex:
             cached=self._active_marker_index=(signature,buckets)
         return cached[1].get(math.floor(boundary),())
 
-    def _release_for(self, marker: dict[str, Any], boundary: float) -> float:
+    @staticmethod
+    def _visible_before(marker, cutoff):
+        if "source_beat" not in marker:
+            raise ValueError("Prefix queries require a rebuilt index with exact source beats")
+        return marker["source_beat"] < cutoff
+
+    def _release_for(self, marker: dict[str, Any], boundary: float, *, visible_before_beat=None) -> float:
         # Postparse before-slide/tail flags may depend on *future* target heads.
         # Only already-authored heads can affect this causal boundary snapshot.
         lane = marker.get("lane") if marker["type"] in {"hold", "touch_hold"} else marker.get("end_lane")
@@ -243,6 +270,8 @@ class SustainStateIndex:
         radius = 1/180
         lo, hi = bisect_left(traces, end-radius), bisect_right(traces, end+radius)
         for following in following_markers[lo:hi]:
+            if visible_before_beat is not None and not self._visible_before(following, visible_before_beat):
+                continue
             if (following["key"] != marker["key"] and following["type"] in {"slide", "wifi"}
                     and following["second"] < boundary - _EPS and following["lane"] == lane
                     and abs(following["slide_trace_second"] - end) < radius):

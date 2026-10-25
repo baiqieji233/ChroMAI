@@ -22,6 +22,8 @@ from maichart.timing import RawTimingPoint
 
 
 FACTOR_CONTRACT = 'parsed_legal_action_factors_v1'
+JOINT_FACTOR_CONTRACT = 'parsed_legal_action_factors_v2'
+SLIDE_FACTOR_POLICIES = {'marginal_v1', 'branch_joint_v2'}
 KIND_BITS = {name: 1 << index for index, name in enumerate(
     ('tap', 'hold', 'slide', 'touch', 'touch_hold'))}
 TOUCH_RING_BITS = {name: 1 << index for index, name in enumerate('ABCDE')}
@@ -77,7 +79,24 @@ def _slide_keys(note: ParsedNote) -> tuple:
     return _sorted(shapes), _sorted(endpoints), _sorted(durations)
 
 
-def _parse_factors(atom: str) -> dict[str, Any]:
+def _slide_joint_keys(note: ParsedNote) -> tuple:
+    branches = []
+    for segment in note.slide_segments:
+        current = int(segment['start_position'])
+        path = []
+        for part in segment.get('path_parts') or [segment]:
+            path.append((str(part['pattern']),
+                         tuple((int(arg)-current) % 8 for arg in part['path_args'])))
+            current = int(part['end_position'])
+        # Keep path, duration, and segment modifiers associated with one branch.
+        # Head modifiers are note-level and already represented by break_ex;
+        # assigning them to the first textual branch would break permutation.
+        branches.append((tuple(path), _duration_key(segment['duration']),
+                         segment.get('modifiers', {})))
+    return _sorted(branches)
+
+
+def _parse_factors(atom: str, *, joint=False) -> dict[str, Any]:
     parsed = parse_timing_point_notes(RawTimingPoint(
         index=0, raw=atom, note_text=atom, beat=Fraction(0), tick=0,
         time_sec=0., division=4, bpm=120.,
@@ -89,6 +108,8 @@ def _parse_factors(atom: str) -> dict[str, Any]:
     result = dict(kind_mask=0, head_lane_mask=0, hold_duration=[],
                   slide_duration=[], trajectory_shape=[], relative_endpoint=[],
                   break_ex=0, branch_count=0, touch_ring=0, firework=0)
+    if joint:
+        result['slide_branch_joint'] = []
     for note in parsed.notes:
         if note.note_type not in KIND_BITS:
             raise ValueError(f'Unsupported parsed note kind: {note.note_type!r}')
@@ -110,8 +131,12 @@ def _parse_factors(atom: str) -> dict[str, Any]:
             result['relative_endpoint'].append(endpoints)
             result['slide_duration'].append(durations)
             result['branch_count'] += len(note.slide_segments)
+            if joint:
+                result['slide_branch_joint'].append(_slide_joint_keys(note))
     for name in ('hold_duration', 'slide_duration', 'trajectory_shape', 'relative_endpoint'):
         result[name] = _sorted(result[name])
+    if joint:
+        result['slide_branch_joint'] = _sorted(result['slide_branch_joint'])
     return result
 
 
@@ -124,7 +149,8 @@ class CompositionalActions(nn.Module):
     separate ring factor and do not become button heads.
     """
 
-    def __init__(self, atom_catalog: list[str], width: int):
+    def __init__(self, atom_catalog: list[str], width: int, anchor_policy='legacy_digit_v1',
+                 slide_factor_policy='marginal_v1'):
         super().__init__()
         if not isinstance(width, int) or isinstance(width, bool) or width <= 0:
             raise ValueError('Factor width must be a positive integer')
@@ -134,12 +160,17 @@ class CompositionalActions(nn.Module):
         if len(set(atoms)) != len(atoms):
             raise ValueError('Factor catalog contains duplicate atoms')
         self.width = width
+        if slide_factor_policy not in SLIDE_FACTOR_POLICIES:
+            raise ValueError('Unknown slide_factor_policy')
+        self.slide_factor_policy = slide_factor_policy
+        self.contract = FACTOR_CONTRACT if slide_factor_policy == 'marginal_v1' else JOINT_FACTOR_CONTRACT
+        self.factor_fields = FACTOR_FIELDS + (('slide_branch_joint',) if slide_factor_policy == 'branch_joint_v2' else ())
         self.atom_catalog = atoms
         self.vocab_size = len(atoms) + 1
-        rows = [_parse_factors(atom) for atom in atoms]
+        rows = [_parse_factors(atom, joint=slide_factor_policy == 'branch_joint_v2') for atom in atoms]
         self.factor_values: dict[str, tuple[str, ...]] = {}
         self.factors = nn.ModuleDict()
-        for name in FACTOR_FIELDS:
+        for name in self.factor_fields:
             keys = [_canonical(row[name]) for row in rows]
             # STOP always has category zero, including when a note has no value
             # for this field.  Its output remains learnable and independent.
@@ -158,17 +189,65 @@ class CompositionalActions(nn.Module):
         heads=self.atom_head_lanes.float()
         self.register_buffer('_normalized_head_lanes',heads/heads.sum(-1,keepdim=True).clamp_min(1),persistent=False)
         atom_to_id={atom:i+1 for i,atom in enumerate(atoms)}
+        # Retain the historical mapping for old checkpoints. Parsed-head
+        # history never reads these duration-sensitive compatibility IDs.
         anchors=[0]
         for i,atom in enumerate(atoms,start=1):
             digit=next((c for c in atom if c in '12345678'),None)
             anchors.append(atom_to_id.get(digit,atom_to_id.get('4',i)) if digit is not None else atom_to_id.get('4',i))
         self.register_buffer('_lane_anchor_ids',torch.tensor(anchors,dtype=torch.long),persistent=False)
+        self.register_buffer('_parsed_anchor_weights', torch.empty(0), persistent=False)
+        self.register_buffer('_anchor_tap_ids', torch.tensor(
+            [atom_to_id.get(str(lane), 0) for lane in range(1, 9)], dtype=torch.long), persistent=False)
+        self.set_history_anchor_policy(anchor_policy)
         self.relative_factors = nn.Embedding(8, width)
         nn.init.zeros_(self.relative_factors.weight)
         fingerprint = hashlib.sha256(_canonical({
-            'contract': FACTOR_CONTRACT, 'atoms': atoms, 'fields': self.factor_values,
+            'contract': self.contract, 'atoms': atoms, 'fields': self.factor_values,
         }).encode('ascii')).digest()
         self.register_buffer('catalog_fingerprint', torch.tensor(list(fingerprint), dtype=torch.uint8))
+
+    def set_history_anchor_policy(self, policy):
+        """Select a derived history representation without changing learned factors."""
+        if policy not in {'legacy_digit_v1', 'parsed_heads_v2', 'parsed_geometry_v3'}:
+            raise ValueError('Unknown history_anchor_policy')
+        self.history_anchor_policy = policy
+        weights = torch.zeros((self.vocab_size, 8), device=self._lane_anchor_ids.device)
+        if policy in {'parsed_heads_v2', 'parsed_geometry_v3'}:
+            for index, atom in enumerate(self.atom_catalog, 1):
+                parsed = parse_timing_point_notes(RawTimingPoint(
+                    index=0, raw=atom, note_text=atom, beat=Fraction(0), tick=0,
+                    time_sec=0., division=4, bpm=120.))
+                lanes = set()
+                for note in parsed.notes:
+                    position = note.position
+                    if policy == 'parsed_geometry_v3':
+                        if isinstance(position, int):
+                            weights[index, position-1] += 1.
+                        elif position != 'C' and len(position) == 2 and position[1] in '12345678':
+                            lane = int(position[1])-1
+                            if position[0] in 'DE':
+                                weights[index, (lane-1) % 8] += .5
+                                weights[index, lane] += .5
+                            else:
+                                weights[index, lane] += 1.
+                        continue
+                    if isinstance(position, int):
+                        lanes.add(position)
+                    elif position != 'C' and len(position) == 2 and position[1] in '12345678':
+                        lanes.add(int(position[1]))
+                for lane in lanes:
+                    weights[index, lane - 1] = 1. / len(lanes)
+                if policy == 'parsed_geometry_v3':
+                    weights[index] /= weights[index].sum().clamp_min(1)
+        self._parsed_anchor_weights = weights
+
+    def history_anchor_embedding(self, ids, event_embedding):
+        if self.history_anchor_policy == 'legacy_digit_v1':
+            return event_embedding(self._lane_anchor_ids[ids])
+        tap_ids = self._anchor_tap_ids
+        taps = event_embedding(tap_ids) * tap_ids.ne(0)[:, None]
+        return self._parsed_anchor_weights[ids].to(taps) @ taps
 
     def composed_weight(self) -> torch.Tensor:
         """Return [legal IDs including STOP, width] without an ID-specific head."""
@@ -179,7 +258,7 @@ class CompositionalActions(nn.Module):
                             for value in self.factors.values())
             if getattr(self,'_composed_cache_key',None)==cache_key:return self._composed_cache
         weight = self.factors[FACTOR_FIELDS[0]](getattr(self, f'atom_{FACTOR_FIELDS[0]}'))
-        for name in FACTOR_FIELDS[1:]:
+        for name in self.factor_fields[1:]:
             weight = weight + self.factors[name](getattr(self, f'atom_{name}'))
         if cache_key is not None:
             self._composed_cache=weight
@@ -194,7 +273,7 @@ class CompositionalActions(nn.Module):
     def embed(self, ids: torch.Tensor) -> torch.Tensor:
         """Additive history embeddings using exactly the output factor weights."""
         result = None
-        for name in FACTOR_FIELDS:
+        for name in self.factor_fields:
             categories = getattr(self, f'atom_{name}').index_select(0, ids.reshape(-1)).reshape(ids.shape)
             contribution = self.factors[name](categories)
             result = contribution if result is None else result + contribution
@@ -229,7 +308,7 @@ class CompositionalActions(nn.Module):
         return F.linear(current,heads)
 
     def get_extra_state(self) -> dict[str, Any]:
-        return {'contract': FACTOR_CONTRACT, 'atom_catalog': list(self.atom_catalog),
+        return {'contract': self.contract, 'atom_catalog': list(self.atom_catalog),
                 'factor_values': dict(self.factor_values)}
 
     def set_extra_state(self, state: dict[str, Any]) -> None:

@@ -99,6 +99,7 @@ class TaskState:
     logs: list[str] = field(default_factory=list)
     result: dict[str, Any] = field(default_factory=dict)
     error: str | None = None
+    cancel_requested: bool = False
     process: subprocess.Popen[str] | None = field(default=None, repr=False)
     lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     # Persistence: the full log lives on disk, the in-memory list stays a ring.
@@ -150,6 +151,7 @@ class TaskState:
                 "task_id": self.task_id,
                 "kind": self.kind,
                 "status": self.status,
+                "cancel_requested": self.cancel_requested,
                 "progress": self.progress,
                 "message": self.message,
                 "logs": list(self.logs),
@@ -217,10 +219,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "multi_dataset_training": True,
                                               "composer_training": True,
                                               "composer_training_runtime": "music_context_shared_slots_v2",
-                                              "composer_training_controls": "rebatch_dropout_controls_v1",
+                                              "composer_training_controls": "causal_motif_controls_v3",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
-            'composer_generation_contract':'composer_generation_controls_v9_touch_history',
+            'composer_generation_contract':'composer_generation_controls_v10_touch_layout',
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
                     "playability_engine": engine_status(),
@@ -380,8 +382,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
         def worker() -> None:
             _open_task_log(task, ["intensity_analyze", str(audio),
                                   f"resolution_sec={resolution}", f"local_context_sec={context}"])
-            task.status = "running"
-            task.message = "正在分析节奏、频谱、和声变化和局部段落张力"
+            with task.lock:
+                if task.cancel_requested:
+                    _finish_cancelled_unlocked(task)
+                    return
+                task.status = "running"
+                task.message = "正在分析节奏、频谱、和声变化和局部段落张力"
             try:
                 from maichart.generation.music_intensity import generate_intensity_profile
                 selected_source = source
@@ -394,6 +400,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"}
                                        or (checkpoint_family in EVENT_FAMILIES and is_music_structure(str(profile_name or "")))
                                        else "audio")
+                if _finish_if_cancelled(task):
+                    return
                 if selected_source == "model":
                     if checkpoint_family == COMPOSER_MODEL_FAMILY:
                         raise ValueError('chart_composer_v1 没有独立的全曲 Planner 曲线头；'
@@ -437,6 +445,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 else:
                     profile = generate_intensity_profile(audio, resolution_sec=resolution,
                                                          local_context_sec=context)
+                if _finish_if_cancelled(task):
+                    return
                 profile["explicit_tempo_map"] = explicit_tempo_map
                 profile["tempo_map_sha256"] = tempo_map_hash
                 profile["tempo_mode"] = tempo_mode
@@ -451,6 +461,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 output = INTENSITY_ROOT / f"{task.task_id}_automatic.json"
                 output.write_text(json.dumps(profile, ensure_ascii=False), encoding="utf-8")
                 with task.lock:
+                    if task.cancel_requested:
+                        _finish_cancelled_unlocked(task)
+                        return
                     task.result["intensity_profile"] = profile
                     task.result["curve_source"] = selected_source
                     task.result["intensity_profile_path"] = str(output)
@@ -461,10 +474,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                          f"duration_sec={profile.get('duration_sec')} points={len(profile.get('points', []))}")
                 _close_task_log(task, status="completed", exit_code=0)
             except Exception as exc:  # task errors are visible to its separate poller
-                task.status = "failed"
-                task.error = str(exc)
-                task.message = "张力分析失败"
-                _close_task_log(task, status="failed", error=str(exc))
+                with task.lock:
+                    if task.cancel_requested:
+                        _finish_cancelled_unlocked(task)
+                        return
+                    task.status = "failed"
+                    task.error = str(exc)
+                    task.message = "张力分析失败"
+                    _close_task_log(task, status="failed", error=str(exc))
 
         threading.Thread(target=worker, name=f"intensity-{task.task_id}", daemon=True).start()
         self._json_response({"task_id": task.task_id})
@@ -1092,7 +1109,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             if existing.get("merged_from"):
                 raise ValueError("联合训练清单不能作为预处理输出；请在‘当前预处理数据集’中选择一个原始数据集")
         existing_task = _find_preprocess_task(output)
-        if existing_task is not None and existing_task.status in {"queued", "running"}:
+        if existing_task is not None and existing_task.status in {"queued", "running", "cancelling"}:
             raise ValueError("这个训练集正在预处理，请等待当前任务完成，不需要再次点击预处理")
         task = _create_task("preprocess")
         # Keep the requested paths while the subprocess is running so the UI
@@ -1648,17 +1665,16 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task = _get_task(str(payload.get("task_id", "")))
         if task is None:
             raise ValueError("任务不存在")
-        process = task.process
+        with task.lock:
+            process = None
+            if task.status not in {"completed", "failed", "cancelled"}:
+                task.cancel_requested = True
+                task.status = "cancelling"
+                task.message = "正在取消，等待当前阶段退出"
+                process = task.process
         if process is not None and process.poll() is None:
             from maichart.webui.subprocess_control import terminate_task_process
-            previous_status = task.status
-            task.status = "cancelled"
-            task.message = "已请求中断"
-            try:
-                terminate_task_process(process)
-            except Exception:
-                task.status = previous_status
-                raise
+            terminate_task_process(process)
         self._json_response(task.to_dict())
 
     def _upload(self) -> None:
@@ -1855,10 +1871,29 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         task.message = f"Composer epoch {epoch} 完成"
 
 
+def _finish_cancelled_unlocked(task: TaskState, *, exit_code=None) -> None:
+    # Caller holds task.lock; workers mark terminal only after execution stops.
+    task.status = "cancelled"
+    task.message = "任务已中断"
+    _close_task_log(task, status="cancelled", exit_code=exit_code)
+
+
+def _finish_if_cancelled(task: TaskState) -> bool:
+    with task.lock:
+        if task.cancel_requested:
+            _finish_cancelled_unlocked(task)
+            return True
+    return False
+
+
 def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: int | None, result_paths: list[Path]) -> None:
     def worker() -> None:
-        task.status = "running"
-        task.message = "启动任务"
+        with task.lock:
+            if task.cancel_requested:
+                _finish_cancelled_unlocked(task)
+                return
+            task.status = "running"
+            task.message = "启动任务"
         env = os.environ.copy()
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -1888,7 +1923,15 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 bufsize=1,
                 start_new_session=os.name != 'nt',
             )
-            task.process = process
+            with task.lock:
+                task.process = process
+                cancel_after_launch = task.cancel_requested
+            if cancel_after_launch and process.poll() is None:
+                from maichart.webui.subprocess_control import terminate_task_process
+                try:
+                    terminate_task_process(process)
+                except Exception as exc:
+                    task.log(f"取消进程失败，等待进程退出: {exc}")
             assert process.stdout is not None
             for line in process.stdout:
                 task.log(line)
@@ -1898,13 +1941,16 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                         task.progress = min(0.99, int(match.group(1)) / expected_epoch)
             code = process.wait()
             with task.lock:
-                cancelled = task.status == "cancelled"
+                cancelled = task.cancel_requested
             if cancelled:
                 with task.lock:
-                    _close_task_log(task, status="cancelled", exit_code=code)
+                    _finish_cancelled_unlocked(task, exit_code=code)
                 return
             if code != 0:
                 with task.lock:
+                    if task.cancel_requested:
+                        _finish_cancelled_unlocked(task, exit_code=code)
+                        return
                     tail = "\n".join(task.logs[-6:])
                     task.error = f"子进程退出码 {code}" + (f"\n{tail}" if tail else "")
                     task.message = "任务失败"
@@ -1920,21 +1966,29 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 task.result["missing_artifacts"] = missing
                 task.log(f"artifact_warning missing={len(missing)} paths={'; '.join(missing)}")
             with task.lock:
-                if task.status == "cancelled":
-                    _close_task_log(task, status="cancelled", exit_code=code)
+                if task.cancel_requested:
+                    _finish_cancelled_unlocked(task, exit_code=code)
                     return
                 _close_task_log(task, status="completed", exit_code=0)
                 task.status = "completed"
                 task.progress = 1.0
                 task.message = "任务完成" if not missing else "任务完成，但部分输出文件缺失"
         except Exception as exc:  # noqa: BLE001 - task state carries the error
+            # A cancelled task remains live until its child really exits.
+            process = task.process
+            if task.cancel_requested and process is not None and process.poll() is None:
+                process.wait()
             with task.lock:
+                if task.cancel_requested:
+                    _finish_cancelled_unlocked(task)
+                    return
                 task.status = "failed"
                 task.error = str(exc)
                 task.message = "任务启动失败"
                 _close_task_log(task, status="failed", error=str(exc))
         finally:
-            task.process = None
+            with task.lock:
+                task.process = None
 
     threading.Thread(target=worker, name=f"maichart-{task.kind}-{task.task_id}", daemon=True).start()
 
@@ -2185,7 +2239,7 @@ def _find_preprocess_task(manifest_path: Path) -> TaskState | None:
 
 def _manifest_pending_status(manifest_path: Path) -> dict[str, Any] | None:
     task = _find_preprocess_task(manifest_path)
-    if task is not None and task.status in {"queued", "running"}:
+    if task is not None and task.status in {"queued", "running", "cancelling"}:
         state = "processing"
         message = "正在预处理这个训练集；请等待右侧任务完成。预处理完成后才能检查和训练。"
     elif task is not None and task.status in {"failed", "cancelled"}:

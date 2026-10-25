@@ -69,15 +69,15 @@ def test_touch_rings_keep_predicted_mass_and_masked_pads_stay_impossible(tempera
 def test_zero_length_holds_remain_sampleable_and_obey_occupancy():
     atoms = ['1', '1h[1:0]', '2h[4:0]']
     grammar = _NoteGrammar.from_atoms(atoms)
-    metadata = module._head_metadata(atoms, grammar)
+    metadata = module._head_metadata(atoms, grammar, touch_layout_policy='open')
     assert metadata[1].tolist() == [0, 1, 1, 1]
     logits = torch.tensor([[-20., -20., 20., -20.]])
     assert module._sample_actions(logits, atoms, grammar, 0., None,
                                   head_metadata=metadata) == ['1h[1:0]']
     assert module._sample_actions(logits, atoms, grammar, 0., None,
-        occupied={'A1'}, head_metadata=metadata) == ['2h[4:0]']
+        occupied={'1'}, head_metadata=metadata) == ['2h[4:0]']
     assert module._sample_actions(logits, atoms, grammar, 0., None,
-        occupied={'A1', 'A2'}, head_metadata=metadata) == []
+        occupied={'1', '2'}, head_metadata=metadata) == []
 
 
 @pytest.mark.parametrize('committed', [None, Fraction(0)])

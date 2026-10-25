@@ -48,10 +48,10 @@ test('Touch summary distinguishes effective, requested and disabled protection, 
   assert.match(summary(false,false,2),/Touch 历史保护：关闭；放大上限 2/);
 });
 
-test('Composer temperature and tempo controls are visible to its family',()=>{
-  assert.match(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">Temperature/);
+test('Composer uses dedicated temperatures and shared tempo controls',()=>{
+  assert.doesNotMatch(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">Temperature/);
   assert.match(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">手动 tempo map/);
-  assert.ok(source.includes('status.composer_generation_contract !== "composer_generation_controls_v9_touch_history"'));
+  assert.ok(source.includes('status.composer_generation_contract !== "composer_generation_controls_v10_touch_layout"'));
   assert.match(html,/id="composerCurveStrength"[^>]*min="0"[^>]*max="2"[^>]*value="1"/);
   assert.match(source,/"composerCurveStrength"/);
   assert.match(source,/"composerPointerTemperature"/);
@@ -90,4 +90,20 @@ test('Composer summary reports missing workload capability without inventing a c
     result:{composer_report:{schema:'legacy',playability:{remaining_hard:0}}}});
   assert.match(summary,/未提供学习负荷曲线/);
   assert.ok(!summary.includes('已预测学习负荷曲线'));
+});
+
+
+test('Touch layout and motif generation inputs forward independently and explain disabled memory',()=>{
+  const values={'#composerTouchLayoutPolicy':'legacy_two_heads','#composerMotifStrength':'1.8'};
+  const c=vm.createContext({valueOrDefault:(id,fallback)=>values[id]??fallback,
+    checkedOrDefault:(id,fallback)=>fallback,formDevice:()=> 'cpu',collectCondition:()=>({}),parseTempoMap:()=>null});
+  vm.runInContext(fn('chartComposerGenerationPayload'),c);
+  vm.runInContext(fn('composerGenerationSummary'),c);
+  const p=c.chartComposerGenerationPayload();
+  assert.equal(p.touch_layout_policy,'legacy_two_heads');assert.equal(p.motif_strength,1.8);
+  const summary=c.composerGenerationSummary({kind:'composer_generate',result:{
+    effective_settings:{motif_strength:1.8,touch_layout_policy:'open'},composer_report:{motif_memory_policy:'off'}}});
+  assert.match(summary,/模型关闭，强度调整无效/);assert.match(summary,/Touch布局：开放/);
+  const fields=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('const CONFLICT_KIND_FIELDS ='));
+  for(const id of ['composerTouchLayoutPolicy','composerMotifStrength'])assert.ok(fields.includes(`"${id}"`));
 });

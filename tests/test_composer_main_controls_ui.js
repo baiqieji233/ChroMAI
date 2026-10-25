@@ -20,7 +20,7 @@ function harness(){
     checkedOrDefault:(id)=>el(id).checked,formDevice:()=> 'cpu',
     api:async(path,payload)=>{
       if(path==='/api/composer/inspect')return structuredClone(parent);
-      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'rebatch_dropout_controls_v1'}};
+      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_controls_v3'}};
       if(path==='/api/composer/train'){submitted=payload;return {task_id:'fake'};}
       throw Error(path);
     }});
@@ -64,4 +64,51 @@ test('Resume inspection reports contract migration instead of claiming missing o
   parent.training_migration='Training contract changed; use finetune with a new directory';
   const result=await c.inspectCheckpoint();
   assert.equal(result.valid,false);assert.equal(result.error,parent.training_migration);
+});
+
+test('Anchor policy is inherited and locked on resume, editable for explicit finetune',async()=>{
+  const {c,el,parent,setMode}=harness();
+  parent.model_config.history_anchor_policy='legacy_digit_v1';
+  await c.inspectCheckpoint();
+  assert.equal(el('#composerHistoryAnchorPolicy').value,'legacy_digit_v1');
+  assert.equal(el('#composerHistoryAnchorPolicy').disabled,true);
+  assert.equal(c.chartComposerTrainingPayload().history_anchor_policy,'legacy_digit_v1');
+  setMode('finetune');c.updateTrainingControls();
+  assert.equal(el('#composerHistoryAnchorPolicy').disabled,false);
+  el('#composerHistoryAnchorPolicy').value='parsed_heads_v2';
+  await c.inspectCheckpoint({preserveEditableConfig:true});
+  assert.equal(c.chartComposerTrainingPayload().history_anchor_policy,'parsed_heads_v2');
+});
+
+
+test('Causal and motif policies inherit and lock on resume, preserve explicit finetune edits',async()=>{
+  const {c,el,parent,setMode}=harness();
+  parent.model_config.action_state_policy='committed_legacy_v1';
+  await c.inspectCheckpoint();
+  for(const [id,want] of [['composerActionStatePolicy','committed_legacy_v1'],
+      ['composerMotifMemoryPolicy','off'],['composerSlideFactorPolicy','marginal_v1'],
+      ['composerRecoveryTouchLayoutPolicy','legacy_two_heads'],['composerMotifMaxEvents','16']]){
+    assert.equal(el('#'+id).value,want);assert.equal(el('#'+id).disabled,true);
+  }
+  setMode('finetune');c.updateTrainingControls();
+  el('#composerActionStatePolicy').value='candidate_prefix_v2';
+  el('#composerMotifMemoryPolicy').value='audio_recurrence_archive_v1';
+  el('#composerSlideFactorPolicy').value='branch_joint_v2';
+  el('#composerRecoveryTouchLayoutPolicy').value='open';el('#composerMotifMaxEvents').value='24';
+  await c.inspectCheckpoint({preserveEditableConfig:true});
+  const payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.action_state_policy,'candidate_prefix_v2');
+  assert.equal(payload.motif_memory_policy,'audio_recurrence_archive_v1');
+  assert.equal(payload.slide_factor_policy,'branch_joint_v2');
+  assert.equal(payload.touch_layout_policy,'open');assert.equal(payload.motif_max_events,24);
+});
+
+test('Policy UI has complete geometry choice and fresh auto reset without generation-reset coupling',()=>{
+  const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
+  assert.ok(html.includes('value="parsed_geometry_v3"'));
+  for(const id of ['composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerRecoveryTouchLayoutPolicy']){
+    assert.ok(html.includes(`id="${id}"`));assert.ok(source.includes(`${id}:'auto'`));
+    const gen=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('const CONFLICT_KIND_FIELDS ='));
+    assert.ok(!gen.includes(`"${id}"`));
+  }
 });

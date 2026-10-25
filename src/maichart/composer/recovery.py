@@ -51,7 +51,9 @@ class RecoveryBuilder:
             guard=self._guard_cache[1]
             self._guard_cache=None
             return guard
-        guard = self.guard_factory(song.tempo, song.first, views.end_sec)
+        options=({'touch_layout_policy':getattr(self.dataset,'touch_layout_policy','legacy_two_heads')}
+                 if self.guard_factory is EventGuard else {})
+        guard = self.guard_factory(song.tempo, song.first, views.end_sec,**options)
         for index, point in enumerate(prefix):
             # Authored events are context; every newly generated event is a
             # checked transaction against that context and earlier proposals.
@@ -125,9 +127,9 @@ class RecoveryBuilder:
             if position>=state_start:state.append(point)
         self._state_cache=(id(views),signature,state)
         committed = previous if previous is not None else Fraction(0)
-        active, padding, _ = state.at(committed, include_current=True)
-        live = active[~padding]
-        action_state = live.mean(0) if live.numel() else torch.zeros(50)
+        from .context_features import composer_action_state
+        action_state=composer_action_state(state,len(prefix),padded,
+            getattr(ds,'action_state_policy','committed_legacy_v1'))
         tail = history[-ds.history_events:]
         preceding = history[-ds.history_events-1][1] if len(history) > ds.history_events else Fraction(0)
         history_features = _history_features(tail, ds.codec_atoms, song.tempo, song.first,
@@ -167,6 +169,10 @@ class RecoveryBuilder:
             'song_index': torch.tensor(sample.song_index),
             'event_index': torch.tensor(sample.event_index),
         }
+        if getattr(ds,'motif_memory_policy','off')!='off':
+            from .motif_memory import ComposerMotifIndex
+            item['_motif_index']=ComposerMotifIndex(getattr(song,'relations',None),
+                [p.beat for p in prefix],np.asarray([ids for ids,_ in history],dtype=np.int64).reshape(-1,ds.action_slots))
         if getattr(ds,'architecture_profile',None)=='audio_grounded_v3' and hasattr(ds, '_grounded_features'):
             item.update(ds._grounded_features(sample.song_index, seconds, seconds, table=table))
         return item, candidates
@@ -214,6 +220,10 @@ class RecoveryBuilder:
         if bool(item['candidate_mask'][selected]):
             return None, 'masked_reference_time'
         item['candidate_target'] = torch.tensor(selected, dtype=torch.long)
+        if '_motif_index' in item:
+            from .context_features import motif_tensors
+            item.update(motif_tensors(item['_motif_index'],target.beat,len(prefix),
+                self.dataset.history_events,self.dataset.motif_max_events))
         item['event_index'] = torch.tensor(target_index)
         item['sample_weight'] = torch.tensor(float(sample.weight))
         # New feature helpers may attach authored labels. Recovery never copies

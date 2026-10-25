@@ -352,7 +352,8 @@ def _encode(result):
     metadata.update(audio_path=str(result['audio_path']), level=level, weight=weight,
                     points=[[str(p.beat), p.note_text] for p in points],
                     condition=condition.to_dict(), excluded=excluded, record=record,
-                    state_markers=state.markers,
+                    state_markers=[{**marker, **({'source_beat':str(marker['source_beat'])}
+                        if 'source_beat' in marker else {})} for marker in state.markers],
                     song={'tempo': tempo, 'first': song.first, 'audio_profile': song.audio_profile,
                           'rhythm_geometry_profile': song.rhythm_geometry_profile,
                           'quality_profile': song.quality_profile,
@@ -403,10 +404,13 @@ def _decode(metadata, arrays):
                     values.get('rhythm_geometry_profile', 'none'), profile,
                     values.get('curve_bin_seconds', default_curve_bin_seconds(profile)))
     # Restore parsed markers instead of recompiling and parsing the same chart.
-    # Its code/reference digest participates in the cache identity above.
+    # Legacy caches may lack exact source beats; new causal consumers rebuild
+    # those indexes explicitly instead of guessing visibility from float time.
     state = SustainStateIndex.__new__(SustainStateIndex)
     state.points, state.tempo_changes, state.first = tuple(points), tuple(tempo), float(song.first)
     state.markers, state._references = metadata['state_markers'], None
+    for marker in state.markers:
+        if 'source_beat' in marker:marker['source_beat']=Fraction(marker['source_beat'])
     condition = GenerationCondition.from_dict(metadata['condition'])
     if 'metadata' in metadata['condition']:
         from maichart.generation.event_quality import EventGenerationCondition

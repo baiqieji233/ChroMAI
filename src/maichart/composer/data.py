@@ -65,12 +65,16 @@ class ComposerDataset(Dataset):
     def __init__(self, manifest, *, cache_dir='cache/chart_composer_v1',
                  candidate_count=96, history_events=128, action_slots=8,
                  preparation_workers=1, audio_cache_gb=4., limit_charts=0,
-                 quality_enabled=True, seed=0, architecture_profile='music_context_v2'):
+                 quality_enabled=True, seed=0, architecture_profile='music_context_v2',
+                 action_state_policy='committed_legacy_v1', motif_memory_policy='off', motif_max_events=16):
         started = time.monotonic()
         self.cache_dir = str(cache_dir) if cache_dir is not None else None
         self.codec_atoms=[]; self.atom_to_id={}; self.samples=[]; self.songs=[]
         self.candidate_count=int(candidate_count);self.history_events=int(history_events)
         self.architecture_profile = architecture_profile
+        self.action_state_policy=action_state_policy
+        self.motif_memory_policy=motif_memory_policy
+        self.motif_max_events=int(motif_max_events)
         self.candidate_policy = MUSIC_CANDIDATE_POLICY_V6 if architecture_profile in MUSIC_PROFILES else CANDIDATE_POLICY
         self.canonical_offsets = offset_universe(self.candidate_policy)
         if self.candidate_count < 16:
@@ -274,6 +278,11 @@ class ComposerDataset(Dataset):
             'quality_sha256': hashlib.sha256(json.dumps(
                 [(r[3],r[6],r[7]) for r in records],sort_keys=True,default=str).encode()).hexdigest(),
         }, sort_keys=True)
+        if action_state_policy!='committed_legacy_v1' or motif_memory_policy!='off':
+            fingerprint=json.loads(self.fingerprint)
+            fingerprint.update(action_state_policy=action_state_policy,motif_memory_policy=motif_memory_policy,
+                               motif_max_events=self.motif_max_events)
+            self.fingerprint=json.dumps(fingerprint,sort_keys=True)
         if not self.samples:
             raise ValueError('Composer has no eligible events after candidate filtering; check manifest and candidate recall')
         print('composer_prepare ' + json.dumps({
@@ -502,6 +511,12 @@ class ComposerDataset(Dataset):
             'workload_targets': workload_targets,
             'workload_query': workload_query,
         }
+        if self.action_state_policy!='committed_legacy_v1' and any('source_beat' not in m for m in table['state_index'].markers):
+            table['state_index']=SustainStateIndex(points,song.tempo,song.first)
+        if self.motif_memory_policy!='off':
+            from .motif_memory import ComposerMotifIndex
+            table['motif_index']=ComposerMotifIndex(getattr(song,'relations',None),
+                [p.beat for p in points],atom_ids)
         self._song_tables[song_index] = table
         return table
 
@@ -511,6 +526,12 @@ class ComposerDataset(Dataset):
 
     def _action_state_unlocked(self, song_index: int, event_index: int, table: dict) -> torch.Tensor:
         if not table['action_ready'][event_index]:
+            if self.action_state_policy=='committed_causal_v2':
+                from .context_features import composer_action_state
+                table['action_states'][event_index]=composer_action_state(
+                    table['state_index'],event_index,(),self.action_state_policy)
+                table['action_ready'][event_index]=1
+                return table['action_states'][event_index]
             action, mask, _ = prefix_action_state(table['state_index'], table['points'], event_index)
             active = action[~mask]
             if active.numel():
@@ -756,7 +777,15 @@ class ComposerDataset(Dataset):
         ledger = prefix_ledger(table['point_seconds'], table['head_prefix'], seconds, committed_count=ev)
         exit_weight = table['transition_weights'][ev]
         stamp=time.perf_counter()
-        action_state=self._action_state(sample.song_index,ev,table)
+        if self.action_state_policy=='candidate_prefix_v2':
+            from .context_features import composer_action_state
+            if candidates is None:
+                base_frac=Fraction(0) if sample.previous is None else sample.previous
+                candidates=[base_frac+off for off in offsets]
+                candidates.extend([candidates[-1]]*(self.candidate_count-len(candidates)))
+            action_state=composer_action_state(table['state_index'],ev,candidates,self.action_state_policy)
+        else:
+            action_state=self._action_state(sample.song_index,ev,table)
         self._data_timing['action_state_sec']+=time.perf_counter()-stamp
         result = {
             'candidate_features': torch.from_numpy(features),
@@ -784,6 +813,10 @@ class ComposerDataset(Dataset):
             'head_timing': torch.from_numpy(head_timing_features(table['last_head_seconds'][ev],
                 table['last_head_beats'][ev], seconds, beat_floats)),
         }
+        if self.motif_memory_policy!='off':
+            from .context_features import motif_tensors
+            result.update(motif_tensors(table['motif_index'],sample.target,ev,
+                                        self.history_events,self.motif_max_events))
         if self.architecture_profile in MUSIC_PROFILES:
             # Trailing labels have their own support; a future exclusion must
             # not mask an otherwise valid past-only window (or vice versa).
@@ -855,6 +888,12 @@ def collate_composer(items):
         required=min(targets.size(1),int(targets.ne(0).sum(-1).max())+1)
         result['action_target']=targets[:,:required].contiguous()
     result['action_state']=torch.stack([item['action_state'] for item in items])
+    if 'motif_ids' in items[0]:
+        width=max(item['motif_ids'].size(-1) for item in items)
+        result['motif_ids']=torch.stack([torch.nn.functional.pad(item['motif_ids'],
+            (0,width-item['motif_ids'].size(-1))) for item in items])
+        for key in ('motif_relative_beats','motif_mask'):
+            result[key]=torch.stack([item[key] for item in items])
     result['future_target']=torch.stack([item['future_target'] for item in items])
     result['condition']=torch.stack([item['condition'] for item in items])
     result['history']=pad_sequence([item['history'] for item in items],batch_first=True,padding_value=0)
