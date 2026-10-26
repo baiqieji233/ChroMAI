@@ -67,7 +67,8 @@ class AudioGroundedComposer(ChartComposer):
                 symbolic_keep=None,audio_auxiliary=True,head_timing=None,audio_lens=None,
                 audio_lens_mask=None,planner_audio=None,planner_mask=None,planner_indices=None,
                 planner_mix=None,planner_override=None,lens_embeddings=None,
-                motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,**unused):
+                motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,
+                selected_action_state=None,**unused):
         if (audio_lens is None and lens_embeddings is None) or planner_audio is None or head_timing is None:
             raise ValueError('audio_grounded_v3 requires local audio, coarse plan audio and causal head timing')
         batch,count=candidate_features.shape[:2]
@@ -162,21 +163,41 @@ class AudioGroundedComposer(ChartComposer):
             'pointer_residual_rms':(correction.square()*valid).sum().sqrt()/valid.sum().clamp_min(1).sqrt(),
             'plan_context_rms':candidate_plan.square().mean().sqrt()}
         if trailing is not None:result['trailing_workload']=trailing
+        if self.config.action_state_policy=='selected_prefix_v3':
+            # Keep the committed snapshot in the pointer. Only the chosen
+            # action query replaces it with state advanced to that time.
+            state_term=(projected_state[:,None] if action_state.ndim==2 else projected_state) if action_state is not None else 0.
+            pre=audio_context+symbolic+self.action_relation(last_heads)[:,None]*symbolic_keep[:,None]
+            result['selected_state_base']=pre-state_term*symbolic_keep[:,None]
+            result['selected_state_keep']=symbolic_keep
         if decode_actions:
             result.update(self.decode_candidate(action_context,candidate_indices,
                 action_targets=action_targets,audio_context=audio_action_context,
                 motif_ids=motif_ids,motif_relative_beats=motif_relative_beats,motif_mask=motif_mask,
-                motif_strength=motif_strength,motif_keep=symbolic_keep))
+                motif_strength=motif_strength,motif_keep=symbolic_keep,
+                selected_action_state=selected_action_state,state_base=result.get('selected_state_base'),
+                state_keep=result.get('selected_state_keep')))
         return result
 
     def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
-                         motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None):
+                         motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None,
+                         selected_action_state=None,state_base=None,state_keep=None):
         if candidate_indices is not None:
             rows=torch.arange(candidate_context.size(0),device=candidate_context.device)
             candidate_context=candidate_context[rows,candidate_indices]
             if audio_context is not None:
                 audio_context=audio_context[rows,candidate_indices]
+            if state_base is not None:state_base=state_base[rows,candidate_indices]
         result={'future':self.future_head(candidate_context),'eos_logits':self.eos_head(candidate_context).squeeze(-1),'action_context':candidate_context}
+        if self.config.action_state_policy=='selected_prefix_v3':
+            if selected_action_state is None or state_base is None:
+                raise ValueError('selected_prefix_v3 requires a causal state at the selected beat')
+            if selected_action_state.shape!=(*state_base.shape[:-1],self.config.action_dim):
+                raise ValueError('Selected action state must match the selected candidate shape')
+            keep=state_keep if state_keep is not None else state_base.new_ones(state_base.shape[0],1)
+            while keep.ndim<state_base.ndim:keep=keep.unsqueeze(-2)
+            candidate_context=self.candidate_fusion(state_base+self.action_projection(selected_action_state)*keep)
+            result['action_context']=candidate_context
         # Motifs guide configurations only. The learned timing pointer, EOS,
         # future summary and audio-only action reference retain their inputs.
         if hasattr(self,'motif_memory') and motif_ids is not None:

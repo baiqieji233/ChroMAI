@@ -220,6 +220,9 @@ class RecoveryBuilder:
         if bool(item['candidate_mask'][selected]):
             return None, 'masked_reference_time'
         item['candidate_target'] = torch.tensor(selected, dtype=torch.long)
+        if getattr(self.dataset,'action_state_policy','committed_legacy_v1')=='selected_prefix_v3':
+            from .context_features import selected_action_state
+            item['selected_action_state']=selected_action_state(item['_action_index'],len(prefix),target.beat)
         if '_motif_index' in item:
             from .context_features import motif_tensors
             item.update(motif_tensors(item['_motif_index'],target.beat,len(prefix),

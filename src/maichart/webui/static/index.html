@@ -371,7 +371,7 @@
 <label class="field">普通 dropout<input id="composerDropout" type="number" min="0" max="1" step="0.05" value="0.1"><small>从头训练时可调，建议0–0.3；继续训练和微调继承检查点。与历史、台账遮挡概率不同。</small></label>
 <label class="field">局部音频宽度<input id="composerLensWidth" type="number" min="8" max="256" value="64"></label>
 <label class="field">局部音频分块候选数<input id="composerLensChunkSize" type="number" min="1" max="256" value="32"></label>
-<label class="field">持续动作状态<select id="composerActionStatePolicy"><option value="auto">自动（新训练使用因果边界；已有模型继承）</option><option value="committed_causal_v2">已提交事件的因果状态</option><option value="committed_legacy_v1">旧边界状态（兼容）</option><option value="candidate_prefix_v2">逐候选查询状态（实验）</option></select><small>逐候选状态可能增加CPU开销。旧检查点改变策略须显式微调到新目录，不能继续训练。</small></label>
+<label class="field">持续动作状态<select id="composerActionStatePolicy"><option value="auto">自动（新训练使用因果边界；已有模型继承）</option><option value="committed_causal_v2">已提交事件的因果状态</option><option value="committed_legacy_v1">旧边界状态（兼容）</option><option value="candidate_prefix_v2">逐候选查询状态（实验）</option><option value="selected_prefix_v3">选定拍位查询状态（实验）</option></select><small>选定拍位查询只为动作读取所选拍位状态，选位仍使用已提交状态。旧检查点改变策略须显式 finetune 到新目录，不能继续训练。</small></label>
 <label class="field">跨段动机记忆<select id="composerMotifMemoryPolicy"><option value="auto">自动（新训练关闭；已有模型继承）</option><option value="off">关闭</option><option value="audio_recurrence_archive_v1">音频复现检索档案（实验）</option></select><small>实验功能须显式选择微调开启；只检索已提交事件，保留局部音频决定差异。</small></label>
 <label class="field">动机记忆事件上限<input id="composerMotifMaxEvents" type="number" min="1" max="32" step="1" value="16"></label>
 <label class="field">Slide分支因子<select id="composerSlideFactorPolicy"><option value="auto">自动（新训练联合分支；已有模型继承）</option><option value="branch_joint_v2">分支内联合端点与轨迹</option><option value="marginal_v1">旧边际统计（兼容）</option></select></label>
@@ -901,11 +901,14 @@
 <label class="field">Touch 历史放大上限<input id="composerTouchHistoryBound" type="number" min="0" max="4" step="0.1" value="1"><small>默认1，越小保护越强；0禁止历史正向额外放大。1表示在温度和物理过滤前，Touch相对非Touch的赔率最多比纯音频分支额外放大约2.72倍，并非Touch百分比。关闭保护后不生效。</small></label>
 <label class="field">同键最短间隔（毫秒）<input id="composerMinSameHeadMs" type="number" min="0" max="200" step="5" value="50"></label>
 <label class="field checkbox-field"><input id="composerInterceptTapOnSlide" type="checkbox"><span>拦截 Slide 撞尾（TapOnSlide）</span><small>默认关闭（仅报告，不拦截也不删音符）；勾选后在生成与后处理中拦截 TapOnSlide。</small></label>
-<label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>适用于具备音频选位分支的模型：1 使用完整历史，0 使用音频分支；audio_grounded_v3 的历史残差已有幅度上限。</small></label>
+<label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>仅控制选时分支：1 使用完整历史，0 使用音频分支。</small></label>
 <label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" value="0.55"><small>audio_grounded_v3在正温度下保留模型预测的时间区间概率，只调整区间内部拍位的随机程度；0直接选择全体候选中最高分的拍位。</small></label>
 <label class="field">Touch布局<select id="composerTouchLayoutPolicy"><option value="open" selected>开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>开放模式不把全部Touch算作按钮双头；仍检查时序与物理硬冲突。</small></label>
 <label class="field">动机记忆强度<input id="composerMotifStrength" type="number" min="0" max="2" step="0.1" value="1"><small>默认1。仅已开启实验动机记忆的模型生效；off模型调整此值无效。</small></label>
 <label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" value="0.85"><small>仅控制按键、Hold、Slide 等动作采样；可独立保留配置多样性。</small></label>
+<label class="field">动作历史权重<input id="composerActionHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>audio_grounded_v3 的动作解码：1 使用完整历史，0 使用音频分支；与选时历史权重独立。</small></label>
+<label class="field">动作类别温度<input id="composerActionTypeTemperature" type="number" min="0" max="2" step="0.05" value="1"><small>仅正动作配置温度生效。控制 Tap/Hold/Slide/Touch 四类概率，不直接改变 Touch 环区比例；0 只保留最高类别，1 沿用旧类别概率。</small></label>
+<label class="field">动作类别 min-p<input id="composerActionTypeMinP" type="number" min="0" max="1" step="0.01" value="0"><small>仅在动作温度大于 0 时生效；按类别过滤低概率类型，Touch 环区内部比例保持原条件分布。</small></label>
 <label class="field span-2">condition JSON（可选）<textarea id="composerConditionFile" class="path-input" rows="2" placeholder="可粘贴条件 JSON 文件路径"></textarea><small>留空使用界面的等级、Radar 与 Style。填写后仅覆盖文件中明确给出的字段；文件中的 level 优先于界面等级。任务和报告会记录最终条件。</small></label>
 </div></div>
 </details>

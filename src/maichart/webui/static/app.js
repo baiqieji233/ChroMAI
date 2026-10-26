@@ -743,7 +743,7 @@ const GENERATION_PARAM_FIELDS = [
   "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
   "streamStyleBalanceStrength", "streamSectionTypeStrength", "streamPlanIntentStrength", "streamLocalChordStrength", "streamPhysicalStrength",
   "streamConfigurationCandidates",
-  "composerMaxEvents", "composerConditionFile", "composerCurveStrength", "composerPointerTemperature", "composerActionTemperature", "composerMinSameHeadMs", "composerPointerHistoryStrength",
+  "composerMaxEvents", "composerConditionFile", "composerCurveStrength", "composerPointerTemperature", "composerActionTemperature", "composerActionHistoryStrength", "composerActionTypeTemperature", "composerActionTypeMinP", "composerMinSameHeadMs", "composerPointerHistoryStrength",
   "composerInterceptTapOnSlide", "composerTouchHistoryGuard", "composerTouchHistoryBound",
   "composerTouchLayoutPolicy", "composerMotifStrength",
   "seed", "candidates", "temperature", "sampleEvents",       // 采样与随机性
@@ -2161,6 +2161,9 @@ function chartComposerGenerationPayload() {
     temperature: Number(valueOrDefault("#temperature", .8)),
     pointer_temperature: Number(valueOrDefault("#composerPointerTemperature", valueOrDefault("#temperature", .8))),
     action_temperature: Number(valueOrDefault("#composerActionTemperature", valueOrDefault("#temperature", .8))),
+    action_history_strength: Number(valueOrDefault('#composerActionHistoryStrength',1)),
+    action_type_temperature: Number(valueOrDefault('#composerActionTypeTemperature',1)),
+    action_type_min_p: Number(valueOrDefault('#composerActionTypeMinP',0)),
     curve_strength: Number(valueOrDefault("#composerCurveStrength", 1)),
     pointer_history_strength: Number(valueOrDefault('#composerPointerHistoryStrength',1)),
     min_same_head_ms: Number(valueOrDefault("#composerMinSameHeadMs", 50)),
@@ -2741,6 +2744,11 @@ function composerGenerationSummary(task) {
   const historyStrength=report.pointer_history_strength??settings.pointer_history_strength;
   if (report.pointer_sampling_policy==='joint_t1_bin_mass_within_bin_temperature_v1') parts.push(Number(pointerTemperature)===0?'选时采用全体候选贪心':'选时保留模型预测的时间区间概率，温度只调整区间内部');
   if (historyStrength!==undefined) parts.push(`选时历史权重 ${historyStrength}（1 为完整历史，0 为音频分支）`);
+  const actionHistory=report.action_history_strength??settings.action_history_strength;
+  if (actionHistory!==undefined) parts.push(`动作历史权重 ${actionHistory}（1 为完整历史，0 为音频分支）`);
+  const typeTemperature=report.action_type_temperature??settings.action_type_temperature;
+  const typeMinP=report.action_type_min_p??settings.action_type_min_p;
+  if(typeTemperature!==undefined || typeMinP!==undefined) parts.push(`动作类别温度 ${typeTemperature??'未记录'}；min-p ${typeMinP??'未记录'}（不直接改Touch环区比例；温度0仅保留最高类别，温度1沿用旧类别概率）`);
   const layout=report.touch_layout_policy??settings.touch_layout_policy;
   if(layout)parts.push(`Touch布局：${layout==='open'?'开放':'旧双头限制'}`);
   const motifPolicy=report.motif_memory_policy;
@@ -4175,7 +4183,7 @@ async function submitTrain(options = {}) {
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
-        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v4')
+        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v5_selected_state')
       throw new Error('当前服务尚未加载 Composer 历史锚定等训练控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
@@ -5067,7 +5075,7 @@ async function submitGenerate() {
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
   if (payload.model_family === "chart_composer_v1") {
     const status = await api("/api/status");
-    if (status.composer_generation_contract !== "composer_generation_controls_v10_touch_layout") {
+    if (status.composer_generation_contract !== "composer_generation_controls_v11_history_type_sampling") {
       throw new Error("当前服务尚未加载 Composer Touch 控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。");
     }
     const data = await api("/api/composer/generate", payload);

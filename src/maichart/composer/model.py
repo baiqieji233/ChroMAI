@@ -14,7 +14,7 @@ GROUNDED_PROFILE = 'audio_grounded_v3'
 WORKLOAD_PROFILES.add(GROUNDED_PROFILE)
 MUSIC_PROFILES = {'music_context_v2', GROUNDED_PROFILE}
 HISTORY_ANCHOR_POLICIES = {'legacy_digit_v1', 'parsed_heads_v2', 'parsed_geometry_v3'}
-STATE_POLICIES = {'committed_legacy_v1', 'committed_causal_v2', 'candidate_prefix_v2'}
+STATE_POLICIES = {'committed_legacy_v1', 'committed_causal_v2', 'candidate_prefix_v2', 'selected_prefix_v3'}
 MOTIF_POLICIES = {'off', 'audio_recurrence_archive_v1'}
 SLIDE_FACTOR_POLICIES = {'marginal_v1', 'branch_joint_v2'}
 COMPOSER_POLICY_FIELDS = {
@@ -30,7 +30,7 @@ def validate_supported_context_policies(config):
     if values.get('architecture_profile')==GROUNDED_PROFILE:return
     unsupported = {
         'motif_memory_policy': values.get('motif_memory_policy','off')!='off',
-        'action_state_policy': values.get('action_state_policy','committed_legacy_v1')=='candidate_prefix_v2',
+        'action_state_policy': values.get('action_state_policy','committed_legacy_v1') in {'candidate_prefix_v2','selected_prefix_v3'},
         'slide_factor_policy': values.get('slide_factor_policy','marginal_v1')!='marginal_v1',
     }
     for name, invalid in unsupported.items():

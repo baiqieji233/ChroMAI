@@ -63,6 +63,27 @@ def test_recovery_rebuilds_generated_history_and_masks_every_nonpointer_label():
     assert item['sample_weight'].item() == pytest.approx(.7)
 
 
+def test_selected_state_recovery_uses_generated_sustains_at_reference_time():
+    from maichart.composer.context_features import selected_action_state
+    recovery=builder()
+    recovery.dataset.action_state_policy='selected_prefix_v3'
+    atom='2h[4:2]'
+    recovery.dataset.codec_atoms.append(atom)
+    recovery.dataset.atom_to_id[atom]=len(recovery.dataset.codec_atoms)
+    prefix=[point(0),point(1,atom),point(2,'4')]
+    item,reason=recovery.build(prefix,0,generated_count=2)
+    assert reason=='accepted'
+    target=item['_candidate_beats'][item['candidate_target'].item()]
+    assert target==Fraction(3)
+    expected=selected_action_state(item['_action_index'],len(prefix),target)
+    torch.testing.assert_close(item['selected_action_state'],expected,rtol=0,atol=0)
+    assert not torch.equal(item['action_state'],expected)
+    batch,diagnostics=recovery.batch_from_indices([0],propose=lambda item,index:prefix[len(item['_prefix_points'])])
+    assert diagnostics=={'accepted':1}
+    torch.testing.assert_close(batch['selected_action_state'][0],expected,rtol=0,atol=0)
+    assert not batch['action_weight'].any()
+
+
 def test_recovery_never_crosses_unknown_reference_intervals():
     recovery = builder(excluded=[(.7, .8)])
     item, reason = recovery.build([point(0), point(1, '4'), point(2, '4')], 0, generated_count=2)

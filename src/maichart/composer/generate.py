@@ -57,6 +57,12 @@ def parser():
     p.add_argument('--motif-strength',type=float,default=1.,help='trained optional configuration memory residual, [0,2]; 0 disables')
     p.add_argument('--pointer-history-strength',type=float,default=1.,
         help='pointer audio anchor: 1 preserves full-context route, 0 uses audio-only route')
+    p.add_argument('--action-history-strength',type=float,default=1.,
+        help='independent action history/audio blend in [0,1]; 1 keeps full action context')
+    p.add_argument('--action-type-temperature',type=float,default=1.,
+        help='positive action-temperature sampling: Tap/Hold/Slide/Touch type temperature, 1 keeps calibrated mass')
+    p.add_argument('--action-type-min-p',type=float,default=0.,
+        help='relative probability floor for four action types, 0 disables; preserves conditional Touch rings')
     p.add_argument('--min-same-head-ms',type=float,default=50.,
         help='minimum same-pad head spacing in milliseconds; 0 disables this generation safety policy')
     p.add_argument('--intercept-tap-on-slide',action=argparse.BooleanOptionalAction,default=False,
@@ -187,23 +193,44 @@ def _grounded_pointer_probabilities(logits, bins, temperature, *, eligible=None,
     return probabilities
 
 
-def _category_truncate_actions(masked_logits, temperature, groups):
+def _category_truncate_actions(masked_logits, temperature, groups, *, type_temperature=1.,type_min_p=0.):
     """Preserve T=1 kind/ring mass, truncating only inside each disjoint group.
 
     Legacy callers may still supply four coarse kind masks. Production uses
     three button kinds followed by the five Touch rings.
     """
     macro_probs = masked_logits.softmax(-1)
+    if not math.isfinite(float(type_temperature)) or not 0<=type_temperature<=2:
+        raise ValueError('action_type_temperature must be in [0,2]')
+    if not math.isfinite(float(type_min_p)) or not 0<=type_min_p<=1:
+        raise ValueError('action_type_min_p must be in [0,1]')
     if groups is None:
         return (masked_logits / max(float(temperature), 1e-6)).softmax(-1)
     out = torch.zeros_like(macro_probs)
     out[0] = macro_probs[0]
+    masses=None
+    if type_temperature!=1. or type_min_p!=0.:
+        masses=torch.stack([macro_probs[mask.to(masked_logits.device)].sum() for mask in groups])
+        # Three button kinds plus one Touch kind. Tempering each Touch ring
+        # separately would reintroduce a bias toward its most common ring.
+        coarse=torch.cat((masses[:3],masses[3:].sum().reshape(1)))
+        total=coarse.sum()
+        if total>0:
+            if type_temperature==0.:
+                selected=torch.zeros_like(coarse);selected[coarse.argmax()]=1.
+            else:
+                selected=(coarse.log()/max(float(type_temperature),1e-6)).softmax(-1)
+                selected=torch.where(selected>=selected.max()*float(type_min_p),selected,0.)
+                selected=selected/selected.sum().clamp_min(1e-12)
+            adjusted=selected*total
+            touch=masses[3:]/coarse[3].clamp_min(1e-30)*adjusted[3]
+            masses=torch.cat((adjusted[:3],touch))
     limits=(16,12,16)+tuple(8 for _ in groups[3:])
-    for mask, max_k in zip(groups, limits):
+    for group_index,(mask, max_k) in enumerate(zip(groups, limits)):
         m = mask.to(masked_logits.device) & masked_logits.isfinite()
         if not m.any():
             continue
-        cat_mass = macro_probs[m].sum()
+        cat_mass = macro_probs[m].sum() if masses is None else masses[group_index]
         if cat_mass <= 0:
             continue
         # Normalize inside the category: a global low-temperature softmax can
@@ -239,7 +266,8 @@ def _compile_composer_chart(points, tempo, first, condition):
 
 
 def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), blocked=(), max_heads=2,diagnostics=None,
-                    slot_decoder=None,blocked_first=(),head_metadata=None,canonical_order=False,touch_layout_policy='open'):
+                    slot_decoder=None,blocked_first=(),head_metadata=None,canonical_order=False,touch_layout_policy='open',
+                    type_temperature=1.,type_min_p=0.):
     if touch_layout_policy not in {'open','legacy_two_heads'}:
         raise ValueError('unknown touch_layout_policy')
     selected=[]
@@ -271,7 +299,8 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
         mask=torch.full_like(values,float('-inf'))
         mask[torch.tensor(allowed,device=values.device)]=values[torch.tensor(allowed,device=values.device)]
         if temperature > 0:
-            probabilities=_category_truncate_actions(mask,temperature,groups)
+            probabilities=_category_truncate_actions(mask,temperature,groups,
+                type_temperature=type_temperature,type_min_p=type_min_p)
             if diagnostics is not None and slot==0:
                 diagnostics['action_top_probability_sum']+=probabilities.max().detach()
                 diagnostics['action_decisions']+=1
@@ -391,6 +420,12 @@ def generate(args):
     pointer_history_strength=float(getattr(args,'pointer_history_strength',1.))
     if not math.isfinite(pointer_history_strength) or not 0. <= pointer_history_strength <= 1.:
         raise ValueError('pointer_history_strength must be between 0 and 1')
+    action_history_strength=float(getattr(args,'action_history_strength',1.))
+    type_temperature=float(getattr(args,'action_type_temperature',1.))
+    type_min_p=float(getattr(args,'action_type_min_p',0.))
+    for name,value,maximum in (('action_history_strength',action_history_strength,1.),
+                               ('action_type_temperature',type_temperature,2.),('action_type_min_p',type_min_p,1.)):
+        if not math.isfinite(value) or not 0<=value<=maximum:raise ValueError(f'{name} must be in [0,{maximum}]')
     min_same_head_ms=float(getattr(args,'min_same_head_ms',50.))
     if not math.isfinite(min_same_head_ms) or not 0 <= min_same_head_ms <= 200:
         raise ValueError('min_same_head_ms must be between 0 and 200')
@@ -474,6 +509,7 @@ def generate(args):
         'temperature':args.temperature,'pointer_temperature':pointer_temperature,
         'action_temperature':action_temperature,
         'pointer_history_strength':pointer_history_strength,
+        'action_history_strength':action_history_strength,'action_type_temperature':type_temperature,'action_type_min_p':type_min_p,
         'sampling_mode':('greedy' if pointer_temperature==0 and action_temperature==0 else 'temperature'),
         'condition':condition.to_dict(),'condition_source':condition_source,
         'architecture_profile':model.config.architecture_profile,
@@ -586,6 +622,10 @@ def generate(args):
                 memory=motif_tensors(motif_index,beat,len(history),model.config.history_events,model.config.motif_max_events)
                 motif_queries+=1;motif_matched_queries+=int(memory['motif_mask'].any())
                 memory={k:v[None].to(device) for k,v in memory.items()}
+            if model.config.action_state_policy=='selected_prefix_v3':
+                from .context_features import selected_action_state
+                memory.update(selected_action_state=selected_action_state(action_index,len(history),beat)[None].to(device),
+                    state_base=output['selected_state_base'],state_keep=output['selected_state_keep'])
             decision=model.decode_candidate(output['candidate_context'],torch.tensor([choice],device=device),
                  project_actions=not learned,audio_context=output.get('audio_action_context'),
                  **({**memory,'motif_strength':motif_strength} if grounded else {}))
@@ -596,7 +636,7 @@ def generate(args):
             decoder_diagnostics={}
             decoder=(lambda slot,chosen: action_logits_with_touch_guard(model,decision['action_context'][0],slot,
                 [atom_to_id[atom] for atom in chosen],audio_context=audio_act,
-                history_strength=pointer_history_strength,enabled=touch_history_guard,touch_mask=touch_mask,
+                 history_strength=action_history_strength,enabled=touch_history_guard,touch_mask=touch_mask,
                 diagnostics=decoder_diagnostics,log_odds_bound=touch_history_bound)) if learned else None
             blocked_first=set()
             for retry in range(6):
@@ -606,7 +646,8 @@ def generate(args):
                 proposed=_sample_actions(slot_rows,atoms,grammar,action_temperature,rng,
                     occupied=occupied,blocked=cooldown_blocked,max_heads=2,diagnostics=sampling,
                     slot_decoder=decoder,blocked_first=blocked_first,head_metadata=head_metadata,
-                    canonical_order=music_v2,touch_layout_policy=touch_layout_policy)
+                    canonical_order=music_v2,touch_layout_policy=touch_layout_policy,
+                    type_temperature=type_temperature,type_min_p=type_min_p)
                 if proposed:
                     guided=bool(decoder_diagnostics.get('applied'))
                     sampling['touch_guard_proposals']+=int(guided)
@@ -711,6 +752,7 @@ def generate(args):
             'touch_history_log_odds_bound':touch_history_bound if touch_history_guard else None,
             'density_observation':{'before_postprocess':raw_density,'exported':density_observation(points,clock,touch_layout_policy=touch_layout_policy)},
             'curve_strength':curve_strength,'pointer_history_strength':pointer_history_strength,
+            'action_history_strength':action_history_strength,'action_type_temperature':type_temperature,'action_type_min_p':type_min_p,
             'audio_pointer_training_weight':payload.get('args',{}).get('audio_pointer_weight'),
             'pointer_route':'audio_plus_full_context_residual' if music_v2 else 'full_context',
             'stop_reason':'max_events' if len(points)>=max_events else stop_reason,

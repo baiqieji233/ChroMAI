@@ -133,6 +133,43 @@ def test_unmasked_forward_matches_standalone_motif_decode():
     for key in standalone:torch.testing.assert_close(output[key],standalone[key],rtol=0,atol=0)
 
 
+def test_selected_time_state_only_changes_the_configuration_path():
+    parent=_model().eval()
+    model=migrate_audio_grounded(parent,ATOMS,action_state_policy='selected_prefix_v3').eval()
+    data=_inputs();selected=torch.randn(2,50)
+    with torch.no_grad():
+        old=parent(**data)
+        result=model(**data,selected_action_state=selected)
+        changed=model(**data,selected_action_state=selected+2.)
+        base=model(**data,decode_actions=False)
+        decoded=model.decode_candidate(base['candidate_context'],data['candidate_indices'],
+            state_base=base['selected_state_base'],state_keep=base['selected_state_keep'],
+            selected_action_state=selected,action_targets=data['action_targets'],audio_context=base['audio_action_context'])
+    for key in ('candidate_logits','audio_candidate_logits','eos_logits','future','audio_action_logits'):
+        torch.testing.assert_close(old[key],result[key],rtol=0,atol=0)
+        torch.testing.assert_close(result[key],changed[key],rtol=0,atol=0)
+    assert not torch.equal(result['action_logits'],changed['action_logits'])
+    for key in decoded:torch.testing.assert_close(decoded[key],result[key],rtol=0,atol=0)
+    model.train();data['symbolic_keep']=torch.zeros(2,1)
+    one=model(**data,selected_action_state=selected)
+    two=model(**data,selected_action_state=selected+2.)
+    torch.testing.assert_close(one['action_logits'],two['action_logits'],rtol=0,atol=0)
+
+
+def test_selected_query_is_a_single_causal_state_with_future_suffix_isolation():
+    from maichart.composer.context_features import selected_action_state
+    tempo=[EventTempo(F(0),120.)]
+    prefix=[EventPoint(F(0),'1h[4:2]'),EventPoint(F(1),'2-6[4:2]')]
+    full=SustainStateIndex(prefix+[EventPoint(F(2),'7h[1:16]')],tempo,0.)
+    incremental=IncrementalState(tempo,0.)
+    for point in prefix:incremental.append(point)
+    before=composer_action_state(full,2,[F(3)],'selected_prefix_v3')
+    chosen=selected_action_state(full,2,F(3))
+    torch.testing.assert_close(chosen,selected_action_state(incremental,2,F(3)),rtol=0,atol=0)
+    torch.testing.assert_close(chosen,composer_action_state(full,2,[F(3)],'candidate_prefix_v2')[0],rtol=0,atol=0)
+    assert not torch.equal(before,chosen)
+
+
 def test_shared_context_matches_real_incremental_state_and_ignores_future_suffix():
     tempo = [EventTempo(F(0),137.),EventTempo(F(18),193.)]
     prefix = [EventPoint(F(0),'1h[1:16]'),EventPoint(F(8),'2'),EventPoint(F(20),'1')]

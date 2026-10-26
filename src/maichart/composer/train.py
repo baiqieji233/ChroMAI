@@ -394,7 +394,7 @@ def _assert_model_finite(model):
 def _forward_batch(model,tensors,*,decode_actions=True,**overrides):
     extra={key:tensors[key] for key in ('head_timing','workload_audio','ledger','interval_audio',
         'trailing_audio','audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
-        'motif_ids','motif_relative_beats','motif_mask') if key in tensors}
+        'motif_ids','motif_relative_beats','motif_mask','selected_action_state') if key in tensors}
     extra.update(overrides)
     return model(tensors['candidate_features'],tensors['history'],tensors['condition'],
         action_state=tensors['action_state'],history_features=tensors['history_features'],
@@ -443,12 +443,19 @@ def recovery_batch(dataset,model,args,device,global_step):
             cand_sec=float(item['_clock'].at(beat))
             context=result['candidate_context'][0,chosen]
             audio_ctx=result['audio_action_context'][0,chosen] if 'audio_action_context' in result else None
+            decode_extra={}
+            if model.config.action_state_policy=='selected_prefix_v3':
+                from .context_features import selected_action_state
+                decode_extra.update(selected_action_state=selected_action_state(item['_action_index'],len(item['_prefix_points']),beat)[None].to(device),
+                    state_base=result['selected_state_base'],state_keep=result['selected_state_keep'])
             if '_motif_index' in item:
                 from .context_features import motif_tensors
                 memory=motif_tensors(item['_motif_index'],beat,len(item['_prefix_points']),
                     model.config.history_events,model.config.motif_max_events)
-                decoded=model.decode_candidate(context[None],project_actions=False,
-                    **{k:v[None].to(device) for k,v in memory.items()})
+                decode_extra.update({k:v[None].to(device) for k,v in memory.items()})
+            if decode_extra:
+                decoded=model.decode_candidate(result['candidate_context'],torch.tensor([chosen],device=device),
+                    project_actions=False,**decode_extra)
                 context=decoded['action_context'][0]
             occupied,blocked,_=constraints[chosen]
             cooldown_blocked=set(blocked)|{pad for pad,prior in guard.last_head_seconds.items()

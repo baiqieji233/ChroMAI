@@ -47,6 +47,17 @@ def test_explicit_finetune_policies_forward_and_resume_rejects(harness):
     assert len(calls)==1
 
 
+def test_selected_prefix_training_policy_is_finetune_only_and_forwarded(harness):
+    payload,parent,calls,handler,runtime=harness
+    api.start_train(handler,dict(payload,mode='finetune',action_state_policy='selected_prefix_v3'),runtime=runtime)
+    task,args=calls[0]
+    assert value(args,'action_state_policy')=='selected_prefix_v3'
+    assert task.result['effective_settings']['action_state_policy']=='selected_prefix_v3'
+    with pytest.raises(ValueError,match='[Rr]esume inherits'):
+        api.start_train(handler,dict(payload,mode='resume',action_state_policy='selected_prefix_v3'),runtime=runtime)
+    assert len(calls)==1
+
+
 def test_generation_new_options_reach_cli_and_echo(harness,tmp_path):
     payload,parent,calls,handler,runtime=harness
     audio=tmp_path/'audio.wav';audio.write_bytes(b'mock')
@@ -55,7 +66,13 @@ def test_generation_new_options_reach_cli_and_echo(harness,tmp_path):
     task,args=calls[0]
     assert value(args,'touch_layout_policy')=='open' and value(args,'motif_strength')=='1.7'
     assert task.result['effective_settings']['motif_strength']==1.7
-    assert task.result['generation_contract']=='composer_generation_controls_v10_touch_layout'
+    assert value(args,'action_history_strength')=='1.0'
+    assert value(args,'action_type_temperature')=='1.0'
+    assert value(args,'action_type_min_p')=='0.0'
+    assert task.result['effective_settings']['action_history_strength']==1.
+    assert task.result['effective_settings']['action_type_temperature']==1.
+    assert task.result['effective_settings']['action_type_min_p']==0.
+    assert task.result['generation_contract']=='composer_generation_controls_v11_history_type_sampling'
     for changes in [{'motif_strength':2.1},{'touch_layout_policy':'auto'}]:
         with pytest.raises(ValueError):
             api.start_generate(handler,dict(audio=str(audio),checkpoint=payload['checkpoint'],**changes),runtime=runtime)

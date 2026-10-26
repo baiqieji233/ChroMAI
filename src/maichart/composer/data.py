@@ -527,7 +527,7 @@ class ComposerDataset(Dataset):
 
     def _action_state_unlocked(self, song_index: int, event_index: int, table: dict) -> torch.Tensor:
         if not table['action_ready'][event_index]:
-            if self.action_state_policy=='committed_causal_v2':
+            if self.action_state_policy in {'committed_causal_v2','selected_prefix_v3'}:
                 from .context_features import composer_action_state
                 table['action_states'][event_index]=composer_action_state(
                     table['state_index'],event_index,(),self.action_state_policy)
@@ -818,6 +818,9 @@ class ComposerDataset(Dataset):
             from .context_features import motif_tensors
             result.update(motif_tensors(table['motif_index'],sample.target,ev,
                                         self.history_events,self.motif_max_events))
+        if self.action_state_policy=='selected_prefix_v3':
+            from .context_features import selected_action_state
+            result['selected_action_state']=selected_action_state(table['state_index'],ev,sample.target)
         if self.architecture_profile in MUSIC_PROFILES:
             # Trailing labels have their own support; a future exclusion must
             # not mask an otherwise valid past-only window (or vice versa).
@@ -918,7 +921,8 @@ def collate_composer(items):
                 'ledger', 'sample_weight', 'transition_weight', 'interval_audio',
                 'trailing_audio', 'trailing_target', 'trailing_weight', 'head_timing',
                 'eos_weight', 'future_weight', 'pointer_weight','action_weight',
-                'audio_lens','audio_lens_mask','placement_target','placement_weight','planner_indices','planner_mix'):
+                'audio_lens','audio_lens_mask','placement_target','placement_weight','planner_indices','planner_mix',
+                'selected_action_state'):
         if key in items[0]: result[key] = torch.stack([item[key] for item in items])
     if 'planner_audio' in items[0]:
         for key in ('planner_audio','planner_target','planner_weight'):

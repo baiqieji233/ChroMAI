@@ -154,7 +154,12 @@ def validate(payload):
     values.setdefault('action_state_policy','committed_legacy_v1')
     values.setdefault('motif_memory_policy','off')
     values.setdefault('slide_factor_policy','marginal_v1')
-    config=ComposerConfig(**values)
+    try:
+        config=ComposerConfig(**values)
+    except TypeError as exc:
+        if 'unexpected keyword argument' not in str(exc):raise
+        raise ValueError('Composer checkpoint 与当前进程加载的模型代码不兼容：'
+            f'{exc}。请更新本工作区代码并重启正在使用的 WebUI 后端，再重新检查 checkpoint。') from exc
     from .model import validate_supported_context_policies
     validate_supported_context_policies(config)
     if config.architecture_profile not in {'legacy_v2',*WORKLOAD_PROFILES}:

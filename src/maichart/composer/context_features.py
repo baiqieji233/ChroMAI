@@ -12,11 +12,16 @@ def composer_action_state(index, committed_count, candidate_beats, policy):
         rows, mask, _ = index.at(previous, include_current=True)
         active = rows[~mask]
         return active.mean(0) if active.numel() else torch.zeros(50)
-    if policy == 'committed_causal_v2':
+    if policy in {'committed_causal_v2','selected_prefix_v3'}:
         return committed_prefix_states(index, [previous], committed_events=committed_count)[0]
     if policy == 'candidate_prefix_v2':
         return committed_prefix_states(index, candidate_beats, committed_events=committed_count)
     raise ValueError('Unknown action_state_policy')
+
+
+def selected_action_state(index,committed_count,beat):
+    """One selected-time query, with the same strict prefix as the pointer."""
+    return committed_prefix_states(index,[beat],committed_events=committed_count)[0]
 
 
 def motif_tensors(index, query_beat, committed_count, history_events, max_events):

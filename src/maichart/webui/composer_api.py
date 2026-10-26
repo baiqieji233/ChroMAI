@@ -10,7 +10,7 @@ from typing import Any
 
 FAMILY = "chart_composer_v1"
 SCHEMA = "maichart-chart-composer-checkpoint-v2"
-GENERATION_CONTRACT = 'composer_generation_controls_v10_touch_layout'
+GENERATION_CONTRACT = 'composer_generation_controls_v11_history_type_sampling'
 
 
 def _path(value: Any, label: str, *, exists: bool = False, directory: bool = False) -> Path:
@@ -326,6 +326,15 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     pointer_history_strength = _float(payload, 'pointer_history_strength', 1., minimum=0.)
     if pointer_history_strength > 1.:
         raise ValueError('pointer_history_strength 不能大于 1')
+    for key in ('action_history_strength','action_type_temperature','action_type_min_p'):
+        if isinstance(payload.get(key), bool):
+            raise ValueError(f'{key} 必须是数字')
+    action_history_strength=_float(payload,'action_history_strength',1.,minimum=0.)
+    if action_history_strength>1.:raise ValueError('action_history_strength 不能大于 1')
+    action_type_temperature=_float(payload,'action_type_temperature',1.,minimum=0.)
+    if action_type_temperature>2.:raise ValueError('action_type_temperature 不能大于 2')
+    action_type_min_p=_float(payload,'action_type_min_p',0.,minimum=0.)
+    if action_type_min_p>1.:raise ValueError('action_type_min_p 不能大于 1')
     min_same_head_ms=_float(payload,'min_same_head_ms',50.,minimum=0.)
     if min_same_head_ms>200.:
         raise ValueError('min_same_head_ms 不能大于 200')
@@ -351,6 +360,9 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                        ('--curve-strength',curve_strength),
                        ('--touch-layout-policy',touch_layout_policy),('--motif-strength',motif_strength),
                        ('--pointer-history-strength',pointer_history_strength),
+                       ('--action-history-strength',action_history_strength),
+                       ('--action-type-temperature',action_type_temperature),
+                       ('--action-type-min-p',action_type_min_p),
                        ('--touch-history-bound',touch_history_bound),
                        ('--min-same-head-ms',min_same_head_ms),
                        ('--seed',seed),('--max-events',max_events),('--device',device)):
@@ -377,6 +389,9 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
             'action_temperature':action_temperature,'curve_strength':curve_strength,
             'touch_layout_policy':touch_layout_policy,'motif_strength':motif_strength,
             'pointer_history_strength':pointer_history_strength,
+            'action_history_strength':action_history_strength,
+            'action_type_temperature':action_type_temperature,
+            'action_type_min_p':action_type_min_p,
             'touch_history_guard':touch_history_guard,'touch_history_bound':touch_history_bound,
             'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,
             'condition':condition.to_dict(),'condition_source':condition_source,

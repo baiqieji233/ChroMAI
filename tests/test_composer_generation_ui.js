@@ -6,7 +6,8 @@ function fn(name){let start=source.indexOf(`function ${name}(`);return source.sl
 
 test('Composer payload forwards Radar/Style, tempo, temperature and blank seed',()=>{
   const values={'#level':'14.2','#temperature':'.91','#seed':'','#checkpointPath':'cp.pt',
-    '#composerCurveStrength':'1.4','#composerMinSameHeadMs':'65','#composerPointerHistoryStrength':'.4'};
+    '#composerCurveStrength':'1.4','#composerMinSameHeadMs':'65','#composerPointerHistoryStrength':'.4',
+    '#composerActionHistoryStrength':'.7','#composerActionTypeTemperature':'.8','#composerActionTypeMinP':'.06'};
   const condition={level:14.2,radar:{note_density:.42},style:{slide_bias:.7}};
   const tempo=[{beat:'0',bpm:150},{beat:'8',bpm:180}];
   const context=vm.createContext({valueOrDefault:(id,fallback)=>values[id]??fallback,
@@ -19,6 +20,9 @@ test('Composer payload forwards Radar/Style, tempo, temperature and blank seed',
   assert.equal(payload.curve_strength,1.4);assert.equal(payload.device,'cpu');
   assert.equal(payload.min_same_head_ms,65);
   assert.equal(payload.pointer_history_strength,.4);
+  assert.equal(payload.action_history_strength,.7);
+  assert.equal(payload.action_type_temperature,.8);
+  assert.equal(payload.action_type_min_p,.06);
   assert.equal(payload.intercept_tap_on_slide,false);
   assert.equal(payload.touch_history_guard,true);assert.equal(payload.touch_history_bound,1);
   values['#composerTouchHistoryGuard']=false;values['#composerTouchHistoryBound']='0';
@@ -38,6 +42,19 @@ test('Main UI resets Touch controls and intercept with the generation defaults',
   assert.match(html,/id="composerTouchHistoryBound"[^>]*min="0"[^>]*max="4"[^>]*value="1"/);
 });
 
+test('New Composer controls persist across reset and submit their documented defaults',()=>{
+  const fields=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('const CONFLICT_KIND_FIELDS ='));
+  for(const id of ['composerActionHistoryStrength','composerActionTypeTemperature','composerActionTypeMinP'])
+    assert.ok(fields.includes(`"${id}"`),id);
+  const c=vm.createContext({valueOrDefault:(_id,fallback)=>fallback,checkedOrDefault:(_id,fallback)=>fallback,
+    formDevice:()=> 'cpu',collectCondition:()=>({}),parseTempoMap:()=>null});
+  vm.runInContext(fn('chartComposerGenerationPayload'),c);
+  const payload=c.chartComposerGenerationPayload();
+  assert.equal(payload.action_history_strength,1);
+  assert.equal(payload.action_type_temperature,1);
+  assert.equal(payload.action_type_min_p,0);
+});
+
 test('Touch summary distinguishes effective, requested and disabled protection, including zero bound',()=>{
   const c=vm.createContext({});vm.runInContext(fn('composerGenerationSummary'),c);
   function summary(effective,requested,bound) {return c.composerGenerationSummary({kind:'composer_generate',result:{composer_report:{
@@ -51,24 +68,31 @@ test('Touch summary distinguishes effective, requested and disabled protection, 
 test('Composer uses dedicated temperatures and shared tempo controls',()=>{
   assert.doesNotMatch(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">Temperature/);
   assert.match(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">手动 tempo map/);
-  assert.ok(source.includes('status.composer_generation_contract !== "composer_generation_controls_v10_touch_layout"'));
+  assert.ok(source.includes('status.composer_generation_contract !== "composer_generation_controls_v11_history_type_sampling"'));
   assert.match(html,/id="composerCurveStrength"[^>]*min="0"[^>]*max="2"[^>]*value="1"/);
   assert.match(source,/"composerCurveStrength"/);
   assert.match(source,/"composerPointerTemperature"/);
   assert.match(source,/"composerActionTemperature"/);
   assert.match(html,/id="composerMinSameHeadMs"[^>]*min="0"[^>]*max="200"[^>]*value="50"/);
   assert.match(html,/id="composerPointerHistoryStrength"[^>]*min="0"[^>]*max="1"[^>]*value="1"/);
+  assert.match(html,/id="composerActionHistoryStrength"[^>]*min="0"[^>]*max="1"[^>]*value="1"/);
+  assert.match(html,/id="composerActionTypeTemperature"[^>]*min="0"[^>]*max="2"[^>]*value="1"/);
+  assert.match(html,/id="composerActionTypeMinP"[^>]*min="0"[^>]*max="1"[^>]*value="0"/);
+  assert.match(html,/value="selected_prefix_v3"/);
   assert.match(source,/"composerPointerHistoryStrength"/);
+  for (const id of ['composerActionHistoryStrength','composerActionTypeTemperature','composerActionTypeMinP']) assert.ok(source.includes(`"${id}"`));
 });
 
 test('Composer result explains actual controls and greedy invariance',()=>{
   const context=vm.createContext({});vm.runInContext(fn('composerGenerationSummary'),context);
   const summary=context.composerGenerationSummary({kind:'composer_generate',result:{seed:0,
-    effective_settings:{temperature:0,pointer_temperature:0.2,action_temperature:0.3,pointer_history_strength:.3,condition_source:'ui+file'},composer_report:{weights_sha256:'a'.repeat(64),
+    effective_settings:{temperature:0,pointer_temperature:0.2,action_temperature:0.3,pointer_history_strength:.3,
+      action_history_strength:.8,action_type_temperature:1.2,action_type_min_p:.1,condition_source:'ui+file'},composer_report:{weights_sha256:'a'.repeat(64),
       events_sha256:'b'.repeat(64),optimizer_steps:3500,condition:{level:14.2,style:{slide_bias:.7}}}}});
   assert.match(summary,/seed：0/);assert.ok(!summary.includes('贪心'));assert.match(summary,/候选温度 0.2/);assert.match(summary,/动作温度 0.3/);assert.match(summary,/3500/);
   assert.match(summary,/已覆盖/);assert.match(summary,/音符序列 bbbbbbbbbbbb/);
   assert.match(summary,/选时历史权重 0.3/);
+  assert.match(summary,/动作历史权重 0.8/);assert.match(summary,/动作类别温度 1.2；min-p 0.1/);
 });
 
 test('Composer summary distinguishes learned workload and all unresolved hard Muri',()=>{
