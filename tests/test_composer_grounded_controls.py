@@ -38,7 +38,8 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'recovery_weight': .1, 'action_state_policy':'committed_causal_v2',
                 'motif_memory_policy':'off','slide_factor_policy':'branch_joint_v2','motif_max_events':16,
                 'touch_layout_policy':'open', 'cpu_threads': 0,'history_memory_rms_bound':8.,
-                'history_memory_policy':'rms_cap_v1','history_attention_policy':'math_v1'}
+                'history_memory_policy':'rms_cap_v1','history_attention_policy':'math_v1',
+                'action_objective_policy':'event_balanced_v1'}
     assert task.result['effective_settings'] == expected
     for key, value in expected.items():
         flag = '--' + key.replace('_', '-')
@@ -128,3 +129,27 @@ def test_legacy_resume_defaults_missing_history_memory_bound_to_eight(tmp_path, 
     payload.update(mode='resume', resume=str(parent), history_memory_rms_bound=12)
     with pytest.raises(ValueError, match='resume inherits history_memory_rms_bound=8'):
         composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime([]))
+
+
+def test_action_objective_api_requires_explicit_finetune_and_inherits_resume(tmp_path, monkeypatch):
+    from maichart.composer import checkpoint
+    parent = tmp_path / 'old.pt'; parent.write_bytes(b'checkpoint')
+    saved_args = {}
+    monkeypatch.setattr(checkpoint, 'read_payload', lambda _: {})
+    monkeypatch.setattr(checkpoint, 'inspect_payload', lambda _: {
+        'can_resume': True, 'can_init': True, 'model_config': {'architecture_profile': 'audio_grounded_v3'},
+        'args': saved_args})
+    payload = _payload(tmp_path)
+    payload.update(mode='resume', resume=str(parent), action_objective_policy='joint_event_nll_v2')
+    with pytest.raises(ValueError, match='Resume inherits action_objective_policy'):
+        composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime([]))
+    payload.update(mode='finetune', init_checkpoint=str(parent))
+    calls = []
+    composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime(calls))
+    assert calls[0][0].result['effective_settings']['action_objective_policy'] == 'joint_event_nll_v2'
+    assert calls[0][1][calls[0][1].index('--action-objective-policy') + 1] == 'joint_event_nll_v2'
+    saved_args['action_objective_policy'] = 'joint_event_nll_v2'
+    payload.update(mode='resume', action_objective_policy='auto')
+    calls = []
+    composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime(calls))
+    assert calls[0][0].result['effective_settings']['action_objective_policy'] == 'joint_event_nll_v2'

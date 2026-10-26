@@ -63,6 +63,28 @@ def test_recovery_rebuilds_generated_history_and_masks_every_nonpointer_label():
     assert item['sample_weight'].item() == pytest.approx(.7)
 
 
+def test_configuration_recovery_teaches_legal_authored_actions_after_actual_generated_history():
+    source = [point(i, '4/2' if i==3 else '1') for i in range(12)]
+    recovery = builder(source=source)
+    recovery.supervise_actions = True
+    item,reason = recovery.build([point(0),point(1,'3'),point(2,'3')],0,generated_count=2)
+    assert reason=='accepted'
+    assert item['history'][:,0].tolist()==[1,3,3]
+    assert item['action_target'].tolist()==[2,4,0]
+    assert item['action_weight'].item()==1
+    for key in ('future_weight','eos_weight','workload_weight','trailing_weight'):
+        assert not item[key].any()
+
+
+@pytest.mark.parametrize('target', ['8', '1/2/3/4', '7'])
+def test_configuration_recovery_rejects_illegal_unknown_or_truncated_reference(target):
+    recovery = builder(source=[point(i,target if i==3 else '1') for i in range(12)])
+    recovery.supervise_actions = True
+    item,reason = recovery.build([point(0),point(1,'3'),point(2,'3')],0,generated_count=2)
+    assert item is None
+    assert reason in {'illegal_reference_continuation','unsupported_reference_actions'}
+
+
 def test_selected_state_recovery_uses_generated_sustains_at_reference_time():
     from maichart.composer.context_features import selected_action_state
     recovery=builder()

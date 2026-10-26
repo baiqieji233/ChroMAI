@@ -151,3 +151,14 @@ test('Composer dashboard displays effective grounded and inherited settings',()=
   const text=JSON.stringify(view.cards);
   assert.match(text,/audio_grounded_v3/);assert.match(text,/继承 checkpoint/);assert.match(text,/100 \/ 2 \/ 2/);
 });
+
+for(const policy of ['joint_event_nll_v2','joint_event_recovery_v3'])test(`Objective ${policy} dashboard identifies its units and exposes comparable configuration errors`,()=>{
+  const view=context.composerTrainingView({result:{composer_runtime:{architecture_profile:'audio_grounded_v3',
+    action_objective_policy:policy},composer_metrics:{metric_batches:12,action_loss:3.4,
+      action_legacy_ce:2.1,action_first_slot_ce:2.8,audio_action_first_slot_ce:3.9}}});
+  const labels=Object.fromEntries(view.cards.find(([name])=>name==='学习情况')[1]);
+  assert.equal(labels['配置联合 NLL'],'3.4');
+  assert.equal(labels['配置首槽 CE（共同标尺）'],'2.8');
+  assert.equal(labels['配置旧标尺 CE'],'2.1');
+  assert.match(view.note,/不同配置学习目标的总loss不可直接比较/);
+});

@@ -170,6 +170,9 @@ def test_generation_retry_does_not_turn_search_cursor_into_history(
         '--device', 'cpu', '--max-events', '2' if commit_first else '1'])
     report = module.generate(args)
     assert report['event_count'] == (2 if commit_first else 1)
+    for key in ('configuration_observation', 'configuration_observation_before_postprocess'):
+        assert report[key]['repetition']['event_count'] == report['event_count']
+        assert report[key]['repetition']['exact_event_text']['windows']['2'] == report['event_count'] - 1
     assert report['guard']['skipped_candidates'] == (1 if commit_first else 2)
     candidates, committed, mask = masks[-1]
     assert candidates[0] == Fraction(1, 8)

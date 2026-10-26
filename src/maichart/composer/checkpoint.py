@@ -8,6 +8,8 @@ from .model import ChartComposer,ComposerConfig,WORKLOAD_PROFILES,GROUNDED_PROFI
 from .candidates import COMPOSER_AUDIO_FEATURE_POLICY, MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6
 from .events import HEAD_TIMING_DIM
 from . import MOTIF_TRAINING_POLICY
+from .objectives import (LEGACY_ACTION_OBJECTIVE, JOINT_TRAINING_SEMANTICS, RECOVERY_TRAINING_SEMANTICS,
+                         resolve_action_objective, training_semantics_for_objective)
 
 
 def motif_training_compatible(payload):
@@ -83,6 +85,8 @@ def _write_payload(path, payload):
 
 def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimizer_steps=0,
          atom_catalog=(), dataset_fingerprint=None, training_state=None):
+    objective=resolve_action_objective(args.get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
+                                      architecture_profile=model.config.architecture_profile)
     current_music = (model.config.architecture_profile == 'music_context_v2'
                      and model.config.head_timing_dim == HEAD_TIMING_DIM)
     music_semantics = TRAINING_SEMANTICS if current_music else _OLD_MUSIC_SEMANTICS
@@ -110,7 +114,7 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
             raise ValueError('Save slide_factor_policy differs from the effective model representation')
         if list(atom_catalog)!=list(model.action_factors.atom_catalog):
             raise ValueError('Save catalog order differs from the compositional action mapping')
-        payload.update(training_semantics=GROUNDED_TRAINING_SEMANTICS,candidate_policy=MUSIC_CANDIDATE_POLICY_V6,
+        payload.update(training_semantics=training_semantics_for_objective(GROUNDED_PROFILE,objective),candidate_policy=MUSIC_CANDIDATE_POLICY_V6,
             action_sampling_policy=ACTION_SAMPLING_POLICY,
             atom_catalog=list(atom_catalog),
             architecture_features='ordered_lens_interpolated_plan_banded_pointer_compositional_actions_v1')
@@ -165,6 +169,8 @@ def validate(payload):
             f'{exc}。请更新本工作区代码并重启正在使用的 WebUI 后端，再重新检查 checkpoint。') from exc
     from .model import validate_supported_context_policies
     validate_supported_context_policies(config)
+    objective=resolve_action_objective((payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
+                                      architecture_profile=config.architecture_profile)
     if config.architecture_profile not in {'legacy_v2',*WORKLOAD_PROFILES}:
         raise ValueError('Unknown Composer architecture profile')
     contract=_PROFILE_POLICIES[config.architecture_profile]
@@ -172,10 +178,14 @@ def validate(payload):
     allowed_semantics={contract['training_semantics']}
     if config.architecture_profile==GROUNDED_PROFILE:
         allowed_semantics.update({_GROUNDED_V7_SEMANTICS, _GROUNDED_V8_SEMANTICS, _GROUNDED_V9_SEMANTICS,
-                                  _GROUNDED_V10_SEMANTICS})
+                                  _GROUNDED_V10_SEMANTICS,JOINT_TRAINING_SEMANTICS,RECOVERY_TRAINING_SEMANTICS})
         if semantics not in allowed_semantics:
             raise ValueError('audio_grounded_v3 requires its explicit training semantics')
-        if semantics in {_GROUNDED_V10_SEMANTICS,GROUNDED_TRAINING_SEMANTICS} and payload.get('action_sampling_policy')!=ACTION_SAMPLING_POLICY:
+        new_semantics={JOINT_TRAINING_SEMANTICS,RECOVERY_TRAINING_SEMANTICS}
+        if ((semantics in new_semantics or objective!=LEGACY_ACTION_OBJECTIVE)
+                and semantics!=training_semantics_for_objective(GROUNDED_PROFILE,objective)):
+            raise ValueError('Composer action objective/training semantics mismatch')
+        if semantics in {_GROUNDED_V10_SEMANTICS,GROUNDED_TRAINING_SEMANTICS,*new_semantics} and payload.get('action_sampling_policy')!=ACTION_SAMPLING_POLICY:
             raise ValueError('Current Composer recovery action sampling policy mismatch')
     if config.architecture_profile=='music_context_v2':
         # Existing v5 music-context weights remain valid for generation and
@@ -244,8 +254,11 @@ def inspect_payload(payload):
     try: config=validate(payload);valid=True;error=None
     except (ValueError,KeyError,TypeError) as exc: config=None;valid=False;error=str(exc)
     migration = None
+    current_semantics=None
     if config is not None:
-        if config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != GROUNDED_TRAINING_SEMANTICS:
+        current_semantics=training_semantics_for_objective(config.architecture_profile,
+            (payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE))
+        if config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != current_semantics:
             migration = 'Older grounded planning/recovery contracts require explicit finetune with a new output directory'
         elif not motif_training_compatible(payload):
             migration = 'Motif symbolic dropout contract changed; use explicit finetune with a new output directory'
@@ -265,7 +278,7 @@ def inspect_payload(payload):
             'candidate_policy':payload.get('candidate_policy'),
             'can_resume':bool(valid and config.architecture_profile in {'music_context_v2',GROUNDED_PROFILE}
                               and config.head_timing_dim==HEAD_TIMING_DIM
-                              and payload.get('training_semantics')==(GROUNDED_TRAINING_SEMANTICS if config.architecture_profile==GROUNDED_PROFILE else TRAINING_SEMANTICS)
+                              and payload.get('training_semantics')==current_semantics
                               and payload.get('optimizer_state_dict') is not None and motif_training_compatible(payload)),
             'can_init':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),
             'can_train':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),'can_generate':valid,

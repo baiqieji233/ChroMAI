@@ -1,8 +1,8 @@
 """Conservative reference-continuation supervision after real short rollouts.
 
-The reference continuation is not an optimal recovery oracle. Only its time is
-supervised, and only when the original configuration remains legal after the
-generated prefix. ``propose(item, sample_index)`` must sample the actual model;
+The reference continuation is not an optimal recovery oracle. Legacy training
+supervises its time only; explicit v3 training also supervises its configuration
+when it remains legal after the generated prefix. ``propose(item, sample_index)`` must sample the actual model;
 the builder never fabricates generated events by perturbing authored labels.
 """
 from __future__ import annotations
@@ -28,13 +28,15 @@ from .workload import prefix_ledger
 
 class RecoveryBuilder:
     def __init__(self, dataset, model=None, device='cpu', *, propose=None,
-                 tolerance_sec=PLACEMENT_TOLERANCE_SEC, guard_factory=EventGuard):
+                 tolerance_sec=PLACEMENT_TOLERANCE_SEC, guard_factory=EventGuard,
+                 supervise_actions=False):
         self.dataset, self.model = dataset, model
         self.device, self.propose = torch.device(device), propose
         self.tolerance_sec = float(tolerance_sec)
         if not math.isfinite(self.tolerance_sec) or self.tolerance_sec < PLACEMENT_TOLERANCE_SEC:
             raise ValueError('Recovery tolerance must be finite and at least placement tolerance')
         self.guard_factory = guard_factory
+        self.supervise_actions = bool(supervise_actions)
         self._state_cache = None
         self._guard_cache = None
 
@@ -181,8 +183,9 @@ class RecoveryBuilder:
         """Return ``(item, reason)``; rejected samples return ``(None, reason)``.
 
         Prefix must consist of the exact context before the anchor followed by
-        two to four actual model events. All labels except continuation time
-        have zero weight, including independently authored placement labels.
+        two to four actual model events. Only continuation time and explicitly
+        enabled legal reference actions are supervised. Independent authored
+        placement, workload and future labels remain masked.
         """
         sample, song, views, table = self._environment(sample_index)
         prefix = list(prefix)
@@ -235,6 +238,19 @@ class RecoveryBuilder:
             if key.endswith(('_target', '_weight')) and key not in {
                     'candidate_target', 'pointer_weight', 'sample_weight', 'transition_weight'}:
                 item[key] = torch.zeros_like(torch.as_tensor(value))
+        if self.supervise_actions:
+            # The same legality check above covers the COMPLETE target event.
+            # Never supervise empty placeholder actions or truncate a chord.
+            try:
+                atoms = sorted(event_metadata(target.note_text).atoms)
+            except ValueError:
+                return None, 'unsupported_reference_actions'
+            if (not atoms or len(atoms) > self.dataset.action_slots
+                    or any(atom not in self.dataset.atom_to_id for atom in atoms)):
+                return None, 'unsupported_reference_actions'
+            ids = [self.dataset.atom_to_id[atom] for atom in atoms]
+            item['action_target'] = torch.tensor(ids + [0] * (self.dataset.action_slots-len(ids)), dtype=torch.long)
+            item['action_weight'] = torch.tensor(1.)
         return item, 'accepted'
 
     def rollout(self, sample_index, *, steps=2, propose=None):

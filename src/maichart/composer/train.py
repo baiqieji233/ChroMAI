@@ -21,6 +21,8 @@ from .model import (ChartComposer,ComposerConfig,build_model,GROUNDED_PROFILE,WO
 from .events import HEAD_TIMING_DIM
 from .checkpoint import save,load,migrate_music_context,migrate_audio_grounded
 from .runtime_memory import GIB,host_memory,memory_gib
+from .objectives import (ACTION_OBJECTIVES, LEGACY_ACTION_OBJECTIVE, RECOVERY_ACTION_OBJECTIVE, action_objective, recovery_objective,
+                         resolve_action_objective, training_semantics_for_objective)
 
 
 class RemainingBatches:
@@ -220,6 +222,8 @@ def parser():
                    help='probability of coherently hiding chart history/state/ledger, retaining audio and targets')
     p.add_argument('--audio-pointer-weight',type=float,default=.15,
         help='audio-only auxiliary weight: next-position plus action supervision in audio_grounded_v3')
+    p.add_argument('--action-objective-policy',choices=('auto',*sorted(ACTION_OBJECTIVES)),default='auto',
+        help='auto preserves the existing objective; v2 uses complete event likelihood; v3 also learns legal actions after real short rollouts')
     p.add_argument('--profile-steps',type=int,default=0,
                    help='record CUDA H2D/forward/backward/update timings for first N consumed batches; 0 disables')
     p.add_argument('--architecture-profile',choices=('music_context_v2',GROUNDED_PROFILE),default=GROUNDED_PROFILE)
@@ -256,7 +260,8 @@ def _precision(value,device):
     return value
 
 
-def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_weight=.15,planner_weight=.2):
+def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_weight=.15,planner_weight=.2,
+          action_objective_policy=LEGACY_ACTION_OBJECTIVE):
     weights=batch.get('sample_weight',torch.ones_like(batch['eos_target']))
     transitions=batch.get('transition_weight',torch.ones_like(weights))
     def reduce(values, factors=weights):
@@ -273,25 +278,19 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
         future=output['future'][rows,target]
         eos=output['eos_logits'][rows,target]
     action_targets=batch['action_target']
-    action_per_slot=F.cross_entropy(action_logits.reshape(-1,atom_vocab_size),
-        action_targets.reshape(-1),reduction='none').reshape(action_logits.size(0),-1)
-    active_slots=torch.ones_like(action_targets,dtype=torch.bool)
-    if action_targets.size(1)>1:
-        active_slots[:,1:]=action_targets[:,:-1].ne(0)
-    slot_weights=torch.where(action_targets.ne(0),1.,.35)*active_slots.to(action_per_slot)
     action_weights=weights*transitions*batch.get('action_weight',torch.ones_like(weights))
-    action=reduce((action_per_slot*slot_weights).sum(-1)/slot_weights.sum(-1).clamp_min(1e-6),
-                  action_weights)
+    if action_logits.size(-1)!=atom_vocab_size:
+        raise ValueError('Action logits do not match atom_vocab_size')
+    action,action_metrics=action_objective(action_logits,action_targets,action_weights,policy=action_objective_policy)
     audio_action_loss=pointer.new_zeros(())
+    audio_action_metrics={}
     if 'audio_action_logits' in output:
         audio_action_logits=output['audio_action_logits']
         if audio_action_logits.ndim>3:
             rows=torch.arange(target.size(0),device=target.device)
             audio_action_logits=audio_action_logits[rows,target]
-        audio_per_slot=F.cross_entropy(audio_action_logits.reshape(-1,atom_vocab_size),
-            action_targets.reshape(-1),reduction='none').reshape(audio_action_logits.size(0),-1)
-        audio_action_loss=reduce((audio_per_slot*slot_weights).sum(-1)/slot_weights.sum(-1).clamp_min(1e-6),
-                                 action_weights)
+        audio_action_loss,audio_action_metrics=action_objective(
+            audio_action_logits,action_targets,action_weights,policy=action_objective_policy)
     eos_target=batch['eos_target']
     eos_weights=weights*batch.get('eos_weight',torch.ones_like(weights))
     positives=(eos_target*eos_weights).sum().clamp_min(1.)
@@ -347,6 +346,8 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
         plan_loss=(errors*mask).sum()/mask.sum().clamp_min(1e-6)
     total=pointer+action+.05*eos_loss+.2*future_loss+.4*workload_loss+.05*curve_slope_loss+audio_pointer_weight*(audio_pointer_loss+audio_action_loss)+.2*trailing_loss+placement_weight*placement_loss+planner_weight*plan_loss
     return total,{'loss':total.detach(),
+        **{'action_'+name:value.detach() for name,value in action_metrics.items()},
+        **{'audio_action_'+name:value.detach() for name,value in audio_action_metrics.items()},
         'pointer_loss':pointer.detach(),'action_loss':action.detach(),'eos_loss':eos_loss.detach(),
         'future_loss':future_loss.detach(),'workload_loss':workload_loss.detach(),
         'curve_slope_loss':curve_slope_loss.detach(),'workload_rate_mae':workload_rate_mae.detach(),
@@ -482,7 +483,9 @@ def recovery_batch(dataset,model,args,device,global_step):
     model.eval()
     try:
         with torch.no_grad():
-            return RecoveryBuilder(dataset,model,device,propose=propose).batch_from_indices(indices,steps=args.recovery_steps)
+            return RecoveryBuilder(dataset,model,device,propose=propose,
+                supervise_actions=getattr(args,'action_objective_policy',LEGACY_ACTION_OBJECTIVE)==RECOVERY_ACTION_OBJECTIVE
+                ).batch_from_indices(indices,steps=args.recovery_steps)
     finally:model.train(was_training)
 
 
@@ -552,13 +555,15 @@ def _train(args,explicit_flags):
                         'ledger_dropout','history_residual_bound','lens_width','lens_chunk_size'):
                 if key in (old.get('args') or {}) and '--'+key.replace('_','-') not in explicit_flags:
                     setattr(args,key,old['args'][key])
-        semantics=GROUNDED_TRAINING_SEMANTICS if args.architecture_profile==GROUNDED_PROFILE else TRAINING_SEMANTICS
-        if args.resume and old.get('training_semantics')!=semantics:
-            raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
         if args.resume:
             from .checkpoint import motif_training_compatible
             if not motif_training_compatible(old):
                 raise ValueError('Motif symbolic dropout contract changed; use --init-checkpoint with a new output directory')
+    args.action_objective_policy=resolve_action_objective(getattr(args,'action_objective_policy','auto'),
+        old.get('args',{}) if old else None,resume=bool(args.resume),architecture_profile=args.architecture_profile)
+    semantics=training_semantics_for_objective(args.architecture_profile,args.action_objective_policy)
+    if args.resume and old.get('training_semantics')!=semantics:
+        raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
     if not (args.resume or args.init_checkpoint):
         args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy)
     for name in COMPOSER_POLICY_FIELDS:
@@ -691,7 +696,8 @@ def _train(args,explicit_flags):
     run_started=time.monotonic()
     timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.,save_sec=0.)
     gpu_profiles=[]; gpu_timing=dict(samples=0,h2d_ms=0.,forward_ms=0.,backward_ms=0.,update_ms=0.)
-    print('composer_runtime '+json.dumps({'family':FAMILY,'training_semantics':GROUNDED_TRAINING_SEMANTICS if model.config.architecture_profile==GROUNDED_PROFILE else TRAINING_SEMANTICS,
+    print('composer_runtime '+json.dumps({'family':FAMILY,'training_semantics':semantics,
+        'action_objective_policy':args.action_objective_policy,
         'device':str(device),'precision':precision,'effective_lr':effective_lr,'samples':len(dataset),'parameters':parameters,
         'model_bytes':sum(p.numel()*p.element_size() for p in model.parameters()),
         'action_head_parameters':sum(p.numel() for p in model.action_head.parameters()),
@@ -762,7 +768,8 @@ def _train(args,explicit_flags):
                     output=_forward_batch(model,tensors)
                     output_bad=_nonfinite_tensors(output)
                     loss,metrics=_loss(output,tensors,model.config.atom_vocab_size,audio_pointer_weight=args.audio_pointer_weight,
-                        placement_weight=args.placement_weight,planner_weight=args.planner_weight)
+                        placement_weight=args.placement_weight,planner_weight=args.planner_weight,
+                        action_objective_policy=args.action_objective_policy)
                 if events: events[2].record()
                 if output_bad or not torch.isfinite(loss):
                     details={'message':'non-finite batch skipped; checkpoint remains valid',
@@ -793,22 +800,33 @@ def _train(args,explicit_flags):
                             and (global_step+1)%args.recovery_interval==0):
                         recovery_started=time.perf_counter()
                         recovered,diagnostics=recovery_batch(dataset,model,args,device,global_step)
+                        recovery_sampled=time.perf_counter()
                         recovery_value=None
+                        recovery_parts={}
+                        configuration_samples=0
                         if recovered is not None:
                             recovered={k:v.to(device) for k,v in recovered.items() if torch.is_tensor(v)}
                             with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
                                     enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
-                                recovery_output=_forward_batch(model,recovered,decode_actions=False)
-                                per_sample=F.cross_entropy(recovery_output['candidate_logits'],recovered['candidate_target'],reduction='none')
-                                importance=recovered['sample_weight']*recovered['pointer_weight']
-                                recovery_loss=(per_sample*importance).sum()/importance.sum().clamp_min(1e-6)*args.recovery_weight
+                                recovery_output=_forward_batch(model,recovered,
+                                    decode_actions=args.action_objective_policy==RECOVERY_ACTION_OBJECTIVE,
+                                    audio_auxiliary=False)
+                                recovery_loss,recovery_metrics=recovery_objective(recovery_output,recovered,
+                                    policy=args.action_objective_policy,weight=args.recovery_weight)
                             if torch.isfinite(recovery_loss):
                                 recovery_value=float(recovery_loss.detach())
+                                recovery_parts={name:float(value) for name,value in recovery_metrics.items()}
                                 if scaler is not None:scaler.scale(recovery_loss).backward()
                                 else:recovery_loss.backward()
+                                if args.action_objective_policy==RECOVERY_ACTION_OBJECTIVE:
+                                    configuration_samples=int(recovered['candidate_target'].numel())
                         print('composer_recovery '+json.dumps({'optimizer_step':global_step+1,
                             'seconds':time.perf_counter()-recovery_started,'outcomes':diagnostics,
-                            'loss':recovery_value,'loss_includes_weight':True}),flush=True)
+                            'sampling_seconds':recovery_sampled-recovery_started,
+                            'learning_seconds':time.perf_counter()-recovery_sampled,
+                            'loss':recovery_value,'loss_includes_weight':True,
+                            'components_unweighted':recovery_parts,
+                            'configuration_samples':configuration_samples}),flush=True)
                     if scaler is not None: scaler.unscale_(optimizer)
                     # The global norm detects NaN/Inf across all gradients;
                     # no per-parameter Python scalar checks or mutation needed.

@@ -1,8 +1,7 @@
 """Generate a structured event chart with chart_composer_v1."""
 from __future__ import annotations
 import argparse,hashlib,json,math
-from collections import Counter,OrderedDict
-from itertools import groupby
+from collections import OrderedDict
 from fractions import Fraction
 from pathlib import Path
 import numpy as np
@@ -26,6 +25,7 @@ from .candidates import (COMPOSER_AUDIO_FEATURE_POLICY,candidate_beats,
                           candidate_features,composer_audio_nodes,interp_candidate_audio, MUSIC_CANDIDATE_POLICY_V6)
 from .model import ChartComposer, WORKLOAD_PROFILES, MUSIC_PROFILES, GROUNDED_PROFILE
 from .generation_settings import resolve_seed,resolve_condition
+from .configuration_observation import configuration_observation
 from maichart.tempo_clock import TempoClock
 from .acoustics import AcousticContext
 from .workload import build_workload_targets, causal_ledger, event_statistics
@@ -697,6 +697,7 @@ def generate(args):
             stop_reason='learned_eos'
             break
     raw_density=density_observation(points,clock,touch_layout_policy=touch_layout_policy)
+    raw_configuration_observation=configuration_observation(points)
     playability = process_chart_points(
         points, song.tempo, args.first,
         PostProcessConfig(
@@ -716,7 +717,6 @@ def generate(args):
     points = playability.points
     text,_=_compile_composer_chart(points,song.tempo,args.first,condition)
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
-    configurations=Counter(point.note_text for point in points)
     report={'schema':'maichart-chart-composer-generation-v2','family':'chart_composer_v1','event_count':len(points),
             'architecture_profile':model.config.architecture_profile,
             'checkpoint':str(Path(args.checkpoint).resolve()),'device':str(device),'seed':seed,
@@ -733,9 +733,8 @@ def generate(args):
                 'touch_guard_proposals':sampling['touch_guard_proposals'],
                 'touch_guard_safety_rejections':sampling['touch_guard_safety_rejections'],
                 'mean_audio_full_pointer_js':float(sampling['audio_pointer_js_sum'])/max(1,sampling['audio_pointer_js_count']) if sampling['audio_pointer_js_count'] else None},
-            'configuration_observation':{'unique_texts':len(configurations),
-                'top_texts':configurations.most_common(5),
-                'max_consecutive_same_text':max((sum(1 for _ in group) for _,group in groupby(point.note_text for point in points)),default=0)},
+            'configuration_observation':configuration_observation(points),
+            'configuration_observation_before_postprocess':raw_configuration_observation,
             'audio_bounds':bounds,'structured_event_generation':True,'hard_constraints':'exact_heads_and_runtime_miacode_transactions',
             'audio_feature_policy':feature_policy,'candidate_policy':candidate_policy,
             'trained_candidate_policy':trained_candidate_policy,'min_same_head_ms':min_same_head_ms,
@@ -760,6 +759,7 @@ def generate(args):
             'curve_strength':curve_strength,'pointer_history_strength':pointer_history_strength,
             'action_history_strength':action_history_strength,'action_type_temperature':type_temperature,'action_type_min_p':type_min_p,
             'audio_pointer_training_weight':payload.get('args',{}).get('audio_pointer_weight'),
+            'trained_action_objective_policy':payload.get('args',{}).get('action_objective_policy','event_balanced_v1'),
             'pointer_route':'audio_plus_full_context_residual' if music_v2 else 'full_context',
             'stop_reason':'max_events' if len(points)>=max_events else stop_reason,
             'guard':{'checks':guard.checks,'rejections':guard.rejections,'skipped_candidates':skipped_candidates,

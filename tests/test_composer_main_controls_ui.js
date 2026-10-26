@@ -20,7 +20,7 @@ function harness(){
     checkedOrDefault:(id)=>el(id).checked,formDevice:()=> 'cpu',
     api:async(path,payload)=>{
       if(path==='/api/composer/inspect')return structuredClone(parent);
-      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v6_history_stability'}};
+      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v8_configuration_recovery'}};
       if(path==='/api/composer/train'){submitted=payload;return {task_id:'fake'};}
       throw Error(path);
     }});
@@ -119,6 +119,22 @@ test('History policies inherit on resume and RMS parent default is loaded only o
   assert.equal(el('#composerHistoryAttentionPolicy').disabled,true);
   assert.equal(el('#composerHistoryMemoryRmsBound').value,'8');
   assert.equal(el('#composerHistoryMemoryRmsBound').disabled,true);
+});
+
+for(const policy of ['joint_event_nll_v2','joint_event_recovery_v3'])test(`Action objective ${policy} inherits on resume and survives finetune submit reinspection`,async()=>{
+  const {c,el,parent,setMode,submitted}=harness();
+  await c.inspectCheckpoint();
+  assert.equal(el('#composerActionObjectivePolicy').value,'event_balanced_v1');
+  assert.equal(el('#composerActionObjectivePolicy').disabled,true);
+  setMode('finetune');await c.inspectCheckpoint();
+  el('#composerActionObjectivePolicy').value=policy;
+  c.checkpointInspection={key:'',data:null}; // editing the manifest invalidates compatibility, not user intent
+  await c.submitTrain();
+  assert.equal(submitted().action_objective_policy,policy);
+  parent.args.action_objective_policy=policy;
+  setMode('resume');await c.inspectCheckpoint();
+  assert.equal(el('#composerActionObjectivePolicy').value,policy);
+  assert.equal(el('#composerActionObjectivePolicy').disabled,true);
 });
 
 test('Policy UI has complete geometry choice and fresh auto reset without generation-reset coupling',()=>{

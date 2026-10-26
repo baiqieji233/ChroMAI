@@ -181,7 +181,7 @@ class AudioGroundedComposer(ChartComposer):
             result['selected_state_keep']=symbolic_keep
         if decode_actions:
             result.update(self.decode_candidate(action_context,candidate_indices,
-                action_targets=action_targets,audio_context=audio_action_context,
+                action_targets=action_targets,audio_context=audio_action_context,project_audio_actions=audio_auxiliary,
                 motif_ids=motif_ids,motif_relative_beats=motif_relative_beats,motif_mask=motif_mask,
                 motif_strength=motif_strength,motif_keep=symbolic_keep,
                 selected_action_state=selected_action_state,state_base=result.get('selected_state_base'),
@@ -190,7 +190,8 @@ class AudioGroundedComposer(ChartComposer):
 
     def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
                          motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None,
-                         selected_action_state=None,state_base=None,state_keep=None,factor_weight=None):
+                         selected_action_state=None,state_base=None,state_keep=None,factor_weight=None,
+                         project_audio_actions=True):
         if project_actions and factor_weight is None:
             factor_weight=self.action_factors.composed_weight()
         if candidate_indices is not None:
@@ -234,7 +235,8 @@ class AudioGroundedComposer(ChartComposer):
                     raise ValueError('Action target slots exceed the configured capacity')
                 slot_embeddings=slot_embeddings[:action_targets.size(-1)]
             contexts=candidate_context.unsqueeze(-2)+slot_embeddings
-            audio_contexts=audio_context.unsqueeze(-2)+slot_embeddings if audio_context is not None else None
+            audio_contexts=(audio_context.unsqueeze(-2)+slot_embeddings
+                            if audio_context is not None and project_audio_actions else None)
             relation=None
             if action_targets is not None:
                 embedded=self._embedding(action_targets,factor_weight=factor_weight)

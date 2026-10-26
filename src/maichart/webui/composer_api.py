@@ -142,6 +142,11 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args,'--dropout',dropout)
     _arg(args,'--history-anchor-policy',anchor_policy)
     grounded_settings = {'architecture_profile': architecture_profile,'dropout':dropout,'history_anchor_policy':anchor_policy}
+    from maichart.composer.objectives import resolve_action_objective
+    objective=resolve_action_objective(payload.get('action_objective_policy','auto'),
+        parent_args if mode!='fresh' else None,resume=mode=='resume',architecture_profile=architecture_profile)
+    grounded_settings['action_objective_policy']=objective
+    _arg(args,'--action-objective-policy',objective)
     cpu_default = (parent_args.get('cpu_threads') or 0) if mode == 'resume' else 0
     cpu_raw = payload.get('cpu_threads', cpu_default)
     if isinstance(cpu_raw, bool) or not isinstance(cpu_raw, (int, str)):
