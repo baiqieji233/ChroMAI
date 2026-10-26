@@ -1,5 +1,7 @@
 # Composer 独立审查核实、有限修订与下一阶段参数（2026-10-26）
 
+> 后续loss深审发现并修复了fused AdamW更新后动作因子评估缓存过期问题。本文短微调after数值已按重新加载模型的有效评分更正；同权重静态生成对照不受影响。128首歌曲、多模块梯度及五组短程对照见[最新深审](COMPOSER_LOSS_DEEP_AUDIT_20261026_ZH.md)。
+
 本记录接续[效率优化交接](COMPOSER_GPU_EFFICIENCY_20261026_ZH.md)。依据是本轮修改前的 `14f8f3c` 源码、用户提供的独立审查、实际 v11 检查点，以及同输入诊断。不能把报告里的机制推测当作已经确认的音乐质量根因。
 
 ## 当前状态与保留点
@@ -65,7 +67,7 @@
 - 最终完整相关回归：576项Python通过、1项默认跳过（含真实生成持续状态的accepted恢复采样及极小正类别温度边界）；前端33项Node通过。记录为`.scratch/composer_review_20261026/regression_final.txt`。
 - 真实Edge主页面：实际检查v11有效、可resume；finetune提交保留`selected_prefix_v3`、resume锁定继承committed；三项生成控件显示/保存/重置/提交通过。训练和生成POST在浏览器测试中使用stub，没有启动正式任务。结果为`.scratch/composer_review_20261026/browser_result.json`。
 - 官方CLI小模型：真实单chart、候选96、CPU、batch2，selected策略fresh2batch保存后resume2batch成功。恢复提案执行但未被接受（原始续接非法或时间不可达），未宣称该短跑产生有效恢复训练信号；另有accepted生成前缀的定向回归通过。最初候选16触发覆盖检查，未绕过检查，改回96。
-- GPU短微调：从保留v11显式迁移，只拟合第一首chart中32个持续状态变化样本，batch4、BF16、AdamW2e-5、24次更新。固定eval总loss **5.451832→4.935296**，动作 **3.009469→2.719457**，选时 **1.588912→1.407875**，但选时准确率 **0.5000→0.4375**。只证明可优化，不能证明泛化或全面改善。
+- GPU短微调：从保留v11显式迁移，只拟合第一首chart中32个持续状态变化样本，batch4、BF16、AdamW2e-5、24次更新。缓存修复后重新加载评分的总loss **5.451832→4.905069**，动作 **3.009469→2.692925**，选时 **1.588912→1.407875**，但选时准确率 **0.5000→0.4375**。旧after总loss4.935296和动作2.719457受评估缓存影响，已替代；新结果见`.scratch/composer_loss_deep_20261026/selected_trial_rescored.json`。只证明可优化，不能证明泛化或全面改善。
 - 该短程训练及eval约3.119秒，峰值活跃CUDA分配838,542,336字节；这是小batch诊断，不能外推全量吞吐。诊断模型参数全部finite，位于`.scratch/composer_review_20261026/selected_state_diagnostic.pt`，不覆盖生产模型，也没有当作正式训练恢复点。
 - 该诊断模型另以同一真实音频在CPU生成32事件，正常以`max_events`停止；报告确认selected策略和独立历史/类型参数生效，短片段无残留hard冲突。只用于验证实际加载、选时后状态查询、动作解码与导出链路，不作为质量A/B；输出位于`.scratch/composer_review_20261026/selected_generation/`。
 

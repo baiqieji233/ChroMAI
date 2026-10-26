@@ -249,8 +249,22 @@ class CompositionalActions(nn.Module):
         taps = event_embedding(tap_ids) * tap_ids.ne(0)[:, None]
         return self._parsed_anchor_weights[ids].to(taps) @ taps
 
+    def _clear_composed_cache(self):
+        self._composed_cache_key=None
+        self._composed_cache=None
+
+    def train(self,mode=True):
+        # Fused optimizers can update parameters without advancing _version.
+        # An eval cache must never survive a training/evaluation boundary.
+        self._clear_composed_cache()
+        return super().train(mode)
+
     def composed_weight(self) -> torch.Tensor:
         """Return [legal IDs including STOP, width] without an ID-specific head."""
+        if self.training or torch.is_grad_enabled():
+            # Also cover dropout-off optimization that intentionally stays in
+            # eval mode: its grad-enabled forward precedes an optimizer step.
+            self._clear_composed_cache()
         cache_key=None
         if (not self.training and not torch.is_grad_enabled()
                 and not any(torch.is_inference(value.weight) for value in self.factors.values())):

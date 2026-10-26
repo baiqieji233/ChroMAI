@@ -6,6 +6,8 @@
 
 **本工作区最新状态（2026-10-26）：** 用户已停止 v11 正式训练，第5轮 / 17,500次更新检查点已另存保留。本轮拆开选时与动作历史权重，增加可选的动作类别采样控制，以及需要显式微调的选定拍位状态策略。长程训练未重启，主工作台已更新到 [7860](http://127.0.0.1:7860/)。核实结论、实际验证及下一阶段参数见[本轮审查与调参说明](docs/COMPOSER_REVIEW_AND_PARAMETERS_20261026_ZH.md)；此前提速数据见[效率优化记录](docs/COMPOSER_GPU_EFFICIENCY_20261026_ZH.md)。
 
+**loss深审接续：** 已用128首歌曲和5组GPU短程对照复查。确认并修复fused AdamW更新后动作因子评估缓存可能过期的问题；训练前向本身不读此缓存，尚不能用它解释全部loss平台。没有支持“总loss一半是不可约底噪”或“音频辅助头必然拖拽主任务”的证据。数据、边界与下一阶段建议见[深审记录](docs/COMPOSER_LOSS_DEEP_AUDIT_20261026_ZH.md)。
+
 **后续自主复查：** 已修正动机训练遮挡、持续状态边界/缓存、Touch统计口径、取消重试和同目录重复训练保护；相关回归491项Python、28项前端及真实浏览器通过。旧动机实验模型需要显式finetune迁移；未开启动机的原v10续训资格不变。详见[自主复查记录](docs/COMPOSER_SELF_AUDIT_FOLLOWUP_20261025_ZH.md)。
 
 你可以从这里开始：
@@ -335,6 +337,7 @@ dataset/
 | CPU 算子线程 `cpu_threads` | 控制PyTorch的CPU算子线程，0保留环境/PyTorch设置，范围0–256；与采样准备线程不是同一个参数。GPU训练的小数组处理可试2–4。本机实测2更合适；resume会回填保存值，仍可明确修改。CLI为`--cpu-threads`。 |
 | 允许轮中重分 batch 续训 `rebatch_resume` | 主界面仅 resume 可勾选，默认关闭。先检查已有检查点，再勾选并调整 batch 与梯度累积，保持乘积不变（如96×4→64×6），且 `max_steps=0`。程序保留当前轮剩余样本顺序；取消勾选会恢复检查点的批量。CLI 对应 `--rebatch-resume`。已重分批保存后的检查点，后续按相同64×6普通 resume 即可。 |
 | 普通 dropout `dropout` | 模型内部随机丢弃的概率，默认 `0.1`，范围 `0–1`。只有 fresh 可修改；resume / finetune 继承模型配置。它与历史、台账或符号分支的遮挡参数分别控制不同部分。 |
+| 音频辅助监督权重 `audio_pointer_weight` | 默认0.15，范围0–1。audio_grounded_v3中同时乘在音频选位与音频动作两项辅助损失上，字段名为兼容旧配置而保留。它不是只调整动作分支的独立开关；调低会直接减少总loss，不能据此判断学习改善。更改需finetune。 |
 | 历史键位锚定 `history_anchor_policy` | 仅audio_grounded_v3使用。fresh自动为 `parsed_geometry_v3`：读取真实音符头，中心C不占外圈角度，D/E按相邻两键各半表示。已有模型自动继承legacy或v2；resume不能更换。想尝试v3，用finetune与新目录。 |
 | 持续动作状态 `action_state_policy` | fresh自动为 `committed_causal_v2`，在最后已提交拍位查询状态。实验选项 `selected_prefix_v3` 保持选时输入不变，只在动作解码时把同一个已提交前缀推进到选定拍位，每样本增加一次查询。`candidate_prefix_v2` 为所有候选查询，成本更高，且会改变选时输入。旧模型缺字段时按 `committed_legacy_v1` 解释；更换需显式finetune与新目录，不能直接resume。 |
 | 跨段落动机记忆 `motif_memory_policy` | 默认关闭 `off`。实验选项 `audio_recurrence_archive_v1` 按音频重复段检索普通历史窗口以外、已经提交的配置。开启会增加新分支，需训练或显式finetune；原模型仅调生成强度不能获得此能力。 |

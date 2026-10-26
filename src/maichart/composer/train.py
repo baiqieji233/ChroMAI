@@ -219,7 +219,7 @@ def parser():
     p.add_argument('--symbolic-dropout',type=float,default=.15,
                    help='probability of coherently hiding chart history/state/ledger, retaining audio and targets')
     p.add_argument('--audio-pointer-weight',type=float,default=.15,
-                   help='auxiliary next-position supervision using audio/condition without chart context')
+        help='audio-only auxiliary weight: next-position plus action supervision in audio_grounded_v3')
     p.add_argument('--profile-steps',type=int,default=0,
                    help='record CUDA H2D/forward/backward/update timings for first N consumed batches; 0 disables')
     p.add_argument('--architecture-profile',choices=('music_context_v2',GROUNDED_PROFILE),default=GROUNDED_PROFILE)

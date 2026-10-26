@@ -404,7 +404,7 @@
 <label class="field checkbox-field"><input id="composerRebatchResume" type="checkbox"><span>允许轮中重分 batch 续训</span><small>仅 resume 有效。先检查检查点，再调整单批和梯度累积，保持乘积不变（如96×4→64×6）；max_steps需为0。保留已保存样本顺序，不从头重训。</small></label>
 <label class="field">样本局部性<input id="composerSampleLocality" type="number" min="1" max="8" value="4"><small>每批交错的歌曲数；建议 4。1 提高缓存复用，也会增加同曲样本的梯度相关性。</small></label>
 <label class="field">历史模态遮挡概率<input id="composerSymbolicDropout" type="number" min="0" max="0.5" step="0.05" value="0.15"><small>统一隐藏模型读取的谱面历史、动作状态与 ledger，保留音频和真实监督；建议 0.15。</small></label>
-<label class="field">独立音频选位监督权重<input id="composerAudioPointerWeight" type="number" min="0" max="1" step="0.05" value="0.15"><small>让音频与难度条件单独学习谱师选位，减少仅靠历史复制节奏的捷径；建议 0.15。</small></label>
+<label class="field">音频辅助监督权重<input id="composerAudioPointerWeight" type="number" min="0" max="1" step="0.05" value="0.15"><small>默认0.15。audio_grounded_v3中同时控制音频选位和音频动作两项辅助损失；调低会直接降低总loss数值，不能据此判断主任务学得更好。改变目标须显式微调。</small></label>
 <label class="field">CUDA 分段计时批数<input id="composerProfileSteps" type="number" min="0" value="0"><small>0 关闭；需要定位效率时可填 8，在日志中比较传输、前向、反向和更新耗时。</small></label>
 <label class="field">日志间隔（batch）<input id="composerLogInterval" type="number" min="1" value="25"><small>更新吞吐、ETA、损失和缓存反馈；不改变训练目标。</small></label>
 <label class="field">每轮 batch 上限<input id="composerMaxSteps" type="number" min="0" value="0"><small>0 完整训练集；短跑限制仅用于流程检查。</small></label>
