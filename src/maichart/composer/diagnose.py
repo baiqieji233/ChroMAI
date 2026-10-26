@@ -14,7 +14,7 @@ import torch
 
 from .checkpoint import load
 from .data import ComposerDataset, collate_composer
-from .candidates import candidate_beats, candidate_features, interp_candidate_audio
+from .candidates import candidate_beats, candidate_features, interp_candidate_audio, _select_candidate_offsets
 from .workload import prefix_ledger
 from .events import head_timing_features
 from .model import MUSIC_PROFILES,WORKLOAD_PROFILES,GROUNDED_PROFILE
@@ -47,21 +47,35 @@ def _inputs(batch, device):
         'candidate_mask':'candidate_padding_mask','history_padding_mask':'history_padding_mask',
         'workload_audio':'workload_audio','ledger':'ledger','interval_audio':'interval_audio',
         'trailing_audio':'trailing_audio','head_timing':'head_timing',
-        **{k:k for k in ('audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix')}}
+        **{k:k for k in ('audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
+                          'selected_action_state','motif_ids','motif_relative_beats','motif_mask')}}
     return {key:batch[source].to(device) for key,source in mapping.items() if source in batch}
 
 
 @torch.inference_mode()
-def interventions(model, inputs):
+def interventions(model, inputs, *, decode_context=None):
     """Hold audio/history/candidates fixed for workload interventions.
 
     Oracle is a separate optional caller diagnostic, never a production input.
     Layout JS is evaluated at the SAME base-selected candidate in every case.
+    Selected-time state and enabled motif memory require a callback that builds
+    causal context at that candidate; authored-target context is not equivalent.
     """
+    if decode_context is None and (model.config.action_state_policy=='selected_prefix_v3'
+                                   or hasattr(model,'motif_memory')):
+        raise ValueError('Selected state or motif diagnostics require a causal decode_context callback')
     model.eval()
     base=model(**inputs,decode_actions=False)
     choice=base['candidate_logits'].argmax(-1)
-    baseline=model.decode_candidate(base['candidate_context'],choice)['action_logits'][...,0,:]
+    def decode(result, current_inputs):
+        extra={} if decode_context is None else decode_context(choice,current_inputs)
+        if hasattr(model,'motif_memory') and 'symbolic_keep' in current_inputs:
+            extra['motif_keep']=current_inputs['symbolic_keep']
+        if 'selected_state_base' in result:
+            extra.setdefault('state_base',result['selected_state_base'])
+            extra.setdefault('state_keep',result.get('selected_state_keep'))
+        return model.decode_candidate(result['candidate_context'],choice,**extra)['action_logits'][...,0,:]
+    baseline=decode(base,inputs)
     workload=base.get('workload')
     variants={}
     valid=(~inputs['candidate_mask'] if 'candidate_mask' in inputs else
@@ -116,7 +130,7 @@ def interventions(model, inputs):
     expected=(base['candidate_logits'].float().softmax(-1)*gaps).sum(-1)
     for name,change in variants.items():
         alternate=model(**{**inputs,**change},decode_actions=False)
-        action=model.decode_candidate(alternate['candidate_context'],choice)['action_logits'][...,0,:]
+        action=decode(alternate,{**inputs,**change})
         result[name]={'pointer_js':_js(base['candidate_logits'],alternate['candidate_logits']),
             'first_atom_js_at_fixed_candidate':_js(baseline,action),
             'expected_gap_change_sec':float(((alternate['candidate_logits'].float().softmax(-1)*gaps).sum(-1)-expected).mean())}
@@ -178,6 +192,11 @@ def _omit_last_prefix(dataset, sample, item, id_map):
             while len(dataset._context_cache)>dataset._context_cache_limit:
                 dataset._context_cache.popitem(last=False)
     start=max(0,ev-dataset.history_events)
+    if dataset.action_state_policy=='candidate_prefix_v2':
+        from .context_features import composer_action_state
+        action_state=composer_action_state(table['state_index'],ev,candidates,dataset.action_state_policy)
+    else:
+        action_state=dataset._action_state(sample.song_index,ev,table)
     result=dict(item,
         candidate_features=torch.from_numpy(np.concatenate((interp_candidate_audio(values,times,seconds),
             candidate_features(candidates,previous,song.tempo,song.first,clock=clock,candidate_seconds=seconds,rich_time=True)),axis=-1)),
@@ -185,9 +204,14 @@ def _omit_last_prefix(dataset, sample, item, id_map):
             | (seconds < 0.) | (seconds >= dataset._song_audio_ends[sample.song_index])),
         history=torch.from_numpy(id_map[table['atom_ids'][start:ev].numpy()]),
         history_features=table['history_features'][start:ev],
-        action_state=dataset._action_state(sample.song_index,ev,table),
+        action_state=action_state,
         workload_audio=torch.from_numpy(context.at(seconds)),
         ledger=torch.from_numpy(prefix_ledger(table['point_seconds'],table['head_prefix'],seconds,committed_count=ev)))
+    # These are selected-beat inputs. The old sample's target beat no longer
+    # identifies the candidate selected from this altered prefix; rebuild them
+    # through _decode_context after the new pointer choice instead.
+    for key in ('selected_action_state','motif_ids','motif_relative_beats','motif_mask'):
+        result.pop(key,None)
     if dataset.architecture_profile in MUSIC_PROFILES:
         result.update(interval_audio=torch.from_numpy(context.interval(float(clock.at(previous)) if previous is not None else 0.,seconds)),
                       trailing_audio=torch.from_numpy(context.trailing(seconds)))
@@ -196,7 +220,63 @@ def _omit_last_prefix(dataset, sample, item, id_map):
             table['last_head_beats'][ev],seconds,[float(x) for x in candidates]))
     if dataset.architecture_profile==GROUNDED_PROFILE:
         result.update(dataset._grounded_features(sample.song_index,seconds,seconds,table=table))
-    return result,seconds
+    return result,seconds,candidates
+
+
+def _decode_context(dataset, sample, candidate_beats, id_map, device, *, committed_count=None):
+    """Build causal configuration inputs after the pointer has selected a beat."""
+    table=dataset._song_table(sample.song_index)
+    committed_count=sample.event_index if committed_count is None else committed_count
+    def build(choice, _inputs=None):
+        # Diagnostic reports currently collate one sample at a time.
+        if choice.numel()!=1:
+            raise ValueError('Causal decode context currently requires one diagnostic sample')
+        beat=candidate_beats[int(choice.item())]
+        extra={}
+        if dataset.action_state_policy=='selected_prefix_v3':
+            from .context_features import selected_action_state
+            extra['selected_action_state']=selected_action_state(
+                table['state_index'],committed_count,beat)[None].to(device)
+        if dataset.motif_memory_policy!='off':
+            from .context_features import motif_tensors
+            memory=motif_tensors(table['motif_index'],beat,committed_count,
+                dataset.history_events,dataset.motif_max_events)
+            memory['motif_ids']=_map_catalog_ids(memory['motif_ids'],id_map,'retrieved motif')
+            extra.update({key:value[None].to(device) for key,value in memory.items()})
+        return extra
+    return build
+
+
+def _map_catalog_ids(values, id_map, label):
+    """Map dataset atom IDs without silently turning unknown motifs into STOP."""
+    ids=values.detach().cpu().numpy().astype(np.int64,copy=False)
+    valid=(ids>=0)&(ids<len(id_map))
+    mapped=np.zeros(ids.shape,dtype=np.int64)
+    mapped[valid]=id_map[ids[valid]]
+    unknown=(ids!=0)&(~valid | (mapped==0))
+    if np.any(unknown):
+        raise ValueError(f'{label} contains atom IDs absent from the checkpoint catalog')
+    return torch.from_numpy(mapped)
+
+
+def _sample_candidate_beats(dataset, sample):
+    offsets,_,_=_select_candidate_offsets(sample.previous is None,sample.valid_candidates,
+        dataset.candidate_count,sample.previous,dataset.candidate_policy)
+    base=Fraction(0) if sample.previous is None else sample.previous
+    candidates=[base+offset for offset in offsets]
+    if len(candidates)<dataset.candidate_count:
+        candidates.extend([candidates[-1]]*(dataset.candidate_count-len(candidates)))
+    return candidates
+
+
+def _diagnostic_dataset(args, model):
+    return ComposerDataset(args.manifest,cache_dir=args.cache_dir,limit_charts=args.limit_charts,
+        candidate_count=model.config.candidate_count,history_events=model.config.history_events,
+        action_slots=model.config.action_slots,architecture_profile=model.config.architecture_profile,
+        action_state_policy=model.config.action_state_policy,
+        motif_memory_policy=model.config.motif_memory_policy,
+        motif_max_events=model.config.motif_max_events,
+        preparation_workers=1,audio_cache_gb=.25)
 
 
 @torch.inference_mode()
@@ -205,15 +285,13 @@ def diagnose(args):
     model,payload=load(args.checkpoint,device=device);model.eval()
     if model.config.architecture_profile not in WORKLOAD_PROFILES:
         raise ValueError('These interventions require a Composer workload checkpoint')
-    dataset=ComposerDataset(args.manifest,cache_dir=args.cache_dir,limit_charts=args.limit_charts,
-        candidate_count=model.config.candidate_count,history_events=model.config.history_events,
-        action_slots=model.config.action_slots,architecture_profile=model.config.architecture_profile,
-        preparation_workers=1,audio_cache_gb=.25)
+    dataset=_diagnostic_dataset(args,model)
     if dataset.action_slots != model.config.action_slots:
         raise ValueError('Diagnostic dataset exceeds checkpoint action_slots; finetune an expanded model first')
     catalog={text:i+1 for i,text in enumerate(payload['atom_catalog'])}
     id_map=np.asarray([0]+[catalog.get(text,0) for text in dataset.codec_atoms],dtype=np.int64)
-    report={'schema':'composer_interventions_v1','checkpoint':str(args.checkpoint),'samples':[],
+    report={'schema':'composer_interventions_v2_causal_configuration','checkpoint':str(args.checkpoint),'samples':[],
+        'model_config':model.config.to_dict(),
         'scope':'fixed-state sensitivity, one-event omission and bounded geometric reachability; not a musical quality certification',
         'workload_probe_scope':'candidate valid rows only; uniform whole-song rows fixed',
         'candidate_misses':dataset.candidate_miss_categories}
@@ -223,9 +301,13 @@ def diagnose(args):
         sample=dataset.samples[int(index)];item=dataset[int(index)]
         if (id_map[item['history'].numpy()]==0).sum() > (item['history'].numpy()==0).sum(): continue
         item['history']=torch.from_numpy(id_map[item['history'].numpy()])
+        if 'motif_ids' in item:
+            item['motif_ids']=_map_catalog_ids(item['motif_ids'],id_map,'sample motif')
         batch=collate_composer([item]);inputs=_inputs(batch,device)
         if not model.config.head_timing_dim:inputs.pop('head_timing',None)
-        result=interventions(model,inputs)
+        current_beats=_sample_candidate_beats(dataset,sample)
+        result=interventions(model,inputs,decode_context=_decode_context(
+            dataset,sample,current_beats,id_map,device))
         table=dataset._song_table(sample.song_index);song=dataset.base.songs[sample.song_index][0]
         previous=sample.previous or Fraction(0)
         recovery=[]
@@ -238,14 +320,25 @@ def diagnose(args):
                     policy=dataset.candidate_policy,clock=table['clock'])})
         omitted=_omit_last_prefix(dataset,sample,item,id_map)
         if omitted is not None:
-            changed,seconds=omitted
+            changed,seconds,omitted_beats=omitted
             changed_inputs=_inputs(collate_composer([changed]),device)
             if not model.config.head_timing_dim:changed_inputs.pop('head_timing',None)
             probe=model(**changed_inputs,decode_actions=False)
             probability=probe['candidate_logits'].float().softmax(-1)[0].cpu().numpy()
+            omitted_choice=probe['candidate_logits'].argmax(-1)
+            decode_extra=_decode_context(dataset,sample,omitted_beats,id_map,device,
+                committed_count=sample.event_index-1)(omitted_choice)
+            if 'selected_state_base' in probe:
+                decode_extra.update(state_base=probe['selected_state_base'],
+                    state_keep=probe.get('selected_state_keep'))
+            atom_logits=model.decode_candidate(probe['candidate_context'],omitted_choice,
+                **decode_extra)['action_logits'][...,0,:].float()
+            atom_probs=atom_logits.softmax(-1)
+            atom_entropy=-(atom_probs*atom_probs.clamp_min(1e-12).log()).sum(-1).mean()
             result['omit_last_committed_event']={'expected_next_second':float(probability@seconds),
                 'authored_next_second_reference_only':float(table['clock'].at(sample.target)),
-                'supervised_recovery_loss':None}
+                'supervised_recovery_loss':None,
+                'first_atom_entropy_nats':float(atom_entropy)}
         report['samples'].append({'song_index':sample.song_index,'event_index':sample.event_index,
                                   'interventions':result,'phase_reachability':recovery})
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
