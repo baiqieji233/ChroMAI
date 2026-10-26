@@ -48,6 +48,17 @@ coverage.xml
 /.scratch/
 /.native/
 /backups/
+# pip may fall back to the project root when its normal temp directory is unavailable.
+/pip-build-tracker-*/
+/pip-build-env-*/
+/pip-ephem-wheel-cache-*/
+/pip-install-*/
+/pip-unpack-*/
+/pip-metadata-*/
+/pip-modern-metadata-*/
+/tmp????????
+/tmp/
+/temp/
 *.log
 *.tmp
 *.temp
@@ -59,6 +70,8 @@ coverage.xml
 
 # Local credentials and machine-specific settings
 /.webui-python
+/.claude/
+/.workbuddy/
 .env
 .env.*
 !.env.example

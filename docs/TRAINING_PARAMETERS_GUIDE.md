@@ -364,6 +364,6 @@ grep "form_perturbation" logs/training.log
 4. 参数是否在推荐范围内
 
 参考文档：
-- `QUALITY_IMPROVEMENTS_2026-10-15.md` - 实施详情
-- `WORK_COMPLETION_SUMMARY.md` - 完成报告
+- [质量改进记录](archive/20261015/QUALITY_IMPROVEMENTS_2026-10-15.md) - 实施详情
+- [工作完成报告](archive/20261015/WORK_COMPLETION_SUMMARY.md) - 完成报告
 - `QUALITY_CONTROLS_WEBUI_HANDOFF_20261015.md` - 交接文档

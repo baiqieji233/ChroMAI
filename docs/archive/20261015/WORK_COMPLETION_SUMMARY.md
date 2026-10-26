@@ -138,8 +138,8 @@
 4. `src/maichart/webui/form_api.py` - WebUI参数暴露
 
 ### 文档文件（2个）
-1. `E:\simai_transformer\QUALITY_IMPROVEMENTS_2026-10-15.md` - 详细实施记录
-2. `E:\simai_transformer\WORK_COMPLETION_SUMMARY.md` - 本文件
+1. [质量改进实施记录](QUALITY_IMPROVEMENTS_2026-10-15.md) - 详细实施记录
+2. [工作完成报告](WORK_COMPLETION_SUMMARY.md) - 本文件
 
 ---
 

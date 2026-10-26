@@ -481,5 +481,6 @@ node tests/test_composer_intensity_ui.js
 - [连续等级与快捷偏好](docs/CONTINUOUS_LEVEL_AND_PREFERENCES.md)。
 - [10 月 24 日项目交接](docs/COMPOSER_PROJECT_HANDOFF_20261024_ZH.md)及[质量修复记录](docs/COMPOSER_QUALITY_AND_AUDIT_FIXES_20261024.md)：保留当时的实验与修复证据。
 - [旧 event 模型说明](docs/EVENT_GUIDE.md)、[旧模型曲线与休止说明](docs/CURVE_DENSITY_FEEDBACK.md)。阅读旧文档时先确认模型族，不能将旧参数直接套用到 Composer。
+- [2026-10-15 历史优化报告](docs/archive/20261015/README.md)：原先放在根目录的旧质量改进、完成报告和优化建议，现归档保留。
 
 无理检测使用项目内的 MiaCode Python 移植，感谢 [Team-MiaCode](https://github.com/Team-MiaCode/MiaCode)。该路径不要求用户另行编译 DLL。相关说明见 [MiaCode 检测](docs/MIACODE_NATIVE_PLAYABILITY.md)、[Python 移植说明](docs/MIACODE_PYTHON_PORT.md)与[第三方声明](THIRD_PARTY_NOTICES.md)；参考资源按其原许可范围使用，不随项目源码重新声明为 MIT。
