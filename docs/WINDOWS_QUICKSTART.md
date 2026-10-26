@@ -47,6 +47,14 @@ START_WEBUI.bat --check
 
 升级Python后，先检查`.venv\pyvenv.cfg`及`.\START_WEBUI.bat --check`的输出。若虚拟环境依赖已卸载的解释器，需要备份旧环境后重新创建并安装依赖。不要仅放宽启动脚本版本限制：还需确认torch、音频库等提供对应Python版本的安装包。例如PyTorch 2.7没有Python 3.15的Windows安装包，无法通过原样复制3.11的依赖恢复。
 
+### 本工作区2026-10-26恢复记录
+
+系统Python 3.11已卸载，系统默认版本为3.15。已另建项目专用Python 3.12.14环境，安装PyTorch 2.7.0+cu128，并保留旧环境的NumPy 2.1.2、SciPy 1.17.1、librosa 0.11.0等主要库版本。系统3.15没有改动。
+
+本机实测根目录环境中的Python写文件失败；更换启动器类型仍可复现，不能认定为标准venv启动器故障。相同Python与依赖在专用目录中写入正常，底层权限原因尚未确定。目前通过本机忽略文件`.webui-python`指定`E:\simai_transformer\.scratch\python312_runtime\Scripts\python.exe`。**该目录现在是正在使用的运行环境，不应按普通临时文件删除。** 后续定位环境时先读取`.webui-python`，不要假定它位于默认`.venv`。
+
+日常仍使用`.\START_WEBUI.bat --port 7860`。已验证脚本的CUDA检查、主页面、真实文件上传、保留检查点的检查入口，以及Composer回归544通过/1跳过；这不代表新一轮长程训练或音乐质量验收。原环境及尝试目录归档在`.scratch`，原检查点没有覆盖。
+
 复制时未包含训练集、checkpoint、缓存或运行中间文件。训练前在 WebUI 导入数据，生成前导入自己保存的兼容 checkpoint 和歌曲；小型示例 ZIP 仅用于验证流程。原项目仍在 E 盘，需要在同机使用其数据时，可在 WebUI 填写原数据目录。
 
 运行测试：
