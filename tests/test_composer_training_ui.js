@@ -74,7 +74,7 @@ test('Finetune checkpoint inspection preserves the chosen destination architectu
   const start=source.indexOf('function applyChartComposerCheckpointConfig(');
   const fn=source.slice(start,source.indexOf('\nfunction renderChartComposerCheckpointInspection',start));
   const elements={'#composerArchitectureProfile':{value:'audio_grounded_v3'},'#composerLensWidth':{value:'96'},
-    '#composerHistoryResidualBound':{value:'.8'}};
+    '#composerHistoryResidualBound':{value:'.8'},'#composerHistoryMemoryRmsBound':{value:'8'}};
   const c=vm.createContext({element:id=>elements[id]});
   vm.runInContext(fn,c);
   c.applyChartComposerCheckpointConfig({model_config:{architecture_profile:'music_context_v2',lens_width:64,history_residual_bound:1}},'finetune');
@@ -84,6 +84,8 @@ test('Finetune checkpoint inspection preserves the chosen destination architectu
   c.applyChartComposerCheckpointConfig({model_config:{architecture_profile:'music_context_v2',lens_width:64,history_residual_bound:1}},'resume');
   assert.equal(elements['#composerArchitectureProfile'].value,'music_context_v2');
   assert.equal(elements['#composerArchitectureProfile'].disabled,true);
+  assert.equal(elements['#composerHistoryMemoryRmsBound'].value,'8');
+  assert.equal(elements['#composerHistoryMemoryRmsBound'].disabled,true);
 });
 test('Composer workload diagnostics show losses and log1p density error as numbers',()=>{
   const view=context.composerTrainingView({result:{composer_stage:'training',composer_metrics:{
@@ -101,7 +103,8 @@ test('Composer runtime controls reach its training payload',()=>{
     '#gradAccumulation':'8','#composerOptimizerImplementation':'standard',
     '#composerSymbolicDropout':'.2','#composerAudioPointerWeight':'.25','#composerProfileSteps':'8',
     '#composerArchitectureProfile':'audio_grounded_v3','#composerLensWidth':'96','#composerLensChunkSize':'16',
-    '#composerHistoryResidualBound':'.8','#composerHistoryDropout':'.4','#composerLedgerDropout':'.6',
+    '#composerHistoryResidualBound':'.8','#composerHistoryMemoryRmsBound':'12','#composerHistoryMemoryPolicy':'rms_cap_v1',
+    '#composerHistoryAttentionPolicy':'math_v1','#composerHistoryDropout':'.4','#composerLedgerDropout':'.6',
     '#composerPlacementWeight':'.25','#composerPlannerWeight':'.3','#composerRecoveryInterval':'80',
     '#composerRecoverySamples':'3','#composerRecoverySteps':'4','#composerRecoveryWeight':'.2'};
   const c=vm.createContext({currentTrainingMode:()=> 'fresh',trainingSourcePaths:()=>({manifest:'data.json'}),
@@ -117,6 +120,8 @@ test('Composer runtime controls reach its training payload',()=>{
   assert.equal(payload.optimizer_implementation,'standard');assert.equal(payload.export_inference,false);
   assert.equal(payload.architecture_profile,'audio_grounded_v3');assert.equal(payload.lens_width,96);
   assert.equal(payload.lens_chunk_size,16);assert.equal(payload.history_residual_bound,.8);
+  assert.equal(payload.history_memory_rms_bound,12);assert.equal(payload.history_memory_policy,'rms_cap_v1');
+  assert.equal(payload.history_attention_policy,'math_v1');
   assert.equal(payload.history_dropout,.4);assert.equal(payload.ledger_dropout,.6);
   assert.equal(payload.placement_weight,.25);assert.equal(payload.planner_weight,.3);
   assert.equal(payload.recovery_interval,80);assert.equal(payload.recovery_samples,3);

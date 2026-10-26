@@ -7,6 +7,7 @@ from .model import ChartComposer
 from .audio_lens import AudioLens
 from .action_factors import CompositionalActions
 from .planning import AudioPlanner,read_plan
+from .stability import bounded_history_memory, history_attention_context
 
 GROUNDED_PROFILE='audio_grounded_v3'
 BIN_EDGES=(.5,1.,2.,4.,8.)
@@ -124,7 +125,10 @@ class AudioGroundedComposer(ChartComposer):
             attn_padding=safe_padding.clone()
             attn_padding[:,0]&=~all_masked
             memory=self.history_encoder(memory,src_key_padding_mask=attn_padding)
-            attended,_=self.history_attention(audio_context,memory,memory,key_padding_mask=attn_padding,need_weights=False)
+            if self.config.history_memory_policy=='rms_cap_v1':
+                memory=bounded_history_memory(memory,safe_padding,self.config.history_memory_rms_bound)
+            with history_attention_context(self.config.history_attention_policy,audio_context.device.type):
+                attended,_=self.history_attention(audio_context,memory,memory,key_padding_mask=attn_padding,need_weights=False)
             attended=attended*(~all_masked)[:,None,None]
             tail=memory[rows,(lengths-1).clamp_min(0)]*tail_valid[:,None]
             symbolic=symbolic+(tail[:,None]+self.history_gate.tanh()*attended)*lengths.gt(0)[:,None,None]

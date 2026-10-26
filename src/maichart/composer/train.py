@@ -232,6 +232,8 @@ def parser():
     p.add_argument('--lens-width',type=int,default=64)
     p.add_argument('--lens-chunk-size',type=int,default=32)
     p.add_argument('--history-residual-bound',type=float,default=1.)
+    p.add_argument('--history-memory-rms-bound',type=float,default=8.,
+                   help='per-event history-memory RMS ceiling for rms_cap_v1; existing models inherit their value')
     p.add_argument('--history-dropout',type=float,default=.3)
     p.add_argument('--ledger-dropout',type=float,default=.5)
     p.add_argument('--placement-weight',type=float,default=.15)
@@ -565,6 +567,13 @@ def _train(args,explicit_flags):
         args.motif_max_events=int(parent_anchor_config.get('motif_max_events',16))
     if args.resume and args.motif_max_events!=int(parent_anchor_config.get('motif_max_events',16)):
         raise ValueError('Resume inherits motif_max_events; use explicit finetune')
+    inherited_rms=float((parent_anchor_config or {}).get('history_memory_rms_bound',8.))
+    if parent_anchor_config and '--history-memory-rms-bound' not in explicit_flags:
+        args.history_memory_rms_bound=inherited_rms
+    if not math.isfinite(args.history_memory_rms_bound) or not 1<=args.history_memory_rms_bound<=64:
+        raise ValueError('history_memory_rms_bound must be in [1,64]')
+    if args.resume and args.history_memory_rms_bound!=inherited_rms:
+        raise ValueError('Resume inherits history_memory_rms_bound; use explicit finetune')
     if not 1<=args.motif_max_events<=32:raise ValueError('motif_max_events must be in [1,32]')
     inherited_touch=(old.get('args',{}).get('touch_layout_policy','legacy_two_heads') if old else 'open')
     if args.touch_layout_policy=='auto':args.touch_layout_policy=inherited_touch
@@ -594,8 +603,10 @@ def _train(args,explicit_flags):
             model=(migrate_audio_grounded(model,dataset.codec_atoms,action_slots=args.action_slots,lens_width=args.lens_width,
                 lens_chunk_size=args.lens_chunk_size,history_residual_bound=args.history_residual_bound,
                 history_dropout=args.history_dropout,ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
+                history_memory_rms_bound=args.history_memory_rms_bound,
                 motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS})
                 if args.architecture_profile==GROUNDED_PROFILE else migrate_music_context(model,action_slots=args.action_slots,history_anchor_policy=args.history_anchor_policy,
+                    history_memory_rms_bound=args.history_memory_rms_bound,
                     motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}))
             model.config.symbolic_dropout=args.symbolic_dropout
         if list(old.get('atom_catalog') or []) != list(dataset.codec_atoms):
@@ -613,11 +624,12 @@ def _train(args,explicit_flags):
             head_timing_dim=HEAD_TIMING_DIM,lens_width=args.lens_width,lens_chunk_size=args.lens_chunk_size,
             history_residual_bound=args.history_residual_bound,history_dropout=args.history_dropout,
             ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
+            history_memory_rms_bound=args.history_memory_rms_bound,
             motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}),dataset.codec_atoms)
     model.to(device).train()
     cuda_cache_guard=CudaCacheGuard(device,0.)
     if model.config.architecture_profile==GROUNDED_PROFILE:
-        for key in ('lens_width','lens_chunk_size','history_residual_bound','history_dropout','ledger_dropout'):
+        for key in ('lens_width','lens_chunk_size','history_residual_bound','history_dropout','ledger_dropout','history_memory_rms_bound'):
             if getattr(model.config,key)!=getattr(args,key):
                 raise ValueError(f'Effective model {key} differs from requested value; use explicit finetune')
     loader_generator=torch.Generator().manual_seed(args.seed)
@@ -697,6 +709,9 @@ def _train(args,explicit_flags):
         'history_anchor_policy':model.config.history_anchor_policy,
         'action_state_policy':model.config.action_state_policy,'motif_memory_policy':model.config.motif_memory_policy,
         'slide_factor_policy':model.config.slide_factor_policy,'motif_max_events':model.config.motif_max_events,
+        'history_memory_policy':model.config.history_memory_policy,
+        'history_attention_policy':model.config.history_attention_policy,
+        'history_memory_rms_bound':model.config.history_memory_rms_bound,
         'touch_layout_policy':args.touch_layout_policy,
         'dropout':model.config.dropout,
         **{key:getattr(args,key) for key in ('lens_width','lens_chunk_size','history_residual_bound',

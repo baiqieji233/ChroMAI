@@ -20,7 +20,7 @@ function harness(){
     checkedOrDefault:(id)=>el(id).checked,formDevice:()=> 'cpu',
     api:async(path,payload)=>{
       if(path==='/api/composer/inspect')return structuredClone(parent);
-      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v5_selected_state'}};
+      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v6_history_stability'}};
       if(path==='/api/composer/train'){submitted=payload;return {task_id:'fake'};}
       throw Error(path);
     }});
@@ -103,6 +103,24 @@ test('Causal and motif policies inherit and lock on resume, preserve explicit fi
   assert.equal(payload.touch_layout_policy,'open');assert.equal(payload.motif_max_events,24);
 });
 
+test('History policies inherit on resume and RMS parent default is loaded only on first finetune inspection',()=>{
+  const {c,el}=harness();
+  const parent={model_config:{history_memory_rms_bound:12,history_memory_policy:'unbounded_v1',history_attention_policy:'auto_v1'}};
+  c.applyChartComposerCheckpointConfig(parent,'finetune');
+  assert.equal(el('#composerHistoryMemoryRmsBound').value,'12');
+  el('#composerHistoryMemoryRmsBound').value='10';
+  c.applyChartComposerCheckpointConfig(parent,'finetune',true);
+  assert.equal(el('#composerHistoryMemoryRmsBound').value,'10');
+  const legacy={model_config:{}};
+  c.applyChartComposerCheckpointConfig(legacy,'resume');
+  assert.equal(el('#composerHistoryMemoryPolicy').value,'unbounded_v1');
+  assert.equal(el('#composerHistoryMemoryPolicy').disabled,true);
+  assert.equal(el('#composerHistoryAttentionPolicy').value,'auto_v1');
+  assert.equal(el('#composerHistoryAttentionPolicy').disabled,true);
+  assert.equal(el('#composerHistoryMemoryRmsBound').value,'8');
+  assert.equal(el('#composerHistoryMemoryRmsBound').disabled,true);
+});
+
 test('Policy UI has complete geometry choice and fresh auto reset without generation-reset coupling',()=>{
   const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
   assert.ok(html.includes('value="parsed_geometry_v3"'));
@@ -111,4 +129,10 @@ test('Policy UI has complete geometry choice and fresh auto reset without genera
     const gen=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('const CONFLICT_KIND_FIELDS ='));
     assert.ok(!gen.includes(`"${id}"`));
   }
+  for(const id of ['composerHistoryMemoryPolicy','composerHistoryAttentionPolicy']) {
+    assert.ok(html.includes(`id="${id}"`));assert.ok(source.includes(`${id}:'auto'`));
+    const gen=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('const CONFLICT_KIND_FIELDS ='));
+    assert.ok(!gen.includes(`"${id}"`));
+  }
+  assert.match(html,/id="composerHistoryMemoryRmsBound"[^>]+min="1"[^>]+max="64"/);
 });

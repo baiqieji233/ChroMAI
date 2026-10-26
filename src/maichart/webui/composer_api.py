@@ -203,6 +203,21 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
             value = inherited
         grounded_settings[key] = value
         _arg(args, '--' + key.replace('_', '-'), value)
+    inherited_history_rms = (
+        parent_config.get('history_memory_rms_bound', parent_args.get('history_memory_rms_bound', 8.))
+        if mode != 'fresh' else None
+    )
+    history_memory_rms_bound = _float(
+        payload, 'history_memory_rms_bound',
+        float(inherited_history_rms if inherited_history_rms is not None else 8.), minimum=1.)
+    if history_memory_rms_bound > 64.:
+        raise ValueError('history_memory_rms_bound cannot exceed 64')
+    if mode == 'resume':
+        if 'history_memory_rms_bound' in payload and history_memory_rms_bound != float(inherited_history_rms):
+            raise ValueError(f'resume inherits history_memory_rms_bound={inherited_history_rms}; use finetune to change it')
+        history_memory_rms_bound = float(inherited_history_rms)
+    grounded_settings['history_memory_rms_bound'] = history_memory_rms_bound
+    _arg(args, '--history-memory-rms-bound', history_memory_rms_bound)
     for key, flag, default, minimum in (
         ("epochs", "--epochs", 10, 1), ("batch_size", "--batch-size", 4, 1),
         ("grad_accumulation", "--grad-accumulation", 1, 1),

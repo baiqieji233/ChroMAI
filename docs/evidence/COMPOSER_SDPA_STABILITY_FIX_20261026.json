@@ -1,0 +1,1147 @@
+{
+  "date": "2026-10-26",
+  "source_baseline": "73636345f9094eec8f19d30855a160c27d43b311",
+  "scope": "Independent review verification; versioned history guards; no long training restart",
+  "minimal_saturated_attention": {
+    "torch": "2.7.0+cu128",
+    "gpu": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "cases": [
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.0,
+        "backend": "SDPBackend.EFFICIENT_ATTENTION",
+        "out_values": [
+          2.0
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 110.85124969482422,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.0,
+        "backend": "SDPBackend.MATH",
+        "out_values": [
+          2.0
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 110.85124969482422,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.0,
+        "backend": "SDPBackend.FLASH_ATTENTION",
+        "error": "No available kernel. Aborting execution."
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.0,
+        "backend": "SDPBackend.CUDNN_ATTENTION",
+        "out_values": [
+          2.0
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 110.85124969482422,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.1,
+        "backend": "SDPBackend.EFFICIENT_ATTENTION",
+        "out_values": [
+          2.21875
+        ],
+        "dq_norm": 3.078125,
+        "dk_norm": 12.3125,
+        "dv_norm": 122.9756088256836,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.1,
+        "backend": "SDPBackend.MATH",
+        "out_values": [
+          0.0,
+          2.21875
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 107.82015991210938,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.1,
+        "backend": "SDPBackend.FLASH_ATTENTION",
+        "error": "No available kernel. Aborting execution."
+      },
+      {
+        "dtype": "torch.bfloat16",
+        "dropout": 0.1,
+        "backend": "SDPBackend.CUDNN_ATTENTION",
+        "out_values": [
+          0.0,
+          2.21875
+        ],
+        "dq_norm": 2.6657345294952393,
+        "dk_norm": 9.25,
+        "dv_norm": 92.23170471191406,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.0,
+        "backend": "SDPBackend.EFFICIENT_ATTENTION",
+        "out_values": [
+          2.0
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 110.85124969482422,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.0,
+        "backend": "SDPBackend.MATH",
+        "out_values": [
+          2.0
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 110.85124969482422,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.0,
+        "backend": "SDPBackend.FLASH_ATTENTION",
+        "error": "No available kernel. Aborting execution."
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.0,
+        "backend": "SDPBackend.CUDNN_ATTENTION",
+        "error": "No available kernel. Aborting execution."
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.1,
+        "backend": "SDPBackend.EFFICIENT_ATTENTION",
+        "out_values": [
+          2.222222328186035
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 123.16806030273438,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.1,
+        "backend": "SDPBackend.MATH",
+        "out_values": [
+          0.0,
+          2.222222328186035
+        ],
+        "dq_norm": 0.0,
+        "dk_norm": 0.0,
+        "dv_norm": 107.77204132080078,
+        "warnings": []
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.1,
+        "backend": "SDPBackend.FLASH_ATTENTION",
+        "error": "No available kernel. Aborting execution."
+      },
+      {
+        "dtype": "torch.float32",
+        "dropout": 0.1,
+        "backend": "SDPBackend.CUDNN_ATTENTION",
+        "error": "No available kernel. Aborting execution."
+      }
+    ]
+  },
+  "minimal_single_valid_key": [
+    {
+      "backend": "SDPBackend.EFFICIENT_ATTENTION",
+      "dq_norm": 0.7094227075576782,
+      "dk_norm": 0.6558957099914551,
+      "out_values": [
+        2.21875
+      ]
+    },
+    {
+      "backend": "SDPBackend.MATH",
+      "dq_norm": 0.0,
+      "dk_norm": 0.0,
+      "out_values": [
+        0.0,
+        2.21875
+      ]
+    }
+  ],
+  "real_gradients": {
+    "scope": "fixed checkpoint; encoder and grouped dropout off, history-attention dropout remains 0.1; backend RNG masks need not coincide",
+    "variants": {
+      "legacy": [
+        {
+          "batch": 0,
+          "loss": 3.2562496662139893,
+          "total_norm": 28.327497914217147,
+          "audio_norm": 17.612159759289,
+          "history_norm": 9.35917732144644
+        },
+        {
+          "batch": 1,
+          "loss": 4.292026996612549,
+          "total_norm": 13.144170380514248,
+          "audio_norm": 4.700628790491861,
+          "history_norm": 9.660555475348463
+        },
+        {
+          "batch": 2,
+          "loss": 3.8184218406677246,
+          "total_norm": 110.85201665463748,
+          "audio_norm": 87.29445724457538,
+          "history_norm": 8.180336184133829
+        },
+        {
+          "batch": 3,
+          "loss": 3.912855625152588,
+          "total_norm": 50.84649099285786,
+          "audio_norm": 34.70518798742037,
+          "history_norm": 5.644124559581174
+        },
+        {
+          "batch": 4,
+          "loss": 3.4506874084472656,
+          "total_norm": 20.056480393504646,
+          "audio_norm": 8.869641042712072,
+          "history_norm": 13.083641939512377
+        },
+        {
+          "batch": 5,
+          "loss": 4.473935604095459,
+          "total_norm": 49.13214269381858,
+          "audio_norm": 30.155632684743782,
+          "history_norm": 15.872109938548409
+        },
+        {
+          "batch": 6,
+          "loss": 4.583854675292969,
+          "total_norm": 40.69088666509743,
+          "audio_norm": 26.690252300626415,
+          "history_norm": 6.57694681449035
+        },
+        {
+          "batch": 7,
+          "loss": 4.2706098556518555,
+          "total_norm": 187.66670078166317,
+          "audio_norm": 123.31500646844447,
+          "history_norm": 19.036154630215336
+        },
+        {
+          "batch": 8,
+          "loss": 3.890700578689575,
+          "total_norm": 35.26050036349554,
+          "audio_norm": 9.767240491377606,
+          "history_norm": 31.204780760087967
+        },
+        {
+          "batch": 9,
+          "loss": 4.944577217102051,
+          "total_norm": 53.93304622606043,
+          "audio_norm": 29.930581713018668,
+          "history_norm": 20.057488787116707
+        },
+        {
+          "batch": 10,
+          "loss": 4.462328910827637,
+          "total_norm": 175.15408008326466,
+          "audio_norm": 117.95566980464525,
+          "history_norm": 32.968825903348645
+        },
+        {
+          "batch": 11,
+          "loss": 4.442094326019287,
+          "total_norm": 21.878169427591544,
+          "audio_norm": 14.89501785856049,
+          "history_norm": 3.5538079483615728
+        }
+      ],
+      "math_cross_only": [
+        {
+          "batch": 0,
+          "loss": 3.2291505336761475,
+          "total_norm": 8.190993904785183,
+          "audio_norm": 1.3913856312050286,
+          "history_norm": 5.504903861305554
+        },
+        {
+          "batch": 1,
+          "loss": 4.28591775894165,
+          "total_norm": 5.747280303457177,
+          "audio_norm": 1.162310260752292,
+          "history_norm": 1.736636225652633
+        },
+        {
+          "batch": 2,
+          "loss": 3.8354008197784424,
+          "total_norm": 7.75400903931536,
+          "audio_norm": 1.2873827538297997,
+          "history_norm": 2.046445845248337
+        },
+        {
+          "batch": 3,
+          "loss": 3.91644287109375,
+          "total_norm": 8.424554993097372,
+          "audio_norm": 1.7451732692662218,
+          "history_norm": 2.368365004361506
+        },
+        {
+          "batch": 4,
+          "loss": 3.4627842903137207,
+          "total_norm": 6.997569281679508,
+          "audio_norm": 2.8256983172433716,
+          "history_norm": 2.987331024881856
+        },
+        {
+          "batch": 5,
+          "loss": 4.444794178009033,
+          "total_norm": 8.727987816382857,
+          "audio_norm": 1.3180392858673298,
+          "history_norm": 2.962498557818742
+        },
+        {
+          "batch": 6,
+          "loss": 4.579709529876709,
+          "total_norm": 8.470901620123284,
+          "audio_norm": 3.5874950874108893,
+          "history_norm": 2.5813990293620828
+        },
+        {
+          "batch": 7,
+          "loss": 4.275067329406738,
+          "total_norm": 11.44827915081512,
+          "audio_norm": 2.00286993107776,
+          "history_norm": 3.1273392123842925
+        },
+        {
+          "batch": 8,
+          "loss": 3.9059181213378906,
+          "total_norm": 8.239223002901243,
+          "audio_norm": 3.5361111020546594,
+          "history_norm": 3.589087339123478
+        },
+        {
+          "batch": 9,
+          "loss": 4.92667293548584,
+          "total_norm": 14.271142284854259,
+          "audio_norm": 2.1187755076805614,
+          "history_norm": 2.513960388272112
+        },
+        {
+          "batch": 10,
+          "loss": 4.466842174530029,
+          "total_norm": 14.814200771766005,
+          "audio_norm": 2.025518223891699,
+          "history_norm": 6.956079571085108
+        },
+        {
+          "batch": 11,
+          "loss": 4.446887016296387,
+          "total_norm": 9.030796918157593,
+          "audio_norm": 1.785891325212699,
+          "history_norm": 1.8998493235221057
+        }
+      ],
+      "bound_only": [
+        {
+          "batch": 0,
+          "loss": 3.2324156761169434,
+          "total_norm": 13.201856241552116,
+          "audio_norm": 3.25651352414615,
+          "history_norm": 11.20366264127896
+        },
+        {
+          "batch": 1,
+          "loss": 4.313356399536133,
+          "total_norm": 6.535021617129427,
+          "audio_norm": 2.151060188958793,
+          "history_norm": 1.7344070294146243
+        },
+        {
+          "batch": 2,
+          "loss": 3.8222408294677734,
+          "total_norm": 8.113143271169188,
+          "audio_norm": 2.4747963754139377,
+          "history_norm": 2.951497431735046
+        },
+        {
+          "batch": 3,
+          "loss": 3.9098639488220215,
+          "total_norm": 8.104612359826948,
+          "audio_norm": 2.4947237604146855,
+          "history_norm": 2.715991670812046
+        },
+        {
+          "batch": 4,
+          "loss": 3.4859299659729004,
+          "total_norm": 7.11446308587844,
+          "audio_norm": 1.3966620058848351,
+          "history_norm": 5.097374498319998
+        },
+        {
+          "batch": 5,
+          "loss": 4.482188701629639,
+          "total_norm": 9.895976733798824,
+          "audio_norm": 1.9726686987153614,
+          "history_norm": 6.216609107084279
+        },
+        {
+          "batch": 6,
+          "loss": 4.573075771331787,
+          "total_norm": 7.446936223046706,
+          "audio_norm": 2.259889696518325,
+          "history_norm": 3.5824083568620346
+        },
+        {
+          "batch": 7,
+          "loss": 4.261802673339844,
+          "total_norm": 11.28174323729346,
+          "audio_norm": 2.6895798907466006,
+          "history_norm": 4.6223411134158425
+        },
+        {
+          "batch": 8,
+          "loss": 3.8954803943634033,
+          "total_norm": 6.379252275951764,
+          "audio_norm": 1.7282956085698438,
+          "history_norm": 3.2310422967086203
+        },
+        {
+          "batch": 9,
+          "loss": 4.90892219543457,
+          "total_norm": 14.282699771464443,
+          "audio_norm": 2.4848377108780877,
+          "history_norm": 4.174967673170833
+        },
+        {
+          "batch": 10,
+          "loss": 4.421261787414551,
+          "total_norm": 12.313059622113883,
+          "audio_norm": 2.2628873925471584,
+          "history_norm": 7.271977229889492
+        },
+        {
+          "batch": 11,
+          "loss": 4.409276008605957,
+          "total_norm": 10.327503399648961,
+          "audio_norm": 2.267436073184376,
+          "history_norm": 5.877205617291258
+        }
+      ],
+      "protected": [
+        {
+          "batch": 0,
+          "loss": 3.220878839492798,
+          "total_norm": 11.993501936163831,
+          "audio_norm": 1.1494804369641873,
+          "history_norm": 10.60776657024874
+        },
+        {
+          "batch": 1,
+          "loss": 4.31428861618042,
+          "total_norm": 6.090547159990877,
+          "audio_norm": 1.3520965403111158,
+          "history_norm": 1.776731280761631
+        },
+        {
+          "batch": 2,
+          "loss": 3.831681251525879,
+          "total_norm": 7.249554501187508,
+          "audio_norm": 1.1569555037571455,
+          "history_norm": 2.4082449037713185
+        },
+        {
+          "batch": 3,
+          "loss": 3.9137067794799805,
+          "total_norm": 7.3604932626011434,
+          "audio_norm": 1.5103117632336263,
+          "history_norm": 2.1868179347858665
+        },
+        {
+          "batch": 4,
+          "loss": 3.4848742485046387,
+          "total_norm": 6.964179174569565,
+          "audio_norm": 1.2079335515996985,
+          "history_norm": 5.0001888239492
+        },
+        {
+          "batch": 5,
+          "loss": 4.4831037521362305,
+          "total_norm": 8.075344756545206,
+          "audio_norm": 1.2602849318754585,
+          "history_norm": 3.654387953585062
+        },
+        {
+          "batch": 6,
+          "loss": 4.583340644836426,
+          "total_norm": 6.794804825156777,
+          "audio_norm": 1.2757454768419676,
+          "history_norm": 3.1150978369372937
+        },
+        {
+          "batch": 7,
+          "loss": 4.260704517364502,
+          "total_norm": 10.633328327416175,
+          "audio_norm": 2.1150805134700414,
+          "history_norm": 3.5340552876006157
+        },
+        {
+          "batch": 8,
+          "loss": 3.9051051139831543,
+          "total_norm": 5.8827637577314675,
+          "audio_norm": 1.133205056410744,
+          "history_norm": 2.9891550818471293
+        },
+        {
+          "batch": 9,
+          "loss": 4.904815673828125,
+          "total_norm": 14.082467891595375,
+          "audio_norm": 2.05232247703514,
+          "history_norm": 3.4845427742154227
+        },
+        {
+          "batch": 10,
+          "loss": 4.407938003540039,
+          "total_norm": 12.301416993457542,
+          "audio_norm": 1.8844521375465106,
+          "history_norm": 7.4812555681174455
+        },
+        {
+          "batch": 11,
+          "loss": 4.399129390716553,
+          "total_norm": 8.627794247703005,
+          "audio_norm": 1.5732963642663904,
+          "history_norm": 3.07692652573759
+        }
+      ],
+      "global_math": [
+        {
+          "batch": 0,
+          "loss": 3.230628490447998,
+          "total_norm": 6.644465083430085,
+          "audio_norm": 1.5095720055948585,
+          "history_norm": 3.0169606783855034
+        },
+        {
+          "batch": 1,
+          "loss": 4.288041591644287,
+          "total_norm": 5.753343478030536,
+          "audio_norm": 1.1645060980519628,
+          "history_norm": 1.70821076240289
+        },
+        {
+          "batch": 2,
+          "loss": 3.83708119392395,
+          "total_norm": 7.721857872336862,
+          "audio_norm": 1.230422052375296,
+          "history_norm": 2.0521596000428066
+        },
+        {
+          "batch": 3,
+          "loss": 3.91668438911438,
+          "total_norm": 8.230904009516493,
+          "audio_norm": 1.5931859981910943,
+          "history_norm": 2.1527853511007127
+        },
+        {
+          "batch": 4,
+          "loss": 3.4613475799560547,
+          "total_norm": 6.587759996078642,
+          "audio_norm": 2.6865536110173953,
+          "history_norm": 2.376313799824854
+        },
+        {
+          "batch": 5,
+          "loss": 4.447607040405273,
+          "total_norm": 8.921900251621304,
+          "audio_norm": 1.3147180072136462,
+          "history_norm": 3.4731401035597567
+        },
+        {
+          "batch": 6,
+          "loss": 4.581374645233154,
+          "total_norm": 6.76785737211659,
+          "audio_norm": 1.3861197883947625,
+          "history_norm": 2.640598816149307
+        },
+        {
+          "batch": 7,
+          "loss": 4.278230667114258,
+          "total_norm": 11.344131025090379,
+          "audio_norm": 1.9908994213049949,
+          "history_norm": 2.7690492971983978
+        },
+        {
+          "batch": 8,
+          "loss": 3.903522491455078,
+          "total_norm": 8.863729591718931,
+          "audio_norm": 4.215146935052446,
+          "history_norm": 3.568905075097766
+        },
+        {
+          "batch": 9,
+          "loss": 4.923518657684326,
+          "total_norm": 14.319660187489221,
+          "audio_norm": 2.1194202994452715,
+          "history_norm": 2.653892278536229
+        },
+        {
+          "batch": 10,
+          "loss": 4.465155601501465,
+          "total_norm": 15.046427553307792,
+          "audio_norm": 2.02223352381351,
+          "history_norm": 7.3885750699943085
+        },
+        {
+          "batch": 11,
+          "loss": 4.447495937347412,
+          "total_norm": 9.000275387181022,
+          "audio_norm": 1.7616257061462568,
+          "history_norm": 1.7641197472364856
+        }
+      ]
+    },
+    "timing_ms": {
+      "legacy": [
+        75.4834213256836,
+        72.10499572753906,
+        76.28678131103516,
+        75.28015899658203,
+        72.53177642822266,
+        74.42086029052734,
+        70.33897399902344,
+        75.51942443847656,
+        71.40509033203125,
+        75.45065307617188
+      ],
+      "math_cross_only": [
+        73.33487701416016,
+        69.2227554321289,
+        72.2681884765625,
+        72.05404663085938,
+        73.78463745117188,
+        79.00521850585938,
+        72.12985229492188,
+        73.49993896484375,
+        74.61257934570312,
+        68.61593627929688
+      ],
+      "protected": [
+        75.07539367675781,
+        76.11539459228516,
+        76.19184112548828,
+        74.17977905273438,
+        72.84121704101562,
+        76.54454040527344,
+        73.46640014648438,
+        75.61622619628906,
+        74.61325073242188,
+        75.80828857421875
+      ]
+    }
+  },
+  "real_gradient_summary": {
+    "legacy": {
+      "audio_norm_max": 123.31500646844447,
+      "history_norm_max": 32.968825903348645,
+      "total_norm_max": 187.66670078166317
+    },
+    "math_cross_only": {
+      "audio_norm_max": 3.5874950874108893,
+      "history_norm_max": 6.956079571085108,
+      "total_norm_max": 14.814200771766005
+    },
+    "bound_only": {
+      "audio_norm_max": 3.25651352414615,
+      "history_norm_max": 11.20366264127896,
+      "total_norm_max": 14.282699771464443
+    },
+    "protected": {
+      "audio_norm_max": 2.1150805134700414,
+      "history_norm_max": 10.60776657024874,
+      "total_norm_max": 14.082467891595375
+    },
+    "global_math": {
+      "audio_norm_max": 4.215146935052446,
+      "history_norm_max": 7.3885750699943085,
+      "total_norm_max": 15.046427553307792
+    }
+  },
+  "resident_batch_forward_backward_median_ms": {
+    "legacy": 74.85050964355469,
+    "math_cross_only": 72.80153274536133,
+    "protected": 75.34580993652344
+  },
+  "legacy_full_model_equivalence": {
+    "checkpoint": "E:\\simai_transformer\\checkpoints\\Prism_composer_v12_preserved_20261026_step15500\\composer_last.pt",
+    "policies": {
+      "memory": "unbounded_v1",
+      "attention": "auto_v1"
+    },
+    "output_max_differences": {
+      "candidate_logits": 0.0,
+      "candidate_context": 0.0,
+      "audio_action_context": 0.0,
+      "audio_candidate_logits": 0.0,
+      "candidate_bins": 0.0,
+      "bin_logits": 0.0,
+      "placement_logits": 0.0,
+      "plan": 0.0,
+      "workload": 0.0,
+      "pointer_residual_rms": 0.0,
+      "plan_context_rms": 0.0,
+      "trailing_workload": 0.0,
+      "future": 0.0,
+      "eos_logits": 0.0,
+      "action_context": 0.0,
+      "action_logits": 0.0,
+      "audio_action_logits": 0.0
+    },
+    "gradient_max_difference": 0.0,
+    "gradient_tensors": 259,
+    "losses": [
+      3.2808470726013184,
+      3.2808470726013184
+    ]
+  },
+  "browser_training": {
+    "base_url": "http://127.0.0.1:7871/",
+    "actual_training_started": true,
+    "fresh_task": "9e9d5bb7ecb2",
+    "fresh_effective": {
+      "architecture_profile": "audio_grounded_v3",
+      "dropout": 0.1,
+      "history_anchor_policy": "parsed_geometry_v3",
+      "cpu_threads": 2,
+      "action_state_policy": "committed_causal_v2",
+      "motif_memory_policy": "off",
+      "slide_factor_policy": "branch_joint_v2",
+      "history_memory_policy": "rms_cap_v1",
+      "history_attention_policy": "math_v1",
+      "motif_max_events": 16,
+      "touch_layout_policy": "open",
+      "lens_width": 64,
+      "lens_chunk_size": 32,
+      "recovery_interval": 100,
+      "recovery_samples": 2,
+      "recovery_steps": 2,
+      "history_residual_bound": 1,
+      "history_dropout": 0.3,
+      "ledger_dropout": 0.5,
+      "placement_weight": 0.15,
+      "planner_weight": 0.2,
+      "recovery_weight": 0.1,
+      "history_memory_rms_bound": 8
+    },
+    "legacy_resume_inheritance": true,
+    "finetune_edit_preserved": true,
+    "finetune_task": "d2fa252072bd",
+    "submissions": [
+      {
+        "model_family": "chart_composer_v1",
+        "mode": "finetune",
+        "architecture_profile": "audio_grounded_v3",
+        "history_anchor_policy": "auto",
+        "history_memory_policy": "rms_cap_v1",
+        "history_attention_policy": "math_v1",
+        "action_state_policy": "committed_causal_v2",
+        "motif_memory_policy": "audio_recurrence_archive_v1",
+        "slide_factor_policy": "branch_joint_v2",
+        "motif_max_events": 16,
+        "touch_layout_policy": "open",
+        "manifest": "E:/全量官谱/training_manifest.json",
+        "manifests": [],
+        "dataset_paths": [],
+        "checkpoint_dir": "E:/simai_transformer/.scratch/composer_stability_fix_20261026/finetune_ui",
+        "init_checkpoint": "E:/simai_transformer/checkpoints/Prism_composer_v12_preserved_20261026_step15500/composer_last.pt",
+        "epochs": 1,
+        "batch_size": 64,
+        "lr": 2e-05,
+        "grad_accumulation": 4,
+        "rebatch_resume": false,
+        "dropout": 0.1,
+        "prefetch_batches": 2,
+        "sample_workers": 1,
+        "cpu_threads": 2,
+        "sample_locality": 4,
+        "symbolic_dropout": 0.15,
+        "audio_pointer_weight": 0.15,
+        "lens_width": 64,
+        "lens_chunk_size": 32,
+        "history_residual_bound": 1,
+        "history_memory_rms_bound": 8,
+        "history_dropout": 0.3,
+        "ledger_dropout": 0.5,
+        "placement_weight": 0.15,
+        "planner_weight": 0.2,
+        "recovery_interval": 100,
+        "recovery_samples": 2,
+        "recovery_steps": 2,
+        "recovery_weight": 0.1,
+        "profile_steps": 0,
+        "log_interval": 64,
+        "max_steps": 512,
+        "optimizer_implementation": "auto",
+        "export_inference": true,
+        "d_model": 384,
+        "dim_feedforward": 1536,
+        "layers": 6,
+        "nhead": 8,
+        "history_events": 128,
+        "candidate_count": 96,
+        "action_slots": 33,
+        "device": "cuda",
+        "precision": "bf16",
+        "seed": 0,
+        "limit_charts": 0,
+        "prepare_workers": 1,
+        "audio_cache_gb": 2,
+        "checkpoint_interval_steps": 64,
+        "cache_dir": "cache/chart_composer_v1",
+        "auto_preprocess": false
+      }
+    ],
+    "errors": [],
+    "status": "passed"
+  },
+  "browser_final": {
+    "status": "passed",
+    "checkpoint_policy_roundtrip": true,
+    "resume_locked": true,
+    "local_storage_restored": true,
+    "checkpoint_details": "状态：chart_composer_v1 checkpoint 可用\n模型族：chart_composer_v1（事件候选与动作槽位）\nschema：maichart-chart-composer-checkpoint-v2\n架构：audio_grounded_v3\n历史几何：parsed_geometry_v3；持续状态：committed_causal_v2\n历史记忆幅度策略：rms_cap_v1；历史记忆RMS上限：8\n历史跨注意力后端：math_v1\n动机记忆：audio_recurrence_archive_v1；事件上限：16；Slide因子：branch_joint_v2\n恢复Touch布局：open\n保存 epoch：1\n优化器更新：128\n模型结构：d_model=384；layers=6；nhead=8；历史=128；候选=96；动作槽位=33\n训练语义：chart_composer_training_v11_history_relation_mask",
+    "actual_training_started": false,
+    "page_errors": []
+  },
+  "trial_validation": {
+    "parent_legacy": {
+      "heldout": {
+        "main_action": 2.25718619091676,
+        "main_slot0_ce": 3.000179611810363,
+        "main_slot0_acc": 0.2896039603960396,
+        "main_entropy": 2.855486501561533,
+        "audio_action": 3.026872200540977,
+        "audio_slot0_ce": 3.9344685620600632,
+        "audio_slot0_acc": 0.09900990099009901,
+        "audio_entropy": 3.8465510831020846,
+        "pointer": 1.0379641882263788,
+        "audio_pointer": 1.1615365000054387,
+        "eos_abs_logit": 6.735556165377299
+      },
+      "motif": {
+        "main_action": 2.460457695855035,
+        "main_slot0_ce": 3.27329953511556,
+        "main_slot0_acc": 0.2222222222222222,
+        "main_entropy": 4.531618754069011,
+        "audio_action": 2.951670116848416,
+        "audio_slot0_ce": 3.856533474392361,
+        "audio_slot0_acc": 0.1111111111111111,
+        "audio_entropy": 3.8611729939778647,
+        "pointer": 0.4140265252855089,
+        "audio_pointer": 0.4945916069878472,
+        "eos_abs_logit": 7.578990936279297
+      },
+      "config": {
+        "atom_vocab_size": 18454,
+        "d_model": 384,
+        "nhead": 8,
+        "layers": 6,
+        "dim_feedforward": 1536,
+        "dropout": 0.1,
+        "audio_dim": 120,
+        "condition_dim": 16,
+        "action_dim": 50,
+        "history_events": 128,
+        "candidate_count": 96,
+        "action_slots": 33,
+        "candidate_feature_dim": 141,
+        "history_feature_dim": 8,
+        "future_dim": 8,
+        "architecture_profile": "audio_grounded_v3",
+        "symbolic_dropout": 0.15,
+        "head_timing_dim": 99,
+        "lens_width": 64,
+        "lens_chunk_size": 32,
+        "history_residual_bound": 1.0,
+        "history_dropout": 0.3,
+        "ledger_dropout": 0.5,
+        "history_anchor_policy": "parsed_geometry_v3",
+        "action_state_policy": "committed_causal_v2",
+        "motif_memory_policy": "audio_recurrence_archive_v1",
+        "motif_max_events": 16,
+        "slide_factor_policy": "branch_joint_v2",
+        "history_memory_policy": "unbounded_v1",
+        "history_memory_rms_bound": 8.0,
+        "history_attention_policy": "auto_v1"
+      }
+    },
+    "parent_migrated": {
+      "heldout": {
+        "main_action": 2.256049958786162,
+        "main_slot0_ce": 3.000930918325292,
+        "main_slot0_acc": 0.29455445544554454,
+        "main_entropy": 2.8617819984360495,
+        "audio_action": 3.026872200540977,
+        "audio_slot0_ce": 3.9344685620600632,
+        "audio_slot0_acc": 0.09900990099009901,
+        "audio_entropy": 3.8465510831020846,
+        "pointer": 1.0338322667792292,
+        "audio_pointer": 1.1615365000054387,
+        "eos_abs_logit": 6.727643569310506
+      },
+      "motif": {
+        "main_action": 2.460259755452474,
+        "main_slot0_ce": 3.2730320824517145,
+        "main_slot0_acc": 0.2222222222222222,
+        "main_entropy": 4.532263014051649,
+        "audio_action": 2.951670116848416,
+        "audio_slot0_ce": 3.856533474392361,
+        "audio_slot0_acc": 0.1111111111111111,
+        "audio_entropy": 3.8611729939778647,
+        "pointer": 0.41349972618950737,
+        "audio_pointer": 0.4945916069878472,
+        "eos_abs_logit": 7.582171440124512
+      },
+      "config": {
+        "atom_vocab_size": 18454,
+        "d_model": 384,
+        "nhead": 8,
+        "layers": 6,
+        "dim_feedforward": 1536,
+        "dropout": 0.1,
+        "audio_dim": 120,
+        "condition_dim": 16,
+        "action_dim": 50,
+        "history_events": 128,
+        "candidate_count": 96,
+        "action_slots": 33,
+        "candidate_feature_dim": 141,
+        "history_feature_dim": 8,
+        "future_dim": 8,
+        "architecture_profile": "audio_grounded_v3",
+        "symbolic_dropout": 0.15,
+        "head_timing_dim": 99,
+        "lens_width": 64,
+        "lens_chunk_size": 32,
+        "history_residual_bound": 1.0,
+        "history_dropout": 0.3,
+        "ledger_dropout": 0.5,
+        "history_anchor_policy": "parsed_geometry_v3",
+        "action_state_policy": "committed_causal_v2",
+        "motif_memory_policy": "audio_recurrence_archive_v1",
+        "motif_max_events": 16,
+        "slide_factor_policy": "branch_joint_v2",
+        "history_memory_policy": "rms_cap_v1",
+        "history_memory_rms_bound": 8.0,
+        "history_attention_policy": "math_v1"
+      }
+    },
+    "trained_protected": {
+      "heldout": {
+        "main_action": 2.2026800401139965,
+        "main_slot0_ce": 2.9400583021711597,
+        "main_slot0_acc": 0.3118811881188119,
+        "main_entropy": 3.0374767756698153,
+        "audio_action": 3.0039220186743405,
+        "audio_slot0_ce": 3.927413600506169,
+        "audio_slot0_acc": 0.09900990099009901,
+        "audio_entropy": 4.0229929555760755,
+        "pointer": 0.9390491306191624,
+        "audio_pointer": 1.0835493295499594,
+        "eos_abs_logit": 7.073837677637736
+      },
+      "motif": {
+        "main_action": 2.5607611338297525,
+        "main_slot0_ce": 3.4239054785834417,
+        "main_slot0_acc": 0.2222222222222222,
+        "main_entropy": 4.73178227742513,
+        "audio_action": 2.921785142686632,
+        "audio_slot0_ce": 3.7698148091634116,
+        "audio_slot0_acc": 0.1111111111111111,
+        "audio_entropy": 4.015644921196832,
+        "pointer": 0.4694014655219184,
+        "audio_pointer": 0.5096991856892904,
+        "eos_abs_logit": 8.116185188293457
+      },
+      "config": {
+        "atom_vocab_size": 18454,
+        "d_model": 384,
+        "nhead": 8,
+        "layers": 6,
+        "dim_feedforward": 1536,
+        "dropout": 0.1,
+        "audio_dim": 120,
+        "condition_dim": 16,
+        "action_dim": 50,
+        "history_events": 128,
+        "candidate_count": 96,
+        "action_slots": 33,
+        "candidate_feature_dim": 141,
+        "history_feature_dim": 8,
+        "future_dim": 8,
+        "architecture_profile": "audio_grounded_v3",
+        "symbolic_dropout": 0.15,
+        "head_timing_dim": 99,
+        "lens_width": 64,
+        "lens_chunk_size": 32,
+        "history_residual_bound": 1.0,
+        "history_dropout": 0.3,
+        "ledger_dropout": 0.5,
+        "history_anchor_policy": "parsed_geometry_v3",
+        "action_state_policy": "committed_causal_v2",
+        "motif_memory_policy": "audio_recurrence_archive_v1",
+        "motif_max_events": 16,
+        "slide_factor_policy": "branch_joint_v2",
+        "history_memory_policy": "rms_cap_v1",
+        "history_memory_rms_bound": 8.0,
+        "history_attention_policy": "math_v1"
+      }
+    },
+    "checkpoint": {
+      "optimizer_steps": 128,
+      "epoch": 1,
+      "can_resume": true,
+      "can_generate": true,
+      "model_config": {
+        "atom_vocab_size": 18454,
+        "d_model": 384,
+        "nhead": 8,
+        "layers": 6,
+        "dim_feedforward": 1536,
+        "dropout": 0.1,
+        "audio_dim": 120,
+        "condition_dim": 16,
+        "action_dim": 50,
+        "history_events": 128,
+        "candidate_count": 96,
+        "action_slots": 33,
+        "candidate_feature_dim": 141,
+        "history_feature_dim": 8,
+        "future_dim": 8,
+        "architecture_profile": "audio_grounded_v3",
+        "symbolic_dropout": 0.15,
+        "head_timing_dim": 99,
+        "lens_width": 64,
+        "lens_chunk_size": 32,
+        "history_residual_bound": 1.0,
+        "history_dropout": 0.3,
+        "ledger_dropout": 0.5,
+        "history_anchor_policy": "parsed_geometry_v3",
+        "action_state_policy": "committed_causal_v2",
+        "motif_memory_policy": "audio_recurrence_archive_v1",
+        "motif_max_events": 16,
+        "slide_factor_policy": "branch_joint_v2",
+        "history_memory_policy": "rms_cap_v1",
+        "history_memory_rms_bound": 8.0,
+        "history_attention_policy": "math_v1"
+      },
+      "optimizer_nonfinite": [],
+      "max_steps": 512,
+      "lr": 2e-05,
+      "optimizer_betas": [
+        0.9,
+        0.999
+      ]
+    }
+  },
+  "generation": [
+    {
+      "task_id": "10ec4e1d4ed3",
+      "seed": 1922635584,
+      "output": "E:\\simai_transformer\\.scratch\\composer_stability_fix_20261026\\generation\\10ec4e1d4ed3\\maidata.txt",
+      "sidecar": "E:\\simai_transformer\\.scratch\\composer_stability_fix_20261026\\generation\\10ec4e1d4ed3\\maidata.composer.json",
+      "policies": {
+        "history_memory_policy": "rms_cap_v1",
+        "history_memory_rms_bound": 8.0,
+        "history_attention_policy": "math_v1"
+      }
+    },
+    {
+      "task_id": "1de338e36934",
+      "seed": 1696576229,
+      "output": "E:\\simai_transformer\\.scratch\\composer_stability_fix_20261026\\generation\\1de338e36934\\maidata.txt",
+      "sidecar": "E:\\simai_transformer\\.scratch\\composer_stability_fix_20261026\\generation\\1de338e36934\\maidata.composer.json",
+      "policies": {
+        "history_memory_policy": "rms_cap_v1",
+        "history_memory_rms_bound": 8.0,
+        "history_attention_policy": "math_v1"
+      }
+    }
+  ],
+  "validation": {
+    "python_command": "python -m pytest -q tests -k composer",
+    "python_passed": 544,
+    "python_skipped": 1,
+    "python_deselected": 2708,
+    "frontend_passed": 23,
+    "frontend_files": [
+      "test_composer_main_controls_ui.js",
+      "test_composer_training_ui.js",
+      "test_composer_cpu_threads_ui.js"
+    ]
+  },
+  "preserved_checkpoint_hashes": {
+    "checkpoints\\Prism_composer_v12_preserved_20261026_step15500\\composer_last.pt": "b565f60eb70eb8daa5456252dd972c125ed4439e7cc273c8cf0f2903b16a3deb",
+    "checkpoints\\Prism_composer_v12_preserved_20261026_step16000\\composer_last.pt": "8869edf8d4af0378b44c2127b538d93a871f814e6f0e13585a82a02e63fb8791",
+    "checkpoints\\Prism_composer_v12_preserved_20261026_instability\\composer_last.pt": "d5497843df4b8de06b75b72b43f6c930bb1e20ee29abe750d6967f0a58a00293"
+  },
+  "task_status": [
+    {
+      "task_id": "78f828eaac2a",
+      "kind": "composer_train",
+      "status": "cancelled",
+      "error": null
+    },
+    {
+      "task_id": "9e9d5bb7ecb2",
+      "kind": "composer_train",
+      "status": "completed",
+      "error": null
+    },
+    {
+      "task_id": "d2fa252072bd",
+      "kind": "composer_train",
+      "status": "completed",
+      "error": null
+    },
+    {
+      "task_id": "10ec4e1d4ed3",
+      "kind": "composer_generate",
+      "status": "completed",
+      "error": null
+    },
+    {
+      "task_id": "1de338e36934",
+      "kind": "composer_generate",
+      "status": "completed",
+      "error": null
+    }
+  ],
+  "runtime_note": "Automatic approval review blocked stopping/restarting port 7860 (blocked by policy). Original service retained; current main workbench separately started at port 7871.",
+  "limitations": [
+    "Only this GPU/PyTorch combination tested; not a Blackwell exclusivity claim.",
+    "Different SDPA backends can consume different dropout masks.",
+    "Shared 384-row probe is not a globally unseen test set; 8-row motif probe is small.",
+    "128 finetune updates are not a full epoch; 64-event generations are not full songs.",
+    "No claim of permanent recovery, long-run stability or improved musical quality."
+  ]
+}

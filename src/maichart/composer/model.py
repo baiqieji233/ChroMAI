@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import math
 import torch
 from torch import nn
 
@@ -17,10 +18,14 @@ HISTORY_ANCHOR_POLICIES = {'legacy_digit_v1', 'parsed_heads_v2', 'parsed_geometr
 STATE_POLICIES = {'committed_legacy_v1', 'committed_causal_v2', 'candidate_prefix_v2', 'selected_prefix_v3'}
 MOTIF_POLICIES = {'off', 'audio_recurrence_archive_v1'}
 SLIDE_FACTOR_POLICIES = {'marginal_v1', 'branch_joint_v2'}
+HISTORY_MEMORY_POLICIES = {'unbounded_v1', 'rms_cap_v1'}
+HISTORY_ATTENTION_POLICIES = {'auto_v1', 'math_v1'}
 COMPOSER_POLICY_FIELDS = {
     'action_state_policy': (STATE_POLICIES, 'committed_legacy_v1', 'committed_causal_v2'),
     'motif_memory_policy': (MOTIF_POLICIES, 'off', 'off'),
     'slide_factor_policy': (SLIDE_FACTOR_POLICIES, 'marginal_v1', 'branch_joint_v2'),
+    'history_memory_policy': (HISTORY_MEMORY_POLICIES, 'unbounded_v1', 'rms_cap_v1'),
+    'history_attention_policy': (HISTORY_ATTENTION_POLICIES, 'auto_v1', 'math_v1'),
 }
 
 
@@ -32,6 +37,8 @@ def validate_supported_context_policies(config):
         'motif_memory_policy': values.get('motif_memory_policy','off')!='off',
         'action_state_policy': values.get('action_state_policy','committed_legacy_v1') in {'candidate_prefix_v2','selected_prefix_v3'},
         'slide_factor_policy': values.get('slide_factor_policy','marginal_v1')!='marginal_v1',
+        'history_memory_policy': values.get('history_memory_policy','unbounded_v1')!='unbounded_v1',
+        'history_attention_policy': values.get('history_attention_policy','auto_v1')!='auto_v1',
     }
     for name, invalid in unsupported.items():
         if invalid:raise ValueError(f'{name}={values[name]} requires audio_grounded_v3')
@@ -41,7 +48,8 @@ def resolve_composer_policy(name, requested='auto', parent_config=None, *, resum
     choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
     if not isinstance(requested,str) or requested not in {'auto', *choices}:
         raise ValueError(f'Unknown {name}')
-    if name=='slide_factor_policy' and architecture_profile!=GROUNDED_PROFILE:fresh='marginal_v1'
+    if name in {'slide_factor_policy','history_memory_policy','history_attention_policy'} and architecture_profile!=GROUNDED_PROFILE:
+        fresh=legacy
     inherited = parent_config.get(name, legacy) if parent_config else None
     resolved = (inherited or fresh) if requested == 'auto' else requested
     if resume and inherited is not None and resolved != inherited:
@@ -91,6 +99,9 @@ class ComposerConfig:
     motif_memory_policy: str = 'off'
     motif_max_events: int = 16
     slide_factor_policy: str = 'marginal_v1'
+    history_memory_policy: str = 'unbounded_v1'
+    history_memory_rms_bound: float = 8.
+    history_attention_policy: str = 'auto_v1'
 
     def __post_init__(self):
         if self.history_anchor_policy not in HISTORY_ANCHOR_POLICIES:
@@ -98,6 +109,10 @@ class ComposerConfig:
         for name, (choices, _, _) in COMPOSER_POLICY_FIELDS.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f'Unknown {name}')
+        if (isinstance(self.history_memory_rms_bound, bool)
+                or not math.isfinite(self.history_memory_rms_bound)
+                or not 1. <= self.history_memory_rms_bound <= 64.):
+            raise ValueError('history_memory_rms_bound must be finite and in [1,64]')
         if isinstance(self.motif_max_events, bool) or not 1 <= self.motif_max_events <= 32:
             raise ValueError('motif_max_events must be in [1,32]')
         if not 1 <= self.action_slots <= 64:
@@ -110,7 +125,6 @@ class ComposerConfig:
         if self.head_timing_dim and self.head_timing_dim != HEAD_TIMING_DIM:
             raise ValueError(f'music_context_v2 head_timing_dim must equal {HEAD_TIMING_DIM}')
         if self.architecture_profile==GROUNDED_PROFILE:
-            import math
             if self.head_timing_dim!=HEAD_TIMING_DIM:raise ValueError('audio_grounded_v3 requires head timing')
             if self.lens_width<8 or self.lens_chunk_size<1:raise ValueError('Invalid audio lens size')
             if not math.isfinite(self.history_residual_bound) or not 0<self.history_residual_bound<=4:

@@ -254,6 +254,9 @@ function composerTrainingView(task) {
       ['架构',effective.architecture_profile],['短窗音频宽度 / 分块',`${effective.lens_width??'—'} / ${effective.lens_chunk_size??'—'}`],
       ['普通 dropout',`${runtime.dropout??effective.dropout??'—'}`],
       ['历史键位锚定',runtime.history_anchor_policy??effective.history_anchor_policy??'旧模型兼容'],
+      ['历史记忆幅度策略',runtime.history_memory_policy??effective.history_memory_policy??'旧模型兼容'],
+      ['历史记忆 RMS 上限',runtime.history_memory_rms_bound??effective.history_memory_rms_bound??8],
+      ['历史跨注意力后端',runtime.history_attention_policy??effective.history_attention_policy??'旧模型兼容'],
       ['持续动作状态',runtime.action_state_policy??effective.action_state_policy??'committed_legacy_v1'],
       ['动机记忆 / 事件上限',`${runtime.motif_memory_policy??effective.motif_memory_policy??'off'} / ${runtime.motif_max_events??effective.motif_max_events??16}`],
       ['Slide分支因子',runtime.slide_factor_policy??effective.slide_factor_policy??'marginal_v1'],
@@ -2018,6 +2021,8 @@ function chartComposerTrainingPayload(options = {}) {
     model_family: "chart_composer_v1", mode,
     architecture_profile: valueOrDefault('#composerArchitectureProfile','audio_grounded_v3'),
     history_anchor_policy: valueOrDefault('#composerHistoryAnchorPolicy','auto'),
+    history_memory_policy: valueOrDefault('#composerHistoryMemoryPolicy','auto'),
+    history_attention_policy: valueOrDefault('#composerHistoryAttentionPolicy','auto'),
     action_state_policy: valueOrDefault('#composerActionStatePolicy','auto'),
     motif_memory_policy: valueOrDefault('#composerMotifMemoryPolicy','auto'),
     slide_factor_policy: valueOrDefault('#composerSlideFactorPolicy','auto'),
@@ -2042,6 +2047,7 @@ function chartComposerTrainingPayload(options = {}) {
     lens_width: Number(valueOrDefault('#composerLensWidth',64)),
     lens_chunk_size: Number(valueOrDefault('#composerLensChunkSize',32)),
     history_residual_bound: Number(valueOrDefault('#composerHistoryResidualBound',1)),
+    history_memory_rms_bound: Number(valueOrDefault('#composerHistoryMemoryRmsBound',8)),
     history_dropout: Number(valueOrDefault('#composerHistoryDropout',.3)),
     ledger_dropout: Number(valueOrDefault('#composerLedgerDropout',.5)),
     placement_weight: Number(valueOrDefault('#composerPlacementWeight',.15)),
@@ -2470,9 +2476,9 @@ function updateTrainingControls() {
   }
   if (currentModelFamily()==='chart_composer_v1' && currentTrainingMode()==='fresh') {
     for (const id of ['composerDModel','composerDimFeedforward','composerLayers','composerNhead',
-      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerHistoryAnchorPolicy',
+      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy',
       'composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy',
-      'composerLensWidth','composerLensChunkSize','composerHistoryResidualBound','composerHistoryDropout',
+      'composerLensWidth','composerLensChunkSize','composerHistoryResidualBound','composerHistoryMemoryRmsBound','composerHistoryDropout',
       'composerLedgerDropout','composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
       'composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerDropout']) {
       const target=element('#'+id);if(target)target.disabled=false;
@@ -2496,9 +2502,11 @@ function updateTrainingControls() {
   const composerDropout=element('#composerDropout');
   const composerAnchor=element('#composerHistoryAnchorPolicy');
   if (composerAnchor) composerAnchor.disabled=composer && resume;
-  for (const id of ['composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy']) {
+  for (const id of ['composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy']) {
     const target=element('#'+id); if(target)target.disabled=composer && resume;
   }
+  const historyMemoryBound=element('#composerHistoryMemoryRmsBound');
+  if(historyMemoryBound)historyMemoryBound.disabled=composer && resume;
   if (composerDropout) composerDropout.disabled=currentTrainingMode()!=='fresh';
   updateSongFormRhythmGeometryControls();
   updateSongFormQualityControls();
@@ -3543,15 +3551,23 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
   Object.entries(mapping).forEach(([selector, value]) => {
     const target = element(selector);
     if (target && value !== undefined && value !== null) target.value = String(value);
-    if (target) target.disabled = ['#composerArchitectureProfile','#composerLensWidth','#composerHistoryResidualBound','#composerHistoryAnchorPolicy'].includes(selector)
+    if (target) target.disabled = ['#composerArchitectureProfile','#composerLensWidth','#composerHistoryResidualBound','#composerHistoryAnchorPolicy','#composerHistoryMemoryRmsBound'].includes(selector)
       ? mode==='resume' : mode !== "fresh";
   });
+  const historyMemoryBound=element('#composerHistoryMemoryRmsBound');
+  if(historyMemoryBound) {
+    if(mode!=='fresh' && (!preserveEditable || mode==='resume'))
+      historyMemoryBound.value=String(config.history_memory_rms_bound??8);
+    historyMemoryBound.disabled=mode==='resume';
+  }
   for (const [id,key,fallback] of [
     ['composerActionStatePolicy','action_state_policy','committed_legacy_v1'],
     ['composerMotifMemoryPolicy','motif_memory_policy','off'],
     ['composerSlideFactorPolicy','slide_factor_policy','marginal_v1'],
     ['composerMotifMaxEvents','motif_max_events',16],
-    ['composerRecoveryTouchLayoutPolicy','touch_layout_policy','legacy_two_heads']]) {
+    ['composerRecoveryTouchLayoutPolicy','touch_layout_policy','legacy_two_heads'],
+    ['composerHistoryMemoryPolicy','history_memory_policy','unbounded_v1'],
+    ['composerHistoryAttentionPolicy','history_attention_policy','auto_v1']]) {
     const target=element('#'+id);
     if(target && mode!=='fresh' && (mode==='resume' || !preserveEditable))
       target.value=String(config[key]??data?.args?.[key]??fallback);
@@ -3609,6 +3625,8 @@ function renderChartComposerCheckpointInspection(data) {
     `schema：${data?.schema || "未记录"}`,
     `架构：${config.architecture_profile || "未记录"}`,
     `历史几何：${config.history_anchor_policy??'legacy_digit_v1'}；持续状态：${config.action_state_policy??'committed_legacy_v1'}`,
+    `历史记忆幅度策略：${config.history_memory_policy??'unbounded_v1'}；历史记忆RMS上限：${config.history_memory_rms_bound??8}`,
+    `历史跨注意力后端：${config.history_attention_policy??'auto_v1'}`,
     `动机记忆：${config.motif_memory_policy??'off'}；事件上限：${config.motif_max_events??16}；Slide因子：${config.slide_factor_policy??'marginal_v1'}`,
     `恢复Touch布局：${data?.args?.touch_layout_policy??'legacy_two_heads'}`,
     data?.epoch !== undefined ? `保存 epoch：${data.epoch}` : "保存 epoch：未记录",
@@ -4183,8 +4201,8 @@ async function submitTrain(options = {}) {
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
-        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v5_selected_state')
-      throw new Error('当前服务尚未加载 Composer 历史锚定等训练控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。');
+        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v6_history_stability')
+      throw new Error('当前服务尚未加载 Composer 历史记忆稳定性控件。请重启更新后的 WebUI 后端；有活动训练时先保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -5451,8 +5469,8 @@ on("#modelFamily", "change", () => {
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_composer_v1") {
     for (const [id, v] of Object.entries({composerDModel:192, composerDimFeedforward:576, composerLayers:3, composerNhead:6,
       composerHistoryEvents:128, composerCandidateCount:96, composerActionSlots:8,
-      composerArchitectureProfile:'audio_grounded_v3',composerHistoryAnchorPolicy:'auto',composerActionStatePolicy:'auto',composerMotifMemoryPolicy:'auto',composerSlideFactorPolicy:'auto',composerMotifMaxEvents:16,composerRecoveryTouchLayoutPolicy:'auto',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
-      composerHistoryResidualBound:1,composerHistoryDropout:.3,composerLedgerDropout:.5,
+      composerArchitectureProfile:'audio_grounded_v3',composerHistoryAnchorPolicy:'auto',composerHistoryMemoryPolicy:'auto',composerHistoryAttentionPolicy:'auto',composerActionStatePolicy:'auto',composerMotifMemoryPolicy:'auto',composerSlideFactorPolicy:'auto',composerMotifMaxEvents:16,composerRecoveryTouchLayoutPolicy:'auto',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
+      composerHistoryResidualBound:1,composerHistoryMemoryRmsBound:8,composerHistoryDropout:.3,composerLedgerDropout:.5,
       composerPlacementWeight:.15,composerPlannerWeight:.2,composerRecoveryInterval:100,
       composerRecoverySamples:2,composerRecoverySteps:2,composerRecoveryWeight:.1,
       composerCpuThreads:0,
@@ -5466,7 +5484,7 @@ on("#modelFamily", "change", () => {
   }
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
-on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerHistoryAnchorPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerRecoveryTouchLayoutPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults(); updateTrainingControls(); });
+on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerRecoveryTouchLayoutPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults(); updateTrainingControls(); });
 on('#composerRebatchResume','change',()=>{updateTrainingControls();saveSettings();});
 on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });
 on("#formQualityApplyRecipe", "click", applySongFormQualityRecipe);

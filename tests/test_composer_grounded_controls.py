@@ -37,7 +37,8 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'recovery_interval': 100, 'recovery_samples': 2, 'recovery_steps': 2,
                 'recovery_weight': .1, 'action_state_policy':'committed_causal_v2',
                 'motif_memory_policy':'off','slide_factor_policy':'branch_joint_v2','motif_max_events':16,
-                'touch_layout_policy':'open', 'cpu_threads': 0}
+                'touch_layout_policy':'open', 'cpu_threads': 0,'history_memory_rms_bound':8.,
+                'history_memory_policy':'rms_cap_v1','history_attention_policy':'math_v1'}
     assert task.result['effective_settings'] == expected
     for key, value in expected.items():
         flag = '--' + key.replace('_', '-')
@@ -47,7 +48,8 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
 @pytest.mark.parametrize(('key', 'value'), [
     ('architecture_profile', 'unknown'), ('action_slots', 65), ('lens_width', 7), ('lens_width', 257),
     ('lens_chunk_size', 0), ('lens_chunk_size', 257), ('history_residual_bound', .09),
-    ('history_residual_bound', 4.1), ('history_dropout', .91), ('ledger_dropout', -.1),
+    ('history_residual_bound', 4.1), ('history_memory_rms_bound', .99), ('history_memory_rms_bound', 64.1),
+    ('history_dropout', .91), ('ledger_dropout', -.1),
     ('placement_weight', 1.1), ('planner_weight', float('nan')), ('recovery_interval', -1),
     ('recovery_samples', 9), ('recovery_steps', 1), ('recovery_steps', 5), ('recovery_weight', 1.1),
 ])
@@ -96,3 +98,33 @@ def test_generation_api_validates_history_strength_before_task_creation(tmp_path
     with pytest.raises(ValueError):
         composer_api.start_generate(SimpleNamespace(_json_response=lambda _: None),
             {'audio': str(audio), 'checkpoint': str(checkpoint), 'pointer_history_strength': value}, runtime=runtime)
+
+
+def test_history_memory_rms_bound_inherits_for_finetune_and_resume_locks_value(tmp_path, monkeypatch):
+    from maichart.composer import checkpoint
+    parent = tmp_path / 'parent.pt'; parent.write_bytes(b'checkpoint')
+    monkeypatch.setattr(checkpoint, 'read_payload', lambda _: {})
+    monkeypatch.setattr(checkpoint, 'inspect_payload', lambda _: {
+        'can_resume': True, 'can_init': True,
+        'model_config': {'history_memory_rms_bound': 12.}, 'args': {}})
+    payload = _payload(tmp_path); payload.update(mode='finetune', init_checkpoint=str(parent))
+    calls = []
+    composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime(calls))
+    task, args = calls[0]
+    assert task.result['effective_settings']['history_memory_rms_bound'] == 12.
+    assert args[args.index('--history-memory-rms-bound') + 1] == '12.0'
+    payload.update(mode='resume', resume=str(parent), history_memory_rms_bound=8)
+    with pytest.raises(ValueError, match='resume inherits history_memory_rms_bound'):
+        composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime([]))
+
+
+def test_legacy_resume_defaults_missing_history_memory_bound_to_eight(tmp_path, monkeypatch):
+    from maichart.composer import checkpoint
+    parent = tmp_path / 'legacy.pt'; parent.write_bytes(b'checkpoint')
+    monkeypatch.setattr(checkpoint, 'read_payload', lambda _: {})
+    monkeypatch.setattr(checkpoint, 'inspect_payload', lambda _: {
+        'can_resume': True, 'can_init': True, 'model_config': {}, 'args': {}})
+    payload = _payload(tmp_path)
+    payload.update(mode='resume', resume=str(parent), history_memory_rms_bound=12)
+    with pytest.raises(ValueError, match='resume inherits history_memory_rms_bound=8'):
+        composer_api.start_train(SimpleNamespace(_json_response=lambda _: None), payload, runtime=_runtime([]))

@@ -154,6 +154,9 @@ def validate(payload):
     values.setdefault('action_state_policy','committed_legacy_v1')
     values.setdefault('motif_memory_policy','off')
     values.setdefault('slide_factor_policy','marginal_v1')
+    values.setdefault('history_memory_policy','unbounded_v1')
+    values.setdefault('history_memory_rms_bound',8.)
+    values.setdefault('history_attention_policy','auto_v1')
     try:
         config=ComposerConfig(**values)
     except TypeError as exc:
@@ -295,7 +298,8 @@ def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slot
     slots = model.config.action_slots if action_slots is None else int(action_slots)
     if slots < model.config.action_slots:
         raise ValueError('Finetune migration cannot reduce action_slots')
-    allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy'}
+    allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy',
+             'history_memory_policy','history_memory_rms_bound','history_attention_policy'}
     if set(policy_options)-allowed:raise ValueError('Unknown music-context migration option')
     config=ComposerConfig(**{**model.config.to_dict(),**policy_options,'architecture_profile':'music_context_v2',
                              'head_timing_dim':HEAD_TIMING_DIM,'action_slots':slots})

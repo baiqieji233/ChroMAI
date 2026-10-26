@@ -37,7 +37,7 @@ test('old checkpoint CPU threads defaults to zero and UI declares persistence/re
   assert.match(html,/id="composerCpuThreads" type="number" min="0" max="256" step="1" value="0"/);
   const source=fs.readFileSync('src/maichart/webui/static/app.js','utf8');
   assert.ok(source.includes('composerCpuThreads:0'));
-  assert.ok(source.includes('causal_motif_runtime_controls_v5_selected_state'));
+  assert.ok(source.includes('causal_motif_runtime_controls_v6_history_stability'));
   assert.ok(source.includes('input[id], select[id], textarea[id]'));
 });
 
