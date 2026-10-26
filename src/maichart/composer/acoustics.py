@@ -115,10 +115,12 @@ class AcousticContext:
             return np.zeros((len(seconds), 26), dtype=np.float64)
         seconds = np.clip(seconds, self.times[0], self.times[-1])
         left = np.clip(np.searchsorted(self.times, seconds, side='right') - 1, 0, len(self.times) - 2)
-        delta = seconds - self.times[left]
-        denom = np.maximum(self.times[left + 1] - self.times[left], 1e-9)
-        slope = ((self.data[left + 1] - self.data[left]) / denom[:, None])
-        return self.prefix[left] + self.data[left] * delta[:, None] + .5 * slope * delta[:, None] ** 2
+        base_time=self.times[left]
+        base=self.data[left]
+        delta = seconds - base_time
+        denom = np.maximum(self.times[left + 1] - base_time, 1e-9)
+        slope = ((self.data[left + 1] - base) / denom[:, None])
+        return self.prefix[left] + base * delta[:, None] + .5 * slope * delta[:, None] ** 2
 
     def at(self, seconds):
         seconds = np.asarray(seconds, dtype=np.float64).reshape(-1)
@@ -153,13 +155,14 @@ class AcousticContext:
         seconds = np.asarray(candidate_seconds, dtype=np.float64).reshape(-1)
         start = np.clip(float(committed_second), 0., self.duration)
         stop = np.clip(seconds, start, self.duration)
-        integrals = self._integral(np.r_[stop, start])
+        boundaries=np.r_[stop,start]
+        integrals = self._integral(boundaries)
         area = integrals[:-1] - integrals[-1:]
         width = np.maximum(stop - start, 1e-6)
         mean = area[:, :14] / width[:, None]
         if len(self.times):
             endpoints = np.column_stack([
-                np.interp(np.r_[stop, start], self.times, self.data[:, c]) for c in range(14, 26)])
+                np.interp(boundaries, self.times, self.data[:, c]) for c in range(14, 26)])
             begin, end = endpoints[-1], endpoints[:-1]
             norm = np.linalg.norm(end, axis=-1) * np.linalg.norm(begin)
             novelty = np.where(norm > 1e-9, 1. - (end * begin).sum(-1) / np.maximum(norm, 1e-9), 0.)

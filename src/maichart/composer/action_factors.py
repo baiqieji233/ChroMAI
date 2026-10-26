@@ -284,8 +284,12 @@ class CompositionalActions(nn.Module):
             raise ValueError(f'Action factor context must end in width {self.width}')
         return F.linear(context, self.composed_weight())
 
-    def embed(self, ids: torch.Tensor) -> torch.Tensor:
+    def embed(self, ids: torch.Tensor, *, composed_weight=None) -> torch.Tensor:
         """Additive history embeddings using exactly the output factor weights."""
+        if composed_weight is not None:
+            if composed_weight.shape != (self.vocab_size,self.width):
+                raise ValueError('Composed factor table must match the atom catalog and width')
+            return F.embedding(ids,composed_weight)
         result = None
         for name in self.factor_fields:
             categories = getattr(self, f'atom_{name}').index_select(0, ids.reshape(-1)).reshape(ids.shape)

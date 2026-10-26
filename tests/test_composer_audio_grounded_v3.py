@@ -270,6 +270,15 @@ def test_factor_inference_cache_refreshes_after_weight_update():
     assert not torch.equal(before,after)
 
 
+def test_pointer_only_forward_does_not_materialize_full_factor_table(monkeypatch):
+    model=build_model(config(),ATOMS).train()
+    def unexpected():
+        raise AssertionError('pointer-only forward should keep sparse factor lookups')
+    monkeypatch.setattr(model.action_factors,'composed_weight',unexpected)
+    output=model(**inputs(),decode_actions=False)
+    assert torch.isfinite(output['candidate_logits']).all()
+
+
 def test_active_slot_loss_is_invariant_to_trailing_stop_padding():
     from maichart.composer.train import _loss
     base_logits = torch.randn(2, 3, 5)

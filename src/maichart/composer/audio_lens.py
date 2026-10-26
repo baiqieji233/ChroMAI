@@ -65,8 +65,8 @@ class LensBank:
                        0, len(self.times) - 2)
         fraction = ((flat_clock - self.times[left])
                     / (self.times[left + 1] - self.times[left])).astype(np.float32)
-        result[valid] = (self.values[left]
-            + fraction[:, None] * (self.values[left + 1] - self.values[left]))
+        base=self.values[left]
+        result[valid] = base + fraction[:, None] * (self.values[left + 1] - base)
         return result, valid
 
 

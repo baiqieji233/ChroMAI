@@ -57,8 +57,8 @@ class AudioGroundedComposer(ChartComposer):
         # A full ledger still describes valid causal state. Its direct and
         # discrepancy routes cannot write an unbounded pointer logit anymore.
 
-    def _embedding(self,ids):
-        return (self.event_embedding(ids)+self.action_factors.embed(ids))*ids.ne(0)[...,None]
+    def _embedding(self,ids,*,factor_weight=None):
+        return (self.event_embedding(ids)+self.action_factors.embed(ids,composed_weight=factor_weight))*ids.ne(0)[...,None]
 
     def forward(self,candidate_features,history,condition,action_state=None,history_features=None,
                 candidate_mask=None,history_padding_mask=None,candidate_indices=None,
@@ -71,6 +71,11 @@ class AudioGroundedComposer(ChartComposer):
                 selected_action_state=None,**unused):
         if (audio_lens is None and lens_embeddings is None) or planner_audio is None or head_timing is None:
             raise ValueError('audio_grounded_v3 requires local audio, coarse plan audio and causal head timing')
+        # A full training decode already needs every atom's factor vector.
+        # Reuse that differentiable table for history, teacher prefixes and
+        # both output branches. Keep it local to this forward, never cached
+        # across optimizer updates. Pointer-only calls retain sparse lookups.
+        factor_weight=self.action_factors.composed_weight() if decode_actions else None
         batch,count=candidate_features.shape[:2]
         valid=~candidate_mask if candidate_mask is not None else torch.ones((batch,count),device=candidate_features.device,dtype=torch.bool)
         hidden=self.audio_projection(candidate_features[...,:self.config.audio_dim])+self.time_projection(candidate_features[...,self.config.audio_dim:])
@@ -104,7 +109,7 @@ class AudioGroundedComposer(ChartComposer):
             # head angles. Factors and the original embedding retain note kinds,
             # modifiers and touch rings; center Touch has no outer angle.
             anchors=self.action_factors.history_anchor_embedding(history,self.event_embedding)
-            hist_emb=(.75*anchors+.25*self.event_embedding(history)+self.action_factors.embed(history))*history.ne(0)[...,None]
+            hist_emb=(.75*anchors+.25*self.event_embedding(history)+self.action_factors.embed(history,composed_weight=factor_weight))*history.ne(0)[...,None]
             memory=hist_emb.sum(-2)+self.position_embedding(positions.clamp_max(self.config.history_events+3))
             if history_features is not None:memory=memory+self.history_feature_projection(history_features)
             safe_padding=padding.clone()
@@ -176,12 +181,14 @@ class AudioGroundedComposer(ChartComposer):
                 motif_ids=motif_ids,motif_relative_beats=motif_relative_beats,motif_mask=motif_mask,
                 motif_strength=motif_strength,motif_keep=symbolic_keep,
                 selected_action_state=selected_action_state,state_base=result.get('selected_state_base'),
-                state_keep=result.get('selected_state_keep')))
+                state_keep=result.get('selected_state_keep'),factor_weight=factor_weight))
         return result
 
     def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
                          motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None,
-                         selected_action_state=None,state_base=None,state_keep=None):
+                         selected_action_state=None,state_base=None,state_keep=None,factor_weight=None):
+        if project_actions and factor_weight is None:
+            factor_weight=self.action_factors.composed_weight()
         if candidate_indices is not None:
             rows=torch.arange(candidate_context.size(0),device=candidate_context.device)
             candidate_context=candidate_context[rows,candidate_indices]
@@ -204,7 +211,8 @@ class AudioGroundedComposer(ChartComposer):
             if motif_relative_beats is None or motif_mask is None:
                 raise ValueError('Motif IDs require relative timing and visibility mask')
             motif_residual=self.motif_memory(
-                candidate_context,self._embedding,motif_ids,motif_relative_beats,motif_mask)
+                candidate_context,lambda ids:self._embedding(ids,factor_weight=factor_weight),
+                motif_ids,motif_relative_beats,motif_mask)
             # The archive is symbolic history too. Coherent history dropout
             # must not leave a second token-history route into action decoding.
             if motif_keep is not None:
@@ -225,7 +233,7 @@ class AudioGroundedComposer(ChartComposer):
             audio_contexts=audio_context.unsqueeze(-2)+slot_embeddings if audio_context is not None else None
             relation=None
             if action_targets is not None:
-                embedded=self._embedding(action_targets)
+                embedded=self._embedding(action_targets,factor_weight=factor_weight)
                 prefix=embedded.cumsum(-2)-embedded
                 contexts=contexts+prefix
                 if audio_contexts is not None:
@@ -233,13 +241,13 @@ class AudioGroundedComposer(ChartComposer):
                 heads=self.action_factors.atom_head_lanes[action_targets].to(contexts)
                 relation=(heads.cumsum(-2)-heads)>0
             contexts=self.slot_fusion(contexts)
-            full_logits=self.action_head(contexts)+self.action_factors(contexts)
+            full_logits=self.action_head(contexts)+F.linear(contexts,factor_weight)
             if relation is not None:
                 full_logits=full_logits+self.action_factors.relative_logits(contexts,relation)
             result['action_logits']=full_logits
             if audio_contexts is not None:
                 audio_contexts=self.slot_fusion(audio_contexts)
-                audio_logits=self.action_head(audio_contexts)+self.action_factors(audio_contexts)
+                audio_logits=self.action_head(audio_contexts)+F.linear(audio_contexts,factor_weight)
                 if relation is not None:
                     audio_logits=audio_logits+self.action_factors.relative_logits(audio_contexts,relation)
                 result['audio_action_logits']=audio_logits
