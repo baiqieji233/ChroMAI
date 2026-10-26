@@ -1,5 +1,7 @@
 # v12训练速度、GPU供给与loss解释（2026-10-26）
 
+> **后续状态：** v12第5轮出现已复现的配置退化，正式任务已取消。后续通过梯度路由和6组短训定位到历史memory尺度失控及跨注意力反馈，见[退化根因调查](COMPOSER_INSTABILITY_ROOT_CAUSE_20261026_ZH.md)。本文保留此前性能优化与恢复阶段的测量，运行状态以新交接为准。
+
 本轮依据实际运行的v12、CUDA分段计时、CPU profile和交替端到端对照编写。接续[上一轮GPU效率记录](COMPOSER_GPU_EFFICIENCY_20261026_ZH.md)与[loss深审](COMPOSER_LOSS_DEEP_AUDIT_20261026_ZH.md)。旧记录中的“v11停止”“当前任务4f37670023b0”等均属于此前阶段。
 
 ## 当前训练与保存点
