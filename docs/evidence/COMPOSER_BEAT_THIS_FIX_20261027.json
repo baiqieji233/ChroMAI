@@ -7169,7 +7169,19 @@
     "long-run learning speed improvement",
     "same-budget musical/playability improvement",
     "global bar-phase accuracy",
-    "full-corpus enhanced structure preparation completion",
     "full GPU throughput under the new inputs"
-  ]
+  ],
+  "fresh_training_followup": {
+    "recorded_at": "2026-10-27T20:27:16.643168+08:00",
+    "evidence_file": "COMPOSER_V16_FRESH_START_20261027.json",
+    "task_id": "05f3e929fb70",
+    "full_corpus_enhanced_preparation": {
+      "charts": 1787,
+      "completed": 1787,
+      "failed": 0,
+      "errors": []
+    },
+    "initial_updates_verified": 25,
+    "previous_active_training_snapshot_is_historical": true
+  }
 }
