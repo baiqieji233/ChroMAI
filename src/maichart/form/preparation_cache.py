@@ -17,7 +17,7 @@ import zipfile
 import numpy as np
 
 from maichart.event_timing import EventPoint, EventTempo
-from maichart.form.recurrence import Relation, SongRelations
+from maichart.form.recurrence import Relation, SongRelations, LEGACY_RECURRENCE_DESCRIPTOR_POLICY
 from maichart.form.timing import MeterChange, MetricSpan, normalize_meter_map
 from maichart.form.quality_profile import (
     enhanced, evidence_profile, density_profile, duration_semantics, descriptor_dim,
@@ -237,6 +237,9 @@ class PreparationCache:
                          'reconstruction': options['reconstruction'], 'meter_map': meters},
         }
         profile = options.get('quality_profile', 'legacy')
+        recurrence_policy=options.get('recurrence_descriptor_policy',LEGACY_RECURRENCE_DESCRIPTOR_POLICY)
+        if recurrence_policy!=LEGACY_RECURRENCE_DESCRIPTOR_POLICY:
+            identity['settings']['recurrence_descriptor_policy']=recurrence_policy
         # Only annotated exclusions change preparation. Unannotated stream
         # songs can reuse their existing prepared artifacts unchanged.
         if options.get('preserve_excluded_context') and any(

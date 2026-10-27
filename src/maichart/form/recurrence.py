@@ -18,6 +18,8 @@ CHROMA_DIM = 12
 ONSET_DIM = 1
 DESCRIPTOR_CHANNELS = CHROMA_DIM + ONSET_DIM + MEL_BANDS
 DESCRIPTOR_DIM = 24 * DESCRIPTOR_CHANNELS
+RECURRENCE_DESCRIPTOR_POLICY = 'temporal_noise_stable_v2'
+LEGACY_RECURRENCE_DESCRIPTOR_POLICY = 'legacy_temporal_unit_v1'
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,6 +102,18 @@ def _unit(values: np.ndarray) -> np.ndarray:
     return values / norm if norm > 1e-10 else np.zeros_like(values)
 
 
+def _temporal_unit(shape: np.ndarray, reference: np.ndarray) -> np.ndarray:
+    """Do not promote float32-scale residue in a flat channel to unit energy.
+
+    Native acoustic inputs are float32. Centering a nearly constant channel
+    can leave tiny independent residues; normalizing each residue would give
+    it the same vote as a real rhythmic contour. The relative tolerance covers
+    the averaging/normalization/centering operations, not musical similarity.
+    """
+    threshold = max(1e-6, 32 * np.finfo(np.float32).eps * float(np.linalg.norm(reference)))
+    return _unit(shape) if np.linalg.norm(shape) > threshold else np.zeros(shape.size, dtype=np.float64)
+
+
 def _aligned_similarity(left: np.ndarray, right: np.ndarray, bins: int) -> tuple[float, int]:
     """Best cosine under a small circular phase offset in normalized time.
 
@@ -135,7 +149,9 @@ def _aligned_similarity(left: np.ndarray, right: np.ndarray, bins: int) -> tuple
     return max(-1.0, min(1.0, similarity)), phase_shift
 
 
-def _describe(samples: np.ndarray, bins: int) -> tuple[np.ndarray, bool]:
+def _describe(samples: np.ndarray, bins: int, *, descriptor_policy=RECURRENCE_DESCRIPTOR_POLICY) -> tuple[np.ndarray, bool]:
+    if descriptor_policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+        raise ValueError('Unknown recurrence descriptor policy')
     if not len(samples):
         return np.zeros(bins * DESCRIPTOR_CHANNELS, dtype=np.float32), False
 
@@ -162,12 +178,19 @@ def _describe(samples: np.ndarray, bins: int) -> tuple[np.ndarray, bool]:
     chroma_shape = chroma_bins - chroma_bins.mean(axis=0, keepdims=True)
     onset_shape = onset_bins - onset_bins.mean(axis=0, keepdims=True)
     # Remove both frame level and a static song-wide spectral envelope.
+    timbre_reference = timbre_bins.copy()
     timbre_bins -= timbre_bins.mean(axis=1, keepdims=True)
     timbre_shape = timbre_bins - timbre_bins.mean(axis=0, keepdims=True)
     raw_pieces = (chroma_shape, onset_shape, timbre_shape)
-    pieces = [_unit(piece) for piece in raw_pieces]
+    if descriptor_policy == LEGACY_RECURRENCE_DESCRIPTOR_POLICY:
+        pieces = [_unit(piece) for piece in raw_pieces]
+    else:
+        pieces = [_temporal_unit(piece, reference) for piece, reference in
+                  zip(raw_pieces, (chroma_bins, onset_bins, timbre_reference))]
     descriptor = _unit(np.concatenate(pieces))
-    temporal_evidence = any(float(np.linalg.norm(piece)) > 1e-6 for piece in raw_pieces)
+    temporal_evidence = (any(float(np.linalg.norm(piece)) > 1e-6 for piece in raw_pieces)
+                         if descriptor_policy == LEGACY_RECURRENCE_DESCRIPTOR_POLICY
+                         else any(bool(np.any(piece)) for piece in pieces))
     return descriptor.astype(np.float32), temporal_evidence and bool(np.linalg.norm(descriptor) > 1e-8)
 
 
@@ -209,11 +232,14 @@ def analyze_recurrence(
     min_similarity: float = 0.75,
     min_separation: int = 1,
     quality_profile: str = 'legacy',
+    descriptor_policy: str = RECURRENCE_DESCRIPTOR_POLICY,
 ) -> SongRelations:
     """Compare beat-normalized audio spans without accessing chart events."""
 
     from maichart.form.quality_profile import enhanced
     use_dynamics = enhanced(quality_profile)
+    if descriptor_policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+        raise ValueError('Unknown recurrence descriptor policy')
     if bins <= 0 or top_k < 0 or min_separation < 0:
         raise ValueError("bins must be positive; top_k and min_separation must be nonnegative")
     if not math.isfinite(min_similarity) or not -1 <= min_similarity <= 1:
@@ -232,7 +258,7 @@ def analyze_recurrence(
         beats = [span.start + (span.end - span.start) * Fraction(2 * i + 1, 2 * bins) for i in range(bins)]
         stamps = np.asarray([seconds_at_beat(beat, tempo, first) for beat in beats], dtype=np.float64)
         samples = _sample(audio, stamps)
-        descriptors[row], valid[row] = _describe(samples, bins)
+        descriptors[row], valid[row] = _describe(samples, bins, descriptor_policy=descriptor_policy)
         if use_dynamics:
             dynamics[row] = _layout_dynamics(samples)
 
@@ -285,6 +311,7 @@ def analyze_recurrence(
             "valid_span_count": int(valid.sum()),
             "rejected_flat_span_indices": [span.index for i, span in enumerate(ordered) if not valid[i]],
             "feature_source": "audio_only",
+            "descriptor_policy": descriptor_policy,
             "candidate_count": candidate_count,
             "candidate_max": candidate_max,
             "empty_reason": (

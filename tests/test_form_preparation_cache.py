@@ -105,6 +105,20 @@ def test_damaged_array_cache_is_rebuilt_instead_of_blocking_training(cached_sour
     assert build().preparation_cache_stats['hits'] == 1
 
 
+def test_recurrence_policy_has_a_distinct_semantic_cache_key(cached_source):
+    from maichart.form.recurrence import RECURRENCE_DESCRIPTOR_POLICY
+    build,_,_,_=cached_source
+    legacy=build()
+    assert legacy.preparation_cache_stats['rebuilt']==1
+    assert legacy.songs[0][0].relations.audit['descriptor_policy']=='legacy_temporal_unit_v1'
+    revised=build(recurrence_descriptor_policy=RECURRENCE_DESCRIPTOR_POLICY)
+    assert revised.preparation_cache_stats['hits']==0
+    assert revised.preparation_cache_stats['rebuilt']==1
+    assert revised.songs[0][0].relations.audit['descriptor_policy']==RECURRENCE_DESCRIPTOR_POLICY
+    assert build(recurrence_descriptor_policy=RECURRENCE_DESCRIPTOR_POLICY).preparation_cache_stats['hits']==1
+    assert build().preparation_cache_stats['hits']==1
+
+
 def test_unrelated_quality_edit_does_not_invalidate_other_chart_cache(cached_source):
     build, chart, _, _ = cached_source
     build()

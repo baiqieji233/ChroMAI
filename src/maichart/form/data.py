@@ -28,7 +28,8 @@ from maichart.generation.event_audio import (
 )
 from maichart.generation.sustain_state import SustainStateIndex
 from maichart.form.codec import RationalCodec
-from maichart.form.recurrence import analyze_recurrence, CausalMotifMemory
+from maichart.form.recurrence import (analyze_recurrence, CausalMotifMemory,
+    RECURRENCE_DESCRIPTOR_POLICY, LEGACY_RECURRENCE_DESCRIPTOR_POLICY)
 from maichart.form.timing import MetricSpan, normalize_meter_map
 from maichart.form.revision import DraftPoint
 from maichart.form.quality_profile import (
@@ -245,7 +246,8 @@ class FormSong:
 
 
 def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2.0, max_seconds=14.0,
-                  rhythm_geometry_profile='none', quality_profile='legacy', curve_bin_seconds=None):
+                  rhythm_geometry_profile='none', quality_profile='legacy', curve_bin_seconds=None,
+                  recurrence_descriptor_policy=None):
     from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
     if rhythm_geometry_profile not in GEOMETRY_PROFILES:
         raise ValueError('Unknown rhythm geometry profile')
@@ -270,8 +272,9 @@ def organize_song(audio, tempo, first, *, meters=None, spans=None, min_seconds=2
         spans, audit = list(spans), {"source": "explicit_spans"}
         regions = list(spans)
         span_region_indices = list(range(len(spans)))
-    relations = (analyze_recurrence(audio, regions, tempo, first, quality_profile=quality_profile)
-                 if enhanced(quality_profile) else analyze_recurrence(audio, regions, tempo, first))
+    recurrence_options={'descriptor_policy':recurrence_descriptor_policy or LEGACY_RECURRENCE_DESCRIPTOR_POLICY}
+    relations = (analyze_recurrence(audio, regions, tempo, first, quality_profile=quality_profile,**recurrence_options)
+                 if enhanced(quality_profile) else analyze_recurrence(audio, regions, tempo, first,**recurrence_options))
     audit['region_count'] = len(regions)
     audit['computational_span_count'] = len(spans)
     return FormSong(audio, list(tempo), float(first), meters, spans, relations, audit,
@@ -592,7 +595,8 @@ def _prepare_form_entry(entry, options, annotations, audio_store):
                                  max_seconds=options['max_region_seconds'],
                                  rhythm_geometry_profile=options.get('rhythm_geometry_profile','none'),
                                  quality_profile=options.get('quality_profile', 'legacy'),
-                                 curve_bin_seconds=options.get('curve_bin_seconds'))
+                                 curve_bin_seconds=options.get('curve_bin_seconds'),
+                                 recurrence_descriptor_policy=options.get('recurrence_descriptor_policy',LEGACY_RECURRENCE_DESCRIPTOR_POLICY))
             excluded = [(float(region['start_sec']), float(region['end_sec']))
                         for region in (record or {}).get('regions', []) if float(region.get('weight', 1)) <= 0]
             selected_points = [p for p in chart.points if not any(
@@ -734,13 +738,15 @@ class FormDataset(Dataset):
                  preparation_workers=1, audio_cache_gb=1, sample_cache_mb=256, audio_profile='legacy_50hz',
                  rhythm_geometry_profile='none', perturbation_config=None, quality_profile='legacy',
                  curve_bin_seconds=None, position_alignment_tolerance_ms=15.,
-                 preserve_excluded_context=False):
+                 preserve_excluded_context=False,recurrence_descriptor_policy=LEGACY_RECURRENCE_DESCRIPTOR_POLICY):
         from maichart.form.rational_audio import PROFILE, extract_rational_audio
         from maichart.form.rhythm_geometry import GEOMETRY_PROFILES
         if rhythm_geometry_profile not in GEOMETRY_PROFILES:
             raise ValueError('Unknown rhythm geometry profile')
         self.rhythm_geometry_profile = rhythm_geometry_profile
         self.quality_profile = validate_quality_profile(quality_profile)
+        if recurrence_descriptor_policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+            raise ValueError('Unknown recurrence descriptor policy')
         self.curve_bin_seconds = (default_curve_bin_seconds(quality_profile) if curve_bin_seconds is None
                                   else float(curve_bin_seconds))
         self.position_alignment_tolerance_ms = float(position_alignment_tolerance_ms)
@@ -814,6 +820,7 @@ class FormDataset(Dataset):
             rhythm_geometry_profile=rhythm_geometry_profile, quality_profile=quality_profile,
             curve_bin_seconds=self.curve_bin_seconds,
             position_alignment_tolerance_ms=self.position_alignment_tolerance_ms,
+            recurrence_descriptor_policy=recurrence_descriptor_policy,
             preserve_excluded_context=bool(preserve_excluded_context))
         started = time.monotonic()
         print('form_prepare '+json.dumps({'stage':'preparation','workers':workers,'requested_workers':preparation_workers,

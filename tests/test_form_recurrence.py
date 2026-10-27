@@ -109,6 +109,57 @@ def test_partial_chroma_only_descriptors_normalize_to_full_similarity():
     assert relations.links[0].similarity == pytest.approx(1.0)
 
 
+@pytest.mark.parametrize('noise',[1e-8,1e-7,1e-6])
+def test_flat_channel_roundoff_cannot_overrule_a_repeated_rhythmic_contour(noise):
+    from maichart.form.recurrence import _describe
+    rng=np.random.default_rng(20261027)
+    template=np.zeros((24,ACOUSTIC_DIM),dtype=np.float32)
+    template[:,80]=1.
+    template[:,92]=np.asarray([0,1,0,0,0,1]*4)
+    template[:,:80]=np.linspace(-8,-1,80)
+    descriptors=[]
+    for _ in range(2):
+        sample=template.copy()
+        sample[:,80:92]+=rng.normal(0,noise,(24,12)).astype(np.float32)
+        sample[:,:80]+=rng.normal(0,noise,(24,80)).astype(np.float32)
+        descriptor,valid=_describe(sample,24)
+        assert valid
+        descriptors.append(descriptor)
+    similarity,_=_aligned_similarity(*descriptors,24)
+    assert similarity>.99
+
+
+def test_only_float32_scale_temporal_noise_is_not_recurrence_evidence():
+    from maichart.form.recurrence import _describe
+    rng=np.random.default_rng(27)
+    sample=np.zeros((24,ACOUSTIC_DIM),dtype=np.float32)
+    sample[:,80]=1.
+    sample[:,:80]=np.linspace(-8,-1,80)
+    sample[:,80:92]+=rng.normal(0,1e-7,(24,12)).astype(np.float32)
+    sample[:,:80]+=rng.normal(0,1e-7,(24,80)).astype(np.float32)
+    descriptor,valid=_describe(sample,24)
+    assert not valid
+    assert not descriptor.any()
+
+
+def test_legacy_descriptor_policy_retains_existing_checkpoint_interpretation():
+    from maichart.form.recurrence import _describe,LEGACY_RECURRENCE_DESCRIPTOR_POLICY
+    rng=np.random.default_rng(20261027)
+    template=np.zeros((24,ACOUSTIC_DIM),dtype=np.float32)
+    template[:,80]=1.;template[:,92]=np.asarray([0,1,0,0,0,1]*4)
+    template[:,:80]=np.linspace(-8,-1,80)
+    pairs=[]
+    for _ in range(2):
+        sample=template.copy()
+        sample[:,80:92]+=rng.normal(0,1e-7,(24,12)).astype(np.float32)
+        sample[:,:80]+=rng.normal(0,1e-7,(24,80)).astype(np.float32)
+        pairs.append(sample)
+    legacy=[_describe(x,24,descriptor_policy=LEGACY_RECURRENCE_DESCRIPTOR_POLICY)[0] for x in pairs]
+    revised=[_describe(x,24)[0] for x in pairs]
+    assert _aligned_similarity(*legacy,24)[0]<.75
+    assert _aligned_similarity(*revised,24)[0]>.99
+
+
 def test_phase_alignment_shifts_channel_major_descriptor_blocks_and_reports_sign():
     rng = np.random.default_rng(19)
     bins = 24

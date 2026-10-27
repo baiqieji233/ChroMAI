@@ -8,13 +8,25 @@ from .model import ChartComposer,ComposerConfig,WORKLOAD_PROFILES,GROUNDED_PROFI
 from .candidates import COMPOSER_AUDIO_FEATURE_POLICY, MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6
 from .events import HEAD_TIMING_DIM
 from . import MOTIF_TRAINING_POLICY
+from maichart.form.recurrence import RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY
 from .objectives import (LEGACY_ACTION_OBJECTIVE, JOINT_TRAINING_SEMANTICS, RECOVERY_TRAINING_SEMANTICS,
                          resolve_action_objective, training_semantics_for_objective)
 
 
 def motif_training_compatible(payload):
     return ((payload.get('model_config') or {}).get('motif_memory_policy','off')=='off'
-            or payload.get('motif_training_policy')==MOTIF_TRAINING_POLICY)
+            or (payload.get('motif_training_policy')==MOTIF_TRAINING_POLICY
+                and payload.get('motif_input_policy')==RECURRENCE_DESCRIPTOR_POLICY))
+
+
+def generation_motif_input_policy(payload):
+    """Keep the audio-relation interpretation that the checkpoint was trained on."""
+    if (payload.get('model_config') or {}).get('motif_memory_policy','off')=='off':
+        return RECURRENCE_DESCRIPTOR_POLICY
+    policy=payload.get('motif_input_policy',LEGACY_RECURRENCE_DESCRIPTOR_POLICY)
+    if policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+        raise ValueError('Unknown Composer motif input policy; update the runtime before generation')
+    return policy
 
 
 _LEGACY_SEMANTICS = 'chart_composer_training_v2_audio_only_candidate_actions'
@@ -120,6 +132,7 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
             architecture_features='ordered_lens_interpolated_plan_banded_pointer_compositional_actions_v1')
         if model.config.motif_memory_policy!='off':
             payload['motif_training_policy']=MOTIF_TRAINING_POLICY
+            payload['motif_input_policy']=RECURRENCE_DESCRIPTOR_POLICY
     _write_payload(path,payload)
     return payload
 
@@ -169,6 +182,7 @@ def validate(payload):
             f'{exc}。请更新本工作区代码并重启正在使用的 WebUI 后端，再重新检查 checkpoint。') from exc
     from .model import validate_supported_context_policies
     validate_supported_context_policies(config)
+    generation_motif_input_policy(payload)
     objective=resolve_action_objective((payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
                                       architecture_profile=config.architecture_profile)
     if config.architecture_profile not in {'legacy_v2',*WORKLOAD_PROFILES}:
@@ -261,7 +275,7 @@ def inspect_payload(payload):
         if config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != current_semantics:
             migration = 'Older grounded planning/recovery contracts require explicit finetune with a new output directory'
         elif not motif_training_compatible(payload):
-            migration = 'Motif symbolic dropout contract changed; use explicit finetune with a new output directory'
+            migration = 'Motif input/dropout contract changed; use explicit finetune with a new output directory'
         elif config.architecture_profile == 'music_context_v2' and payload.get('training_semantics') != TRAINING_SEMANTICS:
             migration = 'Existing music-context contracts require explicit finetune under the current training contract'
         elif config.architecture_profile not in {'music_context_v2',GROUNDED_PROFILE}:
@@ -271,6 +285,7 @@ def inspect_payload(payload):
             'epoch':payload.get('epoch'),'optimizer_steps':payload.get('optimizer_steps',0),
             'training_semantics':payload.get('training_semantics'),'error':error,
             'motif_training_policy':payload.get('motif_training_policy'),
+            'motif_input_policy':payload.get('motif_input_policy'),
             'audio_feature_policy':payload.get('audio_feature_policy','legacy'),
             'workload_curve_trained':bool(config and config.architecture_profile in WORKLOAD_PROFILES
                                          and payload.get('optimizer_steps',0)>0),

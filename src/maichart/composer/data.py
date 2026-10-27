@@ -17,6 +17,7 @@ import torch
 from torch.utils.data import Dataset
 
 from maichart.form.data import FormDataset
+from maichart.form.recurrence import RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY
 from maichart.stream.context import prefix_action_state
 from maichart.generation.sustain_state import SustainStateIndex
 from maichart.stream.audio_bounds import generation_bounds
@@ -98,7 +99,9 @@ class ComposerDataset(Dataset):
             preparation_workers=preparation_workers,audio_cache_gb=max(0.,float(audio_cache_gb))*.25,
             limit_charts=limit_charts,quality_enabled=quality_enabled,
             preserve_excluded_context=True,quality_profile='musical_evidence_v1',
-            rhythm_geometry_profile='none',audio_profile='rational_audio_queries_v1')
+            rhythm_geometry_profile='none',audio_profile='rational_audio_queries_v1',
+            recurrence_descriptor_policy=(RECURRENCE_DESCRIPTOR_POLICY if motif_memory_policy!='off'
+                                          else LEGACY_RECURRENCE_DESCRIPTOR_POLICY))
         records = list(self.base.songs)
         self._split_cache: dict[str, tuple[str, ...]] = {}
         self._text_meta_cache: dict[str, tuple] = {}
@@ -282,6 +285,11 @@ class ComposerDataset(Dataset):
             fingerprint=json.loads(self.fingerprint)
             fingerprint.update(action_state_policy=action_state_policy,motif_memory_policy=motif_memory_policy,
                                motif_max_events=self.motif_max_events)
+            if motif_memory_policy!='off':
+                from .motif_memory import motif_relations_fingerprint
+                fingerprint.update(motif_input_policy=RECURRENCE_DESCRIPTOR_POLICY,
+                    motif_relations_sha256=motif_relations_fingerprint(
+                        (i, getattr(records[i][0], 'relations', None)) for i in sorted(self.event_views)))
             self.fingerprint=json.dumps(fingerprint,sort_keys=True)
         if not self.samples:
             raise ValueError('Composer has no eligible events after candidate filtering; check manifest and candidate recall')

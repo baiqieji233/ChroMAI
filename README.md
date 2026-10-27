@@ -4,7 +4,11 @@
 
 **当前开发主路线是 ChartComposer：模型族 `chart_composer_v1`，新训练默认架构 `audio_grounded_v3`。** 本文按 2026-10-27 的工作区实现核实。旧 event、song-form 和 stream 模型保留各自的兼容入口；它们的参数、检查点和输出文件不完全相同。
 
-**最新配置学习修复（2026-10-27）：** 已修正旧评分中结束标记与事件长度造成的偏差，并补上模型生成历史之后的配置续接训练。主界面通过“配置学习目标”明确选择，旧模型不会自动迁移。原v13仍在7860服务训练；包含新控件的本机主工作台为[7872](http://127.0.0.1:7872/)。只改评分时ABAB仍会增加，配置恢复短测又出现Touch升高，因此后者保留为实验选项，不推荐立即用于正式长程。面向协作者的解释见[配置重复的原因、修复与验证](docs/COMPOSER_CONFIGURATION_LEARNING_ROOT_CAUSE_20261027_ZH.md)。
+**全面审查入口（2026-10-27）：** [当前项目架构与全链路排查交接](docs/COMPOSER_FULL_ARCHITECTURE_AUDIT_HANDOFF_20261027_ZH.md)说明主界面、数据、模型、训练、生成和共享基础层，也列出需要重新检查的既有假设。本文档不把此前通过的局部测试视为完整质量验收。
+
+**最新复核与修复：** 五组历史音频/相对关系短训没有胜过基线，未加入正式网络。确认运行中v13的动机输入命中很少；本轮修复了平坦声学通道放大极小噪声的问题，并补上动机关联图的训练身份校验。旧启用动机模型在新版代码接续时须finetune到新目录；原v13继续在7860训练，新验证工作台为[7873](http://127.0.0.1:7873/)。实测与边界见[独立审查复核](docs/COMPOSER_INDEPENDENT_REVIEW_VALIDATION_20261027_ZH.md)。
+
+**此前配置学习修复：** 主界面“配置学习目标”可选择完整事件联合似然、实验性配置恢复。只改评分时ABAB仍会增加，配置恢复短测又出现Touch升高，均未宣布音乐质量通过。面向协作者的解释见[配置重复的原因、修复与验证](docs/COMPOSER_CONFIGURATION_LEARNING_ROOT_CAUSE_20261027_ZH.md)。
 
 **下一位智能体的接手入口：** [项目现状、训练实现与配置能力学习效率交接](docs/COMPOSER_CONFIGURATION_LEARNING_HANDOFF_20261026_ZH.md)。包含带时间的v12训练快照、数据与模型流程、loss口径、已验证修复，以及提高配置能力在每次更新和每GPU小时中学习效果的实验方案。
 
@@ -334,11 +338,11 @@ dataset/
 
 **目录版本号与训练合同版本号是两回事。** 本工作区保留的 `Prism_composer_v7` 属于旧 v8 合同，`Prism_composer_v8` 属于旧 v9 合同，`Prism_composer_v9` 属于旧 v10 合同。当前同时支持旧目标的 `chart_composer_training_v11_history_relation_mask`、联合似然的 `chart_composer_training_v12_joint_event_likelihood`，以及增加配置恢复训练的 `chart_composer_training_v13_configuration_recovery`。正在训练的目录 `prism_composer_v13` 仍属v11合同。切换目标须finetune到新目录；同目标且其他合同兼容时可resume。已有模型的实际尺寸是384维、6层、8头、前馈维度1536，与表单的新训练默认值不同；CLI / API 会继承未显式填写的父模型主干参数，显式填写时仍需兼容。
 
-动机分支另有训练约定：启用了动机、但没有`motif_training_policy=symbolic_masked_archive_v1`的旧实验模型，仍可生成；继续训练请选finetune和新目录。检查点检查会说明原因。没有开启动机的模型不受这项迁移影响。
+动机分支另有训练约定：启用了动机的旧模型，需要同时具备`motif_training_policy=symbolic_masked_archive_v1`和`motif_input_policy=temporal_noise_stable_v2`才符合当前续训约定；数据指纹还会检查实际动机关联图。旧模型仍可生成；接续训练请选finetune和新目录，检查点检查会说明原因。没有开启动机的模型不受这项迁移影响。不要手工改检查点标记来跳过迁移。
 
 本机此前的v9 / 20轮目标及64×6重分批属于历史实验，记录见[原始训练排查](docs/COMPOSER_V9_FRESH_DIAGNOSIS_20261025_ZH.md)和[显存与续训修复](docs/COMPOSER_GPU_RESIDENCY_FIX_20261025_ZH.md)。v11已另存第5轮 / 17,500更新点；v12后续在第5轮发现退化，现已停止，并保留15,500、16,000、17,000完整点。保护修复与实际短训结果见[最新复核](docs/COMPOSER_SDPA_STABILITY_FIX_20261026_ZH.md)。
 
-2026-10-27本轮已加载全部配置训练修复的主工作台为[7872](http://127.0.0.1:7872/)。7860服务保留以监控运行中的v13；7871保留此前版本。日后重新启动服务，以启动窗口显示的地址及后端能力为准。
+2026-10-27本轮已加载动机输入校验修复的主工作台为[7873](http://127.0.0.1:7873/)。7860服务保留以监控运行中的v13；7871/7872保留此前版本。日后重新启动服务，以启动窗口显示的地址及后端能力为准。
 
 ### 6.3 常用训练参数
 

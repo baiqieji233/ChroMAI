@@ -26,6 +26,7 @@ from .candidates import (COMPOSER_AUDIO_FEATURE_POLICY,candidate_beats,
 from .model import ChartComposer, WORKLOAD_PROFILES, MUSIC_PROFILES, GROUNDED_PROFILE
 from .generation_settings import resolve_seed,resolve_condition
 from .configuration_observation import configuration_observation
+from .checkpoint import generation_motif_input_policy
 from maichart.tempo_clock import TempoClock
 from .acoustics import AcousticContext
 from .workload import build_workload_targets, causal_ledger, event_statistics
@@ -467,7 +468,9 @@ def generate(args):
     audio=extract_rational_audio(args.audio,cache_dir=Path(args.checkpoint).parent/'audio_cache',evidence_profile='balanced_evidence_v1')
     tempo=(normalize_tempo_map(json.loads(Path(args.tempo_map).read_text(encoding='utf-8-sig')))
            if args.tempo_map else [EventTempo(Fraction(0),args.bpm or audio.tempo_bpm)])
-    song=organize_song(audio,tempo,args.first,max_seconds=999.,quality_profile='musical_evidence_v1')
+    motif_input_policy=generation_motif_input_policy(payload)
+    song=organize_song(audio,tempo,args.first,max_seconds=999.,quality_profile='musical_evidence_v1',
+        recurrence_descriptor_policy=motif_input_policy)
     clock=TempoClock(song.tempo,song.first)
     values,times=composer_audio_nodes(song,policy=COMPOSER_AUDIO_FEATURE_POLICY if learned else 'legacy')
     bounds=generation_bounds(audio,trim_exact_silence=True);end_sec=bounds['effective_end_sec']
@@ -760,6 +763,9 @@ def generate(args):
             'action_history_strength':action_history_strength,'action_type_temperature':type_temperature,'action_type_min_p':type_min_p,
             'audio_pointer_training_weight':payload.get('args',{}).get('audio_pointer_weight'),
             'trained_action_objective_policy':payload.get('args',{}).get('action_objective_policy','event_balanced_v1'),
+            'trained_motif_input_policy':(payload.get('motif_input_policy','legacy_temporal_unit_v1')
+                if model.config.motif_memory_policy!='off' else 'off'),
+            'runtime_motif_input_policy':(motif_input_policy if model.config.motif_memory_policy!='off' else 'off'),
             'pointer_route':'audio_plus_full_context_residual' if music_v2 else 'full_context',
             'stop_reason':'max_events' if len(points)>=max_events else stop_reason,
             'guard':{'checks':guard.checks,'rejections':guard.rejections,'skipped_candidates':skipped_candidates,

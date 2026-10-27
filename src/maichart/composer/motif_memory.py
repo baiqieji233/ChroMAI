@@ -10,6 +10,8 @@ from bisect import bisect_left, bisect_right
 from dataclasses import dataclass
 from fractions import Fraction
 import math
+import hashlib
+import json
 
 import numpy as np
 import torch
@@ -17,6 +19,28 @@ from torch import nn
 
 MOTIF_POLICY = 'audio_recurrence_archive_v1'
 MOTIF_POLICIES = {'off', MOTIF_POLICY}
+
+
+def motif_relations_fingerprint(indexed_relations):
+    """Identify the actual retrieval graph, not only the source audio files.
+
+    Bounds, link ranking and phase mapping determine the archive inputs.
+    Similarity/segmentation changes must not silently reuse a training cursor.
+    Descriptors and diagnostic text are not read by Composer retrieval.
+    """
+    records = []
+    for chart_index, relations in indexed_relations:
+        spans = [] if relations is None else sorted(
+            (int(s.index), str(s.start), str(s.end)) for s in relations.spans)
+        # Retrieval consumes rank, not the score magnitude. A harmless numeric
+        # change that leaves the selected ordering intact must not block resume.
+        links = [] if relations is None else sorted(
+            (int(span.index), rank, int(r.source), int(r.phase_shift_bins), int(r.phase_bins))
+            for span in relations.spans
+            for rank, r in enumerate(relations.prior_links(span.index)[:4]))
+        records.append((int(chart_index), spans, links))
+    encoded = json.dumps(sorted(records), sort_keys=True, separators=(',', ':'), allow_nan=False)
+    return hashlib.sha256(encoded.encode('utf-8')).hexdigest()
 
 
 @dataclass(frozen=True, slots=True)

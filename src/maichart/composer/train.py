@@ -558,7 +558,7 @@ def _train(args,explicit_flags):
         if args.resume:
             from .checkpoint import motif_training_compatible
             if not motif_training_compatible(old):
-                raise ValueError('Motif symbolic dropout contract changed; use --init-checkpoint with a new output directory')
+                raise ValueError('Motif input/dropout contract changed; use --init-checkpoint with a new output directory')
     args.action_objective_policy=resolve_action_objective(getattr(args,'action_objective_policy','auto'),
         old.get('args',{}) if old else None,resume=bool(args.resume),architecture_profile=args.architecture_profile)
     semantics=training_semantics_for_objective(args.architecture_profile,args.action_objective_policy)

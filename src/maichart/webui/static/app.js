@@ -3635,6 +3635,7 @@ function renderChartComposerCheckpointInspection(data) {
     `schema：${data?.schema || "未记录"}`,
     `架构：${config.architecture_profile || "未记录"}`,
     `配置学习目标：${data?.args?.action_objective_policy??'event_balanced_v1'}`,
+    `动机输入策略：${config.motif_memory_policy==='off'?'关闭':data?.motif_input_policy??'旧版（续训须检查迁移说明）'}`,
     `历史几何：${config.history_anchor_policy??'legacy_digit_v1'}；持续状态：${config.action_state_policy??'committed_legacy_v1'}`,
     `历史记忆幅度策略：${config.history_memory_policy??'unbounded_v1'}；历史记忆RMS上限：${config.history_memory_rms_bound??8}`,
     `历史跨注意力后端：${config.history_attention_policy??'auto_v1'}`,
@@ -4216,8 +4217,8 @@ async function submitTrain(options = {}) {
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
-        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v8_configuration_recovery')
-      throw new Error('当前服务尚未加载 Composer 配置学习目标控件。请使用更新后的 WebUI 后端；有活动训练时先保留原服务监控训练。');
+        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v9_motif_input_identity')
+      throw new Error('当前服务尚未加载 Composer 动机输入兼容性检查。请使用更新后的 WebUI 后端；有活动训练时先保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
