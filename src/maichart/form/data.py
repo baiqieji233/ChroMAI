@@ -29,7 +29,7 @@ from maichart.generation.event_audio import (
 from maichart.generation.sustain_state import SustainStateIndex
 from maichart.form.codec import RationalCodec
 from maichart.form.recurrence import (analyze_recurrence, CausalMotifMemory,
-    RECURRENCE_DESCRIPTOR_POLICY, LEGACY_RECURRENCE_DESCRIPTOR_POLICY)
+    RECURRENCE_DESCRIPTOR_POLICY, LEGACY_RECURRENCE_DESCRIPTOR_POLICY,RECURRENCE_DESCRIPTOR_POLICIES)
 from maichart.form.timing import MetricSpan, normalize_meter_map
 from maichart.form.revision import DraftPoint
 from maichart.form.quality_profile import (
@@ -745,7 +745,7 @@ class FormDataset(Dataset):
             raise ValueError('Unknown rhythm geometry profile')
         self.rhythm_geometry_profile = rhythm_geometry_profile
         self.quality_profile = validate_quality_profile(quality_profile)
-        if recurrence_descriptor_policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+        if recurrence_descriptor_policy not in RECURRENCE_DESCRIPTOR_POLICIES:
             raise ValueError('Unknown recurrence descriptor policy')
         self.curve_bin_seconds = (default_curve_bin_seconds(quality_profile) if curve_bin_seconds is None
                                   else float(curve_bin_seconds))

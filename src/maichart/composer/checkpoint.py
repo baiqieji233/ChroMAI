@@ -3,12 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 import copy,os,tempfile
 import torch
-from . import CHECKPOINT_SCHEMA,FAMILY,INPUT_CONTRACT,TRAINING_SEMANTICS,GROUNDED_TRAINING_SEMANTICS,ACTION_SAMPLING_POLICY
+from . import CHECKPOINT_SCHEMA,FAMILY,INPUT_CONTRACT,RELATIONAL_INPUT_CONTRACT,TRAINING_SEMANTICS,GROUNDED_TRAINING_SEMANTICS,ACTION_SAMPLING_POLICY
+from .sampling_contract import RECOVERY_SAMPLING_POLICIES
 from .model import ChartComposer,ComposerConfig,WORKLOAD_PROFILES,GROUNDED_PROFILE,build_model
 from .candidates import COMPOSER_AUDIO_FEATURE_POLICY, MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6
-from .events import HEAD_TIMING_DIM
+from .events import HEAD_TIMING_DIM,head_timing_dim_for_policy
 from . import MOTIF_TRAINING_POLICY
-from maichart.form.recurrence import RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY
+from maichart.form.recurrence import RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY,RECURRENCE_DESCRIPTOR_POLICIES
 from .objectives import (LEGACY_ACTION_OBJECTIVE, JOINT_TRAINING_SEMANTICS, RECOVERY_TRAINING_SEMANTICS,
                          resolve_action_objective, training_semantics_for_objective)
 
@@ -24,7 +25,7 @@ def generation_motif_input_policy(payload):
     if (payload.get('model_config') or {}).get('motif_memory_policy','off')=='off':
         return RECURRENCE_DESCRIPTOR_POLICY
     policy=payload.get('motif_input_policy',LEGACY_RECURRENCE_DESCRIPTOR_POLICY)
-    if policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+    if policy not in RECURRENCE_DESCRIPTOR_POLICIES:
         raise ValueError('Unknown Composer motif input policy; update the runtime before generation')
     return policy
 
@@ -119,6 +120,8 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
              'dataset_fingerprint':dataset_fingerprint,
              'training_state':(training_state or {}) if optimizer is not None else {},
              'checkpoint_kind':'training' if optimizer is not None else 'inference'}
+    if model.config.head_timing_policy!='merged_pads_v1' or model.config.cross_event_relation_policy!='off':
+        payload['input_contract']=RELATIONAL_INPUT_CONTRACT
     if model.config.architecture_profile==GROUNDED_PROFILE:
         if model.config.history_anchor_policy != model.action_factors.history_anchor_policy:
             raise ValueError('Save history_anchor_policy differs from the effective model representation')
@@ -126,8 +129,10 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
             raise ValueError('Save slide_factor_policy differs from the effective model representation')
         if list(atom_catalog)!=list(model.action_factors.atom_catalog):
             raise ValueError('Save catalog order differs from the compositional action mapping')
+        sampling=args.get('recovery_sampling_policy',ACTION_SAMPLING_POLICY)
+        if sampling not in RECOVERY_SAMPLING_POLICIES:raise ValueError('Unknown recovery_sampling_policy at save')
         payload.update(training_semantics=training_semantics_for_objective(GROUNDED_PROFILE,objective),candidate_policy=MUSIC_CANDIDATE_POLICY_V6,
-            action_sampling_policy=ACTION_SAMPLING_POLICY,
+            action_sampling_policy=sampling,
             atom_catalog=list(atom_catalog),
             architecture_features='ordered_lens_interpolated_plan_banded_pointer_compositional_actions_v1')
         if model.config.motif_memory_policy!='off':
@@ -163,7 +168,7 @@ def read_payload(path):
 def validate(payload):
     if payload.get('schema')!=CHECKPOINT_SCHEMA or payload.get('family')!=FAMILY:
         raise ValueError('Not a chart_composer_v2 checkpoint')
-    if payload.get('input_contract')!=INPUT_CONTRACT:raise ValueError('Composer input contract mismatch')
+    if payload.get('input_contract') not in {INPUT_CONTRACT,RELATIONAL_INPUT_CONTRACT}:raise ValueError('Composer input contract mismatch')
     values=dict(payload['model_config'])
     values.setdefault('architecture_profile','legacy_v2')
     values.setdefault('head_timing_dim',0)
@@ -182,6 +187,9 @@ def validate(payload):
             f'{exc}。请更新本工作区代码并重启正在使用的 WebUI 后端，再重新检查 checkpoint。') from exc
     from .model import validate_supported_context_policies
     validate_supported_context_policies(config)
+    expected_input=(RELATIONAL_INPUT_CONTRACT if config.head_timing_policy!='merged_pads_v1'
+                    or config.cross_event_relation_policy!='off' else INPUT_CONTRACT)
+    if payload.get('input_contract')!=expected_input:raise ValueError('Composer input policy/contract mismatch')
     generation_motif_input_policy(payload)
     objective=resolve_action_objective((payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
                                       architecture_profile=config.architecture_profile)
@@ -199,8 +207,10 @@ def validate(payload):
         if ((semantics in new_semantics or objective!=LEGACY_ACTION_OBJECTIVE)
                 and semantics!=training_semantics_for_objective(GROUNDED_PROFILE,objective)):
             raise ValueError('Composer action objective/training semantics mismatch')
-        if semantics in {_GROUNDED_V10_SEMANTICS,GROUNDED_TRAINING_SEMANTICS,*new_semantics} and payload.get('action_sampling_policy')!=ACTION_SAMPLING_POLICY:
+        if semantics in {_GROUNDED_V10_SEMANTICS,GROUNDED_TRAINING_SEMANTICS,*new_semantics} and payload.get('action_sampling_policy') not in RECOVERY_SAMPLING_POLICIES:
             raise ValueError('Current Composer recovery action sampling policy mismatch')
+        if (payload.get('args') or {}).get('recovery_sampling_policy',payload.get('action_sampling_policy'))!=payload.get('action_sampling_policy'):
+            raise ValueError('Composer recovery sampling metadata mismatch')
     if config.architecture_profile=='music_context_v2':
         # Existing v5 music-context weights remain valid for generation and
         # explicit finetune after a newer training contract is introduced.
@@ -291,8 +301,10 @@ def inspect_payload(payload):
                                          and payload.get('optimizer_steps',0)>0),
             'args':payload.get('args',{}),
             'candidate_policy':payload.get('candidate_policy'),
+            'input_contract':payload.get('input_contract'),
+            'action_sampling_policy':payload.get('action_sampling_policy'),
             'can_resume':bool(valid and config.architecture_profile in {'music_context_v2',GROUNDED_PROFILE}
-                              and config.head_timing_dim==HEAD_TIMING_DIM
+                              and config.head_timing_dim==head_timing_dim_for_policy(config.head_timing_policy)
                               and payload.get('training_semantics')==current_semantics
                               and payload.get('optimizer_state_dict') is not None and motif_training_compatible(payload)),
             'can_init':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),
@@ -327,7 +339,7 @@ def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slot
     if slots < model.config.action_slots:
         raise ValueError('Finetune migration cannot reduce action_slots')
     allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy',
-             'history_memory_policy','history_memory_rms_bound','history_attention_policy'}
+             'history_memory_policy','history_memory_rms_bound','history_attention_policy','head_timing_policy','cross_event_relation_policy'}
     if set(policy_options)-allowed:raise ValueError('Unknown music-context migration option')
     config=ComposerConfig(**{**model.config.to_dict(),**policy_options,'architecture_profile':'music_context_v2',
                              'head_timing_dim':HEAD_TIMING_DIM,'action_slots':slots})
@@ -361,7 +373,8 @@ def migrate_audio_grounded(model,atom_catalog,**options):
     if model.config.architecture_profile not in WORKLOAD_PROFILES:
         raise ValueError('Only Composer workload/music models support this migration')
     config=ComposerConfig(**{**model.config.to_dict(),**options,
-        'architecture_profile':GROUNDED_PROFILE,'head_timing_dim':HEAD_TIMING_DIM})
+        'architecture_profile':GROUNDED_PROFILE,
+        'head_timing_dim':head_timing_dim_for_policy(options.get('head_timing_policy',model.config.head_timing_policy))})
     upgraded=build_model(config,atom_catalog)
     current=upgraded.state_dict()
     for key,value in model.state_dict().items():

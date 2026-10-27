@@ -1,4 +1,4 @@
-"""Conservative reference-continuation supervision after real short rollouts.
+"""Reference-continuation supervision on retained, actually generated histories.
 
 The reference continuation is not an optimal recovery oracle. Legacy training
 supervises its time only; explicit v3 training also supervises its configuration
@@ -19,17 +19,42 @@ from .acoustics import AcousticContext
 from .audio_lens import PLACEMENT_TOLERANCE_SEC
 from .candidates import candidate_beats, candidate_features, interp_candidate_audio
 from .data import collate_composer
-from .events import HEAD_PADS, event_metadata, head_timing_features
+from .events import event_metadata, head_timing_features,head_pads_for_policy,head_pad_indices_for_policy
 from .generate import _history_features
 from .guard import EventGuard
 from .model import MUSIC_PROFILES
 from .workload import prefix_ledger
+from maichart.event_timing import EventPoint
+
+RECOVERY_EPISODE_SCHEMA='committed_generated_episodes_v1'
+
+
+def recovery_episode_state(model):
+    import copy
+    return {'schema':RECOVERY_EPISODE_SCHEMA,'episodes':copy.deepcopy(getattr(model,'_recovery_episodes',[]))}
+
+
+def restore_recovery_episodes(model,state):
+    import copy
+    if state is None:model._recovery_episodes=[];return
+    if state.get('schema')!=RECOVERY_EPISODE_SCHEMA or not isinstance(state.get('episodes'),list) or len(state['episodes'])>8:
+        raise ValueError('Invalid recovery episode state')
+    for record in state['episodes']:
+        if record is None:continue
+        if (not isinstance(record,dict) or not isinstance(record.get('sample_index'),int)
+                or record['sample_index']<0 or not isinstance(record.get('events'),list) or len(record['events'])>132):
+            raise ValueError('Invalid recovery episode record')
+        for item in record['events']:
+            if not isinstance(item,(tuple,list)) or len(item)!=2 or not isinstance(item[1],str):
+                raise ValueError('Invalid recovery episode event')
+            Fraction(item[0])
+    model._recovery_episodes=copy.deepcopy(state['episodes'])
 
 
 class RecoveryBuilder:
     def __init__(self, dataset, model=None, device='cpu', *, propose=None,
                  tolerance_sec=PLACEMENT_TOLERANCE_SEC, guard_factory=EventGuard,
-                 supervise_actions=False):
+                 supervise_actions=False,maximum_generated_events=4):
         self.dataset, self.model = dataset, model
         self.device, self.propose = torch.device(device), propose
         self.tolerance_sec = float(tolerance_sec)
@@ -37,6 +62,9 @@ class RecoveryBuilder:
             raise ValueError('Recovery tolerance must be finite and at least placement tolerance')
         self.guard_factory = guard_factory
         self.supervise_actions = bool(supervise_actions)
+        if not 4<=maximum_generated_events<=132:raise ValueError('Invalid recovery episode horizon')
+        self.maximum_generated_events=int(maximum_generated_events)
+        self.last_reference_kind=None
         self._state_cache = None
         self._guard_cache = None
 
@@ -111,8 +139,9 @@ class RecoveryBuilder:
         else:
             state=IncrementalState(song.tempo,song.first)
             state_start=0
-        last_seconds = np.full(len(HEAD_PADS), np.nan)
-        last_beats = np.full(len(HEAD_PADS), np.nan)
+        timing_policy=getattr(ds,'head_timing_policy','merged_pads_v1')
+        last_seconds = np.full(len(head_pads_for_policy(timing_policy)), np.nan)
+        last_beats = np.full(len(last_seconds), np.nan)
         for position,point in enumerate(prefix):
             meta = event_metadata(str(point.note_text))
             if len(meta.atoms) > ds.action_slots or any(atom not in ds.atom_to_id for atom in meta.atoms):
@@ -124,7 +153,7 @@ class RecoveryBuilder:
             second = float(clock.at(point.beat))
             prefix_seconds.append(second)
             counts.append(len(meta.heads))
-            for pad in meta.head_pad_indices:
+            for pad in head_pad_indices_for_policy(meta,timing_policy):
                 last_seconds[pad], last_beats[pad] = second, float(point.beat)
             if position>=state_start:state.append(point)
         self._state_cache=(id(views),signature,state)
@@ -183,14 +212,16 @@ class RecoveryBuilder:
         """Return ``(item, reason)``; rejected samples return ``(None, reason)``.
 
         Prefix must consist of the exact context before the anchor followed by
-        two to four actual model events. Only continuation time and explicitly
+        actual model events within the bounded episode. Each visit adds only
+        two to four new events. Only continuation time and explicitly
         enabled legal reference actions are supervised. Independent authored
         placement, workload and future labels remain masked.
         """
         sample, song, views, table = self._environment(sample_index)
         prefix = list(prefix)
+        self.last_reference_kind=None
         anchor = sample.event_index
-        if not 2 <= generated_count <= 4 or len(prefix) != anchor + generated_count:
+        if not 2 <= generated_count <= self.maximum_generated_events or len(prefix) != anchor + generated_count:
             return None, 'invalid_rollout_length'
         if any((p.beat, p.note_text) != (q.beat, q.note_text)
                for p, q in zip(prefix[:anchor], views.context_points[:anchor])):
@@ -205,6 +236,8 @@ class RecoveryBuilder:
             return None, 'no_reference_continuation'
         boundary = float(views.seconds[anchor-1]) if anchor else 0.
         target = views.context_points[target_index]
+        counts=event_metadata(target.note_text).type_counts
+        self.last_reference_kind=('mixed' if sum(counts[:3]) and sum(counts[3:]) else 'touch' if sum(counts[3:]) else 'button')
         if (not views.trusted[target_index]
                 or float(views.window_weight(boundary, views.seconds[target_index])) <= 0.):
             return None, 'unknown_reference_span'
@@ -253,7 +286,7 @@ class RecoveryBuilder:
             item['action_weight'] = torch.tensor(1.)
         return item, 'accepted'
 
-    def rollout(self, sample_index, *, steps=2, propose=None):
+    def rollout(self, sample_index, *, steps=2, propose=None,initial_prefix=None):
         """Run a real model callback for each event; return prefix or rejection."""
         if steps not in (2, 3, 4):
             raise ValueError('Recovery rollouts must contain two to four events')
@@ -261,8 +294,13 @@ class RecoveryBuilder:
         if propose is None:
             raise ValueError('Recovery requires an actual model proposal callback')
         sample, song, views, table = self._environment(sample_index)
-        prefix = list(views.context_points[:sample.event_index])
+        prefix = list(views.context_points[:sample.event_index] if initial_prefix is None else initial_prefix)
+        if (not sample.event_index<=len(prefix)<=sample.event_index+self.maximum_generated_events-steps
+                or any((p.beat,p.note_text)!=(q.beat,q.note_text)
+                       for p,q in zip(prefix[:sample.event_index],views.context_points[:sample.event_index]))):
+            return None,'invalid_episode_prefix'
         guard = self._guard(song, views, prefix, sample.event_index)
+        if guard is None:return None,'illegal_generated_prefix'
         for _ in range(steps):
             item, candidates = self._inputs(prefix, sample_index)
             if item is None:
@@ -283,6 +321,36 @@ class RecoveryBuilder:
             prefix.append(point)
         self._guard_cache=((id(views),sample.event_index,tuple((p.beat,p.note_text) for p in prefix)),guard)
         return prefix, 'accepted'
+
+    def batch_from_episodes(self,indices,episodes,*,steps=2):
+        """Advance a bounded number of real proposals, retaining generated histories."""
+        items=[];outcomes=Counter();updated=[];reference_types={};lengths=[]
+        for slot,default_index in enumerate(indices):
+            record=episodes[slot] if slot<len(episodes) else None
+            if record and len(record['events'])+steps>self.maximum_generated_events:record=None
+            index=int(record['sample_index'] if record else default_index)
+            if not 0<=index<len(self.dataset.samples):raise ValueError('Recovery episode sample index is outside the dataset')
+            sample,_,views,_=self._environment(index)
+            generated=[] if record is None else [EventPoint(Fraction(beat),text) for beat,text in record['events']]
+            prefix=list(views.context_points[:sample.event_index])+generated
+            prefix,reason=self.rollout(index,steps=steps,initial_prefix=prefix)
+            keep=None
+            if prefix is not None:
+                generated=prefix[sample.event_index:];lengths.append(len(generated))
+                item,reason=self.build(prefix,index,generated_count=len(generated))
+                kind=self.last_reference_kind
+                if kind:
+                    values=reference_types.setdefault(kind,{'accepted':0,'rejected':0,'accepted_weight':0.,'rejected_weight':0.})
+                    outcome='accepted' if item is not None else 'rejected'
+                    values[outcome]+=1;values[outcome+'_weight']+=float(sample.weight)
+                if item is not None:
+                    items.append({key:value for key,value in item.items() if not key.startswith('_')})
+                if reason not in {'no_reference_continuation','unknown_reference_span','unsupported_generated_prefix'}:
+                    keep={'sample_index':index,'events':[[str(point.beat),point.note_text] for point in generated]}
+            updated.append(keep);outcomes[reason]+=1
+        diagnostics={'generated_history_events':lengths,'maximum_generated_events':self.maximum_generated_events,
+                     'reference_types':reference_types,'self_generated_window':int(self.dataset.history_events)}
+        return (collate_composer(items) if items else None),dict(outcomes),updated,diagnostics
 
     def batch_from_indices(self, indices, *, steps=2, propose=None):
         """Return ``(collated_batch_or_None, rejection_counts)`` on CPU.

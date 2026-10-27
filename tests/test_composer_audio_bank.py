@@ -60,3 +60,37 @@ def test_dataset_reuses_bank_when_resident_cache_is_disabled(tmp_path,monkeypatc
         np.testing.assert_array_equal(first[key].numpy(),second[key].numpy())
     assert dataset.cache_stats()['mapped_bank_hits']==1
     assert dataset.cache_stats()['bytes']==0
+
+
+def test_bank_path_is_resolved_again_after_lazy_source_cache_creation(tmp_path,monkeypatch):
+    from collections import OrderedDict
+    from types import SimpleNamespace
+    import threading
+    from maichart.composer import data
+    source=tmp_path/'late_audio.npz'
+    lazy=SimpleNamespace(path=tmp_path/'track.wav',store=SimpleNamespace(disk_cache_path=lambda path:source))
+    dataset=data.ComposerDataset.__new__(data.ComposerDataset)
+    dataset.base=SimpleNamespace(songs=[(SimpleNamespace(audio=lazy),)])
+    dataset.cache_dir=str(tmp_path);dataset._bank_paths={}
+    dataset._feature_lock=threading.RLock();dataset._feature_cache=OrderedDict()
+    dataset._mapped_bank_cache=OrderedDict();dataset._mapped_bank_cache_limit=2
+    dataset._feature_cache_effective_budget_bytes=0;dataset._feature_cache_bytes=0
+    for name in ('_feature_cache_hits','_feature_cache_misses','_bank_hits','_bank_builds',
+                 '_bank_write_errors','_bank_mmap_loads','_bank_view_hits'):
+        setattr(dataset,name,0)
+    monkeypatch.setattr(dataset,'_check_cache_headroom',lambda:None)
+    monkeypatch.setattr(dataset,'_song_feature_key',lambda index:('late-source',))
+    def resolve(index,**kwargs):
+        source.write_bytes(b'created only by lazy source loading')
+        return SimpleNamespace()
+    monkeypatch.setattr(dataset,'_source_song',resolve)
+    values=np.arange(360,dtype=np.float32).reshape(3,120);times=np.array([0.,.1,.2])
+    monkeypatch.setattr(data,'composer_audio_nodes',lambda song:(values,times))
+    first=dataset._song_features(0)
+    second=dataset._song_features(0)
+    assert dataset._bank_builds==1
+    assert dataset._bank_hits==1
+    assert dataset._bank_paths[0].is_file()
+    for actual,expected in zip(first,second):
+        np.testing.assert_array_equal(actual,expected)
+        assert isinstance(actual,np.memmap)

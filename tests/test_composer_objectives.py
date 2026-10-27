@@ -59,6 +59,8 @@ def test_actual_training_loss_does_not_shift_a_true_half_stop_probability_under_
 
 
 def test_old_checkpoint_keeps_legacy_and_objective_changes_require_finetune():
+    assert resolve_action_objective('auto') == RECOVERY_ACTION_OBJECTIVE
+    assert resolve_action_objective('auto', architecture_profile='music_context_v2') == LEGACY_ACTION_OBJECTIVE
     assert resolve_action_objective('auto', {}, resume=True) == LEGACY_ACTION_OBJECTIVE
     assert resolve_action_objective('auto', {'action_objective_policy': JOINT_ACTION_OBJECTIVE}, resume=True) == JOINT_ACTION_OBJECTIVE
     with pytest.raises(ValueError, match='finetune'):

@@ -27,12 +27,14 @@ from .model import ChartComposer, WORKLOAD_PROFILES, MUSIC_PROFILES, GROUNDED_PR
 from .generation_settings import resolve_seed,resolve_condition
 from .configuration_observation import configuration_observation
 from .checkpoint import generation_motif_input_policy
+from .sampling_contract import RETRY_POLICIES
 from maichart.tempo_clock import TempoClock
 from .acoustics import AcousticContext
 from .workload import build_workload_targets, causal_ledger, event_statistics
-from .guard import EventGuard
+from .guard import EventGuard,first_rejected_prefix
+from . import LEGACY_ACTION_SAMPLING_POLICY
 from .events import (HEAD_PADS, event_metadata, head_timing_features,
-                     history_event_features)
+                     history_event_features,head_pads_for_policy,head_pad_indices_for_policy)
 from .candidates import MUSIC_CANDIDATE_POLICY
 
 GROUNDED_POINTER_SAMPLING_POLICY = 'joint_t1_bin_mass_within_bin_temperature_v1'
@@ -66,6 +68,8 @@ def parser():
         help='relative probability floor for four action types, 0 disables; preserves conditional Touch rings')
     p.add_argument('--min-same-head-ms',type=float,default=50.,
         help='minimum same-pad head spacing in milliseconds; 0 disables this generation safety policy')
+    p.add_argument('--action-retry-policy',choices=('auto',*sorted(RETRY_POLICIES)),default='auto',
+        help='auto inherits the checkpoint sampling contract; failed_prefix_v2 keeps valid first atoms when a later combination fails')
     p.add_argument('--intercept-tap-on-slide',action=argparse.BooleanOptionalAction,default=False,
         help='intercept TapOnSlide in EventGuard and post-process; default only reports it')
     return p
@@ -268,7 +272,7 @@ def _compile_composer_chart(points, tempo, first, condition):
 
 def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), blocked=(), max_heads=2,diagnostics=None,
                     slot_decoder=None,blocked_first=(),head_metadata=None,canonical_order=False,touch_layout_policy='open',
-                    type_temperature=1.,type_min_p=0.):
+                    type_temperature=1.,type_min_p=0.,blocked_prefixes=()):
     if touch_layout_policy not in {'open','legacy_two_heads'}:
         raise ValueError('unknown touch_layout_policy')
     selected=[]
@@ -292,6 +296,10 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
         if canonical_order and selected:
             mask_np[1:lookup[selected[-1]]+1]=False
         if slot==0 and blocked_first: mask_np[list(blocked_first)]=False
+        prefix=tuple(selected)
+        for rejected in blocked_prefixes:
+            if len(rejected)==slot+1 and tuple(rejected[:-1])==prefix:
+                mask_np[lookup[rejected[-1]]]=False
         for atom in selected: mask_np[lookup[atom]]=False
         allowed=np.flatnonzero(mask_np).tolist()
         if not allowed:
@@ -454,6 +462,12 @@ def generate(args):
     learned=model.config.architecture_profile in WORKLOAD_PROFILES
     music_v2=model.config.architecture_profile in MUSIC_PROFILES
     grounded=model.config.architecture_profile==GROUNDED_PROFILE
+    retry_policy=getattr(args,'action_retry_policy','auto')
+    if retry_policy=='auto':
+        retry_policy=('failed_prefix_v2' if payload.get('action_sampling_policy')==ACTION_SAMPLING_POLICY
+                      else 'legacy_first_atom_v1')
+    if retry_policy not in RETRY_POLICIES:raise ValueError('Unknown action_retry_policy')
+    runtime_sampling_policy=(ACTION_SAMPLING_POLICY if retry_policy=='failed_prefix_v2' else LEGACY_ACTION_SAMPLING_POLICY)
     touch_history_guard_requested=bool(getattr(args,'touch_history_guard',True))
     touch_history_guard=touch_history_guard_requested and grounded and action_temperature>0
     if not music_v2 and pointer_history_strength!=1.:
@@ -494,8 +508,8 @@ def generate(args):
         lens_cache_hits=lens_cache_misses=0
     intercept_tap_on_slide=bool(getattr(args,'intercept_tap_on_slide',False))
     guard=EventGuard(song.tempo,song.first,end_sec,min_same_head_sec=min_same_head_ms/1000.,intercept_tap_on_slide=intercept_tap_on_slide,touch_layout_policy=touch_layout_policy)
-    last_head_seconds=np.full(len(HEAD_PADS),np.nan)
-    last_head_beats=np.full(len(HEAD_PADS),np.nan)
+    last_head_seconds=np.full(len(head_pads_for_policy(model.config.head_timing_policy)),np.nan)
+    last_head_beats=np.full(len(last_head_seconds),np.nan)
     history_seconds=[];history_heads=[];head_prefix=[0.];skipped_candidates=0;stop_reason='audio_range_exhausted'
     context_coverage=[]
     grammar=_NoteGrammar.from_atoms(atoms)
@@ -518,7 +532,9 @@ def generate(args):
         'architecture_profile':model.config.architecture_profile,
         'head_timing_dim':model.config.head_timing_dim,'candidate_policy':candidate_policy,
         'trained_candidate_policy':trained_candidate_policy,'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,
-        'action_sampling_policy':ACTION_SAMPLING_POLICY,
+        'action_sampling_policy':runtime_sampling_policy,
+        'trained_action_sampling_policy':payload.get('action_sampling_policy'),
+        'action_retry_policy':retry_policy,
         'history_anchor_policy':getattr(model.config,'history_anchor_policy','legacy_digit_v1'),
         'history_memory_policy':model.config.history_memory_policy,
         'history_memory_rms_bound':model.config.history_memory_rms_bound,
@@ -634,7 +650,8 @@ def generate(args):
                     state_base=output['selected_state_base'],state_keep=output['selected_state_keep'])
             decision=model.decode_candidate(output['candidate_context'],torch.tensor([choice],device=device),
                  project_actions=not learned,audio_context=output.get('audio_action_context'),
-                 **({**memory,'motif_strength':motif_strength} if grounded else {}))
+                 **({**memory,'motif_strength':motif_strength,
+                     'previous_heads':output.get('previous_heads')} if grounded else {}))
             occupied,blocked,_=constraints[choice]
             cooldown_blocked=set(blocked)|{pad for pad,prior in guard.last_head_seconds.items()
                 if cand_sec-prior<guard.min_same_head_sec-1e-9}
@@ -643,8 +660,10 @@ def generate(args):
             decoder=(lambda slot,chosen: action_logits_with_touch_guard(model,decision['action_context'][0],slot,
                 [atom_to_id[atom] for atom in chosen],audio_context=audio_act,
                  history_strength=action_history_strength,enabled=touch_history_guard,touch_mask=touch_mask,
-                diagnostics=decoder_diagnostics,log_odds_bound=touch_history_bound)) if learned else None
+                diagnostics=decoder_diagnostics,log_odds_bound=touch_history_bound,
+                previous_heads=(decision['previous_heads'][0] if 'previous_heads' in decision else None))) if learned else None
             blocked_first=set()
+            blocked_prefixes=set()
             for retry in range(6):
                 decoder_diagnostics.clear()
                 slot_rows=(torch.zeros((model.config.action_slots,len(atoms)+1),device=device)
@@ -653,7 +672,7 @@ def generate(args):
                     occupied=occupied,blocked=cooldown_blocked,max_heads=2,diagnostics=sampling,
                     slot_decoder=decoder,blocked_first=blocked_first,head_metadata=head_metadata,
                     canonical_order=music_v2,touch_layout_policy=touch_layout_policy,
-                    type_temperature=type_temperature,type_min_p=type_min_p)
+                    type_temperature=type_temperature,type_min_p=type_min_p,blocked_prefixes=blocked_prefixes)
                 if proposed:
                     guided=bool(decoder_diagnostics.get('applied'))
                     sampling['touch_guard_proposals']+=int(guided)
@@ -666,10 +685,15 @@ def generate(args):
                         sampling['touch_guard_safety_rejections']+=1
                 sampling['fallback_count']+=1
                 if proposed:
-                    blocked_first.add(atom_to_id[proposed[0]])
+                    if retry_policy=='failed_prefix_v2':
+                        blocked_prefixes.add(first_rejected_prefix(guard,beat,proposed,protect_reported_hard=guided))
+                    else:blocked_first.add(atom_to_id[proposed[0]])
                     if guard.last_reason=='repeated_head_too_soon':
                         for head in event_metadata('/'.join(proposed)).heads:
-                            cooldown_blocked.add(f'A{head}' if touch_layout_policy=='legacy_two_heads' and str(head).isdigit() else str(head))
+                            pad=f'A{head}' if touch_layout_policy=='legacy_two_heads' and str(head).isdigit() else str(head)
+                            prior=guard.last_head_seconds.get(pad)
+                            if retry_policy=='legacy_first_atom_v1' or (prior is not None and cand_sec-prior<guard.min_same_head_sec-1e-9):
+                                cooldown_blocked.add(pad)
             if selected: break
             logits[choice]=float('-inf')
         if not selected:
@@ -681,7 +705,7 @@ def generate(args):
         text='/'.join(selected)
         event=EventPoint(beat,text)
         points.append(event); action_index.append(event);guard.commit(event)
-        for pad in event_metadata(text).head_pad_indices:
+        for pad in head_pad_indices_for_policy(event_metadata(text),model.config.head_timing_policy):
             last_head_seconds[pad]=float(clock.at(beat));last_head_beats[pad]=float(beat)
         history_seconds.append(float(clock.at(beat)));history_heads.append(event_statistics(text)[0])
         head_prefix.append(head_prefix[-1]+history_heads[-1])
@@ -741,7 +765,8 @@ def generate(args):
             'audio_bounds':bounds,'structured_event_generation':True,'hard_constraints':'exact_heads_and_runtime_miacode_transactions',
             'audio_feature_policy':feature_policy,'candidate_policy':candidate_policy,
             'trained_candidate_policy':trained_candidate_policy,'min_same_head_ms':min_same_head_ms,
-            'action_sampling_policy':ACTION_SAMPLING_POLICY,
+            'action_sampling_policy':runtime_sampling_policy,
+            'trained_action_sampling_policy':payload.get('action_sampling_policy'),
             'history_anchor_policy':getattr(model.config,'history_anchor_policy','legacy_digit_v1'),
             'history_memory_policy':model.config.history_memory_policy,
             'history_memory_rms_bound':model.config.history_memory_rms_bound,
@@ -763,12 +788,16 @@ def generate(args):
             'action_history_strength':action_history_strength,'action_type_temperature':type_temperature,'action_type_min_p':type_min_p,
             'audio_pointer_training_weight':payload.get('args',{}).get('audio_pointer_weight'),
             'trained_action_objective_policy':payload.get('args',{}).get('action_objective_policy','event_balanced_v1'),
+            'action_retry_policy':retry_policy,
+            'head_timing_policy':model.config.head_timing_policy,
+            'cross_event_relation_policy':model.config.cross_event_relation_policy,
             'trained_motif_input_policy':(payload.get('motif_input_policy','legacy_temporal_unit_v1')
                 if model.config.motif_memory_policy!='off' else 'off'),
             'runtime_motif_input_policy':(motif_input_policy if model.config.motif_memory_policy!='off' else 'off'),
             'pointer_route':'audio_plus_full_context_residual' if music_v2 else 'full_context',
             'stop_reason':'max_events' if len(points)>=max_events else stop_reason,
             'guard':{'checks':guard.checks,'rejections':guard.rejections,'skipped_candidates':skipped_candidates,
+                     'retry_prefix_checks':getattr(guard,'retry_prefix_checks',0),
                 'rejection_reasons':dict(guard.reason_counts)},
             'playability':playability.to_dict()}
     if context_coverage:

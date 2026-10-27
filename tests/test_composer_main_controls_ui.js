@@ -20,15 +20,33 @@ function harness(){
     checkedOrDefault:(id)=>el(id).checked,formDevice:()=> 'cpu',
     api:async(path,payload)=>{
       if(path==='/api/composer/inspect')return structuredClone(parent);
-      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v9_motif_input_identity'}};
+      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v10_relational_recovery'}};
       if(path==='/api/composer/train'){submitted=payload;return {task_id:'fake'};}
       throw Error(path);
     }});
-  for(const name of ['chartComposerTrainingPayload','applyChartComposerCheckpointConfig','updateTrainingControls','inspectCheckpoint','submitTrain'])vm.runInContext(fn(name),c);
+  for(const name of ['chartComposerTrainingPayload','updateComposerRecoverySamplingControls','applyChartComposerCheckpointConfig','updateTrainingControls','inspectCheckpoint','submitTrain'])vm.runInContext(fn(name),c);
   c.trainingPayload=c.chartComposerTrainingPayload;
   el('#trainingCheckpointPath').value='parent.pt';
   return {c,el,parent,setMode:value=>{mode=value;},submitted:()=>submitted};
 }
+
+test('New-stage policies stay auto and recovery temperatures remain editable',()=>{
+  const {c,el,setMode}=harness();setMode('finetune');
+  for(const id of ['composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerRecoverySamplingPolicy'])el('#'+id).value='auto';
+  c.applyChartComposerCheckpointConfig({model_config:{head_timing_policy:'merged_pads_v1',cross_event_relation_policy:'off'},
+    action_sampling_policy:'calibrated_kind_touch_rings_v2'},'finetune');
+  c.updateTrainingControls();
+  assert.equal(el('#composerRecoverySamplingPolicy').value,'auto');
+  assert.equal(el('#composerHeadTimingPolicy').value,'auto');
+  assert.equal(el('#composerCrossEventRelationPolicy').value,'auto');
+  assert.equal(el('#composerRecoveryActionTemperature').disabled,false);
+  el('#composerRecoveryPointerTemperature').value='0.9';el('#composerRecoveryActionTemperature').value='0.7';
+  const p=c.chartComposerTrainingPayload();
+  assert.equal(p.recovery_pointer_temperature,.9);assert.equal(p.recovery_action_temperature,.7);
+  el('#composerRecoverySamplingPolicy').value='calibrated_kind_touch_rings_v2';c.updateComposerRecoverySamplingControls();
+  assert.equal(el('#composerRecoveryActionTemperature').disabled,true);
+  assert.equal(el('#composerRecoveryActionTemperature').value,'0.85');
+});
 
 test('Real submit inspection preserves rebatch edits, current optimizer lr and immutable dropout',async()=>{
   const {c,el,submitted}=harness();

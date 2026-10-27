@@ -167,11 +167,13 @@ def test_diagnostic_dataset_inherits_checkpoint_context_contract(monkeypatch):
     args = SimpleNamespace(manifest='manifest.json', cache_dir='cache', limit_charts=2)
     config = SimpleNamespace(candidate_count=96, history_events=128, action_slots=8,
         architecture_profile=GROUNDED_PROFILE, action_state_policy='selected_prefix_v3',
-        motif_memory_policy='audio_recurrence_archive_v1', motif_max_events=12)
+        motif_memory_policy='audio_recurrence_archive_v1', motif_max_events=12,
+        head_timing_policy='separate_pads_v2')
     _diagnostic_dataset(args, SimpleNamespace(config=config))
     assert seen['action_state_policy'] == 'selected_prefix_v3'
     assert seen['motif_memory_policy'] == 'audio_recurrence_archive_v1'
     assert seen['motif_max_events'] == 12
+    assert seen['head_timing_policy'] == 'separate_pads_v2'
 
 
 def test_omitted_prefix_recomputes_candidate_state_from_strict_prefix(tmp_path, monkeypatch):

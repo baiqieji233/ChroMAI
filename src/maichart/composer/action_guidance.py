@@ -41,8 +41,9 @@ def constrain_touch_history(full_logits,audio_logits,touch_mask,*,log_odds_bound
 
 def action_logits_with_touch_guard(model,context,slot,selected_ids,*,audio_context=None,
                                   history_strength=1.,enabled=False,touch_mask=None,diagnostics=None,
-                                  log_odds_bound=TOUCH_HISTORY_LOG_ODDS_BOUND):
-    full=model.action_slot(context,slot,selected_ids,audio_context=audio_context,history_strength=history_strength)
+                                  log_odds_bound=TOUCH_HISTORY_LOG_ODDS_BOUND,previous_heads=None):
+    extra={} if previous_heads is None else {'previous_heads':previous_heads}
+    full=model.action_slot(context,slot,selected_ids,audio_context=audio_context,history_strength=history_strength,**extra)
     if not enabled or audio_context is None:
         return full
     if touch_mask is None:

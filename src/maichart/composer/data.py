@@ -34,7 +34,7 @@ from .candidates import (
     interp_candidate_audio,
 )
 from .events import (EVENT_SEMANTICS, HEAD_PADS, event_metadata,
-                     head_timing_features, history_event_features)
+                     head_timing_features, history_event_features,head_pads_for_policy,head_pad_indices_for_policy)
 from .event_views import EVENT_VIEW_POLICY, EventViews
 from .model import MUSIC_PROFILES,GROUNDED_PROFILE
 from .runtime_memory import cache_capacity, host_memory
@@ -67,13 +67,16 @@ class ComposerDataset(Dataset):
                  candidate_count=96, history_events=128, action_slots=8,
                  preparation_workers=1, audio_cache_gb=4., limit_charts=0,
                  quality_enabled=True, seed=0, architecture_profile='music_context_v2',
-                 action_state_policy='committed_legacy_v1', motif_memory_policy='off', motif_max_events=16):
+                 action_state_policy='committed_legacy_v1', motif_memory_policy='off', motif_max_events=16,
+                 head_timing_policy='merged_pads_v1'):
         started = time.monotonic()
         self.cache_dir = str(cache_dir) if cache_dir is not None else None
         self.codec_atoms=[]; self.atom_to_id={}; self.samples=[]; self.songs=[]
         self.candidate_count=int(candidate_count);self.history_events=int(history_events)
         self.architecture_profile = architecture_profile
         self.action_state_policy=action_state_policy
+        self.head_timing_policy=head_timing_policy
+        self.head_pads=head_pads_for_policy(head_timing_policy)
         self.motif_memory_policy=motif_memory_policy
         self.motif_max_events=int(motif_max_events)
         self.candidate_policy = MUSIC_CANDIDATE_POLICY_V6 if architecture_profile in MUSIC_PROFILES else CANDIDATE_POLICY
@@ -167,7 +170,7 @@ class ComposerDataset(Dataset):
                 from maichart.generation.event_quality import condition_from_events, MIACODE_DURATION_SEMANTICS
                 condition=condition_from_events(
                     [p for p,known in zip(views.context_points,views.trusted) if known],
-                    song.tempo, level=level, duration_sec=max(audio_end_sec,1e-6),
+                    song.tempo, level=level, duration_sec=max(float(song.audio.duration_sec),1e-6),
                     audio=song.audio, audio_first=song.first,
                     duration_semantics=MIACODE_DURATION_SEMANTICS)
             self._song_conditions[song_index]=condition
@@ -290,6 +293,10 @@ class ComposerDataset(Dataset):
                 fingerprint.update(motif_input_policy=RECURRENCE_DESCRIPTOR_POLICY,
                     motif_relations_sha256=motif_relations_fingerprint(
                         (i, getattr(records[i][0], 'relations', None)) for i in sorted(self.event_views)))
+            self.fingerprint=json.dumps(fingerprint,sort_keys=True)
+        if head_timing_policy!='merged_pads_v1':
+            fingerprint=json.loads(self.fingerprint)
+            fingerprint['head_timing_policy']=head_timing_policy
             self.fingerprint=json.dumps(fingerprint,sort_keys=True)
         if not self.samples:
             raise ValueError('Composer has no eligible events after candidate filtering; check manifest and candidate recall')
@@ -414,10 +421,10 @@ class ComposerDataset(Dataset):
         holds = [0.0] * n
         slides = [0.0] * n
         touches = [0.0] * n
-        last_head_seconds = np.full((n, len(HEAD_PADS)), np.nan, dtype=np.float32)
-        last_head_beats = np.full((n, len(HEAD_PADS)), np.nan, dtype=np.float32)
-        seen_seconds = np.full(len(HEAD_PADS), np.nan)
-        seen_beats = np.full(len(HEAD_PADS), np.nan)
+        last_head_seconds = np.full((n, len(self.head_pads)), np.nan, dtype=np.float32)
+        last_head_beats = np.full((n, len(self.head_pads)), np.nan, dtype=np.float32)
+        seen_seconds = np.full(len(self.head_pads), np.nan)
+        seen_beats = np.full(len(self.head_pads), np.nan)
         prior_beat = Fraction(0)
         prior_second = float(clock.at(prior_beat))
         for i, p in enumerate(points):
@@ -436,7 +443,7 @@ class ComposerDataset(Dataset):
             # Snapshot BEFORE this target: current/future heads never enter
             # candidate-relative recency, including on the first event.
             last_head_seconds[i], last_head_beats[i] = seen_seconds, seen_beats
-            for pad in meta.head_pad_indices:
+            for pad in head_pad_indices_for_policy(meta,self.head_timing_policy):
                 seen_seconds[pad], seen_beats[pad] = cur_sec, float(p.beat)
             prior_beat = p.beat
             prior_second = cur_sec
@@ -568,14 +575,15 @@ class ComposerDataset(Dataset):
         return key
 
     def _audio_bank_path(self,song_index,key):
-        if song_index not in self._bank_paths:
+        if self._bank_paths.get(song_index) is None:
             path=None
             audio=self.base.songs[song_index][0].audio
             if self.cache_dir and hasattr(audio,'store') and hasattr(audio,'path'):
                 source_cache=audio.store.disk_cache_path(audio.path)
                 if source_cache is not None and source_cache.is_file():
                     path=bank_path(self.cache_dir,key,source_cache)
-            self._bank_paths[song_index]=path
+            if path is not None:self._bank_paths[song_index]=path
+            return path
         return self._bank_paths[song_index]
 
     def _song_features(self, song_index: int):
@@ -609,6 +617,8 @@ class ComposerDataset(Dataset):
                 song = self._source_song(song_index, cache_in_base=False)
                 arrays = composer_audio_nodes(song)
                 self._bank_builds+=1
+                if path is None:
+                    path=self._audio_bank_path(song_index,key)
                 if path is not None:
                     try:
                         arrays=publish_bank(path,arrays)

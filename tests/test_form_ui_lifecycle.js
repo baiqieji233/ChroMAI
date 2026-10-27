@@ -159,7 +159,7 @@ test("repair summary calls out exhausted budget and partial coverage when report
     renderTaskOnsetDiagnostics() {},
   };
   vm.createContext(context);
-  vm.runInContext(`${functionSource("function renderTaskResults(task) {", "function renderGenerationResult(task) {")}\nglobalThis.render = renderTaskResults;`, context);
+  vm.runInContext(`${functionSource("function composerGenerationSummary(task) {", "function renderGenerationResult(task) {")}\nglobalThis.render = renderTaskResults;`, context);
   context.render({kind: "form_generate", result: {repair_summary: {remaining_actionable_hard: 3,
     budget_exhausted: true, coverage_status: "partial"}}});
   assert.match(container.children[0].textContent, /修订预算已耗尽/);
@@ -176,7 +176,7 @@ test("local load notice preserves separate peak units and reads existing worker 
     renderTaskOnsetDiagnostics() {},
   };
   vm.createContext(context);
-  vm.runInContext(`${functionSource("function renderTaskResults(task) {", "function renderGenerationResult(task) {")}\nglobalThis.render = renderTaskResults;`, context);
+  vm.runInContext(`${functionSource("function composerGenerationSummary(task) {", "function renderGenerationResult(task) {")}\nglobalThis.render = renderTaskResults;`, context);
   context.render({kind:"form_generate", result:{}, logs:[
     '[12:00:00] form_local_load {"peak_all_head_nps":20,"peak_occupied_events_nps":14,"burst_interval_count":1,"burst_intervals":[]}'
   ]});

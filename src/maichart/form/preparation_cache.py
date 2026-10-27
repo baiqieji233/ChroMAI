@@ -13,11 +13,12 @@ import tempfile
 import threading
 import time
 import zipfile
+import inspect
 
 import numpy as np
 
 from maichart.event_timing import EventPoint, EventTempo
-from maichart.form.recurrence import Relation, SongRelations, LEGACY_RECURRENCE_DESCRIPTOR_POLICY
+from maichart.form.recurrence import Relation, SongRelations, LEGACY_RECURRENCE_DESCRIPTOR_POLICY,recurrence_policy_settings
 from maichart.form.timing import MeterChange, MetricSpan, normalize_meter_map
 from maichart.form.quality_profile import (
     enhanced, evidence_profile, density_profile, duration_semantics, descriptor_dim,
@@ -31,9 +32,15 @@ from maichart.generation.sustain_state import SustainStateIndex
 SCHEMA = 'song_form_preparation_v1'
 # Bump when parsing, segmentation, labels or cached tensor semantics change.
 SEMANTICS = 'song_form_preparation_exact_geometry_v1'
+LEGACY_COMPONENT_VERSIONS={'segmentation':'novelty_regions_v1','sustain_parser':'source_beat_markers_v1',
+                          'conditions':'musical_evidence_statistics_v1','event_parser':'strict_simai_events_v1'}
+# Bump the affected component when its prepared outputs change. Ordinary code,
+# logging, typing and storage refactors must not invalidate the whole corpus.
+PREPARATION_COMPONENT_VERSIONS=dict(LEGACY_COMPONENT_VERSIONS)
 _DEPENDENCIES = (
     'form/preparation_cache.py', 'form/data.py', 'form/codec.py',
     'form/rational_audio.py', 'form/waveform_cache.py', 'form/rhythm_geometry.py',
+    'form/native_dynamics.py',
     'form/timing.py', 'form/segmentation.py', 'form/recurrence.py', 'form/curve.py',
     'event_timing.py', 'maidata.py', 'notes.py', 'timing.py', 'duration.py', 'ir.py',
     'generation/event_compile.py', 'generation/event_audio.py', 'generation/event_model.py',
@@ -238,6 +245,24 @@ class PreparationCache:
         }
         profile = options.get('quality_profile', 'legacy')
         recurrence_policy=options.get('recurrence_descriptor_policy',LEGACY_RECURRENCE_DESCRIPTOR_POLICY)
+        from .segmentation import segment_music
+        from .data import organize_song
+        segmentation_defaults=inspect.signature(segment_music).parameters
+        organize_defaults=inspect.signature(organize_song).parameters
+        segmentation_parameters={
+            'min_seconds':organize_defaults['min_seconds'].default,
+            'novelty_threshold':segmentation_defaults['novelty_threshold'].default}
+        recurrence_parameters=recurrence_policy_settings(recurrence_policy)
+        legacy_recurrence={'bins':24,'top_k':3,'min_similarity':.75,'min_separation':1,
+                           'spectral_sample_seconds':None,'attack_sample_seconds':None,'beat_duration_ratio':None}
+        recurrence_values={key:value for key,value in recurrence_parameters.items() if key!='policy'}
+        if (segmentation_parameters!={'min_seconds':2.,'novelty_threshold':.65}
+                or recurrence_values!=legacy_recurrence):
+            identity['settings']['segmentation_parameters']=segmentation_parameters
+            identity['settings']['recurrence_parameters']=recurrence_parameters
+            identity['settings']['component_versions']=dict(PREPARATION_COMPONENT_VERSIONS)
+        elif PREPARATION_COMPONENT_VERSIONS!=LEGACY_COMPONENT_VERSIONS:
+            identity['settings']['component_versions']=dict(PREPARATION_COMPONENT_VERSIONS)
         if recurrence_policy!=LEGACY_RECURRENCE_DESCRIPTOR_POLICY:
             identity['settings']['recurrence_descriptor_policy']=recurrence_policy
         # Only annotated exclusions change preparation. Unannotated stream
@@ -412,6 +437,7 @@ def _decode(metadata, arrays):
     state = SustainStateIndex.__new__(SustainStateIndex)
     state.points, state.tempo_changes, state.first = tuple(points), tuple(tempo), float(song.first)
     state.markers, state._references = metadata['state_markers'], None
+    state._release_index = None
     for marker in state.markers:
         if 'source_beat' in marker:marker['source_beat']=Fraction(marker['source_beat'])
     condition = GenerationCondition.from_dict(metadata['condition'])

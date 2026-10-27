@@ -39,11 +39,27 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'motif_memory_policy':'off','slide_factor_policy':'branch_joint_v2','motif_max_events':16,
                 'touch_layout_policy':'open', 'cpu_threads': 0,'history_memory_rms_bound':8.,
                 'history_memory_policy':'rms_cap_v1','history_attention_policy':'math_v1',
-                'action_objective_policy':'event_balanced_v1'}
+                'action_objective_policy':'joint_event_recovery_v3',
+                'head_timing_policy':'separate_pads_v2','cross_event_relation_policy':'relative_heads_v1',
+                'recovery_sampling_policy':'generation_matched_recovery_prefix_retry_v3',
+                'recovery_pointer_temperature':1.,'recovery_action_temperature':.85}
+    from maichart.composer.sampling_contract import recovery_sampling_settings
+    expected['recovery_sampling_settings']=recovery_sampling_settings(expected['recovery_sampling_policy'])
     assert task.result['effective_settings'] == expected
     for key, value in expected.items():
+        if key=='recovery_sampling_settings':continue
         flag = '--' + key.replace('_', '-')
         assert args[args.index(flag) + 1] == str(value)
+
+
+def test_new_recovery_temperatures_are_forwarded_and_recorded(tmp_path):
+    calls=[];payload=_payload(tmp_path)
+    payload.update(recovery_pointer_temperature=.9,recovery_action_temperature=.7)
+    composer_api.start_train(SimpleNamespace(_json_response=lambda _:None),payload,runtime=_runtime(calls))
+    task,args=calls[0]
+    assert args[args.index('--recovery-pointer-temperature')+1]=='0.9'
+    assert args[args.index('--recovery-action-temperature')+1]=='0.7'
+    assert task.result['effective_settings']['recovery_sampling_settings']['action_temperature']==.7
 
 
 @pytest.mark.parametrize(('key', 'value'), [

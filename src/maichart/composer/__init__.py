@@ -8,9 +8,13 @@ modules while keeping a new checkpoint family and training contract.
 FAMILY = 'chart_composer_v1'
 CHECKPOINT_SCHEMA = 'maichart-chart-composer-checkpoint-v2'
 INPUT_CONTRACT = 'chart_composer_inputs_v2_audio_only_history_state'
+RELATIONAL_INPUT_CONTRACT = 'chart_composer_inputs_v3_separate_pads_relative_heads'
 TRAINING_SEMANTICS = 'chart_composer_training_v6_unified_events_head_timing'
 GROUNDED_TRAINING_SEMANTICS = 'chart_composer_training_v11_history_relation_mask'
-ACTION_SAMPLING_POLICY = 'calibrated_kind_touch_rings_v2'
+LEGACY_ACTION_SAMPLING_POLICY = 'calibrated_kind_touch_rings_v2'
+ACTION_SAMPLING_POLICY = 'generation_matched_recovery_prefix_retry_v3'
 MOTIF_TRAINING_POLICY = 'symbolic_masked_archive_v1'
 
-__all__ = ['FAMILY','CHECKPOINT_SCHEMA','INPUT_CONTRACT','TRAINING_SEMANTICS','GROUNDED_TRAINING_SEMANTICS','ACTION_SAMPLING_POLICY','MOTIF_TRAINING_POLICY']
+__all__ = ['FAMILY','CHECKPOINT_SCHEMA','INPUT_CONTRACT','RELATIONAL_INPUT_CONTRACT',
+           'TRAINING_SEMANTICS','GROUNDED_TRAINING_SEMANTICS','ACTION_SAMPLING_POLICY',
+           'LEGACY_ACTION_SAMPLING_POLICY','MOTIF_TRAINING_POLICY']

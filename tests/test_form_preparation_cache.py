@@ -41,6 +41,9 @@ def test_warm_cache_skips_structure_preparation_and_preserves_all_sample_tensors
     assert cold.preparation_cache_stats['rebuilt'] == 1
     def unexpected(*_args, **_kwargs):
         raise AssertionError('Warm cache must not parse or rebuild chart structure')
+    # Cache identity reads preparation defaults without invoking preparation.
+    import inspect
+    unexpected.__signature__ = inspect.signature(data.organize_song)
     monkeypatch.setattr(data, 'parse_event_chart', unexpected)
     monkeypatch.setattr(data, 'organize_song', unexpected)
     monkeypatch.setattr(data, 'SustainStateIndex', unexpected)

@@ -74,6 +74,7 @@ def interventions(model, inputs, *, decode_context=None):
         if 'selected_state_base' in result:
             extra.setdefault('state_base',result['selected_state_base'])
             extra.setdefault('state_keep',result.get('selected_state_keep'))
+        if 'previous_heads' in result:extra['previous_heads']=result['previous_heads']
         return model.decode_candidate(result['candidate_context'],choice,**extra)['action_logits'][...,0,:]
     baseline=decode(base,inputs)
     workload=base.get('workload')
@@ -274,6 +275,7 @@ def _diagnostic_dataset(args, model):
         candidate_count=model.config.candidate_count,history_events=model.config.history_events,
         action_slots=model.config.action_slots,architecture_profile=model.config.architecture_profile,
         action_state_policy=model.config.action_state_policy,
+        head_timing_policy=model.config.head_timing_policy,
         motif_memory_policy=model.config.motif_memory_policy,
         motif_max_events=model.config.motif_max_events,
         preparation_workers=1,audio_cache_gb=.25)
@@ -331,6 +333,7 @@ def diagnose(args):
             if 'selected_state_base' in probe:
                 decode_extra.update(state_base=probe['selected_state_base'],
                     state_keep=probe.get('selected_state_keep'))
+            if 'previous_heads' in probe:decode_extra['previous_heads']=probe['previous_heads']
             atom_logits=model.decode_candidate(probe['candidate_context'],omitted_choice,
                 **decode_extra)['action_logits'][...,0,:].float()
             atom_probs=atom_logits.softmax(-1)

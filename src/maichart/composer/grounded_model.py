@@ -8,6 +8,7 @@ from .audio_lens import AudioLens
 from .action_factors import CompositionalActions
 from .planning import AudioPlanner,read_plan
 from .stability import bounded_history_memory, history_attention_context
+from .events import merge_separate_head_timing
 
 GROUNDED_PROFILE='audio_grounded_v3'
 BIN_EDGES=(.5,1.,2.,4.,8.)
@@ -52,6 +53,18 @@ class AudioGroundedComposer(ChartComposer):
         self.action_factors=CompositionalActions(list(atom_catalog),width,config.history_anchor_policy,config.slide_factor_policy)
         self.action_relation=nn.Linear(8,width,bias=False)
         nn.init.zeros_(self.action_relation.weight)
+        if config.head_timing_policy=='separate_pads_v2':
+            self.head_timing_detail_projection=nn.Linear(123,width,bias=False)
+            nn.init.zeros_(self.head_timing_detail_projection.weight)
+        if config.cross_event_relation_policy=='relative_heads_v1':
+            self.cross_event_relative_factors=nn.Embedding(8,width)
+            nn.init.zeros_(self.cross_event_relative_factors.weight)
+            self.register_buffer('cross_event_geometry',self.action_factors._normalized_head_lanes.clone(),persistent=False)
+            kinds=[None]+[(None if atom[0] not in '12345678' else
+                2 if any(c in atom for c in '-<>^pqszvwV') else 1 if 'h' in atom else 0) for atom in atom_catalog]
+            for kind in range(3):
+                self.register_buffer(f'cross_event_kind_{kind}',torch.tensor(
+                    [i for i,value in enumerate(kinds) if value==kind],dtype=torch.long),persistent=False)
         if config.motif_memory_policy != 'off':
             from .motif_memory import MotifMemoryAdapter
             self.motif_memory=MotifMemoryAdapter(width)
@@ -101,6 +114,7 @@ class AudioGroundedComposer(ChartComposer):
         else:symbolic_keep=symbolic_keep.to(hidden)
         symbolic=torch.zeros_like(audio_context)
         last_heads=hidden.new_zeros(batch,8)
+        previous_heads=hidden.new_zeros(batch,8)
         if history is not None and history.size(1):
             if history.ndim==2:history=history.unsqueeze(-1)
             padding=history_padding_mask if history_padding_mask is not None else torch.zeros(history.shape[:2],device=history.device,dtype=torch.bool)
@@ -134,10 +148,15 @@ class AudioGroundedComposer(ChartComposer):
             symbolic=symbolic+(tail[:,None]+self.history_gate.tanh()*attended)*lengths.gt(0)[:,None,None]
             last_ids=history[rows,(lengths-1).clamp_min(0)]
             last_heads=self.action_factors.atom_head_lanes[last_ids].any(-2).to(hidden)*tail_valid[:,None]
+            if hasattr(self,'cross_event_relative_factors'):
+                previous_heads=last_heads
         if action_state is not None:
             projected_state=self.action_projection(action_state)
             symbolic=symbolic+(projected_state[:,None] if action_state.ndim==2 else projected_state)
-        symbolic=symbolic+self.head_timing_projection(head_timing.to(hidden))
+        timing=(merge_separate_head_timing(head_timing) if self.config.head_timing_policy=='separate_pads_v2' else head_timing)
+        symbolic=symbolic+self.head_timing_projection(timing.to(hidden))
+        if hasattr(self,'head_timing_detail_projection'):
+            symbolic=symbolic+self.head_timing_detail_projection(head_timing.to(hidden))
         trailing=self.predict_trailing(trailing_audio,condition) if trailing_audio is not None else None
         if ledger is not None:
             keep=((torch.rand(batch,1,1,device=hidden.device)>=self.config.ledger_dropout).to(hidden)
@@ -172,6 +191,8 @@ class AudioGroundedComposer(ChartComposer):
             'pointer_residual_rms':(correction.square()*valid).sum().sqrt()/valid.sum().clamp_min(1).sqrt(),
             'plan_context_rms':candidate_plan.square().mean().sqrt()}
         if trailing is not None:result['trailing_workload']=trailing
+        if hasattr(self,'cross_event_relative_factors'):
+            result['previous_heads']=previous_heads*symbolic_keep
         if self.config.action_state_policy=='selected_prefix_v3':
             # Keep the committed snapshot in the pointer. Only the chosen
             # action query replaces it with state advanced to that time.
@@ -185,13 +206,18 @@ class AudioGroundedComposer(ChartComposer):
                 motif_ids=motif_ids,motif_relative_beats=motif_relative_beats,motif_mask=motif_mask,
                 motif_strength=motif_strength,motif_keep=symbolic_keep,
                 selected_action_state=selected_action_state,state_base=result.get('selected_state_base'),
-                state_keep=result.get('selected_state_keep'),factor_weight=factor_weight))
+                state_keep=result.get('selected_state_keep'),factor_weight=factor_weight,
+                previous_heads=result.get('previous_heads')))
         return result
 
     def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
                          motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None,
                          selected_action_state=None,state_base=None,state_keep=None,factor_weight=None,
-                         project_audio_actions=True):
+                         project_audio_actions=True,previous_heads=None):
+        if hasattr(self,'cross_event_relative_factors') and previous_heads is None:
+            raise ValueError('Cross-event action decoding requires causal previous_heads from the same forward')
+        if previous_heads is not None and previous_heads.shape!=(candidate_context.size(0),8):
+            raise ValueError('previous_heads must match the forward batch [B,8]')
         if project_actions and factor_weight is None:
             factor_weight=self.action_factors.composed_weight()
         if candidate_indices is not None:
@@ -201,6 +227,7 @@ class AudioGroundedComposer(ChartComposer):
                 audio_context=audio_context[rows,candidate_indices]
             if state_base is not None:state_base=state_base[rows,candidate_indices]
         result={'future':self.future_head(candidate_context),'eos_logits':self.eos_head(candidate_context).squeeze(-1),'action_context':candidate_context}
+        if previous_heads is not None:result['previous_heads']=previous_heads
         if self.config.action_state_policy=='selected_prefix_v3':
             if selected_action_state is None or state_base is None:
                 raise ValueError('selected_prefix_v3 requires a causal state at the selected beat')
@@ -250,6 +277,9 @@ class AudioGroundedComposer(ChartComposer):
             full_logits=self.action_head(contexts)+F.linear(contexts,factor_weight)
             if relation is not None:
                 full_logits=full_logits+self.action_factors.relative_logits(contexts,relation)
+            if hasattr(self,'cross_event_relative_factors'):
+                first=self._cross_event_logits(full_logits[...,0,:],contexts[...,0,:],previous_heads)
+                full_logits=torch.cat((first.unsqueeze(-2),full_logits[...,1:,:]),-2)
             result['action_logits']=full_logits
             if audio_contexts is not None:
                 audio_contexts=self.slot_fusion(audio_contexts)
@@ -259,7 +289,22 @@ class AudioGroundedComposer(ChartComposer):
                 result['audio_action_logits']=audio_logits
         return result
 
-    def action_slot(self,context,slot,selected_ids,*,audio_context=None,history_strength=1.):
+    def _cross_event_logits(self,logits,context,previous_heads,strength=1.):
+        """Learn button movement without changing Tap/Hold/Slide/Touch masses."""
+        delta=float(strength)*self.action_factors.relative_logits(context,previous_heads,
+            factor_embedding=self.cross_event_relative_factors,target_geometry=self.cross_event_geometry)
+        result=logits
+        for kind in range(3):
+            ids=getattr(self,f'cross_event_kind_{kind}')
+            if not ids.numel():continue
+            original=logits.index_select(-1,ids).float()
+            adjusted=original+delta.index_select(-1,ids).float()
+            shift=original.logsumexp(-1,keepdim=True)-adjusted.logsumexp(-1,keepdim=True)
+            adjusted=adjusted+shift
+            result=result.index_copy(-1,ids,adjusted.to(logits.dtype))
+        return result
+
+    def action_slot(self,context,slot,selected_ids,*,audio_context=None,history_strength=1.,previous_heads=None):
         if audio_context is not None and float(history_strength)<1.:
             alpha=max(0.,min(1.,float(history_strength)))
             context=alpha*context+(1.-alpha)*audio_context
@@ -270,4 +315,6 @@ class AudioGroundedComposer(ChartComposer):
         logits=self.action_head(slot_context)+self.action_factors(slot_context)
         if selected_ids:
             logits=logits+self.action_factors.relative_logits(slot_context,self.action_factors.atom_head_lanes[ids].any(0))
+        if slot==0 and previous_heads is not None and hasattr(self,'cross_event_relative_factors'):
+            logits=self._cross_event_logits(logits,slot_context,previous_heads,history_strength)
         return logits

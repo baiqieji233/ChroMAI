@@ -7,12 +7,37 @@ from copy import deepcopy
 import math
 from collections import Counter
 
-from maichart.event_timing import seconds_at_beat
+from maichart.event_timing import seconds_at_beat,EventPoint
 from maichart.generation.muri.parser import parse_markers
 from maichart.generation.post_process import PostProcessConfig, detect_chart_conflicts
 from .events import event_metadata
 
 _EPS = 1e-9
+
+
+def first_rejected_prefix(guard,beat,atoms,*,protect_reported_hard=False):
+    """Localize a rejected combination before excluding future proposals.
+
+    Called only after the full event was rejected. Check at most S-1 shorter
+    prefixes; the first bad prefix also catches an illegal first atom. These
+    diagnostic checks do not inflate primary proposal/rejection statistics.
+    """
+    original_reason=guard.last_reason
+    counts={name:getattr(guard,name) for name in ('checks','rejections') if hasattr(guard,name)}
+    reasons=guard.reason_counts.copy() if hasattr(guard,'reason_counts') else None
+    probes=0
+    try:
+        for length in range(1,len(atoms)):
+            probes+=1
+            if not guard.accepts(EventPoint(beat,'/'.join(atoms[:length])),protect_reported_hard=protect_reported_hard):
+                return tuple(atoms[:length])
+        guard.last_reason=original_reason
+        return tuple(atoms)
+    finally:
+        for name,value in counts.items():setattr(guard,name,value)
+        if reasons is not None:
+            guard.reason_counts.clear();guard.reason_counts.update(reasons)
+        guard.retry_prefix_checks=getattr(guard,'retry_prefix_checks',0)+probes
 
 
 @lru_cache(maxsize=2048)

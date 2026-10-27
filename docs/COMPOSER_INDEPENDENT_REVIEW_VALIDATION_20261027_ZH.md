@@ -1,5 +1,7 @@
 # 独立审查复核：单步校准、历史音频原型与动机输入
 
+> 本文保留`331620e`及之前的实验。后续独立审查推动了新一轮结构修改，当前实现和测试见[配置结构修改交接](COMPOSER_RELATIONAL_REWORK_20261027_ZH.md)。本文的“尚未启用”、V2动机及7873服务均属此前快照。
+
 本轮按“确实存在架构问题”的假设做了修复原型，而不止复述审查意见。冻结的v13推理点为 **step29664**，文件SHA256为`cd7d8990caeb5585ca0cb32aa928f30018c0907f591e3b13e24d0c6a488eb232`。原训练与检查点保留。
 
 全面架构入口见[架构与全链路排查交接](COMPOSER_FULL_ARCHITECTURE_AUDIT_HANDOFF_20261027_ZH.md)；机器可读结果见[证据JSON](evidence/COMPOSER_INDEPENDENT_REVIEW_VALIDATION_20261027.json)。

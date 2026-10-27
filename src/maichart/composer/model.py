@@ -8,7 +8,7 @@ from torch import nn
 
 from . import INPUT_CONTRACT
 from .acoustics import CONTEXT_DIM, INTERVAL_DIM, TRAILING_CONTEXT_DIM
-from .events import HEAD_TIMING_DIM
+from .events import HEAD_TIMING_DIM,HEAD_TIMING_POLICIES,head_timing_dim_for_policy
 
 WORKLOAD_PROFILES = {'audio_workload_v1', 'music_context_v2'}
 GROUNDED_PROFILE = 'audio_grounded_v3'
@@ -26,6 +26,8 @@ COMPOSER_POLICY_FIELDS = {
     'slide_factor_policy': (SLIDE_FACTOR_POLICIES, 'marginal_v1', 'branch_joint_v2'),
     'history_memory_policy': (HISTORY_MEMORY_POLICIES, 'unbounded_v1', 'rms_cap_v1'),
     'history_attention_policy': (HISTORY_ATTENTION_POLICIES, 'auto_v1', 'math_v1'),
+    'head_timing_policy': (HEAD_TIMING_POLICIES, 'merged_pads_v1', 'separate_pads_v2'),
+    'cross_event_relation_policy': ({'off','relative_heads_v1'}, 'off', 'relative_heads_v1'),
 }
 
 
@@ -39,6 +41,8 @@ def validate_supported_context_policies(config):
         'slide_factor_policy': values.get('slide_factor_policy','marginal_v1')!='marginal_v1',
         'history_memory_policy': values.get('history_memory_policy','unbounded_v1')!='unbounded_v1',
         'history_attention_policy': values.get('history_attention_policy','auto_v1')!='auto_v1',
+        'head_timing_policy':values.get('head_timing_policy','merged_pads_v1')!='merged_pads_v1',
+        'cross_event_relation_policy':values.get('cross_event_relation_policy','off')!='off',
     }
     for name, invalid in unsupported.items():
         if invalid:raise ValueError(f'{name}={values[name]} requires audio_grounded_v3')
@@ -48,9 +52,11 @@ def resolve_composer_policy(name, requested='auto', parent_config=None, *, resum
     choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
     if not isinstance(requested,str) or requested not in {'auto', *choices}:
         raise ValueError(f'Unknown {name}')
-    if name in {'slide_factor_policy','history_memory_policy','history_attention_policy'} and architecture_profile!=GROUNDED_PROFILE:
+    if name in {'slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy'} and architecture_profile!=GROUNDED_PROFILE:
         fresh=legacy
     inherited = parent_config.get(name, legacy) if parent_config else None
+    if not resume and name in {'head_timing_policy','cross_event_relation_policy'}:
+        inherited=None
     resolved = (inherited or fresh) if requested == 'auto' else requested
     if resume and inherited is not None and resolved != inherited:
         raise ValueError(f'Resume inherits {name}; use explicit finetune in a new directory')
@@ -102,6 +108,8 @@ class ComposerConfig:
     history_memory_policy: str = 'unbounded_v1'
     history_memory_rms_bound: float = 8.
     history_attention_policy: str = 'auto_v1'
+    head_timing_policy: str = 'merged_pads_v1'
+    cross_event_relation_policy: str = 'off'
 
     def __post_init__(self):
         if self.history_anchor_policy not in HISTORY_ANCHOR_POLICIES:
@@ -122,10 +130,11 @@ class ComposerConfig:
             raise ValueError('head_timing_dim must be non-negative')
         if self.head_timing_dim and self.architecture_profile not in MUSIC_PROFILES:
             raise ValueError('head_timing_dim is only supported by music_context_v2')
-        if self.head_timing_dim and self.head_timing_dim != HEAD_TIMING_DIM:
-            raise ValueError(f'music_context_v2 head_timing_dim must equal {HEAD_TIMING_DIM}')
+        expected_head_dim=head_timing_dim_for_policy(self.head_timing_policy)
+        if self.head_timing_dim and self.head_timing_dim != expected_head_dim:
+            raise ValueError(f'head_timing_dim must equal {expected_head_dim} for {self.head_timing_policy}')
         if self.architecture_profile==GROUNDED_PROFILE:
-            if self.head_timing_dim!=HEAD_TIMING_DIM:raise ValueError('audio_grounded_v3 requires head timing')
+            if self.head_timing_dim!=expected_head_dim:raise ValueError('audio_grounded_v3 requires head timing')
             if self.lens_width<8 or self.lens_chunk_size<1:raise ValueError('Invalid audio lens size')
             if not math.isfinite(self.history_residual_bound) or not 0<self.history_residual_bound<=4:
                 raise ValueError('history_residual_bound must be in (0,4]')
@@ -172,7 +181,8 @@ class ChartComposer(nn.Module):
         self.future_head=nn.Linear(width,8)
         self.eos_head=nn.Linear(width,1)
         if config.head_timing_dim:
-            self.head_timing_projection=nn.Linear(config.head_timing_dim,width)
+            self.head_timing_projection=nn.Linear(HEAD_TIMING_DIM if config.head_timing_policy=='separate_pads_v2'
+                                                   else config.head_timing_dim,width)
             nn.init.zeros_(self.head_timing_projection.weight)
             nn.init.zeros_(self.head_timing_projection.bias)
         if config.architecture_profile in WORKLOAD_PROFILES:

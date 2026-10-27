@@ -18,8 +18,26 @@ CHROMA_DIM = 12
 ONSET_DIM = 1
 DESCRIPTOR_CHANNELS = CHROMA_DIM + ONSET_DIM + MEL_BANDS
 DESCRIPTOR_DIM = 24 * DESCRIPTOR_CHANNELS
-RECURRENCE_DESCRIPTOR_POLICY = 'temporal_noise_stable_v2'
+STABLE_POINT_RECURRENCE_DESCRIPTOR_POLICY = 'temporal_noise_stable_v2'
+RECURRENCE_DESCRIPTOR_POLICY = 'interval_integrated_temporal_v3'
 LEGACY_RECURRENCE_DESCRIPTOR_POLICY = 'legacy_temporal_unit_v1'
+RECURRENCE_DESCRIPTOR_POLICIES={RECURRENCE_DESCRIPTOR_POLICY,STABLE_POINT_RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}
+SPECTRAL_SAMPLE_SECONDS=.02
+ATTACK_SAMPLE_SECONDS=.005
+MIN_BEAT_DURATION_RATIO=.75
+MAX_BEAT_DURATION_RATIO=4./3.
+
+
+def recurrence_policy_settings(policy):
+    if policy not in RECURRENCE_DESCRIPTOR_POLICIES:raise ValueError('Unknown recurrence descriptor policy')
+    import inspect
+    defaults=inspect.signature(analyze_recurrence).parameters
+    return {'policy':policy,**{name:defaults[name].default for name in ('bins','top_k','min_similarity','min_separation')},
+        'spectral_sample_seconds':SPECTRAL_SAMPLE_SECONDS if policy==RECURRENCE_DESCRIPTOR_POLICY else None,
+        'attack_sample_seconds':ATTACK_SAMPLE_SECONDS if policy==RECURRENCE_DESCRIPTOR_POLICY else None,
+        'beat_duration_ratio':[MIN_BEAT_DURATION_RATIO,MAX_BEAT_DURATION_RATIO] if policy==RECURRENCE_DESCRIPTOR_POLICY else None,
+        **({'spectral_source':'span_bounded_cached_nodes_v2','aggregation':'beat_bin_interval_mean_v1'}
+           if policy==RECURRENCE_DESCRIPTOR_POLICY else {})}
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,7 +168,7 @@ def _aligned_similarity(left: np.ndarray, right: np.ndarray, bins: int) -> tuple
 
 
 def _describe(samples: np.ndarray, bins: int, *, descriptor_policy=RECURRENCE_DESCRIPTOR_POLICY) -> tuple[np.ndarray, bool]:
-    if descriptor_policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+    if descriptor_policy not in RECURRENCE_DESCRIPTOR_POLICIES:
         raise ValueError('Unknown recurrence descriptor policy')
     if not len(samples):
         return np.zeros(bins * DESCRIPTOR_CHANNELS, dtype=np.float32), False
@@ -192,6 +210,54 @@ def _describe(samples: np.ndarray, bins: int, *, descriptor_policy=RECURRENCE_DE
                          if descriptor_policy == LEGACY_RECURRENCE_DESCRIPTOR_POLICY
                          else any(bool(np.any(piece)) for piece in pieces))
     return descriptor.astype(np.float32), temporal_evidence and bool(np.linalg.norm(descriptor) > 1e-8)
+
+
+def _integrated_samples(audio,span,tempo,first,bins):
+    """Average full bin intervals: 20ms spectra plus a 5ms attack envelope.
+
+    The dense attack route uses waveform prefix sums, not extra FFTs. Each
+    grid is bounded by source duration and integrated independently inside
+    exact beat-derived boundaries, including bins that cross BPM changes.
+    """
+    edges=np.asarray([seconds_at_beat(span.start+(span.end-span.start)*Fraction(i,bins),tempo,first)
+                      for i in range(bins+1)],dtype=np.float64)
+    edges=np.clip(edges,0.,float(audio.duration_sec))
+    def grid(period):
+        counts=np.maximum(0,np.ceil(np.diff(edges)/period).astype(np.int64))
+        parts=[edges[i]+(np.arange(n)+.5)*(edges[i+1]-edges[i])/n for i,n in enumerate(counts) if n]
+        return (np.concatenate(parts) if parts else np.empty(0)),counts
+    def average(values,counts):
+        result=np.zeros((bins,values.shape[-1]),np.float32);start=0
+        for i,n in enumerate(counts):
+            if n:result[i]=values[start:start+n].mean(0)
+            start+=n
+        return result
+    stamps,counts=grid(SPECTRAL_SAMPLE_SECONDS)
+    if not len(stamps):return np.zeros((bins,audio.features.shape[1]),np.float32)
+    native=(getattr(audio,'metadata',{}) or {}).get('profile')=='rational_audio_queries_v1'
+    cached_times=np.asarray(audio.times,dtype=np.float64)
+    cached_features=np.asarray(audio.features)
+    # Do not interpolate toward a different section's first frame. Otherwise
+    # a tiny boundary ramp gives a flat chroma/timbre block unit weight and
+    # makes repeated music depend on the section that happens to follow it.
+    local=(cached_times>=edges[0]-1e-9)&(cached_times<edges[-1]-1e-9)
+    if local.any():
+        cached_times,cached_features=cached_times[local],cached_features[local]
+    def interpolate(query,columns):
+        return (np.stack([np.interp(query,cached_times,cached_features[:,column])
+                          for column in columns],axis=1) if len(cached_times)
+                else np.zeros((len(query),len(columns))))
+    spectral=interpolate(stamps,range(cached_features.shape[1]))
+    result=average(spectral,counts)
+    attack_times,attack_counts=grid(ATTACK_SAMPLE_SECONDS)
+    if native:
+        from .native_dynamics import native_dynamics
+        dynamics=native_dynamics(audio,attack_times)[:,:3]
+        result[:,92:95]=average(dynamics,attack_counts)
+    else:
+        attacks=interpolate(attack_times,[92])
+        result[:,92]=average(attacks,attack_counts)[:,0]
+    return result
 
 
 LAYOUT_DYNAMICS_CHANNELS = (
@@ -238,7 +304,7 @@ def analyze_recurrence(
 
     from maichart.form.quality_profile import enhanced
     use_dynamics = enhanced(quality_profile)
-    if descriptor_policy not in {RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY}:
+    if descriptor_policy not in RECURRENCE_DESCRIPTOR_POLICIES:
         raise ValueError('Unknown recurrence descriptor policy')
     if bins <= 0 or top_k < 0 or min_separation < 0:
         raise ValueError("bins must be positive; top_k and min_separation must be nonnegative")
@@ -255,15 +321,19 @@ def analyze_recurrence(
             raise ValueError("Metric spans must have positive duration")
         duration = float(span.end - span.start)
         durations.append(duration)
-        beats = [span.start + (span.end - span.start) * Fraction(2 * i + 1, 2 * bins) for i in range(bins)]
-        stamps = np.asarray([seconds_at_beat(beat, tempo, first) for beat in beats], dtype=np.float64)
-        samples = _sample(audio, stamps)
+        if descriptor_policy==RECURRENCE_DESCRIPTOR_POLICY:
+            samples=_integrated_samples(audio,span,tempo,first,bins)
+        else:
+            beats = [span.start + (span.end - span.start) * Fraction(2 * i + 1, 2 * bins) for i in range(bins)]
+            stamps = np.asarray([seconds_at_beat(beat, tempo, first) for beat in beats], dtype=np.float64)
+            samples = _sample(audio, stamps)
         descriptors[row], valid[row] = _describe(samples, bins, descriptor_policy=descriptor_policy)
         if use_dynamics:
             dynamics[row] = _layout_dynamics(samples)
 
     links: list[Relation] = []
     candidate_count = 0
+    rejected_duration_ratios=0
     candidate_max: float | None = None
     for target_row, target in enumerate(ordered):
         if not valid[target_row] or top_k == 0:
@@ -273,6 +343,10 @@ def analyze_recurrence(
             if target.index - source.index <= min_separation or source.end > target.start:
                 continue
             if not valid[source_row]:
+                continue
+            ratio=durations[target_row]/durations[source_row]
+            if descriptor_policy==RECURRENCE_DESCRIPTOR_POLICY and not MIN_BEAT_DURATION_RATIO<=ratio<=MAX_BEAT_DURATION_RATIO:
+                rejected_duration_ratios+=1
                 continue
             candidate_count += 1
             similarity, phase_shift = _aligned_similarity(
@@ -312,6 +386,7 @@ def analyze_recurrence(
             "rejected_flat_span_indices": [span.index for i, span in enumerate(ordered) if not valid[i]],
             "feature_source": "audio_only",
             "descriptor_policy": descriptor_policy,
+            "rejected_duration_ratios":rejected_duration_ratios,
             "candidate_count": candidate_count,
             "candidate_max": candidate_max,
             "empty_reason": (

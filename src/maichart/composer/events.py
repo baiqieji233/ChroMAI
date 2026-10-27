@@ -17,6 +17,42 @@ EVENT_SEMANTICS = 'parsed_heads_and_types_v2'
 HEAD_PADS = tuple(f'{group}{lane}' for group in 'ABDE' for lane in range(1,9)) + ('C',)
 HEAD_TIMING_DIM = 3 * len(HEAD_PADS)
 _PAD_INDEX = {pad:i for i,pad in enumerate(HEAD_PADS)}
+HEAD_TIMING_POLICIES = {'merged_pads_v1','separate_pads_v2'}
+SEPARATE_HEAD_PADS = tuple(str(lane) for lane in range(1,9)) + HEAD_PADS
+_SEPARATE_PAD_INDEX = {pad:i for i,pad in enumerate(SEPARATE_HEAD_PADS)}
+
+
+def head_pads_for_policy(policy='merged_pads_v1'):
+    if policy not in HEAD_TIMING_POLICIES:raise ValueError('Unknown head_timing_policy')
+    return SEPARATE_HEAD_PADS if policy=='separate_pads_v2' else HEAD_PADS
+
+
+def head_timing_dim_for_policy(policy='merged_pads_v1'):
+    return 3*len(head_pads_for_policy(policy))
+
+
+def head_pad_indices_for_policy(meta,policy='merged_pads_v1'):
+    if policy=='merged_pads_v1':return meta.head_pad_indices
+    head_pads_for_policy(policy)
+    return tuple(sorted({_SEPARATE_PAD_INDEX[head] for head in meta.heads}))
+
+
+def merge_separate_head_timing(features):
+    """Recover the old 33-pad view exactly, retaining learned parent weights.
+
+    New timing distinguishes button 1 from Touch A1. The compatibility route
+    uses the most recent of those two activations, not their sum. A separate
+    zero-initialized projection can then learn the new distinction.
+    """
+    import torch
+    if features.shape[-1]!=123:raise ValueError('Separate head timing requires 123 features')
+    seen,seconds,beats=features.split(41,dim=-1)
+    visible=torch.maximum(seen[...,:8],seen[...,8:16])
+    def merge_age(ages):
+        a=ages[...,:8].masked_fill(seen[...,:8]<=0,float('inf'))
+        b=ages[...,8:16].masked_fill(seen[...,8:16]<=0,float('inf'))
+        return torch.cat((torch.where(visible>0,torch.minimum(a,b),torch.zeros_like(a)),ages[...,16:]),-1)
+    return torch.cat((torch.cat((visible,seen[...,16:]),-1),merge_age(seconds),merge_age(beats)),-1)
 
 
 @dataclass(frozen=True, slots=True)
@@ -89,7 +125,8 @@ def enrich_head_timing(head_timing):
     """Map [seen, log1p(age_sec), log1p(age_beat)] to bounded short/beat/long recency in [0, 1]."""
     import torch
     raw = head_timing.float()
-    pads = len(HEAD_PADS)
+    if raw.shape[-1] not in (99,123):raise ValueError('Unsupported head timing layout')
+    pads = raw.shape[-1]//3
     seen = raw[..., :pads].clamp(0., 1.)
     log_sec = raw[..., pads:2*pads].clamp(0., 10.)
     log_beat = raw[..., 2*pads:3*pads].clamp(0., 10.)

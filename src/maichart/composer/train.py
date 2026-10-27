@@ -18,11 +18,13 @@ from .data import ComposerDataset,collate_composer
 from .candidates import COMPOSER_AUDIO_FEATURE_POLICY
 from .model import (ChartComposer,ComposerConfig,build_model,GROUNDED_PROFILE,WORKLOAD_PROFILES,
                     resolve_history_anchor_policy,resolve_composer_policy,COMPOSER_POLICY_FIELDS,HISTORY_ANCHOR_POLICIES)
-from .events import HEAD_TIMING_DIM
+from .events import HEAD_TIMING_DIM,head_timing_dim_for_policy
 from .checkpoint import save,load,migrate_music_context,migrate_audio_grounded
 from .runtime_memory import GIB,host_memory,memory_gib
 from .objectives import (ACTION_OBJECTIVES, LEGACY_ACTION_OBJECTIVE, RECOVERY_ACTION_OBJECTIVE, action_objective, recovery_objective,
                          resolve_action_objective, training_semantics_for_objective)
+from .sampling_contract import RECOVERY_SAMPLING_POLICIES,resolve_recovery_sampling,recovery_sampling_settings
+from . import ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY
 
 
 class RemainingBatches:
@@ -223,7 +225,11 @@ def parser():
     p.add_argument('--audio-pointer-weight',type=float,default=.15,
         help='audio-only auxiliary weight: next-position plus action supervision in audio_grounded_v3')
     p.add_argument('--action-objective-policy',choices=('auto',*sorted(ACTION_OBJECTIVES)),default='auto',
-        help='auto preserves the existing objective; v2 uses complete event likelihood; v3 also learns legal actions after real short rollouts')
+        help='auto uses joint configuration recovery for fresh grounded models and inherits existing parents')
+    p.add_argument('--recovery-sampling-policy',choices=('auto',*sorted(RECOVERY_SAMPLING_POLICIES)),default='auto',
+        help='auto inherits on resume; new stages use grouped sampling and retained generated histories with recorded temperatures')
+    p.add_argument('--recovery-pointer-temperature',type=float,default=1.)
+    p.add_argument('--recovery-action-temperature',type=float,default=.85)
     p.add_argument('--profile-steps',type=int,default=0,
                    help='record CUDA H2D/forward/backward/update timings for first N consumed batches; 0 disables')
     p.add_argument('--architecture-profile',choices=('music_context_v2',GROUNDED_PROFILE),default=GROUNDED_PROFILE)
@@ -408,7 +414,9 @@ def _forward_batch(model,tensors,*,decode_actions=True,**overrides):
 def recovery_batch(dataset,model,args,device,global_step):
     from .recovery import RecoveryBuilder
     from .generate import (_sample_actions,_head_metadata,_active_constraints,_truncate_probabilities,
-                           _touch_head_sets,_candidate_has_capacity)
+                           _touch_head_sets,_candidate_has_capacity,_grounded_pointer_probabilities,_candidate_playability)
+    from .action_guidance import action_logits_with_touch_guard
+    from .guard import first_rejected_prefix
     from .events import event_metadata
     from maichart.generation.event_cli import _NoteGrammar
     from maichart.event_timing import EventPoint
@@ -416,14 +424,27 @@ def recovery_batch(dataset,model,args,device,global_step):
     touch_policy=getattr(args,'touch_layout_policy','legacy_two_heads')
     metadata=_head_metadata(atoms,grammar,touch_policy)
     touch_heads=_touch_head_sets(atoms,grammar)
+    policy=getattr(args,'recovery_sampling_policy',ACTION_SAMPLING_POLICY)
+    settings=recovery_sampling_settings(policy,getattr(args,'recovery_pointer_temperature',1.),
+                                        getattr(args,'recovery_action_temperature',.85))
+    aligned=policy==ACTION_SAMPLING_POLICY
+    touch_mask=torch.tensor([False]+[atom[0] in 'ABCDE' for atom in atoms],device=device,dtype=torch.bool)
     rng=torch.Generator(device=device).manual_seed(args.seed+global_step+191)
     planner_cache={}
     def propose(item,index):
         candidates=item['_candidate_beats']
         constraints=[_active_constraints(item['_action_index'],beat,item['_tempo'],item['_first'],
             clock=item['_clock'],touch_layout_policy=touch_policy) for beat in candidates]
-        item['candidate_mask']=item['candidate_mask'] | torch.tensor([
-            not _candidate_has_capacity(held,blocked,touch_policy,touch_heads) for held,blocked,_ in constraints])
+        playable=[not bool(item['candidate_mask'][i]) and _candidate_has_capacity(held,blocked,touch_policy,touch_heads)
+                  for i,(held,blocked,_) in enumerate(constraints)]
+        if aligned:
+            previous=item['_prefix_points'][-1].beat if item['_prefix_points'] else None
+            playable=_candidate_playability(candidates,playable,previous,dataset.candidate_policy)
+        # Recovery features have a fixed padded candidate width; physical
+        # proposals contain only actual candidates near the audio boundary.
+        physical_mask=torch.ones_like(item['candidate_mask'])
+        physical_mask[:len(candidates)]=torch.tensor([not value for value in playable])
+        item['candidate_mask']=item['candidate_mask'] | physical_mask
         if bool(item['candidate_mask'].all()):return None
         clean={k:v for k,v in item.items() if not k.startswith('_')}
         batch=collate_composer([clean])
@@ -440,13 +461,15 @@ def recovery_batch(dataset,model,args,device,global_step):
         guard=item['_proposal_guard']
         for _ in range(min(8,len(candidates))):
             if not torch.isfinite(logits).any():break
-            pointer_probs=_truncate_probabilities(logits.softmax(-1),top_p=.92,min_p=.05,max_k=16)
+            pointer_probs=(_grounded_pointer_probabilities(logits,result['candidate_bins'][0],settings['pointer_temperature'])
+                           if aligned else _truncate_probabilities(logits.softmax(-1),top_p=.92,min_p=.05,max_k=16))
             chosen=int(torch.multinomial(pointer_probs,1,generator=rng))
             beat=candidates[chosen]
             cand_sec=float(item['_clock'].at(beat))
             context=result['candidate_context'][0,chosen]
             audio_ctx=result['audio_action_context'][0,chosen] if 'audio_action_context' in result else None
             decode_extra={}
+            if 'previous_heads' in result:decode_extra['previous_heads']=result['previous_heads']
             if model.config.action_state_policy=='selected_prefix_v3':
                 from .context_features import selected_action_state
                 decode_extra.update(selected_action_state=selected_action_state(item['_action_index'],len(item['_prefix_points']),beat)[None].to(device),
@@ -464,18 +487,37 @@ def recovery_batch(dataset,model,args,device,global_step):
             cooldown_blocked=set(blocked)|{pad for pad,prior in guard.last_head_seconds.items()
                 if cand_sec-prior<guard.min_same_head_sec-1e-9}
             blocked_first=set()
+            blocked_prefixes=set()
+            previous_heads=result['previous_heads'][0] if 'previous_heads' in result else None
+            guidance={}
+            def decode_slot(slot,prefix):
+                ids=[dataset.atom_to_id[x] for x in prefix]
+                if aligned:
+                    return action_logits_with_touch_guard(model,context,slot,ids,audio_context=audio_ctx,
+                        enabled=settings['touch_history_guard'],touch_mask=touch_mask,diagnostics=guidance,previous_heads=previous_heads,
+                        log_odds_bound=settings['touch_history_bound'])
+                extra={} if previous_heads is None else {'previous_heads':previous_heads}
+                return model.action_slot(context,slot,ids,audio_context=audio_ctx,**extra)
             for _ in range(6):
-                selected=_sample_actions(context.new_zeros(model.config.action_slots,len(atoms)+1),atoms,grammar,.85,rng,
-                    slot_decoder=lambda slot,prefix:model.action_slot(context,slot,[dataset.atom_to_id[x] for x in prefix],audio_context=audio_ctx),
+                guidance.clear()
+                selected=_sample_actions(context.new_zeros(model.config.action_slots,len(atoms)+1),atoms,grammar,settings['action_temperature'],rng,
+                    slot_decoder=decode_slot,
                     occupied=occupied,blocked=cooldown_blocked,blocked_first=blocked_first,head_metadata=metadata,
-                    canonical_order=True,touch_layout_policy=touch_policy)
+                    canonical_order=True,touch_layout_policy=touch_policy,blocked_prefixes=blocked_prefixes)
                 if selected:
                     point=EventPoint(candidates[chosen],'/'.join(selected))
-                    if guard.accepts(point):return point
-                    blocked_first.add(dataset.atom_to_id[selected[0]])
+                    accepted=(guard.accepts(point,protect_reported_hard=True) if guidance.get('applied') else guard.accepts(point))
+                    if accepted:return point
+                    if aligned:
+                        blocked_prefixes.add(first_rejected_prefix(guard,beat,selected,
+                            protect_reported_hard=bool(guidance.get('applied'))))
+                    else:blocked_first.add(dataset.atom_to_id[selected[0]])
                     if guard.last_reason=='repeated_head_too_soon':
                         for head in event_metadata('/'.join(selected)).heads:
-                            cooldown_blocked.add(f'A{head}' if touch_policy=='legacy_two_heads' and str(head).isdigit() else str(head))
+                            pad=f'A{head}' if touch_policy=='legacy_two_heads' and str(head).isdigit() else str(head)
+                            prior=guard.last_head_seconds.get(pad)
+                            if not aligned or (prior is not None and cand_sec-prior<guard.min_same_head_sec-1e-9):
+                                cooldown_blocked.add(pad)
             logits[chosen]=float('-inf')
         return None
     indices=np.random.default_rng(args.seed+global_step+991).integers(0,len(dataset),size=args.recovery_samples)
@@ -483,9 +525,14 @@ def recovery_batch(dataset,model,args,device,global_step):
     model.eval()
     try:
         with torch.no_grad():
-            return RecoveryBuilder(dataset,model,device,propose=propose,
-                supervise_actions=getattr(args,'action_objective_policy',LEGACY_ACTION_OBJECTIVE)==RECOVERY_ACTION_OBJECTIVE
-                ).batch_from_indices(indices,steps=args.recovery_steps)
+            horizon=max(4,((min(dataset.history_events,128)+args.recovery_steps-1)//args.recovery_steps)*args.recovery_steps)
+            builder=RecoveryBuilder(dataset,model,device,propose=propose,
+                supervise_actions=getattr(args,'action_objective_policy',LEGACY_ACTION_OBJECTIVE)==RECOVERY_ACTION_OBJECTIVE,
+                maximum_generated_events=horizon if aligned else 4)
+            if not aligned:return builder.batch_from_indices(indices,steps=args.recovery_steps)
+            batch,outcomes,episodes,details=builder.batch_from_episodes(indices,getattr(model,'_recovery_episodes',[]),steps=args.recovery_steps)
+            model._recovery_episodes=episodes;model._recovery_diagnostics=details
+            return batch,outcomes
     finally:model.train(was_training)
 
 
@@ -552,7 +599,8 @@ def _train(args,explicit_flags):
             # before dataset construction so CLI defaults do not conflict.
             for key in ('sample_locality','symbolic_dropout','audio_pointer_weight','placement_weight','planner_weight',
                         'recovery_interval','recovery_samples','recovery_steps','recovery_weight','history_dropout',
-                        'ledger_dropout','history_residual_bound','lens_width','lens_chunk_size'):
+                        'ledger_dropout','history_residual_bound','lens_width','lens_chunk_size',
+                        'recovery_pointer_temperature','recovery_action_temperature'):
                 if key in (old.get('args') or {}) and '--'+key.replace('_','-') not in explicit_flags:
                     setattr(args,key,old['args'][key])
         if args.resume:
@@ -561,6 +609,9 @@ def _train(args,explicit_flags):
                 raise ValueError('Motif input/dropout contract changed; use --init-checkpoint with a new output directory')
     args.action_objective_policy=resolve_action_objective(getattr(args,'action_objective_policy','auto'),
         old.get('args',{}) if old else None,resume=bool(args.resume),architecture_profile=args.architecture_profile)
+    args.recovery_sampling_policy=resolve_recovery_sampling(args.recovery_sampling_policy,old,
+        resume=bool(args.resume),architecture_profile=args.architecture_profile)
+    recovery_sampling_settings(args.recovery_sampling_policy,args.recovery_pointer_temperature,args.recovery_action_temperature)
     semantics=training_semantics_for_objective(args.architecture_profile,args.action_objective_policy)
     if args.resume and old.get('training_semantics')!=semantics:
         raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
@@ -592,7 +643,7 @@ def _train(args,explicit_flags):
         history_events=args.history_events,action_slots=args.action_slots,preparation_workers=args.prepare_workers,
         audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,seed=args.seed,architecture_profile=args.architecture_profile,
         action_state_policy=args.action_state_policy,motif_memory_policy=args.motif_memory_policy,
-        motif_max_events=args.motif_max_events)
+        motif_max_events=args.motif_max_events,head_timing_policy=args.head_timing_policy)
     dataset.touch_layout_policy=args.touch_layout_policy
     args.action_slots_requested = dataset.action_slots_requested
     args.action_slots = dataset.action_slots
@@ -626,12 +677,14 @@ def _train(args,explicit_flags):
             nhead=args.nhead,layers=args.layers,dim_feedforward=args.dim_feedforward,dropout=args.dropout,
             history_events=args.history_events,candidate_count=args.candidate_count,action_slots=args.action_slots,
             architecture_profile=args.architecture_profile,symbolic_dropout=args.symbolic_dropout,
-            head_timing_dim=HEAD_TIMING_DIM,lens_width=args.lens_width,lens_chunk_size=args.lens_chunk_size,
+            head_timing_dim=head_timing_dim_for_policy(args.head_timing_policy),lens_width=args.lens_width,lens_chunk_size=args.lens_chunk_size,
             history_residual_bound=args.history_residual_bound,history_dropout=args.history_dropout,
             ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
             history_memory_rms_bound=args.history_memory_rms_bound,
             motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}),dataset.codec_atoms)
     model.to(device).train()
+    from .recovery import restore_recovery_episodes,recovery_episode_state
+    restore_recovery_episodes(model,(old.get('training_state') or {}).get('recovery_episodes') if args.resume else None)
     cuda_cache_guard=CudaCacheGuard(device,0.)
     if model.config.architecture_profile==GROUNDED_PROFILE:
         for key in ('lens_width','lens_chunk_size','history_residual_bound','history_dropout','ledger_dropout','history_memory_rms_bound'):
@@ -670,7 +723,8 @@ def _train(args,explicit_flags):
                 raise ValueError(f'Mid-epoch resume requires the saved {key}={stored}; use finetune to change it')
         for key in ('sample_locality','symbolic_dropout','audio_pointer_weight','placement_weight','planner_weight',
                     'recovery_interval','recovery_samples','recovery_steps','recovery_weight','history_dropout',
-                    'ledger_dropout','history_residual_bound','lens_width','lens_chunk_size'):
+                    'ledger_dropout','history_residual_bound','lens_width','lens_chunk_size',
+                    'recovery_pointer_temperature','recovery_action_temperature'):
             if old.get('args',{}).get(key,getattr(args,key))!=getattr(args,key):
                 raise ValueError(f'Resume requires saved {key}; use finetune to change the training policy')
     start_epoch=(int(old.get('epoch',0))+(0 if partial_resume else 1)) if args.resume and old else 1
@@ -698,6 +752,10 @@ def _train(args,explicit_flags):
     gpu_profiles=[]; gpu_timing=dict(samples=0,h2d_ms=0.,forward_ms=0.,backward_ms=0.,update_ms=0.)
     print('composer_runtime '+json.dumps({'family':FAMILY,'training_semantics':semantics,
         'action_objective_policy':args.action_objective_policy,
+        'recovery_sampling_policy':args.recovery_sampling_policy,
+        'recovery_sampling_settings':recovery_sampling_settings(args.recovery_sampling_policy,args.recovery_pointer_temperature,args.recovery_action_temperature),
+        'recovery_pointer_temperature':args.recovery_pointer_temperature,
+        'recovery_action_temperature':args.recovery_action_temperature,
         'device':str(device),'precision':precision,'effective_lr':effective_lr,'samples':len(dataset),'parameters':parameters,
         'model_bytes':sum(p.numel()*p.element_size() for p in model.parameters()),
         'action_head_parameters':sum(p.numel() for p in model.action_head.parameters()),
@@ -713,6 +771,8 @@ def _train(args,explicit_flags):
         'torch_cpu_threads':torch.get_num_threads(),'python_switch_interval_sec':sys.getswitchinterval(),
         'architecture_profile':model.config.architecture_profile,'symbolic_dropout':model.config.symbolic_dropout,
         'history_anchor_policy':model.config.history_anchor_policy,
+        'head_timing_policy':model.config.head_timing_policy,
+        'cross_event_relation_policy':model.config.cross_event_relation_policy,
         'action_state_policy':model.config.action_state_policy,'motif_memory_policy':model.config.motif_memory_policy,
         'slide_factor_policy':model.config.slide_factor_policy,'motif_max_events':model.config.motif_max_events,
         'history_memory_policy':model.config.history_memory_policy,
@@ -796,9 +856,11 @@ def _train(args,explicit_flags):
                 if events: events[3].record()
                 update=(batch_index%args.grad_accumulation==0 or batch_index==total_batches)
                 if update:
+                    episode_backup=None
                     if (model.config.architecture_profile==GROUNDED_PROFILE and args.recovery_interval and args.recovery_weight>0
                             and (global_step+1)%args.recovery_interval==0):
                         recovery_started=time.perf_counter()
+                        episode_backup=recovery_episode_state(model)
                         recovered,diagnostics=recovery_batch(dataset,model,args,device,global_step)
                         recovery_sampled=time.perf_counter()
                         recovery_value=None
@@ -826,12 +888,14 @@ def _train(args,explicit_flags):
                             'learning_seconds':time.perf_counter()-recovery_sampled,
                             'loss':recovery_value,'loss_includes_weight':True,
                             'components_unweighted':recovery_parts,
+                            'episode':getattr(model,'_recovery_diagnostics',{}),
                             'configuration_samples':configuration_samples}),flush=True)
                     if scaler is not None: scaler.unscale_(optimizer)
                     # The global norm detects NaN/Inf across all gradients;
                     # no per-parameter Python scalar checks or mutation needed.
                     grad_norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.,error_if_nonfinite=False)
                     if not torch.isfinite(grad_norm):
+                        if episode_backup is not None:restore_recovery_episodes(model,episode_backup)
                         print('composer_warning '+json.dumps({'message':'non-finite gradients skipped; checkpoint remains valid',
                             'epoch':epoch,'batch':batch_index}),flush=True)
                         optimizer.zero_grad(set_to_none=True)
@@ -864,6 +928,7 @@ def _train(args,explicit_flags):
                          metrics={key:float(value)/max(1,metric_batches) for key,value in totals.items()},optimizer_steps=global_step,
                          dataset_fingerprint=dataset.fingerprint,atom_catalog=dataset.codec_atoms,
                          training_state={'epoch_complete':batch_index==total_batches,'batch_in_epoch':batch_index,
+                            'recovery_episodes':recovery_episode_state(model),
                             'sample_in_epoch':min(batch_index*args.batch_size,len(dataset)),
                             'sampler_batch_size':sampler_size,
                             'loader_generator_state':checkpoint_loader_rng_state(
@@ -902,6 +967,7 @@ def _train(args,explicit_flags):
             metrics={key:float(value)/max(1,metric_batches) for key,value in totals.items()},optimizer_steps=global_step,
             dataset_fingerprint=dataset.fingerprint,atom_catalog=dataset.codec_atoms,
             training_state={'epoch_complete':True,'batch_in_epoch':total_batches,
+                'recovery_episodes':recovery_episode_state(model),
                 'sample_in_epoch':min(total_batches*args.batch_size,len(dataset)),
                 'sampler_batch_size':sampler_size,
                 'loader_generator_state':loader_generator.get_state(),'torch_rng_state':torch.get_rng_state(),

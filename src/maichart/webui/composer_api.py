@@ -147,6 +147,11 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         parent_args if mode!='fresh' else None,resume=mode=='resume',architecture_profile=architecture_profile)
     grounded_settings['action_objective_policy']=objective
     _arg(args,'--action-objective-policy',objective)
+    from maichart.composer.sampling_contract import resolve_recovery_sampling
+    recovery_sampling=resolve_recovery_sampling(payload.get('recovery_sampling_policy','auto'),
+        inspection if mode!='fresh' else None,resume=mode=='resume',architecture_profile=architecture_profile)
+    grounded_settings['recovery_sampling_policy']=recovery_sampling
+    _arg(args,'--recovery-sampling-policy',recovery_sampling)
     cpu_default = (parent_args.get('cpu_threads') or 0) if mode == 'resume' else 0
     cpu_raw = payload.get('cpu_threads', cpu_default)
     if isinstance(cpu_raw, bool) or not isinstance(cpu_raw, (int, str)):
@@ -197,6 +202,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         ('history_residual_bound', 1., .1, 4.), ('history_dropout', .3, 0., .9),
         ('ledger_dropout', .5, 0., .9), ('placement_weight', .15, 0., 1.),
         ('planner_weight', .2, 0., 1.), ('recovery_weight', .1, 0., 1.),
+        ('recovery_pointer_temperature',1.,0.,2.),('recovery_action_temperature',.85,0.,2.),
     ):
         value = _float(payload, key, default, minimum=minimum)
         if value > maximum:
@@ -208,6 +214,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
             value = inherited
         grounded_settings[key] = value
         _arg(args, '--' + key.replace('_', '-'), value)
+    from maichart.composer.sampling_contract import recovery_sampling_settings
+    grounded_settings['recovery_sampling_settings']=recovery_sampling_settings(recovery_sampling,
+        grounded_settings['recovery_pointer_temperature'],grounded_settings['recovery_action_temperature'])
     inherited_history_rms = (
         parent_config.get('history_memory_rms_bound', parent_args.get('history_memory_rms_bound', 8.))
         if mode != 'fresh' else None
@@ -355,6 +364,10 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     if action_type_temperature>2.:raise ValueError('action_type_temperature 不能大于 2')
     action_type_min_p=_float(payload,'action_type_min_p',0.,minimum=0.)
     if action_type_min_p>1.:raise ValueError('action_type_min_p 不能大于 1')
+    from maichart.composer.sampling_contract import RETRY_POLICIES
+    action_retry_policy=payload.get('action_retry_policy','auto')
+    if not isinstance(action_retry_policy,str) or action_retry_policy not in {'auto',*RETRY_POLICIES}:
+        raise ValueError('Unknown action_retry_policy')
     min_same_head_ms=_float(payload,'min_same_head_ms',50.,minimum=0.)
     if min_same_head_ms>200.:
         raise ValueError('min_same_head_ms 不能大于 200')
@@ -383,6 +396,7 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                        ('--action-history-strength',action_history_strength),
                        ('--action-type-temperature',action_type_temperature),
                        ('--action-type-min-p',action_type_min_p),
+                       ('--action-retry-policy',action_retry_policy),
                        ('--touch-history-bound',touch_history_bound),
                        ('--min-same-head-ms',min_same_head_ms),
                        ('--seed',seed),('--max-events',max_events),('--device',device)):
@@ -412,6 +426,7 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
             'action_history_strength':action_history_strength,
             'action_type_temperature':action_type_temperature,
             'action_type_min_p':action_type_min_p,
+            'action_retry_policy':action_retry_policy,
             'touch_history_guard':touch_history_guard,'touch_history_bound':touch_history_bound,
             'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,
             'condition':condition.to_dict(),'condition_source':condition_source,

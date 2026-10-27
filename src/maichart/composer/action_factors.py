@@ -297,7 +297,8 @@ class CompositionalActions(nn.Module):
             result = contribution if result is None else result + contribution
         return result
 
-    def relative_logits(self, context: torch.Tensor, last_head_mask: torch.Tensor) -> torch.Tensor:
+    def relative_logits(self, context: torch.Tensor, last_head_mask: torch.Tensor, *, factor_embedding=None,
+                        target_geometry=None) -> torch.Tensor:
         """Mean over every previous/current head pair, with no hand assignment.
 
         ``last_head_mask`` is [batch, 8] or follows context's leading dimensions.
@@ -318,10 +319,11 @@ class CompositionalActions(nn.Module):
                zip(previous.shape[:-1], context.shape[:-1])):
             raise ValueError('last_head_mask cannot broadcast to the action context')
         previous = previous / previous.sum(-1, keepdim=True).clamp_min(1)
-        heads = self._normalized_head_lanes.to(dtype=context.dtype)
+        heads = (self._normalized_head_lanes if target_geometry is None else target_geometry).to(dtype=context.dtype)
         lanes = torch.arange(8, device=context.device)
         delta = (lanes[None, :] - lanes[:, None]) % 8
-        relation = torch.einsum('...d,ijd->...ij', context, self.relative_factors(delta))
+        relation = torch.einsum('...d,ijd->...ij', context,
+            (self.relative_factors if factor_embedding is None else factor_embedding)(delta))
         current = torch.einsum('...ij,...i->...j',relation,previous)
         return F.linear(current,heads)
 

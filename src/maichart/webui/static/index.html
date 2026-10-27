@@ -367,11 +367,13 @@
 <div class="form-grid">
 <label class="field">模型宽度 d_model<input id="composerDModel" type="number" min="1" step="1" value="192"></label>
 <label class="field">训练架构<select id="composerArchitectureProfile"><option value="audio_grounded_v3" selected>audio_grounded_v3 音频锚定</option><option value="music_context_v2">music_context_v2 基线</option></select></label>
-<label class="field">配置学习目标<select id="composerActionObjectivePolicy"><option value="auto" selected>自动（已有模型继承；新训练兼容旧目标）</option><option value="event_balanced_v1">旧事件均值（兼容）</option><option value="joint_event_nll_v2">完整事件联合似然</option><option value="joint_event_recovery_v3">联合似然 + 配置恢复训练（实验）</option></select><small>配置恢复训练在模型真实生成几步后，学习仍合法的原谱续接；需恢复采样间隔大于0。短测曾放大Touch，暂不推荐正式长程。联合似然把同拍动作和结束标记作为完整序列学习，不再按事件长度或STOP类别降低权重。仅音频锚定架构可选；已有模型切换须微调到新目录。总loss与旧目标口径不同，比较配置首槽CE和旧标尺CE。</small></label>
+<label class="field">配置学习目标<select id="composerActionObjectivePolicy"><option value="auto" selected>自动（新训练使用配置恢复；已有模型继承）</option><option value="event_balanced_v1">旧事件均值（兼容）</option><option value="joint_event_nll_v2">完整事件联合似然</option><option value="joint_event_recovery_v3">联合似然 + 配置恢复训练</option></select><small>配置恢复在模型自己写出的历史后，学习仍合法的原谱续接；需恢复监督间隔大于0。新版恢复策略会保留已生成的历史，每次只追加2–4个事件，逐步覆盖最近历史窗口。联合似然同时学习动作和结束标记，不按事件长度或STOP类别降低权重。总loss与旧目标口径不同，应比较配置首槽CE、旧标尺CE及实际生成结果。长期音乐质量仍需验收。</small></label>
 <label class="field">历史键位锚定<select id="composerHistoryAnchorPolicy"><option value="auto" selected>自动（新训练用完整几何；已有模型继承）</option><option value="parsed_geometry_v3">完整头部、Touch与Slide几何（新默认）</option><option value="parsed_heads_v2">解析真实音符头（新策略）</option><option value="legacy_digit_v1">旧字符策略（保持旧模型行为）</option></select><small>仅audio_grounded_v3使用。完整几何策略解析Touch区域、Slide端点与轨迹；旧解析头策略平均多头角度，避免把中心TouchHold时值误当键位。已有模型切换策略须选择微调和新输出目录；继续训练固定继承，不会自动迁移。</small></label>
 <label class="field">历史记忆幅度策略<select id="composerHistoryMemoryPolicy"><option value="auto" selected>自动（新训练启用RMS上限；已有模型继承）</option><option value="unbounded_v1">兼容旧无约束</option><option value="rms_cap_v1">逐事件RMS上限</option></select><small>音频锚定架构可限制历史记忆的整体幅度，避免少数历史特征压过音频。旧模型切换须选择微调（finetune）和新输出目录。</small></label>
 <label class="field">历史记忆RMS上限<input id="composerHistoryMemoryRmsBound" type="number" min="1" max="64" step="0.5" value="8"><small>范围 1–64，默认 8；越小约束越强，过小可能削弱历史信息。仅在“逐事件RMS上限”策略下生效；已有模型默认继承，resume 锁定。</small></label>
 <label class="field">历史跨注意力后端<select id="composerHistoryAttentionPolicy"><option value="auto" selected>自动（新训练使用Math数值保护；已有模型继承）</option><option value="auto_v1">兼容自动选择</option><option value="math_v1">Math数值保护</option></select><small>仅保护读取历史的注意力计算，保留 dropout 与整体 BF16 配置；计算开销依环境而定。旧模型切换须选择微调（finetune）和新目录，旧后端服务需更新后重启。</small></label>
+<label class="field">按键计时通道<select id="composerHeadTimingPolicy"><option value="auto" selected>自动（新阶段区分按钮与Touch；续训继承）</option><option value="merged_pads_v1">合并键位（兼容旧模型）</option><option value="separate_pads_v2">独立按钮与Touch通道</option></select><small>fresh和finetune新阶段默认分别记录按钮与Touch A计时；resume继承已保存的通道。新阶段请使用新的输出目录。</small></label>
+<label class="field">跨拍相对键位<select id="composerCrossEventRelationPolicy"><option value="auto" selected>自动（新阶段启用；续训继承）</option><option value="off">关闭</option><option value="relative_heads_v1">相对键位关系</option></select><small>首槽学习相对上一事件按钮头的位置关系，新参数零初始化。fresh和finetune默认启用，resume继承已保存策略；不会直接提高Touch类别概率。</small></label>
 <label class="field">普通 dropout<input id="composerDropout" type="number" min="0" max="1" step="0.05" value="0.1"><small>从头训练时可调，建议0–0.3；继续训练和微调继承检查点。与历史、台账遮挡概率不同。</small></label>
 <label class="field">局部音频宽度<input id="composerLensWidth" type="number" min="8" max="256" value="64"></label>
 <label class="field">局部音频分块候选数<input id="composerLensChunkSize" type="number" min="1" max="256" value="32"></label>
@@ -387,8 +389,11 @@
 <label class="field">四拍块规划监督权重<input id="composerPlannerWeight" type="number" min="0" max="1" step="0.05" value="0.2"></label>
 <label class="field">恢复监督间隔（更新步）<input id="composerRecoveryInterval" type="number" min="0" value="100"></label>
 <label class="field">每次恢复样本数<input id="composerRecoverySamples" type="number" min="1" max="8" value="2"></label>
-<label class="field">恢复展开步数<input id="composerRecoverySteps" type="number" min="2" max="4" value="2"></label>
+<label class="field">恢复展开步数<input id="composerRecoverySteps" type="number" min="2" max="4" value="2"><small>每次恢复追加的事件数。新版会继续上次的生成历史，最多覆盖128事件；并非每次从真实谱面重新开始。</small></label>
 <label class="field">恢复监督权重<input id="composerRecoveryWeight" type="number" min="0" max="1" step="0.05" value="0.1"></label>
+<label class="field">恢复采样策略<select id="composerRecoverySamplingPolicy"><option value="auto" selected>自动（续训继承；新阶段使用新版）</option><option value="calibrated_kind_touch_rings_v2">旧恢复协议（校准类别与Touch环）</option><option value="generation_matched_recovery_prefix_retry_v3">生成同款采样与前缀重试</option></select><small>resume 自动继承检查点；新训练阶段默认使用新版。旧协议不使用下面的温度控件，保持默认值。</small></label>
+<label class="field">恢复选位温度<input id="composerRecoveryPointerTemperature" type="number" min="0" max="2" step="0.05" value="1"><small>新版恢复采样的选位温度；范围 0–2。resume 继承并锁定，finetune 可调整。旧协议固定默认值 1。</small></label>
+<label class="field">恢复动作温度<input id="composerRecoveryActionTemperature" type="number" min="0" max="2" step="0.05" value="0.85"><small>新版恢复采样的动作温度；范围 0–2。resume 继承并锁定，finetune 可调整。旧协议固定默认值 0.85。</small></label>
 <label class="field">前馈层宽度<input id="composerDimFeedforward" type="number" min="1" step="1" value="576"><small>建议约为 d_model 的 4 倍；384 维模型可设 1536。</small></label>
 <label class="field">Transformer 层数<input id="composerLayers" type="number" min="1" step="1" value="3"></label>
 <label class="field">注意力头数 nhead<input id="composerNhead" type="number" min="1" step="1" value="6"><small>必须整除 d_model。</small></label>
@@ -907,6 +912,7 @@
 <label class="field checkbox-field"><input id="composerInterceptTapOnSlide" type="checkbox"><span>拦截 Slide 撞尾（TapOnSlide）</span><small>默认关闭（仅报告，不拦截也不删音符）；勾选后在生成与后处理中拦截 TapOnSlide。</small></label>
 <label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>仅控制选时分支：1 使用完整历史，0 使用音频分支。</small></label>
 <label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" value="0.55"><small>audio_grounded_v3在正温度下保留模型预测的时间区间概率，只调整区间内部拍位的随机程度；0直接选择全体候选中最高分的拍位。</small></label>
+<label class="field">失败重试策略<select id="composerActionRetryPolicy"><option value="auto" selected>自动（继承检查点）</option><option value="legacy_first_atom_v1">旧首音封禁</option><option value="failed_prefix_v2">只封禁失败前缀</option></select><small>自动沿用检查点记录的策略；旧策略封禁失败首音，新策略仅封禁已失败的动作前缀。</small></label>
 <label class="field">Touch布局<select id="composerTouchLayoutPolicy"><option value="open" selected>开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>开放模式不把全部Touch算作按钮双头；仍检查时序与物理硬冲突。</small></label>
 <label class="field">动机记忆强度<input id="composerMotifStrength" type="number" min="0" max="2" step="0.1" value="1"><small>默认1。仅已开启实验动机记忆的模型生效；off模型调整此值无效。</small></label>
 <label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" value="0.85"><small>仅控制按键、Hold、Slide 等动作采样；可独立保留配置多样性。</small></label>

@@ -21,8 +21,11 @@ def resolve_action_objective(requested='auto', parent_args=None, *, resume=False
     inherited = parent_args.get('action_objective_policy', LEGACY_ACTION_OBJECTIVE) if parent_args is not None else None
     if inherited is not None and inherited not in ACTION_OBJECTIVES:
         raise ValueError('Invalid saved action_objective_policy')
-    # A new objective is opt-in until full training and musical evaluation.
-    resolved = (inherited or LEGACY_ACTION_OBJECTIVE) if requested == 'auto' else requested
+    # Fresh grounded training must supervise configurations on its own
+    # generated histories as well as authored histories. Existing parents
+    # retain their explicit training objective unless the caller changes it.
+    default = RECOVERY_ACTION_OBJECTIVE if architecture_profile == 'audio_grounded_v3' else LEGACY_ACTION_OBJECTIVE
+    resolved = (inherited or default) if requested == 'auto' else requested
     if resolved != LEGACY_ACTION_OBJECTIVE and architecture_profile != 'audio_grounded_v3':
         raise ValueError(f'{resolved} requires audio_grounded_v3')
     if resume and inherited is not None and resolved != inherited:
