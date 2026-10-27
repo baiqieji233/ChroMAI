@@ -25,6 +25,7 @@ from .objectives import (ACTION_OBJECTIVES, LEGACY_ACTION_OBJECTIVE, RECOVERY_AC
                          resolve_action_objective, training_semantics_for_objective)
 from .sampling_contract import RECOVERY_SAMPLING_POLICIES,resolve_recovery_sampling,recovery_sampling_settings
 from . import ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY
+from .training_defaults import TRAINING_DEFAULTS as DEFAULTS
 
 
 class RemainingBatches:
@@ -194,10 +195,10 @@ def _cuda_execution(device):
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest',required=True);p.add_argument('--checkpoint-dir',required=True)
-    p.add_argument('--cache-dir',default='cache/chart_composer_v1');p.add_argument('--epochs',type=int,default=10)
-    p.add_argument('--batch-size',type=int,default=4);p.add_argument('--lr',type=float,default=2e-4)
-    p.add_argument('--d-model',type=int,default=192);p.add_argument('--layers',type=int,default=3)
-    p.add_argument('--nhead',type=int,default=6);p.add_argument('--dim-feedforward',type=int,default=576)
+    p.add_argument('--cache-dir',default='cache/chart_composer_v1');p.add_argument('--epochs',type=int,default=DEFAULTS['epochs'])
+    p.add_argument('--batch-size',type=int,default=DEFAULTS['batch_size']);p.add_argument('--lr',type=float,default=DEFAULTS['lr'])
+    p.add_argument('--d-model',type=int,default=DEFAULTS['d_model']);p.add_argument('--layers',type=int,default=DEFAULTS['layers'])
+    p.add_argument('--nhead',type=int,default=DEFAULTS['nhead']);p.add_argument('--dim-feedforward',type=int,default=DEFAULTS['dim_feedforward'])
     p.add_argument('--dropout',type=float,default=.1);p.add_argument('--history-events',type=int,default=128)
     p.add_argument('--candidate-count',type=int,default=96);p.add_argument('--action-slots',type=int,default=8)
     p.add_argument('--device',default='auto');p.add_argument('--precision',choices=('auto','fp32','bf16','fp16'),default='auto')
@@ -208,11 +209,11 @@ def parser():
     continuation.add_argument('--resume');continuation.add_argument('--init-checkpoint')
     p.add_argument('--rebatch-resume',action='store_true',
         help='explicitly change resume microbatch/accumulation while preserving effective batch and current epoch sample sequence')
-    p.add_argument('--grad-accumulation',type=int,default=1)
+    p.add_argument('--grad-accumulation',type=int,default=DEFAULTS['grad_accumulation'])
     p.add_argument('--prefetch-batches',type=int,choices=range(0,17),default=2)
-    p.add_argument('--sample-workers',type=int,choices=range(1,9),default=4,
+    p.add_argument('--sample-workers',type=int,choices=range(1,9),default=DEFAULTS['sample_workers'],
                    help='parallel CPU sample preparation threads; CUDA work stays on the main thread')
-    p.add_argument('--cpu-threads',type=int,default=0,
+    p.add_argument('--cpu-threads',type=int,default=DEFAULTS['cpu_threads'],
                    help='PyTorch CPU threads, 0 keeps environment settings; CUDA runs can benchmark 2-4')
     p.add_argument('--sample-locality',type=int,choices=range(1,9),default=4,
                    help='songs interleaved per batch; fewer improves locality but increases same-song gradient correlation')
@@ -248,7 +249,7 @@ def parser():
     p.add_argument('--ledger-dropout',type=float,default=.5)
     p.add_argument('--placement-weight',type=float,default=.15)
     p.add_argument('--planner-weight',type=float,default=.2)
-    p.add_argument('--recovery-interval',type=int,default=100,help='optimizer updates between short recovery batches; 0 disables')
+    p.add_argument('--recovery-interval',type=int,default=DEFAULTS['recovery_interval'],help='optimizer updates between short recovery batches; 0 disables')
     p.add_argument('--recovery-samples',type=int,default=2)
     p.add_argument('--recovery-steps',type=int,default=2,choices=(2,3,4))
     p.add_argument('--recovery-weight',type=float,default=.1)

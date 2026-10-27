@@ -364,8 +364,9 @@
 </div></section>
 <section id="chartComposerTrainingControls" class="song-form-only" data-training-family="chart_composer_v1" hidden>
 <div class="workflow-group-heading"><span class="step">COMPOSER</span><div><h3>事件候选与动作槽位参数</h3><p>独立的 chart_composer_v1 读取 Composer manifest，按候选拍位预测事件动作；与 event、song-form 和连续流 checkpoint 不兼容。</p></div></div>
+<div class="toolbar"><button id="composerApplyFreshDefaults" type="button">应用重训默认值</button><small>仅fresh可用。设置本轮训练参数和新输出目录；已保存的自定义训练值会被替换。</small></div>
 <div class="form-grid">
-<label class="field">模型宽度 d_model<input id="composerDModel" type="number" min="1" step="1" value="192"></label>
+<label class="field">模型宽度 d_model<input id="composerDModel" type="number" min="1" step="1" value="384"></label>
 <label class="field">训练架构<select id="composerArchitectureProfile"><option value="audio_grounded_v3" selected>audio_grounded_v3 音频锚定</option><option value="music_context_v2">music_context_v2 基线</option></select></label>
 <label class="field">配置学习目标<select id="composerActionObjectivePolicy"><option value="auto" selected>自动（新训练使用配置恢复；已有模型继承）</option><option value="event_balanced_v1">旧事件均值（兼容）</option><option value="joint_event_nll_v2">完整事件联合似然</option><option value="joint_event_recovery_v3">联合似然 + 配置恢复训练</option></select><small>配置恢复在模型自己写出的历史后，学习仍合法的原谱续接；需恢复监督间隔大于0。新版恢复策略会保留已生成的历史，每次只追加2–4个事件，逐步覆盖最近历史窗口。联合似然同时学习动作和结束标记，不按事件长度或STOP类别降低权重。总loss与旧目标口径不同，应比较配置首槽CE、旧标尺CE及实际生成结果。长期音乐质量仍需验收。</small></label>
 <label class="field">历史键位锚定<select id="composerHistoryAnchorPolicy"><option value="auto" selected>自动（新训练用完整几何；已有模型继承）</option><option value="parsed_geometry_v3">完整头部、Touch与Slide几何（新默认）</option><option value="parsed_heads_v2">解析真实音符头（新策略）</option><option value="legacy_digit_v1">旧字符策略（保持旧模型行为）</option></select><small>仅audio_grounded_v3使用。完整几何策略解析Touch区域、Slide端点与轨迹；旧解析头策略平均多头角度，避免把中心TouchHold时值误当键位。已有模型切换策略须选择微调和新输出目录；继续训练固定继承，不会自动迁移。</small></label>
@@ -378,7 +379,7 @@
 <label class="field">局部音频宽度<input id="composerLensWidth" type="number" min="8" max="256" value="64"></label>
 <label class="field">局部音频分块候选数<input id="composerLensChunkSize" type="number" min="1" max="256" value="32"></label>
 <label class="field">持续动作状态<select id="composerActionStatePolicy"><option value="auto">自动（新训练使用因果边界；已有模型继承）</option><option value="committed_causal_v2">已提交事件的因果状态</option><option value="committed_legacy_v1">旧边界状态（兼容）</option><option value="candidate_prefix_v2">逐候选查询状态（实验）</option><option value="selected_prefix_v3">选定拍位查询状态（实验）</option></select><small>选定拍位查询只为动作读取所选拍位状态，选位仍使用已提交状态。旧检查点改变策略须显式 finetune 到新目录，不能继续训练。</small></label>
-<label class="field">跨段动机记忆<select id="composerMotifMemoryPolicy"><option value="auto">自动（新训练关闭；已有模型继承）</option><option value="off">关闭</option><option value="audio_recurrence_archive_v1">音频复现检索档案（实验）</option></select><small>实验功能须显式选择微调开启；只检索已提交事件，保留局部音频决定差异。</small></label>
+<label class="field">跨段动机记忆<select id="composerMotifMemoryPolicy"><option value="auto">自动（新训练启用；已有模型继承）</option><option value="off">关闭</option><option value="audio_recurrence_archive_v1">音频复现检索档案（实验）</option></select><small>fresh默认启用音频复现档案，只检索已提交事件，保留局部音频决定差异。实际命中率和长期配置效果仍需观察。</small></label>
 <label class="field">动机记忆事件上限<input id="composerMotifMaxEvents" type="number" min="1" max="32" step="1" value="16"></label>
 <label class="field">Slide分支因子<select id="composerSlideFactorPolicy"><option value="auto">自动（新训练联合分支；已有模型继承）</option><option value="branch_joint_v2">分支内联合端点与轨迹</option><option value="marginal_v1">旧边际统计（兼容）</option></select></label>
 <label class="field">恢复采样Touch布局<select id="composerRecoveryTouchLayoutPolicy"><option value="auto">自动（新训练开放；已有模型继承）</option><option value="open">开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>仅控制训练恢复采样；继续训练继承原策略。</small></label>
@@ -387,16 +388,16 @@
 <label class="field">台账遮挡概率<input id="composerLedgerDropout" type="number" min="0" max="0.9" step="0.05" value="0.5"></label>
 <label class="field">占用监督权重<input id="composerPlacementWeight" type="number" min="0" max="1" step="0.05" value="0.15"></label>
 <label class="field">四拍块规划监督权重<input id="composerPlannerWeight" type="number" min="0" max="1" step="0.05" value="0.2"></label>
-<label class="field">恢复监督间隔（更新步）<input id="composerRecoveryInterval" type="number" min="0" value="100"></label>
+<label class="field">恢复监督间隔（更新步）<input id="composerRecoveryInterval" type="number" min="0" value="25"></label>
 <label class="field">每次恢复样本数<input id="composerRecoverySamples" type="number" min="1" max="8" value="2"></label>
 <label class="field">恢复展开步数<input id="composerRecoverySteps" type="number" min="2" max="4" value="2"><small>每次恢复追加的事件数。新版会继续上次的生成历史，最多覆盖128事件；并非每次从真实谱面重新开始。</small></label>
 <label class="field">恢复监督权重<input id="composerRecoveryWeight" type="number" min="0" max="1" step="0.05" value="0.1"></label>
 <label class="field">恢复采样策略<select id="composerRecoverySamplingPolicy"><option value="auto" selected>自动（续训继承；新阶段使用新版）</option><option value="calibrated_kind_touch_rings_v2">旧恢复协议（校准类别与Touch环）</option><option value="generation_matched_recovery_prefix_retry_v3">生成同款采样与前缀重试</option></select><small>resume 自动继承检查点；新训练阶段默认使用新版。旧协议不使用下面的温度控件，保持默认值。</small></label>
 <label class="field">恢复选位温度<input id="composerRecoveryPointerTemperature" type="number" min="0" max="2" step="0.05" value="1"><small>新版恢复采样的选位温度；范围 0–2。resume 继承并锁定，finetune 可调整。旧协议固定默认值 1。</small></label>
 <label class="field">恢复动作温度<input id="composerRecoveryActionTemperature" type="number" min="0" max="2" step="0.05" value="0.85"><small>新版恢复采样的动作温度；范围 0–2。resume 继承并锁定，finetune 可调整。旧协议固定默认值 0.85。</small></label>
-<label class="field">前馈层宽度<input id="composerDimFeedforward" type="number" min="1" step="1" value="576"><small>建议约为 d_model 的 4 倍；384 维模型可设 1536。</small></label>
-<label class="field">Transformer 层数<input id="composerLayers" type="number" min="1" step="1" value="3"></label>
-<label class="field">注意力头数 nhead<input id="composerNhead" type="number" min="1" step="1" value="6"><small>必须整除 d_model。</small></label>
+<label class="field">前馈层宽度<input id="composerDimFeedforward" type="number" min="1" step="1" value="1536"><small>默认是 d_model 的4倍。</small></label>
+<label class="field">Transformer 层数<input id="composerLayers" type="number" min="1" step="1" value="6"></label>
+<label class="field">注意力头数 nhead<input id="composerNhead" type="number" min="1" step="1" value="8"><small>必须整除 d_model。</small></label>
 <label class="field">历史事件数<input id="composerHistoryEvents" type="number" min="1" step="1" value="128"><small>模型可回看的最近事件数量。</small></label>
 <label class="field">候选拍位数<input id="composerCandidateCount" type="number" min="16" step="1" value="96"><small>至少 16；建议 96 以覆盖常见细分和长休止。</small></label>
 <label class="field">动作槽位数<input id="composerActionSlots" type="number" min="1" max="64" step="1" value="8"><small>训练容量下限；数据需要更多槽位时自动扩展。续训须与检查点容量一致。</small></label>
@@ -408,8 +409,8 @@
 <label class="field">训练缓存目录<textarea id="composerCacheDir" class="path-input" rows="2">cache/chart_composer_v1</textarea><small>与其他模型族的缓存目录分开。</small></label>
 <label class="field">checkpoint 保存间隔（更新步）<input id="composerCheckpointIntervalSteps" type="number" min="0" step="50" value="500"></label>
 <label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>共享内存的单个后台线程提前准备批次，0 关闭；默认 2。</small></label>
-<label class="field">样本准备线程<input id="composerSampleWorkers" type="number" min="1" max="8" value="4"><small>更多线程可能与GPU任务提交争用CPU，不能只看数据等待减少。本机可先试1，再按实际样本/秒对照2或4。</small></label>
-<label class="field" title="小数组 GPU 供数可尝试 2–4；0 自动，保留环境或 PyTorch 设置。">CPU 算子线程<input id="composerCpuThreads" type="number" min="0" max="256" step="1" value="0"><small>0 保留环境 / PyTorch 设置；小数组 GPU 供数可尝试 2–4。续训时仍可调整。</small></label>
+<label class="field">样本准备线程<input id="composerSampleWorkers" type="number" min="1" max="8" value="1"><small>默认1，减少与GPU任务提交争用CPU；可按实际样本/秒对照2或4。</small></label>
+<label class="field" title="默认2；0保留环境或PyTorch设置。">CPU 算子线程<input id="composerCpuThreads" type="number" min="0" max="256" step="1" value="2"><small>默认2。0保留环境 / PyTorch设置；续训时仍可调整。</small></label>
 <label class="field checkbox-field"><input id="composerRebatchResume" type="checkbox"><span>允许轮中重分 batch 续训</span><small>仅 resume 有效。先检查检查点，再调整单批和梯度累积，保持乘积不变（如96×4→64×6）；max_steps需为0。保留已保存样本顺序，不从头重训。</small></label>
 <label class="field">样本局部性<input id="composerSampleLocality" type="number" min="1" max="8" value="4"><small>每批交错的歌曲数；建议 4。1 提高缓存复用，也会增加同曲样本的梯度相关性。</small></label>
 <label class="field">历史模态遮挡概率<input id="composerSymbolicDropout" type="number" min="0" max="0.5" step="0.05" value="0.15"><small>统一隐藏模型读取的谱面历史、动作状态与 ledger，保留音频和真实监督；建议 0.15。</small></label>
@@ -420,7 +421,7 @@
 <label class="field">优化器实现<select id="composerOptimizerImplementation"><option value="auto">自动（CUDA fused / CPU standard）</option><option value="standard">standard</option><option value="foreach">foreach</option><option value="fused">CUDA fused</option></select><small>保留 AdamW 目标；不同内核不保证浮点逐位相同。</small></label>
 <label class="checkbox-field"><input id="composerExportInference" type="checkbox" checked><span>每轮结束另外保存无损推理权重</span><small>composer_inference.pt 不含优化器，可生成和 finetune；resume 使用 composer_last.pt。</small></label>
 </div>
-<p class="workflow-hint">fresh 默认 audio_grounded_v3，也可选择 music_context_v2 基线；resume 继承 checkpoint 架构。新架构能力需要重新训练，音乐性与可玩性尚需自由生成评估。默认 192 维、3 层、6 头、历史 128、候选 96、动作槽位 8。旧 workload v1 可生成，也可通过 finetune 显式迁移到新目录。音频缓存预算不包含标签与历史表。</p>
+<p class="workflow-hint">fresh默认384维、6层、8头、batch64×累积4、20轮；历史128、候选96，动作槽位下限8，随数据自动扩展。自动启用独立计时、跨拍关系、动机档案和配置恢复。可点击“应用重训默认值”替换浏览器保存的旧参数。新架构能力需要重新训练，音乐质量仍需实际生成验收。音频缓存预算不包含标签与历史表。</p>
 </section>
 <section class="song-form-only" data-training-family="song_form_v1 song_form_v2" hidden>
 <div class="workflow-group-heading"><span class="step">RUNTIME</span><div><h3>训练运行与缓存</h3><p>继续训练会继承原计算精度及每轮步数限制；从头训练和微调使用当前值。</p></div></div>

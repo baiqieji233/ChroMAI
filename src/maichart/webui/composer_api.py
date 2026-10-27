@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from typing import Any
+from maichart.composer.training_defaults import TRAINING_DEFAULTS as DEFAULTS
 
 
 FAMILY = "chart_composer_v1"
@@ -95,9 +96,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         raise ValueError('rebatch_resume requires resume mode and a boolean value')
     if rebatch and _int(payload,'max_steps',0,minimum=0):
         raise ValueError('rebatch_resume requires max_steps=0')
-    d_model = _int(payload, "d_model", 192, minimum=1)
-    dim_feedforward = _int(payload, "dim_feedforward", max(1, d_model * 3), minimum=1)
-    nhead = _int(payload, "nhead", 6, minimum=1)
+    d_model = _int(payload, "d_model", DEFAULTS['d_model'], minimum=1)
+    dim_feedforward = _int(payload, "dim_feedforward", max(1, d_model * 4), minimum=1)
+    nhead = _int(payload, "nhead", DEFAULTS['nhead'], minimum=1)
     if mode != "fresh" and not (payload.get("resume") or payload.get("init_checkpoint") or payload.get("checkpoint")):
         raise ValueError("resume / finetune 模式必须提供 checkpoint")
     parent = payload.get("resume") or payload.get("init_checkpoint") or payload.get("checkpoint")
@@ -152,7 +153,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         inspection if mode!='fresh' else None,resume=mode=='resume',architecture_profile=architecture_profile)
     grounded_settings['recovery_sampling_policy']=recovery_sampling
     _arg(args,'--recovery-sampling-policy',recovery_sampling)
-    cpu_default = (parent_args.get('cpu_threads') or 0) if mode == 'resume' else 0
+    cpu_default = (parent_args.get('cpu_threads') or 0) if mode == 'resume' else DEFAULTS['cpu_threads']
     cpu_raw = payload.get('cpu_threads', cpu_default)
     if isinstance(cpu_raw, bool) or not isinstance(cpu_raw, (int, str)):
         raise ValueError('cpu_threads 必须是整数')
@@ -185,7 +186,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
 
     for key, default, minimum, maximum in (
         ('lens_width', 64, 8, 256), ('lens_chunk_size', 32, 1, 256),
-        ('recovery_interval', 100, 0, None), ('recovery_samples', 2, 1, 8),
+        ('recovery_interval', DEFAULTS['recovery_interval'], 0, None), ('recovery_samples', 2, 1, 8),
         ('recovery_steps', 2, 2, 4),
     ):
         value = _int(payload, key, default, minimum=minimum)
@@ -233,17 +234,17 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     grounded_settings['history_memory_rms_bound'] = history_memory_rms_bound
     _arg(args, '--history-memory-rms-bound', history_memory_rms_bound)
     for key, flag, default, minimum in (
-        ("epochs", "--epochs", 10, 1), ("batch_size", "--batch-size", 4, 1),
-        ("grad_accumulation", "--grad-accumulation", 1, 1),
+        ("epochs", "--epochs", DEFAULTS['epochs'], 1), ("batch_size", "--batch-size", DEFAULTS['batch_size'], 1),
+        ("grad_accumulation", "--grad-accumulation", DEFAULTS['grad_accumulation'], 1),
         ("prefetch_batches", "--prefetch-batches", 2, 0),
         ("log_interval", "--log-interval", 25, 1), ("max_steps", "--max-steps", 0, 0),
         ("d_model", "--d-model", d_model, 1), ("dim_feedforward", "--dim-feedforward", dim_feedforward, 1),
-        ("layers", "--layers", 3, 1),
+        ("layers", "--layers", DEFAULTS['layers'], 1),
         ("nhead", "--nhead", nhead, 1), ("history_events", "--history-events", 128, 1),
         ("candidate_count", "--candidate-count", 96, 16), ("action_slots", "--action-slots", 8, 1),
         ("checkpoint_interval_steps", "--checkpoint-interval-steps", 500, 0),
         ("limit_charts", "--limit-charts", 0, 0), ("prepare_workers", "--prepare-workers", 4, 0),
-        ("sample_workers", "--sample-workers", 4, 1),
+        ("sample_workers", "--sample-workers", DEFAULTS['sample_workers'], 1),
         ("sample_locality", "--sample-locality", 4, 1),
         ("profile_steps", "--profile-steps", 0, 0),
     ):
@@ -266,7 +267,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                     value = int(inherited)
         _arg(args, flag, value)
     if mode != 'resume' or 'lr' in payload:
-        _arg(args, "--lr", _float(payload, "lr", 0.0002, minimum=0.0))
+        _arg(args, "--lr", _float(payload, "lr", DEFAULTS['lr'], minimum=0.0))
     _arg(args, "--audio-cache-gb", _float(payload, "audio_cache_gb", 4.0, minimum=0.0))
     for key,maximum,default in (('symbolic_dropout',.5,.15),('audio_pointer_weight',1.,.15)):
         value=_float(payload,key,default,minimum=0.)
@@ -286,7 +287,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     _arg(args,'--optimizer-implementation',implementation)
     if _int(payload,'prefetch_batches',2,minimum=0)>16:
         raise ValueError('prefetch_batches cannot exceed 16')
-    if _int(payload,'sample_workers',4,minimum=1)>8:
+    if _int(payload,'sample_workers',DEFAULTS['sample_workers'],minimum=1)>8:
         raise ValueError('sample_workers cannot exceed 8')
     if _int(payload,'sample_locality',4,minimum=1)>8:
         raise ValueError('sample_locality cannot exceed 8')

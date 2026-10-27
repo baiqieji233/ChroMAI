@@ -2048,15 +2048,15 @@ function chartComposerTrainingPayload(options = {}) {
     manifests, dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean),
     checkpoint_dir: valueOrDefault("#checkpointDir", "").trim(),
     init_checkpoint: mode === "fresh" ? null : valueOrDefault("#trainingCheckpointPath", "").trim(),
-    epochs: Number(valueOrDefault("#epochs", 10)),
-    batch_size: Number(valueOrDefault("#batchSize", 4)),
+    epochs: Number(valueOrDefault("#epochs", 20)),
+    batch_size: Number(valueOrDefault("#batchSize", 64)),
     lr: Number(valueOrDefault("#learningRate", .0002)),
-    grad_accumulation: Number(valueOrDefault('#gradAccumulation',1)),
+    grad_accumulation: Number(valueOrDefault('#gradAccumulation',4)),
     rebatch_resume: mode === 'resume' && checkedOrDefault('#composerRebatchResume',false),
     dropout: Number(valueOrDefault('#composerDropout',.1)),
     prefetch_batches: Number(valueOrDefault('#composerPrefetchBatches',2)),
-    sample_workers: Number(valueOrDefault('#composerSampleWorkers',4)),
-    cpu_threads: Number(valueOrDefault('#composerCpuThreads',0)),
+    sample_workers: Number(valueOrDefault('#composerSampleWorkers',1)),
+    cpu_threads: Number(valueOrDefault('#composerCpuThreads',2)),
     sample_locality: Number(valueOrDefault('#composerSampleLocality',4)),
     symbolic_dropout: Number(valueOrDefault('#composerSymbolicDropout',.15)),
     audio_pointer_weight: Number(valueOrDefault('#composerAudioPointerWeight',.15)),
@@ -2068,7 +2068,7 @@ function chartComposerTrainingPayload(options = {}) {
     ledger_dropout: Number(valueOrDefault('#composerLedgerDropout',.5)),
     placement_weight: Number(valueOrDefault('#composerPlacementWeight',.15)),
     planner_weight: Number(valueOrDefault('#composerPlannerWeight',.2)),
-    recovery_interval: Number(valueOrDefault('#composerRecoveryInterval',100)),
+    recovery_interval: Number(valueOrDefault('#composerRecoveryInterval',25)),
     recovery_samples: Number(valueOrDefault('#composerRecoverySamples',2)),
     recovery_steps: Number(valueOrDefault('#composerRecoverySteps',2)),
     recovery_weight: Number(valueOrDefault('#composerRecoveryWeight',.1)),
@@ -2080,10 +2080,10 @@ function chartComposerTrainingPayload(options = {}) {
     max_steps: Number(valueOrDefault('#composerMaxSteps',0)),
     optimizer_implementation: valueOrDefault('#composerOptimizerImplementation','auto'),
     export_inference: checkedOrDefault('#composerExportInference',true),
-    d_model: Number(valueOrDefault("#composerDModel", 192)),
-    dim_feedforward: Number(valueOrDefault("#composerDimFeedforward", 576)),
-    layers: Number(valueOrDefault("#composerLayers", 3)),
-    nhead: Number(valueOrDefault("#composerNhead", 6)),
+    d_model: Number(valueOrDefault("#composerDModel", 384)),
+    dim_feedforward: Number(valueOrDefault("#composerDimFeedforward", 1536)),
+    layers: Number(valueOrDefault("#composerLayers", 6)),
+    nhead: Number(valueOrDefault("#composerNhead", 8)),
     history_events: Number(valueOrDefault("#composerHistoryEvents", 128)),
     candidate_count: Number(valueOrDefault("#composerCandidateCount", 96)),
     action_slots: Number(valueOrDefault("#composerActionSlots", 8)),
@@ -2404,11 +2404,42 @@ function parseMeterMap(selector) {
 // ---------------------------------------------------------------------------
 // Training-mode dependent controls
 // ---------------------------------------------------------------------------
-function setTrainingModeDefaults() {
-  const mode = currentTrainingMode();
-  if (mode === 'fresh' && currentModelFamily() === 'chart_composer_v1') {
-    const target = element('#composerCpuThreads'); if (target) target.value = '0';
+const COMPOSER_FRESH_TRAINING_DEFAULTS = Object.freeze({
+  epochs:20,batchSize:64,gradAccumulation:4,learningRate:.0002,device:'auto',
+  checkpointDir:'checkpoints/prism_composer_v14',
+  composerDModel:384,composerDimFeedforward:1536,composerLayers:6,composerNhead:8,
+  composerHistoryEvents:128,composerCandidateCount:96,composerActionSlots:8,
+  composerArchitectureProfile:'audio_grounded_v3',composerActionObjectivePolicy:'auto',
+  composerHistoryAnchorPolicy:'auto',composerHistoryMemoryPolicy:'auto',composerHistoryAttentionPolicy:'auto',
+  composerHeadTimingPolicy:'auto',composerCrossEventRelationPolicy:'auto',composerActionStatePolicy:'auto',
+  composerMotifMemoryPolicy:'auto',composerSlideFactorPolicy:'auto',composerMotifMaxEvents:16,
+  composerRecoveryTouchLayoutPolicy:'auto',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
+  composerHistoryResidualBound:1,composerHistoryMemoryRmsBound:8,composerHistoryDropout:.3,composerLedgerDropout:.5,
+  composerPlacementWeight:.15,composerPlannerWeight:.2,composerRecoveryInterval:25,
+  composerRecoverySamples:2,composerRecoverySteps:2,composerRecoveryWeight:.1,
+  composerRecoverySamplingPolicy:'auto',composerRecoveryPointerTemperature:1,composerRecoveryActionTemperature:.85,
+  composerCpuThreads:2,composerSampleWorkers:1,composerPrefetchBatches:2,composerSampleLocality:4,
+  composerSymbolicDropout:.15,composerAudioPointerWeight:.15,
+  composerPrecision:'auto',composerSeed:0,composerLimitCharts:0,composerPrepareWorkers:4,
+  composerAudioCacheGb:4,composerCacheDir:'cache/chart_composer_v1',composerCheckpointIntervalSteps:500,
+  composerProfileSteps:0,composerLogInterval:25,composerMaxSteps:0,
+  composerOptimizerImplementation:'auto',composerExportInference:true,composerRebatchResume:false,
+});
+
+function applyComposerFreshTrainingDefaults() {
+  if(currentTrainingMode()!=='fresh'||currentModelFamily()!=='chart_composer_v1')return false;
+  for(const [id,value] of Object.entries(COMPOSER_FRESH_TRAINING_DEFAULTS)) {
+    const target=element('#'+id);if(!target)continue;
+    if(target.type==='checkbox')target.checked=value===true;
+    else target.value=String(value);
   }
+  const learningRate=element('#learningRate');if(learningRate)learningRate.dataset.touched='';
+  return true;
+}
+
+function setTrainingModeDefaults({resetComposer=false}={}) {
+  const mode = currentTrainingMode();
+  if(resetComposer)applyComposerFreshTrainingDefaults();
   const learningRate = element("#learningRate");
   if (learningRate && learningRate.dataset.touched !== "1") {
     learningRate.value = mode === "finetune" ? "0.00002" : "0.0002";
@@ -2505,6 +2536,8 @@ function updateTrainingControls() {
     }
   }
   const composer = currentModelFamily() === 'chart_composer_v1';
+  const freshDefaults=element('#composerApplyFreshDefaults');
+  if(freshDefaults)freshDefaults.disabled=!composer||currentTrainingMode()!=='fresh';
   const rebatch = element('#composerRebatchResume');
   if (rebatch) {
     rebatch.disabled = !composer || !resume;
@@ -3623,7 +3656,7 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
   const cpuThreads = element('#composerCpuThreads');
   if (cpuThreads) {
     cpuThreads.disabled = false;
-    if (!preserveEditable) cpuThreads.value = String(mode === 'resume' ? (data?.args?.cpu_threads ?? 0) : 0);
+    if (!preserveEditable) cpuThreads.value = String(mode === 'resume' ? (data?.args?.cpu_threads ?? 0) : 2);
   }
   const sampleWorkers = element('#composerSampleWorkers');
   if (sampleWorkers && mode === 'resume' && !preserveEditable)
@@ -4256,8 +4289,8 @@ async function submitTrain(options = {}) {
     if (!payload.manifest) throw new Error("请先填写已准备的 Composer manifest");
     const backend=await api('/api/status');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
-        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v10_relational_recovery')
-      throw new Error('当前服务尚未加载 Composer 独立计时、跨拍关系与持续恢复训练控件。请使用更新后的 WebUI 后端；有活动训练时先保留原服务监控训练。');
+        || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v11_fresh_training_defaults')
+      throw new Error('当前服务尚未加载 Composer 本轮重训默认设置。请重启为更新后的WebUI后端，再应用重训默认值；有活动训练时先保留原服务监控训练。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -5522,24 +5555,12 @@ on("#modelFamily", "change", () => {
     if (!element("#checkpointDir")?.value || ["checkpoints/song_form_v2", "checkpoints/chart_composer_v1"].includes(element("#checkpointDir")?.value)) element("#checkpointDir").value = "checkpoints/chart_stream_v1";
   }
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "chart_composer_v1") {
-    for (const [id, v] of Object.entries({composerDModel:192, composerDimFeedforward:576, composerLayers:3, composerNhead:6,
-      composerHistoryEvents:128, composerCandidateCount:96, composerActionSlots:8,
-      composerArchitectureProfile:'audio_grounded_v3',composerActionObjectivePolicy:'auto',composerHistoryAnchorPolicy:'auto',composerHistoryMemoryPolicy:'auto',composerHistoryAttentionPolicy:'auto',composerHeadTimingPolicy:'auto',composerCrossEventRelationPolicy:'auto',composerActionStatePolicy:'auto',composerMotifMemoryPolicy:'auto',composerSlideFactorPolicy:'auto',composerMotifMaxEvents:16,composerRecoveryTouchLayoutPolicy:'auto',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
-      composerHistoryResidualBound:1,composerHistoryMemoryRmsBound:8,composerHistoryDropout:.3,composerLedgerDropout:.5,
-      composerPlacementWeight:.15,composerPlannerWeight:.2,composerRecoveryInterval:100,
-      composerRecoverySamples:2,composerRecoverySteps:2,composerRecoveryWeight:.1,composerRecoverySamplingPolicy:'auto',composerRecoveryPointerTemperature:1,composerRecoveryActionTemperature:.85,
-      composerCpuThreads:0,
-      composerPrecision:"auto", composerSeed:0, composerLimitCharts:0, composerPrepareWorkers:4,
-      composerAudioCacheGb:4, composerCacheDir:"cache/chart_composer_v1", composerCheckpointIntervalSteps:500})) {
-      const node = element("#" + id); if (node) node.value = String(v);
-    }
-    if (!element("#checkpointDir")?.value || ["checkpoints/song_form_v2", "checkpoints/chart_stream_v1"].includes(element("#checkpointDir")?.value)) {
-      element("#checkpointDir").value = "checkpoints/chart_composer_v1";
-    }
+    applyComposerFreshTrainingDefaults();
   }
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
-on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults(); updateTrainingControls(); });
+on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults({resetComposer:true}); updateTrainingControls(); });
+on('#composerApplyFreshDefaults','click',()=>{if(applyComposerFreshTrainingDefaults()){updateTrainingControls();saveSettings();setStatus('已应用 Composer 重训默认值：20轮、batch64×累积4，启用动机与配置恢复。',true);}});
 on('#composerRecoverySamplingPolicy','change',()=>{updateComposerRecoverySamplingControls();saveSettings();});
 on('#composerRebatchResume','change',()=>{updateTrainingControls();saveSettings();});
 on("#formRhythmGeometryProfileSelect", "change", () => { updateSongFormRhythmGeometryControls(); saveSettings(); });

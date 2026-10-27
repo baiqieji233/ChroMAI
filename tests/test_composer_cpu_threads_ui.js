@@ -34,20 +34,20 @@ test('old checkpoint CPU threads defaults to zero and UI declares persistence/re
   await c.inspectCheckpoint();
   assert.equal(el('#composerCpuThreads').value,'0');
   const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
-  assert.match(html,/id="composerCpuThreads" type="number" min="0" max="256" step="1" value="0"/);
+  assert.match(html,/id="composerCpuThreads" type="number" min="0" max="256" step="1" value="2"/);
   const source=fs.readFileSync('src/maichart/webui/static/app.js','utf8');
-  assert.ok(source.includes('composerCpuThreads:0'));
-  assert.ok(source.includes('causal_motif_runtime_controls_v10_relational_recovery'));
+  assert.ok(source.includes('composerCpuThreads:2'));
+  assert.ok(source.includes('causal_motif_runtime_controls_v11_fresh_training_defaults'));
   assert.ok(source.includes('input[id], select[id], textarea[id]'));
 });
 
-test('finetune starts from zero and preserves an explicit runtime edit',async()=>{
+test('finetune starts from two and preserves an explicit runtime edit',async()=>{
   const {c,el,parent,setMode}=context.getHarness();
   parent.args.cpu_threads=8;
   await c.inspectCheckpoint();
   setMode('finetune');
   await c.inspectCheckpoint();
-  assert.equal(el('#composerCpuThreads').value,'0');
+  assert.equal(el('#composerCpuThreads').value,'2');
   assert.equal(el('#composerCpuThreads').disabled,false);
   el('#composerCpuThreads').value='4';
   await c.inspectCheckpoint({preserveEditableConfig:true});

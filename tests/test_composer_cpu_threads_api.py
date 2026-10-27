@@ -7,10 +7,10 @@ from maichart.webui import composer_api
 
 
 @pytest.mark.parametrize('mode,saved,requested,expected', [
-    ('fresh', 8, None, 0), ('fresh', 8, 2, 2),
+    ('fresh', 8, None, 2), ('fresh', 8, 2, 2),
     ('resume', 8, None, 8), ('resume', None, None, 0),
     ('resume', 8, 2, 2), ('finetune', 8, 4, 4),
-    ('finetune', 8, None, 0), ('fresh', None, 256, 256),
+    ('finetune', 8, None, 2), ('fresh', None, 256, 256),
 ])
 def test_cpu_threads_runtime_override(tmp_path, monkeypatch, mode, saved, requested, expected):
     from maichart.composer import checkpoint

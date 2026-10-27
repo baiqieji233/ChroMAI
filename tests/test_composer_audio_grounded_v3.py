@@ -235,7 +235,7 @@ def test_grounded_training_checkpoint_generation_and_recovery_are_connected(tmp_
         'audio_path':str(audio),'difficulties':[{'difficulty_index':5,'level_raw':'13'}]}]}),encoding='utf-8')
     output=tmp_path/'model'
     argv=['--manifest',str(manifest),'--checkpoint-dir',str(output),'--cache-dir',str(tmp_path/'cache'),
-        '--epochs','1','--batch-size','2','--max-steps','2','--device','cpu','--precision','fp32',
+        '--epochs','1','--batch-size','2','--grad-accumulation','1','--max-steps','2','--device','cpu','--precision','fp32',
         '--d-model','16','--layers','1','--nhead','4','--dim-feedforward','32','--candidate-count','16',
         '--action-slots','2','--history-events','8','--lens-width','8','--lens-chunk-size','8',
         '--prefetch-batches','0','--prepare-workers','1','--recovery-interval','1','--recovery-samples','1']

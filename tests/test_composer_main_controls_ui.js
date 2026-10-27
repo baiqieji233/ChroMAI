@@ -4,7 +4,7 @@ const source=fs.readFileSync('src/maichart/webui/static/app.js','utf8');
 function fn(name){const start=source.indexOf(`function ${name}(`);return source.slice(source.slice(start-6,start)==='async '?start-6:start,source.indexOf('\n}',start)+2);}
 function harness(){
   const elements=new Map();
-  const el=id=>{if(!elements.has(id))elements.set(id,{value:'',checked:false,disabled:false});return elements.get(id);};
+  const el=id=>{if(!elements.has(id))elements.set(id,{value:'',checked:false,disabled:false,dataset:{}});return elements.get(id);};
   let mode='resume',submitted;
   const parent={valid:true,can_resume:true,family:'chart_composer_v1',model_config:{dropout:.25},
     args:{batch_size:96,grad_accumulation:4,lr:.0002,precision:'bf16',seed:0,max_steps:0},optimizer_lr:.00005};
@@ -20,7 +20,7 @@ function harness(){
     checkedOrDefault:(id)=>el(id).checked,formDevice:()=> 'cpu',
     api:async(path,payload)=>{
       if(path==='/api/composer/inspect')return structuredClone(parent);
-      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v10_relational_recovery'}};
+      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v11_fresh_training_defaults'}};
       if(path==='/api/composer/train'){submitted=payload;return {task_id:'fake'};}
       throw Error(path);
     }});
@@ -46,6 +46,23 @@ test('New-stage policies stay auto and recovery temperatures remain editable',()
   el('#composerRecoverySamplingPolicy').value='calibrated_kind_touch_rings_v2';c.updateComposerRecoverySamplingControls();
   assert.equal(el('#composerRecoveryActionTemperature').disabled,true);
   assert.equal(el('#composerRecoveryActionTemperature').value,'0.85');
+});
+
+test('Fresh defaults apply the complete training recipe and cannot overwrite resume',()=>{
+  const {c,el,setMode}=harness();
+  vm.runInContext(source.slice(source.indexOf('const COMPOSER_FRESH_TRAINING_DEFAULTS ='),
+    source.indexOf('function setTrainingModeDefaults(')),c);
+  el('#composerRebatchResume').type='checkbox';el('#composerExportInference').type='checkbox';
+  el('#composerRebatchResume').checked=true;
+  setMode('fresh');assert.equal(c.applyComposerFreshTrainingDefaults(),true);
+  const p=c.chartComposerTrainingPayload();
+  for(const [key,value] of Object.entries({epochs:20,batch_size:64,grad_accumulation:4,lr:.0002,
+    d_model:384,dim_feedforward:1536,layers:6,nhead:8,cpu_threads:2,sample_workers:1,
+    recovery_interval:25,history_events:128,candidate_count:96,action_slots:8,max_steps:0}))assert.equal(p[key],value,key);
+  assert.equal(p.motif_memory_policy,'auto');assert.equal(p.export_inference,true);assert.equal(p.rebatch_resume,false);
+  assert.equal(p.checkpoint_dir,'checkpoints/prism_composer_v14');
+  setMode('resume');el('#batchSize').value='32';
+  assert.equal(c.applyComposerFreshTrainingDefaults(),false);assert.equal(el('#batchSize').value,'32');
 });
 
 test('Real submit inspection preserves rebatch edits, current optimizer lr and immutable dropout',async()=>{

@@ -28,7 +28,8 @@ def test_auto_policies_resolve_and_are_forwarded_without_training(harness,mode):
     api.start_train(handler,dict(payload,mode=mode),runtime=runtime)
     task,args=calls[0]
     expected={'action_state_policy':'committed_causal_v2' if mode=='fresh' else 'committed_legacy_v1',
-              'motif_memory_policy':'off','slide_factor_policy':'branch_joint_v2' if mode=='fresh' else 'marginal_v1',
+              'motif_memory_policy':'audio_recurrence_archive_v1' if mode=='fresh' else 'off',
+              'slide_factor_policy':'branch_joint_v2' if mode=='fresh' else 'marginal_v1',
               'touch_layout_policy':'open' if mode=='fresh' else 'legacy_two_heads','motif_max_events':16}
     for key,want in expected.items():
         assert value(args,key)==str(want)

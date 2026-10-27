@@ -22,7 +22,7 @@ HISTORY_MEMORY_POLICIES = {'unbounded_v1', 'rms_cap_v1'}
 HISTORY_ATTENTION_POLICIES = {'auto_v1', 'math_v1'}
 COMPOSER_POLICY_FIELDS = {
     'action_state_policy': (STATE_POLICIES, 'committed_legacy_v1', 'committed_causal_v2'),
-    'motif_memory_policy': (MOTIF_POLICIES, 'off', 'off'),
+    'motif_memory_policy': (MOTIF_POLICIES, 'off', 'audio_recurrence_archive_v1'),
     'slide_factor_policy': (SLIDE_FACTOR_POLICIES, 'marginal_v1', 'branch_joint_v2'),
     'history_memory_policy': (HISTORY_MEMORY_POLICIES, 'unbounded_v1', 'rms_cap_v1'),
     'history_attention_policy': (HISTORY_ATTENTION_POLICIES, 'auto_v1', 'math_v1'),
@@ -52,7 +52,7 @@ def resolve_composer_policy(name, requested='auto', parent_config=None, *, resum
     choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
     if not isinstance(requested,str) or requested not in {'auto', *choices}:
         raise ValueError(f'Unknown {name}')
-    if name in {'slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy'} and architecture_profile!=GROUNDED_PROFILE:
+    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy'} and architecture_profile!=GROUNDED_PROFILE:
         fresh=legacy
     inherited = parent_config.get(name, legacy) if parent_config else None
     if not resume and name in {'head_timing_policy','cross_event_relation_policy'}:
