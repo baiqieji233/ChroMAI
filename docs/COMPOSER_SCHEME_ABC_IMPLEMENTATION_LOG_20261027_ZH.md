@@ -48,3 +48,12 @@
 统一回归及主智能体独立复测结果见[复核说明](COMPOSER_SCHEME_ABC_REVIEW_20261028_ZH.md)与[证据文件](evidence/COMPOSER_SCHEME_ABC_REVIEW_20261028.json)。本地原始脚本、日志和复核前源码在上面的`.scratch`目录。
 
 已经验证的是实现行为：跨组梯度、分组采样、条件遮挡、合法尺寸、训练与生成一致性、旧权重读取及真实主界面传参。尚未验收的是新结构在真实长程训练中的学习速度、GPU效率，以及固定歌曲双种子生成的配置、Touch、分音和可玩性。
+
+## 6. 对 `f360ec9` 的二次核查与组合宏观因子修复（2026-10-28 05:25）
+
+1. **保留 `f360ec9` 的 5 项有效修复**：
+   - Touch 具体起始位置分桶（91 组）、生成与恢复采样接入 91 组守恒温度截断（`_conserved_action_probabilities`）、条件遮挡全路径统一（`effective_condition`）、`FutureAudioHorizon` 头数自适应及 `ConservedGroupedActionHead` FP32 输出精度保持。
+2. **修复 `f360ec9` 误将组合宏观因子（`kind_mask`、`head_lane_mask`、`touch_ring`）从输出分类器中抵消归零的问题**：
+   - **问题原因**：在 `f360ec9` 中，第一级宏观桶分数仅由扁平的 `self.macro_head = nn.Linear(width, 91, bias=False)` 计算，而 `action_factors` 的 `kind_mask`、`head_lane_mask`、`touch_ring` 仅留在 `base_logits` 中。由于同一宏观桶内所有音符的这三个因子值完全相同，第二级执行 `within_log_probs = detail_scores - detail_group_lse` 时将它们代数相减 **100% 抵消为 0**（实测对 `kind_mask` 权重加 `+50.0` 时输出变化仅 `3.57e-5`，首槽梯度仅 `1e-8`），导致 91 个宏观桶退化为不共享“动作类型 / 按钮键位 / Touch 环”的孤立分类行。
+   - **修复实现（`src/maichart/composer/conserved_actions.py`）**：按每个宏观桶的代表元提取 `(group_kind_id, group_lane_id, group_ring_id)`，将 `action_factors` 的 `kind_mask`、`head_lane_mask`、`touch_ring` 组合得分直接加回第一级 `macro_raw` 中。
+   - **验证结果**：在保持“Tap 目标对其他 Slide 桶内细化分数跨桶梯度严格为 0”的同时，恢复了 91 个宏观桶之间的类型/键位/Touch 环参数共享与首槽梯度（`test_composer_grouped_head_review.py` 等 47 项定向测试全部通过）。

@@ -101,6 +101,19 @@ class ConservedGroupedActionHead(nn.Module):
         group_ids, num_groups = build_macro_groups(action_factors)
         self.num_groups = int(num_groups)
         self.register_buffer('atom_group_id', group_ids, persistent=False)
+        rep_atoms = [0] * self.num_groups
+        for atom_idx, gid in enumerate(group_ids.tolist()):
+            if rep_atoms[gid] == 0 and atom_idx != 0:
+                rep_atoms[gid] = atom_idx
+        rep_t = torch.tensor(rep_atoms, dtype=torch.long)
+        self.register_buffer('group_kind_id', action_factors.atom_kind_mask[rep_t].clone(), persistent=False)
+        self.register_buffer('group_lane_id', action_factors.atom_head_lane_mask[rep_t].clone(), persistent=False)
+        self.register_buffer('group_ring_id', action_factors.atom_touch_ring[rep_t].clone(), persistent=False)
+        object.__setattr__(self, '_shared_macro_factors', (
+            action_factors.factors['kind_mask'],
+            action_factors.factors['head_lane_mask'],
+            action_factors.factors['touch_ring'],
+        ))
         self.register_buffer('atom_shape_id', action_factors.atom_trajectory_shape.clone(), persistent=False)
         self.register_buffer('atom_endpoint_id', action_factors.atom_relative_endpoint.clone(), persistent=False)
         self.register_buffer('atom_break_id', action_factors.atom_break_ex.clone(), persistent=False)
@@ -205,7 +218,18 @@ class ConservedGroupedActionHead(nn.Module):
         traj_table, dur_table = tables
 
         normed = self.macro_norm(slot_context)
-        macro_delta = float(macro_scale) * self.macro_head(normed).float()
+        macro_raw = self.macro_head(normed).float()
+        shared = getattr(self, '_shared_macro_factors', None)
+        if shared is not None:
+            kind_emb, lane_emb, ring_emb = shared
+            dev = slot_context.device
+            macro_factor_weight = (
+                kind_emb.weight.to(dev).index_select(0, self.group_kind_id.to(dev)).float()
+                + lane_emb.weight.to(dev).index_select(0, self.group_lane_id.to(dev)).float()
+                + ring_emb.weight.to(dev).index_select(0, self.group_ring_id.to(dev)).float()
+            )
+            macro_raw = macro_raw + F.linear(slot_context.float(), macro_factor_weight)
+        macro_delta = float(macro_scale) * macro_raw
         # Keep STOP (group 0) as the gauge reference so macro shifts represent
         # log-odds relative to STOP or between groups without drifting global offset.
         macro_delta = macro_delta - macro_delta[..., :1]

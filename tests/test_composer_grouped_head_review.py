@@ -50,6 +50,23 @@ def test_tap_target_has_no_gradient_to_other_buckets_atom_classifiers():
     assert head.macro_head.weight.grad.abs().sum()>0
 
 
+def test_compositional_macro_factors_are_shared_across_groups_and_receive_slot0_gradients():
+    torch.manual_seed(106)
+    model=build_model(make_config(action_head_policy='conserved_grouped_v2'),ATOMS)
+    ctx=torch.randn(2,16,requires_grad=True)
+    dec=model.decode_candidate(ctx,action_targets=torch.tensor([[1],[12]]))
+    loss=F.cross_entropy(dec['action_logits'][:,0],torch.tensor([1,12]))
+    loss.backward()
+    for name in ('kind_mask','head_lane_mask','touch_ring'):
+        grad=model.action_factors.factors[name].weight.grad
+        assert grad is not None and float(grad.abs().sum())>1e-3, f'{name} was canceled out of macro head'
+    with torch.no_grad():
+        before=model.action_slot(ctx[0],0,[]).clone()
+        model.action_factors.factors['kind_mask'].weight[1].add_(5.0)
+        after=model.action_slot(ctx[0],0,[]).clone()
+        assert float((after-before).abs().max())>0.5
+
+
 def test_group_quality_is_independent_of_flat_logit_group_offset():
     torch.manual_seed(102)
     head=small_head()
