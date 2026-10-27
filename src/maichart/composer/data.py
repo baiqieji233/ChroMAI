@@ -317,10 +317,10 @@ class ComposerDataset(Dataset):
                 'excluded_unknown_or_oversize':before-len(self.samples),
                 'unknown_atom_types':len(atom_set-set(self.codec_atoms))}
         if structure_policy!='off':
-            from .structure import SCHEMA as STRUCTURE_SCHEMA
+            from .structure import structure_schema_for_policy
             fingerprint=json.loads(self.fingerprint)
             fingerprint.update(structure_policy=structure_policy,structure_backend=structure_backend,
-                               structure_schema=STRUCTURE_SCHEMA)
+                               structure_schema=structure_schema_for_policy(structure_policy))
             from .structure_backend import backend_identity
             fingerprint['structure_backend_identity']=backend_identity(structure_backend)
             self.fingerprint=json.dumps(fingerprint,sort_keys=True)

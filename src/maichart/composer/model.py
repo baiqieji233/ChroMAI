@@ -28,7 +28,7 @@ COMPOSER_POLICY_FIELDS = {
     'history_attention_policy': (HISTORY_ATTENTION_POLICIES, 'auto_v1', 'math_v1'),
     'head_timing_policy': (HEAD_TIMING_POLICIES, 'merged_pads_v1', 'separate_pads_v2'),
     'cross_event_relation_policy': ({'off','relative_heads_v1'}, 'off', 'relative_heads_v1'),
-    'structure_policy': ({'off','native_periodic_v1','metrical_context_v1'}, 'off', 'metrical_context_v1'),
+    'structure_policy': ({'off','native_periodic_v1','metrical_context_v1','metrical_context_v2'}, 'off', 'metrical_context_v2'),
     'contact_policy': ({'off','diagnostic_v1','contact_groups_v1'}, 'off', 'diagnostic_v1'),
 }
 
@@ -131,9 +131,10 @@ class ComposerConfig:
         if not math.isfinite(self.structure_dropout) or not 0 <= self.structure_dropout <= .9:
             raise ValueError('structure_dropout must be in [0,.9]')
         if self.structure_policy!='off':
-            from .structure import SCHEMA
-            if self.structure_schema=='auto':self.structure_schema=SCHEMA
-            if self.structure_schema!=SCHEMA:
+            from .structure import structure_schema_for_policy
+            expected_schema=structure_schema_for_policy(self.structure_policy)
+            if self.structure_schema=='auto':self.structure_schema=expected_schema
+            if self.structure_schema!=expected_schema:
                 raise ValueError('Structure feature schema differs from this checkpoint; use its matching implementation')
         elif self.structure_schema=='auto':self.structure_schema='off'
         if (isinstance(self.history_memory_rms_bound, bool)

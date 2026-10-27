@@ -30,7 +30,7 @@
           <label>学习率变化方式<select name="lr_schedule"><option value="auto">自动（新训练恒定，续训继承）</option><option value="constant">恒定</option><option value="cosine">预热后余弦退火</option></select></label>
           <label>预热更新数<input name="warmup_steps" type="number" min="0" placeholder="自动"></label>
           <label>末尾学习率比例<input name="min_lr_ratio" type="number" min="0" max="1" step="0.05" placeholder="自动"></label>
-          <label>音乐结构条件<select name="structure_policy"><option value="auto">自动（新训练启用）</option><option value="off">关闭</option><option value="native_periodic_v1">仅原生周期坐标</option><option value="metrical_context_v1">音频结构与周期坐标</option></select></label>
+          <label>音乐结构条件<select name="structure_policy"><option value="auto">自动（新训练增强信号）</option><option value="off">关闭</option><option value="native_periodic_v1">仅原生周期坐标</option><option value="metrical_context_v1">音频结构与周期坐标（旧版）</option><option value="metrical_context_v2">音频结构与直接强拍信号（新版）</option></select></label>
           <label>结构分析后端<select name="structure_backend"><option value="auto">自动（优先就绪的 Beat This!）</option><option value="native">内置分析</option><option value="beat_this">Beat This!</option></select></label>
           <label>结构条件遮挡概率<input name="structure_dropout" type="number" min="0" max="0.9" step="0.05" value="0.15"></label>
           <label>恢复采样接触预算<select name="contact_policy"><option value="auto">自动（新训练仅诊断）</option><option value="off">关闭</option><option value="diagnostic_v1">仅诊断</option><option value="contact_groups_v1">有限接触模板拦截</option></select></label>

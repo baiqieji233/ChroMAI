@@ -698,13 +698,13 @@ def _train(args,explicit_flags):
         if '--structure-dropout' in explicit_flags and args.structure_dropout!=inherited_drop:
             raise ValueError('Resume inherits structure_dropout')
         args.structure_dropout=inherited_drop
-    elif args.structure_policy=='metrical_context_v1':
+    elif args.structure_policy in {'metrical_context_v1','metrical_context_v2'}:
         from .structure import resolve_structure_backend
         args.structure_backend=resolve_structure_backend(args.structure_backend)
     else:args.structure_backend='native'
     from .structure_backend import backend_identity
     args.structure_backend_identity=(backend_identity(args.structure_backend,refresh=True) if args.structure_policy!='off' else None)
-    if args.resume and args.structure_policy=='metrical_context_v1':
+    if args.resume and args.structure_policy in {'metrical_context_v1','metrical_context_v2'}:
         expected=parent_anchor_config.get('structure_backend_identity') or model.config.structure_backend_identity
         if expected!=args.structure_backend_identity:
             raise ValueError('Resume requires the exact saved structure backend identity')

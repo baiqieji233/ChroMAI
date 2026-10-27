@@ -25,4 +25,15 @@ test('Both workspaces expose actual structure and contact controls',()=>{
     assert.match(lab,new RegExp('name="'+key+'"'));
   assert.match(main,/composerGenerationContactPolicy/);
   assert.match(lab,/不强制分段或换手/);
+  assert.match(main,/value="metrical_context_v2"/);
+});
+
+test('Fresh enhanced auto policy refuses a backend that only supports v1',async()=>{
+  const {c,setMode}=context.getHarness();setMode('fresh');
+  c.api=async path=>{
+    if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',
+      composer_training_controls:'causal_motif_runtime_controls_v11_fresh_training_defaults',composer_structure_context:'metrical_context_v1'}};
+    throw new Error('A stale backend must not receive a training request');
+  };
+  await assert.rejects(c.submitTrain(),/结构信号/);
 });

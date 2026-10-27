@@ -28,7 +28,7 @@ def option(args, name):
 def test_fresh_and_legacy_checkpoint_defaults(harness):
     payload, parent, calls, handler, runtime=harness
     api.start_train(handler,dict(payload,mode='fresh'),runtime=runtime)
-    assert option(calls[-1][1],'structure_policy')=='metrical_context_v1'
+    assert option(calls[-1][1],'structure_policy')=='metrical_context_v2'
     assert option(calls[-1][1],'structure_backend')=='auto'
     assert option(calls[-1][1],'contact_policy')=='diagnostic_v1'
     api.start_train(handler,dict(payload,mode='resume'),runtime=runtime)

@@ -54,10 +54,11 @@ class AudioGroundedComposer(ChartComposer):
         self.action_relation=nn.Linear(8,width,bias=False)
         nn.init.zeros_(self.action_relation.weight)
         if config.structure_policy != 'off':
-            from .structure import STRUCTURE_DIM
-            self.structure_projection=nn.Linear(STRUCTURE_DIM,width,bias=False)
-            self.structure_action_projection=nn.Linear(STRUCTURE_DIM,width,bias=False)
-            self.structure_transition_projection=nn.Linear(STRUCTURE_DIM,width,bias=False)
+            from .structure import structure_dim_for_policy
+            structure_dim=structure_dim_for_policy(config.structure_policy)
+            self.structure_projection=nn.Linear(structure_dim,width,bias=False)
+            self.structure_action_projection=nn.Linear(structure_dim,width,bias=False)
+            self.structure_transition_projection=nn.Linear(structure_dim,width,bias=False)
             # New feature branches have their own versioned input contract.
             # Neutral initialization also supports explicit transfer studies.
             nn.init.zeros_(self.structure_projection.weight)
@@ -103,8 +104,8 @@ class AudioGroundedComposer(ChartComposer):
         batch,count=candidate_features.shape[:2]
         structure_term=None
         if self.config.structure_policy != 'off':
-            from .structure import STRUCTURE_DIM
-            if structure_features is None or structure_features.shape != (batch,count,STRUCTURE_DIM):
+            from .structure import structure_dim_for_policy
+            if structure_features is None or structure_features.shape != (batch,count,structure_dim_for_policy(self.config.structure_policy)):
                 raise ValueError('Structure-enabled Composer requires matching candidate structure features')
             structure_features=structure_features.to(candidate_features)
             if structure_transition is None:structure_transition=torch.zeros_like(structure_features)

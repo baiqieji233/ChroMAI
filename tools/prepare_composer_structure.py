@@ -14,6 +14,7 @@ def main(argv=None):
     p.add_argument('--manifest', required=True)
     p.add_argument('--cache-dir', required=True)
     p.add_argument('--backend', choices=('auto','native','beat_this'), default='auto')
+    p.add_argument('--structure-policy',choices=('metrical_context_v1','metrical_context_v2'),default='metrical_context_v2')
     p.add_argument('--workers', type=int, default=1)
     p.add_argument('--device', default='cpu')
     p.add_argument('--report', help='Write inspectable candidate segments as JSON lines')
@@ -36,9 +37,9 @@ def main(argv=None):
     songs=[record[0] for record in ds.songs]
     def prepare(song):
         try:
-            fingerprint=structure_fingerprint(song, a.cache_dir, a.backend)
-            structure_features(song, [0.], [float(song.first)], cache_dir=a.cache_dir, backend=a.backend)
-            report = structure_segments(song,cache_dir=a.cache_dir,backend=a.backend) if a.report else None
+            fingerprint=structure_fingerprint(song,a.cache_dir,a.backend,policy=a.structure_policy)
+            structure_features(song,[0.],[float(song.first)],cache_dir=a.cache_dir,backend=a.backend,policy=a.structure_policy)
+            report = structure_segments(song,cache_dir=a.cache_dir,backend=a.backend,policy=a.structure_policy) if a.report else None
             return fingerprint, report, None
         except Exception as exc:
             return None,None,{'source':str(song.audio.source),'error':f'{type(exc).__name__}: {exc}'}
@@ -51,7 +52,7 @@ def main(argv=None):
                     failures.append(error)
                     print('structure_prepare_error '+json.dumps({'index':i,**error}),flush=True)
                     continue
-                print('structure_prepare '+json.dumps({'index':i, 'total':len(songs), 'fingerprint':key, 'backend':a.backend}), flush=True)
+                print('structure_prepare '+json.dumps({'index':i, 'total':len(songs), 'fingerprint':key, 'backend':a.backend,'structure_policy':a.structure_policy}), flush=True)
                 if report_file:
                     report_file.write(json.dumps({'index':i,'fingerprint':key,'backend':a.backend,
                         'source':str(songs[i-1].audio.source),'segments':report}, ensure_ascii=False)+'\n')

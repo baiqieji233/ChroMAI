@@ -36,7 +36,7 @@ def raw_cache_key(audio_digest,identity):
 
 def validate_backend_identity(config):
     """Inference must use the same analyzer identity that supplied training."""
-    if config.structure_policy!='metrical_context_v1':return
+    if config.structure_policy not in {'metrical_context_v1','metrical_context_v2'}:return
     current=backend_identity(config.structure_backend,refresh=True)
     expected=getattr(config,'structure_backend_identity',None)
     if expected is None or expected!=current:

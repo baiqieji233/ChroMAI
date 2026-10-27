@@ -2436,7 +2436,7 @@ function parseMeterMap(selector) {
 // ---------------------------------------------------------------------------
 const COMPOSER_FRESH_TRAINING_DEFAULTS = Object.freeze({
   epochs:20,batchSize:64,gradAccumulation:4,learningRate:.0002,device:'auto',
-  checkpointDir:'checkpoints/prism_composer_v14',
+  checkpointDir:'checkpoints/prism_composer_v16_signal',
   composerDModel:384,composerDimFeedforward:1536,composerLayers:6,composerNhead:8,
   composerHistoryEvents:128,composerCandidateCount:96,composerActionSlots:8,
   composerArchitectureProfile:'audio_grounded_v3',composerActionObjectivePolicy:'auto',
@@ -4340,9 +4340,13 @@ async function submitTrain(options = {}) {
     if ((payload.lr_schedule==='cosine'||Number(payload.warmup_steps||0)>0)
         && backend.training_capabilities?.composer_learning_rate_schedule!=='optimizer_updates_v1')
       throw new Error('当前服务尚未加载学习率预热与退火。请保留活动训练，在更新后的WebUI服务中启动新阶段。');
-    if (payload.structure_policy!=='off'
-        && backend.training_capabilities?.composer_structure_context!=='metrical_context_v1')
-      throw new Error('当前服务尚未加载音乐结构训练，请重启更新后的 WebUI 服务。');
+    const effectiveStructure=payload.structure_policy==='auto'
+      ?(payload.mode==='fresh'?'metrical_context_v2':checkpointInspection?.data?.model_config?.structure_policy??'off')
+      :payload.structure_policy;
+    const structureCapability=backend.training_capabilities?.composer_structure_context;
+    if (effectiveStructure!=='off' && !(structureCapability==='metrical_context_v2'
+        || (effectiveStructure!=='metrical_context_v2' && structureCapability==='metrical_context_v1')))
+      throw new Error('当前服务尚未加载所选版本的音乐结构信号，请保留活动训练，在更新后的WebUI服务中启动新阶段。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }

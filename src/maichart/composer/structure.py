@@ -5,6 +5,8 @@ for harmonics 1/2, log bar length, log pulse length, posterior weight,
 support, phase confidence, valid), then acoustic novelty and boundary support.
 Candidates describe periods in chart-beat units, not asserted time signatures.
 Equal durations with different denominator/grouping are intentionally unresolved.
+Enhanced v2 adds local neural beat/downbeat probabilities and availability,
+uses distinct representative periods and dimensionless accent reliability.
 """
 from __future__ import annotations
 
@@ -21,8 +23,12 @@ from functools import lru_cache
 import numpy as np
 
 STRUCTURE_DIM = 48
-STRUCTURE_POLICIES = frozenset(('off', 'native_periodic_v1', 'metrical_context_v1'))
+ENHANCED_POLICY = 'metrical_context_v2'
+ENHANCED_DIM = 51
+METRICAL_POLICIES = frozenset(('metrical_context_v1', ENHANCED_POLICY))
+STRUCTURE_POLICIES = frozenset(('off', 'native_periodic_v1', *METRICAL_POLICIES))
 SCHEMA = 'composer_structure_native_v4'
+ENHANCED_SCHEMA = 'composer_structure_balanced_v6'
 # Exact rational durations, avoiding artificial claims about time signatures.
 PERIODS = np.array(sorted({Fraction(n * 4, d) for d in (2, 4, 8, 16)
                            for n in range(2, 33)}), dtype=np.float64)
@@ -31,6 +37,16 @@ _banks = OrderedDict()
 _identity_bases = OrderedDict()
 _key_locks = {}
 _query_banks=OrderedDict()
+
+
+def structure_dim_for_policy(policy):
+    if policy not in STRUCTURE_POLICIES:raise ValueError('Unknown structure policy')
+    return ENHANCED_DIM if policy == ENHANCED_POLICY else STRUCTURE_DIM
+
+
+def structure_schema_for_policy(policy):
+    if policy not in STRUCTURE_POLICIES:raise ValueError('Unknown structure policy')
+    return ENHANCED_SCHEMA if policy == ENHANCED_POLICY else SCHEMA
 
 
 @lru_cache(maxsize=64)
@@ -58,7 +74,7 @@ def resolve_structure_backend(requested='auto'):
     return resolve(requested)
 
 
-def _identity(song, backend):
+def _identity(song, backend, policy='metrical_context_v1'):
     from .structure_backend import backend_identity
     audio = song.audio
     # Cache the immutable audio identity on the lightweight song object. This
@@ -95,15 +111,15 @@ def _identity(song, backend):
         except (AttributeError, TypeError):
             _identity_bases[id(song)] = (song, audio, details)
             while len(_identity_bases) > 128: _identity_bases.popitem(last=False)
-    return {'schema': SCHEMA, **base[1], 'first': float(song.first),
+    return {'schema': structure_schema_for_policy(policy), **base[1], 'first': float(song.first),
             'tempo': [[str(t.beat), float(t.bpm)] for t in song.tempo],
             'backend_requested': backend, 'backend_effective': backend_identity(backend),
             'grouping': 'unknown', 'grid_beats': .25, 'window_beats': 32.}
 
 
-def structure_fingerprint(song, cache_dir=None, backend='auto'):
+def structure_fingerprint(song, cache_dir=None, backend='auto', *, policy='metrical_context_v1'):
     """Stable cache key; no analysis or network access is performed."""
-    return hashlib.sha256(json.dumps(_identity(song, backend), sort_keys=True,
+    return hashlib.sha256(json.dumps(_identity(song, backend, policy), sort_keys=True,
                                      separators=(',', ':')).encode()).hexdigest()
 
 
@@ -126,7 +142,24 @@ def _harmonic_coefficients(phase, weighted_residual, residual_energy):
     return first, second
 
 
-def _build(song, cache_dir, backend_info):
+def _balanced_harmonics(phase, weighted_residual, residual_energy, original_energy, window_mass):
+    """Gate tiny residues and combine contrast/coherence in comparable units."""
+    relative=residual_energy/np.maximum(original_energy,1e-8)
+    active=(residual_energy>max(1e-6,window_mass*1e-3))&(relative>.02)
+    if not active.any():return np.zeros(phase.shape[1],complex),np.zeros(phase.shape[1],complex)
+    denominator=np.maximum(residual_energy,1e-8)[None,:]
+    first=(phase.T@weighted_residual)/denominator
+    second=((phase*phase).T@weighted_residual)/denominator
+    # Native channels use normalized acoustic units, neural channels use
+    # probabilities. Absolute residual energy cannot compare their reliability.
+    # Prefer relative accent contrast and agreement with this candidate period.
+    coherence=np.maximum(np.abs(first),np.abs(second))
+    weights=coherence**2*np.where(active,relative,0.)[None,:]
+    weights=weights/np.maximum(weights.sum(-1,keepdims=True),1e-8)
+    return (first*weights).sum(-1),(second*weights).sum(-1)
+
+
+def _build(song, cache_dir, backend_info, *, enhanced=False):
     audio = song.audio
     times = np.asarray(audio.times, dtype=np.float64)
     data = np.asarray(audio.features)
@@ -160,6 +193,8 @@ def _build(song, cache_dir, backend_info):
     signal[:, scale < 1e-8] = 0.
     from .structure_backend import beat_this_frames
     frames = beat_this_frames(audio, cache_dir, backend_info)
+    pulse_signal=signal
+    local_probabilities=np.empty((0,3),np.float32)
     if frames is not None:
         logits = np.asarray(frames, dtype=np.float64)
         probabilities = 1. / (1. + np.exp(-np.clip(logits, -30., 30.)))
@@ -168,7 +203,13 @@ def _build(song, cache_dir, backend_info):
         # with silence / near-constant outputs contributing no support.
         neural = np.column_stack([np.maximum.reduce([np.interp(seconds + offset, ft, probabilities[:, j], left=0., right=0.) for offset in (-.04, -.02, 0., .02, .04)]) for j in range(2)])
         neural = np.maximum(neural - np.percentile(neural, 50, axis=0), 0.)
-        signal = np.column_stack((signal, neural))
+        if enhanced:
+            # The beat channel estimates pulse spacing only. Its tiny
+            # de-pulsed residue is not another vote on bar accent phase.
+            pulse_signal=np.column_stack((signal,neural[:,0]))
+            signal=np.column_stack((signal,neural[:,1]))
+            local_probabilities=np.column_stack((ft,probabilities)).astype(np.float32)
+        else:signal = np.column_stack((signal, neural))
     # Section novelty compares acoustic context on either side, rather than
     # equating a single onset with a section boundary. Preserve a quarter-beat
     # output grid and use means over 2, 4, and 8 beats.
@@ -199,6 +240,7 @@ def _build(song, cache_dir, backend_info):
         if valid.sum() < 8: continue
         g = grid[indices[valid]]; w = taper[valid]
         sig = signal[indices[valid]]
+        pulse_sig=pulse_signal[indices[valid]] if enhanced else sig
         energy = np.sum(w[:, None]*sig, axis=0)
         if energy.max() < 1e-6: continue
         # Estimate a pulse separately, then remove its repeated per-pulse
@@ -209,7 +251,7 @@ def _build(song, cache_dir, backend_info):
         pulse_strength=[]
         for option in pulse_options:
             lag=int(round(option*4))
-            left, right = sig[:-lag], sig[lag:]
+            left, right = pulse_sig[:-lag], pulse_sig[lag:]
             denom=np.sqrt(np.sum(left*left)*np.sum(right*right))
             coherence=float(np.sum(left*right)/denom) if denom > 1e-8 else 0.
             pulse_strength.append(coherence - .03*abs(np.log2(option)))
@@ -227,8 +269,11 @@ def _build(song, cache_dir, backend_info):
         if contrast < .02:
             continue
         phase = np.exp(-2j*np.pi*g[:, None]/PERIODS[None, :])
-        combined, combined2 = _harmonic_coefficients(
-            phase, w[:, None]*residual, residual_energy)
+        if enhanced:
+            combined,combined2=_balanced_harmonics(phase,w[:,None]*residual,residual_energy,energy,w.sum())
+        else:
+            combined, combined2 = _harmonic_coefficients(
+                phase, w[:, None]*residual, residual_energy)
         concentration = np.maximum(np.abs(combined), np.abs(combined2))
         cycles = np.clip((g[-1]-g[0])/PERIODS / 3., 0., 1.)
         activity = np.clip(float(np.mean(energy / max(w.sum(), 1e-8))), 0., 1.)
@@ -238,7 +283,9 @@ def _build(song, cache_dir, backend_info):
         eligible = (PERIODS >= 3.*pulse - 1e-7) | np.isclose(PERIODS, 2.*pulse)
         score = concentration * support * eligible
         evidence = np.expm1(np.clip(score * 5., 0., 5.))
-        weight = evidence / (8. + evidence.sum())
+        # Enhanced records retain independent strength until four distinct
+        # representatives are selected. Candidate count cannot dilute them.
+        weight = evidence if enhanced else evidence / (8. + evidence.sum())
         records[k, :, 0] = weight
         records[k, :, 1] = support * eligible
         records[k, :, 2] = concentration * eligible
@@ -247,7 +294,8 @@ def _build(song, cache_dir, backend_info):
         records[k, :, 5] = pulse
         records[k, :, 6] = combined2.real
         records[k, :, 7] = combined2.imag
-    return centers, records, grid, novelty
+    result=(centers,records,grid,novelty)
+    return (*result,local_probabilities) if enhanced else result
 
 
 def _select_order(records):
@@ -263,20 +311,41 @@ def _select_order(records):
     return order
 
 
-def _bank(song, cache_dir, backend):
+def _representative_order(records):
+    """Suppress aliases inside a 32-beat window's frequency resolution."""
+    result=np.full((len(records),4),-1,dtype=np.int32)
+    frequencies=1./PERIODS
+    for row in range(len(records)):
+        chosen=[]
+        for index in np.argsort(-records[row,:,0],kind='stable'):
+            if records[row,index,0]<=1e-8:break
+            if any(abs(frequencies[index]-frequencies[prior])<1./32. for prior in chosen):continue
+            chosen.append(int(index))
+            if len(chosen)==4:break
+        result[row,:len(chosen)]=chosen
+    return result
+
+
+def _representative_weights(strengths):
+    """Four strengths plus one unit unknown prior; not calibrated posteriors."""
+    return strengths/(1.+strengths.sum(-1,keepdims=True))
+
+
+def _bank(song, cache_dir, backend, policy='metrical_context_v1'):
     from .structure_backend import backend_cache_token
     # Fractions and floats compare directly: no JSON/SHA or filesystem work.
     # The small tempo tuple detects in-place tempo edits as well as replacement.
     tempo=tuple((change.beat,change.bpm) for change in song.tempo)
     raw_dir=os.fspath(cache_dir) if cache_dir is not None else None
     audio=song.audio
-    query_key=(id(song),id(audio),float(song.first),tempo,raw_dir,backend,SCHEMA,backend_cache_token())
+    query_key=(id(song),id(audio),float(song.first),tempo,raw_dir,backend,structure_schema_for_policy(policy),backend_cache_token())
     with _lock:
         hit=_query_banks.get(query_key)
         if hit is not None and hit[0] is song and hit[1] is audio:
             _query_banks.move_to_end(query_key)
             return hit[2]
-    result=_cold_bank(song,cache_dir,backend)
+    result=(_cold_bank(song,cache_dir,backend,policy=policy) if policy==ENHANCED_POLICY
+            else _cold_bank(song,cache_dir,backend))
     with _lock:
         _query_banks[query_key]=(song,audio,result)
         _query_banks.move_to_end(query_key)
@@ -284,8 +353,8 @@ def _bank(song, cache_dir, backend):
     return result
 
 
-def _cold_bank(song, cache_dir, backend):
-    identity = _identity(song, backend)
+def _cold_bank(song, cache_dir, backend, *, policy='metrical_context_v1'):
+    identity = (_identity(song,backend,policy) if policy==ENHANCED_POLICY else _identity(song, backend))
     key = hashlib.sha256(json.dumps(identity, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
     cache_key = (_cache_directory(os.fspath(cache_dir) if cache_dir is not None else None),key)
     with _lock:
@@ -342,13 +411,16 @@ def _publish_structure_array(path, values):
 
 
 def _build_bank(song, cache_dir, identity, key):
-    directory = Path(cache_dir) / 'composer_structure_v4' if cache_dir is not None else None
+    enhanced=identity.get('schema')==ENHANCED_SCHEMA
+    directory = Path(cache_dir) / ('composer_structure_v6' if enhanced else 'composer_structure_v4') if cache_dir is not None else None
     path = directory / (key + '.npy') if directory else None
     novelty_path = directory / (key + '.novelty.npy') if directory else None
+    local_path = directory / (key + '.local.npy') if directory and enhanced else None
     width = 2 + len(PERIODS)*8
     array = None
     novelty_array = None
-    if path and path.exists() and novelty_path.exists():
+    local_array=None
+    if path and path.exists() and novelty_path.exists() and (not enhanced or local_path.exists()):
         try:
             candidate = np.load(path, mmap_mode='r', allow_pickle=False)
             if (candidate.ndim == 2 and candidate.shape[1] == width and candidate.shape[0] > 0
@@ -356,10 +428,19 @@ def _build_bank(song, cache_dir, identity, key):
                 novelty_candidate = np.load(novelty_path, mmap_mode='r', allow_pickle=False)
                 if (novelty_candidate.ndim == 2 and novelty_candidate.shape[1] == 2 and len(novelty_candidate)
                         and novelty_candidate.dtype == np.float32 and np.isfinite(novelty_candidate).all()):
+                    if enhanced:
+                        local_candidate=np.load(local_path,mmap_mode='r',allow_pickle=False)
+                        if (local_candidate.ndim!=2 or local_candidate.shape[1]!=3
+                                or local_candidate.dtype!=np.float32 or not np.isfinite(local_candidate).all()):
+                            raise ValueError('Invalid local structure probabilities')
+                        local_array=local_candidate
                     array, novelty_array = candidate, novelty_candidate
         except (OSError, ValueError): pass
     if array is None:
-        centers, records, grid, novelty = _build(song, cache_dir, identity['backend_effective'])
+        built=(_build(song,cache_dir,identity['backend_effective'],enhanced=True) if enhanced
+               else _build(song, cache_dir, identity['backend_effective']))
+        centers, records, grid, novelty = built[:4]
+        if enhanced:local_array=built[4]
         array = np.zeros((len(centers), width), dtype=np.float32)
         array[:, 0] = centers
         array[:, 1] = np.interp(centers, grid, novelty)
@@ -369,6 +450,7 @@ def _build_bank(song, cache_dir, identity, key):
             directory.mkdir(parents=True, exist_ok=True)
             array = _publish_structure_array(path, array)
             novelty_array = _publish_structure_array(novelty_path, novelty_array)
+            if enhanced:local_array=_publish_structure_array(local_path,local_array)
             meta_path = directory / (key + '.json')
             fd, tmp = tempfile.mkstemp(prefix=key+'.', suffix='.json.tmp', dir=directory)
             try:
@@ -383,26 +465,32 @@ def _build_bank(song, cache_dir, identity, key):
             finally:
                 if os.path.exists(tmp): os.unlink(tmp)
     rec = np.asarray(array[:, 2:]).reshape(len(array), len(PERIODS), 8)
-    order = _select_order(rec)
-    selected = rec[np.arange(len(rec))[:, None], order]
+    order = _representative_order(rec) if enhanced else _select_order(rec)
+    selected = rec[np.arange(len(rec))[:, None], np.maximum(order,0)].copy()
+    if enhanced:
+        selected[order<0]=0.
+        selected[:,:,0]=_representative_weights(selected[:,:,0])
 
-    return array, novelty_array, order, selected
+    result=(array,novelty_array,order,selected)
+    return (*result,local_array) if enhanced else result
 
 
 def structure_features(song, beats, seconds, *, policy='metrical_context_v1', cache_dir=None, backend='auto'):
-    """Return [N,48] features; seconds and beats refer to the same positions."""
+    """Return 48 legacy or 51 enhanced features on the same beat/second axis."""
     if policy not in STRUCTURE_POLICIES: raise ValueError(f'Unknown structure policy: {policy}')
     beats = np.asarray(beats, dtype=np.float64).reshape(-1)
     seconds = np.asarray(seconds, dtype=np.float64).reshape(-1)
     if len(beats) != len(seconds) or not np.isfinite(beats).all() or not np.isfinite(seconds).all():
         raise ValueError('beats and seconds must be finite arrays of the same length')
-    out = np.zeros((len(beats), STRUCTURE_DIM), dtype=np.float32)
+    out = np.zeros((len(beats), structure_dim_for_policy(policy)), dtype=np.float32)
     if policy == 'off': return out
     for i, period in enumerate((4., 8., 16.)):
         angle = 2*np.pi*beats/period
         out[:, 2*i] = np.sin(angle); out[:, 2*i+1] = np.cos(angle)
     if policy == 'native_periodic_v1' or not len(beats): return out
-    bank, novelty, order, selected = _bank(song, cache_dir, backend)
+    enhanced=policy==ENHANCED_POLICY
+    cached=_bank(song,cache_dir,backend,policy=policy) if enhanced else _bank(song,cache_dir,backend)
+    bank,novelty,order,selected=cached[:4]
     anchors = np.asarray(bank[:, 0], dtype=np.float64)
     # Select candidates from the nearest anchor, then interpolate evidence for
     # that same period from the surrounding anchors. This never blends two
@@ -412,18 +500,40 @@ def structure_features(song, beats, seconds, *, policy='metrical_context_v1', ca
     lo = np.maximum(0, hi-1)
     alpha = np.clip((beats-anchors[lo])/np.maximum(anchors[hi]-anchors[lo], 1e-8), 0., 1.) if len(anchors)>1 else np.zeros(len(beats))
     nearest = np.where(alpha < .5, lo, hi)
+    values=[];period_ids=[]
     for slot in range(4):
-        ids = order[nearest, slot]
+        raw_ids=order[nearest,slot]
+        ids = np.maximum(raw_ids,0)
         v = rec[lo, ids] * (1.-alpha[:, None]) + rec[hi, ids] * alpha[:, None]
-        p = PERIODS[ids]; wt = v[:, 0]
+        if enhanced:v[raw_ids<0]=0.
+        values.append(v);period_ids.append(ids)
+    weights=(_representative_weights(np.stack([value[:,0] for value in values],axis=-1)) if enhanced else None)
+    for slot,(v,ids) in enumerate(zip(values,period_ids)):
+        p = PERIODS[ids]; wt = weights[:,slot] if enhanced else v[:, 0]
         angle = 2*np.pi*beats/p
         z1 = (v[:, 3] + 1j*v[:, 4]) * np.exp(1j*angle)
         z2 = (v[:, 6] + 1j*v[:, 7]) * np.exp(2j*angle)
+        if enhanced:
+            # Encode direction and relative harmonic shape once; the slot's
+            # confidence gates it once. Do not multiply confidence by the
+            # already attenuated absolute coefficient a second time.
+            magnitude=np.maximum(np.abs(z1),np.abs(z2))
+            z1=np.divide(z1,magnitude,out=np.zeros_like(z1),where=magnitude>1e-6)
+            z2=np.divide(z2,magnitude,out=np.zeros_like(z2),where=magnitude>1e-6)
         token = np.column_stack((wt*z1.imag, wt*z1.real, wt*z2.imag, wt*z2.real,
             np.log1p(p)*wt, np.log1p(v[:, 5])*wt, wt, v[:, 1], v[:, 2], wt > 1e-8))
         out[:, 6+10*slot:16+10*slot] = token
     out[:, 46] = np.interp(beats, novelty[:, 0], novelty[:, 1], left=0., right=0.)
     out[:, 47] = np.clip(out[:, 46] * np.sum(out[:, [12,22,32,42]], axis=1), 0., 1.)
+    if enhanced:
+        local=cached[4]
+        if len(local):
+            available=(seconds>=0.)&(seconds<float(song.audio.duration_sec))
+            for column in range(2):
+                peaks=np.maximum.reduce([np.interp(seconds+offset,local[:,0],local[:,column+1],left=0.,right=0.)
+                                         for offset in (-.04,-.02,0.,.02,.04)])
+                out[:,48+column]=np.where(available,peaks,0.)
+            out[:,50]=available
     return out
 
 
@@ -444,16 +554,19 @@ def structure_features_and_transition(song,beats,seconds,previous_beat=None,prev
     return features,features-joined[-1:]
 
 
-def structure_segments(song, *, cache_dir=None, backend='auto', limit=4):
+def structure_segments(song, *, cache_dir=None, backend='auto', limit=4,policy='metrical_context_v1'):
     """Inspectable local candidates; probabilities are heuristic, not calibrated.
 
     Ranges are anchor neighborhoods and overlap in evidence due to 32-beat
-    windows. The grouping/time signature remains unknown. Unknown weight is
-    the unassigned mass over all candidate periods, not just displayed slots.
+    windows. The grouping/time signature remains unknown. Legacy unknown mass
+    uses the complete period catalog; enhanced mass uses four representatives
+    plus an unknown prior. Neither is a calibrated time-signature probability.
     """
     if not 1 <= limit <= 4:
         raise ValueError('limit must be in [1,4]')
-    bank, novelty, order, selected = _bank(song, cache_dir, backend)
+    enhanced=policy==ENHANCED_POLICY
+    cached=_bank(song,cache_dir,backend,policy=policy) if enhanced else _bank(song,cache_dir,backend)
+    bank,novelty,order,selected=cached[:4]
     rec = np.asarray(bank[:, 2:]).reshape(len(bank), len(PERIODS), 8)
     anchors = np.asarray(bank[:, 0], dtype=np.float64)
     end = float(novelty[-1, 0])
@@ -464,8 +577,9 @@ def structure_segments(song, *, cache_dir=None, backend='auto', limit=4):
         if hi <= lo: continue
         seconds = _seconds_at_beats(np.array([lo, hi]), song)
         candidates=[]
-        for idx in order[row, :limit]:
-            v=rec[row, idx]
+        for slot,idx in enumerate(order[row, :limit]):
+            if idx<0:continue
+            v=selected[row,slot] if enhanced else rec[row, idx]
             if v[0] <= 1e-8: continue
             candidates.append({'period_beats':float(PERIODS[idx]), 'pulse_beats':float(v[5]),
                 'weight':float(v[0]), 'support':float(v[1]), 'phase_confidence':float(v[2]),
@@ -474,6 +588,6 @@ def structure_segments(song, *, cache_dir=None, backend='auto', limit=4):
                 'second_harmonic_amplitude':float(np.hypot(v[6],v[7])), 'grouping':'unknown'})
         result.append({'start_beat':float(lo), 'end_beat':float(hi),
             'start_second':float(seconds[0]), 'end_second':float(seconds[1]),
-            'unknown_weight':float(np.clip(1.-rec[row,:,0].sum(),0.,1.)),
+            'unknown_weight':float(np.clip(1.-(selected[row,:,0].sum() if enhanced else rec[row,:,0].sum()),0.,1.)),
             'candidates':candidates})
     return result

@@ -45,7 +45,7 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'recovery_pointer_temperature':1.,'recovery_action_temperature':.85}
     from maichart.composer.sampling_contract import recovery_sampling_settings
     expected['recovery_sampling_settings']=recovery_sampling_settings(expected['recovery_sampling_policy'])
-    expected.update(structure_policy='metrical_context_v1',contact_policy='diagnostic_v1',
+    expected.update(structure_policy='metrical_context_v2',contact_policy='diagnostic_v1',
                     structure_backend='auto',structure_dropout=.15,
                     lr_schedule='auto',warmup_steps=None,min_lr_ratio=None)
     assert task.result['effective_settings'] == expected

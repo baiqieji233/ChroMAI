@@ -467,6 +467,9 @@ def generate(args):
     device=_device(args.device);model,payload=load(args.checkpoint,device=device);model.eval()
     from .structure_backend import validate_backend_identity
     validate_backend_identity(model.config)
+    from .structure import structure_dim_for_policy
+    structure_feature_dim=(structure_dim_for_policy(model.config.structure_policy)
+                           if model.config.structure_policy!='off' else 0)
     contact_policy=getattr(args,'contact_policy','auto')
     if contact_policy=='auto':contact_policy=model.config.contact_policy
     weights_sha256=_weight_fingerprint(payload['model_state_dict'])
@@ -565,6 +568,7 @@ def generate(args):
         'pointer_sampling_policy':GROUNDED_POINTER_SAMPLING_POLICY if grounded else 'global_temperature_truncation_v1',
         'touch_layout_policy':touch_layout_policy,
         'contact_policy':contact_policy,'structure_policy':model.config.structure_policy,
+        'structure_schema':model.config.structure_schema,'structure_feature_dim':structure_feature_dim,
         'structure_backend':model.config.structure_backend,
         'tempo_source':('provided_map' if args.tempo_map else 'provided_bpm' if args.bpm else 'audio_estimate'),
         'touch_layout_hand_feasibility_guaranteed':False,
@@ -814,6 +818,7 @@ def generate(args):
             'pointer_sampling_policy':GROUNDED_POINTER_SAMPLING_POLICY if grounded else 'global_temperature_truncation_v1',
             'touch_layout_policy':touch_layout_policy,
             'contact_policy':contact_policy,'structure_policy':model.config.structure_policy,
+            'structure_schema':model.config.structure_schema,'structure_feature_dim':structure_feature_dim,
             'structure_backend':model.config.structure_backend,
             'tempo_source':('provided_map' if args.tempo_map else 'provided_bpm' if args.bpm else 'audio_estimate'),
             'touch_layout_hand_feasibility_guaranteed':False,

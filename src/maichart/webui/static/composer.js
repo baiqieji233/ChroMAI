@@ -55,7 +55,9 @@
     delete data.parent;
     if(data.structure_policy!=='off') {
       const status=await(await fetch('/api/status')).json();
-      if(status.training_capabilities?.composer_structure_context!=='metrical_context_v1')
+      const capability=status.training_capabilities?.composer_structure_context;
+      const enhanced=data.structure_policy==='metrical_context_v2'||(data.mode==='fresh'&&data.structure_policy==='auto');
+      if(!(capability==='metrical_context_v2'||(!enhanced&&capability==='metrical_context_v1')))
         throw new Error('当前服务未加载音乐结构训练，请重启更新后的 WebUI 服务。');
     }
     if(data.lr_schedule==='cosine'||Number(data.warmup_steps||0)>0) {

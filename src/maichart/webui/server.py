@@ -226,7 +226,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_training_runtime": "music_context_shared_slots_v2",
                                               "composer_training_controls": "causal_motif_runtime_controls_v11_fresh_training_defaults",
                                               "composer_learning_rate_schedule": "optimizer_updates_v1",
-                                              "composer_structure_context": "metrical_context_v1",
+                                              "composer_structure_context": "metrical_context_v2",
                                               "composer_contact_budget": "conservative_groups_v1",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,

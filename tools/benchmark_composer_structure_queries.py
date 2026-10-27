@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--manifest', required=True)
     parser.add_argument('--cache-dir', required=True)
     parser.add_argument('--backend', choices=('auto', 'native', 'beat_this'), default='native')
+    parser.add_argument('--structure-policy',choices=('metrical_context_v1','metrical_context_v2'),default='metrical_context_v1')
     parser.add_argument('--iterations', type=int, default=100)
     parser.add_argument('--profile', help='Optional cProfile output file')
     args = parser.parse_args()
@@ -47,7 +48,7 @@ def main():
             break
     if len(songs) != 3:
         raise ValueError(f'manifest must yield at least three distinct songs; got {len(songs)}')
-    kwargs = dict(policy='metrical_context_v1', cache_dir=args.cache_dir, backend=args.backend)
+    kwargs = dict(policy=args.structure_policy, cache_dir=args.cache_dir, backend=args.backend)
     beats = np.linspace(8., 16., 64)
     # Local beat/second conversion uses the song's actual tempo map.
     from maichart.composer.structure import _seconds_at_beats
