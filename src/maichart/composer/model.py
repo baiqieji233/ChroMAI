@@ -30,6 +30,8 @@ COMPOSER_POLICY_FIELDS = {
     'cross_event_relation_policy': ({'off','relative_heads_v1'}, 'off', 'relative_heads_v1'),
     'structure_policy': ({'off','native_periodic_v1','metrical_context_v1','metrical_context_v2'}, 'off', 'metrical_context_v2'),
     'contact_policy': ({'off','diagnostic_v1','contact_groups_v1'}, 'off', 'diagnostic_v1'),
+    'future_horizon_policy': ({'off','candidate_horizon_v1'}, 'off', 'candidate_horizon_v1'),
+    'action_head_policy': ({'flat_v1','conserved_grouped_v2'}, 'flat_v1', 'conserved_grouped_v2'),
 }
 
 
@@ -46,6 +48,9 @@ def validate_supported_context_policies(config):
         'head_timing_policy':values.get('head_timing_policy','merged_pads_v1')!='merged_pads_v1',
         'cross_event_relation_policy':values.get('cross_event_relation_policy','off')!='off',
         'structure_policy':values.get('structure_policy','off')!='off',
+        'future_horizon_policy':values.get('future_horizon_policy','off')!='off',
+        'action_head_policy':values.get('action_head_policy','flat_v1')!='flat_v1',
+        'condition_mask_prob':values.get('condition_mask_prob',0.)!=0.,
     }
     for name, invalid in unsupported.items():
         if invalid:raise ValueError(f'{name}={values[name]} requires audio_grounded_v3')
@@ -55,10 +60,10 @@ def resolve_composer_policy(name, requested='auto', parent_config=None, *, resum
     choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
     if not isinstance(requested,str) or requested not in {'auto', *choices}:
         raise ValueError(f'Unknown {name}')
-    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy','structure_policy'} and architecture_profile!=GROUNDED_PROFILE:
+    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy','structure_policy','future_horizon_policy','action_head_policy'} and architecture_profile!=GROUNDED_PROFILE:
         fresh=legacy
     inherited = parent_config.get(name, legacy) if parent_config else None
-    if not resume and name in {'head_timing_policy','cross_event_relation_policy'}:
+    if not resume and name in {'head_timing_policy','cross_event_relation_policy','future_horizon_policy','action_head_policy'}:
         inherited=None
     resolved = (inherited or fresh) if requested == 'auto' else requested
     if resume and inherited is not None and resolved != inherited:
@@ -76,6 +81,21 @@ def resolve_history_anchor_policy(requested='auto', parent_config=None, *, resum
     if resume and inherited is not None and resolved != inherited:
         raise ValueError('Resume inherits history_anchor_policy; use explicit finetune in a new directory to change it')
     return resolved
+
+
+def resolve_condition_mask_prob(requested=None, parent_config=None, *, resume=False):
+    """Keep saved condition masking on continuation; allow explicit new stages."""
+    inherited=float((parent_config or {}).get('condition_mask_prob',0.))
+    raw=inherited if requested is None else requested
+    if isinstance(raw,bool):raise ValueError('condition_mask_prob must be in [0,.9]')
+    try:value=float(raw)
+    except (TypeError,ValueError) as exc:
+        raise ValueError('condition_mask_prob must be in [0,.9]') from exc
+    if not math.isfinite(value) or not 0<=value<=.9:
+        raise ValueError('condition_mask_prob must be in [0,.9]')
+    if resume and value!=inherited:
+        raise ValueError('Resume inherits condition_mask_prob; use explicit finetune in a new directory')
+    return value
 
 
 @dataclass(slots=True)
@@ -115,6 +135,9 @@ class ComposerConfig:
     cross_event_relation_policy: str = 'off'
     structure_policy: str = 'off'
     contact_policy: str = 'off'
+    future_horizon_policy: str = 'off'
+    action_head_policy: str = 'flat_v1'
+    condition_mask_prob: float = 0.
     structure_backend: str = 'native'
     structure_dropout: float = .15
     structure_schema: str = 'auto'
@@ -130,6 +153,7 @@ class ComposerConfig:
             raise ValueError('Unknown structure_backend')
         if not math.isfinite(self.structure_dropout) or not 0 <= self.structure_dropout <= .9:
             raise ValueError('structure_dropout must be in [0,.9]')
+        self.condition_mask_prob=resolve_condition_mask_prob(self.condition_mask_prob)
         if self.structure_policy!='off':
             from .structure import structure_schema_for_policy
             expected_schema=structure_schema_for_policy(self.structure_policy)

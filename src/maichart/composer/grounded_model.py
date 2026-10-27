@@ -79,6 +79,18 @@ class AudioGroundedComposer(ChartComposer):
         if config.motif_memory_policy != 'off':
             from .motif_memory import MotifMemoryAdapter
             self.motif_memory=MotifMemoryAdapter(width)
+        if getattr(config,'future_horizon_policy','off')=='candidate_horizon_v1':
+            from .future_horizon import FutureAudioHorizon
+            # A valid base model may have e.g. width=30 and nhead=6. Its
+            # width need not divide four, so choose a compatible small head
+            # count instead of rejecting otherwise supported configurations.
+            horizon_heads=min(4,config.nhead)
+            while width % horizon_heads:
+                horizon_heads-=1
+            self.future_horizon=FutureAudioHorizon(width,nhead=horizon_heads)
+        if getattr(config,'action_head_policy','flat_v1')=='conserved_grouped_v2':
+            from .conserved_actions import ConservedGroupedActionHead
+            self.conserved_action_head=ConservedGroupedActionHead(self.action_factors,width)
         # A full ledger still describes valid causal state. Its direct and
         # discrepancy routes cannot write an unbounded pointer logit anymore.
 
@@ -102,6 +114,14 @@ class AudioGroundedComposer(ChartComposer):
         # across optimizer updates. Pointer-only calls retain sparse lookups.
         factor_weight=self.action_factors.composed_weight() if decode_actions else None
         batch,count=candidate_features.shape[:2]
+        # Mask the same target-derived controls before EVERY internal consumer.
+        # Otherwise planner/workload/placement predictions leak the hidden
+        # condition back into the action context through their detached paths.
+        effective_condition=condition
+        if self.training and self.config.condition_mask_prob>0. and condition.size(-1)>1:
+            cond_mask=(torch.rand(batch,1,device=condition.device)<self.config.condition_mask_prob)
+            masked_tail=torch.where(cond_mask,condition.new_full((batch,condition.size(-1)-1),.5),condition[:,1:])
+            effective_condition=torch.cat((condition[:,:1],masked_tail),dim=-1)
         structure_term=None
         if self.config.structure_policy != 'off':
             from .structure import structure_dim_for_policy
@@ -128,12 +148,14 @@ class AudioGroundedComposer(ChartComposer):
         lens=self.lens(audio_lens,audio_lens_mask) if lens_embeddings is None else lens_embeddings
         if self.training and lens_embeddings is not None:
             raise ValueError('Cached audio embeddings are inference-only; training must retain lens gradients')
-        placement=self.placement_head(torch.cat((lens,condition[:,None].expand(-1,lens.size(1),-1)),-1)).float()
-        plan=(self.planner(planner_audio,condition,planner_mask) if planner_override is None else planner_override.to(hidden))
+        placement=self.placement_head(torch.cat((lens,effective_condition[:,None].expand(-1,lens.size(1),-1)),-1)).float()
+        # Explicit external overrides remain explicit evidence (e.g. an edited
+        # generation curve); masking only applies to model-computed controls.
+        plan=(self.planner(planner_audio,effective_condition,planner_mask) if planner_override is None else planner_override.to(hidden))
         candidate_plan=read_plan(plan,planner_indices,planner_mix)
-        workload=self.predict_workload(workload_audio,condition)
+        workload=self.predict_workload(workload_audio,effective_condition)
         decision_workload=workload if workload_override is None else workload_override.to(workload)
-        audio_context=hidden+self.lens_projection(lens[:,:count])+self.condition_projection(condition)[:,None]
+        audio_context=hidden+self.lens_projection(lens[:,:count])+self.condition_projection(effective_condition)[:,None]
         audio_context=audio_context+self.interval_projection(interval_audio)
         audio_context=audio_context+float(curve_strength)*(self.workload_projection(decision_workload[:,:count].detach())+self.plan_projection(candidate_plan.detach()))
         # Occupancy is chart-conditional evidence, not a mandatory note rule.
@@ -188,7 +210,7 @@ class AudioGroundedComposer(ChartComposer):
         symbolic=symbolic+self.head_timing_projection(timing.to(hidden))
         if hasattr(self,'head_timing_detail_projection'):
             symbolic=symbolic+self.head_timing_detail_projection(head_timing.to(hidden))
-        trailing=self.predict_trailing(trailing_audio,condition) if trailing_audio is not None else None
+        trailing=self.predict_trailing(trailing_audio,effective_condition) if trailing_audio is not None else None
         if ledger is not None:
             keep=((torch.rand(batch,1,1,device=hidden.device)>=self.config.ledger_dropout).to(hidden)
                 if self.training else 1.)
@@ -217,6 +239,9 @@ class AudioGroundedComposer(ChartComposer):
             # Explicit configuration path, after the timing decision logits.
             # This also survives selected-prefix reconstruction below.
             audio_context=audio_context+structure_term
+        if hasattr(self,'future_horizon'):
+            audio_context=audio_context+self.future_horizon(
+                audio_context,candidate_features,valid,audio_dim=self.config.audio_dim)
         audio_action_context=self.candidate_fusion(audio_context)
         action_context=self.candidate_fusion(audio_context+symbolic+self.action_relation(last_heads)[:,None]*symbolic_keep[:,None])
         result={'candidate_logits':full_logits,'candidate_context':action_context,
@@ -310,15 +335,25 @@ class AudioGroundedComposer(ChartComposer):
                 relation=(heads.cumsum(-2)-heads)>0
             contexts=self.slot_fusion(contexts)
             full_logits=self.action_head(contexts)+F.linear(contexts,factor_weight)
+            conserved_tables=self.conserved_action_head.detail_tables() if hasattr(self,'conserved_action_head') else None
+            if conserved_tables is not None:
+                full_logits=self.conserved_action_head(full_logits,contexts,tables=conserved_tables)
             if relation is not None:
+                # Same-event head geometry is also a macro position decision,
+                # not a trajectory/duration score to normalize away per pad.
                 full_logits=full_logits+self.action_factors.relative_logits(contexts,relation)
             if hasattr(self,'cross_event_relative_factors'):
+                # Relative movement is a macro starting-pad decision. Applying
+                # its per-pad shift before within-group normalization would
+                # cancel the entire learned branch in the grouped head.
                 first=self._cross_event_logits(full_logits[...,0,:],contexts[...,0,:],previous_heads)
                 full_logits=torch.cat((first.unsqueeze(-2),full_logits[...,1:,:]),-2)
             result['action_logits']=full_logits
             if audio_contexts is not None:
                 audio_contexts=self.slot_fusion(audio_contexts)
                 audio_logits=self.action_head(audio_contexts)+F.linear(audio_contexts,factor_weight)
+                if conserved_tables is not None:
+                    audio_logits=self.conserved_action_head(audio_logits,audio_contexts,tables=conserved_tables)
                 if relation is not None:
                     audio_logits=audio_logits+self.action_factors.relative_logits(audio_contexts,relation)
                 result['audio_action_logits']=audio_logits
@@ -348,6 +383,8 @@ class AudioGroundedComposer(ChartComposer):
             context=context+self._embedding(ids).sum(0)
         slot_context=self.slot_fusion(context+self.slot_embedding.weight[slot])
         logits=self.action_head(slot_context)+self.action_factors(slot_context)
+        if hasattr(self,'conserved_action_head'):
+            logits=self.conserved_action_head(logits,slot_context)
         if selected_ids:
             logits=logits+self.action_factors.relative_logits(slot_context,self.action_factors.atom_head_lanes[ids].any(0))
         if slot==0 and previous_heads is not None and hasattr(self,'cross_event_relative_factors'):

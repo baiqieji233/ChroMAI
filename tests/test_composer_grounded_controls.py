@@ -46,6 +46,7 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
     from maichart.composer.sampling_contract import recovery_sampling_settings
     expected['recovery_sampling_settings']=recovery_sampling_settings(expected['recovery_sampling_policy'])
     expected.update(structure_policy='metrical_context_v2',contact_policy='diagnostic_v1',
+                    future_horizon_policy='candidate_horizon_v1',action_head_policy='conserved_grouped_v2',condition_mask_prob=0.,
                     structure_backend='auto',structure_dropout=.15,
                     lr_schedule='auto',warmup_steps=None,min_lr_ratio=None)
     assert task.result['effective_settings'] == expected

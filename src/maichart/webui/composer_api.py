@@ -132,7 +132,7 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     if dropout>1.:raise ValueError('dropout 不能大于 1')
     if mode!='fresh' and dropout!=float(parent_config.get('dropout',.1)):
         raise ValueError('普通 dropout 继承已有模型；改变它需要 fresh 训练')
-    from maichart.composer.model import resolve_history_anchor_policy, resolve_composer_policy, COMPOSER_POLICY_FIELDS, validate_supported_context_policies
+    from maichart.composer.model import resolve_history_anchor_policy, resolve_composer_policy, resolve_condition_mask_prob, COMPOSER_POLICY_FIELDS, validate_supported_context_policies
     anchor_policy=resolve_history_anchor_policy(payload.get('history_anchor_policy','auto'),parent_config,resume=mode=='resume')
 
     args = ["-m", "maichart.composer.train"]
@@ -176,6 +176,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         value = resolve_composer_policy(key, payload.get(key, 'auto'), parent_config, resume=mode=='resume',architecture_profile=architecture_profile)
         grounded_settings[key] = value
         _arg(args, '--' + key.replace('_', '-'), value)
+    condition_mask_prob=resolve_condition_mask_prob(payload.get('condition_mask_prob'),parent_config,resume=mode=='resume')
+    grounded_settings['condition_mask_prob']=condition_mask_prob
+    _arg(args,'--condition-mask-prob',condition_mask_prob)
     validate_supported_context_policies(grounded_settings)
     backend = str(payload.get('structure_backend', 'auto'))
     if backend not in {'auto', 'native', 'beat_this'}:

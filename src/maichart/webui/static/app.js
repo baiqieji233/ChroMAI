@@ -286,6 +286,9 @@ function composerTrainingView(task) {
       ['历史跨注意力后端',runtime.history_attention_policy??effective.history_attention_policy??'旧模型兼容'],
       ['按键计时通道',runtime.head_timing_policy??effective.head_timing_policy??'merged_pads_v1'],
       ['跨拍相对键位',runtime.cross_event_relation_policy??effective.cross_event_relation_policy??'off'],
+      ['未来音频视野',runtime.future_horizon_policy??effective.future_horizon_policy??'off'],
+      ['动作分类头结构',runtime.action_head_policy??effective.action_head_policy??'flat_v1'],
+      ['条件遮挡概率（保留等级）',runtime.condition_mask_prob??effective.condition_mask_prob??0],
       ['恢复采样策略',runtime.recovery_sampling_policy??effective.recovery_sampling_policy??'calibrated_kind_touch_rings_v2'],
       ['恢复选位 / 动作温度',`${runtime.recovery_pointer_temperature??effective.recovery_pointer_temperature??1} / ${runtime.recovery_action_temperature??effective.recovery_action_temperature??.85}`],
       ['持续动作状态',runtime.action_state_policy??effective.action_state_policy??'committed_legacy_v1'],
@@ -2061,6 +2064,9 @@ function chartComposerTrainingPayload(options = {}) {
     history_attention_policy: valueOrDefault('#composerHistoryAttentionPolicy','auto'),
     head_timing_policy: valueOrDefault('#composerHeadTimingPolicy','auto'),
     cross_event_relation_policy: valueOrDefault('#composerCrossEventRelationPolicy','auto'),
+    future_horizon_policy: valueOrDefault('#composerFutureHorizonPolicy','auto'),
+    action_head_policy: valueOrDefault('#composerActionHeadPolicy','auto'),
+    condition_mask_prob: Number(valueOrDefault('#composerConditionMaskProb',0)),
     action_state_policy: valueOrDefault('#composerActionStatePolicy','auto'),
     motif_memory_policy: valueOrDefault('#composerMotifMemoryPolicy','auto'),
     slide_factor_policy: valueOrDefault('#composerSlideFactorPolicy','auto'),
@@ -2441,7 +2447,7 @@ const COMPOSER_FRESH_TRAINING_DEFAULTS = Object.freeze({
   composerHistoryEvents:128,composerCandidateCount:96,composerActionSlots:8,
   composerArchitectureProfile:'audio_grounded_v3',composerActionObjectivePolicy:'auto',
   composerHistoryAnchorPolicy:'auto',composerHistoryMemoryPolicy:'auto',composerHistoryAttentionPolicy:'auto',
-  composerHeadTimingPolicy:'auto',composerCrossEventRelationPolicy:'auto',composerActionStatePolicy:'auto',
+  composerHeadTimingPolicy:'auto',composerCrossEventRelationPolicy:'auto',composerFutureHorizonPolicy:'auto',composerActionHeadPolicy:'auto',composerConditionMaskProb:0,composerActionStatePolicy:'auto',
   composerMotifMemoryPolicy:'auto',composerSlideFactorPolicy:'auto',composerMotifMaxEvents:16,
   composerStructurePolicy:'auto',composerStructureBackend:'auto',composerStructureDropout:.15,composerContactPolicy:'auto',
   composerRecoveryTouchLayoutPolicy:'auto',composerDropout:.1,composerLensWidth:64,composerLensChunkSize:32,
@@ -2559,7 +2565,7 @@ function updateTrainingControls() {
   }
   if (currentModelFamily()==='chart_composer_v1' && currentTrainingMode()==='fresh') {
     for (const id of ['composerDModel','composerDimFeedforward','composerLayers','composerNhead',
-      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy',
+      'composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerActionHeadPolicy','composerConditionMaskProb',
       'composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy','composerStructurePolicy','composerStructureBackend','composerStructureDropout','composerContactPolicy',
       'composerLensWidth','composerLensChunkSize','composerHistoryResidualBound','composerHistoryMemoryRmsBound','composerHistoryDropout',
       'composerLedgerDropout','composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
@@ -2587,7 +2593,7 @@ function updateTrainingControls() {
   const composerDropout=element('#composerDropout');
   const composerAnchor=element('#composerHistoryAnchorPolicy');
   if (composerAnchor) composerAnchor.disabled=composer && resume;
-  for (const id of ['composerActionObjectivePolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy','composerStructurePolicy','composerStructureBackend','composerStructureDropout','composerContactPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerLrSchedule','composerWarmupSteps','composerMinLrRatio']) {
+  for (const id of ['composerActionObjectivePolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy','composerStructurePolicy','composerStructureBackend','composerStructureDropout','composerContactPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerActionHeadPolicy','composerConditionMaskProb','composerLrSchedule','composerWarmupSteps','composerMinLrRatio']) {
     const target=element('#'+id); if(target)target.disabled=composer && resume;
   }
   const historyMemoryBound=element('#composerHistoryMemoryRmsBound');
@@ -3681,9 +3687,12 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
     ['composerHistoryAttentionPolicy','history_attention_policy','auto_v1'],
     ['composerHeadTimingPolicy','head_timing_policy','merged_pads_v1'],
     ['composerCrossEventRelationPolicy','cross_event_relation_policy','off'],
+    ['composerFutureHorizonPolicy','future_horizon_policy','off'],
+    ['composerActionHeadPolicy','action_head_policy','flat_v1'],
+    ['composerConditionMaskProb','condition_mask_prob',0],
     ['composerRecoverySamplingPolicy','recovery_sampling_policy',data?.args?.recovery_sampling_policy??data?.action_sampling_policy??'calibrated_kind_touch_rings_v2']]) {
     const target=element('#'+id);
-    const newStagePolicy=['head_timing_policy','cross_event_relation_policy','recovery_sampling_policy'].includes(key);
+    const newStagePolicy=['head_timing_policy','cross_event_relation_policy','future_horizon_policy','action_head_policy','recovery_sampling_policy'].includes(key);
     if(target && mode!=='fresh' && (mode==='resume' || (!preserveEditable && !newStagePolicy)))
       target.value=String(config[key]??data?.args?.[key]??fallback);
     if(target)target.disabled=mode==='resume';
@@ -4347,6 +4356,10 @@ async function submitTrain(options = {}) {
     if (effectiveStructure!=='off' && !(structureCapability==='metrical_context_v2'
         || (effectiveStructure!=='metrical_context_v2' && structureCapability==='metrical_context_v1')))
       throw new Error('当前服务尚未加载所选版本的音乐结构信号，请保留活动训练，在更新后的WebUI服务中启动新阶段。');
+    // Even explicit off/flat selections need the new adapter: an old service
+    // can discard unknown fields while its new CLI child enables auto defaults.
+    if (backend.training_capabilities?.composer_scheme_abc!=='horizon_grouped_condition_v1')
+      throw new Error('当前服务尚未加载未来音频视野、动作分类头及条件遮挡控件。请保留活动训练，在更新后的WebUI服务中启动新阶段。');
     trainingStarting = true; updateDatasetButtons();
     try { const data = await api("/api/composer/train", payload); watchTask(data.task_id, () => { trainingStarting = false; updateDatasetButtons(); }); }
     catch (error) { trainingStarting = false; updateDatasetButtons(); throw error; }
@@ -5618,7 +5631,7 @@ on("#modelFamily", "change", () => {
   }
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
-on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerStructurePolicy','composerStructureBackend','composerContactPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults({resetComposer:true}); updateTrainingControls(); });
+on("#trainingMode", "change", () => { applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerActionHeadPolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerStructurePolicy','composerStructureBackend','composerContactPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults({resetComposer:true}); updateTrainingControls(); });
 on('#composerApplyFreshDefaults','click',()=>{if(applyComposerFreshTrainingDefaults()){updateTrainingControls();saveSettings();setStatus('已应用 Composer 重训默认值：20轮、batch64×累积4，启用动机与配置恢复。',true);}});
 on('#composerRecoverySamplingPolicy','change',()=>{updateComposerRecoverySamplingControls();saveSettings();});
 on('#composerRebatchResume','change',()=>{updateTrainingControls();saveSettings();});

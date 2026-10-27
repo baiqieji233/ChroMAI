@@ -1,0 +1,597 @@
+{
+  "reviewed_at": "2026-10-28T05:17:08.156928+08:00",
+  "baseline_commit": "375c785",
+  "scope": "review and repair uncommitted Scheme A/B/C; original v16 weights retained; no formal long training started",
+  "pre_review_snapshot": {
+    "head": "375c7859f1d6fff10c36ebc0dd985575d073e11b",
+    "files": [
+      "src/maichart/composer/checkpoint.py",
+      "src/maichart/composer/generate.py",
+      "src/maichart/composer/grounded_model.py",
+      "src/maichart/composer/model.py",
+      "src/maichart/composer/train.py",
+      "src/maichart/webui/static/app.js",
+      "src/maichart/webui/static/index.html",
+      "tests/test_chart_composer_v1.py",
+      "tests/test_composer_grounded_controls.py",
+      "docs/COMPOSER_EFFICIENCY_AND_QUALITY_BLUEPRINT_20261027_ZH.md",
+      "docs/COMPOSER_SCHEME_ABC_IMPLEMENTATION_LOG_20261027_ZH.md",
+      "src/maichart/composer/conserved_actions.py",
+      "src/maichart/composer/future_horizon.py",
+      "tests/test_composer_horizon_and_conserved_actions.py"
+    ]
+  },
+  "root_independent_before_after_probe": {
+    "cpu_only": true,
+    "baseline_snapshot": "E:\\simai_transformer\\.scratch\\composer_scheme_abc_review_20261028_045849\\files",
+    "cross_group_detail_gradient": {
+      "before": 0.6666666269302368,
+      "after": 0.0
+    },
+    "unequal_branch_sampling_masses": {
+      "before": [
+        0.800000011920929,
+        0.20000000298023224
+      ],
+      "after": [
+        0.5,
+        0.5
+      ]
+    },
+    "touch_group_ids": {
+      "before": [
+        0,
+        1,
+        1,
+        2,
+        2
+      ],
+      "after": [
+        0,
+        1,
+        2,
+        3,
+        3
+      ]
+    },
+    "condition_leakage": {
+      "before": {
+        "candidate_context": 0.019555985927581787,
+        "plan": 0.10595124959945679,
+        "placement_logits": 1.6580268144607544,
+        "workload": 0.07887613773345947,
+        "trailing_workload": 0.2617098093032837
+      },
+      "after": {
+        "candidate_context": 0.0,
+        "plan": 0.0,
+        "placement_logits": 0.0,
+        "workload": 0.0,
+        "trailing_workload": 0.0
+      }
+    },
+    "valid_dimensions": {
+      "before_error": "FutureAudioHorizon width (30) must be positive and divisible by nhead (4)",
+      "after_horizon_heads": 3
+    },
+    "bf16_output_dtype": "torch.float32",
+    "bf16_macro_mass_error": 2.384185791015625e-07
+  },
+  "real_catalog_partition": {
+    "review_date": "2026-10-28",
+    "scope": "Read-only CPU catalog partition count; no model construction, parameter changes, or quality claims",
+    "checkpoint": "E:/simai_transformer/checkpoints/prism_composer_v16_signal/composer_inference.pt",
+    "checkpoint_optimizer_step": 21138,
+    "method": "torch.load(map_location='cpu', mmap=True); existing kind/ring factor category IDs plus parser-backed event_metadata(atom).heads",
+    "atom_count_excluding_stop": 17798,
+    "vocabulary_size_including_stop": 17799,
+    "previous_incorrect_bucket_count": 35,
+    "fixed_bucket_count": 91,
+    "fixed_bucket_count_by_type": {
+      "stop": 1,
+      "tap": 8,
+      "hold": 8,
+      "slide": 8,
+      "touch": 33,
+      "touch_hold": 33
+    },
+    "touch_positions": [
+      "A1",
+      "A2",
+      "A3",
+      "A4",
+      "A5",
+      "A6",
+      "A7",
+      "A8",
+      "B1",
+      "B2",
+      "B3",
+      "B4",
+      "B5",
+      "B6",
+      "B7",
+      "B8",
+      "C",
+      "D1",
+      "D2",
+      "D3",
+      "D4",
+      "D5",
+      "D6",
+      "D7",
+      "D8",
+      "E1",
+      "E2",
+      "E3",
+      "E4",
+      "E5",
+      "E6",
+      "E7",
+      "E8"
+    ],
+    "touch_pad_examples": {
+      "A1": {
+        "kind_category_id": 5,
+        "actual_heads": [
+          "A1"
+        ],
+        "ring_category_id": 2
+      },
+      "A2": {
+        "kind_category_id": 5,
+        "actual_heads": [
+          "A2"
+        ],
+        "ring_category_id": 2
+      },
+      "E1": {
+        "kind_category_id": 5,
+        "actual_heads": [
+          "E1"
+        ],
+        "ring_category_id": 3
+      },
+      "E2": {
+        "kind_category_id": 5,
+        "actual_heads": [
+          "E2"
+        ],
+        "ring_category_id": 3
+      },
+      "C": {
+        "kind_category_id": 5,
+        "actual_heads": [
+          "C"
+        ],
+        "ring_category_id": 5
+      }
+    },
+    "note": "Category IDs above are vocabulary-local labels, not physical bit masks. Bucket counts depend on the actual vocabulary and must not be hard-coded as 46."
+  },
+  "validation": {
+    "composer_passed": 728,
+    "composer_skipped": 11,
+    "javascript_passed": 159,
+    "first_full_run": {
+      "passed": 727,
+      "failed": 1,
+      "reason": "old expected settings omitted the new condition_mask_prob default; assertion updated and full rerun passed"
+    },
+    "python_log": "E:\\simai_transformer\\.scratch\\composer_scheme_abc_review_20261028_045849\\composer_regression_final.log",
+    "javascript_log": "E:\\simai_transformer\\.scratch\\composer_scheme_abc_review_20261028_045849\\javascript_regression.log"
+  },
+  "browser_and_legacy_checkpoint": {
+    "checked_at": "2026-10-27T21:05:55.592Z",
+    "status": "passed",
+    "url": "http://127.0.0.1:7898",
+    "cpu_only_qa_service": true,
+    "defaults": {
+      "future_horizon_policy": "auto",
+      "action_head_policy": "auto",
+      "condition_mask_prob": 0
+    },
+    "persisted_controls": {
+      "future_horizon_policy": "off",
+      "action_head_policy": "flat_v1",
+      "condition_mask_prob": 0.25
+    },
+    "intercepted_training_posts": [
+      {
+        "model_family": "chart_composer_v1",
+        "mode": "fresh",
+        "architecture_profile": "audio_grounded_v3",
+        "action_objective_policy": "auto",
+        "history_anchor_policy": "auto",
+        "history_memory_policy": "auto",
+        "history_attention_policy": "auto",
+        "head_timing_policy": "auto",
+        "cross_event_relation_policy": "auto",
+        "future_horizon_policy": "off",
+        "action_head_policy": "flat_v1",
+        "condition_mask_prob": 0.25,
+        "action_state_policy": "auto",
+        "motif_memory_policy": "auto",
+        "slide_factor_policy": "auto",
+        "structure_policy": "auto",
+        "structure_backend": "auto",
+        "structure_dropout": 0.15,
+        "contact_policy": "auto",
+        "motif_max_events": 16,
+        "touch_layout_policy": "auto",
+        "manifest": "E:/全量官谱/training_manifest.json",
+        "manifests": [],
+        "dataset_paths": [],
+        "checkpoint_dir": "E:/simai_transformer/.scratch/composer_scheme_abc_review_20261028_045849/not_a_real_training",
+        "init_checkpoint": null,
+        "epochs": 20,
+        "batch_size": 64,
+        "lr": 0.0002,
+        "lr_schedule": "auto",
+        "warmup_steps": null,
+        "min_lr_ratio": null,
+        "grad_accumulation": 4,
+        "rebatch_resume": false,
+        "dropout": 0.1,
+        "prefetch_batches": 2,
+        "sample_workers": 1,
+        "cpu_threads": 2,
+        "sample_locality": 4,
+        "symbolic_dropout": 0.15,
+        "audio_pointer_weight": 0.15,
+        "lens_width": 64,
+        "lens_chunk_size": 32,
+        "history_residual_bound": 1,
+        "history_memory_rms_bound": 8,
+        "history_dropout": 0.3,
+        "ledger_dropout": 0.5,
+        "placement_weight": 0.15,
+        "planner_weight": 0.2,
+        "recovery_interval": 25,
+        "recovery_samples": 2,
+        "recovery_steps": 2,
+        "recovery_weight": 0.1,
+        "recovery_sampling_policy": "auto",
+        "recovery_pointer_temperature": 1,
+        "recovery_action_temperature": 0.85,
+        "profile_steps": 0,
+        "log_interval": 25,
+        "max_steps": 0,
+        "optimizer_implementation": "auto",
+        "export_inference": true,
+        "d_model": 384,
+        "dim_feedforward": 1536,
+        "layers": 6,
+        "nhead": 8,
+        "history_events": 128,
+        "candidate_count": 96,
+        "action_slots": 8,
+        "device": "auto",
+        "precision": "auto",
+        "seed": 0,
+        "limit_charts": 0,
+        "prepare_workers": 4,
+        "audio_cache_gb": 4,
+        "checkpoint_interval_steps": 500,
+        "cache_dir": "cache/chart_composer_v1",
+        "auto_preprocess": false
+      }
+    ],
+    "actual_training_requests_forwarded": 0,
+    "server_task_list_unchanged": true,
+    "checkpoint_inspection": {
+      "path": "E:/simai_transformer/checkpoints/prism_composer_v16_signal/composer_inference.pt",
+      "valid": true,
+      "future_horizon_policy": "off",
+      "action_head_policy": "flat_v1",
+      "condition_mask_prob": 0,
+      "sha256_before": "32427eb5acff4b7a27d21115911db2fb2f10e74ad5e02ada00ae25d9b8aa13d2",
+      "sha256_after": "32427eb5acff4b7a27d21115911db2fb2f10e74ad5e02ada00ae25d9b8aa13d2",
+      "mtime_unchanged": true,
+      "size": 164822784
+    },
+    "page_errors": []
+  },
+  "real_data_runtime": {
+    "scope": "real one-chart tiny CPU training, two updates, eight-event generation; execution only, not quality comparison",
+    "train_command": [
+      "E:\\simai_transformer\\.scratch\\python312_runtime\\Scripts\\python.exe",
+      "-m",
+      "maichart.composer.train",
+      "--manifest",
+      "E:/全量官谱/training_manifest.json",
+      "--checkpoint-dir",
+      "E:\\simai_transformer\\.scratch\\composer_scheme_abc_review_20261028_045849\\runtime_fresh",
+      "--cache-dir",
+      "E:\\simai_transformer\\cache\\chart_composer_v1",
+      "--device",
+      "cpu",
+      "--precision",
+      "fp32",
+      "--epochs",
+      "1",
+      "--batch-size",
+      "2",
+      "--grad-accumulation",
+      "1",
+      "--d-model",
+      "32",
+      "--layers",
+      "1",
+      "--nhead",
+      "4",
+      "--dim-feedforward",
+      "64",
+      "--history-events",
+      "8",
+      "--candidate-count",
+      "96",
+      "--action-slots",
+      "8",
+      "--limit-charts",
+      "1",
+      "--holdout-fraction",
+      "0",
+      "--generation-eval-songs",
+      "0",
+      "--max-steps",
+      "2",
+      "--recovery-interval",
+      "1",
+      "--recovery-samples",
+      "2",
+      "--recovery-steps",
+      "2",
+      "--prepare-workers",
+      "1",
+      "--sample-workers",
+      "1",
+      "--prefetch-batches",
+      "0",
+      "--cpu-threads",
+      "1",
+      "--structure-policy",
+      "metrical_context_v2",
+      "--structure-backend",
+      "beat_this",
+      "--condition-mask-prob",
+      ".5",
+      "--checkpoint-interval-steps",
+      "1",
+      "--log-interval",
+      "1",
+      "--seed",
+      "7"
+    ],
+    "runtime": {
+      "family": "chart_composer_v1",
+      "training_semantics": "chart_composer_training_v13_configuration_recovery+structure_metrical_context_v2",
+      "action_objective_policy": "joint_event_recovery_v3",
+      "recovery_sampling_policy": "generation_matched_recovery_masked_touch_v4",
+      "recovery_sampling_settings": {
+        "policy": "generation_matched_recovery_masked_touch_v4",
+        "pointer_temperature": 1.0,
+        "action_temperature": 0.85,
+        "pointer_sampler": "grouped",
+        "touch_history_guard": true,
+        "touch_history_bound": 1.0,
+        "touch_legal_mask": true,
+        "action_type_temperature": 1.0,
+        "action_type_min_p": 0.0,
+        "min_same_head_ms": 50.0,
+        "retry_policy": "failed_prefix_v2"
+      },
+      "recovery_pointer_temperature": 1.0,
+      "recovery_action_temperature": 0.85,
+      "device": "cpu",
+      "precision": "fp32",
+      "effective_lr": 0.0002,
+      "learning_rate_schedule": {
+        "schema": "composer_lr_schedule_v1",
+        "kind": "constant",
+        "base_lr": 0.0002,
+        "warmup_steps": 0,
+        "total_steps": 2,
+        "min_lr_ratio": 1.0
+      },
+      "samples": 350,
+      "parameters": 151212,
+      "model_bytes": 604848,
+      "action_head_parameters": 4587,
+      "selected_candidate_projection": true,
+      "optimizer_implementation": "standard",
+      "audio_bank_mode": "lossless_mmap_v1",
+      "audio_feature_policy": "native_dynamics_context_v3",
+      "batch_size": 2,
+      "grad_accumulation": 1,
+      "effective_batch_size": 2,
+      "forward_finite_check": "packed_outputs_and_losses_v1",
+      "start_epoch": 1,
+      "prefetch_batches": 0,
+      "sample_workers": 1,
+      "sample_locality": 4,
+      "cuda_cache_guard": {
+        "enabled": false,
+        "reserved_high_water_gib": 0.0,
+        "minimum_inactive_gib": 0.5,
+        "minimum_inactive_fraction": 0.2,
+        "cooldown_updates": 8
+      },
+      "cuda_allocator_config": null,
+      "resume_sample_cursor": 0,
+      "resume_sampler_batch_size": 2,
+      "rebatch_resume": false,
+      "torch_cpu_threads": 1,
+      "python_switch_interval_sec": 0.005,
+      "architecture_profile": "audio_grounded_v3",
+      "symbolic_dropout": 0.15,
+      "history_anchor_policy": "parsed_geometry_v3",
+      "head_timing_policy": "separate_pads_v2",
+      "cross_event_relation_policy": "relative_heads_v1",
+      "action_state_policy": "committed_causal_v2",
+      "motif_memory_policy": "audio_recurrence_archive_v1",
+      "slide_factor_policy": "branch_joint_v2",
+      "motif_max_events": 16,
+      "history_memory_policy": "rms_cap_v1",
+      "history_attention_policy": "math_v1",
+      "history_memory_rms_bound": 8.0,
+      "touch_layout_policy": "open",
+      "contact_policy": "diagnostic_v1",
+      "structure_policy": "metrical_context_v2",
+      "future_horizon_policy": "candidate_horizon_v1",
+      "action_head_policy": "conserved_grouped_v2",
+      "condition_mask_prob": 0.5,
+      "structure_backend": "beat_this",
+      "structure_dropout": 0.15,
+      "structure_schema": "composer_structure_balanced_v6",
+      "structure_backend_identity": {
+        "name": "beat_this_raw_logits_v1",
+        "checkpoint_sha256": "8c328b45f59d8dd3dff219253ff6a8d6482be57d0133a29140e2febbf8eb8331",
+        "fps": 50,
+        "waveform_policy": "native_mono_float32_v1",
+        "package_version": "1.1.0",
+        "attention_policy": "query_chunked_explicit_math_v1"
+      },
+      "validation_manifest": null,
+      "holdout_fraction": 0.0,
+      "generation_eval_songs": 0,
+      "dropout": 0.1,
+      "lens_width": 64,
+      "lens_chunk_size": 32,
+      "history_residual_bound": 1.0,
+      "history_dropout": 0.3,
+      "ledger_dropout": 0.5,
+      "placement_weight": 0.15,
+      "planner_weight": 0.2,
+      "recovery_interval": 1,
+      "recovery_samples": 2,
+      "recovery_steps": 2,
+      "recovery_weight": 0.1,
+      "audio_pointer_weight": 0.15,
+      "candidate_miss_categories": {},
+      "candidate_count": 96,
+      "action_vocab_size": 139,
+      "action_slots": 8,
+      "action_slots_requested": 8,
+      "max_required_action_slots": 6,
+      "host_memory": {
+        "physical_gib": 31.217,
+        "free_physical_gib": 6.934,
+        "commit_limit_gib": 65.217,
+        "free_commit_gib": 17.682
+      },
+      "end_epoch": 1,
+      "candidate_misses": 0,
+      "phase_filter_misses": 0,
+      "candidate_total": 350,
+      "candidate_miss_examples": [],
+      "candidate_recall": 1.0
+    },
+    "updates": 2,
+    "recovery": {
+      "optimizer_step": 2,
+      "seconds": 0.3362615999940317,
+      "outcomes": {
+        "accepted": 2
+      },
+      "sampling_seconds": 0.2402120000042487,
+      "learning_seconds": 0.09605100000044331,
+      "loss": 2.521796941757202,
+      "loss_includes_weight": true,
+      "components_unweighted": {
+        "pointer_loss": 4.064265251159668,
+        "action_loss": 21.153701782226562,
+        "action_first_nonstop_ce": 3.9670729637145996,
+        "action_first_nonstop_ce_weight": 2.0,
+        "action_later_nonstop_ce": 4.405587673187256,
+        "action_later_nonstop_ce_weight": 6.0
+      },
+      "episode": {
+        "generated_history_events": [
+          4,
+          4
+        ],
+        "maximum_generated_events": 8,
+        "reference_types": {
+          "button": {
+            "accepted": 1,
+            "rejected": 0,
+            "accepted_weight": 1.0,
+            "rejected_weight": 0.0
+          },
+          "touch": {
+            "accepted": 1,
+            "rejected": 0,
+            "accepted_weight": 1.0,
+            "rejected_weight": 0.0
+          }
+        },
+        "self_generated_window": 8
+      },
+      "configuration_samples": 2
+    },
+    "generation": {
+      "event_count": 8,
+      "future_horizon_policy": "candidate_horizon_v1",
+      "action_head_policy": "conserved_grouped_v2",
+      "structure_schema": "composer_structure_balanced_v6",
+      "stop_reason": "max_events"
+    },
+    "long_training_started": false,
+    "original_checkpoints_modified": false
+  },
+  "future_horizon": {
+    "window_scope": "only direct candidate readout; upstream audio encoder remains global",
+    "outside_window_raw_audio_probe_max_change": 0.01627,
+    "candidate_coverage_example": {
+      "candidate_policy": "absolute_recovery_v6_phase_safe",
+      "candidate_count": 96,
+      "previous_beat": 0,
+      "query_beat": 0.25,
+      "bpm": 190,
+      "valid_direct_keys": 66,
+      "keys_in_first_two_beats": 45,
+      "later_keys": 21,
+      "max_adjacent_beat_gap": 0.5
+    },
+    "cpu_benchmark": {
+      "scope": "agent measurement; synthetic11-class catalog, FP32 CPU, one thread, B2/C96/H128/P124, width384 layers6 slots8, two warmups then ABBA",
+      "off_ms": [
+        384.1833,
+        370.883,
+        407.7527,
+        404.3148,
+        375.5271,
+        354.9262
+      ],
+      "on_ms": [
+        383.5877,
+        425.9653,
+        392.4892,
+        377.3131,
+        365.7835,
+        403.4389
+      ],
+      "median_off_ms": 379.8552,
+      "median_on_ms": 388.03845,
+      "not_a_gpu_or_full_vocabulary_throughput_claim": true
+    }
+  },
+  "training_status": {
+    "v16_stopped_manually_by_user_due_to_poor_quality": true,
+    "formal_training_started_or_stopped_by_this_review": false,
+    "qa_service_created_and_closed": true
+  },
+  "remaining": [
+    "real-data short training quality and learning efficiency comparison",
+    "fixed-audio/conditions/two-seed musical and playability acceptance",
+    "full-vocabulary CUDA throughput and memory comparison",
+    "Scheme C microblock/shared encoding implementation and equivalence checks"
+  ],
+  "corrections": [
+    "91 actual groups, not46; previous implementation had35",
+    "A-only zero-initialized migration is neutral; independent B macro head needs learning",
+    "new grouped head still computes vocabulary detail scores",
+    "current v16 never enabled A/B; these new implementation bugs are not its past output cause"
+  ]
+}

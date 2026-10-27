@@ -125,7 +125,8 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
              'dataset_fingerprint':dataset_fingerprint,
              'training_state':(training_state or {}) if optimizer is not None else {},
              'checkpoint_kind':'training' if optimizer is not None else 'inference'}
-    if model.config.head_timing_policy!='merged_pads_v1' or model.config.cross_event_relation_policy!='off':
+    if (model.config.head_timing_policy!='merged_pads_v1' or model.config.cross_event_relation_policy!='off'
+            or model.config.future_horizon_policy!='off' or model.config.action_head_policy!='flat_v1'):
         payload['input_contract']=RELATIONAL_INPUT_CONTRACT
     if model.config.architecture_profile==GROUNDED_PROFILE:
         if model.config.history_anchor_policy != model.action_factors.history_anchor_policy:
@@ -194,6 +195,9 @@ def validate(payload):
     # Missing fields belong to checkpoints created before these policies.
     values.setdefault('structure_policy','off')
     values.setdefault('contact_policy','off')
+    values.setdefault('future_horizon_policy','off')
+    values.setdefault('action_head_policy','flat_v1')
+    values.setdefault('condition_mask_prob',0.)
     values.setdefault('structure_backend','native')
     values.setdefault('structure_dropout',.15)
     if not values.get('structure_backend_identity') and values['structure_policy']!='off':
@@ -216,7 +220,9 @@ def validate(payload):
     from .model import validate_supported_context_policies
     validate_supported_context_policies(config)
     expected_input=(RELATIONAL_INPUT_CONTRACT if config.head_timing_policy!='merged_pads_v1'
-                    or config.cross_event_relation_policy!='off' else INPUT_CONTRACT)
+                    or config.cross_event_relation_policy!='off'
+                    or config.future_horizon_policy!='off'
+                    or config.action_head_policy!='flat_v1' else INPUT_CONTRACT)
     if payload.get('input_contract')!=expected_input:raise ValueError('Composer input policy/contract mismatch')
     generation_motif_input_policy(payload)
     objective=resolve_action_objective((payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
@@ -374,7 +380,8 @@ def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slot
         raise ValueError('Finetune migration cannot reduce action_slots')
     allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy',
              'history_memory_policy','history_memory_rms_bound','history_attention_policy','head_timing_policy','cross_event_relation_policy',
-             'structure_policy','contact_policy','structure_backend','structure_dropout'}
+             'structure_policy','contact_policy','future_horizon_policy','action_head_policy','condition_mask_prob',
+             'structure_backend','structure_dropout'}
     if set(policy_options)-allowed:raise ValueError('Unknown music-context migration option')
     config=ComposerConfig(**{**model.config.to_dict(),**policy_options,'architecture_profile':'music_context_v2',
                              'head_timing_dim':HEAD_TIMING_DIM,'action_slots':slots})

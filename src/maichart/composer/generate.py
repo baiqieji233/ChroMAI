@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse,hashlib,json,math
 from collections import OrderedDict
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 import numpy as np
 import torch
@@ -201,24 +202,15 @@ def _grounded_pointer_probabilities(logits, bins, temperature, *, eligible=None,
     return probabilities
 
 
-def _category_truncate_actions(masked_logits, temperature, groups, *, type_temperature=1.,type_min_p=0.):
-    """Preserve T=1 kind/ring mass, truncating only inside each disjoint group.
-
-    Legacy callers may still supply four coarse kind masks. Production uses
-    three button kinds followed by the five Touch rings.
-    """
-    macro_probs = masked_logits.softmax(-1)
+def _controlled_action_type_masses(macro_probs, groups, type_temperature, type_min_p):
+    """Optional coarse type adjustment, retaining conditional Touch-ring mass."""
     if not math.isfinite(float(type_temperature)) or not 0<=type_temperature<=2:
         raise ValueError('action_type_temperature must be in [0,2]')
     if not math.isfinite(float(type_min_p)) or not 0<=type_min_p<=1:
         raise ValueError('action_type_min_p must be in [0,1]')
-    if groups is None:
-        return (masked_logits / max(float(temperature), 1e-6)).softmax(-1)
-    out = torch.zeros_like(macro_probs)
-    out[0] = macro_probs[0]
     masses=None
-    if type_temperature!=1. or type_min_p!=0.:
-        masses=torch.stack([macro_probs[mask.to(masked_logits.device)].sum() for mask in groups])
+    if groups is not None and (type_temperature!=1. or type_min_p!=0.):
+        masses=torch.stack([macro_probs[mask.to(macro_probs.device)].sum() for mask in groups])
         # Three button kinds plus one Touch kind. Tempering each Touch ring
         # separately would reintroduce a bias toward its most common ring.
         coarse=torch.cat((masses[:3],masses[3:].sum().reshape(1)))
@@ -233,6 +225,17 @@ def _category_truncate_actions(masked_logits, temperature, groups, *, type_tempe
             adjusted=selected*total
             touch=masses[3:]/coarse[3].clamp_min(1e-30)*adjusted[3]
             masses=torch.cat((adjusted[:3],touch))
+    return masses
+
+
+def _category_truncate_actions(masked_logits, temperature, groups, *, type_temperature=1.,type_min_p=0.):
+    """Preserve legacy T=1 kind/ring mass, tempering within those categories."""
+    macro_probs = masked_logits.softmax(-1)
+    masses=_controlled_action_type_masses(macro_probs,groups,type_temperature,type_min_p)
+    if groups is None:
+        return (masked_logits / max(float(temperature), 1e-6)).softmax(-1)
+    out = torch.zeros_like(macro_probs)
+    out[0] = macro_probs[0]
     limits=(16,12,16)+tuple(8 for _ in groups[3:])
     for group_index,(mask, max_k) in enumerate(zip(groups, limits)):
         m = mask.to(masked_logits.device) & masked_logits.isfinite()
@@ -249,6 +252,89 @@ def _category_truncate_actions(masked_logits, temperature, groups, *, type_tempe
         out[m] = cat_mass * sub
     total = out.sum()
     return out / total if total > 0. else (masked_logits / max(float(temperature), 1e-6)).softmax(-1)
+
+
+@lru_cache(maxsize=8)
+def _macro_sampler_layout(group_ids,version):
+    """Pack immutable catalog buckets once, avoiding per-bucket GPU syncs."""
+    ids=group_ids.detach().cpu().tolist()
+    if min(ids)<0:raise ValueError('Macro group IDs must be nonnegative')
+    buckets=[[] for _ in range(max(ids)+1)]
+    for atom_id,group in enumerate(ids):buckets[group].append(atom_id)
+    width=max(map(len,buckets))
+    positions=torch.zeros(len(buckets),width,device=group_ids.device,dtype=torch.long)
+    padding=torch.ones_like(positions,dtype=torch.bool)
+    for group,members in enumerate(buckets):
+        positions[group,:len(members)]=torch.tensor(members,device=group_ids.device)
+        padding[group,:len(members)]=False
+    return positions,padding
+
+
+def _conserved_action_probabilities(masked_logits, temperature, macro_group_ids, groups=None, *,
+                                    type_temperature=1.,type_min_p=0.):
+    """Keep legal starting-pad bucket mass; temper/prune only bucket details.
+
+    Legality and Touch guidance have already changed the distribution on
+    purpose. Type controls may further change its coarse kind mass. Neither
+    atom temperature nor detail top-p/top-k may silently change pad buckets.
+    Zero temperature chooses the best bucket, then its best legal atom.
+    """
+    values=masked_logits.float()
+    group_ids=macro_group_ids.to(device=values.device,dtype=torch.long)
+    if values.ndim!=1 or group_ids.shape!=values.shape or not group_ids.numel():
+        raise ValueError('Grouped action sampling requires matching nonempty vectors')
+    if not math.isfinite(float(temperature)) or temperature<0:
+        raise ValueError('Action temperature must be finite and nonnegative')
+    valid=torch.isfinite(values)
+    out=torch.zeros_like(values)
+    if not bool(valid.any()):return out
+    version=None if torch.is_inference(group_ids) else group_ids._version
+    positions,padding=_macro_sampler_layout(group_ids,version)
+    packed=values[positions].masked_fill(padding,float('-inf'))
+    group_mass_logits=packed.logsumexp(-1)
+    group_probs=group_mass_logits.softmax(-1)
+    if temperature==0:
+        chosen_group=group_mass_logits.argmax()
+        chosen_atom=values.masked_fill(~(valid&group_ids.eq(chosen_group)),float('-inf')).argmax()
+        out[chosen_atom]=1.
+        return out
+    atom_probs=values.softmax(-1)
+    masses=_controlled_action_type_masses(atom_probs,groups,type_temperature,type_min_p)
+    if masses is not None:
+        atom_scale=torch.ones_like(values)
+        # Every catalog bucket belongs to one coarse kind/ring. Its first
+        # atom supplies that intentional type-control scale, even if illegal.
+        # Use the category mask rather than only legal members for that lookup.
+        for group_index,mask in enumerate(groups):
+            original=atom_probs[mask.to(device=values.device)].sum()
+            atom_scale[mask.to(device=values.device)]=masses[group_index]/original.clamp_min(1e-30)
+        group_probs=group_probs*atom_scale[positions[:,0]]
+        group_probs=group_probs/group_probs.sum().clamp_min(1e-30)
+    present=torch.isfinite(group_mass_logits)
+    safe_packed=torch.where(present[:,None],packed,torch.zeros_like(packed))
+    within=((safe_packed-safe_packed.max(-1,keepdim=True).values)/max(float(temperature),1e-6)).softmax(-1)
+    within=within.masked_fill(padding|~present[:,None],0.)
+    max_k=torch.full_like(group_mass_logits,16,dtype=torch.long)
+    if groups is not None:
+        first=positions[:,0]
+        max_k=torch.where(groups[1].to(values.device)[first],12,max_k)
+        if len(groups)>3:
+            touch=torch.stack([mask.to(values.device)[first] for mask in groups[3:]]).any(0)
+            max_k=torch.where(touch,8,max_k)
+    # Batched equivalent of _truncate_probabilities. There are no Python loops
+    # or scalar device synchronizations per macro bucket.
+    sorted_probs=within.sort(descending=True,dim=-1).values
+    ranks=torch.arange(within.size(-1),device=values.device)[None]
+    included=((sorted_probs.cumsum(-1)-sorted_probs)<.85)&(ranks<max_k[:,None])
+    included[:,0]=True
+    floor=sorted_probs.masked_fill(~included,float('inf')).min(-1,keepdim=True).values
+    threshold=torch.maximum(within.max(-1,keepdim=True).values*.08,floor)-1e-12
+    filtered=within.masked_fill(within<threshold,0.)
+    filtered=filtered/filtered.sum(-1,keepdim=True).clamp_min(1e-30)
+    counts=(~padding&torch.isfinite(packed)).sum(-1)
+    within=torch.where((counts<=16)[:,None],within,filtered)
+    out.scatter_add_(0,positions.reshape(-1),(within*group_probs[:,None]).reshape(-1))
+    return out/out.sum().clamp_min(1e-30)
 
 
 def _candidate_playability(candidates, base_playable, committed_previous, policy):
@@ -276,7 +362,7 @@ def _compile_composer_chart(points, tempo, first, condition):
 def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(), blocked=(), max_heads=2,diagnostics=None,
                     slot_decoder=None,blocked_first=(),head_metadata=None,canonical_order=False,touch_layout_policy='open',
                     type_temperature=1.,type_min_p=0.,blocked_prefixes=(),contact_budget=None,contact_policy='off',
-                    slot_mask_decoder=None):
+                    slot_mask_decoder=None,macro_group_ids=None):
     if touch_layout_policy not in {'open','legacy_two_heads'}:
         raise ValueError('unknown touch_layout_policy')
     selected=[]
@@ -314,13 +400,15 @@ def _sample_actions(logits, atoms, grammar, temperature, generator, occupied=(),
         values=row.float().clone()
         mask=torch.full_like(values,float('-inf'))
         mask[torch.tensor(allowed,device=values.device)]=values[torch.tensor(allowed,device=values.device)]
-        if temperature > 0:
-            probabilities=_category_truncate_actions(mask,temperature,groups,
-                type_temperature=type_temperature,type_min_p=type_min_p)
+        if temperature > 0 or macro_group_ids is not None:
+            probabilities=(_conserved_action_probabilities(mask,temperature,macro_group_ids,groups,
+                type_temperature=type_temperature,type_min_p=type_min_p) if macro_group_ids is not None else
+                _category_truncate_actions(mask,temperature,groups,type_temperature=type_temperature,type_min_p=type_min_p))
             if diagnostics is not None and slot==0:
                 diagnostics['action_top_probability_sum']+=probabilities.max().detach()
                 diagnostics['action_decisions']+=1
-            choice=int(torch.multinomial(probabilities,1,generator=generator).item())
+            choice=(int(torch.multinomial(probabilities,1,generator=generator).item())
+                    if temperature>0 else int(probabilities.argmax().item()))
         else:
             choice=int(mask.argmax().item())
         if choice == 0:
@@ -568,6 +656,8 @@ def generate(args):
         'pointer_sampling_policy':GROUNDED_POINTER_SAMPLING_POLICY if grounded else 'global_temperature_truncation_v1',
         'touch_layout_policy':touch_layout_policy,
         'contact_policy':contact_policy,'structure_policy':model.config.structure_policy,
+        'future_horizon_policy':model.config.future_horizon_policy,
+        'action_head_policy':model.config.action_head_policy,
         'structure_schema':model.config.structure_schema,'structure_feature_dim':structure_feature_dim,
         'structure_backend':model.config.structure_backend,
         'tempo_source':('provided_map' if args.tempo_map else 'provided_bpm' if args.bpm else 'audio_estimate'),
@@ -711,7 +801,8 @@ def generate(args):
                     slot_mask_decoder=decoder,blocked_first=blocked_first,head_metadata=head_metadata,
                     canonical_order=music_v2,touch_layout_policy=touch_layout_policy,
                     contact_budget=contact_budget,contact_policy=contact_policy,
-                    type_temperature=type_temperature,type_min_p=type_min_p,blocked_prefixes=blocked_prefixes)
+                    type_temperature=type_temperature,type_min_p=type_min_p,blocked_prefixes=blocked_prefixes,
+                    macro_group_ids=getattr(getattr(model,'conserved_action_head',None),'atom_group_id',None))
                 if proposed:
                     guided=bool(decoder_diagnostics.get('applied'))
                     sampling['touch_guard_proposals']+=int(guided)
@@ -818,6 +909,8 @@ def generate(args):
             'pointer_sampling_policy':GROUNDED_POINTER_SAMPLING_POLICY if grounded else 'global_temperature_truncation_v1',
             'touch_layout_policy':touch_layout_policy,
             'contact_policy':contact_policy,'structure_policy':model.config.structure_policy,
+            'future_horizon_policy':model.config.future_horizon_policy,
+            'action_head_policy':model.config.action_head_policy,
             'structure_schema':model.config.structure_schema,'structure_feature_dim':structure_feature_dim,
             'structure_backend':model.config.structure_backend,
             'tempo_source':('provided_map' if args.tempo_map else 'provided_bpm' if args.bpm else 'audio_estimate'),

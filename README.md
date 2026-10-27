@@ -2,9 +2,11 @@
 
 输入音乐和目标等级，生成可在 Simai 工具中继续编辑、检查和试玩的舞萌 DX 谱面草稿。支持 Tap、Hold、Slide、Touch 等音符，以及等级和风格条件。
 
-**当前开发主路线是 ChartComposer：模型族 `chart_composer_v1`，新训练默认架构 `audio_grounded_v3`。** 本文按 2026-10-27 的工作区实现核实。旧 event、song-form 和 stream 模型保留各自的兼容入口；它们的参数、检查点和输出文件不完全相同。
+**当前开发主路线是 ChartComposer：模型族 `chart_composer_v1`，新训练默认架构 `audio_grounded_v3`。** 本文按 2026-10-28 的工作区实现核实。旧 event、song-form 和 stream 模型保留各自的兼容入口；它们的参数、检查点和输出文件不完全相同。
 
-**Beat This输入修复：** 已复现旧版相位信号过弱和局部节拍/强拍概率未直接输入的问题。新训练自动使用51维“节拍与小节结构（增强信号）”，旧v15仍按原48维解释。已在新目录`checkpoints/prism_composer_v16_signal`启动20轮fresh训练，本机主界面为[http://127.0.0.1:7877](http://127.0.0.1:7877)。原检查点保留；数值对照、实际训练设置和质量边界见[Beat This复核与修复](docs/COMPOSER_BEAT_THIS_FIX_20261027_ZH.md)。
+**A/B/C复核（2026-10-28）：** 已修复新动作头仍依赖平面分类、实际采样破坏分组、Touch位置混桶、条件遮挡漏接与旁路、旧服务忽略控件和合法模型尺寸启动失败。728项Composer Python检查、159项前端检查通过；尚未完成真实短训的音乐质量与学习效率对照。v16已由用户因产出质量差手工停止，本轮没有重启正式训练。具体评价与证据见[方案复核说明](docs/COMPOSER_SCHEME_ABC_REVIEW_20261028_ZH.md)。
+
+**Beat This输入修复：** 已复现旧版相位信号过弱和局部节拍/强拍概率未直接输入的问题。新训练自动使用51维“节拍与小节结构（增强信号）”，旧v15仍按原48维解释。v16曾在`checkpoints/prism_composer_v16_signal`启动20轮fresh，现已手工停止；原检查点保留。数值对照、当时训练设置和质量边界见[Beat This复核与修复](docs/COMPOSER_BEAT_THIS_FIX_20261027_ZH.md)，其中7877地址为当时服务记录。
 
 **当前更新说明：** 已加入音乐结构提示、歌曲隔离的验证集、固定歌曲生成验收、学习率预热/退火和合法候选内的Touch保护，并完成结构缓存与GPU供数优化。先读[这次更新了什么、怎样使用](docs/COMPOSER_CURRENT_CHANGES_20261027_ZH.md)，其中区分了界面默认、历史v15与新v16正式训练设置，也列明了尚未验证的质量问题。
 

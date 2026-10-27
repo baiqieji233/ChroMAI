@@ -353,7 +353,7 @@ def test_mid_epoch_resume_restores_updates_without_reloading_consumed_examples(t
                 'eos_target':torch.tensor(float(index==3)),'song_index':torch.tensor(0),
                 'event_index':torch.tensor(index)}
     monkeypatch.setattr(train,'ComposerDataset',TinyDataset)
-    args=['--manifest','tiny.json','--epochs','1','--batch-size','2','--d-model','16',
+    args=['--manifest','tiny.json','--epochs','1','--batch-size','2','--grad-accumulation','1','--d-model','16',
         '--layers','1','--nhead','4','--dim-feedforward','32','--action-slots','2',
         '--device','cpu','--precision','fp32','--prefetch-batches','0','--checkpoint-interval-steps','1',
         '--architecture-profile','music_context_v2']

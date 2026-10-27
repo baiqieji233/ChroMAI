@@ -20,7 +20,7 @@ function harness(){
     checkedOrDefault:(id)=>el(id).checked,formDevice:()=> 'cpu',
     api:async(path,payload)=>{
       if(path==='/api/composer/inspect')return structuredClone(parent);
-      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v11_fresh_training_defaults',composer_structure_context:'metrical_context_v2'}};
+      if(path==='/api/status')return {training_capabilities:{composer_training_runtime:'music_context_shared_slots_v2',composer_training_controls:'causal_motif_runtime_controls_v11_fresh_training_defaults',composer_structure_context:'metrical_context_v2',composer_scheme_abc:'horizon_grouped_condition_v1'}};
       if(path==='/api/composer/train'){submitted=payload;return {task_id:'fake'};}
       throw Error(path);
     }});

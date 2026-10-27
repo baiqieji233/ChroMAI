@@ -209,6 +209,8 @@ def parser():
     p.add_argument('--generation-eval-seeds',default='0,1')
     p.add_argument('--structure-backend',choices=('auto','native','beat_this'),default='auto')
     p.add_argument('--structure-dropout',type=float,default=.15)
+    p.add_argument('--condition-mask-prob',type=float,default=None,
+        help='hide target-derived condition controls coherently, retaining level; fresh default 0, continuation inherits')
     p.add_argument('--batch-size',type=int,default=DEFAULTS['batch_size']);p.add_argument('--lr',type=float,default=DEFAULTS['lr'])
     p.add_argument('--lr-schedule',choices=('auto','constant','cosine'),default='auto',
         help='auto preserves constant fresh/legacy training and inherits a resumed schedule')
@@ -564,7 +566,8 @@ def recovery_batch(dataset,model,args,device,global_step):
                     slot_mask_decoder=decode_slot,
                     contact_budget=contact_budget,contact_policy=contact_policy,
                     occupied=occupied,blocked=cooldown_blocked,blocked_first=blocked_first,head_metadata=metadata,
-                    canonical_order=True,touch_layout_policy=touch_policy,blocked_prefixes=blocked_prefixes)
+                    canonical_order=True,touch_layout_policy=touch_policy,blocked_prefixes=blocked_prefixes,
+                    macro_group_ids=getattr(getattr(model,'conserved_action_head',None),'atom_group_id',None))
                 if selected:
                     point=EventPoint(candidates[chosen],'/'.join(selected))
                     accepted=(guard.accepts(point,protect_reported_hard=True) if guidance.get('applied') else guard.accepts(point))
@@ -676,6 +679,9 @@ def _train(args,explicit_flags):
             from .checkpoint import motif_training_compatible
             if not motif_training_compatible(old):
                 raise ValueError('Motif input/dropout contract changed; use --init-checkpoint with a new output directory')
+    from .model import resolve_condition_mask_prob
+    args.condition_mask_prob=resolve_condition_mask_prob(getattr(args,'condition_mask_prob',None),
+        parent_anchor_config,resume=bool(args.resume))
     args.action_objective_policy=resolve_action_objective(getattr(args,'action_objective_policy','auto'),
         old.get('args',{}) if old else None,resume=bool(args.resume),architecture_profile=args.architecture_profile)
     args.recovery_sampling_policy=resolve_recovery_sampling(args.recovery_sampling_policy,old,
@@ -749,7 +755,7 @@ def _train(args,explicit_flags):
                         Path(saved_args['manifest']).resolve(),Path(saved_args.get('source_manifest',saved_args['manifest'])).resolve()}:
                     raise ValueError('Resume requires the recorded training or source manifest')
                 if flag not in explicit_flags or key=='manifest':setattr(args,key,saved_args[key])
-    elif not args.validation_manifest and args.holdout_fraction:
+    elif not args.validation_manifest and args.holdout_fraction and Path(args.manifest).is_file():
         from .evaluation import split_manifest
         source_data=json.loads(Path(args.manifest).read_text(encoding='utf-8-sig'))
         if len(source_data.get('songs',[]))>=3:
@@ -785,10 +791,10 @@ def _train(args,explicit_flags):
             model=(migrate_audio_grounded(model,dataset.codec_atoms,action_slots=args.action_slots,lens_width=args.lens_width,
                 lens_chunk_size=args.lens_chunk_size,history_residual_bound=args.history_residual_bound,
                 history_dropout=args.history_dropout,ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
-                history_memory_rms_bound=args.history_memory_rms_bound,
+                history_memory_rms_bound=args.history_memory_rms_bound,condition_mask_prob=args.condition_mask_prob,
                 motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS})
                 if args.architecture_profile==GROUNDED_PROFILE else migrate_music_context(model,action_slots=args.action_slots,history_anchor_policy=args.history_anchor_policy,
-                    history_memory_rms_bound=args.history_memory_rms_bound,
+                    history_memory_rms_bound=args.history_memory_rms_bound,condition_mask_prob=args.condition_mask_prob,
                     motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}))
             model.config.symbolic_dropout=args.symbolic_dropout
         if list(old.get('atom_catalog') or []) != list(dataset.codec_atoms):
@@ -806,7 +812,7 @@ def _train(args,explicit_flags):
             head_timing_dim=head_timing_dim_for_policy(args.head_timing_policy),lens_width=args.lens_width,lens_chunk_size=args.lens_chunk_size,
             history_residual_bound=args.history_residual_bound,history_dropout=args.history_dropout,
             ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
-            history_memory_rms_bound=args.history_memory_rms_bound,
+            history_memory_rms_bound=args.history_memory_rms_bound,condition_mask_prob=args.condition_mask_prob,
             structure_backend=args.structure_backend,structure_dropout=args.structure_dropout,
             structure_backend_identity=args.structure_backend_identity,
             motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}),dataset.codec_atoms)
@@ -938,6 +944,9 @@ def _train(args,explicit_flags):
         'history_memory_rms_bound':model.config.history_memory_rms_bound,
         'touch_layout_policy':args.touch_layout_policy,
         'contact_policy':args.contact_policy,'structure_policy':args.structure_policy,
+        'future_horizon_policy':model.config.future_horizon_policy,
+        'action_head_policy':model.config.action_head_policy,
+        'condition_mask_prob':model.config.condition_mask_prob,
         'structure_backend':args.structure_backend,'structure_dropout':args.structure_dropout,
         'structure_schema':model.config.structure_schema,
         'structure_backend_identity':model.config.structure_backend_identity,
