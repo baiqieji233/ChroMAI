@@ -206,6 +206,14 @@ class RecoveryBuilder:
                 [p.beat for p in prefix],np.asarray([ids for ids,_ in history],dtype=np.int64).reshape(-1,ds.action_slots))
         if getattr(ds,'architecture_profile',None)=='audio_grounded_v3' and hasattr(ds, '_grounded_features'):
             item.update(ds._grounded_features(sample.song_index, seconds, seconds, table=table))
+        if getattr(ds,'structure_policy','off')!='off':
+            from .structure import structure_features_and_transition
+            features,transition=structure_features_and_transition(song,padded,seconds,
+                float(previous) if previous is not None else None,
+                float(clock.at(previous)) if previous is not None else None,
+                policy=ds.structure_policy,cache_dir=ds.cache_dir,backend=ds.structure_backend)
+            item['structure_features']=torch.from_numpy(features)
+            item['structure_transition']=torch.from_numpy(transition)
         return item, candidates
 
     def build(self, prefix, sample_index, *, generated_count):

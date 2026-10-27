@@ -6,7 +6,8 @@
     'history_dropout','ledger_dropout','placement_weight','planner_weight','recovery_interval',
     'recovery_samples','recovery_steps','recovery_weight','sample_locality','symbolic_dropout',
     'audio_pointer_weight','d_model','dim_feedforward','layers','nhead','history_events',
-    'candidate_count','action_slots'];
+    'candidate_count','action_slots','lr_schedule','warmup_steps','min_lr_ratio',
+    'structure_policy','structure_backend','structure_dropout','contact_policy'];
   const forms = ['trainForm','generateForm'].map((id) => document.getElementById(id));
   function saveControls() {
     try { localStorage.setItem(settingsKey, JSON.stringify(Object.fromEntries(forms.map((form) => [form.id,formData(form)])))); } catch (_) {}
@@ -45,12 +46,23 @@
       const inspection=await request('/api/composer/inspect',{checkpoint:data.parent});
       if (!inspection.can_resume) throw new Error(inspection.error||'checkpoint 不能 resume，请使用 finetune');
       for (const key of inheritedKeys) {
-        const value=inspection.model_config?.[key]??inspection.args?.[key];
+        const value=inspection.model_config?.[key]??inspection.args?.[key]??({lr_schedule:'constant',warmup_steps:0,min_lr_ratio:1,
+          structure_policy:'off',structure_backend:'native',structure_dropout:.15,contact_policy:'off'}[key]);
         if (value!==undefined) { data[key]=value; const field=form.elements.namedItem(key); if(field) field.value=String(value); }
       }
       saveControls();
     }
     delete data.parent;
+    if(data.structure_policy!=='off') {
+      const status=await(await fetch('/api/status')).json();
+      if(status.training_capabilities?.composer_structure_context!=='metrical_context_v1')
+        throw new Error('当前服务未加载音乐结构训练，请重启更新后的 WebUI 服务。');
+    }
+    if(data.lr_schedule==='cosine'||Number(data.warmup_steps||0)>0) {
+      const status=await(await fetch('/api/status')).json();
+      if(status.training_capabilities?.composer_learning_rate_schedule!=='optimizer_updates_v1')
+        throw new Error('当前服务未加载学习率预热与退火，请在更新后的服务启动新阶段。');
+    }
   } else if (form.id === "generateForm") { for (const k of ["bpm", "condition_file"]) if (!data[k]) delete data[k]; } const result = await request(endpoint, data); poll(result.task_id); } catch (error) { showError(error); } }
   $("#trainForm").addEventListener("submit", (e) => { e.preventDefault(); launch(e.currentTarget, "/api/composer/train"); }); $("#generateForm").addEventListener("submit", (e) => { e.preventDefault(); launch(e.currentTarget, "/api/composer/generate"); });
   $("#inspectForm").addEventListener("submit", async (e) => { e.preventDefault(); try { $("#inspection").textContent = JSON.stringify(await request("/api/composer/inspect", formData(e.currentTarget)), null, 2); } catch (error) { $("#inspection").textContent = error.message; } });

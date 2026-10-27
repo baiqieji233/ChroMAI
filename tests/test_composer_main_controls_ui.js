@@ -187,3 +187,14 @@ test('Policy UI has complete geometry choice and fresh auto reset without genera
   }
   assert.match(html,/id="composerHistoryMemoryRmsBound"[^>]+min="1"[^>]+max="64"/);
 });
+
+test('Recovery v3 and masked Touch v4 are selectable and resume keeps v3',()=>{
+  const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
+  assert.match(html,/value="generation_matched_recovery_prefix_retry_v3"/);
+  assert.match(html,/value="generation_matched_recovery_masked_touch_v4"/);
+  const {c,el,setMode}=harness();setMode('resume');
+  c.applyChartComposerCheckpointConfig({action_sampling_policy:'generation_matched_recovery_prefix_retry_v3'},'resume');
+  assert.equal(el('#composerRecoverySamplingPolicy').value,'generation_matched_recovery_prefix_retry_v3');
+  c.updateComposerRecoverySamplingControls();
+  assert.equal(el('#composerRecoveryActionTemperature').disabled,true);
+});

@@ -1,8 +1,8 @@
 """Versioned short-rollout contract; generation controls remain independent."""
 import math
-from . import ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY
+from . import ACTION_SAMPLING_POLICY,PREVIOUS_ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY
 
-RECOVERY_SAMPLING_POLICIES={ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY}
+RECOVERY_SAMPLING_POLICIES={ACTION_SAMPLING_POLICY,PREVIOUS_ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY}
 RETRY_POLICIES={'legacy_first_atom_v1','failed_prefix_v2'}
 
 
@@ -23,11 +23,12 @@ def recovery_sampling_settings(policy,pointer_temperature=1.,action_temperature=
     if policy not in RECOVERY_SAMPLING_POLICIES:raise ValueError('Unknown recovery_sampling_policy')
     if any(not math.isfinite(float(v)) or not 0<=float(v)<=2 for v in (pointer_temperature,action_temperature)):
         raise ValueError('Recovery temperatures must be finite and in [0,2]')
-    aligned=policy==ACTION_SAMPLING_POLICY
+    aligned=policy in (ACTION_SAMPLING_POLICY,PREVIOUS_ACTION_SAMPLING_POLICY)
     if not aligned and (float(pointer_temperature)!=1. or float(action_temperature)!=.85):
         raise ValueError('Legacy recovery temperatures are fixed; select the aligned recovery policy')
     return {'policy':policy,'pointer_temperature':float(pointer_temperature),'action_temperature':float(action_temperature),
         'pointer_sampler':'grouped' if aligned else 'global',
         'touch_history_guard':aligned and float(action_temperature)>0,'touch_history_bound':1.,
+        'touch_legal_mask':policy==ACTION_SAMPLING_POLICY,
         'action_type_temperature':1.,'action_type_min_p':0.,'min_same_head_ms':50.,
         'retry_policy':'failed_prefix_v2' if aligned else 'legacy_first_atom_v1'}

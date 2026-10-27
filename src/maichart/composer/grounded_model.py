@@ -53,6 +53,16 @@ class AudioGroundedComposer(ChartComposer):
         self.action_factors=CompositionalActions(list(atom_catalog),width,config.history_anchor_policy,config.slide_factor_policy)
         self.action_relation=nn.Linear(8,width,bias=False)
         nn.init.zeros_(self.action_relation.weight)
+        if config.structure_policy != 'off':
+            from .structure import STRUCTURE_DIM
+            self.structure_projection=nn.Linear(STRUCTURE_DIM,width,bias=False)
+            self.structure_action_projection=nn.Linear(STRUCTURE_DIM,width,bias=False)
+            self.structure_transition_projection=nn.Linear(STRUCTURE_DIM,width,bias=False)
+            # New feature branches have their own versioned input contract.
+            # Neutral initialization also supports explicit transfer studies.
+            nn.init.zeros_(self.structure_projection.weight)
+            nn.init.zeros_(self.structure_action_projection.weight)
+            nn.init.zeros_(self.structure_transition_projection.weight)
         if config.head_timing_policy=='separate_pads_v2':
             self.head_timing_detail_projection=nn.Linear(123,width,bias=False)
             nn.init.zeros_(self.head_timing_detail_projection.weight)
@@ -82,7 +92,7 @@ class AudioGroundedComposer(ChartComposer):
                 audio_lens_mask=None,planner_audio=None,planner_mask=None,planner_indices=None,
                 planner_mix=None,planner_override=None,lens_embeddings=None,
                 motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,
-                selected_action_state=None,**unused):
+                selected_action_state=None,structure_features=None,structure_transition=None,**unused):
         if (audio_lens is None and lens_embeddings is None) or planner_audio is None or head_timing is None:
             raise ValueError('audio_grounded_v3 requires local audio, coarse plan audio and causal head timing')
         # A full training decode already needs every atom's factor vector.
@@ -91,9 +101,29 @@ class AudioGroundedComposer(ChartComposer):
         # across optimizer updates. Pointer-only calls retain sparse lookups.
         factor_weight=self.action_factors.composed_weight() if decode_actions else None
         batch,count=candidate_features.shape[:2]
+        structure_term=None
+        if self.config.structure_policy != 'off':
+            from .structure import STRUCTURE_DIM
+            if structure_features is None or structure_features.shape != (batch,count,STRUCTURE_DIM):
+                raise ValueError('Structure-enabled Composer requires matching candidate structure features')
+            structure_features=structure_features.to(candidate_features)
+            if structure_transition is None:structure_transition=torch.zeros_like(structure_features)
+            if structure_transition.shape!=structure_features.shape:
+                raise ValueError('structure_transition shape must match structure_features')
+            structure_transition=structure_transition.to(structure_features)
+            if self.training and self.config.structure_dropout:
+                # One coherent mask for all candidates and all branches in
+                # this training sample, never candidate-by-candidate flicker.
+                keep=(torch.rand(batch,1,1,device=candidate_features.device)>=self.config.structure_dropout)
+                structure_features=structure_features*keep
+                structure_transition=structure_transition*keep
+            structure_term=(self.structure_action_projection(structure_features)
+                            +self.structure_transition_projection(structure_transition))
         valid=~candidate_mask if candidate_mask is not None else torch.ones((batch,count),device=candidate_features.device,dtype=torch.bool)
         hidden=self.audio_projection(candidate_features[...,:self.config.audio_dim])+self.time_projection(candidate_features[...,self.config.audio_dim:])
         hidden=self.audio_encoder(hidden,src_key_padding_mask=~valid)
+        if structure_term is not None:
+            hidden=hidden+self.structure_projection(structure_features)
         lens=self.lens(audio_lens,audio_lens_mask) if lens_embeddings is None else lens_embeddings
         if self.training and lens_embeddings is not None:
             raise ValueError('Cached audio embeddings are inference-only; training must retain lens gradients')
@@ -182,6 +212,10 @@ class AudioGroundedComposer(ChartComposer):
         delta=delta*valid
         correction=self.config.history_residual_bound*torch.tanh(delta/self.config.history_residual_bound)
         full_logits=(audio_logits+correction).masked_fill(~valid,-1e4).log_softmax(-1)
+        if structure_term is not None:
+            # Explicit configuration path, after the timing decision logits.
+            # This also survives selected-prefix reconstruction below.
+            audio_context=audio_context+structure_term
         audio_action_context=self.candidate_fusion(audio_context)
         action_context=self.candidate_fusion(audio_context+symbolic+self.action_relation(last_heads)[:,None]*symbolic_keep[:,None])
         result={'candidate_logits':full_logits,'candidate_context':action_context,

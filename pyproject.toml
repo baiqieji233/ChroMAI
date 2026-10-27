@@ -30,6 +30,12 @@ training = [
 training-speed = [
   "numba>=0.61"
 ]
+music-structure = [
+  "beat-this==1.1.0",
+  "torchaudio>=2.0",
+  "soundfile>=0.12",
+  "tqdm>=4.66"
+]
 
 [project.scripts]
 maichart = "maichart.cli:main"

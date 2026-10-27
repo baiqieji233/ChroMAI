@@ -32,6 +32,9 @@ function createHarness(fetchImpl) {
     renderGenerationResult() {},
     renderAcceptanceFromTask() {},
     renderGoldResult() {},
+    pendingTaskCancellations: new Set(),
+    liveComposerTrainingTasks: new Set(),
+    updateDatasetButtons() {},
     console,
   };
   context.element = selector => {

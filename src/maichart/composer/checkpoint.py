@@ -1,7 +1,7 @@
 """Checkpoint contract for chart_composer_v1."""
 from __future__ import annotations
 from pathlib import Path
-import copy,os,tempfile
+import copy,json,os,tempfile
 import torch
 from . import CHECKPOINT_SCHEMA,FAMILY,INPUT_CONTRACT,RELATIONAL_INPUT_CONTRACT,TRAINING_SEMANTICS,GROUNDED_TRAINING_SEMANTICS,ACTION_SAMPLING_POLICY
 from .sampling_contract import RECOVERY_SAMPLING_POLICIES
@@ -96,6 +96,11 @@ def _write_payload(path, payload):
     finally: temp.unlink(missing_ok=True)
 
 
+def structure_training_semantics(base, policy):
+    """Bind structural model inputs to the checkpoint's training contract."""
+    return base if policy == 'off' else f'{base}+structure_{policy}'
+
+
 def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimizer_steps=0,
          atom_catalog=(), dataset_fingerprint=None, training_state=None):
     objective=resolve_action_objective(args.get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
@@ -138,6 +143,13 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
         if model.config.motif_memory_policy!='off':
             payload['motif_training_policy']=MOTIF_TRAINING_POLICY
             payload['motif_input_policy']=RECURRENCE_DESCRIPTOR_POLICY
+    payload['training_semantics'] = structure_training_semantics(
+        payload['training_semantics'], model.config.structure_policy)
+    if model.config.structure_policy!='off':
+        from .structure_backend import backend_identity
+        payload['structure_backend_identity']=(model.config.structure_backend_identity
+            or backend_identity(model.config.structure_backend))
+        payload['model_config']['structure_backend_identity']=payload['structure_backend_identity']
     _write_payload(path,payload)
     return payload
 
@@ -179,6 +191,22 @@ def validate(payload):
     values.setdefault('history_memory_policy','unbounded_v1')
     values.setdefault('history_memory_rms_bound',8.)
     values.setdefault('history_attention_policy','auto_v1')
+    # Missing fields belong to checkpoints created before these policies.
+    values.setdefault('structure_policy','off')
+    values.setdefault('contact_policy','off')
+    values.setdefault('structure_backend','native')
+    values.setdefault('structure_dropout',.15)
+    if not values.get('structure_backend_identity') and values['structure_policy']!='off':
+        fingerprint=payload.get('dataset_fingerprint')
+        fingerprint=json.loads(fingerprint) if isinstance(fingerprint,str) else fingerprint or {}
+        values['structure_backend_identity']=(payload.get('structure_backend_identity')
+            or fingerprint.get('structure_backend_identity'))
+    if 'structure_schema' not in values:
+        if values['structure_policy']=='off':values['structure_schema']='off'
+        else:
+            fingerprint=payload.get('dataset_fingerprint')
+            fingerprint=json.loads(fingerprint) if isinstance(fingerprint,str) else fingerprint or {}
+            values['structure_schema']=fingerprint.get('structure_schema','unknown')
     try:
         config=ComposerConfig(**values)
     except TypeError as exc:
@@ -197,6 +225,11 @@ def validate(payload):
         raise ValueError('Unknown Composer architecture profile')
     contract=_PROFILE_POLICIES[config.architecture_profile]
     semantics=payload.get('training_semantics')
+    if config.structure_policy != 'off':
+        suffix = '+structure_' + config.structure_policy
+        if not isinstance(semantics, str) or not semantics.endswith(suffix):
+            raise ValueError('Composer structure policy/training semantics mismatch')
+        semantics = semantics[:-len(suffix)]
     allowed_semantics={contract['training_semantics']}
     if config.architecture_profile==GROUNDED_PROFILE:
         allowed_semantics.update({_GROUNDED_V7_SEMANTICS, _GROUNDED_V8_SEMANTICS, _GROUNDED_V9_SEMANTICS,
@@ -282,11 +315,12 @@ def inspect_payload(payload):
     if config is not None:
         current_semantics=training_semantics_for_objective(config.architecture_profile,
             (payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE))
+        current_semantics=structure_training_semantics(current_semantics, config.structure_policy)
         if config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != current_semantics:
             migration = 'Older grounded planning/recovery contracts require explicit finetune with a new output directory'
         elif not motif_training_compatible(payload):
             migration = 'Motif input/dropout contract changed; use explicit finetune with a new output directory'
-        elif config.architecture_profile == 'music_context_v2' and payload.get('training_semantics') != TRAINING_SEMANTICS:
+        elif config.architecture_profile == 'music_context_v2' and payload.get('training_semantics') != current_semantics:
             migration = 'Existing music-context contracts require explicit finetune under the current training contract'
         elif config.architecture_profile not in {'music_context_v2',GROUNDED_PROFILE}:
             migration = 'Workload v1 supports explicit finetune migration; legacy models retain generation only'
@@ -339,7 +373,8 @@ def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slot
     if slots < model.config.action_slots:
         raise ValueError('Finetune migration cannot reduce action_slots')
     allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy',
-             'history_memory_policy','history_memory_rms_bound','history_attention_policy','head_timing_policy','cross_event_relation_policy'}
+             'history_memory_policy','history_memory_rms_bound','history_attention_policy','head_timing_policy','cross_event_relation_policy',
+             'structure_policy','contact_policy','structure_backend','structure_dropout'}
     if set(policy_options)-allowed:raise ValueError('Unknown music-context migration option')
     config=ComposerConfig(**{**model.config.to_dict(),**policy_options,'architecture_profile':'music_context_v2',
                              'head_timing_dim':HEAD_TIMING_DIM,'action_slots':slots})
@@ -366,6 +401,8 @@ def migrate_audio_grounded(model,atom_catalog,**options):
     """Explicit partial transfer; new listening/planning/pointer paths need learning."""
     if int(options.get('action_slots', model.config.action_slots)) < model.config.action_slots:
         raise ValueError('Finetune migration cannot reduce action_slots')
+    if options.get('structure_policy',model.config.structure_policy)!=model.config.structure_policy:
+        options.setdefault('structure_schema','auto')
     if model.config.architecture_profile==GROUNDED_PROFILE:
         if list(model.action_factors.atom_catalog)!=list(atom_catalog):
             raise ValueError('Migration catalog order differs from existing action mapping')

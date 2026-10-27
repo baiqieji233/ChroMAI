@@ -41,13 +41,16 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'history_memory_policy':'rms_cap_v1','history_attention_policy':'math_v1',
                 'action_objective_policy':'joint_event_recovery_v3',
                 'head_timing_policy':'separate_pads_v2','cross_event_relation_policy':'relative_heads_v1',
-                'recovery_sampling_policy':'generation_matched_recovery_prefix_retry_v3',
+                'recovery_sampling_policy':'generation_matched_recovery_masked_touch_v4',
                 'recovery_pointer_temperature':1.,'recovery_action_temperature':.85}
     from maichart.composer.sampling_contract import recovery_sampling_settings
     expected['recovery_sampling_settings']=recovery_sampling_settings(expected['recovery_sampling_policy'])
+    expected.update(structure_policy='metrical_context_v1',contact_policy='diagnostic_v1',
+                    structure_backend='auto',structure_dropout=.15,
+                    lr_schedule='auto',warmup_steps=None,min_lr_ratio=None)
     assert task.result['effective_settings'] == expected
     for key, value in expected.items():
-        if key=='recovery_sampling_settings':continue
+        if key=='recovery_sampling_settings' or value is None:continue
         flag = '--' + key.replace('_', '-')
         assert args[args.index(flag) + 1] == str(value)
 

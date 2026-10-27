@@ -68,7 +68,8 @@ class ComposerDataset(Dataset):
                  preparation_workers=1, audio_cache_gb=4., limit_charts=0,
                  quality_enabled=True, seed=0, architecture_profile='music_context_v2',
                  action_state_policy='committed_legacy_v1', motif_memory_policy='off', motif_max_events=16,
-                 head_timing_policy='merged_pads_v1'):
+                 head_timing_policy='merged_pads_v1', structure_policy='off', structure_backend='native',
+                 atom_catalog=None):
         started = time.monotonic()
         self.cache_dir = str(cache_dir) if cache_dir is not None else None
         self.codec_atoms=[]; self.atom_to_id={}; self.samples=[]; self.songs=[]
@@ -76,6 +77,9 @@ class ComposerDataset(Dataset):
         self.architecture_profile = architecture_profile
         self.action_state_policy=action_state_policy
         self.head_timing_policy=head_timing_policy
+        self.structure_policy=structure_policy
+        self.structure_backend=structure_backend
+        self.fixed_catalog=atom_catalog is not None
         self.head_pads=head_pads_for_policy(head_timing_policy)
         self.motif_memory_policy=motif_memory_policy
         self.motif_max_events=int(motif_max_events)
@@ -121,11 +125,13 @@ class ComposerDataset(Dataset):
                 self.max_required_action_slots = max(self.max_required_action_slots, len(atoms))
         if self.max_required_action_slots > 64:
             raise ValueError(f'Composer source event requires {self.max_required_action_slots} atoms; maximum is 64')
-        self.action_slots = max(self.action_slots, self.max_required_action_slots)
+        self.action_slots = self.action_slots if self.fixed_catalog else max(self.action_slots, self.max_required_action_slots)
         if self.action_slots != self.action_slots_requested:
             print('composer_prepare ' + json.dumps({'stage': 'action_slots_expanded',
                 'requested': self.action_slots_requested, 'effective': self.action_slots}), flush=True)
-        self.codec_atoms = sorted(atom_set)
+        self.codec_atoms = list(atom_catalog) if self.fixed_catalog else sorted(atom_set)
+        if len(set(self.codec_atoms))!=len(self.codec_atoms):
+            raise ValueError('Composer fixed atom catalog contains duplicates')
         self.atom_to_id = {atom: index + 1 for index, atom in enumerate(self.codec_atoms)}
         self.candidate_total = 0
         self.candidate_misses = 0
@@ -298,6 +304,26 @@ class ComposerDataset(Dataset):
             fingerprint=json.loads(self.fingerprint)
             fingerprint['head_timing_policy']=head_timing_policy
             self.fingerprint=json.dumps(fingerprint,sort_keys=True)
+        if self.fixed_catalog:
+            # Unseen actions must never expand a held-out model vocabulary.
+            # Keep their authored history timing, but exclude unrepresentable
+            # next-event labels and report the exact evaluation coverage.
+            before=len(self.samples)
+            def representable(sample):
+                atoms=event_metadata(sample.note_text).atoms
+                return len(atoms)<=self.action_slots and all(a in self.atom_to_id for a in atoms)
+            self.samples=[s for s in self.samples if representable(s)]
+            self.catalog_coverage={'eligible_events':before,'representable_events':len(self.samples),
+                'excluded_unknown_or_oversize':before-len(self.samples),
+                'unknown_atom_types':len(atom_set-set(self.codec_atoms))}
+        if structure_policy!='off':
+            from .structure import SCHEMA as STRUCTURE_SCHEMA
+            fingerprint=json.loads(self.fingerprint)
+            fingerprint.update(structure_policy=structure_policy,structure_backend=structure_backend,
+                               structure_schema=STRUCTURE_SCHEMA)
+            from .structure_backend import backend_identity
+            fingerprint['structure_backend_identity']=backend_identity(structure_backend)
+            self.fingerprint=json.dumps(fingerprint,sort_keys=True)
         if not self.samples:
             raise ValueError('Composer has no eligible events after candidate filtering; check manifest and candidate recall')
         print('composer_prepare ' + json.dumps({
@@ -435,8 +461,8 @@ class ComposerDataset(Dataset):
             is_chord, is_hold, is_slide, is_touch = meta.chord, meta.hold, meta.slide, meta.touch
             if self.architecture_profile in MUSIC_PROFILES:
                 atoms=tuple(sorted(atoms))
-            for slot, atom in enumerate(atoms):
-                atom_ids[i, slot] = self.atom_to_id[atom]
+            for slot, atom in enumerate(atoms[:self.action_slots]):
+                atom_ids[i, slot] = self.atom_to_id.get(atom,0)
             cur_sec = point_seconds[i]
             hist_feats[i] = history_event_features(text, p.beat-prior_beat, cur_sec-prior_second,
                 parsed=self.architecture_profile in MUSIC_PROFILES)
@@ -832,6 +858,15 @@ class ComposerDataset(Dataset):
             'head_timing': torch.from_numpy(head_timing_features(table['last_head_seconds'][ev],
                 table['last_head_beats'][ev], seconds, beat_floats)),
         }
+        if self.structure_policy!='off':
+            from .structure import structure_features_and_transition
+            song=self.base.songs[sample.song_index][0]
+            structure,transition=structure_features_and_transition(song,beat_floats,seconds,
+                float(sample.previous) if sample.previous is not None else None,
+                float(clock.at(sample.previous)) if sample.previous is not None else None,
+                policy=self.structure_policy,cache_dir=self.cache_dir,backend=self.structure_backend)
+            result['structure_features']=torch.from_numpy(structure)
+            result['structure_transition']=torch.from_numpy(transition)
         if self.motif_memory_policy!='off':
             from .context_features import motif_tensors
             result.update(motif_tensors(table['motif_index'],sample.target,ev,
@@ -940,7 +975,7 @@ def collate_composer(items):
                 'trailing_audio', 'trailing_target', 'trailing_weight', 'head_timing',
                 'eos_weight', 'future_weight', 'pointer_weight','action_weight',
                 'audio_lens','audio_lens_mask','placement_target','placement_weight','planner_indices','planner_mix',
-                'selected_action_state'):
+                'selected_action_state','structure_features','structure_transition'):
         if key in items[0]: result[key] = torch.stack([item[key] for item in items])
     if 'planner_audio' in items[0]:
         for key in ('planner_audio','planner_target','planner_weight'):

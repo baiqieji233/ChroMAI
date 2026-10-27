@@ -136,6 +136,16 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     anchor_policy=resolve_history_anchor_policy(payload.get('history_anchor_policy','auto'),parent_config,resume=mode=='resume')
 
     args = ["-m", "maichart.composer.train"]
+    # Evaluation controls are additive and do not alter model inputs.
+    for key,minimum in (('validation_max_batches',0),('validation_batch_size',1),
+                        ('generation_eval_songs',0),('generation_eval_interval_epochs',1)):
+        if key in payload:_arg(args,'--'+key.replace('_','-'),_int(payload,key,0,minimum=minimum))
+    if payload.get('validation_manifest'):
+        _arg(args,'--validation-manifest',_path(payload['validation_manifest'],'validation manifest',exists=True))
+    if 'holdout_fraction' in payload:
+        fraction=_float(payload,'holdout_fraction',.05,minimum=0.)
+        if fraction>=.5:raise ValueError('holdout_fraction must be less than 0.5')
+        _arg(args,'--holdout-fraction',fraction)
     _arg(args, "--manifest", manifest)
     _arg(args, "--checkpoint-dir", checkpoint_dir)
     _arg(args, "--cache-dir", cache_dir)
@@ -167,6 +177,24 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         grounded_settings[key] = value
         _arg(args, '--' + key.replace('_', '-'), value)
     validate_supported_context_policies(grounded_settings)
+    backend = str(payload.get('structure_backend', 'auto'))
+    if backend not in {'auto', 'native', 'beat_this'}:
+        raise ValueError('unknown structure_backend')
+    inherited_backend = str(parent_config.get('structure_backend', 'native'))
+    if mode == 'resume' and backend not in {'auto', inherited_backend}:
+        raise ValueError('resume inherits structure_backend; use finetune to change it')
+    # CLI resolves auto against available dependencies for fresh training and
+    # the parent checkpoint for continuation; preserve that requested value.
+    grounded_settings['structure_backend'] = inherited_backend if mode == 'resume' else backend
+    _arg(args, '--structure-backend', backend)
+    structure_dropout = _float(payload, 'structure_dropout',
+        float(parent_config.get('structure_dropout', .15)), minimum=0.)
+    if structure_dropout > .9:
+        raise ValueError('structure_dropout cannot exceed 0.9')
+    if mode == 'resume' and structure_dropout != float(parent_config.get('structure_dropout', .15)):
+        raise ValueError('resume inherits structure_dropout; use finetune to change it')
+    grounded_settings['structure_dropout'] = structure_dropout
+    _arg(args, '--structure-dropout', structure_dropout)
     motif_max = _int(payload, 'motif_max_events', int(parent_config.get('motif_max_events',16)), minimum=1)
     if motif_max > 32:
         raise ValueError('motif_max_events cannot exceed 32')
@@ -268,6 +296,29 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         _arg(args, flag, value)
     if mode != 'resume' or 'lr' in payload:
         _arg(args, "--lr", _float(payload, "lr", DEFAULTS['lr'], minimum=0.0))
+    schedule=payload.get('lr_schedule','auto')
+    if schedule not in {'auto','constant','cosine'}:
+        raise ValueError('lr_schedule must be auto, constant or cosine')
+    inherited_schedule=parent_args.get('lr_schedule','constant')
+    if mode=='resume':
+        if schedule not in {'auto',inherited_schedule}:
+            raise ValueError('resume inherits lr_schedule; use finetune to change it')
+        schedule=inherited_schedule
+    _arg(args,'--lr-schedule',schedule)
+    grounded_settings['lr_schedule']=schedule
+    for key,default in (('warmup_steps',0),('min_lr_ratio',1.)):
+        value=payload.get(key)
+        if value=='': value=None
+        if value is not None:
+            value=(_int(payload,key,0,minimum=0) if key=='warmup_steps' else _float(payload,key,1.,minimum=0.))
+            if key=='min_lr_ratio' and value>1: raise ValueError('min_lr_ratio cannot exceed 1')
+        if mode=='resume':
+            inherited=parent_args.get(key,default)
+            if value is not None and value!=inherited:
+                raise ValueError(f'resume inherits {key}; use finetune to change it')
+            value=inherited
+        if value is not None: _arg(args,'--'+key.replace('_','-'),value)
+        grounded_settings[key]=value
     _arg(args, "--audio-cache-gb", _float(payload, "audio_cache_gb", 4.0, minimum=0.0))
     for key,maximum,default in (('symbolic_dropout',.5,.15),('audio_pointer_weight',1.,.15)):
         value=_float(payload,key,default,minimum=0.)
@@ -345,6 +396,9 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     temperature=_float(payload,'temperature',.8,minimum=0.)
     pointer_temperature=_float(payload,'pointer_temperature',temperature,minimum=0.)
     action_temperature=_float(payload,'action_temperature',temperature,minimum=0.)
+    contact_policy = str(payload.get('contact_policy', 'auto'))
+    if contact_policy not in {'auto', 'off', 'diagnostic_v1', 'contact_groups_v1'}:
+        raise ValueError('unknown contact_policy')
     touch_layout_policy=str(payload.get('touch_layout_policy','open'))
     if touch_layout_policy not in {'open','legacy_two_heads'}:
         raise ValueError('unknown touch_layout_policy')
@@ -392,7 +446,7 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     for flag,value in (('--first',first),('--level',condition.level),('--temperature',temperature),
                        ('--pointer-temperature',pointer_temperature),('--action-temperature',action_temperature),
                        ('--curve-strength',curve_strength),
-                       ('--touch-layout-policy',touch_layout_policy),('--motif-strength',motif_strength),
+                       ('--touch-layout-policy',touch_layout_policy),('--contact-policy',contact_policy),('--motif-strength',motif_strength),
                        ('--pointer-history-strength',pointer_history_strength),
                        ('--action-history-strength',action_history_strength),
                        ('--action-type-temperature',action_type_temperature),
@@ -422,7 +476,7 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         'generation_contract':GENERATION_CONTRACT,'effective_settings':{
             'temperature':temperature,'pointer_temperature':pointer_temperature,
             'action_temperature':action_temperature,'curve_strength':curve_strength,
-            'touch_layout_policy':touch_layout_policy,'motif_strength':motif_strength,
+            'touch_layout_policy':touch_layout_policy,'contact_policy':contact_policy,'motif_strength':motif_strength,
             'pointer_history_strength':pointer_history_strength,
             'action_history_strength':action_history_strength,
             'action_type_temperature':action_type_temperature,

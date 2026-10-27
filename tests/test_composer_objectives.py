@@ -140,3 +140,19 @@ def test_recovery_skips_unused_audio_classifier_without_changing_main_loss_or_gr
     assert gradients[0].keys()==gradients[1].keys()
     for name in gradients[0]:
         torch.testing.assert_close(gradients[0][name],gradients[1][name],rtol=0,atol=0)
+
+
+def test_disabled_audio_auxiliary_preserves_training_outputs_gradients_and_rng():
+    model=build_model(config(),ATOMS).train()
+    batch=inputs();results=[]
+    for enabled in (True,False):
+        torch.manual_seed(982);model.zero_grad(set_to_none=True)
+        output=model(**batch,audio_auxiliary=enabled)
+        loss=output['action_logits'].square().mean()+output['candidate_logits'].square().mean()
+        loss.backward()
+        results.append((output['action_logits'].detach().clone(),torch.get_rng_state(),
+            {name:p.grad.clone() for name,p in model.named_parameters() if p.grad is not None}))
+    torch.testing.assert_close(results[0][0],results[1][0],rtol=0,atol=0)
+    torch.testing.assert_close(results[0][1],results[1][1],rtol=0,atol=0)
+    assert results[0][2].keys()==results[1][2].keys()
+    for name in results[0][2]: torch.testing.assert_close(results[0][2][name],results[1][2][name],rtol=0,atol=0)

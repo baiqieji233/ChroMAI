@@ -8,6 +8,19 @@ const context=vm.createContext({trainingMetricNumber:(object,key)=>{
   const raw=object?.[key];return raw===undefined||raw===null?null:Number.isFinite(Number(raw))?Number(raw):null;
 }});
 vm.runInContext(helper,context);
+
+test('Backend recent conditional metrics use decision weights and absent continuations stay unavailable',()=>{
+  const metrics={epoch:1,batch:25,total:100,metric_batches:25,recent_metric_batches:5,
+    recent_metrics:{loss:2,action_later_nonstop_ce:4,action_later_nonstop_ce_weight:3},
+    action_later_nonstop_ce:3.5,action_later_nonstop_ce_weight:10,
+    optimized_updates:6,optimized_loss:5.5,learning_rate:.00005};
+  const recent=context.composerRecentMetrics([],metrics);
+  assert.equal(recent.batches,5);assert.equal(recent.values.action_later_nonstop_ce,4);
+  const text=JSON.stringify(context.composerTrainingView({result:{composer_metrics:metrics}}));
+  assert.match(text,/后续真音符/);assert.match(text,/5\.5/);assert.match(text,/0\.00005/);
+  const missing=JSON.stringify(context.composerTrainingView({result:{composer_metrics:{action_later_nonstop_ce:0,action_later_nonstop_ce_weight:0}}}));
+  assert.ok(missing.includes('后续真音符 CE（不含 STOP）","—'));
+});
 test('Composer dashboard presents recall, ETA, loss and timing without inventing missing values',()=>{
   const view=context.composerTrainingView({result:{epoch_target:12,composer_stage:'training',
     composer_runtime:{samples:947683,parameters:85500000,action_vocab_size:18454,

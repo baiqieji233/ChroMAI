@@ -168,12 +168,55 @@ def test_diagnostic_dataset_inherits_checkpoint_context_contract(monkeypatch):
     config = SimpleNamespace(candidate_count=96, history_events=128, action_slots=8,
         architecture_profile=GROUNDED_PROFILE, action_state_policy='selected_prefix_v3',
         motif_memory_policy='audio_recurrence_archive_v1', motif_max_events=12,
-        head_timing_policy='separate_pads_v2')
+        head_timing_policy='separate_pads_v2',structure_policy='metrical_context_v1',structure_backend='native')
     _diagnostic_dataset(args, SimpleNamespace(config=config))
     assert seen['action_state_policy'] == 'selected_prefix_v3'
     assert seen['motif_memory_policy'] == 'audio_recurrence_archive_v1'
     assert seen['motif_max_events'] == 12
     assert seen['head_timing_policy'] == 'separate_pads_v2'
+    assert seen['structure_policy']=='metrical_context_v1'
+    assert seen['structure_backend']=='native'
+
+
+def test_structure_inputs_reach_interventions_and_acoustic_reorder_preserves_clock():
+    model=build_model(_config(structure_policy='metrical_context_v1'),ATOMS).eval()
+    batch=_batch()
+    batch['structure_features']=torch.randn(2,6,48)
+    batch['structure_transition']=torch.randn(2,6,48)
+    inputs=_inputs(batch,'cpu')
+    captured=[]
+    def capture(_model,args,kwargs):
+        captured.append(kwargs)
+    hook=model.register_forward_pre_hook(capture,with_kwargs=True)
+    try:report=interventions(model,inputs)
+    finally:hook.remove()
+    assert 'candidate_acoustics_reordered_fixed_timing_history' in report
+    for key in ('structure_features','structure_transition'):
+        torch.testing.assert_close(captured[0][key],batch[key])
+        torch.testing.assert_close(captured[1][key][...,:6],batch[key][...,:6])
+        torch.testing.assert_close(captured[1][key][...,6:],batch[key].flip(1)[...,6:])
+
+
+def test_omitted_prefix_recomputes_structure_at_new_candidates(tmp_path,monkeypatch):
+    from test_composer_event_views import dataset_fixture, points
+    import maichart.composer.structure as structure
+    dataset=dataset_fixture(tmp_path,monkeypatch,
+        source=points((0,'1'),(1,'2'),(2,'3'),(3,'4'),(4,'5')))
+    sample=dataset.samples[4];item=dataset[4]
+    dataset.structure_policy='metrical_context_v1';dataset.structure_backend='native'
+    item['structure_features']=torch.full((dataset.candidate_count,48),-999.)
+    item['structure_transition']=torch.full_like(item['structure_features'],-999.)
+    calls=[]
+    def query(song,beats,seconds,previous,previous_second,**kwargs):
+        calls.append((list(beats),np.array(seconds),previous,previous_second))
+        features=np.broadcast_to(np.asarray(seconds)[:,None],(len(beats),48)).copy().astype(np.float32)
+        return features,features-float(previous_second)
+    monkeypatch.setattr(structure,'structure_features_and_transition',query)
+    changed,seconds,candidates=_omit_last_prefix(dataset,sample,item,np.arange(len(dataset.codec_atoms)+1))
+    assert calls[0][0]==candidates and calls[0][2]==2.
+    np.testing.assert_allclose(changed['structure_features'][:,0],seconds)
+    expected=np.asarray(seconds,dtype=np.float32)-np.float32(calls[0][3])
+    np.testing.assert_array_equal(changed['structure_transition'][:,0],expected)
 
 
 def test_omitted_prefix_recomputes_candidate_state_from_strict_prefix(tmp_path, monkeypatch):

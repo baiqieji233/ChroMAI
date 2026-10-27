@@ -48,7 +48,8 @@ def _inputs(batch, device):
         'workload_audio':'workload_audio','ledger':'ledger','interval_audio':'interval_audio',
         'trailing_audio':'trailing_audio','head_timing':'head_timing',
         **{k:k for k in ('audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
-                          'selected_action_state','motif_ids','motif_relative_beats','motif_mask')}}
+                          'selected_action_state','motif_ids','motif_relative_beats','motif_mask',
+                          'structure_features','structure_transition')}}
     return {key:batch[source].to(device) for key,source in mapping.items() if source in batch}
 
 
@@ -98,6 +99,13 @@ def interventions(model, inputs, *, decode_context=None):
     acoustic_change={'candidate_features':reversed_features}
     for key in ('workload_audio','interval_audio','trailing_audio','audio_lens','audio_lens_mask'):
         if key in inputs:acoustic_change[key]=reversed_candidates(inputs[key])
+    for key in ('structure_features','structure_transition'):
+        if key in inputs:
+            # The first six columns are chart-time phases. Reorder only the
+            # audio-derived structure evidence while holding that clock fixed.
+            changed=inputs[key].clone()
+            changed[...,6:]=reversed_candidates(inputs[key][...,6:])
+            acoustic_change[key]=changed
     variants['candidate_acoustics_reordered_fixed_timing_history']=acoustic_change
     if workload is not None:
         # Workload rows are [candidate positions, uniform whole-song probes].
@@ -221,6 +229,14 @@ def _omit_last_prefix(dataset, sample, item, id_map):
             table['last_head_beats'][ev],seconds,[float(x) for x in candidates]))
     if dataset.architecture_profile==GROUNDED_PROFILE:
         result.update(dataset._grounded_features(sample.song_index,seconds,seconds,table=table))
+    if getattr(dataset,'structure_policy','off')!='off':
+        from .structure import structure_features_and_transition
+        features,transition=structure_features_and_transition(song,candidates,seconds,
+            float(previous) if previous is not None else None,
+            float(clock.at(previous)) if previous is not None else None,
+            policy=dataset.structure_policy,cache_dir=dataset.cache_dir,backend=dataset.structure_backend)
+        result['structure_features']=torch.from_numpy(features)
+        result['structure_transition']=torch.from_numpy(transition)
     return result,seconds,candidates
 
 
@@ -278,6 +294,8 @@ def _diagnostic_dataset(args, model):
         head_timing_policy=model.config.head_timing_policy,
         motif_memory_policy=model.config.motif_memory_policy,
         motif_max_events=model.config.motif_max_events,
+        structure_policy=getattr(model.config,'structure_policy','off'),
+        structure_backend=getattr(model.config,'structure_backend','native'),
         preparation_workers=1,audio_cache_gb=.25)
 
 
@@ -285,6 +303,8 @@ def _diagnostic_dataset(args, model):
 def diagnose(args):
     device=torch.device('cuda' if args.device=='auto' and torch.cuda.is_available() else 'cpu' if args.device=='auto' else args.device)
     model,payload=load(args.checkpoint,device=device);model.eval()
+    from .structure_backend import validate_backend_identity
+    validate_backend_identity(model.config)
     if model.config.architecture_profile not in WORKLOAD_PROFILES:
         raise ValueError('These interventions require a Composer workload checkpoint')
     dataset=_diagnostic_dataset(args,model)

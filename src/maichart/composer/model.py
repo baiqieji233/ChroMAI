@@ -28,6 +28,8 @@ COMPOSER_POLICY_FIELDS = {
     'history_attention_policy': (HISTORY_ATTENTION_POLICIES, 'auto_v1', 'math_v1'),
     'head_timing_policy': (HEAD_TIMING_POLICIES, 'merged_pads_v1', 'separate_pads_v2'),
     'cross_event_relation_policy': ({'off','relative_heads_v1'}, 'off', 'relative_heads_v1'),
+    'structure_policy': ({'off','native_periodic_v1','metrical_context_v1'}, 'off', 'metrical_context_v1'),
+    'contact_policy': ({'off','diagnostic_v1','contact_groups_v1'}, 'off', 'diagnostic_v1'),
 }
 
 
@@ -43,6 +45,7 @@ def validate_supported_context_policies(config):
         'history_attention_policy': values.get('history_attention_policy','auto_v1')!='auto_v1',
         'head_timing_policy':values.get('head_timing_policy','merged_pads_v1')!='merged_pads_v1',
         'cross_event_relation_policy':values.get('cross_event_relation_policy','off')!='off',
+        'structure_policy':values.get('structure_policy','off')!='off',
     }
     for name, invalid in unsupported.items():
         if invalid:raise ValueError(f'{name}={values[name]} requires audio_grounded_v3')
@@ -52,7 +55,7 @@ def resolve_composer_policy(name, requested='auto', parent_config=None, *, resum
     choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
     if not isinstance(requested,str) or requested not in {'auto', *choices}:
         raise ValueError(f'Unknown {name}')
-    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy'} and architecture_profile!=GROUNDED_PROFILE:
+    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy','structure_policy'} and architecture_profile!=GROUNDED_PROFILE:
         fresh=legacy
     inherited = parent_config.get(name, legacy) if parent_config else None
     if not resume and name in {'head_timing_policy','cross_event_relation_policy'}:
@@ -110,6 +113,12 @@ class ComposerConfig:
     history_attention_policy: str = 'auto_v1'
     head_timing_policy: str = 'merged_pads_v1'
     cross_event_relation_policy: str = 'off'
+    structure_policy: str = 'off'
+    contact_policy: str = 'off'
+    structure_backend: str = 'native'
+    structure_dropout: float = .15
+    structure_schema: str = 'auto'
+    structure_backend_identity: dict | None = None
 
     def __post_init__(self):
         if self.history_anchor_policy not in HISTORY_ANCHOR_POLICIES:
@@ -117,6 +126,16 @@ class ComposerConfig:
         for name, (choices, _, _) in COMPOSER_POLICY_FIELDS.items():
             if getattr(self, name) not in choices:
                 raise ValueError(f'Unknown {name}')
+        if self.structure_backend not in {'native','beat_this'}:
+            raise ValueError('Unknown structure_backend')
+        if not math.isfinite(self.structure_dropout) or not 0 <= self.structure_dropout <= .9:
+            raise ValueError('structure_dropout must be in [0,.9]')
+        if self.structure_policy!='off':
+            from .structure import SCHEMA
+            if self.structure_schema=='auto':self.structure_schema=SCHEMA
+            if self.structure_schema!=SCHEMA:
+                raise ValueError('Structure feature schema differs from this checkpoint; use its matching implementation')
+        elif self.structure_schema=='auto':self.structure_schema='off'
         if (isinstance(self.history_memory_rms_bound, bool)
                 or not math.isfinite(self.history_memory_rms_bound)
                 or not 1. <= self.history_memory_rms_bound <= 64.):

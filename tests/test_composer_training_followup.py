@@ -155,3 +155,22 @@ def test_resume_api_leaves_optimizer_learning_rate_untouched_unless_requested(tm
     payload['lr'] = 3e-5
     args = _request(payload)
     assert args[args.index('--lr') + 1] == '3e-05'
+
+
+def test_api_forwards_optional_schedule_and_rejects_schedule_drift_on_old_resume(tmp_path):
+    payload=_api_parent(tmp_path)
+    payload.update(mode='finetune',lr_schedule='cosine',warmup_steps=12,min_lr_ratio=.2)
+    args=_request(payload)
+    assert args[args.index('--lr-schedule')+1]=='cosine'
+    assert args[args.index('--warmup-steps')+1]=='12'
+    assert args[args.index('--min-lr-ratio')+1]=='0.2'
+    payload.update(mode='resume',resume=payload.pop('init_checkpoint'))
+    with pytest.raises(ValueError,match='lr_schedule'):
+        _request(payload)
+
+
+def test_api_accepts_empty_optional_fields_from_standalone_form(tmp_path):
+    payload=_api_parent(tmp_path)
+    payload.update(mode='finetune',lr_schedule='cosine',warmup_steps='',min_lr_ratio='')
+    args=_request(payload)
+    assert '--warmup-steps' not in args and '--min-lr-ratio' not in args

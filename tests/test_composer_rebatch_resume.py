@@ -183,7 +183,7 @@ def test_two_mid_epoch_restarts_and_next_epoch_use_saved_sequence(tmp_path, monk
 
     monkeypatch.setattr(train, 'ComposerDataset', TinyDataset)
     original_save = train.save
-    arguments = ['--manifest', 'fixture.json', '--epochs', '1', '--d-model', '8',
+    arguments = ['--manifest', 'fixture.json', '--holdout-fraction', '0', '--epochs', '1', '--d-model', '8',
                  '--layers', '1', '--nhead', '2', '--dim-feedforward', '16', '--dropout', '0',
                  '--history-events', '8', '--candidate-count', '16', '--action-slots', '2',
                  '--device', 'cpu', '--precision', 'fp32', '--prefetch-batches', '0',

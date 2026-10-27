@@ -19,13 +19,14 @@ from .candidates import COMPOSER_AUDIO_FEATURE_POLICY
 from .model import (ChartComposer,ComposerConfig,build_model,GROUNDED_PROFILE,WORKLOAD_PROFILES,
                     resolve_history_anchor_policy,resolve_composer_policy,COMPOSER_POLICY_FIELDS,HISTORY_ANCHOR_POLICIES)
 from .events import HEAD_TIMING_DIM,head_timing_dim_for_policy
-from .checkpoint import save,load,migrate_music_context,migrate_audio_grounded
+from .checkpoint import save,load,migrate_music_context,migrate_audio_grounded,structure_training_semantics
 from .runtime_memory import GIB,host_memory,memory_gib
 from .objectives import (ACTION_OBJECTIVES, LEGACY_ACTION_OBJECTIVE, RECOVERY_ACTION_OBJECTIVE, action_objective, recovery_objective,
                          resolve_action_objective, training_semantics_for_objective)
 from .sampling_contract import RECOVERY_SAMPLING_POLICIES,resolve_recovery_sampling,recovery_sampling_settings
 from . import ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY
 from .training_defaults import TRAINING_DEFAULTS as DEFAULTS
+from .learning_rate import resolve_plan as resolve_lr_plan, learning_rate
 
 
 class RemainingBatches:
@@ -196,7 +197,25 @@ def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest',required=True);p.add_argument('--checkpoint-dir',required=True)
     p.add_argument('--cache-dir',default='cache/chart_composer_v1');p.add_argument('--epochs',type=int,default=DEFAULTS['epochs'])
+    p.add_argument('--validation-manifest')
+    p.add_argument('--holdout-fraction',type=float,default=.05,
+        help='fresh runs: group-disjoint holdout fraction; 0 explicitly disables automatic split')
+    p.add_argument('--validation-max-batches',type=int,default=32,
+        help='deterministic authored-history evaluation per epoch; 0 evaluates all held-out batches')
+    p.add_argument('--validation-batch-size',type=int,default=8)
+    p.add_argument('--generation-eval-songs',type=int,default=2,
+        help='structure-enabled runs: fixed held-out songs per epoch; 0 disables closed-loop evaluation')
+    p.add_argument('--generation-eval-interval-epochs',type=int,default=1)
+    p.add_argument('--generation-eval-seeds',default='0,1')
+    p.add_argument('--structure-backend',choices=('auto','native','beat_this'),default='auto')
+    p.add_argument('--structure-dropout',type=float,default=.15)
     p.add_argument('--batch-size',type=int,default=DEFAULTS['batch_size']);p.add_argument('--lr',type=float,default=DEFAULTS['lr'])
+    p.add_argument('--lr-schedule',choices=('auto','constant','cosine'),default='auto',
+        help='auto preserves constant fresh/legacy training and inherits a resumed schedule')
+    p.add_argument('--warmup-steps',type=int,default=None,
+        help='successful optimizer updates; cosine defaults to at most 500, constant to 0')
+    p.add_argument('--min-lr-ratio',type=float,default=None,
+        help='cosine final/base rate; defaults to 0.1 (constant: 1.0)')
     p.add_argument('--d-model',type=int,default=DEFAULTS['d_model']);p.add_argument('--layers',type=int,default=DEFAULTS['layers'])
     p.add_argument('--nhead',type=int,default=DEFAULTS['nhead']);p.add_argument('--dim-feedforward',type=int,default=DEFAULTS['dim_feedforward'])
     p.add_argument('--dropout',type=float,default=.1);p.add_argument('--history-events',type=int,default=128)
@@ -205,6 +224,8 @@ def parser():
     p.add_argument('--seed',type=int,default=0);p.add_argument('--limit-charts',type=int,default=0)
     p.add_argument('--prepare-workers',type=int,default=4);p.add_argument('--audio-cache-gb',type=float,default=4.)
     p.add_argument('--checkpoint-interval-steps',type=int,default=500)
+    p.add_argument('--archive-checkpoints',choices=('auto','off','geometric'),default='auto',
+        help='keep immutable inference snapshots at interval * 1,2,4,8... for regression comparisons')
     continuation=p.add_mutually_exclusive_group()
     continuation.add_argument('--resume');continuation.add_argument('--init-checkpoint')
     p.add_argument('--rebatch-resume',action='store_true',
@@ -364,7 +385,20 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
         'pointer_accuracy':(output['candidate_logits'].argmax(-1)==batch['candidate_target']).float().mean().detach()}
 
 
-def _nonfinite_tensors(mapping):
+def summarize_metrics(totals, batches):
+    """Keep historical batch means; pool conditional CEs by decision weight."""
+    summary={key:float(value)/max(1,batches) for key,value in totals.items()
+             if not key.endswith(('_ce_sum','_ce_weight'))}
+    for key,numerator in totals.items():
+        if not key.endswith('_ce_sum'): continue
+        metric=key[:-4]
+        mass=float(totals.get(metric+'_weight',0.))
+        summary[metric]=float(numerator)/max(mass,1e-6)
+        summary[metric+'_weight']=mass
+    return summary
+
+
+def _nonfinite_tensors(mapping,*,healthy_fast_path=False):
     items=[(key,value) for key,value in mapping.items() if torch.is_tensor(value)]
     if not items:return []
     # Infinity norms avoid the per-element isfinite temporaries and several
@@ -390,9 +424,30 @@ def _nonfinite_tensors(mapping):
                 checks=[torch.isfinite(value).all() for _,value in group]
             pending.setdefault(device,[]).extend((index,check) for (index,_),check in zip(group,checks))
         for checks in pending.values():
-            values=torch.stack([check for _,check in checks]).cpu().tolist()
+            packed=torch.stack([check for _,check in checks])
+            if healthy_fast_path and bool(packed.all()):
+                continue
+            values=packed.cpu().tolist()
             for (index,_),finite in zip(checks,values):flags[index]=finite
     return [key for (key,_),finite in zip(items,flags) if not finite]
+
+
+_LOSS_FINITE_KEY=object()
+_BACKWARD_FINITE_KEY=object()
+
+
+def _forward_finite_check(output,loss,backward_loss):
+    """One healthy-path host decision per device for outputs and both losses.
+
+    Detailed offending keys are fetched only on failure. All original output,
+    loss and backward-loss checks remain active before backward is allowed.
+    """
+    checks=dict(output)
+    checks[_LOSS_FINITE_KEY]=loss
+    checks[_BACKWARD_FINITE_KEY]=backward_loss
+    bad=_nonfinite_tensors(checks,healthy_fast_path=True)
+    return ([key for key in bad if key is not _LOSS_FINITE_KEY and key is not _BACKWARD_FINITE_KEY],
+            _LOSS_FINITE_KEY not in bad,_BACKWARD_FINITE_KEY not in bad)
 
 
 def _assert_model_finite(model):
@@ -404,7 +459,7 @@ def _assert_model_finite(model):
 def _forward_batch(model,tensors,*,decode_actions=True,**overrides):
     extra={key:tensors[key] for key in ('head_timing','workload_audio','ledger','interval_audio',
         'trailing_audio','audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
-        'motif_ids','motif_relative_beats','motif_mask','selected_action_state') if key in tensors}
+        'motif_ids','motif_relative_beats','motif_mask','selected_action_state','structure_features','structure_transition') if key in tensors}
     extra.update(overrides)
     return model(tensors['candidate_features'],tensors['history'],tensors['condition'],
         action_state=tensors['action_state'],history_features=tensors['history_features'],
@@ -424,11 +479,14 @@ def recovery_batch(dataset,model,args,device,global_step):
     atoms=dataset.codec_atoms;grammar=dataset.action_grammar
     touch_policy=getattr(args,'touch_layout_policy','legacy_two_heads')
     metadata=_head_metadata(atoms,grammar,touch_policy)
+    from .contacts import ContactBudget
+    contact_policy=getattr(args,'contact_policy','off')
+    contact_budget=ContactBudget(grammar) if contact_policy!='off' else None
     touch_heads=_touch_head_sets(atoms,grammar)
     policy=getattr(args,'recovery_sampling_policy',ACTION_SAMPLING_POLICY)
     settings=recovery_sampling_settings(policy,getattr(args,'recovery_pointer_temperature',1.),
                                         getattr(args,'recovery_action_temperature',.85))
-    aligned=policy==ACTION_SAMPLING_POLICY
+    aligned=settings['pointer_sampler']=='grouped'
     touch_mask=torch.tensor([False]+[atom[0] in 'ABCDE' for atom in atoms],device=device,dtype=torch.bool)
     rng=torch.Generator(device=device).manual_seed(args.seed+global_step+191)
     planner_cache={}
@@ -491,18 +549,20 @@ def recovery_batch(dataset,model,args,device,global_step):
             blocked_prefixes=set()
             previous_heads=result['previous_heads'][0] if 'previous_heads' in result else None
             guidance={}
-            def decode_slot(slot,prefix):
+            def decode_slot(slot,prefix,legal_mask):
                 ids=[dataset.atom_to_id[x] for x in prefix]
                 if aligned:
                     return action_logits_with_touch_guard(model,context,slot,ids,audio_context=audio_ctx,
                         enabled=settings['touch_history_guard'],touch_mask=touch_mask,diagnostics=guidance,previous_heads=previous_heads,
-                        log_odds_bound=settings['touch_history_bound'])
+                        log_odds_bound=settings['touch_history_bound'],legal_mask=legal_mask,
+                        legacy=not settings.get('touch_legal_mask',False))
                 extra={} if previous_heads is None else {'previous_heads':previous_heads}
                 return model.action_slot(context,slot,ids,audio_context=audio_ctx,**extra)
             for _ in range(6):
                 guidance.clear()
                 selected=_sample_actions(context.new_zeros(model.config.action_slots,len(atoms)+1),atoms,grammar,settings['action_temperature'],rng,
-                    slot_decoder=decode_slot,
+                    slot_mask_decoder=decode_slot,
+                    contact_budget=contact_budget,contact_policy=contact_policy,
                     occupied=occupied,blocked=cooldown_blocked,blocked_first=blocked_first,head_metadata=metadata,
                     canonical_order=True,touch_layout_policy=touch_policy,blocked_prefixes=blocked_prefixes)
                 if selected:
@@ -557,6 +617,10 @@ def _train(args,explicit_flags):
         raise ValueError('epochs, batch_size, grad_accumulation and log_interval must be positive; max_steps/profile_steps must be nonnegative')
     if not math.isfinite(args.lr) or args.lr<=0:
         raise ValueError('lr must be positive and finite')
+    if args.warmup_steps is not None and args.warmup_steps<0:
+        raise ValueError('warmup_steps must be nonnegative')
+    if args.min_lr_ratio is not None and (not math.isfinite(args.min_lr_ratio) or not 0<=args.min_lr_ratio<=1):
+        raise ValueError('min_lr_ratio must be in [0,1]')
     if not math.isfinite(args.dropout) or not 0<=args.dropout<=1:
         raise ValueError('dropout must be between 0 and 1')
     if not math.isfinite(args.symbolic_dropout) or not 0<=args.symbolic_dropout<=.5:
@@ -582,6 +646,10 @@ def _train(args,explicit_flags):
     parent_anchor_config=None
     if args.resume or args.init_checkpoint:
         model,old=load(args.resume or args.init_checkpoint,device='cpu',include_optimizer=bool(args.resume))
+        parent_recipe=old.get('args') or {}
+        if (args.resume and (parent_recipe.get('lr_schedule')=='cosine' or parent_recipe.get('warmup_steps',0)>0)
+                and not (old.get('training_state') or {}).get('lr_schedule')):
+            raise ValueError('Scheduled checkpoint is missing its learning-rate plan; use finetune with a new directory')
         parent_anchor_config=model.config.to_dict()
         args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy,parent_anchor_config,resume=bool(args.resume))
         if '--dropout' in explicit_flags and args.dropout!=model.config.dropout:
@@ -613,13 +681,38 @@ def _train(args,explicit_flags):
     args.recovery_sampling_policy=resolve_recovery_sampling(args.recovery_sampling_policy,old,
         resume=bool(args.resume),architecture_profile=args.architecture_profile)
     recovery_sampling_settings(args.recovery_sampling_policy,args.recovery_pointer_temperature,args.recovery_action_temperature)
-    semantics=training_semantics_for_objective(args.architecture_profile,args.action_objective_policy)
-    if args.resume and old.get('training_semantics')!=semantics:
-        raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
     if not (args.resume or args.init_checkpoint):
         args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy)
     for name in COMPOSER_POLICY_FIELDS:
         setattr(args,name,resolve_composer_policy(name,getattr(args,name),parent_anchor_config,resume=bool(args.resume),architecture_profile=args.architecture_profile))
+    semantics=structure_training_semantics(
+        training_semantics_for_objective(args.architecture_profile,args.action_objective_policy),args.structure_policy)
+    if args.resume and old.get('training_semantics')!=semantics:
+        raise ValueError('Composer training contract changed; use --init-checkpoint with a new output directory')
+    if args.resume:
+        parent_backend=parent_anchor_config.get('structure_backend','native')
+        if args.structure_backend not in {'auto',parent_backend}:
+            raise ValueError('Resume inherits structure_backend; use a new training directory')
+        args.structure_backend=parent_backend
+        inherited_drop=float(parent_anchor_config.get('structure_dropout',.15))
+        if '--structure-dropout' in explicit_flags and args.structure_dropout!=inherited_drop:
+            raise ValueError('Resume inherits structure_dropout')
+        args.structure_dropout=inherited_drop
+    elif args.structure_policy=='metrical_context_v1':
+        from .structure import resolve_structure_backend
+        args.structure_backend=resolve_structure_backend(args.structure_backend)
+    else:args.structure_backend='native'
+    from .structure_backend import backend_identity
+    args.structure_backend_identity=(backend_identity(args.structure_backend,refresh=True) if args.structure_policy!='off' else None)
+    if args.resume and args.structure_policy=='metrical_context_v1':
+        expected=parent_anchor_config.get('structure_backend_identity') or model.config.structure_backend_identity
+        if expected!=args.structure_backend_identity:
+            raise ValueError('Resume requires the exact saved structure backend identity')
+    if not math.isfinite(args.structure_dropout) or not 0<=args.structure_dropout<=.9:
+        raise ValueError('structure_dropout must be in [0,.9]')
+    if args.archive_checkpoints=='auto':
+        args.archive_checkpoints=((old.get('args') or {}).get('archive_checkpoints','off') if args.resume
+            else 'geometric' if args.structure_policy!='off' else 'off')
     if parent_anchor_config and '--motif-max-events' not in explicit_flags:
         args.motif_max_events=int(parent_anchor_config.get('motif_max_events',16))
     if args.resume and args.motif_max_events!=int(parent_anchor_config.get('motif_max_events',16)):
@@ -640,12 +733,44 @@ def _train(args,explicit_flags):
     validate_supported_context_policies(vars(args))
     if not 0<=args.cpu_threads<=256:raise ValueError('cpu_threads must be in [0,256]')
     if args.cpu_threads:torch.set_num_threads(args.cpu_threads)
+    if not 0<=args.holdout_fraction<.5 or args.validation_max_batches<0 or args.validation_batch_size<1:
+        raise ValueError('Invalid validation settings')
+    if args.generation_eval_songs<0 or args.generation_eval_interval_epochs<1:
+        raise ValueError('Invalid generation evaluation settings')
+    generation_seeds=tuple(int(s.strip()) for s in args.generation_eval_seeds.split(',') if s.strip())
+    if not generation_seeds:raise ValueError('generation-eval-seeds must include at least one integer')
+    split_report=None
+    if args.resume:
+        saved_args=old.get('args') or {}
+        for key in ('manifest','validation_manifest','holdout_fraction','source_manifest'):
+            if key in saved_args:
+                flag='--'+key.replace('_','-')
+                if key=='manifest' and Path(args.manifest).resolve() not in {
+                        Path(saved_args['manifest']).resolve(),Path(saved_args.get('source_manifest',saved_args['manifest'])).resolve()}:
+                    raise ValueError('Resume requires the recorded training or source manifest')
+                if flag not in explicit_flags or key=='manifest':setattr(args,key,saved_args[key])
+    elif not args.validation_manifest and args.holdout_fraction:
+        from .evaluation import split_manifest
+        source_data=json.loads(Path(args.manifest).read_text(encoding='utf-8-sig'))
+        if len(source_data.get('songs',[]))>=3:
+            args.source_manifest=args.manifest
+            split_report=split_manifest(args.manifest,Path(args.checkpoint_dir)/'data_split',
+                                        fraction=args.holdout_fraction,seed=args.seed)
+            args.manifest=split_report['splits']['train']['path']
+            args.validation_manifest=split_report['splits']['dev']['path']
+            print('composer_data_split '+json.dumps(split_report),flush=True)
+        else:print('composer_validation_disabled '+json.dumps({'reason':'fewer_than_three_source_songs'}),flush=True)
+    if args.validation_manifest:
+        from .evaluation import assert_unseen
+        assert_unseen(args.manifest,args.validation_manifest)
     dataset=ComposerDataset(args.manifest,cache_dir=args.cache_dir,candidate_count=args.candidate_count,
         history_events=args.history_events,action_slots=args.action_slots,preparation_workers=args.prepare_workers,
         audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,seed=args.seed,architecture_profile=args.architecture_profile,
         action_state_policy=args.action_state_policy,motif_memory_policy=args.motif_memory_policy,
-        motif_max_events=args.motif_max_events,head_timing_policy=args.head_timing_policy)
+        motif_max_events=args.motif_max_events,head_timing_policy=args.head_timing_policy,
+        structure_policy=args.structure_policy,structure_backend=args.structure_backend)
     dataset.touch_layout_policy=args.touch_layout_policy
+    dataset.contact_policy=args.contact_policy
     args.action_slots_requested = dataset.action_slots_requested
     args.action_slots = dataset.action_slots
     if args.resume and model.config.action_slots != args.action_slots:
@@ -682,7 +807,22 @@ def _train(args,explicit_flags):
             history_residual_bound=args.history_residual_bound,history_dropout=args.history_dropout,
             ledger_dropout=args.ledger_dropout,history_anchor_policy=args.history_anchor_policy,
             history_memory_rms_bound=args.history_memory_rms_bound,
+            structure_backend=args.structure_backend,structure_dropout=args.structure_dropout,
+            structure_backend_identity=args.structure_backend_identity,
             motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}),dataset.codec_atoms)
+    if args.init_checkpoint:
+        model.config.structure_backend=args.structure_backend
+        model.config.structure_dropout=args.structure_dropout
+        model.config.structure_backend_identity=args.structure_backend_identity
+    validation_dataset=None
+    if args.validation_manifest:
+        validation_dataset=ComposerDataset(args.validation_manifest,cache_dir=args.cache_dir,
+            candidate_count=args.candidate_count,history_events=args.history_events,action_slots=args.action_slots,
+            preparation_workers=args.prepare_workers,audio_cache_gb=min(args.audio_cache_gb,1.),
+            architecture_profile=args.architecture_profile,action_state_policy=args.action_state_policy,
+            motif_memory_policy=args.motif_memory_policy,motif_max_events=args.motif_max_events,
+            head_timing_policy=args.head_timing_policy,structure_policy=args.structure_policy,
+            structure_backend=args.structure_backend,atom_catalog=dataset.codec_atoms)
     model.to(device).train()
     from .recovery import restore_recovery_episodes,recovery_episode_state
     restore_recovery_episodes(model,(old.get('training_state') or {}).get('recovery_episodes') if args.resume else None)
@@ -703,6 +843,9 @@ def _train(args,explicit_flags):
                 else float((old.get('args') or {}).get('lr', args.lr)) if args.resume and old else None)
     effective_lr = (saved_lr if (args.resume and saved_lr is not None and '--lr' not in explicit_flags)
                     else min(float(args.lr), 5e-5) if migrated_from_older else float(args.lr))
+    saved_lr_plan=((old.get('training_state') or {}).get('lr_schedule') if args.resume and old else None)
+    if saved_lr_plan and '--lr' not in explicit_flags:
+        effective_lr=float(saved_lr_plan['base_lr'])
     optimizer=torch.optim.AdamW(model.parameters(),lr=effective_lr,weight_decay=.01,
         **({'fused':True} if implementation=='fused' else {'foreach':True} if implementation=='foreach' else {}))
     if args.resume:
@@ -717,6 +860,17 @@ def _train(args,explicit_flags):
     resumed_state=(old.get('training_state') or {}) if args.resume and old else {}
     partial_resume=bool(resumed_state and not resumed_state.get('epoch_complete',True))
     resume_skip,resume_sampler_size,resume_cursor=resume_batch_layout(args,old,len(dataset))
+    planned_batches=(len(dataset)+args.batch_size-1)//args.batch_size
+    if args.max_steps: planned_batches=min(planned_batches,args.max_steps)
+    remaining_updates=(planned_batches-resume_skip+args.grad_accumulation-1)//args.grad_accumulation
+    remaining_updates+=(args.epochs-1)*((planned_batches+args.grad_accumulation-1)//args.grad_accumulation)
+    lr_plan=resolve_lr_plan(requested=args.lr_schedule,warmup_steps=args.warmup_steps,
+        min_lr_ratio=args.min_lr_ratio,base_lr=effective_lr,total_steps=max(1,global_step+remaining_updates),
+        resume=bool(args.resume),saved=saved_lr_plan)
+    args.lr_schedule=lr_plan['kind'];args.warmup_steps=lr_plan['warmup_steps'];args.min_lr_ratio=lr_plan['min_lr_ratio']
+    args.lr=effective_lr
+    for group in optimizer.param_groups: group['lr']=learning_rate(lr_plan,global_step)
+    print('composer_learning_rate '+json.dumps(lr_plan),flush=True)
     if args.resume and old:
         for key in ('max_steps',):
             stored=old.get('args',{}).get(key,1 if key=='grad_accumulation' else 0)
@@ -757,12 +911,15 @@ def _train(args,explicit_flags):
         'recovery_sampling_settings':recovery_sampling_settings(args.recovery_sampling_policy,args.recovery_pointer_temperature,args.recovery_action_temperature),
         'recovery_pointer_temperature':args.recovery_pointer_temperature,
         'recovery_action_temperature':args.recovery_action_temperature,
-        'device':str(device),'precision':precision,'effective_lr':effective_lr,'samples':len(dataset),'parameters':parameters,
+        'device':str(device),'precision':precision,'effective_lr':effective_lr,'learning_rate_schedule':lr_plan,
+        'samples':len(dataset),'parameters':parameters,
         'model_bytes':sum(p.numel()*p.element_size() for p in model.parameters()),
         'action_head_parameters':sum(p.numel() for p in model.action_head.parameters()),
         'selected_candidate_projection':True,'optimizer_implementation':implementation,
         'audio_bank_mode':'lossless_mmap_v1','audio_feature_policy':COMPOSER_AUDIO_FEATURE_POLICY,
         'batch_size':args.batch_size,'grad_accumulation':args.grad_accumulation,
+        'effective_batch_size':args.batch_size*args.grad_accumulation,
+        'forward_finite_check':'packed_outputs_and_losses_v1',
         'start_epoch':start_epoch,'prefetch_batches':args.prefetch_batches,
         'sample_workers':args.sample_workers,'sample_locality':args.sample_locality,
         'cuda_cache_guard':cuda_cache_guard.policy(),
@@ -780,6 +937,12 @@ def _train(args,explicit_flags):
         'history_attention_policy':model.config.history_attention_policy,
         'history_memory_rms_bound':model.config.history_memory_rms_bound,
         'touch_layout_policy':args.touch_layout_policy,
+        'contact_policy':args.contact_policy,'structure_policy':args.structure_policy,
+        'structure_backend':args.structure_backend,'structure_dropout':args.structure_dropout,
+        'structure_schema':model.config.structure_schema,
+        'structure_backend_identity':model.config.structure_backend_identity,
+        'validation_manifest':args.validation_manifest,'holdout_fraction':args.holdout_fraction,
+        'generation_eval_songs':args.generation_eval_songs,
         'dropout':model.config.dropout,
         **{key:getattr(args,key) for key in ('lens_width','lens_chunk_size','history_residual_bound',
             'history_dropout','ledger_dropout','placement_weight','planner_weight','recovery_interval',
@@ -796,6 +959,8 @@ def _train(args,explicit_flags):
         'candidate_recall':1.-dataset.candidate_misses/max(1,dataset.candidate_total)}),flush=True)
     for epoch in range(start_epoch,end_epoch+1):
         dataset.set_epoch(epoch);started=time.monotonic();totals={};seen=0;metric_batches=0;window_valid=True
+        recent_totals={};recent_batches=0;optimized_total=0.;optimized_updates=0;window_objective=0.
+        last_gradient_norm=None
         continuing=partial_resume and epoch==start_epoch
         skip=resume_skip if continuing else 0
         sampler_size=resume_sampler_size if continuing else args.batch_size
@@ -813,7 +978,8 @@ def _train(args,explicit_flags):
             for batch_index in range(skip+1,total_batches+1):
                 stamp=time.perf_counter();batch=next(batches)
                 timing['data_sec']+=time.perf_counter()-stamp
-                if (batch_index-1)%args.grad_accumulation==0: window_valid=True
+                if (batch_index-1)%args.grad_accumulation==0:
+                    window_valid=True;window_objective=0.
                 if not window_valid: continue
                 events=[torch.cuda.Event(enable_timing=True) for _ in range(5)] if device.type=='cuda' and len(gpu_profiles)+gpu_timing['samples']<args.profile_steps else None
                 if events: events[0].record()
@@ -826,13 +992,16 @@ def _train(args,explicit_flags):
                 stamp=time.perf_counter()
                 with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
                                     enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
-                    output=_forward_batch(model,tensors)
-                    output_bad=_nonfinite_tensors(output)
+                    output=_forward_batch(model,tensors,audio_auxiliary=args.audio_pointer_weight>0)
                     loss,metrics=_loss(output,tensors,model.config.atom_vocab_size,audio_pointer_weight=args.audio_pointer_weight,
                         placement_weight=args.placement_weight,planner_weight=args.planner_weight,
                         action_objective_policy=args.action_objective_policy)
+                window_start=((batch_index-1)//args.grad_accumulation)*args.grad_accumulation
+                window_batches=min(args.grad_accumulation,total_batches-window_start)
+                backward_loss=loss/window_batches
+                output_bad,loss_finite,backward_finite=_forward_finite_check(output,loss,backward_loss)
                 if events: events[2].record()
-                if output_bad or not torch.isfinite(loss):
+                if output_bad or not loss_finite:
                     details={'message':'non-finite batch skipped; checkpoint remains valid',
                         'epoch':epoch,'batch':batch_index,'output_tensors':output_bad}
                     for key in ('song_index','event_index'):
@@ -843,10 +1012,7 @@ def _train(args,explicit_flags):
                     optimizer.zero_grad(set_to_none=True)
                     window_valid=False
                     continue
-                window_start=((batch_index-1)//args.grad_accumulation)*args.grad_accumulation
-                window_batches=min(args.grad_accumulation,total_batches-window_start)
-                backward_loss=loss/window_batches
-                if not torch.isfinite(backward_loss):
+                if not backward_finite:
                     print('composer_nonfinite_loss ' + json.dumps({'epoch':epoch,'batch':batch_index,
                         'optimizer_steps':global_step,'loss':float(loss.detach().cpu()) if torch.isfinite(loss) else None}),flush=True)
                     optimizer.zero_grad(set_to_none=True)
@@ -854,6 +1020,7 @@ def _train(args,explicit_flags):
                     continue
                 if scaler is not None: scaler.scale(backward_loss).backward()
                 else: backward_loss.backward()
+                window_objective=window_objective+backward_loss.detach()
                 if events: events[3].record()
                 update=(batch_index%args.grad_accumulation==0 or batch_index==total_batches)
                 if update:
@@ -878,6 +1045,7 @@ def _train(args,explicit_flags):
                                     policy=args.action_objective_policy,weight=args.recovery_weight)
                             if torch.isfinite(recovery_loss):
                                 recovery_value=float(recovery_loss.detach())
+                                window_objective=window_objective+recovery_loss.detach()
                                 recovery_parts={name:float(value) for name,value in recovery_metrics.items()}
                                 if scaler is not None:scaler.scale(recovery_loss).backward()
                                 else:recovery_loss.backward()
@@ -895,6 +1063,7 @@ def _train(args,explicit_flags):
                     # The global norm detects NaN/Inf across all gradients;
                     # no per-parameter Python scalar checks or mutation needed.
                     grad_norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.,error_if_nonfinite=False)
+                    last_gradient_norm=grad_norm.detach()
                     if not torch.isfinite(grad_norm):
                         if episode_backup is not None:restore_recovery_episodes(model,episode_backup)
                         print('composer_warning '+json.dumps({'message':'non-finite gradients skipped; checkpoint remains valid',
@@ -902,6 +1071,7 @@ def _train(args,explicit_flags):
                         optimizer.zero_grad(set_to_none=True)
                         if scaler is not None: scaler.update()
                         continue
+                    for group in optimizer.param_groups: group['lr']=learning_rate(lr_plan,global_step)
                     if scaler is not None: scaler.step(optimizer);scaler.update()
                     else: optimizer.step()
                     # AdamW can still create non-finite parameters even when
@@ -910,6 +1080,7 @@ def _train(args,explicit_flags):
                     # the previous checkpoint remains the valid recovery point.
                     _assert_model_finite(model)
                     optimizer.zero_grad(set_to_none=True);global_step+=1
+                    optimized_total=optimized_total+window_objective;optimized_updates+=1
                     cache_started=time.perf_counter()
                     cache_event=cuda_cache_guard.check()
                     if cache_event is not None:
@@ -922,13 +1093,16 @@ def _train(args,explicit_flags):
                 metric_batches+=1
                 for key,value in metrics.items():
                     totals[key]=totals[key]+value.float() if key in totals else value.float().clone()
+                    recent_totals[key]=recent_totals[key]+value.float() if key in recent_totals else value.float().clone()
+                recent_batches+=1
                 if update and args.checkpoint_interval_steps and global_step%args.checkpoint_interval_steps==0:
                     _assert_model_finite(model)
                     stamp=time.perf_counter()
                     save(out/'composer_last.pt',model,optimizer,epoch=epoch,args=vars(args),manifest=args.manifest,
-                         metrics={key:float(value)/max(1,metric_batches) for key,value in totals.items()},optimizer_steps=global_step,
+                         metrics=summarize_metrics(totals,metric_batches),optimizer_steps=global_step,
                          dataset_fingerprint=dataset.fingerprint,atom_catalog=dataset.codec_atoms,
                          training_state={'epoch_complete':batch_index==total_batches,'batch_in_epoch':batch_index,
+                            'lr_schedule':lr_plan,
                             'recovery_episodes':recovery_episode_state(model),
                             'sample_in_epoch':min(batch_index*args.batch_size,len(dataset)),
                             'sampler_batch_size':sampler_size,
@@ -941,6 +1115,15 @@ def _train(args,explicit_flags):
                     timing['save_sec']+=time.perf_counter()-stamp
                     print('composer_checkpoint '+json.dumps({'epoch':epoch,'optimizer_steps':global_step,
                         'path':str(out/'composer_last.pt'),'save_sec':timing['save_sec']}),flush=True)
+                    quotient=global_step//args.checkpoint_interval_steps
+                    if args.archive_checkpoints=='geometric' and quotient and not (quotient & (quotient-1)):
+                        archive=out/'snapshots'/f'composer_step_{global_step:08d}.pt'
+                        if not archive.exists():
+                            save(archive,model,None,epoch=epoch,args=vars(args),manifest=args.manifest,
+                                metrics=summarize_metrics(totals,metric_batches),optimizer_steps=global_step,
+                                dataset_fingerprint=dataset.fingerprint,atom_catalog=dataset.codec_atoms)
+                            print('composer_snapshot '+json.dumps({'optimizer_steps':global_step,
+                                'path':str(archive),'kind':'inference'}),flush=True)
                 if batch_index%args.log_interval==0 or batch_index in {1,total_batches}:
                     for recorded in gpu_profiles:
                         recorded[-1].synchronize()
@@ -948,7 +1131,7 @@ def _train(args,explicit_flags):
                             gpu_timing[key]+=recorded[i].elapsed_time(recorded[i+1])
                         gpu_timing['samples']+=1
                     gpu_profiles.clear()
-                    avg={key:float(value)/max(1,metric_batches) for key,value in totals.items()}
+                    avg=summarize_metrics(totals,metric_batches)
                     elapsed=time.monotonic()-started
                     memory=memory_snapshot(device) if device.type=='cuda' else {}
                     if device.type=='cuda':
@@ -958,16 +1141,37 @@ def _train(args,explicit_flags):
                         'phase_elapsed_sec':elapsed,'batches_per_sec':(batch_index-skip)/max(elapsed,1e-6),
                         'samples_per_sec':seen/max(elapsed,1e-6),'eta_sec':(total_batches-batch_index)*elapsed/(batch_index-skip),
                         'metric_batches':metric_batches,'resume_skipped_batches':skip,
+                        'recent_metrics':summarize_metrics(recent_totals,recent_batches),
+                        'recent_metric_batches':recent_batches,'learning_rate':optimizer.param_groups[0]['lr'],
+                        'optimized_loss':float(optimized_total)/max(1,optimized_updates),
+                        'optimized_updates':optimized_updates,
+                        'last_gradient_norm':float(last_gradient_norm) if last_gradient_norm is not None else None,
                         'timing':dict(timing),'cache':dataset.cache_stats(),'cuda_memory':memory,
                         'gpu_timing':dict(gpu_timing),
                         'cuda_cache_trim_count':cuda_cache_guard.trim_count,
                         'prefetch':batches.stats() if hasattr(batches,'stats') else {'mode':'synchronous'},
                         'host_memory':memory_gib(host_memory()),**avg}),flush=True)
+                    recent_totals={};recent_batches=0
         stamp=time.perf_counter()
+        if validation_dataset is not None:
+            from .evaluation import evaluate_teacher_forced
+            validation=evaluate_teacher_forced(model,validation_dataset,device=device,
+                batch_size=args.validation_batch_size,max_batches=args.validation_max_batches,
+                precision=precision,loss_kwargs={'action_objective_policy':args.action_objective_policy,
+                    'audio_pointer_weight':args.audio_pointer_weight,'placement_weight':args.placement_weight,
+                    'planner_weight':args.planner_weight})
+            validation.update(epoch=epoch,optimizer_steps=global_step,
+                manifest=str(Path(args.validation_manifest).resolve()),
+                catalog_coverage=getattr(validation_dataset,'catalog_coverage',None))
+            (out/'validation_latest.json').write_text(json.dumps(validation,ensure_ascii=False,indent=2),encoding='utf-8')
+            with (out/'validation_history.jsonl').open('a',encoding='utf-8') as stream:
+                stream.write(json.dumps(validation,ensure_ascii=False)+'\n')
+            print('composer_validation '+json.dumps(validation),flush=True)
         common=dict(epoch=epoch,args=vars(args),manifest=args.manifest,
-            metrics={key:float(value)/max(1,metric_batches) for key,value in totals.items()},optimizer_steps=global_step,
+            metrics=summarize_metrics(totals,metric_batches),optimizer_steps=global_step,
             dataset_fingerprint=dataset.fingerprint,atom_catalog=dataset.codec_atoms,
             training_state={'epoch_complete':True,'batch_in_epoch':total_batches,
+                'lr_schedule':lr_plan,
                 'recovery_episodes':recovery_episode_state(model),
                 'sample_in_epoch':min(total_batches*args.batch_size,len(dataset)),
                 'sampler_batch_size':sampler_size,
@@ -980,6 +1184,13 @@ def _train(args,explicit_flags):
         timing['save_sec']+=time.perf_counter()-stamp
         print('composer_epoch '+json.dumps({'epoch':epoch,'optimizer_steps':global_step,
             'elapsed_sec':time.monotonic()-started,'timing':dict(timing)}),flush=True)
+        if (args.validation_manifest and args.generation_eval_songs
+                and epoch%args.generation_eval_interval_epochs==0):
+            from .evaluation import run_generation_panel
+            panel=run_generation_panel(out/'composer_last.pt',args.validation_manifest,
+                out/f'generation_eval_epoch_{epoch}',song_limit=args.generation_eval_songs,
+                seeds=generation_seeds,device=str(device))
+            print('composer_generation_validation '+json.dumps(panel),flush=True)
     return 0
 
 

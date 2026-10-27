@@ -382,6 +382,10 @@
 <label class="field">跨段动机记忆<select id="composerMotifMemoryPolicy"><option value="auto">自动（新训练启用；已有模型继承）</option><option value="off">关闭</option><option value="audio_recurrence_archive_v1">音频复现检索档案（实验）</option></select><small>fresh默认启用音频复现档案，只检索已提交事件，保留局部音频决定差异。实际命中率和长期配置效果仍需观察。</small></label>
 <label class="field">动机记忆事件上限<input id="composerMotifMaxEvents" type="number" min="1" max="32" step="1" value="16"></label>
 <label class="field">Slide分支因子<select id="composerSlideFactorPolicy"><option value="auto">自动（新训练联合分支；已有模型继承）</option><option value="branch_joint_v2">分支内联合端点与轨迹</option><option value="marginal_v1">旧边际统计（兼容）</option></select></label>
+<label class="field">音乐结构条件<select id="composerStructurePolicy"><option value="auto">自动（新训练启用节拍结构；已有模型继承）</option><option value="off">关闭</option><option value="native_periodic_v1">周期结构</option><option value="metrical_context_v1">节拍与小节结构</option></select><small>周期结构提供周期相位；节拍与小节结构进一步提供节拍层次信息。结构由音频分析估计，可能有误，不能保证生成质量；旧模型变更须微调到新目录。</small></label>
+<label class="field">结构分析后端<select id="composerStructureBackend"><option value="auto">自动（新训练优先可用的 Beat This）</option><option value="native">内置分析</option><option value="beat_this">Beat This</option></select><small>自动选择取决于本机可用性；续训继承检查点后端。</small></label>
+<label class="field">结构条件遮挡概率<input id="composerStructureDropout" type="number" min="0" max="0.9" step="0.05" value="0.15"><small>训练时随机遮挡结构条件，范围 0–0.9；续训继承。</small></label>
+<label class="field">接触预算策略<select id="composerContactPolicy"><option value="auto">自动（新训练仅诊断；已有模型继承）</option><option value="off">关闭</option><option value="diagnostic_v1">仅诊断</option><option value="contact_groups_v1">按几何假设拦截</option></select><small>Touch 分组与手部可及范围并不等同。相距较远的双按钮加中心 Touch 会按未经真人验证的手部可及假设判为三接触，执行模式可能误拦；其他不确定组合保留。建议先用诊断并检查实际谱面。</small></label>
 <label class="field">恢复采样Touch布局<select id="composerRecoveryTouchLayoutPolicy"><option value="auto">自动（新训练开放；已有模型继承）</option><option value="open">开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>仅控制训练恢复采样；继续训练继承原策略。</small></label>
 <label class="field">历史残差幅度上限<input id="composerHistoryResidualBound" type="number" min="0.1" max="4" step="0.1" value="1"></label>
 <label class="field">历史分支遮挡概率<input id="composerHistoryDropout" type="number" min="0" max="0.9" step="0.05" value="0.3"></label>
@@ -392,7 +396,7 @@
 <label class="field">每次恢复样本数<input id="composerRecoverySamples" type="number" min="1" max="8" value="2"></label>
 <label class="field">恢复展开步数<input id="composerRecoverySteps" type="number" min="2" max="4" value="2"><small>每次恢复追加的事件数。新版会继续上次的生成历史，最多覆盖128事件；并非每次从真实谱面重新开始。</small></label>
 <label class="field">恢复监督权重<input id="composerRecoveryWeight" type="number" min="0" max="1" step="0.05" value="0.1"></label>
-<label class="field">恢复采样策略<select id="composerRecoverySamplingPolicy"><option value="auto" selected>自动（续训继承；新阶段使用新版）</option><option value="calibrated_kind_touch_rings_v2">旧恢复协议（校准类别与Touch环）</option><option value="generation_matched_recovery_prefix_retry_v3">生成同款采样与前缀重试</option></select><small>resume 自动继承检查点；新训练阶段默认使用新版。旧协议不使用下面的温度控件，保持默认值。</small></label>
+<label class="field">恢复采样策略<select id="composerRecoverySamplingPolicy"><option value="auto" selected>自动（续训继承；新阶段使用新版）</option><option value="calibrated_kind_touch_rings_v2">旧恢复协议（校准类别与Touch环）</option><option value="generation_matched_recovery_prefix_retry_v3">v3：生成同款采样与前缀重试</option><option value="generation_matched_recovery_masked_touch_v4">v4：合法动作掩码与 Touch 引导</option></select><small>resume 自动继承检查点；新训练阶段默认使用新版。旧协议不使用下面的温度控件，保持默认值。</small></label>
 <label class="field">恢复选位温度<input id="composerRecoveryPointerTemperature" type="number" min="0" max="2" step="0.05" value="1"><small>新版恢复采样的选位温度；范围 0–2。resume 继承并锁定，finetune 可调整。旧协议固定默认值 1。</small></label>
 <label class="field">恢复动作温度<input id="composerRecoveryActionTemperature" type="number" min="0" max="2" step="0.05" value="0.85"><small>新版恢复采样的动作温度；范围 0–2。resume 继承并锁定，finetune 可调整。旧协议固定默认值 0.85。</small></label>
 <label class="field">前馈层宽度<input id="composerDimFeedforward" type="number" min="1" step="1" value="1536"><small>默认是 d_model 的4倍。</small></label>
@@ -415,6 +419,9 @@
 <label class="field">样本局部性<input id="composerSampleLocality" type="number" min="1" max="8" value="4"><small>每批交错的歌曲数；建议 4。1 提高缓存复用，也会增加同曲样本的梯度相关性。</small></label>
 <label class="field">历史模态遮挡概率<input id="composerSymbolicDropout" type="number" min="0" max="0.5" step="0.05" value="0.15"><small>统一隐藏模型读取的谱面历史、动作状态与 ledger，保留音频和真实监督；建议 0.15。</small></label>
 <label class="field">音频辅助监督权重<input id="composerAudioPointerWeight" type="number" min="0" max="1" step="0.05" value="0.15"><small>默认0.15。audio_grounded_v3中同时控制音频选位和音频动作两项辅助损失；调低会直接降低总loss数值，不能据此判断主任务学得更好。改变目标须显式微调。</small></label>
+<label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（新训练恒定，续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。改变方式请在新输出目录微调；resume 保留原曲线和更新进度。</small></label>
+<label class="field">学习率预热更新数<input id="composerWarmupSteps" type="number" min="0" step="1" placeholder="自动：余弦最多500，恒定0"><small>按实际参数更新计数，梯度累积中的小批次不单独计步。留空自动选择。</small></label>
+<label class="field">末尾学习率比例<input id="composerMinLrRatio" type="number" min="0" max="1" step="0.05" placeholder="自动：余弦0.1，恒定1"><small>0.1 表示末尾降到初始学习率的10%。短实验只验证本地学习指标，长期生成质量需另行比较。</small></label>
 <label class="field">CUDA 分段计时批数<input id="composerProfileSteps" type="number" min="0" value="0"><small>0 关闭；需要定位效率时可填 8，在日志中比较传输、前向、反向和更新耗时。</small></label>
 <label class="field">日志间隔（batch）<input id="composerLogInterval" type="number" min="1" value="25"><small>更新吞吐、ETA、损失和缓存反馈；不改变训练目标。</small></label>
 <label class="field">每轮 batch 上限<input id="composerMaxSteps" type="number" min="0" value="0"><small>0 完整训练集；短跑限制仅用于流程检查。</small></label>
@@ -914,6 +921,7 @@
 <label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>仅控制选时分支：1 使用完整历史，0 使用音频分支。</small></label>
 <label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" value="0.55"><small>audio_grounded_v3在正温度下保留模型预测的时间区间概率，只调整区间内部拍位的随机程度；0直接选择全体候选中最高分的拍位。</small></label>
 <label class="field">失败重试策略<select id="composerActionRetryPolicy"><option value="auto" selected>自动（继承检查点）</option><option value="legacy_first_atom_v1">旧首音封禁</option><option value="failed_prefix_v2">只封禁失败前缀</option></select><small>自动沿用检查点记录的策略；旧策略封禁失败首音，新策略仅封禁已失败的动作前缀。</small></label>
+<label class="field">接触预算<select id="composerGenerationContactPolicy"><option value="auto">继承模型策略</option><option value="off">关闭</option><option value="diagnostic_v1">仅诊断</option><option value="contact_groups_v1">按几何假设拦截</option></select><small>相距较远的双按钮加中心 Touch 的拦截依据未经真人验证的手部可及假设，可能误拦；其他不确定的 Touch 组合保留。建议先用诊断并检查实际谱面。</small></label>
 <label class="field">Touch布局<select id="composerTouchLayoutPolicy"><option value="open" selected>开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>开放模式不把全部Touch算作按钮双头；仍检查时序与物理硬冲突。</small></label>
 <label class="field">动机记忆强度<input id="composerMotifStrength" type="number" min="0" max="2" step="0.1" value="1"><small>默认1。仅已开启实验动机记忆的模型生效；off模型调整此值无效。</small></label>
 <label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" value="0.85"><small>仅控制按键、Hold、Slide 等动作采样；可独立保留配置多样性。</small></label>

@@ -15,7 +15,8 @@ $NoInstall = $false
 $Reinstall = $false
 $Port = 7860
 $SupportedPythonMin = [version]"3.10"
-$SupportedPythonMax = [version]"3.14"
+$SupportedPythonMax = [version]"3.16"
+$SupportedPythonRange = "Python >= $($SupportedPythonMin.ToString(2)) and < $($SupportedPythonMax.ToString(2))"
 
 function Fail([string] $Message) {
     Write-Error $Message
@@ -95,7 +96,7 @@ $pythonConfig = Join-Path $ProjectRoot ".webui-python"
 if (-not $overridePython -and (Test-Path -LiteralPath $pythonConfig)) {
     $overridePython = ([string](Get-Content -LiteralPath $pythonConfig -Raw -Encoding UTF8)).Trim()
     $overrideSource = ".webui-python"
-    if (-not $overridePython) { Fail ".webui-python is empty. Set it to the path of an existing Python 3.10-3.13 executable." }
+    if (-not $overridePython) { Fail ".webui-python is empty. Set it to the path of an existing $SupportedPythonRange executable." }
 }
 if ($overridePython) {
     if (-not [System.IO.Path]::IsPathRooted($overridePython)) {
@@ -106,7 +107,7 @@ if ($overridePython) {
     $pythonInfo = Get-PythonInfo $Python
     if (-not $pythonInfo) { Fail "Unable to run Python from ${overrideSource}: $Python" }
     if (-not (Test-SupportedPython $pythonInfo)) {
-        Fail "$overrideSource must point to Python 3.10-3.13; found $($pythonInfo.Version)."
+        Fail "$overrideSource must point to $SupportedPythonRange; found $($pythonInfo.Version)."
     }
 } else {
     $configuredVenv = [bool]$env:MAICHART_VENV
@@ -121,7 +122,7 @@ if ($overridePython) {
         if (Test-SupportedPython $existingVenvInfo) {
             $Python = $venvPython
         } else {
-            Write-Warning "Ignoring incompatible Python environment '$venvRoot'. Python 3.10-3.13 is required."
+            Write-Warning "Ignoring incompatible Python environment '$venvRoot'. $SupportedPythonRange is required."
         }
     }
 
@@ -146,7 +147,7 @@ if ($overridePython) {
                 }
             }
         }
-        if (-not $bootstrapPython) { Fail "Python 3.10-3.13 was not found. Install Python 3.11 or set MAICHART_PYTHON." }
+        if (-not $bootstrapPython) { Fail "$SupportedPythonRange was not found. Install Python 3.11 or set MAICHART_PYTHON." }
 
         if ($CheckOnly -or $NoInstall) {
             $Python = $bootstrapPython
@@ -162,7 +163,7 @@ if ($overridePython) {
                     Write-Warning "Moving the incompatible project environment to '$backupVenv'."
                     Move-Item -LiteralPath $venvRoot -Destination $backupVenv
                 } else {
-                    Fail "Existing environment '$venvRoot' is incompatible. Set MAICHART_VENV to a new directory or MAICHART_PYTHON to an existing Python 3.10-3.13 environment."
+                    Fail "Existing environment '$venvRoot' is incompatible. Set MAICHART_VENV to a new directory or MAICHART_PYTHON to an existing $SupportedPythonRange environment."
                 }
             }
             Write-Host "Creating virtual environment: $venvRoot"
@@ -177,7 +178,7 @@ if (-not (Test-Path -LiteralPath $Python)) { Fail "Python executable not found: 
 $pythonInfo = Get-PythonInfo $Python
 if (-not $pythonInfo) { Fail "Unable to run Python: $Python" }
 if (-not (Test-SupportedPython $pythonInfo)) {
-    Fail "Python 3.10-3.13 is required; found $($pythonInfo.Version)."
+    Fail "$SupportedPythonRange is required; found $($pythonInfo.Version)."
 }
 Write-Host "Python: $Python ($($pythonInfo.Version))"
 

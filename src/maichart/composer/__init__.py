@@ -12,9 +12,10 @@ RELATIONAL_INPUT_CONTRACT = 'chart_composer_inputs_v3_separate_pads_relative_hea
 TRAINING_SEMANTICS = 'chart_composer_training_v6_unified_events_head_timing'
 GROUNDED_TRAINING_SEMANTICS = 'chart_composer_training_v11_history_relation_mask'
 LEGACY_ACTION_SAMPLING_POLICY = 'calibrated_kind_touch_rings_v2'
-ACTION_SAMPLING_POLICY = 'generation_matched_recovery_prefix_retry_v3'
+PREVIOUS_ACTION_SAMPLING_POLICY = 'generation_matched_recovery_prefix_retry_v3'
+ACTION_SAMPLING_POLICY = 'generation_matched_recovery_masked_touch_v4'
 MOTIF_TRAINING_POLICY = 'symbolic_masked_archive_v1'
 
 __all__ = ['FAMILY','CHECKPOINT_SCHEMA','INPUT_CONTRACT','RELATIONAL_INPUT_CONTRACT',
            'TRAINING_SEMANTICS','GROUNDED_TRAINING_SEMANTICS','ACTION_SAMPLING_POLICY',
-           'LEGACY_ACTION_SAMPLING_POLICY','MOTIF_TRAINING_POLICY']
+           'LEGACY_ACTION_SAMPLING_POLICY','PREVIOUS_ACTION_SAMPLING_POLICY','MOTIF_TRAINING_POLICY']

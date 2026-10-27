@@ -52,3 +52,29 @@ def test_recovery_sampling_with_short_tail_keeps_padding_mask(monkeypatch):
     monkeypatch.setattr(recovery.RecoveryBuilder, 'batch_from_episodes', advance)
     train.recovery_batch(dataset, model, args, torch.device('cpu'), 0)
     assert model.training
+
+
+def test_recovery_contract_versions_preserve_v3_and_default_to_v4():
+    from maichart.composer import (ACTION_SAMPLING_POLICY, PREVIOUS_ACTION_SAMPLING_POLICY,
+                                    LEGACY_ACTION_SAMPLING_POLICY)
+    from maichart.composer.sampling_contract import resolve_recovery_sampling, recovery_sampling_settings
+    assert resolve_recovery_sampling('auto') == ACTION_SAMPLING_POLICY
+    assert resolve_recovery_sampling('auto', {'action_sampling_policy': PREVIOUS_ACTION_SAMPLING_POLICY},
+                                     resume=True) == PREVIOUS_ACTION_SAMPLING_POLICY
+    old = recovery_sampling_settings(PREVIOUS_ACTION_SAMPLING_POLICY, .5, .75)
+    new = recovery_sampling_settings(ACTION_SAMPLING_POLICY, .5, .75)
+    legacy = recovery_sampling_settings(LEGACY_ACTION_SAMPLING_POLICY)
+    assert old['pointer_sampler'] == new['pointer_sampler'] == 'grouped'
+    assert old['retry_policy'] == new['retry_policy'] == 'failed_prefix_v2'
+    assert old['touch_history_guard'] and new['touch_history_guard']
+    assert old['touch_legal_mask'] is False and new['touch_legal_mask'] is True
+    assert legacy['pointer_sampler'] == 'global' and legacy['touch_legal_mask'] is False
+
+
+def test_resume_rejects_explicit_recovery_policy_change():
+    import pytest
+    from maichart.composer import ACTION_SAMPLING_POLICY, PREVIOUS_ACTION_SAMPLING_POLICY
+    from maichart.composer.sampling_contract import resolve_recovery_sampling
+    with pytest.raises(ValueError, match='Resume inherits'):
+        resolve_recovery_sampling(ACTION_SAMPLING_POLICY,
+            {'action_sampling_policy': PREVIOUS_ACTION_SAMPLING_POLICY}, resume=True)

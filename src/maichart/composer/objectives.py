@@ -74,6 +74,18 @@ def action_objective(logits, targets, sample_weights, *, policy=LEGACY_ACTION_OB
         'nonstop_ce': (per_slot * non_stop * decision_weights).sum() / (non_stop * decision_weights).sum().clamp_min(1e-6),
         'stop_ce': (per_slot * stop * decision_weights).sum() / (stop * decision_weights).sum().clamp_min(1e-6),
     }
+    # Separate real-note continuations from the easy STOP prediction. Pool
+    # numerators/masses across batches rather than averaging conditional means.
+    first_non_stop = non_stop.clone()
+    first_non_stop[:, 1:] = False
+    later_non_stop = non_stop.clone()
+    later_non_stop[:, 0] = False
+    for name, mask in (('first_nonstop', first_non_stop), ('later_nonstop', later_non_stop)):
+        mass = (mask * decision_weights).sum()
+        numerator = (per_slot * mask * decision_weights).sum()
+        diagnostics[name + '_ce'] = numerator / mass.clamp_min(1e-6)
+        diagnostics[name + '_ce_sum'] = numerator
+        diagnostics[name + '_ce_weight'] = mass
     return (legacy if policy == LEGACY_ACTION_OBJECTIVE else joint), diagnostics
 
 
@@ -90,7 +102,12 @@ def recovery_objective(output, batch, *, policy=LEGACY_ACTION_OBJECTIVE, weight=
     per_sample = F.cross_entropy(output['candidate_logits'], batch['candidate_target'], reduction='none')
     pointer = (per_sample * importance).sum() / importance.sum().clamp_min(1e-6)
     action = pointer.new_zeros(())
+    action_metrics = {}
     if policy == RECOVERY_ACTION_OBJECTIVE:
-        action, _ = action_objective(output['action_logits'], batch['action_target'],
+        action, diagnostics = action_objective(output['action_logits'], batch['action_target'],
             batch['sample_weight'] * batch['action_weight'], policy=policy)
-    return (pointer + action) * weight, {'pointer_loss': pointer.detach(), 'action_loss': action.detach()}
+        action_metrics = {'action_' + name: value.detach() for name, value in diagnostics.items()
+                          if name in ('first_nonstop_ce', 'later_nonstop_ce',
+                                      'first_nonstop_ce_weight', 'later_nonstop_ce_weight')}
+    return (pointer + action) * weight, {'pointer_loss': pointer.detach(), 'action_loss': action.detach(),
+                                       **action_metrics}

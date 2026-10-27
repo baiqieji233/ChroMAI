@@ -106,7 +106,7 @@ def test_wrapper_applies_requested_bound_to_same_candidate_and_prefix():
     model = SimpleNamespace(action_slot=action_slot)
     outputs = []
     selected = [2]
-    audio_odds = torch.logsumexp(audio[3:], 0)-torch.logsumexp(audio[1:3], 0)
+    audio_odds = torch.logsumexp(audio[3:], 0)-torch.logsumexp(audio[:3], 0)
     for bound in (0., 2.):
         diagnostics = {}
         corrected = action_logits_with_touch_guard(model, 'full', 1, selected,
@@ -114,9 +114,9 @@ def test_wrapper_applies_requested_bound_to_same_candidate_and_prefix():
             log_odds_bound=bound, diagnostics=diagnostics)
         assert diagnostics['applied']
         assert calls[-2:] == [('full', 1, (2,)), ('audio', 1, (2,))]
-        odds = torch.logsumexp(corrected[3:], 0)-torch.logsumexp(corrected[1:3], 0)
+        odds = torch.logsumexp(corrected[3:], 0)-torch.logsumexp(corrected[:3], 0)
         torch.testing.assert_close(odds, audio_odds+bound)
-        torch.testing.assert_close(corrected.softmax(0)[0], full.softmax(0)[0])
+        assert corrected.softmax(0)[0] > full.softmax(0)[0]
         torch.testing.assert_close(corrected[3]-corrected[4], full[3]-full[4])
         outputs.append(corrected)
     assert outputs[0].softmax(0)[3:].sum() < outputs[1].softmax(0)[3:].sum()

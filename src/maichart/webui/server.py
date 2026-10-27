@@ -225,6 +225,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_training": True,
                                               "composer_training_runtime": "music_context_shared_slots_v2",
                                               "composer_training_controls": "causal_motif_runtime_controls_v11_fresh_training_defaults",
+                                              "composer_learning_rate_schedule": "optimizer_updates_v1",
+                                              "composer_structure_context": "metrical_context_v1",
+                                              "composer_contact_budget": "conservative_groups_v1",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
             'composer_generation_contract':'composer_generation_controls_v11_history_type_sampling',
@@ -1832,7 +1835,7 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     if not separator or prefix not in {
         "form_prepare", "composer_prepare",
         "composer_runtime", "composer_progress", "composer_epoch", "composer_checkpoint",
-        "composer_recovery",
+        "composer_recovery", "composer_validation", "composer_generation_validation",
     }:
         return
     try:
@@ -1860,7 +1863,10 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         task.result['composer_stage']='epoch_complete'
     elif prefix=='composer_recovery':
         task.result['composer_recovery']=dict(data)
-    for key in ("epoch", "batch", "total", "optimizer_steps", "loss", "pointer_accuracy", "elapsed_sec", "path"):
+    elif prefix in {'composer_validation','composer_generation_validation'}:
+        task.result[prefix]=dict(data)
+    for key in (() if prefix in {'composer_validation','composer_generation_validation'} else
+                ("epoch", "batch", "total", "optimizer_steps", "loss", "pointer_accuracy", "elapsed_sec", "path")):
         if key in data:
             task.result[key] = data[key]
     if prefix == "form_prepare":

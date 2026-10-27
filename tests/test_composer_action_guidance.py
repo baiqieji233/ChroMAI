@@ -93,3 +93,31 @@ def test_cli_allows_replaying_previous_generation_policy():
     required=['--audio','unused','--checkpoint','unused','--output','unused']
     assert parser().parse_args(required).touch_history_guard
     assert not parser().parse_args(required+['--no-touch-history-guard']).touch_history_guard
+
+
+def test_later_touch_competes_with_stop_after_illegal_buttons_are_removed():
+    full=torch.tensor([0.,2.,3.,5.,7.]);audio=torch.tensor([2.,4.,5.,0.,0.])
+    touch=torch.tensor([False,False,False,True,True])
+    legal=torch.tensor([True,False,False,False,True])
+    result=constrain_touch_history(full,audio,touch,legal_mask=legal,include_stop=True)
+    torch.testing.assert_close(result[4]-result[0],audio[4]-audio[0]+1.)
+    torch.testing.assert_close(torch.logsumexp(result[legal],0),torch.logsumexp(full[legal],0))
+    torch.testing.assert_close(result[~legal],full[~legal])
+    assert result[0]>full[0]
+
+
+def test_real_sampler_passes_canonical_and_occupancy_masks_to_guidance():
+    from maichart.composer.generate import _sample_actions
+    from maichart.generation.event_cli import _NoteGrammar
+    atoms=['1','8','B3','E4'];grammar=_NoteGrammar.from_atoms(atoms)
+    rows=torch.zeros(2,5)
+    full=torch.tensor([0.,2.,3.,5.,7.]);audio=torch.tensor([2.,4.,5.,0.,0.])
+    touch=torch.tensor([False,False,False,True,True])
+    def decoder(slot,prefix,legal):
+        if slot==0:return torch.tensor([-10.,-10.,-10.,10.,-10.])
+        assert prefix==['B3']
+        assert bool(legal[0]) and not bool(legal[1]) and not bool(legal[2])
+        return constrain_touch_history(full,audio,touch,legal_mask=legal,include_stop=True)
+    selected=_sample_actions(rows,atoms,grammar,0.,torch.Generator(),canonical_order=True,
+                             slot_mask_decoder=decoder)
+    assert selected==['B3']

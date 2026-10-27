@@ -11,7 +11,7 @@ test("training preflight rejects duplicate clicks and releases controls on error
   const end = source.indexOf("async function submitTrain(", begin);
   let rejectSubmission;
   let submissions = 0;
-  const start = new Function("submitTrain", "updateDatasetButtons", "let trainingStarting=false,trainingPreflight=false;" + source.slice(begin,end) + ";return startTrain;")(
+  const start = new Function("submitTrain", "updateDatasetButtons", "let trainingStarting=false,trainingPreflight=false; const liveComposerTrainingTasks=new Set();" + source.slice(begin,end) + ";return startTrain;")(
     () => { submissions++; return new Promise((_resolve,reject) => { rejectSubmission=reject; }); }, () => {},
   );
   const first = start();
@@ -72,9 +72,9 @@ test("song-form resume help describes selected migration without changing learni
     "#trainingModeHelp": {textContent:""}, "#epochsHelp": {textContent:""},
     "#learningRate": {value:"0.00007"},
   };
-  const update = new Function("element", "currentTrainingMode",
+  const update = new Function("element", "currentTrainingMode", "currentModelFamily",
     functionSource("updateTrainingModeHelp", "updateDatasetButtons") + "; return updateTrainingModeHelp;")(
-      makeElement(values), () => "resume");
+      makeElement(values), () => "resume", () => values['#modelFamily'].value);
   update();
   assert.match(values["#trainingModeHelp"].textContent,/迁移续训/);
   assert.match(values["#epochsHelp"].textContent,/重跑未完成轮次/);
