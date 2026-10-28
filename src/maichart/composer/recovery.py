@@ -205,7 +205,7 @@ class RecoveryBuilder:
             item['_motif_index']=ComposerMotifIndex(getattr(song,'relations',None),
                 [p.beat for p in prefix],np.asarray([ids for ids,_ in history],dtype=np.int64).reshape(-1,ds.action_slots))
         if getattr(ds,'architecture_profile',None)=='audio_grounded_v3' and hasattr(ds, '_grounded_features'):
-            item.update(ds._grounded_features(sample.song_index, seconds, seconds, table=table))
+            item.update(ds._grounded_features(sample.song_index, seconds, seconds, table=table,defer_queries=False))
         if getattr(ds,'structure_policy','off')!='off':
             from .structure import structure_features_and_transition
             features,transition=structure_features_and_transition(song,padded,seconds,

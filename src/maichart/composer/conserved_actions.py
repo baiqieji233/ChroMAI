@@ -119,6 +119,20 @@ class ConservedGroupedActionHead(nn.Module):
         self.register_buffer('atom_break_id', action_factors.atom_break_ex.clone(), persistent=False)
         self.register_buffer('atom_hold_dur_id', action_factors.atom_hold_duration.clone(), persistent=False)
         self.register_buffer('atom_slide_dur_id', action_factors.atom_slide_duration.clone(), persistent=False)
+        gseb = torch.stack((
+            self.atom_group_id, self.atom_shape_id, self.atom_endpoint_id, self.atom_break_id
+        ), dim=-1)
+        u_gseb, inv_gseb = torch.unique(gseb, dim=0, return_inverse=True)
+        gse = torch.stack((self.atom_group_id, self.atom_shape_id, self.atom_endpoint_id), dim=-1)
+        u_gse, inv_gse = torch.unique(gse, dim=0, return_inverse=True)
+        hdsd = torch.stack((self.atom_hold_dur_id, self.atom_slide_dur_id), dim=-1)
+        u_hdsd, inv_hdsd = torch.unique(hdsd, dim=0, return_inverse=True)
+        self.register_buffer('_u_gseb', u_gseb, persistent=False)
+        self.register_buffer('_inv_gseb', inv_gseb, persistent=False)
+        self.register_buffer('_u_gse', u_gse, persistent=False)
+        self.register_buffer('_inv_gse', inv_gse, persistent=False)
+        self.register_buffer('_u_hdsd', u_hdsd, persistent=False)
+        self.register_buffer('_inv_hdsd', inv_hdsd, persistent=False)
 
         n_shapes = int(action_factors.factors['trajectory_shape'].num_embeddings)
         n_ends = int(action_factors.factors['relative_endpoint'].num_embeddings)
@@ -186,20 +200,24 @@ class ConservedGroupedActionHead(nn.Module):
             if self._table_cache_key == cache_key and self._table_cache is not None:
                 return self._table_cache
 
-        g = self.atom_group_id
-        s = self.atom_shape_id
-        e = self.atom_endpoint_id
-        b = self.atom_break_id
-        hd = self.atom_hold_dur_id
-        sd = self.atom_slide_dur_id
+        u_gseb = self._u_gseb
+        u_gse = self._u_gse
+        u_hdsd = self._u_hdsd
 
-        traj_gate = 1.0 + torch.tanh(self.group_traj_gate(g))
-        traj_base = self.shape_detail(s) + self.endpoint_detail(e) + self.break_detail(b)
-        traj_table = (traj_base * traj_gate) * (g != 0).unsqueeze(-1)
+        t_gate = (1.0 + torch.tanh(self.group_traj_gate.weight)).index_select(0, u_gseb[:, 0])
+        t_base = (self.shape_detail(u_gseb[:, 1])
+                  + self.endpoint_detail(u_gseb[:, 2])
+                  + self.break_detail(u_gseb[:, 3]))
+        u_traj = (t_base * t_gate) * (u_gseb[:, 0] != 0).unsqueeze(-1)
+        traj_table = u_traj.index_select(0, self._inv_gseb)
 
-        dur_gate = 1.0 + torch.tanh(self.group_dur_gate(g) + self.shape_dur_gate(s) + self.end_dur_gate(e))
-        dur_base = self.hold_dur_detail(hd) + self.slide_dur_detail(sd)
-        dur_table = (dur_base * dur_gate) * (g != 0).unsqueeze(-1)
+        d_gate = (1.0 + torch.tanh(
+            self.group_dur_gate(u_gse[:, 0])
+            + self.shape_dur_gate(u_gse[:, 1])
+            + self.end_dur_gate(u_gse[:, 2])
+        )) * (u_gse[:, 0] != 0).unsqueeze(-1)
+        u_dur_base = self.hold_dur_detail(u_hdsd[:, 0]) + self.slide_dur_detail(u_hdsd[:, 1])
+        dur_table = u_dur_base.index_select(0, self._inv_hdsd) * d_gate.index_select(0, self._inv_gse)
 
         result = (traj_table, dur_table)
         if cache_key is not None:

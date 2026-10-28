@@ -42,7 +42,7 @@ def training_semantics_for_objective(architecture_profile, policy=LEGACY_ACTION_
     return TRAINING_SEMANTICS
 
 
-def action_objective(logits, targets, sample_weights, *, policy=LEGACY_ACTION_OBJECTIVE):
+def action_objective(logits, targets, sample_weights, *, policy=LEGACY_ACTION_OBJECTIVE, slot_indices=None):
     """Return the selected loss and diagnostics in fixed, comparable units.
 
     Joint NLL sums every authored action and its first STOP. Every sequence
@@ -52,8 +52,14 @@ def action_objective(logits, targets, sample_weights, *, policy=LEGACY_ACTION_OB
     """
     if policy not in ACTION_OBJECTIVES:
         raise ValueError('Unknown action_objective_policy')
-    per_slot = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1),
-                               reduction='none').reshape_as(targets)
+    if slot_indices is None:
+        per_slot = F.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1),
+                                   reduction='none').reshape_as(targets)
+    else:
+        rows, slots = slot_indices.unbind(-1)
+        packed = F.cross_entropy(logits, targets[rows, slots], reduction='none')
+        # Only the scalar CE grid is restored; never a [B,S,V] vocabulary grid.
+        per_slot = packed.new_zeros(targets.shape).index_put((rows, slots), packed)
     active = torch.ones_like(targets, dtype=torch.bool)
     if targets.size(1) > 1:
         active[:, 1:] = targets[:, :-1].ne(0)
@@ -105,7 +111,8 @@ def recovery_objective(output, batch, *, policy=LEGACY_ACTION_OBJECTIVE, weight=
     action_metrics = {}
     if policy == RECOVERY_ACTION_OBJECTIVE:
         action, diagnostics = action_objective(output['action_logits'], batch['action_target'],
-            batch['sample_weight'] * batch['action_weight'], policy=policy)
+            batch['sample_weight'] * batch['action_weight'], policy=policy,
+            slot_indices=output.get('action_slot_indices'))
         action_metrics = {'action_' + name: value.detach() for name, value in diagnostics.items()
                           if name in ('first_nonstop_ce', 'later_nonstop_ce',
                                       'first_nonstop_ce_weight', 'later_nonstop_ce_weight')}

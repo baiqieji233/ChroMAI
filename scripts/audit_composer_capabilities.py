@@ -156,7 +156,7 @@ def audit(args):
                     permutation = torch.arange(batch['candidate_target'].numel()).roll(1)
                     batch = {**batch, **{key: batch[key][permutation] for key in (
                         'motif_ids', 'motif_relative_beats', 'motif_mask')}}
-                output = _forward_batch(model, batch, **overrides)
+                output = _forward_batch(model, batch, packed_actions=False, **overrides)
                 meter.update(output['action_logits'], batch)
         report['evaluations'][variant] = meter.report()
         print(json.dumps({'variant_complete': variant, 'output': str(args.output)}), flush=True)

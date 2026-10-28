@@ -300,7 +300,7 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
     pointer=reduce(F.cross_entropy(output['candidate_logits'],batch['candidate_target'],reduction='none'),
                    pointer_weights)
     target=batch['candidate_target']
-    if output['action_logits'].ndim==3:
+    if output['action_logits'].ndim==3 or 'action_slot_indices' in output:
         action_logits,future,eos=output['action_logits'],output['future'],output['eos_logits']
     else:
         rows=torch.arange(target.size(0),device=target.device)
@@ -311,7 +311,8 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
     action_weights=weights*transitions*batch.get('action_weight',torch.ones_like(weights))
     if action_logits.size(-1)!=atom_vocab_size:
         raise ValueError('Action logits do not match atom_vocab_size')
-    action,action_metrics=action_objective(action_logits,action_targets,action_weights,policy=action_objective_policy)
+    action,action_metrics=action_objective(action_logits,action_targets,action_weights,policy=action_objective_policy,
+        slot_indices=output.get('action_slot_indices'))
     audio_action_loss=pointer.new_zeros(())
     audio_action_metrics={}
     if 'audio_action_logits' in output:
@@ -320,7 +321,8 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
             rows=torch.arange(target.size(0),device=target.device)
             audio_action_logits=audio_action_logits[rows,target]
         audio_action_loss,audio_action_metrics=action_objective(
-            audio_action_logits,action_targets,action_weights,policy=action_objective_policy)
+            audio_action_logits,action_targets,action_weights,policy=action_objective_policy,
+        slot_indices=output.get('action_slot_indices'))
     eos_target=batch['eos_target']
     eos_weights=weights*batch.get('eos_weight',torch.ones_like(weights))
     positives=(eos_target*eos_weights).sum().clamp_min(1.)
@@ -452,16 +454,56 @@ def _forward_finite_check(output,loss,backward_loss):
             _LOSS_FINITE_KEY not in bad,_BACKWARD_FINITE_KEY not in bad)
 
 
-def _assert_model_finite(model):
-    bad = _nonfinite_tensors(model.state_dict())
+def _forward_finite_flags(output,loss,backward_loss):
+    """Device-only status; keep unused outputs covered without a host wait."""
+    with torch.no_grad():
+        checks=[]
+        groups={}
+        for value in output.values():
+            if not torch.is_tensor(value) or not (value.is_floating_point() or value.is_complex()):continue
+            if value.numel()==0:continue
+            value=value.detach()
+            if value.layout==torch.strided and not value.is_complex():
+                groups.setdefault((value.device,value.dtype),[]).append(value)
+            else:checks.append(torch.isfinite(value).all().to(loss.device))
+        for values in groups.values():
+            try: norms=torch._foreach_norm(values,float('inf'))
+            except (RuntimeError,NotImplementedError):
+                checks.extend(torch.isfinite(value).all().to(loss.device) for value in values)
+            else:checks.append(torch.isfinite(torch.stack(norms)).all().to(loss.device))
+        output_finite=torch.stack(checks).all() if checks else torch.ones((),dtype=torch.bool,device=loss.device)
+        return torch.stack((output_finite,torch.isfinite(loss.detach()).all(),
+                            torch.isfinite(backward_loss.detach()).all()))
+
+
+def _model_finite_items(model):
+    # Build after device placement. Registered tensors are stable throughout an
+    # optimizer run; state_dict construction traverses the full Python module tree.
+    return {name:value for name,value in list(model.named_parameters())+list(model.named_buffers())
+            if value.is_floating_point() or value.is_complex()}
+
+
+def _window_update_health(window_finite,grad_norm,model,episode_backup=None):
+    """One host read at the update boundary, with transactional episode state."""
+    health=torch.cat((window_finite,torch.isfinite(grad_norm.detach()).reshape(1))).cpu().tolist()
+    if not all(health) and episode_backup is not None:
+        from .recovery import restore_recovery_episodes
+        restore_recovery_episodes(model,episode_backup)
+    return health
+
+
+def _assert_model_finite(model,items=None):
+    bad = _nonfinite_tensors(model.state_dict() if items is None else items,healthy_fast_path=True)
     if bad:
         raise FloatingPointError('Composer model became non-finite: ' + ', '.join(bad[:8]))
 
 
-def _forward_batch(model,tensors,*,decode_actions=True,**overrides):
+def _forward_batch(model,tensors,*,decode_actions=True,packed_actions=False,**overrides):
     extra={key:tensors[key] for key in ('head_timing','workload_audio','ledger','interval_audio',
         'trailing_audio','audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
-        'motif_ids','motif_relative_beats','motif_mask','selected_action_state','structure_features','structure_transition') if key in tensors}
+        'motif_ids','motif_relative_beats','motif_mask','selected_action_state','structure_features','structure_transition',
+        'planner_unique_indices','planner_inverse','packed_slot_indices','packed_first_indices') if key in tensors}
+    if getattr(model.config,'architecture_profile',None)=='audio_grounded_v3':extra['packed_actions']=packed_actions
     extra.update(overrides)
     return model(tensors['candidate_features'],tensors['history'],tensors['condition'],
         action_state=tensors['action_state'],history_features=tensors['history_features'],
@@ -738,7 +780,8 @@ def _train(args,explicit_flags):
     from .model import validate_supported_context_policies
     validate_supported_context_policies(vars(args))
     if not 0<=args.cpu_threads<=256:raise ValueError('cpu_threads must be in [0,256]')
-    if args.cpu_threads:torch.set_num_threads(args.cpu_threads)
+    if args.cpu_threads:
+        torch.set_num_threads(args.cpu_threads)
     if not 0<=args.holdout_fraction<.5 or args.validation_max_batches<0 or args.validation_batch_size<1:
         raise ValueError('Invalid validation settings')
     if args.generation_eval_songs<0 or args.generation_eval_interval_epochs<1:
@@ -777,6 +820,9 @@ def _train(args,explicit_flags):
         structure_policy=args.structure_policy,structure_backend=args.structure_backend)
     dataset.touch_layout_policy=args.touch_layout_policy
     dataset.contact_policy=args.contact_policy
+    dataset.defer_audio_queries=device.type=='cuda' and args.architecture_profile==GROUNDED_PROFILE
+    from .device_audio import AudioQueryMaterializer
+    audio_materializer=AudioQueryMaterializer()
     args.action_slots_requested = dataset.action_slots_requested
     args.action_slots = dataset.action_slots
     if args.resume and model.config.action_slots != args.action_slots:
@@ -830,6 +876,7 @@ def _train(args,explicit_flags):
             head_timing_policy=args.head_timing_policy,structure_policy=args.structure_policy,
             structure_backend=args.structure_backend,atom_catalog=dataset.codec_atoms)
     model.to(device).train()
+    model_finite_items=_model_finite_items(model)
     from .recovery import restore_recovery_episodes,recovery_episode_state
     restore_recovery_episodes(model,(old.get('training_state') or {}).get('recovery_episodes') if args.resume else None)
     cuda_cache_guard=CudaCacheGuard(device,0.)
@@ -922,6 +969,10 @@ def _train(args,explicit_flags):
         'model_bytes':sum(p.numel()*p.element_size() for p in model.parameters()),
         'action_head_parameters':sum(p.numel() for p in model.action_head.parameters()),
         'selected_candidate_projection':True,'optimizer_implementation':implementation,
+        'action_projection':'active_slots_v1' if args.architecture_profile==GROUNDED_PROFILE else 'dense',
+        'audio_query_execution':'device_banks_v1' if dataset.defer_audio_queries else 'cpu',
+        'audio_device_cache_budget_bytes':audio_materializer.budget_bytes if dataset.defer_audio_queries else 0,
+        'planner_batch_sharing':'same_source_and_effective_condition_v1',
         'audio_bank_mode':'lossless_mmap_v1','audio_feature_policy':COMPOSER_AUDIO_FEATURE_POLICY,
         'batch_size':args.batch_size,'grad_accumulation':args.grad_accumulation,
         'effective_batch_size':args.batch_size*args.grad_accumulation,
@@ -988,7 +1039,7 @@ def _train(args,explicit_flags):
                 stamp=time.perf_counter();batch=next(batches)
                 timing['data_sec']+=time.perf_counter()-stamp
                 if (batch_index-1)%args.grad_accumulation==0:
-                    window_valid=True;window_objective=0.
+                    window_valid=True;window_objective=0.;window_finite=None;window_metrics={};window_metric_batches=0
                 if not window_valid: continue
                 events=[torch.cuda.Event(enable_timing=True) for _ in range(5)] if device.type=='cuda' and len(gpu_profiles)+gpu_timing['samples']<args.profile_steps else None
                 if events: events[0].record()
@@ -996,40 +1047,29 @@ def _train(args,explicit_flags):
                 tensors={key:value.to(device,non_blocking=device.type=='cuda')
                          for key,value in batch.items() if torch.is_tensor(value)
                          and key not in {'song_index','event_index'}}
+                audio_materializer.materialize(batch,tensors)
                 timing['transfer_sec']+=time.perf_counter()-stamp
                 if events: events[1].record()
                 stamp=time.perf_counter()
                 with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
                                     enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
-                    output=_forward_batch(model,tensors,audio_auxiliary=args.audio_pointer_weight>0)
+                    output=_forward_batch(model,tensors,packed_actions=True,audio_auxiliary=args.audio_pointer_weight>0)
                     loss,metrics=_loss(output,tensors,model.config.atom_vocab_size,audio_pointer_weight=args.audio_pointer_weight,
                         placement_weight=args.placement_weight,planner_weight=args.planner_weight,
                         action_objective_policy=args.action_objective_policy)
                 window_start=((batch_index-1)//args.grad_accumulation)*args.grad_accumulation
                 window_batches=min(args.grad_accumulation,total_batches-window_start)
                 backward_loss=loss/window_batches
-                output_bad,loss_finite,backward_finite=_forward_finite_check(output,loss,backward_loss)
+                finite_flags=_forward_finite_flags(output,loss,backward_loss)
+                window_finite=finite_flags if window_finite is None else window_finite & finite_flags
                 if events: events[2].record()
-                if output_bad or not loss_finite:
-                    details={'message':'non-finite batch skipped; checkpoint remains valid',
-                        'epoch':epoch,'batch':batch_index,'output_tensors':output_bad}
-                    for key in ('song_index','event_index'):
-                        if key in batch:
-                            details[key]=batch[key].detach().cpu().tolist()
-                    print('composer_warning '+json.dumps({'message':'non-finite batch skipped; checkpoint remains valid',
-                        **details}),flush=True)
-                    optimizer.zero_grad(set_to_none=True)
-                    window_valid=False
-                    continue
-                if not backward_finite:
-                    print('composer_nonfinite_loss ' + json.dumps({'epoch':epoch,'batch':batch_index,
-                        'optimizer_steps':global_step,'loss':float(loss.detach().cpu()) if torch.isfinite(loss) else None}),flush=True)
-                    optimizer.zero_grad(set_to_none=True)
-                    window_valid=False
-                    continue
                 if scaler is not None: scaler.scale(backward_loss).backward()
                 else: backward_loss.backward()
                 window_objective=window_objective+backward_loss.detach()
+                for key,value in metrics.items():
+                    value=value.detach().float()
+                    window_metrics[key]=window_metrics[key]+value if key in window_metrics else value.clone()
+                window_metric_batches+=1
                 if events: events[3].record()
                 update=(batch_index%args.grad_accumulation==0 or batch_index==total_batches)
                 if update:
@@ -1048,10 +1088,12 @@ def _train(args,explicit_flags):
                             with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
                                     enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
                                 recovery_output=_forward_batch(model,recovered,
+                                    packed_actions=True,
                                     decode_actions=args.action_objective_policy==RECOVERY_ACTION_OBJECTIVE,
                                     audio_auxiliary=False)
                                 recovery_loss,recovery_metrics=recovery_objective(recovery_output,recovered,
                                     policy=args.action_objective_policy,weight=args.recovery_weight)
+                            window_finite=window_finite & _forward_finite_flags(recovery_output,recovery_loss,recovery_loss)
                             if torch.isfinite(recovery_loss):
                                 recovery_value=float(recovery_loss.detach())
                                 window_objective=window_objective+recovery_loss.detach()
@@ -1073,10 +1115,11 @@ def _train(args,explicit_flags):
                     # no per-parameter Python scalar checks or mutation needed.
                     grad_norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.,error_if_nonfinite=False)
                     last_gradient_norm=grad_norm.detach()
-                    if not torch.isfinite(grad_norm):
-                        if episode_backup is not None:restore_recovery_episodes(model,episode_backup)
-                        print('composer_warning '+json.dumps({'message':'non-finite gradients skipped; checkpoint remains valid',
-                            'epoch':epoch,'batch':batch_index}),flush=True)
+                    update_health=_window_update_health(window_finite,grad_norm,model,episode_backup)
+                    if not all(update_health):
+                        print('composer_warning '+json.dumps({'message':'non-finite accumulation window skipped; checkpoint remains valid',
+                            'epoch':epoch,'batch':batch_index,
+                            'finite':dict(zip(('outputs','loss','backward_loss','grad_norm'),update_health))}),flush=True)
                         optimizer.zero_grad(set_to_none=True)
                         if scaler is not None: scaler.update()
                         continue
@@ -1087,7 +1130,7 @@ def _train(args,explicit_flags):
                     # the gradient was finite (notably after BF16 overflow in
                     # an optimizer state).  Refuse to write such a checkpoint;
                     # the previous checkpoint remains the valid recovery point.
-                    _assert_model_finite(model)
+                    _assert_model_finite(model,model_finite_items)
                     optimizer.zero_grad(set_to_none=True);global_step+=1
                     optimized_total=optimized_total+window_objective;optimized_updates+=1
                     cache_started=time.perf_counter()
@@ -1099,11 +1142,14 @@ def _train(args,explicit_flags):
                     events[4].record();gpu_profiles.append(events)
                 timing['compute_sec']+=time.perf_counter()-stamp
                 seen+=int(tensors['candidate_target'].numel())
-                metric_batches+=1
-                for key,value in metrics.items():
-                    totals[key]=totals[key]+value.float() if key in totals else value.float().clone()
-                    recent_totals[key]=recent_totals[key]+value.float() if key in recent_totals else value.float().clone()
-                recent_batches+=1
+                if update:
+                    # A rejected accumulation window contributes neither updates
+                    # nor NaN metrics to later progress/checkpoint summaries.
+                    metric_batches+=window_metric_batches
+                    for key,value in window_metrics.items():
+                        totals[key]=totals[key]+value if key in totals else value.clone()
+                        recent_totals[key]=recent_totals[key]+value if key in recent_totals else value.clone()
+                    recent_batches+=window_metric_batches
                 if update and args.checkpoint_interval_steps and global_step%args.checkpoint_interval_steps==0:
                     _assert_model_finite(model)
                     stamp=time.perf_counter()

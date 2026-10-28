@@ -69,12 +69,13 @@ class ComposerDataset(Dataset):
                  quality_enabled=True, seed=0, architecture_profile='music_context_v2',
                  action_state_policy='committed_legacy_v1', motif_memory_policy='off', motif_max_events=16,
                  head_timing_policy='merged_pads_v1', structure_policy='off', structure_backend='native',
-                 atom_catalog=None):
+                 atom_catalog=None, defer_audio_queries=False):
         started = time.monotonic()
         self.cache_dir = str(cache_dir) if cache_dir is not None else None
         self.codec_atoms=[]; self.atom_to_id={}; self.samples=[]; self.songs=[]
         self.candidate_count=int(candidate_count);self.history_events=int(history_events)
         self.architecture_profile = architecture_profile
+        self.defer_audio_queries = bool(defer_audio_queries)
         self.action_state_policy=action_state_policy
         self.head_timing_policy=head_timing_policy
         self.structure_policy=structure_policy
@@ -648,6 +649,14 @@ class ComposerDataset(Dataset):
                 if path is not None:
                     try:
                         arrays=publish_bank(path,arrays)
+                        audio=self.base.songs[song_index][0].audio
+                        if hasattr(audio,'store') and hasattr(audio,'path') and len(key)>=2:
+                            sc=audio.store.disk_cache_path(audio.path)
+                            if sc is not None and sc.is_file():
+                                alias=bank_path(self.cache_dir,(sc.name,*key[1:]),sc)
+                                if alias!=path and not alias.exists():
+                                    try:os.link(path,alias)
+                                    except OSError:pass
                     except (OSError,ValueError):
                         self._bank_write_errors+=1
             item_bytes = int(arrays[0].nbytes + arrays[1].nbytes)
@@ -802,7 +811,7 @@ class ComposerDataset(Dataset):
         # event density; deterministic phases vary the centers across samples.
         uniform = (np.arange(16) + ((index % 31) + .5) / 31.) * duration / 16.
         workload_seconds = np.r_[seconds, uniform]
-        workload_audio = context.at(workload_seconds)
+        workload_audio = None if self.defer_audio_queries else context.at(workload_seconds)
         workload_target = table['workload_query'].query(workload_seconds)
         workload_weight = np.zeros(len(workload_seconds), dtype=np.float32)
         if actual_len:
@@ -848,7 +857,7 @@ class ComposerDataset(Dataset):
             'pointer_weight': torch.tensor(sample.pointer_weight, dtype=torch.float32),
             'song_index': torch.tensor(sample.song_index),
             'event_index': torch.tensor(ev),
-            'workload_audio': torch.from_numpy(workload_audio),
+            **({'workload_audio': torch.from_numpy(workload_audio)} if workload_audio is not None else {}),
             'workload_target': torch.from_numpy(workload_target),
             'workload_weight': torch.from_numpy(workload_weight),
             'workload_seconds': torch.from_numpy(workload_seconds),
@@ -873,7 +882,14 @@ class ComposerDataset(Dataset):
                                         self.history_events,self.motif_max_events))
         if self.action_state_policy=='selected_prefix_v3':
             from .context_features import selected_action_state
-            result['selected_action_state']=selected_action_state(table['state_index'],ev,sample.target)
+            # Dataset tables represent authored prefixes only. Recovery builds
+            # its own state and never consults this training-target cache.
+            with self._song_table_locks.setdefault(sample.song_index,threading.RLock()):
+                selected_cache=table.setdefault('selected_target_states',{})
+                selected_key=(ev,sample.target)
+                if selected_key not in selected_cache:
+                    selected_cache[selected_key]=selected_action_state(table['state_index'],ev,sample.target)
+                result['selected_action_state']=selected_cache[selected_key]
         if self.architecture_profile in MUSIC_PROFILES:
             # Trailing labels have their own support; a future exclusion must
             # not mask an otherwise valid past-only window (or vice versa).
@@ -881,29 +897,39 @@ class ComposerDataset(Dataset):
                 probe_weight * views.window_weight(workload_seconds-width, workload_seconds)
                 for width in (1.,1.,4.,4.)])
             result.update({
-                'interval_audio': torch.from_numpy(context.interval(float(clock.at(sample.previous)) if sample.previous is not None else 0., seconds)),
-                'trailing_audio': torch.from_numpy(context.trailing(workload_seconds)),
+                **({} if self.defer_audio_queries else {
+                    'interval_audio': torch.from_numpy(context.interval(float(clock.at(sample.previous)) if sample.previous is not None else 0., seconds)),
+                    'trailing_audio': torch.from_numpy(context.trailing(workload_seconds))}),
                 'trailing_target': torch.from_numpy(trailing_workload_targets(table['known_point_seconds'],
                     table['known_head_prefix'], workload_seconds)),
                 'trailing_weight': torch.from_numpy(trailing_weight),
             })
         if self.architecture_profile==GROUNDED_PROFILE:
-            result.update(self._grounded_features(sample.song_index,workload_seconds,seconds,table=table))
+            result.update(self._grounded_features(sample.song_index,workload_seconds,seconds,table=table,context=context))
             # Candidates are a biased proposal set. Equal total weight for
             # candidates and uniform probes; the latter cover authored rests.
             place_weight=result['placement_weight']
             place_weight[:self.candidate_count]*=torch.from_numpy((~candidate_mask).astype(np.float32))[:,None]/max(1,actual_len)
             place_weight[self.candidate_count:]/=16.
             result['planner_weight']=result['planner_weight']/max(1,len(result['planner_weight']))
+        if self.defer_audio_queries:
+            # Shared immutable CPU bank only; CUDA work belongs to the trainer.
+            result['_audio_bank'] = context
+            result['_audio_music'] = self.architecture_profile in MUSIC_PROFILES
+            result['_audio_grounded'] = self.architecture_profile == GROUNDED_PROFILE
+            result['audio_query_seconds'] = torch.from_numpy(workload_seconds)
+            result['audio_previous_seconds'] = torch.tensor(
+                float(clock.at(sample.previous)) if sample.previous is not None else 0., dtype=torch.float64)
         return result
 
-    def _grounded_features(self,song_index,query_seconds,candidate_seconds,table=None):
+    def _grounded_features(self,song_index,query_seconds,candidate_seconds,table=None,context=None,defer_queries=None):
         from .audio_lens import LensBank,PlacementTargets
         from .planning import PlanGrid
         table=self._song_table(song_index) if table is None else table
         song=self.base.songs[song_index][0]
         key=self._song_feature_key(song_index)
-        with self._feature_lock:context=self._context_cache.get(key)
+        if context is None:
+            with self._feature_lock:context=self._context_cache.get(key)
         if context is None:
             values,times=self._song_features(song_index)
             context=AcousticContext(values,times,table['audio_duration'],validated_bank=True)
@@ -920,10 +946,13 @@ class ComposerDataset(Dataset):
                 table['placement_data']=PlacementTargets(table['points'],song.tempo,song.first,
                     self._song_audio_ends[song_index],self.event_views[song_index])
         plan=table['planner_data']
-        patches,valid=context.lens_bank.query(query_seconds)
+        lens={}
+        if not (self.defer_audio_queries if defer_queries is None else defer_queries):
+            patches,valid=context.lens_bank.query(query_seconds)
+            lens={'audio_lens':torch.from_numpy(patches),'audio_lens_mask':torch.from_numpy(valid)}
         targets,weights=table['placement_data'].query(query_seconds)
         indices,mix=plan.locate(candidate_seconds)
-        return {'audio_lens':torch.from_numpy(patches),'audio_lens_mask':torch.from_numpy(valid),
+        return {**lens,
             'placement_target':torch.from_numpy(targets),'placement_weight':torch.from_numpy(weights),
             'planner_audio':torch.from_numpy(plan.audio),'planner_target':torch.from_numpy(plan.targets),
             'planner_weight':torch.from_numpy(plan.weights.copy()),
@@ -937,7 +966,7 @@ def collate_composer(items):
     result['candidate_features']=torch.stack([item['candidate_features'] for item in items])
     result['candidate_target']=torch.stack([item['candidate_target'] for item in items])
     result['action_target']=torch.stack([item['action_target'] for item in items])
-    if 'audio_lens' in items[0]:
+    if ('audio_lens' in items[0] or items[0].get('_audio_grounded',False)):
         # Grounded v9 ignores slots after the first STOP. Keep every authored
         # atom and its terminating STOP, without projecting padding through
         # both 18k-class heads. Checkpoint slot capacity stays full.
@@ -954,7 +983,7 @@ def collate_composer(items):
     result['future_target']=torch.stack([item['future_target'] for item in items])
     result['condition']=torch.stack([item['condition'] for item in items])
     result['history']=pad_sequence([item['history'] for item in items],batch_first=True,padding_value=0)
-    if 'audio_lens' in items[0] and result['history'].ndim==3:
+    if ('audio_lens' in items[0] or items[0].get('_audio_grounded',False)) and result['history'].ndim==3:
         # History sums atom embeddings after masking STOP. Empty trailing atom
         # columns add exactly zero, but expanding them through every factor
         # embedding is expensive (33 columns for ordinary one/two-note events).
@@ -975,10 +1004,46 @@ def collate_composer(items):
                 'trailing_audio', 'trailing_target', 'trailing_weight', 'head_timing',
                 'eos_weight', 'future_weight', 'pointer_weight','action_weight',
                 'audio_lens','audio_lens_mask','placement_target','placement_weight','planner_indices','planner_mix',
-                'selected_action_state','structure_features','structure_transition'):
+                'selected_action_state','structure_features','structure_transition',
+                'audio_query_seconds','audio_previous_seconds'):
         if key in items[0]: result[key] = torch.stack([item[key] for item in items])
     if 'planner_audio' in items[0]:
         for key in ('planner_audio','planner_target','planner_weight'):
             result[key]=pad_sequence([item[key] for item in items],batch_first=True,padding_value=0.)
         result['planner_mask']=pad_sequence([item['planner_mask'] for item in items],batch_first=True,padding_value=True)
+    if '_audio_bank' in items[0]:
+        banks=[]; rows=[]; identities={}
+        for row,item in enumerate(items):
+            identity=id(item['_audio_bank'])
+            if identity not in identities:
+                identities[identity]=len(banks)
+                banks.append(item['_audio_bank']);rows.append([])
+            rows[identities[identity]].append(row)
+        result['_audio_banks']=tuple(banks)
+        result['_audio_bank_rows']=tuple(tuple(group) for group in rows)
+        result['_audio_music']=items[0]['_audio_music']
+        result['_audio_grounded']=items[0]['_audio_grounded']
+    if 'planner_audio' in items[0]:
+        unique=[];inverse=[];groups={}
+        for row,item in enumerate(items):
+            # Dataset rows of one song share the immutable plan.audio storage.
+            # Independently allocated tables remain separate without scanning
+            # whole-song audio on the collate hot path.
+            audio=item['planner_audio']
+            key=(int(item['song_index']),item['condition'].numpy().tobytes(),
+                 audio.data_ptr(),tuple(audio.shape),tuple(audio.stride()),
+                 item['planner_mask'].numpy().tobytes())
+            group=groups.get(key)
+            if group is None:
+                group=len(unique);unique.append(row);groups[key]=group
+            inverse.append(group)
+        result['planner_unique_indices']=torch.tensor(unique,dtype=torch.long)
+        result['planner_inverse']=torch.tensor(inverse,dtype=torch.long)
+    if 'planner_audio' in items[0]:
+        targets=result['action_target']
+        active=torch.ones_like(targets,dtype=torch.bool)
+        active[:,1:]=targets[:,:-1].ne(0)
+        result['packed_slot_indices']=active.nonzero(as_tuple=False)
+        counts=active.sum(-1)
+        result['packed_first_indices']=counts.cumsum(0)-counts
     return result

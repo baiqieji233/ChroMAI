@@ -37,6 +37,8 @@ _banks = OrderedDict()
 _identity_bases = OrderedDict()
 _key_locks = {}
 _query_banks=OrderedDict()
+_prepared_views = OrderedDict()
+_LOCAL_OFFSETS = np.array((-.04, -.02, 0., .02, .04), dtype=np.float64)
 
 
 def structure_dim_for_policy(policy):
@@ -63,9 +65,24 @@ def clear_structure_caches():
         for song in songs:
             try:delattr(song,'_composer_structure_identity_base')
             except (AttributeError,TypeError):pass
-        _query_banks.clear();_banks.clear();_identity_bases.clear()
+        _query_banks.clear();_banks.clear();_identity_bases.clear();_prepared_views.clear()
         _cache_directory.cache_clear()
     clear_backend_identity_cache()
+
+
+def _audio_duration_sec(song):
+    """Read cached audio duration without triggering _LazyAudio disk stat/load on hot queries."""
+    audio = song.audio
+    try:
+        base = vars(song).get('_composer_structure_identity_base')
+        if base is not None and base[0] is audio:
+            return float(base[1]['duration'])
+    except TypeError:
+        pass
+    fallback = _identity_bases.get(id(song))
+    if fallback is not None and fallback[0] is song and fallback[1] is audio:
+        return float(fallback[2]['duration'])
+    return float(audio.duration_sec)
 
 
 def resolve_structure_backend(requested='auto'):
@@ -349,7 +366,7 @@ def _bank(song, cache_dir, backend, policy='metrical_context_v1'):
     with _lock:
         _query_banks[query_key]=(song,audio,result)
         _query_banks.move_to_end(query_key)
-        while len(_query_banks)>128:_query_banks.popitem(last=False)
+        while len(_query_banks)>2048:_query_banks.popitem(last=False)
     return result
 
 
@@ -375,7 +392,7 @@ def _cold_bank(song, cache_dir, backend, *, policy='metrical_context_v1'):
             result = _build_bank(song, cache_dir, identity, key)
             with _lock:
                 _banks[cache_key] = result
-                while len(_banks) > 8:
+                while len(_banks) > 512:
                     _banks.popitem(last=False)
             return result
     finally:
@@ -475,6 +492,36 @@ def _build_bank(song, cache_dir, identity, key):
     return (*result,local_array) if enhanced else result
 
 
+def _get_prepared_views(cached, enhanced):
+    bank = cached[0]
+    view_key = (id(bank), bool(enhanced))
+    with _lock:
+        hit = _prepared_views.get(view_key)
+        if hit is not None and hit[0] is bank:
+            _prepared_views.move_to_end(view_key)
+            return hit[1]
+    bank, novelty, order, _selected = cached[:4]
+    anchors = np.ascontiguousarray(bank[:, 0], dtype=np.float64)
+    rec = np.asarray(bank[:, 2:]).reshape(len(bank), len(PERIODS), 8)
+    nov_t = np.ascontiguousarray(novelty[:, 0], dtype=np.float64)
+    nov_v = np.ascontiguousarray(novelty[:, 1], dtype=np.float64)
+    local_views = None
+    if enhanced and len(cached) > 4 and len(cached[4]):
+        local = cached[4]
+        local_views = (
+            np.ascontiguousarray(local[:, 0], dtype=np.float64),
+            np.ascontiguousarray(local[:, 1], dtype=np.float64),
+            np.ascontiguousarray(local[:, 2], dtype=np.float64),
+        )
+    views = (anchors, rec, nov_t, nov_v, order, local_views)
+    with _lock:
+        _prepared_views[view_key] = (bank, views)
+        _prepared_views.move_to_end(view_key)
+        while len(_prepared_views) > 2048:
+            _prepared_views.popitem(last=False)
+    return views
+
+
 def structure_features(song, beats, seconds, *, policy='metrical_context_v1', cache_dir=None, backend='auto'):
     """Return 48 legacy or 51 enhanced features on the same beat/second axis."""
     if policy not in STRUCTURE_POLICIES: raise ValueError(f'Unknown structure policy: {policy}')
@@ -490,50 +537,64 @@ def structure_features(song, beats, seconds, *, policy='metrical_context_v1', ca
     if policy == 'native_periodic_v1' or not len(beats): return out
     enhanced=policy==ENHANCED_POLICY
     cached=_bank(song,cache_dir,backend,policy=policy) if enhanced else _bank(song,cache_dir,backend)
-    bank,novelty,order,selected=cached[:4]
-    anchors = np.asarray(bank[:, 0], dtype=np.float64)
+    anchors, rec, nov_t, nov_v, order, local_views = _get_prepared_views(cached, enhanced)
     # Select candidates from the nearest anchor, then interpolate evidence for
     # that same period from the surrounding anchors. This never blends two
     # different periods into a single invented token.
-    rec = np.asarray(bank[:, 2:]).reshape(len(bank), len(PERIODS), 8)
     hi = np.clip(np.searchsorted(anchors, beats, side='right'), 1, len(anchors)-1) if len(anchors)>1 else np.zeros(len(beats), dtype=int)
     lo = np.maximum(0, hi-1)
     alpha = np.clip((beats-anchors[lo])/np.maximum(anchors[hi]-anchors[lo], 1e-8), 0., 1.) if len(anchors)>1 else np.zeros(len(beats))
     nearest = np.where(alpha < .5, lo, hi)
-    values=[];period_ids=[]
-    for slot in range(4):
-        raw_ids=order[nearest,slot]
-        ids = np.maximum(raw_ids,0)
-        v = rec[lo, ids] * (1.-alpha[:, None]) + rec[hi, ids] * alpha[:, None]
-        if enhanced:v[raw_ids<0]=0.
-        values.append(v);period_ids.append(ids)
-    weights=(_representative_weights(np.stack([value[:,0] for value in values],axis=-1)) if enhanced else None)
-    for slot,(v,ids) in enumerate(zip(values,period_ids)):
-        p = PERIODS[ids]; wt = weights[:,slot] if enhanced else v[:, 0]
-        angle = 2*np.pi*beats/p
-        z1 = (v[:, 3] + 1j*v[:, 4]) * np.exp(1j*angle)
-        z2 = (v[:, 6] + 1j*v[:, 7]) * np.exp(2j*angle)
-        if enhanced:
-            # Encode direction and relative harmonic shape once; the slot's
-            # confidence gates it once. Do not multiply confidence by the
-            # already attenuated absolute coefficient a second time.
-            magnitude=np.maximum(np.abs(z1),np.abs(z2))
-            z1=np.divide(z1,magnitude,out=np.zeros_like(z1),where=magnitude>1e-6)
-            z2=np.divide(z2,magnitude,out=np.zeros_like(z2),where=magnitude>1e-6)
-        token = np.column_stack((wt*z1.imag, wt*z1.real, wt*z2.imag, wt*z2.real,
-            np.log1p(p)*wt, np.log1p(v[:, 5])*wt, wt, v[:, 1], v[:, 2], wt > 1e-8))
-        out[:, 6+10*slot:16+10*slot] = token
-    out[:, 46] = np.interp(beats, novelty[:, 0], novelty[:, 1], left=0., right=0.)
-    out[:, 47] = np.clip(out[:, 46] * np.sum(out[:, [12,22,32,42]], axis=1), 0., 1.)
+    raw_ids = order[nearest]
+    ids = np.maximum(raw_ids, 0)
+    a3 = alpha[:, None, None]
+    v = rec[lo[:, None], ids] * (1. - a3) + rec[hi[:, None], ids] * a3
     if enhanced:
-        local=cached[4]
-        if len(local):
-            available=(seconds>=0.)&(seconds<float(song.audio.duration_sec))
-            for column in range(2):
-                peaks=np.maximum.reduce([np.interp(seconds+offset,local[:,0],local[:,column+1],left=0.,right=0.)
-                                         for offset in (-.04,-.02,0.,.02,.04)])
-                out[:,48+column]=np.where(available,peaks,0.)
-            out[:,50]=available
+        v[raw_ids < 0] = 0.
+        wt = _representative_weights(v[:, :, 0])
+    else:
+        wt = v[:, :, 0]
+    p = PERIODS[ids]
+    angle = (2.0 * np.pi) * beats[:, None] / p
+    c1, s1 = np.cos(angle), np.sin(angle)
+    c2 = c1 * c1 - s1 * s1
+    s2 = 2.0 * s1 * c1
+    z1_re = v[:, :, 3] * c1 - v[:, :, 4] * s1
+    z1_im = v[:, :, 3] * s1 + v[:, :, 4] * c1
+    z2_re = v[:, :, 6] * c2 - v[:, :, 7] * s2
+    z2_im = v[:, :, 6] * s2 + v[:, :, 7] * c2
+    if enhanced:
+        # Encode direction and relative harmonic shape once; the slot's
+        # confidence gates it once. Do not multiply confidence by the
+        # already attenuated absolute coefficient a second time.
+        magnitude = np.maximum(np.hypot(z1_re, z1_im), np.hypot(z2_re, z2_im))
+        inv_mag = np.divide(1.0, magnitude, out=np.zeros_like(magnitude), where=magnitude > 1e-6)
+        z1_re = z1_re * inv_mag
+        z1_im = z1_im * inv_mag
+        z2_re = z2_re * inv_mag
+        z2_im = z2_im * inv_mag
+    slots = out[:, 6:46].reshape(len(beats), 4, 10)
+    slots[:, :, 0] = wt * z1_im
+    slots[:, :, 1] = wt * z1_re
+    slots[:, :, 2] = wt * z2_im
+    slots[:, :, 3] = wt * z2_re
+    slots[:, :, 4] = np.log1p(p) * wt
+    slots[:, :, 5] = np.log1p(v[:, :, 5]) * wt
+    slots[:, :, 6] = wt
+    slots[:, :, 7] = v[:, :, 1]
+    slots[:, :, 8] = v[:, :, 2]
+    slots[:, :, 9] = wt > 1e-8
+    out[:, 46] = np.interp(beats, nov_t, nov_v, left=0., right=0.)
+    out[:, 47] = np.clip(out[:, 46] * wt.sum(axis=1), 0., 1.)
+    if enhanced and local_views is not None:
+        local_t, local_c0, local_c1 = local_views
+        duration_sec = _audio_duration_sec(song)
+        available = (seconds >= 0.) & (seconds < duration_sec)
+        shifted = (seconds[:, None] + _LOCAL_OFFSETS[None, :]).reshape(-1)
+        for column, col_values in enumerate((local_c0, local_c1)):
+            peaks = np.interp(shifted, local_t, col_values, left=0., right=0.).reshape(len(seconds), -1).max(axis=1)
+            out[:, 48+column] = np.where(available, peaks, 0.)
+        out[:, 50] = available
     return out
 
 

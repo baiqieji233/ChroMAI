@@ -58,7 +58,7 @@ def test_evaluation_pools_weights_and_restores_mode_and_rng(monkeypatch):
     def collate(items):
         x = torch.tensor([item['x'] for item in items], dtype=torch.float32)
         return {'eos_target': x, 'sample_weight': x + 1, 'candidate_target': x.long()}
-    def forward(model, tensors):
+    def forward(model, tensors, *, packed_actions=False):
         assert not model.training
         torch.rand(1)
         return {'candidate_logits': tensors['eos_target']}

@@ -13,13 +13,25 @@ SCHEMA = 'composer_audio_nodes_native_v3'
 BANK_DTYPE = np.dtype([('values', '<f4', (120,)), ('times', '<f8')])
 
 
+def _digest_path(cache_dir, key_tuple, resolved_source, stat):
+    identity = (SCHEMA, key_tuple, resolved_source,
+                stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    digest = hashlib.sha256(json.dumps(identity, ensure_ascii=True).encode()).hexdigest()
+    return Path(cache_dir) / 'composer_audio_banks' / SCHEMA / (digest + '.npy')
+
+
 def bank_path(cache_dir, feature_key, source_cache):
-    source_cache=Path(source_cache)
-    stat=source_cache.stat()
-    identity=(SCHEMA,feature_key,str(source_cache.resolve()),
-              stat.st_size,stat.st_mtime_ns,stat.st_ctime_ns)
-    digest=hashlib.sha256(json.dumps(identity,ensure_ascii=True).encode()).hexdigest()
-    return Path(cache_dir)/'composer_audio_banks'/SCHEMA/(digest+'.npy')
+    source_cache = Path(source_cache)
+    stat = source_cache.stat()
+    resolved = str(source_cache.resolve())
+    primary = _digest_path(cache_dir, feature_key, resolved, stat)
+    if primary.is_file():
+        return primary
+    if isinstance(feature_key, tuple) and len(feature_key) >= 2 and isinstance(feature_key[0], str):
+        content_cand = _digest_path(cache_dir, (source_cache.name, *feature_key[1:]), resolved, stat)
+        if content_cand.is_file():
+            return content_cand
+    return primary
 
 
 def load_bank(path):

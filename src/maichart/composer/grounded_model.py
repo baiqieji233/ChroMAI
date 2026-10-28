@@ -105,7 +105,9 @@ class AudioGroundedComposer(ChartComposer):
                 audio_lens_mask=None,planner_audio=None,planner_mask=None,planner_indices=None,
                 planner_mix=None,planner_override=None,lens_embeddings=None,
                 motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,
-                selected_action_state=None,structure_features=None,structure_transition=None,**unused):
+                selected_action_state=None,structure_features=None,structure_transition=None,
+                packed_actions=False,planner_unique_indices=None,planner_inverse=None,
+                packed_slot_indices=None,packed_first_indices=None,**unused):
         if (audio_lens is None and lens_embeddings is None) or planner_audio is None or head_timing is None:
             raise ValueError('audio_grounded_v3 requires local audio, coarse plan audio and causal head timing')
         # A full training decode already needs every atom's factor vector.
@@ -151,7 +153,22 @@ class AudioGroundedComposer(ChartComposer):
         placement=self.placement_head(torch.cat((lens,effective_condition[:,None].expand(-1,lens.size(1),-1)),-1)).float()
         # Explicit external overrides remain explicit evidence (e.g. an edited
         # generation curve); masking only applies to model-computed controls.
-        plan=(self.planner(planner_audio,effective_condition,planner_mask) if planner_override is None else planner_override.to(hidden))
+        if planner_override is not None:
+            plan=planner_override.to(hidden)
+        elif planner_unique_indices is not None and planner_inverse is not None:
+            # Group by the actual controls after masking, preserving the exact
+            # original per-row RNG draw and distinct difficulty conditions.
+            if not self.training or self.config.condition_mask_prob<=0. or condition.size(-1)<=1:
+                representatives,inverse=planner_unique_indices,planner_inverse
+            else:
+                keys=torch.cat((planner_inverse[:,None].to(effective_condition),effective_condition),-1)
+                _,inverse=torch.unique(keys,dim=0,return_inverse=True)
+                representatives=torch.full((batch,),batch,device=condition.device,dtype=torch.long)
+                representatives.scatter_reduce_(0,inverse,torch.arange(batch,device=condition.device),reduce='amin',include_self=True)
+                representatives=representatives[representatives.ne(batch)]
+            plan=self.planner(planner_audio[representatives],effective_condition[representatives],planner_mask[representatives])[inverse]
+        else:
+            plan=self.planner(planner_audio,effective_condition,planner_mask)
         candidate_plan=read_plan(plan,planner_indices,planner_mix)
         workload=self.predict_workload(workload_audio,effective_condition)
         decision_workload=workload if workload_override is None else workload_override.to(workload)
@@ -267,13 +284,15 @@ class AudioGroundedComposer(ChartComposer):
                 motif_strength=motif_strength,motif_keep=symbolic_keep,
                 selected_action_state=selected_action_state,state_base=result.get('selected_state_base'),
                 state_keep=result.get('selected_state_keep'),factor_weight=factor_weight,
-                previous_heads=result.get('previous_heads')))
+                previous_heads=result.get('previous_heads'),packed_actions=packed_actions,
+                packed_slot_indices=packed_slot_indices,packed_first_indices=packed_first_indices))
         return result
 
     def decode_candidate(self,candidate_context,candidate_indices=None,*,action_targets=None,project_actions=True,audio_context=None,
                          motif_ids=None,motif_relative_beats=None,motif_mask=None,motif_strength=1.,motif_keep=None,
                          selected_action_state=None,state_base=None,state_keep=None,factor_weight=None,
-                         project_audio_actions=True,previous_heads=None):
+                         project_audio_actions=True,previous_heads=None,packed_actions=False,
+                         packed_slot_indices=None,packed_first_indices=None):
         if hasattr(self,'cross_event_relative_factors') and previous_heads is None:
             raise ValueError('Cross-event action decoding requires causal previous_heads from the same forward')
         if previous_heads is not None and previous_heads.shape!=(candidate_context.size(0),8):
@@ -333,6 +352,22 @@ class AudioGroundedComposer(ChartComposer):
                     audio_contexts=audio_contexts+prefix
                 heads=self.action_factors.atom_head_lanes[action_targets].to(contexts)
                 relation=(heads.cumsum(-2)-heads)>0
+            slot_indices=None
+            if packed_actions:
+                if action_targets is None or action_targets.ndim!=2 or contexts.ndim!=3:
+                    raise ValueError('Packed actions require selected candidates and [B,S] teacher targets')
+                if packed_slot_indices is None:
+                    active=torch.ones_like(action_targets,dtype=torch.bool)
+                    # Legacy activity contains joint first-STOP supervision.
+                    active[:,1:]=action_targets[:,:-1].ne(0)
+                    slot_indices=active.nonzero(as_tuple=False)
+                else:
+                    slot_indices=packed_slot_indices
+                row,slot=slot_indices.unbind(-1)
+                contexts=contexts[row,slot]
+                if audio_contexts is not None:audio_contexts=audio_contexts[row,slot]
+                if relation is not None:relation=relation[row,slot]
+                result['action_slot_indices']=slot_indices
             contexts=self.slot_fusion(contexts)
             full_logits=self.action_head(contexts)+F.linear(contexts,factor_weight)
             conserved_tables=self.conserved_action_head.detail_tables() if hasattr(self,'conserved_action_head') else None
@@ -346,8 +381,14 @@ class AudioGroundedComposer(ChartComposer):
                 # Relative movement is a macro starting-pad decision. Applying
                 # its per-pad shift before within-group normalization would
                 # cancel the entire learned branch in the grouped head.
-                first=self._cross_event_logits(full_logits[...,0,:],contexts[...,0,:],previous_heads)
-                full_logits=torch.cat((first.unsqueeze(-2),full_logits[...,1:,:]),-2)
+                if slot_indices is None:
+                    first=self._cross_event_logits(full_logits[...,0,:],contexts[...,0,:],previous_heads)
+                    full_logits=torch.cat((first.unsqueeze(-2),full_logits[...,1:,:]),-2)
+                else:
+                    first_rows=(slot.eq(0).nonzero(as_tuple=False).flatten()
+                        if packed_first_indices is None else packed_first_indices)
+                    first=self._cross_event_logits(full_logits[first_rows],contexts[first_rows],previous_heads[row[first_rows]])
+                    full_logits=full_logits.index_copy(0,first_rows,first)
             result['action_logits']=full_logits
             if audio_contexts is not None:
                 audio_contexts=self.slot_fusion(audio_contexts)

@@ -62,6 +62,9 @@ class AcousticContext:
         data = np.concatenate((dynamics, bands, source[:, 80:92]), axis=-1)
         self.data = np.nan_to_num(data, nan=0.0, posinf=0.0, neginf=0.0)
         intervals = np.diff(self.times)
+        self.slopes = ((self.data[1:] - self.data[:-1]) / np.maximum(intervals, 1e-9)[:, None]
+                       if len(self.times) >= 2 else np.zeros((0, 26), dtype=np.float64))
+        self.chroma = np.ascontiguousarray(self.data[:, 14:26], dtype=np.float64)
         self.prefix = np.vstack((np.zeros((1, 26)),
             np.cumsum((self.data[:-1] + self.data[1:]) * .5 * intervals[:, None], axis=0)))
         self.global_mean = np.nan_to_num(self.prefix[-1] / self.duration if len(data) else np.zeros(26), nan=0.0)
@@ -74,8 +77,7 @@ class AcousticContext:
         base_time=self.times[left]
         base=self.data[left]
         delta = seconds - base_time
-        denom = np.maximum(self.times[left + 1] - base_time, 1e-9)
-        slope = ((self.data[left + 1] - base) / denom[:, None])
+        slope = self.slopes[left]
         return self.prefix[left] + base * delta[:, None] + .5 * slope * delta[:, None] ** 2
 
     def at(self, seconds):
@@ -117,8 +119,20 @@ class AcousticContext:
         width = np.maximum(stop - start, 1e-6)
         mean = area[:, :14] / width[:, None]
         if len(self.times):
-            endpoints = np.column_stack([
-                np.interp(boundaries, self.times, self.data[:, c]) for c in range(14, 26)])
+            if len(self.times) == 1:
+                endpoints = np.repeat(self.chroma[:1], len(boundaries), axis=0)
+            else:
+                clamped = np.clip(boundaries, self.times[0], self.times[-1])
+                idx = np.clip(np.searchsorted(self.times, clamped, side='right') - 1, 0, len(self.times) - 2)
+                t0 = self.times[idx]
+                c0 = self.chroma[idx]
+                # np.interp divides the value difference first, then multiplies
+                # by the clock delta. Exact source endpoints copy the row:
+                # reconstructing the final row introduces rounding residuals
+                # that survive in cosine novelty even after float32 casting.
+                slope = (self.chroma[idx + 1] - c0) / (self.times[idx + 1] - t0)[:, None]
+                endpoints = c0 + slope * (clamped - t0)[:, None]
+                endpoints[clamped == self.times[-1]] = self.chroma[-1]
             begin, end = endpoints[-1], endpoints[:-1]
             norm = np.linalg.norm(end, axis=-1) * np.linalg.norm(begin)
             novelty = np.where(norm > 1e-9, 1. - (end * begin).sum(-1) / np.maximum(norm, 1e-9), 0.)

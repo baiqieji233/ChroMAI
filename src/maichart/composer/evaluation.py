@@ -205,7 +205,7 @@ def evaluate_teacher_forced(model, dataset, *, device, batch_size=32, max_batche
                 tensors = {k: v.to(device) for k, v in batch.items() if torch.is_tensor(v)}
                 with torch.autocast(device_type=device.type, enabled=precision != 'fp32',
                                     dtype=torch.bfloat16 if precision == 'bf16' else torch.float16):
-                    output = _forward_batch(model, tensors)
+                    output = _forward_batch(model, tensors, packed_actions=True)
                     _, metrics = _loss(output, tensors, len(dataset.codec_atoms) + 1, **(loss_kwargs or {}))
                 w = tensors.get('sample_weight', torch.ones_like(tensors['eos_target']))
                 transition = tensors.get('transition_weight', torch.ones_like(w))

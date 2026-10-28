@@ -60,14 +60,33 @@ class LayoutBatchPrefetch:
         with lock:
             return self._loader.dataset[index]
 
+    def _sample_group(self, group):
+        key, pos_indices = group
+        with self._source_locks_guard:
+            lock = self._source_locks.setdefault(key, threading.Lock())
+        with lock:
+            dataset = self._loader.dataset
+            return [(pos, dataset[index]) for pos, index in pos_indices]
+
     def _prepare(self, indices):
         started = time.perf_counter()
         if self._samples is None:
             batch = next(self._source)
         else:
-            # The batch sampler owns exact sample order. Futures finish in any
-            # order, but map returns in that order before the ordinary collate.
-            batch = self._loader.collate_fn(list(self._samples.map(self._sample, indices)))
+            # Group by concurrency key so each song/source submits one contiguous
+            # task instead of 64 per-sample futures fighting on the same lock,
+            # while distinct sources in the batch run in parallel and restore
+            # the batch sampler's exact original item order before collate_fn.
+            indices_list = list(indices)
+            groups = {}
+            for pos, index in enumerate(indices_list):
+                key = self._loader.dataset.prepare_concurrency_key(index)
+                groups.setdefault(key, []).append((pos, index))
+            items = [None] * len(indices_list)
+            for group_rows in self._samples.map(self._sample_group, groups.items()):
+                for pos, item in group_rows:
+                    items[pos] = item
+            batch = self._loader.collate_fn(items)
             # Match the zero-worker DataLoader's actual pin policy. This does
             # not move audio or model work onto CUDA sample threads.
             if self._source._pin_memory:
