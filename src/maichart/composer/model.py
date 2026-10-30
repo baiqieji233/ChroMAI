@@ -31,7 +31,13 @@ COMPOSER_POLICY_FIELDS = {
     'structure_policy': ({'off','native_periodic_v1','metrical_context_v1','metrical_context_v2'}, 'off', 'metrical_context_v2'),
     'contact_policy': ({'off','diagnostic_v1','contact_groups_v1'}, 'off', 'diagnostic_v1'),
     'future_horizon_policy': ({'off','candidate_horizon_v1'}, 'off', 'candidate_horizon_v1'),
-    'action_head_policy': ({'flat_v1','conserved_grouped_v2'}, 'flat_v1', 'conserved_grouped_v2'),
+    'echo_prior_policy': ({'off','phase_echo_v1'}, 'off', 'phase_echo_v1'),
+    'timing_distribution_policy': ({'hierarchical_v1','survival_v1','survival_integrated_v2'}, 'hierarchical_v1', 'survival_integrated_v2'),
+    'button_load_policy': ({'off','per_button_v1','per_button_context_v2'}, 'off', 'per_button_context_v2'),
+    'fine_timing_policy': ({'off','relative_phrase_v1'}, 'off', 'off'),
+    'density_feedback_policy': ({'off','causal_count_debt_v1'}, 'off', 'off'),
+    'action_head_policy': ({'flat_v1','conserved_grouped_v2','compact_grouped_v3'}, 'flat_v1', 'compact_grouped_v3'),
+    'configuration_quality_policy': ({'off','cooperative_v1','cooperative_v2','song_paired_v3'}, 'off', 'song_paired_v3'),
 }
 
 
@@ -49,7 +55,13 @@ def validate_supported_context_policies(config):
         'cross_event_relation_policy':values.get('cross_event_relation_policy','off')!='off',
         'structure_policy':values.get('structure_policy','off')!='off',
         'future_horizon_policy':values.get('future_horizon_policy','off')!='off',
+        'echo_prior_policy':values.get('echo_prior_policy','off')!='off',
+        'timing_distribution_policy':values.get('timing_distribution_policy','hierarchical_v1')!='hierarchical_v1',
+        'button_load_policy':values.get('button_load_policy','off')!='off',
+        'fine_timing_policy':values.get('fine_timing_policy','off')!='off',
+        'density_feedback_policy':values.get('density_feedback_policy','off')!='off',
         'action_head_policy':values.get('action_head_policy','flat_v1')!='flat_v1',
+        'configuration_quality_policy':values.get('configuration_quality_policy','off')!='off',
         'condition_mask_prob':values.get('condition_mask_prob',0.)!=0.,
     }
     for name, invalid in unsupported.items():
@@ -60,10 +72,12 @@ def resolve_composer_policy(name, requested='auto', parent_config=None, *, resum
     choices, legacy, fresh = COMPOSER_POLICY_FIELDS[name]
     if not isinstance(requested,str) or requested not in {'auto', *choices}:
         raise ValueError(f'Unknown {name}')
-    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy','structure_policy','future_horizon_policy','action_head_policy'} and architecture_profile!=GROUNDED_PROFILE:
+    if name in {'motif_memory_policy','slide_factor_policy','history_memory_policy','history_attention_policy','head_timing_policy','cross_event_relation_policy','structure_policy','future_horizon_policy','echo_prior_policy','timing_distribution_policy','button_load_policy','fine_timing_policy','density_feedback_policy','action_head_policy','configuration_quality_policy'} and architecture_profile!=GROUNDED_PROFILE:
         fresh=legacy
     inherited = parent_config.get(name, legacy) if parent_config else None
-    if not resume and name in {'head_timing_policy','cross_event_relation_policy','future_horizon_policy','action_head_policy'}:
+    if resume and name in {'echo_prior_policy','timing_distribution_policy','button_load_policy'} and inherited is None:
+        inherited = legacy
+    if not resume and name in {'head_timing_policy','cross_event_relation_policy','future_horizon_policy','echo_prior_policy','timing_distribution_policy','button_load_policy','action_head_policy'}:
         inherited=None
     resolved = (inherited or fresh) if requested == 'auto' else requested
     if resume and inherited is not None and resolved != inherited:
@@ -136,7 +150,13 @@ class ComposerConfig:
     structure_policy: str = 'off'
     contact_policy: str = 'off'
     future_horizon_policy: str = 'off'
+    echo_prior_policy: str = 'off'
+    timing_distribution_policy: str = 'hierarchical_v1'
+    button_load_policy: str = 'off'
+    fine_timing_policy: str = 'off'
+    density_feedback_policy: str = 'off'
     action_head_policy: str = 'flat_v1'
+    configuration_quality_policy: str = 'off'
     condition_mask_prob: float = 0.
     structure_backend: str = 'native'
     structure_dropout: float = .15
@@ -154,6 +174,8 @@ class ComposerConfig:
         if not math.isfinite(self.structure_dropout) or not 0 <= self.structure_dropout <= .9:
             raise ValueError('structure_dropout must be in [0,.9]')
         self.condition_mask_prob=resolve_condition_mask_prob(self.condition_mask_prob)
+        if self.density_feedback_policy!='off' and self.timing_distribution_policy!='survival_integrated_v2':
+            raise ValueError('Count feedback requires survival_integrated_v2')
         if self.structure_policy!='off':
             from .structure import structure_schema_for_policy
             expected_schema=structure_schema_for_policy(self.structure_policy)
@@ -263,7 +285,7 @@ class ChartComposer(nn.Module):
                 history_features=None, candidate_mask=None, history_padding_mask=None,
                 candidate_indices=None, decode_actions=True, workload_audio=None, ledger=None,
                 action_targets=None, curve_strength=1., interval_audio=None, trailing_audio=None,
-                workload_override=None, symbolic_keep=None, audio_auxiliary=True,
+                workload_override=None, trailing_override=None, symbolic_keep=None, audio_auxiliary=True,
                 head_timing=None):
         batch=candidate_features.size(0)
         acoustic=candidate_features[...,:self.config.audio_dim]
@@ -380,7 +402,7 @@ class ChartComposer(nn.Module):
                 if trailing_audio is not None:
                     trailing = self.predict_trailing(trailing_audio, condition)
                     if ledger is not None:
-                        difference = trailing[:, :candidate_features.size(1)].detach() - ledger[...,:4].float().clamp_min(0).log1p()
+                        difference = (trailing if trailing_override is None else trailing_override.to(trailing))[:, :candidate_features.size(1)].detach() - ledger[...,:4].float().clamp_min(0).log1p()
                         candidate_context = candidate_context + float(curve_strength) * self.discrepancy_projection(difference.to(candidate_context)) * symbolic_keep[:,None]
             candidate_context = self.candidate_fusion(candidate_context)
         pointer=self.pointer(candidate_context).squeeze(-1)

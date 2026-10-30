@@ -1,0 +1,79 @@
+{
+  "date": "2026-10-29",
+  "scope": "implementation and integration; trained musical quality pending",
+  "antigravity_review": "requested through computer-use; network/model unavailable; no completed review claimed",
+  "tests": {
+    "python_full": {
+      "passed": 3859,
+      "skipped": 13
+    },
+    "javascript": {
+      "passed": 168
+    },
+    "final_targeted": {
+      "passed": 16
+    }
+  },
+  "smoke_training": {
+    "optimizer_updates": 2,
+    "device": "cuda",
+    "precision": "bf16",
+    "recovery_interval": 1,
+    "accepted_recovery_updates": 2,
+    "model_width": 64,
+    "layers": 1,
+    "note": "small functional test, not quality evidence"
+  },
+  "generation_smoke": {
+    "event_count": 12,
+    "stop_reason": "max_events",
+    "timing_distribution_policy": "survival_v1",
+    "button_load_policy": "per_button_v1",
+    "survival_skip_count": 0
+  },
+  "controlled_noevent_smoke": {
+    "event_count": 0,
+    "stop_reason": "audio_range_exhausted",
+    "timing_distribution_policy": "survival_v1",
+    "button_load_policy": "per_button_v1",
+    "survival_skip_count": 6
+  },
+  "throughput": {
+    "window": "epoch1 batches25..325; batch64 accumulation4; different runs, not controlled benchmark",
+    "runs": {
+      "v24": {
+        "samples_per_sec": 250.46963055723864,
+        "data_sec": 0.26226799964206293,
+        "compute_sec": 69.69178620027378,
+        "peak_allocated_gib": 3.534,
+        "consumer_wait_sec": 0.631
+      },
+      "v25": {
+        "samples_per_sec": 188.2925202758019,
+        "data_sec": 0.34342309983912855,
+        "compute_sec": 92.62137280061143,
+        "peak_allocated_gib": 3.539,
+        "consumer_wait_sec": 0.774
+      }
+    }
+  },
+  "training": {
+    "task_id": "2f47804688c2",
+    "status": "running",
+    "ui_url": "http://127.0.0.1:7862",
+    "mode": "fresh",
+    "directory": "E:\\simai_transformer\\checkpoints\\prism_composer_v25",
+    "progress": {
+      "epoch": 1,
+      "batch": 2600,
+      "optimizer_steps": 650,
+      "loss": 8.515583683894231
+    },
+    "policies": {
+      "timing_distribution_policy": "survival_v1",
+      "button_load_policy": "per_button_v1",
+      "configuration_quality_policy": "song_paired_v3",
+      "effective_batch_size": 256
+    }
+  }
+}

@@ -73,7 +73,21 @@ def test_generation_new_options_reach_cli_and_echo(harness,tmp_path):
     assert task.result['effective_settings']['action_history_strength']==1.
     assert task.result['effective_settings']['action_type_temperature']==1.
     assert task.result['effective_settings']['action_type_min_p']==0.
-    assert task.result['generation_contract']=='composer_generation_controls_v11_history_type_sampling'
+    assert task.result['generation_contract']==api.GENERATION_CONTRACT
     for changes in [{'motif_strength':2.1},{'touch_layout_policy':'auto'}]:
         with pytest.raises(ValueError):
             api.start_generate(handler,dict(audio=str(audio),checkpoint=payload['checkpoint'],**changes),runtime=runtime)
+
+
+def test_generation_eval_controls_forward_in_all_modes(harness):
+    payload,parent,calls,handler,runtime=harness
+    for mode in ('fresh','finetune','resume'):
+        calls.clear()
+        api.start_train(
+            handler,
+            dict(payload,mode=mode,generation_eval_songs=0,generation_eval_interval_epochs=2),
+            runtime=runtime,
+        )
+        _,args=calls[0]
+        assert value(args,'generation_eval_songs')=='0'
+        assert value(args,'generation_eval_interval_epochs')=='2'

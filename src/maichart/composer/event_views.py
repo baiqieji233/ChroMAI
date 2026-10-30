@@ -100,9 +100,31 @@ class EventViews:
         for value in arrays:value.flags.writeable=False
         return cls(tuple(context),tuple(indices),*arrays,tuple(merged),tuple(regions),end_sec,final_known,digest)
 
+    def _window_positive(self, lo_f: float, hi_f: float) -> bool:
+        if hi_f < 0. or hi_f >= self.end_sec or lo_f >= self.end_sec:
+            return False
+        for lo, hi in self.unknown_intervals:
+            if hi_f >= lo and lo_f < hi:
+                return False
+        return True
+
     def window_weight(self, lower, upper):
         """Confidence in (lower, upper], with exact unknown-span overlap masks."""
-        lower,upper=np.broadcast_arrays(np.asarray(lower,dtype=np.float64),np.asarray(upper,dtype=np.float64))
+        if isinstance(lower, (int, float, np.floating)) and isinstance(upper, (int, float, np.floating)):
+            lo_f, hi_f = float(lower), float(upper)
+            if hi_f < 0. or hi_f >= self.end_sec or lo_f >= self.end_sec:
+                return np.zeros((), dtype=np.float32)
+            for lo, hi in self.unknown_intervals:
+                if hi_f >= lo and lo_f < hi:
+                    return np.zeros((), dtype=np.float32)
+            w = 1.0
+            for lo, hi, value in self.regions:
+                if value > 0 and hi_f >= lo and lo_f < hi:
+                    w *= min(1., value)
+            return np.asarray(w, dtype=np.float32)
+        if not (type(lower) is np.ndarray and type(upper) is np.ndarray
+                and lower.shape == upper.shape and lower.dtype == np.float64 and upper.dtype == np.float64):
+            lower, upper = np.broadcast_arrays(np.asarray(lower, dtype=np.float64), np.asarray(upper, dtype=np.float64))
         weight=np.ones(lower.shape,dtype=np.float32)
         for lo,hi in self.unknown_intervals:
             weight[(upper>=lo)&(lower<hi)]=0.
@@ -122,10 +144,11 @@ class EventViews:
     def future_mask(self, index, stop):
         mask=np.zeros(8,dtype=np.float32)
         if not self.trusted[index]:return mask
-        before=self.seconds[index-1] if index else 0.
-        mask[0]=float(self.window_weight(before,self.seconds[index])>0)
+        before=float(self.seconds[index-1]) if index else 0.
+        w0_pos=self._window_positive(before,float(self.seconds[index]))
+        mask[0]=float(w0_pos)
         enough=(stop-index==4 or (stop==len(self.context_points) and self.final_known))
-        known=enough and bool(np.all(self.trusted[index:stop])) and bool(self.window_weight(before,self.seconds[stop-1])>0)
+        known=enough and bool(self.trusted[index:stop].all()) and self._window_positive(before,float(self.seconds[stop-1]))
         mask[1:7]=float(known)
-        mask[7]=float(index>0 and self.trusted[index-1] and self.window_weight(before,self.seconds[index])>0)
+        mask[7]=float(index>0 and self.trusted[index-1] and w0_pos)
         return mask

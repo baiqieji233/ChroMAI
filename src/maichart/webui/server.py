@@ -46,6 +46,7 @@ from maichart.training.event_input_policy import resolve_input_policies
 from maichart.training.action_state_policy import resolve_action_state_profile
 from maichart.generation.event_ctx import FRESH_CONTEXT_TOKENS
 from maichart.webui.dataset_api import DatasetAPI
+from maichart.webui.composer_api import GENERATION_CONTRACT as COMPOSER_GENERATION_CONTRACT
 from maichart.webui.quality_api import (
     QualityAPI,
     quality_audio,
@@ -208,6 +209,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "workspace": str(WEBUI_ROOT),
                     "project_root": str(PROJECT_ROOT),
                     "stream_generation_contract": "chart_stream_quality_controls_v8",
+                    "capabilities": {"event_set_stream": True},
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "stream_grounded_context": "causal_audio_v1",
                                               "stream_training_runtime": "resident_pipeline_v3",
@@ -231,7 +233,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_contact_budget": "conservative_groups_v1",
                                               "composer_generation": True},
                     "intensity_curve_capability": True,
-            'composer_generation_contract':'composer_generation_controls_v11_history_type_sampling',
+                    'composer_generation_contract':COMPOSER_GENERATION_CONTRACT,
                     "music_structure_capability": True,
                     "density_feedback_capability": True,
                     "playability_engine": engine_status(),
@@ -359,7 +361,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         checkpoint_path = (_required_path(payload["checkpoint"], "曲线规划 checkpoint", must_exist=True)
                            if source != "audio" and payload.get("checkpoint") else None)
         if source == "model" and checkpoint_path is None:
-            raise ValueError("模型预测曲线需要选择支持曲线预测的 event、song_form 或 chart_stream checkpoint")
+            raise ValueError("模型预测曲线需要选择支持曲线预测的 event、song_form、chart_stream 或 chart_composer checkpoint")
         resolution = float(payload.get("resolution_sec", 2.0))
         context = float(payload.get("local_context_sec", 12.0))
         first = float(payload.get("first", 0.0))
@@ -406,16 +408,26 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                      if checkpoint_data else None)
                 if selected_source == "auto":
                     profile_name = checkpoint_data.get("model_config", {}).get("planner_profile")
-                    selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"}
+                    selected_source = ("model" if checkpoint_family in {"song_form_v1", "song_form_v2", "chart_stream_v1"} or (checkpoint_family == COMPOSER_MODEL_FAMILY and checkpoint_data.get("model_config", {}).get("architecture_profile") in {"audio_workload_v1", "music_context_v2", "audio_grounded_v3", "event_set_stream_v1"})
                                        or (checkpoint_family in EVENT_FAMILIES and is_music_structure(str(profile_name or "")))
                                        else "audio")
                 if _finish_if_cancelled(task):
                     return
                 if selected_source == "model":
                     if checkpoint_family == COMPOSER_MODEL_FAMILY:
-                        raise ValueError('chart_composer_v1 没有独立的全曲 Planner 曲线头；'
-                                         '请选择 auto 或 audio 生成音频参考曲线。音频参考曲线当前不参与 Composer 生成。')
-                    if checkpoint_family == 'chart_stream_v1':
+                        from maichart.composer.curve import generate_learned_profile
+                        from maichart.composer.generation_settings import resolve_condition
+                        condition_file = (_required_path(payload['condition_file'], 'Composer 条件文件', must_exist=True)
+                                          if payload.get('condition_file') else None)
+                        condition, condition_source = resolve_condition(
+                            float(payload.get('level', 13.)), payload.get('condition'), condition_file)
+                        profile = generate_learned_profile(
+                            audio, checkpoint_path, resolution_sec=resolution,
+                            local_context_sec=context, condition=condition, level=condition.level,
+                            bpm=payload.get('bpm') or None, first=first, tempo_mode=tempo_mode,
+                            tempo_map=explicit_tempo_map, meter_map=meter_map, device='cpu')
+                        task.result['condition_source'] = condition_source
+                    elif checkpoint_family == 'chart_stream_v1':
                         from maichart.stream.curve import generate_learned_profile
                         profile = generate_learned_profile(
                             audio, checkpoint_path, resolution_sec=resolution,
@@ -460,6 +472,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 profile["tempo_map_sha256"] = tempo_map_hash
                 profile["tempo_mode"] = tempo_mode
                 profile["first"] = first
+                profile["meter_map"] = meter_map
                 profile["bpm_input"] = (float(payload["bpm"])
                                         if payload.get("bpm") not in {None, ""} else None)
                 if selected_source != "model":
@@ -1835,7 +1848,7 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     prefix, separator, raw = line.partition(" ")
     if not separator or prefix not in {
         "form_prepare", "composer_prepare",
-        "composer_runtime", "composer_progress", "composer_epoch", "composer_checkpoint",
+        "composer_runtime", "composer_stage", "composer_progress", "composer_epoch", "composer_checkpoint",
         "composer_recovery", "composer_validation", "composer_generation_validation",
     }:
         return
@@ -1851,6 +1864,8 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     elif prefix=='composer_runtime':
         task.result['composer_stage']='training'
         task.result['composer_runtime']=dict(data)
+    elif prefix=='composer_stage':
+        task.result['composer_training_stage']=dict(data)
     elif prefix=='composer_progress':
         task.result['composer_stage']='training'
         task.result['composer_metrics']=dict(data)
@@ -1890,6 +1905,12 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
             samples = int(data.get("samples") or 0)
             task.result["samples"] = samples
             task.message = f"Composer 数据就绪 · {samples:,} 个事件"
+        elif stage in {"audio_banks", "structure_banks", "audio_and_structure_banks"}:
+            completed = int(data.get("completed_banks") or 0)
+            total = int(data.get("total_banks") or 0)
+            task.message = (f"Composer 预热音频与结构缓存 {completed}/{total}"
+                            if total and data.get("status") != "ready"
+                            else "Composer 音频与结构缓存就绪")
     elif prefix == "composer_runtime":
         if data.get("end_epoch") is not None:
             task.result["epoch_target"] = int(data["end_epoch"])
@@ -2358,10 +2379,16 @@ def _prepare_training_sources(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         pending = _manifest_pending_status(Path(value))
         if pending is not None:
             raise ValueError(pending["message"] + f" 数据集：{Path(value).parent.name}")
-    prepared = _dataset_api().prepare(manifests, model_family=_requested_model_family(payload))
+    family = _requested_model_family(payload)
+    prepared = _dataset_api().prepare(manifests, model_family=family)
+    preserved_cache_dir = (
+        payload.get("cache_dir")
+        if family == COMPOSER_MODEL_FAMILY and str(payload.get("cache_dir") or "").strip()
+        else None
+    )
     result = dict(payload)
     result.update({"manifest": prepared["manifest"], "raw_root": prepared.get("raw_root") or "",
-                   "cache_dir": prepared["cache_dir"], "auto_preprocess": False})
+                   "cache_dir": preserved_cache_dir or prepared["cache_dir"], "auto_preprocess": False})
     if result.get("quality_enabled") or result.get("preference_enabled"):
         result["quality_annotations"] = prepared.get("quality_annotations") or prepared.get("annotation_path")
     return result, prepared
@@ -2499,6 +2526,9 @@ def _generation_capabilities(model_family: str, payload: dict[str, Any]) -> dict
 
 
 def _checkpoint_model_family(payload: dict[str, Any]) -> str:
+    if (payload.get('schema') == 'maichart-composer-event-set-checkpoint-v1'
+            and payload.get('family') == COMPOSER_MODEL_FAMILY):
+        return COMPOSER_MODEL_FAMILY
     return str(checkpoint_capabilities(payload)["model_family"])
 
 

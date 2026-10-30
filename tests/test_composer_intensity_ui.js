@@ -8,7 +8,7 @@ function fn(name){
   return source.slice(start,source.indexOf('\n}',start)+2);
 }
 
-test('Composer analysis ignores stale saved model source and omits checkpoint loading',async()=>{
+test('Composer analysis supports model curve source and passes checkpoint',async()=>{
   let request;
   const context=vm.createContext({
     intensityAudioPath:()=> 'song.mp3',setWorkspaceMode(){},setIntensitySong(){},setIntensityStatus(){},
@@ -19,13 +19,13 @@ test('Composer analysis ignores stale saved model source and omits checkpoint lo
   });
   vm.runInContext('async '+fn('generateIntensityCurve'),context);
   await context.generateIntensityCurve();
-  assert.equal(request.curve_source,'audio');
-  assert.equal(request.checkpoint,null);
+  assert.equal(request.curve_source,'model');
+  assert.equal(request.checkpoint,'composer.pt');
   assert.equal(request.model_family,'chart_composer_v1');
   assert.equal(request.bpm,190);
 });
 
-test('switching song-form to Composer cannot restore an unsupported model source',()=>{
+test('switching song-form to Composer keeps model source enabled and enables curve save',()=>{
   let family='song_form_v2';
   const model={disabled:false},audio={disabled:false},save={};
   const sourceSelect={value:'model',querySelector:s=>s.includes('"audio"')?audio:model};
@@ -36,7 +36,7 @@ test('switching song-form to Composer cannot restore an unsupported model source
   vm.runInContext(fn('updateSongFormGenerationOptions'),context);
   context.updateSongFormGenerationOptions();
   family='chart_composer_v1';context.updateSongFormGenerationOptions();
-  assert.equal(sourceSelect.value,'audio');assert.equal(model.disabled,true);
-  assert.equal(audio.disabled,false);assert.match(save.textContent,/参考/);
+  assert.equal(sourceSelect.value,'model');assert.equal(model.disabled,false);
+  assert.equal(audio.disabled,false);assert.match(save.textContent,/保存/);
   family='event_v1';context.updateSongFormGenerationOptions();assert.equal(model.disabled,false);
 });

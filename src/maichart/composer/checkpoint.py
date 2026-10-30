@@ -11,7 +11,7 @@ from .events import HEAD_TIMING_DIM,head_timing_dim_for_policy
 from . import MOTIF_TRAINING_POLICY
 from maichart.form.recurrence import RECURRENCE_DESCRIPTOR_POLICY,LEGACY_RECURRENCE_DESCRIPTOR_POLICY,RECURRENCE_DESCRIPTOR_POLICIES
 from .objectives import (LEGACY_ACTION_OBJECTIVE, JOINT_TRAINING_SEMANTICS, RECOVERY_TRAINING_SEMANTICS,
-                         resolve_action_objective, training_semantics_for_objective)
+                         resolve_action_objective, training_semantics_for_objective, training_objective_recipe)
 
 
 def motif_training_compatible(payload):
@@ -125,8 +125,14 @@ def save(path, model, optimizer, *, epoch, args, manifest, metrics=None, optimiz
              'dataset_fingerprint':dataset_fingerprint,
              'training_state':(training_state or {}) if optimizer is not None else {},
              'checkpoint_kind':'training' if optimizer is not None else 'inference'}
+    payload['training_objective_recipe']=training_objective_recipe(model,args)
+    payload['args']['training_objective_recipe']=payload['training_objective_recipe']
+    if getattr(model.config,'configuration_quality_policy','off')!='off':
+        from .quality_inputs import quality_input_policy_for_policy
+        payload['configuration_quality_input_policy']=quality_input_policy_for_policy(model.config.configuration_quality_policy)
     if (model.config.head_timing_policy!='merged_pads_v1' or model.config.cross_event_relation_policy!='off'
-            or model.config.future_horizon_policy!='off' or model.config.action_head_policy!='flat_v1'):
+            or model.config.future_horizon_policy!='off' or model.config.echo_prior_policy!='off' or model.config.timing_distribution_policy!='hierarchical_v1' or model.config.button_load_policy!='off' or model.config.action_head_policy!='flat_v1'
+            or model.config.configuration_quality_policy!='off'):
         payload['input_contract']=RELATIONAL_INPUT_CONTRACT
     if model.config.architecture_profile==GROUNDED_PROFILE:
         if model.config.history_anchor_policy != model.action_factors.history_anchor_policy:
@@ -196,7 +202,13 @@ def validate(payload):
     values.setdefault('structure_policy','off')
     values.setdefault('contact_policy','off')
     values.setdefault('future_horizon_policy','off')
+    values.setdefault('echo_prior_policy','off')
+    values.setdefault('timing_distribution_policy','hierarchical_v1')
+    values.setdefault('button_load_policy','off')
+    values.setdefault('fine_timing_policy','off')
+    values.setdefault('density_feedback_policy','off')
     values.setdefault('action_head_policy','flat_v1')
+    values.setdefault('configuration_quality_policy','off')
     values.setdefault('condition_mask_prob',0.)
     values.setdefault('structure_backend','native')
     values.setdefault('structure_dropout',.15)
@@ -221,8 +233,8 @@ def validate(payload):
     validate_supported_context_policies(config)
     expected_input=(RELATIONAL_INPUT_CONTRACT if config.head_timing_policy!='merged_pads_v1'
                     or config.cross_event_relation_policy!='off'
-                    or config.future_horizon_policy!='off'
-                    or config.action_head_policy!='flat_v1' else INPUT_CONTRACT)
+                    or config.future_horizon_policy!='off' or config.echo_prior_policy!='off' or config.timing_distribution_policy!='hierarchical_v1' or config.button_load_policy!='off'
+                    or config.action_head_policy!='flat_v1' or config.configuration_quality_policy!='off' else INPUT_CONTRACT)
     if payload.get('input_contract')!=expected_input:raise ValueError('Composer input policy/contract mismatch')
     generation_motif_input_policy(payload)
     objective=resolve_action_objective((payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE),
@@ -295,25 +307,56 @@ def validate(payload):
     return config
 
 
+def quality_training_compatible(payload):
+    if (payload.get('model_config') or {}).get('configuration_quality_policy','off')=='off':return True
+    from .quality_inputs import quality_input_policy_for_policy
+    return payload.get('configuration_quality_input_policy')==quality_input_policy_for_policy((payload.get('model_config') or {}).get('configuration_quality_policy','off'))
+
+
+def _upgrade_quality_inference_state(model,payload):
+    """Neutral transfer of the first experimental quality branch; never optimizer state."""
+    if quality_training_compatible(payload):return
+    if payload.get('configuration_quality_input_policy')!='native_lifecycle_paired_anchors_phrase_v1':return
+    state=payload['model_state_dict'];current=model.state_dict()
+    for key in ('cooperative_geometry.head_to_end_factors.weight','quality_context.pair_time_query.weight'):
+        if key in current and key not in state:state[key]=torch.zeros_like(current[key])
+    key='quality_context.pair.0.weight'
+    if key in state and state[key].shape[0]==current[key].shape[0] and state[key].shape[1]+6==current[key].shape[1]:
+        extended=torch.zeros_like(current[key]);extended[:,:state[key].shape[1]]=state[key];state[key]=extended
+
+
 def load(path,device='cpu',*,include_optimizer=False):
     # A resumable optimizer owns and mutates CPU tensors for the entire run.
     # Materialize those rather than retaining a mapping of a file that Windows
     # must later replace at the same checkpoint path.
     payload=(torch.load(path,map_location='cpu',weights_only=False) if include_optimizer else read_payload(path))
+    if payload.get('schema')=='maichart-composer-event-set-checkpoint-v1':
+        from .stream_checkpoint import load as load_stream
+        return load_stream(path,device,include_optimizer=include_optimizer)
     config=validate(payload)
+    if config.configuration_quality_policy=='song_paired_v3' and not quality_training_compatible(payload):
+        raise ValueError('Song-paired configuration quality input contract mismatch; use the matching implementation')
+    if include_optimizer and not quality_training_compatible(payload):
+        raise ValueError('Configuration quality input contract changed; use --init-checkpoint in a new directory')
     if not include_optimizer:
         payload.pop('optimizer_state_dict',None)
         payload.pop('training_state',None)
     # Generation calls load under inference_mode. Parameters still need normal
     # version counters for derived-weight caches and later explicit finetuning.
     with torch.inference_mode(False):
-        model=build_model(config,payload['atom_catalog'])
+        model=build_model(config,payload['atom_catalog']);(setattr(model,'candidate_competition',None) if getattr(model,'candidate_competition',None) is not None and 'candidate_competition.out_proj.weight' not in payload['model_state_dict'] else None);(setattr(model,'local_lead_in',None) if getattr(model,'local_lead_in',None) is not None and 'local_lead_in.out_proj.weight' not in payload['model_state_dict'] else None)
+        _upgrade_quality_inference_state(model,payload)
         model.load_state_dict(payload['model_state_dict'])
         model.to(device)
     return model,payload
 
 
 def inspect_payload(payload):
+    if payload.get('schema')=='maichart-composer-event-set-checkpoint-v1':
+        from .stream_checkpoint import inspect_payload as inspect_stream
+        try:return inspect_stream(payload)
+        except (ValueError,KeyError,TypeError) as exc:
+            return dict(valid=False,family=FAMILY,error=str(exc),can_resume=False,can_init=False)
     try: config=validate(payload);valid=True;error=None
     except (ValueError,KeyError,TypeError) as exc: config=None;valid=False;error=str(exc)
     migration = None
@@ -322,7 +365,9 @@ def inspect_payload(payload):
         current_semantics=training_semantics_for_objective(config.architecture_profile,
             (payload.get('args') or {}).get('action_objective_policy',LEGACY_ACTION_OBJECTIVE))
         current_semantics=structure_training_semantics(current_semantics, config.structure_policy)
-        if config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != current_semantics:
+        if not quality_training_compatible(payload):
+            migration = 'Configuration quality input contract changed; use explicit finetune with a new directory'
+        elif config.architecture_profile == GROUNDED_PROFILE and payload.get('training_semantics') != current_semantics:
             migration = 'Older grounded planning/recovery contracts require explicit finetune with a new output directory'
         elif not motif_training_compatible(payload):
             migration = 'Motif input/dropout contract changed; use explicit finetune with a new output directory'
@@ -334,6 +379,9 @@ def inspect_payload(payload):
             'model_config':config.to_dict() if config else payload.get('model_config'),
             'epoch':payload.get('epoch'),'optimizer_steps':payload.get('optimizer_steps',0),
             'training_semantics':payload.get('training_semantics'),'error':error,
+            'training_objective_recipe':payload.get('training_objective_recipe'),
+            'configuration_quality_input_policy':payload.get('configuration_quality_input_policy','off'),
+            'configuration_quality_available':bool(config and config.configuration_quality_policy!='off'),
             'motif_training_policy':payload.get('motif_training_policy'),
             'motif_input_policy':payload.get('motif_input_policy'),
             'audio_feature_policy':payload.get('audio_feature_policy','legacy'),
@@ -346,7 +394,8 @@ def inspect_payload(payload):
             'can_resume':bool(valid and config.architecture_profile in {'music_context_v2',GROUNDED_PROFILE}
                               and config.head_timing_dim==head_timing_dim_for_policy(config.head_timing_policy)
                               and payload.get('training_semantics')==current_semantics
-                              and payload.get('optimizer_state_dict') is not None and motif_training_compatible(payload)),
+                              and payload.get('optimizer_state_dict') is not None and motif_training_compatible(payload)
+                              and quality_training_compatible(payload)),
             'can_init':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),
             'can_train':bool(valid and config.architecture_profile in WORKLOAD_PROFILES),'can_generate':valid,
             'training_migration':migration,
@@ -380,7 +429,7 @@ def migrate_music_context(model, head_timing_dim=HEAD_TIMING_DIM, *, action_slot
         raise ValueError('Finetune migration cannot reduce action_slots')
     allowed={'history_anchor_policy','action_state_policy','motif_memory_policy','motif_max_events','slide_factor_policy',
              'history_memory_policy','history_memory_rms_bound','history_attention_policy','head_timing_policy','cross_event_relation_policy',
-             'structure_policy','contact_policy','future_horizon_policy','action_head_policy','condition_mask_prob',
+             'structure_policy','contact_policy','future_horizon_policy','echo_prior_policy','timing_distribution_policy','button_load_policy','fine_timing_policy','density_feedback_policy','action_head_policy','configuration_quality_policy','condition_mask_prob',
              'structure_backend','structure_dropout'}
     if set(policy_options)-allowed:raise ValueError('Unknown music-context migration option')
     config=ComposerConfig(**{**model.config.to_dict(),**policy_options,'architecture_profile':'music_context_v2',
@@ -413,7 +462,7 @@ def migrate_audio_grounded(model,atom_catalog,**options):
     if model.config.architecture_profile==GROUNDED_PROFILE:
         if list(model.action_factors.atom_catalog)!=list(atom_catalog):
             raise ValueError('Migration catalog order differs from existing action mapping')
-        if all(getattr(model.config,key)==value for key,value in options.items()):return model
+        if all(getattr(model.config,key)==value for key,value in options.items()) and getattr(model,'candidate_competition',None) is not None and getattr(model,'local_lead_in',None) is not None:return model
     if model.config.architecture_profile not in WORKLOAD_PROFILES:
         raise ValueError('Only Composer workload/music models support this migration')
     config=ComposerConfig(**{**model.config.to_dict(),**options,
@@ -421,7 +470,16 @@ def migrate_audio_grounded(model,atom_catalog,**options):
         'head_timing_dim':head_timing_dim_for_policy(options.get('head_timing_policy',model.config.head_timing_policy))})
     upgraded=build_model(config,atom_catalog)
     current=upgraded.state_dict()
-    for key,value in model.state_dict().items():
+    copied=[]
+    original=model.state_dict()
+    for key,value in original.items():
+        if config.configuration_quality_policy=='song_paired_v3':
+            if (key in current and torch.is_tensor(value) and torch.is_tensor(current[key])
+                    and value.shape==current[key].shape
+                    and not (key.startswith('action_factors.') and (key.endswith('catalog_fingerprint') or '.atom_' in key))):
+                current[key]=value
+                copied.append(key)
+            continue
         if key.startswith('action_head.') and model.config.architecture_profile=='audio_workload_v1':
             current[key]=value.reshape(model.config.action_slots,config.atom_vocab_size,*value.shape[1:]).mean(0)
         elif key == 'slot_embedding.weight':
@@ -432,7 +490,12 @@ def migrate_audio_grounded(model,atom_catalog,**options):
             continue
         elif key in current and torch.is_tensor(value) and torch.is_tensor(current[key]) and value.shape==current[key].shape:
             current[key]=value
+            copied.append(key)
     upgraded.load_state_dict(current)
+    upgraded.migration_report={'source_policy':model.config.configuration_quality_policy,
+        'target_policy':config.configuration_quality_policy,'copied_same_shape':sorted(copied),
+        'dropped':sorted(key for key in original if key not in copied),
+        'new_or_reinitialized':sorted(key for key in current if key not in copied)}
     return upgraded
 
 

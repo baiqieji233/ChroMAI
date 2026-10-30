@@ -49,14 +49,17 @@ def constrain_touch_history(full_logits,audio_logits,touch_mask,*,log_odds_bound
 def action_logits_with_touch_guard(model,context,slot,selected_ids,*,audio_context=None,
                                   history_strength=1.,enabled=False,touch_mask=None,diagnostics=None,
                                   log_odds_bound=TOUCH_HISTORY_LOG_ODDS_BOUND,previous_heads=None,
-                                  legal_mask=None,legacy=False):
+                                  legal_mask=None,legacy=False,echo_heads=None,button_load_features=None):
     extra={} if previous_heads is None else {'previous_heads':previous_heads}
+    if echo_heads is not None:extra['echo_heads']=echo_heads
+    if button_load_features is not None:extra['button_load_features']=button_load_features
     full=model.action_slot(context,slot,selected_ids,audio_context=audio_context,history_strength=history_strength,**extra)
     if not enabled or audio_context is None:
         return full
     if touch_mask is None:
         raise ValueError('Touch guidance requires its catalog mask')
-    reference=model.action_slot(audio_context,slot,selected_ids)
+    reference=(model.audio_reference_slot(audio_context,slot,selected_ids)
+               if hasattr(model,'audio_reference_slot') else model.action_slot(audio_context,slot,selected_ids))
     corrected=constrain_touch_history(full,reference,touch_mask,log_odds_bound=log_odds_bound,
         legal_mask=None if legacy else legal_mask,include_stop=slot>0 and not legacy)
     if diagnostics is not None and not torch.equal(corrected,full):

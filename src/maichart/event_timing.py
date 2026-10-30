@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from bisect import bisect_left
 import math
 from collections import Counter
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -20,6 +22,8 @@ EventTempo = TempoChange
 
 
 def _exact_beat(value: Fraction | int | str) -> Fraction:
+    if type(value) is Fraction:
+        return value
     if isinstance(value, bool) or not isinstance(value, (Fraction, int, str)):
         raise TypeError("Beats must be Fraction, integer, or rational string, not float.")
     return Fraction(value)
@@ -205,6 +209,30 @@ class EventTimingPoint:
 EventTiming = EventTimingPoint
 
 
+@lru_cache(maxsize=1024)
+def _integrated_tempo_tuple(
+    tempo_changes: tuple,
+    first_val: float,
+) -> tuple[tuple[Fraction, ...], tuple[float, ...], tuple[float, ...]]:
+    changes = sorted(
+        (EventTempo(_exact_beat(change.beat), _finite_number(change.bpm, "BPM", positive=True))
+         for change in tempo_changes),
+        key=lambda change: change.beat,
+    )
+    if not changes or changes[0].beat != 0:
+        raise ValueError("tempo_changes must explicitly include a BPM at beat 0.")
+    if any(change.beat < 0 for change in changes):
+        raise ValueError("tempo beats must be nonnegative.")
+    beats = [c.beat for c in changes]
+    bpms = [c.bpm for c in changes]
+    elapsed = first_val
+    seconds = [elapsed]
+    for prev, curr in zip(changes, changes[1:]):
+        elapsed += float(curr.beat - prev.beat) * 60.0 / prev.bpm
+        seconds.append(elapsed)
+    return tuple(beats), tuple(bpms), tuple(seconds)
+
+
 def seconds_at_beat(
     beat: Fraction | int | str,
     tempo_changes: Iterable[EventTempo],
@@ -215,6 +243,16 @@ def seconds_at_beat(
     target = _exact_beat(beat)
     if target < 0:
         raise ValueError("beat must be nonnegative.")
+    first_val = _finite_number(first, "first")
+    if isinstance(tempo_changes, (tuple, list)):
+        tempo_tuple = tempo_changes if isinstance(tempo_changes, tuple) else tuple(tempo_changes)
+        try:
+            beats, bpms, seconds = _integrated_tempo_tuple(tempo_tuple, first_val)
+        except TypeError:
+            pass
+        else:
+            idx = max(0, bisect_left(beats, target) - 1)
+            return seconds[idx] + float(target - beats[idx]) * 60.0 / bpms[idx]
     changes = sorted(
         (EventTempo(_exact_beat(change.beat), _finite_number(change.bpm, "BPM", positive=True))
          for change in tempo_changes),
@@ -224,7 +262,7 @@ def seconds_at_beat(
         raise ValueError("tempo_changes must explicitly include a BPM at beat 0.")
     if any(change.beat < 0 for change in changes):
         raise ValueError("tempo beats must be nonnegative.")
-    elapsed = _finite_number(first, "first")
+    elapsed = first_val
     previous = Fraction(0)
     current_bpm = changes[0].bpm
     for change in changes[1:]:

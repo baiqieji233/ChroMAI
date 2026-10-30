@@ -11,10 +11,14 @@ V10 = 'chart_composer_training_v10_touch_ring_recovery'
 
 
 def _model(history_dropout=.3):
-    return build_model(ComposerConfig(atom_vocab_size=3, d_model=16, nhead=4,
+    model = build_model(ComposerConfig(atom_vocab_size=3, d_model=16, nhead=4,
         layers=1, dim_feedforward=32, dropout=0., history_events=8, action_slots=2,
         architecture_profile='audio_grounded_v3', head_timing_dim=99, lens_width=8,
         history_dropout=history_dropout, ledger_dropout=0., symbolic_dropout=0.), ATOMS)
+    # These tests specify the legacy fully droppable history contract.
+    # Fresh local-lead models are covered by test_composer_rhythm_review.py.
+    model.local_lead_in = None
+    return model
 
 
 def _inputs():

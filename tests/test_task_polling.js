@@ -60,6 +60,28 @@ function jsonResponse(data, ok = true, status = 200) {
   return {ok, status, text: async () => JSON.stringify(data)};
 }
 
+test('event-set Composer renders its actual losses and window throughput without legacy cards',()=>{
+  const {harness,elements}=createHarness(async()=>jsonResponse({}));
+  harness.renderTaskTrainingMetrics({kind:'composer_train',task_id:'event-set-render',status:'running',result:{
+    schema:'maichart-composer-event-set-checkpoint-v1',epoch_target:20,effective_settings:{window_seconds:8},
+    composer_runtime:{architecture_profile:'event_set_stream_v1',samples:1234,batch_size:8,grad_accumulation:2,
+      history_events:64,rollout_steps:16,parameters:1000000,device:'cuda',precision:'bf16',
+      codec_coverage:{events:100,rotatable_events:80,fallback_events:20,rotation_fraction:.8}},
+    composer_metrics:{epoch:2,batch:10,total:100,optimizer_steps:125,stage:'audio_conditioned',
+      loss:2.5,time_loss:1.2,kind_loss:.4,delta_loss:.8,configuration_loss:1.1,shape_loss:.5,phase_loss:.2,detail_loss:.4,plan_loss:2.,plan_rate_loss:1.4,plan_blank_loss:.6,
+      samples_per_sec:12.5,supervised_steps_per_sec:150,supervised_steps:1200,metric_batches:10,
+      learning_rate:.0002,timing:{data_sec:3,transfer_sec:1,compute_sec:4},skipped_windows:0}}});
+  const text=descendantText(elements.get('#taskTrainingMetricsGroups'));
+  const note=elements.get('#taskTrainingMetricsSource').textContent;
+  assert.match(text,/音频条件训练/);assert.match(text,/整拍配置 loss/);assert.match(text,/等价相位 loss/);
+  assert.match(text,/每秒速率 NLL/);assert.match(text,/局部休止概率 BCE/);assert.match(text,/1\.4/);assert.match(text,/0\.6/);
+  assert.match(text,/监督步骤 \/ 秒/);assert.match(text,/窗口序列 \/ 秒/);assert.match(text,/12\.5/);assert.match(text,/150/);
+  assert.match(text,/80\.00%/);assert.match(text,/64 \/ 16/);assert.match(text,/2 \/ 20/);assert.match(text,/125/);
+  assert.doesNotMatch(text,/候选召回率|候选选位|动作槽位|音频锚定训练参数/);
+  assert.match(note,/固定时间窗权重/);assert.match(note,/不等于音符或事件/);
+  assert.match(note,/不能与旧按格均值口径直接比较/);
+});
+
 function descendantText(node) {
   return [node?.textContent || "", ...(node?.children || []).map(descendantText)].join(" ");
 }
@@ -86,6 +108,39 @@ test("queued and running tasks keep polling at the normal interval", async () =>
     assert.equal(harness.taskWatchers.has("t2"), true);
     assert.deepEqual(timers.map(timer => timer.delay), [800]);
   }
+});
+
+test("training polling is slower and hidden pages avoid high-frequency status transfers", async () => {
+  for (const [visibility, status, expected] of [
+    ["visible", "running", 2000], ["hidden", "running", 8000], ["visible", "cancelling", 800],
+  ]) {
+    const {harness, context, timers} = createHarness(async () => jsonResponse({
+      task_id: "training-large", kind: "composer_train", status, result: {}, logs: [],
+    }));
+    context.document.visibilityState = visibility;
+    harness.watchTask("training-large");
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(timers.map(timer => timer.delay), [expected]);
+  }
+});
+
+test("unchanged Composer metrics preserve DOM cards while new metrics and task switches render", () => {
+  const {harness, elements} = createHarness(async () => jsonResponse({}));
+  const task = {task_id: "a", kind: "composer_train", status: "running", result: {
+    composer_metrics: {epoch: 1, batch: 25, loss: 4.2}, composer_metric_history: [],
+  }};
+  harness.renderTaskTrainingMetrics(task);
+  const groups = elements.get("#taskTrainingMetricsGroups");
+  const firstCard = groups.children[0];
+  harness.renderTaskTrainingMetrics(JSON.parse(JSON.stringify(task)));
+  assert.equal(groups.children[0], firstCard, "repeat polls must not rebuild unchanged cards");
+  task.result.composer_metrics.loss = 3.8;
+  harness.renderTaskTrainingMetrics(task);
+  assert.notEqual(groups.children[0], firstCard, "new loss must update cards");
+  harness.renderTaskTrainingMetrics({kind: "form_generate", result: {}});
+  assert.equal(groups.children.length, 0);
+  harness.renderTaskTrainingMetrics(task);
+  assert.ok(groups.children.length > 0, "switching back must rebuild cleared cards");
 });
 
 test("song-form task summaries distinguish batches from optimizer steps and report phase ETA", () => {

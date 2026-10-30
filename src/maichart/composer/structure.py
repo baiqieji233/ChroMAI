@@ -109,19 +109,39 @@ def _identity(song, backend, policy='metrical_context_v1'):
             base = (audio, fallback[2])
             _identity_bases.move_to_end(id(song))
     if base is None:
-        meta = getattr(audio, 'metadata', {}) or {}
-        digest = meta.get('audio_sha256')
-        if not digest:
-            h = hashlib.sha256()
-            for a in (audio.times, audio.features):
-                arr = np.ascontiguousarray(a)
-                h.update(str((arr.shape, arr.dtype)).encode())
-                h.update(memoryview(arr).cast('B'))
-            digest = h.hexdigest()
-        details = {'audio_sha256': str(digest),
-                   'audio_profile': str(getattr(audio, 'feature_policy', 'unknown')),
-                   'evidence_profile': str(getattr(audio, 'evidence_profile', 'unknown')),
-                   'duration': float(audio.duration_sec)}
+        details = None
+        if hasattr(audio, 'store') and hasattr(audio, 'path'):
+            try:
+                store = audio.store
+                if str(audio.path) not in getattr(store, 'entries', ()):
+                    cpath = store.disk_cache_path(audio.path)
+                    if cpath is not None and cpath.is_file() and getattr(store.loader, '__name__', '') == 'extract_rational_audio':
+                        with np.load(cpath, allow_pickle=False) as saved:
+                            meta = json.loads(str(saved['metadata'].item()))
+                        if meta.get('profile') == 'rational_audio_queries_v1' and meta.get('audio_sha256') and 'duration_sec' in meta:
+                            details = {
+                                'audio_sha256': str(meta['audio_sha256']),
+                                'audio_profile': str(getattr(store, 'feature_policy', None) or meta.get('feature_policy', 'legacy_sparse_v1')),
+                                'evidence_profile': str(meta.get('evidence_profile', 'legacy')),
+                                'duration': float(meta['duration_sec']),
+                            }
+            except Exception:
+                details = None
+        if details is None:
+            resolved = audio.store.get(audio.path) if (hasattr(audio, 'store') and hasattr(audio, 'path')) else audio
+            meta = getattr(resolved, 'metadata', {}) or {}
+            digest = meta.get('audio_sha256')
+            if not digest:
+                h = hashlib.sha256()
+                for a in (resolved.times, resolved.features):
+                    arr = np.ascontiguousarray(a)
+                    h.update(str((arr.shape, arr.dtype)).encode())
+                    h.update(memoryview(arr).cast('B'))
+                digest = h.hexdigest()
+            details = {'audio_sha256': str(digest),
+                       'audio_profile': str(getattr(resolved, 'feature_policy', 'unknown')),
+                       'evidence_profile': str(getattr(resolved, 'evidence_profile', 'unknown')),
+                       'duration': float(resolved.duration_sec)}
         base = (audio, details)
         try:
             setattr(song, '_composer_structure_identity_base', base)
@@ -178,6 +198,8 @@ def _balanced_harmonics(phase, weighted_residual, residual_energy, original_ener
 
 def _build(song, cache_dir, backend_info, *, enhanced=False):
     audio = song.audio
+    if hasattr(audio, 'store') and hasattr(audio, 'path'):
+        audio = audio.store.get(audio.path)
     times = np.asarray(audio.times, dtype=np.float64)
     data = np.asarray(audio.features)
     if data.ndim != 2 or len(times) != len(data) or data.shape[1] < 98:
@@ -501,19 +523,40 @@ def _get_prepared_views(cached, enhanced):
             _prepared_views.move_to_end(view_key)
             return hit[1]
     bank, novelty, order, _selected = cached[:4]
-    anchors = np.ascontiguousarray(bank[:, 0], dtype=np.float64)
-    rec = np.asarray(bank[:, 2:]).reshape(len(bank), len(PERIODS), 8)
-    nov_t = np.ascontiguousarray(novelty[:, 0], dtype=np.float64)
-    nov_v = np.ascontiguousarray(novelty[:, 1], dtype=np.float64)
+    anchors = np.ascontiguousarray(bank[:, 0].view(np.ndarray), dtype=np.float64)
+    rec = np.ascontiguousarray(bank[:, 2:].view(np.ndarray), dtype=np.float64).reshape(len(bank), len(PERIODS), 8)
+    nov_t = np.ascontiguousarray(novelty[:, 0].view(np.ndarray), dtype=np.float64)
+    nov_v = np.ascontiguousarray(novelty[:, 1].view(np.ndarray), dtype=np.float64)
+    order = np.ascontiguousarray(np.asarray(order).view(np.ndarray))
     local_views = None
     if enhanced and len(cached) > 4 and len(cached[4]):
-        local = cached[4]
+        local = cached[4].view(np.ndarray)
         local_views = (
             np.ascontiguousarray(local[:, 0], dtype=np.float64),
             np.ascontiguousarray(local[:, 1], dtype=np.float64),
             np.ascontiguousarray(local[:, 2], dtype=np.float64),
         )
-    views = (anchors, rec, nov_t, nov_v, order, local_views)
+    num_segs = max(1, len(anchors) - 1)
+    if len(anchors) > 1:
+        inv_span = 1.0 / np.maximum(anchors[1:] - anchors[:-1], 1e-8)
+        seg_lo = np.repeat(np.arange(num_segs, dtype=np.intp), 2)
+        seg_hi = seg_lo + 1
+        seg_nearest = np.where(np.arange(2 * num_segs) & 1, seg_hi, seg_lo)
+    else:
+        inv_span = np.zeros(1, dtype=np.float64)
+        seg_lo = np.zeros(2, dtype=np.intp)
+        seg_hi = np.zeros(2, dtype=np.intp)
+        seg_nearest = np.zeros(2, dtype=np.intp)
+    raw_ids_s = order[seg_nearest]
+    ids_s = np.maximum(raw_ids_s, 0)
+    rec_lo_s = np.ascontiguousarray(rec[seg_lo[:, None], ids_s])
+    rec_diff_s = np.ascontiguousarray(rec[seg_hi[:, None], ids_s] - rec_lo_s)
+    p_s = PERIODS[ids_s]
+    two_pi_inv_p_s = np.ascontiguousarray((2.0 * np.pi) / p_s)
+    log1p_p_s = np.ascontiguousarray(np.log1p(p_s))
+    neg_mask_s = np.ascontiguousarray(raw_ids_s < 0)
+    state_tables = (inv_span, rec_lo_s, rec_diff_s, two_pi_inv_p_s, log1p_p_s, neg_mask_s)
+    views = (anchors, rec, nov_t, nov_v, order, local_views, state_tables)
     with _lock:
         _prepared_views[view_key] = (bank, views)
         _prepared_views.move_to_end(view_key)
@@ -531,31 +574,39 @@ def structure_features(song, beats, seconds, *, policy='metrical_context_v1', ca
         raise ValueError('beats and seconds must be finite arrays of the same length')
     out = np.zeros((len(beats), structure_dim_for_policy(policy)), dtype=np.float32)
     if policy == 'off': return out
-    for i, period in enumerate((4., 8., 16.)):
-        angle = 2*np.pi*beats/period
-        out[:, 2*i] = np.sin(angle); out[:, 2*i+1] = np.cos(angle)
+    a16 = beats * (np.pi * 0.125)
+    s16, c16 = np.sin(a16), np.cos(a16)
+    s8 = 2.0 * s16 * c16
+    c8 = c16 * c16 - s16 * s16
+    out[:, 0] = 2.0 * s8 * c8
+    out[:, 1] = c8 * c8 - s8 * s8
+    out[:, 2] = s8
+    out[:, 3] = c8
+    out[:, 4] = s16
+    out[:, 5] = c16
     if policy == 'native_periodic_v1' or not len(beats): return out
     enhanced=policy==ENHANCED_POLICY
     cached=_bank(song,cache_dir,backend,policy=policy) if enhanced else _bank(song,cache_dir,backend)
-    anchors, rec, nov_t, nov_v, order, local_views = _get_prepared_views(cached, enhanced)
+    anchors, _rec, nov_t, nov_v, _order, local_views, state_tables = _get_prepared_views(cached, enhanced)
+    inv_span, rec_lo_s, rec_diff_s, two_pi_inv_p_s, log1p_p_s, neg_mask_s = state_tables
     # Select candidates from the nearest anchor, then interpolate evidence for
     # that same period from the surrounding anchors. This never blends two
     # different periods into a single invented token.
-    hi = np.clip(np.searchsorted(anchors, beats, side='right'), 1, len(anchors)-1) if len(anchors)>1 else np.zeros(len(beats), dtype=int)
-    lo = np.maximum(0, hi-1)
-    alpha = np.clip((beats-anchors[lo])/np.maximum(anchors[hi]-anchors[lo], 1e-8), 0., 1.) if len(anchors)>1 else np.zeros(len(beats))
-    nearest = np.where(alpha < .5, lo, hi)
-    raw_ids = order[nearest]
-    ids = np.maximum(raw_ids, 0)
-    a3 = alpha[:, None, None]
-    v = rec[lo[:, None], ids] * (1. - a3) + rec[hi[:, None], ids] * a3
+    if len(anchors) > 1:
+        hi = np.clip(np.searchsorted(anchors, beats, side='right'), 1, len(anchors) - 1)
+        lo = hi - 1
+        alpha = np.clip((beats - anchors[lo]) * inv_span[lo], 0., 1.)
+        state_idx = (lo << 1) | (alpha >= .5)
+        v = rec_lo_s[state_idx] + rec_diff_s[state_idx] * alpha[:, None, None]
+    else:
+        state_idx = np.zeros(len(beats), dtype=np.intp)
+        v = rec_lo_s[state_idx].copy()
     if enhanced:
-        v[raw_ids < 0] = 0.
+        v[neg_mask_s[state_idx]] = 0.
         wt = _representative_weights(v[:, :, 0])
     else:
         wt = v[:, :, 0]
-    p = PERIODS[ids]
-    angle = (2.0 * np.pi) * beats[:, None] / p
+    angle = beats[:, None] * two_pi_inv_p_s[state_idx]
     c1, s1 = np.cos(angle), np.sin(angle)
     c2 = c1 * c1 - s1 * s1
     s2 = 2.0 * s1 * c1
@@ -568,7 +619,7 @@ def structure_features(song, beats, seconds, *, policy='metrical_context_v1', ca
         # confidence gates it once. Do not multiply confidence by the
         # already attenuated absolute coefficient a second time.
         magnitude = np.maximum(np.hypot(z1_re, z1_im), np.hypot(z2_re, z2_im))
-        inv_mag = np.divide(1.0, magnitude, out=np.zeros_like(magnitude), where=magnitude > 1e-6)
+        inv_mag = np.where(magnitude > 1e-6, 1.0 / np.maximum(magnitude, 1e-6), 0.0)
         z1_re = z1_re * inv_mag
         z1_im = z1_im * inv_mag
         z2_re = z2_re * inv_mag
@@ -578,7 +629,7 @@ def structure_features(song, beats, seconds, *, policy='metrical_context_v1', ca
     slots[:, :, 1] = wt * z1_re
     slots[:, :, 2] = wt * z2_im
     slots[:, :, 3] = wt * z2_re
-    slots[:, :, 4] = np.log1p(p) * wt
+    slots[:, :, 4] = log1p_p_s[state_idx] * wt
     slots[:, :, 5] = np.log1p(v[:, :, 5]) * wt
     slots[:, :, 6] = wt
     slots[:, :, 7] = v[:, :, 1]
@@ -590,9 +641,9 @@ def structure_features(song, beats, seconds, *, policy='metrical_context_v1', ca
         local_t, local_c0, local_c1 = local_views
         duration_sec = _audio_duration_sec(song)
         available = (seconds >= 0.) & (seconds < duration_sec)
-        shifted = (seconds[:, None] + _LOCAL_OFFSETS[None, :]).reshape(-1)
+        shifted = (_LOCAL_OFFSETS[:, None] + seconds[None, :]).reshape(-1)
         for column, col_values in enumerate((local_c0, local_c1)):
-            peaks = np.interp(shifted, local_t, col_values, left=0., right=0.).reshape(len(seconds), -1).max(axis=1)
+            peaks = np.interp(shifted, local_t, col_values, left=0., right=0.).reshape(5, len(seconds)).max(axis=0)
             out[:, 48+column] = np.where(available, peaks, 0.)
         out[:, 50] = available
     return out
@@ -609,10 +660,60 @@ def structure_features_and_transition(song,beats,seconds,previous_beat=None,prev
     b=np.asarray(beats,dtype=np.float64).reshape(-1)
     s=np.asarray(seconds,dtype=np.float64).reshape(-1)
     if len(b)!=len(s):raise ValueError('beats and seconds must have the same length')
-    joined=structure_features(song,np.r_[b,float(previous_beat)],np.r_[s,float(previous_second)],
+    b_join=np.empty(len(b)+1,dtype=np.float64);b_join[:-1]=b;b_join[-1]=float(previous_beat)
+    s_join=np.empty(len(s)+1,dtype=np.float64);s_join[:-1]=s;s_join[-1]=float(previous_second)
+    joined=structure_features(song,b_join,s_join,
         policy=policy,cache_dir=cache_dir,backend=backend)
     features=joined[:-1]
     return features,features-joined[-1:]
+
+
+def structure_features_and_transition_batch(song, beats, seconds, previous_beats=None,
+                                            previous_seconds=None, *,
+                                            policy='metrical_context_v1', cache_dir=None,
+                                            backend='auto'):
+    """Query same-source candidate grids with one bank/prepared-view lookup.
+
+    ``beats`` and ``seconds`` have shape [samples, candidates]. Predecessors
+    have one entry per sample; paired None entries retain the initial-sample
+    transition convention (a copy of its features). No query values are
+    rounded or cached, so tempo, tail and backend refresh rules stay identical
+    to :func:`structure_features_and_transition`.
+    """
+    b = np.asarray(beats, dtype=np.float64)
+    s = np.asarray(seconds, dtype=np.float64)
+    if b.ndim != 2 or s.shape != b.shape:
+        raise ValueError('beats and seconds must have the same [samples, candidates] shape')
+    if (previous_beats is None) != (previous_seconds is None):
+        raise ValueError('Previous beats and seconds must both be supplied or absent')
+    rows, candidates = b.shape
+    if previous_beats is None:
+        present = np.zeros(rows, dtype=bool)
+        pb = ps = np.empty(0, dtype=np.float64)
+    else:
+        previous_b = np.asarray(previous_beats, dtype=object)
+        previous_s = np.asarray(previous_seconds, dtype=object)
+        if previous_b.shape != (rows,) or previous_s.shape != (rows,):
+            raise ValueError('Previous beats and seconds must have one entry per sample')
+        present = np.fromiter((value is not None for value in previous_b), bool, rows)
+        second_present = np.fromiter((value is not None for value in previous_s), bool, rows)
+        if not np.array_equal(present, second_present):
+            raise ValueError('Previous beat and second must both be supplied or absent')
+        pb = np.asarray(previous_b[present], dtype=np.float64)
+        ps = np.asarray(previous_s[present], dtype=np.float64)
+    count = b.size
+    if present.any():
+        query_b = np.concatenate((b.reshape(-1), pb))
+        query_s = np.concatenate((s.reshape(-1), ps))
+    else:
+        query_b, query_s = b.reshape(-1), s.reshape(-1)
+    queried = structure_features(song, query_b, query_s, policy=policy,
+                                 cache_dir=cache_dir, backend=backend)
+    features = queried[:count].reshape(rows, candidates, queried.shape[-1])
+    delta = features.copy()
+    if present.any():
+        delta[present] -= queried[count:, None, :]
+    return features, delta
 
 
 def structure_segments(song, *, cache_dir=None, backend='auto', limit=4,policy='metrical_context_v1'):

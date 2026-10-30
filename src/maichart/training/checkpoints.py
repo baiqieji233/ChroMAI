@@ -122,4 +122,13 @@ def compare_checkpoint_contract(
 
 
 def _is_state_dict(value: Any) -> bool:
-    return isinstance(value, Mapping) and bool(value) and all(torch.is_tensor(item) for item in value.values())
+    return (
+        isinstance(value, Mapping)
+        and bool(value)
+        and any(torch.is_tensor(item) for item in value.values())
+        and all(
+            torch.is_tensor(item)
+            or (isinstance(key, str) and (key == "_extra_state" or key.endswith("._extra_state")))
+            for key, item in value.items()
+        )
+    )

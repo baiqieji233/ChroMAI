@@ -8,7 +8,7 @@ function harness(){
   let mode='resume',submitted;
   const parent={valid:true,can_resume:true,family:'chart_composer_v1',model_config:{dropout:.25},
     args:{batch_size:96,grad_accumulation:4,lr:.0002,precision:'bf16',seed:0,max_steps:0},optimizer_lr:.00005};
-  const c=vm.createContext({element:el,currentTrainingMode:()=>mode,currentModelFamily:()=> 'chart_composer_v1',
+  const c=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},element:el,currentTrainingMode:()=>mode,currentModelFamily:()=> 'chart_composer_v1',
     currentCheckpointKey:()=> 'parent',checkpointInspection:{key:'',data:null},checkpointInspectRequest:0,
     currentGenerationFamily:()=> 'chart_composer_v1',datasetUploading:false,trainingStarting:false,
     window:{},updateFamilyFields:()=>{},updateDatasetButtons:()=>{},updateTrainingModeHelp:()=>{},

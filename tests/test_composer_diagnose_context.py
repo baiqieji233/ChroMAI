@@ -45,6 +45,19 @@ def test_inputs_forwards_selected_state_and_motif_tensors():
         torch.testing.assert_close(result[key], batch[key])
 
 
+def test_inputs_forward_fixed_future_when_quality_policy_is_off():
+    batch=_batch()
+    batch.update(quality_future_audio=torch.randn(2,6,10,104),
+                 quality_future_mask=torch.ones(2,6,10,dtype=torch.bool),
+                 quality_future_offsets=torch.ones(2,10),
+                 empty_gap_audio=torch.randn(2,4,104),
+                 empty_gap_exposure=torch.ones(2,4),empty_gap_weight=torch.ones(2,4))
+    result=_inputs(batch,'cpu')
+    for key in ('quality_future_audio','quality_future_mask','quality_future_offsets'):
+        torch.testing.assert_close(result['quality_inputs'][key],batch[key])
+    assert not any(key.startswith('empty_gap_') for key in result)
+
+
 def test_context_policies_cannot_silently_use_context_from_a_different_target():
     import pytest
 
@@ -237,3 +250,35 @@ def test_omitted_prefix_recomputes_candidate_state_from_strict_prefix(tmp_path, 
     assert changed['action_state'].shape == (dataset.candidate_count, 50)
     assert 'selected_action_state' not in changed
     assert 'motif_ids' not in changed
+
+
+def test_omitted_prefix_refreshes_fixed_future_and_discards_empty_gap(tmp_path,monkeypatch):
+    from test_composer_event_views import dataset_fixture, points
+    import maichart.composer.quality_inputs as quality_inputs
+    dataset=dataset_fixture(tmp_path,monkeypatch,
+        source=points((0,'1'),(1,'2'),(2,'3'),(3,'4'),(4,'5')))
+    sample=dataset.samples[4];item=dataset[4]
+    dataset.fixed_future_audio=True
+    item.update(quality_future_audio=torch.full((dataset.candidate_count,10,104),-999.),
+                empty_gap_audio=torch.ones(4,104),empty_gap_exposure=torch.ones(4),
+                empty_gap_weight=torch.ones(4))
+    id_map=np.arange(len(dataset.codec_atoms)+1)
+    for enabled in (False,True):
+        dataset.quality_inputs_enabled=enabled
+        seen=[]
+        def quality(**kwargs):
+            seen.append(kwargs['include_future'])
+            return dict(quality_inputs.fixed_future_audio_inputs(kwargs['acoustic_context'],kwargs['clock'],
+                kwargs['candidate_beats'],kwargs['audio_duration']),quality_phrase_audio=torch.zeros(1,104))
+        monkeypatch.setattr(quality_inputs,'quality_context_inputs',quality)
+        changed,seconds,candidates=_omit_last_prefix(dataset,sample,item,id_map)
+        assert seen==([True] if enabled else [])
+        assert not (changed['quality_future_audio']==-999.).any()
+        assert changed['quality_future_audio'].shape==(dataset.candidate_count,10,104)
+        for key in ('empty_gap_audio','empty_gap_exposure','empty_gap_weight'):
+            assert not changed[key].any()
+        table=dataset._song_table(sample.song_index)
+        ev=sample.event_index-1
+        start=max(0,ev-dataset.history_events)
+        expected=table['point_seconds'][ev-1]-table['point_seconds'][start:ev]
+        np.testing.assert_allclose(changed['history_second_ages'],expected)

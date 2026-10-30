@@ -105,7 +105,7 @@ def _parse_factors(atom: str, *, joint=False) -> dict[str, Any]:
         reasons = ', '.join(f'{token.raw!r}: {token.reason}'
                             for token in parsed.unknown_tokens)
         raise ValueError(f'Invalid Composer factor atom {atom!r}: {reasons or "empty event"}')
-    result = dict(kind_mask=0, head_lane_mask=0, hold_duration=[],
+    result = dict(kind_mask=0, head_lane_mask=0, _end_lane_mask=0, hold_duration=[],
                   slide_duration=[], trajectory_shape=[], relative_endpoint=[],
                   break_ex=0, branch_count=0, touch_ring=0, firework=0)
     if joint:
@@ -116,6 +116,8 @@ def _parse_factors(atom: str, *, joint=False) -> dict[str, Any]:
         result['kind_mask'] |= KIND_BITS[note.note_type]
         if isinstance(note.position, int):
             result['head_lane_mask'] |= 1 << (note.position - 1)
+            if note.note_type != 'slide':
+                result['_end_lane_mask'] |= 1 << (note.position - 1)
         else:
             ring = note.modifiers.get('touch_area')
             if ring not in TOUCH_RING_BITS:
@@ -131,6 +133,11 @@ def _parse_factors(atom: str, *, joint=False) -> dict[str, Any]:
             result['relative_endpoint'].append(endpoints)
             result['slide_duration'].append(durations)
             result['branch_count'] += len(note.slide_segments)
+            for segment in note.slide_segments:
+                parts = segment.get('path_parts') or [segment]
+                end_pos = int(parts[-1]['end_position'])
+                if 1 <= end_pos <= 8:
+                    result['_end_lane_mask'] |= 1 << (end_pos - 1)
             if joint:
                 result['slide_branch_joint'].append(_slide_joint_keys(note))
     for name in ('hold_duration', 'slide_duration', 'trajectory_shape', 'relative_endpoint'):
@@ -188,6 +195,12 @@ class CompositionalActions(nn.Module):
             dtype=torch.bool))
         heads=self.atom_head_lanes.float()
         self.register_buffer('_normalized_head_lanes',heads/heads.sum(-1,keepdim=True).clamp_min(1),persistent=False)
+        end_masks = [0, *(row['_end_lane_mask'] for row in rows)]
+        self.register_buffer('atom_end_lanes', torch.tensor(
+            [[bool(mask & (1 << lane)) for lane in range(8)] for mask in end_masks],
+            dtype=torch.bool), persistent=False)
+        ends = self.atom_end_lanes.float()
+        self.register_buffer('_normalized_end_lanes', ends / ends.sum(-1, keepdim=True).clamp_min(1), persistent=False)
         atom_to_id={atom:i+1 for i,atom in enumerate(atoms)}
         # Retain the historical mapping for old checkpoints. Parsed-head
         # history never reads these duration-sensitive compatibility IDs.

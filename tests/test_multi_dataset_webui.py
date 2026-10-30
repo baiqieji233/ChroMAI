@@ -71,6 +71,41 @@ def test_song_form_training_prepares_all_selected_sources(webui_api, monkeypatch
     assert task.kind == "form_train"
 
 
+@pytest.mark.parametrize("endpoint", ["/api/train", "/api/composer/train"])
+def test_composer_training_prepares_all_selected_sources_and_preserves_composer_cache(
+    webui_api, monkeypatch, tmp_path, endpoint
+):
+    monkeypatch.setattr(webui, "WEBUI_ROOT", tmp_path / "workspace")
+    a, b = make_source(tmp_path / "a", "Title A"), make_source(tmp_path / "b", "Title B")
+    composer_cache = tmp_path / "composer_cache"
+    payload = {
+        "model_family": "chart_composer_v1",
+        "mode": "fresh",
+        "manifest": str(a),
+        "manifests": [str(a), str(b)],
+        "checkpoint_dir": str(tmp_path / f"composer_model_{endpoint.strip('/').replace('/', '_')}"),
+        "cache_dir": str(composer_cache),
+        "epochs": 1,
+        "device": "cpu",
+    }
+    status, inspected = webui_api("/api/inspect-manifest", payload)
+    assert status == 200, inspected
+    assert inspected["song_count"] == 2
+    calls = []
+    monkeypatch.setattr(webui, "_run_subprocess_task", lambda task, args, **kwargs: calls.append(args))
+    status, result = webui_api(endpoint, payload)
+    assert status == 200, result
+    args = calls[0]
+    assert args[:2] == ["-m", "maichart.composer.train"]
+    assert args[args.index("--manifest") + 1] == inspected["manifest"]
+    assert Path(args[args.index("--cache-dir") + 1]).resolve() == composer_cache.resolve()
+    task = webui.TASKS[result["task_id"]]
+    assert task.result["dataset_selection"]["manifest"] == inspected["manifest"]
+    merged = json.loads(Path(task.result["source_manifest"]).read_text(encoding="utf-8"))
+    assert {song["title"] for song in merged["songs"]} == {"Title A", "Title B"}
+    assert task.kind == "composer_train"
+
+
 def test_checkpoint_inspection_receives_selected_sources(webui_api, monkeypatch, tmp_path):
     monkeypatch.setattr(webui, "WEBUI_ROOT", tmp_path / "workspace")
     a, b = make_source(tmp_path / "a", "Title A"), make_source(tmp_path / "b", "Title B")

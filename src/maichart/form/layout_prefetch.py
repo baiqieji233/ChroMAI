@@ -47,17 +47,27 @@ class LayoutBatchPrefetch:
         self._lock = threading.Lock()
         self._source_locks_guard = threading.Lock()
         self._source_locks = {}
+        self._worker_gate = threading.Event()
+        self._worker_gate.set()
         self._samples = None
         self._prepared = 0
         self._prepare_seconds = self._wait_seconds = 0.
         self._buffered_bytes = self._max_buffered_bytes = 0
         self._stream = None
 
+    def pause_workers(self):
+        self._worker_gate.clear()
+
+    def resume_workers(self):
+        self._worker_gate.set()
+
     def _sample(self, index):
+        self._worker_gate.wait()
         key = self._loader.dataset.prepare_concurrency_key(index)
         with self._source_locks_guard:
             lock = self._source_locks.setdefault(key, threading.Lock())
         with lock:
+            self._worker_gate.wait()
             return self._loader.dataset[index]
 
     def _sample_group(self, group):
@@ -66,12 +76,55 @@ class LayoutBatchPrefetch:
             lock = self._source_locks.setdefault(key, threading.Lock())
         with lock:
             dataset = self._loader.dataset
-            return [(pos, dataset[index]) for pos, index in pos_indices]
+            fetch_batch = getattr(dataset, '__getitems__', None)
+            rows = []
+            if callable(fetch_batch):
+                # Keep a pause responsive even for a batch concentrated on one
+                # source. A running call finishes at most eight samples before
+                # the next gate check; the source lock spans every chunk.
+                for start in range(0, len(pos_indices), 8):
+                    chunk = pos_indices[start:start + 8]
+                    self._worker_gate.wait()
+                    items = list(fetch_batch([index for _, index in chunk]))
+                    if len(items) != len(chunk):
+                        raise ValueError('Dataset batch fetch returned an incorrect number of samples')
+                    rows.extend((pos, item) for (pos, _), item in zip(chunk, items))
+                return rows
+            for pos, index in pos_indices:
+                self._worker_gate.wait()
+                rows.append((pos, dataset[index]))
+            return rows
 
     def _prepare(self, indices):
         started = time.perf_counter()
         if self._samples is None:
-            batch = next(self._source)
+            if hasattr(self._source, '_next_index'):
+                batch_indices = self._source._next_index()
+                dataset = self._loader.dataset
+                fetch_batch = getattr(dataset, '__getitems__', None)
+                if callable(fetch_batch):
+                    items = []
+                    batch_indices = list(batch_indices)
+                    for start in range(0, len(batch_indices), 8):
+                        self._worker_gate.wait()
+                        chunk = batch_indices[start:start + 8]
+                        prepared = list(fetch_batch(chunk))
+                        if len(prepared) != len(chunk):
+                            raise ValueError('Dataset batch fetch returned an incorrect number of samples')
+                        items.extend(prepared)
+                else:
+                    items = []
+                    for index in batch_indices:
+                        self._worker_gate.wait()
+                        items.append(dataset[index])
+                self._worker_gate.wait()
+                batch = self._loader.collate_fn(items)
+                if self._source._pin_memory:
+                    from torch.utils.data._utils.pin_memory import pin_memory
+                    batch = pin_memory(batch, self._source._pin_memory_device)
+            else:
+                self._worker_gate.wait()
+                batch = next(self._source)
         else:
             # Group by concurrency key so each song/source submits one contiguous
             # task instead of 64 per-sample futures fighting on the same lock,
@@ -86,6 +139,7 @@ class LayoutBatchPrefetch:
             for group_rows in self._samples.map(self._sample_group, groups.items()):
                 for pos, item in group_rows:
                     items[pos] = item
+            self._worker_gate.wait()
             batch = self._loader.collate_fn(items)
             # Match the zero-worker DataLoader's actual pin policy. This does
             # not move audio or model work onto CUDA sample threads.
@@ -115,6 +169,7 @@ class LayoutBatchPrefetch:
     def __next__(self):
         if self._stream is None:
             raise RuntimeError('Use LayoutBatchPrefetch as a context manager')
+        self._worker_gate.set()
         started = time.perf_counter()
         batch = next(self._stream)
         with self._lock:
@@ -133,6 +188,7 @@ class LayoutBatchPrefetch:
                     'max_buffered_tensor_bytes': self._max_buffered_bytes}
 
     def close(self):
+        self._worker_gate.set()
         if self._stream is not None:
             self._stream.close(cancel=True)
             self._stream = None

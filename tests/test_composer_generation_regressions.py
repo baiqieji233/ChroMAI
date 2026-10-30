@@ -99,8 +99,8 @@ def test_existing_phase_policy_and_fallback_are_preserved():
         candidates = candidate_beats(committed, tempo=tempo, first=0., audio_end_sec=20.,
                                     candidate_count=96, policy=MUSIC_CANDIDATE_POLICY_V6)
         base = [index % 3 != 0 for index in range(len(candidates))]
-        expected = [ok and beat.denominator in canonical and
-            (committed is None or (beat - committed).denominator in canonical)
+        expected = [ok and module.is_playable_candidate_transition(beat, committed, MUSIC_CANDIDATE_POLICY_V6)
+            and True
             for ok, beat in zip(base, candidates)]
         assert module._candidate_playability(candidates, base, committed,
             MUSIC_CANDIDATE_POLICY_V6) == (expected if any(expected) else base)

@@ -22,6 +22,56 @@ CANDIDATE_POLICY = 'absolute_recovery_v4'
 MUSIC_CANDIDATE_POLICY = 'absolute_recovery_v5'
 MUSIC_CANDIDATE_POLICY_V6 = 'absolute_recovery_v6_phase_safe'
 _MIN_MUSIC_RECOVERY_GAP = Fraction(1, 16)
+CANONICAL_BEAT_DENOMINATORS = frozenset({1, 2, 3, 4, 6, 8})
+
+
+def is_playable_candidate_transition(
+    beat: Fraction,
+    committed_previous: Fraction | None,
+    policy: str = MUSIC_CANDIDATE_POLICY_V6,
+    *,
+    min_gap: Fraction = _MIN_MUSIC_RECOVERY_GAP,
+) -> bool:
+    """Check whether ``beat`` is a legal phase-safe candidate after ``committed_previous``.
+
+    Under ``MUSIC_CANDIDATE_POLICY_V6``, candidate beats must lie on the
+    canonical absolute grid ``{1, 2, 3, 4, 6, 8}`` and maintain at least
+    ``min_gap`` (1/16 beat) from ``committed_previous`` so binary/ternary
+    transitions cannot create 1/24 or 1/48 micro-bridge notes, while still
+    allowing direct return from ternary phases (e.g. 1/3, 1/6) to valid binary
+    subdivisions (e.g. 3/4, 7/8).
+    """
+    if policy != MUSIC_CANDIDATE_POLICY_V6:
+        return True
+    beat = beat if isinstance(beat, Fraction) else Fraction(beat)
+    if beat.denominator not in CANONICAL_BEAT_DENOMINATORS:
+        return False
+    if committed_previous is None:
+        return True
+    prev = committed_previous if isinstance(committed_previous, Fraction) else Fraction(committed_previous)
+    delta = beat - prev
+    if delta < min_gap:
+        return False
+    if prev.denominator not in CANONICAL_BEAT_DENOMINATORS:
+        return True
+    if delta.denominator not in CANONICAL_BEAT_DENOMINATORS:
+        # Cross-grid binary/ternary transitions must never create <1/4 beat
+        # micro-bridges such as 1/24 ({96}) or 1/12 ({48}, e.g. 2/3 -> 3/4).
+        return delta >= Fraction(1, 4)
+    if beat.denominator == 8 and prev.denominator in {1, 2, 4, 8}:
+        # Enter a {32} (1/8-beat) off-beat only via a genuine 1/8-beat step,
+        # never across 3/8, 5/8, 7/8 empty syncopation gaps.
+        return delta == Fraction(1, 8)
+    if prev.denominator == 8 and beat.denominator in {1, 2, 4}:
+        # Exit a {32} off-beat either by completing the 1/8-beat pair onto the
+        # 1/4 grid, landing on the next integer beat (e.g. 0->1/8 then 1), or
+        # recovering to a >=1-beat anchor, never via a 3/8 hiccup ({32}x,y,{16},).
+        return (
+            delta == Fraction(1, 8)
+            or (beat.denominator == 1 and delta >= Fraction(5, 8))
+            or (beat.denominator == 2 and delta >= Fraction(1, 1))
+        )
+    return True
 
 
 _FINE_OFFSETS: tuple[Fraction, ...] = tuple(sorted({
@@ -96,7 +146,7 @@ def _select_candidate_offsets(
     return _cached_candidate_offsets(first_event, valid_len, count, phase, policy)
 
 
-@lru_cache(maxsize=4096)
+@lru_cache(maxsize=32768)
 def _cached_candidate_offsets(first_event, valid_len, count, phase, policy):
     offsets = offset_universe(policy)[:valid_len]
     values = ([Fraction(0)] if first_event else []) + list(offsets)
@@ -138,19 +188,23 @@ def _cached_candidate_offsets(first_event, valid_len, count, phase, policy):
             recovery_priority = list(dict.fromkeys(coarse + recovery))[:max(2, count//4)]
             priority_offsets = (([Fraction(0)] if first_event else []) + list(_NEAR_REQUIRED)
                                 + recovery_priority + list(_PRIORITY_TAIL) + recovery)
-        by_offset = {value: value for value in values}
-        far = [by_offset[offset] for offset in (_FAR_OFFSETS+_LONG_REST_OFFSETS if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6} else _FAR_OFFSETS) if offset in by_offset]
+        by_offset = set(values)
+        far = [offset for offset in (_FAR_OFFSETS+_LONG_REST_OFFSETS if policy in {MUSIC_CANDIDATE_POLICY, MUSIC_CANDIDATE_POLICY_V6} else _FAR_OFFSETS) if offset in by_offset]
         far_slots = min(len(far), max(0, count // 4))
         near_slots = max(0, count - far_slots)
-        selected = list(dict.fromkeys(by_offset[offset] for offset in priority_offsets if offset in by_offset))[:near_slots]
-        remaining_far = [value for value in far if value not in selected]
+        selected = list(dict.fromkeys(offset for offset in priority_offsets if offset in by_offset))[:near_slots]
+        selected_set = set(selected)
+        remaining_far = [value for value in far if value not in selected_set]
         if far_slots and remaining_far:
             indices = sorted(set(
                 round(i * (len(remaining_far) - 1) / max(1, far_slots - 1))
                 for i in range(far_slots)
             ))
-            selected.extend(remaining_far[index] for index in indices)
-        remaining = [value for value in values if value not in selected]
+            for index in indices:
+                val = remaining_far[index]
+                selected.append(val)
+                selected_set.add(val)
+        remaining = [value for value in values if value not in selected_set]
         slots = count - len(selected)
         if slots and remaining:
             indices = sorted(set(
@@ -266,10 +320,77 @@ def candidate_beats(previous: Fraction | None, *, tempo, first: float, audio_end
     return [previous_beat + offset for offset in selected]
 
 
+# Rhythm grid level of an absolute candidate beat, used by timing samplers to
+# keep the model's learned mass per grid level (integer / half / quarter /
+# eighth / third / sixth) at T=1. Temperature and truncation then act only
+# inside one level, so a sharp temperature cannot erase a whole rhythm family
+# (e.g. every triplet position) just because it is the minority in its bin.
+GRID_LEVEL_COUNT = 7
+_GRID_LEVEL_BY_DENOMINATOR = {1: 0, 2: 1, 4: 2, 8: 3, 3: 4, 6: 5}
+
+
+def candidate_grid_levels(candidates, width: int | None = None) -> np.ndarray:
+    """Return int64 grid levels [width]; padding and off-grid beats use level 6."""
+    size = len(candidates) if width is None else int(width)
+    levels = np.full(size, GRID_LEVEL_COUNT - 1, dtype=np.int64)
+    for index, beat in enumerate(candidates[:size]):
+        value = beat if isinstance(beat, Fraction) else Fraction(beat)
+        levels[index] = _GRID_LEVEL_BY_DENOMINATOR.get(value.denominator, GRID_LEVEL_COUNT - 1)
+    return levels
+
+
+# Rhythm family of the recent committed prefix. Official Master charts (341
+# charts, 2026-10-29): after a ternary onset within 2 beats the next onset is
+# ternary 41.6% of the time; after a binary one, 1.6%; with only integer onsets,
+# 1.8%. Only 6.2% of ternary onsets are isolated (no other ternary onset within
+# one beat). Integer beats belong to both families and never set the state.
+RHYTHM_FAMILY_WINDOW = Fraction(2)
+RHYTHM_FAMILY_STATES = ('binary', 'ternary', 'neutral')
+_BINARY_LEVELS = (1, 2, 3)
+_TERNARY_LEVELS = (4, 5)
+
+
+def rhythm_family_state(committed_beats, window: Fraction = RHYTHM_FAMILY_WINDOW) -> str:
+    """Family of the most recent non-integer committed onset within ``window`` beats of the last one."""
+    beats = list(committed_beats)
+    if not beats:
+        return 'neutral'
+    last = Fraction(beats[-1])
+    for beat in reversed(beats):
+        beat = Fraction(beat)
+        if last - beat > window:
+            break
+        level = _GRID_LEVEL_BY_DENOMINATOR.get(beat.denominator)
+        if level in _TERNARY_LEVELS:
+            return 'ternary'
+        if level in _BINARY_LEVELS:
+            return 'binary'
+    return 'neutral'
+
+
+def family_switch_levels(state: str, *, entering_microstep: bool = False) -> np.ndarray:
+    """Boolean [GRID_LEVEL_COUNT]: grid levels that would switch away from ``state``.
+
+    Neutral (only integer onsets recently) defaults to binary, the common case.
+    Integer beats are shared and never a switch; off-canonical levels always are.
+    """
+    if state not in RHYTHM_FAMILY_STATES:
+        raise ValueError('Unknown rhythm family state')
+    switch = np.zeros(GRID_LEVEL_COUNT, dtype=bool)
+    switch[list(_BINARY_LEVELS if state == 'ternary' else _TERNARY_LEVELS)] = True
+    switch[GRID_LEVEL_COUNT - 1] = True
+    if entering_microstep:
+        switch[3] = True
+    return switch
+
+
 def candidate_index(target: Fraction, candidates: list[Fraction]) -> int:
     if target in candidates:
         return candidates.index(target)
     return -1
+
+
+_HARMONICS = np.asarray((2, 3, 4, 6, 8, 12, 16), dtype=np.float64)[None, :]
 
 
 def candidate_features(
@@ -282,6 +403,7 @@ def candidate_features(
     clock: TempoClock | None = None,
     candidate_seconds: np.ndarray | None = None,
     beat_floats: np.ndarray | None = None,
+    previous_second: float | None = None,
     rich_time: bool = False,
 ):
     """Numeric time features; audio probes are attached by the dataset/model."""
@@ -289,8 +411,9 @@ def candidate_features(
     if (beat_floats is None and not candidates) or (beat_floats is not None and len(beat_floats) == 0):
         return np.zeros((0, 5), dtype=np.float32)
     timeline = clock if clock is not None else TempoClock(tempo, first)
-    previous_beat = Fraction(0) if previous is None else max(Fraction(0), Fraction(previous))
-    previous_second = float(timeline.at(previous_beat))
+    previous_beat = Fraction(0) if previous is None else max(Fraction(0), previous if type(previous) is Fraction else Fraction(previous))
+    if previous_second is None:
+        previous_second = float(timeline.at(previous_beat))
     if beat_floats is None:
         beat_floats = np.asarray([float(beat) for beat in candidates], dtype=np.float64)
     if candidate_seconds is None:
@@ -301,8 +424,8 @@ def candidate_features(
         else beat_floats - float(previous_beat)
     )
     delta_sec = np.maximum(0.0, candidate_seconds - previous_second)
-    angles = 2.0 * math.pi * beat_floats
-    out = np.empty((len(beat_floats), 5), dtype=np.float32)
+    angles = (2.0 * math.pi) * beat_floats
+    out = np.empty((len(beat_floats), 21 if rich_time else 5), dtype=np.float32)
     out[:, 0] = delta_beats
     out[:, 1] = delta_sec
     out[:, 2] = np.log1p(delta_sec)
@@ -310,16 +433,19 @@ def candidate_features(
     out[:, 4] = np.cos(angles)
     if not rich_time:
         return out
-    harmonics = np.asarray((2, 3, 4, 6, 8, 12, 16), dtype=np.float64)
-    phases = angles[:, None] * harmonics[None]
-    extra = np.column_stack((np.sin(phases), np.cos(phases),
-        np.log1p(np.maximum(delta_beats, 0.)), np.log1p(1. / np.maximum(delta_beats, 1e-6))))
-    return np.concatenate((out, extra.astype(np.float32)), axis=1)
+    phases = angles[:, None] * _HARMONICS
+    out[:, 5:12] = np.sin(phases)
+    out[:, 12:19] = np.cos(phases)
+    out[:, 19] = np.log1p(np.maximum(delta_beats, 0.))
+    out[:, 20] = np.log1p(1. / np.maximum(delta_beats, 1e-6))
+    return out
 
 
 def interp_candidate_audio(values: np.ndarray, times: np.ndarray, seconds: np.ndarray,
                            *, suppress_attack_bridges: bool = False) -> np.ndarray:
     """Vectorized 2D linear interpolation matching np.interp(..., left=0., right=0.)."""
+    values = np.asarray(values).view(np.ndarray)
+    times = np.asarray(times, dtype=np.float64).view(np.ndarray)
     seconds = np.asarray(seconds, dtype=np.float64)
     n_queries = len(seconds)
     n_times = len(times)

@@ -15,6 +15,10 @@ def file_hash(path):
     return h.hexdigest()
 
 
+STRUCTURE_COMPARISON_KEYS=('rhythm_echo_rate','layout_echo_rate','ternary_rate','ternary_isolated_rate',
+                           'aa_rate','pingpong_rate','double_chain_rate')
+
+
 def compare_chart_reports(reference,generated,*,factor=2.):
     """Flag descriptive deviations; a reference is one valid composition."""
     pairs=[]
@@ -35,8 +39,14 @@ def compare_chart_reports(reference,generated,*,factor=2.):
                 'multiple':current/base if base>0 else None,
                 'reference_denominator':base_n,'generated_denominator':current_n,
                 'reason':'over_reference_factor' if base>0 else 'nonzero_against_zero_reference'})
-    return {'factor':factor,'alerts':alerts,
+    result={'factor':factor,'alerts':alerts,
         'scope':'review signals only; reference choice and small denominators can explain deviations'}
+    if reference.get('structure') and generated.get('structure'):
+        # Same-song structure: bar echo, rhythm grids, repetition. Descriptive
+        # only; one song can lack triplets or echoes without being wrong.
+        result['structure']={key:{'reference':reference['structure'].get(key),'generated':generated['structure'].get(key)}
+            for key in STRUCTURE_COMPARISON_KEYS}
+    return result
 
 
 def split_manifest(manifest, output_dir, *, fraction=.05, seed=0):
@@ -193,6 +203,8 @@ def evaluate_teacher_forced(model, dataset, *, device, batch_size=32, max_batche
         evaluation_source=Subset(dataset,selected)
         selection='fixed_song_balanced_uniform_event_positions'
     loader = DataLoader(evaluation_source, batch_size=batch_size, shuffle=False, collate_fn=collate_composer)
+    from .echo_metrics import EchoMetrics
+    echo = EchoMetrics()
     sums = {}; masses = {}; batches = samples = 0
     modes = [(module, module.training) for module in model.modules()]
     python_rng = random.getstate(); numpy_rng = np.random.get_state()
@@ -207,23 +219,29 @@ def evaluate_teacher_forced(model, dataset, *, device, batch_size=32, max_batche
                                     dtype=torch.bfloat16 if precision == 'bf16' else torch.float16):
                     output = _forward_batch(model, tensors, packed_actions=True)
                     _, metrics = _loss(output, tensors, len(dataset.codec_atoms) + 1, **(loss_kwargs or {}))
+                echo.update(model, tensors, output)
                 w = tensors.get('sample_weight', torch.ones_like(tensors['eos_target']))
                 transition = tensors.get('transition_weight', torch.ones_like(w))
-                pointer_mass = (w * transition * tensors.get('pointer_weight', torch.ones_like(w))).sum().item()
-                action_mass = (w * transition * tensors.get('action_weight', torch.ones_like(w))).sum().item()
+                pointer_mass = (w * transition * tensors.get('pointer_weight', torch.ones_like(w))).sum()
+                action_mass = (w * transition * tensors.get('action_weight', torch.ones_like(w))).sum()
                 action_weights = w * transition * tensors.get('action_weight', torch.ones_like(w))
                 targets = tensors['action_target'] if 'action_target' in tensors else None
                 if targets is not None:
                     active = torch.ones_like(targets, dtype=torch.bool)
                     if targets.size(1) > 1:
                         active[:, 1:] = targets[:, :-1].ne(0).long().cumprod(-1).bool()
-                    nonstop_mass = (active * targets.ne(0) * action_weights[:, None]).sum().item()
-                    stop_mass = (active * targets.eq(0) * action_weights[:, None]).sum().item()
+                    nonstop_mass = (active * targets.ne(0) * action_weights[:, None]).sum()
+                    stop_mass = (active * targets.eq(0) * action_weights[:, None]).sum()
                 else:
-                    nonstop_mass = stop_mass = 0.
+                    nonstop_mass = stop_mass = w.new_zeros(())
+                # Preserve Python/double report accumulation, but read every
+                # scalar in one transfer instead of synchronizing per metric.
+                names = tuple(metrics)
+                report_values = torch.stack([pointer_mass, action_mass, nonstop_mass, stop_mass,
+                                             *(metrics[key] for key in names)]).cpu().tolist()
+                pointer_mass, action_mass, nonstop_mass, stop_mass = report_values[:4]
                 size = int(w.numel()); samples += size; batches += 1
-                for key, value in metrics.items():
-                    v = float(value.item())
+                for key, v in zip(names, report_values[4:]):
                     if key.endswith(('_ce_sum', '_ce_weight')):
                         sums[key] = sums.get(key, 0.) + v
                         continue
@@ -249,7 +267,7 @@ def evaluate_teacher_forced(model, dataset, *, device, batch_size=32, max_batche
             'metrics': result, 'aggregation': 'pointer and sequence action losses weighted by objective mass; conditional CE pooled; remaining auxiliary metrics batch means',
             'precision': precision,'selection':selection,
             'available_events':len(dataset),
-            'scope': 'authored histories; not free generation'}
+            'scope': 'authored histories; not free generation', **echo.report(model)}
 
 
 def run_generation_panel(checkpoint, holdout_manifest, output_dir, *, song_limit=2,
@@ -377,6 +395,10 @@ def run_generation_panel(checkpoint, holdout_manifest, output_dir, *, song_limit
                 raise ValueError('generator did not produce a valid evaluation report')
             report['songs'].append({**info, 'report_path': str(panel_path), 'evaluation': panel})
             for run in panel.get('runs',[]):
+                structure=run.get('reference_comparison',{}).get('structure')
+                if structure:
+                    print('composer_structure_observation '+json.dumps({'song_id':entry.get('song_id'),
+                        'seed':run.get('seed'),**structure}),flush=True)
                 for alert in run.get('reference_comparison',{}).get('alerts',[]):
                     print('composer_quality_observation '+json.dumps({'song_id':entry.get('song_id'),
                         'seed':run.get('seed'),**alert}),flush=True)

@@ -50,7 +50,8 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 
-ACTION_HEAD_POLICIES = frozenset({'flat_v1', 'conserved_grouped_v2'})
+ACTION_HEAD_POLICIES = frozenset({'flat_v1', 'conserved_grouped_v2', 'compact_grouped_v3'})
+AUDIO_MACRO_GROUP_POLICY = 'kind_ring_modifier_duration_no_position_v1'
 
 
 def build_macro_groups(action_factors) -> tuple[torch.Tensor, int]:
@@ -69,6 +70,33 @@ def build_macro_groups(action_factors) -> tuple[torch.Tensor, int]:
     for idx in range(1, vocab_size):
         heads = event_metadata(action_factors.atom_catalog[idx - 1]).heads
         key = (int(kinds[idx]), heads, int(rings[idx]))
+        gid = group_map.get(key)
+        if gid is None:
+            gid = len(group_map)
+            group_map[key] = gid
+        group_ids[idx] = gid
+    return torch.tensor(group_ids, dtype=torch.long), len(group_map)
+
+
+def build_audio_macro_groups(action_factors) -> tuple[torch.Tensor, int]:
+    """Partition actions by position-invariant acoustic attributes.
+
+    The audio-only auxiliary branch sees local acoustic features and same-beat
+    prefixes, not cross-event pad history. Grouping by ``(kind_mask, touch_ring,
+    break_ex, hold_duration, slide_duration)`` (with ``STOP`` as group 0) lets
+    ``audio_action_loss`` supervise note type, modifier, touch ring, and
+    sustain duration without penalizing rotational pad symmetries.
+    """
+    kinds = action_factors.atom_kind_mask.detach().cpu().tolist()
+    rings = action_factors.atom_touch_ring.detach().cpu().tolist()
+    breaks = action_factors.atom_break_ex.detach().cpu().tolist()
+    hold_durs = action_factors.atom_hold_duration.detach().cpu().tolist()
+    slide_durs = action_factors.atom_slide_duration.detach().cpu().tolist()
+    vocab_size = len(kinds)
+    group_map: dict[tuple[int, int, int, int, int], int] = {(0, 0, 0, 0, 0): 0}
+    group_ids = [0] * vocab_size
+    for idx in range(1, vocab_size):
+        key = (int(kinds[idx]), int(rings[idx]), int(breaks[idx]), int(hold_durs[idx]), int(slide_durs[idx]))
         gid = group_map.get(key)
         if gid is None:
             gid = len(group_map)
@@ -99,8 +127,11 @@ class ConservedGroupedActionHead(nn.Module):
         super().__init__()
         self.width = int(width)
         group_ids, num_groups = build_macro_groups(action_factors)
+        audio_group_ids, num_audio_groups = build_audio_macro_groups(action_factors)
         self.num_groups = int(num_groups)
+        self.num_audio_groups = int(num_audio_groups)
         self.register_buffer('atom_group_id', group_ids, persistent=False)
+        self.register_buffer('audio_macro_group_id', audio_group_ids, persistent=False)
         rep_atoms = [0] * self.num_groups
         for atom_idx, gid in enumerate(group_ids.tolist()):
             if rep_atoms[gid] == 0 and atom_idx != 0:
@@ -269,3 +300,106 @@ class ConservedGroupedActionHead(nn.Module):
         # Normalizers and final log-probabilities stay in float32 under BF16
         # autocast; rounding them back to BF16 changes the conserved masses.
         return final
+
+
+class CompactGroupedActionHead(ConservedGroupedActionHead):
+    """Compact macro classifier with one kind-conserved geometry adjustment.
+
+    ``base_logits`` contains only shared compositional detail scores. Head bias
+    is [..., 3, 8] (tap, hold, slide); endpoint/shape bias belongs in the
+    separate [..., V] ``detail_bias``. STOP and Touch groups are untouched by
+    the geometry adjustment. The independent audio reference predicts acoustic
+    groups, with uniform atom details; it does not learn slide trajectories.
+    """
+
+    def __init__(self, action_factors, width: int):
+        super().__init__(action_factors, width)
+        from .events import event_metadata
+
+        representatives = [0] * self.num_groups
+        for atom, group in enumerate(self.atom_group_id.tolist()):
+            representatives[group] = atom
+        categories = []
+        for atom in representatives:
+            if atom == 0:
+                categories.append(-1)
+                continue
+            meta = event_metadata(action_factors.atom_catalog[atom - 1])
+            categories.append(-1 if meta.touch else 2 if meta.slide else 1 if meta.hold else 0)
+        self.register_buffer('macro_kind_category', torch.tensor(categories, dtype=torch.long), persistent=False)
+        self.register_buffer('group_head_projection', action_factors.atom_head_lanes[
+            torch.tensor(representatives, dtype=torch.long)].float().clone(), persistent=False)
+        # Precompute even absent kinds: forward never needs a device-to-host
+        # synchronization to discover whether a class has groups.
+        for kind in range(3):
+            self.register_buffer(f'_kind_groups_{kind}',
+                                 torch.tensor([g for g, k in enumerate(categories) if k == kind], dtype=torch.long),
+                                 persistent=False)
+        counts = torch.bincount(self.audio_macro_group_id, minlength=self.num_audio_groups)
+        self.register_buffer('_audio_log_group_sizes', counts.float().log(), persistent=False)
+        self.audio_macro_head = nn.Linear(self.width, self.num_audio_groups)
+
+    def audio_logits(self, slot_context: torch.Tensor) -> torch.Tensor:
+        """Return normalized atom log-probabilities with uniform acoustic-group details."""
+        groups = self.audio_macro_head(self.macro_norm(slot_context)).float().log_softmax(-1)
+        return (groups - self._audio_log_group_sizes).index_select(-1, self.audio_macro_group_id)
+
+    def forward(self, base_logits: torch.Tensor, slot_context: torch.Tensor, *,
+                tables: tuple[torch.Tensor, torch.Tensor] | None = None,
+                macro_scale: float = 1.0, head_bias: torch.Tensor | None = None,
+                detail_bias: torch.Tensor | None = None) -> torch.Tensor:
+        if (base_logits.shape[:-1] != slot_context.shape[:-1]
+                or slot_context.size(-1) != self.width
+                or base_logits.size(-1) != self.atom_group_id.numel()):
+            raise ValueError('base_logits and slot_context shapes must match the action catalog and width')
+        if tables is None:
+            tables = self.detail_tables()
+        normed = self.macro_norm(slot_context)
+        macro_raw = self.macro_head(normed).float()
+        kind_emb, lane_emb, ring_emb = self._shared_macro_factors
+        macro_weight = (kind_emb.weight.index_select(0, self.group_kind_id).float()
+                        + lane_emb.weight.index_select(0, self.group_lane_id).float()
+                        + ring_emb.weight.index_select(0, self.group_ring_id).float())
+        macro_raw = macro_raw + F.linear(normed.float(), macro_weight)
+        macro = float(macro_scale) * macro_raw
+        macro = (macro - macro[..., :1]).log_softmax(-1)
+        traj_table, dur_table = tables
+        h_traj, h_dur = self.traj_context(normed), self.dur_context(normed)
+        scores = (base_logits.float() + F.linear(h_traj, traj_table.to(h_traj.dtype)).float()
+                  + F.linear(h_dur, dur_table.to(h_dur.dtype)).float())
+        old_lse = group_logsumexp(scores, self.atom_group_id, self.num_groups)
+        new_lse = old_lse
+        gain = torch.zeros_like(macro)
+        if head_bias is not None:
+            if head_bias.shape[-2:] != (3, 8):
+                raise ValueError('head_bias must end in [3, 8] (tap, hold, slide)')
+            for kind in range(3):
+                groups = getattr(self, f'_kind_groups_{kind}')
+                if groups.numel():
+                    delta = F.linear(head_bias[..., kind, :].float(),
+                                     self.group_head_projection.index_select(0, groups)).float()
+                    gain = gain.index_copy(-1, groups, delta.expand(*macro.shape[:-1], groups.numel()))
+        if detail_bias is not None:
+            # Differences in detail partition functions are necessary for exact
+            # equivalence to applying endpoint/shape bias after atom expansion.
+            scores = scores + detail_bias.float()
+            new_lse = group_logsumexp(scores, self.atom_group_id, self.num_groups)
+            gain = gain + new_lse - old_lse
+        adjusted_macro = macro
+        if head_bias is not None or detail_bias is not None:
+            for kind in range(3):
+                groups = getattr(self, f'_kind_groups_{kind}')
+                if groups.numel():
+                    original = macro.index_select(-1, groups)
+                    shifted = original + gain.index_select(-1, groups)
+                    conserved = shifted + original.logsumexp(-1, keepdim=True) - shifted.logsumexp(-1, keepdim=True)
+                    adjusted_macro = adjusted_macro.index_copy(-1, groups, conserved)
+        expanded = self.atom_group_id.view(*([1] * (scores.ndim - 1)), -1).expand_as(scores)
+        # Touch and STOP keep both their original macro mass and original detail
+        # probabilities, even if a caller supplies a full-V geometry bias.
+        within = scores - new_lse.gather(-1, expanded)
+        if detail_bias is not None:
+            untouched = self.macro_kind_category.index_select(0, self.atom_group_id) < 0
+            original_within = scores - detail_bias.float() - old_lse.gather(-1, expanded)
+            within = torch.where(untouched, original_within, within)
+        return adjusted_macro.gather(-1, expanded) + within

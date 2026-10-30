@@ -32,6 +32,47 @@
     return path ? `/api/download?path=${encodeURIComponent(String(path))}` : "";
   }
 
+  const DISPLAY_BYTE_LIMIT = 64 * 1024;
+  const LINE_BYTE_LIMIT = 2 * 1024;
+  const encoder = new TextEncoder();
+  const byteLength = (text) => encoder.encode(text).length;
+
+  function bytePrefix(text, budget) {
+    const encoded = encoder.encode(text);
+    if (encoded.length <= budget) return text;
+    let end = budget;
+    // A continuation byte means the cut falls inside a multibyte code point.
+    while (end > 0 && (encoded[end] & 0xc0) === 0x80) end -= 1;
+    return new TextDecoder().decode(encoded.subarray(0, end));
+  }
+
+  // Bound work before signatures, filtering and layout. Inspect at most a small
+  // prefix to detect oversized JSON lines; never parse their complete payloads.
+  function displayLine(value) {
+    const text = String(value);
+    let prefixEnd = Math.min(text.length, LINE_BYTE_LIMIT);
+    if (prefixEnd < text.length && /[\uD800-\uDBFF]/.test(text[prefixEnd - 1])) prefixEnd -= 1;
+    const prefix = text.slice(0, prefixEnd);
+    if (text.length <= LINE_BYTE_LIMIT && byteLength(prefix) <= LINE_BYTE_LIMIT) return text;
+    const marker = " …［过长行已截断，完整内容请下载日志］";
+    return bytePrefix(prefix, LINE_BYTE_LIMIT - byteLength(marker)) + marker;
+  }
+
+  function boundedDisplayLines(lines) {
+    const marker = "［较早日志已省略，完整内容请下载日志］";
+    const selected = [];
+    let bytes = byteLength(marker) + 1;
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = displayLine(lines[index]);
+      const size = byteLength(line) + (selected.length ? 1 : 0);
+      if (bytes + size > DISPLAY_BYTE_LIMIT) break;
+      selected.push(line);
+      bytes += size;
+    }
+    if (selected.length < lines.length) selected.push(marker);
+    return selected.reverse();
+  }
+
   function installControls(logs) {
     const panel = logs.closest(".task-panel");
     if (!panel) return null;
@@ -154,7 +195,7 @@
     if (!toolbar) return;
     const state = toolbar._maichartLogState;
     const taskId = String(task.task_id || "");
-    const rawLines = Array.isArray(task.logs) ? task.logs.map((line) => String(line)) : [];
+    const rawLines = Array.isArray(task.logs) ? boundedDisplayLines(task.logs) : [];
     const initializing = ["queued", "running"].includes(task.status) && rawLines.length === 0;
     const source = rawLines.length ? rawLines : initializing ? ["等待任务开始输出日志…"] : [];
     const signature = JSON.stringify(source);
@@ -187,5 +228,5 @@
     }
   }
 
-  return { severityOf, isKeyEvent, filterLines, downloadUrl, renderTask };
+  return { severityOf, isKeyEvent, filterLines, downloadUrl, renderTask, boundedDisplayLines };
 });

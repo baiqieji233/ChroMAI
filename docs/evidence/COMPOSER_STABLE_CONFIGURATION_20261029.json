@@ -1,0 +1,563 @@
+{
+  "date": "2026-10-29",
+  "architecture_policy": "cooperative_v2",
+  "scope": "stability-first changes; no formal long training",
+  "validation_before_edits": {
+    "low_support_mask": {
+      "unmasked_legal_probability": 8.315280410897685e-07,
+      "selected": [
+        "2"
+      ]
+    },
+    "bf16_neighbor_clock": {
+      "left_log1p_gap": [
+        0.0,
+        0.0
+      ],
+      "expected_log1p": 0.11778303235769272
+    },
+    "same_event_class_drift": {
+      "stop_before": 0.1666666716337204,
+      "stop_after": 4.5121283214621015e-36,
+      "touch_before": 0.1666666716337204,
+      "touch_after": 4.5121283214621015e-36,
+      "relative_delta": [
+        0.0,
+        80.0,
+        80.0,
+        80.0,
+        80.0,
+        0.0
+      ]
+    },
+    "preview_small_future_gain": {
+      "baseline_current_probability": 0.999,
+      "alternate_current_probability": 0.001,
+      "chosen": "2",
+      "reason": "alternative_preserves_more_mass"
+    }
+  },
+  "tests": {
+    "python_passed": 1015,
+    "python_skipped": 1,
+    "javascript_passed": 164
+  },
+  "real_pipeline": {
+    "status": "passed",
+    "stage": "complete",
+    "source_checkpoint": "E:\\simai_transformer\\checkpoints\\prism_composer_v21\\composer_inference.pt",
+    "scope": "new width64 model; real v21 source manifest/catalog/conditions; at most four charts",
+    "timings": {
+      "metadata_sec": 0.01970100001199171,
+      "dataset_sec": 1.8821131000295281,
+      "data_sec": 0.5346130000543781,
+      "supervised_forward_backward_update_sec": 0.5886024999781512,
+      "recovery_forward_backward_update_sec": 0.14230060001136735,
+      "checkpoint_sec": 3.6084515000111423
+    },
+    "elapsed_sec": 14.356689399981406,
+    "source_optimizer_steps": 22266,
+    "manifest": "E:\\simai_transformer\\checkpoints\\prism_composer_v20\\data_split\\train_manifest.json",
+    "cache_dir": "E:\\simai_transformer\\cache\\chart_composer_v1",
+    "vocabulary_atoms": 25491,
+    "limit_charts": 2,
+    "sample_indices": [
+      132,
+      482
+    ],
+    "event_indices": [
+      132,
+      132
+    ],
+    "song_indices": [
+      0,
+      1
+    ],
+    "shapes": {
+      "candidate_features": [
+        2,
+        96,
+        141
+      ],
+      "action_target": [
+        2,
+        3
+      ],
+      "condition": [
+        2,
+        16
+      ],
+      "history": [
+        2,
+        128,
+        5
+      ],
+      "quality_lifecycle": [
+        2,
+        96,
+        88
+      ],
+      "quality_anchor_audio": [
+        2,
+        8,
+        120
+      ],
+      "quality_anchor_ids": [
+        2,
+        8,
+        33
+      ],
+      "quality_anchor_ages": [
+        2,
+        8
+      ],
+      "quality_anchor_mask": [
+        2,
+        8
+      ],
+      "quality_phrase_indices": [
+        2,
+        96
+      ],
+      "quality_gap_target": [
+        2
+      ],
+      "quality_gap_weight": [
+        2
+      ],
+      "quality_candidate_offsets": [
+        2,
+        96
+      ],
+      "quality_phrase_audio": [
+        2,
+        100,
+        104
+      ],
+      "quality_phrase_target": [
+        2,
+        100,
+        8
+      ],
+      "quality_phrase_weight": [
+        2,
+        100
+      ]
+    },
+    "conditions": [
+      [
+        0.8533333539962769,
+        0.2272726446390152,
+        0.4375,
+        0.1498706191778183,
+        0.14189189672470093,
+        0.0979350134730339,
+        0.18658892810344696,
+        0.2142857164144516,
+        0.5022522807121277,
+        0.20270270109176636,
+        0.09684684872627258,
+        0.19819819927215576,
+        0.2142857164144516,
+        0.9742857217788696,
+        0.015625,
+        0.10606060922145844
+      ],
+      [
+        0.8866666555404663,
+        0.2726978063583374,
+        0.3125,
+        0.15855468809604645,
+        0.20181818306446075,
+        0.124649778008461,
+        0.12062256783246994,
+        0.2448979616165161,
+        0.6727272868156433,
+        0.22363635897636414,
+        0.07090909034013748,
+        0.036363635212183,
+        0.2448979616165161,
+        0.9659863710403442,
+        0.021978022530674934,
+        0.057777777314186096
+      ]
+    ],
+    "audio_banks_built": 0,
+    "supervised": {
+      "loss": 24.631681442260742,
+      "quality_gradient_norm": 0.7994928677452444,
+      "metrics": {
+        "quality_phrase_loss": 0.07051123678684235,
+        "quality_gap_loss": 2.6705987453460693,
+        "quality_gap_full_loss": 2.785902976989746,
+        "quality_gap_audio_loss": 2.5552945137023926,
+        "quality_phrase_error_sum": 12.339466094970703,
+        "quality_phrase_weight": 175.0,
+        "quality_gap_ce_sum": 5.341197490692139,
+        "quality_gap_ce_weight": 2.0,
+        "pointer_loss": 4.299095153808594,
+        "action_loss": 17.58333969116211,
+        "eos_loss": 0.6387298107147217,
+        "future_loss": 0.050082117319107056,
+        "workload_loss": 0.20746247470378876,
+        "curve_slope_loss": 0.09445430338382721,
+        "audio_pointer_loss": 4.299095153808594,
+        "audio_action_loss": 9.746198654174805,
+        "trailing_workload_loss": 0.4046453833580017,
+        "placement_loss": 0.7036648988723755,
+        "placement_alignment_loss": 0.09362559020519257,
+        "planner_loss": 0.22590219974517822
+      }
+    },
+    "recovery_attempts": [
+      {
+        "outcomes": {
+          "accepted": 2
+        },
+        "diagnostics": {
+          "generated_history_events": [
+            2,
+            2
+          ],
+          "maximum_generated_events": 128,
+          "reference_types": {
+            "button": {
+              "accepted": 1,
+              "rejected": 0,
+              "accepted_weight": 1.0,
+              "rejected_weight": 0.0
+            },
+            "touch": {
+              "accepted": 1,
+              "rejected": 0,
+              "accepted_weight": 1.0,
+              "rejected_weight": 0.0
+            }
+          },
+          "self_generated_window": 128,
+          "playability_unreachable_references": 0,
+          "reference_reachability": {
+            "reachable": 2
+          },
+          "low_action_support_rejections": 0,
+          "min_retained_action_mass": 0.9575946927070618
+        }
+      }
+    ],
+    "recovery_generated_events": [
+      {
+        "sample_index": 16,
+        "events": [
+          [
+            "615/4",
+            "A6fh[2:1]/A8b/E6"
+          ],
+          [
+            "663/4",
+            "B2f/D7h[8:8]"
+          ]
+        ]
+      },
+      {
+        "sample_index": 28,
+        "events": [
+          [
+            "623/4",
+            "A8h[16:5]/E2f/E4h[16:42]/E7/E8"
+          ],
+          [
+            "567/2",
+            "5bx-1[32:3]/E3"
+          ]
+        ]
+      }
+    ],
+    "recovery": {
+      "loss": 27.215957641601562,
+      "quality_gradient_norm": 0.23479519204621396,
+      "metrics": {
+        "quality_phrase_loss": 0.0,
+        "quality_gap_loss": 0.0,
+        "quality_gap_full_loss": 0.0,
+        "quality_gap_audio_loss": 0.0,
+        "quality_phrase_error_sum": 0.0,
+        "quality_phrase_weight": 0.0,
+        "quality_gap_ce_sum": 0.0,
+        "quality_gap_ce_weight": 0.0,
+        "pointer_loss": 4.524990081787109,
+        "action_loss": 20.14849090576172,
+        "eos_loss": 0.6966784000396729,
+        "future_loss": 0.0,
+        "workload_loss": 0.0,
+        "curve_slope_loss": 0.0,
+        "audio_pointer_loss": 4.524974822998047,
+        "audio_action_loss": 12.19263744354248,
+        "trailing_workload_loss": 0.0,
+        "placement_loss": 0.0,
+        "placement_alignment_loss": 0.0,
+        "planner_loss": 0.0
+      }
+    },
+    "checkpoint": {
+      "path": ".scratch\\composer_stability_20261029\\quality_real_pipeline_checkpoint.pt",
+      "bytes": 59482378,
+      "exact_state_roundtrip": true,
+      "input_policy": "native_lifecycle_paired_candidate_clock_phrase_v2"
+    },
+    "peak_allocated_bytes": 186458112,
+    "peak_reserved_bytes": 205520896
+  },
+  "performance_b8": {
+    "scope": "synthetic forward/backward; excludes data/transfer/optimizer/recovery/generation",
+    "torch_version": "2.7.0+cu128",
+    "device": "cuda",
+    "device_name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "precision": "bf16",
+    "profile": "representative",
+    "batch_size": 8,
+    "vocab_size": 25492,
+    "catalog_source": "checkpoints/prism_composer_v21/composer_inference.pt",
+    "config": {
+      "atom_vocab_size": 25492,
+      "d_model": 384,
+      "nhead": 8,
+      "layers": 6,
+      "dim_feedforward": 1536,
+      "dropout": 0.0,
+      "audio_dim": 120,
+      "condition_dim": 16,
+      "action_dim": 50,
+      "history_events": 128,
+      "candidate_count": 96,
+      "action_slots": 33,
+      "candidate_feature_dim": 141,
+      "history_feature_dim": 8,
+      "future_dim": 8,
+      "architecture_profile": "audio_grounded_v3",
+      "symbolic_dropout": 0.0,
+      "head_timing_dim": 99,
+      "lens_width": 64,
+      "lens_chunk_size": 32,
+      "history_residual_bound": 1.0,
+      "history_dropout": 0.0,
+      "ledger_dropout": 0.0,
+      "history_anchor_policy": "parsed_geometry_v3",
+      "action_state_policy": "committed_causal_v2",
+      "motif_memory_policy": "off",
+      "motif_max_events": 16,
+      "slide_factor_policy": "marginal_v1",
+      "history_memory_policy": "unbounded_v1",
+      "history_memory_rms_bound": 8.0,
+      "history_attention_policy": "auto_v1",
+      "head_timing_policy": "merged_pads_v1",
+      "cross_event_relation_policy": "relative_heads_v1",
+      "structure_policy": "off",
+      "contact_policy": "off",
+      "future_horizon_policy": "candidate_horizon_v1",
+      "action_head_policy": "conserved_grouped_v2",
+      "configuration_quality_policy": "cooperative_v2",
+      "condition_mask_prob": 0.0,
+      "structure_backend": "native",
+      "structure_dropout": 0.15,
+      "structure_schema": "off",
+      "structure_backend_identity": null
+    },
+    "steps": 12,
+    "warmup": 4,
+    "quality_parameter_count": 122623,
+    "geometry_parameter_count": 12288,
+    "memory_note": "Both variants retain one model and Q1/Q2 parameter storage; extra_peak reports temporary/gradient memory above that baseline.",
+    "variants": {
+      "off": {
+        "wall_sec": 1.196577199967578,
+        "wall_step_ms": 99.71476666396484,
+        "synthetic_samples_per_sec": 80.22883939506885,
+        "forward_ms_median": 49.92928123474121,
+        "backward_ms_median": 46.872751235961914,
+        "baseline_allocated_mib": 214.3837890625,
+        "peak_allocated_mib": 959.8857421875,
+        "extra_peak_allocated_mib": 745.501953125,
+        "final_loss": 37.07804870605469
+      },
+      "on": {
+        "wall_sec": 1.4987741999793798,
+        "wall_step_ms": 124.89784999828164,
+        "synthetic_samples_per_sec": 64.05234357605086,
+        "forward_ms_median": 64.75675201416016,
+        "backward_ms_median": 59.2894229888916,
+        "baseline_allocated_mib": 214.3837890625,
+        "peak_allocated_mib": 992.52392578125,
+        "extra_peak_allocated_mib": 778.14013671875,
+        "final_loss": 37.31679153442383
+      }
+    },
+    "wall_overhead_ratio": 0.2525511935376923
+  },
+  "performance_b64_abba": {
+    "scope": "synthetic forward/backward; excludes data/transfer/optimizer/recovery/generation",
+    "torch_version": "2.7.0+cu128",
+    "device": "cuda",
+    "device_name": "NVIDIA GeForce RTX 5070 Ti Laptop GPU",
+    "precision": "bf16",
+    "profile": "representative",
+    "batch_size": 64,
+    "vocab_size": 25492,
+    "catalog_source": "checkpoints/prism_composer_v21/composer_inference.pt",
+    "config": {
+      "atom_vocab_size": 25492,
+      "d_model": 384,
+      "nhead": 8,
+      "layers": 6,
+      "dim_feedforward": 1536,
+      "dropout": 0.0,
+      "audio_dim": 120,
+      "condition_dim": 16,
+      "action_dim": 50,
+      "history_events": 128,
+      "candidate_count": 96,
+      "action_slots": 33,
+      "candidate_feature_dim": 141,
+      "history_feature_dim": 8,
+      "future_dim": 8,
+      "architecture_profile": "audio_grounded_v3",
+      "symbolic_dropout": 0.0,
+      "head_timing_dim": 99,
+      "lens_width": 64,
+      "lens_chunk_size": 32,
+      "history_residual_bound": 1.0,
+      "history_dropout": 0.0,
+      "ledger_dropout": 0.0,
+      "history_anchor_policy": "parsed_geometry_v3",
+      "action_state_policy": "committed_causal_v2",
+      "motif_memory_policy": "off",
+      "motif_max_events": 16,
+      "slide_factor_policy": "marginal_v1",
+      "history_memory_policy": "unbounded_v1",
+      "history_memory_rms_bound": 8.0,
+      "history_attention_policy": "auto_v1",
+      "head_timing_policy": "merged_pads_v1",
+      "cross_event_relation_policy": "relative_heads_v1",
+      "structure_policy": "off",
+      "contact_policy": "off",
+      "future_horizon_policy": "candidate_horizon_v1",
+      "action_head_policy": "conserved_grouped_v2",
+      "configuration_quality_policy": "cooperative_v2",
+      "condition_mask_prob": 0.0,
+      "structure_backend": "native",
+      "structure_dropout": 0.15,
+      "structure_schema": "off",
+      "structure_backend_identity": null
+    },
+    "steps": 6,
+    "warmup": 2,
+    "quality_parameter_count": 122623,
+    "geometry_parameter_count": 12288,
+    "memory_note": "Both variants retain one model and Q1/Q2 parameter storage; extra_peak reports temporary/gradient memory above that baseline.",
+    "variants": {
+      "off": {
+        "wall_sec": 0.9142563499917742,
+        "wall_step_ms": 152.37605833196238,
+        "synthetic_samples_per_sec": 420.0143217719765,
+        "forward_ms_median": 67.854248046875,
+        "backward_ms_median": 81.74300003051758,
+        "baseline_allocated_mib": 249.72265625,
+        "peak_allocated_mib": 3332.73583984375,
+        "extra_peak_allocated_mib": 3082.7529296875,
+        "final_loss": 38.18802261352539
+      },
+      "on": {
+        "wall_sec": 1.0942344500217587,
+        "wall_step_ms": 182.37240833695978,
+        "synthetic_samples_per_sec": 350.9639292127538,
+        "forward_ms_median": 83.38009452819824,
+        "backward_ms_median": 96.51573753356934,
+        "baseline_allocated_mib": 249.46240234375,
+        "peak_allocated_mib": 3559.3583984375,
+        "extra_peak_allocated_mib": 3309.89599609375,
+        "final_loss": 38.40500259399414
+      }
+    },
+    "rounds": [
+      {
+        "variant": "off",
+        "wall_sec": 0.9155431999824941,
+        "wall_step_ms": 152.5905333304157,
+        "synthetic_samples_per_sec": 419.4231359124751,
+        "forward_ms_median": 67.99940872192383,
+        "backward_ms_median": 81.96803283691406,
+        "baseline_allocated_mib": 249.46240234375,
+        "peak_allocated_mib": 3332.21533203125,
+        "extra_peak_allocated_mib": 3082.7529296875,
+        "final_loss": 38.18802261352539
+      },
+      {
+        "variant": "on",
+        "wall_sec": 1.1049491000012495,
+        "wall_step_ms": 184.1581833335416,
+        "synthetic_samples_per_sec": 347.52732048884945,
+        "forward_ms_median": 84.36927795410156,
+        "backward_ms_median": 96.4596176147461,
+        "baseline_allocated_mib": 249.46240234375,
+        "peak_allocated_mib": 3559.3583984375,
+        "extra_peak_allocated_mib": 3309.89599609375,
+        "final_loss": 38.40500259399414
+      },
+      {
+        "variant": "on",
+        "wall_sec": 1.0835198000422679,
+        "wall_step_ms": 180.58663334037797,
+        "synthetic_samples_per_sec": 354.4005379366581,
+        "forward_ms_median": 82.39091110229492,
+        "backward_ms_median": 96.57185745239258,
+        "baseline_allocated_mib": 249.46240234375,
+        "peak_allocated_mib": 3559.3583984375,
+        "extra_peak_allocated_mib": 3309.89599609375,
+        "final_loss": 38.40500259399414
+      },
+      {
+        "variant": "off",
+        "wall_sec": 0.9129695000010543,
+        "wall_step_ms": 152.16158333350904,
+        "synthetic_samples_per_sec": 420.6055076314779,
+        "forward_ms_median": 67.70908737182617,
+        "backward_ms_median": 81.5179672241211,
+        "baseline_allocated_mib": 249.98291015625,
+        "peak_allocated_mib": 3332.73583984375,
+        "extra_peak_allocated_mib": 3082.7529296875,
+        "final_loss": 38.18802261352539
+      }
+    ],
+    "order": "abba",
+    "wall_overhead_ratio": 0.19685736941461074
+  },
+  "source_sha256": {
+    "src/maichart/composer/future_gap_evidence.py": "01e11b35dc765a9479942ecb5e0714b2acdbeae811fd7e25e049031d975ddfc8",
+    "src/maichart/composer/quality_context.py": "d1c83879c2324c10269e3a42b23a37dddefcde59bc26b12ed75aa07e36d7e5ab",
+    "src/maichart/composer/grounded_model.py": "b0c8db34f27f537ffa4046ee816dd240387e50024e9f8c358d51bf52db661511",
+    "src/maichart/composer/generate.py": "3445189015139e6037e441c034f6def71dd2ecdb8aeb48afa0204d5212671b2a",
+    "src/maichart/composer/lookahead.py": "ce1849f4f88824b69fc4218e35f7ce814b4e48c8fc3854e845d1563e1237bcb1",
+    "src/maichart/composer/train.py": "467650a10dea2670665d529189e482a1949a1ca957bb38dcc57d89b9a7c50d01",
+    "src/maichart/composer/model.py": "ca309375138534e0b890d0c2d510f6873602deb79e3b12ec4ab82fca543126b2",
+    "src/maichart/composer/objectives.py": "2822e769ff6b8085b74b252870e1b8b92aad035e452d90396103f11482877d30",
+    "src/maichart/webui/static/index.html": "0c5b56cc3c8f4d8230645dad704a03b4ecd5da640eee2ba5e02e90ee51078022",
+    "src/maichart/webui/static/app.js": "e1da00899c944ad7be6bbaa98657a960357edf4e783fcbc244a9da96d7b2b83c"
+  },
+  "implemented": [
+    "future gap evidence from presence/attack/observed support",
+    "v2 same-event kind-mass conservation",
+    "v2 first-slot minimum legal mass 0.01 in generation and recovery",
+    "lookahead current-sequence support >=0.25 and joint gain >=10%",
+    "FP32 neighbor time arithmetic"
+  ],
+  "deferred": [
+    "learned unclaimed-history routing",
+    "extra Break/EX prominence modifier branch"
+  ],
+  "not_adopted": [
+    "forced single Tap from predicted future gap",
+    "hard nearest-neighbor ownership",
+    "fixed Break/EX placement rules"
+  ],
+  "checkpoint_state": "Original v21 checkpoint untouched; only scratch acceptance checkpoints written.",
+  "musical_quality": "Not established by these engineering checks; requires trained fixed-audio comparison."
+}

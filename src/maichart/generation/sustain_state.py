@@ -6,10 +6,13 @@ does not simulate a player's body or certify that a chart is playable.
 from __future__ import annotations
 
 from bisect import bisect_left, bisect_right
+from collections import OrderedDict
 from fractions import Fraction
 import math
+import threading
 from typing import Any, Iterable
 
+import numpy as np
 import torch
 
 from maichart.event_timing import EventPoint, EventTempo, seconds_at_beat, tokenize_event_timing
@@ -32,6 +35,13 @@ _UNTIL_TRACE_OFFSET = _REMAINING_OFFSET + 1
 _PROGRESS_OFFSET = _UNTIL_TRACE_OFFSET + 1
 _EX_OFFSET = _PROGRESS_OFFSET + 1
 _EPS = 1e-9
+_PAD_INDEX = {pad: idx for idx, pad in enumerate(PADS)}
+_PAD_GEOMETRY = tuple((pad, float(CENTERS[pad][0]), float(CENTERS[pad][1]), float(RADII[pad[0]]) + _EPS) for pad in PADS)
+_PAD_X = np.asarray([item[1] for item in _PAD_GEOMETRY], dtype=np.float64)
+_PAD_Y = np.asarray([item[2] for item in _PAD_GEOMETRY], dtype=np.float64)
+_PAD_RADII = np.asarray([item[3] for item in _PAD_GEOMETRY], dtype=np.float64)
+_SLIDE_PAD_CACHE_LIMIT = 1024
+_LOG1P_MAX_SECONDS = math.log1p(MAX_SECONDS_SCALE)
 
 
 def action_state_kwargs(batch: dict, *, batched: bool = True) -> dict:
@@ -59,7 +69,7 @@ def _as_beat(value: Fraction | int | str | float) -> Fraction:
 
 def _unit_log_seconds(seconds: float) -> float:
     value = max(0.0, min(MAX_SECONDS_SCALE, float(seconds)))
-    return math.log1p(value) / math.log1p(MAX_SECONDS_SCALE)
+    return math.log1p(value) / _LOG1P_MAX_SECONDS
 
 
 def _sample_path(path: list[dict[str, Any]], progress: float) -> tuple[float, float]:
@@ -80,9 +90,10 @@ def _sample_path(path: list[dict[str, Any]], progress: float) -> tuple[float, fl
 
 
 def _path_pads(position: tuple[float, float], radius: float = HAND_RADIUS) -> set[str]:
+    px, py = position
     return {
-        pad for pad in PADS
-        if math.dist(position, CENTERS[pad]) <= radius + RADII[pad[0]] + _EPS
+        pad for pad, cx, cy, base_r in _PAD_GEOMETRY
+        if math.hypot(px - cx, py - cy) <= radius + base_r
     }
 
 
@@ -134,7 +145,7 @@ class SustainStateIndex:
         self._references: dict[str, Any] | None = None
         self._release_index = None
 
-    def at(self, start_beat: Fraction | int | str | float, *, include_current=False, visible_before_beat=None, visibility_version="legacy_v1", max_states=MAX_STATES) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
+    def at(self, start_beat: Fraction | int | str | float, *, include_current=False, visible_before_beat=None, visibility_version="legacy_v1", max_states=MAX_STATES, include_metadata: bool = True) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         if visibility_version not in {"legacy_v1", "causal_v2"}:
             raise ValueError("Unknown sustain visibility version")
         if max_states is not None and max_states < 1:
@@ -186,6 +197,9 @@ class SustainStateIndex:
             mask = torch.zeros((len(retained),), dtype=torch.bool)
             for row, (deadline, _order, marker, release, waiting) in enumerate(retained):
                 self._encode_state(states[row], marker, boundary, deadline, waiting)
+
+        if not include_metadata:
+            return states, mask, {}
 
         metadata = {
             "visibility_version": visibility_version,
@@ -315,8 +329,9 @@ class SustainStateIndex:
             pads = {pad} if pad in PADS else set()
 
         for pad in pads:
-            index = PADS.index(pad)
-            row[_PAD_OFFSET + index] = 1.0
+            index = _PAD_INDEX.get(pad)
+            if index is not None:
+                row[_PAD_OFFSET + index] = 1.0
         for lane in self._terminal_lanes(marker):
             if 1 <= lane <= 8:
                 row[_LANE_OFFSET + lane - 1] = 1.0
@@ -375,6 +390,117 @@ class SustainStateIndex:
         if boundary < trace:
             return {f"A{int(marker['lane'])}"}
         raise ValueError(f"Boundary fell outside MiaCode Slide segment timing: {marker.get('raw', '')}")
+
+    def _slide_pad_matrix(self, marker: dict[str, Any], boundaries) -> np.ndarray:
+        """Return native pad occupancy for many clocks of one visible marker.
+
+        Keep segment selection and interpolation identical to the scalar path;
+        only the independent pad-distance calculations are batched. A bounded
+        per-index cache retains primitive occupancy for exact clocks.
+        """
+        if self._references is None:
+            self._references = reference_data()
+        clocks = np.asarray(boundaries, dtype=np.float64)
+        # Cache only primitive per-marker geometry, never aggregate symbolic
+        # features. Visibility is checked by the caller before this method.
+        # A list replacement or append (including incremental rollback) resets
+        # the cache; marker identity and geometry fields guard reused entries.
+        cache_state = self.__dict__.get('_slide_pad_cache')
+        if cache_state is None:
+            cache_state = self.__dict__.setdefault('_slide_pad_cache', (threading.RLock(), [None, -1, OrderedDict()]))
+        lock, state = cache_state
+        signature = (marker['type'], marker.get('slide_trace_second'), marker.get('end_second'),
+                     marker.get('lane'), marker.get('slide_track_key'),
+                     tuple(marker.get('slide_segment_keys', ())),
+                     tuple(marker.get('slide_segment_shoot_seconds', ())),
+                     tuple(marker.get('slide_segment_durations', ())), id(self._references))
+        result = np.zeros((len(clocks), len(PADS)), dtype=bool)
+        missing = []
+        with lock:
+            if state[0] is not self.markers or state[1] != len(self.markers):
+                state[:] = [self.markers, len(self.markers), OrderedDict()]
+            cache = state[2]
+            for row, clock in enumerate(clocks):
+                key = (id(marker), signature, float(clock))
+                entry = cache.get(key)
+                if entry is not None and entry[0] is marker:
+                    result[row] = entry[1]
+                    cache.move_to_end(key)
+                else:
+                    missing.append((row, key))
+        if missing:
+            calculated = self._slide_pad_matrix_uncached(marker, clocks[[row for row, _ in missing]])
+            with lock:
+                # An append/replacement during calculation invalidates the
+                # entire old generation and must not repopulate its cache.
+                current = state[0] is self.markers and state[1] == len(self.markers)
+                for (row, key), occupancy in zip(missing, calculated):
+                    result[row] = occupancy
+                    if current:
+                        cache[key] = (marker, occupancy.copy())
+                        cache.move_to_end(key)
+                while len(cache) > _SLIDE_PAD_CACHE_LIMIT:
+                    cache.popitem(last=False)
+        return result
+
+    def _slide_pad_matrix_uncached(self, marker: dict[str, Any], boundaries) -> np.ndarray:
+        data = self._references
+        clocks = np.asarray(boundaries, dtype=np.float64)
+        result = np.zeros((len(clocks), len(PADS)), dtype=bool)
+        positions = []
+        rows = []
+        trace = float(marker['slide_trace_second'])
+        if marker['type'] == 'wifi':
+            paths = _wifi_paths(data.get('wifi', {}).get(marker.get('slide_track_key'), {}))
+            duration = max(0.0, float(marker['end_second']) - trace)
+            for row, boundary in enumerate(clocks):
+                progress = 1.0 if duration <= _EPS else (float(boundary) - trace) / duration
+                for path in paths:
+                    positions.append(_sample_path(path, progress))
+                    rows.append(row)
+            radius = 50.0
+        else:
+            keys = marker.get('slide_segment_keys', [])
+            shoots = marker.get('slide_segment_shoot_seconds', [])
+            durations = marker.get('slide_segment_durations', [])
+            if not keys or not (len(keys) == len(shoots) == len(durations)):
+                raise ValueError(f"MiaCode Slide marker has incomplete segment timing: {marker.get('raw', '')}")
+            segments = [(key, float(shoot), max(0.0, float(duration)))
+                        for key, shoot, duration in zip(keys, shoots, durations)]
+            for row, clock in enumerate(clocks):
+                boundary = float(clock)
+                segment = next(((key, shoot, duration) for key, shoot, duration in segments
+                                if shoot - _EPS <= boundary <= shoot + duration + _EPS), None)
+                if segment is None:
+                    segment = next(((key, shoot, duration) for key, shoot, duration in segments
+                                    if abs(boundary - shoot) <= _EPS), None)
+                if segment is None:
+                    if boundary < trace:
+                        pad_index = _PAD_INDEX.get(f"A{int(marker['lane'])}")
+                        if pad_index is not None:
+                            result[row, pad_index] = True
+                        continue
+                    raise ValueError(f"Boundary fell outside MiaCode Slide segment timing: {marker.get('raw', '')}")
+                key, shoot, duration = segment
+                entry = data.get('slides', {}).get(key, {})
+                path = entry.get('real_path_samples') or entry.get('samples') or []
+                progress = 1.0 if duration <= _EPS else (boundary - shoot) / duration
+                positions.append(_sample_path(path, progress))
+                rows.append(row)
+            radius = HAND_RADIUS
+        if positions:
+            xy = np.asarray(positions, dtype=np.float64)
+            rows = np.asarray(rows, dtype=np.intp)
+            thresholds = radius + _PAD_RADII
+            distances = np.hypot(xy[:, 0, None] - _PAD_X, xy[:, 1, None] - _PAD_Y)
+            inside = distances <= thresholds
+            # numpy and math hypot can round differently exactly at a pad
+            # edge; use the original scalar predicate in that narrow band.
+            for index, column in np.argwhere(np.abs(distances - thresholds) <= 1e-12):
+                inside[index, column] = math.hypot(float(xy[index, 0]) - _PAD_X[column],
+                                                   float(xy[index, 1]) - _PAD_Y[column]) <= thresholds[column]
+            np.logical_or.at(result, rows, inside)
+        return result
 
     @staticmethod
     def _state_metadata(marker: dict[str, Any], boundary: float, deadline: float,

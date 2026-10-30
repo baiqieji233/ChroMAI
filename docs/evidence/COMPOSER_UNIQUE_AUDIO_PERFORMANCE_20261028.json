@@ -1,0 +1,305 @@
+{
+  "schema": "composer-unique-audio-performance-v1",
+  "date": "2026-10-28",
+  "baseline": "source snapshot including prewarm and short GIL gate, before this turn",
+  "baseline_source_hashes": {
+    "composer/train.py": "a894282bc9e994ff3206aa89a02d6deb48c6e7bc62bfe72d0cb7dec954a7caf5",
+    "composer/audio_lens.py": "5ed36b776c136a66c0a7be96f7dfd4f49c8ea0671e352aa208c44edc1f2db6aa",
+    "composer/data.py": "374a607059e851320e851838e6c8fff691e853defa296493d874cab4f3fea088",
+    "composer/device_audio.py": "5c872da510dc9ac23c2ad2bc1a61223fdde57e3ca79fa97b55bc4aa5cc680328",
+    "composer/grounded_model.py": "74863f849b382b16e99279f1348fef2809505f56aa706c543e5de966aff6201e",
+    "composer/structure.py": "7082d649caa95cc37690329bb5aa4bc5183bbc3f2e4e88e6f947350fb4121801"
+  },
+  "settings": {
+    "batch_size": 96,
+    "accumulation": 6,
+    "precision": "bf16",
+    "prefetch_batches": 8,
+    "sample_workers": 1,
+    "cpu_threads": 2,
+    "switch_interval": 0.0005,
+    "gate": "H2D/materialize only",
+    "warmup": 12,
+    "measured_batches": 72,
+    "cpu_tables": "prewarmed",
+    "checkpoint": "E:\\simai_transformer\\checkpoints\\prism_composer_v19\\composer_last.pt",
+    "optimizer": "restored AdamW",
+    "scope": "no recovery, checkpoint I/O or generation panel"
+  },
+  "separate_orders": [
+    {
+      "order": "ABBA",
+      "rates": {
+        "baseline": 440.69853380188715,
+        "updated": 458.50552061222845
+      },
+      "ratio": 1.0404062765009023
+    },
+    {
+      "order": "BAAB",
+      "rates": {
+        "baseline": 467.61209006779484,
+        "updated": 472.7116432754783
+      },
+      "ratio": 1.010905520443118
+    }
+  ],
+  "combined_median_samples_per_second": {
+    "baseline": 460.786607593117,
+    "updated": 467.840030811932
+  },
+  "combined_ratio": 1.0153073529104024,
+  "unique_query_fraction": 0.7997788525132276,
+  "peak_allocated_bytes": {
+    "baseline": 5415616000,
+    "updated": 5321340928
+  },
+  "precision_probe": {
+    "scope": "same real 32-row v19 batch, eval mode, BF16, no optimizer update",
+    "dense": {
+      "loss": 8.398482322692871,
+      "pointer_loss": 1.590074062347412,
+      "action_loss": 5.954617023468018,
+      "audio_action_loss": 3.1317076683044434
+    },
+    "compact": {
+      "loss": 8.398481369018555,
+      "pointer_loss": 1.590074062347412,
+      "action_loss": 5.954616546630859,
+      "audio_action_loss": 3.131707191467285
+    },
+    "loss_abs_difference": 9.5367431640625e-07,
+    "lens_gradient_cosine": 0.9999892115592957,
+    "lens_gradient_relative_l2": 0.004806208424270153,
+    "max_logit_difference": {
+      "candidate_logits": 0.0,
+      "action_logits": 3.814697265625e-06
+    },
+    "unique_fraction": 0.4126674107142857
+  },
+  "tests": {
+    "full_cpu_python": {
+      "passed": 3514,
+      "skipped": 39
+    },
+    "javascript": {
+      "passed": 162
+    },
+    "cuda_and_audio_paths": {
+      "passed": 26
+    }
+  },
+  "runs": [
+    {
+      "mode": "baseline",
+      "samples_per_second": 456.6307451578373,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 1.0,
+      "unique_queries_mean": 10752,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.028790300246328115,
+        "transfer": 1.5879730999586172,
+        "forward": 7.282132299966179,
+        "backward": 5.701485100085847,
+        "metrics_and_update": 0.49532179994275793
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.569144421153599,
+        "forward": 91.25076982710097,
+        "backward": 108.61439832051595
+      },
+      "data_wait_max_ms": 0.9945000056177378,
+      "peak_allocated_bytes": 5415616000,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "updated",
+      "samples_per_second": 452.0287142872804,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 0.7997788525132276,
+      "unique_queries_mean": 8599.222222222223,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.03219560004072264,
+        "transfer": 1.5973710999824107,
+        "forward": 7.413090200221632,
+        "backward": 5.697133599896915,
+        "metrics_and_update": 0.5010802999022417
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.54909556441837,
+        "forward": 93.79132742351956,
+        "backward": 108.15823173522949
+      },
+      "data_wait_max_ms": 1.1081999982707202,
+      "peak_allocated_bytes": 5321340928,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "updated",
+      "samples_per_second": 464.9823269371765,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 0.7997788525132276,
+      "unique_queries_mean": 8599.222222222223,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.031564599950797856,
+        "transfer": 1.6938973001088016,
+        "forward": 6.951465600111987,
+        "backward": 5.61915939982282,
+        "metrics_and_update": 0.5242268994334154
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.910882665051354,
+        "forward": 87.92408858405219,
+        "backward": 107.7575871149699
+      },
+      "data_wait_max_ms": 0.9000999853014946,
+      "peak_allocated_bytes": 5321340928,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "baseline",
+      "samples_per_second": 424.766322445937,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 1.0,
+      "unique_queries_mean": 10752,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.03032420011004433,
+        "transfer": 1.6538369996706024,
+        "forward": 7.573519199446309,
+        "backward": 6.399110000114888,
+        "metrics_and_update": 0.5685880003729835
+      },
+      "cuda_stage_ms": {
+        "transfer": 9.086695108148787,
+        "forward": 93.6639011171129,
+        "backward": 121.23821269141303
+      },
+      "data_wait_max_ms": 0.8711999980732799,
+      "peak_allocated_bytes": 5415616000,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "updated",
+      "samples_per_second": 474.725551864269,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 0.7997788525132276,
+      "unique_queries_mean": 8599.222222222223,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.030144399730488658,
+        "transfer": 1.6826201997464523,
+        "forward": 6.817777600022964,
+        "backward": 5.471742999914568,
+        "metrics_and_update": 0.5152765001403168
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.261527995268503,
+        "forward": 87.24108494652643,
+        "backward": 104.90328481462267
+      },
+      "data_wait_max_ms": 1.075299980584532,
+      "peak_allocated_bytes": 5321340928,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "baseline",
+      "samples_per_second": 470.28171010719285,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 1.0,
+      "unique_queries_mean": 10752,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.030730100406799465,
+        "transfer": 1.577880600176286,
+        "forward": 6.849673300050199,
+        "backward": 5.676443099859171,
+        "metrics_and_update": 0.5204807003028691
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.109078645706177,
+        "forward": 85.91140842437744,
+        "backward": 108.25279161665175
+      },
+      "data_wait_max_ms": 0.9971000254154205,
+      "peak_allocated_bytes": 5415616000,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "baseline",
+      "samples_per_second": 464.94247002839677,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 1.0,
+      "unique_queries_mean": 10752,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.02675520005868748,
+        "transfer": 1.6656843001255766,
+        "forward": 6.9138140003196895,
+        "backward": 5.690340199857019,
+        "metrics_and_update": 0.5271126003353857
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.493417269653744,
+        "forward": 87.16728931003146,
+        "backward": 108.98605028788249
+      },
+      "data_wait_max_ms": 0.7792999967932701,
+      "peak_allocated_bytes": 5415616000,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    },
+    {
+      "mode": "updated",
+      "samples_per_second": 470.69773468668757,
+      "schedule_hash": "615c3d9aeb6b71cf0dd8e1672f0123866b0b32e5b24c4c1c0f05efd763684a9e",
+      "unique_query_fraction": 0.7997788525132276,
+      "unique_queries_mean": 8599.222222222223,
+      "full_queries_mean": 10752,
+      "host_seconds": {
+        "data": 0.030119999893940985,
+        "transfer": 1.5573042005416937,
+        "forward": 6.887954799924046,
+        "backward": 5.622774799994659,
+        "metrics_and_update": 0.5294716998469085
+      },
+      "cuda_stage_ms": {
+        "transfer": 8.616921756002638,
+        "forward": 86.6912014219496,
+        "backward": 106.79666339026556
+      },
+      "data_wait_max_ms": 1.3969000428915024,
+      "peak_allocated_bytes": 5321340928,
+      "checkpoint_step": 500,
+      "vocab": 25492,
+      "charts": 48
+    }
+  ],
+  "limits": [
+    "48 real charts; warmed CPU tables; not a full-epoch measurement",
+    "No recovery, checkpoint serialization or generation panel in timing",
+    "Speed gain is small relative to run-to-run variation",
+    "BF16/TF32 reduction grouping is not bitwise deterministic"
+  ],
+  "preserved_checkpoint": {
+    "path": "E:\\simai_transformer\\checkpoints\\prism_composer_v19\\composer_last.pt",
+    "sha256": "798d4f51144f749a641835011f53e00b9d6119a8b1d70bf8a528f501f5995ee4",
+    "matches_snapshot": true
+  }
+}

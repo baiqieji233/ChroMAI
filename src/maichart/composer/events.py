@@ -17,9 +17,13 @@ EVENT_SEMANTICS = 'parsed_heads_and_types_v2'
 HEAD_PADS = tuple(f'{group}{lane}' for group in 'ABDE' for lane in range(1,9)) + ('C',)
 HEAD_TIMING_DIM = 3 * len(HEAD_PADS)
 _PAD_INDEX = {pad:i for i,pad in enumerate(HEAD_PADS)}
+# The native judge interprets numbered center Touch spellings as C. Keep the
+# authored atom spelling/catalog stable, but give them the same physical pad.
+_PAD_INDEX.update({f'C{lane}': _PAD_INDEX['C'] for lane in range(1, 9)})
 HEAD_TIMING_POLICIES = {'merged_pads_v1','separate_pads_v2'}
 SEPARATE_HEAD_PADS = tuple(str(lane) for lane in range(1,9)) + HEAD_PADS
 _SEPARATE_PAD_INDEX = {pad:i for i,pad in enumerate(SEPARATE_HEAD_PADS)}
+_SEPARATE_PAD_INDEX.update({f'C{lane}': _SEPARATE_PAD_INDEX['C'] for lane in range(1, 9)})
 
 
 def head_pads_for_policy(policy='merged_pads_v1'):
@@ -115,10 +119,20 @@ def head_timing_features(last_seconds, last_beats, seconds, beats):
     seconds=np.asarray(seconds,dtype=np.float64).reshape(-1)
     beats=np.asarray(beats,dtype=np.float64).reshape(-1)
     seen=np.isfinite(last_seconds)
-    ages_sec=np.maximum(0.,seconds[:,None]-np.where(seen,last_seconds,0.))
-    ages_beat=np.maximum(0.,beats[:,None]-np.where(seen,last_beats,0.))
-    return np.concatenate((np.broadcast_to(seen,(len(seconds),len(seen))),
-        np.log1p(ages_sec)*seen,np.log1p(ages_beat)*seen),axis=-1).astype(np.float32)
+    p=len(seen)
+    n=len(seconds)
+    out=np.zeros((n,3*p),dtype=np.float32)
+    if not n:
+        return out
+    seen_idx=np.flatnonzero(seen)
+    if not len(seen_idx):
+        return out
+    out[:,seen_idx]=1.0
+    ages_sec=np.maximum(0.,seconds[:,None]-last_seconds[seen_idx])
+    ages_beat=np.maximum(0.,beats[:,None]-last_beats[seen_idx])
+    out[:,p+seen_idx]=np.log1p(ages_sec)
+    out[:,2*p+seen_idx]=np.log1p(ages_beat)
+    return out
 
 
 def enrich_head_timing(head_timing):

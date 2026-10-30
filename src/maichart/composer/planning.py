@@ -11,7 +11,7 @@ PLAN_CHANNELS=('event_rate','head_rate','hold','slide','touch','rest')
 
 
 class PlanGrid:
-    def __init__(self, clock, end_sec, acoustic_context, views=None):
+    def __init__(self, clock, end_sec, acoustic_context, views=None, *, share_audio=False):
         self.end_sec=float(end_sec)
         # A four-beat computational span is not asserted to be a musical bar.
         seconds=[0.]
@@ -33,7 +33,14 @@ class PlanGrid:
         if len(seconds)>2 and seconds[-1]-seconds[-2] < .5*(seconds[-2]-seconds[-3]):
             seconds=np.delete(seconds,-2)
         self.edges=seconds;self.centers=(seconds[:-1]+seconds[1:])*.5
-        self.audio=acoustic_context.at(self.centers)
+        if share_audio:
+            from .quality_inputs import shared_raw_plan_bank
+            bank = shared_raw_plan_bank(acoustic_context, clock, self.centers)
+            self._shared_raw_plan_bank = bank
+            self._quality_plan_clock = bank['clock']
+            self.audio = bank['audio']
+        else:
+            self.audio=acoustic_context.at(self.centers)
         self.targets=np.zeros((len(self.centers),6),np.float32)
         self.weights=np.ones(len(self.centers),np.float32)
         if views is not None:
@@ -66,13 +73,14 @@ class AudioPlanner(nn.Module):
         self.layers=nn.ModuleList(nn.Conv1d(width,width,3,padding=d,dilation=d) for d in (1,2,4))
         self.output=nn.Linear(width,6)
 
-    def forward(self,audio,condition,padding):
+    def forward(self,audio,condition,padding,*,return_rest_logits=False):
         controls=condition[:,None].expand(-1,audio.size(1),-1)
         x=self.input(torch.cat((audio,controls),-1)).masked_fill(padding[...,None],0.).transpose(1,2)
         for layer in self.layers:
             x=(x+torch.nn.functional.gelu(layer(x))).masked_fill(padding[:,None],0.)
         raw=self.output(x.transpose(1,2)).float()
-        return torch.cat((torch.nn.functional.softplus(raw[...,:2]),raw[...,2:].sigmoid()),-1)
+        plan=torch.cat((torch.nn.functional.softplus(raw[...,:2]),raw[...,2:].sigmoid()),-1)
+        return (plan,raw[...,5]) if return_rest_logits else plan
 
 
 def read_plan(plan,indices,mix):

@@ -1,0 +1,792 @@
+{
+  "schema": "composer_stream_efficiency_v1",
+  "preserved_checkpoint": "checkpoints/prism_composer_v28/snapshots/before_stream_perf_20261030/composer_last.pt",
+  "parent_epoch": 5,
+  "parent_step": 8000,
+  "parent_cursor": 816,
+  "live_before": {
+    "epoch": 5,
+    "batch": 1150,
+    "total": 1796,
+    "optimizer_steps": 8334,
+    "elapsed_sec": 368.5152500999975,
+    "samples_per_sec": 49.93009107494769,
+    "supervised_steps_per_sec": 645.5553737204799,
+    "supervised_steps": 237897,
+    "metric_batches": 1150,
+    "timing": {
+      "data_sec": 122.45803269959288,
+      "transfer_sec": 2.676494300190825,
+      "compute_sec": 234.35486070014304
+    },
+    "skipped_windows": 0,
+    "prefetch": {
+      "mode": "shared_audio_ordered_batches",
+      "depth": 2,
+      "sample_workers": 1,
+      "prepared_batches": 1150,
+      "prepare_sec": 345.707,
+      "consumer_wait_sec": 121.704,
+      "buffered_tensor_bytes": 0,
+      "max_buffered_tensor_bytes": 99418410
+    },
+    "cache": {
+      "bank": {
+        "bytes": 1072724048,
+        "budget_bytes": 1073741824,
+        "entries": 76,
+        "hits": 103335,
+        "misses": 2263,
+        "evictions": 2187
+      },
+      "state": {
+        "estimated_bytes": 172285086,
+        "budget_bytes": 536870912,
+        "entries": 652,
+        "hits": 103947,
+        "misses": 652,
+        "evictions": 0,
+        "uncached": 0
+      },
+      "plan": {
+        "bytes": 222300288,
+        "policy": "eager_labels_not_in_cache_budget"
+      },
+      "form_audio": {
+        "hits": 218696,
+        "misses": 3129,
+        "loads": 3129,
+        "evictions": 2966,
+        "entries": 163,
+        "bytes": 534118400,
+        "budget_bytes": 536870912,
+        "disk_loads": 3129,
+        "source_resolutions": 531
+      }
+    },
+    "cuda_memory": {
+      "allocated_gib": 0.26134347915649414,
+      "reserved_gib": 2.576171875,
+      "peak_allocated_gib": 1.058422565460205
+    },
+    "last_gradient_norm": 3.684602737426758,
+    "learning_rate": 0.0001775380211290304,
+    "stage": "audio_conditioned",
+    "loss": 3.9959854789402174,
+    "time_loss": 0.3837872314453125,
+    "kind_loss": 0.09908411440641984,
+    "delta_loss": 0.2847034752887228,
+    "configuration_loss": 2.377615276834239,
+    "shape_loss": 0.7057158096976902,
+    "phase_loss": 0.697794189453125,
+    "detail_loss": 0.9741068699048913,
+    "plan_loss": 11.92920261548913,
+    "plan_rate_loss": 11.746082710597825,
+    "plan_blank_loss": 0.18311599068019702,
+    "base_loss": 3.954323624320652,
+    "recovery_loss": 0.04166141675866168
+  },
+  "cpu": {
+    "scope": "CPU v28 train first actual chart, H64 K16, real 10ms bank, 2 CPU threads, warm matching caches; no GPU",
+    "prepare_sec": 1.0584618000430055,
+    "chart_steps": 374,
+    "rows_compared": 32,
+    "batch_size": 16,
+    "bitwise_equal": true,
+    "results": {
+      "baseline_rows": {
+        "median_sec": 0.11012840003240854,
+        "seconds": [
+          0.11294989997986704,
+          0.11012840003240854,
+          0.11120730004040524,
+          0.10889219999080524,
+          0.109654399973806
+        ],
+        "samples_per_sec": 290.56991648460394
+      },
+      "optimized_rows": {
+        "median_sec": 0.015753700048662722,
+        "seconds": [
+          0.0156190000125207,
+          0.015441600000485778,
+          0.015753700048662722,
+          0.017321000050287694,
+          0.021088600042276084
+        ],
+        "samples_per_sec": 2031.2688385047911
+      },
+      "baseline_batch": {
+        "median_sec": 0.06161540001630783,
+        "seconds": [
+          0.06872129999101162,
+          0.07638939999742433,
+          0.060137399996165186,
+          0.06161540001630783,
+          0.06001990003278479
+        ],
+        "samples_per_sec": 259.6753408363049
+      },
+      "optimized_batch": {
+        "median_sec": 0.017793199978768826,
+        "seconds": [
+          0.015452899970114231,
+          0.01473450002958998,
+          0.019698800053447485,
+          0.018150900024920702,
+          0.017793199978768826
+        ],
+        "samples_per_sec": 899.2199277865418
+      }
+    },
+    "optimized_cache": {
+      "bank": {
+        "bytes": 11820248,
+        "budget_bytes": 107374182,
+        "entries": 1,
+        "hits": 0,
+        "misses": 1,
+        "evictions": 0
+      },
+      "state": {
+        "estimated_bytes": 175294,
+        "budget_bytes": 40265319,
+        "entries": 1,
+        "hits": 319,
+        "misses": 1,
+        "evictions": 0,
+        "uncached": 0
+      },
+      "symbol": {
+        "estimated_bytes": 80262,
+        "budget_bytes": 13421772,
+        "entries": 1,
+        "hits": 319,
+        "misses": 1,
+        "evictions": 0
+      },
+      "plan": {
+        "bytes": 293064,
+        "policy": "eager_labels_not_in_cache_budget"
+      },
+      "disk_bank": {
+        "path": "cache\\chart_composer_v1\\event_set_stream_banks\\stream_238_time_grid_peaks_v1",
+        "hits": 0,
+        "misses": 1,
+        "invalid": 0,
+        "write_errors": 0,
+        "read_sec": 9.440002031624317e-05,
+        "build_sec": 0.6011944999918342,
+        "write_sec": 0.010291500017046928,
+        "bytes_written": 11820440,
+        "load_mode": "copy_on_write_mmap"
+      },
+      "form_audio": {
+        "hits": 323,
+        "misses": 1,
+        "loads": 1,
+        "evictions": 0,
+        "entries": 1,
+        "bytes": 3276800,
+        "budget_bytes": 53687091,
+        "disk_loads": 1,
+        "source_resolutions": 1
+      }
+    },
+    "baseline_cache": {
+      "bank": {
+        "bytes": 0,
+        "budget_bytes": 107374182,
+        "entries": 0,
+        "hits": 0,
+        "misses": 0,
+        "evictions": 0
+      },
+      "state": {
+        "estimated_bytes": 175294,
+        "budget_bytes": 53687091,
+        "entries": 1,
+        "hits": 319,
+        "misses": 1,
+        "evictions": 0,
+        "uncached": 0
+      },
+      "plan": {
+        "bytes": 293064,
+        "policy": "eager_labels_not_in_cache_budget"
+      },
+      "form_audio": {
+        "hits": 323,
+        "misses": 1,
+        "loads": 1,
+        "evictions": 0,
+        "entries": 1,
+        "bytes": 3276800,
+        "budget_bytes": 53687091,
+        "disk_loads": 1,
+        "source_resolutions": 1
+      }
+    },
+    "checkpoint_step": 7500
+  },
+  "disk": {
+    "scope": "first real training song, cold build/write vs disk mmap hit, no extra source audio loads",
+    "cold_sec": 0.3506526999990456,
+    "warm_sec": 0.0016376000130549073,
+    "bytes": 11820248,
+    "exact_tensor_match": true,
+    "extra_source_loads": 0,
+    "stats": {
+      "path": ".scratch\\perf_stream_20261030\\cold_bank_probe\\event_set_stream_banks\\stream_238_time_grid_peaks_v1",
+      "hits": 1,
+      "misses": 1,
+      "invalid": 0,
+      "write_errors": 0,
+      "read_sec": 0.0008132000220939517,
+      "build_sec": 0.3408677999977954,
+      "write_sec": 0.0082465999876149,
+      "bytes_written": 11820440,
+      "load_mode": "copy_on_write_mmap"
+    }
+  },
+  "gpu_fp32": {
+    "dtype": "fp32",
+    "rows": 16,
+    "frames": 12211,
+    "dense_detail_rows": 1376,
+    "sparse_detail_rows": 176,
+    "results": [
+      {
+        "name": "baseline",
+        "loss": 4.756460189819336,
+        "seconds_per_step": 0.09707935000187717,
+        "step_times": [
+          0.09826240001711994,
+          0.1010542000294663,
+          0.08536149997962639,
+          0.09127590002026409,
+          0.10677190002752468,
+          0.09183060005307198,
+          0.09786109998822212,
+          0.09629760001553223
+        ],
+        "peak_allocated_bytes": 604250624
+      },
+      {
+        "name": "optimized",
+        "loss": 4.756460189819336,
+        "seconds_per_step": 0.1004784999822732,
+        "step_times": [
+          0.10014009999576956,
+          0.10081689996877685,
+          0.10752599994884804,
+          0.0913113999995403,
+          0.08494740002788603,
+          0.08605320000788197,
+          0.1391418999992311,
+          0.1012592000188306
+        ],
+        "peak_allocated_bytes": 604426240
+      }
+    ],
+    "loss_abs_diff": 0.0,
+    "max_grad_abs_diff": 7.450580596923828e-08,
+    "largest_gradient_differences": [
+      [
+        "audio_input.0.weight",
+        7.450580596923828e-08
+      ],
+      [
+        "audio_clock.weight",
+        5.960464477539063e-08
+      ],
+      [
+        "detail_output.weight",
+        2.9802322387695312e-08
+      ],
+      [
+        "decoder.layers.0.self_attn.in_proj_weight",
+        1.6996636986732483e-08
+      ],
+      [
+        "near_audio.weight",
+        1.6763806343078613e-08
+      ],
+      [
+        "audio_input.2.weight",
+        1.4901161193847656e-08
+      ],
+      [
+        "audio_clock.bias",
+        1.4901161193847656e-08
+      ],
+      [
+        "detail_output.bias",
+        1.4901161193847656e-08
+      ]
+    ]
+  },
+  "gpu_bf16": {
+    "dtype": "bf16",
+    "rows": 16,
+    "frames": 12211,
+    "dense_detail_rows": 1376,
+    "sparse_detail_rows": 176,
+    "results": [
+      {
+        "name": "baseline",
+        "loss": 4.773259162902832,
+        "seconds_per_step": 0.12936425002408214,
+        "step_times": [
+          0.12008860002970323,
+          0.10702109994599596,
+          0.11585360002936795,
+          0.13343639997765422,
+          0.1361866999650374,
+          0.12929920002352446,
+          0.14332239999203011,
+          0.12942930002463982
+        ],
+        "peak_allocated_bytes": 595490304
+      },
+      {
+        "name": "optimized",
+        "loss": 4.773259162902832,
+        "seconds_per_step": 0.12374300003284588,
+        "step_times": [
+          0.1173920999863185,
+          0.12667060003150254,
+          0.12969660002272576,
+          0.1381254000007175,
+          0.12081540003418922,
+          0.1368889000150375,
+          0.11283040000125766,
+          0.12053000001469627
+        ],
+        "peak_allocated_bytes": 595490304
+      }
+    ],
+    "loss_abs_diff": 0.0,
+    "max_grad_abs_diff": 0.001953125,
+    "largest_gradient_differences": [
+      [
+        "audio_input.0.weight",
+        0.001953125
+      ],
+      [
+        "audio_clock.weight",
+        0.0009765625
+      ],
+      [
+        "detail_output.weight",
+        0.00048828125
+      ],
+      [
+        "detail_output.bias",
+        0.0003662109375
+      ],
+      [
+        "action_fusion.0.weight",
+        0.000244140625
+      ],
+      [
+        "audio_input.0.bias",
+        0.0001220703125
+      ],
+      [
+        "audio_local.weight",
+        0.0001220703125
+      ],
+      [
+        "audio_clock.bias",
+        0.0001220703125
+      ]
+    ]
+  },
+  "pipeline": {
+    "baseline": {
+      "seconds": 19.006886299990583,
+      "steps_per_sec": 700.2725112322366,
+      "supervised_steps": 13310,
+      "speedup": 1.0,
+      "timing": {
+        "data_sec": 4.938055800041184,
+        "transfer_sec": 0.14814939995994791,
+        "compute_sec": 13.153269699716475
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 65,
+        "prepare_sec": 17.942,
+        "consumer_wait_sec": 4.9,
+        "buffered_tensor_bytes": 16984927,
+        "max_buffered_tensor_bytes": 62181384
+      },
+      "cache": {
+        "bank": {
+          "bytes": 281255304,
+          "budget_bytes": 1073741824,
+          "entries": 21,
+          "hits": 1030,
+          "misses": 21,
+          "evictions": 0
+        },
+        "state": {
+          "estimated_bytes": 6360474,
+          "budget_bytes": 536870912,
+          "entries": 24,
+          "hits": 1028,
+          "misses": 24,
+          "evictions": 0,
+          "uncached": 0
+        },
+        "plan": {
+          "bytes": 10741320,
+          "policy": "eager_labels_not_in_cache_budget"
+        },
+        "form_audio": {
+          "hits": 2162,
+          "misses": 25,
+          "loads": 25,
+          "evictions": 0,
+          "entries": 25,
+          "bytes": 81920000,
+          "budget_bytes": 536870912,
+          "disk_loads": 25,
+          "source_resolutions": 25
+        }
+      },
+      "memory": {
+        "allocated_gib": 0.24561643600463867,
+        "reserved_gib": 0.87890625,
+        "peak_allocated_gib": 0.7277770042419434
+      },
+      "loss": 3.6463003158569336,
+      "skipped_windows": 0
+    },
+    "optimized": {
+      "seconds": 16.44565310003236,
+      "steps_per_sec": 809.3324065052674,
+      "supervised_steps": 13310,
+      "speedup": 1.1557392208372184,
+      "timing": {
+        "data_sec": 3.3340129997231998,
+        "transfer_sec": 0.14399069984210655,
+        "compute_sec": 11.968880200001877
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 65,
+        "prepare_sec": 13.049,
+        "consumer_wait_sec": 3.302,
+        "buffered_tensor_bytes": 16984927,
+        "max_buffered_tensor_bytes": 62181384
+      },
+      "cache": {
+        "bank": {
+          "bytes": 295409400,
+          "budget_bytes": 1073741824,
+          "entries": 22,
+          "hits": 1033,
+          "misses": 22,
+          "evictions": 0
+        },
+        "state": {
+          "estimated_bytes": 6616084,
+          "budget_bytes": 402653184,
+          "entries": 25,
+          "hits": 1030,
+          "misses": 25,
+          "evictions": 0,
+          "uncached": 0
+        },
+        "symbol": {
+          "estimated_bytes": 2540230,
+          "budget_bytes": 134217728,
+          "entries": 25,
+          "hits": 1031,
+          "misses": 25,
+          "evictions": 0
+        },
+        "plan": {
+          "bytes": 10741320,
+          "policy": "eager_labels_not_in_cache_budget"
+        },
+        "disk_bank": {
+          "path": "cache\\chart_composer_v1\\event_set_stream_banks\\stream_238_time_grid_peaks_v1",
+          "hits": 1,
+          "misses": 21,
+          "invalid": 0,
+          "write_errors": 0,
+          "read_sec": 0.0037579997442662716,
+          "build_sec": 7.9527774000307545,
+          "write_sec": 0.16149690008023754,
+          "bytes_written": 283593184,
+          "load_mode": "copy_on_write_mmap"
+        },
+        "form_audio": {
+          "hits": 28,
+          "misses": 25,
+          "loads": 25,
+          "evictions": 0,
+          "entries": 25,
+          "bytes": 81920000,
+          "budget_bytes": 536870912,
+          "disk_loads": 25,
+          "source_resolutions": 25
+        }
+      },
+      "memory": {
+        "allocated_gib": 0.2443685531616211,
+        "reserved_gib": 0.86328125,
+        "peak_allocated_gib": 0.7285284996032715
+      },
+      "loss": 3.6462554931640625,
+      "skipped_windows": 0
+    },
+    "optimized_warm": {
+      "seconds": 11.091094599978533,
+      "steps_per_sec": 1200.0618947047626,
+      "supervised_steps": 13310,
+      "speedup": 1.7137069861461076,
+      "timing": {
+        "data_sec": 0.1947153999353759,
+        "transfer_sec": 0.12722029990982264,
+        "compute_sec": 10.757581299811136
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 66,
+        "prepare_sec": 5.59,
+        "consumer_wait_sec": 0.157,
+        "buffered_tensor_bytes": 52282827,
+        "max_buffered_tensor_bytes": 63137424
+      },
+      "cache": {
+        "bank": {
+          "bytes": 295409400,
+          "budget_bytes": 1073741824,
+          "entries": 22,
+          "hits": 1034,
+          "misses": 22,
+          "evictions": 0
+        },
+        "state": {
+          "estimated_bytes": 6616084,
+          "budget_bytes": 402653184,
+          "entries": 25,
+          "hits": 1031,
+          "misses": 25,
+          "evictions": 0,
+          "uncached": 0
+        },
+        "symbol": {
+          "estimated_bytes": 2540230,
+          "budget_bytes": 134217728,
+          "entries": 25,
+          "hits": 1031,
+          "misses": 25,
+          "evictions": 0
+        },
+        "plan": {
+          "bytes": 10741320,
+          "policy": "eager_labels_not_in_cache_budget"
+        },
+        "disk_bank": {
+          "path": "cache\\chart_composer_v1\\event_set_stream_banks\\stream_238_time_grid_peaks_v1",
+          "hits": 22,
+          "misses": 0,
+          "invalid": 0,
+          "write_errors": 0,
+          "read_sec": 0.02486760017927736,
+          "build_sec": 0.0,
+          "write_sec": 0.0,
+          "bytes_written": 0,
+          "load_mode": "copy_on_write_mmap"
+        },
+        "form_audio": {
+          "hits": 7,
+          "misses": 25,
+          "loads": 25,
+          "evictions": 0,
+          "entries": 25,
+          "bytes": 81920000,
+          "budget_bytes": 536870912,
+          "disk_loads": 25,
+          "source_resolutions": 25
+        }
+      },
+      "memory": {
+        "allocated_gib": 0.2443685531616211,
+        "reserved_gib": 0.86328125,
+        "peak_allocated_gib": 0.7285284996032715
+      },
+      "loss": 3.6462554931640625,
+      "skipped_windows": 0
+    }
+  },
+  "pipeline_scope": "Same checkpoint weights, sample order, 32-chart dataset, 1024 sequences and 13310 supervised targets; BF16; recovery/evaluation disabled for comparison; excludes initial dataset preparation and final checkpoint write",
+  "regression": {
+    "passed": 99,
+    "log": ".scratch\\perf_stream_20261030\\regression.log"
+  },
+  "source_sha256": {
+    "src\\maichart\\composer\\stream_data.py": "c8cc3bcccea791aa480281b2ae4f4a52e7ddf22fc2f18a829b9a413d4008fbc2",
+    "src\\maichart\\composer\\stream_model.py": "0f97951f591e5c70dd6749d3d0c006a5a7c9a02ab29c1da43cdf765f2360028f",
+    "src\\maichart\\composer\\stream_bank_cache.py": "7c69e85a49a20908baa81025cc159e6500abdaf3fc9f018a90b7e02d41cd27c9"
+  },
+  "resume": {
+    "task_id": "f1a54ce469a0",
+    "status": "running",
+    "error": null,
+    "runtime": {
+      "family": "chart_composer_v1",
+      "architecture_profile": "event_set_stream_v1",
+      "training_semantics": "causal_event_set_stream_v1",
+      "samples": 28729,
+      "batch_size": 16,
+      "grad_accumulation": 1,
+      "history_events": 64,
+      "rollout_steps": 16,
+      "parameters": 16591272,
+      "codec_coverage": {
+        "events": 350278,
+        "rotatable_events": 308281,
+        "fallback_events": 41997,
+        "rotation_fraction": 0.8801038032648354
+      },
+      "effective_lr": 0.00017925140244226648,
+      "start_epoch": 5,
+      "end_epoch": 20,
+      "resume_sample_cursor": 13056,
+      "precision": "bf16",
+      "device": "cuda",
+      "epoch_target": 20,
+      "learning_rate_schedule": {
+        "schema": "composer_lr_schedule_v1",
+        "kind": "cosine",
+        "base_lr": 0.0002,
+        "warmup_steps": 100,
+        "total_steps": 35920,
+        "min_lr_ratio": 0.1
+      },
+      "audio_grid_seconds": 0.01,
+      "plan_target_units": "rates_per_second_v2",
+      "plan_loss_normalization": "per_second_v2",
+      "plan_blank_window_seconds": 0.5,
+      "clock_policy": "musical_v2",
+      "timing_audio_policy": "delta_local_v2",
+      "detail_policy": "phase_autoregressive_v2",
+      "motion_continuation_policy": "motion_continuation_v1",
+      "attention_policy": "bf16_dropout_math_v1"
+    },
+    "metrics": {
+      "epoch": 5,
+      "batch": 1375,
+      "total": 1796,
+      "optimizer_steps": 8559,
+      "elapsed_sec": 178.81310120003764,
+      "samples_per_sec": 50.01870634744138,
+      "supervised_steps_per_sec": 643.6049664574341,
+      "supervised_steps": 115085,
+      "metric_batches": 559,
+      "timing": {
+        "data_sec": 59.21973770170007,
+        "transfer_sec": 1.3858485995442607,
+        "compute_sec": 111.50021220004419
+      },
+      "skipped_windows": 0,
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 561,
+        "prepare_sec": 149.573,
+        "consumer_wait_sec": 58.933,
+        "buffered_tensor_bytes": 34250652,
+        "max_buffered_tensor_bytes": 66098209
+      },
+      "cache": {
+        "bank": {
+          "bytes": 1069702920,
+          "budget_bytes": 1073741824,
+          "entries": 79,
+          "hits": 8861,
+          "misses": 196,
+          "evictions": 117
+        },
+        "state": {
+          "estimated_bytes": 53889336,
+          "budget_bytes": 402653184,
+          "entries": 205,
+          "hits": 8771,
+          "misses": 205,
+          "evictions": 0,
+          "uncached": 0
+        },
+        "symbol": {
+          "estimated_bytes": 23097702,
+          "budget_bytes": 134217728,
+          "entries": 205,
+          "hits": 8771,
+          "misses": 205,
+          "evictions": 0
+        },
+        "plan": {
+          "bytes": 222300288,
+          "policy": "eager_labels_not_in_cache_budget"
+        },
+        "disk_bank": {
+          "path": "E:\\simai_transformer\\cache\\chart_composer_v1\\event_set_stream_banks\\stream_238_time_grid_peaks_v1",
+          "hits": 12,
+          "misses": 184,
+          "invalid": 0,
+          "write_errors": 0,
+          "read_sec": 0.03730169957270846,
+          "build_sec": 101.50650820048759,
+          "write_sec": 1.7793915991205722,
+          "bytes_written": 2513382472,
+          "load_mode": "copy_on_write_mmap"
+        },
+        "form_audio": {
+          "hits": 825,
+          "misses": 686,
+          "loads": 686,
+          "evictions": 523,
+          "entries": 163,
+          "bytes": 534118400,
+          "budget_bytes": 536870912,
+          "disk_loads": 686,
+          "source_resolutions": 531
+        }
+      },
+      "cuda_memory": {
+        "allocated_gib": 0.2693600654602051,
+        "reserved_gib": 1.54296875,
+        "peak_allocated_gib": 0.8870978355407715
+      },
+      "last_gradient_norm": 2.0556960105895996,
+      "learning_rate": 0.00017635103457824122,
+      "stage": "audio_conditioned",
+      "loss": 3.9642960713886404,
+      "time_loss": 0.34593784830438,
+      "kind_loss": 0.054884837223933294,
+      "delta_loss": 0.2910529394269203,
+      "configuration_loss": 2.397803564191078,
+      "shape_loss": 0.709205586496534,
+      "phase_loss": 0.701450409317699,
+      "detail_loss": 0.9871489877990832,
+      "plan_loss": 11.84655128438059,
+      "plan_rate_loss": 11.663094672406082,
+      "plan_blank_loss": 0.18345723979588272,
+      "base_loss": 3.9283964808810374,
+      "recovery_loss": 0.03589905140011809
+    }
+  }
+}

@@ -49,7 +49,7 @@ test("visible device selector has no family restriction or collapsed ancestor", 
 for (const device of ["auto", "cuda", "cpu"]) {
   test(`stream payload retains ${device}, seed and temperature zero`, () => {
     const values = {"#generationDevice": device, "#seed": "42", "#temperature": "0", "#bpm": "130"};
-    const context = vm.createContext({
+    const context = vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},
       valueOrDefault: (key, fallback) => values[key] ?? fallback,
       collectCondition: () => ({level: 13.6}), parseTempoMap: () => null,
     });
@@ -85,7 +85,7 @@ for (const device of ["auto", "cuda", "cpu"]) {
 }
 
 test("empty seed and BPM delegate to server random seed and audio tempo", () => {
-  const context = vm.createContext({valueOrDefault: (_key, fallback) => fallback,
+  const context = vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault: (_key, fallback) => fallback,
     collectCondition: () => ({}), parseTempoMap: () => null, formDevice: () => "auto"});
   install(context, "chartStreamGenerationPayload", "intensityCurvePayload");
   const result = context.chartStreamGenerationPayload();
@@ -102,7 +102,7 @@ test('stream timing controls are visible in its family panel and forwarded', () 
     '#streamRepetitionStructureStrength':'0', '#streamConfigurationExplorationTemperature':'0',
     '#streamSustainEndSec':'157.5',
     '#streamRepetitionMinSeconds':'6', '#streamRepetitionMinBeats':'12'};
-  const context = vm.createContext({valueOrDefault: (key, fallback) => values[key] ?? fallback,
+  const context = vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault: (key, fallback) => values[key] ?? fallback,
     collectCondition: () => ({}), parseTempoMap: () => null, formDevice: () => 'cpu'});
   install(context, 'chartStreamGenerationPayload', 'intensityCurvePayload');
   const result = context.chartStreamGenerationPayload();
@@ -128,7 +128,7 @@ test('stream timing controls are visible in its family panel and forwarded', () 
 
 test('stream training forwards visible dropout and seed including zero', () => {
   const values = {'#streamDropout':'0', '#streamSeed':'173', '#streamWeightDecay':'0.02'};
-  const context = vm.createContext({valueOrDefault:(key, fallback)=>values[key] ?? fallback,
+  const context = vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault:(key, fallback)=>values[key] ?? fallback,
     checkedOrDefault:()=>true,
     currentTrainingMode:()=> 'fresh', trainingSourcePaths:()=>({}),
     selectedTrainingManifests:()=>[], selectedDatasetItems:()=>[], formDevice:()=> 'cpu'});
@@ -168,7 +168,7 @@ test('stream training forwards visible dropout and seed including zero', () => {
 });
 
 test('stream attention backend selection is forwarded and old servers are rejected', () => {
-  const context = vm.createContext({valueOrDefault:(key, fallback)=>({
+  const context = vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault:(key, fallback)=>({
     '#streamAttentionBackend':'cudnn','#streamHandBackend':'native'}[key]??fallback),
     checkedOrDefault:()=>true,currentTrainingMode:()=> 'fresh',trainingSourcePaths:()=>({}),
     selectedTrainingManifests:()=>[],selectedDatasetItems:()=>[],formDevice:()=> 'cuda'});
@@ -188,7 +188,7 @@ test('finetune reinspection preserves explicit grounding upgrade and training se
   nodes['#streamSymmetryAugmentation'].value='mirror4';
   nodes['#streamAlignmentLossWeight'].value='0.24';
   nodes['#streamPrefetchBatches'].value='4';
-  const context=vm.createContext({element:id=>nodes[id]});
+  const context=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},element:id=>nodes[id]});
   install(context,'applyChartStreamCheckpointConfig','renderChartStreamCheckpointInspection');
   const data={model_config:{d_model:256,grounding_profile:'none'},
     args:{alignment_loss_weight:0,prefetch_batches:0,quality_enabled:true,symmetry_augmentation:'none'}};
@@ -210,7 +210,7 @@ test('finetune reinspection preserves explicit grounding upgrade and training se
 
 test('stream checkpoint inspection resolves its manifest before sending the request', async () => {
   const calls=[];
-  const context=vm.createContext({currentTrainingMode:()=> 'finetune',currentModelFamily:()=> 'chart_stream_v1',
+  const context=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},currentTrainingMode:()=> 'finetune',currentModelFamily:()=> 'chart_stream_v1',
     element:()=>null,assertTrainingSelection(){},assertDatasetBackend:async()=>{},
     valueOrDefault:()=> 'old.pt',trainingSourcePaths:()=>({manifest:'source.json'}),
     checkpointInspectRequest:0,currentCheckpointKey:()=> 'same',setCheckpointStatus(){},
@@ -226,7 +226,7 @@ test('stream checkpoint inspection resolves its manifest before sending the requ
 for (const family of ['chart_stream_v1', 'song_form_v2']) {
   test(`checkpoint inspection detects ${family} independently of training selection`, async () => {
     const calls = [], messages = [];
-    const context = vm.createContext({
+    const context = vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},
       valueOrDefault: () => 'stream.pt', generationInspectRequest: 0,
       currentModelFamily: () => 'song_form_v2', element: () => null,
       updateFamilyFields() {}, updateGenerationCapabilityControls() {},

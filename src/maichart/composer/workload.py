@@ -45,8 +45,9 @@ def event_statistics(note_text: str, bpm: float = 120.) -> tuple[int, float, flo
 
 def _triangle_integral(position):
     position = np.clip(np.asarray(position, dtype=np.float64), -1., 1.)
-    return np.where(position < 0., .5 * (position + 1.) ** 2,
-                    1. - .5 * (1. - position) ** 2)
+    u = 1. - np.abs(position)
+    half_u2 = .5 * (u * u)
+    return np.where(position < 0., half_u2, 1. - half_u2)
 
 
 def build_workload_targets(points, tempo, first, centers_seconds, duration_sec):
@@ -223,7 +224,9 @@ class ExactWorkloadQuery:
         output[valid, :2] = np.log1p(weighted[valid, :2] / area[valid, None])
         active = valid & (weighted[:, 0] > 1e-9)
         output[active, 2:] = np.clip(weighted[active, 2:] / weighted[active, :1], 0., 1.)
-        return np.nan_to_num(output, nan=0., posinf=0., neginf=0.).astype(np.float32, copy=False)
+        if not np.isfinite(output).all():
+            np.nan_to_num(output, copy=False, nan=0., posinf=0., neginf=0.)
+        return output
 
 
 def exact_workload_targets(points, tempo, first, centers_seconds, duration_sec, *, parsed=True):
@@ -268,17 +271,74 @@ def prefix_ledger(times, sums, queries, *, committed_count=None):
     if not len(times) or not len(queries):
         return result
     right = np.searchsorted(times, queries, side='right')
-    for offset, width in ((0, 1.), (2, 4.)):
-        left = np.searchsorted(times, queries - width, side='right')
-        result[:, offset] = (right - left) / width
-        result[:, offset + 1] = (sums[right] - sums[left]) / width
+    left1 = np.searchsorted(times, queries - 1., side='right')
+    left4 = np.searchsorted(times, queries - 4., side='right')
+    result[:, 0] = right - left1
+    result[:, 1] = sums[right] - sums[left1]
+    result[:, 2] = (right - left4) * .25
+    result[:, 3] = (sums[right] - sums[left4]) * .25
     visible = right > 0
-    last = times[np.maximum(right - 1, 0)]
-    result[visible, 4] = np.log1p(np.maximum(0., queries[visible] - last[visible]))
-    result[visible, 5] = np.clip((last[visible] - times[0]) / 4., 0., 1.)
-    return np.nan_to_num(result, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32, copy=False)
+    if visible.any():
+        vis_idx = right[visible] - 1
+        last = times[vis_idx]
+        result[visible, 4] = np.log1p(np.maximum(0., queries[visible] - last))
+        result[visible, 5] = np.clip((last - times[0]) * .25, 0., 1.)
+    if not np.isfinite(result).all():
+        np.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return result
+
+
+def prefix_ledger_batch(times, sums, queries, committed_counts):
+    """Exact causal ledger for same-chart [rows, candidates] query grids.
+
+    Searching the full clock once and clipping each row's indices to its own
+    committed count is identical to searching separate truncated prefixes.
+    Future authored events can therefore never contribute to these inputs.
+    """
+    times = np.asarray(times, dtype=np.float64)
+    sums = np.asarray(sums, dtype=np.float64)
+    queries = np.asarray(queries, dtype=np.float64)
+    counts = np.asarray(committed_counts, dtype=np.intp)
+    if queries.ndim != 2 or counts.shape != (len(queries),):
+        raise ValueError('Ledger batch requires a query grid and one committed count per row')
+    if np.any((counts < 0) | (counts > len(times))):
+        raise ValueError('Invalid committed prefix length')
+    result = np.zeros((*queries.shape, LEDGER_DIM), dtype=np.float32)
+    if not len(times) or not queries.size:
+        return result
+    right = np.minimum(np.searchsorted(times, queries, side='right'), counts[:, None])
+    left1 = np.minimum(np.searchsorted(times, queries - 1., side='right'), counts[:, None])
+    left4 = np.minimum(np.searchsorted(times, queries - 4., side='right'), counts[:, None])
+    result[..., 0] = right - left1
+    result[..., 1] = sums[right] - sums[left1]
+    result[..., 2] = (right - left4) * .25
+    result[..., 3] = (sums[right] - sums[left4]) * .25
+    visible = right > 0
+    if visible.any():
+        last = times[right[visible] - 1]
+        result[..., 4][visible] = np.log1p(np.maximum(0., queries[visible] - last))
+        result[..., 5][visible] = np.clip((last - times[0]) * .25, 0., 1.)
+    if not np.isfinite(result).all():
+        np.nan_to_num(result, copy=False, nan=0., posinf=0., neginf=0.)
+    return result
 
 
 def trailing_workload_targets(times, head_prefix, queries):
     """Label log1p rates in exactly the same past 1s/4s windows as ledger."""
-    return np.log1p(prefix_ledger(times, head_prefix, queries)[:, :4]).astype(np.float32)
+    times = np.asarray(times, dtype=np.float64)
+    sums = np.asarray(head_prefix, dtype=np.float64)
+    queries = np.asarray(queries, dtype=np.float64).reshape(-1)
+    result = np.zeros((len(queries), 4), dtype=np.float32)
+    if not len(times) or not len(queries):
+        return result
+    right = np.searchsorted(times, queries, side='right')
+    left1 = np.searchsorted(times, queries - 1., side='right')
+    left4 = np.searchsorted(times, queries - 4., side='right')
+    result[:, 0] = right - left1
+    result[:, 1] = sums[right] - sums[left1]
+    result[:, 2] = (right - left4) * .25
+    result[:, 3] = (sums[right] - sums[left4]) * .25
+    np.log1p(result, out=result)
+    if not np.isfinite(result).all():
+        np.nan_to_num(result, copy=False, nan=0.0, posinf=0.0, neginf=0.0)
+    return result

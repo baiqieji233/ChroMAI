@@ -17,8 +17,8 @@ import torch
 from maichart.stream.grounded_inference import IncrementalState
 from .acoustics import AcousticContext
 from .audio_lens import PLACEMENT_TOLERANCE_SEC
-from .candidates import candidate_beats, candidate_features, interp_candidate_audio
-from .data import collate_composer
+from .candidates import candidate_beats, candidate_features, interp_candidate_audio, is_playable_candidate_transition
+from .data import collate_composer, ComposerDataset
 from .events import event_metadata, head_timing_features,head_pads_for_policy,head_pad_indices_for_policy
 from .generate import _history_features
 from .guard import EventGuard
@@ -54,7 +54,7 @@ def restore_recovery_episodes(model,state):
 class RecoveryBuilder:
     def __init__(self, dataset, model=None, device='cpu', *, propose=None,
                  tolerance_sec=PLACEMENT_TOLERANCE_SEC, guard_factory=EventGuard,
-                 supervise_actions=False,maximum_generated_events=4):
+                 supervise_actions=False, supervise_eos=False, maximum_generated_events=4):
         self.dataset, self.model = dataset, model
         self.device, self.propose = torch.device(device), propose
         self.tolerance_sec = float(tolerance_sec)
@@ -62,9 +62,12 @@ class RecoveryBuilder:
             raise ValueError('Recovery tolerance must be finite and at least placement tolerance')
         self.guard_factory = guard_factory
         self.supervise_actions = bool(supervise_actions)
+        self.supervise_eos = bool(supervise_eos)
         if not 4<=maximum_generated_events<=132:raise ValueError('Invalid recovery episode horizon')
         self.maximum_generated_events=int(maximum_generated_events)
         self.last_reference_kind=None
+        self.playability_unreachable_references=0
+        self.reference_reachability_counts=Counter()
         self._state_cache = None
         self._guard_cache = None
 
@@ -166,6 +169,7 @@ class RecoveryBuilder:
         history_features = _history_features(tail, ds.codec_atoms, song.tempo, song.first,
             ds.action_slots, clock=clock, preceding_beat=preceding, parsed=True)
         count = ds.candidate_count
+        from .history_clock import history_beat_ages
         item = {
             '_candidate_beats': tuple(padded),
             '_prefix_points': tuple(prefix),
@@ -179,6 +183,9 @@ class RecoveryBuilder:
             'action_target': torch.zeros(ds.action_slots, dtype=torch.long),
             'history': torch.tensor([ids for ids, _ in tail], dtype=torch.long).reshape(-1, ds.action_slots),
             'history_features': torch.tensor(history_features, dtype=torch.float32).reshape(-1, 8),
+            'history_beat_ages': torch.from_numpy(history_beat_ages([beat for _, beat in tail])),
+            'history_second_ages': torch.tensor(
+                [prefix_seconds[-1] - float(clock.at(beat)) for _, beat in tail], dtype=torch.float32),
             'action_state': action_state,
             'condition': table['condition'],
             'head_timing': torch.from_numpy(head_timing_features(last_seconds, last_beats,
@@ -189,6 +196,11 @@ class RecoveryBuilder:
             'workload_seconds': torch.from_numpy(seconds),
             'workload_target': torch.zeros(count, 5),
             'workload_weight': torch.zeros(count),
+            # A generated prefix is context, never an authored event-rate label.
+            'event_count_target': torch.zeros(count),
+            'event_exposure': torch.zeros(count),
+            'event_rate_weight': torch.zeros(count),
+            'survival_start': torch.tensor(0., dtype=torch.float64),
             'interval_audio': torch.from_numpy(context.interval(prefix_seconds[-1] if prefix else 0., seconds)),
             'trailing_audio': torch.from_numpy(context.trailing(seconds)),
             'trailing_target': torch.zeros(count, 4),
@@ -200,12 +212,37 @@ class RecoveryBuilder:
             'song_index': torch.tensor(sample.song_index),
             'event_index': torch.tensor(sample.event_index),
         }
+        if getattr(ds, 'fixed_future_audio', False):
+            # A generated prefix provides no authored empty-gap supervision.
+            item.update(empty_gap_audio=torch.zeros(4, 104),
+                        empty_gap_exposure=torch.zeros(4),
+                        empty_gap_weight=torch.zeros(4))
+        if getattr(ds, 'quality_inputs_enabled', False):
+            from .quality_inputs import quality_context_inputs
+            song_paired = getattr(ds, 'quality_inputs_policy', None) == 'song_paired_v3'
+            if song_paired and 'planner_data' not in table:
+                ds._grounded_features(sample.song_index, seconds, seconds, table=table, context=context, defer_queries=False)
+            quality_start = max(0, len(prefix)-ds.history_events) if song_paired else 0
+            item.update(quality_context_inputs(points=prefix[quality_start:],
+                include_future=getattr(ds,'fixed_future_audio',False),
+                atom_ids=np.asarray([ids for ids, _ in history[quality_start:]], dtype=np.int64).reshape(-1, ds.action_slots),
+                candidate_beats=padded, candidate_seconds=seconds, state_index=state,
+                audio_features=values, audio_times=times, acoustic_context=context, clock=clock,
+                audio_duration=table['audio_duration'], point_seconds=prefix_seconds[quality_start:],
+                policy=getattr(ds, 'quality_inputs_policy', None), plan_grid=table.get('planner_data')))
+            # A generated prefix has changed the problem. Authored future
+            # phrase/gap labels are not silently reused as recovery targets.
+            phrases = len(item['quality_phrase_audio'])
+            item.update(quality_phrase_target=torch.zeros(phrases, 9 if song_paired else 8), quality_phrase_weight=torch.zeros(phrases),
+                quality_gap_target=torch.tensor(0, dtype=torch.long), quality_gap_weight=torch.tensor(0.))
         if getattr(ds,'motif_memory_policy','off')!='off':
             from .motif_memory import ComposerMotifIndex
             item['_motif_index']=ComposerMotifIndex(getattr(song,'relations',None),
                 [p.beat for p in prefix],np.asarray([ids for ids,_ in history],dtype=np.int64).reshape(-1,ds.action_slots))
         if getattr(ds,'architecture_profile',None)=='audio_grounded_v3' and hasattr(ds, '_grounded_features'):
             item.update(ds._grounded_features(sample.song_index, seconds, seconds, table=table,defer_queries=False))
+            if 'planner_data' in table:
+                item['_planner_centers']=table['planner_data'].centers
         if getattr(ds,'structure_policy','off')!='off':
             from .structure import structure_features_and_transition
             features,transition=structure_features_and_transition(song,padded,seconds,
@@ -214,6 +251,16 @@ class RecoveryBuilder:
                 policy=ds.structure_policy,cache_dir=ds.cache_dir,backend=ds.structure_backend)
             item['structure_features']=torch.from_numpy(features)
             item['structure_transition']=torch.from_numpy(transition)
+        if getattr(ds,'fixed_future_audio',False) and 'quality_future_audio' not in item:
+            from .quality_inputs import fixed_future_audio_inputs
+            item.update(fixed_future_audio_inputs(context,clock,padded,table['audio_duration']))
+        if getattr(ds, 'timing_distribution_policy', 'hierarchical_v1') == 'survival_integrated_v2':
+            from .density_grid import survival_grid_inputs
+            item.update({key: torch.from_numpy(value) for key, value in survival_grid_inputs(
+                context, prefix_seconds[-1] if prefix else 0., seconds, table['audio_duration'],
+                plan_grid=table.get('planner_data'),
+                prefix_seconds=(prefix_seconds if getattr(ds, 'density_feedback_policy', 'off')
+                                == 'causal_count_debt_v1' else None)).items()})
         return item, candidates
 
     def build(self, prefix, sample_index, *, generated_count):
@@ -258,11 +305,27 @@ class RecoveryBuilder:
             item, candidates = self._inputs(prefix, sample_index)
         except (ValueError, KeyError):
             return None, 'unsupported_generated_prefix'
+        playable_transition = is_playable_candidate_transition(
+            target.beat,
+            Fraction(prefix[-1].beat) if prefix else None,
+            getattr(self.dataset, 'candidate_policy', None),
+        )
         if item is None or target.beat not in candidates:
+            self.reference_reachability_counts['generator_unreachable'] += 1
+            if not playable_transition:
+                self.playability_unreachable_references += 1
             return None, 'unreachable_reference_time'
         selected = candidates.index(target.beat)
         if bool(item['candidate_mask'][selected]):
+            self.reference_reachability_counts['prefilter_masked'] += 1
+            if not playable_transition:
+                self.playability_unreachable_references += 1
             return None, 'masked_reference_time'
+        if not playable_transition:
+            self.playability_unreachable_references += 1
+            self.reference_reachability_counts['playability_filtered'] += 1
+        else:
+            self.reference_reachability_counts['reachable'] += 1
         item['candidate_target'] = torch.tensor(selected, dtype=torch.long)
         if getattr(self.dataset,'action_state_policy','committed_legacy_v1')=='selected_prefix_v3':
             from .context_features import selected_action_state
@@ -279,6 +342,10 @@ class RecoveryBuilder:
             if key.endswith(('_target', '_weight')) and key not in {
                     'candidate_target', 'pointer_weight', 'sample_weight', 'transition_weight'}:
                 item[key] = torch.zeros_like(torch.as_tensor(value))
+        if self.supervise_eos:
+            eos_target, eos_weight = views.eos(target_index)
+            item['eos_target'] = torch.tensor(float(eos_target), dtype=torch.float32)
+            item['eos_weight'] = torch.tensor(float(eos_weight), dtype=torch.float32)
         if self.supervise_actions:
             # The same legality check above covers the COMPLETE target event.
             # Never supervise empty placeholder actions or truncate a chord.
@@ -290,7 +357,8 @@ class RecoveryBuilder:
                     or any(atom not in self.dataset.atom_to_id for atom in atoms)):
                 return None, 'unsupported_reference_actions'
             ids = [self.dataset.atom_to_id[atom] for atom in atoms]
-            item['action_target'] = torch.tensor(ids + [0] * (self.dataset.action_slots-len(ids)), dtype=torch.long)
+            item['action_target'] = ComposerDataset.ordered_action_target(self.dataset,
+                torch.tensor(ids + [0] * (self.dataset.action_slots-len(ids)), dtype=torch.long), sample_index)
             item['action_weight'] = torch.tensor(1.)
         return item, 'accepted'
 
@@ -316,7 +384,7 @@ class RecoveryBuilder:
             item['_proposal_guard']=guard
             point = propose(item, sample_index)
             if point is None:
-                return None, 'rollout_stopped'
+                return None, item.get('_proposal_stop_reason', 'rollout_stopped')
             if point.beat not in candidates or (prefix and point.beat <= prefix[-1].beat):
                 return None, 'rollout_unreachable_proposal'
             second = float(table['clock'].at(point.beat))
@@ -357,7 +425,9 @@ class RecoveryBuilder:
                     keep={'sample_index':index,'events':[[str(point.beat),point.note_text] for point in generated]}
             updated.append(keep);outcomes[reason]+=1
         diagnostics={'generated_history_events':lengths,'maximum_generated_events':self.maximum_generated_events,
-                     'reference_types':reference_types,'self_generated_window':int(self.dataset.history_events)}
+                     'reference_types':reference_types,'self_generated_window':int(self.dataset.history_events),
+                     'playability_unreachable_references':self.playability_unreachable_references,
+                     'reference_reachability':dict(self.reference_reachability_counts)}
         return (collate_composer(items) if items else None),dict(outcomes),updated,diagnostics
 
     def batch_from_indices(self, indices, *, steps=2, propose=None):

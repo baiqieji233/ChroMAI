@@ -44,6 +44,47 @@ def _patterns(values, beats, *, maximum_gap=None):
     }
 
 
+def _rhythm_family(beat: Fraction) -> str:
+    denom = int(Fraction(beat).denominator)
+    if denom in (1, 2):
+        return 'aligned'
+    if denom % 3 == 0:
+        return 'ternary'
+    return 'binary'
+
+
+def _rhythm_observation(beats):
+    fractions = [ b if isinstance(b, Fraction) else Fraction(b) for b in beats ]
+    beat_denoms = Counter(int(b.denominator) for b in fractions)
+    interval_denoms = Counter(
+        int((right - left).denominator)
+        for left, right in zip(fractions, fractions[1:])
+        if right > left
+    )
+    families = [_rhythm_family(b) for b in fractions]
+    family_counts = Counter(families)
+    transitions = sum(1 for left, right in zip(families, families[1:]) if left != right)
+    non_aligned = [f for f in families if f != 'aligned']
+    cross_grid_transitions = sum(1 for left, right in zip(non_aligned, non_aligned[1:]) if left != right)
+    ternary_count = family_counts.get('ternary', 0)
+    max_ternary_run = max(
+        (sum(1 for _ in group) for key, group in groupby(families) if key == 'ternary'),
+        default=0,
+    )
+    return {
+        'schema': 'composer_rhythm_observation_v1',
+        'event_count': len(fractions),
+        'beat_denominator_counts': {str(k): beat_denoms[k] for k in sorted(beat_denoms)},
+        'interval_denominator_counts': {str(k): interval_denoms[k] for k in sorted(interval_denoms)},
+        'family_counts': {name: family_counts.get(name, 0) for name in ('aligned', 'binary', 'ternary')},
+        'ternary_event_count': ternary_count,
+        'ternary_event_ratio': ternary_count / len(fractions) if fractions else 0.0,
+        'rhythm_family_transitions': transitions,
+        'cross_grid_transitions': cross_grid_transitions,
+        'max_ternary_run_length': max_ternary_run,
+    }
+
+
 def configuration_observation(points):
     """Measure committed/exported events, preserving simultaneous note groups.
 
@@ -69,6 +110,7 @@ def configuration_observation(points):
     return {
         'unique_texts': len(frequencies), 'top_texts': frequencies.most_common(5),
         'max_consecutive_same_text': max((sum(1 for _ in group) for _, group in groupby(texts)), default=0),
+        'rhythm': _rhythm_observation(beats),
         'repetition': {
             'schema': 'composer_event_repetition_v1', 'event_count': len(points),
             'exact_event_text': _patterns(texts, beats),

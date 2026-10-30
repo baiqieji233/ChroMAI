@@ -440,3 +440,20 @@ def test_handlers_are_registered_for_every_interactive_surface():
                    "cancelButton", "trainingModeTab", "generationModeTab"):
         assert f'on("#{button}"' in APP_JS or f'$("#{button}")' in APP_JS, \
             f"#{button} has no click handler"
+
+
+def test_composer_generation_eval_controls_are_exposed_and_wired():
+    """Per-epoch closed-loop generation evaluation (composer_quality_observation) controls."""
+
+    for field_id, default in (
+        ("composerGenerationEvalSongs", "2"),
+        ("composerGenerationEvalIntervalEpochs", "1"),
+    ):
+        block = label_block(field_id)
+        assert f'value="{default}"' in block
+    assert 'generation_eval_songs: Number(valueOrDefault("#composerGenerationEvalSongs", 2))' in APP_JS
+    assert 'generation_eval_interval_epochs: Number(valueOrDefault("#composerGenerationEvalIntervalEpochs", 1))' in APP_JS
+    assert "composer_quality_observation" in label_block("composerGenerationEvalSongs")
+    composer_html = (ROOT / "src/maichart/webui/static/composer.html").read_text(encoding="utf-8")
+    assert 'name="generation_eval_songs"' in composer_html
+    assert 'name="generation_eval_interval_epochs"' in composer_html

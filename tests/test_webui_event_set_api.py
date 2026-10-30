@@ -1,0 +1,174 @@
+from types import SimpleNamespace
+
+import pytest
+
+from maichart.webui import composer_api, event_set_api
+
+
+class Handler:
+    def _json_response(self, value): self.response = value
+
+
+class Runtime:
+    def __init__(self): self.task = SimpleNamespace(task_id='set-test', result={})
+    def _reserve_composer_training_task(self, directory): return self.task
+    def _create_task(self, kind): return self.task
+    def _run_subprocess_task(self, task, args, **kwargs): self.args = args; self.dispatch = kwargs
+
+
+def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
+    manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
+    handler, runtime = Handler(), Runtime()
+    composer_api.start_train(handler, dict(model_family='chart_composer_v1', architecture_profile=event_set_api.PROFILE,
+        manifest=str(manifest), checkpoint_dir=str(tmp_path / 'out'), cache_dir=str(tmp_path / 'cache'),
+        candidate_count=999, action_slots=33, echo_prior_policy='phase_echo_v1'), runtime=runtime)
+    assert runtime.args[:2] == ['-m', 'maichart.composer.stream_train']
+    for flag, expected in [('--batch-size','16'),('--grad-accumulation','1'),('--d-model','256'),('--rollout-steps','16'),('--window-seconds','8.0'),('--precision','bf16')]:
+        assert runtime.args[runtime.args.index(flag)+1] == expected
+    assert '--candidate-count' not in runtime.args
+    assert '--echo-prior-policy' not in runtime.args
+    assert runtime.task.result['epoch_target'] == 20
+    assert runtime.dispatch['expected_epoch'] == 20
+    assert runtime.args[runtime.args.index('--audio-grid-seconds')+1]=='0.01'
+    assert runtime.args[runtime.args.index('--plan-weight')+1]=='0.1'
+    for flag,value in [('--validation-max-batches','32'),('--validation-batch-size','4'),
+                       ('--generation-eval-interval-epochs','1'),('--warmup-steps','100'),
+                       ('--prefetch-batches','2'),('--sample-workers','1'),('--audio-cache-gb','2.0'),
+                       ('--min-lr-ratio','0.1'),('--lr-schedule','cosine'),('--plan-blank-window-seconds','0.5')]:
+        assert runtime.args[runtime.args.index(flag)+1]==value
+
+
+def test_stream_generate_routes_checkpoint_and_filters_old_knobs(tmp_path, monkeypatch):
+    checkpoint=tmp_path/'model.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    monkeypatch.setattr(event_set_api,'checkpoint_profile',lambda path:event_set_api.PROFILE)
+    runtime, handler=Runtime(),Handler()
+    composer_api.start_generate(handler,dict(checkpoint=str(checkpoint),audio=str(audio),output=str(tmp_path/'maidata.txt'),
+        seed=0,level=13.,pointer_grid_policy='obsolete',density_feedback_policy='obsolete'),runtime=runtime)
+    assert runtime.args[:2] == ['-m','maichart.composer.stream_generate']
+    assert '--condition-file' in runtime.args
+    assert '--pointer-grid-policy' not in runtime.args
+    assert '--density-feedback-policy' not in runtime.args
+    assert runtime.dispatch['expected_epoch'] is None
+
+
+def test_stream_rejects_old_checkpoint_initialization(tmp_path,monkeypatch):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'old.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(event_set_api,'checkpoint_profile',lambda path:'audio_grounded_v3')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':'old'})
+    with pytest.raises(ValueError,match='incompatible'):
+        event_set_api.start_train(Handler(),dict(mode='finetune',manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=Runtime())
+
+
+@pytest.mark.parametrize('mode', ['resume','finetune'])
+def test_grid_inherits_parent_instead_of_ui_default(tmp_path,monkeypatch,mode):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(event_set_api,'checkpoint_profile',lambda path:event_set_api.PROFILE)
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{}})
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),audio_grid_seconds=.01),runtime=runtime)
+    assert runtime.args[runtime.args.index('--audio-grid-seconds')+1]=='0.05'
+
+
+@pytest.mark.parametrize('extra,pointer,action',[
+    ({'temperature':0},'0.0','0.0'),
+    ({'temperature':.3,'pointer_temperature':0},'0.0','0.3'),
+    ({'temperature':0,'action_temperature':.7},'0.0','0.7'),
+    ({'temperature':.4,'pointer_temperature':None},'0.4','0.4'),
+])
+def test_api_stage_temperatures_inherit_total(tmp_path,extra,pointer,action):
+    checkpoint=tmp_path/'cp.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    runtime=Runtime()
+    event_set_api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),output=str(tmp_path/'out.txt'),seed=0,**extra),runtime=runtime)
+    assert runtime.args[runtime.args.index('--pointer-temperature')+1]==pointer
+    assert runtime.args[runtime.args.index('--action-temperature')+1]==action
+
+
+@pytest.mark.parametrize('mode', ['fresh','finetune','resume'])
+def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_path,monkeypatch,mode):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{'history_events':96,'motion_continuation_policy':'motion_continuation_v1'}})
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
+    policies=runtime.task.result['effective_settings']
+    expected='rolling_legacy_v1' if mode=='resume' else 'block_aligned_v2'
+    assert policies['history_window_policy']==expected
+    assert policies['continuation_policy']==('off' if mode=='resume' else 'pattern_runs_v2')
+    assert policies['motion_continuation_policy']==('motion_continuation_v1' if mode=='resume' else 'context_motion_v3')
+    assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'mixed_exit_v2')
+    assert policies['prefix_augmentation_rate']==(0 if mode=='resume' else .15)
+    assert policies['generation_eval_temperature']==.65
+    assert policies['lane_load_policy']==('off' if mode=='resume' else 'direct_buttons_v1')
+    assert runtime.args[runtime.args.index('--lane-load-policy')+1]==policies['lane_load_policy']
+    assert policies['transition_exit_weight']==(0 if mode=='resume' else .5)
+    assert runtime.args[runtime.args.index('--history-window-policy')+1]==expected
+    assert runtime.args[runtime.args.index('--transition-exit-weight')+1]==str(policies['transition_exit_weight'])
+    if mode!='fresh':assert policies['history_events']==96
+
+
+def test_api_rejects_resume_policy_upgrade_and_supports_explicit_old_baseline(tmp_path,monkeypatch):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{}})
+    payload=dict(mode='resume',manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),continuation_policy='typed_runs_v1')
+    with pytest.raises(ValueError,match='Resume inherits continuation_policy'):
+        event_set_api.start_train(Handler(),payload,runtime=Runtime())
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),{**payload,'mode':'fresh','learning_policy':'legacy','continuation_policy':'off'},runtime=runtime)
+    assert runtime.task.result['effective_settings']['transition_exit_weight']==0
+    assert runtime.task.result['effective_settings']['history_window_policy']=='rolling_legacy_v1'
+
+
+@pytest.mark.parametrize('parent_values', [{}, {'history_window_policy':'block_aligned_v2',
+    'continuation_policy':'typed_runs_v1','sensor_load_policy':'separate_touch_v1',
+    'gap_continuation_policy':'probability_v2','motion_continuation_policy':'motion_distinct_v2',
+    'lane_load_policy':'direct_buttons_v1','transition_exit_weight':.3}])
+def test_explicit_checkpoint_learning_policy_finetune_inherits_parent(tmp_path,monkeypatch,parent_values):
+    from maichart.composer import stream_checkpoint
+    from maichart.composer.stream_model import StreamComposerConfig
+    from maichart.composer.stream_train import LEARNING_POLICIES
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':parent_values})
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(mode='finetune',learning_policy='checkpoint',
+        manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
+    parent=StreamComposerConfig.from_dict(parent_values)
+    for key in (*LEARNING_POLICIES,'transition_exit_weight','prefix_augmentation_rate'):
+        assert runtime.task.result['effective_settings'][key]==getattr(parent,key)
+        flag='--'+key.replace('_','-')
+        assert runtime.args[runtime.args.index(flag)+1]==str(getattr(parent,key))
+
+
+def test_explicit_checkpoint_learning_policy_without_parent_is_rejected(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    runtime=Runtime()
+    with pytest.raises(ValueError,match='requires a parent checkpoint'):
+        event_set_api.start_train(Handler(),dict(mode='fresh',learning_policy='checkpoint',
+            manifest=str(manifest),checkpoint_dir=str(tmp_path/'out')),runtime=runtime)
+    assert not hasattr(runtime,'args')
+
+
+def test_augmentation_and_eval_temperature_are_real_flags_with_resume_checks(tmp_path,monkeypatch):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{},'args':{'generation_eval_temperature':.4}})
+    payload=dict(manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint))
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(payload,mode='finetune',prefix_augmentation_rate=.2,generation_eval_temperature=.7),runtime=runtime)
+    assert runtime.args[runtime.args.index('--prefix-augmentation-rate')+1]=='0.2'
+    assert runtime.args[runtime.args.index('--generation-eval-temperature')+1]=='0.7'
+    event_set_api.start_train(Handler(),dict(payload,mode='resume'),runtime=runtime)
+    assert runtime.task.result['effective_settings']['prefix_augmentation_rate']==0
+    assert runtime.task.result['effective_settings']['generation_eval_temperature']==.4
+    with pytest.raises(ValueError,match='Resume inherits generation_eval_temperature'):
+        event_set_api.start_train(Handler(),dict(payload,mode='resume',generation_eval_temperature=.7),runtime=Runtime())

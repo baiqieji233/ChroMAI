@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / 'src'))
 sys.path.insert(0, str(ROOT / 'tools'))
 from audit_generated_chart import _events_from_inote
 from maichart.composer.configuration_observation import configuration_observation
+from maichart.composer.structure_metrics import structure_metrics
 from maichart.composer.evaluation import assert_unseen, file_hash,compare_chart_reports
 from maichart.generation.event_quality import assess_event_chart
 from maichart.maidata import parse_maidata_file
@@ -65,6 +66,7 @@ def chart_report(path, difficulty, *, fallback_bpm=None):
                 'break_events': ratio(counts['break_events'], valid_events),
                 'ex_events': ratio(counts['ex_events'], valid_events)},
             'configuration': configuration_observation(events),
+            'structure': structure_metrics(events),
             'judge': assess_event_chart(points, tempo, first=float(chart.first or 0)) if bpm_available else None,
             'judge_unavailable_reason': None if bpm_available else 'wholebpm metadata missing',
             'scope': 'unique positions per event; Break and EX may overlap; unsupported events excluded from rates'}

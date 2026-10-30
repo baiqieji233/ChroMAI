@@ -32,12 +32,12 @@ function setup(family = "event_v1") {
   return {context,nodes,profile,stored:()=>stored};
 }
 
-test("Composer keeps analysis as a reference without enabling unsupported curve generation",()=>{
+test("Composer saves an editable curve and enables curve generation",()=>{
   const {context,nodes}=setup('chart_composer_v1');
   vm.runInContext('saveIntensityCurveAndReturn()',context);
-  assert.equal(context.intensityCurveState.saved,false);
-  assert.equal(nodes['#intensityCurveEnabled'].checked,false);
-  assert.match(nodes['#intensityCurveStatus'].textContent,/不会读取/);
+  assert.equal(context.intensityCurveState.saved,true);
+  assert.equal(nodes['#intensityCurveEnabled'].checked,true);
+  assert.match(nodes['#intensityCurveStatus'].textContent,/已保存/);
 });
 
 test("changing controls keeps saved curve and original prediction metadata usable across reload",()=>{

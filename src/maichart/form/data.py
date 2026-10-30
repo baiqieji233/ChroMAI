@@ -786,6 +786,10 @@ class FormDataset(Dataset):
         path=Path(manifest).resolve(); data=json.loads(path.read_text(encoding='utf-8-sig'))
         annotations=None
         annotation_path=path.with_name('quality_annotations.json')
+        if not annotation_path.exists() and isinstance(data.get('split_metadata'), dict):
+            source_manifest = data['split_metadata'].get('source_manifest')
+            if source_manifest:
+                annotation_path = Path(source_manifest).with_name('quality_annotations.json')
         if quality_enabled and annotation_path.exists():
             from maichart.training.quality_annotations import load_quality_annotations
             annotations=load_quality_annotations(annotation_path)

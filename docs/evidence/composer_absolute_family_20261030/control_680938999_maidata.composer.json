@@ -1,0 +1,985 @@
+{
+  "schema": "maichart-chart-composer-generation-v2",
+  "family": "chart_composer_v1",
+  "architecture_profile": "event_set_stream_v1",
+  "checkpoint": "E:\\simai_transformer\\.scratch\\absolute_semantic_repair_20261030\\control600\\composer_inference.pt",
+  "checkpoint_epoch": 1,
+  "optimizer_steps": 600,
+  "history_window_policy": "block_aligned_v2",
+  "continuation_policy": "pattern_runs_v2",
+  "timing_output_policy": "relative_delta_v1",
+  "timing_phase_count": 0,
+  "event_family_policy": "legacy_v1",
+  "gap_continuation_policy": "probability_v2",
+  "sensor_load_policy": "separate_touch_v1",
+  "lane_load_policy": "direct_buttons_v1",
+  "motion_continuation_policy": "context_motion_v3",
+  "recovery_policy": "mixed_exit_v2",
+  "prefix_augmentation_rate": 0.15,
+  "training_prefix_input_policy": "causal_window_config_time_first_decision_v3",
+  "continuation_feature_dim": 16,
+  "transition_exit_weight": 0.5,
+  "history_events": 128,
+  "rollout_steps": 16,
+  "event_count": 432,
+  "seed": 680938999,
+  "condition": {
+    "level": 14.3,
+    "difficulty": 5,
+    "radar": {
+      "note_density": 0.393,
+      "peak": 0.594,
+      "sweep": 0.087,
+      "slide_tricky": 0.093,
+      "slide_sequence": 0.057,
+      "jack": 0.174,
+      "chord": 0.247
+    },
+    "style": {
+      "tap_bias": 0.771,
+      "slide_bias": 0.101,
+      "hold_bias": 0.076,
+      "touch_bias": 0.044,
+      "chord_bias": 0.247,
+      "melody_following": 0.9,
+      "pattern_reuse": 0.011,
+      "directionality": 0.038
+    }
+  },
+  "stop_reason": "learned_eos",
+  "device": "cuda",
+  "temperature": 0.65,
+  "pointer_temperature": 0.65,
+  "action_temperature": 0.65,
+  "stream_steps": 474,
+  "wait_steps": 41,
+  "forced_waits": 0,
+  "configuration_retries": 3,
+  "rejected_onset_attempts": 0,
+  "audio_duration_sec": 160.73685416666666,
+  "last_head_sec": 156.31578947368422,
+  "elapsed_sec": 18.853396200000134,
+  "codec_coverage": {
+    "events": 370963,
+    "rotatable_events": 326436,
+    "fallback_events": 44527,
+    "rotation_fraction": 0.879969161344932
+  },
+  "guard": {
+    "checks": 435,
+    "rejections": 3,
+    "reasons": {
+      "new_miacode_runtime_hard_conflict": 3
+    }
+  },
+  "configuration_observation": {
+    "unique_texts": 120,
+    "top_texts": [
+      [
+        "E5",
+        40
+      ],
+      [
+        "E6",
+        33
+      ],
+      [
+        "E4",
+        32
+      ],
+      [
+        "E3",
+        26
+      ],
+      [
+        "E7",
+        18
+      ]
+    ],
+    "max_consecutive_same_text": 3,
+    "rhythm": {
+      "schema": "composer_rhythm_observation_v1",
+      "event_count": 432,
+      "beat_denominator_counts": {
+        "1": 304,
+        "2": 80,
+        "3": 1,
+        "4": 25,
+        "6": 1,
+        "12": 21
+      },
+      "interval_denominator_counts": {
+        "1": 256,
+        "2": 127,
+        "3": 11,
+        "4": 37
+      },
+      "family_counts": {
+        "aligned": 384,
+        "binary": 25,
+        "ternary": 23
+      },
+      "ternary_event_count": 23,
+      "ternary_event_ratio": 0.05324074074074074,
+      "rhythm_family_transitions": 45,
+      "cross_grid_transitions": 10,
+      "max_ternary_run_length": 13
+    },
+    "repetition": {
+      "schema": "composer_event_repetition_v1",
+      "event_count": 432,
+      "exact_event_text": {
+        "windows": {
+          "2": 431,
+          "3": 430,
+          "4": 429
+        },
+        "counts": {
+          "same": 28,
+          "ABA": 16,
+          "ABAB": 1,
+          "lane_1_same": 0,
+          "lanes_1_8_ABA": 1,
+          "lanes_1_8_ABAB": 0,
+          "lanes_4_5_ABA": 0,
+          "lanes_4_5_ABAB": 0
+        },
+        "rates": {
+          "same": 0.06496519721577726,
+          "ABA": 0.037209302325581395,
+          "ABAB": 0.002331002331002331,
+          "lane_1_same": 0.0,
+          "lanes_1_8_ABA": 0.002325581395348837,
+          "lanes_1_8_ABAB": 0.0,
+          "lanes_4_5_ABA": 0.0,
+          "lanes_4_5_ABAB": 0.0
+        }
+      },
+      "consecutive_single_tap_lanes": {
+        "windows": {
+          "2": 49,
+          "3": 24,
+          "4": 14
+        },
+        "counts": {
+          "same": 2,
+          "ABA": 5,
+          "ABAB": 0,
+          "lane_1_same": 0,
+          "lanes_1_8_ABA": 1,
+          "lanes_1_8_ABAB": 0,
+          "lanes_4_5_ABA": 0,
+          "lanes_4_5_ABAB": 0
+        },
+        "rates": {
+          "same": 0.04081632653061224,
+          "ABA": 0.20833333333333334,
+          "ABAB": 0.0,
+          "lane_1_same": 0.0,
+          "lanes_1_8_ABA": 0.041666666666666664,
+          "lanes_1_8_ABAB": 0.0,
+          "lanes_4_5_ABA": 0.0,
+          "lanes_4_5_ABAB": 0.0
+        }
+      },
+      "single_tap_lanes_at_most_half_beat": {
+        "windows": {
+          "2": 27,
+          "3": 13,
+          "4": 6
+        },
+        "counts": {
+          "same": 1,
+          "ABA": 4,
+          "ABAB": 0,
+          "lane_1_same": 0,
+          "lanes_1_8_ABA": 1,
+          "lanes_1_8_ABAB": 0,
+          "lanes_4_5_ABA": 0,
+          "lanes_4_5_ABAB": 0
+        },
+        "rates": {
+          "same": 0.037037037037037035,
+          "ABA": 0.3076923076923077,
+          "ABAB": 0.0,
+          "lane_1_same": 0.0,
+          "lanes_1_8_ABA": 0.07692307692307693,
+          "lanes_1_8_ABAB": 0.0,
+          "lanes_4_5_ABA": 0.0,
+          "lanes_4_5_ABAB": 0.0
+        }
+      },
+      "unsupported_event_count": 0,
+      "scope": "adjacent_exported_events; raw note text equality; singleton Tap windows exclude other events; descriptive only",
+      "named_pairs": "1/8 and 4/5 mean alternating singleton Tap heads, not every possible configuration using those lanes"
+    }
+  },
+  "structure_metrics": {
+    "events": 432,
+    "echo_evidence_profile": {
+      "scope": "full committed prefix, strongest available lag then transform; no 4/4 assumption",
+      "events": 123,
+      "by_E": {
+        "0": {
+          "count": 38,
+          "share": 0.30894309282302856,
+          "copy_rate": 0.02631578966975212
+        },
+        "1": {
+          "count": 79,
+          "share": 0.642276406288147,
+          "copy_rate": 0.08860759437084198
+        },
+        "2": {
+          "count": 6,
+          "share": 0.04878048598766327,
+          "copy_rate": 0.0
+        },
+        "3": {
+          "count": 0,
+          "share": 0.0,
+          "copy_rate": null
+        },
+        "4": {
+          "count": 0,
+          "share": 0.0,
+          "copy_rate": null
+        }
+      }
+    },
+    "bars": 17,
+    "rhythm_echo_rate": 0.058823529411764705,
+    "layout_echo_rate": 0.0,
+    "layout_echo_by_transform": {
+      "identity": 0.0,
+      "mirror_lr": 0.0,
+      "rotate_180": 0.0
+    },
+    "ternary_rate": 0.004629629629629629,
+    "ternary_isolated_rate": 1.0,
+    "ternary_onsets": 2,
+    "grid_level_distribution": {
+      "integer": 0.7037037037037037,
+      "half": 0.18518518518518517,
+      "quarter": 0.05787037037037037,
+      "eighth": 0.0,
+      "third": 0.0023148148148148147,
+      "sixth": 0.0023148148148148147,
+      "other": 0.04861111111111111
+    },
+    "absolute_grid_observation": {
+      "scope": "exact_onset_phases; nonquarter does not itself mean musically incorrect",
+      "quarter_aligned_rate": 0.9467592592592593,
+      "signed_quarter_offsets": {
+        "0": 409,
+        "-1/12": 3,
+        "1/12": 20
+      },
+      "beat_denominators": {
+        "4": 25,
+        "12": 21,
+        "1": 304,
+        "2": 80,
+        "3": 1,
+        "6": 1
+      },
+      "longest_same_nonquarter_phase_run": 12,
+      "longest_same_nonquarter_phase_span": {
+        "offset_beats": "1/12",
+        "start_beat": "2167/12",
+        "end_beat": "2257/12"
+      }
+    },
+    "aa_rate": 0.043795620437956206,
+    "pingpong_rate": 0.029197080291970802,
+    "double_chain_rate": 0.0,
+    "double_chain_contexts": 1,
+    "pattern_decisions": 137,
+    "onsets": 432,
+    "reference": {
+      "rhythm_echo_rate": 0.556,
+      "layout_echo_rate": 0.152,
+      "layout_echo_by_transform": {
+        "identity": 0.048,
+        "mirror_lr": 0.092,
+        "rotate_180": 0.012
+      },
+      "ternary_rate": 0.043,
+      "ternary_isolated_rate": 0.062,
+      "aa_rate": 0.157,
+      "pingpong_rate": 0.045,
+      "double_chain_rate": 0.425,
+      "echo_evidence_profile": {
+        "share_by_E": [
+          0.11,
+          0.377,
+          0.244,
+          0.106,
+          0.163
+        ],
+        "copy_rate_by_E": [
+          0.068,
+          0.149,
+          0.249,
+          0.439,
+          0.791
+        ],
+        "source": "341 official Master charts; full-prefix strongest evidence, 2026-10-29"
+      }
+    }
+  },
+  "continuation_observation": {
+    "schema": "composer_continuation_observation_v2",
+    "event_count": 432,
+    "scope": "descriptive_runs_not_bad_chart_labels; actual_committed_WAIT_resets_runs",
+    "same_configuration_run": {
+      "count": 3,
+      "start_event": 38,
+      "end_event": 40,
+      "start_beat": "61",
+      "end_beat": "64",
+      "start_second": 19.263157894736842,
+      "end_second": 20.210526315789473,
+      "elapsed_seconds": 0.9473684210526301,
+      "configuration": "E5"
+    },
+    "button_fast_run": {
+      "count": 2,
+      "start_event": 103,
+      "end_event": 104,
+      "start_beat": "146",
+      "end_beat": "293/2",
+      "start_second": 46.10526315789474,
+      "end_second": 46.26315789473684,
+      "elapsed_seconds": 0.15789473684210265,
+      "button": 7,
+      "max_gap_beats": "1/2"
+    },
+    "exact_period2_run": {
+      "count": 4,
+      "start_event": 146,
+      "end_event": 149,
+      "start_beat": "717/4",
+      "end_beat": "1085/6",
+      "start_second": 56.60526315789474,
+      "end_second": 57.10526315789474,
+      "elapsed_seconds": 0.5
+    },
+    "motion_pattern_run": {
+      "count": 11,
+      "start_event": 135,
+      "end_event": 146,
+      "start_beat": "347/2",
+      "end_beat": "717/4",
+      "start_second": 54.78947368421053,
+      "end_second": 56.60526315789474,
+      "elapsed_seconds": 1.8157894736842124,
+      "count_unit": "transitions",
+      "rotation_steps": [
+        1
+      ]
+    },
+    "template_run": {
+      "count": 12,
+      "start_event": 135,
+      "end_event": 146,
+      "start_beat": "347/2",
+      "end_beat": "717/4",
+      "start_second": 54.78947368421053,
+      "end_second": 56.60526315789474,
+      "elapsed_seconds": 1.8157894736842124
+    },
+    "type_set_run": {
+      "count": 76,
+      "start_event": 337,
+      "end_event": 412,
+      "start_beat": "360",
+      "end_beat": "456",
+      "start_second": 113.6842105263158,
+      "end_second": 144.0,
+      "elapsed_seconds": 30.315789473684205
+    },
+    "touch_only_run": {
+      "count": 76,
+      "start_event": 337,
+      "end_event": 412,
+      "start_beat": "360",
+      "end_beat": "456",
+      "start_second": 113.6842105263158,
+      "end_second": 144.0,
+      "elapsed_seconds": 30.315789473684205
+    },
+    "same_gap_run": {
+      "count": 29,
+      "start_event": 384,
+      "end_event": 412,
+      "start_beat": "400",
+      "end_beat": "456",
+      "start_second": 126.3157894736842,
+      "end_second": 144.0,
+      "elapsed_seconds": 17.684210526315795,
+      "gap_beats": "2",
+      "elapsed_beats": 58.0
+    }
+  },
+  "curve": {
+    "active": false,
+    "mode": "follow",
+    "strength": 0.65
+  },
+  "playability": {
+    "schema": "maichart-playability-static-v2",
+    "reference": "6573efb611056bccd046dd17bc2f4cceda78bf88",
+    "status": "engine_reference",
+    "notes": 541,
+    "original_notes": 541,
+    "conflicts": 0,
+    "hard": 0,
+    "details": [],
+    "remaining_hard": 0,
+    "remaining_actionable_hard": 0,
+    "remaining_details": [],
+    "repairs": [],
+    "success": true,
+    "coverage": {
+      "status": "engine_reference",
+      "engine": "miacode_python",
+      "implementation": "python",
+      "reference": "6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "in_process": true,
+      "dynamic_dependency": false,
+      "unsupported": [],
+      "parse_errors": [],
+      "elapsed_sec": 0.07611720000022615,
+      "engine_reference_only": true,
+      "playable_verified": false,
+      "ignored": [],
+      "tap_on_slide_threshold_ms": 200.0,
+      "sustained_actions": [
+        {
+          "source_id": [
+            3,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 2.526315789473684,
+          "trace_start_sec": -1.0,
+          "end_sec": 3.1578947368421053
+        },
+        {
+          "source_id": [
+            8,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 10.105263157894738,
+          "trace_start_sec": -1.0,
+          "end_sec": 11.36842105263158
+        },
+        {
+          "source_id": [
+            10,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 12.473684210526315,
+          "trace_start_sec": -1.0,
+          "end_sec": 13.736842105263158
+        },
+        {
+          "source_id": [
+            58,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 28.1052631578947,
+          "trace_start_sec": -1.0,
+          "end_sec": 28.736842105263122
+        },
+        {
+          "source_id": [
+            65,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 30.315789473684163,
+          "trace_start_sec": -1.0,
+          "end_sec": 31.578947368421005
+        },
+        {
+          "source_id": [
+            68,
+            0
+          ],
+          "note_type": "touch_hold",
+          "start_sec": 31.578947368421005,
+          "trace_start_sec": -1.0,
+          "end_sec": 32.84210526315785
+        },
+        {
+          "source_id": [
+            71,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 32.84210526315784,
+          "trace_start_sec": -1.0,
+          "end_sec": 33.47368421052626
+        },
+        {
+          "source_id": [
+            78,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 35.36842105263153,
+          "trace_start_sec": -1.0,
+          "end_sec": 35.99999999999995
+        },
+        {
+          "source_id": [
+            79,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 35.684210526315745,
+          "trace_start_sec": -1.0,
+          "end_sec": 35.9210526315789
+        },
+        {
+          "source_id": [
+            83,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 36.63157894736838,
+          "trace_start_sec": -1.0,
+          "end_sec": 36.86842105263154
+        },
+        {
+          "source_id": [
+            93,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 40.42105263157891,
+          "trace_start_sec": -1.0,
+          "end_sec": 40.73684210526312
+        },
+        {
+          "source_id": [
+            93,
+            1
+          ],
+          "note_type": "hold",
+          "start_sec": 40.42105263157891,
+          "trace_start_sec": -1.0,
+          "end_sec": 40.73684210526312
+        },
+        {
+          "source_id": [
+            94,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 41.68421052631575,
+          "trace_start_sec": -1.0,
+          "end_sec": 41.92105263157891
+        },
+        {
+          "source_id": [
+            105,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 46.7368421052631,
+          "trace_start_sec": 47.05263157894731,
+          "end_sec": 47.210526315789416
+        },
+        {
+          "source_id": [
+            123,
+            1
+          ],
+          "note_type": "slide",
+          "start_sec": 52.42105263157892,
+          "trace_start_sec": 52.73684210526313,
+          "end_sec": 52.89473684210523
+        },
+        {
+          "source_id": [
+            127,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 53.052631578947334,
+          "trace_start_sec": 53.36842105263155,
+          "end_sec": 53.68421052631576
+        },
+        {
+          "source_id": [
+            133,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 54.63157894736839,
+          "trace_start_sec": 54.9473684210526,
+          "end_sec": 55.105263157894704
+        },
+        {
+          "source_id": [
+            163,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 60.02631578947364,
+          "trace_start_sec": -1.0,
+          "end_sec": 60.184210526315745
+        },
+        {
+          "source_id": [
+            166,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 60.47368421052627,
+          "trace_start_sec": 60.789473684210485,
+          "end_sec": 60.94736842105259
+        },
+        {
+          "source_id": [
+            178,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 65.68421052631574,
+          "trace_start_sec": -1.0,
+          "end_sec": 65.84210526315785
+        },
+        {
+          "source_id": [
+            183,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 66.94736842105257,
+          "trace_start_sec": -1.0,
+          "end_sec": 67.18421052631574
+        },
+        {
+          "source_id": [
+            186,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 67.89473684210519,
+          "trace_start_sec": 68.2105263157894,
+          "end_sec": 68.3684210526315
+        },
+        {
+          "source_id": [
+            209,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 74.21052631578942,
+          "trace_start_sec": -1.0,
+          "end_sec": 74.36842105263153
+        },
+        {
+          "source_id": [
+            209,
+            1
+          ],
+          "note_type": "hold",
+          "start_sec": 74.21052631578942,
+          "trace_start_sec": -1.0,
+          "end_sec": 74.36842105263153
+        },
+        {
+          "source_id": [
+            213,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 76.7368421052631,
+          "trace_start_sec": -1.0,
+          "end_sec": 76.8947368421052
+        },
+        {
+          "source_id": [
+            217,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 78.47368421052626,
+          "trace_start_sec": -1.0,
+          "end_sec": 78.63157894736837
+        },
+        {
+          "source_id": [
+            222,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 79.578947368421,
+          "trace_start_sec": 79.8947368421052,
+          "end_sec": 80.05263157894731
+        },
+        {
+          "source_id": [
+            223,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 79.8947368421052,
+          "trace_start_sec": -1.0,
+          "end_sec": 80.13157894736837
+        },
+        {
+          "source_id": [
+            231,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 81.94736842105257,
+          "trace_start_sec": -1.0,
+          "end_sec": 82.18421052631574
+        },
+        {
+          "source_id": [
+            257,
+            0
+          ],
+          "note_type": "touch_hold",
+          "start_sec": 87.47368421052629,
+          "trace_start_sec": -1.0,
+          "end_sec": 88.73684210526312
+        },
+        {
+          "source_id": [
+            413,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 145.26315789473645,
+          "trace_start_sec": -1.0,
+          "end_sec": 145.89473684210486
+        },
+        {
+          "source_id": [
+            429,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 155.05263157894706,
+          "trace_start_sec": 155.36842105263128,
+          "end_sec": 155.6842105263155
+        }
+      ],
+      "limitations": [
+        "使用 MiaCode 判定区、Slide/Wifi、Touch 联动与动作参考的 Python 移植；仍不等同于实机玩家认证。"
+      ],
+      "diagnostics": [
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "second": 52.827777777777776,
+          "occurrence_second": 52.827777777777776,
+          "marker_key": "note|152|1|157",
+          "line": 152,
+          "col": 1,
+          "title": "TapOnSlide",
+          "detail_kind": "TapOnSlide",
+          "detail_args": {},
+          "detail": "A4 提前 67.0 ms 触发；来源 note|148|6|154",
+          "cause": {
+            "marker_key": "note|148|6|154",
+            "source_type": "slide",
+            "source_order": 154,
+            "line": 148,
+            "col": 6,
+            "second": 52.827777777777776,
+            "extra_pad_down": false,
+            "pad": "A4"
+          }
+        },
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "second": 54.98888888888889,
+          "occurrence_second": 54.98888888888889,
+          "marker_key": "note|164|1|169",
+          "line": 164,
+          "col": 1,
+          "title": "TapOnSlide",
+          "detail_kind": "TapOnSlide",
+          "detail_args": {},
+          "detail": "A3 提前 37.4 ms 触发；来源 note|161|4|166",
+          "cause": {
+            "marker_key": "note|161|4|166",
+            "source_type": "slide",
+            "source_order": 166,
+            "line": 161,
+            "col": 4,
+            "second": 54.98888888888889,
+            "extra_pad_down": false,
+            "pad": "A3"
+          }
+        }
+      ],
+      "static_references": [
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "line": 152,
+          "col": 1,
+          "second": 52.89473684210523,
+          "occurrence_second": 52.89473684210523,
+          "marker_key": "note|152|1|157",
+          "detail": "MiaCode TapOnSlide",
+          "affected": {
+            "marker_key": "note|152|1|157",
+            "marker_type": "tap",
+            "line": 152,
+            "col": 1,
+            "second": 52.89473684210523,
+            "lane": 4,
+            "end_lane": 4,
+            "head_star_tap_like": false,
+            "has_protection": true,
+            "pad": "A4"
+          },
+          "cause": {
+            "marker_key": "note|148|6|154",
+            "marker_type": "slide",
+            "line": 148,
+            "col": 6,
+            "second": 52.42105263157892,
+            "lane": 6,
+            "end_lane": 3,
+            "head_star_tap_like": false,
+            "has_protection": false,
+            "end_second": 52.89473684210523,
+            "slide_trace_second": 52.73684210526313,
+            "slide_track_key": "6>3"
+          },
+          "delta_second": -0.06845557894736487
+        },
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "line": 153,
+          "col": 5,
+          "second": 53.052631578947334,
+          "occurrence_second": 53.052631578947334,
+          "marker_key": "slide_head_star|53.052632|3|153|4|127",
+          "detail": "MiaCode TapOnSlide",
+          "affected": {
+            "marker_key": "slide_head_star|53.052632|3|153|4|127",
+            "marker_type": "tap",
+            "line": 153,
+            "col": 5,
+            "second": 53.052631578947334,
+            "lane": 3,
+            "end_lane": 3,
+            "head_star_tap_like": true,
+            "has_protection": false,
+            "pad": "A3"
+          },
+          "cause": {
+            "marker_key": "note|148|6|154",
+            "marker_type": "slide",
+            "line": 148,
+            "col": 6,
+            "second": 52.42105263157892,
+            "lane": 6,
+            "end_lane": 3,
+            "head_star_tap_like": false,
+            "has_protection": false,
+            "end_second": 52.89473684210523,
+            "slide_trace_second": 52.73684210526313,
+            "slide_track_key": "6>3"
+          },
+          "delta_second": -0.17371863157894296
+        },
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "line": 164,
+          "col": 1,
+          "second": 55.02631578947365,
+          "occurrence_second": 55.02631578947365,
+          "marker_key": "note|164|1|169",
+          "detail": "MiaCode TapOnSlide",
+          "affected": {
+            "marker_key": "note|164|1|169",
+            "marker_type": "tap",
+            "line": 164,
+            "col": 1,
+            "second": 55.02631578947365,
+            "lane": 3,
+            "end_lane": 3,
+            "head_star_tap_like": false,
+            "has_protection": true,
+            "pad": "A3"
+          },
+          "cause": {
+            "marker_key": "note|161|4|166",
+            "marker_type": "slide",
+            "line": 161,
+            "col": 4,
+            "second": 54.63157894736839,
+            "lane": 4,
+            "end_lane": 1,
+            "head_star_tap_like": false,
+            "has_protection": false,
+            "end_second": 55.105263157894704,
+            "slide_trace_second": 54.9473684210526,
+            "slide_track_key": "4>1"
+          },
+          "delta_second": -0.04213973684210259
+        },
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "line": 207,
+          "col": 4,
+          "second": 60.94736842105259,
+          "occurrence_second": 60.94736842105259,
+          "marker_key": "note|207|4|206",
+          "detail": "MiaCode TapOnSlide",
+          "affected": {
+            "marker_key": "note|207|4|206",
+            "marker_type": "tap",
+            "line": 207,
+            "col": 4,
+            "second": 60.94736842105259,
+            "lane": 5,
+            "end_lane": 5,
+            "head_star_tap_like": false,
+            "has_protection": true,
+            "pad": "A5"
+          },
+          "cause": {
+            "marker_key": "note|205|1|202",
+            "marker_type": "slide",
+            "line": 205,
+            "col": 1,
+            "second": 60.47368421052627,
+            "lane": 1,
+            "end_lane": 5,
+            "head_star_tap_like": false,
+            "has_protection": false,
+            "end_second": 60.94736842105259,
+            "slide_trace_second": 60.789473684210485,
+            "slide_track_key": "1>5"
+          },
+          "delta_second": -0.011867999999999768
+        }
+      ]
+    },
+    "message": "0 miacode references"
+  },
+  "quality_scope": "generated_stream_requires_listening_and_playtest"
+}

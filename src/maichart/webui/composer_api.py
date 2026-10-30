@@ -11,7 +11,7 @@ from maichart.composer.training_defaults import TRAINING_DEFAULTS as DEFAULTS
 
 FAMILY = "chart_composer_v1"
 SCHEMA = "maichart-chart-composer-checkpoint-v2"
-GENERATION_CONTRACT = 'composer_generation_controls_v11_history_type_sampling'
+GENERATION_CONTRACT = 'composer_generation_controls_v13_cooperative_quality'
 
 
 def _path(value: Any, label: str, *, exists: bool = False, directory: bool = False) -> Path:
@@ -82,9 +82,22 @@ def _arg(args: list[str], name: str, value: Any) -> None:
 
 
 def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
+    from . import event_set_api
+    parent = payload.get('resume') or payload.get('init_checkpoint') or payload.get('checkpoint')
+    stream = payload.get('architecture_profile') == event_set_api.PROFILE
+    if payload.get('mode', 'fresh') != 'fresh' and parent:
+        stream = stream or event_set_api.checkpoint_profile(_path(parent, 'checkpoint', exists=True)) == event_set_api.PROFILE
+    if stream:
+        return event_set_api.start_train(handler, payload, runtime=runtime)
     requested_family = payload.get("model_family")
     if requested_family not in {None, FAMILY}:
         raise ValueError(f"Composer endpoint 只接受 model_family={FAMILY}")
+    dataset_selection = payload.get("dataset_selection")
+    if "manifests" in payload and dataset_selection is None and hasattr(runtime, "_prepare_training_sources"):
+        composer_cache_dir = payload.get("cache_dir")
+        payload, dataset_selection = runtime._prepare_training_sources({**payload, "model_family": FAMILY})
+        if composer_cache_dir is not None and str(composer_cache_dir).strip():
+            payload["cache_dir"] = composer_cache_dir
     manifest = _manifest(payload)
     checkpoint_dir = _path(payload.get("checkpoint_dir"), "checkpoint-dir")
     cache_dir = _path(payload.get("cache_dir"), "cache-dir")
@@ -136,6 +149,15 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     anchor_policy=resolve_history_anchor_policy(payload.get('history_anchor_policy','auto'),parent_config,resume=mode=='resume')
 
     args = ["-m", "maichart.composer.train"]
+    if 'generation_eval_seeds' in payload:
+        seeds=str(payload['generation_eval_seeds']).split(',')
+        if not seeds or any(not token.strip().isascii() or not token.strip().isdigit() for token in seeds):
+            raise ValueError('固定生成随机种子必须为英文逗号分隔的非负整数，例如0,1')
+        _arg(args,'--generation-eval-seeds',','.join(str(int(token.strip())) for token in seeds))
+    if 'archive_checkpoints' in payload:
+        archive=str(payload['archive_checkpoints'])
+        if archive not in {'auto','off','geometric'}:raise ValueError('Unknown archive_checkpoints')
+        _arg(args,'--archive-checkpoints',archive)
     # Evaluation controls are additive and do not alter model inputs.
     for key,minimum in (('validation_max_batches',0),('validation_batch_size',1),
                         ('generation_eval_songs',0),('generation_eval_interval_epochs',1)):
@@ -176,6 +198,12 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         value = resolve_composer_policy(key, payload.get(key, 'auto'), parent_config, resume=mode=='resume',architecture_profile=architecture_profile)
         grounded_settings[key] = value
         _arg(args, '--' + key.replace('_', '-'), value)
+    from maichart.composer.sampling import resolve_sample_sequence_policy
+    sample_sequence_policy=resolve_sample_sequence_policy(payload.get('sample_sequence_policy','auto'),
+        parent_args if mode!='fresh' else None,resume=mode=='resume',
+        configuration_quality_policy=grounded_settings['configuration_quality_policy'])
+    grounded_settings['sample_sequence_policy']=sample_sequence_policy
+    _arg(args,'--sample-sequence-policy',sample_sequence_policy)
     condition_mask_prob=resolve_condition_mask_prob(payload.get('condition_mask_prob'),parent_config,resume=mode=='resume')
     grounded_settings['condition_mask_prob']=condition_mask_prob
     _arg(args,'--condition-mask-prob',condition_mask_prob)
@@ -361,6 +389,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                         "rebatch_resume_requested": rebatch,
                         "effective_settings": grounded_settings,
                         "settings_policy": "resume_inherited" if mode == 'resume' else "requested"})
+    if dataset_selection is not None:
+        task.result["dataset_selection"] = dataset_selection
+        task.result["source_manifest"] = str(manifest)
     artifacts=[checkpoint_dir/'composer_last.pt']
     if payload.get('export_inference') is not False: artifacts.append(checkpoint_dir/'composer_inference.pt')
     try:
@@ -381,6 +412,9 @@ def start_train(handler, payload: dict[str, Any], *, runtime: Any) -> None:
 
 
 def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
+    from . import event_set_api
+    if event_set_api.checkpoint_profile(_path(payload.get('checkpoint'), 'checkpoint', exists=True)) == event_set_api.PROFILE:
+        return event_set_api.start_generate(handler, payload, runtime=runtime)
     requested_family = payload.get("model_family")
     if requested_family not in {None, FAMILY}:
         raise ValueError(f"Composer endpoint 只接受 model_family={FAMILY}")
@@ -395,6 +429,8 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                     if payload.get('condition_file') else None)
     condition,condition_source=resolve_condition(level,payload.get('condition'),condition_file)
     tempo=serialize_tempo_map(payload['tempo_map']) if payload.get('tempo_map') is not None else None
+    from maichart.form.timing import normalize_meter_map
+    meters=[meter.to_dict() for meter in normalize_meter_map(payload.get('meter_map'))]
     first=_float(payload,'first',0.)
     temperature=_float(payload,'temperature',.8,minimum=0.)
     pointer_temperature=_float(payload,'pointer_temperature',temperature,minimum=0.)
@@ -407,9 +443,33 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         raise ValueError('unknown touch_layout_policy')
     motif_strength=_float(payload,'motif_strength',1.,minimum=0.)
     if motif_strength>2.:raise ValueError('motif_strength cannot exceed 2')
+    quality_controls={name:_float(payload,name,default,minimum=0.) for name,default in (
+        ('quality_context_strength',1.),('quality_plan_strength',1.),('quality_lookahead_strength',0.))}
+    for name,value in quality_controls.items():
+        if value>(1. if name=='quality_lookahead_strength' else 2.):
+            raise ValueError(f'{name} exceeds its supported range')
     curve_strength=_float(payload,'curve_strength',1.,minimum=0.)
     if curve_strength>2.:
         raise ValueError('curve_strength 不能大于 2')
+    intensity_curve_strength=_float(payload,'intensity_curve_strength',.65,minimum=0.)
+    if intensity_curve_strength>2.:
+        raise ValueError('intensity_curve_strength 不能大于 2')
+    curve_mode=str(payload.get('intensity_curve_mode','follow'))
+    curve_span=str(payload.get('intensity_curve_span','full'))
+    if curve_mode not in {'follow','soft','hard','strict'}:
+        raise ValueError('intensity_curve_mode 必须是 follow、soft、hard 或 strict')
+    if curve_span not in {'full','trim'}:
+        raise ValueError('Composer 曲线时间范围必须是 full 或 trim')
+    chord_multiplier=_float(payload,'intensity_curve_chord_multiplier',1.,minimum=.25)
+    if chord_multiplier>4.:
+        raise ValueError('同拍物量倍率不能大于 4')
+    curve_profile=None
+    curve_input_file=None
+    if payload.get('intensity_curve_enabled'):
+        from maichart.generation.music_intensity import validate_intensity_profile
+        curve_profile=validate_intensity_profile(payload.get('intensity_curve'))
+    elif payload.get('intensity_curve_file') not in (None,''):
+        curve_input_file=_path(payload['intensity_curve_file'],'intensity_curve_file',exists=True)
     pointer_history_strength = _float(payload, 'pointer_history_strength', 1., minimum=0.)
     if pointer_history_strength > 1.:
         raise ValueError('pointer_history_strength 不能大于 1')
@@ -426,6 +486,18 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
     action_retry_policy=payload.get('action_retry_policy','auto')
     if not isinstance(action_retry_policy,str) or action_retry_policy not in {'auto',*RETRY_POLICIES}:
         raise ValueError('Unknown action_retry_policy')
+    from maichart.composer.sampling_contract import POINTER_GRID_POLICIES,POINTER_GRID_POLICY,REPETITION_GUARD_POLICIES,REPETITION_GUARD_POLICY
+    pointer_grid_policy=payload.get('pointer_grid_policy',POINTER_GRID_POLICY)
+    if not isinstance(pointer_grid_policy,str) or pointer_grid_policy not in POINTER_GRID_POLICIES:
+        raise ValueError('Unknown pointer_grid_policy')
+    repetition_guard=payload.get('repetition_guard',REPETITION_GUARD_POLICY)
+    if not isinstance(repetition_guard,str) or repetition_guard not in REPETITION_GUARD_POLICIES:
+        raise ValueError('Unknown repetition_guard')
+    survival_calibration=payload.get('survival_calibration','auto')
+    if survival_calibration not in {'auto','trained','integrated'}:
+        raise ValueError('Unknown survival_calibration')
+    density_feedback=payload.get('density_feedback_policy','auto')
+    if density_feedback not in {'auto','off','causal_count_debt_v1'}:raise ValueError('Unknown density_feedback_policy')
     min_same_head_ms=_float(payload,'min_same_head_ms',50.,minimum=0.)
     if min_same_head_ms>200.:
         raise ValueError('min_same_head_ms 不能大于 200')
@@ -455,11 +527,15 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
                        ('--action-type-temperature',action_type_temperature),
                        ('--action-type-min-p',action_type_min_p),
                        ('--action-retry-policy',action_retry_policy),
+                       ('--pointer-grid-policy',pointer_grid_policy),('--repetition-guard',repetition_guard),
+                       ('--survival-calibration',survival_calibration),
+                       ('--density-feedback-policy',density_feedback),
                        ('--touch-history-bound',touch_history_bound),
                        ('--min-same-head-ms',min_same_head_ms),
                        ('--seed',seed),('--max-events',max_events),('--device',device)):
         _arg(args,flag,value)
     if intercept_tap_on_slide:args.append('--intercept-tap-on-slide')
+    for name,value in quality_controls.items():_arg(args,'--'+name.replace('_','-'),value)
     args.append('--touch-history-guard' if touch_history_guard else '--no-touch-history-guard')
     if seed_randomized:args.append('--seed-randomized')
     # Snapshot the effective condition so later UI/file edits cannot change
@@ -473,23 +549,41 @@ def start_generate(handler, payload: dict[str, Any], *, runtime: Any) -> None:
         tempo_file=task_directory/'tempo.json'
         tempo_file.write_text(json.dumps(tempo,ensure_ascii=False,allow_nan=False),encoding='utf-8')
         _arg(args,'--tempo-map',tempo_file)
+    if meters:
+        meter_file=task_directory/'meter.json'
+        meter_file.write_text(json.dumps(meters,ensure_ascii=False,allow_nan=False),encoding='utf-8')
+        _arg(args,'--meter-map',meter_file)
+    curve_file=curve_input_file
+    if curve_profile is not None:
+        curve_file=task_directory/f'{task.task_id}_composer_curve.json'
+        curve_file.write_text(json.dumps(curve_profile,ensure_ascii=False,allow_nan=False),encoding='utf-8')
+    if curve_file is not None:
+        for flag,value in (('--intensity-curve-file',curve_file),('--intensity-curve-mode',curve_mode),
+                           ('--intensity-curve-span',curve_span),('--intensity-curve-strength',intensity_curve_strength),
+                           ('--intensity-curve-chord-multiplier',chord_multiplier)):
+            _arg(args,flag,value)
     sidecar = output.with_suffix(".composer.json")
     task.result.update({"family": FAMILY, "checkpoint": str(checkpoint), "output": str(output),
         'requested_output':str(requested_output),'seed':seed,'seed_randomized':seed_randomized,
         'generation_contract':GENERATION_CONTRACT,'effective_settings':{
+            **quality_controls,
             'temperature':temperature,'pointer_temperature':pointer_temperature,
             'action_temperature':action_temperature,'curve_strength':curve_strength,
+            'intensity_curve_file':str(curve_file) if curve_file else None,
+            'intensity_curve_strength':intensity_curve_strength,'intensity_curve_span':curve_span,
+            'intensity_curve_mode':curve_mode,'intensity_curve_chord_multiplier':chord_multiplier,
             'touch_layout_policy':touch_layout_policy,'contact_policy':contact_policy,'motif_strength':motif_strength,
             'pointer_history_strength':pointer_history_strength,
             'action_history_strength':action_history_strength,
             'action_type_temperature':action_type_temperature,
             'action_type_min_p':action_type_min_p,
             'action_retry_policy':action_retry_policy,
+            'pointer_grid_policy':pointer_grid_policy,'repetition_guard':repetition_guard,
             'touch_history_guard':touch_history_guard,'touch_history_bound':touch_history_bound,
             'min_same_head_ms':min_same_head_ms,'intercept_tap_on_slide':intercept_tap_on_slide,
             'condition':condition.to_dict(),'condition_source':condition_source,
             'seed':seed,'seed_randomized':seed_randomized,'bpm':bpm,'first':first,
-            'tempo_map':tempo,'max_events':max_events,'device':device}})
+            'tempo_map':tempo,'meter_map':meters,'max_events':max_events,'device':device}})
     runtime._run_subprocess_task(task, args, expected_epoch=None, result_paths=[output, sidecar])
     handler._json_response({"task_id": task.task_id, "family": FAMILY,'seed':seed,
         'seed_randomized':seed_randomized,'output':str(output)})

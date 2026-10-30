@@ -11,8 +11,63 @@ from maichart.event_timing import seconds_at_beat,EventPoint
 from maichart.generation.muri.parser import parse_markers
 from maichart.generation.post_process import PostProcessConfig, detect_chart_conflicts
 from .events import event_metadata
+from maichart.notes import parse_timing_point_notes
+from maichart.timing import RawTimingPoint
 
 _EPS = 1e-9
+
+
+def enforced_native_hard_conflict(issue, *, intercept_tap_on_slide=False):
+    """Recognize enforced runtime findings and exact static pad occupancy.
+
+    Static Overlap checks an identical physical pad during another note's
+    lifetime. Other static geometric references keep their existing report
+    semantics; Touch circles intersecting is not a MultiTouch prohibition.
+    """
+    if issue.severity!='hard' or issue.action!='enforce':return False
+    evidence=issue.evidence
+    return (evidence.startswith('miacode_runtime:')
+        or (evidence.startswith('miacode_static:') and issue.conflict_type=='miacode_Overlap'
+            and _static_held_head_overlap(issue.notes))
+        or (intercept_tap_on_slide and issue.conflict_type=='miacode_TapOnSlide'))
+
+
+def _static_held_head_overlap(notes):
+    """A real sustained head shares its own physical pad with a new onset.
+
+    Native static references also include near Tap/Tap pairs and merge a
+    button with its A-ring sensor. Those are broader than this guard's open
+    layout/head-cooldown contract. Keep their previous runtime-only handling.
+    """
+    def pad(note):
+        value=str(getattr(note,'button',''))
+        return 'C' if value.startswith('C') and value[1:].isdigit() else value
+    for held in notes:
+        if getattr(held,'note_type',None) not in ('hold','touch_hold'):continue
+        duration=float(getattr(held,'duration',0.) or 0.)
+        if duration<=_EPS:continue
+        start=float(held.time);finish=start+duration;head=pad(held)
+        if not head:continue
+        for other in notes:
+            if other is held or pad(other)!=head:continue
+            second=float(other.time)
+            if start-_EPS<=second<finish-_EPS:return True
+    return False
+
+
+@lru_cache(maxsize=16384)
+def _event_syntax_error(text):
+    """Match the strict exporter's onset contract before native judging.
+
+    The native runtime permits some repeated Touch markers. The exported
+    chart parser rejects them, including Tap/TouchHold mixtures on one pad.
+    Parse complete notes so multi-branch Slides still have just one head.
+    """
+    parsed=parse_timing_point_notes(RawTimingPoint(index=0,raw=text,note_text=text,
+        beat=Fraction(0),tick=0,time_sec=0.,division=4,bpm=120.))
+    if parsed.unknown_tokens or not parsed.notes:return 'unsupported_or_empty_event'
+    heads=Counter(str(note.position) for note in parsed.notes)
+    return 'duplicate_event_head' if any(count>1 for count in heads.values()) else None
 
 
 def first_rejected_prefix(guard,beat,atoms,*,protect_reported_hard=False):
@@ -81,10 +136,18 @@ class EventGuard:
         markers, errors = self._markers(point.note_text, bpm)
         # Explicit timing brackets are measured by the existing parser.
         end = max((float(m.get('end_second', 0.)) for m in markers), default=0.) + second
-        sustained = any(m['type'] in {'hold','touch_hold','slide','wifi'} for m in markers)
+        # Zero-duration Hold/TouchHold is an accepted source dialect. It has
+        # an onset like Tap/Touch, but no sustained occupancy. Keep its spelling
+        # for model history and let the native judge check ordinary conflicts.
+        sustained = any(m['type'] in {'hold','touch_hold','slide','wifi'}
+                        and float(m.get('end_second', 0.)) > _EPS for m in markers)
         return second, max(second, end), sustained, errors
 
     def accepts(self, point, *, protect_reported_hard=False):
+        syntax_error=_event_syntax_error(point.note_text)
+        if syntax_error:
+            self._reject(syntax_error)
+            return False
         second, end, sustained, errors = self._lifetime(point)
         self.last_reason = None
         if errors or second<0. or point.beat<0 or end > self.audio_end + 1e-8:
@@ -112,8 +175,7 @@ class EventGuard:
                      tuple((str(n.beat), n.raw) for n in issue.notes))
                     for issue in result.conflicts_detected
                     if issue.severity == 'hard' and (not enforced_only or
-                        (issue.action == 'enforce' and (issue.evidence.startswith('miacode_runtime:')
-                         or (self.intercept_tap_on_slide and issue.conflict_type == 'miacode_TapOnSlide')))))
+                        enforced_native_hard_conflict(issue,intercept_tap_on_slide=self.intercept_tap_on_slide)))
         # Candidate time can change the active window without a commit. Keep
         # only an immutable summary of the exact latest context/configuration.
         key = (tuple((p.beat, p.note_text) for p in context),

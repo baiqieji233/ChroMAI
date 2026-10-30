@@ -1,0 +1,211 @@
+{
+  "date": "2026-10-29",
+  "new_policy": "song_paired_v3",
+  "parent": {
+    "directory": "checkpoints/prism_composer_v23",
+    "epoch": 5,
+    "optimizer_steps": 3030
+  },
+  "tests": {
+    "python_passed": 1114,
+    "python_skipped": 1,
+    "javascript_passed": 62
+  },
+  "performance": {
+    "baseline": {
+      "quality_policy": "cooperative_v2",
+      "samples_per_sec": 405.5769506392708,
+      "parameters": 37925720,
+      "timing": {
+        "data_sec": 0.13830310001503676,
+        "transfer_sec": 0.5082962998421863,
+        "forward_sec": 2.108709499996621,
+        "backward_sec": 2.7741340999491513,
+        "compute_sec": 4.882843599945772
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 30,
+        "prepare_sec": 8.385,
+        "consumer_wait_sec": 0.617,
+        "buffered_tensor_bytes": 0,
+        "max_buffered_tensor_bytes": 33685776
+      },
+      "cuda_memory": {
+        "allocated_gib": 0.368,
+        "reserved_gib": 4.389,
+        "inactive_cached_gib": 4.02,
+        "device_free_gib": 6.24,
+        "device_total_gib": 11.94,
+        "peak_allocated_gib": 4.071
+      },
+      "host_memory_before": {
+        "physical_gib": 31.217,
+        "free_physical_gib": 12.793,
+        "commit_limit_gib": 65.217,
+        "free_commit_gib": 30.854
+      },
+      "host_memory_after": {
+        "physical_gib": 31.217,
+        "free_physical_gib": 10.846,
+        "commit_limit_gib": 65.217,
+        "free_commit_gib": 24.52
+      },
+      "indices_sha256": "82e79192867d10fa243189304da37d298e583142d9b69f01b6565ab478f5f301",
+      "manifest_sha256": "6cda4b1d1dba943dea7089f2d821221ed3d05e0ac989bc373e774b558a578168",
+      "mean_loss": 6.007138729095459,
+      "losses_finite": true,
+      "scope": "fixed real-chart subset; prep+collate, optionally H2D+current-model forward/loss/backward; no optimizer/recovery/health/validation/checkpoint; not full training throughput"
+    },
+    "new": {
+      "quality_policy": "song_paired_v3",
+      "samples_per_sec": 409.56647015728936,
+      "parameters": 38006665,
+      "timing": {
+        "data_sec": 0.25471660011680797,
+        "transfer_sec": 0.49386160005815327,
+        "forward_sec": 2.043463400215842,
+        "backward_sec": 2.664497399877291,
+        "compute_sec": 4.707960800093133
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 30,
+        "prepare_sec": 8.188,
+        "consumer_wait_sec": 0.817,
+        "buffered_tensor_bytes": 0,
+        "max_buffered_tensor_bytes": 39302104
+      },
+      "cuda_memory": {
+        "allocated_gib": 0.368,
+        "reserved_gib": 4.34,
+        "inactive_cached_gib": 3.971,
+        "device_free_gib": 6.289,
+        "device_total_gib": 11.94,
+        "peak_allocated_gib": 4.166
+      },
+      "host_memory_before": {
+        "physical_gib": 31.217,
+        "free_physical_gib": 13.033,
+        "commit_limit_gib": 65.217,
+        "free_commit_gib": 30.759
+      },
+      "host_memory_after": {
+        "physical_gib": 31.217,
+        "free_physical_gib": 11.071,
+        "commit_limit_gib": 65.217,
+        "free_commit_gib": 24.575
+      },
+      "indices_sha256": "82e79192867d10fa243189304da37d298e583142d9b69f01b6565ab478f5f301",
+      "manifest_sha256": "6cda4b1d1dba943dea7089f2d821221ed3d05e0ac989bc373e774b558a578168",
+      "mean_loss": 6.230624198913574,
+      "losses_finite": true,
+      "scope": "fixed real-chart subset; prep+collate, optionally H2D+current-model forward/loss/backward; no optimizer/recovery/health/validation/checkpoint; not full training throughput"
+    },
+    "relative_throughput": 1.0098366524816813,
+    "extra_peak_mib": 97.28000000000065,
+    "parameter_increase": 80945,
+    "note": "10 real charts, fixed B96/C96/H128/S33, 6 warmup+24 measured batches, CUDA BF16; no optimizer/recovery in timing; within measurement noise; not full epoch or quality acceptance"
+  },
+  "real_validation": {
+    "parent_sha256": "67f16255878a8f6f247aae4a281b797f3e71269dd67c1b670f219448d3caa9cc",
+    "losses": [
+      7.179075717926025,
+      6.063930511474609,
+      6.109025478363037,
+      5.771050930023193
+    ],
+    "gradient_norms": [
+      6.867076873779297,
+      5.580902099609375,
+      5.373652458190918,
+      5.392813682556152
+    ],
+    "recovery_outcomes": {
+      "accepted": 2
+    },
+    "recovery_loss": 0.5549655556678772,
+    "roundtrip_exact": true,
+    "curve_generated": true,
+    "generations": [
+      {
+        "seed": 0,
+        "path": "E:\\simai_transformer\\.scratch\\composer_song_pair_rework_20261029\\generated_seed0.txt",
+        "bytes": 558
+      },
+      {
+        "seed": 1,
+        "path": "E:\\simai_transformer\\.scratch\\composer_song_pair_rework_20261029\\generated_seed1.txt",
+        "bytes": 543
+      }
+    ],
+    "scope": "4 main updates and optional recovery; generation capped64events; integration only, NOT musical-quality acceptance"
+  },
+  "actual_cli_validation": {
+    "configuration_quality_policy": "song_paired_v3",
+    "sample_sequence_policy": "phrase_groups_v1",
+    "batches": 12,
+    "optimizer_steps": 2,
+    "recovery_outcomes": [
+      {
+        "accepted": 2
+      },
+      {
+        "accepted": 2
+      }
+    ],
+    "recovery_configuration_samples": [
+      2,
+      2
+    ],
+    "timing": {
+      "data_sec": 0.6028437001514249,
+      "transfer_sec": 0.45546390005620196,
+      "compute_sec": 4.636801799933892,
+      "save_sec": 0.8065189000335522
+    },
+    "scope": "full training manifest explicit v23 init in isolated scratch dir;12batches2updates2recoveries; not production long training"
+  },
+  "checkpoint_preservation": [
+    {
+      "file": "checkpoints\\prism_composer_v23\\composer_last.pt",
+      "backup": "checkpoints\\prism_composer_v23\\archive\\before_song_paired_20261029\\composer_last.pt",
+      "sha256": "94a409db07808e1de5a2c58da325c3c17091b1c74404dfd9fa75c09ef1a052c0",
+      "unchanged": true
+    },
+    {
+      "file": "checkpoints\\prism_composer_v23\\composer_inference.pt",
+      "backup": "checkpoints\\prism_composer_v23\\archive\\before_song_paired_20261029\\composer_inference.pt",
+      "sha256": "67f16255878a8f6f247aae4a281b797f3e71269dd67c1b670f219448d3caa9cc",
+      "unchanged": true
+    }
+  ],
+  "source_sha256": {
+    "song_context.py": "f7d12aec23ac30297d30cf05dfeebcc9598aaedc9aacdc9c62debf371e171dfd",
+    "quality_context.py": "08004a8a69b299a25f1d0489794b231e1716f1eef2fa2b12344aee3976313ed6",
+    "grounded_model.py": "789c15364f1e7cf18b0ad17cb0905d79aa7d5f9255c226ea0d000ca5b7663694",
+    "quality_inputs.py": "88173805bfc69aa8ee8263e7eef6d25041cbab2f5c407de24d337664fcc8c98e",
+    "data.py": "c4e68ca93c9b82e4c079906e098fbeb300b4381fb9d8423b589983eebc39f2d5",
+    "planning.py": "1bff6631f6bedf1d59ca85896631e747b41649fdad6de727c71748e69766e672",
+    "sampling.py": "783e5648a01b77b51bc89136fddc60f93d2c41cf6e0f6d4644b705f82e914dfd",
+    "train.py": "ee6cfb0bf9471bdadef7a50e5c14b966c867f3e087167bfbf2bc1598d1521fe0",
+    "checkpoint.py": "0d23cd5e29492b16c8e50de5df66849f6a67b7fafbadfaa41cb05ba4e852de05",
+    "model.py": "54464db9c4c3749555ac72028cabdc2b0042ed1dc4c6ff5f1f152b3f356de45c",
+    "objectives.py": "758754775ccf3d914bec1fc646a4457ddb149ff0eb80c199d3cbb1eeb8180762",
+    "generate.py": "8f25e2704ab4f681b306686e7f706203b530611ef993672b070ba5bd928aa1e1",
+    "recovery.py": "7607e0576db004f08fc2622b33921bc01b08aa9abcc390441561837782837660",
+    "curve.py": "08ffc26b43b311704420b50688c68bc91e1ebee9bdd54d847507d57fc9199a57",
+    "diagnose.py": "083caed5e37d1f368f16880ea78dc735ad02ac599ecccfa8017e89a9455b8359"
+  },
+  "limits": [
+    "Musical quality after sustained training not yet accepted.",
+    "Two generation smoke outputs capped64events, not complete-song quality comparison.",
+    "Continuous phrase grouping implemented; bidirectional history encoder results not shared across prediction targets.",
+    "Existing timeline labels retained because units/windows differ; no duplicate new delta objective.",
+    "Raw song sharing within same acoustic context/grid; different clock/meter contexts remain isolated."
+  ]
+}

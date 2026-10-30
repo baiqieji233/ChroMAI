@@ -10,9 +10,9 @@ test('Composer payload forwards Radar/Style, tempo, temperature and blank seed',
     '#composerActionHistoryStrength':'.7','#composerActionTypeTemperature':'.8','#composerActionTypeMinP':'.06'};
   const condition={level:14.2,radar:{note_density:.42},style:{slide_bias:.7}};
   const tempo=[{beat:'0',bpm:150},{beat:'8',bpm:180}];
-  const context=vm.createContext({valueOrDefault:(id,fallback)=>values[id]??fallback,
+  const context=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault:(id,fallback)=>values[id]??fallback,
     checkedOrDefault:(id,fallback)=>Boolean(values[id]??fallback),
-    formDevice:()=> 'cpu',collectCondition:()=>condition,parseTempoMap:()=>tempo});
+    formDevice:()=> 'cpu',collectCondition:()=>condition,parseTempoMap:()=>tempo,intensityCurvePayload:()=>null});
   vm.runInContext(fn('chartComposerGenerationPayload'),context);
   const payload=context.chartComposerGenerationPayload();
   assert.equal(payload.condition,condition);assert.equal(payload.tempo_map,tempo);
@@ -24,6 +24,8 @@ test('Composer payload forwards Radar/Style, tempo, temperature and blank seed',
   assert.equal(payload.action_type_temperature,.8);
   assert.equal(payload.action_type_min_p,.06);
   assert.equal(payload.intercept_tap_on_slide,false);
+  assert.equal(payload.intensity_curve_enabled,false);
+  assert.equal(payload.intensity_curve,null);
   assert.equal(payload.touch_history_guard,true);assert.equal(payload.touch_history_bound,1);
   values['#composerTouchHistoryGuard']=false;values['#composerTouchHistoryBound']='0';
   assert.equal(context.chartComposerGenerationPayload().touch_history_guard,false);
@@ -46,8 +48,8 @@ test('New Composer controls persist across reset and submit their documented def
   const fields=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('const CONFLICT_KIND_FIELDS ='));
   for(const id of ['composerActionHistoryStrength','composerActionTypeTemperature','composerActionTypeMinP'])
     assert.ok(fields.includes(`"${id}"`),id);
-  const c=vm.createContext({valueOrDefault:(_id,fallback)=>fallback,checkedOrDefault:(_id,fallback)=>fallback,
-    formDevice:()=> 'cpu',collectCondition:()=>({}),parseTempoMap:()=>null});
+  const c=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault:(_id,fallback)=>fallback,checkedOrDefault:(_id,fallback)=>fallback,
+    formDevice:()=> 'cpu',collectCondition:()=>({}),parseTempoMap:()=>null,intensityCurvePayload:()=>null});
   vm.runInContext(fn('chartComposerGenerationPayload'),c);
   const payload=c.chartComposerGenerationPayload();
   assert.equal(payload.action_history_strength,1);
@@ -56,7 +58,7 @@ test('New Composer controls persist across reset and submit their documented def
 });
 
 test('Touch summary distinguishes effective, requested and disabled protection, including zero bound',()=>{
-  const c=vm.createContext({});vm.runInContext(fn('composerGenerationSummary'),c);
+  const c=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},});vm.runInContext(fn('composerGenerationSummary'),c);
   function summary(effective,requested,bound) {return c.composerGenerationSummary({kind:'composer_generate',result:{composer_report:{
     touch_history_guard:effective,touch_history_guard_requested:requested,touch_history_bound_requested:bound,
     touch_history_log_odds_bound:effective?bound:null}}});}
@@ -68,7 +70,7 @@ test('Touch summary distinguishes effective, requested and disabled protection, 
 test('Composer uses dedicated temperatures and shared tempo controls',()=>{
   assert.doesNotMatch(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">Temperature/);
   assert.match(html,/<label[^>]*data-generation-family="[^"]*chart_composer_v1[^"]*">手动 tempo map/);
-  assert.ok(source.includes('status.composer_generation_contract !== "composer_generation_controls_v11_history_type_sampling"'));
+  assert.ok(source.includes('status.composer_generation_contract !== "composer_generation_controls_v13_cooperative_quality"'));
   assert.match(html,/id="composerCurveStrength"[^>]*min="0"[^>]*max="2"[^>]*value="1"/);
   assert.match(source,/"composerCurveStrength"/);
   assert.match(source,/"composerPointerTemperature"/);
@@ -84,7 +86,7 @@ test('Composer uses dedicated temperatures and shared tempo controls',()=>{
 });
 
 test('Composer result explains actual controls and greedy invariance',()=>{
-  const context=vm.createContext({});vm.runInContext(fn('composerGenerationSummary'),context);
+  const context=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},});vm.runInContext(fn('composerGenerationSummary'),context);
   const summary=context.composerGenerationSummary({kind:'composer_generate',result:{seed:0,
     effective_settings:{temperature:0,pointer_temperature:0.2,action_temperature:0.3,pointer_history_strength:.3,
       action_history_strength:.8,action_type_temperature:1.2,action_type_min_p:.1,condition_source:'ui+file'},composer_report:{weights_sha256:'a'.repeat(64),
@@ -96,7 +98,7 @@ test('Composer result explains actual controls and greedy invariance',()=>{
 });
 
 test('Composer summary distinguishes learned workload and all unresolved hard Muri',()=>{
-  const context=vm.createContext({});vm.runInContext(fn('composerGenerationSummary'),context);
+  const context=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},});vm.runInContext(fn('composerGenerationSummary'),context);
   const summary=context.composerGenerationSummary({kind:'composer_generate',status:'completed',result:{
     composer_report:{curve_strength:0,learned_workload_curve:{times_sec:[0,2,4]},
       guard:{checks:18,rejections:4,skipped_candidates:2},
@@ -109,7 +111,7 @@ test('Composer summary distinguishes learned workload and all unresolved hard Mu
 });
 
 test('Composer summary reports missing workload capability without inventing a curve',()=>{
-  const context=vm.createContext({});vm.runInContext(fn('composerGenerationSummary'),context);
+  const context=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},});vm.runInContext(fn('composerGenerationSummary'),context);
   const summary=context.composerGenerationSummary({kind:'composer_generate',status:'completed',
     result:{composer_report:{schema:'legacy',playability:{remaining_hard:0}}}});
   assert.match(summary,/未提供学习负荷曲线/);
@@ -119,8 +121,8 @@ test('Composer summary reports missing workload capability without inventing a c
 
 test('Touch layout and motif generation inputs forward independently and explain disabled memory',()=>{
   const values={'#composerTouchLayoutPolicy':'legacy_two_heads','#composerMotifStrength':'1.8'};
-  const c=vm.createContext({valueOrDefault:(id,fallback)=>values[id]??fallback,
-    checkedOrDefault:(id,fallback)=>fallback,formDevice:()=> 'cpu',collectCondition:()=>({}),parseTempoMap:()=>null});
+  const c=vm.createContext({isEventSetGeneration:()=>false,updateEventSetControls:()=>{},valueOrDefault:(id,fallback)=>values[id]??fallback,
+    checkedOrDefault:(id,fallback)=>fallback,formDevice:()=> 'cpu',collectCondition:()=>({}),parseTempoMap:()=>null,intensityCurvePayload:()=>null});
   vm.runInContext(fn('chartComposerGenerationPayload'),c);
   vm.runInContext(fn('composerGenerationSummary'),c);
   const p=c.chartComposerGenerationPayload();

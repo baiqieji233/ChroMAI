@@ -1,0 +1,1055 @@
+{
+  "schema": "maichart-chart-composer-generation-v2",
+  "family": "chart_composer_v1",
+  "architecture_profile": "event_set_stream_v1",
+  "checkpoint": "E:\\simai_transformer\\.scratch\\absolute_semantic_repair_20261030\\control600\\composer_inference.pt",
+  "checkpoint_epoch": 1,
+  "optimizer_steps": 600,
+  "history_window_policy": "block_aligned_v2",
+  "continuation_policy": "pattern_runs_v2",
+  "timing_output_policy": "relative_delta_v1",
+  "timing_phase_count": 0,
+  "event_family_policy": "legacy_v1",
+  "gap_continuation_policy": "probability_v2",
+  "sensor_load_policy": "separate_touch_v1",
+  "lane_load_policy": "direct_buttons_v1",
+  "motion_continuation_policy": "context_motion_v3",
+  "recovery_policy": "mixed_exit_v2",
+  "prefix_augmentation_rate": 0.15,
+  "training_prefix_input_policy": "causal_window_config_time_first_decision_v3",
+  "continuation_feature_dim": 16,
+  "transition_exit_weight": 0.5,
+  "history_events": 128,
+  "rollout_steps": 16,
+  "event_count": 459,
+  "seed": 43375136,
+  "condition": {
+    "level": 14.3,
+    "difficulty": 5,
+    "radar": {
+      "note_density": 0.393,
+      "peak": 0.594,
+      "sweep": 0.087,
+      "slide_tricky": 0.093,
+      "slide_sequence": 0.057,
+      "jack": 0.174,
+      "chord": 0.247
+    },
+    "style": {
+      "tap_bias": 0.771,
+      "slide_bias": 0.101,
+      "hold_bias": 0.076,
+      "touch_bias": 0.044,
+      "chord_bias": 0.247,
+      "melody_following": 0.9,
+      "pattern_reuse": 0.011,
+      "directionality": 0.038
+    }
+  },
+  "stop_reason": "learned_eos",
+  "device": "cuda",
+  "temperature": 0.65,
+  "pointer_temperature": 0.65,
+  "action_temperature": 0.65,
+  "stream_steps": 509,
+  "wait_steps": 49,
+  "forced_waits": 0,
+  "configuration_retries": 43,
+  "rejected_onset_attempts": 3,
+  "audio_duration_sec": 160.73685416666666,
+  "last_head_sec": 155.8421052631579,
+  "elapsed_sec": 24.009718399999656,
+  "codec_coverage": {
+    "events": 370963,
+    "rotatable_events": 326436,
+    "fallback_events": 44527,
+    "rotation_fraction": 0.879969161344932
+  },
+  "guard": {
+    "checks": 501,
+    "rejections": 43,
+    "reasons": {
+      "new_miacode_runtime_hard_conflict": 42,
+      "repeated_head_too_soon": 1
+    }
+  },
+  "configuration_observation": {
+    "unique_texts": 119,
+    "top_texts": [
+      [
+        "E5",
+        57
+      ],
+      [
+        "E4",
+        39
+      ],
+      [
+        "E6",
+        32
+      ],
+      [
+        "E7",
+        25
+      ],
+      [
+        "4",
+        18
+      ]
+    ],
+    "max_consecutive_same_text": 4,
+    "rhythm": {
+      "schema": "composer_rhythm_observation_v1",
+      "event_count": 459,
+      "beat_denominator_counts": {
+        "1": 321,
+        "2": 91,
+        "3": 1,
+        "4": 42,
+        "12": 3,
+        "24": 1
+      },
+      "interval_denominator_counts": {
+        "1": 244,
+        "2": 146,
+        "3": 3,
+        "4": 63,
+        "8": 2
+      },
+      "family_counts": {
+        "aligned": 412,
+        "binary": 42,
+        "ternary": 5
+      },
+      "ternary_event_count": 5,
+      "ternary_event_ratio": 0.010893246187363835,
+      "rhythm_family_transitions": 65,
+      "cross_grid_transitions": 2,
+      "max_ternary_run_length": 5
+    },
+    "repetition": {
+      "schema": "composer_event_repetition_v1",
+      "event_count": 459,
+      "exact_event_text": {
+        "windows": {
+          "2": 458,
+          "3": 457,
+          "4": 456
+        },
+        "counts": {
+          "same": 40,
+          "ABA": 20,
+          "ABAB": 1,
+          "lane_1_same": 0,
+          "lanes_1_8_ABA": 0,
+          "lanes_1_8_ABAB": 0,
+          "lanes_4_5_ABA": 1,
+          "lanes_4_5_ABAB": 0
+        },
+        "rates": {
+          "same": 0.08733624454148471,
+          "ABA": 0.0437636761487965,
+          "ABAB": 0.0021929824561403508,
+          "lane_1_same": 0.0,
+          "lanes_1_8_ABA": 0.0,
+          "lanes_1_8_ABAB": 0.0,
+          "lanes_4_5_ABA": 0.002188183807439825,
+          "lanes_4_5_ABAB": 0.0
+        }
+      },
+      "consecutive_single_tap_lanes": {
+        "windows": {
+          "2": 52,
+          "3": 26,
+          "4": 15
+        },
+        "counts": {
+          "same": 7,
+          "ABA": 5,
+          "ABAB": 0,
+          "lane_1_same": 0,
+          "lanes_1_8_ABA": 0,
+          "lanes_1_8_ABAB": 0,
+          "lanes_4_5_ABA": 1,
+          "lanes_4_5_ABAB": 0
+        },
+        "rates": {
+          "same": 0.1346153846153846,
+          "ABA": 0.19230769230769232,
+          "ABAB": 0.0,
+          "lane_1_same": 0.0,
+          "lanes_1_8_ABA": 0.0,
+          "lanes_1_8_ABAB": 0.0,
+          "lanes_4_5_ABA": 0.038461538461538464,
+          "lanes_4_5_ABAB": 0.0
+        }
+      },
+      "single_tap_lanes_at_most_half_beat": {
+        "windows": {
+          "2": 19,
+          "3": 6,
+          "4": 2
+        },
+        "counts": {
+          "same": 2,
+          "ABA": 0,
+          "ABAB": 0,
+          "lane_1_same": 0,
+          "lanes_1_8_ABA": 0,
+          "lanes_1_8_ABAB": 0,
+          "lanes_4_5_ABA": 0,
+          "lanes_4_5_ABAB": 0
+        },
+        "rates": {
+          "same": 0.10526315789473684,
+          "ABA": 0.0,
+          "ABAB": 0.0,
+          "lane_1_same": 0.0,
+          "lanes_1_8_ABA": 0.0,
+          "lanes_1_8_ABAB": 0.0,
+          "lanes_4_5_ABA": 0.0,
+          "lanes_4_5_ABAB": 0.0
+        }
+      },
+      "unsupported_event_count": 0,
+      "scope": "adjacent_exported_events; raw note text equality; singleton Tap windows exclude other events; descriptive only",
+      "named_pairs": "1/8 and 4/5 mean alternating singleton Tap heads, not every possible configuration using those lanes"
+    }
+  },
+  "structure_metrics": {
+    "events": 459,
+    "echo_evidence_profile": {
+      "scope": "full committed prefix, strongest available lag then transform; no 4/4 assumption",
+      "events": 129,
+      "by_E": {
+        "0": {
+          "count": 40,
+          "share": 0.3100775182247162,
+          "copy_rate": 0.05000000074505806
+        },
+        "1": {
+          "count": 65,
+          "share": 0.5038759708404541,
+          "copy_rate": 0.07692307978868484
+        },
+        "2": {
+          "count": 24,
+          "share": 0.1860465109348297,
+          "copy_rate": 0.0
+        },
+        "3": {
+          "count": 0,
+          "share": 0.0,
+          "copy_rate": null
+        },
+        "4": {
+          "count": 0,
+          "share": 0.0,
+          "copy_rate": null
+        }
+      }
+    },
+    "bars": 18,
+    "rhythm_echo_rate": 0.3333333333333333,
+    "layout_echo_rate": 0.0,
+    "layout_echo_by_transform": {
+      "identity": 0.0,
+      "mirror_lr": 0.0,
+      "rotate_180": 0.0
+    },
+    "ternary_rate": 0.002178649237472767,
+    "ternary_isolated_rate": 1.0,
+    "ternary_onsets": 1,
+    "grid_level_distribution": {
+      "integer": 0.6993464052287581,
+      "half": 0.19825708061002179,
+      "quarter": 0.0915032679738562,
+      "eighth": 0.0,
+      "third": 0.002178649237472767,
+      "sixth": 0.0,
+      "other": 0.008714596949891068
+    },
+    "absolute_grid_observation": {
+      "scope": "exact_onset_phases; nonquarter does not itself mean musically incorrect",
+      "quarter_aligned_rate": 0.9891067538126361,
+      "signed_quarter_offsets": {
+        "0": 454,
+        "-1/12": 2,
+        "1/24": 1,
+        "1/12": 2
+      },
+      "beat_denominators": {
+        "1": 321,
+        "2": 91,
+        "4": 42,
+        "3": 1,
+        "24": 1,
+        "12": 3
+      },
+      "longest_same_nonquarter_phase_run": 2,
+      "longest_same_nonquarter_phase_span": {
+        "offset_beats": "1/12",
+        "start_beat": "2275/12",
+        "end_beat": "2281/12"
+      }
+    },
+    "aa_rate": 0.10948905109489052,
+    "pingpong_rate": 0.0,
+    "double_chain_rate": 0.0,
+    "double_chain_contexts": 1,
+    "pattern_decisions": 137,
+    "onsets": 459,
+    "reference": {
+      "rhythm_echo_rate": 0.556,
+      "layout_echo_rate": 0.152,
+      "layout_echo_by_transform": {
+        "identity": 0.048,
+        "mirror_lr": 0.092,
+        "rotate_180": 0.012
+      },
+      "ternary_rate": 0.043,
+      "ternary_isolated_rate": 0.062,
+      "aa_rate": 0.157,
+      "pingpong_rate": 0.045,
+      "double_chain_rate": 0.425,
+      "echo_evidence_profile": {
+        "share_by_E": [
+          0.11,
+          0.377,
+          0.244,
+          0.106,
+          0.163
+        ],
+        "copy_rate_by_E": [
+          0.068,
+          0.149,
+          0.249,
+          0.439,
+          0.791
+        ],
+        "source": "341 official Master charts; full-prefix strongest evidence, 2026-10-29"
+      }
+    }
+  },
+  "continuation_observation": {
+    "schema": "composer_continuation_observation_v2",
+    "event_count": 459,
+    "scope": "descriptive_runs_not_bad_chart_labels; actual_committed_WAIT_resets_runs",
+    "same_configuration_run": {
+      "count": 4,
+      "start_event": 332,
+      "end_event": 335,
+      "start_beat": "1255/4",
+      "end_beat": "316",
+      "start_second": 99.07894736842105,
+      "end_second": 99.78947368421052,
+      "elapsed_seconds": 0.7105263157894655,
+      "configuration": "E5"
+    },
+    "button_fast_run": {
+      "count": 2,
+      "start_event": 68,
+      "end_event": 69,
+      "start_beat": "187/2",
+      "end_beat": "94",
+      "start_second": 29.526315789473685,
+      "end_second": 29.68421052631579,
+      "elapsed_seconds": 0.1578947368421062,
+      "button": 5,
+      "max_gap_beats": "1/2"
+    },
+    "exact_period2_run": {
+      "count": 4,
+      "start_event": 285,
+      "end_event": 288,
+      "start_beat": "541/2",
+      "end_beat": "272",
+      "start_second": 85.42105263157895,
+      "end_second": 85.89473684210526,
+      "elapsed_seconds": 0.47368421052631504
+    },
+    "motion_pattern_run": {
+      "count": 3,
+      "start_event": 69,
+      "end_event": 72,
+      "start_beat": "94",
+      "end_beat": "191/2",
+      "start_second": 29.68421052631579,
+      "end_second": 30.157894736842106,
+      "elapsed_seconds": 0.47368421052631504,
+      "count_unit": "transitions",
+      "rotation_steps": [
+        7
+      ]
+    },
+    "template_run": {
+      "count": 6,
+      "start_event": 69,
+      "end_event": 74,
+      "start_beat": "94",
+      "end_beat": "195/2",
+      "start_second": 29.68421052631579,
+      "end_second": 30.789473684210527,
+      "elapsed_seconds": 1.1052631578947363
+    },
+    "type_set_run": {
+      "count": 85,
+      "start_event": 177,
+      "end_event": 261,
+      "start_beat": "2275/12",
+      "end_beat": "252",
+      "start_second": 59.86842105263158,
+      "end_second": 79.57894736842105,
+      "elapsed_seconds": 19.710526315789473
+    },
+    "touch_only_run": {
+      "count": 85,
+      "start_event": 177,
+      "end_event": 261,
+      "start_beat": "2275/12",
+      "end_beat": "252",
+      "start_second": 59.86842105263158,
+      "end_second": 79.57894736842105,
+      "elapsed_seconds": 19.710526315789473
+    },
+    "same_gap_run": {
+      "count": 19,
+      "start_event": 233,
+      "end_event": 251,
+      "start_beat": "229",
+      "end_beat": "247",
+      "start_second": 72.3157894736842,
+      "end_second": 78.0,
+      "elapsed_seconds": 5.684210526315795,
+      "gap_beats": "1",
+      "elapsed_beats": 19.0
+    }
+  },
+  "curve": {
+    "active": false,
+    "mode": "follow",
+    "strength": 0.65
+  },
+  "playability": {
+    "schema": "maichart-playability-static-v2",
+    "reference": "6573efb611056bccd046dd17bc2f4cceda78bf88",
+    "status": "engine_reference",
+    "notes": 550,
+    "original_notes": 550,
+    "conflicts": 0,
+    "hard": 0,
+    "details": [],
+    "remaining_hard": 0,
+    "remaining_actionable_hard": 0,
+    "remaining_details": [],
+    "repairs": [],
+    "success": true,
+    "coverage": {
+      "status": "engine_reference",
+      "engine": "miacode_python",
+      "implementation": "python",
+      "reference": "6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "in_process": true,
+      "dynamic_dependency": false,
+      "unsupported": [],
+      "parse_errors": [],
+      "elapsed_sec": 0.09770730000036565,
+      "engine_reference_only": true,
+      "playable_verified": false,
+      "ignored": [],
+      "tap_on_slide_threshold_ms": 200.0,
+      "sustained_actions": [
+        {
+          "source_id": [
+            13,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 11.368421052631579,
+          "trace_start_sec": -1.0,
+          "end_sec": 12.0
+        },
+        {
+          "source_id": [
+            18,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 12.631578947368421,
+          "trace_start_sec": -1.0,
+          "end_sec": 13.263157894736842
+        },
+        {
+          "source_id": [
+            23,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 14.368421052631579,
+          "trace_start_sec": -1.0,
+          "end_sec": 15.631578947368421
+        },
+        {
+          "source_id": [
+            41,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 20.052631578947363,
+          "trace_start_sec": -1.0,
+          "end_sec": 20.21052631578947
+        },
+        {
+          "source_id": [
+            74,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 31.26315789473682,
+          "trace_start_sec": -1.0,
+          "end_sec": 31.49999999999998
+        },
+        {
+          "source_id": [
+            75,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 31.57894736842103,
+          "trace_start_sec": 31.89473684210524,
+          "end_sec": 32.368421052631554
+        },
+        {
+          "source_id": [
+            89,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 34.73684210526315,
+          "trace_start_sec": -1.0,
+          "end_sec": 34.97368421052631
+        },
+        {
+          "source_id": [
+            90,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 35.05263157894736,
+          "trace_start_sec": 35.368421052631575,
+          "end_sec": 35.52631578947368
+        },
+        {
+          "source_id": [
+            103,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 39.15789473684211,
+          "trace_start_sec": 39.47368421052632,
+          "end_sec": 39.789473684210535
+        },
+        {
+          "source_id": [
+            109,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 41.052631578947384,
+          "trace_start_sec": 41.3684210526316,
+          "end_sec": 41.5263157894737
+        },
+        {
+          "source_id": [
+            125,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 45.78947368421057,
+          "trace_start_sec": 46.10526315789478,
+          "end_sec": 46.263157894736885
+        },
+        {
+          "source_id": [
+            130,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 48.94736842105267,
+          "trace_start_sec": 49.263157894736885,
+          "end_sec": 49.42105263157899
+        },
+        {
+          "source_id": [
+            131,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 49.5789473684211,
+          "trace_start_sec": 49.89473684210531,
+          "end_sec": 50.05263157894741
+        },
+        {
+          "source_id": [
+            132,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 50.210526315789515,
+          "trace_start_sec": -1.0,
+          "end_sec": 50.84210526315793
+        },
+        {
+          "source_id": [
+            175,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 59.657894736842174,
+          "trace_start_sec": -1.0,
+          "end_sec": 60.921052631579016
+        },
+        {
+          "source_id": [
+            344,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 105.15789473684198,
+          "trace_start_sec": -1.0,
+          "end_sec": 105.39473684210515
+        },
+        {
+          "source_id": [
+            352,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 112.02631578947354,
+          "trace_start_sec": -1.0,
+          "end_sec": 112.26315789473671
+        },
+        {
+          "source_id": [
+            355,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 114.94736842105249,
+          "trace_start_sec": 115.2631578947367,
+          "end_sec": 116.36842105263143
+        },
+        {
+          "source_id": [
+            356,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 115.57894736842091,
+          "trace_start_sec": -1.0,
+          "end_sec": 116.21052631578934
+        },
+        {
+          "source_id": [
+            361,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 118.73684210526304,
+          "trace_start_sec": -1.0,
+          "end_sec": 118.9736842105262
+        },
+        {
+          "source_id": [
+            367,
+            1
+          ],
+          "note_type": "slide",
+          "start_sec": 119.99999999999989,
+          "trace_start_sec": 120.31578947368409,
+          "end_sec": 120.4736842105262
+        },
+        {
+          "source_id": [
+            368,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 120.63157894736831,
+          "trace_start_sec": -1.0,
+          "end_sec": 120.86842105263148
+        },
+        {
+          "source_id": [
+            369,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 121.26315789473674,
+          "trace_start_sec": 121.57894736842094,
+          "end_sec": 123.157894736842
+        },
+        {
+          "source_id": [
+            372,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 122.21052631578935,
+          "trace_start_sec": 122.52631578947356,
+          "end_sec": 122.68421052631567
+        },
+        {
+          "source_id": [
+            373,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 122.52631578947356,
+          "trace_start_sec": 122.84210526315776,
+          "end_sec": 123.15789473684197
+        },
+        {
+          "source_id": [
+            377,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 124.73684210526302,
+          "trace_start_sec": -1.0,
+          "end_sec": 125.05263157894723
+        },
+        {
+          "source_id": [
+            377,
+            1
+          ],
+          "note_type": "hold",
+          "start_sec": 124.73684210526302,
+          "trace_start_sec": -1.0,
+          "end_sec": 125.21052631578934
+        },
+        {
+          "source_id": [
+            378,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 125.36842105263143,
+          "trace_start_sec": -1.0,
+          "end_sec": 125.6052631578946
+        },
+        {
+          "source_id": [
+            379,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 125.52631578947354,
+          "trace_start_sec": -1.0,
+          "end_sec": 125.76315789473671
+        },
+        {
+          "source_id": [
+            386,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 126.94736842105252,
+          "trace_start_sec": -1.0,
+          "end_sec": 127.10526315789463
+        },
+        {
+          "source_id": [
+            386,
+            1
+          ],
+          "note_type": "hold",
+          "start_sec": 126.94736842105252,
+          "trace_start_sec": -1.0,
+          "end_sec": 127.10526315789463
+        },
+        {
+          "source_id": [
+            387,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 127.57894736842094,
+          "trace_start_sec": 127.89473684210515,
+          "end_sec": 128.21052631578937
+        },
+        {
+          "source_id": [
+            400,
+            0
+          ],
+          "note_type": "touch_hold",
+          "start_sec": 131.68421052631575,
+          "trace_start_sec": -1.0,
+          "end_sec": 132.31578947368416
+        },
+        {
+          "source_id": [
+            403,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 133.89473684210523,
+          "trace_start_sec": -1.0,
+          "end_sec": 134.52631578947364
+        },
+        {
+          "source_id": [
+            404,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 135.15789473684208,
+          "trace_start_sec": 135.4736842105263,
+          "end_sec": 135.5921052631579
+        },
+        {
+          "source_id": [
+            408,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 137.68421052631572,
+          "trace_start_sec": -1.0,
+          "end_sec": 137.99999999999994
+        },
+        {
+          "source_id": [
+            408,
+            1
+          ],
+          "note_type": "hold",
+          "start_sec": 137.68421052631572,
+          "trace_start_sec": -1.0,
+          "end_sec": 137.99999999999994
+        },
+        {
+          "source_id": [
+            411,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 139.57894736842096,
+          "trace_start_sec": -1.0,
+          "end_sec": 139.8157894736841
+        },
+        {
+          "source_id": [
+            414,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 140.52631578947359,
+          "trace_start_sec": 140.8421052631578,
+          "end_sec": 140.99999999999991
+        },
+        {
+          "source_id": [
+            419,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 141.63157894736835,
+          "trace_start_sec": -1.0,
+          "end_sec": 146.0526315789473
+        },
+        {
+          "source_id": [
+            421,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 141.94736842105257,
+          "trace_start_sec": -1.0,
+          "end_sec": 142.18421052631572
+        },
+        {
+          "source_id": [
+            424,
+            0
+          ],
+          "note_type": "touch_hold",
+          "start_sec": 143.36842105263156,
+          "trace_start_sec": -1.0,
+          "end_sec": 147.15789473684208
+        },
+        {
+          "source_id": [
+            429,
+            0
+          ],
+          "note_type": "slide",
+          "start_sec": 147.15789473684208,
+          "trace_start_sec": 147.4736842105263,
+          "end_sec": 147.71052631578945
+        },
+        {
+          "source_id": [
+            432,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 148.2631578947368,
+          "trace_start_sec": -1.0,
+          "end_sec": 148.78947368421046
+        },
+        {
+          "source_id": [
+            438,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 149.68421052631572,
+          "trace_start_sec": -1.0,
+          "end_sec": 153.78947368421046
+        },
+        {
+          "source_id": [
+            442,
+            0
+          ],
+          "note_type": "hold",
+          "start_sec": 150.7894736842105,
+          "trace_start_sec": -1.0,
+          "end_sec": 151.02631578947364
+        }
+      ],
+      "limitations": [
+        "使用 MiaCode 判定区、Slide/Wifi、Touch 联动与动作参考的 Python 移植；仍不等同于实机玩家认证。"
+      ],
+      "diagnostics": [
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "second": 39.71111111111111,
+          "occurrence_second": 39.71111111111111,
+          "marker_key": "note|147|1|116",
+          "line": 147,
+          "col": 1,
+          "title": "TapOnSlide",
+          "detail_kind": "TapOnSlide",
+          "detail_args": {},
+          "detail": "A1 提前 78.4 ms 触发；来源 note|145|4|114",
+          "cause": {
+            "marker_key": "note|145|4|114",
+            "source_type": "slide",
+            "source_order": 114,
+            "line": 145,
+            "col": 4,
+            "second": 39.71111111111111,
+            "extra_pad_down": false,
+            "pad": "A1"
+          }
+        },
+        {
+          "kind": "SlideHeadTap",
+          "alert_level": "Warning",
+          "second": 140.86111111111111,
+          "occurrence_second": 140.86111111111111,
+          "marker_key": "note|492|1|507",
+          "line": 492,
+          "col": 1,
+          "title": "SlideHeadTap",
+          "detail_kind": "SlideHeadTap",
+          "detail_args": {},
+          "detail": "A2 提前 157.9 ms 触发；来源 note|490|1|504",
+          "cause": {
+            "marker_key": "note|490|1|504",
+            "source_type": "slide",
+            "source_order": 504,
+            "line": 490,
+            "col": 1,
+            "second": 140.86111111111111,
+            "extra_pad_down": true,
+            "pad": "A2"
+          }
+        }
+      ],
+      "static_references": [
+        {
+          "kind": "TapOnSlide",
+          "alert_level": "Warning",
+          "line": 147,
+          "col": 1,
+          "second": 39.789473684210535,
+          "occurrence_second": 39.789473684210535,
+          "marker_key": "note|147|1|116",
+          "detail": "MiaCode TapOnSlide",
+          "affected": {
+            "marker_key": "note|147|1|116",
+            "marker_type": "tap",
+            "line": 147,
+            "col": 1,
+            "second": 39.789473684210535,
+            "lane": 1,
+            "end_lane": 1,
+            "head_star_tap_like": false,
+            "has_protection": true,
+            "pad": "A1"
+          },
+          "cause": {
+            "marker_key": "note|145|4|114",
+            "marker_type": "slide",
+            "line": 145,
+            "col": 4,
+            "second": 39.15789473684211,
+            "lane": 5,
+            "end_lane": 8,
+            "head_star_tap_like": false,
+            "has_protection": false,
+            "end_second": 39.789473684210535,
+            "slide_trace_second": 39.47368421052632,
+            "slide_track_key": "5>8"
+          },
+          "delta_second": -0.08214663157895075
+        },
+        {
+          "kind": "SlideHeadTap",
+          "alert_level": "Warning",
+          "line": 492,
+          "col": 1,
+          "second": 140.99999999999991,
+          "occurrence_second": 140.99999999999991,
+          "marker_key": "note|492|1|507",
+          "detail": "MiaCode SlideHeadTap",
+          "affected": {
+            "marker_key": "note|492|1|507",
+            "marker_type": "tap",
+            "line": 492,
+            "col": 1,
+            "second": 140.99999999999991,
+            "lane": 2,
+            "end_lane": 2,
+            "head_star_tap_like": false,
+            "has_protection": true,
+            "pad": "A2"
+          },
+          "cause": {
+            "marker_key": "note|490|1|504",
+            "marker_type": "slide",
+            "line": 490,
+            "col": 1,
+            "second": 140.52631578947359,
+            "lane": 2,
+            "end_lane": 5,
+            "head_star_tap_like": false,
+            "has_protection": false,
+            "end_second": 140.99999999999991,
+            "slide_trace_second": 140.8421052631578,
+            "slide_track_key": "2>5"
+          },
+          "delta_second": -0.15789473684210975,
+          "slide_head_has_tap_on_slide": false
+        }
+      ]
+    },
+    "message": "0 miacode references"
+  },
+  "quality_scope": "generated_stream_requires_listening_and_playtest"
+}

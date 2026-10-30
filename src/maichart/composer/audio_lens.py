@@ -19,6 +19,7 @@ from .events import event_metadata
 LENS_DIM = 26
 LENS_OFFSETS = tuple(index * .02 for index in range(-10, 21))
 PLACEMENT_TOLERANCE_SEC = .025
+PLACEMENT_PROXIMITY_SIGMA_SEC = .010
 PLACEMENT_CHANNELS = ('presence', 'hold', 'slide', 'touch', 'break_ex')
 
 
@@ -30,21 +31,32 @@ class LensBank:
     the source-clock support or [0,duration) are zero, never endpoint copies.
     """
 
-    def __init__(self, values, times, duration):
-        values = np.asarray(values)
-        self.times = np.asarray(times, dtype=np.float64).reshape(-1)
+    def __init__(self, values, times, duration, *, validated_bank=False):
+        values = np.asarray(values).view(np.ndarray)
+        if isinstance(times, np.ndarray) and times.dtype == np.float64 and times.ndim == 1 and times.flags.c_contiguous:
+            self.times = times
+        else:
+            self.times = np.ascontiguousarray(np.asarray(times).view(np.ndarray), dtype=np.float64).reshape(-1)
         self.duration = float(duration)
         if not math.isfinite(self.duration) or self.duration < 0.:
             raise ValueError('Lens duration must be finite and nonnegative')
         if values.ndim != 2 or values.shape != (len(self.times), 120):
             raise ValueError('Lens source values must have shape [N,120]')
-        if not np.isfinite(self.times).all() or np.any(np.diff(self.times) <= 0.):
-            raise ValueError('Lens source times must be finite and strictly increasing')
-        source = np.asarray(values[:, :98], dtype=np.float32)
-        if not np.isfinite(source).all():
-            raise ValueError('Lens source values must be finite')
-        self.values = np.concatenate((source[:, 92:98],
-            source[:, :80].reshape(-1, 8, 10).mean(-1), source[:, 80:92]), axis=-1)
+        if not validated_bank:
+            if not np.isfinite(self.times).all() or np.any(np.diff(self.times) <= 0.):
+                raise ValueError('Lens source times must be finite and strictly increasing')
+            source = np.asarray(values[:, :98], dtype=np.float32)
+            if not np.isfinite(source).all():
+                raise ValueError('Lens source values must be finite')
+            self.values = np.concatenate((source[:, 92:98],
+                source[:, :80].reshape(-1, 8, 10).mean(-1), source[:, 80:92]), axis=-1)
+        else:
+            n = len(self.times)
+            out = np.empty((n, LENS_DIM), dtype=np.float32)
+            out[:, :6] = values[:, 92:98]
+            out[:, 6:14] = values[:, :80].reshape(n, 8, 10).mean(-1)
+            out[:, 14:26] = values[:, 80:92]
+            self.values = out
 
     def query(self, seconds):
         seconds = np.asarray(seconds, dtype=np.float64).reshape(-1)
@@ -103,7 +115,35 @@ class AudioLens(nn.Module):
         self.position_pool = nn.Linear(len(LENS_OFFSETS), 1, bias=False)
         self.output = nn.Sequential(nn.LayerNorm(self.width), nn.Linear(self.width, self.width), nn.GELU())
 
-    def forward(self, patches, valid):
+    def _encode_rows(self, patches, valid):
+        mask = valid[:, None].bool()
+        source = patches.transpose(1, 2)
+        source = (source if torch.is_autocast_enabled() else source.to(self.input_projection.weight.dtype)).masked_fill(~mask, 0.)
+        hidden = self.input_projection(source).masked_fill(~mask, 0.)
+        for block in self.blocks:
+            hidden = block(hidden, mask)
+        pooled = self.position_pool(hidden).squeeze(-1)
+        return self.output(pooled).masked_fill(~mask.any(-1), 0.)
+
+    def forward(self, patches, valid, *, inverse=None):
+        if inverse is not None:
+            # Shared within this forward only: gradients from every repeated
+            # query sum back into the same CNN result. This module has neither
+            # stochastic dropout nor batch-dependent normalization.
+            if patches.ndim != 3 or patches.shape[1:] != (len(LENS_OFFSETS), LENS_DIM):
+                raise ValueError('Unique Lens patches must have shape [U,31,26]')
+            if valid.shape != patches.shape[:-1] or inverse.ndim != 2:
+                raise ValueError('Unique Lens mask/index shapes do not match')
+            batch, candidates = inverse.shape
+            if batch == 0 or candidates == 0:
+                return patches.new_zeros((batch, candidates, self.width))
+            # Keep the existing peak convolution-row bound even if one source
+            # has few duplicate queries. No whole-song activation cache.
+            rows_per_chunk = batch * min(candidates, self.chunk_size)
+            chunks = [self._encode_rows(patches[start:start + rows_per_chunk], valid[start:start + rows_per_chunk])
+                      for start in range(0, len(patches), rows_per_chunk)]
+            unique = torch.cat(chunks)
+            return unique[inverse]
         if patches.ndim != 4 or patches.shape[-2:] != (len(LENS_OFFSETS), LENS_DIM):
             raise ValueError('Lens patches must have shape [B,Q,31,26]')
         if valid.shape != patches.shape[:-1]:
@@ -114,15 +154,8 @@ class AudioLens(nn.Module):
         chunks = []
         for start in range(0, candidates, self.chunk_size):
             stop = min(start + self.chunk_size, candidates)
-            mask = valid[:, start:stop].reshape(-1, 1, len(LENS_OFFSETS)).bool()
-            source = patches[:, start:stop].reshape(-1, len(LENS_OFFSETS), LENS_DIM).transpose(1, 2)
-            source = (source if torch.is_autocast_enabled() else source.to(self.input_projection.weight.dtype)).masked_fill(~mask, 0.)
-            hidden = self.input_projection(source).masked_fill(~mask, 0.)
-            for block in self.blocks:
-                hidden = block(hidden, mask)
-            pooled = self.position_pool(hidden).squeeze(-1)
-            embedded = self.output(pooled)
-            embedded = embedded.masked_fill(~mask.any(-1), 0.)
+            embedded = self._encode_rows(patches[:, start:stop].reshape(-1, len(LENS_OFFSETS), LENS_DIM),
+                                         valid[:, start:stop].reshape(-1, len(LENS_OFFSETS)))
             chunks.append(embedded.reshape(batch, stop - start, self.width))
         return torch.cat(chunks, dim=1)
 
@@ -151,9 +184,48 @@ class PlacementTargets:
             if trusted:
                 meta = event_metadata(str(point.note_text))
                 flags.append((1., meta.hold, meta.slide, meta.touch, meta.break_ex))
-        values = np.asarray(flags, dtype=np.float32).reshape(-1, len(PLACEMENT_CHANNELS))
+        self.flags = np.asarray(flags, dtype=np.float32).reshape(-1, len(PLACEMENT_CHANNELS))
         self.prefix = np.vstack((np.zeros((1, len(PLACEMENT_CHANNELS)), dtype=np.float32),
-                                 np.cumsum(values, axis=0)))
+                                 np.cumsum(self.flags, axis=0)))
+        # A Gaussian is largest at the nearest event of each type. Store those
+        # clocks once instead of reducing a variable event slice for each query.
+        active = self.flags > 0.
+        self._previous_type_times = np.vstack((np.full((1, len(PLACEMENT_CHANNELS)), -np.inf),
+            np.maximum.accumulate(np.where(active, self.times[:, None], -np.inf), axis=0)))
+        self._next_type_times = np.vstack((
+            np.minimum.accumulate(np.where(active, self.times[:, None], np.inf)[::-1], axis=0)[::-1],
+            np.full((1, len(PLACEMENT_CHANNELS)), np.inf)))
+
+    def _proximity_at(self, seconds, sigma):
+        out = np.zeros((len(seconds), len(PLACEMENT_CHANNELS)), dtype=np.float32)
+        valid = (seconds >= 0.) & (seconds < self.end_sec)
+        lower = seconds[:, None] - PLACEMENT_TOLERANCE_SEC - 1e-9
+        upper = seconds[:, None] + PLACEMENT_TOLERANCE_SEC + 1e-9
+        # One shared search for every type; absent types use +/-inf sentinels.
+        position = np.searchsorted(self.times, seconds, side='left')
+        before = self._previous_type_times[position]
+        after = self._next_type_times[position]
+        nearest = np.where(np.abs(seconds[:, None] - before) <= np.abs(seconds[:, None] - after), before, after)
+        included = valid[:, None] & (nearest >= lower) & (nearest <= upper)
+        delta = (seconds[:, None] - nearest)[included] / sigma
+        out[included] = np.exp(-.5 * delta ** 2).astype(np.float32)
+        return out
+
+    def _proximity_with_bounds(self, seconds, left, right, valid, sigma):
+        # Keep the existing cheap single-event path. Only overlapping events
+        # need the type-specific lookup, now one vector operation for all rows.
+        out = np.zeros((len(seconds), len(PLACEMENT_CHANNELS)), dtype=np.float32)
+        counts = right - left
+        single = valid & (counts == 1)
+        if np.any(single):
+            idx = left[single]
+            delta = seconds[single] - self.times[idx]
+            kernel = np.exp(-.5 * (delta / sigma) ** 2).astype(np.float32)
+            out[single] = kernel[:, None] * self.flags[idx]
+        multi = np.flatnonzero(valid & (counts > 1))
+        if len(multi):
+            out[multi] = self._proximity_at(seconds[multi], sigma)
+        return out
 
     def query(self, query_seconds):
         seconds = np.asarray(query_seconds, dtype=np.float64).reshape(-1)
@@ -175,3 +247,46 @@ class PlacementTargets:
                 confidence[(upper >= lo) & (lower < hi)] *= min(1., weight)
         weights = np.broadcast_to(confidence[:, None], targets.shape).copy()
         return targets, weights
+
+    def query_with_proximity(self, query_seconds, *, sigma_sec=PLACEMENT_PROXIMITY_SIGMA_SEC):
+        seconds = np.asarray(query_seconds, dtype=np.float64).reshape(-1)
+        if not np.isfinite(seconds).all():
+            raise ValueError('Placement query times must be finite')
+        sigma = float(sigma_sec)
+        if not math.isfinite(sigma) or sigma <= 0.:
+            raise ValueError('Placement proximity sigma_sec must be finite and positive')
+        lower = seconds - PLACEMENT_TOLERANCE_SEC
+        upper = seconds + PLACEMENT_TOLERANCE_SEC
+        left = np.searchsorted(self.times, lower - 1e-9, side='left')
+        right = np.searchsorted(self.times, upper + 1e-9, side='right')
+        targets = ((self.prefix[right] - self.prefix[left]) > 0.).astype(np.float32)
+        valid = (seconds >= 0.) & (seconds < self.end_sec)
+        targets[~valid] = 0.
+        confidence = valid.astype(np.float32)
+        for lo, hi in self.views.unknown_intervals:
+            confidence[(upper >= lo) & (lower < hi)] = 0.
+        for lo, hi, weight in self.views.regions:
+            if weight > 0.:
+                confidence[(upper >= lo) & (lower < hi)] *= min(1., weight)
+        weights = np.broadcast_to(confidence[:, None], targets.shape).copy()
+        proximity = self._proximity_with_bounds(seconds, left, right, valid, sigma)
+        return targets, weights, proximity
+
+    def proximity(self, query_seconds, *, sigma_sec=PLACEMENT_PROXIMITY_SIGMA_SEC):
+        """Gaussian centering score in [0,1] peaking at exact reference event times.
+
+        While ``query`` returns flat +/-25ms neighborhood occupancy, ``proximity``
+        evaluates all trusted events within +/-25ms and takes the per-channel
+        maximum Gaussian response so every active occupancy channel receives its
+        true nearest onset center.
+        """
+        seconds = np.asarray(query_seconds, dtype=np.float64).reshape(-1)
+        if not np.isfinite(seconds).all():
+            raise ValueError('Placement query times must be finite')
+        sigma = float(sigma_sec)
+        if not math.isfinite(sigma) or sigma <= 0.:
+            raise ValueError('Placement proximity sigma_sec must be finite and positive')
+        left = np.searchsorted(self.times, seconds - PLACEMENT_TOLERANCE_SEC - 1e-9, side='left')
+        right = np.searchsorted(self.times, seconds + PLACEMENT_TOLERANCE_SEC + 1e-9, side='right')
+        return self._proximity_with_bounds(seconds, left, right,
+                                          (seconds >= 0.) & (seconds < self.end_sec), sigma)

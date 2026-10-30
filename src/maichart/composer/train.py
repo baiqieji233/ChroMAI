@@ -22,7 +22,8 @@ from .events import HEAD_TIMING_DIM,head_timing_dim_for_policy
 from .checkpoint import save,load,migrate_music_context,migrate_audio_grounded,structure_training_semantics
 from .runtime_memory import GIB,host_memory,memory_gib
 from .objectives import (ACTION_OBJECTIVES, LEGACY_ACTION_OBJECTIVE, RECOVERY_ACTION_OBJECTIVE, action_objective, recovery_objective,
-                         resolve_action_objective, training_semantics_for_objective)
+                         resolve_action_objective, training_semantics_for_objective,
+                         action_group_loss_kwargs, training_objective_recipe, PLACEMENT_ALIGNMENT_SCALE)
 from .sampling_contract import RECOVERY_SAMPLING_POLICIES,resolve_recovery_sampling,recovery_sampling_settings
 from . import ACTION_SAMPLING_POLICY,LEGACY_ACTION_SAMPLING_POLICY
 from .training_defaults import TRAINING_DEFAULTS as DEFAULTS
@@ -36,22 +37,29 @@ class RemainingBatches:
     def __len__(self): return max(0,min(len(self.batches),self.stop if self.stop is not None else len(self.batches))-self.skip)
 
 
+from .sampling import SAMPLE_SEQUENCE_POLICIES, resolve_sample_sequence_policy, phrase_sample_groups
+
+
 class SongLocalBatchSampler:
     """Shuffle samples while keeping a small active set of source songs.
 
     Global sample shuffling maximizes mmap page churn: nearly every batch asks
     for unrelated audio banks. This sampler shuffles song order and each
-    song's events, then interleaves a few active songs per batch. It preserves
+    song's events (or bounded chronological phrase groups), then interleaves a few active songs per batch. It preserves
     every sample exactly once per epoch while allowing the bank/context caches
     to reuse nearby files.
     """
-    def __init__(self, dataset, batch_size, generator, locality=4):
+    def __init__(self, dataset, batch_size, generator, locality=4, sequence_policy='independent_events_v1'):
         self.batch_size=int(batch_size); self.generator=generator
         self.locality=max(1,int(locality))
+        if sequence_policy not in SAMPLE_SEQUENCE_POLICIES:raise ValueError('Unknown sample_sequence_policy')
+        self.sequence_policy=sequence_policy
         grouped={}
         for index,sample in enumerate(dataset.samples):
             grouped.setdefault(sample.song_index,[]).append(index)
         self.groups=list(grouped.values())
+        self.phrase_groups=([phrase_sample_groups(dataset.samples, group) for group in self.groups]
+                            if sequence_policy=='phrase_groups_v1' else None)
 
     def __len__(self):
         total=sum(len(group) for group in self.groups)
@@ -63,8 +71,14 @@ class SongLocalBatchSampler:
         states=[]
         for gid in group_order:
             source=self.groups[gid]
-            order=torch.randperm(len(source),generator=self.generator).tolist()
-            states.append({'values':[source[i] for i in order],'pos':0})
+            if self.phrase_groups is not None:
+                phrases=self.phrase_groups[gid]
+                order=torch.randperm(len(phrases),generator=self.generator).tolist()
+                values=[index for phrase_index in order for index in phrases[phrase_index]]
+            else:
+                order=torch.randperm(len(source),generator=self.generator).tolist()
+                values=[source[i] for i in order]
+            states.append({'values':values,'pos':0})
         active=deque()
         next_group=0
         while next_group<len(states) and len(active)<self.locality:
@@ -193,6 +207,112 @@ def _cuda_execution(device):
         raise
 
 
+def _prewarm_missing_song_banks(dataset, validation_dataset, args, device):
+    """Pre-build any missing disk-cached audio or structure banks before Epoch 1.
+
+    Without upfront pre-warming, the first visit to an uncached chart inside the
+    single background DataLoader worker runs BeatThis / harmonic analysis on CPU
+    with 2 threads, stalling the GPU at 0% utilization for 10-25s per chart.
+    """
+    if not getattr(args, 'cache_dir', None) or getattr(args, 'max_steps', 0):
+        return
+    from .structure import ENHANCED_SCHEMA, _bank, _identity, structure_fingerprint
+    from . import structure_backend
+    datasets = [ds for ds in (dataset, validation_dataset) if ds is not None and getattr(ds, 'cache_dir', None)]
+    if not datasets:
+        return
+    missing_audio = []
+    missing_struct = []
+    seen_audio_paths = set()
+    seen_struct_keys = set()
+    for ds in datasets:
+        check_struct = getattr(ds, 'structure_policy', 'off') not in ('off', 'native_periodic_v1')
+        for song_index in range(len(ds.base.songs)):
+            song = ds.base.songs[song_index][0]
+            audio = getattr(song, 'audio', None)
+            if not (hasattr(audio, 'store') and hasattr(audio, 'path')):
+                continue
+            key = ds._song_feature_key(song_index)
+            apath = ds._audio_bank_path(song_index, key)
+            if apath is not None and str(apath) not in seen_audio_paths:
+                seen_audio_paths.add(str(apath))
+                if not apath.is_file():missing_audio.append((ds, song_index))
+            if check_struct:
+                ident = _identity(song, ds.structure_backend, ds.structure_policy)
+                skey = structure_fingerprint(song, ds.cache_dir, ds.structure_backend, policy=ds.structure_policy)
+                destination = (str(Path(ds.cache_dir).resolve()), skey)
+                if destination not in seen_struct_keys:
+                    seen_struct_keys.add(destination)
+                    enhanced = ident.get('schema') == ENHANCED_SCHEMA
+                    sdir = Path(ds.cache_dir) / ('composer_structure_v6' if enhanced else 'composer_structure_v4')
+                    ready = ((sdir / f'{skey}.npy').is_file()
+                             and (sdir / f'{skey}.novelty.npy').is_file()
+                             and (not enhanced or (sdir / f'{skey}.local.npy').is_file()))
+                    if not ready:
+                        missing_struct.append((ds, song_index, song, ident))
+    if not missing_audio and not missing_struct:
+        return
+    started = time.monotonic()
+    total_banks = len(missing_audio) + len(missing_struct)
+    print('composer_prepare ' + json.dumps({
+        'stage': 'audio_and_structure_banks',
+        'status': 'building',
+        'missing_audio_banks': len(missing_audio),
+        'missing_structure_banks': len(missing_struct),
+        'completed_banks': 0,
+        'total_banks': total_banks,
+    }), flush=True)
+    prev_bt_device = os.environ.get('MAICHART_BEAT_THIS_DEVICE')
+    prev_threads = torch.get_num_threads()
+    completed = 0
+    try:
+        if prev_bt_device is None and device.type == 'cuda':
+            os.environ['MAICHART_BEAT_THIS_DEVICE'] = str(device)
+        torch.set_num_threads(max(prev_threads, min(8, os.cpu_count() or 4)))
+        for idx, (ds, song_index) in enumerate(missing_audio, 1):
+            ds._song_features(song_index)
+            completed += 1
+            if idx % 25 == 0 or idx == len(missing_audio):
+                print('composer_prepare ' + json.dumps({
+                    'stage': 'audio_banks',
+                    'completed_banks': completed,
+                    'total_banks': total_banks,
+                    'elapsed_sec': round(time.monotonic() - started, 2),
+                }), flush=True)
+        for idx, (ds, song_index, _song, _ident) in enumerate(missing_struct, 1):
+            _bank(ds._source_song(song_index, cache_in_base=False), ds.cache_dir, ds.structure_backend, policy=ds.structure_policy)
+            completed += 1
+            if idx % 25 == 0 or idx == len(missing_struct):
+                print('composer_prepare ' + json.dumps({
+                    'stage': 'structure_banks',
+                    'completed_banks': completed,
+                    'total_banks': total_banks,
+                    'elapsed_sec': round(time.monotonic() - started, 2),
+                }), flush=True)
+    finally:
+        for ds in datasets:
+            ds._bank_builds = ds._feature_cache_misses = ds._feature_cache_hits = 0
+            ds._bank_hits = ds._bank_mmap_loads = ds._bank_view_hits = 0
+        if prev_bt_device is None:
+            os.environ.pop('MAICHART_BEAT_THIS_DEVICE', None)
+        else:
+            os.environ['MAICHART_BEAT_THIS_DEVICE'] = prev_bt_device
+        torch.set_num_threads(prev_threads)
+        with structure_backend._model_lock:
+            structure_backend._models.clear()
+        if device.type == 'cuda':
+            torch.cuda.empty_cache()
+    print('composer_prepare ' + json.dumps({
+        'stage': 'audio_and_structure_banks',
+        'status': 'ready',
+        'built_audio_banks': len(missing_audio),
+        'built_structure_banks': len(missing_struct),
+        'completed_banks': total_banks,
+        'total_banks': total_banks,
+        'elapsed_sec': round(time.monotonic() - started, 2),
+    }), flush=True)
+
+
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--manifest',required=True);p.add_argument('--checkpoint-dir',required=True)
@@ -237,9 +357,11 @@ def parser():
     p.add_argument('--sample-workers',type=int,choices=range(1,9),default=DEFAULTS['sample_workers'],
                    help='parallel CPU sample preparation threads; CUDA work stays on the main thread')
     p.add_argument('--cpu-threads',type=int,default=DEFAULTS['cpu_threads'],
-                   help='PyTorch CPU threads, 0 keeps environment settings; CUDA runs can benchmark 2-4')
+                   help='PyTorch CPU threads; 0 uses at most 2 for CUDA, environment settings for CPU')
     p.add_argument('--sample-locality',type=int,choices=range(1,9),default=4,
                    help='songs interleaved per batch; fewer improves locality but increases same-song gradient correlation')
+    p.add_argument('--sample-sequence-policy',choices=('auto',*sorted(SAMPLE_SEQUENCE_POLICIES)),default='auto',
+        help='shuffle independent events or chronological phrase groups (up to 8 targets / 16 beats); resume inherits')
     p.add_argument('--log-interval',type=int,default=25)
     p.add_argument('--max-steps',type=int,default=0,help='maximum batches per epoch; 0 uses every batch')
     p.add_argument('--optimizer-implementation',choices=('auto','standard','foreach','fused'),default='auto')
@@ -291,15 +413,18 @@ def _precision(value,device):
 
 
 def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_weight=.15,planner_weight=.2,
-          action_objective_policy=LEGACY_ACTION_OBJECTIVE):
+          action_objective_policy=LEGACY_ACTION_OBJECTIVE,macro_group_ids=None,audio_macro_group_ids=None,
+          macro_num_groups=None,audio_macro_num_groups=None):
     weights=batch.get('sample_weight',torch.ones_like(batch['eos_target']))
     transitions=batch.get('transition_weight',torch.ones_like(weights))
     def reduce(values, factors=weights):
         return (values * factors).sum()/factors.sum().clamp_min(1e-6)
     pointer_weights=weights*transitions*batch.get('pointer_weight',torch.ones_like(weights))
-    pointer=reduce(F.cross_entropy(output['candidate_logits'],batch['candidate_target'],reduction='none'),
-                   pointer_weights)
     target=batch['candidate_target']
+    survival = 'next_event_log_probs' in output
+    pointer_values = (-output['next_event_log_probs'].gather(1,target[:,None]).squeeze(1)
+                      if survival else F.cross_entropy(output['candidate_logits'],target,reduction='none'))
+    pointer=reduce(pointer_values,pointer_weights)
     if output['action_logits'].ndim==3 or 'action_slot_indices' in output:
         action_logits,future,eos=output['action_logits'],output['future'],output['eos_logits']
     else:
@@ -311,8 +436,8 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
     action_weights=weights*transitions*batch.get('action_weight',torch.ones_like(weights))
     if action_logits.size(-1)!=atom_vocab_size:
         raise ValueError('Action logits do not match atom_vocab_size')
-    action,action_metrics=action_objective(action_logits,action_targets,action_weights,policy=action_objective_policy,
-        slot_indices=output.get('action_slot_indices'))
+    action,action_metrics=action_objective(action_logits,action_targets,action_weights,policy=action_objective_policy,macro_group_ids=macro_group_ids,
+        macro_num_groups=macro_num_groups,slot_indices=output.get('action_slot_indices'))
     audio_action_loss=pointer.new_zeros(())
     audio_action_metrics={}
     if 'audio_action_logits' in output:
@@ -321,13 +446,13 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
             rows=torch.arange(target.size(0),device=target.device)
             audio_action_logits=audio_action_logits[rows,target]
         audio_action_loss,audio_action_metrics=action_objective(
-            audio_action_logits,action_targets,action_weights,policy=action_objective_policy,
-        slot_indices=output.get('action_slot_indices'))
+            audio_action_logits,action_targets,action_weights,policy=action_objective_policy,macro_only=audio_macro_group_ids is not None,macro_group_ids=audio_macro_group_ids,
+            macro_num_groups=audio_macro_num_groups,slot_indices=output.get('action_slot_indices'))
     eos_target=batch['eos_target']
     eos_weights=weights*batch.get('eos_weight',torch.ones_like(weights))
     positives=(eos_target*eos_weights).sum().clamp_min(1.)
     negatives=((1.-eos_target)*eos_weights).sum().clamp_min(1.)
-    eos_loss=reduce(F.binary_cross_entropy_with_logits(eos,eos_target,
+    eos_pos_weight=(negatives/positives).clamp(1.,64.);eos_loss=reduce(F.binary_cross_entropy_with_logits(eos,eos_target,
         pos_weight=(negatives/positives).clamp(1.,64.),reduction='none'),eos_weights)
     future_weights=weights[:,None]*batch.get('future_weight',torch.ones_like(future))
     future_loss=(F.smooth_l1_loss(future,batch['future_target'],reduction='none')*future_weights).sum()/future_weights.sum().clamp_min(1e-6)
@@ -336,13 +461,42 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
     workload_rate_mae=pointer.new_zeros(())
     audio_pointer_loss=pointer.new_zeros(())
     trailing_loss=pointer.new_zeros(())
-    if 'audio_candidate_logits' in output:
+    rate_loss=pointer.new_zeros(())
+    if 'audio_timing_log_probs' in output:
+        # Preserve a direct local-onset learning task. The main likelihood owns
+        # event/window mass; repeating it here would teach only the same rate.
+        audio_pointer_loss=reduce(F.cross_entropy(output['audio_timing_log_probs'],target,reduction='none'),pointer_weights)
+    elif 'audio_next_event_log_probs' in output:
+        audio_pointer_loss=reduce(-output['audio_next_event_log_probs'].gather(1,target[:,None]).squeeze(1),pointer_weights)
+    elif 'audio_candidate_logits' in output:
         audio_pointer_loss=reduce(F.cross_entropy(output['audio_candidate_logits'], target, reduction='none'), pointer_weights)
+    rate_loss_per_second=pointer.new_zeros(())
+    if 'survival_grid_rates' in output and 'survival_count_target' in batch:
+        rate=output['survival_grid_rates'].float()
+        exposure=batch['survival_widths'].float()
+        expected=rate*exposure
+        counts=batch['survival_count_target'].float()
+        rate_mask=batch['survival_count_weight'].float()*weights[:,None]
+        errors=expected-counts*expected.clamp_min(1e-8).log()+torch.lgamma(counts+1.)
+        rate_loss_per_second=(errors*rate_mask).sum()/(exposure*rate_mask).sum().clamp_min(1e-6)
+        # Preserve the previous quarter-second reference exposure rather than
+        # shrinking this objective fivefold just because the grid is finer.
+        rate_loss=.25*rate_loss_per_second
+    elif survival and 'workload' in output and 'event_count_target' in batch:
+        # This is a Poisson count likelihood over known time exposure. Empty
+        # probes penalize rate directly; no candidate softmax can remove it.
+        rate=torch.expm1(output['workload'][...,0].float().clamp(0.,8.))
+        expected=rate*batch['event_exposure'].float()
+        counts=batch['event_count_target'].float()
+        rate_mask=batch['event_rate_weight'].float()*weights[:,None]
+        errors=expected-counts*expected.clamp_min(1e-8).log()+torch.lgamma(counts+1.)
+        rate_loss=(errors*rate_mask).sum()/rate_mask.sum().clamp_min(1e-6)
     if 'workload' in output and 'workload_target' in batch:
         prediction=output['workload'].float()
         reference=batch['workload_target']
         mask=batch['workload_weight']*weights[:,None]
-        residual=F.smooth_l1_loss(prediction,reference,reduction='none').mean(-1)
+        residual=F.smooth_l1_loss(prediction[...,1:] if survival else prediction,
+            reference[...,1:] if survival else reference,reduction='none').mean(-1)
         workload_loss=(residual*mask).sum()/mask.sum().clamp_min(1e-6)
         workload_rate_mae=((prediction[...,:2]-reference[...,:2]).abs().mean(-1)*mask).sum()/mask.sum().clamp_min(1e-6)
         # Match authored changes, rather than penalizing every change as noise.
@@ -359,38 +513,72 @@ def _loss(output,batch,atom_vocab_size, *, audio_pointer_weight=.15,placement_we
         ordered_reference=slope_reference.gather(1,order[...,None].expand(-1,-1,5))
         ordered_mask=slope_mask.gather(1,order)
         pair_weight=torch.minimum(ordered_mask[:,1:],ordered_mask[:,:-1])
-        changes=F.smooth_l1_loss(torch.diff(ordered_prediction,dim=1),
-            torch.diff(ordered_reference,dim=1),reduction='none').mean(-1)
+        changes=F.smooth_l1_loss(torch.diff(ordered_prediction[...,1:] if survival else ordered_prediction,dim=1),
+            torch.diff(ordered_reference[...,1:] if survival else ordered_reference,dim=1),reduction='none').mean(-1)
         curve_slope_loss=(changes*pair_weight).sum()/pair_weight.sum().clamp_min(1e-6)
     if 'trailing_workload' in output and 'trailing_target' in batch:
         mask=batch['trailing_weight']*weights[:,None,None]
         errors=F.smooth_l1_loss(output['trailing_workload'].float(),batch['trailing_target'],reduction='none')
         trailing_loss=(errors*mask).sum()/mask.sum().clamp_min(1e-6)
-    placement_loss=pointer.new_zeros(())
+    placement_loss=pointer.new_zeros(());placement_alignment_loss=pointer.new_zeros(())
     plan_loss=pointer.new_zeros(())
     if 'placement_logits' in output:
         mask=batch['placement_weight']*weights[:,None,None]
         errors=F.binary_cross_entropy_with_logits(output['placement_logits'].float(),batch['placement_target'],reduction='none')
-        placement_loss=(errors*mask).sum()/mask.sum().clamp_min(1e-6)
+        placement_loss=(errors*mask).sum()/mask.sum().clamp_min(1e-6);pos_mask=mask*(batch['placement_target']>.5).to(mask.dtype) if 'placement_proximity' in batch else None;placement_alignment_loss=((F.smooth_l1_loss(output['placement_logits'].float().sigmoid(),batch['placement_proximity'],reduction='none')*pos_mask).sum()/pos_mask.sum().clamp_min(1e-6)) if pos_mask is not None else placement_alignment_loss
     if 'plan' in output:
         mask=batch['planner_weight']*weights[:,None]
-        errors=F.smooth_l1_loss(output['plan'].float(),batch['planner_target'],reduction='none').mean(-1)
+        plan_errors=F.smooth_l1_loss(output['plan'].float(),batch['planner_target'],reduction='none')
+        if 'survival_grid_rates' in output:
+            # Rest is a binary empty-span label. Regressing a sigmoid with
+            # SmoothL1 suppresses exactly the gradient needed when the model
+            # confidently fills a real rest. Keep the other five regressions.
+            with torch.autocast(device_type=output['plan'].device.type,enabled=False):
+                if 'plan_rest_logits' in output:
+                    # A probability can round to 1 even in FP32. Keep the raw
+                    # logit so confidently wrong rest predictions still learn.
+                    rest_error=F.binary_cross_entropy_with_logits(output['plan_rest_logits'].float(),
+                        batch['planner_target'][...,5].float(),reduction='none')
+                else:
+                    # Inference planner overrides and legacy output callers
+                    # provide probabilities only; retain their existing API.
+                    rest_error=F.binary_cross_entropy(output['plan'][...,5].float(),
+                        batch['planner_target'][...,5].float(),reduction='none')
+            plan_errors=torch.cat((plan_errors[...,:5],rest_error[...,None]),-1)
+        errors=plan_errors.mean(-1)
         plan_loss=(errors*mask).sum()/mask.sum().clamp_min(1e-6)
-    total=pointer+action+.05*eos_loss+.2*future_loss+.4*workload_loss+.05*curve_slope_loss+audio_pointer_weight*(audio_pointer_loss+audio_action_loss)+.2*trailing_loss+placement_weight*placement_loss+planner_weight*plan_loss
+    empty_gap_loss=pointer.new_zeros(())
+    if 'empty_gap_rates' in output and 'empty_gap_weight' in batch:
+        gap_weight=batch['empty_gap_weight'].float()*weights[:,None]*transitions[:,None]
+        integral=(output['empty_gap_rates']*batch['empty_gap_exposure'].float()*gap_weight).sum(-1)
+        mass=(gap_weight.amax(-1)>0).to(weights)*weights*transitions
+        empty_gap_loss=integral.sum()/mass.sum().clamp_min(1e-6)
+    total=pointer+action+.05*eos_loss+.2*future_loss+.4*workload_loss+.05*curve_slope_loss+audio_pointer_weight*(audio_pointer_loss+audio_action_loss)+.2*trailing_loss+placement_weight*(placement_loss+PLACEMENT_ALIGNMENT_SCALE*placement_alignment_loss)+planner_weight*plan_loss+.2*rate_loss+.2*empty_gap_loss
+    quality_metrics={}
+    if 'quality_phrase_prediction' in output:
+        from .quality_context import quality_context_loss
+        quality_loss,quality_metrics=quality_context_loss(output,batch)
+        total=total+quality_loss
     return total,{'loss':total.detach(),
+        'empty_gap_nll':empty_gap_loss.detach(),'empty_gap_loss_contribution':(.2*empty_gap_loss).detach(),
+        **quality_metrics,
         **{'action_'+name:value.detach() for name,value in action_metrics.items()},
         **{'audio_action_'+name:value.detach() for name,value in audio_action_metrics.items()},
         'pointer_loss':pointer.detach(),'action_loss':action.detach(),'eos_loss':eos_loss.detach(),
+        'rawrate_loss':rate_loss.detach(),'rate_loss_contribution':(.2*rate_loss).detach(),
+        'rate_nll_per_second':rate_loss_per_second.detach(),
         'future_loss':future_loss.detach(),'workload_loss':workload_loss.detach(),
         'curve_slope_loss':curve_slope_loss.detach(),'workload_rate_mae':workload_rate_mae.detach(),
         'audio_pointer_loss':audio_pointer_loss.detach(),'audio_action_loss':audio_action_loss.detach(),
         'trailing_workload_loss':trailing_loss.detach(),
-        'placement_loss':placement_loss.detach(),'planner_loss':plan_loss.detach(),
+        'placement_loss':placement_loss.detach(),'placement_alignment_loss':placement_alignment_loss.detach(),'eos_pos_weight':eos_pos_weight.detach(),'planner_loss':plan_loss.detach(),
         'pointer_accuracy':(output['candidate_logits'].argmax(-1)==batch['candidate_target']).float().mean().detach()}
 
 
 def summarize_metrics(totals, batches):
     """Keep historical batch means; pool conditional CEs by decision weight."""
+    if hasattr(totals, 'as_floats'):
+        totals=totals.as_floats()
     summary={key:float(value)/max(1,batches) for key,value in totals.items()
              if not key.endswith(('_ce_sum','_ce_weight'))}
     for key,numerator in totals.items():
@@ -399,6 +587,10 @@ def summarize_metrics(totals, batches):
         mass=float(totals.get(metric+'_weight',0.))
         summary[metric]=float(numerator)/max(mass,1e-6)
         summary[metric+'_weight']=mass
+    if 'quality_phrase_error_sum' in totals:
+        mass=float(totals.get('quality_phrase_weight',0.))
+        summary['quality_phrase_loss']=float(totals['quality_phrase_error_sum'])/max(mass,1e-6)
+        summary['quality_phrase_weight']=mass
     return summary
 
 
@@ -502,8 +694,28 @@ def _forward_batch(model,tensors,*,decode_actions=True,packed_actions=False,**ov
     extra={key:tensors[key] for key in ('head_timing','workload_audio','ledger','interval_audio',
         'trailing_audio','audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
         'motif_ids','motif_relative_beats','motif_mask','selected_action_state','structure_features','structure_transition',
-        'planner_unique_indices','planner_inverse','packed_slot_indices','packed_first_indices') if key in tensors}
-    if getattr(model.config,'architecture_profile',None)=='audio_grounded_v3':extra['packed_actions']=packed_actions
+        'planner_unique_indices','planner_inverse','song_audio','song_mask','song_clock','prepared_song_state','song_unique_indices','song_inverse','packed_slot_indices','packed_first_indices','audio_lens_inverse','empty_gap_audio') if key in tensors}
+    # Song-paired training encodes only the deduplicated song bank. The model's
+    # legacy input guard still requires planner_audio, so provide the same bank
+    # as its unused placeholder rather than materializing B copies.
+    compact_song = ('planner_audio' not in tensors and 'song_audio' in tensors
+                    and getattr(model.config,'configuration_quality_policy','off') == 'song_paired_v3')
+    if compact_song:
+        extra['planner_audio']=tensors['song_audio']
+        extra['planner_mask']=tensors['song_mask']
+    if getattr(model.config,'architecture_profile',None)=='audio_grounded_v3':
+        extra['packed_actions']=packed_actions
+        if 'survival_start' in tensors:extra['survival_start']=tensors['survival_start']
+        if 'history_beat_ages' in tensors:extra['history_beat_ages']=tensors['history_beat_ages']
+        if 'history_second_ages' in tensors:extra['history_second_ages']=tensors['history_second_ages']
+        for key in ('survival_audio','survival_edges','survival_candidate_seconds',
+                    'survival_start_seconds','survival_plan_indices','survival_plan_mix','survival_prefix_counts'):
+            if key in tensors:extra[key]=tensors[key]
+        if getattr(model.config,'configuration_quality_policy','off')!='off' or getattr(model,'compact_actions',False):
+            from .quality_inputs import quality_forward_inputs
+            extra['quality_inputs']=quality_forward_inputs(tensors)
+            if compact_song:
+                extra['quality_inputs']['quality_plan_clock']=tensors['song_clock']
     extra.update(overrides)
     return model(tensors['candidate_features'],tensors['history'],tensors['condition'],
         action_state=tensors['action_state'],history_features=tensors['history_features'],
@@ -517,6 +729,9 @@ def recovery_batch(dataset,model,args,device,global_step):
                            _touch_head_sets,_candidate_has_capacity,_grounded_pointer_probabilities,_candidate_playability)
     from .action_guidance import action_logits_with_touch_guard
     from .guard import first_rejected_prefix
+    from .generate import _filter_rhythm_and_active_span_candidates, _pointer_bin_settings, _microstep_head_limit
+    from .generate import REPETITION_HISTORY_EVENTS, pointer_switch_levels, _sample_survival_tail
+    from .candidates import candidate_grid_levels
     from .events import event_metadata
     from maichart.generation.event_cli import _NoteGrammar
     from maichart.event_timing import EventPoint
@@ -533,6 +748,9 @@ def recovery_batch(dataset,model,args,device,global_step):
     aligned=settings['pointer_sampler']=='grouped'
     touch_mask=torch.tensor([False]+[atom[0] in 'ABCDE' for atom in atoms],device=device,dtype=torch.bool)
     rng=torch.Generator(device=device).manual_seed(args.seed+global_step+191)
+    stable_actions=getattr(model.config,'configuration_quality_policy','off') in {'cooperative_v2','song_paired_v3'}
+    support_diagnostics=({'action_top_probability_sum':torch.zeros((),device=device),'action_decisions':0}
+                         if stable_actions else None)
     planner_cache={}
     def propose(item,index):
         candidates=item['_candidate_beats']
@@ -543,28 +761,72 @@ def recovery_batch(dataset,model,args,device,global_step):
         if aligned:
             previous=item['_prefix_points'][-1].beat if item['_prefix_points'] else None
             playable=_candidate_playability(candidates,playable,previous,dataset.candidate_policy)
+        else:
+            previous=None
         # Recovery features have a fixed padded candidate width; physical
         # proposals contain only actual candidates near the audio boundary.
+        range_mask=item['candidate_mask'].clone()
         physical_mask=torch.ones_like(item['candidate_mask'])
         physical_mask[:len(candidates)]=torch.tensor([not value for value in playable])
-        item['candidate_mask']=item['candidate_mask'] | physical_mask
-        if bool(item['candidate_mask'].all()):return None
+        playable_mask=range_mask | physical_mask
+        if bool(playable_mask.all()):return None
+        if model.config.architecture_profile!=GROUNDED_PROFILE:
+            item['candidate_mask']=playable_mask
         clean={k:v for k,v in item.items() if not k.startswith('_')}
         batch=collate_composer([clean])
         tensors={k:v.to(device) for k,v in batch.items() if torch.is_tensor(v)}
         song_id=int(item['song_index'])
         overrides={}
         if model.config.architecture_profile==GROUNDED_PROFILE and 'planner_audio' in tensors:
-            if song_id not in planner_cache:
-                planner_cache[song_id]=model.planner(tensors['planner_audio'],tensors['condition'],tensors['planner_mask'])
-            overrides['planner_override']=planner_cache[song_id]
+            if getattr(model.config,'configuration_quality_policy','off')=='song_paired_v3':
+                if song_id not in planner_cache:
+                    state=model.planner.encode(tensors.get('song_audio',tensors['planner_audio']),
+                        tensors.get('song_mask',tensors['planner_mask']),
+                        tensors.get('song_clock',tensors['quality_plan_clock']))
+                    if 'song_inverse' in tensors:state=state[tensors['song_inverse']]
+                    plan,_=model.planner.heads(state,tensors['condition'])
+                    planner_cache[song_id]=(plan,state)
+                overrides['planner_override'],overrides['prepared_song_state']=planner_cache[song_id]
+            else:
+                if song_id not in planner_cache:
+                    planner_cache[song_id]=model.planner(tensors['planner_audio'],tensors['condition'],tensors['planner_mask'])
+                overrides['planner_override']=planner_cache[song_id]
+        if aligned and model.config.architecture_profile==GROUNDED_PROFILE:
+            plan=overrides.get('planner_override')
+            playable=_filter_rhythm_and_active_span_candidates(
+                candidates,playable,np.asarray([float(item['_clock'].at(b)) for b in candidates]),
+                previous,float(item['_clock'].at(previous)) if previous is not None else None,
+                policy=dataset.candidate_policy,
+                learned_rest=getattr(model.config,'timing_distribution_policy','hierarchical_v1') in {'survival_v1','survival_integrated_v2'},
+                committed_note_text=item['_prefix_points'][-1].note_text if item['_prefix_points'] else None,
+                plan_centers=item.get('_planner_centers'),
+                plan_values=plan[0].detach().float().cpu().numpy() if plan is not None else None)
+            physical_mask[:len(candidates)]=torch.tensor([not value for value in playable])
+            playable_mask=range_mask | physical_mask
+            if not any(playable):return None
         result=_forward_batch(model,tensors,decode_actions=False,**overrides)
-        logits=result['candidate_logits'][0].float().masked_fill(tensors['candidate_padding_mask'][0],float('-inf'))
+        if 'next_event_log_probs' in result:
+            # Draw the full event/window-tail distribution before conditioning
+            # on a playable event. A rest never fabricates a committed event.
+            full_pointer=result['next_event_log_probs'][0]
+            audio_pointer=result.get('audio_next_event_log_probs',result['next_event_log_probs'])[0]
+            if _sample_survival_tail(full_pointer,audio_pointer,result['no_event_log_prob'][0],
+                    result.get('audio_no_event_log_prob',result['no_event_log_prob'])[0],1.,rng):
+                item['_proposal_stop_reason']='no_event_in_horizon'
+                return None
+        logits=result['candidate_logits'][0].float().masked_fill(playable_mask.to(device),float('-inf'))
         if not torch.isfinite(logits).any():return None
         guard=item['_proposal_guard']
+        pointer_levels=(torch.from_numpy(candidate_grid_levels(candidates,logits.numel())).to(logits.device)
+                        if aligned and settings.get('pointer_grid_policy','off')!='off' else None)
+        pointer_switch=(pointer_switch_levels(settings['pointer_grid_policy'],
+                            [p.beat for p in item['_prefix_points'][-32:]],logits.device)
+                        if pointer_levels is not None else None)
         for _ in range(min(8,len(candidates))):
             if not torch.isfinite(logits).any():break
-            pointer_probs=(_grounded_pointer_probabilities(logits,result['candidate_bins'][0],settings['pointer_temperature'])
+            pointer_probs=(_grounded_pointer_probabilities(logits,result['candidate_bins'][0],settings['pointer_temperature'],
+                           levels=pointer_levels,switch_levels=pointer_switch,
+                           **_pointer_bin_settings(settings['pointer_temperature'],learned_rest='next_event_log_probs' in result))
                            if aligned else _truncate_probabilities(logits.softmax(-1),top_p=.92,min_p=.05,max_k=16))
             chosen=int(torch.multinomial(pointer_probs,1,generator=rng))
             beat=candidates[chosen]
@@ -573,6 +835,8 @@ def recovery_batch(dataset,model,args,device,global_step):
             audio_ctx=result['audio_action_context'][0,chosen] if 'audio_action_context' in result else None
             decode_extra={}
             if 'previous_heads' in result:decode_extra['previous_heads']=result['previous_heads']
+            if 'echo_lane_bias' in result:decode_extra['echo_heads']=result['echo_lane_bias']
+            if 'button_load_features' in result:decode_extra['button_load_features']=result['button_load_features']
             if model.config.action_state_policy=='selected_prefix_v3':
                 from .context_features import selected_action_state
                 decode_extra.update(selected_action_state=selected_action_state(item['_action_index'],len(item['_prefix_points']),beat)[None].to(device),
@@ -592,15 +856,22 @@ def recovery_batch(dataset,model,args,device,global_step):
             blocked_first=set()
             blocked_prefixes=set()
             previous_heads=result['previous_heads'][0] if 'previous_heads' in result else None
+            echo_heads=result['echo_lane_bias'][0,chosen] if 'echo_lane_bias' in result else None
+            button_features=result['button_load_features'][0,chosen] if 'button_load_features' in result else None
+            micro_limit=_microstep_head_limit(beat,previous) if aligned else None
+            recent_history=[([dataset.atom_to_id[atom] for atom in event_metadata(p.note_text).atoms],p.beat)
+                            for p in item['_prefix_points'][-REPETITION_HISTORY_EVENTS:]] if aligned else None
             guidance={}
             def decode_slot(slot,prefix,legal_mask):
                 ids=[dataset.atom_to_id[x] for x in prefix]
                 if aligned:
                     return action_logits_with_touch_guard(model,context,slot,ids,audio_context=audio_ctx,
-                        enabled=settings['touch_history_guard'],touch_mask=touch_mask,diagnostics=guidance,previous_heads=previous_heads,
+                        enabled=settings['touch_history_guard'],touch_mask=touch_mask,diagnostics=guidance,previous_heads=previous_heads,echo_heads=echo_heads,button_load_features=button_features,
                         log_odds_bound=settings['touch_history_bound'],legal_mask=legal_mask,
                         legacy=not settings.get('touch_legal_mask',False))
                 extra={} if previous_heads is None else {'previous_heads':previous_heads}
+                if echo_heads is not None:extra['echo_heads']=echo_heads
+                if button_features is not None:extra['button_load_features']=button_features
                 return model.action_slot(context,slot,ids,audio_context=audio_ctx,**extra)
             for _ in range(6):
                 guidance.clear()
@@ -608,8 +879,15 @@ def recovery_batch(dataset,model,args,device,global_step):
                     slot_mask_decoder=decode_slot,
                     contact_budget=contact_budget,contact_policy=contact_policy,
                     occupied=occupied,blocked=cooldown_blocked,blocked_first=blocked_first,head_metadata=metadata,
-                    canonical_order=True,touch_layout_policy=touch_policy,blocked_prefixes=blocked_prefixes,
-                    macro_group_ids=getattr(getattr(model,'conserved_action_head',None),'atom_group_id',None))
+                    canonical_order=getattr(model.config,'action_head_policy','flat_v1')!='compact_grouped_v3',
+                    per_lane_runs=getattr(model.config,'action_head_policy','flat_v1')=='compact_grouped_v3',
+                    touch_layout_policy=touch_policy,blocked_prefixes=blocked_prefixes,
+                    macro_group_ids=getattr(getattr(model,'conserved_action_head',None),'atom_group_id',None),
+                    max_total_heads=micro_limit,microstep=micro_limit is not None,
+                    recent_history=recent_history,beat=beat,repetition_clock=item['_clock'],
+                    repetition_guard=settings.get('repetition_guard','legacy_v1'),
+                    min_legal_mass=.01 if stable_actions else 0.,diagnostics=support_diagnostics)
+                if not selected and stable_actions:break
                 if selected:
                     point=EventPoint(candidates[chosen],'/'.join(selected))
                     accepted=(guard.accepts(point,protect_reported_hard=True) if guidance.get('applied') else guard.accepts(point))
@@ -633,10 +911,13 @@ def recovery_batch(dataset,model,args,device,global_step):
         with torch.no_grad():
             horizon=max(4,((min(dataset.history_events,128)+args.recovery_steps-1)//args.recovery_steps)*args.recovery_steps)
             builder=RecoveryBuilder(dataset,model,device,propose=propose,
-                supervise_actions=getattr(args,'action_objective_policy',LEGACY_ACTION_OBJECTIVE)==RECOVERY_ACTION_OBJECTIVE,
+                supervise_actions=getattr(args,'action_objective_policy',LEGACY_ACTION_OBJECTIVE)==RECOVERY_ACTION_OBJECTIVE,supervise_eos=getattr(args,'action_objective_policy',LEGACY_ACTION_OBJECTIVE)==RECOVERY_ACTION_OBJECTIVE,
                 maximum_generated_events=horizon if aligned else 4)
             if not aligned:return builder.batch_from_indices(indices,steps=args.recovery_steps)
             batch,outcomes,episodes,details=builder.batch_from_episodes(indices,getattr(model,'_recovery_episodes',[]),steps=args.recovery_steps)
+            if support_diagnostics is not None:
+                details['low_action_support_rejections']=support_diagnostics.get('low_action_support_rejections',0)
+                details['min_retained_action_mass']=support_diagnostics.get('min_retained_mass')
             model._recovery_episodes=episodes;model._recovery_diagnostics=details
             return batch,outcomes
     finally:model.train(was_training)
@@ -645,6 +926,16 @@ def recovery_batch(dataset,model,args,device,global_step):
 def main(argv=None):
     import sys
     arguments=list(sys.argv[1:] if argv is None else argv)
+    if '--architecture-profile=event_set_stream_v1' in arguments:
+        arguments.remove('--architecture-profile=event_set_stream_v1')
+        from .stream_train import main as stream_main
+        return stream_main(arguments)
+    if '--architecture-profile' in arguments:
+        position=arguments.index('--architecture-profile')
+        if arguments[position+1:position+2]==['event_set_stream_v1']:
+            del arguments[position:position+2]
+            from .stream_train import main as stream_main
+            return stream_main(arguments)
     explicit_flags={token.split('=',1)[0] for token in arguments if token.startswith('--')}
     args=parser().parse_args(arguments)
     from .training_lock import training_output_lock
@@ -733,6 +1024,9 @@ def _train(args,explicit_flags):
         args.history_anchor_policy=resolve_history_anchor_policy(args.history_anchor_policy)
     for name in COMPOSER_POLICY_FIELDS:
         setattr(args,name,resolve_composer_policy(name,getattr(args,name),parent_anchor_config,resume=bool(args.resume),architecture_profile=args.architecture_profile))
+    args.sample_sequence_policy=resolve_sample_sequence_policy(args.sample_sequence_policy,
+        (old.get('args') or {}) if old else None,resume=bool(args.resume),
+        configuration_quality_policy=args.configuration_quality_policy)
     semantics=structure_training_semantics(
         training_semantics_for_objective(args.architecture_profile,args.action_objective_policy),args.structure_policy)
     if args.resume and old.get('training_semantics')!=semantics:
@@ -782,6 +1076,10 @@ def _train(args,explicit_flags):
     if not 0<=args.cpu_threads<=256:raise ValueError('cpu_threads must be in [0,256]')
     if args.cpu_threads:
         torch.set_num_threads(args.cpu_threads)
+    elif device.type=='cuda':
+        # CPU-side feature assembly consists of small operators. Environment
+        # defaults can create a large intra-op pool alongside sample workers.
+        torch.set_num_threads(min(2,torch.get_num_threads()))
     if not 0<=args.holdout_fraction<.5 or args.validation_max_batches<0 or args.validation_batch_size<1:
         raise ValueError('Invalid validation settings')
     if args.generation_eval_songs<0 or args.generation_eval_interval_epochs<1:
@@ -817,10 +1115,16 @@ def _train(args,explicit_flags):
         audio_cache_gb=args.audio_cache_gb,limit_charts=args.limit_charts,seed=args.seed,architecture_profile=args.architecture_profile,
         action_state_policy=args.action_state_policy,motif_memory_policy=args.motif_memory_policy,
         motif_max_events=args.motif_max_events,head_timing_policy=args.head_timing_policy,
-        structure_policy=args.structure_policy,structure_backend=args.structure_backend)
+        structure_policy=args.structure_policy,structure_backend=args.structure_backend,
+        quality_inputs_enabled=args.configuration_quality_policy!='off',
+        quality_inputs_policy=args.configuration_quality_policy,
+        action_order_policy='symmetric_v1' if args.action_head_policy=='compact_grouped_v3' else 'off',
+        fixed_future_audio=args.action_head_policy=='compact_grouped_v3',
+        timing_distribution_policy=args.timing_distribution_policy,density_feedback_policy=args.density_feedback_policy)
     dataset.touch_layout_policy=args.touch_layout_policy
     dataset.contact_policy=args.contact_policy
     dataset.defer_audio_queries=device.type=='cuda' and args.architecture_profile==GROUNDED_PROFILE
+    dataset.compact_audio_queries=dataset.defer_audio_queries
     from .device_audio import AudioQueryMaterializer
     audio_materializer=AudioQueryMaterializer()
     args.action_slots_requested = dataset.action_slots_requested
@@ -842,6 +1146,8 @@ def _train(args,explicit_flags):
                 if args.architecture_profile==GROUNDED_PROFILE else migrate_music_context(model,action_slots=args.action_slots,history_anchor_policy=args.history_anchor_policy,
                     history_memory_rms_bound=args.history_memory_rms_bound,condition_mask_prob=args.condition_mask_prob,
                     motif_max_events=args.motif_max_events,**{name:getattr(args,name) for name in COMPOSER_POLICY_FIELDS}))
+            if getattr(model,'migration_report',None):
+                print(json.dumps({'finetune_migration':model.migration_report}),flush=True)
             model.config.symbolic_dropout=args.symbolic_dropout
         if list(old.get('atom_catalog') or []) != list(dataset.codec_atoms):
             raise ValueError('Composer atom catalog differs from checkpoint; use a matching manifest or retrain a new model')
@@ -874,8 +1180,23 @@ def _train(args,explicit_flags):
             architecture_profile=args.architecture_profile,action_state_policy=args.action_state_policy,
             motif_memory_policy=args.motif_memory_policy,motif_max_events=args.motif_max_events,
             head_timing_policy=args.head_timing_policy,structure_policy=args.structure_policy,
-            structure_backend=args.structure_backend,atom_catalog=dataset.codec_atoms)
+            structure_backend=args.structure_backend,atom_catalog=dataset.codec_atoms,
+            fixed_future_audio=args.action_head_policy=='compact_grouped_v3',
+            timing_distribution_policy=args.timing_distribution_policy,
+            density_feedback_policy=args.density_feedback_policy,
+            quality_inputs_enabled=args.configuration_quality_policy!='off',
+        quality_inputs_policy=args.configuration_quality_policy)
+    _prewarm_missing_song_banks(dataset, validation_dataset, args, device)
     model.to(device).train()
+    args.training_objective_recipe=training_objective_recipe(model,vars(args))
+    previous_recipe=(old.get('training_objective_recipe') or (old.get('args') or {}).get('training_objective_recipe')) if old else None
+    if old and previous_recipe != args.training_objective_recipe:
+        print('composer_objective_change '+json.dumps({
+            'mode':'resume' if args.resume else 'finetune',
+            'previous_recipe':previous_recipe or 'unrecorded_legacy',
+            'effective_recipe':args.training_objective_recipe,
+            'message':'Training objective differs or was unrecorded; compare the policy-matched audio_action_atom_legacy_ce or audio_action_atom_joint_nll, not old total/audio macro loss.'}),flush=True)
+    group_loss_kwargs=action_group_loss_kwargs(model)
     model_finite_items=_model_finite_items(model)
     from .recovery import restore_recovery_episodes,recovery_episode_state
     restore_recovery_episodes(model,(old.get('training_state') or {}).get('recovery_episodes') if args.resume else None)
@@ -959,6 +1280,7 @@ def _train(args,explicit_flags):
     timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.,save_sec=0.)
     gpu_profiles=[]; gpu_timing=dict(samples=0,h2d_ms=0.,forward_ms=0.,backward_ms=0.,update_ms=0.)
     print('composer_runtime '+json.dumps({'family':FAMILY,'training_semantics':semantics,
+        'training_objective_recipe':args.training_objective_recipe,
         'action_objective_policy':args.action_objective_policy,
         'recovery_sampling_policy':args.recovery_sampling_policy,
         'recovery_sampling_settings':recovery_sampling_settings(args.recovery_sampling_policy,args.recovery_pointer_temperature,args.recovery_action_temperature),
@@ -967,10 +1289,12 @@ def _train(args,explicit_flags):
         'device':str(device),'precision':precision,'effective_lr':effective_lr,'learning_rate_schedule':lr_plan,
         'samples':len(dataset),'parameters':parameters,
         'model_bytes':sum(p.numel()*p.element_size() for p in model.parameters()),
-        'action_head_parameters':sum(p.numel() for p in model.action_head.parameters()),
+        'action_head_parameters':sum(p.numel() for p in (
+            model.conserved_action_head if getattr(model,'compact_actions',False) else model.action_head).parameters()),
         'selected_candidate_projection':True,'optimizer_implementation':implementation,
         'action_projection':'active_slots_v1' if args.architecture_profile==GROUNDED_PROFILE else 'dense',
         'audio_query_execution':'device_banks_v1' if dataset.defer_audio_queries else 'cpu',
+        'audio_lens_execution':'batch_unique_exact_v1' if dataset.compact_audio_queries else 'dense',
         'audio_device_cache_budget_bytes':audio_materializer.budget_bytes if dataset.defer_audio_queries else 0,
         'planner_batch_sharing':'same_source_and_effective_condition_v1',
         'audio_bank_mode':'lossless_mmap_v1','audio_feature_policy':COMPOSER_AUDIO_FEATURE_POLICY,
@@ -979,6 +1303,7 @@ def _train(args,explicit_flags):
         'forward_finite_check':'packed_outputs_and_losses_v1',
         'start_epoch':start_epoch,'prefetch_batches':args.prefetch_batches,
         'sample_workers':args.sample_workers,'sample_locality':args.sample_locality,
+        'sample_sequence_policy':args.sample_sequence_policy,
         'cuda_cache_guard':cuda_cache_guard.policy(),
         'cuda_allocator_config':os.environ.get('PYTORCH_CUDA_ALLOC_CONF'),
         'resume_sample_cursor':resume_cursor,'resume_sampler_batch_size':resume_sampler_size,
@@ -996,7 +1321,14 @@ def _train(args,explicit_flags):
         'touch_layout_policy':args.touch_layout_policy,
         'contact_policy':args.contact_policy,'structure_policy':args.structure_policy,
         'future_horizon_policy':model.config.future_horizon_policy,
+        'timing_distribution_policy':model.config.timing_distribution_policy,
+        'button_load_policy':model.config.button_load_policy,
+        'pointer_objective':('integrated_grid_first_event_nll' if model.config.timing_distribution_policy=='survival_integrated_v2' else 'joint_first_event_nll' if model.config.timing_distribution_policy=='survival_v1' else 'candidate_cross_entropy'),
+        'event_rate_loss_weight':.2 if model.config.timing_distribution_policy in {'survival_v1','survival_integrated_v2'} else 0.,
+        'fine_timing_policy':model.config.fine_timing_policy,
+        'echo_prior_policy':model.config.echo_prior_policy,
         'action_head_policy':model.config.action_head_policy,
+        'configuration_quality_policy':model.config.configuration_quality_policy,
         'condition_mask_prob':model.config.condition_mask_prob,
         'structure_backend':args.structure_backend,'structure_dropout':args.structure_dropout,
         'structure_schema':model.config.structure_schema,
@@ -1013,19 +1345,21 @@ def _train(args,explicit_flags):
         'max_required_action_slots':dataset.max_required_action_slots,
         'host_memory':memory_gib(initial_host_memory),
         'end_epoch':end_epoch,'candidate_misses':dataset.candidate_misses,
-        'phase_filter_misses':getattr(dataset,'phase_filter_misses',0),
+        'phase_filter_misses':getattr(dataset,'phase_filter_misses',0),'playability_unreachable_targets':getattr(dataset,'playability_unreachable_targets',0),
         'candidate_total':dataset.candidate_total,
         'candidate_miss_examples':dataset.candidate_miss_examples,
         'candidate_recall':1.-dataset.candidate_misses/max(1,dataset.candidate_total)}),flush=True)
+    from .metric_totals import MetricTotals
     for epoch in range(start_epoch,end_epoch+1):
-        dataset.set_epoch(epoch);started=time.monotonic();totals={};seen=0;metric_batches=0;window_valid=True
-        recent_totals={};recent_batches=0;optimized_total=0.;optimized_updates=0;window_objective=0.
+        dataset.set_epoch(epoch);started=time.monotonic();totals=MetricTotals();seen=0;metric_batches=0;window_valid=True
+        recent_totals=MetricTotals();recent_batches=0;optimized_total=0.;optimized_updates=0;window_objective=0.
         last_gradient_norm=None
         continuing=partial_resume and epoch==start_epoch
         skip=resume_skip if continuing else 0
         sampler_size=resume_sampler_size if continuing else args.batch_size
         epoch_loader_state=loader_generator.get_state().clone()
-        batch_sampler=SongLocalBatchSampler(dataset,sampler_size,loader_generator,args.sample_locality)
+        batch_sampler=SongLocalBatchSampler(dataset,sampler_size,loader_generator,args.sample_locality,
+            sequence_policy=args.sample_sequence_policy)
         if sampler_size!=args.batch_size:
             batch_sampler=RebatchedSampler(batch_sampler,args.batch_size,len(dataset))
         all_batches=len(batch_sampler)
@@ -1039,36 +1373,45 @@ def _train(args,explicit_flags):
                 stamp=time.perf_counter();batch=next(batches)
                 timing['data_sec']+=time.perf_counter()-stamp
                 if (batch_index-1)%args.grad_accumulation==0:
-                    window_valid=True;window_objective=0.;window_finite=None;window_metrics={};window_metric_batches=0
+                    window_valid=True;window_objective=0.;window_finite=None;window_metrics=MetricTotals();window_metric_batches=0
                 if not window_valid: continue
                 events=[torch.cuda.Event(enable_timing=True) for _ in range(5)] if device.type=='cuda' and len(gpu_profiles)+gpu_timing['samples']<args.profile_steps else None
                 if events: events[0].record()
-                stamp=time.perf_counter()
-                tensors={key:value.to(device,non_blocking=device.type=='cuda')
-                         for key,value in batch.items() if torch.is_tensor(value)
-                         and key not in {'song_index','event_index'}}
-                audio_materializer.materialize(batch,tensors)
-                timing['transfer_sec']+=time.perf_counter()-stamp
-                if events: events[1].record()
-                stamp=time.perf_counter()
-                with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
-                                    enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
-                    output=_forward_batch(model,tensors,packed_actions=True,audio_auxiliary=args.audio_pointer_weight>0)
-                    loss,metrics=_loss(output,tensors,model.config.atom_vocab_size,audio_pointer_weight=args.audio_pointer_weight,
-                        placement_weight=args.placement_weight,planner_weight=args.planner_weight,
-                        action_objective_policy=args.action_objective_policy)
-                window_start=((batch_index-1)//args.grad_accumulation)*args.grad_accumulation
-                window_batches=min(args.grad_accumulation,total_batches-window_start)
-                backward_loss=loss/window_batches
-                finite_flags=_forward_finite_flags(output,loss,backward_loss)
-                window_finite=finite_flags if window_finite is None else window_finite & finite_flags
-                if events: events[2].record()
+                if hasattr(batches, 'pause_workers'):
+                    batches.pause_workers()
+                try:
+                    stamp=time.perf_counter()
+                    tensors={key:value.to(device,non_blocking=device.type=='cuda')
+                             for key,value in batch.items() if torch.is_tensor(value)
+                             and key not in {'song_index','event_index'}}
+                    audio_materializer.materialize(batch,tensors)
+                    timing['transfer_sec']+=time.perf_counter()-stamp
+                    if device.type!='cuda' and hasattr(batches,'resume_workers'):
+                        batches.resume_workers()
+                    if events: events[1].record()
+                    stamp=time.perf_counter()
+                    with torch.autocast('cuda',dtype=torch.bfloat16 if precision=='bf16' else torch.float16,
+                                        enabled=device.type=='cuda' and precision in {'bf16','fp16'}):
+                        output=_forward_batch(model,tensors,packed_actions=True,audio_auxiliary=args.audio_pointer_weight>0)
+                        loss,metrics=_loss(output,tensors,model.config.atom_vocab_size,audio_pointer_weight=args.audio_pointer_weight,
+                            placement_weight=args.placement_weight,planner_weight=args.planner_weight,
+                            action_objective_policy=args.action_objective_policy,**group_loss_kwargs)
+                    window_start=((batch_index-1)//args.grad_accumulation)*args.grad_accumulation
+                    window_batches=min(args.grad_accumulation,total_batches-window_start)
+                    backward_loss=loss/window_batches
+                    finite_flags=_forward_finite_flags(output,loss,backward_loss)
+                    window_finite=finite_flags if window_finite is None else window_finite & finite_flags
+                    if events: events[2].record()
+                finally:
+                    # Protect Python-heavy GPU submission, then overlap the
+                    # native backward engine with CPU preparation. Always
+                    # release the existing gate if a forward raises.
+                    if hasattr(batches, 'resume_workers'):
+                        batches.resume_workers()
                 if scaler is not None: scaler.scale(backward_loss).backward()
                 else: backward_loss.backward()
                 window_objective=window_objective+backward_loss.detach()
-                for key,value in metrics.items():
-                    value=value.detach().float()
-                    window_metrics[key]=window_metrics[key]+value if key in window_metrics else value.clone()
+                window_metrics.add(metrics)
                 window_metric_batches+=1
                 if events: events[3].record()
                 update=(batch_index%args.grad_accumulation==0 or batch_index==total_batches)
@@ -1146,9 +1489,8 @@ def _train(args,explicit_flags):
                     # A rejected accumulation window contributes neither updates
                     # nor NaN metrics to later progress/checkpoint summaries.
                     metric_batches+=window_metric_batches
-                    for key,value in window_metrics.items():
-                        totals[key]=totals[key]+value if key in totals else value.clone()
-                        recent_totals[key]=recent_totals[key]+value if key in recent_totals else value.clone()
+                    totals.add(window_metrics)
+                    recent_totals.add(window_metrics)
                     recent_batches+=window_metric_batches
                 if update and args.checkpoint_interval_steps and global_step%args.checkpoint_interval_steps==0:
                     _assert_model_finite(model)
@@ -1206,7 +1548,7 @@ def _train(args,explicit_flags):
                         'cuda_cache_trim_count':cuda_cache_guard.trim_count,
                         'prefetch':batches.stats() if hasattr(batches,'stats') else {'mode':'synchronous'},
                         'host_memory':memory_gib(host_memory()),**avg}),flush=True)
-                    recent_totals={};recent_batches=0
+                    recent_totals=MetricTotals();recent_batches=0
         stamp=time.perf_counter()
         if validation_dataset is not None:
             from .evaluation import evaluate_teacher_forced
@@ -1214,8 +1556,9 @@ def _train(args,explicit_flags):
                 batch_size=args.validation_batch_size,max_batches=args.validation_max_batches,
                 precision=precision,loss_kwargs={'action_objective_policy':args.action_objective_policy,
                     'audio_pointer_weight':args.audio_pointer_weight,'placement_weight':args.placement_weight,
-                    'planner_weight':args.planner_weight})
+                    'planner_weight':args.planner_weight,**group_loss_kwargs})
             validation.update(epoch=epoch,optimizer_steps=global_step,
+                training_objective_recipe=args.training_objective_recipe,
                 manifest=str(Path(args.validation_manifest).resolve()),
                 catalog_coverage=getattr(validation_dataset,'catalog_coverage',None))
             (out/'validation_latest.json').write_text(json.dumps(validation,ensure_ascii=False,indent=2),encoding='utf-8')

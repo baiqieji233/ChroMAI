@@ -41,12 +41,14 @@ def test_fresh_api_forwards_grounded_defaults_and_effective_settings(tmp_path):
                 'history_memory_policy':'rms_cap_v1','history_attention_policy':'math_v1',
                 'action_objective_policy':'joint_event_recovery_v3',
                 'head_timing_policy':'separate_pads_v2','cross_event_relation_policy':'relative_heads_v1',
-                'recovery_sampling_policy':'generation_matched_recovery_masked_touch_v4',
+                'recovery_sampling_policy':'generation_matched_recovery_microstep_tails_v6',
                 'recovery_pointer_temperature':1.,'recovery_action_temperature':.85}
     from maichart.composer.sampling_contract import recovery_sampling_settings
     expected['recovery_sampling_settings']=recovery_sampling_settings(expected['recovery_sampling_policy'])
     expected.update(structure_policy='metrical_context_v2',contact_policy='diagnostic_v1',
-                    future_horizon_policy='candidate_horizon_v1',action_head_policy='conserved_grouped_v2',condition_mask_prob=0.,
+                    timing_distribution_policy='survival_integrated_v2',button_load_policy='per_button_context_v2',fine_timing_policy='off',density_feedback_policy='off',
+                    configuration_quality_policy='song_paired_v3',sample_sequence_policy='phrase_groups_v1',
+                    future_horizon_policy='candidate_horizon_v1',echo_prior_policy='phase_echo_v1',action_head_policy='compact_grouped_v3',condition_mask_prob=0.,
                     structure_backend='auto',structure_dropout=.15,
                     lr_schedule='auto',warmup_steps=None,min_lr_ratio=None)
     assert task.result['effective_settings'] == expected
@@ -64,6 +66,24 @@ def test_new_recovery_temperatures_are_forwarded_and_recorded(tmp_path):
     assert args[args.index('--recovery-pointer-temperature')+1]=='0.9'
     assert args[args.index('--recovery-action-temperature')+1]=='0.7'
     assert task.result['effective_settings']['recovery_sampling_settings']['action_temperature']==.7
+
+
+@pytest.mark.parametrize(('mode','requested','expected'),[
+    ('fresh','off','off'),('finetune','auto','phase_echo_v1'),('resume','auto','off')])
+def test_echo_policy_api_resolves_and_forwards_new_stage_or_saved_policy(tmp_path,monkeypatch,mode,requested,expected):
+    from maichart.composer import checkpoint
+    parent=tmp_path/'parent.pt';parent.write_bytes(b'checkpoint')
+    monkeypatch.setattr(checkpoint,'read_payload',lambda _: {})
+    monkeypatch.setattr(checkpoint,'inspect_payload',lambda _: {
+        'can_resume':True,'can_init':True,
+        'model_config':{'architecture_profile':'audio_grounded_v3','configuration_quality_policy':'cooperative_v2'},'args':{}})
+    payload=_payload(tmp_path)
+    payload.update(mode=mode,resume=str(parent),init_checkpoint=str(parent),echo_prior_policy=requested)
+    calls=[]
+    composer_api.start_train(SimpleNamespace(_json_response=lambda _:None),payload,runtime=_runtime(calls))
+    task,args=calls[0]
+    assert task.result['effective_settings']['echo_prior_policy']==expected
+    assert args[args.index('--echo-prior-policy')+1]==expected
 
 
 @pytest.mark.parametrize(('key', 'value'), [

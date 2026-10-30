@@ -25,17 +25,23 @@ def prefix_state_summary(index, query_beat, *, visible_before_beat):
 
     Empty prefixes yield all zeros. Count is available in the raw API metadata.
     """
-    states, mask, _ = prefix_action_states(
-        index, query_beat, visible_before_beat=visible_before_beat)
+    states, mask, _ = index.at(
+        query_beat, include_current=True,
+        visible_before_beat=visible_before_beat,
+        visibility_version='causal_v2', max_states=None,
+        include_metadata=False)
+    if not bool(mask.any()):
+        return states[0] if len(states) == 1 else states.mean(0)
+    if bool(mask.all()):
+        return states[0] if (len(states) == 1 and not bool(states[0].any())) else torch.zeros(STATE_DIM, dtype=torch.float32)
     active = states[~mask]
-    result = torch.zeros(STATE_DIM, dtype=torch.float32)
-    if len(active):
-        result = active.mean(0)
-    return result
+    return active.mean(0) if len(active) else torch.zeros(STATE_DIM, dtype=torch.float32)
 
 
 def candidate_prefix_states(index, candidate_beats, *, visible_before_beat):
     """Return [C,50] states sharing one immutable committed prefix."""
+    if len(candidate_beats) == 1:
+        return prefix_state_summary(index, candidate_beats[0], visible_before_beat=visible_before_beat).unsqueeze(0)
     values = [prefix_state_summary(index, beat, visible_before_beat=visible_before_beat)
               for beat in candidate_beats]
     return torch.stack(values) if values else torch.zeros((0, STATE_DIM))

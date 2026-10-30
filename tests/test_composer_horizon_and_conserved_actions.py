@@ -30,14 +30,14 @@ def make_config(**overrides):
 
 def test_policy_resolution_defaults_and_resume_inheritance():
     assert resolve_composer_policy('future_horizon_policy') == 'candidate_horizon_v1'
-    assert resolve_composer_policy('action_head_policy') == 'conserved_grouped_v2'
+    assert resolve_composer_policy('action_head_policy') == 'compact_grouped_v3'
     assert resolve_composer_policy('future_horizon_policy', architecture_profile='music_context_v2') == 'off'
     assert resolve_composer_policy('action_head_policy', architecture_profile='music_context_v2') == 'flat_v1'
     old_parent = {'architecture_profile': GROUNDED_PROFILE}
     assert resolve_composer_policy('future_horizon_policy', 'auto', old_parent, resume=True) == 'off'
     assert resolve_composer_policy('action_head_policy', 'auto', old_parent, resume=True) == 'flat_v1'
     assert resolve_composer_policy('future_horizon_policy', 'auto', old_parent, resume=False) == 'candidate_horizon_v1'
-    assert resolve_composer_policy('action_head_policy', 'auto', old_parent, resume=False) == 'conserved_grouped_v2'
+    assert resolve_composer_policy('action_head_policy', 'auto', old_parent, resume=False) == 'compact_grouped_v3'
 
 
 def test_horizon_only_migration_preserves_exact_outputs_at_step_zero():

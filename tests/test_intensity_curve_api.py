@@ -90,6 +90,7 @@ def test_analysis_is_separate_and_returns_editable_profile(api, monkeypatch, tmp
 @pytest.mark.parametrize('source', ['auto', 'audio', 'model'])
 def test_composer_curve_sources_do_not_enter_event_checkpoint_loader(api, monkeypatch, tmp_path, source):
     from maichart.generation import music_intensity, learned_curve
+    from maichart.composer import curve as composer_curve
     audio=tmp_path/'track.wav';audio.write_bytes(b'audio')
     checkpoint=tmp_path/'composer.pt';checkpoint.write_bytes(b'checkpoint')
     def load(_path):
@@ -101,6 +102,8 @@ def test_composer_curve_sources_do_not_enter_event_checkpoint_loader(api, monkey
         raise AssertionError('Composer checkpoint was sent to the event curve loader')
     monkeypatch.setattr(webui,'_load_checkpoint_payload',load)
     monkeypatch.setattr(learned_curve,'generate_learned_profile',forbidden)
+    monkeypatch.setattr(composer_curve,'generate_learned_profile',lambda *a,**kw:{
+        **profile(audio),'method':'learned_audio_grounded_v3','model_family':'chart_composer_v1'})
     monkeypatch.setattr(music_intensity,'generate_intensity_profile',lambda *a,**kw:profile(audio))
     status,started,_=api('/api/intensity/analyze',{'audio':str(audio),'checkpoint':str(checkpoint),
         'curve_source':source,'model_family':'chart_stream_v1'})
@@ -111,9 +114,9 @@ def test_composer_curve_sources_do_not_enter_event_checkpoint_loader(api, monkey
         if result['status'] not in {'queued','running'}:break
         time.sleep(.02)
     if source=='model':
-        assert result['status']=='failed'
-        assert '没有独立的全曲 Planner 曲线头' in result['error']
-        assert '旧固定帧' not in result['error']
+        assert result['status']=='completed',result
+        assert result['result']['curve_source']=='model'
+        assert result['result']['intensity_profile']['method']=='learned_audio_grounded_v3'
     else:
         assert result['status']=='completed',result
         assert result['result']['curve_source']=='audio'
@@ -663,3 +666,26 @@ def test_missing_native_engine_fails_before_generation_task(api, monkeypatch, tm
     assert code >= 400
     assert "未部署" in result["error"]
     assert not calls and not webui.TASKS
+
+
+def test_load_checkpoint_accepts_pytorch_extra_state_entries(tmp_path):
+    import torch
+    from maichart.training.checkpoints import load_checkpoint
+
+    ckpt = tmp_path / "composer_last.pt"
+    torch.save(
+        {
+            "schema": "maichart-chart-composer-checkpoint-v2",
+            "family": "chart_composer_v1",
+            "input_contract": "chart_composer_inputs_v2_audio_only_history_state",
+            "model_config": {"architecture_profile": "audio_grounded_v3"},
+            "model_state_dict": {
+                "weight": torch.zeros(2, 2),
+                "action_factors._extra_state": {"schema": "composer_action_factors_v1"},
+            },
+        },
+        ckpt,
+    )
+    loaded = load_checkpoint(ckpt)
+    assert "action_factors._extra_state" in loaded["model_state_dict"]
+    assert torch.is_tensor(loaded["model_state_dict"]["weight"])

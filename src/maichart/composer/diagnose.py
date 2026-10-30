@@ -49,8 +49,16 @@ def _inputs(batch, device):
         'trailing_audio':'trailing_audio','head_timing':'head_timing',
         **{k:k for k in ('audio_lens','audio_lens_mask','planner_audio','planner_mask','planner_indices','planner_mix',
                           'selected_action_state','motif_ids','motif_relative_beats','motif_mask',
-                          'structure_features','structure_transition')}}
-    return {key:batch[source].to(device) for key,source in mapping.items() if source in batch}
+                          'structure_features','structure_transition','history_beat_ages','history_second_ages',
+                          'song_unique_indices','song_inverse','song_audio','song_mask','song_clock',
+                          'survival_audio','survival_edges','survival_candidate_seconds',
+                          'survival_start_seconds','survival_plan_indices','survival_plan_mix',
+                          'survival_prefix_counts')}}
+    result={key:batch[source].to(device) for key,source in mapping.items() if source in batch}
+    if 'quality_lifecycle' in batch or 'quality_future_audio' in batch:
+        from .quality_inputs import quality_forward_inputs
+        result['quality_inputs']={key:value.to(device) for key,value in quality_forward_inputs(batch).items()}
+    return result
 
 
 @torch.inference_mode()
@@ -76,6 +84,8 @@ def interventions(model, inputs, *, decode_context=None):
             extra.setdefault('state_base',result['selected_state_base'])
             extra.setdefault('state_keep',result.get('selected_state_keep'))
         if 'previous_heads' in result:extra['previous_heads']=result['previous_heads']
+        if 'echo_lane_bias' in result:extra['echo_heads']=result['echo_lane_bias']
+        if 'button_load_features' in result:extra['button_load_features']=result['button_load_features']
         return model.decode_candidate(result['candidate_context'],choice,**extra)['action_logits'][...,0,:]
     baseline=decode(base,inputs)
     workload=base.get('workload')
@@ -216,6 +226,37 @@ def _omit_last_prefix(dataset, sample, item, id_map):
         action_state=action_state,
         workload_audio=torch.from_numpy(context.at(seconds)),
         ledger=torch.from_numpy(prefix_ledger(table['point_seconds'],table['head_prefix'],seconds,committed_count=ev)))
+    from .history_clock import history_beat_ages
+    result['history_beat_ages']=torch.from_numpy(history_beat_ages([p.beat for p in points[start:ev]]))
+    origin=float(table['point_seconds'][ev-1]) if ev else 0.
+    result['history_second_ages']=torch.from_numpy((origin-table['point_seconds'][start:ev]).astype(np.float32))
+    result.pop('_history_atom_width', None)
+    if getattr(dataset,'quality_inputs_enabled',False):
+        from .quality_inputs import quality_context_inputs
+        policy=getattr(dataset,'quality_inputs_policy',None)
+        quality_start=start if policy=='song_paired_v3' else 0
+        quality=quality_context_inputs(points=points[quality_start:ev],atom_ids=table['atom_ids'][quality_start:ev],
+            include_future=getattr(dataset,'fixed_future_audio',False),
+            candidate_beats=candidates,candidate_seconds=seconds,state_index=table['state_index'],
+            audio_features=values,audio_times=times,acoustic_context=context,clock=clock,
+            audio_duration=table['audio_duration'],visible_before_beat=points[ev].beat,
+            point_seconds=table['point_seconds'][quality_start:ev],policy=policy,
+            plan_grid=table.get('planner_data'))
+        if 'quality_anchor_ids' in quality:
+            quality['quality_anchor_ids']=_map_catalog_ids(quality['quality_anchor_ids'],id_map,'omitted-prefix anchors')
+        result.update(quality)
+        # This intervention is an observation, not an authored continuation
+        # target. Do not carry supervision from the unmodified prefix into it.
+        result['quality_phrase_weight']=torch.zeros(len(quality['quality_phrase_audio']))
+        result['quality_gap_weight']=torch.tensor(0.)
+    elif getattr(dataset,'fixed_future_audio',False):
+        from .quality_inputs import fixed_future_audio_inputs
+        result.update(fixed_future_audio_inputs(context,clock,candidates,table['audio_duration']))
+    # Altering the committed prefix invalidates target-derived empty-gap
+    # supervision. Keep no authored-gap audio or exposure on this intervention.
+    for key in ('empty_gap_audio','empty_gap_exposure','empty_gap_weight'):
+        if key in result:
+            result[key]=torch.zeros_like(result[key])
     # These are selected-beat inputs. The old sample's target beat no longer
     # identifies the candidate selected from this altered prefix; rebuild them
     # through _decode_context after the new pointer choice instead.
@@ -229,6 +270,21 @@ def _omit_last_prefix(dataset, sample, item, id_map):
             table['last_head_beats'][ev],seconds,[float(x) for x in candidates]))
     if dataset.architecture_profile==GROUNDED_PROFILE:
         result.update(dataset._grounded_features(sample.song_index,seconds,seconds,table=table))
+    if getattr(dataset, 'timing_distribution_policy', 'hierarchical_v1') == 'survival_integrated_v2':
+        from .density_grid import survival_grid_inputs
+        result.update({key: torch.from_numpy(value) for key, value in survival_grid_inputs(
+            context, float(clock.at(previous)) if previous is not None else 0., seconds,
+            table['audio_duration'], plan_grid=table.get('planner_data'),
+            prefix_seconds=(table['point_seconds'][:ev]
+                if getattr(dataset, 'density_feedback_policy', 'off') == 'causal_count_debt_v1' else None)).items()})
+    # The altered prefix has no authored future/count targets. Preserve only
+    # audio evidence and causal state, never labels copied from the source row.
+    for key in ('future_target', 'future_weight', 'event_count_target', 'event_exposure',
+                'event_rate_weight', 'workload_target', 'workload_weight',
+                'trailing_target', 'trailing_weight', 'quality_phrase_target',
+                'quality_phrase_weight', 'quality_gap_target', 'quality_gap_weight'):
+        if key in result:
+            result[key] = torch.zeros_like(result[key])
     if getattr(dataset,'structure_policy','off')!='off':
         from .structure import structure_features_and_transition
         features,transition=structure_features_and_transition(song,candidates,seconds,
@@ -291,11 +347,16 @@ def _diagnostic_dataset(args, model):
         candidate_count=model.config.candidate_count,history_events=model.config.history_events,
         action_slots=model.config.action_slots,architecture_profile=model.config.architecture_profile,
         action_state_policy=model.config.action_state_policy,
+        timing_distribution_policy=getattr(model.config,'timing_distribution_policy','hierarchical_v1'),
+        density_feedback_policy=getattr(model.config,'density_feedback_policy','off'),
         head_timing_policy=model.config.head_timing_policy,
         motif_memory_policy=model.config.motif_memory_policy,
         motif_max_events=model.config.motif_max_events,
         structure_policy=getattr(model.config,'structure_policy','off'),
         structure_backend=getattr(model.config,'structure_backend','native'),
+        quality_inputs_enabled=getattr(model.config,'configuration_quality_policy','off')!='off',
+        quality_inputs_policy=getattr(model.config,'configuration_quality_policy','off'),
+        fixed_future_audio=getattr(model.config,'action_head_policy','flat_v1')=='compact_grouped_v3',
         preparation_workers=1,audio_cache_gb=.25)
 
 
@@ -325,6 +386,8 @@ def diagnose(args):
         item['history']=torch.from_numpy(id_map[item['history'].numpy()])
         if 'motif_ids' in item:
             item['motif_ids']=_map_catalog_ids(item['motif_ids'],id_map,'sample motif')
+        if 'quality_anchor_ids' in item:
+            item['quality_anchor_ids']=_map_catalog_ids(item['quality_anchor_ids'],id_map,'sample quality anchors')
         batch=collate_composer([item]);inputs=_inputs(batch,device)
         if not model.config.head_timing_dim:inputs.pop('head_timing',None)
         current_beats=_sample_candidate_beats(dataset,sample)
@@ -354,6 +417,8 @@ def diagnose(args):
                 decode_extra.update(state_base=probe['selected_state_base'],
                     state_keep=probe.get('selected_state_keep'))
             if 'previous_heads' in probe:decode_extra['previous_heads']=probe['previous_heads']
+            if 'echo_lane_bias' in probe:decode_extra['echo_heads']=probe['echo_lane_bias']
+            if 'button_load_features' in probe:decode_extra['button_load_features']=probe['button_load_features']
             atom_logits=model.decode_candidate(probe['candidate_context'],omitted_choice,
                 **decode_extra)['action_logits'][...,0,:].float()
             atom_probs=atom_logits.softmax(-1)

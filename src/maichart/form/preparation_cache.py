@@ -66,6 +66,30 @@ def _json_bytes(value):
                       separators=(',', ':')).encode('utf-8')
 
 
+def _annotation_inputs(record):
+    """Only annotation values used to prepare labels, spans and weights.
+
+    Source matching/hash verification happens before cache lookup. Dataset
+    namespaces, display names, reasons and chart IDs describe provenance; they
+    must not require recomputing identical acoustic/structural artifacts.
+    """
+    if record is None:return None
+    if not isinstance(record,dict):raise ValueError('Invalid cached annotation identity')
+    return {'label':record.get('label'), 'weight':float(record.get('weight',1.)),
+            'regions':[{'start_sec':float(row['start_sec']),'end_sec':float(row['end_sec']),
+                        'weight':float(row.get('weight',1.))} for row in record.get('regions',[])]}
+
+
+def _bind_cached_result(result,identity,source_path,audio_path):
+    """Return the reused artifact with this request's verified provenance."""
+    if source_path is not None:result['chart']['source']=str(Path(source_path).resolve())
+    if audio_path is not None:result['audio_path']=Path(audio_path).resolve()
+    record=identity.get('quality')
+    result['chart']['quality']=record
+    result['song']=(*result['song'][:7],record)
+    return result
+
+
 def _read_index_identity(path):
     """Read the small identity prefix without materializing cached chart data.
 
@@ -151,6 +175,7 @@ class PreparationCache:
         value.pop('code_sha256', None)
         value.pop('source', None)
         value.pop('audio', None)
+        if 'quality' in value:value['quality']=_annotation_inputs(value['quality'])
         # Legacy entries predate the explicit version; never default them to
         # a future SEMANTICS value when preprocessing changes again.
         value.setdefault('semantics', 'song_form_preparation_exact_geometry_v1')
@@ -307,8 +332,7 @@ class PreparationCache:
                         raise ValueError('Preparation arrays checksum mismatch')
                     with np.load(arrays_path, allow_pickle=False) as arrays:
                         result = _decode(metadata['result'], arrays)
-                    if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
-                    if audio_path is not None: result['audio_path'] = Path(audio_path).resolve()
+                    result=_bind_cached_result(result,identity,source_path,audio_path)
                     self._count('hits')
                     return result, 'hit'
                 direct_invalid = True
@@ -331,8 +355,7 @@ class PreparationCache:
                         continue
                     with np.load(arrays_path, allow_pickle=False) as arrays:
                         result = _decode(probe['result'], arrays)
-                    if source_path is not None: result['chart']['source'] = str(Path(source_path).resolve())
-                    if audio_path is not None: result['audio_path'] = Path(audio_path).resolve()
+                    result=_bind_cached_result(result,identity,source_path,audio_path)
                     self._promote_legacy(key, identity, candidate, probe)
                     self._count('hits')
                     return result, 'hit_legacy_identity'

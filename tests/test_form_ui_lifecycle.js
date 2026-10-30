@@ -25,7 +25,7 @@ function installGeometryControls(context) {
 test("migration controls are visible only for song-form resume", () => {
   const group = {hidden: true};
   const context = {
-    updateFamilyFields() {}, updateDatasetButtons() {}, updateTrainingModeHelp() {},
+    updateEventSetControls() {}, updateFamilyFields() {}, updateDatasetButtons() {}, updateTrainingModeHelp() {},
     currentTrainingMode: () => "resume", currentModelFamily: () => "song_form_v1",
     element: selector => selector === "#formResumeDataPolicyGroup" ? group : null,
     window: {},
