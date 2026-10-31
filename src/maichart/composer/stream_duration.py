@@ -48,8 +48,8 @@ def select_duration_context(context, indices):
             for key, value in context.items()}
 
 
-def _read_intervals(cache, queries, inverse, field='local'):
-    """Search one flattened bank, avoiding a full-song clock copy per event."""
+def prepare_interval_clock(cache):
+    """Prepare once per forward; clocks have no shape/slot dependence."""
     seconds = cache['seconds'].double()
     mask = cache['mask']
     lengths = mask.sum(-1).clamp_min(1)
@@ -57,16 +57,24 @@ def _read_intervals(cache, queries, inverse, field='local'):
     stride = last.max().clamp_min(0)+2.
     offsets = torch.arange(seconds.size(0), device=seconds.device, dtype=seconds.dtype)*stride
     times = seconds.masked_fill(~mask, stride-1.)+offsets[:, None]
+    return dict(lengths=lengths,last=last,offsets=offsets,times=times.flatten().contiguous(),width=seconds.size(1))
+
+
+def _read_intervals(cache, queries, inverse, field='local'):
+    """Search one flattened bank, avoiding a full-song clock copy per event."""
+    clock=cache.get('_duration_clock')
+    if clock is None:clock=prepare_interval_clock(cache)
+    lengths,last,offsets,times=(clock[key] for key in ('lengths','last','offsets','times'))
     clipped = queries.double().clamp_min(0.)
     clipped = torch.minimum(clipped, last[inverse, None, None])
     shifted = clipped+offsets[inverse, None, None]
     flat = shifted.flatten().contiguous()
-    right = torch.searchsorted(times.flatten().contiguous(), flat, right=True)
-    base = (inverse*seconds.size(1))[:, None, None].expand_as(queries).flatten()
+    right = torch.searchsorted(times, flat, right=True)
+    base = (inverse*clock['width'])[:, None, None].expand_as(queries).flatten()
     upper = base+lengths[inverse, None, None].expand_as(queries).flatten()-1
     right = torch.minimum(right, upper)
     left = torch.maximum(right-1, base)
-    lo, hi = times.flatten()[left], times.flatten()[right]
+    lo, hi = times[left], times[right]
     mix = ((flat-lo)/(hi-lo).clamp_min(1e-8)).clamp(0, 1).float()
     bank = cache[field].flatten(0, 1)
     a, b = bank[left], bank[right]
@@ -79,6 +87,7 @@ class DurationAudioScorer(nn.Module):
         self.score = nn.Linear(32 * 4 + 2, 1, bias=False)
         nn.init.zeros_(self.score.weight)
         self._tables = {}
+        self._candidate_indices = {}
         self._catalog_candidates = 0
         self._supported_candidates = 0
         for shape, slots in enumerate(codec.shape_catalog):
@@ -95,13 +104,18 @@ class DurationAudioScorer(nn.Module):
                 self._supported_candidates += sum(bool(row[4]) for row in table)
                 if not any(row[4] for row in table): continue
                 name = f'duration_{shape}_{slot}'
-                self.register_buffer(name, torch.tensor(table, dtype=torch.float32), persistent=False)
+                unique, inverse = torch.unique(torch.tensor(table, dtype=torch.float32), dim=0, return_inverse=True)
+                self.register_buffer(name, unique, persistent=False)
+                index_name = f'duration_index_{shape}_{slot}'
+                self.register_buffer(index_name, inverse, persistent=False)
                 self._tables[shape, slot] = name
+                self._candidate_indices[shape, slot] = index_name
 
     def forward(self, model, logits, shape, slot, context):
         name = self._tables.get((shape, slot))
         if context is None or name is None: return logits
-        table = getattr(self, name).to(logits)
+        # Logit autocast must not quantize physical interval boundaries to BF16.
+        table = getattr(self, name).to(device=logits.device, dtype=torch.float32)
         second = context['second']
         spb = context['seconds_per_beat']
         begin = second[:, None] + spb[:, None]*table[None, :, 0] + table[None, :, 1]
@@ -126,7 +140,8 @@ class DurationAudioScorer(nn.Module):
                               (end-begin)[..., None]), -1)
         supported = table[None, :, 4].bool() & context['valid'][:, None] & (end <= context['end_second'][:, None])
         residual = self.score(features).squeeze(-1).masked_fill(~supported, 0.)
-        return logits + residual.to(logits)
+        indices = getattr(self, self._candidate_indices[shape, slot])
+        return logits + residual.index_select(-1, indices).to(logits)
 
     def coverage(self):
         return {'supported': self._supported_candidates,

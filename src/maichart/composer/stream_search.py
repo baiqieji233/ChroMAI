@@ -17,6 +17,29 @@ from maichart.generation.note_repair import candidate_note_edits
 from .stream_data import NOTE, WAIT, StreamStep, second_at_beat
 
 
+class PhraseSearchExhausted(ValueError):
+    """Fail closed while retaining reproducible private-search evidence."""
+    def __init__(self,message,diagnostics):
+        super().__init__(message)
+        self.diagnostics=diagnostics
+
+
+def _failure_evidence(result):
+    guard=result['guard']
+    def point(p):return dict(beat=str(p.beat),text=p.note_text)
+    return dict(reason=result['reason'],cursor=str(result['cursor']),
+        anchor_second=result.get('anchor_second'),retries=result.get('retries'),
+        timing_retries=result.get('timing_retries'),forced_waits=result.get('forced_waits'),
+        seed=result.get('seed'),guard_last_reason=getattr(guard,'last_reason',None),
+        guard_reasons=dict(guard.reason_counts),
+        last_proposal=point(guard.last_proposal) if getattr(guard,'last_proposal',None) is not None else None,
+        failure_trials=[dict(point=point(p),conflicts=[dict(kind=x.conflict_type,time=x.time,
+            evidence=x.evidence,notes=[dict(beat=str(n.beat),raw=n.raw) for n in x.notes]) for x in issues])
+            for p,issues in getattr(guard,'failure_trials',())],
+        steps=[dict(kind=s.kind,start=str(s.start),end=str(s.end),start_second=s.start_second,
+            end_second=s.end_second,text=s.text) for s in result['steps']])
+
+
 def _points(steps):
     return [EventPoint(s.end,s.text) for s in steps if s.kind==NOTE]
 
@@ -103,9 +126,17 @@ def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None
         step_index=next((i for i,s in enumerate(steps) if s.kind==NOTE and s.end==point.beat and s.text==point.note_text),None)
         if step_index is None:continue
         if withdraw:
-            # The old onset and every dependent future step are discarded.
-            if improves([p for i,p in enumerate(trial_points) if i!=point_index]):
-                yield steps[:step_index],dict(operation='withdraw_sustain_and_regenerate',beat=str(point.beat),raw=event.raw)
+            # Withdraw exactly the implicated child. Same-onset protected and
+            # unrelated children remain authoritative while the suffix is rebuilt.
+            remaining='/'.join(raw for key,raw in texts.items() if key[0]==point_index and key!=event.source_id)
+            counter=[EventPoint(p.beat,remaining) if i==point_index else p
+                     for i,p in enumerate(trial_points) if i!=point_index or remaining]
+            if improves(counter):
+                prefix=list(steps[:step_index])
+                if remaining:
+                    old=steps[step_index]
+                    prefix.append(StreamStep(NOTE,old.start,old.end,old.start_second,old.end_second,remaining))
+                yield prefix,dict(operation='withdraw_sustain_and_regenerate',beat=str(point.beat),raw=event.raw)
             continue
         edits=[edit for edit in candidate_note_edits(event,None,events,song.tempo,song.first)
                if edit['operation']=='shorten_hold']
@@ -154,6 +185,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
     if not 0<commit<=write or seconds<=0 or not 0<=strength<=2 or repair_budget<0 or rollback_budget<0 or int(getattr(args,'phrase_step_budget',256))<1:
         raise ValueError('phrase budgets must be positive; commit <= write; repair/rollback/strength nonnegative')
     committed=[];retained=[];records=[];phrase_index=0;repairs_used=rollbacks_used=0
+    current_retries_used=0
     native_metrics=dict(native_calls=0,native_sec=0.);lifetimes={}
     duration_catalog={}
     for atom in codec.atom_catalog if codec is not None else ():
@@ -168,6 +200,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
             seed=(int(args.seed)+phrase_index*1000003+attempt*9176)%(2**63-1);attempt+=1
             try:
                 result=rollout(prefix,seed,target,deadline)
+                result['seed']=seed
                 physical,hard=_gate(result,song,native_metrics,lifetimes)
             except ValueError as exc:
                 candidate_errors.append(dict(seed=seed,error=str(exc)))
@@ -192,12 +225,14 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
         if not valid:
             # Retry only the current unaccepted event from a private accepted
             # prefix. Keep its real timing/type distribution and temperature.
-            retry_sources=list(failures)
             for retry_index in range(2):
-                if valid or not retry_sources or repairs_used>=repair_budget or time.perf_counter()>=deadline:break
-                failed=retry_sources[retry_index%len(retry_sources)]
-                if failed['reason']!='physical_dead_end':continue
-                repairs_used+=1
+                retry_sources=[failed for failed in failures if failed['reason']=='physical_dead_end']
+                if valid or not retry_sources or time.perf_counter()>=deadline:break
+                # A retry may have advanced before finding its next rejected
+                # event. Retain that private progress instead of repeatedly
+                # restarting from the original failure snapshot.
+                failed=max(retry_sources,key=lambda item:(item['cursor'],len(item['steps'])))
+                current_retries_used+=1
                 run(list(failed['steps']))
                 retry_record=dict(operation='current_event_retry',beat=str(failed['cursor']),accepted=bool(valid))
                 current_event_retries.append(retry_record)
@@ -219,7 +254,19 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                     rollbacks_used+=1;run(prefix)
                     if valid:changes.append(edit);break
         if not valid:
-            raise ValueError(f'phrase search exhausted at beat {start}: no complete physically feasible candidate; chart not exported')
+            evidence=dict(start_beat=str(start),target_beat=str(target),commit_budget_end_beat=str(commit_end),
+                candidate_count=count,attempted_rollouts=attempt,repairs_used=repairs_used,repair_budget=repair_budget,
+                rollbacks_used=rollbacks_used,rollback_budget=rollback_budget,
+                current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
+                time_budget_sec=seconds,deadline_exhausted=time.perf_counter()>=deadline,
+                candidate_errors=candidate_errors,current_event_retries=current_event_retries,
+                recent_failures=[_failure_evidence(failed) for failed in failures[-8:]],
+                committed_steps=[dict(kind=s.kind,start=str(s.start),end=str(s.end),start_second=s.start_second,
+                    end_second=s.end_second,text=s.text) for s in committed],
+                retained_tail=[dict(kind=s.kind,start=str(s.start),end=str(s.end),start_second=s.start_second,
+                    end_second=s.end_second,text=s.text) for s in retained],
+                prior_phrases=records,search_totals={**aggregate,**native_metrics})
+            raise PhraseSearchExhausted(f'phrase search exhausted at beat {start}: no complete physically feasible candidate; chart not exported',evidence)
         _,winner,score=max(valid,key=lambda item:item[0])
         previous_length=sum(step.end<=start for step in winner['steps'])
         committed=_cut(winner['steps'],commit_end,clock,previous_length)
@@ -242,6 +289,8 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
             break
     return committed,dict(policy='phrase_v1',candidate_count=count,stop_reason='audio_end',phrases=records,
         repairs_used=repairs_used,rollbacks_used=rollbacks_used,search_totals={**aggregate,**native_metrics},
+        current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
+        repair_counter_scope='historical_sustain_edit_attempts_excludes_current_event_retry',
         native_metric_scope='candidate_gate_and_edit_counterfactuals_excludes_proposal_guard',
         capabilities=dict(shared_readonly_audio_cache=True,independent_prefix_guard_curve_rng=True,
             complete_equal_span_selection=True,full_state_replay=True,sustain_withdrawal=True,retained_winner_tail=True,

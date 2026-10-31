@@ -10,6 +10,14 @@ import torch
 from maichart.composer import stream_train
 
 
+def synthetic_bank(song, clock, audio_grid_seconds=.01):
+    """Deterministic acoustic contract for the tiny 120-BPM training fixtures."""
+    seconds=torch.arange(0.,song.audio.duration_sec,audio_grid_seconds,dtype=torch.float64)
+    bands=torch.arange(1,239,dtype=torch.float32)
+    features=torch.sin(seconds.float()[:,None]*bands[None]*.1)
+    return features,seconds,seconds*2.
+
+
 class Rows:
     def __init__(self):self.samples=[(i//3,i,i+1,1.) for i in range(11)]
     def __len__(self):return len(self.samples)
@@ -82,7 +90,10 @@ def test_audio_grid_fresh_default_and_continuation_inheritance():
 
 def test_dataset_train_and_validation_receive_same_audio_grid(monkeypatch):
     captured=[]
-    monkeypatch.setattr(stream_train,'StreamDataset',lambda *a,**kw:captured.append(kw))
+    def capture(*args,**kwargs):
+        captured.append(kwargs)
+        return SimpleNamespace()
+    monkeypatch.setattr(stream_train,'StreamDataset',capture)
     args=stream_train.parser().parse_args(['--manifest','train.json','--checkpoint-dir','unused',
                                          '--validation-manifest','dev.json','--audio-grid-seconds','.02'])
     stream_train._dataset(args)
@@ -107,6 +118,8 @@ def test_audio_grid_is_part_of_dataset_fingerprint(tmp_path):
 
 
 def test_interrupted_cpu_training_resumes_exact_optimizer_rng_and_cursor(tmp_path,monkeypatch):
+    from maichart.composer import stream_data
+    monkeypatch.setattr(stream_data,'build_audio_bank',synthetic_bank)
     from maichart.composer.stream_data import StreamDataset
     from maichart.composer import stream_checkpoint
     from maichart.event_timing import EventPoint,EventTempo
@@ -115,8 +128,11 @@ def test_interrupted_cpu_training_resumes_exact_optimizer_rng_and_cursor(tmp_pat
     points=[EventPoint(Fraction(i,2),str(i%8+1)) for i in range(8)]
     base=SimpleNamespace(songs=[(song,points,12.,1.,None,torch.zeros(16),(),None)])
     def dataset(args,*,codec=None,delta_vocab=None,validation=False):
-        return StreamDataset(base=base,codec=codec,delta_vocab=delta_vocab,lead_in=4,targets=2,
-            history_window_policy=args.history_window_policy,continuation_policy=args.continuation_policy)
+        result=StreamDataset(base=base,codec=codec,delta_vocab=delta_vocab,lead_in=4,targets=2,
+            history_window_policy=args.history_window_policy,continuation_policy=args.continuation_policy,
+            phrase_context_policy=args.phrase_context_policy)
+        result.physical_policy=args.physical_policy
+        return result
     monkeypatch.setattr(stream_train,'_dataset',dataset)
     monkeypatch.setattr(stream_train,'_condition_defaults',lambda ds:{})
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')
@@ -145,8 +161,16 @@ def test_interrupted_cpu_training_resumes_exact_optimizer_rng_and_cursor(tmp_pat
     left=stream_checkpoint.read(complete/'composer_last.pt')
     right=stream_checkpoint.read(interrupted/'composer_last.pt')
     assert left['optimizer_steps']==right['optimizer_steps']
+    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='causal_phrase_v1'
+    assert left['model_config']['duration_audio_policy']==right['model_config']['duration_audio_policy']=='interval_v1'
     assert left['training_state']['batch_in_epoch']==right['training_state']['batch_in_epoch']
     assert torch.equal(left['training_state']['torch_rng'],right['training_state']['torch_rng'])
+    assert left['training_state']['python_rng']==right['training_state']['python_rng']
+    left_numpy,right_numpy=left['training_state']['numpy_rng'],right['training_state']['numpy_rng']
+    assert left_numpy[0]==right_numpy[0] and np.array_equal(left_numpy[1],right_numpy[1])
+    assert left_numpy[2:]==right_numpy[2:]
+    assert left['optimizer_state_dict']['param_groups']==right['optimizer_state_dict']['param_groups']
+    assert left['optimizer_state_dict']['state'].keys()==right['optimizer_state_dict']['state'].keys()
     for key,value in left['model_state_dict'].items():
         torch.testing.assert_close(value,right['model_state_dict'][key],atol=0,rtol=0)
     for key,state in left['optimizer_state_dict']['state'].items():
@@ -208,11 +232,31 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         'literal_stop_head.weight','literal_stop_head.bias','literal_type_embedding.weight',
         'decoder.norm.weight','decoder.norm.bias',
         'music_exit_head.0.weight','music_exit_head.0.bias','music_exit_head.2.weight','music_exit_head.2.bias',
+        'duration_audio.score.weight','phrase_context.null_reference',
     }
+    for name in ('audio','writing','shared','intent','progress'):
+        for layer in (0,2):
+            for tensor in ('weight','bias'):expected.add(f'phrase_context.{name}.{layer}.{tensor}')
+    for layer in (0,1):
+        for tensor in ('weight','bias'):expected.add(f'phrase_context.style.{layer}.{tensor}')
+    for name in ('query','key','predict','tracking','tracking_acoustic'):
+        for tensor in ('weight','bias'):expected.add(f'phrase_context.{name}.{tensor}')
+    for name in ('intent_output','progress_output','style_output','tracking_output'):
+        expected.add(f'phrase_context.{name}.weight')
     assert additions==expected
     for key in additions:
         value=upgraded.state_dict()[key]
-        if key=='decoder.norm.weight':
+        if key.startswith('phrase_context.'):
+            assert torch.isfinite(value).all(),key
+            if key=='phrase_context.null_reference' or '_output.weight' in key:
+                assert torch.count_nonzero(value)==0,key
+            elif key.endswith('.2.weight') or key=='phrase_context.style.1.weight':
+                assert torch.equal(value,torch.ones_like(value)),key
+            elif key.endswith('.2.bias') or key=='phrase_context.style.1.bias':
+                assert torch.count_nonzero(value)==0,key
+            elif key.endswith('weight'):
+                assert torch.count_nonzero(value)>0,key
+        elif key=='decoder.norm.weight':
             assert torch.equal(value,torch.ones_like(value)),key
         elif key=='music_exit_head.0.weight':
             assert torch.isfinite(value).all(),key
@@ -228,6 +272,8 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
 
 
 def test_cpu_finetune_inherits_parent_shape_resets_adam_and_records_parent_stage(tmp_path,monkeypatch):
+    from maichart.composer import stream_data
+    monkeypatch.setattr(stream_data,'build_audio_bank',synthetic_bank)
     from maichart.composer.stream_data import StreamDataset
     from maichart.composer import stream_checkpoint
     from maichart.event_timing import EventPoint,EventTempo
@@ -235,8 +281,11 @@ def test_cpu_finetune_inherits_parent_shape_resets_adam_and_records_parent_stage
     points=[EventPoint(Fraction(i,2),str(i%8+1)) for i in range(8)]
     base=SimpleNamespace(songs=[(song,points,12.,1.,None,torch.zeros(16),(),None)])
     def dataset(args,*,codec=None,delta_vocab=None,validation=False):
-        return StreamDataset(base=base,codec=codec,delta_vocab=delta_vocab,lead_in=args.history_events,targets=args.rollout_steps,
-            history_window_policy=args.history_window_policy,continuation_policy=args.continuation_policy)
+        result=StreamDataset(base=base,codec=codec,delta_vocab=delta_vocab,lead_in=args.history_events,targets=args.rollout_steps,
+            history_window_policy=args.history_window_policy,continuation_policy=args.continuation_policy,
+            phrase_context_policy=args.phrase_context_policy)
+        result.physical_policy=args.physical_policy
+        return result
     monkeypatch.setattr(stream_train,'_dataset',dataset)
     monkeypatch.setattr(stream_train,'_condition_defaults',lambda ds:{})
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')

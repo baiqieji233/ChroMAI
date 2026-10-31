@@ -886,7 +886,9 @@ class StreamComposer(nn.Module):
             attention = attention+strength*(2*self.phrase_context.tracking_acoustic(intent).sigmoid()-1)
         inv = inverse[:, None].expand_as(event_seconds)
         end = seconds.gather(1, (lengths-1).clamp_min(0)[:, None]).expand_as(event_seconds)
-        return dict(cache=audio_cache, inverse=inv.flatten(), second=event_seconds.float().flatten(),
+        from .stream_duration import prepare_interval_clock
+        duration_cache=dict(audio_cache,_duration_clock=prepare_interval_clock(audio_cache))
+        return dict(cache=duration_cache, inverse=inv.flatten(), second=event_seconds.float().flatten(),
                     seconds_per_beat=spb.flatten(), valid=valid.flatten(),
                     attention=attention.flatten(0, 1), end_second=end.float().flatten())
 

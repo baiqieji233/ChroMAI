@@ -112,6 +112,19 @@ class _Curve:
         return self.counts[region]+heads<=limit
     def commit(self,second,heads):self.counts[int(second//2)]+=heads
 
+
+def replay_stream_prefix(prefix,context_factory,guard_factory,base_curve,clock):
+    """Rebuild every prefix-dependent state without sharing branch mutations."""
+    from copy import copy
+    context=context_factory();guard=guard_factory();curve=copy(base_curve);curve.counts=Counter()
+    points=[]
+    for step in prefix:
+        context.commit(step)
+        if step.kind==NOTE:
+            point=EventPoint(step.end,step.text);points.append(point);guard.commit(point)
+            curve.commit(second_at_beat(clock,step.end),len(event_metadata(step.text).heads))
+    return context,guard,curve,points
+
 @torch.no_grad()
 def continuation_observation(steps):
     """Describe committed runs without a musical-quality label or rejection."""
@@ -292,21 +305,17 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         audio_bank=context.bank
         def rollout(prefix,seed,stop_beat,deadline=None):
             nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator
-            context=StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
-                audio_bank=audio_bank,audio_grid_seconds=model.config.audio_grid_seconds,
-                history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
-                continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
-                phrase_context_policy=getattr(model.config,'phrase_context_policy','off'))
-            guard=EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
-                touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,
-                physical_policy=getattr(args,'physical_policy','runtime_hard_v2'))
-            curve=copy(base_curve);curve.counts=Counter()
-            points=[]
-            for step in prefix:
-                context.commit(step)
-                if step.kind==NOTE:
-                    point=EventPoint(step.end,step.text);points.append(point);guard.commit(point)
-                    curve.commit(second_at_beat(clock,step.end),len(event_metadata(step.text).heads))
+            def context_factory():
+                return StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
+                    audio_bank=audio_bank,audio_grid_seconds=model.config.audio_grid_seconds,
+                    history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
+                    continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
+                    phrase_context_policy=getattr(model.config,'phrase_context_policy','off'))
+            def guard_factory():
+                return EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
+                    touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,
+                    physical_policy=getattr(args,'physical_policy','runtime_hard_v2'))
+            context,guard,curve,points=replay_stream_prefix(prefix,context_factory,guard_factory,base_curve,clock)
             cursor=prefix[-1].end if prefix else Fraction(0)
             anchor_second=second_at_beat(clock,cursor)
             waits=sum(s.kind==WAIT for s in prefix);retries=timing_retries=forced_waits=0

@@ -716,9 +716,11 @@ class StreamDataset(Dataset):
             phrase_index = self._phrase_index(song)
             row.update(phrase_index.rows(stream,first,end,supervise=True))
             trusted = row['loss_mask'] & row['sample_weight'].gt(0)
-            trusted &= torch.tensor([bool(phrase_index.supervision_valid[phrase_index.segment(s.start)]) for s in sequence])
+            segments = np.clip(np.searchsorted(phrase_index.boundaries,row['step_beat'].numpy(),side='right')-1,
+                               0,len(phrase_index.supervision_valid)-1)
+            trusted &= torch.from_numpy(phrase_index.supervision_valid[segments])
             row['target_phrase_mask'] &= trusted
-            counts = torch.tensor([max(1,int(phrase_index.supervision_counts[phrase_index.segment(s.start)])) for s in sequence],dtype=torch.float32)
+            counts = torch.from_numpy(np.maximum(1,phrase_index.supervision_counts[segments]).astype(np.float32))
             row['target_phrase_weight'] *= row['sample_weight']/counts
         return row
 
@@ -921,9 +923,8 @@ class StreamInferenceContext:
         result['song_inverse'] = torch.zeros(1,dtype=torch.long)
         if self._phrase is not None:
             first_query = len(self._committed)-length+1
-            phrase_rows = [self._phrase.row(first_query+i,float(result['step_beat'][0,i])) for i in range(length)]
-            for key in PHRASE_ROW_FIELDS:
-                result[key] = torch.stack([row[key] for row in phrase_rows]).unsqueeze(0)
+            phrase_rows = self._phrase.rows_at(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
+            result.update({key:value.unsqueeze(0) for key,value in phrase_rows.items()})
         return result
 
 

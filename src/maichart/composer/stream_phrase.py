@@ -186,18 +186,20 @@ class PhraseIndex:
         self.lanes = [None]*count
         self.lane_history = [[] for _ in range(count)]
         self.count = 0
+        self._feature_cache = {}
         for step in steps: self.append(step)
 
     @property
     def nbytes(self):
         # Include Python/list overhead conservatively in the cache budget.
-        return self.count*(PHRASE_FEATURE_DIM*4+320)+len(self.boundaries)*256
+        return self.count*(PHRASE_FEATURE_DIM*8+336)+len(self.boundaries)*256
 
     def segment(self, beat):
         return min(len(self.indices)-1, max(0, bisect_right(self.boundaries, float(beat))-1))
 
     def append(self, step):
         segment = self.segment(step.end)
+        self._feature_cache.pop(segment,None)
         # EOS has no event and is only a supervision query.
         if step.kind in (2, 3):
             value, lane = _event_vector(step, self.boundaries[segment], self.boundaries[segment+1], self.lanes[segment])
@@ -219,6 +221,7 @@ class PhraseIndex:
             result.indices.append(indices[:keep]); result.prefix.append(values[:keep])
             result.lane_history.append(lanes[:keep]); result.lanes.append(lanes[keep-1] if keep else None)
         result.count = begin
+        result._feature_cache = {}
         for step in steps[begin:end]: result.append(step)
         return result
 
@@ -245,5 +248,65 @@ class PhraseIndex:
             target_phrase_mask=torch.tensor(bool(supervise)), target_phrase_weight=torch.tensor(1. if supervise else 0.))
 
     def rows(self, steps, first, end, *, supervise=False):
-        rows = [self.row(q, steps[q].start, supervise=supervise) for q in range(first, end)]
-        return {key: torch.stack([row[key] for row in rows]) for key in PHRASE_ROW_FIELDS}
+        queries = np.arange(first,end,dtype=np.int64)
+        cursors = np.fromiter((float(step.start) for step in steps[first:end]),dtype=np.float64,count=end-first)
+        return self.rows_at(queries,cursors,supervise=supervise)
+
+    def _packed_features(self,segment):
+        packed = self._feature_cache.get(segment)
+        if packed is None:
+            indices = np.asarray(self.indices[segment],dtype=np.int64)
+            if len(indices):
+                raw = np.stack(self.prefix[segment])
+                features = np.sign(raw)*np.log1p(np.abs(raw))
+            else:features = np.empty((0,PHRASE_FEATURE_DIM),dtype=np.float32)
+            packed = indices,features
+            self._feature_cache[segment] = packed
+        return packed
+
+    def rows_at(self,queries,cursors,*,supervise=False):
+        """Bulk CPU extraction: ten NumPy allocations, no per-query Torch ops.
+
+        Prefix selection remains strictly index < query, including references.
+        Cached descriptors only depend on committed/raw events; visibility is
+        applied on every gather, so a packed full training phrase cannot leak.
+        """
+        queries = np.asarray(queries,dtype=np.int64)
+        cursors = np.asarray(cursors,dtype=np.float64)
+        segments = np.clip(np.searchsorted(self.boundaries,cursors,side='right')-1,0,len(self.indices)-1)
+        length = len(queries)
+        progress = np.zeros((length,PHRASE_FEATURE_DIM),dtype=np.float32)
+        memory = np.zeros((length,PHRASE_MEMORY_SLOTS,PHRASE_FEATURE_DIM),dtype=np.float32)
+        memory_start = np.zeros((length,PHRASE_MEMORY_SLOTS),dtype=np.float64)
+        memory_end = np.zeros_like(memory_start)
+        memory_mask = np.zeros((length,PHRASE_MEMORY_SLOTS),dtype=np.bool_)
+        target = np.zeros_like(progress)
+        def gather(segment,selected):
+            indices,features = self._packed_features(segment)
+            positions = np.searchsorted(indices,selected,side='left')-1
+            result = np.zeros((len(selected),PHRASE_FEATURE_DIM),dtype=np.float32)
+            valid = positions>=0
+            if valid.any():result[valid] = features[positions[valid]]
+            return result
+        for segment in np.unique(segments):
+            group = np.flatnonzero(segments==segment)
+            selected = queries[group]
+            progress[group] = gather(segment,selected)
+            if supervise:
+                indices,features = self._packed_features(segment)
+                if len(indices):target[group] = features[-1]
+            for slot,reference in enumerate(self.references[segment]):
+                memory_start[group,slot] = self.boundaries[reference]
+                memory_end[group,slot] = self.boundaries[reference+1]
+                memory_mask[group,slot] = True
+                indices,features = self._packed_features(reference)
+                if len(indices) and np.all(selected>indices[-1]):
+                    memory[group,slot] = features[-1]
+                elif len(indices):memory[group,slot] = gather(reference,selected)
+        arrays = dict(phrase_start_beat=self.boundaries[segments].copy(),
+            phrase_end_beat=self.boundaries[segments+1].copy(),phrase_progress=progress,
+            phrase_memory_features=memory,phrase_memory_start_beat=memory_start,
+            phrase_memory_end_beat=memory_end,phrase_memory_mask=memory_mask,
+            target_phrase_features=target,target_phrase_mask=np.full(length,supervise,dtype=np.bool_),
+            target_phrase_weight=np.full(length,1. if supervise else 0.,dtype=np.float32))
+        return {key:torch.from_numpy(value) for key,value in arrays.items()}

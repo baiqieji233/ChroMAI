@@ -988,7 +988,7 @@
 <label class="field">试写跨度（拍）<input id="composerPhraseWriteBeats" type="number" min="0.25" step="0.25" value="8"></label>
 <label class="field">提交预算（拍）<input id="composerPhraseCommitBeats" type="number" min="0.25" step="0.25" value="4"><small>只在真实事件边界提交，不把预算跨度当作小节。</small></label>
 <label class="field">每候选最大步数<input id="composerPhraseStepBudget" type="number" min="1" value="256"></label>
-<label class="field">全曲最小编辑预算<input id="composerPhraseRepairBudget" type="number" min="0" value="8"></label>
+<label class="field">全曲历史编辑预算<input id="composerPhraseRepairBudget" type="number" min="0" value="8"><small>用于修改旧 Hold／Slide；当前事件的有限重采单独计数。</small></label>
 <label class="field">全曲撤回重采预算<input id="composerPhraseRollbackBudget" type="number" min="0" value="4"><small>必要时撤回涉事旧Hold/Slide，并从之前重建后续状态。</small></label>
 <label class="field">每短句时间预算（秒）<input id="composerPhraseTimeBudgetSec" type="number" min="1" value="30"></label>
 </div></details></div>
