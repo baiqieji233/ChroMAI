@@ -98,7 +98,7 @@ test('learning repair payload maps actual policies and checkpoint resume is lock
   const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
   c.applyEventSetFreshDefaults();
   let payload=c.chartComposerTrainingPayload();assert.equal(payload.continuation_policy,'auto');assert.equal(payload.lane_load_policy,'auto');assert.equal(payload.recovery_policy,'auto');assert.equal(payload.prefix_augmentation_rate,.15);assert.equal(payload.generation_eval_temperature,.65);assert.equal(payload.transition_exit_weight,.5);
-  const legacyPolicies={decoder_policy:'postnorm_v1',window_balance_policy:'equal_window_v1',
+  const legacyPolicies={transition_policy:'off',decoder_policy:'postnorm_v1',window_balance_policy:'equal_window_v1',
     timing_group_policy:'phase_only_v1',literal_output_policy:'flat_family_v1',
     history_window_policy:'rolling_legacy_v1',continuation_policy:'off',sensor_load_policy:'button_only_v1',
     gap_continuation_policy:'additive_v1',motion_continuation_policy:'motion_continuation_v1',lane_load_policy:'off',
@@ -117,9 +117,10 @@ test('learning repair payload maps actual policies and checkpoint resume is lock
 test('resume preserves explicit architecture policies instead of replacing them with new defaults',()=>{
   const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
   c.currentTrainingMode=()=> 'resume';
-  const policies={decoder_policy:'prenorm_independent_v2',window_balance_policy:'sqrt_window_v2',
+  const policies={transition_policy:'music_exit_v1',decoder_policy:'prenorm_independent_v2',window_balance_policy:'sqrt_window_v2',
     timing_group_policy:'phase_gap_v2',literal_output_policy:'type_blocks_v1',
-    timing_output_policy:'absolute_grid_v1',timing_grid_audio_policy:'candidate_pool_v1',event_family_policy:'audio_prior_transition_v3'};
+    timing_output_policy:'absolute_grid_v1',timing_grid_audio_policy:'query_pool_v2',event_family_policy:'audio_prior_transition_v3',
+    prefix_augmentation_input_policy:'musical_loop_recovery_v5',recovery_policy:'greedy_mixed_v3'};
   c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',
     model_config:{architecture_profile:'event_set_stream_v1',...policies},args:{}},'resume');
   const payload=c.chartComposerTrainingPayload();
@@ -139,4 +140,23 @@ test('music type budget is submitted, inherited on resume and preserved on finet
   const payload=c.chartComposerTrainingPayload();
   assert.equal(payload.event_family_audio_weight,.4);assert.equal(payload.event_family_policy,'audio_semantic_v2');
   assert.equal(e('#composerEventFamilyAudioWeight').disabled,true);
+});
+
+test('resume retains the residual musical exit version recorded by the checkpoint',()=>{
+  for(const transitionPolicy of ['music_exit_v2','music_exit_v3']){
+  for(const prefixPolicy of ['musical_loop_recovery_v6','musical_loop_recovery_v7','musical_loop_recovery_v8']){
+    const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+    c.currentTrainingMode=()=> 'resume';
+    c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',
+      model_config:{architecture_profile:'event_set_stream_v1',transition_policy:transitionPolicy,
+        prefix_augmentation_input_policy:prefixPolicy,recovery_policy:'greedy_mixed_v4',
+        timing_grid_audio_policy:'query_pool_v3'},args:{}},'resume');
+    const payload=c.chartComposerTrainingPayload();
+    assert.equal(payload.transition_policy,transitionPolicy);
+    assert.equal(payload.prefix_augmentation_input_policy,prefixPolicy);
+    assert.equal(payload.recovery_policy,'greedy_mixed_v4');
+    assert.equal(payload.timing_grid_audio_policy,'query_pool_v3');
+    assert.equal(e('#composerLearningPolicy').disabled,true);
+  }
+  }
 });

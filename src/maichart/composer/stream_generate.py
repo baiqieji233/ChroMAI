@@ -211,6 +211,13 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     families=model.family_context_at(cache,actual_seconds,batch['song_inverse'],batch)
                     proposal['family_context']=families['full'][0,-1]
                     if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
+                if getattr(model.config,'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+                    transition=model.transition_logits_at(cache,actual_seconds,batch['song_inverse'],batch)[0,-1]
+                    proposal['motion_keep_logit']=transition[1]
+                    proposal['motion_reference_shape']=result['motion_reference_shape'][0,-1]
+                    proposal['template_keep_logit']=transition[2]
+                    proposal['template_reference_shape']=torch.where(batch['history_kind'][0,-1].eq(NOTE),
+                        batch['history_shape'][0,-1],batch['history_shape'].new_tensor(-1))
                 return proposal
             accepted,delta_id,failed,failed_times=sample_timed_event(model,timing,deltas,cursor,at_time,
                 int(result['reference_phase'][0,-1]),result.get('reference_phase_mask',None)[0,-1]
@@ -218,6 +225,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 pointer_temperature=args.pointer_temperature,action_temperature=args.action_temperature,
                 timing_grid_ids=result.get('timing_grid_ids'),
                 timing_group_count=result.get('timing_group_count'),
+                timing_keep_mask=result.get('timing_keep_mask'),
                 repeat_delta_id=int(result['repeat_delta_id'][0,-1]) if 'repeat_delta_id' in result else -1,
                 motion_phase_distribution=result['motion_phase_distribution'][0,-1]
                     if 'motion_phase_distribution' in result else None,
@@ -249,6 +257,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         history_window_policy=model.config.history_window_policy,continuation_policy=model.config.continuation_policy,
         timing_output_policy=model.config.timing_output_policy,
         timing_group_policy=model.config.timing_group_policy,
+        transition_policy=getattr(model.config,'transition_policy','off'),
         timing_phase_count=len(model.timing_grid.phase_catalog) if hasattr(model,'timing_grid') else 0,
         event_family_policy=model.config.event_family_policy,
         event_family_audio_weight=getattr(model.config,'event_family_audio_weight',0.),

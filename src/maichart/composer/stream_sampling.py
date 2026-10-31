@@ -58,14 +58,21 @@ def delta_sampling_logits(logits,temperature,repeat_delta_id=-1):
 
 def sample_guarded_event(model, context, reference_phase, beat, guard, generator,
                          *, temperature=.8, attempts=8, accepts_extra=None, reference_phase_mask=None,
-                         motion_phase_distribution=None,button_load=None,family_context=None,family_logits=None):
+                         motion_phase_distribution=None,button_load=None,family_context=None,family_logits=None,
+                         motion_keep_logit=None,motion_reference_shape=None,
+                         template_keep_logit=None,template_reference_shape=None):
     """Try at most attempts complete events; commit the accepted point once."""
     if not 1 <= attempts <= 8:
         raise ValueError('Guarded action attempts must be between 1 and 8')
     blocked = set()
     permanent = set()
-    family=None
-    if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'):
+    family=None;template_keep_override=None
+    if getattr(getattr(model,'config',None),'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+        family,template_keep_override=model.sample_event_intent(context,family_logits=family_logits,
+            template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape,
+            temperature=temperature,generator=generator)
+        if family is None:return None,0
+    elif getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'):
         if family_context is None and family_logits is None:raise ValueError('Audio semantic decoding requires candidate music context')
         options={'family_logits':family_logits} if family_logits is not None else {}
         family=model.sample_event_family(family_context,temperature=temperature,generator=generator,**options)
@@ -79,6 +86,11 @@ def sample_guarded_event(model, context, reference_phase, beat, guard, generator
         if motion_phase_distribution is not None:
             options['motion_phase_distribution'] = motion_phase_distribution
         if button_load is not None:options['button_load']=button_load
+        if motion_keep_logit is not None:options['motion_keep_logit']=motion_keep_logit
+        if motion_reference_shape is not None:options['motion_reference_shape']=motion_reference_shape
+        if template_keep_logit is not None:options['template_keep_logit']=template_keep_logit
+        if template_reference_shape is not None:options['template_reference_shape']=template_reference_shape
+        if template_keep_override is not None:options['template_keep_override']=template_keep_override
         if blocked:
             options['blocked_shape_phases'] = blocked
         event = model.decode_event(context, **options)

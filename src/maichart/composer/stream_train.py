@@ -16,24 +16,25 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
+    'transition_policy': ('music_exit_v3','music_exit_v2','music_exit_v1','off'),
     'decoder_policy': ('prenorm_independent_v2','postnorm_v1'),
     'window_balance_policy': ('sqrt_window_v2','equal_window_v1'),
     'timing_output_policy': ('absolute_grid_v1','relative_delta_v1'),
-    'timing_grid_audio_policy': ('candidate_pool_v1','off'),
+    'timing_grid_audio_policy': ('query_pool_v3','query_pool_v2','candidate_pool_v1','off'),
     'timing_group_policy': ('phase_gap_v2','phase_only_v1'),
     'literal_output_policy': ('type_blocks_v1','flat_family_v1'),
     'event_family_policy': ('audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
-    'prefix_augmentation_input_policy': ('phase_recovery_v4','causal_window_config_time_first_decision_v3'),
+    'prefix_augmentation_input_policy': ('musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
     'history_window_policy': ('block_aligned_v2','rolling_legacy_v1'),
     'continuation_policy': ('pattern_runs_v2','typed_runs_v1','off'),
     'sensor_load_policy': ('separate_touch_v1','button_only_v1'),
     'gap_continuation_policy': ('probability_v2','additive_v1'),
     'motion_continuation_policy': ('context_motion_v3','motion_distinct_v2','motion_continuation_v1','off'),
     'lane_load_policy': ('direct_buttons_v1','off'),
-    'recovery_policy': ('mixed_exit_v2','persistent_v1'),
+    'recovery_policy': ('greedy_mixed_v4','greedy_mixed_v3','mixed_exit_v2','persistent_v1'),
 }
 
-LEGACY_LEARNING_POLICIES = dict(decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
+LEGACY_LEARNING_POLICIES = dict(transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
     prefix_augmentation_input_policy='causal_window_config_time_first_decision_v3',
     history_window_policy='rolling_legacy_v1',continuation_policy='off',
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
@@ -69,8 +70,8 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
 
 
 def upgrade_learning_stage(model, policies, device='cpu'):
-    # New projections are zero initialized. Their temporary constructor draws
-    # must not shift dropout RNG when comparing matched stage interventions.
+    # New output interfaces start at zero; the small musical exit MLP keeps
+    # random hidden features. Temporary draws must not shift dropout RNG.
     with torch.random.fork_rng(devices=[]):
         upgraded=StreamComposer(replace(model.config,**policies),model.codec).to(device)
     source=model.state_dict(); target=upgraded.state_dict()
@@ -83,7 +84,7 @@ def upgrade_learning_stage(model, policies, device='cpu'):
                   'literal_route_head.','literal_family_embedding.','family_audio_projection.',
                   'family_history_projection.','family_audio_norm.','audio_event_family_head.',
                   'family_continuity_head.','family_rhythm_projection.','decoder.norm.',
-                  'literal_stop_head.','literal_type_embedding.')
+                  'literal_stop_head.','literal_type_embedding.','music_exit_head.')
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
     missing=set(target)-set(source); unexpected=set(source)-set(target)
     # Explicit baseline policies may remove only these optional projection modules.
@@ -96,6 +97,12 @@ def upgrade_learning_stage(model, policies, device='cpu'):
         if not key.startswith(new_prefixes) and torch.count_nonzero(target[key]).item():
             raise ValueError(f'New parameter is not zero initialized: {key}')
     transferred={key:value for key,value in source.items() if key in target}
+    if ((model.config.transition_policy=='music_exit_v1' and upgraded.config.transition_policy=='music_exit_v2')
+            or (model.config.transition_policy in ('music_exit_v1','music_exit_v2')
+                and upgraded.config.transition_policy=='music_exit_v3')):
+        # Absolute outputs and the old cursor-note reference are not a new
+        # residual. Retain features, but restart its correction at zero.
+        for key in ('music_exit_head.2.weight','music_exit_head.2.bias'):transferred.pop(key,None)
     for key,value in list(transferred.items()):
         if value.shape==target[key].shape:continue
         if key=='continuation_projection.weight' and value.ndim==2 and value.shape[1]==8 and target[key].shape==(value.shape[0],16):
@@ -280,6 +287,7 @@ def _fingerprint(args,ds,*,legacy=False,pre_blank=False):
     if getattr(args,'decoder_policy','postnorm_v1')!='postnorm_v1':h.update(args.decoder_policy.encode())
     if getattr(args,'timing_group_policy','phase_only_v1')!='phase_only_v1':h.update(args.timing_group_policy.encode())
     if getattr(args,'literal_output_policy','flat_family_v1')!='flat_family_v1':h.update(args.literal_output_policy.encode())
+    if getattr(args,'transition_policy','off')!='off':h.update(args.transition_policy.encode())
     return h.hexdigest()
 
 def _resolve_audio_grid(requested,parent_config=None):
@@ -457,17 +465,46 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version='stream_stationary_family_budget_v3',
+    args.training_objective_recipe=dict(version='stream_musical_transition_residual_budget_v5',
+        transition_policy=model.config.transition_policy,
         decoder_policy=model.config.decoder_policy,window_balance_policy=model.config.window_balance_policy,
         timing_output_policy=model.config.timing_output_policy,
         timing_grid_audio_policy=model.config.timing_grid_audio_policy,
+        timing_query_interaction=('elementwise_query_candidate_32d'
+            if model.config.timing_grid_audio_policy=='query_pool_v3' else 'scalar_query_candidate'
+            if model.config.timing_grid_audio_policy=='query_pool_v2' else 'candidate_audio_mean_or_off'),
+        timing_query_residual_gain=(8. if model.config.timing_grid_audio_policy=='query_pool_v3' else 1.
+            if model.config.timing_grid_audio_policy=='query_pool_v2' else 0.),
+        timing_query_compatibility=('retain_v2_scalar_projection_and_add_zero_vector_readout'
+            if model.config.timing_grid_audio_policy=='query_pool_v3' else 'policy_defined'),
         timing_group_policy=model.config.timing_group_policy,literal_output_policy=model.config.literal_output_policy,
         event_family_policy=model.config.event_family_policy,
         family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3') else 0.),
         family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3') else 1.),
         family_mixture_gradient=('audio_prior_detached_when_audio_budget_positive' if model.config.event_family_policy=='audio_prior_transition_v3' else 'joint'),
-        conditional_geometry='unchanged_joint_phase_detail',
+        conditional_geometry=('joint_phase_detail_with_learned_motion_exit'
+            if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') else 'unchanged_joint_phase_detail'),
         transition_exit='same_budget_as_main_configuration',
+        transition_factorization=('parent_keep_exit_log_odds_plus_musical_residual'
+            if model.config.transition_policy in ('music_exit_v2','music_exit_v3') else
+            'learned_keep_exit_time_motion_template_same_nll_budget'
+            if model.config.transition_policy=='music_exit_v1' else 'legacy_joint_reweighting'),
+        transition_residual_gain=(8. if model.config.transition_policy in ('music_exit_v2','music_exit_v3') else 1.
+            if model.config.transition_policy=='music_exit_v1' else 0.),
+        time_music_reference=('strict_prior_note_at_cursor'
+            if model.config.transition_policy=='music_exit_v3' else 'checkpoint_policy_defined'),
+        history_recovery=model.config.recovery_policy,
+        recovery_long_sources=('alternating_persistent_8_steps_and_constructed_authored_exit'
+            if model.config.recovery_policy=='greedy_mixed_v4' else 'policy_defined'),
+        counterfactual_span=('variable_event_count_loops_32_64_128_with_first_trusted_authored_target'
+            if args.prefix_augmentation_input_policy in ('musical_loop_recovery_v7','musical_loop_recovery_v8') else 'all_loop_modes_up_to_history_events'
+            if args.prefix_augmentation_input_policy in ('musical_loop_recovery_v5','musical_loop_recovery_v6')
+            else 'short_legacy_loops_with_policy_defined_phase_edits'),
+        counterfactual_budget=('preserve_source_row_total_sample_weight'
+            if args.prefix_augmentation_input_policy in ('musical_loop_recovery_v7','musical_loop_recovery_v8') else 'policy_defined'),
+        counterfactual_selection=('authored_exits3to1positivecontrols_within_existing_rate'
+            if args.prefix_augmentation_input_policy=='musical_loop_recovery_v8' else 'within_existing_prefix_augmentation_rate'
+            if args.prefix_augmentation_input_policy=='musical_loop_recovery_v7' else 'policy_defined'),
         time_target='exact_authored_onset',prefix_input=args.prefix_augmentation_input_policy)
     dev=_dataset(args,codec=ds.codec,delta_vocab=ds.delta_vocab,validation=True) if args.validation_manifest else None
     if dev is not None:_validation_timing_support(dev,model)

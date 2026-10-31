@@ -13,6 +13,8 @@ from torch.nn import functional as F
 
 TIMING_POLICIES = ('absolute_grid_v1', 'relative_delta_v1')
 TIMING_GROUP_POLICIES = ('phase_gap_v2', 'phase_only_v1')
+TIMING_AUDIO_POLICIES = ('off','candidate_pool_v1','query_pool_v2','query_pool_v3')
+QUERY_INTERACTION_GAIN = 8.
 GRID_DENOMINATORS = (1, 2, 4, 8, 16, 32, 3, 6, 12, 24)
 GRID_FAMILIES = (*map(str, GRID_DENOMINATORS), 'other')
 
@@ -90,7 +92,7 @@ def temper_grid_logits(logits, temperature, group_ids, group_count=None):
 class AbsoluteTimingHead(nn.Module):
     def __init__(self, width, delta_beats, phases=(), *, audio_policy='off',group_policy='phase_only_v1'):
         super().__init__()
-        if audio_policy not in ('off','candidate_pool_v1'):
+        if audio_policy not in TIMING_AUDIO_POLICIES:
             raise ValueError('Unsupported timing grid audio policy')
         self.audio_policy=audio_policy
         if group_policy not in TIMING_GROUP_POLICIES:raise ValueError('Unsupported timing group policy')
@@ -107,9 +109,15 @@ class AbsoluteTimingHead(nn.Module):
             for module in (self.bucket_head,self.interval_candidate_projection,self.interval_group_projection):
                 nn.init.zeros_(module.weight)
                 if module.bias is not None:nn.init.zeros_(module.bias)
-        if audio_policy=='candidate_pool_v1':
+        if audio_policy in ('candidate_pool_v1','query_pool_v2','query_pool_v3'):
             self.audio_projection=nn.Linear(32,1,bias=False)
             nn.init.zeros_(self.audio_projection.weight)
+        if audio_policy in ('query_pool_v2','query_pool_v3'):
+            self.query_projection=nn.Linear(1,1,bias=False)
+            nn.init.zeros_(self.query_projection.weight)
+        if audio_policy=='query_pool_v3':
+            self.query_interaction_projection=nn.Linear(32,1,bias=False)
+            nn.init.zeros_(self.query_interaction_projection.weight)
         self.register_buffer('phases', torch.empty(0, dtype=torch.float64), persistent=False)
         self.register_buffer('group_ids', torch.empty(0, dtype=torch.long), persistent=False)
         self.configure(timing_phases(delta_beats, phases))
@@ -159,6 +167,35 @@ class AbsoluteTimingHead(nn.Module):
         centered=self._center_groups(pooled,counts)
         return self.audio_projection(centered.to(self.audio_projection.weight.dtype)).float().squeeze(-1)
 
+    def query_audio_logits(self,audio_scores,allowed,counts,group_ids):
+        """Context/music compatibility can change macro timing decisions.
+
+        The same scores already enter the conditional choice inside a grid.
+        That contribution cancels for singleton grids, so its count-normalized
+        log-mean-exp must separately reach the macro classifier. Repeated
+        identical candidates have identical evidence rather than extra mass.
+        """
+        values=audio_scores.float().masked_fill(~allowed,-torch.inf)
+        pooled=grouped_logsumexp(values,group_ids,groups=self.num_groups)
+        pooled=(pooled-counts.clamp_min(1).float().log()).masked_fill(counts.eq(0),0.)
+        centered=self._center_groups(pooled[...,None],counts)
+        return self.query_projection(centered.to(self.query_projection.weight.dtype)).float().squeeze(-1)
+
+    def query_interaction_logits(self,query,candidate_audio,allowed,counts,group_ids):
+        """Learn the macro readout of all 32 existing query/key interactions.
+
+        Reuse the same candidate keys and query as the dot-product score.
+        A count-normalized mean keeps duplicated candidates from adding
+        evidence. Zero initialization preserves the V2 probability contract;
+        the fixed gain scales learning rather than imposing a rhythm rule.
+        """
+        interaction=query.float()[...,None,:]*candidate_audio.float()/math.sqrt(32)
+        interaction=interaction.masked_fill(~allowed[...,None],0.)
+        pooled=self._group_means(interaction,allowed,counts,group_ids)
+        centered=self._center_groups(pooled,counts)
+        return QUERY_INTERACTION_GAIN*self.query_interaction_projection(
+            centered.to(self.query_interaction_projection.weight.dtype)).float().squeeze(-1)
+
     def forward(self, hidden, cursor, relative_logits, relative_values, query, audio_scores, allowed,
                 *, candidate_audio=None,candidate_expected_count=None):
         beats, gaps = self.candidates(cursor)
@@ -190,8 +227,12 @@ class AbsoluteTimingHead(nn.Module):
         macro=self.grid_head(hidden).float()
         if self.group_policy=='phase_gap_v2':
             macro=torch.cat((macro,macro),-1)+self.bucket_head(hidden).float()
-        if self.audio_policy=='candidate_pool_v1' and candidate_audio is not None:
+        if self.audio_policy in ('candidate_pool_v1','query_pool_v2','query_pool_v3') and candidate_audio is not None:
             macro=macro+self.pooled_audio_logits(candidate_audio,allowed,counts,group_ids)
+        if self.audio_policy in ('query_pool_v2','query_pool_v3'):
+            macro=macro+self.query_audio_logits(audio_scores,allowed,counts,group_ids)
+        if self.audio_policy=='query_pool_v3' and candidate_audio is not None:
+            macro=macro+self.query_interaction_logits(query,candidate_audio,allowed,counts,group_ids)
         if interval_features is not None:
             pooled=self._group_means(interval_features,allowed,counts,group_ids)
             macro=macro+self.interval_group_projection(self._center_groups(pooled,counts)).float().squeeze(-1)

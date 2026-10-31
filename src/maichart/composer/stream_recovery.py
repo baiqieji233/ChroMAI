@@ -5,8 +5,10 @@ import copy
 from collections import Counter
 from dataclasses import replace
 from fractions import Fraction
+from types import SimpleNamespace
 import random
 import math
+from bisect import bisect_left
 
 import numpy as np
 import torch
@@ -22,7 +24,12 @@ from .stream_proposal import sample_timed_event
 from .stream_timing import current_timing_deltas
 
 SCHEMA = 'event_set_stream_recovery_v1'
-MAX_EPISODE_STEPS = 64
+MAX_EPISODE_STEPS = 128
+LEGACY_EPISODE_STEPS = 64
+
+
+def _episode_limit(policy):
+    return MAX_EPISODE_STEPS if policy in ('greedy_mixed_v3','greedy_mixed_v4') else LEGACY_EPISODE_STEPS
 
 
 def recovery_state(model):
@@ -42,13 +49,17 @@ def restore_recovery_state(model, state):
         return
     if not isinstance(state,dict) or state.get('schema') != SCHEMA or not isinstance(state.get('episodes'), list) or len(state['episodes']) > 16:
         raise ValueError('Invalid stream recovery state')
+    policy=state.get('policy','persistent_v1')
+    if policy not in ('persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'):raise ValueError('Invalid recovery policy state')
     for episode in state['episodes']:
         if episode is None:
             continue
         if (not isinstance(episode, dict) or not isinstance(episode.get('song'), int)
                 or not isinstance(episode.get('anchor'), int) or episode['song'] < 0 or episode['anchor'] < 0
-                or not isinstance(episode.get('generated'), list) or len(episode['generated']) > MAX_EPISODE_STEPS):
+                or not isinstance(episode.get('generated'), list) or len(episode['generated']) > _episode_limit(policy)):
             raise ValueError('Invalid stream recovery episode')
+        if 'decode_temperature' in episode and episode['decode_temperature'] not in (0.,.65):
+            raise ValueError('Invalid recovery episode decoding mode')
         for row in episode['generated']:
             if not isinstance(row, dict) or row.get('kind') not in (NOTE,WAIT):
                 raise ValueError('Invalid recovery generated step')
@@ -57,8 +68,6 @@ def restore_recovery_state(model, state):
                 raise ValueError('Invalid recovery generated event')
     cursor=state.get('anchor_cursor',0)
     if not isinstance(cursor,int) or cursor<0:raise ValueError('Invalid recovery anchor cursor')
-    policy=state.get('policy','persistent_v1')
-    if policy not in ('persistent_v1','mixed_exit_v2'):raise ValueError('Invalid recovery policy state')
     requested=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')
     if requested!=policy:
         restore_recovery_state(model,None)
@@ -240,6 +249,12 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
             families=model.family_context_at(cache,times,batch['song_inverse'],batch)
             proposal['family_context']=families['full'][0,-1]
             if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
+        if getattr(getattr(model,'config',None),'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+            transition=model.transition_logits_at(cache,times,batch['song_inverse'],batch)[0,-1]
+            proposal['motion_keep_logit']=transition[1]
+            proposal['motion_reference_shape']=result['motion_reference_shape'][0,-1]
+            proposal['template_keep_logit']=transition[2]
+            proposal['template_reference_shape']=batch['history_shape'][0,-1].masked_fill(~batch['history_kind'][0,-1].eq(NOTE),-1)
         return proposal
     point,delta_id,retries,failed_times = sample_timed_event(model,scores,deltas,cursor,action_at,
         int(result['reference_phase'][0,-1]),
@@ -248,6 +263,7 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
         repeat_delta_id=int(result['repeat_delta_id'][0,-1]) if 'repeat_delta_id' in result else -1,
         timing_grid_ids=result.get('timing_grid_ids'),
         timing_group_count=result.get('timing_group_count'),
+        timing_keep_mask=result.get('timing_keep_mask'),
         motion_phase_distribution=(result['motion_phase_distribution'][0,-1]
                                    if 'motion_phase_distribution' in result else None))
     if point is None: return wait('rejected_configurations')
@@ -276,6 +292,8 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
     generator = torch.Generator(device=device).manual_seed(int(step))
     episodes = copy.deepcopy(getattr(model,'_stream_recovery_episodes',[]))[:samples]
     anchor_cursor=int(getattr(model,'_stream_recovery_anchor_cursor',0))
+    policy=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')
+    limit=_episode_limit(policy)
     episodes += [None] * (samples-len(episodes))
     modes = [(module,module.training) for module in model.modules()]
     model.eval()
@@ -284,8 +302,10 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
     try:
         for slot in range(samples):
             episode = episodes[slot]
-            if episode is None or len(episode['generated']) >= MAX_EPISODE_STEPS:
+            if episode is None or len(episode['generated']) >= limit:
                 episode = _new_episode(dataset,rng,slot,rotation=anchor_cursor)
+                if episode is not None and policy in ('greedy_mixed_v3','greedy_mixed_v4'):
+                    episode['decode_temperature']=0. if anchor_cursor%2==0 else .65
                 anchor_cursor+=1
                 diagnostics['new_episode']+=int(episode is not None)
             if episode is None:
@@ -314,15 +334,17 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                                 torch.zeros(1,dtype=torch.long,device=device),
                                 torch.tensor([float(song.audio.duration_sec)],dtype=torch.float64,device=device))
                 accepted = 0
-                for _ in range(min(steps,MAX_EPISODE_STEPS-len(episode['generated']))):
+                for _ in range(min(steps,limit-len(episode['generated']))):
+                    options=({'temperature':episode.get('decode_temperature',.65)} if policy in ('greedy_mixed_v3','greedy_mixed_v4') else {})
                     proposal, reason = _propose(dataset,model,episode['song'],prefix,guard,generator,device,
-                        context=context,audio_cache=audio_caches[episode['song']])
+                        context=context,audio_cache=audio_caches[episode['song']],**options)
                     if proposal is None:
                         diagnostics[reason] += 1
                         break
                     if reason != 'ok': diagnostics[reason] += 1
                     context.commit(proposal)
                     prefix.append(proposal); accepted += 1
+                    if policy in ('greedy_mixed_v3','greedy_mixed_v4'):diagnostics['greedy_generated_steps' if options['temperature']==0 else 'sampled_generated_steps']+=1
                     episode['generated'].append(dict(kind=proposal.kind,start=str(proposal.start),
                         end=str(proposal.end),text=proposal.text))
                 if accepted == 0:
@@ -340,7 +362,7 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                     diagnostics['actual_exit_supervised']+=int(row['transition_exit_mask'][-1] and row['transition_exit_labels'][-1])
                     diagnostics['supervised'] += 1
                     diagnostics['target_'+str(target.kind)] += 1
-                episodes[slot] = episode if len(episode['generated']) < MAX_EPISODE_STEPS else None
+                episodes[slot] = episode if len(episode['generated']) < limit else None
             except (ValueError,KeyError) as exc:
                 diagnostics['invalid_episode'] += 1
                 diagnostics['last_error'] = str(exc)
@@ -397,7 +419,7 @@ def _prepared_cache(dataset,model,song,bank,device,caches):
 
 
 @torch.no_grad()
-def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cache):
+def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cache,*,temperature=.8):
     """Sample configuration at an authored onset; never sample or shift time."""
     raw=context.current_batch()
     batch={k:v.to(device) for k,v in raw.items() if torch.is_tensor(v) and k not in
@@ -416,8 +438,14 @@ def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cach
         families=model.family_context_at(cache,times,batch['song_inverse'],batch)
         family_options['family_context']=families['full'][0,-1]
         if 'full_logits' in families:family_options['family_logits']=families['full_logits'][0,-1]
+    if getattr(getattr(model,'config',None),'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+        transition=model.transition_logits_at(cache,times,batch['song_inverse'],batch)[0,-1]
+        family_options['motion_keep_logit']=transition[1]
+        family_options['motion_reference_shape']=output['motion_reference_shape'][0,-1]
+        family_options['template_keep_logit']=transition[2]
+        family_options['template_reference_shape']=batch['history_shape'][0,-1].masked_fill(~batch['history_kind'][0,-1].eq(NOTE),-1)
     point,retries=sample_guarded_event(model,action[0,-1],int(output['reference_phase'][0,-1]),
-        source_step.end,guard,generator,temperature=.8,
+        source_step.end,guard,generator,temperature=temperature,
         reference_phase_mask=output.get('reference_phase_mask',None)[0,-1]
             if 'reference_phase_mask' in output else None,
         motion_phase_distribution=output['motion_phase_distribution'][0,-1]
@@ -434,10 +462,13 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
     diagnostics['new_episode']+=1;diagnostics['new_short_episode']+=1
     diagnostics['new_anchor_'+name]+=1
     source=dataset.streams[song];target=source[index]
-    count=min(2,max(1,steps),index)
+    musical=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1') in ('greedy_mixed_v3','greedy_mixed_v4')
+    count=min(min(5,max(4,steps)) if musical else min(2,max(1,steps)),index)
     # Only immediately preceding NOTE actions are corrupted. A WAIT remains an
     # authored boundary, so crossing one would not be a short fixed-time run.
     while count and any(s.kind!=NOTE for s in source[index-count:index]):count-=1
+    if musical and count<4:
+        diagnostics['skip_short_motion_horizon']+=1;return None
     if not count:
         diagnostics['skip_no_preceding_notes']+=1;return None
     anchor=index-count;prefix=list(source[:anchor])
@@ -446,7 +477,8 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
     context.batch(prefix,prefix[-1].end if prefix else Fraction(0))
     cache=_prepared_cache(dataset,model,song,bank,device,caches)
     for reference in source[anchor:index]:
-        proposal,retries=_propose_fixed(dataset,model,context,reference,guard,generator,device,cache)
+        options=({'temperature':0. if cursor%2==0 else .65} if musical else {})
+        proposal,retries=_propose_fixed(dataset,model,context,reference,guard,generator,device,cache,**options)
         diagnostics['guard_retry']+=retries
         if proposal is None:
             diagnostics['skip_configuration_conflict']+=1;return None
@@ -454,6 +486,7 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
         if proposal.start!=reference.start or proposal.end!=reference.end:
             raise ValueError('Fixed recovery proposal changed authored timing')
         prefix.append(proposal);context.commit(proposal)
+        if musical:diagnostics['greedy_generated_steps' if options['temperature']==0 else 'sampled_generated_steps']+=1
     current=prefix[-1].end if prefix else Fraction(0)
     if current!=target.start or (target.kind==NOTE and current>=target.end):
         diagnostics['overshot']+=1;diagnostics['skip_unreachable_exit']+=1;return None
@@ -466,12 +499,128 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
     return row
 
 
+def _synthetic_loop_targets(dataset):
+    """Cache trusted authored exits, including real WAIT/EOS boundaries."""
+    cached=getattr(dataset,'_synthetic_loop_exit_anchors',None)
+    if cached is not None:return cached
+    groups={NOTE:set(),WAIT:set(),EOS:set()}
+    for anchors in _risk_exits(dataset).values():
+        for song,index in anchors:
+            if dataset.streams[song][index].kind==NOTE:groups[NOTE].add((song,index))
+    for song,source in enumerate(dataset.streams):
+        for index,target in enumerate(source):
+            if target.kind in (WAIT,EOS) and target.weight>0 and not dataset.unknown_steps[song][index]:
+                groups[target.kind].add((song,index))
+    cached={kind:tuple(sorted(rows)) for kind,rows in groups.items()}
+    dataset._synthetic_loop_exit_anchors=cached
+    return cached
+
+
+def _synthetic_long_exit_row(dataset,model,rng,cursor,diagnostics):
+    """Variable-count wrong history ending exactly at a real target's start.
+
+    Counts are independent of the authored history density: 128 one-beat
+    events can replace a longer span containing many more authored events.
+    Only the causal prefix is changed; music, condition and target stay real.
+    """
+    groups=_synthetic_loop_targets(dataset)
+    available=[kind for kind in (NOTE,WAIT,EOS) if groups[kind]]
+    if not available:
+        diagnostics['skip_no_synthetic_exit']+=1;return None
+    kind=(NOTE,WAIT,EOS)[cursor%3]
+    if not groups[kind]:kind=available[cursor%len(available)]
+    anchors=groups[kind];song,index=anchors[rng.randrange(len(anchors))]
+    return _synthetic_long_exit_row_at(dataset,song,index,rng,cursor,diagnostics)
+
+
+def _synthetic_long_exit_row_at(dataset,song,index,rng,cursor,diagnostics,*,reference=None,repeat_gap=None):
+    """Construct a legal changed-count prefix for one explicit authored target.
+
+    This CPU-only constructor is shared by sparse recovery and the main
+    batch curriculum. No target's atom is read when choosing the wrong loop.
+    """
+    from .stream_augmentation import _loop_texts,_validate_window,_encode_gap,event_is_sustained
+    source=dataset.streams[song];target=source[index]
+    if target.kind not in (NOTE,WAIT,EOS) or target.weight<=0 or dataset.unknown_steps[song][index]:
+        diagnostics['skip_synthetic_unknown_target']+=1;return None
+    record=dataset.base.songs[song][0];clock=dataset.clocks[song]
+    boundary=target.start
+    if boundary<=0 or second_at_beat(clock,boundary)>=float(record.audio.duration_sec)-1e-9:
+        diagnostics['skip_synthetic_boundary']+=1;return None
+    if reference is not None and (reference.kind!=NOTE or event_is_sustained(reference.text)):
+        raise ValueError('Aligned loop needs a simple preceding NOTE template')
+    gaps=([Fraction(repeat_gap)] if repeat_gap is not None else list(map(Fraction,('1/4','1/2','1','2'))))
+    if repeat_gap is None and target.kind==NOTE and cursor%2==0:
+        gaps=[gap for gap in gaps if gap!=target.end-target.start]
+    choices=[]
+    desired=rng.choices((32,64,128),weights=(1,2,3),k=1)[0]
+    for gap in gaps:
+        if not 0<gap<=2:continue
+        count=min(128,desired,int(boundary//gap)+1)
+        if count<4:continue
+        first=boundary-(count-1)*gap
+        keep=bisect_left(source,first,hi=index,key=lambda step:step.end)
+        previous=source[keep-1].end if keep else Fraction(0)
+        head_gap=first-previous
+        if not (0<head_gap<=2 or (not keep and first==0)):continue
+        try:_encode_gap(dataset,gap);_encode_gap(dataset,head_gap)
+        except ValueError:continue
+        choices.append((gap,count,first,keep))
+    if not choices:
+        diagnostics['skip_synthetic_unreachable']+=1;return None
+    gap,count,first,keep=choices[cursor%len(choices)]
+    prefix=list(source[:keep]);previous=prefix[-1].end if prefix else Fraction(0)
+    mode=('same_key','abab','rotation','same_shape','touch','same_gap','rotation_gap')[cursor%7]
+    # The motif pool is strictly before the supervised target and contains
+    # no sustains that would become overlapping merely by repetition.
+    motifs=[step.text for step in source[max(0,index-32):index]
+            if step.kind==NOTE and not event_is_sustained(step.text)]
+    if reference is not None:
+        encoded=dataset.codec.encode(reference.text)
+        mode='reference_template'
+        if encoded['shape']:
+            direction=(-1,0,1)[rng.randrange(3)]
+            texts=[dataset.codec.decode(encoded['shape'],(encoded['phase']+direction*(i-count+1))%8,
+                       encoded['details']) for i in range(count)]
+        else:texts=[reference.text]*count
+    elif mode=='same_gap':
+        if not motifs:raise ValueError('No simple authored pattern for a timing loop')
+        texts=[motifs[i%len(motifs)] for i in range(count)]
+    else:
+        pool=[SimpleNamespace(kind=NOTE,text=text) for text in motifs]
+        texts=_loop_texts(dataset,pool,0,count,mode,rng)
+    loop=[]
+    for offset,text in enumerate(texts):
+        dataset.codec.encode(text)
+        beat=first+offset*gap
+        loop.append(StreamStep(NOTE,previous,beat,max(0.,second_at_beat(clock,previous)),
+            max(0.,second_at_beat(clock,beat)),text))
+        previous=beat
+    if previous!=target.start:raise ValueError('Synthetic loop changed the target cursor')
+    guard=_guard(record,prefix,len(prefix))
+    _validate_window(guard,loop+[target])
+    prefix.extend(loop)
+    row=recovery_sample(dataset,song,prefix,target,weight=target.weight)
+    row['_synthetic_loop_events']=count
+    row['_synthetic_loop_mode']=mode
+    row['_synthetic_loop_gap']=str(gap)
+    row['_synthetic_loop_last_text']=loop[-1].text
+    row['_synthetic_loop_reference_aligned']=reference is not None
+    diagnostics['synthetic_long_rows']+=1;diagnostics['synthetic_loop_events']+=count
+    diagnostics['synthetic_'+mode]+=1;diagnostics['synthetic_gap_'+str(gap)]+=1
+    diagnostics['supervised']+=1;diagnostics['target_'+str(target.kind)]+=1
+    diagnostics['actual_exit_supervised']+=int(row['transition_exit_mask'][-1] and row['transition_exit_labels'][-1])
+    return row
+
+
 def recovery_batch(dataset,model,device,step,*,samples=2,steps=2):
     """Mixed fixed-time exits plus a minority of persistent free-time drift.
 
     A four-slot cursor gives exactly three short risk trajectories per long
     one, including across calls with samples=2. The long pool is independent
     of short anchors, and only future-reachable authored targets supervise it.
+    V4 alternates those long slots between model rollouts and immediately
+    constructed variable-count loops at real NOTE/WAIT/EOS boundaries.
     """
     policy=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')
     previous=getattr(model,'_stream_recovery_policy',policy)
@@ -479,7 +628,7 @@ def recovery_batch(dataset,model,device,step,*,samples=2,steps=2):
     model._stream_recovery_policy=policy
     if policy=='persistent_v1':
         return _persistent_recovery_batch(dataset,model,device,step,samples=samples,steps=steps)
-    if policy!='mixed_exit_v2':raise ValueError('Unsupported recovery policy')
+    if policy not in ('mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'):raise ValueError('Unsupported recovery policy')
     if not 0<=samples<=16 or not 0<=steps<=64:raise ValueError('Invalid recovery budget')
     if not steps or not samples:return None,{'new_episode':0,'actual_exit_supervised':0}
     rng=random.Random(int(step));device=torch.device(device)
@@ -498,11 +647,25 @@ def recovery_batch(dataset,model,device,step,*,samples=2,steps=2):
                 diagnostics['skip_invalid_short']+=1;diagnostics['last_error']=str(exc)
             short_cursor+=1
         if long_count:
-            _,long_diagnostics=_persistent_recovery_batch(dataset,model,device,step,
-                samples=long_count,steps=steps,_rows_out=rows,_audio_caches=caches)
-            for key,value in long_diagnostics.items():
-                if isinstance(value,(int,float)):diagnostics[key]+=value
-                else:diagnostics[key]=value
+            persistent_count=long_count
+            if policy=='greedy_mixed_v4':
+                long_indices=[(mix+i)//4 for i in range(samples) if (mix+i)%4==3]
+                persistent_count=sum(index%2==0 for index in long_indices)
+                for index in long_indices:
+                    if index%2==0:continue
+                    try:
+                        row=_synthetic_long_exit_row(dataset,model,rng,index//2,diagnostics)
+                        if row is not None:rows.append(row)
+                    except (ValueError,KeyError) as exc:
+                        diagnostics['skip_invalid_synthetic']+=1;diagnostics['last_error']=str(exc)
+                diagnostics['synthetic_long_slots']+=long_count-persistent_count
+            if persistent_count:
+                _,long_diagnostics=_persistent_recovery_batch(dataset,model,device,step,
+                    samples=persistent_count,steps=(8 if policy in ('greedy_mixed_v3','greedy_mixed_v4') else steps),_rows_out=rows,_audio_caches=caches)
+                for key,value in long_diagnostics.items():
+                    if isinstance(value,(int,float)):diagnostics[key]+=value
+                    else:diagnostics[key]=value
+                diagnostics['persistent_long_slots']+=persistent_count
             diagnostics['long_slots']+=long_count
         diagnostics['short_slots']+=short_count
     finally:

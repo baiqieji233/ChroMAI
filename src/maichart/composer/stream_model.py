@@ -72,6 +72,7 @@ class StreamComposerConfig:
     prefix_augmentation_input_policy: str = 'phase_recovery_v4'
     attention_policy: str = 'bf16_dropout_math_v1'
     decoder_policy: str = 'prenorm_independent_v2'
+    transition_policy: str = 'off'
     rollout_steps: int = 16
     audio_summary_tokens: int = 128
     state_dim: int = 50
@@ -88,7 +89,7 @@ class StreamComposerConfig:
         self.delta_beats = tuple(str(x) for x in self.delta_beats)
         self.timing_phase_catalog = tuple(str(x) for x in self.timing_phase_catalog)
         if self.timing_output_policy not in TIMING_POLICIES:raise ValueError('Unsupported timing output policy')
-        if self.timing_grid_audio_policy not in ('off','candidate_pool_v1'):raise ValueError('Unsupported timing grid audio policy')
+        if self.timing_grid_audio_policy not in ('off','candidate_pool_v1','query_pool_v2','query_pool_v3'):raise ValueError('Unsupported timing grid audio policy')
         if self.timing_group_policy not in TIMING_GROUP_POLICIES:raise ValueError('Unsupported timing group policy')
         if not math.isfinite(self.audio_grid_seconds) or not .005<=self.audio_grid_seconds<=.05:
             raise ValueError('Audio grid seconds must be positive and finite in [0.005, 0.05]')
@@ -109,12 +110,15 @@ class StreamComposerConfig:
             ('lane_load_policy',{'off','direct_buttons_v1'}),
             ('gap_continuation_policy',{'additive_v1','probability_v2'}),
             ('plan_kind_policy',{'off','rate_integral_v2'}),
-            ('recovery_policy',{'persistent_v1','mixed_exit_v2'}),
-            ('prefix_augmentation_input_policy',{'phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
+            ('recovery_policy',{'persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'}),
+            ('prefix_augmentation_input_policy',{'musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
             ('motion_continuation_policy',{'off','motion_continuation_v1','motion_distinct_v2','context_motion_v3'})):
             if getattr(self,name) not in allowed:raise ValueError(f'Unsupported {name}')
         if self.attention_policy not in ('auto_v1','bf16_dropout_math_v1'):raise ValueError('Unsupported attention policy')
         if self.decoder_policy not in ('postnorm_v1','prenorm_independent_v2'):raise ValueError('Unsupported decoder policy')
+        if self.transition_policy not in ('off','music_exit_v1','music_exit_v2','music_exit_v3'):raise ValueError('Unsupported transition policy')
+        if self.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') and self.event_family_policy=='legacy_v1':
+            raise ValueError(f'{self.transition_policy} requires semantic event families')
         if not math.isfinite(self.event_family_audio_weight) or not 0<=self.event_family_audio_weight<=1:
             raise ValueError('Event family audio weight must be finite in [0, 1]')
         if self.plan_target_units not in ('counts_per_audio_cell','rates_per_second_v2'):
@@ -158,7 +162,7 @@ class StreamComposerConfig:
                       'prefix_augmentation_input_policy':'causal_window_config_time_first_decision_v3',
                       'transition_exit_weight':0.,
                       'attention_policy':'auto_v1',
-                      'decoder_policy':'postnorm_v1',
+                      'decoder_policy':'postnorm_v1','transition_policy':'off',
                       'plan_target_units':'counts_per_audio_cell','plan_blank_window_seconds':0.,
                       'plan_loss_normalization':'cell_mean_v1',**values})
 
@@ -182,6 +186,11 @@ class StreamComposer(nn.Module):
         self.register_buffer('delta_values', torch.tensor([float(Fraction(x)) for x in config.delta_beats],dtype=torch.float64), persistent=False)
         self.atom_embedding = nn.Embedding(codec.num_atoms, d, padding_idx=0)
         self.condition = nn.Linear(config.condition_dim, d)
+        if config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+            clock_dim=14 if config.clock_policy=='musical_v2' else 4
+            inputs=32*9+clock_dim+2+config.condition_dim+continuation_dim(config.continuation_policy)+38
+            self.music_exit_head=nn.Sequential(nn.Linear(inputs,32),nn.GELU(),nn.Linear(32,3))
+            nn.init.zeros_(self.music_exit_head[2].weight);nn.init.zeros_(self.music_exit_head[2].bias)
         self.cursor_clock = nn.Linear(18 if config.clock_policy=='musical_v2' else 8, d)
         self.state_projection = nn.Linear(config.state_dim, d)
         self.load_projection = nn.Linear(32 if config.button_load_policy=='target_fast_v2' else 16, d)
@@ -338,6 +347,19 @@ class StreamComposer(nn.Module):
             for _,head in slots:
                 for phase in range(8):shape_lanes[shape,phase,(head+phase)%8]=1.
         self.register_buffer('shape_button_lanes',shape_lanes,persistent=False)
+        # A motion decision concerns typed head geometry, not modifier/detail
+        # spelling. Close KEEP over each shape's geometric rotation orbit so
+        # equivalent physical configurations cannot land in opposite groups.
+        stabilizers=torch.zeros(codec.num_shapes,8,dtype=torch.bool)
+        stabilizers[:,0]=True
+        for shape,slots in enumerate(codec.shape_catalog):
+            if shape==0:continue
+            original=tuple(sorted(slots))
+            for shift in range(1,8):
+                stabilizers[shape,shift]=tuple(sorted((kind,(head+shift)%8) for kind,head in slots))==original
+        self.register_buffer('shape_motion_stabilizer',stabilizers,persistent=False)
+        angles=torch.arange(8)
+        self.register_buffer('motion_rotation_differences',(angles[:,None]-angles[None,:])%8,persistent=False)
         self._literal_bits=literal_bits
         self.register_buffer('literal_head_bits',torch.tensor(literal_bits,dtype=torch.long),persistent=False)
 
@@ -386,7 +408,7 @@ class StreamComposer(nn.Module):
         result={'local': x, 'global': summaries, 'global_mask': summary_valid,
                 'seconds': song_seconds, 'beats': song_beats, 'mask': valid}
         if hasattr(self,'delta_audio_key'):result['delta_keys']=self.delta_audio_key(x)
-        if self.config.timing_grid_audio_policy=='candidate_pool_v1' and self.config.timing_output_policy=='absolute_grid_v1':
+        if self.config.timing_grid_audio_policy in ('candidate_pool_v1','query_pool_v2','query_pool_v3') and self.config.timing_output_policy=='absolute_grid_v1':
             # Reuse the projected keys. Older local-only audio policies can
             # provide a bounded 32d view without another learned backbone.
             result['grid_audio_keys']=(result['delta_keys'] if 'delta_keys' in result else
@@ -477,6 +499,103 @@ class StreamComposer(nn.Module):
         mixture=torch.where((~other.any(-1))[...,None],torch.zeros_like(mixture),mixture)
         result=torch.where(eligible[...,None],mixture,ordinary).masked_fill(~allowed,-1e4)
         return result,torch.where(eligible,previous,torch.full_like(previous,-1))
+
+    def transition_reference_seconds(self,batch,event_seconds):
+        """Select the committed music reference without reading future labels.
+
+        At a V3 NOTE cursor, use the strictly earlier NOTE: the latest NOTE
+        is the current music itself. WAIT and future action queries still
+        use the latest NOTE. Missing references compare music to itself.
+        V1/V2 retain their original last-NOTE/song-start contract.
+        """
+        kinds=batch['history_kind'];note=kinds.eq(NOTE)&batch['step_mask'].bool()
+        positions=torch.arange(kinds.size(1),device=kinds.device)[None].expand_as(kinds)
+        last=positions.masked_fill(~note,-1).cummax(-1).values
+        if self.config.transition_policy=='music_exit_v3':
+            earlier=torch.cat((last.new_full((last.size(0),1),-1),last[:,:-1]),1)
+            cursor_note=(event_seconds.double()-batch['step_second'].double()).abs().lt(1e-7)&note
+            last=torch.where(cursor_note,earlier,last)
+        previous=batch['step_second'].gather(1,last.clamp_min(0))
+        if self.config.transition_policy=='music_exit_v3':
+            return torch.where(last.ge(0),previous,event_seconds.to(previous))
+        return previous.masked_fill(last.lt(0),0.)
+
+    def transition_logits_at(self,cache,event_seconds,inverse,batch):
+        """Shared music/run-conditioned time, motion and template retention.
+
+        Uses only committed notes and encoded song reads, never target labels.
+        Six fixed future probes provide evidence for stopping a regular run.
+        """
+        kinds=batch['history_kind']
+        previous=self.transition_reference_seconds(batch,event_seconds)
+        if 'delta_keys' in cache:keys=cache
+        else:
+            local=cache['local'];keys={**cache,'transition_keys':F.pad(local,(0,max(0,32-local.size(-1))))[...,:32]}
+        field='delta_keys' if 'delta_keys' in keys else 'transition_keys'
+        current=self._read_audio(keys,event_seconds,inverse,field=field).float()
+        old=self._read_audio(keys,previous,inverse,field=field).float()
+        beat_cache={**cache,'transition_beats':cache['beats'][...,None]}
+        beats=self._read_audio(beat_cache,event_seconds,inverse,field='transition_beats').squeeze(-1)
+        offsets=beats.new_tensor([.25,.5,1.,2.,4.,8.])
+        future=self._read_audio(keys,beats[...,None]+offsets,inverse,clock='beats',field=field).float().flatten(-2)
+        elapsed=(event_seconds.double()-previous).clamp_min(0).log1p().float()
+        gap=batch.get('history_gap_beats',self.delta_values[batch['history_delta'].clamp_min(0)]).float().clamp_min(0).log1p()
+        condition=batch['condition'].float()[:,None].expand(-1,kinds.size(1),-1)
+        values=torch.cat((current,current-old,current*old,future,self._clock(event_seconds,beats),
+            elapsed[...,None],gap[...,None],condition,self._continuation_input(batch,current),
+            self.transition_symbol_features(batch)),-1)
+        return self.music_exit_head(F.layer_norm(values,(values.size(-1),))).float()
+
+    def transition_symbol_features(self,batch):
+        """Relative movement/type/size identifies what the music must change.
+
+        Average complete phase orbits; never invent a left/right hand label
+        or choose an arbitrary anchor for a symmetric chord.
+        """
+        kinds=batch['history_kind'];note=kinds.eq(NOTE)
+        shapes=batch['history_shape']
+        masks=batch.get('history_phase_mask',F.one_hot(batch['history_phase'].clamp_min(0),8).bool()).bool()
+        symmetry=self.shape_motion_stabilizer[shapes]
+        masks=(masks[...,self.motion_rotation_differences]&symmetry[...,None,:]).any(-1).float()
+        mass=masks/masks.sum(-1,keepdim=True).clamp_min(1)
+        before=torch.cat((mass.new_zeros(mass.size(0),1,8),mass[:,:-1]),1)
+        lanes=torch.arange(8,device=mass.device)
+        bins=F.one_hot((lanes[None,:]-lanes[:,None])%8,8).float()
+        direction=torch.einsum('bti,btj,ijk->btk',before,mass,bins)
+        comparable=self.motion_reference_shapes(batch).gt(0)
+        direction=direction*comparable[...,None]
+        from .stream_actions import family_masks_from_atoms
+        families=family_masks_from_atoms(batch['history_atoms'],self.semantic_atom_families)
+        bits=families.new_tensor([1,2,4,8,16])
+        types=(families[...,None]&bits).ne(0).float()*note[...,None]
+        heads=(self.atom_lanes[batch['history_atoms']].amax(-2).sum(-1)
+            +self.atom_touch[batch['history_atoms']].amax(-2).sum(-1)).float().log1p()*note
+        atom_types=self.semantic_atom_families[batch['history_atoms']]
+        button_types=atom_types[...,None].eq(atom_types.new_tensor([1,2,4]))
+        typed_heads=(self.atom_lanes[batch['history_atoms']][...,None,:]
+            *button_types[...,None]).amax(-3).float().flatten(-2)*note[...,None]
+        return torch.cat((direction,types,heads[...,None],typed_heads),-1)
+
+    @staticmethod
+    def motion_reference_shapes(batch):
+        shapes=batch['history_shape'];note=batch['history_kind'].eq(NOTE)&shapes.gt(0)
+        prior=torch.cat((shapes.new_full((shapes.size(0),1),-1),shapes[:,:-1]),1)
+        previous_note=torch.cat((note.new_zeros(note.size(0),1),note[:,:-1]),1)
+        return shapes.masked_fill(~(note&previous_note&prior.eq(shapes)),-1)
+
+    def motion_keep_mask(self,shape,motion_phase_distribution,motion_reference_shape):
+        if motion_phase_distribution is None or motion_reference_shape is None:return None
+        shape=torch.as_tensor(shape,device=motion_phase_distribution.device,dtype=torch.long)
+        raw=motion_phase_distribution[...,0,:].gt(0)
+        if self.config.transition_policy in ('music_exit_v2','music_exit_v3'):
+            # Distinct motion features reserve KEEP for nonstationary pairs.
+            # A repeated physical head still has a continuation: STAY. Without
+            # this branch, jacks would have no learnable motion exit at all.
+            raw=torch.where(raw.any(-1,keepdim=True),raw,motion_phase_distribution[...,2,:].gt(0))
+        symmetries=self.shape_motion_stabilizer[shape.clamp(0,self.codec.num_shapes-1)]
+        # Last axes are output phase j and symmetry shift s: raw[j-s].
+        closed=(raw[...,self.motion_rotation_differences]&symmetries[...,None,:]).any(-1)
+        return closed&(shape.gt(0)&shape.eq(motion_reference_shape))[...,None]
 
     def action_context_at(self, hidden, event_seconds, audio_cache, song_inverse,batch=None,*,return_button_load=False):
         music = self._read_audio(audio_cache, event_seconds, song_inverse)
@@ -604,7 +723,8 @@ class StreamComposer(nn.Module):
         expected=(integral(stops)-integral(batch['step_second'].double())[...,None]).clamp_min(0)
         return expected.float().detach()
 
-    def event_phase_logits(self, context, shape, reference_phase, reference_phase_mask=None,motion_phase_distribution=None,button_load=None):
+    def event_phase_logits(self, context, shape, reference_phase, reference_phase_mask=None,motion_phase_distribution=None,button_load=None,
+                           motion_keep_logit=None,motion_reference_shape=None):
         if hasattr(self,'motion_context_projection') and motion_phase_distribution is not None:
             context=context+self.motion_context_projection(motion_phase_distribution.float().flatten(-2)).to(context)
         relative = self.phase_head(context+self.shape_embedding(shape))
@@ -620,7 +740,8 @@ class StreamComposer(nn.Module):
             lane=(heads*scores[...,None,:]).sum(-1)/heads.sum(-1).clamp_min(1)
         if self.config.phase_output_policy=='legacy_canonical_v1':
             indices = (absolute-reference_phase[..., None]) % 8
-            return relative.gather(-1, indices) + self.absolute_phase_bias+motion+lane
+            result=relative.gather(-1, indices) + self.absolute_phase_bias+motion+lane
+            return self._motion_transition(result,shape,motion_phase_distribution,motion_keep_logit,motion_reference_shape)
         if reference_phase_mask is None:
             raise ValueError('orbit_reference_v1 requires reference_phase_mask')
         mask=reference_phase_mask.to(device=context.device,dtype=torch.bool)
@@ -633,7 +754,20 @@ class StreamComposer(nn.Module):
         # rows r: reference orientation; columns j: absolute output orientation.
         differences=(absolute[None,:]-absolute[:,None])%8
         joint=reference[..., :,None]+relative[...,differences]
-        return joint.logsumexp(-2)+self.absolute_phase_bias+motion+lane
+        result=joint.logsumexp(-2)+self.absolute_phase_bias+motion+lane
+        return self._motion_transition(result,shape,motion_phase_distribution,motion_keep_logit,motion_reference_shape)
+
+    def _motion_transition(self,logits,shape,distribution,keep_logit,reference_shape):
+        if self.config.transition_policy not in ('music_exit_v1','music_exit_v2','music_exit_v3') or keep_logit is None:return logits
+        from .stream_transition import two_group_log_probs
+        mask=self.motion_keep_mask(shape,distribution,reference_shape)
+        return logits if mask is None else two_group_log_probs(logits,mask,self.transition_keep_logit(logits,mask,keep_logit))
+
+    def transition_keep_logit(self,base,mask,correction,*,allowed=None):
+        if self.config.transition_policy in ('music_exit_v2','music_exit_v3'):
+            from .stream_transition import residual_keep_logit
+            return residual_keep_logit(base,mask,correction,gain=8.,allowed=allowed)
+        return correction
 
     @staticmethod
     def motion_phase_features(kinds,shapes,masks,*,distinct=False,adjacent=False):
@@ -817,7 +951,7 @@ class StreamComposer(nn.Module):
                 keys=self._read_audio(cache,candidate_beats,inverse,clock='beats',field='delta_keys').float()
                 candidate_audio=keys
                 audio_scores=(query.float()[...,None,:]*keys).sum(-1)/math.sqrt(32)
-            elif not symbolic_only and self.config.timing_grid_audio_policy=='candidate_pool_v1':
+            elif not symbolic_only and self.config.timing_grid_audio_policy in ('candidate_pool_v1','query_pool_v2','query_pool_v3'):
                 if 'grid_audio_keys' in cache:
                     candidate_audio=self._read_audio(cache,candidate_beats,inverse,clock='beats',field='grid_audio_keys').float()
                 else:
@@ -838,6 +972,21 @@ class StreamComposer(nn.Module):
         if self.config.gap_continuation_policy=='probability_v2' and not absolute_timing:
             delta_logits,repeat_delta_id=self.repeat_delta_log_probs(
                 hidden,batch,delta_logits,delta_allowed,cache,inverse,symbolic_only=symbolic_only)
+        transition_options={};time_keep_mask=None
+        if self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+            from .stream_transition import two_group_log_probs
+            time_decision=self.transition_logits_at(cache,batch['step_second'],inverse,batch)
+            gaps=candidate_deltas if absolute_timing else values
+            previous_gap=batch.get('history_gap_beats',values[batch['history_delta'].clamp_min(0)])
+            time_keep_mask=(gaps-previous_gap[...,None]).abs().lt(1e-7)&kinds.eq(NOTE)[...,None]&delta_allowed
+            delta_logits=two_group_log_probs(delta_logits,time_keep_mask,
+                self.transition_keep_logit(delta_logits,time_keep_mask,time_decision[...,0],allowed=delta_allowed),allowed=delta_allowed)
+            action_decision=self.transition_logits_at(cache,batch.get('target_second',batch['step_second']),inverse,batch)
+            transition_options=dict(template_keep_logit=action_decision[...,2],
+                template_reference_shape=batch['history_shape'].masked_fill(~kinds.eq(NOTE),-1))
+            motion_options=dict(motion_keep_logit=action_decision[...,1],
+                motion_reference_shape=self.motion_reference_shapes(batch))
+        else:motion_options={}
         if hasattr(self,'lane_load_projection'):
             action,button_load=self.action_context_at(hidden,batch.get('target_second',batch['step_second']),
                 cache,inverse,batch,return_button_load=True)
@@ -852,7 +1001,7 @@ class StreamComposer(nn.Module):
                 family_context=self.family_context_at(cache,batch.get('target_second',batch['step_second']),inverse,batch)
             event_routes=self.event_route_log_probs(action,
                 family_context=family_context['full'] if family_context is not None else None,
-                family_logits=(family_context['full_logits'] if family_context is not None and 'full_logits' in family_context else None))
+                family_logits=(family_context['full_logits'] if family_context is not None and 'full_logits' in family_context else None),**transition_options)
             event_routes=event_routes.masked_fill(~torch.isfinite(event_routes),-1e4)
             # Preserve the public shape view for diagnostics. The supervised
             # likelihood below uses the exact semantic literal route.
@@ -863,14 +1012,18 @@ class StreamComposer(nn.Module):
         shapes = (batch['target_shape'] if 'target_shape' in batch else shape_logits.argmax(-1)).clamp_min(0)
         result = {'kind_logits': kind_logits, 'delta_logits': delta_logits,
                   'shape_logits': shape_logits,
-                  'phase_logits': self.event_phase_logits(action, shapes, reference_phase,reference_phase_mask,motion_distribution,button_load),
+                  'phase_logits': self.event_phase_logits(action, shapes, reference_phase,reference_phase_mask,motion_distribution,button_load,**motion_options),
                   'hidden': hidden, 'action_context': action, 'reference_phase': reference_phase,
                   'reference_phase_mask':reference_phase_mask,'repeat_delta_id':repeat_delta_id}
         if motion_distribution is not None:result['motion_phase_distribution']=motion_distribution
+        if time_keep_mask is not None:
+            result.update(timing_keep_mask=time_keep_mask,**motion_options,**transition_options)
         if event_routes is not None:
             result['event_route_log_probs']=event_routes
             result['event_family_logits']=(family_context['full_logits'] if family_context is not None and 'full_logits' in family_context
                 else self.event_family_scores(family_context['full'] if family_context is not None else action))
+            if self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+                result['event_family_logits']=grouped_logsumexp(event_routes,self.semantic_route_families-1,groups=31)
             if family_context is not None:
                 result['event_family_audio_logits']=(family_context['audio_logits'] if 'audio_logits' in family_context
                     else self.event_family_scores(family_context['audio']))
@@ -1041,7 +1194,8 @@ class StreamComposer(nn.Module):
         return int(torch.multinomial(scores.softmax(-1),1,generator=generator))+1
 
     def event_route_log_probs(self,contexts,*,family_context=None,family_logits=None,family_override=None,
-                             temperature=1.,available_shapes=None,blocked_families=()):
+                             temperature=1.,available_shapes=None,blocked_families=(),
+                             template_keep_logit=None,template_reference_shape=None,template_keep_override=None):
         from .stream_actions import grouped_event_log_probs
         base=self.shape_head(contexts).float()
         scores=torch.cat((base[...,1:],base[...,:1]+self.literal_route_head(contexts).float()),-1)
@@ -1061,8 +1215,38 @@ class StreamComposer(nn.Module):
             if self.config.event_family_policy=='audio_semantic_v2' and family_context is None:
                 raise ValueError('audio_semantic_v2 requires candidate music family_context')
             family_logits=self.event_family_scores(contexts if family_context is None else family_context)
-        return grouped_event_log_probs(scores,family_logits,
+        result=grouped_event_log_probs(scores,family_logits,
             self.semantic_route_families,self.semantic_family_supported,temperature=temperature)
+        if self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') and template_keep_logit is not None:
+            from .stream_transition import two_group_log_probs
+            mask=self.template_keep_mask(template_reference_shape,result)
+            result=two_group_log_probs(result,mask,self.transition_keep_logit(result,mask,template_keep_logit))
+            if template_keep_override is not None:
+                selected=mask if bool(template_keep_override) else ~mask
+                result=result.masked_fill(~selected,-torch.inf)
+        return result
+
+    def template_keep_mask(self,reference_shape,scores):
+        if reference_shape is None:return torch.zeros_like(scores,dtype=torch.bool)
+        ids=torch.cat((torch.arange(1,self.codec.num_shapes,device=scores.device),
+            torch.zeros(31,device=scores.device,dtype=torch.long)))
+        reference=torch.as_tensor(reference_shape,device=scores.device)
+        return ids.eq(reference[...,None])&reference.gt(0)[...,None]
+
+    @torch.no_grad()
+    def sample_event_intent(self,context,*,family_logits,template_keep_logit,template_reference_shape,
+                            temperature=1.,generator=None):
+        """Choose template continuation, then semantic family; retain both on retry."""
+        routes=self.event_route_log_probs(context.reshape(1,-1),family_logits=family_logits,
+            template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape).reshape(-1)
+        mask=self.template_keep_mask(template_reference_shape,routes)
+        masses=torch.stack((routes.masked_fill(~mask,-torch.inf).logsumexp(-1),
+            routes.masked_fill(mask,-torch.inf).logsumexp(-1)))
+        if not bool(torch.isfinite(masses).any()):return None,None
+        group=int(masses.argmax()) if temperature<=0 else int(torch.multinomial(masses.softmax(-1),1,generator=generator))
+        routes=routes.masked_fill(~(mask if group==0 else ~mask),-torch.inf)
+        scores=grouped_logsumexp(routes,self.semantic_route_families-1,groups=31)
+        return self.sample_event_family(family_logits=scores,temperature=temperature,generator=generator),group==0
 
     def event_family_targets(self,batch):
         from .stream_actions import family_masks_from_atoms
@@ -1215,7 +1399,9 @@ class StreamComposer(nn.Module):
     @torch.no_grad()
     def decode_event(self, context, *, reference_phase=0, reference_phase_mask=None,temperature=1., generator=None,
                      blocked_shape_phases=None,shape_override=None,phase_override=None,motion_phase_distribution=None,button_load=None,
-                     family_context=None,family_logits=None,family_override=None):
+                     family_context=None,family_logits=None,family_override=None,
+                     motion_keep_logit=None,motion_reference_shape=None,template_keep_logit=None,
+                     template_reference_shape=None,template_keep_override=None):
         """Decode one entire NOTE; callers choose its time before this method."""
         context = context.reshape(-1, self.config.d_model)
         if context.size(0) != 1:
@@ -1226,12 +1412,15 @@ class StreamComposer(nn.Module):
             family_contexts=[None]*len(refs) if family_context is None else family_context.reshape(-1,self.config.d_model).expand(context.size(0),-1)
             family_scores=[None]*len(refs) if family_logits is None else family_logits.reshape(-1,31).expand(context.size(0),-1)
             overrides=[None]*len(refs) if family_override is None else torch.as_tensor(family_override).reshape(-1).expand(context.size(0)).tolist()
+            def per_row(value):return [None]*len(refs) if value is None else torch.as_tensor(value).reshape(-1).expand(len(refs)).tolist()
+            decisions=list(zip(per_row(motion_keep_logit),per_row(motion_reference_shape),per_row(template_keep_logit),per_row(template_reference_shape),per_row(template_keep_override)))
             return [self.decode_event(row, reference_phase=ref,reference_phase_mask=mask,
                 temperature=temperature, generator=generator,blocked_shape_phases=blocked_shape_phases,
                 shape_override=shape_override,phase_override=phase_override,motion_phase_distribution=motion,button_load=load,
-                family_context=family_ctx,family_logits=family_score,family_override=override)
-                for row, ref,mask,motion,load,family_ctx,family_score,override in
-                    zip(context, refs,masks,motions,loads,family_contexts,family_scores,overrides)]
+                family_context=family_ctx,family_logits=family_score,family_override=override,
+                motion_keep_logit=decision[0],motion_reference_shape=decision[1],template_keep_logit=decision[2],template_reference_shape=decision[3],template_keep_override=decision[4])
+                for row, ref,mask,motion,load,family_ctx,family_score,override,decision in
+                    zip(context, refs,masks,motions,loads,family_contexts,family_scores,overrides,decisions)]
         def choose(logits,sampling_temperature=None):
             scale=temperature if sampling_temperature is None else sampling_temperature
             if scale <= 0:
@@ -1242,6 +1431,12 @@ class StreamComposer(nn.Module):
         semantic=self.config.event_family_policy!='legacy_v1'
         family=None
         if semantic:
+            if (self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') and template_keep_logit is not None
+                    and family_override is None and shape_override is None):
+                family_override,template_keep_override=self.sample_event_intent(context,family_logits=family_logits,
+                    template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape,
+                    temperature=temperature,generator=generator)
+                if family_override is None:return None
             blocked_families={entry[2] for entry in blocked if len(entry)==3 and entry[:2]==(0,0)}
             route_available=list(available)
             if shape_override is not None:
@@ -1250,7 +1445,9 @@ class StreamComposer(nn.Module):
                 route_available=[allowed and index==shape for index,allowed in enumerate(route_available)]
             routes=self.event_route_log_probs(context,temperature=temperature,
                 available_shapes=route_available,blocked_families=blocked_families,
-                family_context=family_context,family_logits=family_logits,family_override=family_override)
+                family_context=family_context,family_logits=family_logits,family_override=family_override,
+                template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape,
+                template_keep_override=template_keep_override)
             if not bool(torch.isfinite(routes).any()):return None
             if temperature<=0:
                 # Select the family before its route so its number of shapes
@@ -1281,9 +1478,18 @@ class StreamComposer(nn.Module):
                 torch.tensor([reference_phase],device=context.device),None if reference_phase_mask is None else
                 torch.as_tensor(reference_phase_mask,device=context.device).reshape(1,8),
                 None if motion_phase_distribution is None else motion_phase_distribution.to(context.device).reshape(1,3,8),
-                None if button_load is None else button_load.to(context.device).reshape(1,8,4))
+                None if button_load is None else button_load.to(context.device).reshape(1,8,4),
+                motion_keep_logit=None if motion_keep_logit is None else torch.as_tensor(motion_keep_logit,device=context.device).reshape(1),
+                motion_reference_shape=None if motion_reference_shape is None else torch.as_tensor(motion_reference_shape,device=context.device).reshape(1))
             phase_logits=phase_logits.masked_fill(torch.tensor([(shape,p) in blocked for p in range(8)],device=context.device)[None],-torch.inf)
-            phase=choose(phase_logits)
+            if (self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') and motion_keep_logit is not None
+                    and motion_reference_shape is not None and motion_phase_distribution is not None):
+                from .stream_transition import sample_two_group
+                keep=self.motion_keep_mask(torch.tensor(shape,device=context.device),motion_phase_distribution,
+                    torch.as_tensor(motion_reference_shape,device=context.device))
+                phase=(sample_two_group(phase_logits,keep,temperature=temperature,generator=generator)
+                    if keep is not None else choose(phase_logits))
+            else:phase=choose(phase_logits)
         else:phase=0
         if shape:
             if self.config.detail_policy=='independent_v1':
@@ -1499,6 +1705,33 @@ def stream_loss(model, output, batch):
     joint_nll=kind_nll+delta_nll+shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights)
     transition_exit_loss=model.config.transition_exit_weight*reduce(joint_nll*exit_mask)
     total = base_loss+transition_exit_loss+model.config.recovery_weight*recovery
+    continuation_metrics={}
+    if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+        # These are components/diagnostics of the existing joint NLL. They
+        # are not another loss added to it and cannot double the exit budget.
+        with torch.no_grad():
+            def describe(name,logits,keep,truth,active):
+                scores=logits.float().log_softmax(-1)
+                keep=keep.expand_as(scores)
+                available=torch.isfinite(scores)&scores.gt(-9999)
+                eligible=(keep&available).any(-1)&(~keep&available).any(-1)&active
+                target_keep=(truth&keep).any(-1)
+                target_exit=(truth&~keep).any(-1)
+                masses=torch.stack((scores.masked_fill(~keep,-torch.inf).logsumexp(-1),
+                    scores.masked_fill(keep,-torch.inf).logsumexp(-1)),-1)
+                accepted=torch.stack((target_keep,target_exit),-1)
+                nll=-masses.masked_fill(~accepted,-torch.inf).logsumexp(-1)
+                continuation_metrics[name+'_decision_loss']=reduce(nll.masked_fill(~eligible,0.))
+                continuation_metrics[name+'_exit_targets']=(eligible&target_exit&~target_keep).sum().float()
+            truth=F.one_hot(delta_targets,output['delta_logits'].size(-1)).bool()
+            describe('time',output['delta_logits'],output['timing_keep_mask'],truth,note&weights.gt(0))
+            motion=model.motion_keep_mask(batch['target_shape'],output.get('motion_phase_distribution'),output['motion_reference_shape'])
+            if motion is not None:describe('motion',output['phase_logits'],motion,phase_mask,regular)
+            routes=torch.where(batch['target_shape'].gt(0),batch['target_shape']-1,
+                model.codec.num_shapes-2+families.clamp_min(1))
+            keep=model.template_keep_mask(output['template_reference_shape'],output['event_route_log_probs'])
+            describe('template',output['event_route_log_probs'],keep,
+                F.one_hot(routes,output['event_route_log_probs'].size(-1)).bool(),note&weights.gt(0))
     metrics = {name: value.detach() for name, value in dict(loss=total, time_loss=time_loss,
         kind_loss=kind_loss, delta_loss=delta_loss, timing_grid_loss=timing_grid_loss,
         timing_within_grid_loss=timing_within_grid_loss, configuration_loss=configuration_loss,
@@ -1510,7 +1743,7 @@ def stream_loss(model, output, batch):
         base_loss=base_loss,transition_exit_loss=transition_exit_loss,exit_count=exit_mask.sum(),
         exit_note_count=(exit_mask&note).sum(),exit_wait_count=(exit_mask&kind.eq(WAIT)).sum(),
         exit_eos_count=(exit_mask&kind.eq(EOS)).sum(),
-        recovery_loss=model.config.recovery_weight*recovery).items()}
+        recovery_loss=model.config.recovery_weight*recovery,**continuation_metrics).items()}
     return total, metrics
 
 

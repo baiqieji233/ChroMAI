@@ -164,13 +164,15 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     assert fresh['lane_load_policy']=='direct_buttons_v1'
     assert fresh['continuation_policy']=='pattern_runs_v2'
     assert fresh['motion_continuation_policy']=='context_motion_v3'
-    assert fresh['recovery_policy']=='mixed_exit_v2'
+    assert fresh['recovery_policy']=='greedy_mixed_v4'
+    assert fresh['transition_policy']=='music_exit_v3'
     assert fresh['prefix_augmentation_rate']==.15
     resumed=stream_train.resolve_learning_policies(args,parent,resume=True)
     assert resumed['history_window_policy']=='rolling_legacy_v1'
     assert resumed['transition_exit_weight']==0
     assert resumed['lane_load_policy']=='off'
     assert resumed['recovery_policy']=='persistent_v1'
+    assert resumed['transition_policy']=='off'
     assert resumed['prefix_augmentation_rate']==0
     with pytest.raises(ValueError,match='Resume inherits'):
         stream_train.resolve_learning_policies(SimpleNamespace(continuation_policy='typed_runs_v1'),parent,resume=True)
@@ -195,6 +197,8 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         'timing_grid.grid_head.weight','timing_grid.grid_head.bias',
         'timing_grid.bucket_head.weight','timing_grid.bucket_head.bias',
         'timing_grid.feature_key.weight','timing_grid.audio_projection.weight',
+        'timing_grid.query_projection.weight',
+        'timing_grid.query_interaction_projection.weight',
         'timing_grid.interval_candidate_projection.weight','timing_grid.interval_group_projection.weight',
         'event_family_head.weight','event_family_head.bias',
         'literal_route_head.weight','literal_route_head.bias','literal_family_embedding.weight',
@@ -203,12 +207,18 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         'family_continuity_head.weight','family_continuity_head.bias',
         'literal_stop_head.weight','literal_stop_head.bias','literal_type_embedding.weight',
         'decoder.norm.weight','decoder.norm.bias',
+        'music_exit_head.0.weight','music_exit_head.0.bias','music_exit_head.2.weight','music_exit_head.2.bias',
     }
     assert additions==expected
     for key in additions:
         value=upgraded.state_dict()[key]
         if key=='decoder.norm.weight':
             assert torch.equal(value,torch.ones_like(value)),key
+        elif key=='music_exit_head.0.weight':
+            assert torch.isfinite(value).all(),key
+            assert torch.count_nonzero(value)>0,key
+        elif key=='music_exit_head.0.bias':
+            assert torch.isfinite(value).all(),key
         else:
             assert torch.count_nonzero(value)==0,key
     original=parent.state_dict

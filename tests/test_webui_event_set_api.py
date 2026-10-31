@@ -102,7 +102,10 @@ def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_pat
     assert policies['history_window_policy']==expected
     assert policies['continuation_policy']==('off' if mode=='resume' else 'pattern_runs_v2')
     assert policies['motion_continuation_policy']==('motion_continuation_v1' if mode=='resume' else 'context_motion_v3')
-    assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'mixed_exit_v2')
+    assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'greedy_mixed_v4')
+    assert policies['prefix_augmentation_input_policy']==('causal_window_config_time_first_decision_v3' if mode=='resume' else 'musical_loop_recovery_v7')
+    assert policies['timing_grid_audio_policy']==('off' if mode=='resume' else 'query_pool_v3')
+    assert policies['transition_policy']==('off' if mode=='resume' else 'music_exit_v3')
     assert policies['prefix_augmentation_rate']==(0 if mode=='resume' else .15)
     assert policies['generation_eval_temperature']==.65
     assert policies['lane_load_policy']==('off' if mode=='resume' else 'direct_buttons_v1')

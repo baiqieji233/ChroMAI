@@ -53,6 +53,7 @@ def inspect_payload(payload):
             absolute_onset_prediction=getattr(config,'timing_output_policy','relative_delta_v1')=='absolute_grid_v1',
             semantic_event_families=getattr(config,'event_family_policy','legacy_v1')!='legacy_v1',
             audio_grounded_event_families=getattr(config,'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'),
+            music_conditioned_transition_exit=getattr(config,'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'),
             pattern_aware_continuation=config.continuation_policy=='pattern_runs_v2'),
         continuation_feature_dim=continuation_dim(config.continuation_policy),
         training_semantics='causal_event_set_stream_v1',condition_defaults=payload.get('condition_defaults'))
