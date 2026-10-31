@@ -132,11 +132,12 @@ def test_protected_hold_is_not_repaired_and_retry_budget_stops(monkeypatch):
         phrase_repair_budget=1,phrase_rollback_budget=2,phrase_time_budget_sec=30.,softcomfort_strength=1.)
     with pytest.raises(ValueError,match='no complete physically feasible candidate') as caught:
         search_stream(rollout,song,SimpleNamespace(),args,F(4),clock,Curve(),audio_bank=bank,codec=codec)
-    assert len(calls)==3 and len({seed for _,seed in calls})==3
+    assert len(calls)==5 and len({seed for _,seed in calls})==5
     import json
     evidence=caught.value.diagnostics
     assert evidence['repair_budget']==1 and evidence['repairs_used']==0
     assert evidence['current_event_retries_used']==2
+    assert evidence['private_tail_retries_used']==2
     assert evidence['recent_failures'][-1]['reason']=='physical_dead_end'
     assert evidence['recent_failures'][-1]['steps'][0]['text']=='1xh[4:8]'
     assert evidence['recent_failures'][-1]['seed']==calls[-1][1]
@@ -165,3 +166,106 @@ def test_current_retry_keeps_private_progress_without_spending_history_budget(mo
     assert selected[-1].end==3
     assert report['repairs_used']==0 and report['rollbacks_used']==0
     assert report['current_event_retries_used']==2
+
+
+def test_uncommitted_sustain_tail_can_restart_without_history_budget(monkeypatch):
+    from maichart.composer import stream_quality
+    monkeypatch.setattr(stream_quality,'score_phrase',lambda *a,**kw:dict(total=1.,components={}))
+    song,clock,bank,codec,cf,gf,step=fixture()
+    calls=[]
+    def rollout(prefix,seed,target,deadline):
+        calls.append(list(prefix))
+        ctx,g,curve,points=replay_stream_prefix(prefix,cf,gf,Curve(),clock)
+        cursor=prefix[-1].end if prefix else F(0)
+        if not prefix:
+            raw='1h[4:8]/5x' if len(calls)==1 else '5x'
+            ctx.commit(step(0,0,raw));g.commit(EventPoint(F(0),raw));points.append(EventPoint(F(0),raw))
+        if any('h[' in point.note_text for point in points):
+            if cursor==0:
+                ctx.commit(step(0,1,'2'));g.commit(EventPoint(F(1),'2'));points.append(EventPoint(F(1),'2'));cursor=F(1)
+            assert not g.accepts(EventPoint(F(2),'1'))
+            reason='physical_dead_end'
+        else:
+            while cursor<target:
+                beat=cursor+1;raw=str(int(beat)+1);point=EventPoint(beat,raw)
+                assert g.accepts(point)
+                g.commit(point);ctx.commit(step(cursor,beat,raw));points.append(point);cursor=beat
+            reason='span_complete'
+        return dict(steps=list(ctx._committed),points=points,cursor=cursor,guard=g,reason=reason,
+            anchor_second=0.,retries=0,timing_retries=0,forced_waits=0)
+    args=SimpleNamespace(seed=13,phrase_candidates=1,phrase_write_beats=3.,phrase_commit_beats=1.,
+        phrase_repair_budget=0,phrase_rollback_budget=0,phrase_time_budget_sec=30.,softcomfort_strength=1.)
+    selected,report=search_stream(rollout,song,SimpleNamespace(),args,F(3),clock,Curve(),audio_bank=bank,codec=codec)
+    assert len(calls)==4 and calls[3]==[]
+    assert not any('h[' in s.text for s in selected)
+    assert selected[0].text=='5x'
+    assert report['repairs_used']==report['rollbacks_used']==0
+    assert report['private_tail_retries_used']==1 and report['current_event_retries_used']==2
+
+
+@pytest.mark.parametrize('switch_slide_path',[False,True])
+def test_duration_counterfactual_keeps_old_identity_but_rejects_new_slide_path(monkeypatch,switch_slide_path):
+    """A diagnostic fingerprint may ignore duration, never trajectory identity."""
+    from maichart.composer import stream_search
+    song,clock,_,_,_,gf,step=fixture()
+    old=[step(0,0,'1h[4:8]/5x'),step(0,1,'2')]
+    guard=gf()
+    for s in old:guard.commit(EventPoint(s.end,s.text))
+    assert not guard.accepts(EventPoint(F(2),'1'))
+    result=dict(steps=old,points=[EventPoint(s.end,s.text) for s in old],guard=guard,anchor_second=.5)
+    def diagnostic(points,*args):
+        hold=next(event for event in stream_search._extract(points,song.tempo,song.first)[0] if event.note_type=='hold')
+        unchanged=hold.raw=='1h[4:8]'
+        branch='4-8[4:1]' if switch_slide_path and not unchanged else '4-6[4:1]'
+        notes=[SimpleNamespace(beat=hold.beat,raw=hold.raw,note_type='hold',button=1),
+               SimpleNamespace(beat=F(1),raw=branch,note_type='slide',button=4)]
+        def issue(kind):return SimpleNamespace(conflict_type=kind,time=1.,severity='hard',action='enforce',
+            evidence='miacode_runtime:fingerprint_fixture',notes=notes)
+        return SimpleNamespace(coverage={},conflicts_detected=[issue('miacode_Overlap')]
+            +([issue('miacode_MultiTouch')] if unchanged else []))
+    monkeypatch.setattr(stream_search,'_judge',diagnostic)
+    edits=list(_repair_prefix(result,song,clock,dict(native_calls=0,native_sec=0.),{}))
+    assert bool(edits)==(not switch_slide_path)
+
+
+def test_completed_candidate_rejected_by_native_gate_can_backtrack_private_tail(monkeypatch):
+    """A completed rollout is not feasible until the phrase gate agrees."""
+    from maichart.composer import stream_quality
+    monkeypatch.setattr(stream_quality,'score_phrase',lambda *a,**kw:dict(total=1.,components={}))
+    song,clock,bank,codec,cf,gf,step=fixture()
+    calls=[]
+    def rollout(prefix,seed,target,deadline):
+        calls.append(list(prefix))
+        bad=len(calls)==1
+        ctx,g,curve,points=replay_stream_prefix(prefix,cf,gf,Curve(),clock)
+        # Reproduce the callback contract of the real v36 failure: it reports
+        # span_complete with no last guard rejection, while full native judging
+        # finds a conflict in the still-private completed suffix.
+        source=[step(0,0,'1h[4:8]/5x' if bad else '5x')]
+        source += [step(i-1,i,'1' if bad and i==2 else str(i+1)) for i in range(1,4)]
+        for record in source:
+            ctx.commit(record);g.commit(EventPoint(record.end,record.text));points.append(EventPoint(record.end,record.text))
+        assert g.last_reason is None and not g.failure_trials
+        return dict(steps=list(ctx._committed),points=points,cursor=F(3),reason='span_complete',guard=g,
+            anchor_second=0.,retries=0,timing_retries=0,forced_waits=0)
+    args=SimpleNamespace(seed=17,phrase_candidates=1,phrase_write_beats=3.,phrase_commit_beats=1.,
+        phrase_repair_budget=0,phrase_rollback_budget=0,phrase_time_budget_sec=30.,softcomfort_strength=1.)
+    selected,report=search_stream(rollout,song,SimpleNamespace(),args,F(3),clock,Curve(),audio_bank=bank,codec=codec)
+    assert calls==[[],[]]
+    assert selected[0].text=='5x'
+    assert report['current_event_retries_used']==0
+    assert report['private_tail_retries_used']==1
+    assert report['repairs_used']==report['rollbacks_used']==0
+
+
+def test_phrase_gate_retains_intermediate_slide_during_old_active_slide():
+    from maichart.composer.stream_search import _gate
+    song=SimpleNamespace(tempo=[EventTempo(F(0),205.)],first=0.)
+    guard=EventGuard(song.tempo,0.,120.,touch_layout_policy='open',intercept_tap_on_slide=True,
+        physical_policy='runtime_hard_v2')
+    points=[EventPoint(F(63623,192),'1bx-5[16.2406##0.2256]'),
+            EventPoint(F(346),'3/8-4[8:1]'),EventPoint(F(699,2),'5')]
+    result=dict(points=points,guard=guard,anchor_second=101.26829268292683)
+    physical,hard=_gate(result,song,dict(native_calls=0,native_sec=0.),{})
+    assert not physical.coverage.get('parse_errors')
+    assert any(issue.conflict_type=='miacode_SlideTooFast' for issue in hard)

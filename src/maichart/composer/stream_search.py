@@ -27,7 +27,12 @@ class PhraseSearchExhausted(ValueError):
 def _failure_evidence(result):
     guard=result['guard']
     def point(p):return dict(beat=str(p.beat),text=p.note_text)
+    gate=result.get('_physical_gate')
+    candidate_gate=(dict(parse_errors=gate[0].coverage.get('parse_errors',[]),
+        enforced_conflicts=[dict(kind=issue.conflict_type,time=issue.time,evidence=issue.evidence,
+            notes=[dict(beat=str(n.beat),raw=n.raw) for n in issue.notes]) for issue in gate[1]]) if gate else None)
     return dict(reason=result['reason'],cursor=str(result['cursor']),
+        candidate_gate=candidate_gate,
         anchor_second=result.get('anchor_second'),retries=result.get('retries'),
         timing_retries=result.get('timing_retries'),forced_waits=result.get('forced_waits'),
         seed=result.get('seed'),guard_last_reason=getattr(guard,'last_reason',None),
@@ -67,17 +72,18 @@ def _gate(result,song,metrics,lifetimes):
     if '_physical_gate' in result:return result['_physical_gate']
     guard=result['guard']
     anchor=float(result.get('anchor_second',0.))
-    relevant=[]
+    rows=[]
     for point in result['points']:
         key=(point.beat,point.note_text)
         if key not in lifetimes:
             lifetimes[key]=guard._lifetime(point)
             if len(lifetimes)>4096:lifetimes.pop(next(iter(lifetimes)))
-        second,finish,_,_=lifetimes[key]
-        # Exactly the guard's existing active-prefix rule, plus all new points.
-        # Every omitted prefix action was already accepted and ended before
-        # this anchor's 300 ms interaction horizon.
-        if second>=anchor-.3 or finish>=anchor-.3:relevant.append(point)
+        second,finish,sustained,_=lifetimes[key]
+        rows.append((point,second,finish,sustained))
+    # Active sustains need their intervening interaction history, not just the
+    # sustain itself and taps near the newest onset. Share the guard's window.
+    cutoff=guard.interaction_start(anchor,rows)
+    relevant=[point for point,second,finish,_ in rows if second>=cutoff or finish>=cutoff]
     physical=_judge(relevant,song,guard.config,metrics)
     result['_physical_gate']=(physical,[issue for issue in physical.conflicts_detected if guard.enforced(issue)])
     return result['_physical_gate']
@@ -87,7 +93,7 @@ def _duration_signature(raw):
     return re.sub(r'\[[^\]]+\]', '[]', raw)
 
 
-def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None,duration_catalog=None,deadline=None):
+def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None,duration_catalog=None,deadline=None,committed_steps=None):
     """Yield one edit/withdrawal at a time, with its entire suffix invalidated."""
     guard=result['guard'];steps=result['steps'];points=result['points']
     proposal=getattr(guard,'last_proposal',None)
@@ -103,7 +109,9 @@ def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None
     involved={(str(n.beat),n.raw) for issue in issues for n in issue.notes}
     def keys(report):
         # Deleting an old event shifts source IDs. Musical identities do not.
-        return {(x.conflict_type,round(x.time,6),tuple((str(n.beat),n.raw) for n in x.notes))
+        # Only duration is editable here. Retain paths, endpoints and modifiers
+        # so a different same-head slide cannot masquerade as an old finding.
+        return {(x.conflict_type,round(x.time,6),tuple(sorted((str(n.beat),str(n.note_type),str(n.button),_duration_signature(n.raw)) for n in x.notes)))
                 for x in report.conflicts_detected if guard.enforced(x)}
     before=_judge(trial_points,song,guard.config,metrics)
     before_keys=keys(before)
@@ -125,6 +133,10 @@ def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None
             if not any(onset<=issue.time<=finish+.3 for issue in issues):continue
         step_index=next((i for i,s in enumerate(steps) if s.kind==NOTE and s.end==point.beat and s.text==point.note_text),None)
         if step_index is None:continue
+        if committed_steps is not None:
+            # Global history budgets protect precisely the authoritative log;
+            # private branch notes are handled by bounded phrase-local retries.
+            if step_index>=len(committed_steps) or steps[step_index]!=committed_steps[step_index]:continue
         if withdraw:
             # Withdraw exactly the implicated child. Same-onset protected and
             # unrelated children remain authoritative while the suffix is rebuilt.
@@ -185,7 +197,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
     if not 0<commit<=write or seconds<=0 or not 0<=strength<=2 or repair_budget<0 or rollback_budget<0 or int(getattr(args,'phrase_step_budget',256))<1:
         raise ValueError('phrase budgets must be positive; commit <= write; repair/rollback/strength nonnegative')
     committed=[];retained=[];records=[];phrase_index=0;repairs_used=rollbacks_used=0
-    current_retries_used=0
+    current_retries_used=0;private_tail_retries_used=0
     native_metrics=dict(native_calls=0,native_sec=0.);lifetimes={}
     duration_catalog={}
     for atom in codec.atom_catalog if codec is not None else ():
@@ -221,7 +233,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
         for candidate_index in range(count):
             if time.perf_counter()>=deadline:break
             run(list(committed)+(list(retained) if candidate_index==0 else []))
-        changes=[];current_event_retries=[]
+        changes=[];current_event_retries=[];private_tail_retries=[]
         if not valid:
             # Retry only the current unaccepted event from a private accepted
             # prefix. Keep its real timing/type distribution and temperature.
@@ -237,11 +249,23 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 retry_record=dict(operation='current_event_retry',beat=str(failed['cursor']),accepted=bool(valid))
                 current_event_retries.append(retry_record)
                 if valid:changes.append(retry_record)
+        if not valid:
+            for _ in range(2):
+                private_failures=[failed for failed in failures
+                    if failed['steps'][:len(committed)]==committed and len(failed['steps'])>len(committed)]
+                if valid or not private_failures or time.perf_counter()>=deadline:break
+                private_tail_retries_used+=1
+                # The tentative suffix is a candidate, not committed history.
+                # Discard it atomically and resample from the common prefix.
+                run(list(committed))
+                retry_record=dict(operation='private_tail_retry',beat=str(start),accepted=bool(valid))
+                private_tail_retries.append(retry_record)
+                if valid:changes.append(retry_record)
         if not valid and repairs_used<repair_budget:
             for failed in list(failures):
                 if valid or time.perf_counter()>=deadline:break
                 for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,
-                                                codec=codec,duration_catalog=duration_catalog,deadline=deadline):
+                                                codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
                     if repairs_used>=repair_budget or time.perf_counter()>=deadline:break
                     repairs_used+=1;run(prefix)
                     if valid:changes.append(edit);break
@@ -249,7 +273,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
             for failed in list(failures):
                 if valid or time.perf_counter()>=deadline:break
                 for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,withdraw=True,
-                                                codec=codec,duration_catalog=duration_catalog,deadline=deadline):
+                                                codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
                     if rollbacks_used>=rollback_budget or time.perf_counter()>=deadline:break
                     rollbacks_used+=1;run(prefix)
                     if valid:changes.append(edit);break
@@ -258,8 +282,9 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 candidate_count=count,attempted_rollouts=attempt,repairs_used=repairs_used,repair_budget=repair_budget,
                 rollbacks_used=rollbacks_used,rollback_budget=rollback_budget,
                 current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
+                private_tail_retries_used=private_tail_retries_used,private_tail_retry_limit_per_phrase=2,
                 time_budget_sec=seconds,deadline_exhausted=time.perf_counter()>=deadline,
-                candidate_errors=candidate_errors,current_event_retries=current_event_retries,
+                candidate_errors=candidate_errors,current_event_retries=current_event_retries,private_tail_retries=private_tail_retries,
                 recent_failures=[_failure_evidence(failed) for failed in failures[-8:]],
                 committed_steps=[dict(kind=s.kind,start=str(s.start),end=str(s.end),start_second=s.start_second,
                     end_second=s.end_second,text=s.text) for s in committed],
@@ -280,7 +305,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
         records.append(dict(start_beat=str(start),write_end_beat=str(target),commit_end_beat=str(commit_end),
             actual_commit_end_beat=str(committed[-1].end if committed else Fraction(0)),
             requested_candidates=count,attempted_rollouts=attempt,valid_candidates=len(valid),
-            score=score,changes=changes,current_event_retries=current_event_retries,candidate_errors=candidate_errors,
+            score=score,changes=changes,current_event_retries=current_event_retries,private_tail_retries=private_tail_retries,candidate_errors=candidate_errors,
             elapsed_sec=seconds-max(0.,deadline-time.perf_counter())))
         phrase_index+=1
         if target==end and winner['cursor']>=end:
@@ -290,6 +315,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
     return committed,dict(policy='phrase_v1',candidate_count=count,stop_reason='audio_end',phrases=records,
         repairs_used=repairs_used,rollbacks_used=rollbacks_used,search_totals={**aggregate,**native_metrics},
         current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
+        private_tail_retries_used=private_tail_retries_used,private_tail_retry_limit_per_phrase=2,
         repair_counter_scope='historical_sustain_edit_attempts_excludes_current_event_retry',
         native_metric_scope='candidate_gate_and_edit_counterfactuals_excludes_proposal_guard',
         capabilities=dict(shared_readonly_audio_cache=True,independent_prefix_guard_curve_rng=True,

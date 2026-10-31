@@ -140,6 +140,20 @@ class EventGuard:
             intercept=False
         return enforced_native_hard_conflict(issue,intercept_tap_on_slide=intercept)
 
+    def interaction_start(self,second,rows=None):
+        """Keep the input history of every action still judged by the runtime.
+
+        A long waiting/tracing Slide can depend on earlier intervening taps,
+        even when those taps have already ended. Keeping only its own head and
+        the latest 300 ms resets the native judge's accumulated path state.
+        """
+        cutoff=float(second)-.3
+        if self.physical_policy=='runtime_hard_v2':
+            for _,onset,finish,sustained in (self.prefix if rows is None else rows):
+                if sustained and finish>=float(second)-.3:
+                    cutoff=min(cutoff,onset-.3)
+        return cutoff
+
     @staticmethod
     def _markers(text, bpm):
         # Parser output contains mutable nested dictionaries/lists. Never expose
@@ -180,8 +194,9 @@ class EventGuard:
                 if prior is not None and second - prior < self.min_same_head_sec - _EPS:
                     self._reject('repeated_head_too_soon')
                     return False
+        cutoff=self.interaction_start(second)
         active = [(p, t, finish, sustain) for p, t, finish, sustain in self.prefix
-                  if finish >= second - .3 or t >= second - .3]
+                  if finish >= cutoff or t >= cutoff]
         # A first event can itself contain duplicate heads or impossible
         # simultaneous actions. Taps in the recent prefix also require the
         # same native transaction as events containing sustained actions.
@@ -228,7 +243,8 @@ class EventGuard:
     def commit(self, point):
         self._before_cache = None
         second, end, sustained, _ = self._lifetime(point)
-        self.prefix = [row for row in self.prefix if row[2] >= second - .3 or row[1] >= second - .3]
+        cutoff=self.interaction_start(second)
+        self.prefix = [row for row in self.prefix if row[2] >= cutoff or row[1] >= cutoff]
         self.prefix.append((point, second, end, sustained))
         for head in event_metadata(point.note_text).heads:
             pad = f'A{head}' if self.touch_layout_policy=='legacy_two_heads' and str(head).isdigit() else str(head)

@@ -325,7 +325,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
             return dict(steps=list(context._committed),points=list(points),cursor=cursor,reason=reason,
                 retries=retries,timing_retries=timing_retries,forced_waits=forced_waits,guard=guard,
                 anchor_second=anchor_second)
-        selected,search_report=search_stream(rollout,song,condition,args,end,clock,base_curve,audio_bank=audio_bank,codec=model.codec)
+        try:
+            selected,search_report=search_stream(rollout,song,condition,args,end,clock,base_curve,audio_bank=audio_bank,codec=model.codec)
+        except ValueError as exc:
+            if getattr(exc,'diagnostics',None) is not None:
+                exc.diagnostics.update(checkpoint_epoch=checkpoint_epoch,optimizer_steps=optimizer_steps)
+            raise
         rollout(selected,int(args.seed),selected[-1].end if selected else Fraction(0))
         reason=search_report['stop_reason']
         totals=search_report['search_totals']
@@ -417,6 +422,25 @@ def evaluate_panel(checkpoint_path,dataset,directory,*,count=2,seeds=(0,1),devic
     return result
 
 def main(argv=None):
-    args=parser().parse_args(argv);print(json.dumps(generate(args),ensure_ascii=False));return 0
+    args=parser().parse_args(argv)
+    try:report=generate(args)
+    except ValueError as exc:
+        diagnostics=getattr(exc,'diagnostics',None)
+        if diagnostics is not None:
+            path=Path(args.output).with_suffix('.failure.json')
+            write_error=None
+            try:
+                path.parent.mkdir(parents=True,exist_ok=True)
+                path.write_text(json.dumps(dict(status='failed',error=str(exc),
+                    checkpoint=str(args.checkpoint),seed=args.seed,settings=vars(args),
+                    diagnostics=diagnostics),ensure_ascii=False,indent=2),encoding='utf-8')
+            except OSError as error:write_error=str(error)
+            print('composer_generation_failure '+json.dumps(dict(error=str(exc),report_path=str(path),
+                report_write_error=write_error,
+                beat=diagnostics.get('start_beat'),deadline_exhausted=diagnostics.get('deadline_exhausted'),
+                repairs_used=diagnostics.get('repairs_used'),rollbacks_used=diagnostics.get('rollbacks_used')),
+                ensure_ascii=False),flush=True)
+        raise
+    print(json.dumps(report,ensure_ascii=False));return 0
 
 if __name__=='__main__':raise SystemExit(main())

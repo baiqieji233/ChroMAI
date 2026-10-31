@@ -3060,7 +3060,7 @@ function composerGenerationSummary(task) {
   if(typeTemperature!==undefined || typeMinP!==undefined) parts.push(`动作类别温度 ${typeTemperature??'未记录'}；min-p ${typeMinP??'未记录'}（不直接改Touch环区比例；温度0仅保留最高类别，温度1沿用旧类别概率）`);
   const layout=report.touch_layout_policy??settings.touch_layout_policy;
   if(layout)parts.push(`Touch布局：${layout==='open'?'开放':'旧双头限制'}`);
-  if(report.phrase_search||settings.search_policy){const search=report.phrase_search||{};parts.push(`短句生成：${search.policy??settings.search_policy}；候选 ${search.candidate_count??settings.phrase_candidates??1}；采音连续性 ${report.audio_tracking_strength??settings.audio_tracking_strength??0}；手感软评分 ${settings.softcomfort_strength??1}；当前重采 ${search.current_event_retries_used??0}；历史编辑 ${search.repairs_used??0}；撤回重采 ${search.rollbacks_used??0}`);}
+  if(report.phrase_search||settings.search_policy){const search=report.phrase_search||{};parts.push(`短句生成：${search.policy??settings.search_policy}；候选 ${search.candidate_count??settings.phrase_candidates??1}；采音连续性 ${report.audio_tracking_strength??settings.audio_tracking_strength??0}；手感软评分 ${settings.softcomfort_strength??1}；当前重采 ${search.current_event_retries_used??0}；试写回退 ${search.private_tail_retries_used??0}；历史编辑 ${search.repairs_used??0}；撤回重采 ${search.rollbacks_used??0}`);}
   const motifPolicy=report.motif_memory_policy;
   const qualityPolicy=report.configuration_quality_policy;
   if(qualityPolicy) {
