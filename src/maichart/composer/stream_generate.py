@@ -36,6 +36,17 @@ def parser():
     for key,default in [('temperature',.65),('pointer-temperature',None),('action-temperature',None),('min-same-head-ms',50.),('intensity-curve-strength',.65)]:p.add_argument('--'+key,type=float,default=default)
     p.add_argument('--touch-layout-policy',choices=('open','legacy_two_heads'),default='open')
     p.add_argument('--intensity-curve-mode',choices=('soft','follow','hard','strict'),default='follow')
+    p.add_argument('--search-policy',choices=('legacy','phrase_v1'),default='phrase_v1')
+    p.add_argument('--phrase-candidates',type=int,choices=(1,2,4),default=1)
+    p.add_argument('--phrase-write-beats',type=float,default=8.)
+    p.add_argument('--phrase-commit-beats',type=float,default=4.)
+    p.add_argument('--phrase-step-budget',type=int,default=256)
+    p.add_argument('--phrase-repair-budget',type=int,default=8)
+    p.add_argument('--phrase-rollback-budget',type=int,default=4)
+    p.add_argument('--phrase-time-budget-sec',type=float,default=30.)
+    p.add_argument('--softcomfort-strength',type=float,default=1.)
+    p.add_argument('--audio-tracking-strength',type=float,default=0.)
+    p.add_argument('--physical-policy',choices=('legacy','runtime_hard_v2'),default='runtime_hard_v2')
     return p
 
 
@@ -147,6 +158,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     torch.set_num_threads(2)
     model,payload=load(args.checkpoint,device) if model_override is None else (model_override,payload_override)
     model.eval();condition=_condition(args,payload)
+    tracking=float(getattr(args,'audio_tracking_strength',0.))
+    if not math.isfinite(tracking) or not 0<=tracking<=1:raise ValueError('audio_tracking_strength must be in [0,1]')
+    if tracking>0 and getattr(model.config,'phrase_context_policy','off')=='off':
+        raise ValueError('This checkpoint has no trained phrase context; audio_tracking_strength must be 0')
+    if hasattr(model,'set_audio_tracking_strength'):model.set_audio_tracking_strength(tracking)
+    elif tracking:raise ValueError('model does not support audio tracking')
     vocab=DeltaVocabulary.from_dict(payload['delta_vocab'])
     checkpoint_epoch=payload.get('epoch');optimizer_steps=payload.get('optimizer_steps')
     # Do not retain mapped checkpoint tensors while a trainer replaces its file.
@@ -162,7 +179,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     context=StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
         audio_grid_seconds=model.config.audio_grid_seconds,
         history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
-        continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy)
+        continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
+        phrase_context_policy=getattr(model.config,'phrase_context_policy','off'))
     batch=to_device_batch(context.current_batch(),device)
     cache=model.encode_audio(batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     if model.config.plan_kind_policy!='off':
@@ -174,81 +192,148 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     points=[];cursor=Fraction(0);waits=0;retries=0;timing_retries=0;forced_waits=0;reason='budget'
     maximum=args.max_events or 100000
     deltas=[Fraction(x) for x in model.config.delta_beats]
-    for step_index in range(maximum+max(100,math.ceil(float(end)*2))):
-        if len(points)>=maximum:reason='max_events';break
-        if cursor>=end:reason='audio_end';break
-        batch=to_device_batch({k:v for k,v in context.current_batch().items()
-            if k not in ('song_audio','song_mask','song_seconds','song_beats')},device)
-        result=model(batch,audio_cache=cache)
-        kinds=kind_logits_for_audio(result['kind_logits'][0,-1],cursor,end)
-        kinds[NOTE]+=float(curve.bias(np.asarray([second_at_beat(clock,cursor)]))[0])
-        kind=_sample(kinds,args.pointer_temperature,generator)
-        if kind==EOS:reason='learned_eos';break
-        if kind==WAIT:
-            nxt=cursor+2
+    step_index=0
+    def advance(stop_beat,step_budget,deadline=None):
+        nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator
+        for step_index in range(step_index,step_index+step_budget):
+            if getattr(args,'search_policy','phrase_v1')=='legacy' and len(points)>=maximum:reason='max_events';break
+            if cursor>=stop_beat:reason='audio_end' if getattr(args,'search_policy','phrase_v1')=='legacy' else 'span_complete';break
+            if deadline is not None and time.perf_counter()>=deadline:reason='time_budget';break
+            if len(points)>=maximum:reason='max_events';break
+            if cursor>=end:reason='audio_end';break
+            batch=to_device_batch({k:v for k,v in context.current_batch().items()
+                if k not in ('song_audio','song_mask','song_seconds','song_beats')},device)
+            result=model(batch,audio_cache=cache)
+            kinds=kind_logits_for_audio(result['kind_logits'][0,-1],cursor,end)
+            kinds[NOTE]+=float(curve.bias(np.asarray([second_at_beat(clock,cursor)]))[0])
+            kind=_sample(kinds,args.pointer_temperature,generator)
+            if kind==EOS:
+                reason='learned_eos'
+                if getattr(args,'search_policy','phrase_v1')!='legacy':cursor=end
+                break
+            if kind==WAIT:
+                nxt=cursor+2
+                context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt)))
+                cursor=nxt;waits+=1;continue
+            deltas=current_timing_deltas(model,result,cursor)
+            timing=note_delta_logits_for_audio(result['delta_logits'][0,-1],deltas,cursor,end,
+                clock,duration,first_step=step_index==0)
+            seconds=np.asarray([second_at_beat(clock,cursor+d) for d in deltas])
+            if curve.active:
+                timing+=torch.as_tensor(curve.bias(seconds),device=device)
+                timing=timing.masked_fill(torch.as_tensor(curve.controller.rest_mask(seconds),device=device),-torch.inf)
+            if not bool(torch.isfinite(timing).any()):
+                if end-cursor<=2:
+                    reason='tail_no_legal_onset'
+                    if getattr(args,'search_policy','phrase_v1')!='legacy':cursor=end
+                    break
+                kind=WAIT;nxt=cursor+2;forced_waits+=1
+            else:
+                def at_time(delta_id,beat):
+                    actual_seconds=torch.full_like(batch['step_second'],second_at_beat(clock,beat))
+                    ids=torch.full_like(batch['history_delta'],delta_id)
+                    if hasattr(model,'lane_load_projection'):
+                        ctx,load=model.action_context_for_delta(result,batch,ids,cache,event_seconds=actual_seconds,return_button_load=True)
+                        proposal=dict(context=ctx[0,-1],button_load=load[0,-1])
+                    else:
+                        proposal=dict(context=model.action_context_for_delta(result,batch,ids,cache,event_seconds=actual_seconds)[0,-1])
+                    duration_context=(model.duration_context_at(result,batch,actual_seconds,cache)
+                                      if hasattr(model,'duration_context_at') else None)
+                    if duration_context is not None:
+                        from .stream_duration import select_duration_context
+                        proposal['duration_context']=select_duration_context(duration_context,
+                            torch.tensor([batch['step_second'].numel()-1],device=device))
+                    if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3'):
+                        families=model.family_context_at(cache,actual_seconds,batch['song_inverse'],batch)
+                        proposal['family_context']=families['full'][0,-1]
+                        if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
+                    if getattr(model.config,'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
+                        transition=model.transition_logits_at(cache,actual_seconds,batch['song_inverse'],batch)[0,-1]
+                        proposal['motion_keep_logit']=transition[1]
+                        proposal['motion_reference_shape']=result['motion_reference_shape'][0,-1]
+                        proposal['template_keep_logit']=transition[2]
+                        proposal['template_reference_shape']=torch.where(batch['history_kind'][0,-1].eq(NOTE),
+                            batch['history_shape'][0,-1],batch['history_shape'].new_tensor(-1))
+                    return proposal
+                accepted,delta_id,failed,failed_times=sample_timed_event(model,timing,deltas,cursor,at_time,
+                    int(result['reference_phase'][0,-1]),result.get('reference_phase_mask',None)[0,-1]
+                        if 'reference_phase_mask' in result else None,guard,generator,
+                    pointer_temperature=args.pointer_temperature,action_temperature=args.action_temperature,
+                    timing_grid_ids=result.get('timing_grid_ids'),
+                    timing_group_count=result.get('timing_group_count'),
+                    timing_keep_mask=result.get('timing_keep_mask'),
+                    repeat_delta_id=int(result['repeat_delta_id'][0,-1]) if 'repeat_delta_id' in result else -1,
+                    motion_phase_distribution=result['motion_phase_distribution'][0,-1]
+                        if 'motion_phase_distribution' in result else None,
+                    accepts_extra=lambda pt:curve.allows(
+                        second_at_beat(clock,pt.beat),len(event_metadata(pt.note_text).heads)))
+                retries+=failed;timing_retries+=failed_times
+                if accepted is not None:
+                    nxt=accepted.beat
+                    heads=len(event_metadata(accepted.note_text).heads)
+                    points.append(accepted);curve.commit(second_at_beat(clock,nxt),heads)
+                    context.commit(StreamStep(NOTE,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),accepted.note_text))
+                    cursor=nxt
+                    if len(points)%100==0:print('composer_generation_progress '+json.dumps(dict(events=len(points),beat=float(cursor),duration_sec=duration)),flush=True)
+                    continue
+                if end-cursor<=2 and getattr(args,'search_policy','phrase_v1')=='legacy':reason='tail_rejected_configurations';break
+                if getattr(args,'search_policy','phrase_v1')!='legacy':
+                    reason='physical_dead_end';break
+                kind=WAIT;nxt=cursor+2;forced_waits+=1
             context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt)))
-            cursor=nxt;waits+=1;continue
-        deltas=current_timing_deltas(model,result,cursor)
-        timing=note_delta_logits_for_audio(result['delta_logits'][0,-1],deltas,cursor,end,
-            clock,duration,first_step=step_index==0)
-        seconds=np.asarray([second_at_beat(clock,cursor+d) for d in deltas])
-        if curve.active:
-            timing+=torch.as_tensor(curve.bias(seconds),device=device)
-            timing=timing.masked_fill(torch.as_tensor(curve.controller.rest_mask(seconds),device=device),-torch.inf)
-        if not bool(torch.isfinite(timing).any()):
-            if end-cursor<=2:reason='tail_no_legal_onset';break
-            kind=WAIT;nxt=cursor+2;forced_waits+=1
-        else:
-            def at_time(delta_id,beat):
-                actual_seconds=torch.full_like(batch['step_second'],second_at_beat(clock,beat))
-                ids=torch.full_like(batch['history_delta'],delta_id)
-                if hasattr(model,'lane_load_projection'):
-                    ctx,load=model.action_context_for_delta(result,batch,ids,cache,event_seconds=actual_seconds,return_button_load=True)
-                    proposal=dict(context=ctx[0,-1],button_load=load[0,-1])
-                else:
-                    proposal=dict(context=model.action_context_for_delta(result,batch,ids,cache,event_seconds=actual_seconds)[0,-1])
-                if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3'):
-                    families=model.family_context_at(cache,actual_seconds,batch['song_inverse'],batch)
-                    proposal['family_context']=families['full'][0,-1]
-                    if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
-                if getattr(model.config,'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
-                    transition=model.transition_logits_at(cache,actual_seconds,batch['song_inverse'],batch)[0,-1]
-                    proposal['motion_keep_logit']=transition[1]
-                    proposal['motion_reference_shape']=result['motion_reference_shape'][0,-1]
-                    proposal['template_keep_logit']=transition[2]
-                    proposal['template_reference_shape']=torch.where(batch['history_kind'][0,-1].eq(NOTE),
-                        batch['history_shape'][0,-1],batch['history_shape'].new_tensor(-1))
-                return proposal
-            accepted,delta_id,failed,failed_times=sample_timed_event(model,timing,deltas,cursor,at_time,
-                int(result['reference_phase'][0,-1]),result.get('reference_phase_mask',None)[0,-1]
-                    if 'reference_phase_mask' in result else None,guard,generator,
-                pointer_temperature=args.pointer_temperature,action_temperature=args.action_temperature,
-                timing_grid_ids=result.get('timing_grid_ids'),
-                timing_group_count=result.get('timing_group_count'),
-                timing_keep_mask=result.get('timing_keep_mask'),
-                repeat_delta_id=int(result['repeat_delta_id'][0,-1]) if 'repeat_delta_id' in result else -1,
-                motion_phase_distribution=result['motion_phase_distribution'][0,-1]
-                    if 'motion_phase_distribution' in result else None,
-                accepts_extra=lambda pt:curve.allows(
-                    second_at_beat(clock,pt.beat),len(event_metadata(pt.note_text).heads)))
-            retries+=failed;timing_retries+=failed_times
-            if accepted is not None:
-                nxt=accepted.beat
-                heads=len(event_metadata(accepted.note_text).heads)
-                points.append(accepted);curve.commit(second_at_beat(clock,nxt),heads)
-                context.commit(StreamStep(NOTE,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),accepted.note_text))
-                cursor=nxt
-                if len(points)%100==0:print('composer_generation_progress '+json.dumps(dict(events=len(points),beat=float(cursor),duration_sec=duration)),flush=True)
-                continue
-            if end-cursor<=2:reason='tail_rejected_configurations';break
-            kind=WAIT;nxt=cursor+2;forced_waits+=1
-        context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt)))
-        cursor=nxt;waits+=1
+            cursor=nxt;waits+=1
+    search_report={'policy':'legacy','candidate_count':1}
+    if getattr(args,'search_policy','phrase_v1')=='legacy':
+        advance(end,maximum+max(100,math.ceil(float(end)*2)))
+    else:
+        from copy import copy
+        from .stream_search import search_stream
+        base_curve=curve
+        audio_bank=context.bank
+        def rollout(prefix,seed,stop_beat,deadline=None):
+            nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator
+            context=StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
+                audio_bank=audio_bank,audio_grid_seconds=model.config.audio_grid_seconds,
+                history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
+                continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
+                phrase_context_policy=getattr(model.config,'phrase_context_policy','off'))
+            guard=EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
+                touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,
+                physical_policy=getattr(args,'physical_policy','runtime_hard_v2'))
+            curve=copy(base_curve);curve.counts=Counter()
+            points=[]
+            for step in prefix:
+                context.commit(step)
+                if step.kind==NOTE:
+                    point=EventPoint(step.end,step.text);points.append(point);guard.commit(point)
+                    curve.commit(second_at_beat(clock,step.end),len(event_metadata(step.text).heads))
+            cursor=prefix[-1].end if prefix else Fraction(0)
+            anchor_second=second_at_beat(clock,cursor)
+            waits=sum(s.kind==WAIT for s in prefix);retries=timing_retries=forced_waits=0
+            step_index=len(prefix);reason='step_budget'
+            generator=torch.Generator(device=device).manual_seed(seed)
+            advance(stop_beat,int(getattr(args,'phrase_step_budget',256)),deadline)
+            return dict(steps=list(context._committed),points=list(points),cursor=cursor,reason=reason,
+                retries=retries,timing_retries=timing_retries,forced_waits=forced_waits,guard=guard,
+                anchor_second=anchor_second)
+        selected,search_report=search_stream(rollout,song,condition,args,end,clock,base_curve,audio_bank=audio_bank,codec=model.codec)
+        rollout(selected,int(args.seed),selected[-1].end if selected else Fraction(0))
+        reason=search_report['stop_reason']
+        totals=search_report['search_totals']
+        retries=totals['configuration_retries'];timing_retries=totals['rejected_onset_attempts'];forced_waits=totals['forced_waits']
+        guard.checks=totals['guard_checks'];guard.rejections=totals['guard_rejections'];guard.reason_counts=Counter(totals['guard_reasons'])
+        search_report['retry_counter_scope']='all_searched_candidates'
     text,_=compile_event_points(points,tempo_changes=song.tempo,first=song.first,
         end_beat=Fraction(math.ceil(float(end)*4),4),level=str(condition.level),difficulty=condition.difficulty,strict_notes=True)
-    output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
     physical=process_chart_points(points,song.tempo,song.first,PostProcessConfig(enable_conflict_detection=True,
         conflict_engine='miacode',conflict_repair_mode='none',detect_hard_conflicts=True,detect_soft_conflicts=False))
+    if getattr(args,'search_policy','phrase_v1')!='legacy':
+        from maichart.generation.post_process import detect_chart_conflicts
+        final_physical=detect_chart_conflicts(points,song.tempo,song.first,guard.config)
+        if final_physical.coverage.get('parse_errors') or any(guard.enforced(x) for x in final_physical.conflicts_detected):
+            raise ValueError('final physical validation failed; chart not exported')
+        search_report['final_physical_gate']='passed'
+    output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
     from .configuration_observation import configuration_observation
     from .structure_metrics import structure_metrics
     from .stream_continuation import continuation_dim
@@ -275,7 +360,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         history_events=model.config.history_events,rollout_steps=model.config.rollout_steps,
         event_count=len(points),seed=args.seed,condition=condition.to_dict(),stop_reason=reason,device=device,
         temperature=args.temperature,pointer_temperature=args.pointer_temperature,action_temperature=args.action_temperature,
-        stream_steps=step_index+1,wait_steps=waits,forced_waits=forced_waits,configuration_retries=retries,
+        stream_steps=(step_index+1 if search_report['policy']=='legacy' else len(context._committed)),wait_steps=waits,forced_waits=forced_waits,configuration_retries=retries,
         rejected_onset_attempts=timing_retries,
         audio_duration_sec=duration,last_head_sec=second_at_beat(clock,points[-1].beat) if points else None,
         elapsed_sec=time.perf_counter()-started,codec_coverage=model.codec.coverage,
@@ -283,6 +368,11 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         configuration_observation=configuration_observation(points),
         structure_metrics=structure_metrics(points),
         continuation_observation=continuation_observation(context._committed),
+        phrase_search=search_report,audio_tracking_strength=tracking,
+        phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
+        duration_audio_policy=getattr(model.config,'duration_audio_policy','off'),
+        duration_audio_coverage=(model.duration_audio.coverage() if hasattr(model,'duration_audio') else None),
+        physical_policy=guard.physical_policy,
         curve=dict(active=curve.active,mode=args.intensity_curve_mode,strength=args.intensity_curve_strength),
         playability=physical.to_dict(),
         quality_scope='generated_stream_requires_listening_and_playtest')

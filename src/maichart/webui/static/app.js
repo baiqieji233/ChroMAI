@@ -2136,10 +2136,14 @@ function chartComposerTrainingPayload(options = {}) {
     payload.learning_policy=valueOrDefault('#composerLearningPolicy','auto');
     payload.transition_exit_weight=Number(valueOrDefault('#composerTransitionExitWeight',.5));
     payload.event_family_audio_weight=Number(valueOrDefault('#composerEventFamilyAudioWeight',.25));
+    payload.phrase_loss_weight=Number(valueOrDefault('#composerPhraseLossWeight',.05));
     const learningKeys=['transition_policy','decoder_policy','window_balance_policy','timing_group_policy','literal_output_policy','history_window_policy','continuation_policy','sensor_load_policy','gap_continuation_policy','motion_continuation_policy','lane_load_policy','recovery_policy','timing_output_policy','event_family_policy','prefix_augmentation_input_policy','timing_grid_audio_policy'];
     const legacyValues={transition_policy:'off',decoder_policy:'postnorm_v1',window_balance_policy:'equal_window_v1',timing_group_policy:'phase_only_v1',literal_output_policy:'flat_family_v1',history_window_policy:'rolling_legacy_v1',continuation_policy:'off',sensor_load_policy:'button_only_v1',gap_continuation_policy:'additive_v1',motion_continuation_policy:'motion_continuation_v1',lane_load_policy:'off',recovery_policy:'persistent_v1',timing_output_policy:'relative_delta_v1',event_family_policy:'legacy_v1',prefix_augmentation_input_policy:'causal_window_config_time_first_decision_v3',timing_grid_audio_policy:'off'};
     const savedPolicies=element('#composerLearningPolicy')?.dataset.savedPolicies;
     for(const key of learningKeys)payload[key]=mode==='resume'&&savedPolicies?JSON.parse(savedPolicies)[key]:(payload.learning_policy==='legacy'?legacyValues[key]:'auto');
+    for(const [key,id,legacy] of [['phrase_context_policy','composerPhraseContextPolicy','off'],['duration_audio_policy','composerDurationAudioPolicy','off'],['physical_policy',null,'legacy_report_v1']]) {
+      payload[key]=mode==='resume'&&savedPolicies?(JSON.parse(savedPolicies)[key]??legacy):(payload.learning_policy==='legacy'?legacy:(id?valueOrDefault('#'+id,'auto'):'auto'));
+    }
     payload.lr_schedule=valueOrDefault('#composerLrSchedule','cosine');
     return payload;
   }
@@ -2357,7 +2361,12 @@ function chartComposerGenerationPayload() {
     intensity_curve_chord_multiplier: Number(valueOrDefault("#composerChordMultiplier", 1)),
   };
   if(isEventSetGeneration()) {
+    for(const [key,id,fallback] of [['phrase_candidates','composerPhraseCandidates',1],['audio_tracking_strength','composerAudioTrackingStrength',0],['softcomfort_strength','composerSoftcomfortStrength',1],['phrase_write_beats','composerPhraseWriteBeats',8],['phrase_commit_beats','composerPhraseCommitBeats',4],['phrase_step_budget','composerPhraseStepBudget',256],['phrase_repair_budget','composerPhraseRepairBudget',8],['phrase_rollback_budget','composerPhraseRollbackBudget',4],['phrase_time_budget_sec','composerPhraseTimeBudgetSec',30]])payload[key]=Number(valueOrDefault('#'+id,fallback));
+    payload.search_policy=valueOrDefault('#composerSearchPolicy','phrase_v1');
+    payload.physical_policy=valueOrDefault('#composerPhysicalPolicy','runtime_hard_v2');
+    if(generationInspection?.data?.generation_capabilities?.optional_audio_tracking!==true)payload.audio_tracking_strength=0;
     const allowed=new Set(['model_family','checkpoint','audio','output','bpm','first','level','condition','tempo_map','meter_map','temperature','pointer_temperature','action_temperature','seed','max_events','device','min_same_head_ms','touch_layout_policy','condition_file','intensity_curve_enabled','intensity_curve','intensity_curve_file','intensity_curve_strength','intensity_curve_mode']);
+    for(const key of ['phrase_candidates','audio_tracking_strength','softcomfort_strength','phrase_write_beats','phrase_commit_beats','phrase_step_budget','phrase_repair_budget','phrase_rollback_budget','phrase_time_budget_sec','search_policy','physical_policy'])allowed.add(key);
     return Object.fromEntries(Object.entries(payload).filter(([key])=>allowed.has(key)));
   }
   return payload;
@@ -2369,8 +2378,9 @@ function isEventSetGeneration() {
 }
 function updateEventSetControls() {
   const stream=valueOrDefault('#composerArchitectureProfile','')==='event_set_stream_v1';
-  const allowed=new Set(['composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerPlanBlankWindowSeconds','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalIntervalEpochs','composerWarmupSteps','composerPrefetchBatches','composerSampleWorkers','composerAudioCacheGb','composerMinLrRatio','composerLrSchedule','composerPlanWeight','composerAudioGridSeconds','composerArchitectureProfile','composerPrecision','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerDropout','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerPrepareWorkers','composerCpuThreads','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCheckpointIntervalSteps','composerCacheDir','composerValidationManifest','composerGenerationEvalSongs','composerGenerationEvalSeeds']);
+  const allowed=new Set(['composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerPlanBlankWindowSeconds','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalIntervalEpochs','composerWarmupSteps','composerPrefetchBatches','composerSampleWorkers','composerAudioCacheGb','composerMinLrRatio','composerLrSchedule','composerPlanWeight','composerAudioGridSeconds','composerArchitectureProfile','composerPrecision','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerDropout','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerPrepareWorkers','composerCpuThreads','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCheckpointIntervalSteps','composerCacheDir','composerValidationManifest','composerGenerationEvalSongs','composerGenerationEvalSeeds']);
   allowed.add('composerEventFamilyAudioWeight');
+  for(const id of ['composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight'])allowed.add(id);
   document.querySelectorAll('#chartComposerTrainingControls input,#chartComposerTrainingControls select,#chartComposerTrainingControls textarea').forEach(control=>{
     const legacy=!allowed.has(control.id),field=control.closest('label.field');
     if(legacy&&field){field.hidden=stream;if(stream){if(control.dataset.eventSetDisabled===undefined)control.dataset.eventSetDisabled=String(control.disabled);control.disabled=true;}else if(control.dataset.eventSetDisabled!==undefined){control.disabled=control.dataset.eventSetDisabled==='true';delete control.dataset.eventSetDisabled;}}
@@ -2379,12 +2389,26 @@ function updateEventSetControls() {
   const sampleWorker=element('#composerSampleWorkers');if(sampleWorker){if(stream){if(sampleWorker.dataset.eventSetWorkerDisabled===undefined)sampleWorker.dataset.eventSetWorkerDisabled=String(sampleWorker.disabled);sampleWorker.value='1';sampleWorker.disabled=true;}else if(sampleWorker.dataset.eventSetWorkerDisabled!==undefined){sampleWorker.disabled=sampleWorker.dataset.eventSetWorkerDisabled==='true';delete sampleWorker.dataset.eventSetWorkerDisabled;}}
   const workerHint=element('#composerEventSetWorkerHint');if(workerHint)workerHint.hidden=!stream;
   const hint=element('#composerEventSetHint');if(hint)hint.hidden=!stream;
+  document.querySelectorAll('[data-event-set-generation-only]').forEach(node=>{node.hidden=!isEventSetGeneration();});
+  const phraseHint=element('#composerPhraseCapabilityHint');
+  if(phraseHint&&isEventSetGeneration()){
+    const caps=generationInspection?.data?.generation_capabilities||{};
+    phraseHint.textContent=`短句搜索可用；短句组织训练：${caps.learned_phrase_context?'已启用':'未启用（旧点不具备已学习呼应能力）'}；持续区间音频训练：${caps.duration_interval_audio?'已启用':'未启用'}。采音连续性默认关闭。`;
+  }
+  const trackingControl=element('#composerAudioTrackingStrength');
+  if(trackingControl){
+    const available=isEventSetGeneration()&&generationInspection?.data?.generation_capabilities?.optional_audio_tracking===true;
+    trackingControl.disabled=!available;
+    if(!available)trackingControl.value='0';
+    trackingControl.title=available?'默认0关闭':'当前检查点未训练短句上下文，采音连续性不可用，提交值固定为0';
+  }
   const oldGeneration=['composerActionRetryPolicy','composerPointerGridPolicy','composerSurvivalCalibration','composerDensityFeedbackOverride','composerRepetitionGuard','composerActionHistoryStrength','composerActionTypeTemperature','composerActionTypeMinP','composerCurveStrength','composerPointerHistoryStrength','composerInterceptTapOnSlide','composerGenerationContactPolicy','composerMotifStrength','composerQualityContextStrength','composerQualityPlanStrength','composerQualityLookaheadStrength','composerTouchHistoryGuard','composerTouchHistoryBound','composerIntensityCurveSpan','composerChordMultiplier'];
   for(const id of oldGeneration){const node=element('#'+id);if(node){const field=node.closest('label.field');if(field)field.hidden=isEventSetGeneration();if(isEventSetGeneration()){if(node.dataset.eventSetDisabled===undefined)node.dataset.eventSetDisabled=String(node.disabled);node.disabled=true;}else if(node.dataset.eventSetDisabled!==undefined){node.disabled=node.dataset.eventSetDisabled==='true';delete node.dataset.eventSetDisabled;}}}
 }
 function applyEventSetFreshDefaults() {
   if(currentTrainingMode()!=='fresh')return;
   const familyAudio=element('#composerEventFamilyAudioWeight');if(familyAudio)familyAudio.value='0.25';
+  for(const [id,value] of [['composerPhraseContextPolicy','auto'],['composerDurationAudioPolicy','auto'],['composerPhraseLossWeight',.05]]){const node=element('#'+id);if(node)node.value=String(value);}
   for(const [id,value] of Object.entries({composerLearningPolicy:'auto',composerTransitionExitWeight:.5,composerPrefixAugmentationRate:.15,composerGenerationEvalTemperature:.65,epochs:20,batchSize:16,gradAccumulation:1,learningRate:.0002,composerDModel:256,composerLayers:4,composerNhead:8,composerDimFeedforward:768,composerHistoryEvents:64,composerRolloutSteps:16,composerWindowSeconds:8,composerAudioGridSeconds:.01,composerPlanWeight:.1,composerPlanBlankWindowSeconds:.5,composerValidationMaxBatches:32,composerValidationBatchSize:4,composerGenerationEvalIntervalEpochs:1,composerWarmupSteps:100,composerPrefetchBatches:2,composerSampleWorkers:1,composerAudioCacheGb:2,composerMinLrRatio:.1,composerLrSchedule:'cosine',composerPrecision:'bf16',composerPrepareWorkers:1,composerCacheDir:'cache/event_set_stream_v1'})) {
     const node=element('#'+id);if(node)node.value=String(value);
   }
@@ -2720,7 +2744,7 @@ function updateTrainingControls() {
   }
   if (currentModelFamily()==='chart_composer_v1' && currentTrainingMode()==='fresh') {
     for (const id of ['composerDModel','composerDimFeedforward','composerLayers','composerNhead',
-      'composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerEchoPriorPolicy','composerTimingDistributionPolicy','composerButtonLoadPolicy','composerFineTimingPolicy','composerDensityFeedbackPolicy','composerActionHeadPolicy','composerConfigurationQualityPolicy','composerConditionMaskProb',
+      'composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerHistoryEvents','composerCandidateCount','composerActionSlots','composerArchitectureProfile','composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerEchoPriorPolicy','composerTimingDistributionPolicy','composerButtonLoadPolicy','composerFineTimingPolicy','composerDensityFeedbackPolicy','composerActionHeadPolicy','composerConfigurationQualityPolicy','composerConditionMaskProb',
       'composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerMotifMaxEvents','composerRecoveryTouchLayoutPolicy','composerStructurePolicy','composerStructureBackend','composerStructureDropout','composerContactPolicy',
       'composerLensWidth','composerLensChunkSize','composerHistoryResidualBound','composerHistoryMemoryRmsBound','composerHistoryDropout',
       'composerLedgerDropout','composerPlacementWeight','composerPlannerWeight','composerRecoveryInterval',
@@ -3036,6 +3060,7 @@ function composerGenerationSummary(task) {
   if(typeTemperature!==undefined || typeMinP!==undefined) parts.push(`动作类别温度 ${typeTemperature??'未记录'}；min-p ${typeMinP??'未记录'}（不直接改Touch环区比例；温度0仅保留最高类别，温度1沿用旧类别概率）`);
   const layout=report.touch_layout_policy??settings.touch_layout_policy;
   if(layout)parts.push(`Touch布局：${layout==='open'?'开放':'旧双头限制'}`);
+  if(report.phrase_search||settings.search_policy){const search=report.phrase_search||{};parts.push(`短句生成：${search.policy??settings.search_policy}；候选 ${search.candidate_count??settings.phrase_candidates??1}；采音连续性 ${report.audio_tracking_strength??settings.audio_tracking_strength??0}；手感软评分 ${settings.softcomfort_strength??1}；编辑 ${search.repairs_used??0}；撤回重采 ${search.rollbacks_used??0}`);}
   const motifPolicy=report.motif_memory_policy;
   const qualityPolicy=report.configuration_quality_policy;
   if(qualityPolicy) {
@@ -3821,8 +3846,11 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
     const fields={composerArchitectureProfile:'architecture_profile',composerDModel:'d_model',composerDimFeedforward:'dim_feedforward',composerLayers:'layers',composerNhead:'nhead',composerHistoryEvents:'history_events',composerRolloutSteps:'rollout_steps',composerWindowSeconds:'window_seconds',composerAudioGridSeconds:'audio_grid_seconds',composerPlanWeight:'plan_weight',composerPlanBlankWindowSeconds:'plan_blank_window_seconds',composerLrSchedule:'lr_schedule',composerWarmupSteps:'warmup_steps',composerMinLrRatio:'min_lr_ratio',composerValidationMaxBatches:'validation_max_batches',composerValidationBatchSize:'validation_batch_size',composerGenerationEvalIntervalEpochs:'generation_eval_interval_epochs',composerGenerationEvalSongs:'generation_eval_songs',composerPrefetchBatches:'prefetch_batches',composerAudioCacheGb:'audio_cache_gb',composerDropout:'dropout',composerSymbolicPretrainEpochs:'symbolic_pretrain_epochs',batchSize:'batch_size',gradAccumulation:'grad_accumulation'};
     for(const [id,key] of Object.entries(fields)){const node=element('#'+id),value=config[key]??args[key];if(node&&value!==undefined){node.value=String(value);node.disabled=mode==='resume';}}
     const policy=element('#composerLearningPolicy'),weight=element('#composerTransitionExitWeight');
-    if(policy){policy.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)policy.value=mode==='resume'?'checkpoint':'auto';policy.dataset.savedPolicies=JSON.stringify({transition_policy:config.transition_policy??'off',timing_group_policy:config.timing_group_policy??'phase_only_v1',literal_output_policy:config.literal_output_policy??'flat_family_v1',decoder_policy:config.decoder_policy??'postnorm_v1',window_balance_policy:config.window_balance_policy??'equal_window_v1',history_window_policy:config.history_window_policy??'rolling_legacy_v1',continuation_policy:config.continuation_policy??'off',sensor_load_policy:config.sensor_load_policy??'button_only_v1',gap_continuation_policy:config.gap_continuation_policy??'additive_v1',motion_continuation_policy:config.motion_continuation_policy??'off',lane_load_policy:config.lane_load_policy??'off',recovery_policy:config.recovery_policy??'persistent_v1',timing_output_policy:config.timing_output_policy??'relative_delta_v1',event_family_policy:config.event_family_policy??'legacy_v1',prefix_augmentation_input_policy:config.prefix_augmentation_input_policy??'causal_window_config_time_first_decision_v3',timing_grid_audio_policy:config.timing_grid_audio_policy??'off'});}
+    if(policy){policy.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)policy.value=mode==='resume'?'checkpoint':'auto';policy.dataset.savedPolicies=JSON.stringify({transition_policy:config.transition_policy??'off',timing_group_policy:config.timing_group_policy??'phase_only_v1',literal_output_policy:config.literal_output_policy??'flat_family_v1',decoder_policy:config.decoder_policy??'postnorm_v1',window_balance_policy:config.window_balance_policy??'equal_window_v1',history_window_policy:config.history_window_policy??'rolling_legacy_v1',continuation_policy:config.continuation_policy??'off',sensor_load_policy:config.sensor_load_policy??'button_only_v1',gap_continuation_policy:config.gap_continuation_policy??'additive_v1',motion_continuation_policy:config.motion_continuation_policy??'off',lane_load_policy:config.lane_load_policy??'off',recovery_policy:config.recovery_policy??'persistent_v1',timing_output_policy:config.timing_output_policy??'relative_delta_v1',event_family_policy:config.event_family_policy??'legacy_v1',prefix_augmentation_input_policy:config.prefix_augmentation_input_policy??'causal_window_config_time_first_decision_v3',timing_grid_audio_policy:config.timing_grid_audio_policy??'off',phrase_context_policy:config.phrase_context_policy??'off',duration_audio_policy:config.duration_audio_policy??'off',physical_policy:config.physical_policy??'legacy_report_v1'});}
     if(weight){weight.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)weight.value=String(mode==='resume'?(config.transition_exit_weight??0):.5);}
+    for(const [id,key,fallback] of [['composerPhraseContextPolicy','phrase_context_policy','off'],['composerDurationAudioPolicy','duration_audio_policy','off'],['composerPhraseLossWeight','phrase_loss_weight',.05]]){
+      const node=element('#'+id);if(node){node.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)node.value=String(mode==='resume'?(config[key]??args[key]??fallback):(key==='phrase_loss_weight' ? .05 : 'auto'));}
+    }
     for(const [id,value] of [['composerPrefixAugmentationRate',mode==='resume'?(config.prefix_augmentation_rate??0):.15],['composerGenerationEvalTemperature',mode==='resume'?(args.generation_eval_temperature??.65):.65],['composerEventFamilyAudioWeight',mode==='resume'?(config.event_family_audio_weight??0):.25]]){const node=element('#'+id);if(node){node.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)node.value=String(value);}}
     updateEventSetControls();return;
   }
@@ -3964,6 +3992,7 @@ function renderChartComposerCheckpointInspection(data) {
     `历史跨注意力后端：${config.history_attention_policy??'auto_v1'}`,
     `按键计时通道：${config.head_timing_policy??'merged_pads_v1'}；跨拍相对键位：${config.cross_event_relation_policy??'off'}`,
     `相位呼应先验：${config.echo_prior_policy??'off'}`,
+    `短句组织训练：${config.phrase_context_policy??'off'}；持续区间音频训练：${config.duration_audio_policy??'off'}；短句辅助损失：${config.phrase_loss_weight??data?.args?.phrase_loss_weight??.05}`,
     `选时分布：${config.timing_distribution_policy??'hierarchical_v1'}`,
     `逐按钮历史负担：${config.button_load_policy??'off'}`,
     `恢复采样策略：${config.recovery_sampling_policy??data?.args?.recovery_sampling_policy??data?.action_sampling_policy??'calibrated_kind_touch_rings_v2'}；选位 / 动作温度：${data?.args?.recovery_pointer_temperature??1} / ${data?.args?.recovery_action_temperature??.85}`,
@@ -4330,7 +4359,7 @@ async function inspectGenerationCheckpoint() {
       : "当前 chart_composer_v1 checkpoint 未通过检查，请先处理 checkpoint 检查结果。";
     const composerNotice = element("#generationCapabilityNotice");
     if (composerNotice) { composerNotice.hidden = false; composerNotice.textContent = composerReady
-      ? (isEventSetGeneration()?"整拍集合 checkpoint 可用；仅显示并提交此架构支持的温度、等级、时序、布局和强度曲线设置。":"Composer checkpoint 可用；温度、失败重试策略、等级、最大事件数和可选 condition 文件会传给独立生成器。")
+      ? (isEventSetGeneration()?"整拍集合 checkpoint 可用；可选择1／2／4个短句候选，采音连续性默认关闭。短句组织和持续区间音频是否学过，以检查点能力说明为准。":"Composer checkpoint 可用；温度、失败重试策略、等级、最大事件数和可选 condition 文件会传给独立生成器。")
       : "Composer checkpoint 不可用；请使用 chart_composer_v1 自己的 checkpoint。"; composerNotice.classList.toggle("warn", !composerReady); }
     setGenerationStatus(composerReady
       ? `模型族：chart_composer_v1；${architectureSummary}；保存 epoch ${data.epoch ?? 0}；更新 ${data.optimizer_steps ?? '未记录'} 步；生成可用`

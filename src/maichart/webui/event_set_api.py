@@ -110,6 +110,7 @@ def start_train(handler, payload, *, runtime):
     requested['transition_exit_weight']=payload.get('transition_exit_weight',0. if learning_policy=='legacy' else None)
     requested['prefix_augmentation_rate']=payload.get('prefix_augmentation_rate',0. if learning_policy=='legacy' else None)
     requested['event_family_audio_weight']=payload.get('event_family_audio_weight',0. if learning_policy=='legacy' else None)
+    requested['phrase_loss_weight']=payload.get('phrase_loss_weight')
     parent_config=StreamComposerConfig.from_dict(parent_data['model_config']) if parent_data else None
     if learning_policy=='checkpoint' and parent_config is None:
         raise ValueError('Checkpoint learning policy requires a parent checkpoint; use finetune or resume')
@@ -170,6 +171,24 @@ def start_generate(handler, payload, *, runtime):
     touch = payload.get('touch_layout_policy', 'open')
     if touch not in {'open', 'legacy_two_heads'}: raise ValueError('Unknown touch layout')
     _arg(args, '--touch-layout-policy', touch)
+    settings['touch_layout_policy']=touch
+    for key,default,choices in [('search_policy','phrase_v1',{'legacy','phrase_v1'}),
+                                ('physical_policy','runtime_hard_v2',{'legacy','runtime_hard_v2'})]:
+        value=payload.get(key,default)
+        if value not in choices:raise ValueError('Unknown '+key)
+        settings[key]=value;_arg(args,'--'+key.replace('_','-'),value)
+    for key,default,minimum in [('phrase_candidates',1,1),('phrase_step_budget',256,1),
+                               ('phrase_repair_budget',8,0),('phrase_rollback_budget',4,0)]:
+        value=_int(payload,key,default,minimum=minimum)
+        if key=='phrase_candidates' and value not in (1,2,4):raise ValueError('phrase_candidates must be 1,2,4')
+        settings[key]=value;_arg(args,'--'+key.replace('_','-'),value)
+    for key,default in [('phrase_write_beats',8.),('phrase_commit_beats',4.),('phrase_time_budget_sec',30.),
+                        ('softcomfort_strength',1.),('audio_tracking_strength',0.)]:
+        value=_float(payload,key,default,minimum=0.)
+        if key in {'phrase_write_beats','phrase_commit_beats','phrase_time_budget_sec'} and value<=0:raise ValueError(key+' must be positive')
+        if key=='audio_tracking_strength' and value>1 or key=='softcomfort_strength' and value>2:raise ValueError(key+' exceeds supported range')
+        settings[key]=value;_arg(args,'--'+key.replace('_','-'),value)
+    if settings['phrase_commit_beats']>settings['phrase_write_beats']:raise ValueError('phrase_commit_beats cannot exceed phrase_write_beats')
     if payload.get('bpm') not in (None, ''):
         bpm = _float(payload, 'bpm', 120., minimum=0.)
         if bpm <= 0: raise ValueError('bpm must be positive')

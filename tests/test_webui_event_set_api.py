@@ -52,6 +52,32 @@ def test_stream_generate_routes_checkpoint_and_filters_old_knobs(tmp_path, monke
     assert runtime.dispatch['expected_epoch'] is None
 
 
+def test_phrase_generation_settings_reach_cli_and_effective_settings(tmp_path):
+    checkpoint=tmp_path/'model.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    runtime=Runtime()
+    event_set_api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),
+        output=str(tmp_path/'out.txt'),seed=0,phrase_candidates=4,audio_tracking_strength=0.,
+        softcomfort_strength=1.5,phrase_rollback_budget=3),runtime=runtime)
+    for flag,value in [('--phrase-candidates','4'),('--audio-tracking-strength','0.0'),
+                       ('--softcomfort-strength','1.5'),('--phrase-rollback-budget','3')]:
+        assert runtime.args[runtime.args.index(flag)+1]==value
+    effective=runtime.task.result['effective_settings']
+    assert effective['phrase_candidates']==4
+    assert effective['audio_tracking_strength']==0.
+    assert effective['search_policy']=='phrase_v1'
+
+
+@pytest.mark.parametrize('settings',[{'phrase_candidates':3},{'audio_tracking_strength':1.1},
+    {'softcomfort_strength':2.1},{'phrase_commit_beats':9.,'phrase_write_beats':8.}])
+def test_phrase_generation_rejects_invalid_settings(tmp_path,settings):
+    checkpoint=tmp_path/'model.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    with pytest.raises(ValueError):
+        event_set_api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),
+            output=str(tmp_path/'out.txt'),seed=0,**settings),runtime=Runtime())
+
+
 def test_stream_rejects_old_checkpoint_initialization(tmp_path,monkeypatch):
     from maichart.composer import stream_checkpoint
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')

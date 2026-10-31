@@ -20,6 +20,11 @@ def sample_timed_event(model, timing_logits, deltas, cursor, action_context,
     """
     if not 1 <= time_attempts <= 3:
         raise ValueError('Time attempts must be between 1 and 3')
+    # A rollback may only diagnose rejections from this undecided event.
+    # Earlier rejected proposals can have been superseded by accepted notes.
+    if hasattr(guard, 'failure_trials'):
+        guard.failure_trials.clear()
+        guard.failure_conflicts.clear()
     scores=timing_logits.clone()
     failed_config=failed_timing=0
     for _ in range(time_attempts):
@@ -37,7 +42,7 @@ def sample_timed_event(model, timing_logits, deltas, cursor, action_context,
         action=action_context(delta_id,beat)
         context=action['context'] if isinstance(action,dict) else action
         load=action.get('button_load') if isinstance(action,dict) else None
-        family_options=({key:action[key] for key in ('family_context','family_logits','motion_keep_logit','motion_reference_shape','template_keep_logit','template_reference_shape') if key in action} if isinstance(action,dict) else {})
+        family_options=({key:action[key] for key in ('family_context','family_logits','motion_keep_logit','motion_reference_shape','template_keep_logit','template_reference_shape','duration_context') if key in action} if isinstance(action,dict) else {})
         point,failed=sample_guarded_event(model,context,
             reference_phase,beat,guard,generator,temperature=action_temperature,
             attempts=action_attempts,accepts_extra=accepts_extra,

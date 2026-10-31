@@ -157,9 +157,9 @@ def _prefix(dataset, episode):
     return prefix
 
 
-def _guard(song, prefix, anchor):
+def _guard(song, prefix, anchor, *, physical_policy='legacy_report_v1'):
     guard = EventGuard(song.tempo,song.first,float(song.audio.duration_sec),
-                       touch_layout_policy='open',intercept_tap_on_slide=True)
+                       touch_layout_policy='open',intercept_tap_on_slide=True,physical_policy=physical_policy)
     for index, step in enumerate(prefix):
         if step.kind == NOTE:
             point = EventPoint(step.end,step.text)
@@ -167,6 +167,12 @@ def _guard(song, prefix, anchor):
                 raise ValueError('Restored generated event violates EventGuard')
             guard.commit(point)
     return guard
+
+
+def _dataset_guard(dataset,song_index,prefix,anchor):
+    policy=getattr(dataset,'physical_policy','legacy_report_v1')
+    options={'physical_policy':policy} if policy!='legacy_report_v1' else {}
+    return _guard(dataset.base.songs[song_index][0],prefix,anchor,**options)
 
 
 def _next_reference(dataset, song, prefix, guard):
@@ -212,7 +218,8 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
                                          audio_grid_seconds=dataset.audio_grid_seconds,
                                          history_window_policy=dataset.history_window_policy,rollout_steps=dataset.targets,
                                          continuation_policy=dataset.continuation_policy,
-                                         timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'))
+                                         timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
+                                         phrase_context_policy=getattr(dataset,'phrase_context_policy','off'))
         raw = context.batch(prefix,cursor)
     else:
         raw = context.current_batch()
@@ -245,6 +252,12 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
             proposal=dict(context=action[0,-1],button_load=load[0,-1])
         else:
             proposal=dict(context=model.action_context_for_delta(result,batch,ids,cache,event_seconds=times)[0,-1])
+        if hasattr(model,'duration_context_at'):
+            duration_context=model.duration_context_at(result,batch,times,cache)
+            if duration_context is not None:
+                from .stream_duration import select_duration_context
+                proposal['duration_context']=select_duration_context(duration_context,
+                    torch.tensor([batch['step_second'].numel()-1],device=device))
         if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'):
             families=model.family_context_at(cache,times,batch['song_inverse'],batch)
             proposal['family_context']=families['full'][0,-1]
@@ -315,7 +328,7 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
             diagnostics['anchor_'+episode.get('risk','legacy')]+=1
             try:
                 prefix = _prefix(dataset,episode)
-                guard = _guard(dataset.base.songs[episode['song']][0],prefix,episode['anchor'])
+                guard = _dataset_guard(dataset,episode['song'],prefix,episode['anchor'])
                 song = dataset.base.songs[episode['song']][0]
                 bank = dataset._bank(episode['song'])
                 context = StreamInferenceContext(song,dataset.codec,dataset.delta_vocab,
@@ -323,7 +336,8 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                     audio_grid_seconds=dataset.audio_grid_seconds,
                     history_window_policy=dataset.history_window_policy,rollout_steps=dataset.targets,
                     continuation_policy=dataset.continuation_policy,
-                    timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'))
+                    timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
+                    phrase_context_policy=getattr(dataset,'phrase_context_policy','off'))
                 context.batch(prefix,prefix[-1].end if prefix else Fraction(0))
                 if episode['song'] not in audio_caches:
                     audio_caches[episode['song']] = _encode_song(model,bank,device)
@@ -404,7 +418,8 @@ def _context(dataset,song,bank):
         dataset.conditions[song],lead_in=dataset.lead_in,audio_bank=bank,
         audio_grid_seconds=dataset.audio_grid_seconds,history_window_policy=dataset.history_window_policy,
         rollout_steps=dataset.targets,continuation_policy=dataset.continuation_policy,
-        timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'))
+        timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
+        phrase_context_policy=getattr(dataset,'phrase_context_policy','off'))
 
 
 def _prepared_cache(dataset,model,song,bank,device,caches):
@@ -434,6 +449,12 @@ def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cach
         action=model.action_context_at(output['hidden'],times,cache,batch['song_inverse'],batch)
         load=None
     family_options={}
+    if hasattr(model,'duration_context_at'):
+        duration_context=model.duration_context_at(output,batch,times,cache)
+        if duration_context is not None:
+            from .stream_duration import select_duration_context
+            family_options['duration_context']=select_duration_context(duration_context,
+                torch.tensor([batch['step_second'].numel()-1],device=device))
     if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'):
         families=model.family_context_at(cache,times,batch['song_inverse'],batch)
         family_options['family_context']=families['full'][0,-1]
@@ -472,7 +493,7 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
     if not count:
         diagnostics['skip_no_preceding_notes']+=1;return None
     anchor=index-count;prefix=list(source[:anchor])
-    guard=_guard(dataset.base.songs[song][0],prefix,anchor)
+    guard=_dataset_guard(dataset,song,prefix,anchor)
     bank=dataset._bank(song);context=_context(dataset,song,bank)
     context.batch(prefix,prefix[-1].end if prefix else Fraction(0))
     cache=_prepared_cache(dataset,model,song,bank,device,caches)
@@ -597,7 +618,7 @@ def _synthetic_long_exit_row_at(dataset,song,index,rng,cursor,diagnostics,*,refe
             max(0.,second_at_beat(clock,beat)),text))
         previous=beat
     if previous!=target.start:raise ValueError('Synthetic loop changed the target cursor')
-    guard=_guard(record,prefix,len(prefix))
+    guard=_dataset_guard(dataset,song,prefix,len(prefix))
     _validate_window(guard,loop+[target])
     prefix.extend(loop)
     row=recovery_sample(dataset,song,prefix,target,weight=target.weight)

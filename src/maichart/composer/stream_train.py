@@ -16,6 +16,9 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
+    'phrase_context_policy': ('causal_phrase_v1','off'),
+    'duration_audio_policy': ('interval_v1','off'),
+    'physical_policy': ('runtime_hard_v2','legacy_report_v1'),
     'transition_policy': ('music_exit_v3','music_exit_v2','music_exit_v1','off'),
     'decoder_policy': ('prenorm_independent_v2','postnorm_v1'),
     'window_balance_policy': ('sqrt_window_v2','equal_window_v1'),
@@ -34,7 +37,7 @@ LEARNING_POLICIES = {
     'recovery_policy': ('greedy_mixed_v4','greedy_mixed_v3','mixed_exit_v2','persistent_v1'),
 }
 
-LEGACY_LEARNING_POLICIES = dict(transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
+LEGACY_LEARNING_POLICIES = dict(phrase_context_policy='off',duration_audio_policy='off',physical_policy='legacy_report_v1',transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
     prefix_augmentation_input_policy='causal_window_config_time_first_decision_v3',
     history_window_policy='rolling_legacy_v1',continuation_policy='off',
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
@@ -66,7 +69,13 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
     if not math.isfinite(audio_weight) or not 0<=audio_weight<=1:
         raise ValueError('Event family audio weight must be in [0,1]')
     if resume and audio_weight!=inherited:raise ValueError('Resume inherits event_family_audio_weight')
-    return {**result,'transition_exit_weight':weight,'prefix_augmentation_rate':rate,'event_family_audio_weight':audio_weight}
+    phrase_weight=getattr(requested,'phrase_loss_weight',None)
+    saved_phrase_weight=getattr(parent_config,'phrase_loss_weight',.05) if parent_config is not None else .05
+    if phrase_weight is None:phrase_weight=saved_phrase_weight if resume else .05
+    if not math.isfinite(phrase_weight) or phrase_weight<0:raise ValueError('Phrase loss weight must be finite and nonnegative')
+    if resume and phrase_weight!=saved_phrase_weight:raise ValueError('Resume inherits phrase_loss_weight')
+    return {**result,'transition_exit_weight':weight,'prefix_augmentation_rate':rate,'event_family_audio_weight':audio_weight,
+            'phrase_loss_weight':phrase_weight}
 
 
 def upgrade_learning_stage(model, policies, device='cpu'):
@@ -84,7 +93,7 @@ def upgrade_learning_stage(model, policies, device='cpu'):
                   'literal_route_head.','literal_family_embedding.','family_audio_projection.',
                   'family_history_projection.','family_audio_norm.','audio_event_family_head.',
                   'family_continuity_head.','family_rhythm_projection.','decoder.norm.',
-                  'literal_stop_head.','literal_type_embedding.','music_exit_head.')
+                  'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.')
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
     missing=set(target)-set(source); unexpected=set(source)-set(target)
     # Explicit baseline policies may remove only these optional projection modules.
@@ -139,6 +148,7 @@ def parser():
     p.add_argument('--transition-exit-weight',type=float,default=None)
     p.add_argument('--prefix-augmentation-rate',type=float,default=None)
     p.add_argument('--event-family-audio-weight',type=float,default=None)
+    p.add_argument('--phrase-loss-weight',type=float,default=None)
     p.add_argument('--generation-eval-temperature',type=float,default=None)
     p.add_argument('--device',default='auto');p.add_argument('--precision',choices=('auto','bf16','fp16','fp32'),default='bf16')
     return p
@@ -146,7 +156,7 @@ def parser():
 def _emit(kind,**values):print(kind+' '+json.dumps(values,ensure_ascii=False),flush=True)
 
 def _dataset(args,*,codec=None,delta_vocab=None,validation=False):
-    return StreamDataset(args.validation_manifest if validation else args.manifest,
+    dataset=StreamDataset(args.validation_manifest if validation else args.manifest,
         cache_dir=args.cache_dir,codec=codec,delta_vocab=delta_vocab,lead_in=args.history_events,
         targets=args.rollout_steps,window_seconds=args.window_seconds,
         preparation_workers=args.prepare_workers,audio_cache_gb=args.audio_cache_gb,
@@ -156,7 +166,10 @@ def _dataset(args,*,codec=None,delta_vocab=None,validation=False):
         window_balance_policy=getattr(args,'window_balance_policy','equal_window_v1'),
         history_window_policy=('block_aligned_v2' if getattr(args,'history_window_policy','auto')=='auto' else args.history_window_policy),
         continuation_policy=('pattern_runs_v2' if getattr(args,'continuation_policy','auto')=='auto' else args.continuation_policy),
+        phrase_context_policy=getattr(args,'phrase_context_policy','off'),
         limit_charts=args.limit_charts,unknown_policy='mask' if validation else 'error')
+    dataset.physical_policy=getattr(args,'physical_policy','legacy_report_v1')
+    return dataset
 
 class _LocalBatches(Sampler):
     def __init__(self,ds,batch_size,seed,epoch,skip=0):
@@ -288,6 +301,10 @@ def _fingerprint(args,ds,*,legacy=False,pre_blank=False):
     if getattr(args,'timing_group_policy','phase_only_v1')!='phase_only_v1':h.update(args.timing_group_policy.encode())
     if getattr(args,'literal_output_policy','flat_family_v1')!='flat_family_v1':h.update(args.literal_output_policy.encode())
     if getattr(args,'transition_policy','off')!='off':h.update(args.transition_policy.encode())
+    for key,default in (('phrase_context_policy','off'),('duration_audio_policy','off'),('physical_policy','legacy_report_v1')):
+        value=getattr(args,key,default)
+        if value!=default:h.update((key+':'+value).encode())
+    if getattr(args,'phrase_context_policy','off')!='off':h.update(str(getattr(args,'phrase_loss_weight',.05)).encode())
     return h.hexdigest()
 
 def _resolve_audio_grid(requested,parent_config=None):
@@ -465,7 +482,15 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version='stream_musical_transition_residual_budget_v5',
+    args.training_objective_recipe=dict(version='stream_causal_phrase_joint_v1',
+        phrase_context_policy=model.config.phrase_context_policy,
+        phrase_loss_weight=model.config.phrase_loss_weight,
+        phrase_target='ordered_segment_features_labels_only',
+        phrase_loss_normalization='sum_weighted_features_over_batch_and_features_query_budget_preserved',
+        phrase_input='audio_anchor_and_completed_prefix_references',
+        audio_tracking_training='25_percent_rows_uniform_strength_otherwise_zero',
+        duration_audio_policy=model.config.duration_audio_policy,
+        physical_policy=model.config.physical_policy,
         transition_policy=model.config.transition_policy,
         decoder_policy=model.config.decoder_policy,window_balance_policy=model.config.window_balance_policy,
         timing_output_policy=model.config.timing_output_policy,
@@ -598,6 +623,13 @@ def _train(args):
                 timing['transfer_sec']+=time.perf_counter()-tick;tick=time.perf_counter()
                 window_start=((bi-1)//args.grad_accumulation)*args.grad_accumulation
                 divisor=min(args.grad_accumulation,batches_per_epoch-window_start)
+                if not symbolic and model.config.phrase_context_policy!='off':
+                    # Train both the default disabled setting and the optional
+                    # acoustic continuity control. Keep one strength per row,
+                    # never independently resample it at each event.
+                    strength=torch.rand(b['history_kind'].size(0),device=args.device)
+                    enabled=torch.rand_like(strength)<.25
+                    b['audio_tracking_strength']=strength*enabled
                 with _autocast(args):out=model(b,symbolic_only=symbolic);loss,metrics=model.loss(out,b)
                 backward_loss=loss/divisor
                 window_finite=window_finite & _forward_finite_flags(out,loss,backward_loss)

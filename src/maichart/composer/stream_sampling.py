@@ -60,7 +60,7 @@ def sample_guarded_event(model, context, reference_phase, beat, guard, generator
                          *, temperature=.8, attempts=8, accepts_extra=None, reference_phase_mask=None,
                          motion_phase_distribution=None,button_load=None,family_context=None,family_logits=None,
                          motion_keep_logit=None,motion_reference_shape=None,
-                         template_keep_logit=None,template_reference_shape=None):
+                         template_keep_logit=None,template_reference_shape=None,duration_context=None):
     """Try at most attempts complete events; commit the accepted point once."""
     if not 1 <= attempts <= 8:
         raise ValueError('Guarded action attempts must be between 1 and 8')
@@ -79,6 +79,7 @@ def sample_guarded_event(model, context, reference_phase, beat, guard, generator
         if family is None:return None,0
     for attempt in range(attempts):
         options = dict(reference_phase=reference_phase, temperature=temperature, generator=generator)
+        if duration_context is not None:options['duration_context']=duration_context
         if family is not None:options.update(family_context=family_context,family_override=family)
         if family_logits is not None:options['family_logits']=family_logits
         if reference_phase_mask is not None:

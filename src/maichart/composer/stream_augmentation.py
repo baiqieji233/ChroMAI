@@ -316,6 +316,8 @@ def _rebuild_local_row(dataset,row,source,modified,song,begin,start,end,incremen
         states[target_at]=state;masks[target_at]=mask
     row['action_state']=pad_sequence(states,batch_first=True)
     row['action_state_mask']=pad_sequence(masks,batch_first=True,padding_value=True)
+    if getattr(dataset,'phrase_context_policy','off') != 'off':
+        dataset.rebuild_phrase_row(row,song,modified,begin,first,end)
     return row
 
 
@@ -330,7 +332,9 @@ def _augment_phase_row(dataset,index,*,rng,row=None):
     begin=start-1
     local=_native_prefix(dataset,song,source,begin,first_step=modified[begin])
     guard_prefix=modified[:begin] if local is None else local[1]
-    guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix))
+    physical=getattr(dataset,'physical_policy','legacy_report_v1')
+    guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix),
+                 **({'physical_policy':physical} if physical!='legacy_report_v1' else {}))
     _validate_window(guard,modified[begin:end])
     started=time.perf_counter()
     if local is not None:
@@ -364,6 +368,8 @@ def _augment_phase_row(dataset,index,*,rng,row=None):
     result['_augmentation_phase_shift_beats']=float(shift)
     result['_augmentation_phase_local_rebuild']=local is not None
     result['_augmentation_timing_replay_sec']=time.perf_counter()-started
+    if getattr(dataset,'phrase_context_policy','off') != 'off':
+        dataset.rebuild_phrase_row(result,song,modified,begin,first,end)
     return _rebalance_first_decision(result),'phase_shift',1
 
 
@@ -477,7 +483,9 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     # actions and the complete unchanged target block against their new state.
     local=_native_prefix(dataset,song,source,begin,first_step=modified[begin]) if timing_mode else _native_prefix(dataset,song,source,begin)
     guard_prefix=modified[:begin] if local is None else local[1]
-    guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix))
+    physical=getattr(dataset,'physical_policy','legacy_report_v1')
+    guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix),
+                 **({'physical_policy':physical} if physical!='legacy_report_v1' else {}))
     _validate_window(guard,modified[begin:end])
     row=dataset[index] if row is None else row
     if local is not None and (not timing_mode or musical):
@@ -519,6 +527,8 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     row['transition_exit_mask']=eligible[first:end]&row['loss_mask']&row['sample_weight'].gt(0)
     row['transition_exit_labels']=labels[first:end]
     if timing_mode:row['_augmentation_timing_replay_sec']=time.perf_counter()-replay_started
+    if getattr(dataset,'phrase_context_policy','off') != 'off':
+        dataset.rebuild_phrase_row(row,song,modified,begin,first,end)
     return _rebalance_first_decision(row),mode,count
 
 

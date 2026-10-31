@@ -300,6 +300,9 @@
 <label class="field" data-event-set-only hidden>音频窗口（秒）<input id="composerWindowSeconds" type="number" min="0.1" step="0.5" value="8"></label>
 <label class="field" data-event-set-only hidden>音频共享网格（秒）<input id="composerAudioGridSeconds" type="number" min="0.005" max="0.05" step="0.005" value="0.01"><small>默认10毫秒；继续训练和微调继承检查点网格，旧检查点缺失此字段时使用50毫秒。</small></label>
 <label class="field" data-event-set-only hidden>音频规划损失权重<input id="composerPlanWeight" type="number" min="0" step="0.05" value="0.1"><small>作用于共享音频的休止概率、每秒头数率与每秒事件率监督；0关闭该项监督。</small></label>
+<label class="field" data-event-set-only hidden>短句组织与呼应<select id="composerPhraseContextPolicy"><option value="auto">自动（新阶段启用，续训继承）</option><option value="off">关闭（对照）</option><option value="causal_phrase_v1">因果短句记忆</option></select><small>读取已写短句的组织与音乐位置；旧检查点需微调后才具备这项学习能力。</small></label>
+<label class="field" data-event-set-only hidden>持续动作区间音频<select id="composerDurationAudioPolicy"><option value="auto">自动（新阶段启用，续训继承）</option><option value="off">关闭（对照）</option><option value="interval_v1">持续区间音频</option></select><small>为支持的Hold与Slide时长细节读取其实际覆盖音乐区间。</small></label>
+<details data-event-set-only hidden><summary>短句训练高级设置</summary><label class="field">短句辅助损失权重<input id="composerPhraseLossWeight" type="number" min="0" step="0.01" value="0.05"><small>默认0.05；续训继承原值，0关闭辅助损失。</small></label></details>
 <label class="field" data-event-set-only hidden>连续生成训练修复<select id="composerLearningPolicy"><option value="auto">自动（新阶段启用新版修复，续训继承）</option><option value="legacy">旧策略基线</option><option value="checkpoint" disabled>继承检查点策略</option></select><small>新阶段保留模型已学得的节奏和配置概率，比较前后音乐变化与候选音频的逐项匹配，学习如何修正节奏选择和继续／退出倾向；学习长时间同键、交替、回旋、固定节奏及错拍历史后的真实后续，保留绝对拍位和密集段权重修复。旧检查点请用微调及新目录迁移；续训沿用原策略。</small></label>
 <label class="field" data-event-set-only hidden>循环历史训练比例<input id="composerPrefixAugmentationRate" type="number" min="0" max="1" step="0.01" value="0.15"><small>默认尝试扰动15%的短段，包含重复配置、固定间隔与真实错拍光标；新版在此比例内安排部分样本练习32／64／128事件的错误历史，保持原样本总训练权重，学习第一个可信的原谱后续目标。0关闭，验证不扰动，续训继承。</small></label>
 <label class="field" data-event-set-only hidden>验证生成温度<input id="composerGenerationEvalTemperature" type="number" min="0" step="0.05" value="0.65"><small>固定验证种子下生成面板的采样温度；续训继承检查点记录。</small></label>
@@ -975,6 +978,20 @@
 <label class="field">失败重试策略<select id="composerActionRetryPolicy"><option value="auto" selected>自动（继承检查点）</option><option value="legacy_first_atom_v1">旧首音封禁</option><option value="failed_prefix_v2">只封禁失败前缀</option></select><small>自动沿用检查点记录的策略；旧策略封禁失败首音，新策略仅封禁已失败的动作前缀。</small></label>
 <label class="field">接触预算<select id="composerGenerationContactPolicy"><option value="auto">继承模型策略</option><option value="off">关闭</option><option value="diagnostic_v1">仅诊断</option><option value="contact_groups_v1">按几何假设拦截</option></select><small>相距较远的双按钮加中心 Touch 的拦截依据未经真人验证的手部可及假设，可能误拦；其他不确定的 Touch 组合保留。建议先用诊断并检查实际谱面。</small></label>
 <label class="field">Touch布局<select id="composerTouchLayoutPolicy"><option value="open" selected>开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>默认开放模式，不把全部Touch算作按钮双头；仍检查时序与物理硬冲突。整拍集合的空间衔接策略随检查点加载，不使用旧版的配置关系强度等控件。</small></label>
+<div data-event-set-generation-only hidden style="grid-column:1/-1"><h4>短句生成与选优</h4><p id="composerPhraseCapabilityHint">候选搜索可用于旧检查点；短句呼应与持续区间音频能力以检查点实际训练策略为准。</p><div class="form-grid">
+<label class="field">候选数<select id="composerPhraseCandidates"><option value="1">1（默认）</option><option value="2">2</option><option value="4">4</option></select><small>共享音频缓存，比较相同音乐跨度；增加候选会增加生成耗时。</small></label>
+<label class="field">采音连续性强度<input id="composerAudioTrackingStrength" type="number" min="0" max="1" step="0.1" value="0"><small>默认0关闭；只有需要连续采音时再提高。</small></label>
+<label class="field">手感软评分强度<input id="composerSoftcomfortStrength" type="number" min="0" max="2" step="0.1" value="1"><small>默认1；用于多候选比较，单候选仅记录。考虑持续动作占用和快速交替负担，不硬禁合法单手技巧。</small></label></div>
+<details><summary>短句生成高级设置</summary><div class="form-grid">
+<label class="field">生成流程<select id="composerSearchPolicy"><option value="phrase_v1">短句事务生成</option><option value="legacy">完整旧点流程（对照）</option></select></label>
+<label class="field">物理判定<select id="composerPhysicalPolicy"><option value="runtime_hard_v2">运行证据硬冲突</option><option value="legacy">旧判定（对照）</option></select></label>
+<label class="field">试写跨度（拍）<input id="composerPhraseWriteBeats" type="number" min="0.25" step="0.25" value="8"></label>
+<label class="field">提交预算（拍）<input id="composerPhraseCommitBeats" type="number" min="0.25" step="0.25" value="4"><small>只在真实事件边界提交，不把预算跨度当作小节。</small></label>
+<label class="field">每候选最大步数<input id="composerPhraseStepBudget" type="number" min="1" value="256"></label>
+<label class="field">全曲最小编辑预算<input id="composerPhraseRepairBudget" type="number" min="0" value="8"></label>
+<label class="field">全曲撤回重采预算<input id="composerPhraseRollbackBudget" type="number" min="0" value="4"><small>必要时撤回涉事旧Hold/Slide，并从之前重建后续状态。</small></label>
+<label class="field">每短句时间预算（秒）<input id="composerPhraseTimeBudgetSec" type="number" min="1" value="30"></label>
+</div></details></div>
 <label class="field">动机记忆强度<input id="composerMotifStrength" type="number" min="0" max="2" step="0.1" value="1"><small>默认1。仅已开启实验动机记忆的模型生效；off模型调整此值无效。</small></label>
 <label class="field">配置关系强度<input id="composerQualityContextStrength" type="number" min="0" max="2" step="0.1" value="1"><small>仅配置协同模型生效。1为训练时强度，0关闭新增音频配对与持续状态输入，不关闭原有历史分支。</small></label>
 <label class="field">短句计划影响<input id="composerQualityPlanStrength" type="number" min="0" max="2" step="0.1" value="1"><small>仅配置协同模型生效。1使用预测计划，0移除计划对配置的影响；采音指针不受此滑块直接控制。</small></label>

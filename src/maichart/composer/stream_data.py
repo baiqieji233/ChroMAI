@@ -33,6 +33,7 @@ from .events import event_metadata
 from .stream_bank_cache import StreamBankDiskCache, bank_identity
 from .stream_continuation import ContinuationState, continuation_rows, continuation_dim, POLICIES as CONTINUATION_POLICIES
 from .stream_timing import encode_history_gap, TIMING_POLICIES
+from .stream_phrase import PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS
 
 PROFILE = 'event_set_stream_v1'
 PAD, BOS, NOTE, WAIT, EOS = range(5)
@@ -267,12 +268,14 @@ class StreamDataset(Dataset):
                  preparation_workers=1, audio_cache_gb=4., limit_charts=0, unknown_policy='error',
                  audio_grid_seconds=GRID_SECONDS, plan_blank_window_seconds=.5,
                  history_window_policy='rolling_legacy_v1',continuation_policy='off',timing_output_policy='relative_delta_v1',
-                 window_balance_policy='equal_window_v1'):
+                 window_balance_policy='equal_window_v1',phrase_context_policy='off'):
         if lead_in < 0 or targets < 1 or window_seconds <= 0:
             raise ValueError('invalid stream window settings')
         if unknown_policy not in ('error','mask'):
             raise ValueError('unknown_policy must be error or mask')
         self.unknown_policy = unknown_policy
+        if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
+        self.phrase_context_policy = phrase_context_policy
         if timing_output_policy not in TIMING_POLICIES:raise ValueError('invalid timing output policy')
         self.timing_output_policy=timing_output_policy
         if window_balance_policy not in ('equal_window_v1','sqrt_window_v2'):raise ValueError('invalid window balance policy')
@@ -438,6 +441,38 @@ class StreamDataset(Dataset):
         self._symbolic_bank = (torch.zeros(1,238), torch.zeros(1,dtype=torch.float64),
                                torch.zeros(1,dtype=torch.float64))
         self._symbolic_plan = (torch.zeros(1,3), torch.zeros(1), torch.zeros(1),torch.zeros(1))
+        self._phrases = OrderedDict()
+        self._phrase_bytes = 0
+        self._phrase_budget = 64*1024**2
+        self._phrase_uncached = 0
+
+    def _phrase_index(self, song):
+        with self._bank_lock, self._state_lock:
+            if song in self._phrases:
+                self._phrases.move_to_end(song)
+                return self._phrases[song]
+            index = PhraseIndex(self._bank(song), self._end_beats[song], self.streams[song])
+            index.supervision_valid = np.ones(len(index.boundaries)-1,dtype=np.bool_)
+            index.supervision_counts = np.zeros(len(index.boundaries)-1,dtype=np.int64)
+            for step, unknown in zip(self.streams[song],self.unknown_steps[song]):
+                if unknown:index.supervision_valid[index.segment(step.end)] = False
+                if not unknown and step.weight>0:index.supervision_counts[index.segment(step.start)] += 1
+            if index.nbytes > self._phrase_budget:
+                self._phrase_uncached += 1
+                return index
+            while self._phrases and self._phrase_bytes+index.nbytes > self._phrase_budget:
+                _, old = self._phrases.popitem(last=False)
+                self._phrase_bytes -= old.nbytes
+            self._phrases[song] = index
+            self._phrase_bytes += index.nbytes
+            return index
+
+    def rebuild_phrase_row(self, row, song, modified, begin, first, end):
+        """Edited prefix features are rebuilt; future auxiliary labels disabled."""
+        if self.phrase_context_policy != 'off':
+            index = self._phrase_index(song).edited(modified, begin, end)
+            row.update(index.rows(modified, first, end))
+        return row
 
     def __len__(self): return len(self.samples)
 
@@ -575,6 +610,8 @@ class StreamDataset(Dataset):
                     'symbol':{'estimated_bytes':self._symbol_bytes,'budget_bytes':self._symbol_budget,
                               'entries':len(self._symbols),'hits':self._symbol_hits,
                               'misses':self._symbol_misses,'evictions':self._symbol_evictions},
+                    'phrase':{'estimated_bytes':self._phrase_bytes,'budget_bytes':self._phrase_budget,
+                              'entries':len(self._phrases),'uncached':self._phrase_uncached},
                     'plan':{'bytes':sum(t.numel()*t.element_size() for plan in self.plans for t in plan),
                             'policy':'eager_labels_not_in_cache_budget'},
                     'disk_bank':self._disk_bank.stats() if self._disk_bank is not None else None,
@@ -675,6 +712,14 @@ class StreamDataset(Dataset):
         row['_song_bank'] = self._symbolic_bank if self.symbolic_only else self._bank(song)
         row['_song_plan'] = self._symbolic_plan if self.symbolic_only else self.plans[song]
         row['_literal_atom_types']=self._literal_atom_types
+        if self.phrase_context_policy != 'off':
+            phrase_index = self._phrase_index(song)
+            row.update(phrase_index.rows(stream,first,end,supervise=True))
+            trusted = row['loss_mask'] & row['sample_weight'].gt(0)
+            trusted &= torch.tensor([bool(phrase_index.supervision_valid[phrase_index.segment(s.start)]) for s in sequence])
+            row['target_phrase_mask'] &= trusted
+            counts = torch.tensor([max(1,int(phrase_index.supervision_counts[phrase_index.segment(s.start)])) for s in sequence],dtype=torch.float32)
+            row['target_phrase_weight'] *= row['sample_weight']/counts
         return row
 
 
@@ -682,6 +727,11 @@ def collate_stream(items):
     if not items: raise ValueError('empty stream batch')
     output = {}
     output['_sample_indices'] = [item.get('_sample_index') for item in items]
+    if any('phrase_progress' in item for item in items):
+        if not all('phrase_progress' in item for item in items):
+            raise ValueError('Cannot mix phrase-enabled and legacy stream rows')
+        for key in PHRASE_ROW_FIELDS:
+            output[key] = pad_sequence([item[key] for item in items], batch_first=True)
     for key in ('history_kind','history_delta','history_shape','history_phase','history_atoms','history_phase_mask',
                 'target_kind','target_delta','target_shape','target_phase_mask','target_details',
                 'step_beat','step_second','step_index','target_second','target_beat','history_gap_beats','loss_mask','sample_weight',
@@ -746,8 +796,10 @@ class StreamInferenceContext:
     """
     def __init__(self, song, codec, delta_vocab, condition, *, lead_in=64, audio_bank=None,
                  audio_grid_seconds=GRID_SECONDS, history_window_policy='rolling_legacy_v1',rollout_steps=16,
-                 continuation_policy='off',timing_output_policy='relative_delta_v1'):
+                 continuation_policy='off',timing_output_policy='relative_delta_v1',phrase_context_policy='off'):
         self.song, self.codec, self.delta_vocab = song, codec, delta_vocab
+        if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
+        self.phrase_context_policy = phrase_context_policy
         if timing_output_policy not in TIMING_POLICIES:raise ValueError('invalid timing output policy')
         self.timing_output_policy=timing_output_policy
         self.clock = TempoClock(song.tempo, song.first)
@@ -766,6 +818,8 @@ class StreamInferenceContext:
         self._reset_prefix()
 
     def _reset_prefix(self):
+        self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec))
+                        if self.phrase_context_policy != 'off' else None)
         self._committed = []
         self._incremental_state = IncrementalState(self.song.tempo,self.song.first)
         self._max_atoms = 1
@@ -796,6 +850,7 @@ class StreamInferenceContext:
             state, mask, _ = self._incremental_state.at(step.end,include_current=True,
                 visible_before_beat=cutoff,visibility_version='causal_v2',include_metadata=False)
         self._committed.append(step)
+        if self._phrase is not None:self._phrase.append(step)
         self._rows.append((step.kind,delta,event,step.end,state,mask))
         if self.continuation_policy != 'off':
             self._continuation.append(step)
@@ -864,6 +919,11 @@ class StreamInferenceContext:
         result['song_beats'] = self.bank[2].unsqueeze(0)
         result['song_mask'] = torch.ones(1,len(self.bank[0]),dtype=torch.bool)
         result['song_inverse'] = torch.zeros(1,dtype=torch.long)
+        if self._phrase is not None:
+            first_query = len(self._committed)-length+1
+            phrase_rows = [self._phrase.row(first_query+i,float(result['step_beat'][0,i])) for i in range(length)]
+            for key in PHRASE_ROW_FIELDS:
+                result[key] = torch.stack([row[key] for row in phrase_rows]).unsqueeze(0)
         return result
 
 
@@ -876,9 +936,10 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     context = StreamInferenceContext(song,dataset.codec,dataset.delta_vocab,dataset.conditions[song_index],
                                      lead_in=dataset.lead_in,audio_bank=bank,audio_grid_seconds=dataset.audio_grid_seconds,
                                      history_window_policy=dataset.history_window_policy,rollout_steps=dataset.targets,
-                                     continuation_policy=policy,timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'))
+                                     continuation_policy=policy,timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
+                                     phrase_context_policy=getattr(dataset,'phrase_context_policy','off'))
     batch = context.batch(prefix,cursor)
-    row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in
+    row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in PHRASE_ROW_FIELDS or key in
            ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features')}
     length = len(row['history_kind'])
     for key in ('target_kind','target_delta','target_shape'):

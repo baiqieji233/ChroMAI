@@ -103,7 +103,12 @@ def _cached_markers(text, bpm):
 
 
 class EventGuard:
-    def __init__(self, tempo, first, audio_end, *, min_same_head_sec=.05, intercept_tap_on_slide=False, touch_layout_policy='legacy_two_heads'):
+    def __init__(self, tempo, first, audio_end, *, min_same_head_sec=.05, intercept_tap_on_slide=False, touch_layout_policy='legacy_two_heads', physical_policy='legacy'):
+        if physical_policy == 'legacy_report_v1':
+            physical_policy = 'legacy'
+        if physical_policy not in {'legacy','runtime_hard_v2'}:
+            raise ValueError('unknown physical_policy')
+        self.physical_policy=physical_policy
         min_same_head_sec = float(min_same_head_sec)
         if not math.isfinite(min_same_head_sec) or not 0. <= min_same_head_sec <= .2:
             raise ValueError('min_same_head_sec must be finite and between 0 and 0.2 seconds')
@@ -123,6 +128,17 @@ class EventGuard:
                 'Overlap':'enforce','SlideHeadTap':'report','SlideTooFast':'report'})
         self.last_reason = None
         self._before_cache = None
+        self.last_conflicts = []
+        self.failure_conflicts = []
+        self.failure_trials = []
+        if physical_policy=='runtime_hard_v2':
+            self.config.conflict_kind_modes['SlideTooFast']='enforce'
+
+    def enforced(self, issue):
+        intercept=self.intercept_tap_on_slide
+        if self.physical_policy=='runtime_hard_v2' and issue.evidence.startswith('miacode_static:'):
+            intercept=False
+        return enforced_native_hard_conflict(issue,intercept_tap_on_slide=intercept)
 
     @staticmethod
     def _markers(text, bpm):
@@ -144,6 +160,8 @@ class EventGuard:
         return second, max(second, end), sustained, errors
 
     def accepts(self, point, *, protect_reported_hard=False):
+        self.last_proposal=point
+        self.last_conflicts=[]
         syntax_error=_event_syntax_error(point.note_text)
         if syntax_error:
             self._reject(syntax_error)
@@ -175,7 +193,7 @@ class EventGuard:
                      tuple((str(n.beat), n.raw) for n in issue.notes))
                     for issue in result.conflicts_detected
                     if issue.severity == 'hard' and (not enforced_only or
-                        enforced_native_hard_conflict(issue,intercept_tap_on_slide=self.intercept_tap_on_slide)))
+                        self.enforced(issue)))
         # Candidate time can change the active window without a commit. Keep
         # only an immutable summary of the exact latest context/configuration.
         key = (tuple((p.beat, p.note_text) for p in context),
@@ -187,6 +205,10 @@ class EventGuard:
                                   bool(before and before.coverage.get('parse_errors')))
         _, before_enforced, before_all, _ = self._before_cache
         after = detect_chart_conflicts(context + [point], self.tempo, self.first, self.config)
+        self.last_conflicts = [issue for issue in after.conflicts_detected if self.enforced(issue)]
+        self.failure_conflicts=(self.failure_conflicts+self.last_conflicts)[-64:]
+        if self.last_conflicts:
+            self.failure_trials=(self.failure_trials+[(point,list(self.last_conflicts))])[-8:]
         # Only an explicitly guided proposal requests this stronger check.
         # Keep configured report/enforce behavior unchanged for all other
         # generation proposals and for training recovery (the default call).

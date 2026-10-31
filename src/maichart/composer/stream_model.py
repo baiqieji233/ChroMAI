@@ -84,8 +84,20 @@ class StreamComposerConfig:
     plan_blank_window_seconds: float = .5
     recovery_weight: float = .1
     transition_exit_weight: float = .5
+    phrase_context_policy: str = 'off'
+    phrase_loss_weight: float = .05
+    duration_audio_policy: str = 'off'
+    physical_policy: str = 'legacy_report_v1'
 
     def __post_init__(self):
+        if self.duration_audio_policy not in ('off', 'interval_v1'):
+            raise ValueError('Unsupported duration audio policy')
+        if self.physical_policy not in ('legacy_report_v1', 'runtime_hard_v2'):
+            raise ValueError('Unsupported physical policy')
+        if self.phrase_context_policy not in ('off', 'causal_phrase_v1'):
+            raise ValueError('Unsupported phrase context policy')
+        if not math.isfinite(self.phrase_loss_weight) or self.phrase_loss_weight < 0:
+            raise ValueError('Phrase loss weight must be finite and nonnegative')
         self.delta_beats = tuple(str(x) for x in self.delta_beats)
         self.timing_phase_catalog = tuple(str(x) for x in self.timing_phase_catalog)
         if self.timing_output_policy not in TIMING_POLICIES:raise ValueError('Unsupported timing output policy')
@@ -172,6 +184,13 @@ class StreamComposer(nn.Module):
         super().__init__()
         self.config, self.codec = config, codec
         d = config.d_model
+        self._audio_tracking_strength = 0.
+        if config.duration_audio_policy == 'interval_v1':
+            from .stream_duration import DurationAudioScorer
+            self.duration_audio = DurationAudioScorer(d, codec)
+        if config.phrase_context_policy == 'causal_phrase_v1':
+            from .stream_phrase_model import CausalPhraseContext
+            self.phrase_context = CausalPhraseContext(d, config.condition_dim)
         self.audio_input = nn.Sequential(nn.Linear(config.audio_dim, d), nn.GELU(), nn.LayerNorm(d))
         self.audio_local = nn.Conv1d(d, d, 5, padding=2, groups=d)
         self.audio_clock = nn.Linear(14 if config.clock_policy=='musical_v2' else 4, d)
@@ -829,6 +848,52 @@ class StreamComposer(nn.Module):
         movement = torch.einsum('bti,btj,ijd->btd',probability,old_probability,self.phase_change.weight[difference])
         return probability @ self.phase_embedding.weight, movement*active[...,None], reference
 
+    def set_audio_tracking_strength(self, strength=0.):
+        strength = float(strength)
+        if not math.isfinite(strength) or not 0 <= strength <= 1:
+            raise ValueError('Audio tracking strength must be finite in [0, 1]')
+        self._audio_tracking_strength = strength
+
+    def duration_context_at(self, output, batch, event_seconds, audio_cache):
+        """Prepare bounded reads using the audio bank's local tempo estimate.
+
+        A bank cell straddling a tempo change has an averaged beat length. This
+        auxiliary score never replaces the native parser's physical timings.
+        """
+        if not hasattr(self, 'duration_audio'): return None
+        inverse = batch.get('song_inverse')
+        if inverse is None:
+            inverse = torch.arange(event_seconds.size(0), device=event_seconds.device)
+        seconds = audio_cache['seconds'][inverse]
+        beats = audio_cache['beats'][inverse]
+        lengths = audio_cache['mask'].sum(-1)[inverse]
+        ordered = seconds.masked_fill(~audio_cache['mask'][inverse], torch.inf).contiguous()
+        right = torch.searchsorted(ordered, event_seconds.to(ordered).contiguous(), right=True)
+        right = torch.minimum(right, (lengths-1)[:, None]).clamp_min(1)
+        right = right.clamp_max(seconds.size(1)-1)
+        left = (right-1).clamp_min(0)
+        ds = seconds.gather(1, right)-seconds.gather(1, left)
+        db = beats.gather(1, right)-beats.gather(1, left)
+        valid = (lengths[:, None] >= 2) & (db > 0) & (ds > 0)
+        spb = (ds/db.clamp_min(1e-8)).float()
+        intent = output.get('phrase_intent')
+        attention = self.kind_embedding.weight.new_ones(*event_seconds.shape, 32)
+        if intent is not None:
+            strength = torch.as_tensor(batch.get('audio_tracking_strength', self._audio_tracking_strength),
+                device=attention.device,dtype=attention.dtype)
+            if strength.ndim == 1: strength = strength[:, None]
+            if strength.ndim == 2: strength = strength[..., None]
+            attention = attention+strength*(2*self.phrase_context.tracking_acoustic(intent).sigmoid()-1)
+        inv = inverse[:, None].expand_as(event_seconds)
+        end = seconds.gather(1, (lengths-1).clamp_min(0)[:, None]).expand_as(event_seconds)
+        return dict(cache=audio_cache, inverse=inv.flatten(), second=event_seconds.float().flatten(),
+                    seconds_per_beat=spb.flatten(), valid=valid.flatten(),
+                    attention=attention.flatten(0, 1), end_second=end.float().flatten())
+
+    def duration_detail_logits(self, logits, shape, slot, duration_context=None):
+        if not hasattr(self, 'duration_audio'): return logits
+        return self.duration_audio(self, logits, shape, slot, duration_context)
+
     def forward(self, batch, audio_cache=None, *, symbolic_only=False):
         symbolic_only = symbolic_only or batch.get('symbolic_only', False)
         if symbolic_only:
@@ -895,6 +960,11 @@ class StreamComposer(nn.Module):
         offsets = self.near_offsets.to(x)
         nearby = self._read_audio(cache, beat[..., None]+offsets, inverse, clock='beats')
         x = x + self.near_audio(nearby.flatten(-2))
+        phrase_output = {}
+        if hasattr(self, 'phrase_context'):
+            phrase_residual, phrase_output = self.phrase_context(self, cache, inverse, batch,
+                tracking_strength=batch.get('audio_tracking_strength', self._audio_tracking_strength))
+            x = x + phrase_residual.to(x)
         t = x.size(1)
         causal = torch.ones(t, t, device=x.device, dtype=torch.bool).triu(1)
         safe_valid = valid.clone()
@@ -1015,6 +1085,10 @@ class StreamComposer(nn.Module):
                   'phase_logits': self.event_phase_logits(action, shapes, reference_phase,reference_phase_mask,motion_distribution,button_load,**motion_options),
                   'hidden': hidden, 'action_context': action, 'reference_phase': reference_phase,
                   'reference_phase_mask':reference_phase_mask,'repeat_delta_id':repeat_delta_id}
+        result.update(phrase_output)
+        if hasattr(self, 'duration_audio'):
+            result['duration_audio_context'] = self.duration_context_at(result, batch,
+                batch.get('target_second', batch['step_second']), cache)
         if motion_distribution is not None:result['motion_phase_distribution']=motion_distribution
         if time_keep_mask is not None:
             result.update(timing_keep_mask=time_keep_mask,**motion_options,**transition_options)
@@ -1375,13 +1449,14 @@ class StreamComposer(nn.Module):
             logits=logits.float().masked_fill(~allowed,-1e4)
         return logits
 
-    def regular_detail_log_probs(self,context,shape,phases,targets):
+    def regular_detail_log_probs(self,context,shape,phases,targets,duration_context=None):
         """Exact teacher-forced detail sequence likelihood at each real phase."""
         count=context.size(0)
         if self.config.detail_policy=='independent_v1':
             result=context.new_zeros(count)
             for slot,head in enumerate(self.detail_heads[shape]):
-                result=result-F.cross_entropy(head(context).float(),targets[:,slot],reduction='none')
+                logits=self.duration_detail_logits(head(context),shape,slot,duration_context)
+                result=result-F.cross_entropy(logits.float(),targets[:,slot],reduction='none')
             return result
         hidden=context+self.shape_embedding.weight[shape]+self.phase_embedding(phases)
         previous=self.detail_start.expand(count,-1)
@@ -1389,6 +1464,7 @@ class StreamComposer(nn.Module):
         for slot,embedding in enumerate(self.detail_embeddings[shape]):
             hidden=self.detail_cell(previous,hidden)
             logits=F.linear(self.detail_output(hidden),embedding.weight,self.detail_bias[shape][slot])
+            logits=self.duration_detail_logits(logits,shape,slot,duration_context)
             result=result-F.cross_entropy(logits.float(),targets[:,slot],reduction='none')
             previous=self.detail_input(embedding(targets[:,slot]))
         return result
@@ -1401,7 +1477,7 @@ class StreamComposer(nn.Module):
                      blocked_shape_phases=None,shape_override=None,phase_override=None,motion_phase_distribution=None,button_load=None,
                      family_context=None,family_logits=None,family_override=None,
                      motion_keep_logit=None,motion_reference_shape=None,template_keep_logit=None,
-                     template_reference_shape=None,template_keep_override=None):
+                     template_reference_shape=None,template_keep_override=None,duration_context=None):
         """Decode one entire NOTE; callers choose its time before this method."""
         context = context.reshape(-1, self.config.d_model)
         if context.size(0) != 1:
@@ -1418,9 +1494,11 @@ class StreamComposer(nn.Module):
                 temperature=temperature, generator=generator,blocked_shape_phases=blocked_shape_phases,
                 shape_override=shape_override,phase_override=phase_override,motion_phase_distribution=motion,button_load=load,
                 family_context=family_ctx,family_logits=family_score,family_override=override,
-                motion_keep_logit=decision[0],motion_reference_shape=decision[1],template_keep_logit=decision[2],template_reference_shape=decision[3],template_keep_override=decision[4])
-                for row, ref,mask,motion,load,family_ctx,family_score,override,decision in
-                    zip(context, refs,masks,motions,loads,family_contexts,family_scores,overrides,decisions)]
+                motion_keep_logit=decision[0],motion_reference_shape=decision[1],template_keep_logit=decision[2],template_reference_shape=decision[3],template_keep_override=decision[4],
+                duration_context=({key:value if key=='cache' else value[row_index:row_index+1]
+                    for key,value in duration_context.items()} if duration_context is not None else None))
+                for row_index,(row, ref,mask,motion,load,family_ctx,family_score,override,decision) in
+                    enumerate(zip(context, refs,masks,motions,loads,family_contexts,family_scores,overrides,decisions))]
         def choose(logits,sampling_temperature=None):
             scale=temperature if sampling_temperature is None else sampling_temperature
             if scale <= 0:
@@ -1493,7 +1571,8 @@ class StreamComposer(nn.Module):
         else:phase=0
         if shape:
             if self.config.detail_policy=='independent_v1':
-                details = [choose(head(context)) for head in self.detail_heads[shape]]
+                details = [choose(self.duration_detail_logits(head(context),shape,slot,duration_context))
+                           for slot,head in enumerate(self.detail_heads[shape])]
             else:
                 details=[]
                 hidden=context+self.shape_embedding.weight[shape]+self.phase_embedding.weight[phase]
@@ -1501,6 +1580,7 @@ class StreamComposer(nn.Module):
                 for slot,embedding in enumerate(self.detail_embeddings[shape]):
                     hidden=self.detail_cell(previous,hidden)
                     logits=F.linear(self.detail_output(hidden),embedding.weight,self.detail_bias[shape][slot])
+                    logits=self.duration_detail_logits(logits,shape,slot,duration_context)
                     detail=choose(logits);details.append(detail)
                     previous=self.detail_input(embedding.weight[detail][None])
         elif semantic and hasattr(self,'literal_stop_head'):
@@ -1624,22 +1704,32 @@ def stream_loss(model, output, batch):
     for group in groups:
         shape, indices = group[:2]
         ctx = context.index_select(0, indices)
+        duration_context=None
+        if output.get('duration_audio_context') is not None:
+            from .stream_duration import select_duration_context
+            duration_context=select_duration_context(output['duration_audio_context'],indices)
         target, mass = details.index_select(0, indices), flat_weights.index_select(0, indices)
         if model.config.detail_policy=='independent_v1':
             for slot, head in enumerate(model.detail_heads[shape]):
-                slot_nll=F.cross_entropy(head(ctx).float(), target[:, slot], reduction='none')
+                logits=model.duration_detail_logits(head(ctx),shape,slot,duration_context)
+                slot_nll=F.cross_entropy(logits.float(), target[:, slot], reduction='none')
                 detail_sum = detail_sum + (slot_nll*mass).sum()
                 detail_per_row=detail_per_row.index_add(0,indices,slot_nll)
         else:
             if sparse_groups is None:
                 phases=torch.arange(8,device=ctx.device)[None].expand(ctx.size(0),-1)
+                expanded_duration=(select_duration_context(duration_context,
+                    torch.arange(ctx.size(0),device=ctx.device).repeat_interleave(8))
+                    if duration_context is not None else None)
                 phase_details=model.regular_detail_log_probs(
                     ctx[:,None].expand(-1,8,-1).reshape(-1,ctx.size(-1)),shape,phases.reshape(-1),
-                    target[:,None].expand(-1,8,-1).reshape(-1,target.size(-1))).reshape(-1,8)
+                    target[:,None].expand(-1,8,-1).reshape(-1,target.size(-1)),
+                    duration_context=expanded_duration).reshape(-1,8)
             else:
                 rows, phases = group[2:]
                 packed = model.regular_detail_log_probs(ctx.index_select(0, rows), shape,
-                    phases, target.index_select(0, rows))
+                    phases, target.index_select(0, rows),duration_context=(select_duration_context(duration_context,rows)
+                        if duration_context is not None else None))
                 phase_details = packed.new_full((ctx.size(0), 8), -torch.inf).index_put(
                     (rows, phases), packed)
             phase_log_probs=output['phase_logits'].flatten(0,1).index_select(0,indices).float().log_softmax(-1)
@@ -1704,7 +1794,11 @@ def stream_loss(model, output, batch):
                &(note|kind.eq(WAIT)|kind.eq(EOS))&weights.gt(0))
     joint_nll=kind_nll+delta_nll+shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights)
     transition_exit_loss=model.config.transition_exit_weight*reduce(joint_nll*exit_mask)
-    total = base_loss+transition_exit_loss+model.config.recovery_weight*recovery
+    phrase_loss = kind_loss.new_zeros(())
+    if 'phrase_prediction' in output:
+        from .stream_phrase_model import phrase_auxiliary_loss
+        phrase_loss = phrase_auxiliary_loss(output, batch)
+    total = base_loss+transition_exit_loss+model.config.recovery_weight*recovery+model.config.phrase_loss_weight*phrase_loss
     continuation_metrics={}
     if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
         # These are components/diagnostics of the existing joint NLL. They
@@ -1740,7 +1834,8 @@ def stream_loss(model, output, batch):
         event_route_conditional_loss=shape_loss-family_loss, phase_loss=phase_loss, detail_loss=detail_loss,
         literal_stop_loss=literal_stop_loss,
         plan_loss=plan_loss,plan_rate_loss=plan_rate_loss,plan_blank_loss=plan_blank_loss,
-        base_loss=base_loss,transition_exit_loss=transition_exit_loss,exit_count=exit_mask.sum(),
+        base_loss=base_loss,phrase_loss=phrase_loss,phrase_weighted_loss=model.config.phrase_loss_weight*phrase_loss,
+        transition_exit_loss=transition_exit_loss,exit_count=exit_mask.sum(),
         exit_note_count=(exit_mask&note).sum(),exit_wait_count=(exit_mask&kind.eq(WAIT)).sum(),
         exit_eos_count=(exit_mask&kind.eq(EOS)).sum(),
         recovery_loss=model.config.recovery_weight*recovery,**continuation_metrics).items()}
