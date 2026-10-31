@@ -16,7 +16,7 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
-    'phrase_context_policy': ('causal_phrase_v1','off'),
+    'phrase_context_policy': ('ordered_phrase_v2','causal_phrase_v1','off'),
     'duration_audio_policy': ('interval_v1','off'),
     'physical_policy': ('runtime_hard_v2','legacy_report_v1'),
     'transition_policy': ('music_exit_v3','music_exit_v2','music_exit_v1','off'),
@@ -203,11 +203,13 @@ class _TrainingCollator:
     def __call__(self,items):
         self.batch_number+=1
         diagnostics={}
+        original_items=items
         if self.rate:
             from .stream_augmentation import augment_stream_items
             items,diagnostics=augment_stream_items(self.dataset,items,rate=self.rate,
                 seed=self.seed+self.batch_number,input_policy=self.input_policy)
         batch=collate_stream(items)
+        batch['augmented_row_mask']=torch.tensor([item is not original for item,original in zip(items,original_items)],dtype=torch.bool)
         batch['_augmentation']=diagnostics
         return batch
 
@@ -482,10 +484,16 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version='stream_causal_phrase_joint_v1',
+    args.training_objective_recipe=dict(version=('stream_ordered_phrase_joint_v2'
+        if model.config.phrase_context_policy=='ordered_phrase_v2' else 'stream_causal_phrase_joint_v1'),
         phrase_context_policy=model.config.phrase_context_policy,
         phrase_loss_weight=model.config.phrase_loss_weight,
         phrase_target='ordered_segment_features_labels_only',
+        ordered_phrase_target=('configuration_only_ordered_encoder_cosine_detached_symmetric_match_joint'
+            if model.config.phrase_context_policy=='ordered_phrase_v2' else 'off'),
+        phrase_budget=('half_coarse_statistics_half_ordered_cosine_and_multi_positive_match'
+            if model.config.phrase_context_policy=='ordered_phrase_v2' else 'coarse_statistics'),
+        ordered_memory_max_events=32 if model.config.phrase_context_policy=='ordered_phrase_v2' else 0,
         phrase_loss_normalization='sum_weighted_features_over_batch_and_features_query_budget_preserved',
         phrase_input='audio_anchor_and_completed_prefix_references',
         audio_tracking_training='25_percent_rows_uniform_strength_otherwise_zero',

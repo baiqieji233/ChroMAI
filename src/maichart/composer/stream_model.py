@@ -94,7 +94,7 @@ class StreamComposerConfig:
             raise ValueError('Unsupported duration audio policy')
         if self.physical_policy not in ('legacy_report_v1', 'runtime_hard_v2'):
             raise ValueError('Unsupported physical policy')
-        if self.phrase_context_policy not in ('off', 'causal_phrase_v1'):
+        if self.phrase_context_policy not in ('off', 'causal_phrase_v1', 'ordered_phrase_v2'):
             raise ValueError('Unsupported phrase context policy')
         if not math.isfinite(self.phrase_loss_weight) or self.phrase_loss_weight < 0:
             raise ValueError('Phrase loss weight must be finite and nonnegative')
@@ -188,9 +188,10 @@ class StreamComposer(nn.Module):
         if config.duration_audio_policy == 'interval_v1':
             from .stream_duration import DurationAudioScorer
             self.duration_audio = DurationAudioScorer(d, codec)
-        if config.phrase_context_policy == 'causal_phrase_v1':
+        if config.phrase_context_policy in ('causal_phrase_v1', 'ordered_phrase_v2'):
             from .stream_phrase_model import CausalPhraseContext
-            self.phrase_context = CausalPhraseContext(d, config.condition_dim)
+            self.phrase_context = CausalPhraseContext(d, config.condition_dim,
+                ordered=config.phrase_context_policy=='ordered_phrase_v2')
         self.audio_input = nn.Sequential(nn.Linear(config.audio_dim, d), nn.GELU(), nn.LayerNorm(d))
         self.audio_local = nn.Conv1d(d, d, 5, padding=2, groups=d)
         self.audio_clock = nn.Linear(14 if config.clock_policy=='musical_v2' else 4, d)
@@ -350,7 +351,10 @@ class StreamComposer(nn.Module):
         lanes = torch.zeros(codec.num_atoms, 8)
         touch_lanes = torch.zeros(codec.num_atoms,33)
         literal_bits=[0]*codec.num_atoms
+        diagnostic_atom_sustain=torch.zeros(codec.num_atoms,dtype=torch.bool)
         for i, text in enumerate(codec.atom_catalog, 1):
+            type_counts=event_metadata(text).type_counts
+            diagnostic_atom_sustain[i]=bool(type_counts[1] or type_counts[2] or type_counts[4])
             pads=head_pad_indices_for_policy(event_metadata(text),'separate_pads_v2')
             literal_bits[i]=sum(1<<pad for pad in pads)
             for pad in pads:
@@ -360,6 +364,10 @@ class StreamComposer(nn.Module):
                     lanes[i, int(head) - 1] = 1.
         self.register_buffer('atom_lanes', lanes, persistent=False)
         self.register_buffer('atom_touch',touch_lanes,persistent=False)
+        self.register_buffer('diagnostic_atom_sustain',diagnostic_atom_sustain,persistent=False)
+        self.register_buffer('diagnostic_shape_sustain',torch.tensor([
+            any(kind in ('hold','slide','touch_hold') for kind,_ in slots) if index else False
+            for index,slots in enumerate(codec.shape_catalog)],dtype=torch.bool),persistent=False)
         shape_lanes=torch.zeros(codec.num_shapes,8,8)
         for shape,slots in enumerate(codec.shape_catalog):
             if shape==0:continue
@@ -433,6 +441,8 @@ class StreamComposer(nn.Module):
             result['grid_audio_keys']=(result['delta_keys'] if 'delta_keys' in result else
                 x[...,:32] if x.size(-1)>=32 else F.pad(x,(0,32-x.size(-1))))
         if self.config.plan_kind_policy!='off':result['plan_base_logits']=self.plan_head(x)
+        if hasattr(self,'phrase_context') and hasattr(self.phrase_context,'ordered'):
+            result=self.phrase_context.ordered.prepare_audio(result)
         return result
 
     @staticmethod
@@ -975,6 +985,10 @@ class StreamComposer(nn.Module):
             hidden = self.decoder(x, cache['global'][inverse], tgt_mask=causal,
                 tgt_key_padding_mask=~safe_valid, memory_key_padding_mask=~cache['global_mask'][inverse])
         hidden = hidden * valid[..., None]
+        if hasattr(self, 'phrase_context') and hasattr(self.phrase_context, 'ordered'):
+            ordered_residual = self.phrase_context.ordered.actor_residual(hidden, phrase_output, batch)
+            hidden = hidden+ordered_residual
+            phrase_output['phrase_ordered_actor_residual_rms'] = ordered_residual.float().square().mean(-1).sqrt()
         # target_second is intentionally read only after time logits exist.
         kind_logits, delta_logits = self.kind_head(hidden).float(), self.delta_head(hidden).float()
         if hasattr(self,'kind_continuation_projection'):
@@ -1759,6 +1773,25 @@ def stream_loss(model, output, batch):
         detail_sum = detail_sum + (literal_nll*flat_weights.index_select(0, literal)).sum()
         detail_per_row=detail_per_row.index_add(0,literal,literal_nll)
     detail_loss = detail_sum/denominator
+    with torch.no_grad():
+        per_event_detail=detail_per_row.detach().reshape_as(weights)
+        regular_detail_mask=note&batch['target_shape'].gt(0)
+        literal_detail_mask=note&batch['target_shape'].eq(0)
+        augmented_rows=batch.get('augmented_row_mask',torch.zeros(weights.size(0),device=weights.device,dtype=torch.bool)).bool()
+        augmented_mask=augmented_rows[:,None].expand_as(note)
+        target_atom_ids=batch['target_details'].clamp_min(0)
+        literal_sustain=model.diagnostic_atom_sustain[target_atom_ids].any(-1)
+        sustain=torch.where(batch['target_shape'].gt(0),
+            model.diagnostic_shape_sustain[batch['target_shape'].clamp_min(0)],literal_sustain)&note
+        detail_metrics=dict(regular_detail_loss=reduce(per_event_detail*regular_detail_mask),
+            literal_detail_loss=reduce(per_event_detail*literal_detail_mask),
+            sustain_detail_loss=reduce(per_event_detail*sustain),
+            authored_detail_loss=reduce(per_event_detail*~augmented_mask),
+            augmented_detail_loss=reduce(per_event_detail*augmented_mask))
+        for label,mask in (('regular',regular_detail_mask),('literal',literal_detail_mask),('sustain',sustain),
+                           ('authored',note&~augmented_mask),('augmented',note&augmented_mask)):
+            detail_metrics[label+'_detail_count']=(mask&weights.gt(0)).sum().float()
+            detail_metrics[label+'_detail_weight_sum']=(weights*mask).sum()
     plan_loss = kind_loss.new_zeros(())
     plan_rate_loss=kind_loss.new_zeros(())
     plan_blank_loss=kind_loss.new_zeros(())
@@ -1797,9 +1830,23 @@ def stream_loss(model, output, batch):
     joint_nll=kind_nll+delta_nll+shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights)
     transition_exit_loss=model.config.transition_exit_weight*reduce(joint_nll*exit_mask)
     phrase_loss = kind_loss.new_zeros(())
+    phrase_metrics = {}
     if 'phrase_prediction' in output:
         from .stream_phrase_model import phrase_auxiliary_loss
-        phrase_loss = phrase_auxiliary_loss(output, batch)
+        histogram_loss = phrase_auxiliary_loss(output, batch)
+        phrase_loss = histogram_loss
+        phrase_metrics['phrase_histogram_loss'] = histogram_loss
+        if 'phrase_ordered_prediction' in output:
+            from .stream_phrase_model import ordered_phrase_auxiliary_loss
+            ordered_loss, ordered_metrics = ordered_phrase_auxiliary_loss(model, output, batch)
+            phrase_loss = .5*(histogram_loss+ordered_loss)
+            phrase_metrics.update(ordered_metrics, phrase_ordered_loss=ordered_loss)
+        diagnostic_mask=batch['step_mask'].float()
+        diagnostic_count=diagnostic_mask.sum().clamp_min(1)
+        phrase_metrics['phrase_reference_null_mass']=(output['phrase_reference_weights'][...,0]*diagnostic_mask).sum()/diagnostic_count
+        for field in ('phrase_residual_rms','phrase_ordered_anchor_residual_rms',
+                      'phrase_ordered_reference_residual_rms','phrase_ordered_actor_residual_rms'):
+            if field in output:phrase_metrics[field]=(output[field]*diagnostic_mask).sum()/diagnostic_count
     total = base_loss+transition_exit_loss+model.config.recovery_weight*recovery+model.config.phrase_loss_weight*phrase_loss
     continuation_metrics={}
     if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
@@ -1840,7 +1887,7 @@ def stream_loss(model, output, batch):
         transition_exit_loss=transition_exit_loss,exit_count=exit_mask.sum(),
         exit_note_count=(exit_mask&note).sum(),exit_wait_count=(exit_mask&kind.eq(WAIT)).sum(),
         exit_eos_count=(exit_mask&kind.eq(EOS)).sum(),
-        recovery_loss=model.config.recovery_weight*recovery,**continuation_metrics).items()}
+        recovery_loss=model.config.recovery_weight*recovery,**continuation_metrics,**phrase_metrics,**detail_metrics).items()}
     return total, metrics
 
 

@@ -7,8 +7,10 @@ from bisect import bisect_left, bisect_right
 from collections import OrderedDict
 from dataclasses import dataclass
 import math
+import hashlib
 import threading
 import weakref
+from fractions import Fraction
 
 import numpy as np
 import torch
@@ -21,7 +23,129 @@ MUSIC_LAYOUT_SCHEMA = 'acoustic32_interval_novelty_v2'
 _LAYOUTS = OrderedDict()
 _LAYOUT_LOCK = threading.RLock()
 _LAYOUT_BUDGET = 4*1024**2
-PHRASE_POLICIES = ('off', 'causal_phrase_v1')
+PHRASE_POLICIES = ('off', 'causal_phrase_v1', 'ordered_phrase_v2')
+PHRASE_SEQUENCE_LENGTH = 32
+PHRASE_SEQUENCE_FIELDS = ('kind','shape','phase_mask','atoms','beats','seconds','gap_beats','gap_seconds','mask')
+_ENCODE_UNSET = object()
+
+
+def collate_phrase_music(batch):
+    """Exact CPU interval table shared by all ordered-phrase audio queries.
+
+    Song identity participates in deduplication: equal beat ranges from two
+    different audio banks are never merged. No tensor is copied back from GPU.
+    """
+    names=('phrase_start_beat','phrase_end_beat','phrase_memory_start_beat','phrase_memory_end_beat','song_inverse')
+    if any(batch[name].device.type!='cpu' for name in names):
+        raise ValueError('Phrase music intervals must be deduplicated during CPU collation')
+    start=batch['phrase_start_beat'].double().numpy()
+    end=batch['phrase_end_beat'].double().numpy()
+    reference_start=batch['phrase_memory_start_beat'].double().numpy()
+    reference_end=batch['phrase_memory_end_beat'].double().numpy()
+    songs=batch['song_inverse'].numpy()
+    anchor_songs=np.broadcast_to(songs[:,None],start.shape)
+    reference_songs=np.broadcast_to(songs[:,None,None],reference_start.shape)
+    anchor=np.stack((anchor_songs,start,end),-1).reshape(-1,3)
+    reference=np.stack((reference_songs,reference_start,reference_end),-1).reshape(-1,3)
+    unique,inverse=np.unique(np.concatenate((anchor,reference),0),axis=0,return_inverse=True)
+    split=start.size
+    return dict(phrase_music_song_inverse=torch.from_numpy(unique[:,0].astype(np.int64)),
+        phrase_music_start_beat=torch.from_numpy(unique[:,1].copy()),
+        phrase_music_end_beat=torch.from_numpy(unique[:,2].copy()),
+        phrase_music_anchor_inverse=torch.from_numpy(inverse[:split].reshape(start.shape).copy()),
+        phrase_music_reference_inverse=torch.from_numpy(inverse[split:].reshape(reference_start.shape).copy()))
+
+
+def _sequence_arrays(count,atom_width=1):
+    length = PHRASE_SEQUENCE_LENGTH
+    return dict(kind=np.zeros((count,length),dtype=np.int64),shape=np.zeros((count,length),dtype=np.int64),
+        phase_mask=np.zeros((count,length,8),dtype=np.bool_),atoms=np.zeros((count,length,max(1,atom_width)),dtype=np.int64),
+        beats=np.zeros((count,length),dtype=np.float64),seconds=np.zeros((count,length),dtype=np.float64),
+        gap_beats=np.zeros((count,length),dtype=np.float64),gap_seconds=np.zeros((count,length),dtype=np.float64),
+        mask=np.zeros((count,length),dtype=np.bool_))
+
+
+def _pack_sequences(sequences,prefix):
+    width = max((sequence['atoms'].shape[-1] for sequence in sequences),default=1)
+    arrays = _sequence_arrays(len(sequences),width)
+    for i,sequence in enumerate(sequences):
+        for field in PHRASE_SEQUENCE_FIELDS:
+            if field=='atoms':arrays[field][i,:,:sequence[field].shape[-1]] = sequence[field]
+            else:arrays[field][i] = sequence[field]
+    return {prefix+field:torch.from_numpy(value) for field,value in arrays.items()}
+
+
+def _positive_ids(fingerprints):
+    identities = {}
+    result = np.empty(len(fingerprints),dtype=np.int64)
+    for i,value in enumerate(fingerprints):
+        key = tuple(int(x) for x in value)
+        result[i] = identities.setdefault(key,len(identities))
+    return torch.from_numpy(result)
+
+
+def _visible_sequence_fingerprint(sequence):
+    """Positive identity follows only the configuration actually encoded.
+
+    Unselected events remain in the full provenance fingerprint, but cannot
+    distinguish contrastive labels whose 32-event encoder inputs are equal.
+    Padding widths and absolute song positions are deliberately excluded.
+    """
+    digest = hashlib.blake2b(digest_size=16,person=b'phrasevisiblev2')
+    indices = np.flatnonzero(sequence['mask'])
+    if len(indices):
+        first = indices[0]
+        origin_beat,origin_second = sequence['beats'][first],sequence['seconds'][first]
+        for i in indices:
+            atoms = tuple(int(atom) for atom in sequence['atoms'][i] if atom!=0)
+            record = (int(sequence['kind'][i]),int(sequence['shape'][i]),
+                tuple(bool(value) for value in sequence['phase_mask'][i]),atoms,
+                round(float(sequence['beats'][i]-origin_beat),9),
+                round(float(sequence['seconds'][i]-origin_second),9),
+                round(float(sequence['gap_beats'][i]),9),round(float(sequence['gap_seconds'][i]),9))
+            digest.update(repr(record).encode('utf-8'));digest.update(b'\0')
+    return np.frombuffer(digest.digest(),dtype='<i8').copy()
+
+
+def collate_phrase_sequences(items):
+    """Deduplicate by archive identity and segment, never by original song ID.
+
+    An augmentation owns a distinct archive, so its edited events cannot be
+    accidentally replaced by the unedited chart's sequence during collation.
+    """
+    if not all('_phrase_sequence_owner' in item for item in items):
+        raise ValueError('Cannot mix ordered and legacy phrase rows')
+    length = max(len(item['history_kind']) for item in items)
+    output = {}
+    for target in (False,True):
+        prefix = 'target_phrase_sequence_' if target else 'phrase_sequence_'
+        segment_key = '_target_phrase_sequence_segments' if target else '_phrase_sequence_segments'
+        shape = (len(items),length) if target else (len(items),length,PHRASE_MEMORY_SLOTS)
+        inverse = np.full(shape,-1,dtype=np.int64)
+        identities,unique = {},[]
+        for batch,item in enumerate(items):
+            owner = item['_phrase_sequence_owner']
+            segments = item[segment_key]
+            mapping = np.empty(len(segments),dtype=np.int64)
+            for local,segment in enumerate(segments):
+                identity = id(owner),segment
+                if identity not in identities:
+                    identities[identity] = len(unique)
+                    unique.append(owner.sequence(segment))
+                mapping[local] = identities[identity]
+            source = item[prefix+'inverse'].numpy()
+            destination = inverse[batch,:len(source)]
+            valid = source>=0
+            destination[valid] = mapping[source[valid]]
+        output.update(_pack_sequences(unique,prefix))
+        output[prefix+'inverse'] = torch.from_numpy(inverse)
+        if target:
+            fingerprints = np.stack([sequence['_fingerprint'] for sequence in unique]) if unique else np.empty((0,2),dtype=np.int64)
+            visible = np.stack([sequence['_visible_fingerprint'] for sequence in unique]) if unique else np.empty((0,2),dtype=np.int64)
+            output[prefix+'fingerprint'] = torch.from_numpy(fingerprints)
+            output[prefix+'visible_fingerprint'] = torch.from_numpy(visible)
+            output[prefix+'positive_ids'] = _positive_ids(visible)
+    return output
 PHRASE_ROW_FIELDS = (
     'phrase_start_beat', 'phrase_end_beat', 'phrase_progress',
     'phrase_memory_features', 'phrase_memory_start_beat',
@@ -177,7 +301,7 @@ class PhraseIndex:
     Each event stores one cumulative feature vector, never R memory tensors.
     Query reads are logarithmic and only expose indices strictly before q.
     """
-    def __init__(self, bank, end_beat, steps=()):
+    def __init__(self, bank, end_beat, steps=(), *, sequence_codec=None, encoded=None):
         self.layout = music_phrase_layout(bank,end_beat)
         self.boundaries,self.audio,self.references = self.layout.boundaries,self.layout.audio,self.layout.references
         count = len(self.boundaries)-1
@@ -187,19 +311,28 @@ class PhraseIndex:
         self.lane_history = [[] for _ in range(count)]
         self.count = 0
         self._feature_cache = {}
-        for step in steps: self.append(step)
+        self.sequence_codec = sequence_codec
+        self.sequence_events = [[] for _ in range(count)] if sequence_codec is not None else None
+        self._sequence_cache = {}
+        self._sequence_atom_count = 0
+        self._max_sequence_atoms = 1
+        for i,step in enumerate(steps):self.append(step,encoded=encoded[i][1] if encoded is not None else _ENCODE_UNSET)
 
     @property
     def nbytes(self):
         # Include Python/list overhead conservatively in the cache budget.
-        return self.count*(PHRASE_FEATURE_DIM*8+336)+len(self.boundaries)*256
+        sequences = (self.count*512+self._sequence_atom_count*16
+                     +len(self.indices)*PHRASE_SEQUENCE_LENGTH*(128+self._max_sequence_atoms*8)
+                     if self.sequence_events is not None else 0)
+        return self.count*(PHRASE_FEATURE_DIM*8+336)+len(self.boundaries)*256+sequences
 
     def segment(self, beat):
         return min(len(self.indices)-1, max(0, bisect_right(self.boundaries, float(beat))-1))
 
-    def append(self, step):
+    def append(self, step, *, encoded=_ENCODE_UNSET):
         segment = self.segment(step.end)
         self._feature_cache.pop(segment,None)
+        self._sequence_cache.pop(segment,None)
         # EOS has no event and is only a supervision query.
         if step.kind in (2, 3):
             value, lane = _event_vector(step, self.boundaries[segment], self.boundaries[segment+1], self.lanes[segment])
@@ -208,6 +341,17 @@ class PhraseIndex:
             self.indices[segment].append(self.count)
             previous = self.prefix[segment][-1] if self.prefix[segment] else 0.
             self.prefix[segment].append(value+previous)
+            if self.sequence_events is not None:
+                event = (encoded if encoded is not _ENCODE_UNSET else self.sequence_codec.encode(step.text)) if step.kind==2 else None
+                atoms = tuple(event['atoms']) if event is not None else ()
+                phase_mask = tuple(bool(x) for x in event['phase_mask']) if event is not None else (False,)*8
+                # Preserve original event gaps, including clocks crossing a boundary.
+                record = (step.kind,int(event['shape']) if event is not None else 0,phase_mask,atoms,
+                          float(step.end),float(step.end_second),float(step.end-step.start),
+                          float(step.end_second-step.start_second),str(step.end),str(step.end-step.start))
+                self.sequence_events[segment].append(record)
+                self._sequence_atom_count += len(atoms)
+                self._max_sequence_atoms = max(self._max_sequence_atoms,len(atoms))
         self.count += 1
 
     def edited(self, steps, begin, end):
@@ -222,6 +366,18 @@ class PhraseIndex:
             result.lane_history.append(lanes[:keep]); result.lanes.append(lanes[keep-1] if keep else None)
         result.count = begin
         result._feature_cache = {}
+        result.sequence_codec = self.sequence_codec
+        result._sequence_cache = {}
+        result._sequence_atom_count = 0
+        result._max_sequence_atoms = 1
+        result.sequence_events = [] if self.sequence_events is not None else None
+        if result.sequence_events is not None:
+            for indices,events in zip(self.indices,self.sequence_events):
+                keep = bisect_left(indices,begin)
+                kept = events[:keep]
+                result.sequence_events.append(kept)
+                result._sequence_atom_count += sum(len(event[3]) for event in kept)
+                result._max_sequence_atoms = max(result._max_sequence_atoms,max((len(event[3]) for event in kept),default=1))
         for step in steps[begin:end]: result.append(step)
         return result
 
@@ -229,6 +385,87 @@ class PhraseIndex:
         pos = bisect_left(self.indices[segment], query)-1
         raw = self.prefix[segment][pos] if pos >= 0 else np.zeros(PHRASE_FEATURE_DIM, dtype=np.float32)
         return torch.from_numpy(np.sign(raw)*np.log1p(np.abs(raw)))
+
+    def sequence(self,segment):
+        """A bounded ordered archive; main stream events are never truncated."""
+        if self.sequence_events is None:raise ValueError('Ordered sequence codec is not enabled')
+        cached = self._sequence_cache.get(segment)
+        if cached is not None:return cached
+        events = self.sequence_events[segment]
+        count = len(events)
+        if count>PHRASE_SEQUENCE_LENGTH:
+            # Nearest real event to equal-time anchors, with strict progression
+            # and explicit first/last retention even for simultaneous events.
+            times = np.asarray([event[4] for event in events])
+            anchors = np.linspace(times[0],times[-1],PHRASE_SEQUENCE_LENGTH)
+            candidates = np.searchsorted(times,anchors).clip(0,count-1)
+            left = np.maximum(0,candidates-1)
+            candidates = np.where(np.abs(times[left]-anchors)<np.abs(times[candidates]-anchors),left,candidates)
+            chosen = [0]
+            for i in range(1,PHRASE_SEQUENCE_LENGTH-1):
+                chosen.append(min(count-(PHRASE_SEQUENCE_LENGTH-i),max(chosen[-1]+1,int(candidates[i]))))
+            chosen.append(count-1)
+        else:chosen = list(range(count))
+        width = max((len(event[3]) for event in events),default=1)
+        arrays = {key:value[0] for key,value in _sequence_arrays(1,width).items()}
+        for i,position in enumerate(chosen):
+            event = events[position]
+            arrays['kind'][i],arrays['shape'][i] = event[:2]
+            arrays['phase_mask'][i] = event[2]
+            arrays['atoms'][i,:len(event[3])] = event[3]
+            for field,value in zip(('beats','seconds','gap_beats','gap_seconds'),event[4:8]):arrays[field][i] = value
+            arrays['mask'][i] = True
+        # Full unselected events remain provenance diagnostics. They cannot
+        # define negatives for an encoder that never observes those events.
+        digest = hashlib.blake2b(digest_size=16,person=b'orderedphrasev2')
+        if events:
+            beat_origin = Fraction(events[0][8])-Fraction(events[0][9])
+            second_origin = events[0][5]-events[0][7]
+            for event in events:
+                digest.update(repr((event[0],event[1],event[2],event[3],
+                    str(Fraction(event[8])-beat_origin),event[9],
+                    round(event[5]-second_origin,9),round(event[7],9))).encode('utf-8'))
+                digest.update(b'\0')
+        arrays['_fingerprint'] = np.frombuffer(digest.digest(),dtype='<i8').copy()
+        arrays['_visible_fingerprint'] = _visible_sequence_fingerprint(arrays)
+        self._sequence_cache[segment] = arrays
+        return arrays
+
+    def sequence_rows(self,queries,cursors,*,target_mask=None):
+        """Only inverse IDs scale with queries; actual sequence rows are unique."""
+        queries = np.asarray(queries,dtype=np.int64)
+        cursors = np.asarray(cursors,dtype=np.float64)
+        segments = np.clip(np.searchsorted(self.boundaries,cursors,side='right')-1,0,len(self.indices)-1)
+        refs = np.full((len(queries),PHRASE_MEMORY_SLOTS),-1,dtype=np.int64)
+        for segment in np.unique(segments):
+            group = np.flatnonzero(segments==segment)
+            for slot,reference in enumerate(self.references[segment]):
+                indices = self.indices[reference]
+                if not indices:continue
+                visible = (queries[group]>indices[-1]) & (self.boundaries[reference+1]<=self.boundaries[segment])
+                refs[group[visible],slot] = reference
+        reference_segments = np.unique(refs[refs>=0])
+        inverse = np.full_like(refs,-1)
+        valid = refs>=0
+        inverse[valid] = np.searchsorted(reference_segments,refs[valid])
+        target_inverse = np.full(len(queries),-1,dtype=np.int64)
+        eligible = np.zeros(len(queries),dtype=np.bool_) if target_mask is None else np.asarray(target_mask,dtype=np.bool_)
+        target_segments = np.unique(segments[eligible])
+        if len(target_segments):target_inverse[eligible] = np.searchsorted(target_segments,segments[eligible])
+        references = [self.sequence(int(segment)) for segment in reference_segments]
+        targets = [self.sequence(int(segment)) for segment in target_segments]
+        result = _pack_sequences(references,'phrase_sequence_')
+        result.update(_pack_sequences(targets,'target_phrase_sequence_'))
+        fingerprints = np.stack([target['_fingerprint'] for target in targets]) if targets else np.empty((0,2),dtype=np.int64)
+        visible = np.stack([target['_visible_fingerprint'] for target in targets]) if targets else np.empty((0,2),dtype=np.int64)
+        result.update(phrase_sequence_inverse=torch.from_numpy(inverse),
+            target_phrase_sequence_inverse=torch.from_numpy(target_inverse),
+            target_phrase_sequence_fingerprint=torch.from_numpy(fingerprints),
+            target_phrase_sequence_visible_fingerprint=torch.from_numpy(visible),
+            target_phrase_sequence_positive_ids=_positive_ids(visible),
+            _phrase_sequence_owner=self,_phrase_sequence_segments=tuple(int(segment) for segment in reference_segments),
+            _target_phrase_sequence_segments=tuple(int(segment) for segment in target_segments))
+        return result
 
     def row(self, query, cursor, *, supervise=False):
         segment = self.segment(cursor)

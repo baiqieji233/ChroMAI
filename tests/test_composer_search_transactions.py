@@ -79,7 +79,8 @@ def test_multiround_withdrawal_replays_all_state_and_invalidates_old_tail(monkey
         assert g.last_head_seconds==fg.last_head_seconds and curve.counts==fc.counts
         snapshots.append((list(prefix),seed,list(ctx._committed),dict(curve.counts),g))
         return dict(steps=list(ctx._committed),points=points,cursor=cursor,reason=reason,guard=g,
-                    anchor_second=anchor,retries=0,timing_retries=0,forced_waits=0)
+                    anchor_second=anchor,retries=0,timing_retries=0,forced_waits=0,
+                    model_diagnostics=dict(seed_checksum=seed,new_interval_only=True))
     args=SimpleNamespace(seed=7,phrase_candidates=candidates,phrase_write_beats=2.,phrase_commit_beats=1.,
         phrase_repair_budget=0,phrase_rollback_budget=2,phrase_time_budget_sec=30.,softcomfort_strength=1.)
     global_rng=torch.get_rng_state().clone()
@@ -93,6 +94,14 @@ def test_multiround_withdrawal_replays_all_state_and_invalidates_old_tail(monkey
     assert len({id(snapshot[4]) for snapshot in snapshots})==len(snapshots)
     assert base.counts=={}
     assert selected[-1].end==5
+    for phrase in report['phrases']:
+        assert len(phrase['candidate_logs'])==phrase['attempted_rollouts']
+        winner=next(log for log in phrase['candidate_logs'] if log['candidate_id']==phrase['winner_candidate_id'])
+        assert winner['eligible'] and winner['score']==phrase['score']
+        assert winner['seed']==phrase['winner_seed']
+        assert winner['model_diagnostics']==phrase['model_diagnostics']
+        assert all(isinstance(log['event_count'],int) and isinstance(log['head_count'],int) for log in phrase['candidate_logs'])
+        assert phrase['score_effect']==('diagnostic_only_single_candidate' if candidates==1 else 'rank_physically_feasible_candidates')
 
 
 @pytest.mark.parametrize('old,new', [('1h[4:8]/5x','1h[4:1]/5x'),
@@ -256,6 +265,10 @@ def test_completed_candidate_rejected_by_native_gate_can_backtrack_private_tail(
     assert report['current_event_retries_used']==0
     assert report['private_tail_retries_used']==1
     assert report['repairs_used']==report['rollbacks_used']==0
+    rejected=report['phrases'][0]['candidate_logs'][0]
+    assert not rejected['eligible'] and rejected['score'] is None
+    assert rejected['failure_reason']=='enforced_native_hard_conflict'
+    assert rejected['physical_gate']['enforced_conflicts']
 
 
 def test_phrase_gate_retains_intermediate_slide_during_old_active_slide():

@@ -71,6 +71,21 @@ def test_transition_exit_reuses_full_regular_and_literal_joint_likelihood():
     assert continuing['exit_count']==0
 
 
+def test_detail_diagnostics_partition_existing_weighted_budget():
+    model,batch=fixture()
+    output=model(batch)
+    total,metrics=model.loss(output,batch)
+    torch.testing.assert_close(metrics['regular_detail_loss']+metrics['literal_detail_loss'],metrics['detail_loss'])
+    torch.testing.assert_close(metrics['authored_detail_loss'],metrics['detail_loss'])
+    assert metrics['augmented_detail_loss']==0
+    assert metrics['regular_detail_count']==1 and metrics['literal_detail_count']==1
+    changed=dict(batch,augmented_row_mask=torch.tensor([True]))
+    augmented,observed=model.loss(output,changed)
+    torch.testing.assert_close(augmented,total,atol=0,rtol=0)
+    torch.testing.assert_close(observed['augmented_detail_loss'],observed['detail_loss'])
+    assert observed['authored_detail_loss']==0
+
+
 def test_action_context_returns_reused_per_lane_target_time_load():
     model,batch=fixture()
     cache=model.encode_audio(batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])

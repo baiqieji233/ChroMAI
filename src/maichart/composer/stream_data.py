@@ -33,7 +33,7 @@ from .events import event_metadata
 from .stream_bank_cache import StreamBankDiskCache, bank_identity
 from .stream_continuation import ContinuationState, continuation_rows, continuation_dim, POLICIES as CONTINUATION_POLICIES
 from .stream_timing import encode_history_gap, TIMING_POLICIES
-from .stream_phrase import PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS
+from .stream_phrase import PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS, collate_phrase_sequences, collate_phrase_music
 
 PROFILE = 'event_set_stream_v1'
 PAD, BOS, NOTE, WAIT, EOS = range(5)
@@ -451,7 +451,9 @@ class StreamDataset(Dataset):
             if song in self._phrases:
                 self._phrases.move_to_end(song)
                 return self._phrases[song]
-            index = PhraseIndex(self._bank(song), self._end_beats[song], self.streams[song])
+            ordered = self.phrase_context_policy=='ordered_phrase_v2'
+            index = PhraseIndex(self._bank(song), self._end_beats[song], self.streams[song],
+                                sequence_codec=self.codec if ordered else None,encoded=self.encoded[song] if ordered else None)
             index.supervision_valid = np.ones(len(index.boundaries)-1,dtype=np.bool_)
             index.supervision_counts = np.zeros(len(index.boundaries)-1,dtype=np.int64)
             for step, unknown in zip(self.streams[song],self.unknown_steps[song]):
@@ -472,6 +474,8 @@ class StreamDataset(Dataset):
         if self.phrase_context_policy != 'off':
             index = self._phrase_index(song).edited(modified, begin, end)
             row.update(index.rows(modified, first, end))
+            if self.phrase_context_policy=='ordered_phrase_v2':
+                row.update(index.sequence_rows(np.arange(first,end),row['step_beat'].numpy()))
         return row
 
     def __len__(self): return len(self.samples)
@@ -722,6 +726,9 @@ class StreamDataset(Dataset):
             row['target_phrase_mask'] &= trusted
             counts = torch.from_numpy(np.maximum(1,phrase_index.supervision_counts[segments]).astype(np.float32))
             row['target_phrase_weight'] *= row['sample_weight']/counts
+            if self.phrase_context_policy=='ordered_phrase_v2':
+                row.update(phrase_index.sequence_rows(row['step_index'].numpy(),row['step_beat'].numpy(),
+                                                      target_mask=row['target_phrase_mask'].numpy()))
         return row
 
 
@@ -734,6 +741,8 @@ def collate_stream(items):
             raise ValueError('Cannot mix phrase-enabled and legacy stream rows')
         for key in PHRASE_ROW_FIELDS:
             output[key] = pad_sequence([item[key] for item in items], batch_first=True)
+    if any('_phrase_sequence_owner' in item for item in items):
+        output.update(collate_phrase_sequences(items))
     for key in ('history_kind','history_delta','history_shape','history_phase','history_atoms','history_phase_mask',
                 'target_kind','target_delta','target_shape','target_phase_mask','target_details',
                 'step_beat','step_second','step_index','target_second','target_beat','history_gap_beats','loss_mask','sample_weight',
@@ -787,6 +796,8 @@ def collate_stream(items):
         from .stream_literal import pack_literal_type_blocks
         literal_targets=output['target_details'].flatten(0,1)[output['_literal_indices']]
         output['_literal_type_blocks']=pack_literal_type_blocks(literal_targets,items[0]['_literal_atom_types'])
+    if 'phrase_sequence_inverse' in output:
+        output.update(collate_phrase_music(output))
     return output
 
 
@@ -820,7 +831,8 @@ class StreamInferenceContext:
         self._reset_prefix()
 
     def _reset_prefix(self):
-        self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec))
+        self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec),
+                                   sequence_codec=self.codec if self.phrase_context_policy=='ordered_phrase_v2' else None)
                         if self.phrase_context_policy != 'off' else None)
         self._committed = []
         self._incremental_state = IncrementalState(self.song.tempo,self.song.first)
@@ -852,7 +864,7 @@ class StreamInferenceContext:
             state, mask, _ = self._incremental_state.at(step.end,include_current=True,
                 visible_before_beat=cutoff,visibility_version='causal_v2',include_metadata=False)
         self._committed.append(step)
-        if self._phrase is not None:self._phrase.append(step)
+        if self._phrase is not None:self._phrase.append(step,encoded=event)
         self._rows.append((step.kind,delta,event,step.end,state,mask))
         if self.continuation_policy != 'off':
             self._continuation.append(step)
@@ -925,6 +937,11 @@ class StreamInferenceContext:
             first_query = len(self._committed)-length+1
             phrase_rows = self._phrase.rows_at(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
             result.update({key:value.unsqueeze(0) for key,value in phrase_rows.items()})
+            if self.phrase_context_policy=='ordered_phrase_v2':
+                sequences = self._phrase.sequence_rows(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
+                for key in ('phrase_sequence_inverse','target_phrase_sequence_inverse'):sequences[key] = sequences[key].unsqueeze(0)
+                result.update(sequences)
+                result.update(collate_phrase_music(result))
         return result
 
 
@@ -942,6 +959,10 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     batch = context.batch(prefix,cursor)
     row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in PHRASE_ROW_FIELDS or key in
            ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features')}
+    if getattr(dataset,'phrase_context_policy','off')=='ordered_phrase_v2':
+        for key,value in batch.items():
+            if key.startswith(('phrase_sequence_','target_phrase_sequence_','_phrase_sequence_','_target_phrase_sequence_')):
+                row[key] = value[0] if key in ('phrase_sequence_inverse','target_phrase_sequence_inverse') else value
     length = len(row['history_kind'])
     for key in ('target_kind','target_delta','target_shape'):
         row[key] = torch.zeros(length,dtype=torch.long)

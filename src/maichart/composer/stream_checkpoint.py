@@ -52,6 +52,7 @@ def inspect_payload(payload):
         generation_capabilities=dict(composer_generation=True,event_set_stream=True,rational_event_positions=True,
             phrase_search=True,phrase_candidates=(1,2,4),transactional_sustain_repair=True,
             learned_phrase_context=getattr(config,'phrase_context_policy','off')!='off',
+            ordered_phrase_memory=getattr(config,'phrase_context_policy','off')=='ordered_phrase_v2',
             duration_interval_audio=getattr(config,'duration_audio_policy','off')!='off',
             optional_audio_tracking=getattr(config,'phrase_context_policy','off')!='off',audio_tracking_default=0.,
             absolute_onset_prediction=getattr(config,'timing_output_policy','relative_delta_v1')=='absolute_grid_v1',

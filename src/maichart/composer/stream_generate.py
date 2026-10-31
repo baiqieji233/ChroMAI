@@ -203,11 +203,19 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     guard=EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
         touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True)
     points=[];cursor=Fraction(0);waits=0;retries=0;timing_retries=0;forced_waits=0;reason='budget'
+    model_diagnostic_sums=None;model_diagnostic_count=0
+    diagnostic_fields=('phrase_residual_rms','phrase_ordered_anchor_residual_rms',
+                       'phrase_ordered_reference_residual_rms','phrase_ordered_actor_residual_rms')
+    def model_diagnostics():
+        if model_diagnostic_sums is None:return None
+        means=(model_diagnostic_sums/max(1,model_diagnostic_count)).cpu().tolist()
+        return dict(forward_queries=model_diagnostic_count,mean_reference_weights=means[:5],
+                    **dict(zip(diagnostic_fields,means[5:])))
     maximum=args.max_events or 100000
     deltas=[Fraction(x) for x in model.config.delta_beats]
     step_index=0
     def advance(stop_beat,step_budget,deadline=None):
-        nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator
+        nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator,model_diagnostic_sums,model_diagnostic_count
         for step_index in range(step_index,step_index+step_budget):
             if getattr(args,'search_policy','phrase_v1')=='legacy' and len(points)>=maximum:reason='max_events';break
             if cursor>=stop_beat:reason='audio_end' if getattr(args,'search_policy','phrase_v1')=='legacy' else 'span_complete';break
@@ -217,6 +225,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
             batch=to_device_batch({k:v for k,v in context.current_batch().items()
                 if k not in ('song_audio','song_mask','song_seconds','song_beats')},device)
             result=model(batch,audio_cache=cache)
+            if 'phrase_reference_weights' in result:
+                reference=result['phrase_reference_weights'][0,-1].detach().float()
+                values=torch.cat((reference,*[(result[field][0,-1].detach().float().reshape(1)
+                    if field in result else reference.new_zeros(1)) for field in diagnostic_fields]))
+                model_diagnostic_sums=(values.clone() if model_diagnostic_sums is None else model_diagnostic_sums+values)
+                model_diagnostic_count+=1
             kinds=kind_logits_for_audio(result['kind_logits'][0,-1],cursor,end)
             kinds[NOTE]+=float(curve.bias(np.asarray([second_at_beat(clock,cursor)]))[0])
             kind=_sample(kinds,args.pointer_temperature,generator)
@@ -304,7 +318,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         base_curve=curve
         audio_bank=context.bank
         def rollout(prefix,seed,stop_beat,deadline=None):
-            nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator
+            nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator,model_diagnostic_sums,model_diagnostic_count
             def context_factory():
                 return StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
                     audio_bank=audio_bank,audio_grid_seconds=model.config.audio_grid_seconds,
@@ -320,11 +334,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
             anchor_second=second_at_beat(clock,cursor)
             waits=sum(s.kind==WAIT for s in prefix);retries=timing_retries=forced_waits=0
             step_index=len(prefix);reason='step_budget'
+            model_diagnostic_sums=None;model_diagnostic_count=0
             generator=torch.Generator(device=device).manual_seed(seed)
             advance(stop_beat,int(getattr(args,'phrase_step_budget',256)),deadline)
             return dict(steps=list(context._committed),points=list(points),cursor=cursor,reason=reason,
                 retries=retries,timing_retries=timing_retries,forced_waits=forced_waits,guard=guard,
-                anchor_second=anchor_second)
+                anchor_second=anchor_second,model_diagnostics=model_diagnostics())
         try:
             selected,search_report=search_stream(rollout,song,condition,args,end,clock,base_curve,audio_bank=audio_bank,codec=model.codec)
         except ValueError as exc:

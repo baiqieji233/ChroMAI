@@ -2393,7 +2393,7 @@ function updateEventSetControls() {
   const phraseHint=element('#composerPhraseCapabilityHint');
   if(phraseHint&&isEventSetGeneration()){
     const caps=generationInspection?.data?.generation_capabilities||{};
-    phraseHint.textContent=`短句搜索可用；短句组织训练：${caps.learned_phrase_context?'已启用':'未启用（旧点不具备已学习呼应能力）'}；持续区间音频训练：${caps.duration_interval_audio?'已启用':'未启用'}。采音连续性默认关闭。`;
+    phraseHint.textContent=`短句搜索可用；短句记忆：${caps.ordered_phrase_memory?'有序配置短句':caps.learned_phrase_context?'旧版短句统计':'未启用'}；持续区间音频训练：${caps.duration_interval_audio?'已启用':'未启用'}。能力是否学好仍以生成验收为准；采音连续性默认关闭。`;
   }
   const trackingControl=element('#composerAudioTrackingStrength');
   if(trackingControl){

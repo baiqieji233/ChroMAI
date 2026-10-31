@@ -18,6 +18,32 @@ def synthetic_bank(song, clock, audio_grid_seconds=.01):
     return features,seconds,seconds*2.
 
 
+def ordered_parameter_initialization():
+    """Exact new checkpoint interface, independent of a model's state_dict."""
+    expected={}
+    for name in ('audio_keys','audio_summary.0','sequence_input.0','reference_fusion.0',
+                 'actor_input.0','interaction.0','predict.0','predict.3'):
+        for tensor in ('weight','bias'):expected[f'phrase_context.ordered.{name}.{tensor}']='random'
+    for name in ('audio_summary.2','sequence_input.2','sequence_norm','reference_fusion.2',
+                 'actor_input.1','interaction.2','predict.2'):
+        expected[f'phrase_context.ordered.{name}.weight']='ones'
+        expected[f'phrase_context.ordered.{name}.bias']='zeros'
+    for name in ('reference_output','anchor_output','interaction_output'):
+        expected[f'phrase_context.ordered.{name}.weight']='zeros'
+    for tensor in ('weight_ih_l0','weight_hh_l0','bias_ih_l0','bias_hh_l0'):
+        expected[f'phrase_context.ordered.sequence_gru.{tensor}']='random'
+    return expected
+
+
+def assert_ordered_parameter_initialization(state):
+    for key,initialization in ordered_parameter_initialization().items():
+        value=state[key]
+        assert torch.isfinite(value).all(),key
+        if initialization=='zeros':assert torch.count_nonzero(value)==0,key
+        elif initialization=='ones':assert torch.equal(value,torch.ones_like(value)),key
+        else:assert torch.count_nonzero(value)>0,key
+
+
 class Rows:
     def __init__(self):self.samples=[(i//3,i,i+1,1.) for i in range(11)]
     def __len__(self):return len(self.samples)
@@ -161,7 +187,7 @@ def test_interrupted_cpu_training_resumes_exact_optimizer_rng_and_cursor(tmp_pat
     left=stream_checkpoint.read(complete/'composer_last.pt')
     right=stream_checkpoint.read(interrupted/'composer_last.pt')
     assert left['optimizer_steps']==right['optimizer_steps']
-    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='causal_phrase_v1'
+    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='ordered_phrase_v2'
     assert left['model_config']['duration_audio_policy']==right['model_config']['duration_audio_policy']=='interval_v1'
     assert left['training_state']['batch_in_epoch']==right['training_state']['batch_in_epoch']
     assert torch.equal(left['training_state']['torch_rng'],right['training_state']['torch_rng'])
@@ -183,6 +209,7 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     parent=StreamComposerConfig.from_dict({})
     args=SimpleNamespace()
     fresh=stream_train.resolve_learning_policies(args,parent)
+    assert fresh['phrase_context_policy']=='ordered_phrase_v2'
     assert fresh['history_window_policy']=='block_aligned_v2'
     assert fresh['transition_exit_weight']==.5
     assert fresh['lane_load_policy']=='direct_buttons_v1'
@@ -192,6 +219,7 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     assert fresh['transition_policy']=='music_exit_v3'
     assert fresh['prefix_augmentation_rate']==.15
     resumed=stream_train.resolve_learning_policies(args,parent,resume=True)
+    assert resumed['phrase_context_policy']=='off'
     assert resumed['history_window_policy']=='rolling_legacy_v1'
     assert resumed['transition_exit_weight']==0
     assert resumed['lane_load_policy']=='off'
@@ -243,10 +271,15 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         for tensor in ('weight','bias'):expected.add(f'phrase_context.{name}.{tensor}')
     for name in ('intent_output','progress_output','style_output','tracking_output'):
         expected.add(f'phrase_context.{name}.weight')
+    ordered=ordered_parameter_initialization()
+    expected.update(ordered)
     assert additions==expected
+    assert_ordered_parameter_initialization(upgraded.state_dict())
     for key in additions:
         value=upgraded.state_dict()[key]
-        if key.startswith('phrase_context.'):
+        if key in ordered:
+            continue  # Exact individual initialization contracts checked above.
+        elif key.startswith('phrase_context.'):
             assert torch.isfinite(value).all(),key
             if key=='phrase_context.null_reference' or '_output.weight' in key:
                 assert torch.count_nonzero(value)==0,key
@@ -269,6 +302,41 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
     parent.state_dict=lambda:{key:value for key,value in original().items() if key!='kind_head.weight'}
     with pytest.raises(ValueError,match='Unsafe stage migration'):
         stream_train.upgrade_learning_stage(parent,policies)
+
+
+def test_causal_to_ordered_migration_preserves_complete_actor_outputs_with_real_sequence_tables(monkeypatch):
+    from maichart.composer import stream_data
+    from maichart.composer.stream_data import StreamDataset,collate_stream
+    from maichart.composer.stream_model import StreamComposer,StreamComposerConfig
+    from maichart.event_timing import EventPoint,EventTempo
+    monkeypatch.setattr(stream_data,'build_audio_bank',synthetic_bank)
+    song=SimpleNamespace(audio=SimpleNamespace(duration_sec=8.),tempo=[EventTempo(Fraction(0),120.)],first=0.)
+    points=[EventPoint(Fraction(i,2),str(i%8+1)) for i in range(32)]
+    base=SimpleNamespace(songs=[(song,points,12.,1.,None,torch.zeros(16),(),None)])
+    dataset=StreamDataset(base=base,lead_in=4,targets=2,history_window_policy='block_aligned_v2',
+        continuation_policy='pattern_runs_v2',phrase_context_policy='ordered_phrase_v2')
+    batch=collate_stream([dataset[len(dataset)-1]])
+    assert batch['phrase_sequence_kind'].size(0)>0
+    assert batch['phrase_sequence_mask'].any()
+    config=StreamComposerConfig(d_model=16,nhead=4,layers=1,dim_feedforward=32,dropout=0.,
+        history_events=4,rollout_steps=2,delta_beats=('0',*map(str,dataset.delta_vocab.values)),
+        phrase_context_policy='causal_phrase_v1')
+    parent=StreamComposer(config,dataset.codec).eval()
+    with torch.no_grad():parent.phrase_context.intent_output.weight.normal_(0,.03)
+    before=torch.get_rng_state().clone()
+    upgraded=stream_train.upgrade_learning_stage(parent,{'phrase_context_policy':'ordered_phrase_v2'}).eval()
+    assert torch.equal(torch.get_rng_state(),before)
+    additions=set(upgraded.state_dict())-set(parent.state_dict())
+    assert additions==set(ordered_parameter_initialization())
+    assert_ordered_parameter_initialization(upgraded.state_dict())
+    for key,value in parent.state_dict().items():assert torch.equal(value,upgraded.state_dict()[key]),key
+    with torch.no_grad():
+        expected=parent(batch)
+        observed=upgraded(batch)
+    for key in ('kind_logits','delta_logits','shape_logits','phase_logits','hidden','action_context',
+                'phrase_intent','phrase_prediction','phrase_reference_weights'):
+        torch.testing.assert_close(expected[key],observed[key],atol=0,rtol=0)
+    assert torch.count_nonzero(observed['phrase_ordered_actor_residual_rms'])==0
 
 
 def test_cpu_finetune_inherits_parent_shape_resets_adam_and_records_parent_stage(tmp_path,monkeypatch):
