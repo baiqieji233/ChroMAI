@@ -26,6 +26,9 @@ def sample_timed_event(model, timing_logits, deltas, cursor, action_context,
         guard.failure_trials.clear()
         guard.failure_conflicts.clear()
     scores=timing_logits.clone()
+    diagnostic=dict(retry_policy='joint_event_rejection_v2',onsets=[],first_proposal=None,
+        final_proposal=None,changed_time=False,configuration_changed=False)
+    if guard is not None:guard.last_timed_sampling_trace=diagnostic
     failed_config=failed_timing=0
     for _ in range(time_attempts):
         if timing_keep_mask is not None:
@@ -48,8 +51,19 @@ def sample_timed_event(model, timing_logits, deltas, cursor, action_context,
             attempts=action_attempts,accepts_extra=accepts_extra,
             reference_phase_mask=reference_phase_mask,
             motion_phase_distribution=motion_phase_distribution,button_load=load,**family_options)
+        trials=list(getattr(guard,'last_sampling_trace',()))
+        diagnostic['onsets'].append(dict(delta_id=int(delta_id),beat=str(beat),trials=trials,
+            accepted=point is not None))
+        if diagnostic['first_proposal'] is None and trials:
+            diagnostic['first_proposal']=trials[0]
+        diagnostic['changed_time']=len(diagnostic['onsets'])>1
         failed_config+=failed
-        if point is not None:return point,delta_id,failed_config,failed_timing
+        if point is not None:
+            diagnostic['final_proposal']=trials[-1] if trials else dict(beat=str(beat),text=point.note_text)
+            first=diagnostic['first_proposal'];last=diagnostic['final_proposal']
+            diagnostic['configuration_changed']=bool(first and any(first.get(key)!=last.get(key)
+                for key in ('family','shape','phase','text','template_keep')))
+            return point,delta_id,failed_config,failed_timing
         scores[delta_id]=-float('inf')
         failed_timing+=1
     return None,None,failed_config,failed_timing

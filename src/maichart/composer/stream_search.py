@@ -216,6 +216,9 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
             seed=(int(args.seed)+phrase_index*1000003+attempt*9176)%(2**63-1);attempt+=1
             log=dict(candidate_id=attempt-1,seed=seed,origin=origin,eligible=False,
                 prefix_end_beat=str(prefix[-1].end if prefix else Fraction(0)),
+                authoritative_prefix_steps=len(committed),
+                retained_sampled_suffix_steps=(len(prefix)-len(committed)
+                    if origin=='primary_retained_tail' else 0),
                 score=None,event_count=None,head_count=None,model_diagnostics=None)
             candidate_logs.append(log)
             aggregate['rollouts']+=1
@@ -253,7 +256,9 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 log['failure_reason']='nonfinite_quality_score';failures.append(result);return
             log.update(eligible=True,failure_reason=None)
             valid.append((float(score['total']),result,score))
-        # All requested primary candidates start at exactly the same prefix.
+        # All candidates share the authoritative committed prefix. Candidate
+        # zero may also preserve the prior winner's real, already sampled tail;
+        # the others regenerate that tentative suffix rather than inheriting it.
         for candidate_index in range(count):
             if time.perf_counter()>=deadline:break
             run(list(committed)+(list(retained) if candidate_index==0 else []),

@@ -99,4 +99,4 @@ def test_greedy_family_choice_is_independent_of_its_number_of_routes():
 
 def test_old_checkpoint_config_keeps_the_original_event_likelihood():
     assert StreamComposerConfig.from_dict({}).event_family_policy=='legacy_v1'
-    assert StreamComposerConfig().event_family_policy=='audio_prior_transition_v3'
+    assert StreamComposerConfig().event_family_policy=='audio_state_phrase_v4'

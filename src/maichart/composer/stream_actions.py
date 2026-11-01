@@ -84,3 +84,58 @@ def refresh_family_log_probs(audio_logits,continuity_logits,previous_family,has_
     refresh=F.logsigmoid(-gate)[...,None]+fresh
     mixture=torch.logaddexp(copy,refresh)
     return torch.where(has_previous[...,None],mixture,fresh)
+
+
+class StatePhraseFamilyResidual(torch.nn.Module):
+    """Small candidate-conditioned correction; no previous-note identity input.
+
+    STATE50 is sampled at the causal cursor. Its bounded log-seconds fields
+    are advanced to the actual candidate, rather than treating cursor occupancy
+    as candidate occupancy. Spatial slide pads are deliberately not extrapolated.
+    """
+    def __init__(self, model_width, phrase_width):
+        super().__init__()
+        self.phrase_width=phrase_width
+        width=min(model_width,128)
+        self.features=torch.nn.Sequential(torch.nn.Linear(model_width+phrase_width+11,width),
+            torch.nn.GELU(),torch.nn.LayerNorm(width))
+        self.output=torch.nn.Linear(width,32)
+        torch.nn.init.zeros_(self.output.weight)
+        torch.nn.init.zeros_(self.output.bias)
+
+    @staticmethod
+    def candidate_state(batch,event_seconds):
+        import math
+        gap=(event_seconds.double()-batch['step_second'].double()).clamp_min(0).float()
+        state=batch.get('action_state')
+        if state is None:
+            return gap.new_zeros(*gap.shape,9)
+        state=torch.nan_to_num(state.float()).clamp(0,1)
+        valid=~batch['action_state_mask'].bool()
+        # STATE50: types 0:4; waiting 45; remaining 46; until-trace 47.
+        scale=math.log1p(60.)
+        remaining=(torch.expm1(state[...,46]*scale)-gap[...,None]).clamp_min(0)
+        until=(torch.expm1(state[...,47]*scale)-gap[...,None]).clamp_min(0)
+        valid=valid & remaining.gt(0)
+        count=valid.sum(-1).float()
+        norm=count.clamp_min(1)
+        remaining=remaining.log1p()/scale
+        until=until.log1p()/scale
+        types=(state[...,:4]*valid[...,None]).sum(-2)/norm[...,None]
+        avg=(remaining*valid).sum(-1)/norm
+        maximum=remaining.masked_fill(~valid,0).amax(-1)
+        waiting=(state[...,45].gt(0)&until.gt(0)&valid).sum(-1)/norm
+        until_avg=(until*valid).sum(-1)/norm
+        return torch.cat((types,(count.log1p()/math.log1p(32.))[...,None],
+            avg[...,None],maximum[...,None],waiting[...,None],until_avg[...,None]),-1)
+
+    def forward(self,music,event_seconds,event_beats,batch,phrase_output=None):
+        intent=None if phrase_output is None else phrase_output.get('phrase_intent')
+        if intent is None:intent=music.new_zeros(*music.shape[:-1],self.phrase_width)
+        # Intent is the stable phrase plan, not the autoregressive decoder hidden.
+        state=self.candidate_state(batch,event_seconds).to(music)
+        gap_seconds=(event_seconds.double()-batch['step_second'].double()).clamp_min(0).log1p().float()
+        gap_beats=(event_beats.double()-batch['step_beat'].double()).clamp_min(0).log1p().float()
+        values=torch.cat((music,intent.to(music),state,gap_seconds[...,None].to(music),
+            gap_beats[...,None].to(music)),-1)
+        return self.output(self.features(values)).float()

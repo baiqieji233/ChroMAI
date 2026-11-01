@@ -126,17 +126,18 @@
     const checkpointGroup = $("#trainingCheckpointGroup");
     if (checkpointGroup) checkpointGroup.hidden = mode === "fresh";
     const sources = typeof selectedDatasetItems === "function" ? selectedDatasetItems() : [];
-    const modeLabel = {fresh: "从头训练", resume: "从断点追加训练", finetune: "已有模型加强训练"}[mode];
+    const modeLabel = {fresh: "从头训练", resume: "从断点继续训练", finetune: "已有模型加强训练"}[mode];
     const limits = Number(value("maxSteps", 0));
     const selectedFamily = value("modelFamily");
     const formFamily = ["song_form_v1", "song_form_v2"].includes(selectedFamily);
     const streamFamily = selectedFamily === "chart_stream_v1";
     const composerFamily = selectedFamily === 'chart_composer_v1';
+    const eventSetFamily = composerFamily && value('composerArchitectureProfile') === 'event_set_stream_v1';
     const chartLimit = Number(value(composerFamily?'composerLimitCharts':'formLimitCharts', 0));
     list("trainingRunSummary", [
       `起点：${modeLabel}${mode !== "fresh" ? ` · ${value("trainingCheckpointPath").trim() || "尚未选择 checkpoint"}` : ""}`,
       sources.length ? `素材：${sources.map((item) => item.name || item.path).join("、")}` : `素材：当前单份清单 · ${value("manifestPath").trim() || "尚未准备"}`,
-      `${mode === "resume" ? "追加" : "本阶段"} ${value("epochs")} 轮 · ${composerFamily
+      `${eventSetFamily ? "总目标" : mode === "resume" ? "追加" : "本阶段"} ${value("epochs")} 轮 · ${composerFamily
         ? `${chartLimit>0?`最多 ${chartLimit} 张谱面`:'全部合格谱面'} · 每轮 ${Number(value('composerMaxSteps',0))||'全部'} batch`
         : streamFamily
         ? `${chartLimit > 0 ? `最多 ${chartLimit} 张谱面` : "全部合格谱面"}${limits > 0 ? ` · continuation batch 上限 ${limits}` : " · 不限 continuation batch"}`
@@ -144,7 +145,12 @@
         ? `${chartLimit > 0 ? `最多 ${chartLimit} 张谱面` : "全部合格谱面"}${limits > 0 ? ` · 配置 batch 上限 ${limits}` : " · 不限配置 batch"}`
         : `每轮${limits > 0 ? `最多 ${limits} 个训练 batch（短跑）` : "完整训练集"}`}`,
       `学习率 ${value("learningRate")} · batch ${value("batchSize")} × 累积 ${value("gradAccumulation")} ≈ 每次更新 ${Number(value("batchSize")) * Number(value("gradAccumulation"))} 个片段`,
-      ...(composerFamily ? [`结构 ${value('composerDModel')} 维 / ${value('composerLayers')} 层 / FFN ${value('composerDimFeedforward')} · 动作槽位 ${value('composerActionSlots')}`,
+      ...(eventSetFamily ? [`结构 ${value('composerDModel')} 维 / ${value('composerLayers')} 层 / FFN ${value('composerDimFeedforward')} · 精度 ${nameOf('composerPrecision')}`,
+        `历史 ${value('composerHistoryEvents')} 个事件 · 短段展开 ${value('composerRolloutSteps')} 个事件`,
+        `短句：${value('composerPhraseContextPolicy')==='auto'?(value('composerLearningPolicy')==='legacy'?'关闭（旧策略）':'有序配置短句（v2）'):nameOf('composerPhraseContextPolicy')} · 类型学习：${value('eventSetPolicy_event_family_policy')==='auto'?(value('composerLearningPolicy')==='legacy'?'旧版基线（v1）':'音频先验＋持续状态与短句（v4）'):nameOf('eventSetPolicy_event_family_policy')}`,
+        `验证：${value('composerValidationManifest').trim()?'独立验证集':Number(value('composerHoldoutFraction',0))>0?`自动留出 ${Number(value('composerHoldoutFraction'))*100}%（开发＋最终留出合计）`:'关闭自动留出，无验证集'}`,
+        `后台预取 ${value('composerPrefetchBatches')} batch · 音频预算 ${value('composerAudioCacheGb')} GiB`,
+        '完整续训权重 composer_last.pt；推理权重 composer_inference.pt'] : composerFamily ? [`结构 ${value('composerDModel')} 维 / ${value('composerLayers')} 层 / FFN ${value('composerDimFeedforward')} · 动作槽位 ${value('composerActionSlots')}`,
         `历史 ${value('composerHistoryEvents')} 个事件 · 候选 ${value('composerCandidateCount')} · 精度 ${nameOf('composerPrecision')}`,
         `后台预取 ${value('composerPrefetchBatches')} batch · 音频预算 ${value('composerAudioCacheGb')} GiB · 日志每 ${value('composerLogInterval')} batch`,
         `完整续训权重 composer_last.pt；额外推理权重${checked('composerExportInference')?'开启':'关闭'}`] : streamFamily ? [`种子 ${value("trainingSeed").trim() || "0"} · 权重衰减 ${value("streamWeightDecay")} · 精度 ${nameOf("streamPrecision")}`,

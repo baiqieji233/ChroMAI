@@ -2112,6 +2112,8 @@ function chartStreamTrainingPayload(options = {}) {
   };
 }
 
+const EVENT_SET_LEARNING_POLICIES = {"phrase_context_policy": ["ordered_phrase_v2", "causal_phrase_v1", "off"], "duration_audio_policy": ["interval_v1", "off"], "physical_policy": ["runtime_hard_v2", "legacy_report_v1"], "transition_policy": ["music_exit_v3", "music_exit_v2", "music_exit_v1", "off"], "decoder_policy": ["prenorm_independent_v2", "postnorm_v1"], "window_balance_policy": ["sqrt_window_v2", "equal_window_v1"], "timing_output_policy": ["absolute_grid_v1", "relative_delta_v1"], "timing_grid_audio_policy": ["query_pool_v3", "query_pool_v2", "candidate_pool_v1", "off"], "timing_group_policy": ["phase_gap_v2", "phase_only_v1"], "literal_output_policy": ["type_blocks_v1", "flat_family_v1"], "event_family_policy": ["audio_state_phrase_v4", "audio_prior_transition_v3", "audio_semantic_v2", "semantic_mass_v1", "legacy_v1"], "prefix_augmentation_input_policy": ["musical_loop_recovery_v7", "musical_loop_recovery_v8", "musical_loop_recovery_v6", "musical_loop_recovery_v5", "phase_recovery_v4", "causal_window_config_time_first_decision_v3"], "history_window_policy": ["block_aligned_v2", "rolling_legacy_v1"], "continuation_policy": ["pattern_runs_v2", "typed_runs_v1", "off"], "sensor_load_policy": ["separate_touch_v1", "button_only_v1"], "gap_continuation_policy": ["probability_v2", "additive_v1"], "motion_continuation_policy": ["context_motion_v3", "motion_distinct_v2", "motion_continuation_v1", "off"], "lane_load_policy": ["direct_buttons_v1", "off"], "recovery_policy": ["greedy_mixed_v4", "greedy_mixed_v3", "mixed_exit_v2", "persistent_v1"]};
+const EVENT_SET_POLICY_LABELS = {"audio_state_phrase_v4": "音频先验＋持续状态与短句共同决定类型（v4）", "audio_prior_transition_v3": "音频先验与类型转折（v3）", "audio_semantic_v2": "音频语义校准（v2）", "semantic_mass_v1": "语义类型概率（v1）", "legacy_v1": "旧版基线（v1）", "musical_loop_recovery_v8": "长循环出口训练＋正常历史对照（v8）", "musical_loop_recovery_v7": "长循环错误历史恢复（v7）", "musical_loop_recovery_v6": "音乐循环与错拍恢复（v6）", "musical_loop_recovery_v5": "音乐循环历史恢复（v5）", "phase_recovery_v4": "错拍拍位恢复（v4）", "causal_window_config_time_first_decision_v3": "旧版短段首步恢复（v3）", "greedy_mixed_v4": "确定性生成＋构造出口混合恢复（v4）", "greedy_mixed_v3": "确定性与随机混合恢复（v3）", "mixed_exit_v2": "重复出口混合恢复（v2）", "persistent_v1": "持续保存错误历史恢复（v1）", "music_exit_v3": "比较当前光标之前音乐的转折学习（v3）", "music_exit_v2": "音乐转折残差学习（v2）", "music_exit_v1": "音乐转折联合学习（v1）", "off": "关闭（对照）", "prenorm_independent_v2": "逐层独立的前置归一化（v2）", "postnorm_v1": "旧版后置归一化（v1）", "sqrt_window_v2": "按短段长度平方根平衡（v2）", "equal_window_v1": "每个短段等权（v1）", "absolute_grid_v1": "绝对拍位网格（v1）", "relative_delta_v1": "相对拍距（v1）", "query_pool_v3": "候选音频与时序逐项匹配（v3）", "query_pool_v2": "候选音频与时序标量匹配（v2）", "candidate_pool_v1": "候选时刻音频池化（v1）", "phase_gap_v2": "拍内位置与间隔联合分组（v2）", "phase_only_v1": "仅拍内位置分组（v1）", "type_blocks_v1": "按音符类型分块输出（v1）", "flat_family_v1": "旧版平铺类型输出（v1）", "block_aligned_v2": "历史窗口按训练块对齐（v2）", "rolling_legacy_v1": "旧版滚动窗口（v1）", "pattern_runs_v2": "跟踪重复写法的连续状态（v2）", "typed_runs_v1": "按类型跟踪连续状态（v1）", "separate_touch_v1": "分别计算按钮与Touch负荷（v1）", "button_only_v1": "仅计算按钮负荷（v1）", "probability_v2": "以概率表达间隔延续（v2）", "additive_v1": "旧版加法间隔延续（v1）", "context_motion_v3": "结合上下文的动作衔接（v3）", "motion_distinct_v2": "区分动作写法的衔接（v2）", "motion_continuation_v1": "基础动作延续（v1）", "direct_buttons_v1": "显式按钮键位负荷（v1）", "runtime_hard_v2": "依据运行证据判定硬冲突（v2）", "legacy_report_v1": "旧版物理报告（v1）"};
 function chartComposerTrainingPayload(options = {}) {
   const mode = currentTrainingMode();
   const source = trainingSourcePaths(options);
@@ -2121,7 +2123,7 @@ function chartComposerTrainingPayload(options = {}) {
       manifest:source.manifest||manifests[0]||'',manifests,dataset_paths:selectedDatasetItems().map(item=>item.path).filter(Boolean),
       checkpoint_dir:valueOrDefault('#checkpointDir','').trim(),init_checkpoint:mode==='fresh'?null:valueOrDefault('#trainingCheckpointPath','').trim(),
       cache_dir:valueOrDefault('#composerCacheDir','cache/event_set_stream_v1'),device:formDevice('#device'),precision:valueOrDefault('#composerPrecision','bf16'),
-      validation_manifest:valueOrDefault('#composerValidationManifest','').trim()||null,generation_eval_seeds:valueOrDefault('#composerGenerationEvalSeeds','0,1')};
+      holdout_fraction:Number(valueOrDefault('#composerHoldoutFraction',.05)),validation_manifest:valueOrDefault('#composerValidationManifest','').trim()||null,generation_eval_seeds:valueOrDefault('#composerGenerationEvalSeeds','0,1')};
     for(const [key,id,fallback] of [['epochs','epochs',20],['batch_size','batchSize',16],['grad_accumulation','gradAccumulation',1],['lr','learningRate',.0002],
       ['d_model','composerDModel',256],['layers','composerLayers',4],['nhead','composerNhead',8],['dim_feedforward','composerDimFeedforward',768],
       ['history_events','composerHistoryEvents',64],['rollout_steps','composerRolloutSteps',16],['window_seconds','composerWindowSeconds',8],
@@ -2144,6 +2146,9 @@ function chartComposerTrainingPayload(options = {}) {
     for(const [key,id,legacy] of [['phrase_context_policy','composerPhraseContextPolicy','off'],['duration_audio_policy','composerDurationAudioPolicy','off'],['physical_policy',null,'legacy_report_v1']]) {
       payload[key]=mode==='resume'&&savedPolicies?(JSON.parse(savedPolicies)[key]??legacy):(payload.learning_policy==='legacy'?legacy:(id?valueOrDefault('#'+id,'auto'):'auto'));
     }
+    for(const key of Object.keys(EVENT_SET_LEARNING_POLICIES)){const node=element('#eventSetPolicy_'+key);if(node&&mode!=='resume'&&node.value&&node.value!=='auto')payload[key]=node.value;}
+    for(const node of document.querySelectorAll('[data-generation-eval-key]'))payload['generation_eval_'+node.dataset.generationEvalKey]=node.tagName==='SELECT'?node.value:(node.value.trim()===''?null:Number(node.value));
+    if(mode!=='resume')for(const [key,id] of [['phrase_context_policy','composerPhraseContextPolicy'],['duration_audio_policy','composerDurationAudioPolicy']]){const value=valueOrDefault('#'+id,'auto');if(value&&value!=='auto')payload[key]=value;}
     payload.lr_schedule=valueOrDefault('#composerLrSchedule','cosine');
     return payload;
   }
@@ -2327,8 +2332,8 @@ function chartComposerGenerationPayload() {
     tempo_map: parseTempoMap(),
     meter_map: valueOrDefault("#formGenerationMeterMap", "").trim() ? parseMeterMap("#formGenerationMeterMap") : null,
     temperature: Number(valueOrDefault("#temperature", .65)),
-    pointer_temperature: Number(valueOrDefault("#composerPointerTemperature", valueOrDefault("#temperature", .65))),
-    action_temperature: Number(valueOrDefault("#composerActionTemperature", valueOrDefault("#temperature", .65))),
+    pointer_temperature: (valueOrDefault("#composerPointerTemperature", "").trim()===""?null:Number(valueOrDefault("#composerPointerTemperature", .65))),
+    action_temperature: (valueOrDefault("#composerActionTemperature", "").trim()===""?null:Number(valueOrDefault("#composerActionTemperature", .65))),
     action_retry_policy: valueOrDefault('#composerActionRetryPolicy','auto'),
     pointer_grid_policy: valueOrDefault('#composerPointerGridPolicy','grid_family_coherent_v3'),
     survival_calibration: valueOrDefault('#composerSurvivalCalibration','auto'),
@@ -2360,6 +2365,7 @@ function chartComposerGenerationPayload() {
     intensity_curve_mode: valueOrDefault("#intensityCurveMode", "follow"),
     intensity_curve_chord_multiplier: Number(valueOrDefault("#composerChordMultiplier", 1)),
   };
+  for(const key of ['pointer_temperature','action_temperature'])if(payload[key]===null)delete payload[key];
   if(isEventSetGeneration()) {
     for(const [key,id,fallback] of [['phrase_candidates','composerPhraseCandidates',1],['audio_tracking_strength','composerAudioTrackingStrength',0],['softcomfort_strength','composerSoftcomfortStrength',1],['phrase_write_beats','composerPhraseWriteBeats',8],['phrase_commit_beats','composerPhraseCommitBeats',4],['phrase_step_budget','composerPhraseStepBudget',256],['phrase_repair_budget','composerPhraseRepairBudget',8],['phrase_rollback_budget','composerPhraseRollbackBudget',4],['phrase_time_budget_sec','composerPhraseTimeBudgetSec',30]])payload[key]=Number(valueOrDefault('#'+id,fallback));
     payload.search_policy=valueOrDefault('#composerSearchPolicy','phrase_v1');
@@ -2376,13 +2382,47 @@ function isEventSetGeneration() {
   return generationInspection?.path===valueOrDefault('#checkpointPath','').trim() && data?.valid===true
     && (data?.model_config?.architecture_profile==='event_set_stream_v1'||data?.schema==='maichart-composer-event-set-checkpoint-v1');
 }
+function initializeEventSetParameterGroups() {
+  const host=element('#chartComposerTrainingControls');if(!host)return;
+  let groups=element('#eventSetParameterGroups');
+  if(!groups){
+    groups=document.createElement('div');groups.id='eventSetParameterGroups';host.append(groups);
+    const titles={basic:'基础运行',learning:'学习目标与短句记忆',recovery:'恢复与鲁棒性',validation:'验证与检查点',model:'模型骨架',performance:'性能与诊断'};
+    for(const [key,title] of Object.entries(titles)){const details=document.createElement('details');details.className='settings-section';details.open=['basic','learning','validation'].includes(key);details.innerHTML=`<summary>${title}</summary><div class="settings-content form-grid" id="eventSetGroup_${key}"></div>`;groups.append(details);}
+    const names={transition_policy:'重复段转折学习',decoder_policy:'解码器归一化',window_balance_policy:'短段样本权重',timing_output_policy:'拍位输出方式',timing_grid_audio_policy:'候选拍位与音乐匹配',timing_group_policy:'节奏分组',literal_output_policy:'配置字面输出',event_family_policy:'事件类型学习',prefix_augmentation_input_policy:'错误历史构造',history_window_policy:'历史窗口对齐',continuation_policy:'持续配置状态',sensor_load_policy:'Touch与按钮负荷',gap_continuation_policy:'间隔持续状态',motion_continuation_policy:'动作衔接状态',lane_load_policy:'键位负荷状态',recovery_policy:'自主生成恢复',physical_policy:'训练物理判定'};
+    for(const [key,choices] of Object.entries(EVENT_SET_LEARNING_POLICIES)){
+      if(['phrase_context_policy','duration_audio_policy'].includes(key))continue;
+      const field=document.createElement('label');field.className='field';field.innerHTML=`${names[key]||key}<select id="eventSetPolicy_${key}"><option value="auto">随预设（自动）</option>${choices.map(value=>`<option value="${value}" title="${value}">${EVENT_SET_POLICY_LABELS[value]||value}</option>`).join('')}</select><small>${key}；高级单项选择优先于预设，resume继承。</small>`;
+      element('#eventSetGroup_'+(['prefix_augmentation_input_policy','recovery_policy'].includes(key)?'recovery':'learning')).append(field);
+    }
+    const panel=[['pointer_temperature','选时温度（留空继承验证总温度）',''],['action_temperature','配置温度（留空继承验证总温度）',''],['min_same_head_ms','同键最短间隔（毫秒）',50],['touch_layout_policy','Touch布局','open',['open','legacy_two_heads']],['max_events','诊断事件上限（0自动）',0],['search_policy','生成流程','phrase_v1',['phrase_v1','legacy']],['physical_policy','物理判定','runtime_hard_v2',['runtime_hard_v2','legacy']],['phrase_candidates','候选数',1,[1,2,4]],['phrase_write_beats','试写拍数',8],['phrase_commit_beats','提交拍数',4],['phrase_step_budget','每候选步数',256],['phrase_repair_budget','历史编辑预算',8],['phrase_rollback_budget','撤回预算',4],['phrase_time_budget_sec','每短句秒数',30],['softcomfort_strength','手感评分强度',1],['audio_tracking_strength','采音连续性',0]];
+    const advanced=document.createElement('details');advanced.id='eventSetValidationGeneration';advanced.className='settings-section';advanced.style.gridColumn='1 / -1';advanced.innerHTML='<summary>验证自由生成设置</summary><p>参考谱条件下的固定歌曲抽检；下列采样与搜索设置独立于手动生成页，默认一致；采用各验证谱派生条件与原节拍，不使用外部强度曲线。</p><div class="form-grid" id="eventSetValidationGenerationGrid"></div>';element('#eventSetGroup_validation').append(advanced);
+    for(const [key,name,value,choices] of panel){const field=document.createElement('label');field.className='field';field.innerHTML=name+(choices?`<select id="eventSetEval_${key}" data-generation-eval-key="${key}">${choices.map(v=>`<option value="${v}" ${v===value?'selected':''}>${({touch_layout_policy:{open:'开放Touch布局',legacy_two_heads:'旧双头限制'},search_policy:{phrase_v1:'短句事务生成',legacy:'旧点生成流程（对照）'},physical_policy:{runtime_hard_v2:'运行证据硬冲突（v2）',legacy:'旧物理判定（对照）'}})[key]?.[v]??v}</option>`).join('')}</select>`:`<input id="eventSetEval_${key}" data-generation-eval-key="${key}" type="number" min="0" step="any" value="${value}">`);element('#eventSetValidationGenerationGrid').append(field);}
+    const preset=element('#composerLearningPolicy');preset?.addEventListener('change',()=>{for(const [id,value] of [['composerTransitionExitWeight',.5],['composerPrefixAugmentationRate',.15],['composerEventFamilyAudioWeight',.25]]){const node=element('#'+id);if(node)node.value=String(preset.value==='legacy'?0:value);}});
+  }
+  const stream=valueOrDefault('#composerArchitectureProfile','')==='event_set_stream_v1';groups.hidden=!stream;
+  const sections=['composerTrainingCommon','composerTrainingEvaluation','composerTrainingAdvanced'];
+  for(const id of sections){const node=element('#'+id);if(node)node.hidden=stream;}
+  const ids={basic:['composerArchitectureProfile','composerPrecision','composerLrSchedule','composerWarmupSteps','composerMinLrRatio'],learning:['composerLearningPolicy','composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerTransitionExitWeight','composerEventFamilyAudioWeight','composerPlanWeight'],recovery:['composerPrefixAugmentationRate','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerSymbolicPretrainEpochs'],validation:['composerValidationManifest','composerHoldoutFraction','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalSongs','composerGenerationEvalIntervalEpochs','composerGenerationEvalSeeds','composerGenerationEvalTemperature','composerCheckpointIntervalSteps'],model:['composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanBlankWindowSeconds','composerDropout'],performance:['composerPrepareWorkers','composerSampleWorkers','composerCpuThreads','composerPrefetchBatches','composerAudioCacheGb','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCacheDir']};
+  for(const [group,list] of Object.entries(ids))for(const id of list){const node=element('#'+id),field=node?.closest('label.field');if(!field)continue;if(stream){if(!field._eventSetHome){const anchor=document.createComment('event-set-home');field.before(anchor);field._eventSetHome=anchor;}element('#eventSetGroup_'+group).append(field);}else if(field._eventSetHome){field._eventSetHome.after(field);}}
+  if(stream)element('#eventSetGroup_validation').append(element('#eventSetValidationGeneration'));
+}
+
 function updateEventSetControls() {
   const stream=valueOrDefault('#composerArchitectureProfile','')==='event_set_stream_v1';
-  const allowed=new Set(['composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerPlanBlankWindowSeconds','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalIntervalEpochs','composerWarmupSteps','composerPrefetchBatches','composerSampleWorkers','composerAudioCacheGb','composerMinLrRatio','composerLrSchedule','composerPlanWeight','composerAudioGridSeconds','composerArchitectureProfile','composerPrecision','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerDropout','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerPrepareWorkers','composerCpuThreads','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCheckpointIntervalSteps','composerCacheDir','composerValidationManifest','composerGenerationEvalSongs','composerGenerationEvalSeeds']);
+  initializeEventSetParameterGroups();
+  if(stream){
+    const mode=currentTrainingMode();
+    for(const id of ['composerArchitectureProfile','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerRolloutSteps','composerAudioGridSeconds','composerPlanBlankWindowSeconds','composerDropout']){const node=element('#'+id);if(node){node.disabled=mode!=='fresh';node.title=mode==='fresh'?'':'继承检查点；改变此项需要从头训练';}}
+    for(const id of ['composerSeed','composerMaxSteps','composerLimitCharts','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerPlanWeight','composerWindowSeconds','composerSymbolicPretrainEpochs','composerGenerationEvalSeeds','composerValidationManifest','composerHoldoutFraction','composerEventFamilyAudioWeight']){const node=element('#'+id);if(node)node.disabled=mode==='resume';}
+    for(const node of document.querySelectorAll('[id^="eventSetPolicy_"],[data-generation-eval-key]'))node.disabled=mode==='resume';
+  }
+  const fp16=element('#composerPrecision option[value=fp16]');if(fp16){fp16.hidden=stream;fp16.disabled=stream;if(stream&&element('#composerPrecision').value==='fp16')element('#composerPrecision').value='bf16';}
+  const allowed=new Set(['composerHoldoutFraction','composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerPlanBlankWindowSeconds','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalIntervalEpochs','composerWarmupSteps','composerPrefetchBatches','composerSampleWorkers','composerAudioCacheGb','composerMinLrRatio','composerLrSchedule','composerPlanWeight','composerAudioGridSeconds','composerArchitectureProfile','composerPrecision','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerDropout','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerPrepareWorkers','composerCpuThreads','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCheckpointIntervalSteps','composerCacheDir','composerValidationManifest','composerGenerationEvalSongs','composerGenerationEvalSeeds']);
   allowed.add('composerEventFamilyAudioWeight');
   for(const id of ['composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight'])allowed.add(id);
   document.querySelectorAll('#chartComposerTrainingControls input,#chartComposerTrainingControls select,#chartComposerTrainingControls textarea').forEach(control=>{
-    const legacy=!allowed.has(control.id),field=control.closest('label.field');
+    const legacy=!allowed.has(control.id)&&!control.id.startsWith('eventSetPolicy_')&&!control.hasAttribute('data-generation-eval-key'),field=control.closest('label.field');
     if(legacy&&field){field.hidden=stream;if(stream){if(control.dataset.eventSetDisabled===undefined)control.dataset.eventSetDisabled=String(control.disabled);control.disabled=true;}else if(control.dataset.eventSetDisabled!==undefined){control.disabled=control.dataset.eventSetDisabled==='true';delete control.dataset.eventSetDisabled;}}
   });
   document.querySelectorAll('[data-event-set-only]').forEach(node=>{node.hidden=!stream;});
@@ -2407,6 +2447,9 @@ function updateEventSetControls() {
 }
 function applyEventSetFreshDefaults() {
   if(currentTrainingMode()!=='fresh')return;
+  const directory=element('#checkpointDir');
+  if(directory){const current=directory.value.trim().replace(/\\/g,'/').replace(/\/+$/,'');if(!current||['checkpoints/song_form_v2','checkpoints/chart_stream_v1','checkpoints/chart_composer_v1','checkpoints/prism_composer_v16_signal'].includes(current))directory.value='checkpoints/event_set_stream_v1';}
+  for(const node of document.querySelectorAll('[id^="eventSetPolicy_"]'))node.value='auto';
   const familyAudio=element('#composerEventFamilyAudioWeight');if(familyAudio)familyAudio.value='0.25';
   for(const [id,value] of [['composerPhraseContextPolicy','auto'],['composerDurationAudioPolicy','auto'],['composerPhraseLossWeight',.05]]){const node=element('#'+id);if(node)node.value=String(value);}
   for(const [id,value] of Object.entries({composerLearningPolicy:'auto',composerTransitionExitWeight:.5,composerPrefixAugmentationRate:.15,composerGenerationEvalTemperature:.65,epochs:20,batchSize:16,gradAccumulation:1,learningRate:.0002,composerDModel:256,composerLayers:4,composerNhead:8,composerDimFeedforward:768,composerHistoryEvents:64,composerRolloutSteps:16,composerWindowSeconds:8,composerAudioGridSeconds:.01,composerPlanWeight:.1,composerPlanBlankWindowSeconds:.5,composerValidationMaxBatches:32,composerValidationBatchSize:4,composerGenerationEvalIntervalEpochs:1,composerWarmupSteps:100,composerPrefetchBatches:2,composerSampleWorkers:1,composerAudioCacheGb:2,composerMinLrRatio:.1,composerLrSchedule:'cosine',composerPrecision:'bf16',composerPrepareWorkers:1,composerCacheDir:'cache/event_set_stream_v1'})) {
@@ -2685,7 +2728,7 @@ function updateTrainingModeHelp(mode = currentTrainingMode()) {
       ? "本次从头训练的轮数。短跑可先限制 batch 数验证流程；正式训练轮数按数据量和实际生成效果选择。"
       : mode === "resume"
         ? currentModelFamily()==='chart_composer_v1'
-          ? 'Composer 的 epochs 是本次继续的轮数，包含尚未完成的当前轮。第4轮中途恢复并希望到第20轮，应填17；第4轮已完成则填16。'
+          ? (valueOrDefault('#composerArchitectureProfile','')==='event_set_stream_v1'?'整拍集合的 epochs 是总目标轮数；例如从第4轮恢复并希望训练到第20轮，请填20。':'Composer 的 epochs 是本次继续的轮数，包含尚未完成的当前轮。第4轮中途恢复并希望到第20轮，应填17；第4轮已完成则填16。')
           : songForm
           ? "本次继续训练的轮数，从 checkpoint 已完成轮次的下一轮开始；迁移时重跑未完成轮次，保留其中已学到的权重。"
           : "resume 的 epochs 是从断点额外训练的轮数；会从 checkpoint 的 epoch 接着计数，早停会按验证 loss 停止。"
@@ -3843,7 +3886,7 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
   const config = data?.model_config || {};
   if(config.architecture_profile==='event_set_stream_v1'||data?.schema==='maichart-composer-event-set-checkpoint-v1') {
     const args=data.args||{};
-    const fields={composerArchitectureProfile:'architecture_profile',composerDModel:'d_model',composerDimFeedforward:'dim_feedforward',composerLayers:'layers',composerNhead:'nhead',composerHistoryEvents:'history_events',composerRolloutSteps:'rollout_steps',composerWindowSeconds:'window_seconds',composerAudioGridSeconds:'audio_grid_seconds',composerPlanWeight:'plan_weight',composerPlanBlankWindowSeconds:'plan_blank_window_seconds',composerLrSchedule:'lr_schedule',composerWarmupSteps:'warmup_steps',composerMinLrRatio:'min_lr_ratio',composerValidationMaxBatches:'validation_max_batches',composerValidationBatchSize:'validation_batch_size',composerGenerationEvalIntervalEpochs:'generation_eval_interval_epochs',composerGenerationEvalSongs:'generation_eval_songs',composerPrefetchBatches:'prefetch_batches',composerAudioCacheGb:'audio_cache_gb',composerDropout:'dropout',composerSymbolicPretrainEpochs:'symbolic_pretrain_epochs',batchSize:'batch_size',gradAccumulation:'grad_accumulation'};
+    const fields={composerSeed:'seed',composerMaxSteps:'max_steps',composerLimitCharts:'limit_charts',composerRecoveryInterval:'recovery_interval',composerRecoverySamples:'recovery_samples',composerRecoverySteps:'recovery_steps',composerRecoveryWeight:'recovery_weight',learningRate:'lr',composerGenerationEvalSeeds:'generation_eval_seeds',composerValidationManifest:'validation_manifest',composerArchitectureProfile:'architecture_profile',composerDModel:'d_model',composerDimFeedforward:'dim_feedforward',composerLayers:'layers',composerNhead:'nhead',composerHistoryEvents:'history_events',composerRolloutSteps:'rollout_steps',composerWindowSeconds:'window_seconds',composerAudioGridSeconds:'audio_grid_seconds',composerPlanWeight:'plan_weight',composerPlanBlankWindowSeconds:'plan_blank_window_seconds',composerLrSchedule:'lr_schedule',composerWarmupSteps:'warmup_steps',composerMinLrRatio:'min_lr_ratio',composerValidationMaxBatches:'validation_max_batches',composerValidationBatchSize:'validation_batch_size',composerGenerationEvalIntervalEpochs:'generation_eval_interval_epochs',composerGenerationEvalSongs:'generation_eval_songs',composerPrefetchBatches:'prefetch_batches',composerAudioCacheGb:'audio_cache_gb',composerDropout:'dropout',composerSymbolicPretrainEpochs:'symbolic_pretrain_epochs',batchSize:'batch_size',gradAccumulation:'grad_accumulation'};
     for(const [id,key] of Object.entries(fields)){const node=element('#'+id),value=config[key]??args[key];if(node&&value!==undefined){node.value=String(value);node.disabled=mode==='resume';}}
     const policy=element('#composerLearningPolicy'),weight=element('#composerTransitionExitWeight');
     if(policy){policy.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)policy.value=mode==='resume'?'checkpoint':'auto';policy.dataset.savedPolicies=JSON.stringify({transition_policy:config.transition_policy??'off',timing_group_policy:config.timing_group_policy??'phase_only_v1',literal_output_policy:config.literal_output_policy??'flat_family_v1',decoder_policy:config.decoder_policy??'postnorm_v1',window_balance_policy:config.window_balance_policy??'equal_window_v1',history_window_policy:config.history_window_policy??'rolling_legacy_v1',continuation_policy:config.continuation_policy??'off',sensor_load_policy:config.sensor_load_policy??'button_only_v1',gap_continuation_policy:config.gap_continuation_policy??'additive_v1',motion_continuation_policy:config.motion_continuation_policy??'off',lane_load_policy:config.lane_load_policy??'off',recovery_policy:config.recovery_policy??'persistent_v1',timing_output_policy:config.timing_output_policy??'relative_delta_v1',event_family_policy:config.event_family_policy??'legacy_v1',prefix_augmentation_input_policy:config.prefix_augmentation_input_policy??'causal_window_config_time_first_decision_v3',timing_grid_audio_policy:config.timing_grid_audio_policy??'off',phrase_context_policy:config.phrase_context_policy??'off',duration_audio_policy:config.duration_audio_policy??'off',physical_policy:config.physical_policy??'legacy_report_v1'});}
@@ -3852,6 +3895,9 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
       const node=element('#'+id);if(node){node.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)node.value=String(mode==='resume'?(config[key]??args[key]??fallback):(key==='phrase_loss_weight' ? .05 : 'auto'));}
     }
     for(const [id,value] of [['composerPrefixAugmentationRate',mode==='resume'?(config.prefix_augmentation_rate??0):.15],['composerGenerationEvalTemperature',mode==='resume'?(args.generation_eval_temperature??.65):.65],['composerEventFamilyAudioWeight',mode==='resume'?(config.event_family_audio_weight??0):.25]]){const node=element('#'+id);if(node){node.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)node.value=String(value);}}
+    for(const key of Object.keys(EVENT_SET_LEARNING_POLICIES)){const node=element('#eventSetPolicy_'+key);if(node){node.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)node.value=mode==='resume'?(config[key]??'auto'):'auto';}}
+    for(const node of document.querySelectorAll('[data-generation-eval-key]')){const key='generation_eval_'+node.dataset.generationEvalKey;node.disabled=mode==='resume';if(args[key]!==undefined)node.value=String(args[key]);}
+    for(const id of ['composerArchitectureProfile','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerRolloutSteps','composerAudioGridSeconds','composerPlanBlankWindowSeconds','composerDropout']){const node=element('#'+id);if(node){node.disabled=true;node.title='继承检查点；改变此项需要从头训练';}}
     updateEventSetControls();return;
   }
   const mapping = {
@@ -5773,6 +5819,7 @@ controlRows("radarControls", radarKeys);
 controlRows("styleControls", styleKeys);
 loadIntensityCurveState();
 generationDefaults = captureGenerationDefaults();
+initializeEventSetParameterGroups();
 const restoredSettings = restoreSettings();
 if (restoredSettingNotice) {
   const status = element("#conditionPresetStatus");

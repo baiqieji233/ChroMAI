@@ -7,7 +7,7 @@ from fractions import Fraction
 from pathlib import Path
 import numpy as np
 import torch
-from torch.utils.data import DataLoader,Sampler
+from torch.utils.data import DataLoader,Sampler,Subset
 from .stream_data import StreamDataset,DeltaVocabulary,collate_stream
 from .stream_model import StreamComposer,StreamComposerConfig,to_device_batch
 from . import stream_checkpoint as checkpoint
@@ -26,7 +26,7 @@ LEARNING_POLICIES = {
     'timing_grid_audio_policy': ('query_pool_v3','query_pool_v2','candidate_pool_v1','off'),
     'timing_group_policy': ('phase_gap_v2','phase_only_v1'),
     'literal_output_policy': ('type_blocks_v1','flat_family_v1'),
-    'event_family_policy': ('audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
+    'event_family_policy': ('audio_state_phrase_v4','audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
     'prefix_augmentation_input_policy': ('musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
     'history_window_policy': ('block_aligned_v2','rolling_legacy_v1'),
     'continuation_policy': ('pattern_runs_v2','typed_runs_v1','off'),
@@ -92,7 +92,7 @@ def upgrade_learning_stage(model, policies, device='cpu'):
     new_prefixes=('timing_grid.','history_gap_projection.','event_family_head.',
                   'literal_route_head.','literal_family_embedding.','family_audio_projection.',
                   'family_history_projection.','family_audio_norm.','audio_event_family_head.',
-                  'family_continuity_head.','family_rhythm_projection.','decoder.norm.',
+                  'family_continuity_head.','family_rhythm_projection.','family_state_phrase.','decoder.norm.',
                   'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.')
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
     missing=set(target)-set(source); unexpected=set(source)-set(target)
@@ -137,7 +137,7 @@ def parser():
     for key,default in dict(lr=2e-4,dropout=.1,window_seconds=8.,recovery_weight=.1,
         plan_weight=.1,audio_cache_gb=2.,min_lr_ratio=.1).items():
         p.add_argument('--'+key.replace('_','-'),type=float,default=default)
-    for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps'):p.set_defaults(**{key:None})
+    for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps','dropout'):p.set_defaults(**{key:None})
     p.add_argument('--lr-schedule',choices=('constant','cosine'),default='cosine')
     p.add_argument('--generation-eval-seeds',default='0,1')
     p.add_argument('--audio-grid-seconds',type=float,default=None,
@@ -150,6 +150,8 @@ def parser():
     p.add_argument('--event-family-audio-weight',type=float,default=None)
     p.add_argument('--phrase-loss-weight',type=float,default=None)
     p.add_argument('--generation-eval-temperature',type=float,default=None)
+    from .stream_evaluation_settings import add_arguments
+    add_arguments(p)
     p.add_argument('--device',default='auto');p.add_argument('--precision',choices=('auto','bf16','fp16','fp32'),default='bf16')
     return p
 
@@ -218,7 +220,14 @@ def _loader(ds,args,epoch,skip=0,validation=False):
     # DataLoader iterator creation must not consume the model/dropout RNG on
     # resume, where the number of loader constructions differs from a full run.
     generator=torch.Generator().manual_seed(args.seed+epoch*1000003+1729)
-    if validation:return DataLoader(ds,batch_size=args.validation_batch_size,collate_fn=collate_stream,num_workers=0,generator=generator)
+    if validation:
+        budget=getattr(args,'validation_max_batches',0)*args.validation_batch_size
+        if budget and len(ds)>budget:
+            # Validation rows are song-local in the dataset. A prefix-only
+            # batch limit would repeatedly measure just the first few songs.
+            selected=np.linspace(0,len(ds)-1,budget,dtype=np.int64).tolist()
+            ds=Subset(ds,selected)
+        return DataLoader(ds,batch_size=args.validation_batch_size,collate_fn=collate_stream,num_workers=0,generator=generator)
     return DataLoader(ds,batch_sampler=_LocalBatches(ds,args.batch_size,args.seed,epoch,skip),
         collate_fn=_TrainingCollator(ds,args,epoch,skip),num_workers=0,pin_memory=args.device.startswith('cuda'),generator=generator)
 
@@ -335,7 +344,11 @@ def _initialize_structured_heads(model,ds,parent_config=None,*,resume=False):
     semantic=model.config.event_family_policy!='legacy_v1'
     init_timing=absolute and not resume and (parent_config is None or parent_config.timing_output_policy!='absolute_grid_v1'
         or parent_config.timing_group_policy!=model.config.timing_group_policy)
-    init_family=semantic and not resume and (parent_config is None or parent_config.event_family_policy!=model.config.event_family_policy)
+    preserve_family_prior=(parent_config is not None
+        and parent_config.event_family_policy=='audio_prior_transition_v3'
+        and model.config.event_family_policy=='audio_state_phrase_v4')
+    init_family=(semantic and not resume and not preserve_family_prior
+        and (parent_config is None or parent_config.event_family_policy!=model.config.event_family_policy))
     init_literal=semantic and model.config.literal_output_policy=='type_blocks_v1' and not resume and (
         parent_config is None or parent_config.literal_output_policy!='type_blocks_v1')
     phases={Fraction(value)%1 for value in model.config.delta_beats} if absolute else set()
@@ -423,7 +436,8 @@ def evaluate(model,ds,args):
                 n+=1
     finally:model.train(was)
     return dict(metrics=_averages(totals,n),batches=n,oov=ds.oov,
-        condition_scope='reference-derived requested controls',scope='authored_prefix_not_musical_quality')
+        condition_scope='reference-derived requested controls',scope='authored_prefix_not_musical_quality',
+        selection='deterministic_spread_across_all_samples' if args.validation_max_batches else 'all_samples')
 
 def _autocast(args):
     return torch.autocast('cuda',dtype=torch.bfloat16 if args.precision=='bf16' else torch.float16,
@@ -442,12 +456,20 @@ def _train(args):
     args.device=('cuda' if torch.cuda.is_available() else 'cpu') if args.device=='auto' else args.device
     if args.precision=='auto':args.precision='bf16' if args.device.startswith('cuda') else 'fp32'
     if args.precision=='fp16':raise ValueError('Use BF16 or FP32 for the event-set trainer')
-    torch.set_num_threads(args.cpu_threads);random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
+    if args.cpu_threads<0:raise ValueError('CPU threads must be nonnegative; 0 selects automatic')
+    args.effective_cpu_threads=(args.cpu_threads if args.cpu_threads else
+        min(2,torch.get_num_threads()) if args.device.startswith('cuda') else torch.get_num_threads())
+    torch.set_num_threads(args.effective_cpu_threads);random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     directory=Path(args.checkpoint_dir);directory.mkdir(parents=True,exist_ok=True)
     if not args.resume and (directory/'composer_last.pt').exists():raise ValueError('Use a new directory for fresh/finetune')
     old=None
     if args.resume or args.init_checkpoint:model,old=checkpoint.load(args.resume or args.init_checkpoint,args.device,include_optimizer=bool(args.resume))
-    for key,default in dict(d_model=256,layers=4,nhead=8,dim_feedforward=768,history_events=64,rollout_steps=16).items():
+    if args.resume:
+        saved=old.get('training_state') or {}
+        next_epoch=int(old.get('epoch',0))+int(saved.get('epoch_complete',False))
+        if next_epoch>args.epochs:
+            raise ValueError(f'epochs is the total target, not added epochs; next epoch is {next_epoch}, requested target is {args.epochs}')
+    for key,default in dict(d_model=256,layers=4,nhead=8,dim_feedforward=768,history_events=64,rollout_steps=16,dropout=.1).items():
         if getattr(args,key) is None:setattr(args,key,getattr(model.config,key) if old else default)
     if args.rollout_steps<1 or args.history_events<1:raise ValueError('Invalid history/rollout controls')
     learning_policies=resolve_learning_policies(args,model.config if old else None,resume=bool(args.resume))
@@ -458,6 +480,8 @@ def _train(args):
         raise ValueError('Generation evaluation temperature must be finite and nonnegative')
     if args.resume and args.generation_eval_temperature!=inherited_temperature:
         raise ValueError('Resume inherits generation_eval_temperature; use finetune')
+    from .stream_evaluation_settings import from_training_args
+    generation_settings=from_training_args(args)
     if args.init_checkpoint:model=upgrade_learning_stage(model,learning_policies,args.device)
     args.audio_grid_seconds=_resolve_audio_grid(args.audio_grid_seconds,model.config if old else None)
     inherited_blank=model.config.plan_blank_window_seconds if old else .5
@@ -466,6 +490,9 @@ def _train(args):
     if old and args.plan_blank_window_seconds is not None and args.plan_blank_window_seconds!=inherited_blank:
         raise ValueError('Continuation inherits checkpoint plan_blank_window_seconds')
     args.plan_blank_window_seconds=inherited_blank if args.plan_blank_window_seconds is None else args.plan_blank_window_seconds
+    if args.validation_manifest:
+        from .evaluation import assert_unseen
+        assert_unseen(args.manifest,args.validation_manifest,cache_dir=args.cache_dir)
     ds=_dataset(args,codec=model.codec if old else None,
         delta_vocab=DeltaVocabulary.from_dict(old['delta_vocab']) if old else None)
     if not len(ds):raise ValueError('No supervised stream samples')
@@ -478,7 +505,7 @@ def _train(args):
             max_event_atoms=max(33,max(a for a,d in ds.widths)),plan_weight=args.plan_weight,recovery_weight=args.recovery_weight)
         model=StreamComposer(config,ds.codec).to(args.device)
     else:
-        for name in ('history_events','rollout_steps','d_model','layers','nhead','dim_feedforward'):
+        for name in ('history_events','rollout_steps','d_model','layers','nhead','dim_feedforward','dropout'):
             if getattr(args,name)!=getattr(model.config,name):raise ValueError(f'Continuation requires saved {name}')
         if args.init_checkpoint:
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
@@ -512,9 +539,11 @@ def _train(args):
             if model.config.timing_grid_audio_policy=='query_pool_v3' else 'policy_defined'),
         timing_group_policy=model.config.timing_group_policy,literal_output_policy=model.config.literal_output_policy,
         event_family_policy=model.config.event_family_policy,
-        family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3') else 0.),
-        family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3') else 1.),
-        family_mixture_gradient=('audio_prior_detached_when_audio_budget_positive' if model.config.event_family_policy=='audio_prior_transition_v3' else 'joint'),
+        family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4') else 0.),
+        family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4') else 1.),
+        family_mixture_gradient=('audio_prior_detached_context_residual_live' if model.config.event_family_policy=='audio_state_phrase_v4' else
+            'audio_prior_detached_when_audio_budget_positive' if model.config.event_family_policy=='audio_prior_transition_v3' else 'joint'),
+        family_context_inputs=('music_phrase_intent_candidate_state_gap' if model.config.event_family_policy=='audio_state_phrase_v4' else 'policy_default'),
         conditional_geometry=('joint_phase_detail_with_learned_motion_exit'
             if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') else 'unchanged_joint_phase_detail'),
         transition_exit='same_budget_as_main_configuration',
@@ -540,7 +569,13 @@ def _train(args):
             if args.prefix_augmentation_input_policy=='musical_loop_recovery_v7' else 'policy_defined'),
         time_target='exact_authored_onset',prefix_input=args.prefix_augmentation_input_policy)
     dev=_dataset(args,codec=ds.codec,delta_vocab=ds.delta_vocab,validation=True) if args.validation_manifest else None
-    if dev is not None:_validation_timing_support(dev,model)
+    if dev is not None:
+        _validation_timing_support(dev,model)
+        trusted=sum(1 for song,stream in enumerate(dev.streams) for index,step in enumerate(stream)
+                    if step.weight>0 and dev.chart_weights[song]>0 and not dev.unknown_steps[song][index])
+        if not len(dev) or not trusted:
+            raise ValueError('Validation set has no trusted supervised targets; choose eligible independent songs or explicitly disable validation')
+        _emit('composer_validation_support',samples=len(dev),trusted_targets=trusted,oov=dev.oov)
     optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=.01,
         **({'fused':True} if args.device.startswith('cuda') else {}))
     state=(old or {}).get('training_state') or {};fingerprint=_fingerprint(args,ds)
@@ -582,6 +617,8 @@ def _train(args):
         parameters=sum(p.numel() for p in model.parameters()),codec_coverage=ds.codec.coverage,
         effective_lr=optimizer.param_groups[0]['lr'],start_epoch=start_epoch,end_epoch=args.epochs,
         resume_sample_cursor=skip*args.batch_size,precision=args.precision,device=args.device,
+        cpu_threads=args.effective_cpu_threads,validation_enabled=dev is not None,
+        validation_manifest=args.validation_manifest,generation_eval_settings=generation_settings,
         epoch_target=args.epochs,learning_rate_schedule=lr_plan,audio_grid_seconds=args.audio_grid_seconds,
         plan_target_units=model.config.plan_target_units,plan_loss_normalization=model.config.plan_loss_normalization,
         plan_blank_window_seconds=model.config.plan_blank_window_seconds,
@@ -711,7 +748,7 @@ def _train(args):
             with _preserve_rng(args.device):
                 panel=evaluate_panel(directory/'composer_inference.pt',dev,directory/f'generation_eval_epoch_{epoch}',
                     count=args.generation_eval_songs,seeds=[int(s) for s in args.generation_eval_seeds.split(',')],device=args.device,
-                    temperature=args.generation_eval_temperature)
+                    temperature=args.generation_eval_temperature,generation_settings=generation_settings)
             _emit('composer_generation_validation',**panel)
     return 0
 

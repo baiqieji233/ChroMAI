@@ -40,6 +40,43 @@ def start_train(handler, payload, *, runtime):
         parent_data = read(parent)
         if parent_data.get('schema') != SCHEMA:
             raise ValueError('Event-set stream requires a new event-set checkpoint; old Composer weights are incompatible')
+    payload = dict(payload)
+    parent_args = (parent_data or {}).get('args') or {}
+    parent_config = (parent_data or {}).get('model_config') or {}
+    if parent_data:
+        for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps','dropout'):
+            if key in parent_config: payload[key] = parent_config[key]
+    if mode == 'resume':
+        for key in ('batch_size','grad_accumulation','seed','symbolic_pretrain_epochs','max_steps',
+                    'recovery_interval','recovery_samples','recovery_steps','recovery_weight','plan_weight',
+                    'window_seconds','limit_charts','lr','warmup_steps','min_lr_ratio'):
+            if key in parent_args: payload[key] = parent_args[key]
+        # Reuse the effective split, rather than splitting a saved train subset again.
+        if parent_args.get('manifest'):
+            saved_manifest = _path(parent_args['manifest'], 'saved manifest', exists=True)
+            saved_document = json.loads(saved_manifest.read_text(encoding='utf-8-sig'))
+            source = (saved_document.get('split_metadata') or {}).get('source_manifest')
+            accepted = {saved_manifest}
+            if source: accepted.add(_path(source, 'source manifest'))
+            if manifest not in accepted:
+                raise ValueError('Resume requires its saved train manifest or original split source; use finetune for new data')
+            source_hash = (saved_document.get('split_metadata') or {}).get('source_sha256')
+            if source and manifest == _path(source, 'source manifest') and source_hash:
+                from maichart.composer.evaluation import file_hash
+                if file_hash(manifest) != source_hash:
+                    raise ValueError('Resume split source changed; use finetune for new data')
+            manifest = saved_manifest
+        payload['validation_manifest'] = parent_args.get('validation_manifest')
+    fraction = _float(payload, 'holdout_fraction', .05, minimum=0.)
+    if fraction >= .5: raise ValueError('holdout_fraction must be less than 0.5')
+    split_report = None
+    if mode != 'resume' and not payload.get('validation_manifest') and fraction:
+        from maichart.composer.evaluation import split_manifest, form_chart_eligibility
+        split_report = split_manifest(manifest, directory / 'data_split', fraction=fraction,
+                                      seed=_int(payload, 'seed', 0, minimum=0), cache_dir=cache,
+                                      chart_eligibility=form_chart_eligibility)
+        manifest = _path(split_report['splits']['train']['path'], 'effective train manifest', exists=True)
+        payload['validation_manifest'] = split_report['splits']['dev']['path']
     args = ['-m', 'maichart.composer.stream_train']
     for name, value in [('manifest', manifest), ('checkpoint-dir', directory), ('cache-dir', cache)]:
         _arg(args, '--' + name, value)
@@ -51,6 +88,8 @@ def start_train(handler, payload, *, runtime):
         generation_eval_songs=2,validation_max_batches=32,validation_batch_size=4,
         generation_eval_interval_epochs=1,warmup_steps=100,prefetch_batches=2,sample_workers=1)
     settings = {'architecture_profile': PROFILE}
+    settings['holdout_fraction'] = fraction
+    settings['validation_manifest'] = payload.get('validation_manifest')
     zero = {'max_steps', 'limit_charts', 'prepare_workers', 'cpu_threads', 'seed',
             'recovery_interval', 'symbolic_pretrain_epochs', 'generation_eval_songs', 'checkpoint_interval_steps',
             'validation_max_batches','warmup_steps','prefetch_batches'}
@@ -126,11 +165,21 @@ def start_train(handler, payload, *, runtime):
     _arg(args,'--generation-eval-temperature',temperature)
     settings.update(policies)
     for key,value in policies.items():_arg(args,'--'+key.replace('_','-'),value)
+    for key, default in dict(search_policy='phrase_v1', physical_policy='runtime_hard_v2',
+            phrase_candidates=1, phrase_write_beats=8., phrase_commit_beats=4., phrase_step_budget=256,
+            phrase_repair_budget=8, phrase_rollback_budget=4, phrase_time_budget_sec=30.,
+            softcomfort_strength=1., audio_tracking_strength=0., pointer_temperature=None,
+            action_temperature=None,min_same_head_ms=50.,touch_layout_policy='open',max_events=0).items():
+        field = 'generation_eval_' + key
+        value = parent_args.get(field, default) if mode == 'resume' else payload.get(field, default)
+        settings[field] = value
+        if value is not None: _arg(args, '--' + field.replace('_', '-'), value)
     reserve = getattr(runtime, '_reserve_composer_training_task', None)
     task = reserve(directory) if reserve else runtime._create_task('composer_train')
     task.result.update(family=FAMILY, schema=SCHEMA, mode=mode, manifest=str(manifest),
         checkpoint_dir=str(directory), epoch_target=settings['epochs'], effective_settings=settings,
         settings_policy='resume_inherited' if mode == 'resume' else 'requested')
+    if split_report is not None: task.result['data_split'] = split_report
     if selection is not None:
         task.result['dataset_selection'] = selection
     try:

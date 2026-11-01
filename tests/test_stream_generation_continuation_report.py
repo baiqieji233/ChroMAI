@@ -39,7 +39,7 @@ def test_panel_passes_matched_stage_temperatures(monkeypatch,tmp_path):
     captured=[]
     monkeypatch.setattr(g,'generate',lambda args,**kwargs:captured.append(args) or {'status':'ok'})
     condition=SimpleNamespace(level=13.,to_dict=lambda:{'level':13.})
-    ds=SimpleNamespace(base=SimpleNamespace(songs=[(object(),None,None,None,None,condition)]))
+    ds=SimpleNamespace(base=SimpleNamespace(songs=[(SimpleNamespace(audio=SimpleNamespace(source='one')),None,None,None,None,condition)]))
     evaluate_panel('unused',ds,tmp_path,count=1,seeds=(7,))
     assert (captured[0].temperature,captured[0].pointer_temperature,captured[0].action_temperature) == (.65,.65,.65)
     evaluate_panel('unused',ds,tmp_path,count=1,seeds=(7,),temperature=.4)

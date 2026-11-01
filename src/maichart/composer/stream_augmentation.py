@@ -19,7 +19,7 @@ from .stream_continuation import typed_event,pattern_event,continuation_rows,Con
 from .stream_recovery import _context,_guard
 from maichart.generation.muri.model import RELEASE
 from torch.nn.utils.rnn import pad_sequence
-from .guard import _event_syntax_error,enforced_native_hard_conflict
+from .guard import _event_syntax_error
 from .events import event_metadata
 from maichart.generation.post_process import detect_chart_conflicts
 
@@ -85,7 +85,7 @@ def _enforced_hard_keys(result,guard):
     return frozenset((issue.conflict_type,round(issue.time,6),
         tuple((str(note.beat),note.raw) for note in issue.notes))
         for issue in result.conflicts_detected
-        if enforced_native_hard_conflict(issue,intercept_tap_on_slide=guard.intercept_tap_on_slide))
+        if guard.enforced(issue))
 
 
 def _validate_window(guard,steps):
@@ -114,7 +114,8 @@ def _validate_window(guard,steps):
             if guard.min_same_head_sec>0 and prior is not None and second-prior<guard.min_same_head_sec-1e-9:
                 raise ValueError('Augmentation repeated physical head too soon')
             last_heads[pad]=second
-    context=[row[0] for row in guard.prefix if row[2]>=first_second-.3 or row[1]>=first_second-.3]
+    cutoff=guard.interaction_start(first_second)
+    context=[row[0] for row in guard.prefix if row[2]>=cutoff or row[1]>=cutoff]
     before=detect_chart_conflicts(context,guard.tempo,guard.first,guard.config) if context else None
     after=detect_chart_conflicts(context+points,guard.tempo,guard.first,guard.config)
     if after.coverage.get('parse_errors') or _enforced_hard_keys(after,guard)-_enforced_hard_keys(before,guard):
@@ -140,7 +141,10 @@ def _native_prefix(dataset,song,source,begin,*,first_step=None):
           if marker['source_beat']<=cutoff
           and float(marker.get('end_second',-1.))+RELEASE>=threshold-.300001}
     prior=[step for step in source[:begin] if step.kind==NOTE]
-    guard_prefix=[step for step in prior if step.end in live or step.end_second>=threshold-.300001]
+    # A live long action needs all intervening interactions, not only its
+    # own source and contacts immediately before the edited window.
+    guard_cutoff=min([threshold-.300001]+[step.end_second-.300001 for step in prior if step.end in live])
+    guard_prefix=[step for step in prior if step.end in live or step.end_second>=guard_cutoff]
     song_record=dataset.base.songs[song][0]
     incremental=IncrementalState(song_record.tempo,song_record.first)
     points=[EventPoint(step.end,step.text) for step in prior]

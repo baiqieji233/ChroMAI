@@ -258,8 +258,8 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
                 from .stream_duration import select_duration_context
                 proposal['duration_context']=select_duration_context(duration_context,
                     torch.tensor([batch['step_second'].numel()-1],device=device))
-        if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'):
-            families=model.family_context_at(cache,times,batch['song_inverse'],batch)
+        if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+            families=model.family_context_at(cache,times,batch['song_inverse'],batch,**({'phrase_output':result} if model.config.event_family_policy=='audio_state_phrase_v4' else {}))
             proposal['family_context']=families['full'][0,-1]
             if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
         if getattr(getattr(model,'config',None),'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
@@ -455,8 +455,8 @@ def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cach
             from .stream_duration import select_duration_context
             family_options['duration_context']=select_duration_context(duration_context,
                 torch.tensor([batch['step_second'].numel()-1],device=device))
-    if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3'):
-        families=model.family_context_at(cache,times,batch['song_inverse'],batch)
+    if getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+        families=model.family_context_at(cache,times,batch['song_inverse'],batch,**({'phrase_output':output} if model.config.event_family_policy=='audio_state_phrase_v4' else {}))
         family_options['family_context']=families['full'][0,-1]
         if 'full_logits' in families:family_options['family_logits']=families['full_logits'][0,-1]
     if getattr(getattr(model,'config',None),'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):

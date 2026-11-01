@@ -49,7 +49,51 @@ def compare_chart_reports(reference,generated,*,factor=2.):
     return result
 
 
-def split_manifest(manifest, output_dir, *, fraction=.05, seed=0):
+def form_chart_eligibility(difficulty):
+    """Metadata gate matching FormDataset's default slot and numeric-level range.
+
+    None means eligible; a stable reason names a metadata exclusion. This does
+    not claim the chart can be parsed or survives preparation-time filtering.
+    """
+    from maichart.training.event_dataset import numeric_level
+    if not isinstance(difficulty, dict): return 'invalid_difficulty'
+    try: slot = int(difficulty.get('difficulty_index', difficulty.get('index', 0)))
+    except (TypeError, ValueError, OverflowError): return 'invalid_slot'
+    if not 4 <= slot <= 6: return 'slot_out_of_range'
+    try: level = numeric_level(difficulty.get('level_raw', difficulty.get('level')))
+    except (TypeError, ValueError, OverflowError): return 'invalid_level'
+    if not 12. <= level <= 15.: return 'level_out_of_range'
+    return None
+
+
+def eligible_manifest_songs(songs, chart_eligibility):
+    """Filter copies only, retaining source indices and exclusion evidence."""
+    from collections import Counter
+    eligible=[]; indices=[]; reasons=Counter(); excluded=Counter(); charts=0
+    for index, song in enumerate(songs):
+        if not isinstance(song, dict):
+            excluded['invalid_song'] += 1; continue
+        difficulties=song.get('difficulties', [])
+        if not isinstance(difficulties, list):
+            excluded['invalid_difficulties'] += 1; continue
+        selected=[]; song_reasons=set()
+        for difficulty in difficulties:
+            reason=chart_eligibility(difficulty)
+            if reason is None: selected.append(difficulty)
+            else: reasons[reason] += 1; song_reasons.add(reason)
+        if not selected:
+            excluded['no_eligible_difficulty'] += 1
+            for reason in song_reasons or {'no_difficulties'}: excluded[reason] += 1
+            continue
+        eligible.append({**song, 'difficulties': selected}); indices.append(index); charts += len(selected)
+    return eligible, dict(source_song_count=len(songs),eligible_song_count=len(eligible),
+        excluded_song_count=len(songs)-len(eligible),eligible_chart_count=charts,
+        excluded_difficulty_reason_counts=dict(reasons),excluded_song_reason_counts=dict(excluded),
+        eligible_source_indices=indices,
+        scope='metadata only; chart parsing and preparation may reject further charts')
+
+
+def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None, chart_eligibility=None):
     """Create train/dev/final manifests, joining identical audio and song IDs.
 
     ``fraction`` is the total fraction of groups assigned to both holdouts.
@@ -63,8 +107,16 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0):
     songs = data.get('songs')
     if not isinstance(songs, list) or not songs:
         raise ValueError('manifest must contain a nonempty songs list')
+    eligibility_report = None
+    if chart_eligibility is not None:
+        songs, eligibility_report = eligible_manifest_songs(songs, chart_eligibility)
+        if not songs: raise ValueError('No songs with eligible chart metadata for automatic holdout')
     if not 0 < fraction < 1:
         raise ValueError('fraction must be between 0 and 1')
+    digest_audio = file_hash
+    if cache_dir is not None:
+        from maichart.form.cache_support import source_digests
+        digest_audio = source_digests(str(Path(cache_dir).resolve())).digest
     parents = list(range(len(songs)))
     def find(i):
         while parents[i] != i:
@@ -79,7 +131,7 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0):
         audio = _source_asset(song['audio_path'], source, data)
         if not audio.is_file():
             raise FileNotFoundError(f'cannot verify audio identity: {audio}')
-        digest = file_hash(audio)
+        digest = digest_audio(audio)
         keys = [('audio_sha256', digest)]
         for field in ('song_id', 'music_id', 'maidata_path'):
             if song.get(field) is not None:
@@ -111,6 +163,7 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0):
               'group_count': len(groups), 'actual_total_holdout_group_fraction': holdout_count / len(groups),
               'actual_total_holdout_song_fraction': sum(len(g) for g in ordered[:holdout_count]) / len(songs),
               'splits': {}}
+    if eligibility_report is not None: report['chart_eligibility'] = eligibility_report
     for name, selected in assignments.items():
         indices = sorted(i for g in selected for i in g)
         output = dict(data)
@@ -144,16 +197,20 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0):
     return report
 
 
-def assert_unseen(training_manifest, holdout_manifest):
+def assert_unseen(training_manifest, holdout_manifest, *, cache_dir=None):
     """Reject overlap by audio content or song identity, including old manifests."""
     from maichart.training.dataset_catalog import _source_asset
+    digest_audio = file_hash
+    if cache_dir is not None:
+        from maichart.form.cache_support import source_digests
+        digest_audio = source_digests(str(Path(cache_dir).resolve())).digest
     def keys(path):
         path = Path(path).resolve(); data = json.loads(path.read_text(encoding='utf-8-sig'))
         result = set()
         for i, song in enumerate(data['songs']):
             if not song.get('audio_path'):
                 raise ValueError(f'missing audio_path in {path}, song {i}')
-            result.add(('audio', file_hash(_source_asset(song['audio_path'], path, data))))
+            result.add(('audio', digest_audio(_source_asset(song['audio_path'], path, data))))
             for field in ('song_id', 'music_id'):
                 if song.get(field) is not None:
                     result.add((field, str(song[field])))

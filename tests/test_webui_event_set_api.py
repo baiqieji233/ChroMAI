@@ -20,7 +20,7 @@ def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
     manifest = tmp_path / 'manifest.json'; manifest.write_text('{}')
     handler, runtime = Handler(), Runtime()
     composer_api.start_train(handler, dict(model_family='chart_composer_v1', architecture_profile=event_set_api.PROFILE,
-        manifest=str(manifest), checkpoint_dir=str(tmp_path / 'out'), cache_dir=str(tmp_path / 'cache'),
+        manifest=str(manifest),holdout_fraction=0, checkpoint_dir=str(tmp_path / 'out'), cache_dir=str(tmp_path / 'cache'),
         candidate_count=999, action_slots=33, echo_prior_policy='phase_echo_v1'), runtime=runtime)
     assert runtime.args[:2] == ['-m', 'maichart.composer.stream_train']
     for flag, expected in [('--batch-size','16'),('--grad-accumulation','1'),('--d-model','256'),('--rollout-steps','16'),('--window-seconds','8.0'),('--precision','bf16')]:
@@ -85,7 +85,7 @@ def test_stream_rejects_old_checkpoint_initialization(tmp_path,monkeypatch):
     monkeypatch.setattr(event_set_api,'checkpoint_profile',lambda path:'audio_grounded_v3')
     monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':'old'})
     with pytest.raises(ValueError,match='incompatible'):
-        event_set_api.start_train(Handler(),dict(mode='finetune',manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=Runtime())
+        event_set_api.start_train(Handler(),dict(mode='finetune',manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=Runtime())
 
 
 @pytest.mark.parametrize('mode', ['resume','finetune'])
@@ -96,7 +96,7 @@ def test_grid_inherits_parent_instead_of_ui_default(tmp_path,monkeypatch,mode):
     monkeypatch.setattr(event_set_api,'checkpoint_profile',lambda path:event_set_api.PROFILE)
     monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{}})
     runtime=Runtime()
-    event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),audio_grid_seconds=.01),runtime=runtime)
+    event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),audio_grid_seconds=.01),runtime=runtime)
     assert runtime.args[runtime.args.index('--audio-grid-seconds')+1]=='0.05'
 
 
@@ -122,7 +122,7 @@ def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_pat
     checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
     monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{'history_events':96,'motion_continuation_policy':'motion_continuation_v1'}})
     runtime=Runtime()
-    event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
+    event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
     policies=runtime.task.result['effective_settings']
     expected='rolling_legacy_v1' if mode=='resume' else 'block_aligned_v2'
     assert policies['history_window_policy']==expected
@@ -147,7 +147,7 @@ def test_api_rejects_resume_policy_upgrade_and_supports_explicit_old_baseline(tm
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')
     checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
     monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{}})
-    payload=dict(mode='resume',manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),continuation_policy='typed_runs_v1')
+    payload=dict(mode='resume',manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),continuation_policy='typed_runs_v1')
     with pytest.raises(ValueError,match='Resume inherits continuation_policy'):
         event_set_api.start_train(Handler(),payload,runtime=Runtime())
     runtime=Runtime()
@@ -169,7 +169,7 @@ def test_explicit_checkpoint_learning_policy_finetune_inherits_parent(tmp_path,m
     monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':parent_values})
     runtime=Runtime()
     event_set_api.start_train(Handler(),dict(mode='finetune',learning_policy='checkpoint',
-        manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
+        manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
     parent=StreamComposerConfig.from_dict(parent_values)
     for key in (*LEARNING_POLICIES,'transition_exit_weight','prefix_augmentation_rate'):
         assert runtime.task.result['effective_settings'][key]==getattr(parent,key)
@@ -182,7 +182,7 @@ def test_explicit_checkpoint_learning_policy_without_parent_is_rejected(tmp_path
     runtime=Runtime()
     with pytest.raises(ValueError,match='requires a parent checkpoint'):
         event_set_api.start_train(Handler(),dict(mode='fresh',learning_policy='checkpoint',
-            manifest=str(manifest),checkpoint_dir=str(tmp_path/'out')),runtime=runtime)
+            manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out')),runtime=runtime)
     assert not hasattr(runtime,'args')
 
 
@@ -191,7 +191,7 @@ def test_augmentation_and_eval_temperature_are_real_flags_with_resume_checks(tmp
     manifest=tmp_path/'manifest.json';manifest.write_text('{}')
     checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
     monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{},'args':{'generation_eval_temperature':.4}})
-    payload=dict(manifest=str(manifest),checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint))
+    payload=dict(manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint))
     runtime=Runtime()
     event_set_api.start_train(Handler(),dict(payload,mode='finetune',prefix_augmentation_rate=.2,generation_eval_temperature=.7),runtime=runtime)
     assert runtime.args[runtime.args.index('--prefix-augmentation-rate')+1]=='0.2'
@@ -201,3 +201,83 @@ def test_augmentation_and_eval_temperature_are_real_flags_with_resume_checks(tmp
     assert runtime.task.result['effective_settings']['generation_eval_temperature']==.4
     with pytest.raises(ValueError,match='Resume inherits generation_eval_temperature'):
         event_set_api.start_train(Handler(),dict(payload,mode='resume',generation_eval_temperature=.7),runtime=Runtime())
+
+
+def test_automatic_split_dispatches_effective_manifests_and_records_evidence(tmp_path):
+    import json
+    songs=[]
+    for i in range(4):
+        audio=tmp_path/f'audio_{i}.wav'; audio.write_bytes(bytes([i]))
+        songs.append(dict(song_id=str(i),audio_path=str(audio),difficulties=[dict(difficulty_index=4,level_raw='13')]))
+    manifest=tmp_path/'manifest.json';manifest.write_text(json.dumps(dict(songs=songs)))
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(manifest=str(manifest),checkpoint_dir=str(tmp_path/'out')),
+                              runtime=runtime)
+    report=runtime.task.result['data_split']
+    assert runtime.args[runtime.args.index('--manifest')+1]==report['splits']['train']['path']
+    assert runtime.args[runtime.args.index('--validation-manifest')+1]==report['splits']['dev']['path']
+    assert set(report['splits']['train']['audio_sha256']).isdisjoint(report['splits']['dev']['audio_sha256'])
+    assert (tmp_path/'out'/'data_split'/'split_report.json').is_file()
+
+
+def test_advanced_policies_and_generation_panel_controls_reach_cli(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(manifest=str(manifest),holdout_fraction=0,
+        checkpoint_dir=str(tmp_path/'out'),learning_policy='legacy',
+        prefix_augmentation_input_policy='musical_loop_recovery_v8',recovery_policy='greedy_mixed_v4',
+        generation_eval_phrase_candidates=4,generation_eval_phrase_step_budget=321),runtime=runtime)
+    for flag,value in [('--prefix-augmentation-input-policy','musical_loop_recovery_v8'),
+                       ('--recovery-policy','greedy_mixed_v4'),('--generation-eval-phrase-candidates','4'),
+                       ('--generation-eval-phrase-step-budget','321')]:
+        assert runtime.args[runtime.args.index(flag)+1]==value
+
+
+def test_finetune_backbone_and_resume_objective_values_inherit_parent(tmp_path,monkeypatch):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:dict(schema=event_set_api.SCHEMA,
+        model_config=dict(d_model=128,nhead=4,history_events=96,dropout=.2),
+        args=dict(seed=7,recovery_interval=13,recovery_weight=.3,max_steps=8)))
+    for mode in ('finetune','resume'):
+        runtime=Runtime()
+        event_set_api.start_train(Handler(),dict(mode=mode,manifest=str(manifest),holdout_fraction=0,
+            checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),d_model=512,
+            history_events=64,dropout=.1),runtime=runtime)
+        settings=runtime.task.result['effective_settings']
+        assert settings['d_model']==128 and settings['history_events']==96 and settings['dropout']==.2
+        if mode=='resume':
+            assert settings['seed']==7 and settings['recovery_interval']==13
+            assert settings['recovery_weight']==.3 and settings['max_steps']==8
+
+
+def test_resume_refuses_new_selected_manifest_before_dispatch(tmp_path,monkeypatch):
+    import json
+    from maichart.composer import stream_checkpoint
+    source=tmp_path/'source.json';source.write_text('{}')
+    effective=tmp_path/'train.json';effective.write_text(json.dumps(dict(split_metadata=dict(source_manifest=str(source)))))
+    other=tmp_path/'new.json';other.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:dict(schema=event_set_api.SCHEMA,model_config={},args=dict(manifest=str(effective))))
+    runtime=Runtime()
+    with pytest.raises(ValueError,match='use finetune for new data'):
+        event_set_api.start_train(Handler(),dict(mode='resume',manifest=str(other),holdout_fraction=0,
+            checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
+    assert not hasattr(runtime,'args')
+    event_set_api.start_train(Handler(),dict(mode='resume',manifest=str(source),holdout_fraction=0,
+        checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint)),runtime=runtime)
+    assert runtime.args[runtime.args.index('--manifest')+1]==str(effective)
+
+
+def test_validation_sampling_inherits_total_temperature_until_overridden(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    runtime=Runtime()
+    payload=dict(manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),
+        generation_eval_pointer_temperature=None,generation_eval_action_temperature=0,
+        generation_eval_min_same_head_ms=40,generation_eval_touch_layout_policy='open',generation_eval_max_events=70)
+    event_set_api.start_train(Handler(),payload,runtime=runtime)
+    assert '--generation-eval-pointer-temperature' not in runtime.args
+    for flag,value in [('--generation-eval-action-temperature','0'),('--generation-eval-min-same-head-ms','40'),
+                       ('--generation-eval-touch-layout-policy','open'),('--generation-eval-max-events','70')]:
+        assert runtime.args[runtime.args.index(flag)+1]==value

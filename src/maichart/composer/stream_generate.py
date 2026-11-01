@@ -15,7 +15,7 @@ from maichart.form.timing import normalize_meter_map
 from maichart.generation.conditions import GenerationCondition,GENERATION_DEFAULTS
 from maichart.generation.timeline import normalize_tempo_map
 from maichart.generation.event_compile import compile_event_points
-from maichart.generation.post_process import PostProcessConfig,process_chart_points
+from maichart.generation.post_process import process_chart_points
 from maichart.tempo_clock import TempoClock
 from .stream_data import NOTE,WAIT,EOS,StreamStep,StreamInferenceContext,DeltaVocabulary,beat_at_second,second_at_beat
 from .stream_model import to_device_batch
@@ -65,6 +65,53 @@ def _sample(logits,temperature,generator):
     if not bool(torch.isfinite(logits).any()):raise ValueError('No legal stream decision')
     if temperature<=0:return int(logits.argmax())
     return int(torch.multinomial((logits.float()/temperature).softmax(-1),1,generator=generator))
+
+
+def record_sampling_trace(observation,trace):
+    """Bounded CPU-only evidence for how legal sampling changes proposals."""
+    if not trace:return
+    counts=observation.setdefault('counts',Counter())
+    counts['decisions']+=1
+    counts['changed_time']+=bool(trace.get('changed_time'))
+    counts['changed_configuration']+=bool(trace.get('configuration_changed'))
+    first,last=trace.get('first_proposal'),trace.get('final_proposal')
+    if first:observation.setdefault('first_family_counts',Counter())[str(first.get('family'))]+=1
+    if last:observation.setdefault('accepted_family_counts',Counter())[str(last.get('family'))]+=1
+    if first and last:counts['changed_family']+=first.get('family')!=last.get('family')
+    counts['failed_decisions']+=last is None
+    for onset in trace.get('onsets',()):
+        counts['onsets_tried']+=1
+        for trial in onset.get('trials',()):
+            counts['proposals']+=1
+            if not trial.get('accepted'):
+                counts['rejected_proposals']+=1
+                observation.setdefault('rejection_reasons',Counter())[trial.get('rejection_reason') or 'unknown']+=1
+    examples=observation.setdefault('examples',[])
+    if (trace.get('changed_time') or trace.get('configuration_changed') or last is None) and len(examples)<12:
+        examples.append(trace)
+
+
+def physical_policy_report(result,guard):
+    """Keep native findings visible while reporting the actual execution policy."""
+    report=result.to_dict()
+    def details(issues):
+        rows=[]
+        for issue in issues:
+            row=issue.to_dict()
+            row['engine_action']=row.get('action')
+            row['action']='enforce' if guard.enforced(issue) else 'report'
+            row['source']='native_runtime' if issue.evidence.startswith('miacode_runtime:') else 'static_reference'
+            rows.append(row)
+        return rows
+    report['details']=details(result.conflicts_detected)
+    report['remaining_details']=details(result.remaining_conflicts)
+    report['remaining_actionable_hard']=sum(guard.enforced(issue) for issue in result.remaining_conflicts)
+    report['remaining_report_only_hard']=sum(issue.severity=='hard' and not guard.enforced(issue)
+                                            for issue in result.remaining_conflicts)
+    report['physical_policy']=guard.physical_policy
+    report['conflict_kind_modes']=dict(guard.config.conflict_kind_modes or {})
+    report['scope']='native_findings_preserved_actions_follow_actual_generation_guard'
+    return report
 
 def _condition(args,payload):
     if getattr(args,'condition_file',None):return GenerationCondition.from_json(args.condition_file)
@@ -201,9 +248,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     curve=_Curve(args,song,model,cache,condition)
     generator=torch.Generator(device=device).manual_seed(int(args.seed))
     guard=EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
-        touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True)
+        touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,
+        physical_policy=getattr(args,'physical_policy','runtime_hard_v2'))
     points=[];cursor=Fraction(0);waits=0;retries=0;timing_retries=0;forced_waits=0;reason='budget'
     model_diagnostic_sums=None;model_diagnostic_count=0
+    sampling_observation=dict(retry_policy='joint_event_rejection_v2',
+        scope='all_trial_rollouts_including_rejected_candidates_not_only_exported_notes')
     diagnostic_fields=('phrase_residual_rms','phrase_ordered_anchor_residual_rms',
                        'phrase_ordered_reference_residual_rms','phrase_ordered_actor_residual_rms')
     def model_diagnostics():
@@ -270,8 +320,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                         from .stream_duration import select_duration_context
                         proposal['duration_context']=select_duration_context(duration_context,
                             torch.tensor([batch['step_second'].numel()-1],device=device))
-                    if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3'):
-                        families=model.family_context_at(cache,actual_seconds,batch['song_inverse'],batch)
+                    if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+                        families=model.family_context_at(cache,actual_seconds,batch['song_inverse'],batch,**({'phrase_output':result} if model.config.event_family_policy=='audio_state_phrase_v4' else {}))
                         proposal['family_context']=families['full'][0,-1]
                         if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
                     if getattr(model.config,'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
@@ -295,6 +345,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     accepts_extra=lambda pt:curve.allows(
                         second_at_beat(clock,pt.beat),len(event_metadata(pt.note_text).heads)))
                 retries+=failed;timing_retries+=failed_times
+                record_sampling_trace(sampling_observation,getattr(guard,'last_timed_sampling_trace',None))
                 if accepted is not None:
                     nxt=accepted.beat
                     heads=len(event_metadata(accepted.note_text).heads)
@@ -354,12 +405,9 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         search_report['retry_counter_scope']='all_searched_candidates'
     text,_=compile_event_points(points,tempo_changes=song.tempo,first=song.first,
         end_beat=Fraction(math.ceil(float(end)*4),4),level=str(condition.level),difficulty=condition.difficulty,strict_notes=True)
-    physical=process_chart_points(points,song.tempo,song.first,PostProcessConfig(enable_conflict_detection=True,
-        conflict_engine='miacode',conflict_repair_mode='none',detect_hard_conflicts=True,detect_soft_conflicts=False))
+    physical=process_chart_points(points,song.tempo,song.first,guard.config)
     if getattr(args,'search_policy','phrase_v1')!='legacy':
-        from maichart.generation.post_process import detect_chart_conflicts
-        final_physical=detect_chart_conflicts(points,song.tempo,song.first,guard.config)
-        if final_physical.coverage.get('parse_errors') or any(guard.enforced(x) for x in final_physical.conflicts_detected):
+        if physical.coverage.get('parse_errors') or any(guard.enforced(x) for x in physical.conflicts_detected):
             raise ValueError('final physical validation failed; chart not exported')
         search_report['final_physical_gate']='passed'
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
@@ -376,7 +424,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         event_family_policy=model.config.event_family_policy,
         event_family_audio_weight=getattr(model.config,'event_family_audio_weight',0.),
         timing_grid_audio_policy=getattr(model.config,'timing_grid_audio_policy','off'),
-        configuration_retry_semantics=('preserve_sampled_family' if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3') else 'resample_full_event'),
+        configuration_retry_semantics='joint_event_rejection_v2',sampling_observation=sampling_observation,
         training_objective_recipe=(payload.get('args') or {}).get('training_objective_recipe','legacy_joint_event_objective'),
         gap_continuation_policy=model.config.gap_continuation_policy,sensor_load_policy=model.config.sensor_load_policy,
         lane_load_policy=model.config.lane_load_policy,
@@ -403,19 +451,32 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         duration_audio_coverage=(model.duration_audio.coverage() if hasattr(model,'duration_audio') else None),
         physical_policy=guard.physical_policy,
         curve=dict(active=curve.active,mode=args.intensity_curve_mode,strength=args.intensity_curve_strength),
-        playability=physical.to_dict(),
+        playability=physical_policy_report(physical,guard),
         quality_scope='generated_stream_requires_listening_and_playtest')
     output.with_suffix('.composer.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     return report
 
-def evaluate_panel(checkpoint_path,dataset,directory,*,count=2,seeds=(0,1),device='cpu',temperature=.65):
+def evaluate_panel(checkpoint_path,dataset,directory,*,count=2,seeds=(0,1),device='cpu',temperature=.65,generation_settings=None):
+    from .stream_evaluation_settings import validate
+    settings=validate(generation_settings or {})
     directory=Path(directory);reports=[];model,payload=load(checkpoint_path,device)
-    for i in range(min(count,len(dataset.base.songs))):
+    selected=[];seen=set()
+    for i,record in enumerate(dataset.base.songs):
+        audio=record[0].audio
+        identity=str(getattr(audio,'path',None) or getattr(audio,'source',None) or ('object',id(audio)))
+        if identity in seen:continue
+        seen.add(identity);selected.append(i)
+        if len(selected)>=count:break
+    if count<=0:selected=[]
+    for i in selected:
         record=dataset.base.songs[i];song=record[0]
         for seed in seeds:
-            args=parser().parse_args(['--audio','unused','--checkpoint',str(checkpoint_path),
+            arguments=['--audio','unused','--checkpoint',str(checkpoint_path),
                 '--output',str(directory/f'song_{i}_seed_{seed}'/'maidata.txt'),'--device',str(device),'--seed',str(seed),
-                '--temperature',str(temperature),'--pointer-temperature',str(temperature),'--action-temperature',str(temperature)])
+                '--temperature',str(temperature)]
+            for name,value in settings.items():
+                if value is not None:arguments.extend(('--'+name.replace('_','-'),str(value)))
+            args=resolve_temperatures(parser().parse_args(arguments))
             condition=record[5];args.level=float(condition.level)
             output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
             condfile=output.parent/'condition.json';condfile.write_text(json.dumps(condition.to_dict()),encoding='utf-8');args.condition_file=str(condfile)
@@ -432,7 +493,11 @@ def evaluate_panel(checkpoint_path,dataset,directory,*,count=2,seeds=(0,1),devic
     failed=sum(run.get('status')=='failed' for run in reports)
     result=dict(status='completed_with_failures' if failed else 'completed',failed_runs=failed,
         report_path=str(path),runs=reports,condition_scope='reference-derived controls',
-        temperature=float(temperature),pointer_temperature=float(temperature),action_temperature=float(temperature))
+        temperature=float(temperature),
+        pointer_temperature=float(temperature if settings['pointer_temperature'] is None else settings['pointer_temperature']),
+        action_temperature=float(temperature if settings['action_temperature'] is None else settings['action_temperature']),
+        generation_settings=settings,selected_song_indices=selected,
+        selection_scope='first_distinct_audio_sources_with_reference_conditions_no_external_intensity_curve')
     path.write_text(json.dumps(result,ensure_ascii=False,indent=2),encoding='utf-8')
     return result
 

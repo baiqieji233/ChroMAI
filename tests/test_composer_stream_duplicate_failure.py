@@ -47,7 +47,7 @@ def test_literal_decode_masks_same_head_across_modifier_variants():
 def test_bad_panel_artifact_is_recorded_and_remaining_seeds_run(tmp_path,monkeypatch):
     monkeypatch.setattr(generate,'load',lambda *a:(object(),{}))
     condition=SimpleNamespace(level=12.,to_dict=lambda:{'level':12.})
-    dataset=SimpleNamespace(base=SimpleNamespace(songs=[(object(),None,None,None,None,condition)]))
+    dataset=SimpleNamespace(base=SimpleNamespace(songs=[(SimpleNamespace(audio=SimpleNamespace(source='one')),None,None,None,None,condition)]))
     calls=[]
     def run(args,**kwargs):
         calls.append(args.seed)

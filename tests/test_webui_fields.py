@@ -453,7 +453,7 @@ def test_composer_generation_eval_controls_are_exposed_and_wired():
         assert f'value="{default}"' in block
     assert 'generation_eval_songs: Number(valueOrDefault("#composerGenerationEvalSongs", 2))' in APP_JS
     assert 'generation_eval_interval_epochs: Number(valueOrDefault("#composerGenerationEvalIntervalEpochs", 1))' in APP_JS
-    assert "composer_quality_observation" in label_block("composerGenerationEvalSongs")
+    assert "生成报告" in label_block("composerGenerationEvalSongs")
     composer_html = (ROOT / "src/maichart/webui/static/composer.html").read_text(encoding="utf-8")
     assert 'name="generation_eval_songs"' in composer_html
     assert 'name="generation_eval_interval_epochs"' in composer_html

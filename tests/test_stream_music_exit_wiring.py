@@ -60,7 +60,7 @@ def test_guarded_geometry_retries_retain_candidate_motion_decision():
 
 
 @pytest.mark.parametrize('policy',['music_exit_v1','music_exit_v2','music_exit_v3'])
-def test_guarded_retries_keep_joint_template_and_family_intent(policy):
+def test_guarded_retries_redraw_joint_template_and_family_intent(policy):
     seen=[];intents=[];accepted=[]
     logit=torch.tensor(-.2);shape=torch.tensor(1)
     def intent(context,**kwargs):intents.append(kwargs);return 2,False
@@ -73,7 +73,7 @@ def test_guarded_retries_keep_joint_template_and_family_intent(policy):
     guard=SimpleNamespace(accepts=accepts,commit=lambda point:None)
     point,retries=sample_guarded_event(model,torch.zeros(4),0,Fraction(1),guard,None,
         family_logits=torch.zeros(31),template_keep_logit=logit,template_reference_shape=shape)
-    assert point is not None and retries==1 and len(intents)==1
+    assert point is not None and retries==1 and len(intents)==2
     assert intents[0]['template_keep_logit'] is logit
     for options in seen:
         assert options['family_override']==2

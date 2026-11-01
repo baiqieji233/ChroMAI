@@ -37,4 +37,5 @@ def test_fallback_phase_can_be_revisited_with_different_legal_details():
         return dict(shape=0,phase=0,details=[1,0],text='1' if len(calls)==1 else 'A1')
     guard=Guard()
     point,retries=sample_guarded_event(SimpleNamespace(decode_event=decode),None,0,Fraction(1),guard,None)
-    assert point.note_text=='A1' and retries==1 and len(calls)==3
+    assert point.note_text=='A1' and retries==1 and len(calls)==2
+    assert all('blocked_shape_phases' not in options for options in calls)

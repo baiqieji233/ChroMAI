@@ -257,6 +257,9 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         'family_audio_projection.weight','family_rhythm_projection.weight',
         'audio_event_family_head.weight','audio_event_family_head.bias',
         'family_continuity_head.weight','family_continuity_head.bias',
+        'family_state_phrase.features.0.weight','family_state_phrase.features.0.bias',
+        'family_state_phrase.features.2.weight','family_state_phrase.features.2.bias',
+        'family_state_phrase.output.weight','family_state_phrase.output.bias',
         'literal_stop_head.weight','literal_stop_head.bias','literal_type_embedding.weight',
         'decoder.norm.weight','decoder.norm.bias',
         'music_exit_head.0.weight','music_exit_head.0.bias','music_exit_head.2.weight','music_exit_head.2.bias',
@@ -289,6 +292,13 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
                 assert torch.count_nonzero(value)==0,key
             elif key.endswith('weight'):
                 assert torch.count_nonzero(value)>0,key
+        elif key in ('family_state_phrase.features.0.weight','family_state_phrase.features.0.bias'):
+            assert torch.isfinite(value).all(),key
+            assert torch.count_nonzero(value)>0,key
+        elif key=='family_state_phrase.features.2.weight':
+            assert torch.equal(value,torch.ones_like(value)),key
+        elif key in ('family_state_phrase.features.2.bias','family_state_phrase.output.weight','family_state_phrase.output.bias'):
+            assert torch.count_nonzero(value)==0,key
         elif key=='decoder.norm.weight':
             assert torch.equal(value,torch.ones_like(value)),key
         elif key=='music_exit_head.0.weight':

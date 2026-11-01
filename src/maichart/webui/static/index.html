@@ -138,7 +138,7 @@
 <p class="workflow-hint">首次建立模型选“从头训练”；延续同一次实验选“从断点继续”；更换精选数据或调整采样策略选“已有模型加强训练”。</p>
 <div class="form-grid"><label class="field span-4">模型族 / Model family
 <select id="modelFamily"><option value="song_form_v2" selected>song_form_v2（精确有理数事件）</option>
-              <option value="chart_stream_v1">chart_stream_v1（连续整曲事件流，新架构）</option><option value="chart_composer_v1">chart_composer_v1（事件候选与动作槽位模型）</option>
+              <option value="chart_stream_v1">chart_stream_v1（连续整曲事件流，新架构）</option><option value="chart_composer_v1">chart_composer_v1（整拍集合／Composer）</option>
               <option value="song_form_v1">song_form_v1 全曲结构模型（全曲规划与段落关联）</option><option value="event_ctx_v1">event_ctx_v1 跨窗口事件模型（旧模型兼容路径）</option><option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option><option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option></select>
 <small id="modelFamilyHelp">chart_stream_v1 按整曲连续事件流生成，计算块不代表音乐边界；song_form_v2 保留现有全曲规划与配置流程。切换模型族后，本页显示对应专属参数。</small></label></div>
 <div id="trainingCheckpointGroup">
@@ -277,19 +277,19 @@
 <div class="workflow-group-heading"><span class="step">COMPOSER</span><div><h3>Composer 架构与训练参数</h3><p>读取 Composer manifest。整拍集合连续生成与旧候选动作架构使用各自的检查点；训练和生成设置按所选架构显示。</p></div></div>
 <div class="toolbar"><button id="composerApplyFreshDefaults" type="button">应用重训默认值</button><small>仅fresh可用。设置本轮训练参数和新输出目录；已保存的自定义训练值会被替换。</small></div>
 
-<p class="workflow-hint">先在上方选择训练数据与新输出目录，设置训练轮数、单批大小、梯度累积和学习率。新实验建议：20轮、64×4、0.0002；显存紧张先降单批大小。下面选择配置方案并保留验证，高级设置通常保持默认。</p>
+<p class="workflow-hint">先在上方选择训练数据与新输出目录，设置训练轮数、单批大小、梯度累积和学习率。整拍集合默认20轮、16×1、0.0002；单批按短段计数。显存紧张先降单批大小。下面选择配置方案并保留验证，高级设置通常保持默认。</p>
 <details id="composerTrainingCommon" class="settings-section" open><summary><span>常用方案</span><small>新建训练优先确认这几项</small></summary><div class="settings-content"><div class="form-grid">
 <label class="field">配置质量架构<select id="composerConfigurationQualityPolicy"><option value="auto" selected>自动（新训练使用全曲音乐与历史配对；续训继承）</option><option value="off">关闭</option><option value="cooperative_v1">配置协同初版（复现旧实验）</option><option value="song_paired_v3">全曲音乐与历史配对（新版）</option><option value="cooperative_v2">稳定配置协同：采音分档、类别守恒与动作支持检查</option></select><small>新实验建议选择全曲音乐与历史配对，并新建训练目录。全曲音乐由共享编码器读取，每个历史事件配对自身时刻的音乐；短句计划保留现有监督。旧检查点续训继承原架构，切换新版请用 finetune。</small></label>
 <label class="field">数值精度<select id="composerPrecision"><option value="auto" selected>自动</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>CPU 只能使用 FP32。</small></label>
 <label class="field">结构分析后端<select id="composerStructureBackend"><option value="auto">自动（新训练优先可用的 Beat This）</option><option value="native">内置分析</option><option value="beat_this">Beat This</option></select><small>自动选择取决于本机可用性；续训继承检查点后端。</small></label>
-<label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（新训练恒定，续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。改变方式请在新输出目录微调；resume 保留原曲线和更新进度。</small></label>
+<label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（整拍集合余弦，旧架构恒定；续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。改变方式请在新输出目录微调；resume 保留原曲线和更新进度。</small></label>
 </div></div></details>
 <details id="composerTrainingEvaluation" class="settings-section" open><summary><span>验证与生成对照</span><small>观察留出误差和固定歌曲，发现退化</small></summary><div class="settings-content"><div class="form-grid">
-<label class="field">独立验证集清单<textarea id="composerValidationManifest" class="path-input" rows="2" placeholder="留空：自动留出"></textarea><small>留空自动按歌曲留出；填写时必须与训练集没有同曲或同音频重叠。</small></label>
+<label class="field">独立验证集清单<textarea id="composerValidationManifest" class="path-input" rows="2" placeholder="留空：按下方比例自动留出"></textarea><small>留空且留出比例大于0时，按歌曲与音频内容分组生成训练、开发和最终留出清单；比例0且留空则不验证。填写时必须与训练集没有同曲或同音频重叠。</small></label>
 <label class="field">自动留出比例<input id="composerHoldoutFraction" type="number" value="0.05" min="0" step="0.01" max="0.49"><small>默认0.05，将约5%的歌曲组分给开发集与最终留出集；不是每张谱随机切5%。填写独立验证集时不使用该比例。0关闭自动留出。</small></label>
 <label class="field">每轮验证批次上限<input id="composerValidationMaxBatches" type="number" value="32" min="0" step="1"><small>默认32；0验证全部留出样本。增加会延长每轮验证时间。</small></label>
 <label class="field">验证批大小<input id="composerValidationBatchSize" type="number" value="8" min="1" step="1"><small>仅影响验证显存和速度，不改变训练批大小；显存紧张可降至4。</small></label>
-<label class="field">每轮闭环生成抽检曲数<input id="composerGenerationEvalSongs" type="number" min="0" max="16" step="1" value="2"><small>默认 2。轮末用留出集固定歌曲做自由闭环生成并输出 composer_quality_observation 形态对比；设为 0 关闭抽检以跳过轮末生成耗时。</small></label>
+<label class="field">每轮闭环生成抽检曲数<input id="composerGenerationEvalSongs" type="number" min="0" max="16" step="1" value="2"><small>默认 2。轮末用留出集固定歌曲做自由闭环生成并输出生成报告与形态指标；设为 0 关闭抽检以跳过轮末生成耗时。</small></label>
 <label class="field">闭环生成抽检间隔（轮）<input id="composerGenerationEvalIntervalEpochs" type="number" min="1" max="100" step="1" value="1"><small>每隔多少个 Epoch 执行一次闭环生成抽检；默认 1（每轮）。当抽检曲数为 0 时不生效。</small></label>
 <label class="field">固定生成随机种子<input id="composerGenerationEvalSeeds" type="text" value="0,1"><small>英文逗号分隔的非负整数；默认0,1，每首验证歌曲各生成两份，用于观察稳定性。</small></label>
 </div></div></details>
@@ -970,7 +970,7 @@
 <label class="field">同键最短间隔（毫秒）<input id="composerMinSameHeadMs" type="number" min="0" max="200" step="5" value="50"></label>
 <label class="field checkbox-field"><input id="composerInterceptTapOnSlide" type="checkbox"><span>拦截 Slide 撞尾（TapOnSlide）</span><small>默认关闭（仅报告，不拦截也不删音符）；勾选后在生成与后处理中拦截 TapOnSlide。</small></label>
 <label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>仅控制选时分支：1 使用完整历史，0 使用音频分支。</small></label>
-<label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" value="0.65"><small>默认0.65，与整拍集合固定验证面板一致。整拍集合架构作用于NOTE/WAIT/EOS与拍距分布；0确定性选择。audio_grounded_v3在正温度下只调整时间区间内部拍位的随机程度。明确填写的专用温度覆盖总温度；CLI/API省略时继承总温度。</small></label>
+<label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" placeholder="留空继承总温度" value=""><small>留空继承总温度；填写数字则独立覆盖。整拍集合架构作用于NOTE/WAIT/EOS与拍距分布；0确定性选择。audio_grounded_v3在正温度下只调整时间区间内部拍位的随机程度。明确填写的专用温度覆盖总温度；CLI/API省略时继承总温度。</small></label>
 <label class="field">节奏网格采样<select id="composerPointerGridPolicy"><option value="grid_family_coherent_v3" selected>段落节奏与32分进入校准</option><option value="grid_family_coherent_v2">按段落保持节奏（旧版）</option><option value="grid_level_mass_v1">保留各网格概率（不看段落）</option><option value="off">旧版：温度作用于整个时间区间</option></select><small>新版让孤立三连音和新进入32分的概率也响应候选拍位温度；保留已进入细分后的正常收束，不硬禁16分或32分。</small></label>
 <label class="field">重复抑制<select id="composerRepetitionGuard"><option value="official_tail_v2" selected>官谱尾部与高速成员软抑制</option><option value="legacy_v1">旧版固定抑制</option><option value="off">关闭</option></select><small>所有槽位都检查重复成员，双押交换顺序无法绕过。除过长游程外，也柔和抑制短间隔双押成员复读；不设置新的同键速度硬上限。</small></label>
 <label class="field">休止概率校准<select id="composerSurvivalCalibration"><option value="auto" selected>自动（按检查点训练策略）</option><option value="trained">按训练策略（对照）</option><option value="integrated">实验：旧权重使用新版积分</option></select><small>新版训练检查点自动使用固定格积分。旧权重的实验校准可能改变配置分布，尚未通过音乐质量验收；报告分别记录训练策略和运行策略。</small></label>
@@ -996,7 +996,7 @@
 <label class="field">配置关系强度<input id="composerQualityContextStrength" type="number" min="0" max="2" step="0.1" value="1"><small>仅配置协同模型生效。1为训练时强度，0关闭新增音频配对与持续状态输入，不关闭原有历史分支。</small></label>
 <label class="field">短句计划影响<input id="composerQualityPlanStrength" type="number" min="0" max="2" step="0.1" value="1"><small>仅配置协同模型生效。1使用预测计划，0移除计划对配置的影响；采音指针不受此滑块直接控制。</small></label>
 <label class="field">微前瞻强度<input id="composerQualityLookaheadStrength" type="number" min="0" max="1" step="0.1" value="0"><small>实验项，默认关闭。预测下一步很近时，最多比较两种相同类型与物量的配置，优先保留能顺利衔接的方案。只做有限物理预判，不强制下一拍。</small></label>
-<label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" value="0.65"><small>默认0.65。新版整拍集合保留学得的配置类型集合概率，温度控制类内形状与细节；0为确定性选择。旧模型按原动作分布缩温，可独立于候选拍位温度调整。</small></label>
+<label class="field">动作配置温度<input id="composerActionTemperature" type="number" min="0" step="0.05" placeholder="留空继承总温度" value=""><small>留空继承总温度；填写数字则独立覆盖。整拍集合的正温度影响类型抽样与类内细节随机性；部分保持／停止概率仍按校准规则处理。0优先选择概率最高的配置，物理拒绝后仍可有限尝试替代，不会暗改温度。旧模型按原动作分布缩温，可独立于候选拍位温度调整。</small></label>
 <label class="field">动作历史权重<input id="composerActionHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>audio_grounded_v3 的动作解码：1 使用完整历史，0 使用音频分支；与选时历史权重独立。</small></label>
 <label class="field">动作类别温度<input id="composerActionTypeTemperature" type="number" min="0" max="2" step="0.05" value="1"><small>仅正动作配置温度生效。控制 Tap/Hold/Slide/Touch 四类概率，不直接改变 Touch 环区比例；0 只保留最高类别，1 沿用旧类别概率。</small></label>
 <label class="field">动作类别 min-p<input id="composerActionTypeMinP" type="number" min="0" max="1" step="0.01" value="0"><small>仅在动作温度大于 0 时生效；按类别过滤低概率类型，Touch 环区内部比例保持原条件分布。</small></label>

@@ -219,3 +219,55 @@ def test_evaluate_composer_passes_reference_tempo_map_and_explicit_override(tmp_
     report2 = json.loads((out2 / 'evaluation.json').read_text(encoding='utf-8'))
     assert calls[-1][calls[-1].index('--tempo-map') + 1] == str(override)
     assert report2['generation_tempo_map']['source'] == 'explicit'
+
+
+def test_form_eligible_split_excludes_untrainable_songs_before_audio_hashing(tmp_path,monkeypatch):
+    from maichart.composer.evaluation import form_chart_eligibility
+    from maichart.form import cache_support
+    songs=[]
+    for i in range(30):
+        difficulties=[dict(difficulty_index=4,level_raw='10')] if i%2 else [dict(difficulty_index=2,level_raw='13')]
+        songs.append(dict(song_id=f'excluded-{i}',audio_path='missing.wav',difficulties=difficulties))
+    songs.append(dict(song_id='broken',difficulties=[dict(difficulty_index=4,level_raw='13\ufffd\ufffd')]))
+    for i in range(3):
+        audio=tmp_path/f'{i}.wav';audio.write_bytes(bytes([i]))
+        songs.append(dict(song_id=f'eligible-{i}',audio_path=str(audio),difficulties=[
+            dict(difficulty_index=4,level_raw='13\ufffd\ufffd'),dict(difficulty_index=5,level_raw='13+')]))
+    source=tmp_path/'source.json';original=json.dumps(dict(songs=songs));source.write_text(original)
+    hashed=[]
+    class Digests:
+        def digest(self,path):
+            hashed.append(str(path));return Path(path).read_bytes().hex()
+    monkeypatch.setattr(cache_support,'source_digests',lambda directory:Digests())
+    report=split_manifest(source,tmp_path/'split',fraction=.05,seed=3,cache_dir=tmp_path/'cache',
+        chart_eligibility=form_chart_eligibility)
+    evidence=report['chart_eligibility']
+    assert evidence['source_song_count']==34 and evidence['eligible_song_count']==3
+    assert evidence['excluded_song_count']==31 and evidence['eligible_chart_count']==3
+    assert evidence['excluded_difficulty_reason_counts']['invalid_level']==4
+    assert len(hashed)==3
+    for role in ('train','dev','final'):
+        output=json.loads(Path(report['splits'][role]['path']).read_text())
+        assert len(output['songs'])==1
+        assert output['songs'][0]['song_id'].startswith('eligible-')
+        assert output['songs'][0]['difficulties']==[dict(difficulty_index=5,level_raw='13+')]
+    assert source.read_text()==original
+
+
+def test_form_eligible_split_still_rejects_missing_audio_for_eligible_chart(tmp_path):
+    from maichart.composer.evaluation import form_chart_eligibility
+    source=tmp_path/'source.json';source.write_text(json.dumps(dict(songs=[dict(
+        song_id='eligible',audio_path='missing.wav',difficulties=[dict(difficulty_index=4,level_raw='12')])])) )
+    with pytest.raises(FileNotFoundError,match='audio identity'):
+        split_manifest(source,tmp_path/'split',chart_eligibility=form_chart_eligibility)
+
+
+def test_form_chart_eligibility_matches_default_numeric_boundaries_and_ignores_bad_siblings():
+    from maichart.composer.evaluation import form_chart_eligibility
+    for slot,level in [(4,'12'),(5,'13+'),(6,'15')]:
+        assert form_chart_eligibility(dict(difficulty_index=slot,level_raw=level)) is None
+    for difficulty,reason in [(dict(index=3,level='13'),'slot_out_of_range'),
+        (dict(index=4,level='15+'),'level_out_of_range'),
+        (dict(index=4,level_raw='13\ufffd\ufffd',level=13),'invalid_level'),
+        (dict(index='broken',level=13),'invalid_slot')]:
+        assert form_chart_eligibility(difficulty)==reason
