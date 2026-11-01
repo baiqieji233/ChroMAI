@@ -764,6 +764,25 @@ class StreamDataset(Dataset):
         return row
 
 
+def pack_timing_queries(output):
+    """CPU positions for supervised NOTE timing queries and their scatter."""
+    active = output['target_kind'].eq(NOTE) & output['loss_mask'].bool() & output['sample_weight'].gt(0)
+    counts = active.sum(1)
+    width = max(1, int(counts.max()))
+    positions = torch.zeros(active.size(0), width, dtype=torch.long)
+    packed, original = [], []
+    sequence_width = active.size(1)
+    for row_index in range(active.size(0)):
+        selected = active[row_index].nonzero(as_tuple=False).flatten()
+        count = selected.numel()
+        positions[row_index, :count] = selected
+        packed.extend(range(row_index * width, row_index * width + count))
+        original.extend((row_index * sequence_width + selected).tolist())
+    output['_timing_query_positions'] = positions
+    output['_timing_packed_flat'] = torch.tensor(packed, dtype=torch.long)
+    output['_timing_original_flat'] = torch.tensor(original, dtype=torch.long)
+
+
 def collate_stream(items):
     if not items: raise ValueError('empty stream batch')
     output = {}
@@ -833,6 +852,10 @@ def collate_stream(items):
     output['song_beats'] = pad_sequence([bank[2] for bank in unique], batch_first=True)
     output['song_mask'] = torch.arange(output['song_audio'].size(1))[None] < torch.tensor([len(bank[0]) for bank in unique])[:,None]
     output['song_inverse'] = torch.tensor(inverse, dtype=torch.long)
+    # Keep the song axis intact while the expensive absolute timing head sees
+    # only supervised NOTE queries. Build valid scatter indices on the CPU so
+    # the training forward never needs a GPU nonzero/synchronization.
+    pack_timing_queries(output)
     active = output['target_kind'].eq(NOTE) & output['loss_mask'] & output['configuration_mask'] & output['sample_weight'].gt(0)
     flat_shapes = output['target_shape'].reshape(-1)
     flat_active = active.reshape(-1)

@@ -282,7 +282,9 @@
 <label class="field">配置质量架构<select id="composerConfigurationQualityPolicy"><option value="auto" selected>自动（新训练使用全曲音乐与历史配对；续训继承）</option><option value="off">关闭</option><option value="cooperative_v1">配置协同初版（复现旧实验）</option><option value="song_paired_v3">全曲音乐与历史配对（新版）</option><option value="cooperative_v2">稳定配置协同：采音分档、类别守恒与动作支持检查</option></select><small>新实验建议选择全曲音乐与历史配对，并新建训练目录。全曲音乐由共享编码器读取，每个历史事件配对自身时刻的音乐；短句计划保留现有监督。旧检查点续训继承原架构，切换新版请用 finetune。</small></label>
 <label class="field">数值精度<select id="composerPrecision"><option value="auto" selected>自动</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>CPU 只能使用 FP32。</small></label>
 <label class="field">结构分析后端<select id="composerStructureBackend"><option value="auto">自动（新训练优先可用的 Beat This）</option><option value="native">内置分析</option><option value="beat_this">Beat This</option></select><small>自动选择取决于本机可用性；续训继承检查点后端。</small></label>
-<label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（整拍集合余弦，旧架构恒定；续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。改变方式请在新输出目录微调；resume 保留原曲线和更新进度。</small></label>
+<label class="field" data-event-set-only hidden><span><input id="composerResetLearningRate" type="checkbox"> 调整本次续训学习率</span><small>仅本次续训生效：可设置学习率、曲线、预热和最低比例；保留优化器状态、随机状态及训练进度。未勾选时继承检查点。</small></label>
+<label class="field" data-event-set-only hidden>选时计算<select id="composerTimingCompute"><option value="supervised">仅有监督位置（推荐）</option><option value="dense">完整位置（对照）</option></select><small>只改变计算方式，不改变学习合同。</small></label>
+<label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（整拍集合余弦，旧架构恒定；续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。续训默认继承原曲线；整拍集合可明确勾选调整本次续训学习率。</small></label>
 </div></div></details>
 <details id="composerTrainingEvaluation" class="settings-section" open><summary><span>验证与生成对照</span><small>观察留出误差和固定歌曲，发现退化</small></summary><div class="settings-content"><div class="form-grid">
 <label class="field">独立验证集清单<textarea id="composerValidationManifest" class="path-input" rows="2" placeholder="留空：按下方比例自动留出"></textarea><small>留空且留出比例大于0时，按歌曲与音频内容分组生成训练、开发和最终留出清单；比例0且留空则不验证。填写时必须与训练集没有同曲或同音频重叠。</small></label>
@@ -1679,7 +1681,7 @@
     </aside>
   </main>
   <script src="/workspace_logs.js"></script>
-  <script src="/app.js?v=shared-continuation-1"></script>
-  <script src="/workspace.js?v=shared-continuation-1"></script>
+  <script src="/app.js?v=sparse-timing-resume-lr-20261102"></script>
+  <script src="/workspace.js?v=sparse-timing-resume-lr-20261102"></script>
 </body>
 </html>

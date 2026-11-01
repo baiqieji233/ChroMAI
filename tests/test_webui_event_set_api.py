@@ -308,3 +308,27 @@ def test_validation_sampling_inherits_total_temperature_until_overridden(tmp_pat
     for flag,value in [('--generation-eval-action-temperature','0'),('--generation-eval-min-same-head-ms','40'),
                        ('--generation-eval-touch-layout-policy','open'),('--generation-eval-max-events','70')]:
         assert runtime.args[runtime.args.index(flag)+1]==value
+
+def test_resume_learning_rate_override_and_timing_compute(tmp_path, monkeypatch):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json'; manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt'; checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint, 'read', lambda path: {
+        'schema': event_set_api.SCHEMA, 'model_config': {},
+        'args': {'lr': .0002, 'lr_schedule': 'cosine', 'warmup_steps': 100, 'min_lr_ratio': .1}})
+    payload=dict(mode='resume', manifest=str(manifest), holdout_fraction=0,
+        checkpoint_dir=str(tmp_path/'out'), init_checkpoint=str(checkpoint),
+        lr=.0005, lr_schedule='constant', warmup_steps=0, min_lr_ratio=1, timing_compute='dense')
+    normal=Runtime(); event_set_api.start_train(Handler(), payload, runtime=normal)
+    settings=normal.task.result['effective_settings']
+    assert (settings['lr'],settings['lr_schedule'],settings['warmup_steps'],settings['min_lr_ratio']) == (.0002,'cosine',100,.1)
+    assert '--reset-learning-rate' not in normal.args
+    override=Runtime(); event_set_api.start_train(Handler(), {**payload,'reset_learning_rate':True}, runtime=override)
+    settings=override.task.result['effective_settings']
+    assert (settings['lr'],settings['lr_schedule'],settings['warmup_steps'],settings['min_lr_ratio']) == (.0005,'constant',0,1)
+    assert '--reset-learning-rate' in override.args
+    assert override.args[override.args.index('--timing-compute')+1]=='dense'
+    with pytest.raises(ValueError,match='only available for resume'):
+        event_set_api.start_train(Handler(), {**payload,'mode':'fresh','reset_learning_rate':True}, runtime=Runtime())
+    with pytest.raises(ValueError,match='Unknown timing compute'):
+        event_set_api.start_train(Handler(), {**payload,'timing_compute':'invalid'}, runtime=Runtime())

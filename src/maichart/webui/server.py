@@ -210,6 +210,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "project_root": str(PROJECT_ROOT),
                     "stream_generation_contract": "chart_stream_quality_controls_v8",
                     "capabilities": {"event_set_stream": True,
+                                     "event_set_resume_lr_reset": True,
+                                     "event_set_sparse_timing": "supervised_queries_v1",
                                      "event_set_runtime": "state_phrase_joint_retry_v1",
                                      "event_set_landing_contract": "aligned_selected_family_v1",
                                      "event_set_shared_continuation_contract": "causal_correspondence_v1",

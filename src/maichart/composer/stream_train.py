@@ -143,6 +143,12 @@ def parser():
         p.add_argument('--'+key.replace('_','-'),type=float,default=default)
     for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps','dropout'):p.set_defaults(**{key:None})
     p.add_argument('--lr-schedule',choices=('constant','cosine'),default='cosine')
+    p.add_argument('--reset-learning-rate',action='store_true',
+                   help='Explicitly replace a resumed LR plan while retaining optimizer/RNG/data progress')
+    p.add_argument('--timing-compute',choices=('supervised','dense'),default='supervised',
+                   help='Equivalent training timing execution; dense is the performance reference')
+    p.add_argument('--stop-after-updates',type=int,default=0,
+                   help='Save and exit after this many additional successful updates; 0 is unlimited')
     p.add_argument('--generation-eval-seeds',default='0,1')
     p.add_argument('--audio-grid-seconds',type=float,default=None,
                    help='Fresh default 0.01 seconds; continuation inherits its checkpoint grid')
@@ -457,6 +463,10 @@ def _autocast(args):
 def _train(args):
     from .learning_rate import resolve_plan,learning_rate
     from .stream_recovery import recovery_batch,recovery_state,restore_recovery_state
+    if getattr(args,'reset_learning_rate',False) and not args.resume:
+        raise ValueError('--reset-learning-rate requires --resume')
+    if getattr(args,'stop_after_updates',0)<0:
+        raise ValueError('--stop-after-updates must be nonnegative')
     from .train import _forward_finite_flags,_model_finite_items,_assert_model_finite
     if args.resume and args.init_checkpoint:raise ValueError('Choose resume or init-checkpoint')
     if min(args.epochs,args.batch_size,args.grad_accumulation)<1:raise ValueError('Invalid positive training controls')
@@ -629,11 +639,20 @@ def _train(args):
         _validate_resume_cursor(state,batches_per_epoch,args.grad_accumulation)
         if not state.get('epoch_complete') and skip==batches_per_epoch:
             start_epoch+=1;skip=0
-    warmup=(state['lr_schedule']['warmup_steps'] if args.resume and state.get('lr_schedule') else
+    reset_lr=bool(getattr(args,'reset_learning_rate',False))
+    warmup=(state['lr_schedule']['warmup_steps'] if args.resume and state.get('lr_schedule') and not reset_lr else
             min(args.warmup_steps,max(0,math.ceil(batches_per_epoch/args.grad_accumulation)*args.epochs-1)))
     lr_plan=resolve_plan(requested=args.lr_schedule,warmup_steps=warmup,
         min_lr_ratio=args.min_lr_ratio,base_lr=args.lr,total_steps=math.ceil(batches_per_epoch/args.grad_accumulation)*args.epochs,
-        resume=bool(args.resume),saved=state.get('lr_schedule'))
+        resume=bool(args.resume) and not reset_lr,saved=state.get('lr_schedule'))
+    lr_changes=list(state.get('learning_rate_changes') or [])
+    if reset_lr:
+        lr_changes.append(dict(optimizer_step=steps,previous=state.get('lr_schedule'),current=lr_plan,
+            reason='explicit_resume_learning_rate_reset'))
+        for group in optimizer.param_groups:group['lr']=learning_rate(lr_plan,steps)
+        _emit('composer_learning_rate_changed',**lr_changes[-1])
+    model._sparse_timing_enabled=getattr(args,'timing_compute','supervised')=='supervised'
+    stop_at_update=steps+args.stop_after_updates if getattr(args,'stop_after_updates',0) else None
     defaults=(old or {}).get('condition_defaults') or _condition_defaults(ds)
     _emit('composer_runtime',family=checkpoint.FAMILY,architecture_profile=checkpoint.PROFILE,
         training_semantics='causal_event_set_stream_v1',samples=len(ds),batch_size=args.batch_size,
@@ -642,6 +661,7 @@ def _train(args):
         effective_lr=optimizer.param_groups[0]['lr'],start_epoch=start_epoch,end_epoch=args.epochs,
         resume_sample_cursor=skip*args.batch_size,precision=args.precision,device=args.device,
         cpu_threads=args.effective_cpu_threads,validation_enabled=dev is not None,
+        timing_compute=getattr(args,'timing_compute','supervised'),stop_at_update=stop_at_update,
         validation_manifest=args.validation_manifest,generation_eval_settings=generation_settings,
         epoch_target=args.epochs,learning_rate_schedule=lr_plan,audio_grid_seconds=args.audio_grid_seconds,
         plan_target_units=model.config.plan_target_units,plan_loss_normalization=model.config.plan_loss_normalization,
@@ -662,7 +682,7 @@ def _train(args):
             dataset_content_identity=content_identity,
             python_rng=random.getstate(),numpy_rng=np.random.get_state(),torch_rng=torch.get_rng_state(),
             cuda_rng=torch.cuda.get_rng_state(device=args.device) if args.device.startswith('cuda') else None,
-            lr_schedule=lr_plan,recovery_episodes=recovery_state(model),learning_policies=learning_policies,
+            lr_schedule=lr_plan,learning_rate_changes=lr_changes,recovery_episodes=recovery_state(model),learning_policies=learning_policies,
             parent_stage={'checkpoint':str(args.init_checkpoint),'optimizer_steps':int(old.get('optimizer_steps',0)),
                           'learning_policies':{key:getattr(StreamComposerConfig.from_dict(old['model_config']),key) for key in learning_policies}} if args.init_checkpoint else state.get('parent_stage'))
         kwargs=dict(epoch=epoch,optimizer_steps=steps,args=vars(args),metrics=metrics,
@@ -670,6 +690,10 @@ def _train(args):
         checkpoint.save(directory/'composer_last.pt',model,optimizer,state=s,**kwargs)
         checkpoint.save(directory/'composer_inference.pt',model,**kwargs)
         _emit('composer_checkpoint',epoch=epoch,optimizer_steps=steps,path=str(directory/'composer_last.pt'))
+    if reset_lr:
+        # Make an explicitly changed plan durable before another update. A
+        # later ordinary resume must not silently recover the old schedule.
+        persist(start_epoch,skip,False,(old or {}).get('metrics',{}))
     for epoch in range(start_epoch,args.epochs+1):
         model.train();totals=MetricTotals();n=0;supervised=0;sequences=0;started=time.perf_counter();timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.)
         optimizer.zero_grad(set_to_none=True)
@@ -681,6 +705,7 @@ def _train(args):
         window_metrics=MetricTotals();window_batches=0
         window_finite=torch.ones(3,dtype=torch.bool,device=args.device)
         skipped_windows=0;last_norm=None;augmentation_totals={}
+        timing_queries=0;timing_queries_total=0
         with _prepared_batches(_loader(ds,args,epoch,skip),args) as loader:
             for bi in range(skip+1,batches_per_epoch+1):
                 tick=time.perf_counter();batch=next(loader)
@@ -701,6 +726,8 @@ def _train(args):
                     enabled=torch.rand_like(strength)<.25
                     b['audio_tracking_strength']=strength*enabled
                 with _autocast(args):out=model(b,symbolic_only=symbolic);loss,metrics=model.loss(out,b)
+                timing_queries+=int(out.get('timing_query_evaluated',b['history_kind'].numel()))
+                timing_queries_total+=int(out.get('timing_query_total',b['history_kind'].numel()))
                 backward_loss=loss/divisor
                 window_finite=window_finite & _forward_finite_flags(out,loss,backward_loss)
                 backward_loss.backward()
@@ -740,8 +767,9 @@ def _train(args):
                     window_finite=torch.ones(3,dtype=torch.bool,device=args.device)
                     window_metrics=MetricTotals();window_batches=0
                 timing['compute_sec']+=time.perf_counter()-tick
-                checkpoint_due=updated and args.checkpoint_interval_steps and steps%args.checkpoint_interval_steps==0
-                report_due=bi==skip+1 or bi%args.log_interval==0 or bi==batches_per_epoch
+                stopping=updated and stop_at_update is not None and steps>=stop_at_update
+                checkpoint_due=updated and (stopping or (args.checkpoint_interval_steps and steps%args.checkpoint_interval_steps==0))
+                report_due=stopping or bi==skip+1 or bi%args.log_interval==0 or bi==batches_per_epoch
                 if checkpoint_due or report_due:
                     avg=_averages(totals,n)
                 if checkpoint_due:persist(epoch,bi,bi==batches_per_epoch,avg)
@@ -755,9 +783,14 @@ def _train(args):
                         cache=ds.cache_stats() if hasattr(ds,'cache_stats') else {},
                         exit_coverage={key:value for key,value in totals.as_floats().items() if key.startswith('exit_')},
                         augmentation=augmentation_totals,
+                        timing_queries=dict(evaluated=timing_queries,total=timing_queries_total),
                         cuda_memory=_cuda_memory(args.device),
                         last_gradient_norm=float(last_norm) if last_norm is not None else None,
                         learning_rate=optimizer.param_groups[0]['lr'],stage='symbolic' if symbolic else 'audio_conditioned',**avg)
+                if stopping:
+                    _emit('composer_bounded_stop',epoch=epoch,batch=bi,optimizer_steps=steps,
+                          reason='requested_additional_update_budget',checkpoint=str(directory/'composer_last.pt'))
+                    return 0
         avg=_averages(totals,n)
         skip=0
         if dev is not None:

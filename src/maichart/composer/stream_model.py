@@ -1091,29 +1091,62 @@ class StreamComposer(nn.Module):
         candidate_beats=candidate_deltas=None
         if absolute_timing:
             candidate_beats,candidate_deltas=self.timing_grid.candidates(batch['step_beat'])
-            delta_allowed=(candidate_deltas>0)|(candidate_deltas.eq(0)&first[...,None])
-            delta_allowed=delta_allowed&(candidate_beats<end_beat[:,None,None])
+            sparse_timing=(self.training and getattr(self,'_sparse_timing_enabled',True)
+                and self.config.transition_policy=='off' and '_timing_query_positions' in batch
+                and '_timing_packed_flat' in batch and '_timing_original_flat' in batch)
+            if sparse_timing:
+                positions=batch['_timing_query_positions']
+                def select(values):
+                    index=positions.reshape(*positions.shape,*([1]*(values.ndim-2)))
+                    return values.gather(1,index.expand(*positions.shape,*values.shape[2:]))
+                timing_hidden=select(hidden)
+                timing_cursor=select(batch['step_beat'])
+                timing_relative=select(delta_logits)
+                timing_first=select(first)
+                timing_beats=select(candidate_beats)
+                timing_deltas=select(candidate_deltas)
+                timing_batch={**batch,'step_second':select(batch['step_second'])}
+            else:
+                timing_hidden=hidden
+                timing_cursor=batch['step_beat']
+                timing_relative=delta_logits
+                timing_first=first
+                timing_beats=candidate_beats
+                timing_deltas=candidate_deltas
+                timing_batch=batch
+            delta_allowed=(timing_deltas>0)|(timing_deltas.eq(0)&timing_first[...,None])
+            delta_allowed=delta_allowed&(timing_beats<end_beat[:,None,None])
             delta_allowed[...,0]=False
-            query=(self.delta_query(hidden) if hasattr(self,'delta_query') else
-                   F.pad(hidden,(0,max(0,32-hidden.size(-1))))[...,:32])
-            audio_scores=torch.zeros_like(candidate_beats,dtype=torch.float32)
+            query=(self.delta_query(timing_hidden) if hasattr(self,'delta_query') else
+                   F.pad(timing_hidden,(0,max(0,32-timing_hidden.size(-1))))[...,:32])
+            audio_scores=torch.zeros_like(timing_beats,dtype=torch.float32)
             candidate_audio=None
             if not symbolic_only and 'delta_keys' in cache:
-                keys=self._read_audio(cache,candidate_beats,inverse,clock='beats',field='delta_keys').float()
+                keys=self._read_audio(cache,timing_beats,inverse,clock='beats',field='delta_keys').float()
                 candidate_audio=keys
                 audio_scores=(query.float()[...,None,:]*keys).sum(-1)/math.sqrt(32)
             elif not symbolic_only and self.config.timing_grid_audio_policy in ('candidate_pool_v1','query_pool_v2','query_pool_v3'):
                 if 'grid_audio_keys' in cache:
-                    candidate_audio=self._read_audio(cache,candidate_beats,inverse,clock='beats',field='grid_audio_keys').float()
+                    candidate_audio=self._read_audio(cache,timing_beats,inverse,clock='beats',field='grid_audio_keys').float()
                 else:
                     local=cache['local']
                     grid_cache={**cache,'grid_audio_keys':F.pad(local,(0,max(0,32-local.size(-1))))[...,:32]}
-                    candidate_audio=self._read_audio(grid_cache,candidate_beats,inverse,clock='beats',field='grid_audio_keys').float()
-            expected=(self._plan_candidate_expected_counts(plan_state,cache,batch,inverse,candidate_beats)
+                    candidate_audio=self._read_audio(grid_cache,timing_beats,inverse,clock='beats',field='grid_audio_keys').float()
+            expected=(self._plan_candidate_expected_counts(plan_state,cache,timing_batch,inverse,timing_beats)
                 if self.config.timing_group_policy=='phase_gap_v2' and plan_state is not None else None)
-            delta_logits,candidate_beats,candidate_deltas=self.timing_grid(hidden,batch['step_beat'],
-                delta_logits,self.delta_values,query,audio_scores,delta_allowed,candidate_audio=candidate_audio,
+            timing_logits,_,_=self.timing_grid(timing_hidden,timing_cursor,
+                timing_relative,self.delta_values,query,audio_scores,delta_allowed,candidate_audio=candidate_audio,
                 candidate_expected_count=expected)
+            if sparse_timing:
+                # Unsupervised rows remain finite for the public loss and
+                # diagnostics. Only valid packed queries enter the scatter.
+                original=batch['_timing_original_flat']
+                packed=batch['_timing_packed_flat']
+                delta_logits=timing_logits.new_full((*hidden.shape[:2],timing_logits.size(-1)),-1e4)
+                delta_logits=delta_logits.flatten(0,1).index_copy(0,original,
+                    timing_logits.flatten(0,1).index_select(0,packed)).view(*hidden.shape[:2],-1)
+            else:
+                delta_logits=timing_logits
         else:
             delta_allowed = (values[None, None] > 0) | (values[None, None].eq(0) & first[..., None])
             delta_allowed = delta_allowed & (batch['step_beat'][..., None]+values < end_beat[:, None, None])
@@ -1196,7 +1229,12 @@ class StreamComposer(nn.Module):
         if absolute_timing:
             result.update(candidate_beats=candidate_beats,candidate_deltas=candidate_deltas,
                           timing_grid_ids=self.timing_grid.candidate_groups(candidate_deltas),
-                          timing_group_count=self.timing_grid.num_groups)
+                          timing_group_count=self.timing_grid.num_groups,
+                          timing_query_evaluated=(timing_hidden.size(0)*timing_hidden.size(1) if sparse_timing
+                                                  else hidden.size(0)*hidden.size(1)),
+                          timing_query_supervised=(batch['_timing_original_flat'].numel()
+                                                   if '_timing_original_flat' in batch else hidden.size(0)*hidden.size(1)),
+                          timing_query_total=hidden.size(0)*hidden.size(1))
         if button_load is not None:result['button_load']=button_load
         if plan is not None:
             result['plan_logits'] = plan

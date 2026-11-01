@@ -41,6 +41,9 @@ def start_train(handler, payload, *, runtime):
         if parent_data.get('schema') != SCHEMA:
             raise ValueError('Event-set stream requires a new event-set checkpoint; old Composer weights are incompatible')
     payload = dict(payload)
+    reset_lr = payload.get('reset_learning_rate', False)
+    if not isinstance(reset_lr, bool) or (reset_lr and mode != 'resume'):
+        raise ValueError('reset_learning_rate is only available for resume')
     parent_args = (parent_data or {}).get('args') or {}
     parent_config = (parent_data or {}).get('model_config') or {}
     if parent_data:
@@ -49,8 +52,11 @@ def start_train(handler, payload, *, runtime):
     if mode == 'resume':
         for key in ('batch_size','grad_accumulation','seed','symbolic_pretrain_epochs','max_steps',
                     'recovery_interval','recovery_samples','recovery_steps','recovery_weight','plan_weight',
-                    'window_seconds','limit_charts','lr','warmup_steps','min_lr_ratio'):
+                    'window_seconds','limit_charts'):
             if key in parent_args: payload[key] = parent_args[key]
+        if not reset_lr:
+            for key in ('lr', 'warmup_steps', 'min_lr_ratio'):
+                if key in parent_args: payload[key] = parent_args[key]
         # Reuse the effective split, rather than splitting a saved train subset again.
         if parent_args.get('manifest'):
             saved_manifest = _path(parent_args['manifest'], 'saved manifest', exists=True)
@@ -106,8 +112,14 @@ def start_train(handler, payload, *, runtime):
         raise ValueError('min_lr_ratio cannot exceed 1')
     schedule = payload.get('lr_schedule', 'cosine')
     if schedule == 'auto': schedule = 'cosine'
-    if mode == 'resume': schedule = (parent_data.get('args') or {}).get('lr_schedule','constant')
+    if mode == 'resume' and not reset_lr: schedule = (parent_data.get('args') or {}).get('lr_schedule','constant')
     if schedule not in {'constant','cosine'}: raise ValueError('Unknown learning rate schedule')
+    settings['reset_learning_rate'] = reset_lr
+    if reset_lr: args.append('--reset-learning-rate')
+    timing_compute = payload.get('timing_compute', 'supervised')
+    if timing_compute not in {'dense', 'supervised'}: raise ValueError('Unknown timing compute mode')
+    settings['timing_compute'] = timing_compute
+    _arg(args, '--timing-compute', timing_compute)
     settings['lr_schedule'] = schedule
     _arg(args,'--lr-schedule',schedule)
     settings['precision'] = _precision(payload.get('precision') or 'bf16')

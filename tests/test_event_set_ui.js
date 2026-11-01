@@ -218,7 +218,7 @@ test('grouping moves controls with their labels and restores their original home
     document:{createElement:tag=>new Node(tag),createComment:()=>new Node('comment')}});
   vm.runInContext(source.slice(source.indexOf('const EVENT_SET_LEARNING_POLICIES ='),source.indexOf('function chartComposerTrainingPayload(')),c);
   vm.runInContext(fn('initializeEventSetParameterGroups'),c);c.initializeEventSetParameterGroups();
-  for(const [group,list] of Object.entries(ids))for(const id of list)assert.equal(nodes.get('#'+id).parent.parent,nodes.get('#eventSetGroup_'+group),id);
+  for(const [group,list] of Object.entries(ids))for(const id of list)assert.equal(nodes.get('#'+id).parent.parent,nodes.get(id==='composerResetLearningRate'?'#eventSetBasicAdvancedGrid':'#eventSetGroup_'+group),id);
   assert.equal(nodes.has('#eventSetPolicy_phrase_context_policy'),false);assert.equal(nodes.has('#eventSetPolicy_duration_audio_policy'),false);
   assert.ok(nodes.get('#composerPhraseContextPolicy'));assert.ok(nodes.get('#composerDurationAudioPolicy'));
   assert.equal(nodes.get('#eventSetValidationGeneration').style.gridColumn,'1 / -1');
@@ -295,4 +295,25 @@ test('gap continuation offers off and retains historical choices',()=>{
   const c=vm.createContext({});
   vm.runInContext(source.slice(source.indexOf('const EVENT_SET_LEARNING_POLICIES ='),source.indexOf('function chartComposerTrainingPayload(')),c);
   assert.deepEqual(Array.from(vm.runInContext('EVENT_SET_LEARNING_POLICIES.gap_continuation_policy',c)),['off','probability_v2','additive_v1']);
+});
+
+test('resume learning-rate reset is explicit and survives checkpoint reinspection',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.currentTrainingMode=()=> 'resume';
+  const data={schema:'maichart-composer-event-set-checkpoint-v1',model_config:{architecture_profile:'event_set_stream_v1'},args:{lr:.0002,lr_schedule:'cosine',warmup_steps:100,min_lr_ratio:.1}};
+  c.applyChartComposerCheckpointConfig(data,'resume');
+  assert.equal(c.chartComposerTrainingPayload().reset_learning_rate,undefined);
+  e('#composerResetLearningRate').checked=true;e('#learningRate').value='.0005';e('#composerLrSchedule').value='constant';e('#composerWarmupSteps').value='0';e('#composerMinLrRatio').value='1';e('#composerTimingCompute').value='dense';
+  c.applyChartComposerCheckpointConfig(data,'resume',true);
+  const p=c.chartComposerTrainingPayload();assert.equal(p.reset_learning_rate,true);assert.equal(p.lr,.0005);assert.equal(p.lr_schedule,'constant');assert.equal(p.warmup_steps,0);assert.equal(p.min_lr_ratio,1);assert.equal(p.timing_compute,'dense');
+  c.currentTrainingMode=()=> 'fresh';assert.equal(c.chartComposerTrainingPayload().reset_learning_rate,undefined);
+});
+
+
+test('resume learning-rate reset requires backend capability while normal runs remain compatible',()=>{
+  const c=vm.createContext({});vm.runInContext(fn('assertEventSetResumeLearningRateCapability'),c);
+  const payload={architecture_profile:'event_set_stream_v1',mode:'resume',reset_learning_rate:true};
+  assert.throws(()=>c.assertEventSetResumeLearningRateCapability(payload,{capabilities:{}}),/重载更新后的 WebUI/);
+  assert.doesNotThrow(()=>c.assertEventSetResumeLearningRateCapability(payload,{capabilities:{event_set_resume_lr_reset:true}}));
+  assert.doesNotThrow(()=>c.assertEventSetResumeLearningRateCapability({...payload,reset_learning_rate:false},{capabilities:{}}));
 });
