@@ -43,6 +43,49 @@ def test_augmented_row_rebuilds_events_and_preserves_targets_and_clocks(monkeypa
         if row.any():assert all(int(atom)<ds.codec.num_atoms for atom in row)
 
 
+def test_causal_augmentation_masks_configuration_but_preserves_time(monkeypatch):
+    ds=dataset(monkeypatch);ds.recovery_target_policy='causal_correspondence_v1'
+    original=ds[3]
+    changed,_,_=stream_augmentation.augment_stream_row(ds,3,rng=random.Random(8),mode='abab')
+    active=changed['loss_mask'] & changed['sample_weight'].gt(0)
+    assert original['configuration_mask'][active].all()
+    assert not changed['configuration_mask'][active].any()
+    torch.testing.assert_close(changed['target_kind'],original['target_kind'])
+    torch.testing.assert_close(changed['target_delta'],original['target_delta'])
+    packed=collate_stream([changed])
+    assert packed['_literal_indices'].numel()==0 and not packed['_detail_groups']
+
+
+def test_causal_augmentation_rotates_proved_target_with_prefix(monkeypatch):
+    ds=dataset(monkeypatch);ds.recovery_target_policy='causal_correspondence_v1'
+    from maichart.composer.stream_target_correspondence import rotated_text
+    def rotate_source(dataset,source,begin,start,mode,rng):
+        return [rotated_text(source[i].text,2) for i in range(begin,start)]
+    monkeypatch.setattr(stream_augmentation,'_loop_texts',rotate_source)
+    changed,_,_=stream_augmentation.augment_stream_row(ds,1,rng=random.Random(8),mode='abab')
+    song,start,end,_=ds.samples[1]
+    at=start-max(0,start-ds.lead_in)
+    assert changed['configuration_mask'][at].item()
+    assert changed['_configuration_correspondence']=='rotation_correspondence'
+    target=ds.streams[song][start]
+    rotated=ds.codec.encode(rotated_text(target.text,2))
+    assert changed['target_shape'][at].item()==rotated['shape']
+    assert changed['target_details'][at,:len(rotated['details'])].tolist()==rotated['details']
+
+
+def test_causal_rotation_downgrades_at_active_old_boundary(monkeypatch):
+    ds=dataset(monkeypatch);ds.recovery_target_policy='causal_correspondence_v1'
+    from maichart.composer.stream_target_correspondence import rotated_text
+    monkeypatch.setattr(stream_augmentation,'_loop_texts',lambda dataset,source,begin,start,mode,rng:
+        [rotated_text(source[i].text,2) for i in range(begin,start)])
+    changed,_,_=stream_augmentation.augment_stream_row(ds,3,rng=random.Random(8),mode='abab')
+    song,start,_,_=ds.samples[3]
+    at=start-max(0,start-ds.lead_in)
+    assert not changed['configuration_mask'][at].item()
+    assert changed['_configuration_correspondence']=='time_only'
+    assert changed['target_shape'][at].item()==ds[3]['target_shape'][at].item()
+
+
 def test_batch_augmentation_is_seeded_and_rate_zero_is_identity(monkeypatch):
     ds=dataset(monkeypatch);batch=collate_stream([ds[2],ds[3]])
     same,stats=stream_augmentation.augment_stream_batch(ds,batch,rate=0,seed=4)

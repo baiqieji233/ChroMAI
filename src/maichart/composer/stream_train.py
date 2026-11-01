@@ -16,32 +16,36 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
-    'phrase_context_policy': ('ordered_phrase_v2','causal_phrase_v1','off'),
+    'phrase_context_policy': ('aligned_phrase_v3','ordered_phrase_v2','causal_phrase_v1','off'),
+    'template_policy': ('family_preserving_v1','cross_family_v1'),
+    'candidate_state_policy': ('selected_native_v1','cursor_v1'),
     'duration_audio_policy': ('interval_v1','off'),
     'physical_policy': ('runtime_hard_v2','legacy_report_v1'),
-    'transition_policy': ('music_exit_v3','music_exit_v2','music_exit_v1','off'),
+    'transition_policy': ('off','music_exit_v3','music_exit_v2','music_exit_v1'),
     'decoder_policy': ('prenorm_independent_v2','postnorm_v1'),
     'window_balance_policy': ('sqrt_window_v2','equal_window_v1'),
     'timing_output_policy': ('absolute_grid_v1','relative_delta_v1'),
     'timing_grid_audio_policy': ('query_pool_v3','query_pool_v2','candidate_pool_v1','off'),
     'timing_group_policy': ('phase_gap_v2','phase_only_v1'),
     'literal_output_policy': ('type_blocks_v1','flat_family_v1'),
-    'event_family_policy': ('audio_state_phrase_v4','audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
+    'event_family_policy': ('shared_continuation_v1','audio_state_phrase_v4','audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
+    'recovery_target_policy': ('causal_correspondence_v1','authored_next_v1'),
     'prefix_augmentation_input_policy': ('musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
     'history_window_policy': ('block_aligned_v2','rolling_legacy_v1'),
     'continuation_policy': ('pattern_runs_v2','typed_runs_v1','off'),
     'sensor_load_policy': ('separate_touch_v1','button_only_v1'),
-    'gap_continuation_policy': ('probability_v2','additive_v1'),
+    'gap_continuation_policy': ('off','probability_v2','additive_v1'),
     'motion_continuation_policy': ('context_motion_v3','motion_distinct_v2','motion_continuation_v1','off'),
     'lane_load_policy': ('direct_buttons_v1','off'),
     'recovery_policy': ('greedy_mixed_v4','greedy_mixed_v3','mixed_exit_v2','persistent_v1'),
 }
 
-LEGACY_LEARNING_POLICIES = dict(phrase_context_policy='off',duration_audio_policy='off',physical_policy='legacy_report_v1',transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
+LEGACY_LEARNING_POLICIES = dict(phrase_context_policy='off',template_policy='cross_family_v1',candidate_state_policy='cursor_v1',duration_audio_policy='off',physical_policy='legacy_report_v1',transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
     prefix_augmentation_input_policy='causal_window_config_time_first_decision_v3',
     history_window_policy='rolling_legacy_v1',continuation_policy='off',
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
-    motion_continuation_policy='motion_continuation_v1',lane_load_policy='off',recovery_policy='persistent_v1')
+    motion_continuation_policy='motion_continuation_v1',lane_load_policy='off',recovery_policy='persistent_v1',
+    recovery_target_policy='authored_next_v1')
 
 
 def resolve_learning_policies(requested, parent_config=None, *, resume=False):
@@ -55,7 +59,7 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
         result[key]=value
     weight=getattr(requested,'transition_exit_weight',None)
     inherited=getattr(parent_config,'transition_exit_weight',0.) if parent_config is not None else None
-    if weight is None:weight=inherited if resume else .5
+    if weight is None:weight=inherited if resume else 0.
     if not math.isfinite(weight) or weight<0:raise ValueError('Transition exit weight must be finite and nonnegative')
     if resume and weight!=inherited:raise ValueError('Resume inherits transition_exit_weight; use finetune')
     rate=getattr(requested,'prefix_augmentation_rate',None)
@@ -88,7 +92,7 @@ def upgrade_learning_stage(model, policies, device='cpu'):
              'continuation_projection.weight','continuation_projection.bias',
              'keep_gap_audio.weight','keep_gap_audio.bias','lane_load_projection.weight',
              'action_continuation_projection.weight','kind_continuation_projection.weight',
-             'gap_continuation_projection.weight','motion_context_projection.weight'}
+             'gap_continuation_projection.weight','motion_context_projection.weight','candidate_state_projection.weight'}
     new_prefixes=('timing_grid.','history_gap_projection.','event_family_head.',
                   'literal_route_head.','literal_family_embedding.','family_audio_projection.',
                   'family_history_projection.','family_audio_norm.','audio_event_family_head.',
@@ -169,8 +173,10 @@ def _dataset(args,*,codec=None,delta_vocab=None,validation=False):
         history_window_policy=('block_aligned_v2' if getattr(args,'history_window_policy','auto')=='auto' else args.history_window_policy),
         continuation_policy=('pattern_runs_v2' if getattr(args,'continuation_policy','auto')=='auto' else args.continuation_policy),
         phrase_context_policy=getattr(args,'phrase_context_policy','off'),
+        candidate_state_policy=getattr(args,'candidate_state_policy','cursor_v1'),
         limit_charts=args.limit_charts,unknown_policy='mask' if validation else 'error')
     dataset.physical_policy=getattr(args,'physical_policy','legacy_report_v1')
+    dataset.recovery_target_policy=getattr(args,'recovery_target_policy','authored_next_v1')
     return dataset
 
 class _LocalBatches(Sampler):
@@ -302,6 +308,8 @@ def _fingerprint(args,ds,*,legacy=False,pre_blank=False):
         # Configuration/time reconstruction and native whole-window selection
         # define training examples. Changing that recipe requires a new stage.
         h.update(getattr(args,'prefix_augmentation_input_policy','causal_window_config_time_first_decision_v3').encode())
+    target_policy=getattr(args,'recovery_target_policy','authored_next_v1')
+    if target_policy!='authored_next_v1':h.update(target_policy.encode())
     timing=getattr(args,'timing_output_policy','relative_delta_v1')
     family=getattr(args,'event_family_policy','legacy_v1')
     if timing!='relative_delta_v1' or family!='legacy_v1':
@@ -316,6 +324,9 @@ def _fingerprint(args,ds,*,legacy=False,pre_blank=False):
         value=getattr(args,key,default)
         if value!=default:h.update((key+':'+value).encode())
     if getattr(args,'phrase_context_policy','off')!='off':h.update(str(getattr(args,'phrase_loss_weight',.05)).encode())
+    for key,default in (('template_policy','cross_family_v1'),('candidate_state_policy','cursor_v1')):
+        value=getattr(args,key,default)
+        if value!=default:h.update((key+':'+value).encode())
     return h.hexdigest()
 
 def _resolve_audio_grid(requested,parent_config=None):
@@ -511,16 +522,17 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version=('stream_ordered_phrase_joint_v2'
-        if model.config.phrase_context_policy=='ordered_phrase_v2' else 'stream_causal_phrase_joint_v1'),
+    args.training_objective_recipe=dict(version=('stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
+        else 'stream_aligned_phrase_joint_v3' if model.config.phrase_context_policy=='aligned_phrase_v3' else 'stream_ordered_phrase_joint_v2'
+        if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 'stream_causal_phrase_joint_v1'),
         phrase_context_policy=model.config.phrase_context_policy,
         phrase_loss_weight=model.config.phrase_loss_weight,
         phrase_target='ordered_segment_features_labels_only',
         ordered_phrase_target=('configuration_only_ordered_encoder_cosine_detached_symmetric_match_joint'
-            if model.config.phrase_context_policy=='ordered_phrase_v2' else 'off'),
+            if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 'off'),
         phrase_budget=('half_coarse_statistics_half_ordered_cosine_and_multi_positive_match'
-            if model.config.phrase_context_policy=='ordered_phrase_v2' else 'coarse_statistics'),
-        ordered_memory_max_events=32 if model.config.phrase_context_policy=='ordered_phrase_v2' else 0,
+            if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 'coarse_statistics'),
+        ordered_memory_max_events=32 if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 0,
         phrase_loss_normalization='sum_weighted_features_over_batch_and_features_query_budget_preserved',
         phrase_input='audio_anchor_and_completed_prefix_references',
         audio_tracking_training='25_percent_rows_uniform_strength_otherwise_zero',
@@ -539,23 +551,30 @@ def _train(args):
             if model.config.timing_grid_audio_policy=='query_pool_v3' else 'policy_defined'),
         timing_group_policy=model.config.timing_group_policy,literal_output_policy=model.config.literal_output_policy,
         event_family_policy=model.config.event_family_policy,
-        family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4') else 0.),
-        family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4') else 1.),
+        family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1') else 0.),
+        family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1') else 1.),
         family_mixture_gradient=('audio_prior_detached_context_residual_live' if model.config.event_family_policy=='audio_state_phrase_v4' else
             'audio_prior_detached_when_audio_budget_positive' if model.config.event_family_policy=='audio_prior_transition_v3' else 'joint'),
-        family_context_inputs=('music_phrase_intent_candidate_state_gap' if model.config.event_family_policy=='audio_state_phrase_v4' else 'policy_default'),
+        family_context_inputs=('shared_causal_history_landing_music_phrase_progress_native_state'
+            if model.config.event_family_policy=='shared_continuation_v1' else
+            'music_phrase_intent_candidate_state_gap' if model.config.event_family_policy=='audio_state_phrase_v4' else 'policy_default'),
         conditional_geometry=('joint_phase_detail_with_learned_motion_exit'
             if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') else 'unchanged_joint_phase_detail'),
-        transition_exit='same_budget_as_main_configuration',
+        transition_exit='additional_weighted_joint_nll_on_exit_targets',
+        template_policy=model.config.template_policy,
+        candidate_state_policy=model.config.candidate_state_policy,
         transition_factorization=('parent_keep_exit_log_odds_plus_musical_residual'
             if model.config.transition_policy in ('music_exit_v2','music_exit_v3') else
             'learned_keep_exit_time_motion_template_same_nll_budget'
-            if model.config.transition_policy=='music_exit_v1' else 'legacy_joint_reweighting'),
+            if model.config.transition_policy=='music_exit_v1' else 'direct_joint_without_keep_exit_override'),
         transition_residual_gain=(8. if model.config.transition_policy in ('music_exit_v2','music_exit_v3') else 1.
             if model.config.transition_policy=='music_exit_v1' else 0.),
         time_music_reference=('strict_prior_note_at_cursor'
             if model.config.transition_policy=='music_exit_v3' else 'checkpoint_policy_defined'),
         history_recovery=model.config.recovery_policy,
+        recovery_target_policy=model.config.recovery_target_policy,
+        configuration_target=('authored_or_certified_causal_geometry_correspondence'
+            if model.config.recovery_target_policy=='causal_correspondence_v1' else 'next_reachable_authored_event'),
         recovery_long_sources=('alternating_persistent_8_steps_and_constructed_authored_exit'
             if model.config.recovery_policy=='greedy_mixed_v4' else 'policy_defined'),
         counterfactual_span=('variable_event_count_loops_32_64_128_with_first_trusted_authored_target'
@@ -578,11 +597,16 @@ def _train(args):
         _emit('composer_validation_support',samples=len(dev),trusted_targets=trusted,oov=dev.oov)
     optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=.01,
         **({'fused':True} if args.device.startswith('cuda') else {}))
+    from .stream_data_identity import dataset_content_identity
+    content_identity=dataset_content_identity(args.manifest,ds,cache_dir=args.cache_dir)
     state=(old or {}).get('training_state') or {};fingerprint=_fingerprint(args,ds)
     steps=0;start_epoch=1;skip=0
     if args.resume:
         if not old.get('optimizer_state_dict') or not state:
             raise ValueError('Resume requires a complete optimizer/RNG/cursor checkpoint')
+        saved_content=state.get('dataset_content_identity') or {}
+        if saved_content.get('schema')!=content_identity['schema'] or saved_content.get('fingerprint')!=content_identity['fingerprint']:
+            raise ValueError('Resume requires an unchanged, content-verified dataset; this checkpoint lacks matching material identity. Use finetune in a new directory.')
         if state.get('dataset_fingerprint')!=fingerprint:
             legacy_grid=('audio_grid_seconds' not in old['model_config'] and args.audio_grid_seconds==.05
                          and state.get('dataset_fingerprint')==_fingerprint(args,ds,legacy=True))
@@ -635,6 +659,7 @@ def _train(args):
     _assert_model_finite(model,finite_items)
     def persist(epoch,batch,complete,metrics):
         s=dict(epoch_complete=complete,batch_in_epoch=batch,dataset_fingerprint=fingerprint,
+            dataset_content_identity=content_identity,
             python_rng=random.getstate(),numpy_rng=np.random.get_state(),torch_rng=torch.get_rng_state(),
             cuda_rng=torch.cuda.get_rng_state(device=args.device) if args.device.startswith('cuda') else None,
             lr_schedule=lr_plan,recovery_episodes=recovery_state(model),learning_policies=learning_policies,

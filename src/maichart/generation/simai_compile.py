@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+from math import lcm
 from pathlib import Path
 
 from maichart.ir import BpmEvent, ChartIR, ChartMetadata, DifficultyMetadata, GridEvent, Note, TimingData
@@ -45,21 +46,36 @@ def compile_predictions(
     changes = sorted(tempo_changes or [TempoChange(Fraction(0), bpm)], key=lambda item: item.beat)
     if not changes or changes[0].beat > 0:
         changes.insert(0, TempoChange(Fraction(0), bpm))
+    if any(change.beat < 0 or change.bpm <= 0 for change in changes):
+        raise ValueError("Tempo changes require nonnegative beats and positive BPM.")
+    if any((change.beat * TICKS_PER_BEAT).denominator != 1 for change in changes):
+        raise ValueError("Tempo change cannot be represented in integer IR ticks.")
+    # A Simai comma advances 4/division beats. Refine the grid so every
+    # off-frame tempo change has its own comma position and survives export.
+    output_division = division
+    for change in changes:
+        output_division = lcm(output_division, (change.beat / 4).denominator)
+    if output_division > 4096:
+        raise ValueError("Tempo map requires a Simai grid finer than 4096 divisions.")
+    frame_stride = output_division // division
+    last_slot = max((max(1, frame_count)-1)*frame_stride,
+                    max(int(change.beat * output_division / 4) for change in changes))
     groups: list[str] = []
     chart_notes: list[Note] = []
     current_bpm = changes[0].bpm
     change_index = 0
-    for frame_index in range(max(1, frame_count)):
-        beat = Fraction(frame_index * 4, division)
+    for slot in range(last_slot+1):
+        beat = Fraction(slot * 4, output_division)
         while change_index + 1 < len(changes) and changes[change_index + 1].beat <= beat:
             change_index += 1
             current_bpm = changes[change_index].bpm
         prefix = ""
-        if frame_index == 0:
-            prefix += f"({_fmt(current_bpm)}){{{division}}}"
+        if slot == 0:
+            prefix += f"({_fmt(current_bpm)}){{{output_division}}}"
         elif change_index > 0 and changes[change_index].beat == beat:
             prefix += f"({_fmt(current_bpm)})"
         tokens: list[str] = []
+        frame_index = slot // frame_stride if slot % frame_stride == 0 else None
         for note in sorted(frame_notes.get(frame_index, []), key=lambda item: (item.position, item.note_type)):
             tokens.append(_render_note(note))
             chart_notes.append(
@@ -85,7 +101,7 @@ def compile_predictions(
                 )
                 for change in changes
             ],
-            grids=[GridEvent(division=division, beat=0.0, tick=0, time_sec=None)],
+            grids=[GridEvent(division=output_division, beat=0.0, tick=0, time_sec=None)],
         ),
         notes=chart_notes,
     )

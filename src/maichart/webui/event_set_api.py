@@ -1,7 +1,7 @@
 """WebUI subprocess adapter for the independent event-set stream contract."""
 from __future__ import annotations
 
-import json, math
+import json, math, os, shutil, uuid
 
 PROFILE = 'event_set_stream_v1'
 SCHEMA = 'maichart-composer-event-set-checkpoint-v1'
@@ -70,13 +70,7 @@ def start_train(handler, payload, *, runtime):
     fraction = _float(payload, 'holdout_fraction', .05, minimum=0.)
     if fraction >= .5: raise ValueError('holdout_fraction must be less than 0.5')
     split_report = None
-    if mode != 'resume' and not payload.get('validation_manifest') and fraction:
-        from maichart.composer.evaluation import split_manifest, form_chart_eligibility
-        split_report = split_manifest(manifest, directory / 'data_split', fraction=fraction,
-                                      seed=_int(payload, 'seed', 0, minimum=0), cache_dir=cache,
-                                      chart_eligibility=form_chart_eligibility)
-        manifest = _path(split_report['splits']['train']['path'], 'effective train manifest', exists=True)
-        payload['validation_manifest'] = split_report['splits']['dev']['path']
+    needs_split = mode != 'resume' and not payload.get('validation_manifest') and bool(fraction)
     args = ['-m', 'maichart.composer.stream_train']
     for name, value in [('manifest', manifest), ('checkpoint-dir', directory), ('cache-dir', cache)]:
         _arg(args, '--' + name, value)
@@ -174,19 +168,56 @@ def start_train(handler, payload, *, runtime):
         value = parent_args.get(field, default) if mode == 'resume' else payload.get(field, default)
         settings[field] = value
         if value is not None: _arg(args, '--' + field.replace('_', '-'), value)
-    reserve = getattr(runtime, '_reserve_composer_training_task', None)
-    task = reserve(directory) if reserve else runtime._create_task('composer_train')
-    task.result.update(family=FAMILY, schema=SCHEMA, mode=mode, manifest=str(manifest),
-        checkpoint_dir=str(directory), epoch_target=settings['epochs'], effective_settings=settings,
-        settings_policy='resume_inherited' if mode == 'resume' else 'requested')
-    if split_report is not None: task.result['data_split'] = split_report
-    if selection is not None:
-        task.result['dataset_selection'] = selection
+    from maichart.composer.training_lock import training_output_lock, training_request_lock
+    reservation = training_request_lock(directory)
+    reservation.__enter__()
+    task = None
     try:
+        # The request lock spans split preparation and the asynchronous child.
+        # The trainer's own output lock also excludes a direct CLI training run.
+        with training_output_lock(directory):
+            if mode != 'resume':
+                permitted = {'.composer-training.lock', '.composer-training-request.lock'}
+                if any(path.name not in permitted for path in directory.iterdir()):
+                    raise ValueError('Use a new empty checkpoint directory for fresh/finetune')
+            reserve = getattr(runtime, '_reserve_composer_training_task', None)
+            task = reserve(directory) if reserve else runtime._create_task('composer_train')
+            if needs_split:
+                from maichart.composer.evaluation import split_manifest, form_chart_eligibility
+                staged = directory / ('.data_split-' + uuid.uuid4().hex)
+                final = directory / 'data_split'
+                try:
+                    split_report = split_manifest(manifest, staged, fraction=fraction,
+                        seed=_int(payload, 'seed', 0, minimum=0), cache_dir=cache,
+                        chart_eligibility=form_chart_eligibility)
+                    for entry in split_report['splits'].values():
+                        entry['path'] = str(final / os.path.basename(entry['path']))
+                    split_report['report_path'] = str(final / 'split_report.json')
+                    (staged / 'split_report.json').write_text(json.dumps(
+                        {key:value for key,value in split_report.items() if key != 'report_path'},
+                        ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+                    os.replace(staged, final)
+                finally:
+                    if staged.exists(): shutil.rmtree(staged)
+                manifest = _path(split_report['splits']['train']['path'], 'effective train manifest', exists=True)
+                payload['validation_manifest'] = split_report['splits']['dev']['path']
+                args[args.index('--manifest') + 1] = str(manifest)
+                _arg(args, '--validation-manifest', _path(payload['validation_manifest'], 'validation manifest', exists=True))
+                settings['validation_manifest'] = payload['validation_manifest']
+        task.result.update(family=FAMILY, schema=SCHEMA, mode=mode, manifest=str(manifest),
+            checkpoint_dir=str(directory), epoch_target=settings['epochs'], effective_settings=settings,
+            settings_policy='resume_inherited' if mode == 'resume' else 'requested')
+        if split_report is not None: task.result['data_split'] = split_report
+        if selection is not None: task.result['dataset_selection'] = selection
         runtime._run_subprocess_task(task, args, expected_epoch=settings['epochs'],
-            result_paths=[directory / 'composer_last.pt', directory / 'composer_inference.pt'])
+            result_paths=[directory / 'composer_last.pt', directory / 'composer_inference.pt'],
+            on_finish=lambda: reservation.__exit__(None, None, None))
     except Exception as exc:
-        task.status = 'failed'; task.error = str(exc)
+        reservation.__exit__(None, None, None)
+        if task is not None:
+            task.status = 'failed'; task.error = str(exc)
+        # A published data_split is experiment evidence. Keep it if launch
+        # fails; the next fresh/finetune request must choose a new directory.
         raise
     handler._json_response({'task_id': task.task_id, 'family': FAMILY})
 

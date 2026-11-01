@@ -64,6 +64,36 @@ def _cut(steps,end,clock,prefix_length=0):
     return result
 
 
+def _step_fingerprint(steps):
+    return tuple((step.kind, str(step.start), str(step.end), step.text) for step in steps)
+
+
+def _advances(steps,start):
+    """A rewritten history may have fewer steps yet reach a later beat."""
+    return bool(steps and steps[-1].end>start)
+
+
+def _committed_history_blocker(failures,committed,song):
+    """Return native evidence only when every named atom is a committed sustain."""
+    if not failures or not committed:return None
+    events,_,_=_extract(_points(committed),song.tempo,song.first)
+    sustained={(str(event.beat),event.raw):event.note_type for event in events
+               if event.note_type in {'hold','touch_hold','slide'} and not event.protected}
+    if not sustained:return None
+    for failed in failures:
+        guard=failed['guard']
+        issues=[('failure_conflicts',issue) for issue in getattr(guard,'failure_conflicts',())]
+        issues.extend(('failure_trials',issue) for _,trial in getattr(guard,'failure_trials',()) for issue in trial)
+        for source,issue in issues:
+            named={(str(note.beat),note.raw) for note in issue.notes}
+            if named and named<=sustained.keys() and guard.enforced(issue):
+                return dict(source=source,conflict_type=issue.conflict_type,
+                    named_committed_atoms=[dict(beat=beat,raw=raw,note_type=sustained[(beat,raw)])
+                                           for beat,raw in sorted(named)],
+                    native_evidence=getattr(issue,'evidence',None))
+    return None
+
+
 def _judge(points,song,config,metrics):
     started=time.perf_counter()
     try:return detect_chart_conflicts(points,song.tempo,song.first,config)
@@ -228,7 +258,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 result['candidate_log_id']=log['candidate_id']
                 log['model_diagnostics']=result.get('model_diagnostics')
                 log['rollout_stop_reason']=result['reason']
-                interval=[point for point in result['points'] if start<=point.beat<target]
+                interval=[point for point in result['points'] if start<point.beat<=target or start==0 and point.beat==0]
                 log['event_count']=len(interval)
                 log['head_count']=sum(len(event_metadata(point.note_text).heads) for point in interval)
                 physical,hard=_gate(result,song,native_metrics,lifetimes)
@@ -248,10 +278,26 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 log['failure_reason']=('incomplete:'+result['reason'] if not complete else
                     'parse_errors' if physical.coverage.get('parse_errors') else 'enforced_native_hard_conflict')
                 failures.append(result);return
-            score=score_phrase(result['points'],_points(prefix),song,condition,start,target,
+            terminal=result['cursor']>=end and result['reason'] in {'learned_eos','tail_no_legal_onset'}
+            prior_steps=sum(step.end<=start for step in result['steps'])
+            proposed=_cut(result['steps'],commit_end,clock,prior_steps)
+            if not _advances(proposed,start) and not terminal:
+                log['failure_reason']='no_committed_progress';failures.append(result);return
+            # Score the full observed write span, including its private tail.
+            # If the first committed step overshoots the write target, charge
+            # that actual step to this evaluation instead of omitting it.
+            score_end=max(target,proposed[-1].end if proposed else target)
+            score=score_phrase(result['points'],_points(committed),song,condition,start,score_end,
                                softcomfort_strength=strength,scorer=scorer,
                                observed_end_second=second_at_beat(clock,result['cursor']))
             log['score']=score
+            log['score_start_beat']=str(start)
+            log['score_end_beat']=str(score_end)
+            log['observed_end_beat']=str(result['cursor'])
+            log['proposed_commit_end_beat']=str(proposed[-1].end if proposed else start)
+            interval=[point for point in result['points'] if start<point.beat<=score_end or start==0 and point.beat==0]
+            log['event_count']=len(interval)
+            log['head_count']=sum(len(event_metadata(point.note_text).heads) for point in interval)
             if not math.isfinite(float(score['total'])):
                 log['failure_reason']='nonfinite_quality_score';failures.append(result);return
             log.update(eligible=True,failure_reason=None)
@@ -264,6 +310,61 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
             run(list(committed)+(list(retained) if candidate_index==0 else []),
                 origin='primary_retained_tail' if candidate_index==0 and retained else 'primary')
         changes=[];current_event_retries=[];private_tail_retries=[]
+        history_blocker=_committed_history_blocker(failures,committed,song) if not valid else None
+        history_priority=bool(history_blocker)
+        attempted_historical_edits=set()
+        def try_historical_repair():
+            nonlocal repairs_used,rollbacks_used
+            if not valid and repairs_used<repair_budget:
+                for failed in list(failures):
+                    if valid or time.perf_counter()>=deadline:break
+                    for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,
+                                                    codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
+                        if repairs_used>=repair_budget or time.perf_counter()>=deadline:break
+                        edit_key=(edit['operation'],edit['beat'],edit.get('raw'),edit.get('replacement'),_step_fingerprint(prefix))
+                        if edit_key in attempted_historical_edits:continue
+                        attempted_historical_edits.add(edit_key)
+                        repairs_used+=1;run(prefix,origin='historical_sustain_edit')
+                        if valid:changes.append(edit);break
+            if not valid and rollbacks_used<rollback_budget:
+                for failed in list(failures):
+                    if valid or time.perf_counter()>=deadline:break
+                    for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,withdraw=True,
+                                                    codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
+                        if rollbacks_used>=rollback_budget or time.perf_counter()>=deadline:break
+                        edit_key=(edit['operation'],edit['beat'],edit.get('raw'),edit.get('replacement'),_step_fingerprint(prefix))
+                        if edit_key in attempted_historical_edits:continue
+                        attempted_historical_edits.add(edit_key)
+                        rollbacks_used+=1;run(prefix,origin='historical_sustain_withdrawal')
+                        if valid:changes.append(edit);break
+        if history_priority:
+            try_historical_repair()
+        if valid:
+            # An overshooting commit expands the common comparison horizon.
+            # Never score a shorter rollout as though its unobserved tail were
+            # empty; only candidates with real observations to that beat rank.
+            evaluation_end=max(Fraction(log['score_end_beat']) for log in candidate_logs if log['eligible'])
+            comparable=[]
+            for _,result,score in valid:
+                log=candidate_logs[result['candidate_log_id']]
+                if result['cursor']<evaluation_end:
+                    log.update(eligible=False,failure_reason='insufficient_observed_horizon',
+                               required_score_end_beat=str(evaluation_end))
+                    continue
+                if Fraction(log['score_end_beat'])<evaluation_end:
+                    score=score_phrase(result['points'],_points(committed),song,condition,start,evaluation_end,
+                        softcomfort_strength=strength,scorer=scorer,
+                        observed_end_second=second_at_beat(clock,result['cursor']))
+                    log['score']=score
+                    log['score_end_beat']=str(evaluation_end)
+                    interval=[point for point in result['points'] if start<point.beat<=evaluation_end or start==0 and point.beat==0]
+                    log['event_count']=len(interval)
+                    log['head_count']=sum(len(event_metadata(point.note_text).heads) for point in interval)
+                if not math.isfinite(float(score['total'])):
+                    log.update(eligible=False,failure_reason='nonfinite_quality_score')
+                    continue
+                comparable.append((float(score['total']),result,score))
+            valid=comparable
         if not valid:
             # Retry only the current unaccepted event from a private accepted
             # prefix. Keep its real timing/type distribution and temperature.
@@ -291,28 +392,17 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 retry_record=dict(operation='private_tail_retry',beat=str(start),accepted=bool(valid))
                 private_tail_retries.append(retry_record)
                 if valid:changes.append(retry_record)
-        if not valid and repairs_used<repair_budget:
-            for failed in list(failures):
-                if valid or time.perf_counter()>=deadline:break
-                for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,
-                                                codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
-                    if repairs_used>=repair_budget or time.perf_counter()>=deadline:break
-                    repairs_used+=1;run(prefix,origin='historical_sustain_edit')
-                    if valid:changes.append(edit);break
-        if not valid and rollbacks_used<rollback_budget:
-            for failed in list(failures):
-                if valid or time.perf_counter()>=deadline:break
-                for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,withdraw=True,
-                                                codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
-                    if rollbacks_used>=rollback_budget or time.perf_counter()>=deadline:break
-                    rollbacks_used+=1;run(prefix,origin='historical_sustain_withdrawal')
-                    if valid:changes.append(edit);break
+        if not history_priority:
+            try_historical_repair()
         if not valid:
             evidence=dict(start_beat=str(start),target_beat=str(target),commit_budget_end_beat=str(commit_end),
                 candidate_count=count,attempted_rollouts=attempt,repairs_used=repairs_used,repair_budget=repair_budget,
                 rollbacks_used=rollbacks_used,rollback_budget=rollback_budget,
                 current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
                 private_tail_retries_used=private_tail_retries_used,private_tail_retry_limit_per_phrase=2,
+                history_priority=history_priority,
+                retry_schedule='historical_blocker_first' if history_priority else 'current_event_first',
+                history_blocker_evidence=history_blocker,
                 time_budget_sec=seconds,deadline_exhausted=time.perf_counter()>=deadline,
                 candidate_errors=candidate_errors,candidate_logs=candidate_logs,current_event_retries=current_event_retries,private_tail_retries=private_tail_retries,
                 recent_failures=[_failure_evidence(failed) for failed in failures[-8:]],
@@ -323,9 +413,14 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 prior_phrases=records,search_totals={**aggregate,**native_metrics})
             raise PhraseSearchExhausted(f'phrase search exhausted at beat {start}: no complete physically feasible candidate; chart not exported',evidence)
         _,winner,score=max(valid,key=lambda item:item[0])
+        previous_retained=_step_fingerprint(retained)
         previous_length=sum(step.end<=start for step in winner['steps'])
         committed=_cut(winner['steps'],commit_end,clock,previous_length)
         retained=winner['steps'][len(committed):]
+        if previous_retained and _step_fingerprint(winner['steps'][previous_length:])[:len(previous_retained)]!=previous_retained:
+            for prior in records:
+                if prior.get('tentative_tail_fingerprint')==previous_retained:
+                    prior['invalidated_by_suffix_regeneration']=True
         if changes:
             changed_from=min(Fraction(edit['beat']) for edit in changes)
             for prior in records:
@@ -334,19 +429,31 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                     prior['invalidated_by_suffix_regeneration']=True
         records.append(dict(start_beat=str(start),write_end_beat=str(target),commit_end_beat=str(commit_end),
             actual_commit_end_beat=str(committed[-1].end if committed else Fraction(0)),
+            score_start_beat=str(start),
+            score_end_beat=next(log['score_end_beat'] for log in candidate_logs if log['candidate_id']==winner['candidate_log_id']),
+            tentative_tail_fingerprint=_step_fingerprint(retained),
             requested_candidates=count,attempted_rollouts=attempt,valid_candidates=len(valid),
             score=score,changes=changes,current_event_retries=current_event_retries,private_tail_retries=private_tail_retries,candidate_errors=candidate_errors,
+            history_priority=history_priority,
+            retry_schedule='historical_blocker_first' if history_priority else 'current_event_first',
+            history_blocker_evidence=history_blocker,
             candidate_logs=candidate_logs,winner_candidate_id=winner['candidate_log_id'],winner_seed=winner['seed'],
             model_diagnostics=winner.get('model_diagnostics'),
             winner_reason='only_physically_feasible_candidate' if len(valid)==1 else 'highest_music_and_trajectory_quality_score',
             score_effect='diagnostic_only_single_candidate' if count==1 else 'rank_physically_feasible_candidates',
             elapsed_sec=seconds-max(0.,deadline-time.perf_counter())))
         phrase_index+=1
-        if target==end and winner['cursor']>=end:
+        if winner['cursor']>=end and (target==end or winner['reason'] in {'learned_eos','tail_no_legal_onset'}):
             # EOS/end-of-audio is terminal metadata, never a synthetic WAIT.
             committed=list(winner['steps'])
             break
+        if not committed or committed[-1].end<=start:
+            raise PhraseSearchExhausted(f'phrase search made no progress at beat {start}',
+                                        dict(start_beat=str(start),winner_reason=winner['reason'],prior_phrases=records))
+    final_score=score_phrase(_points(committed),[],song,condition,Fraction(0),end,
+        softcomfort_strength=strength,scorer=scorer,observed_end_second=second_at_beat(clock,end))
     return committed,dict(policy='phrase_v1',candidate_count=count,stop_reason='audio_end',phrases=records,
+        final_export_score=final_score,
         repairs_used=repairs_used,rollbacks_used=rollbacks_used,search_totals={**aggregate,**native_metrics},
         current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
         private_tail_retries_used=private_tail_retries_used,private_tail_retry_limit_per_phrase=2,

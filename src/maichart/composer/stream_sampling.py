@@ -127,7 +127,7 @@ def sample_guarded_event(model, context, reference_phase, beat, guard, generator
                 template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape,
                 temperature=temperature,generator=generator,
                 **({'decision_chooser':frontier.choose} if frontier is not None else {}))
-        elif getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+        elif getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
             sampled_family=True
             if family_context is None and family_logits is None:raise ValueError('Audio semantic decoding requires candidate music context')
             family_options={'family_logits':family_logits} if family_logits is not None else {}

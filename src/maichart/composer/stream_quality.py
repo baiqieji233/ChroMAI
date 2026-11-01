@@ -287,9 +287,13 @@ class PhraseQualityScorer:
         duration = max(end-start,1e-6)
         # Callers may supply an entire rollout including its committed prefix.
         # Parse only the candidate span, so held prefix actions are counted once.
-        current_points = [point for point in points if float(start_beat)<=float(point.beat)<float(end_beat)]
+        # A StreamStep NOTE is committed at step.end. Attribute an onset at
+        # the right boundary to this span, never to the following span.
+        current_points = [point for point in points if
+                          (float(start_beat)<float(point.beat)<=float(end_beat)
+                           or float(start_beat)==0. and float(point.beat)==0.)]
         notes = self._parse(current_points)
-        active = [note for note in notes if start<=float(note.time_sec)<end
+        active = [note for note in notes if start-1e-8<=float(note.time_sec)<=end+1e-8
                   and not (note.note_type=='slide' and note.modifiers.get('no_head',False))]
         # Compare identical elapsed spans; dense chords cannot multiply coverage.
         cell_count = max(4,int(math.ceil(duration/.125)))

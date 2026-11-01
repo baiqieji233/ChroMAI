@@ -20,7 +20,7 @@ class OrderedPhraseContext(nn.Module):
     exclusively encoded by ordered_phrase_auxiliary_loss. Contrastive label
     gradients never turn future configurations into decoder inputs.
     """
-    def __init__(self, model_width, width):
+    def __init__(self, model_width, width, *, aligned=False):
         super().__init__()
         self.width = width
         self.audio_keys = nn.Linear(model_width, 64)
@@ -35,13 +35,21 @@ class OrderedPhraseContext(nn.Module):
         self.interaction = nn.Sequential(nn.Linear(4*width+1, width), nn.GELU(), nn.LayerNorm(width))
         self.interaction_output = nn.Linear(width, model_width, bias=False)
         self.predict = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.LayerNorm(width), nn.Linear(width, width))
+        self.aligned = aligned
+        if aligned:
+            self.alignment_query = nn.Linear(2*width+1,width)
+            self.alignment_key = nn.Linear(width,width)
+            self.alignment_null = nn.Parameter(torch.zeros(width))
+            self.alignment_output = nn.Linear(width,model_width,bias=False)
+            nn.init.zeros_(self.alignment_output.weight)
         for layer in (self.reference_output, self.anchor_output, self.interaction_output):
             nn.init.zeros_(layer.weight)
 
-    def encode_sequences(self, model, batch, prefix='phrase_sequence_'):
+    def encode_sequences(self, model, batch, prefix='phrase_sequence_', *, return_states=False):
         kinds = batch[prefix+'kind']
         if kinds.size(0) == 0:
-            return self.sequence_norm.weight.new_zeros(0, self.width)
+            empty = self.sequence_norm.weight.new_zeros(0, self.width)
+            return (empty,empty.new_zeros(0,kinds.size(1),self.width)) if return_states else empty
         mask = batch[prefix+'mask'].bool()
         atoms = batch[prefix+'atoms']
         atom_mask = atoms.ne(0)
@@ -74,7 +82,46 @@ class OrderedPhraseContext(nn.Module):
         sequence, _ = self.sequence_gru(inputs)
         last = (mask.long().sum(-1)-1).clamp_min(0)
         pooled = sequence.gather(1, last[:, None, None].expand(-1, 1, self.width))[:, 0]
-        return self.sequence_norm(pooled).masked_fill(~mask.any(-1)[:, None], 0.)
+        pooled = self.sequence_norm(pooled).masked_fill(~mask.any(-1)[:, None], 0.)
+        return (pooled,self.sequence_norm(sequence).masked_fill(~mask[...,None],0.)) if return_states else pooled
+
+    def aligned_read(self, batch, states, anchor, style, valid, projected_keys=None):
+        """Read bounded reference event states near the landing-relative beat.
+
+        Every reference has its own duration. A learned null supports novel
+        writing even when acoustically similar references are available.
+        """
+        indices = batch['phrase_sequence_inverse']
+        mask_bank = torch.cat((batch['phrase_sequence_mask'].new_zeros(1,states.size(1)),
+                               batch['phrase_sequence_mask']),0)
+        event_mask = mask_bank[(indices+1).clamp_min(0)] & valid[...,None]
+        beats_bank = torch.cat((batch['phrase_sequence_beats'].new_zeros(1,states.size(1)),
+                                batch['phrase_sequence_beats']),0)
+        event_beats = beats_bank[(indices+1).clamp_min(0)]
+        start,end = batch['phrase_memory_start_beat'],batch['phrase_memory_end_beat']
+        event_position = ((event_beats-start[...,None])/(end-start).clamp_min(1e-8)[...,None]).float()
+        landing = ((batch['step_beat']-batch['phrase_start_beat'])/
+                   (batch['phrase_end_beat']-batch['phrase_start_beat']).clamp_min(1e-8)).float().clamp(0,1)
+        query = self.alignment_query(torch.cat((anchor,style,landing[...,None]),-1))
+        distance = (event_position-landing[...,None,None]).abs().masked_fill(~event_mask,torch.inf)
+        # Find only the two nearest timed events per reference using scalar
+        # positions. Never broadcast all 32 hidden vectors to every query.
+        proximity,chosen = distance.topk(2,dim=-1,largest=False)
+        unique_keys = self.alignment_key(states) if projected_keys is None else projected_keys
+        sequence_bank = torch.cat((states.new_zeros(1,*states.shape[1:]),states),0)
+        key_bank = torch.cat((unique_keys.new_zeros(1,*unique_keys.shape[1:]),unique_keys),0)
+        selected = (indices+1).clamp_min(0)[...,None].expand_as(chosen)
+        events = sequence_bank[selected,chosen]
+        keys = key_bank[selected,chosen]
+        scores = (query[...,None,None,:]*keys).sum(-1)/math.sqrt(self.width)
+        # Smooth proximity retains off-beat responses and unequal phrase spans.
+        scores = (scores-4.*proximity).masked_fill(~torch.isfinite(proximity),-torch.inf).flatten(-2)
+        null_score = (query*self.alignment_null).sum(-1)[...,None]/math.sqrt(self.width)
+        scores = torch.cat((null_score,scores),-1)
+        weights = scores.float().softmax(-1).to(events)
+        values = torch.cat((self.alignment_null.expand(*anchor.shape[:-1],1,self.width),
+                            events.flatten(-3,-2)), -2)
+        return (weights[...,None]*values).sum(-2),weights[...,0],unique_keys
 
     def prepare_audio(self, cache):
         if 'ordered_configuration_keys' in cache:
@@ -119,11 +166,13 @@ class OrderedPhraseContext(nn.Module):
         prefix = self.actor_input(hidden)
         features = torch.cat((intent, progress, intent*progress, prefix, remaining[..., None]), -1)
         residual = self.interaction_output(self.interaction(features)).to(hidden)
+        if self.aligned and 'phrase_aligned_read' in output:
+            residual = residual+self.alignment_output(output['phrase_aligned_read']).to(hidden)
         return residual*batch['step_mask'][..., None]
 
 
 class CausalPhraseContext(nn.Module):
-    def __init__(self, width, condition_dim, *, ordered=False):
+    def __init__(self, width, condition_dim, *, ordered=False, aligned=False):
         super().__init__()
         model_width, width = width, min(width, 128)
         self.phrase_width = width
@@ -145,8 +194,8 @@ class CausalPhraseContext(nn.Module):
         self.tracking_output = nn.Linear(width, model_width, bias=False)
         for layer in (self.intent_output, self.progress_output, self.style_output, self.tracking_output):
             nn.init.zeros_(layer.weight)
-        if ordered:
-            self.ordered = OrderedPhraseContext(model_width, width)
+        if ordered or aligned:
+            self.ordered = OrderedPhraseContext(model_width, width, aligned=aligned)
 
     def _music(self, model, cache, inverse, start, end):
         fractions = start.new_tensor([0., .125, .25, .375, .5, .625, .75, .875, 1.])
@@ -164,7 +213,7 @@ class CausalPhraseContext(nn.Module):
                               values[..., 5:7, :].mean(-2), values[..., 7:, :].mean(-2)), -2)
         return self.audio(pooled.flatten(-2))
 
-    def forward(self, model, cache, inverse, batch, tracking_strength=0.):
+    def forward(self, model, cache, inverse, batch, tracking_strength=0., *, encoded_cache=None):
         start, end = batch['phrase_start_beat'], batch['phrase_end_beat']
         features = batch['phrase_memory_features'].float()
         if features.size(-1) != PHRASE_FEATURE_DIM or features.size(-2) > 4:
@@ -188,7 +237,12 @@ class CausalPhraseContext(nn.Module):
                 reference_music=self.ordered.music(model, ordered_cache, inverse, memory_start, memory_end)
             anchor_increment = self.ordered.anchor_output(anchor_music)
             anchor = anchor+anchor_increment
-            sequence = self.ordered.encode_sequences(model, batch)
+            if self.ordered.aligned and encoded_cache is not None and batch.get('phrase_sequence_shared',False):
+                encoded = encoded_cache
+            else:
+                encoded = self.ordered.encode_sequences(model, batch, return_states=self.ordered.aligned)
+            sequence,sequence_states = encoded[:2] if self.ordered.aligned else (encoded,None)
+            projected_keys = encoded[2] if self.ordered.aligned and len(encoded)>2 else None
             indices = batch['phrase_sequence_inverse']
             sequence_bank = torch.cat((sequence.new_zeros(1, self.phrase_width), sequence), 0)
             sequence_values = sequence_bank[(indices+1).clamp_min(0)]
@@ -201,6 +255,12 @@ class CausalPhraseContext(nn.Module):
         null = self.null_reference.expand(*anchor.shape[:-1], 1, anchor.size(-1))
         references = torch.cat((null, references), -2)
         style = self.style(batch['condition'].float())[:, None].expand_as(anchor)
+        if hasattr(self,'ordered') and self.ordered.aligned:
+            aligned_read,null_weight,projected_keys = self.ordered.aligned_read(
+                batch,sequence_states,anchor,style,valid,projected_keys)
+            ordered_output.update(phrase_aligned_read=aligned_read,
+                                  phrase_aligned_null_weight=null_weight,
+                                  _phrase_encoding_cache=(sequence,sequence_states,projected_keys))
         query = self.query(torch.cat((anchor, style), -1))
         scores = (query[..., None, :] * self.key(references)).sum(-1)/math.sqrt(anchor.size(-1))
         allowed = torch.cat((torch.ones_like(valid[..., :1]), valid), -1)
@@ -224,6 +284,34 @@ class CausalPhraseContext(nn.Module):
             phrase_prediction=prediction, phrase_repr=representation,
             phrase_reference_repr=references, phrase_reference_mask=allowed,
             phrase_residual_rms=residual.float().square().mean(-1).sqrt(), **ordered_output)
+
+    @staticmethod
+    def _candidate_view(batch):
+        candidate = {key[len('candidate_'):]:value for key,value in batch.items()
+                     if key.startswith('candidate_')}
+        candidate['condition'] = batch['condition']
+        candidate['step_mask'] = batch['step_mask'] if batch['step_mask'].shape == candidate['phrase_start_beat'].shape else batch['step_mask'][:,-1:]
+        if 'step_beat' not in candidate:
+            raise ValueError('candidate_step_beat is required')
+        return candidate
+
+    def at_candidate(self, model, cache, inverse, batch, tracking_strength=0., *, encoded_cache=None):
+        """Evaluate only the phrase branch at the selected landing clock.
+
+        The caller retains its departure-clock main hidden and timing output.
+        Candidate inputs have an independent namespace so target clocks cannot
+        silently replace timing inputs in the ordinary forward path.
+        """
+        if not hasattr(self,'ordered') or not self.ordered.aligned:
+            raise ValueError('at_candidate requires aligned phrase context')
+        return self.forward(model,cache,inverse,self._candidate_view(batch),tracking_strength,
+                            encoded_cache=encoded_cache)
+
+    def candidate_actor_residual(self, hidden, output, batch):
+        """Apply the same actor branch at landing, without main trunk replay."""
+        if not hasattr(self,'ordered') or not self.ordered.aligned:
+            raise ValueError('candidate actor requires aligned phrase context')
+        return self.ordered.actor_residual(hidden,output,self._candidate_view(batch))
 
 
 def phrase_auxiliary_loss(output, batch):

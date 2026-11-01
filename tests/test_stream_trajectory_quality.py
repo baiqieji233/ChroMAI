@@ -100,6 +100,15 @@ def test_true_musical_silence_still_prefers_rest_over_added_noise():
     assert empty['total']>noisy['total']
 
 
+def test_committed_right_boundary_is_scored_once():
+    quality=scorer()
+    note=points((1,'1'))
+    first=quality.score_phrase(note,[],0,1,softcomfort_strength=0.)
+    following=quality.score_phrase(note,note,1,2,softcomfort_strength=0.)
+    assert first['components']['actual_nps']>0.
+    assert following['components']['actual_nps']==0.
+
+
 def test_immutable_point_motion_cache_reuses_paths_and_edits_get_new_entries(monkeypatch):
     from maichart.composer import stream_quality
     native=stream_quality._native_markers;calls=[]

@@ -147,7 +147,7 @@
       `学习率 ${value("learningRate")} · batch ${value("batchSize")} × 累积 ${value("gradAccumulation")} ≈ 每次更新 ${Number(value("batchSize")) * Number(value("gradAccumulation"))} 个片段`,
       ...(eventSetFamily ? [`结构 ${value('composerDModel')} 维 / ${value('composerLayers')} 层 / FFN ${value('composerDimFeedforward')} · 精度 ${nameOf('composerPrecision')}`,
         `历史 ${value('composerHistoryEvents')} 个事件 · 短段展开 ${value('composerRolloutSteps')} 个事件`,
-        `短句：${value('composerPhraseContextPolicy')==='auto'?(value('composerLearningPolicy')==='legacy'?'关闭（旧策略）':'有序配置短句（v2）'):nameOf('composerPhraseContextPolicy')} · 类型学习：${value('eventSetPolicy_event_family_policy')==='auto'?(value('composerLearningPolicy')==='legacy'?'旧版基线（v1）':'音频先验＋持续状态与短句（v4）'):nameOf('eventSetPolicy_event_family_policy')}`,
+        `短句：${value('composerPhraseContextPolicy')==='auto'?(value('composerLearningPolicy')==='legacy'?'关闭（旧策略）':'有序配置短句（v2）'):nameOf('composerPhraseContextPolicy')} · 类型学习：${value('eventSetPolicy_event_family_policy')==='auto'?(value('composerLearningPolicy')==='legacy'?'旧版基线（v1）':'共享续写状态（推荐）'):nameOf('eventSetPolicy_event_family_policy')}`,
         `验证：${value('composerValidationManifest').trim()?'独立验证集':Number(value('composerHoldoutFraction',0))>0?`自动留出 ${Number(value('composerHoldoutFraction'))*100}%（开发＋最终留出合计）`:'关闭自动留出，无验证集'}`,
         `后台预取 ${value('composerPrefetchBatches')} batch · 音频预算 ${value('composerAudioCacheGb')} GiB`,
         '完整续训权重 composer_last.pt；推理权重 composer_inference.pt'] : composerFamily ? [`结构 ${value('composerDModel')} 维 / ${value('composerLayers')} 层 / FFN ${value('composerDimFeedforward')} · 动作槽位 ${value('composerActionSlots')}`,

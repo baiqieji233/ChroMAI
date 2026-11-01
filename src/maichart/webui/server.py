@@ -211,6 +211,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "stream_generation_contract": "chart_stream_quality_controls_v8",
                     "capabilities": {"event_set_stream": True,
                                      "event_set_runtime": "state_phrase_joint_retry_v1",
+                                     "event_set_landing_contract": "aligned_selected_family_v1",
+                                     "event_set_shared_continuation_contract": "causal_correspondence_v1",
                                      "event_set_automatic_holdout": True},
                     "training_capabilities": {"independent_touch_oversample": True,
                                               "stream_grounded_context": "causal_audio_v1",
@@ -1957,11 +1959,14 @@ def _finish_if_cancelled(task: TaskState) -> bool:
     return False
 
 
-def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: int | None, result_paths: list[Path]) -> None:
+def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: int | None, result_paths: list[Path],
+                         on_finish=None) -> None:
     def worker() -> None:
         with task.lock:
             if task.cancel_requested:
                 _finish_cancelled_unlocked(task)
+                if on_finish is not None:
+                    on_finish()
                 return
             task.status = "running"
             task.message = "启动任务"
@@ -2062,6 +2067,8 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
         finally:
             with task.lock:
                 task.process = None
+            if on_finish is not None:
+                on_finish()
 
     threading.Thread(target=worker, name=f"maichart-{task.kind}-{task.task_id}", daemon=True).start()
 

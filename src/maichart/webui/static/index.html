@@ -300,13 +300,13 @@
 <label class="field" data-event-set-only hidden>音频窗口（秒）<input id="composerWindowSeconds" type="number" min="0.1" step="0.5" value="8"></label>
 <label class="field" data-event-set-only hidden>音频共享网格（秒）<input id="composerAudioGridSeconds" type="number" min="0.005" max="0.05" step="0.005" value="0.01"><small>默认10毫秒；继续训练和微调继承检查点网格，旧检查点缺失此字段时使用50毫秒。</small></label>
 <label class="field" data-event-set-only hidden>音频规划损失权重<input id="composerPlanWeight" type="number" min="0" step="0.05" value="0.1"><small>作用于共享音频的休止概率、每秒头数率与每秒事件率监督；0关闭该项监督。</small></label>
-<label class="field" data-event-set-only hidden>短句组织与呼应<select id="composerPhraseContextPolicy"><option value="auto">自动（新阶段启用有序短句，续训继承）</option><option value="ordered_phrase_v2">有序配置短句（新版）</option><option value="causal_phrase_v1">因果短句统计（旧版）</option><option value="off">关闭（对照）</option></select><small>新版保留已完成段的配置顺序、路径和时值，并学习音乐与完整写法的联系；旧模型需在新目录微调或从头训练。</small></label>
+<label class="field" data-event-set-only hidden>短句组织与呼应<select id="composerPhraseContextPolicy"><option value="auto">自动（新阶段启用拍位对齐短句，续训继承）</option><option value="aligned_phrase_v3">拍位对齐的有序短句（新版）</option><option value="ordered_phrase_v2">有序配置短句（旧版）</option><option value="causal_phrase_v1">因果短句统计（旧版）</option><option value="off">关闭（对照）</option></select><small>新版按落点拍位读取短句意图；旧模型需在新目录微调或从头训练。</small></label>
 <label class="field" data-event-set-only hidden>持续动作区间音频<select id="composerDurationAudioPolicy"><option value="auto">自动（新阶段启用，续训继承）</option><option value="off">关闭（对照）</option><option value="interval_v1">持续区间音频</option></select><small>为支持的Hold与Slide时长细节读取其实际覆盖音乐区间。</small></label>
 <details data-event-set-only hidden><summary>短句训练高级设置</summary><label class="field">短句辅助损失权重<input id="composerPhraseLossWeight" type="number" min="0" step="0.01" value="0.05"><small>默认0.05；续训继承原值，0关闭辅助损失。</small></label></details>
-<label class="field" data-event-set-only hidden>连续生成训练修复<select id="composerLearningPolicy"><option value="auto">自动（新阶段启用新版修复，续训继承）</option><option value="legacy">旧策略基线</option><option value="checkpoint" disabled>继承检查点策略</option></select><small>新阶段保留模型已学得的节奏和配置概率，比较前后音乐变化与候选音频的逐项匹配，学习如何修正节奏选择和继续／退出倾向；学习长时间同键、交替、回旋、固定节奏及错拍历史后的真实后续，保留绝对拍位和密集段权重修复。旧检查点请用微调及新目录迁移；续训沿用原策略。</small></label>
+<label class="field" data-event-set-only hidden>连续生成训练修复<select id="composerLearningPolicy"><option value="auto">自动（新阶段启用新版修复，续训继承）</option><option value="legacy">旧策略基线</option><option value="checkpoint" disabled>继承检查点策略</option></select><small>新训练由共同的音乐、历史和持续状态学习续写；恢复训练分别处理时间与配置，只用可信对应的配置作为监督。旧检查点请用微调及新目录迁移；续训沿用原策略。</small></label>
 <label class="field" data-event-set-only hidden>循环历史训练比例<input id="composerPrefixAugmentationRate" type="number" min="0" max="1" step="0.01" value="0.15"><small>默认尝试扰动15%的短段，包含重复配置、固定间隔与真实错拍光标；新版在此比例内安排部分样本练习32／64／128事件的错误历史，保持原样本总训练权重，学习第一个可信的原谱后续目标。0关闭，验证不扰动，续训继承。</small></label>
 <label class="field" data-event-set-only hidden>验证生成温度<input id="composerGenerationEvalTemperature" type="number" min="0" step="0.05" value="0.65"><small>固定验证种子下生成面板的采样温度；续训继承检查点记录。</small></label>
-<label class="field" data-event-set-only hidden>转折学习权重<input id="composerTransitionExitWeight" type="number" min="0" step="0.1" value="0.5"><small>额外学习重复段落出口，原基础loss保持不变；续训继承。</small></label>
+<label class="field" data-event-set-only hidden>转折学习权重<input id="composerTransitionExitWeight" type="number" min="0" step="0.1" value="0"><small>历史策略可额外学习重复段落出口；新训练默认关闭，续训继承。</small></label>
 <label class="field" data-event-set-only hidden>音频类型学习比例<input id="composerEventFamilyAudioWeight" type="number" min="0" max="1" step="0.05" value="0.25"><small>类型学习预算中，默认25%校准音乐与节奏条件下的类型概率，75%学习在音乐变化时延续还是切换；不额外叠加完整损失。具体键位、Touch环区和负担仍由配置分支处理；续训继承。</small></label>
 <label class="field" data-event-set-only hidden>休止监督窗口（秒）<input id="composerPlanBlankWindowSeconds" type="number" min="0" step="0.1" value="0.5"><small>休止标签读取的音乐时间跨度，独立于音频网格分辨率；已有模型继承检查点。</small></label>
 <p class="muted" id="composerEventSetWorkerHint" data-event-set-only hidden>整拍集合共享歌曲缓存，样本准备固定使用1个线程；CPU算子线程仍可单独调整。</p>
@@ -1679,7 +1679,7 @@
     </aside>
   </main>
   <script src="/workspace_logs.js"></script>
-  <script src="/app.js"></script>
-  <script src="/workspace.js"></script>
+  <script src="/app.js?v=shared-continuation-1"></script>
+  <script src="/workspace.js?v=shared-continuation-1"></script>
 </body>
 </html>

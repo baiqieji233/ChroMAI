@@ -9,7 +9,7 @@ from maichart.composer.event_set_codec import EventSetCodec
 from maichart.composer.guard import EventGuard
 from maichart.composer.stream_data import StreamInferenceContext, StreamStep, DeltaVocabulary, NOTE, second_at_beat
 from maichart.composer.stream_generate import replay_stream_prefix, _Curve
-from maichart.composer.stream_search import _repair_prefix, search_stream
+from maichart.composer.stream_search import _repair_prefix, _advances, _committed_history_blocker, search_stream
 from maichart.event_timing import EventPoint, EventTempo
 from maichart.tempo_clock import TempoClock
 
@@ -46,6 +46,54 @@ def test_shorten_and_withdraw_keep_protected_same_onset_child():
     withdrawals=list(_repair_prefix(result,song,clock,metrics,{},withdraw=True))
     assert withdrawals and withdrawals[0][0][-1].text=='5x'
     assert old[0].text=='1h[4:8]/5x'
+
+
+def test_rewritten_history_progress_uses_beat_not_step_count():
+    _,_,_,_,_,_,step=fixture()
+    old=[step(0,1,'1'),step(1,2,'2'),step(2,3,'3')]
+    rewritten=[step(0,2,'4'),step(2,4,'5')]
+    assert len(rewritten)<len(old)
+    assert _advances(rewritten,F(3))
+    assert not _advances(rewritten[:1],F(3))
+
+
+def test_search_accepts_shorter_rewritten_history_that_advances(monkeypatch):
+    from maichart.composer import stream_quality
+    monkeypatch.setattr(stream_quality,'score_phrase',lambda *a,**kw:dict(total=1.,components={}))
+    song,clock,bank,codec,_,gf,step=fixture()
+    calls=[]
+    def rollout(prefix,seed,target,deadline):
+        calls.append(target)
+        steps=([step(0,1,'1'),step(1,2,'2'),step(2,3,'3')] if len(calls)==1
+               else [step(0,3,'4'),step(3,6,'5')])
+        return dict(steps=steps,points=[EventPoint(item.end,item.text) for item in steps],
+            cursor=steps[-1].end,reason='span_complete',guard=gf(),anchor_second=0.,
+            retries=0,timing_retries=0,forced_waits=0,
+            _physical_gate=(SimpleNamespace(coverage={'parse_errors':[]}),[]))
+    args=SimpleNamespace(seed=1,phrase_candidates=1,phrase_write_beats=3.,phrase_commit_beats=3.,
+        phrase_repair_budget=0,phrase_rollback_budget=0,phrase_time_budget_sec=30.,softcomfort_strength=1.)
+    selected,report=search_stream(rollout,song,SimpleNamespace(),args,F(6),clock,Curve(),audio_bank=bank,codec=codec)
+    assert calls==[F(3),F(6)]
+    assert len(selected)==2 and selected[-1].end==6
+    assert report['phrases'][1]['candidate_logs'][0]['eligible']
+
+
+def test_committed_sustain_conflict_is_history_priority(monkeypatch):
+    from maichart.composer import stream_search
+    song,_,_,_,_,_,step=fixture()
+    committed=[step(0,1,'1b>8[4:13]')]
+    old=SimpleNamespace(beat=F(1),raw='1b>8[4:13]')
+    new=SimpleNamespace(beat=F(2),raw='2')
+    issue=SimpleNamespace(notes=[old],conflict_type='miacode_MultiTouch',evidence={'native':'fixture'})
+    guard=SimpleNamespace(failure_conflicts=[issue],failure_trials=[],enforced=lambda item:True)
+    failed=[dict(guard=guard)]
+    event=SimpleNamespace(beat=F(1),raw=old.raw,note_type='slide',protected=False)
+    monkeypatch.setattr(stream_search,'_extract',lambda *args:([event],{},None))
+    evidence=_committed_history_blocker(failed,committed,song)
+    assert evidence['conflict_type']=='miacode_MultiTouch'
+    assert evidence['named_committed_atoms']==[dict(beat='1',raw=old.raw,note_type='slide')]
+    issue.notes=[old,new]
+    assert not _committed_history_blocker(failed,committed,song)
 
 
 @pytest.mark.parametrize('candidates',[1,2,4])
@@ -175,6 +223,69 @@ def test_current_retry_keeps_private_progress_without_spending_history_budget(mo
     assert selected[-1].end==3
     assert report['repairs_used']==0 and report['rollbacks_used']==0
     assert report['current_event_retries_used']==2
+
+
+def test_short_write_eos_terminates_without_repeating_empty_commit(monkeypatch):
+    from maichart.composer import stream_quality
+    monkeypatch.setattr(stream_quality,'score_phrase',lambda *a,**kw:dict(total=1.,components={}))
+    song,clock,bank,codec,_,gf,_=fixture()
+    calls=[]
+    def rollout(prefix,seed,target,deadline):
+        calls.append(target)
+        return dict(steps=list(prefix),points=[],cursor=F(1),reason='learned_eos',
+            guard=gf(),anchor_second=0.,retries=0,timing_retries=0,forced_waits=0,
+            _physical_gate=(SimpleNamespace(coverage={'parse_errors':[]}),[]))
+    args=SimpleNamespace(seed=1,phrase_candidates=1,phrase_write_beats=.25,phrase_commit_beats=.125,
+        phrase_repair_budget=0,phrase_rollback_budget=0,phrase_time_budget_sec=30.,softcomfort_strength=1.)
+    selected,report=search_stream(rollout,song,SimpleNamespace(),args,F(1),clock,Curve(),audio_bank=bank,codec=codec)
+    assert selected==[] and calls==[F(1,4)]
+    assert report['stop_reason']=='audio_end'
+
+
+def test_default_search_scores_full_write_tail_before_selecting(monkeypatch):
+    from maichart.composer import stream_quality
+    observed=[]
+    def score(points,prefix,song,condition,start,finish,**kwargs):
+        observed.append((tuple(point.beat for point in points),start,finish,kwargs['observed_end_second']))
+        return dict(total=1.,components={})
+    monkeypatch.setattr(stream_quality,'score_phrase',score)
+    song,clock,bank,codec,_,gf,step=fixture()
+    steps=[step(0,1,'1'),step(1,2,'2')]
+    def rollout(prefix,seed,target,deadline):
+        return dict(steps=steps,points=[EventPoint(F(1),'1'),EventPoint(F(2),'2')],
+            cursor=F(2),reason='span_complete',guard=gf(),anchor_second=0.,
+            retries=0,timing_retries=0,forced_waits=0,
+            _physical_gate=(SimpleNamespace(coverage={'parse_errors':[]}),[]))
+    args=SimpleNamespace(seed=1,phrase_candidates=1,phrase_write_beats=2.,phrase_commit_beats=1.,
+        phrase_repair_budget=0,phrase_rollback_budget=0,phrase_time_budget_sec=30.,softcomfort_strength=1.)
+    selected,report=search_stream(rollout,song,SimpleNamespace(),args,F(2),clock,Curve(),audio_bank=bank,codec=codec)
+    assert selected==steps
+    assert observed[0][:3]==((F(1),F(2)),F(0),F(2))
+    assert observed[0][3]==second_at_beat(clock,F(2))
+    assert report['phrases'][0]['score_end_beat']=='2'
+
+
+def test_overshooting_commit_requires_common_observed_score_horizon(monkeypatch):
+    from maichart.composer import stream_quality
+    monkeypatch.setattr(stream_quality,'score_phrase',lambda *a,**kw:dict(total=1.,components={}))
+    song,clock,bank,codec,_,gf,step=fixture()
+    calls=[]
+    def rollout(prefix,seed,target,deadline):
+        calls.append(seed)
+        steps=[step(0,3,'1')] if len(calls)==1 else [step(0,1,'1'),step(1,2,'2')]
+        return dict(steps=steps,points=[EventPoint(item.end,item.text) for item in steps],
+            cursor=steps[-1].end,reason='span_complete',guard=gf(),anchor_second=0.,
+            retries=0,timing_retries=0,forced_waits=0,
+            _physical_gate=(SimpleNamespace(coverage={'parse_errors':[]}),[]))
+    args=SimpleNamespace(seed=1,phrase_candidates=2,phrase_write_beats=2.,phrase_commit_beats=1.,
+        phrase_repair_budget=0,phrase_rollback_budget=0,phrase_time_budget_sec=30.,softcomfort_strength=1.)
+    selected,report=search_stream(rollout,song,SimpleNamespace(),args,F(3),clock,Curve(),audio_bank=bank,codec=codec)
+    assert selected[-1].end==3
+    first,shorter=report['phrases'][0]['candidate_logs']
+    assert first['score_end_beat']=='3' and first['eligible']
+    assert not shorter['eligible']
+    assert shorter['failure_reason']=='insufficient_observed_horizon'
+    assert shorter['required_score_end_beat']=='3'
 
 
 def test_uncommitted_sustain_tail_can_restart_without_history_budget(monkeypatch):

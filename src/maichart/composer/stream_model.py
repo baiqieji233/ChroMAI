@@ -63,11 +63,13 @@ class StreamComposerConfig:
     literal_output_policy: str = 'type_blocks_v1'
     event_family_policy: str = 'audio_state_phrase_v4'
     event_family_audio_weight: float = .25
+    template_policy: str = 'family_preserving_v1'
     window_balance_policy: str = 'sqrt_window_v2'
     button_load_policy: str = 'target_fast_v2'
     plan_kind_policy: str = 'rate_integral_v2'
     motion_continuation_policy: str = 'context_motion_v3'
     recovery_policy: str = 'mixed_exit_v2'
+    recovery_target_policy: str = 'causal_correspondence_v1'
     prefix_augmentation_rate: float = .15
     prefix_augmentation_input_policy: str = 'phase_recovery_v4'
     attention_policy: str = 'bf16_dropout_math_v1'
@@ -88,14 +90,17 @@ class StreamComposerConfig:
     phrase_loss_weight: float = .05
     duration_audio_policy: str = 'off'
     physical_policy: str = 'legacy_report_v1'
+    candidate_state_policy: str = 'selected_native_v1'
 
     def __post_init__(self):
         if self.duration_audio_policy not in ('off', 'interval_v1'):
             raise ValueError('Unsupported duration audio policy')
         if self.physical_policy not in ('legacy_report_v1', 'runtime_hard_v2'):
             raise ValueError('Unsupported physical policy')
-        if self.phrase_context_policy not in ('off', 'causal_phrase_v1', 'ordered_phrase_v2'):
+        if self.phrase_context_policy not in ('off', 'causal_phrase_v1', 'ordered_phrase_v2', 'aligned_phrase_v3'):
             raise ValueError('Unsupported phrase context policy')
+        if self.candidate_state_policy not in ('cursor_v1', 'selected_native_v1'):
+            raise ValueError('Unsupported candidate state policy')
         if not math.isfinite(self.phrase_loss_weight) or self.phrase_loss_weight < 0:
             raise ValueError('Phrase loss weight must be finite and nonnegative')
         self.delta_beats = tuple(str(x) for x in self.delta_beats)
@@ -113,22 +118,25 @@ class StreamComposerConfig:
             ('timing_audio_policy',{'legacy_v1','delta_local_v2'}),
             ('detail_policy',{'independent_v1','phase_autoregressive_v2'}),
             ('literal_output_policy',{'flat_family_v1','type_blocks_v1'}),
-            ('event_family_policy',{'legacy_v1','semantic_mass_v1','audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'}),
+            ('event_family_policy',{'legacy_v1','semantic_mass_v1','audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'}),
             ('window_balance_policy',{'sqrt_window_v2','equal_window_v1'}),
             ('button_load_policy',{'prefix_v1','target_fast_v2'}),
             ('history_window_policy',{'rolling_legacy_v1','block_aligned_v2'}),
             ('continuation_policy',{'off','typed_runs_v1','pattern_runs_v2'}),
             ('sensor_load_policy',{'button_only_v1','separate_touch_v1'}),
             ('lane_load_policy',{'off','direct_buttons_v1'}),
-            ('gap_continuation_policy',{'additive_v1','probability_v2'}),
+            ('gap_continuation_policy',{'off','additive_v1','probability_v2'}),
             ('plan_kind_policy',{'off','rate_integral_v2'}),
             ('recovery_policy',{'persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'}),
+            ('recovery_target_policy',{'authored_next_v1','causal_correspondence_v1'}),
             ('prefix_augmentation_input_policy',{'musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
             ('motion_continuation_policy',{'off','motion_continuation_v1','motion_distinct_v2','context_motion_v3'})):
             if getattr(self,name) not in allowed:raise ValueError(f'Unsupported {name}')
         if self.attention_policy not in ('auto_v1','bf16_dropout_math_v1'):raise ValueError('Unsupported attention policy')
         if self.decoder_policy not in ('postnorm_v1','prenorm_independent_v2'):raise ValueError('Unsupported decoder policy')
         if self.transition_policy not in ('off','music_exit_v1','music_exit_v2','music_exit_v3'):raise ValueError('Unsupported transition policy')
+        if self.template_policy not in ('cross_family_v1','family_preserving_v1'):
+            raise ValueError('Unsupported template policy')
         if self.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') and self.event_family_policy=='legacy_v1':
             raise ValueError(f'{self.transition_policy} requires semantic event families')
         if not math.isfinite(self.event_family_audio_weight) or not 0<=self.event_family_audio_weight<=1:
@@ -169,12 +177,14 @@ class StreamComposerConfig:
                       'motion_continuation_policy':'off',
                       'history_window_policy':'rolling_legacy_v1','continuation_policy':'off',
                       'sensor_load_policy':'button_only_v1','gap_continuation_policy':'additive_v1',
-                      'lane_load_policy':'off',
+                      'lane_load_policy':'off','candidate_state_policy':'cursor_v1',
                       'recovery_policy':'persistent_v1','prefix_augmentation_rate':0.,
+                       'recovery_target_policy':'authored_next_v1',
                       'prefix_augmentation_input_policy':'causal_window_config_time_first_decision_v3',
                       'transition_exit_weight':0.,
                       'attention_policy':'auto_v1',
                       'decoder_policy':'postnorm_v1','transition_policy':'off',
+                      'template_policy':'cross_family_v1',
                       'plan_target_units':'counts_per_audio_cell','plan_blank_window_seconds':0.,
                       'plan_loss_normalization':'cell_mean_v1',**values})
 
@@ -188,10 +198,14 @@ class StreamComposer(nn.Module):
         if config.duration_audio_policy == 'interval_v1':
             from .stream_duration import DurationAudioScorer
             self.duration_audio = DurationAudioScorer(d, codec)
-        if config.phrase_context_policy in ('causal_phrase_v1', 'ordered_phrase_v2'):
+        if config.phrase_context_policy in ('causal_phrase_v1', 'ordered_phrase_v2', 'aligned_phrase_v3'):
             from .stream_phrase_model import CausalPhraseContext
             self.phrase_context = CausalPhraseContext(d, config.condition_dim,
-                ordered=config.phrase_context_policy=='ordered_phrase_v2')
+                ordered=config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'),
+                aligned=config.phrase_context_policy=='aligned_phrase_v3')
+        if config.candidate_state_policy == 'selected_native_v1':
+            self.candidate_state_projection = nn.Linear(101, d, bias=False)
+            nn.init.zeros_(self.candidate_state_projection.weight)
         self.audio_input = nn.Sequential(nn.Linear(config.audio_dim, d), nn.GELU(), nn.LayerNorm(d))
         self.audio_local = nn.Conv1d(d, d, 5, padding=2, groups=d)
         self.audio_clock = nn.Linear(14 if config.clock_policy=='musical_v2' else 4, d)
@@ -279,13 +293,15 @@ class StreamComposer(nn.Module):
             for module in (self.event_family_head,self.literal_route_head):
                 nn.init.zeros_(module.weight);nn.init.zeros_(module.bias)
             nn.init.zeros_(self.literal_family_embedding.weight)
-            if config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+            if config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
                 # Current music is the nonzero identity basis. New projections
                 # start at zero, without creating a double-zero gradient path.
                 self.family_audio_projection=nn.Linear(5*d,d,bias=False)
                 self.audio_event_family_head=nn.Linear(d,31)
                 modules=[self.family_audio_projection,self.audio_event_family_head]
-                if config.event_family_policy=='audio_semantic_v2':
+                if config.event_family_policy=='shared_continuation_v1':
+                    pass
+                elif config.event_family_policy=='audio_semantic_v2':
                     self.family_history_projection=nn.Linear(30,d,bias=False)
                     modules.append(self.family_history_projection)
                 else:
@@ -632,6 +648,12 @@ class StreamComposer(nn.Module):
     def action_context_at(self, hidden, event_seconds, audio_cache, song_inverse,batch=None,*,return_button_load=False):
         music = self._read_audio(audio_cache, event_seconds, song_inverse)
         result=self.action_fusion(torch.cat((hidden, music.to(hidden)), -1))
+        if hasattr(self,'candidate_state_projection') and batch is not None:
+            from .stream_candidate_state import summarize_candidate_state
+            state=batch.get('candidate_action_state',batch.get('action_state'))
+            mask=batch.get('candidate_action_state_mask',batch.get('action_state_mask'))
+            if state is not None:
+                result=result+self.candidate_state_projection(summarize_candidate_state(state,mask)).to(result)
         if hasattr(self,'action_continuation_projection') and batch is not None:
             result=result+self.action_continuation_projection(self._continuation_input(batch,hidden)).to(result)
         button_load=None
@@ -648,7 +670,44 @@ class StreamComposer(nn.Module):
         if hasattr(self,'touch_load_projection') and batch is not None:
             result=result+self.touch_load_projection(self._pad_load(self.atom_touch,
                 batch['history_atoms'],batch['history_kind'],batch['step_second'],event_seconds)).to(result)
+        if self.config.event_family_policy=='shared_continuation_v1':
+            result=F.layer_norm(result,(result.size(-1),))
         return (result,button_load) if return_button_load else result
+
+    def prepare_action_phrase(self, output, batch, audio_cache):
+        """Landing-only branch. Timing always keeps its departure-clock hidden."""
+        if output.get('_action_phrase_ready',False):return output['hidden'],output
+        if self.config.phrase_context_policy!='aligned_phrase_v3' or 'candidate_phrase_start_beat' not in batch:
+            return output['hidden'],output
+        residual,phrase=self.phrase_context.at_candidate(self,audio_cache,batch['song_inverse'],batch,
+            tracking_strength=batch.get('audio_tracking_strength',self._audio_tracking_strength),
+            encoded_cache=output.get('_phrase_encoding_cache'))
+        base=output.get('decoder_hidden',output['hidden'])
+        # In inference the CPU query contains only the selected final position.
+        tail=phrase['phrase_intent'].size(1)==1 and base.size(1)>1
+        actor=self.phrase_context.candidate_actor_residual(base[:,-1:] if tail else base,phrase,batch)
+        old=output.get('departure_phrase_residual',torch.zeros_like(base))
+        if tail:
+            last=base[:,-1:]+actor+residual-(0 if self.config.event_family_policy=='shared_continuation_v1' else old[:,-1:])
+            hidden=torch.cat((base[:,:-1],last),1)
+        else:hidden=base+actor+residual-(0 if self.config.event_family_policy=='shared_continuation_v1' else old)
+        return hidden,{**output,**phrase,'hidden':hidden,'_action_phrase_ready':True}
+
+    def candidate_action_state(self,output,batch,audio_cache,event_seconds,*,return_button_load=False):
+        """Shared selected-onset state for training, generation, and recovery."""
+        hidden,prepared=self.prepare_action_phrase(output,batch,audio_cache)
+        action=self.action_context_at(hidden,event_seconds,audio_cache,batch['song_inverse'],batch,
+            return_button_load=return_button_load)
+        if return_button_load:
+            context,load=action
+            return context,load,prepared
+        return action,prepared
+
+    def family_logits_for_action(self,action):
+        """Semantic type decision from the same state used by shape and phase."""
+        if self.config.event_family_policy!='shared_continuation_v1':
+            raise ValueError('Shared family logits require shared_continuation_v1')
+        return self.event_family_head(action).float().masked_fill(~self.semantic_family_supported,-1e4)
 
     def action_context_for_delta(self, output, batch, delta_ids, audio_cache, *, event_seconds=None,return_button_load=False):
         """Condition actions on sampled time; exact TempoClock seconds may override interpolation."""
@@ -667,7 +726,8 @@ class StreamComposer(nn.Module):
             mix = ((query-lo)/(hi-lo).clamp_min(1e-8)).clamp(0, 1)
             seconds = audio_cache['seconds'][inverse]
             event_seconds = seconds.gather(1, left)+(seconds.gather(1, right)-seconds.gather(1, left))*mix
-        return self.action_context_at(output['hidden'], event_seconds, audio_cache, batch['song_inverse'],batch,
+        action_hidden,_=self.prepare_action_phrase(output,batch,audio_cache)
+        return self.action_context_at(action_hidden, event_seconds, audio_cache, batch['song_inverse'],batch,
                                       return_button_load=return_button_load)
 
     def _condition_plan(self,cache,condition,inverse):
@@ -976,6 +1036,7 @@ class StreamComposer(nn.Module):
         nearby = self._read_audio(cache, beat[..., None]+offsets, inverse, clock='beats')
         x = x + self.near_audio(nearby.flatten(-2))
         phrase_output = {}
+        phrase_residual=torch.zeros_like(x)
         if hasattr(self, 'phrase_context'):
             phrase_residual, phrase_output = self.phrase_context(self, cache, inverse, batch,
                 tracking_strength=batch.get('audio_tracking_strength', self._audio_tracking_strength))
@@ -988,6 +1049,7 @@ class StreamComposer(nn.Module):
             hidden = self.decoder(x, cache['global'][inverse], tgt_mask=causal,
                 tgt_key_padding_mask=~safe_valid, memory_key_padding_mask=~cache['global_mask'][inverse])
         hidden = hidden * valid[..., None]
+        decoder_hidden=hidden
         if hasattr(self, 'phrase_context') and hasattr(self.phrase_context, 'ordered'):
             ordered_residual = self.phrase_context.ordered.actor_residual(hidden, phrase_output, batch)
             hidden = hidden+ordered_residual
@@ -1076,21 +1138,27 @@ class StreamComposer(nn.Module):
             motion_options=dict(motion_keep_logit=action_decision[...,1],
                 motion_reference_shape=self.motion_reference_shapes(batch))
         else:motion_options={}
+        action_source={**phrase_output,'hidden':hidden,'decoder_hidden':decoder_hidden,
+             'departure_phrase_residual':phrase_residual}
         if hasattr(self,'lane_load_projection'):
-            action,button_load=self.action_context_at(hidden,batch.get('target_second',batch['step_second']),
-                cache,inverse,batch,return_button_load=True)
+            action,button_load,action_phrase_output=self.candidate_action_state(action_source,batch,cache,
+                batch.get('target_second',batch['step_second']),return_button_load=True)
         else:
-            action=self.action_context_at(hidden,batch.get('target_second',batch['step_second']),cache,inverse,batch)
+            action,action_phrase_output=self.candidate_action_state(action_source,batch,cache,
+                batch.get('target_second',batch['step_second']))
             button_load=None
         shape_logits = None
         event_routes=None
         family_context=None
         if self.config.event_family_policy!='legacy_v1':
-            if self.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
-                family_context=self.family_context_at(cache,batch.get('target_second',batch['step_second']),inverse,batch,phrase_output=phrase_output)
+            if self.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+                family_context=self.family_context_at(cache,batch.get('target_second',batch['step_second']),inverse,batch,phrase_output=action_phrase_output)
+            selected_family_logits=(self.family_logits_for_action(action)
+                if self.config.event_family_policy=='shared_continuation_v1' else
+                family_context['full_logits'] if family_context is not None and 'full_logits' in family_context else None)
             event_routes=self.event_route_log_probs(action,
                 family_context=family_context['full'] if family_context is not None else None,
-                family_logits=(family_context['full_logits'] if family_context is not None and 'full_logits' in family_context else None),**transition_options)
+                family_logits=selected_family_logits,**transition_options)
             event_routes=event_routes.masked_fill(~torch.isfinite(event_routes),-1e4)
             # Preserve the public shape view for diagnostics. The supervised
             # likelihood below uses the exact semantic literal route.
@@ -1100,21 +1168,22 @@ class StreamComposer(nn.Module):
             shape_logits=self.shape_head(action)
         shapes = (batch['target_shape'] if 'target_shape' in batch else shape_logits.argmax(-1)).clamp_min(0)
         result = {'kind_logits': kind_logits, 'delta_logits': delta_logits,
+                  'decoder_hidden':decoder_hidden,'departure_phrase_residual':phrase_residual,
                   'shape_logits': shape_logits,
                   'phase_logits': self.event_phase_logits(action, shapes, reference_phase,reference_phase_mask,motion_distribution,button_load,**motion_options),
                   'hidden': hidden, 'action_context': action, 'reference_phase': reference_phase,
                   'reference_phase_mask':reference_phase_mask,'repeat_delta_id':repeat_delta_id}
         result.update(phrase_output)
         if hasattr(self, 'duration_audio'):
-            result['duration_audio_context'] = self.duration_context_at(result, batch,
+            result['duration_audio_context'] = self.duration_context_at(action_phrase_output, batch,
                 batch.get('target_second', batch['step_second']), cache)
         if motion_distribution is not None:result['motion_phase_distribution']=motion_distribution
         if time_keep_mask is not None:
             result.update(timing_keep_mask=time_keep_mask,**motion_options,**transition_options)
         if event_routes is not None:
             result['event_route_log_probs']=event_routes
-            result['event_family_logits']=(family_context['full_logits'] if family_context is not None and 'full_logits' in family_context
-                else self.event_family_scores(family_context['full'] if family_context is not None else action))
+            result['event_family_logits']=(selected_family_logits if selected_family_logits is not None else
+                self.event_family_scores(family_context['full'] if family_context is not None else action))
             if self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
                 result['event_family_logits']=grouped_logsumexp(event_routes,self.semantic_route_families-1,groups=31)
             if family_context is not None:
@@ -1174,7 +1243,7 @@ class StreamComposer(nn.Module):
 
     def family_context_at(self,audio_cache,event_seconds,song_inverse,batch,*,phrase_output=None):
         """Music-first semantic input, separate from the geometry decoder."""
-        if self.config.event_family_policy not in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+        if self.config.event_family_policy not in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
             raise ValueError('Music-first family context requires an audio semantic policy')
         music=self._read_audio(audio_cache,event_seconds,song_inverse)
         beat_cache={**audio_cache,'family_beat_values':audio_cache['beats'][...,None]}
@@ -1196,6 +1265,9 @@ class StreamComposer(nn.Module):
             rhythm=self._family_rhythm_features(audio_cache,event_seconds,beats,song_inverse,batch,condition)
             projected=projected+self.family_rhythm_projection(rhythm).to(projected)
         audio=F.layer_norm(music+condition.to(music)+projected,(self.config.d_model,))
+        if self.config.event_family_policy=='shared_continuation_v1':
+            audio_logits=self.audio_event_family_head(audio).float().masked_fill(~self.semantic_family_supported,-1e4)
+            return dict(full=audio,audio=audio,audio_logits=audio_logits)
         if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4'):
             from .stream_actions import refresh_family_log_probs
             previous_family,previous_seconds,has_previous=self._family_previous_note(batch)
@@ -1282,8 +1354,9 @@ class StreamComposer(nn.Module):
     @torch.no_grad()
     def sample_event_family(self,family_context=None,*,family_logits=None,temperature=1.,generator=None):
         if family_logits is None:
-            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4'):
-                raise ValueError(f'{self.config.event_family_policy} requires mixed family_logits')
+            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+                requirement=('candidate' if self.config.event_family_policy=='shared_continuation_v1' else 'mixed')
+                raise ValueError(f'{self.config.event_family_policy} requires {requirement} family_logits')
             if family_context is None:raise ValueError('Semantic family selection requires its own context')
             family_logits=self.event_family_scores(family_context)
         logits=family_logits.float().reshape(-1,31)
@@ -1310,17 +1383,23 @@ class StreamComposer(nn.Module):
             family_id=torch.as_tensor(family_override,device=scores.device,dtype=torch.long)
             scores=scores.masked_fill(self.semantic_route_families!=family_id[...,None],-torch.inf)
         if family_logits is None:
-            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4'):
-                raise ValueError(f'{self.config.event_family_policy} requires mixed family_logits')
+            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+                requirement=('candidate' if self.config.event_family_policy=='shared_continuation_v1' else 'mixed')
+                raise ValueError(f'{self.config.event_family_policy} requires {requirement} family_logits')
             if self.config.event_family_policy=='audio_semantic_v2' and family_context is None:
                 raise ValueError('audio_semantic_v2 requires candidate music family_context')
             family_logits=self.event_family_scores(contexts if family_context is None else family_context)
         result=grouped_event_log_probs(scores,family_logits,
             self.semantic_route_families,self.semantic_family_supported,temperature=temperature)
         if self.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') and template_keep_logit is not None:
-            from .stream_transition import two_group_log_probs
             mask=self.template_keep_mask(template_reference_shape,result)
-            result=two_group_log_probs(result,mask,self.transition_keep_logit(result,mask,template_keep_logit))
+            if self.config.template_policy=='family_preserving_v1':
+                from .stream_actions import family_preserving_template_log_probs
+                result=family_preserving_template_log_probs(result,mask,self.semantic_route_families,
+                    template_keep_logit,residual=self.config.transition_policy in ('music_exit_v2','music_exit_v3'))
+            else:
+                from .stream_transition import two_group_log_probs
+                result=two_group_log_probs(result,mask,self.transition_keep_logit(result,mask,template_keep_logit))
             if template_keep_override is not None:
                 selected=mask if bool(template_keep_override) else ~mask
                 result=result.masked_fill(~selected,-torch.inf)
@@ -1336,10 +1415,25 @@ class StreamComposer(nn.Module):
     @torch.no_grad()
     def sample_event_intent(self,context,*,family_logits,template_keep_logit,template_reference_shape,
                             temperature=1.,generator=None,decision_chooser=None):
-        """Choose template continuation, then semantic family for one proposal."""
+        """Choose the semantic family and template decision for one proposal."""
         routes=self.event_route_log_probs(context.reshape(1,-1),family_logits=family_logits,
             template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape).reshape(-1)
         mask=self.template_keep_mask(template_reference_shape,routes)
+        if self.config.template_policy=='family_preserving_v1':
+            scores=grouped_logsumexp(routes,self.semantic_route_families-1,groups=31)
+            scores=scores.reshape(-1).masked_fill(~self.semantic_family_supported,-torch.inf)
+            if not bool(torch.isfinite(scores).any()):return None,None
+            family=(decision_chooser(scores)+1 if decision_chooser is not None else
+                self.sample_event_family(family_logits=scores,temperature=temperature,generator=generator))
+            selected=self.semantic_route_families.eq(family)
+            keep=mask&selected
+            leave=(~mask)&selected
+            masses=torch.stack((routes.masked_fill(~keep,-torch.inf).logsumexp(-1),
+                routes.masked_fill(~leave,-torch.inf).logsumexp(-1)))
+            if not bool(torch.isfinite(masses[0])):return family,False
+            group=(decision_chooser(masses) if decision_chooser is not None else
+                int(masses.argmax()) if temperature<=0 else int(torch.multinomial(masses.softmax(-1),1,generator=generator)))
+            return family,group==0
         masses=torch.stack((routes.masked_fill(~mask,-torch.inf).logsumexp(-1),
             routes.masked_fill(mask,-torch.inf).logsumexp(-1)))
         if not bool(torch.isfinite(masses).any()):return None,None
@@ -1369,6 +1463,8 @@ class StreamComposer(nn.Module):
         counts=torch.as_tensor(family_counts,device=self.active_event_family_head.bias.device,dtype=torch.float32).reshape(31)
         prior=(counts+.5).log()
         self.active_event_family_head.bias.copy_(prior-prior.logsumexp(-1))
+        if self.config.event_family_policy=='shared_continuation_v1':
+            self.audio_event_family_head.bias.copy_(prior-prior.logsumexp(-1))
         if literal_counts is None:return
         literals=torch.as_tensor(literal_counts,device=counts.device,dtype=torch.float32).reshape(31)
         for family in range(1,32):
@@ -1673,12 +1769,19 @@ class StreamComposer(nn.Module):
 def stream_loss(model, output, batch):
     """Joint sequence likelihood, uniform-time plan and optional recovery group."""
     weights = batch['loss_mask'].float()*batch.get('sample_weight', torch.ones_like(batch['loss_mask'])).float()
+    # A changed prefix can have a trustworthy musical time without a unique
+    # authored spatial continuation. Never train that arbitrary answer through
+    # a second configuration head after masking the first one.
+    configuration_mask = batch.get('configuration_mask', torch.ones_like(batch['loss_mask'])).bool()
+    configuration_weights = weights*configuration_mask
     # Dataset target weights total K per fixed time window. Renormalizing by
     # their sum here would cancel that balancing in homogeneous/single batches.
     denominator = float(batch.get('_loss_normalizer', weights.size(0)*model.config.rollout_steps))
     if denominator <= 0:raise ValueError('Stream loss normalizer must be positive')
     def reduce(values):
         return (values*weights).sum()/denominator
+    def reduce_configuration(values):
+        return (values*configuration_weights).sum()/denominator
     kind = batch['target_kind']
     note = kind.eq(NOTE)
     kind_nll=F.cross_entropy(output['kind_logits'].flatten(0, 1), kind.flatten(), reduction='none').reshape_as(weights)
@@ -1710,26 +1813,26 @@ def stream_loss(model, output, batch):
         shapes=batch['target_shape'].clamp_min(0)
         routes=torch.where(shapes.gt(0),shapes-1,model.codec.num_shapes-2+families.clamp_min(1))
         shape_nll=-output['event_route_log_probs'].gather(-1,routes[...,None]).squeeze(-1)
-        shape_nll=shape_nll.masked_fill(~(note&weights.gt(0)),0.)
+        shape_nll=shape_nll.masked_fill(~(note&configuration_weights.gt(0)),0.)
         family_nll=F.cross_entropy(output['event_family_logits'].flatten(0,1),
             (families.clamp_min(1)-1).flatten(),reduction='none').reshape_as(weights)
-        family_full_loss=reduce(family_nll*note)
-        if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
+        family_full_loss=reduce_configuration(family_nll*note)
+        if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
             audio_family_nll=F.cross_entropy(output['event_family_audio_logits'].flatten(0,1),
                 (families.clamp_min(1)-1).flatten(),reduction='none').reshape_as(weights)
             alpha=model.config.event_family_audio_weight
             # Reallocate the existing family budget; do not stack a second
             # full family CE onto the configuration objective. Exit targets
             # below consume this same budgeted shape_nll.
-            shape_nll=shape_nll+alpha*(audio_family_nll-family_nll).masked_fill(~(note&weights.gt(0)),0.)
-            family_audio_loss=reduce(audio_family_nll*note)
+            shape_nll=shape_nll+alpha*(audio_family_nll-family_nll).masked_fill(~(note&configuration_weights.gt(0)),0.)
+            family_audio_loss=reduce_configuration(audio_family_nll*note)
             family_loss=(1-alpha)*family_full_loss+alpha*family_audio_loss
         else:family_loss=family_full_loss
     else:
-        shape_nll=F.cross_entropy(output['shape_logits'].flatten(0, 1), batch['target_shape'].clamp_min(0).flatten(), reduction='none').reshape_as(weights)*note
-    shape_loss = reduce(shape_nll)
+        shape_nll=F.cross_entropy(output['shape_logits'].flatten(0, 1), batch['target_shape'].clamp_min(0).flatten(), reduction='none').reshape_as(weights)*note*configuration_mask
+    shape_loss = reduce_configuration(shape_nll)
     phase_mask = batch['target_phase_mask'].bool()
-    regular = note & batch['target_shape'].gt(0) & weights.gt(0)
+    regular = note & batch['target_shape'].gt(0) & configuration_weights.gt(0)
     # Give non-NOTE/fallback rows a finite dummy marginal before masking them.
     safe_mask = phase_mask | ~regular[..., None]
     phase_nll = -output['phase_logits'].float().log_softmax(-1).masked_fill(~safe_mask, -torch.inf).logsumexp(-1)
@@ -1737,7 +1840,7 @@ def stream_loss(model, output, batch):
     detail_sum = output['action_context'].sum()*0.
     context = output['action_context'].flatten(0, 1)
     details = batch['target_details'].flatten(0, 1)
-    flat_weights = weights.flatten()
+    flat_weights = configuration_weights.flatten()
     detail_per_row=context.sum(-1)*0.
     # Collation already knows the target grouping on CPU. No device-to-host
     # shape discovery or dynamically sized boolean indexing in this hot path.
@@ -1800,7 +1903,7 @@ def stream_loss(model, output, batch):
         detail_per_row=detail_per_row.index_add(0,literal,literal_nll)
     detail_loss = detail_sum/denominator
     with torch.no_grad():
-        per_event_detail=detail_per_row.detach().reshape_as(weights)
+        per_event_detail=detail_per_row.detach().reshape_as(weights)*configuration_mask
         regular_detail_mask=note&batch['target_shape'].gt(0)
         literal_detail_mask=note&batch['target_shape'].eq(0)
         augmented_rows=batch.get('augmented_row_mask',torch.zeros(weights.size(0),device=weights.device,dtype=torch.bool)).bool()
@@ -1816,8 +1919,8 @@ def stream_loss(model, output, batch):
             augmented_detail_loss=reduce(per_event_detail*augmented_mask))
         for label,mask in (('regular',regular_detail_mask),('literal',literal_detail_mask),('sustain',sustain),
                            ('authored',note&~augmented_mask),('augmented',note&augmented_mask)):
-            detail_metrics[label+'_detail_count']=(mask&weights.gt(0)).sum().float()
-            detail_metrics[label+'_detail_weight_sum']=(weights*mask).sum()
+            detail_metrics[label+'_detail_count']=(mask&configuration_weights.gt(0)).sum().float()
+            detail_metrics[label+'_detail_weight_sum']=(configuration_weights*mask).sum()
     plan_loss = kind_loss.new_zeros(())
     plan_rate_loss=kind_loss.new_zeros(())
     plan_blank_loss=kind_loss.new_zeros(())
@@ -1853,7 +1956,7 @@ def stream_loss(model, output, batch):
     exit_mask=(batch.get('transition_exit_mask',torch.zeros_like(note)).bool()
                &batch.get('transition_exit_labels',torch.zeros_like(note)).bool()
                &(note|kind.eq(WAIT)|kind.eq(EOS))&weights.gt(0))
-    joint_nll=kind_nll+delta_nll+shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights)
+    joint_nll=kind_nll+delta_nll+(shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights))*configuration_mask
     transition_exit_loss=model.config.transition_exit_weight*reduce(joint_nll*exit_mask)
     phrase_loss = kind_loss.new_zeros(())
     phrase_metrics = {}
@@ -1914,6 +2017,10 @@ def stream_loss(model, output, batch):
         exit_note_count=(exit_mask&note).sum(),exit_wait_count=(exit_mask&kind.eq(WAIT)).sum(),
         exit_eos_count=(exit_mask&kind.eq(EOS)).sum(),
         recovery_loss=model.config.recovery_weight*recovery,**continuation_metrics,**phrase_metrics,**detail_metrics).items()}
+    metrics.update(configuration_target_count=(note&configuration_weights.gt(0)).sum().detach().float(),
+                   configuration_target_weight=(configuration_weights*note).sum().detach(),
+                   timing_only_target_count=(note&weights.gt(0)&~configuration_mask).sum().detach().float(),
+                   timing_target_weight=weights.sum().detach())
     return total, metrics
 
 

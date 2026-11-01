@@ -17,7 +17,7 @@ def canonical_output_directory(directory) -> Path:
 
 
 @contextmanager
-def training_output_lock(directory):
+def _directory_lock(directory, name):
     """Fail immediately if another trainer owns this canonical output directory.
 
     Keep the context around preparation, training and every checkpoint save.
@@ -27,7 +27,7 @@ def training_output_lock(directory):
     """
     destination = canonical_output_directory(directory)
     destination.mkdir(parents=True, exist_ok=True)
-    stream = (destination / ".composer-training.lock").open("a+b")
+    stream = (destination / name).open("a+b")
     acquired = False
     try:
         try:
@@ -59,3 +59,13 @@ def training_output_lock(directory):
                     fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
         finally:
             stream.close()
+
+
+def training_output_lock(directory):
+    """Exclude simultaneous trainer processes."""
+    return _directory_lock(directory, ".composer-training.lock")
+
+
+def training_request_lock(directory):
+    """Reserve an output across WebUI split preparation and its async trainer."""
+    return _directory_lock(directory, ".composer-training-request.lock")

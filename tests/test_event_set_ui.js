@@ -98,7 +98,7 @@ for(const architecture of ['event_set_stream_v1','audio_grounded_v3']) {
 test('learning repair payload maps actual policies and checkpoint resume is locked',()=>{
   const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
   c.applyEventSetFreshDefaults();
-  let payload=c.chartComposerTrainingPayload();assert.equal(payload.continuation_policy,'auto');assert.equal(payload.lane_load_policy,'auto');assert.equal(payload.recovery_policy,'auto');assert.equal(payload.prefix_augmentation_rate,.15);assert.equal(payload.generation_eval_temperature,.65);assert.equal(payload.transition_exit_weight,.5);
+  let payload=c.chartComposerTrainingPayload();assert.equal(payload.continuation_policy,'auto');assert.equal(payload.lane_load_policy,'auto');assert.equal(payload.recovery_policy,'auto');assert.equal(payload.prefix_augmentation_rate,.15);assert.equal(payload.generation_eval_temperature,.65);assert.equal(payload.transition_exit_weight,0);
   const legacyPolicies={transition_policy:'off',decoder_policy:'postnorm_v1',window_balance_policy:'equal_window_v1',
     timing_group_policy:'phase_only_v1',literal_output_policy:'flat_family_v1',
     history_window_policy:'rolling_legacy_v1',continuation_policy:'off',sensor_load_policy:'button_only_v1',
@@ -255,7 +255,7 @@ test('workspace event-set summary reports active inputs without old candidate sl
     list:(_id,rows)=>summary=rows});
   vm.runInContext(workspace.slice(start,end)+'}',c);c.refresh();
   const rendered=summary.join('\n');assert.match(rendered,/总目标 20/);assert.match(rendered,/历史 96/);
-  assert.match(rendered,/短段展开 24/);assert.match(rendered,/有序配置短句/);assert.match(rendered,/持续状态与短句/);
+  assert.match(rendered,/短段展开 24/);assert.match(rendered,/有序配置短句/);assert.match(rendered,/共享续写状态/);
   assert.match(rendered,/5%（开发＋最终留出合计）/);assert.doesNotMatch(rendered,/动作槽位|候选 96|额外推理权重关闭/);
 });
 
@@ -274,4 +274,25 @@ test('fresh defaults replace known output directories while preserving explicit 
   }
   c.currentTrainingMode=()=> 'resume';e('#checkpointDir').value='checkpoints/song_form_v2';
   c.applyEventSetFreshDefaults();assert.equal(e('#checkpointDir').value,'checkpoints/song_form_v2');
+});
+
+
+test('shared continuation and recovery target follow fresh and checkpoint policies',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.applyEventSetFreshDefaults();let payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.event_family_policy,'auto');assert.equal(payload.recovery_target_policy,'auto');assert.equal(payload.gap_continuation_policy,'auto');
+  assert.equal(payload.transition_exit_weight,0);assert.equal(payload.event_family_audio_weight,.25);
+  e('#eventSetPolicy_event_family_policy').value='shared_continuation_v1';
+  e('#eventSetPolicy_recovery_target_policy').value='causal_correspondence_v1';
+  payload=c.chartComposerTrainingPayload();assert.equal(payload.event_family_policy,'shared_continuation_v1');
+  assert.equal(payload.recovery_target_policy,'causal_correspondence_v1');
+  c.currentTrainingMode=()=> 'resume';
+  c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{architecture_profile:'event_set_stream_v1',event_family_policy:'audio_state_phrase_v4'},args:{}},'resume');
+  payload=c.chartComposerTrainingPayload();assert.equal(payload.event_family_policy,'audio_state_phrase_v4');assert.equal(payload.recovery_target_policy,'authored_next_v1');
+});
+
+test('gap continuation offers off and retains historical choices',()=>{
+  const c=vm.createContext({});
+  vm.runInContext(source.slice(source.indexOf('const EVENT_SET_LEARNING_POLICIES ='),source.indexOf('function chartComposerTrainingPayload(')),c);
+  assert.deepEqual(Array.from(vm.runInContext('EVENT_SET_LEARNING_POLICIES.gap_continuation_policy',c)),['off','probability_v2','additive_v1']);
 });

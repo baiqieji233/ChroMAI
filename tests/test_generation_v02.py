@@ -1,6 +1,7 @@
 from fractions import Fraction
 
 import torch
+import pytest
 
 from maichart.generation.conditions import GenerationCondition, condition_from_targets
 from maichart.generation.model import ConditionedChartTransformer, ConditionedChartTransformerConfig
@@ -61,3 +62,18 @@ def test_tempo_map_integrates_chart_seconds():
         tempo_changes=[TempoChange(Fraction(0), 120), TempoChange(Fraction(1), 150)],
     )
     assert chart.notes[0].time_sec == 0.9
+
+
+def test_off_frame_tempo_change_roundtrips_every_clock():
+    from maichart.event_timing import parse_event_chart_text, seconds_at_beat
+    text, chart = compile_predictions(
+        {1:[PredictedNote('tap',1)], 2:[PredictedNote('tap',2)]},
+        frame_count=3, bpm=120, division=16, first=0.25,
+        tempo_changes=[TempoChange(Fraction(0),120),TempoChange(Fraction(1,8),240)])
+    parsed=parse_event_chart_text(f'&first=0.25\n&inote_5={text}\n',5)
+    assert '(240)' in text and '{32}' in text
+    assert [(tempo.beat,tempo.bpm) for tempo in parsed.tempo_changes] == [
+        (Fraction(str(item.beat)),item.bpm) for item in chart.timing.bpms]
+    assert [point.beat for point in parsed.points] == [Fraction(str(note.beat)) for note in chart.notes]
+    for point,note in zip(parsed.points,chart.notes):
+        assert seconds_at_beat(point.beat,parsed.tempo_changes,parsed.first) == pytest.approx(note.time_sec)

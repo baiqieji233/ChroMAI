@@ -33,7 +33,10 @@ from .events import event_metadata
 from .stream_bank_cache import StreamBankDiskCache, bank_identity
 from .stream_continuation import ContinuationState, continuation_rows, continuation_dim, POLICIES as CONTINUATION_POLICIES
 from .stream_timing import encode_history_gap, TIMING_POLICIES
-from .stream_phrase import PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS, collate_phrase_sequences, collate_phrase_music
+from .stream_phrase import (PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS,
+    collate_phrase_sequences, collate_candidate_phrase_sequences, share_aligned_phrase_sequences,
+    collate_phrase_music,
+    prepare_candidate_phrase_inputs)
 
 PROFILE = 'event_set_stream_v1'
 PAD, BOS, NOTE, WAIT, EOS = range(5)
@@ -268,7 +271,8 @@ class StreamDataset(Dataset):
                  preparation_workers=1, audio_cache_gb=4., limit_charts=0, unknown_policy='error',
                  audio_grid_seconds=GRID_SECONDS, plan_blank_window_seconds=.5,
                  history_window_policy='rolling_legacy_v1',continuation_policy='off',timing_output_policy='relative_delta_v1',
-                 window_balance_policy='equal_window_v1',phrase_context_policy='off'):
+                 window_balance_policy='equal_window_v1',phrase_context_policy='off',
+                 candidate_state_policy='cursor_v1'):
         if lead_in < 0 or targets < 1 or window_seconds <= 0:
             raise ValueError('invalid stream window settings')
         if unknown_policy not in ('error','mask'):
@@ -276,6 +280,9 @@ class StreamDataset(Dataset):
         self.unknown_policy = unknown_policy
         if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
+        if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
+            raise ValueError('invalid candidate_state_policy')
+        self.candidate_state_policy = candidate_state_policy
         if timing_output_policy not in TIMING_POLICIES:raise ValueError('invalid timing output policy')
         self.timing_output_policy=timing_output_policy
         if window_balance_policy not in ('equal_window_v1','sqrt_window_v2'):raise ValueError('invalid window balance policy')
@@ -451,7 +458,7 @@ class StreamDataset(Dataset):
             if song in self._phrases:
                 self._phrases.move_to_end(song)
                 return self._phrases[song]
-            ordered = self.phrase_context_policy=='ordered_phrase_v2'
+            ordered = self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3')
             index = PhraseIndex(self._bank(song), self._end_beats[song], self.streams[song],
                                 sequence_codec=self.codec if ordered else None,encoded=self.encoded[song] if ordered else None)
             index.supervision_valid = np.ones(len(index.boundaries)-1,dtype=np.bool_)
@@ -474,8 +481,11 @@ class StreamDataset(Dataset):
         if self.phrase_context_policy != 'off':
             index = self._phrase_index(song).edited(modified, begin, end)
             row.update(index.rows(modified, first, end))
-            if self.phrase_context_policy=='ordered_phrase_v2':
+            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
                 row.update(index.sequence_rows(np.arange(first,end),row['step_beat'].numpy()))
+            if self.phrase_context_policy=='aligned_phrase_v3':
+                row.update(prepare_candidate_phrase_inputs(index,np.arange(first,end),row['target_beat'].numpy()))
+                row['candidate_step_beat'] = row['target_beat'].clone()
         return row
 
     def __len__(self): return len(self.samples)
@@ -590,7 +600,11 @@ class StreamDataset(Dataset):
             rows=[]; row_bytes=sys.getsizeof(rows)
             for absolute in range(len(stream)):
                 state,mask=self._state_at(index,stream,absolute)
-                rows.append((state,mask))
+                if self.candidate_state_policy=='selected_native_v1':
+                    from .stream_candidate_state import candidate_state_at
+                    candidate_state,candidate_mask=candidate_state_at(index,stream,absolute)
+                    rows.append((state,mask,candidate_state,candidate_mask))
+                else:rows.append((state,mask))
                 row_bytes += self._object_bytes(rows[-1]) + 8
                 if row_bytes > self._state_budget:
                     return index_only()
@@ -690,6 +704,7 @@ class StreamDataset(Dataset):
         length = len(sequence)
         row = self._symbol_rows(song,first,end)
         row['loss_mask'] = torch.tensor([first+i >= start for i in range(length)], dtype=torch.bool)
+        row['configuration_mask'] = torch.ones(length,dtype=torch.bool)
         row['sample_weight'] = torch.tensor([s.weight*(self.target_window_weights[song][first+i]
                                              if self.history_window_policy == 'block_aligned_v2' or self.window_balance_policy=='sqrt_window_v2' else window_weight)*self.chart_weights[song]
                                              if first+i >= start and not self.unknown_steps[song][first+i] else 0.
@@ -700,13 +715,24 @@ class StreamDataset(Dataset):
         row['transition_exit_labels'] = exit_labels[first:end].clone()
         state_index,cached_states = self._song_states(song)
         states, state_masks = [], []
+        candidate_states,candidate_state_masks = [], []
         for i, step in enumerate(sequence):
             absolute = first+i
-            state,state_mask=(cached_states[absolute] if cached_states is not None else
-                              self._state_at(state_index,stream,absolute))
+            cached = cached_states[absolute] if cached_states is not None else None
+            state,state_mask=(cached[:2] if cached is not None else self._state_at(state_index,stream,absolute))
             states.append(state); state_masks.append(state_mask)
+            if self.candidate_state_policy=='selected_native_v1':
+                if cached is not None:candidate_state,candidate_mask=cached[2:]
+                else:
+                    from .stream_candidate_state import candidate_state_at
+                    candidate_state,candidate_mask=candidate_state_at(state_index,stream,absolute)
+                candidate_states.append(candidate_state)
+                candidate_state_masks.append(candidate_mask)
         row['action_state'] = pad_sequence(states, batch_first=True)
         row['action_state_mask'] = pad_sequence(state_masks, batch_first=True, padding_value=True)
+        if candidate_states:
+            row['candidate_action_state'] = pad_sequence(candidate_states,batch_first=True)
+            row['candidate_action_state_mask'] = pad_sequence(candidate_state_masks,batch_first=True,padding_value=True)
         row['condition'] = torch.as_tensor(self.conditions[song], dtype=torch.float32)
         row['audio_end_sec'] = torch.tensor(self._durations[song],dtype=torch.float64)
         row['audio_end_beat'] = torch.tensor(self._end_beats[song],dtype=torch.float64)
@@ -726,9 +752,15 @@ class StreamDataset(Dataset):
             row['target_phrase_mask'] &= trusted
             counts = torch.from_numpy(np.maximum(1,phrase_index.supervision_counts[segments]).astype(np.float32))
             row['target_phrase_weight'] *= row['sample_weight']/counts
-            if self.phrase_context_policy=='ordered_phrase_v2':
+            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
                 row.update(phrase_index.sequence_rows(row['step_index'].numpy(),row['step_beat'].numpy(),
                                                       target_mask=row['target_phrase_mask'].numpy()))
+            if self.phrase_context_policy=='aligned_phrase_v3':
+                # Candidate clock is kept in a separate namespace. The main
+                # timing path continues to consume the departure segment only.
+                row.update(prepare_candidate_phrase_inputs(phrase_index,row['step_index'].numpy(),
+                    row['target_beat'].numpy()))
+                row['candidate_step_beat'] = row['target_beat'].clone()
         return row
 
 
@@ -743,9 +775,17 @@ def collate_stream(items):
             output[key] = pad_sequence([item[key] for item in items], batch_first=True)
     if any('_phrase_sequence_owner' in item for item in items):
         output.update(collate_phrase_sequences(items))
+    if any('candidate__phrase_sequence_owner' in item for item in items):
+        output.update(collate_candidate_phrase_sequences(items))
+        share_aligned_phrase_sequences(items,output)
+    if any('candidate_phrase_progress' in item for item in items):
+        if not all('candidate_phrase_progress' in item for item in items):
+            raise ValueError('Cannot mix aligned and legacy phrase rows')
+        for key in PHRASE_ROW_FIELDS:
+            output['candidate_'+key] = pad_sequence([item['candidate_'+key] for item in items],batch_first=True)
     for key in ('history_kind','history_delta','history_shape','history_phase','history_atoms','history_phase_mask',
                 'target_kind','target_delta','target_shape','target_phase_mask','target_details',
-                'step_beat','step_second','step_index','target_second','target_beat','history_gap_beats','loss_mask','sample_weight',
+                'step_beat','step_second','step_index','target_second','target_beat','history_gap_beats','loss_mask','configuration_mask','sample_weight',
                 'continuation_features','transition_exit_mask','transition_exit_labels'):
         if key in ('target_beat','history_gap_beats') and any(key not in item for item in items):continue
         values = [item[key] for item in items]
@@ -761,6 +801,18 @@ def collate_stream(items):
     masks = [torch.nn.functional.pad(x['action_state_mask'], (0,state_width-x['action_state_mask'].size(1)), value=True) for x in items]
     output['action_state'] = pad_sequence(states, batch_first=True)
     output['action_state_mask'] = pad_sequence(masks, batch_first=True, padding_value=True)
+    if any('candidate_action_state' in item for item in items):
+        if not all('candidate_action_state' in item for item in items):
+            raise ValueError('Cannot mix candidate state policies')
+        width = max(item['candidate_action_state'].size(1) for item in items)
+        candidate_states = [torch.nn.functional.pad(item['candidate_action_state'],
+            (0,0,0,width-item['candidate_action_state'].size(1))) for item in items]
+        candidate_masks = [torch.nn.functional.pad(item['candidate_action_state_mask'],
+            (0,width-item['candidate_action_state_mask'].size(1)),value=True) for item in items]
+        output['candidate_action_state'] = pad_sequence(candidate_states,batch_first=True)
+        output['candidate_action_state_mask'] = pad_sequence(candidate_masks,batch_first=True,padding_value=True)
+    if any('candidate_step_beat' in item for item in items):
+        output['candidate_step_beat'] = pad_sequence([item['candidate_step_beat'] for item in items],batch_first=True)
     output['condition'] = torch.stack([item['condition'] for item in items])
     output['audio_end_sec'] = torch.stack([item['audio_end_sec'] for item in items])
     output['audio_end_beat'] = torch.stack([item['audio_end_beat'] for item in items])
@@ -781,7 +833,7 @@ def collate_stream(items):
     output['song_beats'] = pad_sequence([bank[2] for bank in unique], batch_first=True)
     output['song_mask'] = torch.arange(output['song_audio'].size(1))[None] < torch.tensor([len(bank[0]) for bank in unique])[:,None]
     output['song_inverse'] = torch.tensor(inverse, dtype=torch.long)
-    active = output['target_kind'].eq(NOTE) & output['loss_mask'] & output['sample_weight'].gt(0)
+    active = output['target_kind'].eq(NOTE) & output['loss_mask'] & output['configuration_mask'] & output['sample_weight'].gt(0)
     flat_shapes = output['target_shape'].reshape(-1)
     flat_active = active.reshape(-1)
     output['_detail_groups'] = [(int(shape), (flat_active & flat_shapes.eq(shape)).nonzero(as_tuple=False).flatten())
@@ -798,6 +850,10 @@ def collate_stream(items):
         output['_literal_type_blocks']=pack_literal_type_blocks(literal_targets,items[0]['_literal_atom_types'])
     if 'phrase_sequence_inverse' in output:
         output.update(collate_phrase_music(output))
+    if 'candidate_phrase_sequence_inverse' in output:
+        candidate = {key[len('candidate_'):]:value for key,value in output.items() if key.startswith('candidate_')}
+        candidate['song_inverse'] = output['song_inverse']
+        output.update({'candidate_'+key:value for key,value in collate_phrase_music(candidate).items()})
     return output
 
 
@@ -809,10 +865,14 @@ class StreamInferenceContext:
     """
     def __init__(self, song, codec, delta_vocab, condition, *, lead_in=64, audio_bank=None,
                  audio_grid_seconds=GRID_SECONDS, history_window_policy='rolling_legacy_v1',rollout_steps=16,
-                 continuation_policy='off',timing_output_policy='relative_delta_v1',phrase_context_policy='off'):
+                 continuation_policy='off',timing_output_policy='relative_delta_v1',phrase_context_policy='off',
+                 candidate_state_policy='cursor_v1'):
         self.song, self.codec, self.delta_vocab = song, codec, delta_vocab
         if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
+        if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
+            raise ValueError('invalid candidate_state_policy')
+        self.candidate_state_policy = candidate_state_policy
         if timing_output_policy not in TIMING_POLICIES:raise ValueError('invalid timing output policy')
         self.timing_output_policy=timing_output_policy
         self.clock = TempoClock(song.tempo, song.first)
@@ -832,7 +892,7 @@ class StreamInferenceContext:
 
     def _reset_prefix(self):
         self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec),
-                                   sequence_codec=self.codec if self.phrase_context_policy=='ordered_phrase_v2' else None)
+                                   sequence_codec=self.codec if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else None)
                         if self.phrase_context_policy != 'off' else None)
         self._committed = []
         self._incremental_state = IncrementalState(self.song.tempo,self.song.first)
@@ -937,15 +997,54 @@ class StreamInferenceContext:
             first_query = len(self._committed)-length+1
             phrase_rows = self._phrase.rows_at(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
             result.update({key:value.unsqueeze(0) for key,value in phrase_rows.items()})
-            if self.phrase_context_policy=='ordered_phrase_v2':
+            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
                 sequences = self._phrase.sequence_rows(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
                 for key in ('phrase_sequence_inverse','target_phrase_sequence_inverse'):sequences[key] = sequences[key].unsqueeze(0)
                 result.update(sequences)
                 result.update(collate_phrase_music(result))
         return result
 
+    def candidate_batch(self, beat):
+        """One landing query after the current committed prefix.
 
-def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuation_policy=None):
+        Return candidate_* inputs with batch/time dimensions of one. Callers
+        may merge these into current_batch without changing timing inputs.
+        """
+        beat = _fraction(beat)
+        cursor = self._committed[-1].end if self._committed else Fraction(0)
+        if beat < cursor:raise ValueError('candidate precedes committed cursor')
+        result = {}
+        if self.candidate_state_policy=='selected_native_v1':
+            if not self._incremental_state.points or beat < 0:
+                state,mask = torch.zeros(1,STATE_DIM),torch.ones(1,dtype=torch.bool)
+            else:
+                last_note = bool(self._committed and self._committed[-1].kind==NOTE)
+                cutoff = min(cursor+Fraction(1,10**12),beat) if last_note else cursor
+                state,mask,_=self._incremental_state.at(beat,include_current=True,
+                    visible_before_beat=cutoff,visibility_version='causal_v2',include_metadata=False)
+            result['candidate_action_state'] = state.unsqueeze(0).unsqueeze(0)
+            result['candidate_action_state_mask'] = mask.unsqueeze(0).unsqueeze(0)
+        if self.phrase_context_policy!='aligned_phrase_v3' or self._phrase is None:
+            return result
+        query = np.asarray([len(self._committed)],dtype=np.int64)
+        candidate = np.asarray([float(beat)],dtype=np.float64)
+        result.update(prepare_candidate_phrase_inputs(self._phrase,query,candidate))
+        for key in ('candidate_phrase_sequence_inverse','candidate_target_phrase_sequence_inverse'):
+            result[key] = result[key].unsqueeze(0)
+        for key in PHRASE_ROW_FIELDS:
+            result['candidate_'+key] = result['candidate_'+key].unsqueeze(0)
+        candidate_music = {key[len('candidate_'):]:value for key,value in result.items()
+                           if key.startswith('candidate_')}
+        candidate_music['song_inverse'] = torch.zeros(1,dtype=torch.long)
+        result.update({'candidate_'+key:value for key,value in collate_phrase_music(candidate_music).items()})
+        result['candidate_step_beat'] = torch.as_tensor(candidate).reshape(1,1)
+        return result
+
+    candidate_phrase_batch = candidate_batch
+
+
+def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuation_policy=None,
+                    configuration_trusted=True,correspondence='authored'):
     """One supervised reference decision after a real committed prefix."""
     song = dataset.base.songs[song_index][0]
     bank = dataset._bank(song_index)
@@ -955,11 +1054,12 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
                                      lead_in=dataset.lead_in,audio_bank=bank,audio_grid_seconds=dataset.audio_grid_seconds,
                                      history_window_policy=dataset.history_window_policy,rollout_steps=dataset.targets,
                                      continuation_policy=policy,timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
-                                     phrase_context_policy=getattr(dataset,'phrase_context_policy','off'))
+                                     phrase_context_policy=getattr(dataset,'phrase_context_policy','off'),
+                                     candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'))
     batch = context.batch(prefix,cursor)
     row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in PHRASE_ROW_FIELDS or key in
            ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features')}
-    if getattr(dataset,'phrase_context_policy','off')=='ordered_phrase_v2':
+    if getattr(dataset,'phrase_context_policy','off') in ('ordered_phrase_v2','aligned_phrase_v3'):
         for key,value in batch.items():
             if key.startswith(('phrase_sequence_','target_phrase_sequence_','_phrase_sequence_','_target_phrase_sequence_')):
                 row[key] = value[0] if key in ('phrase_sequence_inverse','target_phrase_sequence_inverse') else value
@@ -981,7 +1081,27 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     row['target_second'][-1] = target.end_second
     row['target_beat'] = row['step_beat'].clone()
     row['target_beat'][-1] = float(target.end)
+    if getattr(dataset,'phrase_context_policy','off')=='aligned_phrase_v3':
+        result = prepare_candidate_phrase_inputs(context._phrase,row['step_index'].numpy(),
+            row['target_beat'].numpy())
+        row.update(result)
+        row['candidate_step_beat'] = row['target_beat'].clone()
+    if getattr(dataset,'candidate_state_policy','cursor_v1')=='selected_native_v1':
+        selected = context.candidate_batch(target.end)
+        row['candidate_action_state'] = row['action_state'].clone()
+        row['candidate_action_state_mask'] = row['action_state_mask'].clone()
+        state = selected['candidate_action_state'][0,0]
+        mask = selected['candidate_action_state_mask'][0,0]
+        width = max(row['candidate_action_state'].size(1),state.size(0))
+        row['candidate_action_state'] = torch.nn.functional.pad(row['candidate_action_state'],
+            (0,0,0,width-row['candidate_action_state'].size(1)))
+        row['candidate_action_state_mask'] = torch.nn.functional.pad(row['candidate_action_state_mask'],
+            (0,width-row['candidate_action_state_mask'].size(1)),value=True)
+        row['candidate_action_state'][-1] = torch.nn.functional.pad(state,(0,0,0,width-state.size(0)))
+        row['candidate_action_state_mask'][-1] = torch.nn.functional.pad(mask,(0,width-mask.size(0)),value=True)
     row['loss_mask'][-1] = True
+    row['configuration_mask'] = torch.zeros(length,dtype=torch.bool)
+    row['configuration_mask'][-1] = bool(configuration_trusted)
     row['sample_weight'] = torch.zeros(length,dtype=torch.float32)
     row['sample_weight'][-1] = float(weight)*dataset.chart_weights[song_index]
     row['transition_exit_mask'] = torch.zeros(length,dtype=torch.bool)
@@ -999,4 +1119,8 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     row['_window_weight'] = 1.
     row['_plan_scale'] = 0.
     row['_literal_atom_types']=dataset._literal_atom_types
+    row['_configuration_correspondence']=correspondence if configuration_trusted else 'time_only'
+    if not configuration_trusted and 'target_phrase_mask' in row:
+        row['target_phrase_mask'].zero_()
+        row['target_phrase_weight'].zero_()
     return row

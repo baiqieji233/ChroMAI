@@ -51,6 +51,30 @@ def grouped_event_log_probs(route_scores, family_scores, route_families, support
     return raw-lse.gather(-1, groups)+family.gather(-1, groups)
 
 
+def family_preserving_template_log_probs(base, keep_mask, route_families, correction, *, residual=True):
+    """Repartition template retention within its family, preserving family mass.
+
+    A reference template identifies at most one semantic family. Every other
+    family keeps its exact joint probability, including under a large keep
+    residual. The same joint distribution serves training and generation.
+    """
+    from .stream_transition import residual_keep_logit, two_group_log_probs
+
+    scores=base.float()
+    keep=torch.as_tensor(keep_mask,device=scores.device,dtype=torch.bool).expand_as(scores)
+    family=(keep.long()*route_families).amax(-1)
+    same=route_families.eq(family[...,None]) & family.gt(0)[...,None]
+    valid=torch.isfinite(scores)&scores.gt(-1e4)
+    supported=same&valid
+    present=supported.any(-1)
+    selected=scores.masked_fill(~supported,-torch.inf)
+    safe_mass=torch.where(present[...,None],selected,torch.zeros_like(selected)).logsumexp(-1)
+    gate=(residual_keep_logit(scores,keep,correction,gain=8.,allowed=same)
+          if residual else correction)
+    conditional=two_group_log_probs(scores,keep,gate,allowed=same)
+    return torch.where(supported,conditional+safe_mass[...,None],scores)
+
+
 def family_masks_from_atoms(atom_ids, atom_families):
     """Union observed atom types without adding future information to inputs."""
     ids = atom_ids.clamp(0, atom_families.numel()-1)
@@ -107,15 +131,17 @@ class StatePhraseFamilyResidual(torch.nn.Module):
     def candidate_state(batch,event_seconds):
         import math
         gap=(event_seconds.double()-batch['step_second'].double()).clamp_min(0).float()
-        state=batch.get('action_state')
+        exact='candidate_action_state' in batch
+        state=batch.get('candidate_action_state',batch.get('action_state'))
         if state is None:
             return gap.new_zeros(*gap.shape,9)
         state=torch.nan_to_num(state.float()).clamp(0,1)
-        valid=~batch['action_state_mask'].bool()
+        valid=~batch['candidate_action_state_mask' if exact else 'action_state_mask'].bool()
         # STATE50: types 0:4; waiting 45; remaining 46; until-trace 47.
         scale=math.log1p(60.)
-        remaining=(torch.expm1(state[...,46]*scale)-gap[...,None]).clamp_min(0)
-        until=(torch.expm1(state[...,47]*scale)-gap[...,None]).clamp_min(0)
+        shift=0. if exact else gap[...,None]
+        remaining=(torch.expm1(state[...,46]*scale)-shift).clamp_min(0)
+        until=(torch.expm1(state[...,47]*scale)-shift).clamp_min(0)
         valid=valid & remaining.gt(0)
         count=valid.sum(-1).float()
         norm=count.clamp_min(1)
@@ -133,7 +159,8 @@ class StatePhraseFamilyResidual(torch.nn.Module):
         intent=None if phrase_output is None else phrase_output.get('phrase_intent')
         if intent is None:intent=music.new_zeros(*music.shape[:-1],self.phrase_width)
         # Intent is the stable phrase plan, not the autoregressive decoder hidden.
-        state=self.candidate_state(batch,event_seconds).to(music)
+        state=self.candidate_state(batch,event_seconds).to(music).expand(*music.shape[:-1],9)
+        intent=intent.expand(*music.shape[:-1],self.phrase_width)
         gap_seconds=(event_seconds.double()-batch['step_second'].double()).clamp_min(0).log1p().float()
         gap_beats=(event_beats.double()-batch['step_beat'].double()).clamp_min(0).log1p().float()
         values=torch.cat((music,intent.to(music),state,gap_seconds[...,None].to(music),

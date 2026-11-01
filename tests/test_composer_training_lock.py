@@ -6,7 +6,7 @@ import sys
 import pytest
 
 from maichart.composer.training_lock import (
-    canonical_output_directory, training_output_lock,
+    canonical_output_directory, training_output_lock, training_request_lock,
 )
 
 
@@ -77,6 +77,19 @@ def test_exception_releases_lock_and_yields_canonical_path(tmp_path):
             raise ValueError("preparation failed")
     result = contender(directory)
     assert result.returncode == 0, result.stderr
+
+
+def test_request_reservation_excludes_another_webui_process(tmp_path):
+    child = CHILD.replace('training_output_lock', 'training_request_lock')
+    directory = tmp_path / 'output'
+    with training_request_lock(directory):
+        denied = subprocess.run([sys.executable, '-c', child, str(directory), 'once'],
+            capture_output=True, text=True, env=child_environment(), timeout=15)
+        assert denied.returncode == 17, denied.stderr
+        assert 'already in use' in denied.stdout
+    acquired = subprocess.run([sys.executable, '-c', child, str(directory), 'once'],
+        capture_output=True, text=True, env=child_environment(), timeout=15)
+    assert acquired.returncode == 0, acquired.stderr
 
 
 def test_cli_owns_directory_through_the_training_body(tmp_path,monkeypatch):

@@ -13,7 +13,9 @@ class Runtime:
     def __init__(self): self.task = SimpleNamespace(task_id='set-test', result={})
     def _reserve_composer_training_task(self, directory): return self.task
     def _create_task(self, kind): return self.task
-    def _run_subprocess_task(self, task, args, **kwargs): self.args = args; self.dispatch = kwargs
+    def _run_subprocess_task(self, task, args, **kwargs):
+        self.args = args; self.dispatch = kwargs
+        if kwargs.get('on_finish'): kwargs['on_finish']()
 
 
 def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
@@ -131,12 +133,16 @@ def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_pat
     assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'greedy_mixed_v4')
     assert policies['prefix_augmentation_input_policy']==('causal_window_config_time_first_decision_v3' if mode=='resume' else 'musical_loop_recovery_v7')
     assert policies['timing_grid_audio_policy']==('off' if mode=='resume' else 'query_pool_v3')
-    assert policies['transition_policy']==('off' if mode=='resume' else 'music_exit_v3')
+    assert policies['transition_policy']=='off'
+    assert policies['gap_continuation_policy']==('additive_v1' if mode=='resume' else 'off')
+    assert policies['event_family_policy']==('legacy_v1' if mode=='resume' else 'shared_continuation_v1')
+    assert policies['recovery_target_policy']==('authored_next_v1' if mode=='resume' else 'causal_correspondence_v1')
+    assert runtime.args[runtime.args.index('--gap-continuation-policy')+1]==policies['gap_continuation_policy']
     assert policies['prefix_augmentation_rate']==(0 if mode=='resume' else .15)
     assert policies['generation_eval_temperature']==.65
     assert policies['lane_load_policy']==('off' if mode=='resume' else 'direct_buttons_v1')
     assert runtime.args[runtime.args.index('--lane-load-policy')+1]==policies['lane_load_policy']
-    assert policies['transition_exit_weight']==(0 if mode=='resume' else .5)
+    assert policies['transition_exit_weight']==0
     assert runtime.args[runtime.args.index('--history-window-policy')+1]==expected
     assert runtime.args[runtime.args.index('--transition-exit-weight')+1]==str(policies['transition_exit_weight'])
     if mode!='fresh':assert policies['history_events']==96
@@ -218,6 +224,27 @@ def test_automatic_split_dispatches_effective_manifests_and_records_evidence(tmp
     assert runtime.args[runtime.args.index('--validation-manifest')+1]==report['splits']['dev']['path']
     assert set(report['splits']['train']['audio_sha256']).isdisjoint(report['splits']['dev']['audio_sha256'])
     assert (tmp_path/'out'/'data_split'/'split_report.json').is_file()
+
+
+def test_rejected_existing_output_does_not_rewrite_split(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    output=tmp_path/'out'/'data_split';output.mkdir(parents=True)
+    sentinel=output/'train_manifest.json';sentinel.write_text('old split')
+    with pytest.raises(ValueError,match='new empty checkpoint'):
+        event_set_api.start_train(Handler(),dict(manifest=str(manifest),checkpoint_dir=str(tmp_path/'out')),
+                                  runtime=Runtime())
+    assert sentinel.read_text()=='old split'
+
+
+def test_same_process_busy_request_does_not_write_split(tmp_path):
+    from maichart.composer.training_lock import training_request_lock, TrainingOutputBusyError
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    output=tmp_path/'out'
+    with training_request_lock(output):
+        with pytest.raises(TrainingOutputBusyError):
+            event_set_api.start_train(Handler(),dict(manifest=str(manifest),checkpoint_dir=str(output)),
+                                      runtime=Runtime())
+    assert not (output/'data_split').exists()
 
 
 def test_advanced_policies_and_generation_panel_controls_reach_cli(tmp_path):

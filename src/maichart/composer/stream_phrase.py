@@ -23,7 +23,7 @@ MUSIC_LAYOUT_SCHEMA = 'acoustic32_interval_novelty_v2'
 _LAYOUTS = OrderedDict()
 _LAYOUT_LOCK = threading.RLock()
 _LAYOUT_BUDGET = 4*1024**2
-PHRASE_POLICIES = ('off', 'causal_phrase_v1', 'ordered_phrase_v2')
+PHRASE_POLICIES = ('off', 'causal_phrase_v1', 'ordered_phrase_v2', 'aligned_phrase_v3')
 PHRASE_SEQUENCE_LENGTH = 32
 PHRASE_SEQUENCE_FIELDS = ('kind','shape','phase_mask','atoms','beats','seconds','gap_beats','gap_seconds','mask')
 _ENCODE_UNSET = object()
@@ -126,14 +126,20 @@ def collate_phrase_sequences(items):
         for batch,item in enumerate(items):
             owner = item['_phrase_sequence_owner']
             segments = item[segment_key]
-            mapping = np.empty(len(segments),dtype=np.int64)
-            for local,segment in enumerate(segments):
+            source = item[prefix+'inverse'].numpy()
+            used = set(range(len(segments)))
+            if target and 'target_phrase_mask' in item and 'target_phrase_weight' in item:
+                active = (item['target_phrase_mask'].bool() &
+                          item['target_phrase_weight'].gt(0)).numpy()
+                used = {int(value) for value in source[active] if value >= 0}
+            mapping = np.full(len(segments),-1,dtype=np.int64)
+            for local in sorted(used):
+                segment = segments[local]
                 identity = id(owner),segment
                 if identity not in identities:
                     identities[identity] = len(unique)
                     unique.append(owner.sequence(segment))
                 mapping[local] = identities[identity]
-            source = item[prefix+'inverse'].numpy()
             destination = inverse[batch,:len(source)]
             valid = source>=0
             destination[valid] = mapping[source[valid]]
@@ -146,6 +152,63 @@ def collate_phrase_sequences(items):
             output[prefix+'visible_fingerprint'] = torch.from_numpy(visible)
             output[prefix+'positive_ids'] = _positive_ids(visible)
     return output
+
+
+def prepare_candidate_phrase_inputs(index, queries, candidate_beats, *, supervise=False):
+    """Read the landing segment from a committed prefix at each query index.
+
+    Candidate beats are proposed clock positions, never target configurations.
+    Reference visibility is strictly before the query, including a segment
+    that was the departure segment but is complete at the candidate landing.
+    """
+    result = index.rows_at(queries, candidate_beats, supervise=supervise)
+    result.update(index.sequence_rows(queries, candidate_beats))
+    return {'candidate_'+key:value for key,value in result.items()}
+
+
+def collate_candidate_phrase_sequences(items):
+    """Share the ordered segment deduplication path for landing references."""
+    converted = []
+    for item in items:
+        selected = {key[len('candidate_'):]:value for key,value in item.items()
+                    if key.startswith('candidate_')}
+        selected['history_kind'] = item['history_kind']
+        converted.append(selected)
+    result = collate_phrase_sequences(converted)
+    return {'candidate_'+key:value for key,value in result.items()}
+
+
+def share_aligned_phrase_sequences(items, output):
+    """One reference bank for departure and landing in the same batch.
+
+    Archive owner and segment form the identity. Both inverse tables index the
+    same packed tensors, so a single forward-local GRU encoding serves both.
+    """
+    identities,unique = {},[]
+    replacements = {}
+    for source_prefix in ('','candidate_'):
+        shape = tuple(output[source_prefix+'phrase_sequence_inverse'].shape)
+        inverse = np.full(shape,-1,dtype=np.int64)
+        for batch,item in enumerate(items):
+            owner = item[source_prefix+'_phrase_sequence_owner']
+            segments = item[source_prefix+'_phrase_sequence_segments']
+            mapping = np.empty(len(segments),dtype=np.int64)
+            for local,segment in enumerate(segments):
+                identity = id(owner),segment
+                if identity not in identities:
+                    identities[identity] = len(unique)
+                    unique.append(owner.sequence(segment))
+                mapping[local] = identities[identity]
+            source = item[source_prefix+'phrase_sequence_inverse'].numpy()
+            valid = source>=0
+            inverse[batch,:len(source)][valid] = mapping[source[valid]]
+        replacements[source_prefix+'phrase_sequence_inverse'] = torch.from_numpy(inverse)
+    packed = _pack_sequences(unique,'phrase_sequence_')
+    output.update(replacements)
+    output.update(packed)
+    for key,value in packed.items():
+        output['candidate_'+key] = value
+    output['candidate_phrase_sequence_shared'] = True
 PHRASE_ROW_FIELDS = (
     'phrase_start_beat', 'phrase_end_beat', 'phrase_progress',
     'phrase_memory_features', 'phrase_memory_start_beat',

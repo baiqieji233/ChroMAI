@@ -6,6 +6,22 @@ from .stream_timing import temper_grid_logits
 from .stream_transition import sample_two_group
 
 
+def prepare_selected_candidate(model, context, batch, output, beat, audio_cache):
+    """Shared generation/recovery landing inputs; never rerun main encoders."""
+    from .stream_model import to_device_batch
+    fields=context.candidate_batch(beat) if hasattr(context,'candidate_batch') else {}
+    merged={**batch,**to_device_batch(fields,batch['step_second'].device)}
+    if hasattr(model,'prepare_action_phrase'):
+        # Readiness belongs to one landing clock. A new candidate must always
+        # rebuild its phrase read, even if the caller reuses a prepared result.
+        source={**output}
+        source.pop('_action_phrase_ready',None)
+        hidden,prepared=model.prepare_action_phrase(source,merged,audio_cache)
+        prepared={**prepared,'hidden':hidden,'_action_phrase_ready':True}
+    else:prepared=output
+    return merged,prepared
+
+
 def sample_timed_event(model, timing_logits, deltas, cursor, action_context,
                        reference_phase, reference_phase_mask, guard, generator,
                        *, pointer_temperature=.8, action_temperature=.8,

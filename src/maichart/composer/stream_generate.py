@@ -240,7 +240,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         audio_grid_seconds=model.config.audio_grid_seconds,
         history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
         continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
-        phrase_context_policy=getattr(model.config,'phrase_context_policy','off'))
+        phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
+        candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'))
     batch=to_device_batch(context.current_batch(),device)
     cache=model.encode_audio(batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     if model.config.plan_kind_policy!='off':
@@ -307,30 +308,41 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 kind=WAIT;nxt=cursor+2;forced_waits+=1
             else:
                 def at_time(delta_id,beat):
-                    actual_seconds=torch.full_like(batch['step_second'],second_at_beat(clock,beat))
-                    ids=torch.full_like(batch['history_delta'],delta_id)
-                    if hasattr(model,'lane_load_projection'):
-                        ctx,load=model.action_context_for_delta(result,batch,ids,cache,event_seconds=actual_seconds,return_button_load=True)
+                    from .stream_proposal import prepare_selected_candidate
+                    selected_batch,selected_result=prepare_selected_candidate(model,context,batch,result,beat,cache)
+                    actual_seconds=torch.full_like(selected_batch['step_second'],second_at_beat(clock,beat))
+                    ids=torch.full_like(selected_batch['history_delta'],delta_id)
+                    if model.config.event_family_policy=='shared_continuation_v1':
+                        if hasattr(model,'lane_load_projection'):
+                            ctx,load,selected_result=model.candidate_action_state(selected_result,selected_batch,cache,
+                                actual_seconds,return_button_load=True)
+                            proposal=dict(context=ctx[0,-1],button_load=load[0,-1])
+                        else:
+                            ctx,selected_result=model.candidate_action_state(selected_result,selected_batch,cache,actual_seconds)
+                            proposal=dict(context=ctx[0,-1])
+                        proposal['family_logits']=model.family_logits_for_action(proposal['context'])
+                    elif hasattr(model,'lane_load_projection'):
+                        ctx,load=model.action_context_for_delta(selected_result,selected_batch,ids,cache,event_seconds=actual_seconds,return_button_load=True)
                         proposal=dict(context=ctx[0,-1],button_load=load[0,-1])
                     else:
-                        proposal=dict(context=model.action_context_for_delta(result,batch,ids,cache,event_seconds=actual_seconds)[0,-1])
-                    duration_context=(model.duration_context_at(result,batch,actual_seconds,cache)
+                        proposal=dict(context=model.action_context_for_delta(selected_result,selected_batch,ids,cache,event_seconds=actual_seconds)[0,-1])
+                    duration_context=(model.duration_context_at(selected_result,selected_batch,actual_seconds,cache)
                                       if hasattr(model,'duration_context_at') else None)
                     if duration_context is not None:
                         from .stream_duration import select_duration_context
                         proposal['duration_context']=select_duration_context(duration_context,
-                            torch.tensor([batch['step_second'].numel()-1],device=device))
+                            torch.tensor([selected_batch['step_second'].numel()-1],device=device))
                     if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4'):
-                        families=model.family_context_at(cache,actual_seconds,batch['song_inverse'],batch,**({'phrase_output':result} if model.config.event_family_policy=='audio_state_phrase_v4' else {}))
+                        families=model.family_context_at(cache,actual_seconds,selected_batch['song_inverse'],selected_batch,**({'phrase_output':selected_result} if model.config.event_family_policy=='audio_state_phrase_v4' else {}))
                         proposal['family_context']=families['full'][0,-1]
                         if 'full_logits' in families:proposal['family_logits']=families['full_logits'][0,-1]
                     if getattr(model.config,'transition_policy','off') in ('music_exit_v1','music_exit_v2','music_exit_v3'):
-                        transition=model.transition_logits_at(cache,actual_seconds,batch['song_inverse'],batch)[0,-1]
+                        transition=model.transition_logits_at(cache,actual_seconds,selected_batch['song_inverse'],selected_batch)[0,-1]
                         proposal['motion_keep_logit']=transition[1]
-                        proposal['motion_reference_shape']=result['motion_reference_shape'][0,-1]
+                        proposal['motion_reference_shape']=selected_result['motion_reference_shape'][0,-1]
                         proposal['template_keep_logit']=transition[2]
-                        proposal['template_reference_shape']=torch.where(batch['history_kind'][0,-1].eq(NOTE),
-                            batch['history_shape'][0,-1],batch['history_shape'].new_tensor(-1))
+                        proposal['template_reference_shape']=torch.where(selected_batch['history_kind'][0,-1].eq(NOTE),
+                            selected_batch['history_shape'][0,-1],selected_batch['history_shape'].new_tensor(-1))
                     return proposal
                 accepted,delta_id,failed,failed_times=sample_timed_event(model,timing,deltas,cursor,at_time,
                     int(result['reference_phase'][0,-1]),result.get('reference_phase_mask',None)[0,-1]
@@ -375,7 +387,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     audio_bank=audio_bank,audio_grid_seconds=model.config.audio_grid_seconds,
                     history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
                     continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
-                    phrase_context_policy=getattr(model.config,'phrase_context_policy','off'))
+                    phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
+        candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'))
             def guard_factory():
                 return EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
                     touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,

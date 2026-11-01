@@ -81,10 +81,13 @@ def test_guarded_retries_redraw_joint_template_and_family_intent(policy):
         assert options['template_reference_shape'] is shape
 
 
-def test_new_training_stage_defaults_enable_musical_exit_and_matching_recovery():
+def test_new_training_stage_defaults_use_shared_state_without_exit_override():
     args=parser().parse_args(['--manifest','unused.json','--checkpoint-dir','unused'])
     policies=resolve_learning_policies(args)
-    assert policies['transition_policy']=='music_exit_v3'
+    assert policies['transition_policy']=='off'
+    assert policies['event_family_policy']=='shared_continuation_v1'
+    assert policies['recovery_target_policy']=='causal_correspondence_v1'
+    assert policies['gap_continuation_policy']=='off'
     assert policies['timing_grid_audio_policy']=='query_pool_v3'
     assert policies['prefix_augmentation_input_policy']=='musical_loop_recovery_v7'
     assert policies['recovery_policy']=='greedy_mixed_v4'

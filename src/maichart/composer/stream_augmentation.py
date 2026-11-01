@@ -21,6 +21,7 @@ from maichart.generation.muri.model import RELEASE
 from torch.nn.utils.rnn import pad_sequence
 from .guard import _event_syntax_error
 from .events import event_metadata
+from .stream_target_correspondence import corresponding_shift, rotated_text, rotation_boundary_clear
 from maichart.generation.post_process import detect_chart_conflicts
 
 LEGACY_INPUT_POLICY='causal_window_config_time_first_decision_v3'
@@ -264,6 +265,45 @@ def _record_first_decision(diagnostics,row,original=None):
         diagnostics['first_decision_mass']+=row['_augmentation_first_decision_mass']
 
 
+def _set_configuration_qualification(row,start,first,end,*,trusted,reason):
+    row['configuration_mask']=row['configuration_mask'].clone()
+    row['configuration_mask'][start-first:end-first]=bool(trusted)
+    row['_configuration_correspondence']=reason if trusted else 'time_only'
+    # The cached phrase teacher is derived from the authored chart. Once the
+    # prefix changes it cannot be used as either a positive or a negative.
+    if 'target_phrase_mask' in row:
+        row['target_phrase_mask']=row['target_phrase_mask'].clone()
+        row['target_phrase_mask'][start-first:end-first]=False
+        row['target_phrase_weight']=row['target_phrase_weight'].clone()
+        row['target_phrase_weight'][start-first:end-first]=0.
+    return row
+
+
+def _record_configuration_qualification(diagnostics,row):
+    active=row['loss_mask'].bool() & row['sample_weight'].gt(0) & row['target_kind'].eq(NOTE)
+    trusted=active & row['configuration_mask'].bool()
+    diagnostics['configuration_trusted']+=int(trusted.sum())
+    diagnostics['time_only']+=int((active & ~row['configuration_mask'].bool()).sum())
+    if trusted.any():diagnostics['correspondence_'+row.get('_configuration_correspondence','authored')]+=int(trusted.sum())
+
+
+def _replace_rotated_targets(dataset,row,modified,start,first,end):
+    for absolute in range(start,end):
+        step=modified[absolute]
+        if step.kind!=NOTE:continue
+        at=absolute-first
+        event=dataset.codec.encode(step.text)
+        row['target_shape'][at]=event['shape']
+        row['target_phase_mask'][at]=torch.tensor(event['phase_mask'],dtype=torch.bool)
+        width=len(event['details'])
+        if width>row['target_details'].size(-1):
+            row['target_details']=torch.nn.functional.pad(row['target_details'],
+                (0,width-row['target_details'].size(-1)),value=-1)
+        row['target_details'][at].fill_(-1)
+        row['target_details'][at,:width]=torch.tensor(event['details'])
+    return row
+
+
 def _rebuild_local_row(dataset,row,source,modified,song,begin,start,end,incremental,*,retime=False):
     """Reuse unchanged tensors; rebuild only the edited suffix + K targets."""
     first=max(0,start-dataset.lead_in);length=end-first
@@ -280,9 +320,16 @@ def _rebuild_local_row(dataset,row,source,modified,song,begin,start,end,incremen
     for step in source[:begin]:continuation.append(step)
     states=[row['action_state'][i] for i in range(length)]
     masks=[row['action_state_mask'][i] for i in range(length)]
+    candidate_states=([row['candidate_action_state'][i] for i in range(length)]
+                      if 'candidate_action_state' in row else None)
+    candidate_masks=([row['candidate_action_state_mask'][i] for i in range(length)]
+                     if candidate_states is not None else None)
     for absolute in range(begin,end):
         step=modified[absolute];at=absolute-first
         if at>=0:
+            if candidate_states is not None:
+                from .stream_candidate_state import candidate_state_at
+                candidate_states[at],candidate_masks[at]=candidate_state_at(incremental,modified,absolute)
             if retime:
                 row['step_beat'][at]=float(step.start);row['step_second'][at]=step.start_second
                 row['target_delta'][at]=_encode_gap(dataset,step.end-step.start)
@@ -320,9 +367,33 @@ def _rebuild_local_row(dataset,row,source,modified,song,begin,start,end,incremen
         states[target_at]=state;masks[target_at]=mask
     row['action_state']=pad_sequence(states,batch_first=True)
     row['action_state_mask']=pad_sequence(masks,batch_first=True,padding_value=True)
+    if candidate_states is not None:
+        row['candidate_action_state']=pad_sequence(candidate_states,batch_first=True)
+        row['candidate_action_state_mask']=pad_sequence(candidate_masks,batch_first=True,padding_value=True)
     if getattr(dataset,'phrase_context_policy','off') != 'off':
         dataset.rebuild_phrase_row(row,song,modified,begin,first,end)
     return row
+
+
+def _rebuild_fallback_candidate_states(dataset,row,modified,song,first,end):
+    """Requery every edited-prefix decision with one complete native index.
+
+    A replay context may prune old markers for its short symbolic history.
+    The full modified prefix restores long-lived sustains, while each query's
+    strict visible cutoff still excludes its own and later targets.
+    """
+    if 'candidate_action_state' not in row:return
+    from maichart.generation.sustain_state import SustainStateIndex
+    from .stream_candidate_state import candidate_state_at
+    song_source=dataset.base.songs[song][0]
+    points=[EventPoint(step.end,step.text) for step in modified[:end] if step.kind==NOTE]
+    index=SustainStateIndex(points,song_source.tempo,song_source.first) if points else None
+    states,masks=[],[]
+    for absolute in range(first,end):
+        state,mask=candidate_state_at(index,modified,absolute)
+        states.append(state);masks.append(mask)
+    row['candidate_action_state']=pad_sequence(states,batch_first=True)
+    row['candidate_action_state_mask']=pad_sequence(masks,batch_first=True,padding_value=True)
 
 
 def _augment_phase_row(dataset,index,*,rng,row=None):
@@ -372,8 +443,18 @@ def _augment_phase_row(dataset,index,*,rng,row=None):
     result['_augmentation_phase_shift_beats']=float(shift)
     result['_augmentation_phase_local_rebuild']=local is not None
     result['_augmentation_timing_replay_sec']=time.perf_counter()-started
+    if local is None:
+        _rebuild_fallback_candidate_states(dataset,result,modified,song,first,end)
     if getattr(dataset,'phrase_context_policy','off') != 'off':
         dataset.rebuild_phrase_row(result,song,modified,begin,first,end)
+    if getattr(dataset,'recovery_target_policy','authored_next_v1')=='causal_correspondence_v1':
+        # Only the preceding clock changes: its event text and the entire
+        # authored target structure stay intact, and _validate_window proved
+        # the native target actions legal in the changed state.
+        same_structure=all(modified[i].kind==source[i].kind and
+            modified[i].text==source[i].text for i in range(begin,end))
+        result=_set_configuration_qualification(result,start,first,end,
+            trusted=same_structure,reason='phase_shift_same_configuration')
     return _rebalance_first_decision(result),'phase_shift',1
 
 
@@ -457,6 +538,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     if mode=='phase_shift':return _augment_phase_row(dataset,index,rng=rng,row=row)
     if mode=='timeline_loop':return _augment_timeline_row(dataset,index,rng=rng,row=row,input_policy=input_policy)
     song,start,end,_=dataset.samples[index]
+    first=max(0,start-dataset.lead_in)
     source=dataset.streams[song]
     available=0
     musical=input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY)
@@ -483,6 +565,19 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
         for offset,text in enumerate(texts):modified[begin+offset]=replace(modified[begin+offset],text=text)
         if all(modified[i].text==source[i].text for i in range(begin,start)):
             raise ValueError('Augmentation would leave the prefix unchanged')
+    target_policy=getattr(dataset,'recovery_target_policy','authored_next_v1')
+    shift=None
+    if target_policy=='causal_correspondence_v1':
+        shift=corresponding_shift(source[begin:start],modified[begin:start])
+        if shift is not None and shift!=0:
+            try:
+                translated={i:rotated_text(source[i].text,shift) for i in range(start,end)
+                            if source[i].kind==NOTE}
+                for text in translated.values():dataset.codec.encode(text)
+            except (ValueError,KeyError):
+                shift=None
+            else:
+                for i,text in translated.items():modified[i]=replace(modified[i],text=text)
     # Authored events before the edit are committed as context. Check edited
     # actions and the complete unchanged target block against their new state.
     local=_native_prefix(dataset,song,source,begin,first_step=modified[begin]) if timing_mode else _native_prefix(dataset,song,source,begin)
@@ -490,10 +585,18 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     physical=getattr(dataset,'physical_policy','legacy_report_v1')
     guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix),
                  **({'physical_policy':physical} if physical!='legacy_report_v1' else {}))
+    if shift is not None and shift!=0 and not rotation_boundary_clear(source[:begin],
+            modified[begin].start_second,guard):
+        shift=None
+        for i in range(start,end):modified[i]=source[i]
     _validate_window(guard,modified[begin:end])
     row=dataset[index] if row is None else row
     if local is not None and (not timing_mode or musical):
         rebuilt=_rebuild_local_row(dataset,row,source,modified,song,begin,start,end,local[0],retime=timing_mode)
+        if target_policy=='causal_correspondence_v1':
+            if shift is not None and shift!=0:rebuilt=_replace_rotated_targets(dataset,rebuilt,modified,start,first,end)
+            rebuilt=_set_configuration_qualification(rebuilt,start,first,end,
+                trusted=shift is not None,reason='rotation_correspondence' if shift else 'exact_history')
         rebuilt['_augmentation_local_rebuild']=True
         return _rebalance_first_decision(rebuilt),mode,count
     row=dict(row)
@@ -531,8 +634,13 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     row['transition_exit_mask']=eligible[first:end]&row['loss_mask']&row['sample_weight'].gt(0)
     row['transition_exit_labels']=labels[first:end]
     if timing_mode:row['_augmentation_timing_replay_sec']=time.perf_counter()-replay_started
+    _rebuild_fallback_candidate_states(dataset,row,modified,song,first,end)
     if getattr(dataset,'phrase_context_policy','off') != 'off':
         dataset.rebuild_phrase_row(row,song,modified,begin,first,end)
+    if target_policy=='causal_correspondence_v1':
+        if shift is not None and shift!=0:row=_replace_rotated_targets(dataset,row,modified,start,first,end)
+        row=_set_configuration_qualification(row,start,first,end,
+            trusted=shift is not None,reason='rotation_correspondence' if shift else 'exact_history')
     return _rebalance_first_decision(row),mode,count
 
 
@@ -553,6 +661,7 @@ def augment_stream_items(dataset,items,*,rate=.15,seed=0,input_policy=LEGACY_INP
             result[slot]=replacement
             diagnostics['applied']+=1;diagnostics['applied_'+mode]+=1
             diagnostics['edited_notes']+=count
+            _record_configuration_qualification(diagnostics,replacement)
             _record_first_decision(diagnostics,replacement,row)
             if mode=='timeline_loop':
                 diagnostics['timeline_loop_events']+=count
@@ -598,6 +707,7 @@ def augment_stream_batch(dataset,batch,*,rate=.15,seed=0,input_policy=LEGACY_INP
             replacements[slot]=row
             diagnostics['applied']+=1;diagnostics['applied_'+mode]+=1
             diagnostics['edited_notes']+=count
+            _record_configuration_qualification(diagnostics,row)
             _record_first_decision(diagnostics,row)
             if mode=='timeline_loop':
                 diagnostics['timeline_loop_events']+=count

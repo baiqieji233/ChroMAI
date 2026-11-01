@@ -187,7 +187,7 @@ def test_interrupted_cpu_training_resumes_exact_optimizer_rng_and_cursor(tmp_pat
     left=stream_checkpoint.read(complete/'composer_last.pt')
     right=stream_checkpoint.read(interrupted/'composer_last.pt')
     assert left['optimizer_steps']==right['optimizer_steps']
-    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='ordered_phrase_v2'
+    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='aligned_phrase_v3'
     assert left['model_config']['duration_audio_policy']==right['model_config']['duration_audio_policy']=='interval_v1'
     assert left['training_state']['batch_in_epoch']==right['training_state']['batch_in_epoch']
     assert torch.equal(left['training_state']['torch_rng'],right['training_state']['torch_rng'])
@@ -209,14 +209,17 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     parent=StreamComposerConfig.from_dict({})
     args=SimpleNamespace()
     fresh=stream_train.resolve_learning_policies(args,parent)
-    assert fresh['phrase_context_policy']=='ordered_phrase_v2'
+    assert fresh['phrase_context_policy']=='aligned_phrase_v3'
     assert fresh['history_window_policy']=='block_aligned_v2'
-    assert fresh['transition_exit_weight']==.5
+    assert fresh['transition_exit_weight']==0
     assert fresh['lane_load_policy']=='direct_buttons_v1'
     assert fresh['continuation_policy']=='pattern_runs_v2'
     assert fresh['motion_continuation_policy']=='context_motion_v3'
     assert fresh['recovery_policy']=='greedy_mixed_v4'
-    assert fresh['transition_policy']=='music_exit_v3'
+    assert fresh['transition_policy']=='off'
+    assert fresh['event_family_policy']=='shared_continuation_v1'
+    assert fresh['recovery_target_policy']=='causal_correspondence_v1'
+    assert fresh['gap_continuation_policy']=='off'
     assert fresh['prefix_augmentation_rate']==.15
     resumed=stream_train.resolve_learning_policies(args,parent,resume=True)
     assert resumed['phrase_context_policy']=='off'
@@ -276,6 +279,12 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         expected.add(f'phrase_context.{name}.weight')
     ordered=ordered_parameter_initialization()
     expected.update(ordered)
+    expected.update({'candidate_state_projection.weight','phrase_context.ordered.alignment_null',
+        'phrase_context.ordered.alignment_query.weight','phrase_context.ordered.alignment_query.bias',
+        'phrase_context.ordered.alignment_key.weight','phrase_context.ordered.alignment_key.bias',
+        'phrase_context.ordered.alignment_output.weight'})
+    expected={name for name in expected if not name.startswith((
+        'keep_gap_audio.','family_continuity_head.','family_state_phrase.','family_rhythm_projection.','music_exit_head.'))}
     assert additions==expected
     assert_ordered_parameter_initialization(upgraded.state_dict())
     for key in additions:

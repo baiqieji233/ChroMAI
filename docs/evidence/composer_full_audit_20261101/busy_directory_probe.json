@@ -1,0 +1,8 @@
+{
+  "exception": "directory busy",
+  "order": [
+    "split_write",
+    "reserve_rejected"
+  ],
+  "split_after_rejection": "REPLACED BEFORE LOCK"
+}

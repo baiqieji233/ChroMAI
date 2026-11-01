@@ -127,6 +127,64 @@ def test_illegal_reference_is_not_supervised(monkeypatch):
         stream_recovery.restore_recovery_state(model,{'schema':stream_recovery.SCHEMA,'episodes':[{'song':0}]})
 
 
+def test_causal_recovery_keeps_time_when_authored_configuration_is_illegal(monkeypatch):
+    ds=_dataset(monkeypatch)
+    ds.recovery_target_policy='causal_correspondence_v1'
+    prefix=[ds.streams[0][0],StreamStep(WAIT,F(0),F(1,2),0.,.25)]
+    class Reject:
+        def accepts(self,point):return False
+    target,reason=stream_recovery._next_reference(ds,0,prefix,Reject(),
+        target_policy='causal_correspondence_v1')
+    assert reason=='ok' and target.kind==NOTE
+    target,trusted,reason=stream_recovery._qualified_continuation(ds,0,prefix,target,
+        Reject(),1,1,'causal_correspondence_v1')
+    assert not trusted and reason=='time_only'
+    row=stream_data.recovery_sample(ds,0,prefix,target,configuration_trusted=trusted)
+    packed=stream_data.collate_stream([row])
+    assert packed['configuration_mask'][0,-1].item() is False
+    assert packed['target_kind'][0,-1].item()==NOTE
+    assert not packed['_detail_groups'] and packed['_literal_indices'].numel()==0
+
+
+def test_rotation_requires_clear_old_boundary_even_with_matching_generated_notes(monkeypatch):
+    ds=_dataset(monkeypatch)
+    source=ds.streams[0]
+    from dataclasses import replace
+    from maichart.composer.stream_target_correspondence import rotated_text
+    anchor=1;target_index=4
+    prefix=list(source[:anchor])+[replace(step,text=rotated_text(step.text,2))
+        for step in source[anchor:target_index]]
+    class Guard:
+        def accepts(self,point):return True
+    monkeypatch.setattr(stream_recovery,'rotation_boundary_clear',lambda *args:False)
+    target,trusted,reason=stream_recovery._qualified_continuation(ds,0,prefix,
+        source[target_index],Guard(),anchor,target_index,'causal_correspondence_v1')
+    assert not trusted and reason=='time_only' and target.text==source[target_index].text
+
+
+def test_causal_recovery_rotates_target_after_proved_generated_suffix(monkeypatch):
+    ds=_dataset(monkeypatch)
+    source=ds.streams[0]
+    from dataclasses import replace
+    from maichart.composer.stream_target_correspondence import rotated_text
+    anchor=1;target_index=4
+    prefix=list(source[:anchor])+[replace(step,text=rotated_text(step.text,2))
+        for step in source[anchor:target_index]]
+    checked=[]
+    class Guard:
+        def accepts(self,point):checked.append(point.note_text);return True
+    monkeypatch.setattr(stream_recovery,'rotation_boundary_clear',lambda *args:True)
+    target,trusted,reason=stream_recovery._qualified_continuation(ds,0,prefix,
+        source[target_index],Guard(),anchor,target_index,'causal_correspondence_v1')
+    expected=rotated_text(source[target_index].text,2)
+    assert trusted and reason=='rotation_correspondence'
+    assert target.text==expected and checked==[expected]
+    row=stream_data.recovery_sample(ds,0,prefix,target,configuration_trusted=trusted,
+        correspondence=reason)
+    assert row['configuration_mask'][-1].item()
+    assert row['target_shape'][-1].item()==ds.codec.encode(expected)['shape']
+
+
 def test_actual_sampled_note_is_guarded_before_commit(monkeypatch):
     ds=_dataset(monkeypatch)
     class Context:
