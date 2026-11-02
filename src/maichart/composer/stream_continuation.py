@@ -177,13 +177,13 @@ class ContinuationState:
                 motion=rotation_relation(self.geometry,geometry)!=self.motion_relation)
         return tuple(name for name in eligible if exits.get(name,False))
 
-    def exit_label(self,target):
+    def exit_label(self,target,*,exit_categories=None):
         """Return eligibility/exit labels; these are never model inputs."""
         if self.policy=='pattern_runs_v2':
             eligible=self.eligible_categories()
             if target.weight<=0 or target.kind not in (2,3,4):return False,False
             if target.kind==2 and not typed_event(target.text)[0]:return False,False
-            return bool(eligible),bool(self.exit_categories(target))
+            return bool(eligible),bool(self.exit_categories(target) if exit_categories is None else exit_categories)
         if target.kind != 2 or target.weight <= 0:
             return False,False
         types,buttons,touch=typed_event(target.text)
@@ -198,12 +198,20 @@ class ContinuationState:
                 (touch_eligible and not touch) or button_exit)
 
 
-def continuation_rows(stream,policy='typed_runs_v1'):
+def continuation_rows(stream,policy='typed_runs_v1',*,exit_anchors=None,unknown_steps=None,song_index=0):
+    """Optionally collect recovery exits during the existing causal traversal.
+
+    Unknown/zero-weight steps still update prefix state, but cannot become
+    recovery anchors. The three returned training tensors are unchanged.
+    """
     state=ContinuationState(policy);features=[];masks=[];labels=[]
-    for step in stream:
+    for index,step in enumerate(stream):
         features.append(state.features())
-        eligible,label=state.exit_label(step)
+        categories=state.exit_categories(step) if exit_anchors is not None else None
+        eligible,label=state.exit_label(step,exit_categories=categories)
         masks.append(eligible);labels.append(label)
+        if exit_anchors is not None and step.weight>0 and (unknown_steps is None or not unknown_steps[index]):
+            for name in categories:exit_anchors.setdefault(name,[]).append((song_index,index))
         state.append(step)
     return (torch.stack(features) if features else torch.zeros(0,continuation_dim(policy)),
             torch.tensor(masks,dtype=torch.bool),torch.tensor(labels,dtype=torch.bool))

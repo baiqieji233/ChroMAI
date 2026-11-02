@@ -283,6 +283,7 @@
 <label class="field">数值精度<select id="composerPrecision"><option value="auto" selected>自动</option><option value="bf16">BF16</option><option value="fp16">FP16</option><option value="fp32">FP32</option></select><small>CPU 只能使用 FP32。</small></label>
 <label class="field">结构分析后端<select id="composerStructureBackend"><option value="auto">自动（新训练优先可用的 Beat This）</option><option value="native">内置分析</option><option value="beat_this">Beat This</option></select><small>自动选择取决于本机可用性；续训继承检查点后端。</small></label>
 <label class="field" data-event-set-only hidden><span><input id="composerResetLearningRate" type="checkbox"> 调整本次续训学习率</span><small>仅本次续训生效：可设置学习率、曲线、预热和最低比例；保留优化器状态、随机状态及训练进度。未勾选时继承检查点。</small></label>
+<label class="field" data-event-set-only hidden>细节计算方式<select id="composerDetailCompute"><option value="serial">逐类计算（默认）</option><option value="packed">合并计算（实验）</option></select><small>只改变等价计算的执行方式，续训时可以调整。合并计算的收益取决于数据，尚未确认全程提速。</small></label>
 <label class="field" data-event-set-only hidden>选时计算<select id="composerTimingCompute"><option value="supervised">仅有监督位置（推荐）</option><option value="dense">完整位置（对照）</option></select><small>只改变计算方式，不改变学习合同。</small></label>
 <label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（整拍集合余弦，旧架构恒定；续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。续训默认继承原曲线；整拍集合可明确勾选调整本次续训学习率。</small></label>
 </div></div></details>
@@ -390,7 +391,8 @@
 <label class="field">准备线程<input id="composerPrepareWorkers" type="number" min="0" step="1" value="4"></label>
 <label class="field">样本准备线程<input id="composerSampleWorkers" type="number" min="1" max="8" value="1"><small>默认1，减少与GPU任务提交争用CPU；可按实际样本/秒对照2或4。</small></label>
 <label class="field" title="默认2；0在CUDA训练时最多使用2线程，CPU训练保留环境设置。">CPU 算子线程<input id="composerCpuThreads" type="number" min="0" max="256" step="1" value="2"><small>默认2。0自动：CUDA训练最多2线程；CPU训练保留环境设置。与样本准备线程分别设置。</small></label>
-<label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>共享内存的单个后台线程提前准备批次，0 关闭；默认 2。</small></label>
+<label class="field" data-event-set-only hidden>数据准备进程<select id="composerDataWorkers"><option value="0">0（共享线程）</option><option value="1">1（独立进程）</option></select><small>独立进程可减少线程争用，但会复制语料对象。32GB 主内存进行大语料训练建议保持 0；音频缓存上限不等于训练总内存。</small></label>
+<label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>默认 2。共享线程模式下 0 关闭预取；独立进程模式下 0 使用 2 批缓冲，最多 4 批。</small></label>
 <label class="field">训练样本组织<select id="composerSampleSequencePolicy"><option value="auto" selected>自动（新版新训练按短句；续训继承）</option><option value="phrase_groups_v1">连续短句分组</option><option value="independent_events_v1">独立事件（旧版）</option></select><small>短句内按时间排列，最多 8 个目标、跨度 16 拍；打乱短句顺序。每个目标仍只读取自身已发生的历史；不共享双向历史编码。改变组织方式请用 finetune 和新目录。</small></label>
 <label class="field">样本局部性<input id="composerSampleLocality" type="number" min="1" max="8" value="4"><small>每批交错的歌曲数；建议 4。1 提高缓存复用，也会增加同曲样本的梯度相关性。</small></label>
 <label class="field">音频缓存上限（GB）<input id="composerAudioCacheGb" type="number" min="0" step="0.5" value="4"></label>

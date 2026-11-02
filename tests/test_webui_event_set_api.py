@@ -351,3 +351,42 @@ def test_song_style_default_snapshot_and_explicit_file_are_distinct(tmp_path):
     assert default.args[default.args.index('--song-response-mode')+1]=='2'
     explicit=Runtime();event_set_api.start_generate(Handler(),{**base,'condition_file':str(condition)},runtime=explicit)
     assert '--condition-file-defaults' not in explicit.args
+
+
+def test_data_worker_runtime_setting_reaches_trainer(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    base=dict(manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'))
+    runtime=Runtime();event_set_api.start_train(Handler(),{**base,'data_workers':1},runtime=runtime)
+    assert runtime.args[runtime.args.index('--data-workers')+1]=='1'
+    assert runtime.task.result['effective_settings']['data_workers']==1
+    with pytest.raises(ValueError,match='data_workers'):
+        event_set_api.start_train(Handler(),{**base,'data_workers':2},runtime=Runtime())
+
+
+def test_resume_explicit_rebatch_preserves_effective_batch(tmp_path, monkeypatch):
+    from maichart.composer import stream_checkpoint
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    checkpoint=tmp_path/'parent.pt';checkpoint.write_bytes(b'fixture')
+    monkeypatch.setattr(stream_checkpoint,'read',lambda path:{'schema':event_set_api.SCHEMA,'model_config':{},'args':{'batch_size':32,'grad_accumulation':2}})
+    payload=dict(mode='resume',manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),init_checkpoint=str(checkpoint),batch_size=16,grad_accumulation=4)
+    normal=Runtime();event_set_api.start_train(Handler(),payload,runtime=normal)
+    assert (normal.task.result['effective_settings']['batch_size'],normal.task.result['effective_settings']['grad_accumulation'])==(32,2)
+    assert '--rebatch-resume' not in normal.args
+    edited=Runtime();event_set_api.start_train(Handler(),{**payload,'rebatch_resume':True},runtime=edited)
+    assert (edited.task.result['effective_settings']['batch_size'],edited.task.result['effective_settings']['grad_accumulation'])==(16,4)
+    assert '--rebatch-resume' in edited.args
+    with pytest.raises(ValueError,match='same effective batch'):
+        event_set_api.start_train(Handler(),{**payload,'rebatch_resume':True,'grad_accumulation':3},runtime=Runtime())
+
+
+def test_detail_compute_runtime_setting_reaches_trainer(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    base=dict(manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'))
+    default=Runtime();event_set_api.start_train(Handler(),base,runtime=default)
+    assert default.task.result['effective_settings']['detail_compute']=='serial'
+    for mode in ('packed','serial'):
+        runtime=Runtime();event_set_api.start_train(Handler(),{**base,'detail_compute':mode},runtime=runtime)
+        assert runtime.args[runtime.args.index('--detail-compute')+1]==mode
+        assert runtime.task.result['effective_settings']['detail_compute']==mode
+    with pytest.raises(ValueError,match='detail compute'):
+        event_set_api.start_train(Handler(),{**base,'detail_compute':'invalid'},runtime=Runtime())

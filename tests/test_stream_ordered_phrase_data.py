@@ -152,3 +152,111 @@ def test_identical_translated_full_sequences_share_positive_id():
     assert torch.equal(row['target_phrase_sequence_fingerprint'][0],row['target_phrase_sequence_fingerprint'][1])
     assert row['target_phrase_sequence_positive_ids'].tolist()==[0,0]
     assert torch.equal(row['target_phrase_sequence_visible_fingerprint'][0],row['target_phrase_sequence_visible_fingerprint'][1])
+
+
+@pytest.mark.parametrize('policy',['ordered_phrase_v2','aligned_phrase_v3'])
+@pytest.mark.parametrize('augmented',[False,True])
+def test_lazy_training_archive_packing_is_exact_after_collation(dataset_pair,policy,augmented):
+    dataset,_,_,_=dataset_pair
+    dataset.phrase_context_policy=policy
+    def rows():
+        original=dataset[3]
+        changed=(augment_stream_row(dataset,3,rng=random.Random(8),mode='abab')[0]
+                 if augmented else dataset[2])
+        return [original,changed]
+    eager_rows=rows()
+    eager=collate_stream(eager_rows)
+    dataset.defer_phrase_sequence_packing=True
+    lazy_rows=rows()
+    assert 'phrase_sequence_atoms' not in lazy_rows[0]
+    if policy=='aligned_phrase_v3':assert 'candidate_phrase_sequence_atoms' not in lazy_rows[0]
+    lazy=collate_stream(lazy_rows)
+    assert eager.keys()==lazy.keys()
+    def exact(a,b):
+        if isinstance(a,torch.Tensor):assert torch.equal(a,b)
+        elif isinstance(a,(list,tuple)):
+            assert len(a)==len(b)
+            for left,right in zip(a,b):exact(left,right)
+        else:assert a==b
+    for key in eager:exact(eager[key],lazy[key])
+    if policy=='aligned_phrase_v3':assert lazy['phrase_sequence_atoms'] is lazy['candidate_phrase_sequence_atoms']
+
+
+def test_fused_aligned_collate_matches_original_reference_union_and_packs_once(dataset_pair,monkeypatch):
+    from maichart.composer import stream_phrase
+    dataset,_,_,_=dataset_pair
+    dataset.phrase_context_policy='aligned_phrase_v3'
+    items=[dataset[2],dataset[3]]
+    original=stream_phrase.collate_phrase_sequences(items)
+    original.update(stream_phrase.collate_candidate_phrase_sequences(items))
+    stream_phrase.share_aligned_phrase_sequences(items,original)
+    calls=[];pack=stream_phrase._pack_sequences
+    def counted(sequences,prefix):
+        calls.append(prefix)
+        return pack(sequences,prefix)
+    monkeypatch.setattr(stream_phrase,'_pack_sequences',counted)
+    actual=collate_stream(items)
+    assert calls.count('phrase_sequence_')==1
+    for key,value in original.items():
+        if isinstance(value,torch.Tensor):assert torch.equal(actual[key],value)
+        else:assert actual[key]==value
+
+
+def test_dataset_reuses_continuation_traversal_for_recovery_anchors(dataset_pair,monkeypatch):
+    from maichart.composer.stream_recovery import _risk_exits
+    from maichart.composer.stream_continuation import ContinuationState
+    dataset,_,_,_=dataset_pair
+    key,cached=dataset._mixed_recovery_exit_anchors
+    assert key==(dataset.continuation_policy,len(dataset.streams))
+    del dataset._mixed_recovery_exit_anchors
+    assert _risk_exits(dataset)==cached
+    dataset._mixed_recovery_exit_anchors=(key,cached)
+    monkeypatch.setattr(ContinuationState,'append',lambda *_:pytest.fail('recovery rebuilt initialized anchors'))
+    assert _risk_exits(dataset) is cached
+
+
+def test_dataset_pickle_clears_only_hot_caches_and_preserves_batches(dataset_pair):
+    import pickle
+    dataset,_,_,_=dataset_pair
+    dataset.defer_phrase_sequence_packing=True
+    baseline=collate_stream([dataset[2],dataset[3]])
+    assert dataset._states and dataset._symbols and dataset._phrases
+    before=(len(dataset._states),len(dataset._symbols),len(dataset._phrases))
+    restored=pickle.loads(pickle.dumps(dataset,protocol=pickle.HIGHEST_PROTOCOL))
+    assert before==(len(dataset._states),len(dataset._symbols),len(dataset._phrases))
+    for name in ('_banks','_states','_symbols','_phrases','_relation_cache'):assert not getattr(restored,name)
+    assert restored._mixed_recovery_exit_anchors==dataset._mixed_recovery_exit_anchors
+    assert restored.defer_phrase_sequence_packing
+    with restored._bank_lock,restored._state_lock:pass
+    actual=collate_stream([restored[2],restored[3]])
+    for key,value in baseline.items():
+        if isinstance(value,torch.Tensor):assert torch.equal(actual[key],value)
+    assert restored.samples==dataset.samples
+    assert restored.coverage==dataset.coverage
+
+
+@pytest.mark.parametrize('include_audio',[False,True])
+def test_release_hot_caches_preserves_labels_rows_and_other_process_state(dataset_pair,include_audio):
+    import pickle
+    import threading
+    dataset,_,_,_=dataset_pair
+    baseline=collate_stream([dataset[2],dataset[3]])
+    worker=pickle.loads(pickle.dumps(dataset));worker[2]
+    worker_sizes=(worker._state_bytes,worker._symbol_bytes,worker._phrase_bytes)
+    anchors=dataset._mixed_recovery_exit_anchors
+    plans,streams,continuations=dataset.plans,dataset.streams,dataset.continuations
+    audio=SimpleNamespace(entries={'resident':object()},bytes=1234,_lock=threading.RLock())
+    dataset.base.audio_store=audio
+    released=dataset.release_hot_caches(include_audio=include_audio)
+    assert released['dataset_bytes']>0
+    assert released['audio_bytes']==(1234 if include_audio else 0)
+    assert len(audio.entries)==(0 if include_audio else 1)
+    assert audio.bytes==(0 if include_audio else 1234)
+    for name in ('_banks','_states','_symbols','_phrases','_relation_cache'):assert not getattr(dataset,name)
+    for name in ('_bank_bytes','_state_bytes','_symbol_bytes','_phrase_bytes','_relation_bytes'):assert getattr(dataset,name)==0
+    assert dataset.plans is plans and dataset.streams is streams and dataset.continuations is continuations
+    assert dataset._mixed_recovery_exit_anchors is anchors
+    assert worker_sizes==(worker._state_bytes,worker._symbol_bytes,worker._phrase_bytes)
+    actual=collate_stream([dataset[2],dataset[3]])
+    for key,value in baseline.items():
+        if isinstance(value,torch.Tensor):assert torch.equal(actual[key],value)

@@ -107,7 +107,7 @@ def _visible_sequence_fingerprint(sequence):
     return np.frombuffer(digest.digest(),dtype='<i8').copy()
 
 
-def collate_phrase_sequences(items):
+def collate_phrase_sequences(items, *, pack_references=True):
     """Deduplicate by archive identity and segment, never by original song ID.
 
     An augmentation owns a distinct archive, so its edited events cannot be
@@ -143,7 +143,7 @@ def collate_phrase_sequences(items):
             destination = inverse[batch,:len(source)]
             valid = source>=0
             destination[valid] = mapping[source[valid]]
-        output.update(_pack_sequences(unique,prefix))
+        if target or pack_references:output.update(_pack_sequences(unique,prefix))
         output[prefix+'inverse'] = torch.from_numpy(inverse)
         if target:
             fingerprints = np.stack([sequence['_fingerprint'] for sequence in unique]) if unique else np.empty((0,2),dtype=np.int64)
@@ -154,7 +154,7 @@ def collate_phrase_sequences(items):
     return output
 
 
-def prepare_candidate_phrase_inputs(index, queries, candidate_beats, *, supervise=False):
+def prepare_candidate_phrase_inputs(index, queries, candidate_beats, *, supervise=False, pack=True):
     """Read the landing segment from a committed prefix at each query index.
 
     Candidate beats are proposed clock positions, never target configurations.
@@ -162,11 +162,11 @@ def prepare_candidate_phrase_inputs(index, queries, candidate_beats, *, supervis
     that was the departure segment but is complete at the candidate landing.
     """
     result = index.rows_at(queries, candidate_beats, supervise=supervise)
-    result.update(index.sequence_rows(queries, candidate_beats))
+    result.update(index.sequence_rows(queries, candidate_beats,pack=pack))
     return {'candidate_'+key:value for key,value in result.items()}
 
 
-def collate_candidate_phrase_sequences(items):
+def collate_candidate_phrase_sequences(items, *, pack_references=True):
     """Share the ordered segment deduplication path for landing references."""
     converted = []
     for item in items:
@@ -174,7 +174,7 @@ def collate_candidate_phrase_sequences(items):
                     if key.startswith('candidate_')}
         selected['history_kind'] = item['history_kind']
         converted.append(selected)
-    result = collate_phrase_sequences(converted)
+    result = collate_phrase_sequences(converted,pack_references=pack_references)
     return {'candidate_'+key:value for key,value in result.items()}
 
 
@@ -494,8 +494,12 @@ class PhraseIndex:
         self._sequence_cache[segment] = arrays
         return arrays
 
-    def sequence_rows(self,queries,cursors,*,target_mask=None):
-        """Only inverse IDs scale with queries; actual sequence rows are unique."""
+    def sequence_rows(self,queries,cursors,*,target_mask=None,pack=True):
+        """Only inverse IDs scale with queries; actual sequence rows are unique.
+
+        Training may defer tensor packing until archive owners are deduplicated
+        by the collator. Default eager packing retains the inference API.
+        """
         queries = np.asarray(queries,dtype=np.int64)
         cursors = np.asarray(cursors,dtype=np.float64)
         segments = np.clip(np.searchsorted(self.boundaries,cursors,side='right')-1,0,len(self.indices)-1)
@@ -515,10 +519,10 @@ class PhraseIndex:
         eligible = np.zeros(len(queries),dtype=np.bool_) if target_mask is None else np.asarray(target_mask,dtype=np.bool_)
         target_segments = np.unique(segments[eligible])
         if len(target_segments):target_inverse[eligible] = np.searchsorted(target_segments,segments[eligible])
-        references = [self.sequence(int(segment)) for segment in reference_segments]
+        references = [self.sequence(int(segment)) for segment in reference_segments] if pack else []
         targets = [self.sequence(int(segment)) for segment in target_segments]
-        result = _pack_sequences(references,'phrase_sequence_')
-        result.update(_pack_sequences(targets,'target_phrase_sequence_'))
+        result = _pack_sequences(references,'phrase_sequence_') if pack else {}
+        if pack:result.update(_pack_sequences(targets,'target_phrase_sequence_'))
         fingerprints = np.stack([target['_fingerprint'] for target in targets]) if targets else np.empty((0,2),dtype=np.int64)
         visible = np.stack([target['_visible_fingerprint'] for target in targets]) if targets else np.empty((0,2),dtype=np.int64)
         result.update(phrase_sequence_inverse=torch.from_numpy(inverse),

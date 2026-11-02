@@ -5,6 +5,7 @@ labels must never enter the causal decoder, including through derived state.
 """
 import math
 from bisect import bisect_right
+from functools import lru_cache
 
 import numpy as np
 import torch
@@ -103,12 +104,20 @@ def future_relation_index(stream, unknown):
     return next_notes,wait_prefix,unknown_prefix,previous
 
 
+@lru_cache(maxsize=4096)
+def _head_cross_correlation(old,buttons):
+    """Immutable normalized rotation labels shared by repeated head sets."""
+    denominator=max(len(old),len(buttons))
+    return tuple(sum(((b-1+shift)%8+1) in buttons for b in old)/denominator
+                 for shift in range(8))
+
+
 def future_relation_rows(stream, unknown, first, end, *, index=None):
     """O(requested rows) with a cached index; CPU labels, no model inputs."""
     count=len(stream)
     next_notes,wait_prefix,unknown_prefix,previous=(future_relation_index(stream,unknown) if index is None else index)
-    values = torch.zeros(end-first, RELATION_HORIZONS, RELATION_DIM)
-    masks = torch.zeros_like(values, dtype=torch.bool)
+    values = np.zeros((end-first, RELATION_HORIZONS, RELATION_DIM),dtype=np.float32)
+    masks = np.zeros(values.shape,dtype=np.bool_)
     for local, i in enumerate(range(first, end)):
         p = previous[i]
         old = typed_event(stream[p].text)[1] if p >= 0 and not unknown[p] else frozenset()
@@ -125,8 +134,7 @@ def future_relation_rows(stream, unknown, first, end, *, index=None):
             for button in buttons: values[local,h,button-1] = 1.
             if old and buttons:
                 masks[local,h,8:16] = True
-                for shift in range(8):
-                    values[local,h,8+shift] = sum(((b-1+shift)%8+1) in buttons for b in old)/max(len(old),len(buttons))
+                values[local,h,8:16] = _head_cross_correlation(old,buttons)
             values[local,h,16] = math.log1p(max(0.,float(target.end-stream[i].start)))
             values[local,h,17] = math.log1p(max(0.,target.end_second-stream[i].start_second))
             values[local,h,18] = float(wait_prefix[j] > wait_prefix[i])
@@ -134,7 +142,7 @@ def future_relation_rows(stream, unknown, first, end, *, index=None):
             values[local,h,21] = float('slide' in types)
             masks[local,h,16:19] = True
             masks[local,h,20:22] = True
-    return values, masks
+    return torch.from_numpy(values),torch.from_numpy(masks)
 
 
 def collate_phrase_training(items, output):

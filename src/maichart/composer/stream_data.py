@@ -353,6 +353,7 @@ class StreamDataset(Dataset):
         self.delta_vocab = delta_vocab or DeltaVocabulary.fit(self.streams)
         self.encoded, self.widths, self.unknown_steps = [], [], []
         self.continuations = []
+        recovery_exits={name:[] for name in ('gap','type','template','exact','period2','motion','touch','button')}
         self.oov = {'total_steps': 0, 'delta_oov': 0, 'action_oov': 0, 'fallback_recovered': 0,
                     'masked_steps': 0}
         self.samples, self.plan_weights, self.target_window_weights = [], [], []
@@ -398,7 +399,8 @@ class StreamDataset(Dataset):
             self.encoded.append(encoded)
             self.unknown_steps.append(unknown)
             if self.continuation_policy != 'off':
-                self.continuations.append(continuation_rows(stream,policy=self.continuation_policy))
+                self.continuations.append(continuation_rows(stream,policy=self.continuation_policy,
+                    exit_anchors=recovery_exits,unknown_steps=unknown,song_index=song_index))
             else:
                 self.continuations.append((torch.zeros(len(stream),continuation_dim(self.continuation_policy)),torch.zeros(len(stream),dtype=torch.bool),
                                            torch.zeros(len(stream),dtype=torch.bool)))
@@ -448,6 +450,7 @@ class StreamDataset(Dataset):
         self.oov['known_steps'] = self.oov['total_steps']-self.oov['masked_steps']
         self.oov['known_fraction'] = self.oov['known_steps']/max(1,self.oov['total_steps'])
         self._banks = OrderedDict()
+        self._mixed_recovery_exit_anchors=((self.continuation_policy,len(self.streams)),recovery_exits)
         self._states = OrderedDict()
         self._bank_budget = int(float(audio_cache_gb)*.50*1024**3)
         self._state_budget = int(float(audio_cache_gb)*.25*1024**3)
@@ -465,6 +468,8 @@ class StreamDataset(Dataset):
         self._symbolic_bank = (torch.zeros(1,238), torch.zeros(1,dtype=torch.float64),
                                torch.zeros(1,dtype=torch.float64))
         self._symbolic_plan = (torch.zeros(1,3), torch.zeros(1), torch.zeros(1),torch.zeros(1))
+        # Training loaders opt in; standalone/inference row contracts stay eager.
+        self.defer_phrase_sequence_packing = False
         self._phrases = OrderedDict()
         self._phrase_bytes = 0
         self._phrase_budget = 64*1024**2
@@ -509,6 +514,52 @@ class StreamDataset(Dataset):
                 complete_phrase_fraction=complete_phrases/max(1,total_phrases))
             if self.coverage['supervised_steps']!=count:
                 raise AssertionError('phrase targets must be covered exactly once')
+
+    def release_hot_caches(self,include_audio=True):
+        """Release this process's reloadable residents after a worker has spawned.
+
+        Immutable streams, plans, labels, identities and recovery anchors stay
+        owned by the dataset. Already-spawned workers have independent caches.
+        """
+        with self._bank_lock,self._state_lock:
+            released=sum(getattr(self,name,0) for name in
+                ('_bank_bytes','_state_bytes','_symbol_bytes','_phrase_bytes','_relation_bytes'))
+            for name in ('_banks','_states','_symbols','_phrases','_relation_cache'):
+                getattr(self,name).clear()
+            for name in ('_bank_bytes','_state_bytes','_symbol_bytes','_phrase_bytes','_relation_bytes'):
+                setattr(self,name,0)
+            audio_released=0
+            audio_store=getattr(self.base,'audio_store',None)
+            if include_audio and audio_store is not None:
+                with audio_store._lock:
+                    audio_released=audio_store.bytes
+                    audio_store.entries.clear();audio_store.bytes=0
+        return dict(dataset_bytes=released,audio_bytes=audio_released,
+                    total_bytes=released+audio_released)
+
+    def __getstate__(self):
+        """Spawn workers with immutable labels and independent empty hot caches."""
+        state=self.__dict__.copy()
+        state.pop('_bank_lock',None);state.pop('_state_lock',None)
+        for name in ('_process_loader','_process_sampler','_process_loader_key',
+                     '_process_training_loader','_process_training_sampler'):
+            state.pop(name,None)
+        for name in ('_banks','_states','_symbols','_phrases','_relation_cache'):
+            state[name]=OrderedDict()
+        for name in ('_bank_bytes','_state_bytes','_symbol_bytes','_phrase_bytes','_relation_bytes',
+                     '_bank_hits','_bank_misses','_bank_evictions',
+                     '_state_hits','_state_misses','_state_evictions','_state_uncached',
+                     '_symbol_hits','_symbol_misses','_symbol_evictions','_phrase_uncached',
+                     '_relation_hits','_relation_misses','_relation_evictions'):
+            state[name]=0
+        # Drop mmap tensor views and parsed native geometry above; workers reopen
+        # their disk banks lazily. Eager plans/labels retain PyTorch's normal
+        # spawn shared-storage transport rather than being rebuilt or altered.
+        return state
+
+    def __setstate__(self,state):
+        self.__dict__.update(state)
+        self._bank_lock=threading.RLock();self._state_lock=threading.RLock()
 
     def _relation_rows(self,song,first,end):
         with self._state_lock:
@@ -571,9 +622,9 @@ class StreamDataset(Dataset):
             index = self._phrase_index(song).edited(modified, begin, end)
             row.update(index.rows(modified, first, end))
             if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
-                row.update(index.sequence_rows(np.arange(first,end),row['step_beat'].numpy()))
+                row.update(index.sequence_rows(np.arange(first,end),row['step_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
             if self.phrase_context_policy=='aligned_phrase_v3':
-                row.update(prepare_candidate_phrase_inputs(index,np.arange(first,end),row['target_beat'].numpy()))
+                row.update(prepare_candidate_phrase_inputs(index,np.arange(first,end),row['target_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
                 row['candidate_step_beat'] = row['target_beat'].clone()
         return row
 
@@ -864,12 +915,12 @@ class StreamDataset(Dataset):
             row['target_phrase_weight'] *= row['sample_weight']/counts
             if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
                 row.update(phrase_index.sequence_rows(row['step_index'].numpy(),row['step_beat'].numpy(),
-                                                      target_mask=row['target_phrase_mask'].numpy()))
+                                                      target_mask=row['target_phrase_mask'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
             if self.phrase_context_policy=='aligned_phrase_v3':
                 # Candidate clock is kept in a separate namespace. The main
                 # timing path continues to consume the departure segment only.
                 row.update(prepare_candidate_phrase_inputs(phrase_index,row['step_index'].numpy(),
-                    row['target_beat'].numpy()))
+                    row['target_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
                 row['candidate_step_beat'] = row['target_beat'].clone()
         return row
 
@@ -904,10 +955,11 @@ def collate_stream(items):
             raise ValueError('Cannot mix phrase-enabled and legacy stream rows')
         for key in PHRASE_ROW_FIELDS:
             output[key] = pad_sequence([item[key] for item in items], batch_first=True)
+    aligned_sequences=any('candidate__phrase_sequence_owner' in item for item in items)
     if any('_phrase_sequence_owner' in item for item in items):
-        output.update(collate_phrase_sequences(items))
-    if any('candidate__phrase_sequence_owner' in item for item in items):
-        output.update(collate_candidate_phrase_sequences(items))
+        output.update(collate_phrase_sequences(items,pack_references=not aligned_sequences))
+    if aligned_sequences:
+        output.update(collate_candidate_phrase_sequences(items,pack_references=False))
         share_aligned_phrase_sequences(items,output)
     if any('candidate_phrase_progress' in item for item in items):
         if not all('candidate_phrase_progress' in item for item in items):

@@ -4,7 +4,7 @@ function fn(name){const start=source.indexOf(`function ${name}(`);return source.
 test('training payload submits evaluation zeros, advanced values and fixed seeds',()=>{
   const values={'#composerHoldoutFraction':'0','#composerValidationMaxBatches':'0','#composerValidationBatchSize':'4',
     '#composerGenerationEvalSeeds':'0,17','#composerArchiveCheckpoints':'off','#composerDModel':'512',
-    '#composerValidationManifest':' E:/heldout.json '};
+    '#composerValidationSource':'manual','#composerValidationManifest':' E:/heldout.json '};
   const c=vm.createContext({currentTrainingMode:()=> 'fresh',trainingSourcePaths:()=>({manifest:'train.json'}),
     selectedTrainingManifests:()=>[],selectedDatasetItems:()=>[],valueOrDefault:(id,f)=>values[id]??f,
     checkedOrDefault:(_id,f)=>f,formDevice:()=> 'cpu'});

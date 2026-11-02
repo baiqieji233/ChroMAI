@@ -41,6 +41,9 @@ def start_train(handler, payload, *, runtime):
         if parent_data.get('schema') != SCHEMA:
             raise ValueError('Event-set stream requires a new event-set checkpoint; old Composer weights are incompatible')
     payload = dict(payload)
+    rebatch = payload.get('rebatch_resume', False)
+    if not isinstance(rebatch, bool) or (rebatch and mode != 'resume'):
+        raise ValueError('rebatch_resume is only available for resume')
     reset_lr = payload.get('reset_learning_rate', False)
     if not isinstance(reset_lr, bool) or (reset_lr and mode != 'resume'):
         raise ValueError('reset_learning_rate is only available for resume')
@@ -50,10 +53,13 @@ def start_train(handler, payload, *, runtime):
         for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps','dropout'):
             if key in parent_config: payload[key] = parent_config[key]
     if mode == 'resume':
-        for key in ('batch_size','grad_accumulation','seed','symbolic_pretrain_epochs','max_steps',
+        for key in ('seed','symbolic_pretrain_epochs','max_steps',
                     'recovery_interval','recovery_samples','recovery_steps','recovery_weight','plan_weight',
                     'window_seconds','limit_charts'):
             if key in parent_args: payload[key] = parent_args[key]
+        if not rebatch:
+            for key in ('batch_size','grad_accumulation'):
+                if key in parent_args: payload[key] = parent_args[key]
         if not reset_lr:
             for key in ('lr', 'warmup_steps', 'min_lr_ratio'):
                 if key in parent_args: payload[key] = parent_args[key]
@@ -86,18 +92,25 @@ def start_train(handler, payload, *, runtime):
         prepare_workers=1, cpu_threads=2, seed=0, recovery_interval=25,
         recovery_samples=2, recovery_steps=2, symbolic_pretrain_epochs=0,
         generation_eval_songs=2,validation_max_batches=32,validation_batch_size=4,
-        generation_eval_interval_epochs=1,warmup_steps=0,prefetch_batches=2,sample_workers=1)
+        generation_eval_interval_epochs=1,warmup_steps=0,prefetch_batches=2,sample_workers=1,data_workers=0)
     settings = {'architecture_profile': PROFILE}
+    settings['rebatch_resume'] = rebatch
+    if rebatch: args.append('--rebatch-resume')
     settings['holdout_fraction'] = fraction
     settings['validation_manifest'] = payload.get('validation_manifest')
     zero = {'max_steps', 'limit_charts', 'prepare_workers', 'cpu_threads', 'seed',
             'recovery_interval', 'symbolic_pretrain_epochs', 'generation_eval_songs', 'checkpoint_interval_steps',
-            'validation_max_batches','warmup_steps','prefetch_batches'}
+            'validation_max_batches','warmup_steps','prefetch_batches','data_workers'}
     for key, default in integers.items():
         if parent_data and key in {'d_model','layers','nhead','dim_feedforward','history_events','rollout_steps'}:
             default=(parent_data.get('model_config') or {}).get(key,default)
         settings[key] = _int(payload, key, default, minimum=0 if key in zero else 1)
         _arg(args, '--' + key.replace('_', '-'), settings[key])
+    if rebatch and 'batch_size' in parent_args and 'grad_accumulation' in parent_args:
+        if settings['batch_size'] * settings['grad_accumulation'] != int(parent_args['batch_size']) * int(parent_args['grad_accumulation']):
+            raise ValueError('rebatch_resume requires the same effective batch size')
+    if settings['data_workers'] not in (0, 1):
+        raise ValueError('data_workers must be 0 or 1')
     if settings['sample_workers'] != 1:
         raise ValueError('Event-set shared song caches require sample_workers=1')
     if settings['prefetch_batches'] > 16:
@@ -116,6 +129,10 @@ def start_train(handler, payload, *, runtime):
     if schedule not in {'constant','cosine'}: raise ValueError('Unknown learning rate schedule')
     settings['reset_learning_rate'] = reset_lr
     if reset_lr: args.append('--reset-learning-rate')
+    detail_compute = payload.get('detail_compute', 'serial')
+    if detail_compute not in {'serial', 'packed'}: raise ValueError('Unknown detail compute mode')
+    settings['detail_compute'] = detail_compute
+    _arg(args, '--detail-compute', detail_compute)
     timing_compute = payload.get('timing_compute', 'supervised')
     if timing_compute not in {'dense', 'supervised'}: raise ValueError('Unknown timing compute mode')
     settings['timing_compute'] = timing_compute

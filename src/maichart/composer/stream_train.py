@@ -7,7 +7,7 @@ from fractions import Fraction
 from pathlib import Path
 import numpy as np
 import torch
-from torch.utils.data import DataLoader,Sampler,Subset
+from torch.utils.data import DataLoader,Sampler,Subset,Dataset
 from .stream_data import StreamDataset,DeltaVocabulary,collate_stream
 from .stream_model import StreamComposer,StreamComposerConfig,to_device_batch
 from . import stream_checkpoint as checkpoint
@@ -172,6 +172,10 @@ def parser():
     p=argparse.ArgumentParser(description=__doc__)
     for key in ('manifest','checkpoint-dir'):p.add_argument('--'+key,required=True)
     p.add_argument('--cache-dir',default='cache/chart_composer_v1')
+    p.add_argument('--rebatch-resume',action='store_true',help='Explicitly remap a complete resume cursor while retaining effective batch and sample order')
+    p.add_argument('--data-workers',type=int,choices=(0,1),default=0)
+    p.add_argument('--detail-compute',choices=('serial','packed'),default='serial',
+        help='Batch equivalent detail recurrence across shapes; serial is a diagnostic reference')
     p.add_argument('--validation-manifest');p.add_argument('--resume');p.add_argument('--init-checkpoint')
     for key,default in dict(epochs=50,batch_size=16,grad_accumulation=1,d_model=256,layers=4,nhead=8,
         dim_feedforward=768,history_events=64,rollout_steps=16,checkpoint_interval_steps=500,
@@ -257,12 +261,13 @@ class _LocalBatches(Sampler):
                 # Bounded sortish pools retain song locality and stochastic
                 # batches, while grouping similar causal sequence lengths.
                 # Fixed sample counts keep batch/optimizer cursor contracts.
-                span=max(self.bs,self.bs*16)
+                order_bs=int(getattr(self.ds,'_sample_order_batch_size',self.bs))
+                span=max(order_bs,order_bs*16)
                 packed=[]
                 for start in range(0,len(shuffled),span):
                     pool=shuffled[start:start+span]
                     pool.sort(key=lambda index:self.ds.samples[index][2]-self.ds.samples[index][1])
-                    chunks=[pool[j:j+self.bs] for j in range(0,len(pool),self.bs)]
+                    chunks=[pool[j:j+order_bs] for j in range(0,len(pool),order_bs)]
                     chunk_order=torch.randperm(len(chunks),generator=g).tolist()
                     packed.extend(index for j in chunk_order for index in chunks[j])
                 shuffled=packed
@@ -292,7 +297,84 @@ class _TrainingCollator:
         return batch
 
 
+class _ProcessBatches(Sampler):
+    def __init__(self,ds,args,epoch,skip):
+        self.ds=ds;self.bs=args.batch_size;self.seed=args.seed
+        self.reset(epoch,skip)
+    def reset(self,epoch,skip):
+        self.epoch=epoch;self.skip=skip;self.symbolic_only=bool(getattr(self.ds,'symbolic_only',False))
+    def __len__(self):return len(_LocalBatches(self.ds,self.bs,self.seed,self.epoch,self.skip))
+    def __iter__(self):
+        for number,indices in enumerate(_LocalBatches(self.ds,self.bs,self.seed,self.epoch,self.skip),self.skip+1):
+            yield [(index,self.epoch,number,self.symbolic_only) for index in indices]
+
+
+class _ProcessRows(Dataset):
+    def __init__(self,dataset):self.dataset=dataset
+    def __len__(self):return len(self.dataset)
+    def __getitem__(self,key):
+        index,epoch,number,symbolic=key
+        started=time.perf_counter()
+        self.dataset.set_symbolic_only(symbolic)
+        item=self.dataset[index]
+        item['_process_cursor']=(epoch,number)
+        item['_process_row_sec']=time.perf_counter()-started
+        return item
+
+
+class _ProcessCollator:
+    def __init__(self,dataset,args):self.dataset=dataset;self.args=args
+    def __call__(self,items):
+        started=time.perf_counter()
+        epoch,number=items[0]['_process_cursor']
+        if any(item['_process_cursor']!=(epoch,number) for item in items):
+            raise ValueError('Mixed process batch cursors')
+        row_seconds=sum(item.pop('_process_row_sec') for item in items)
+        for item in items:item.pop('_process_cursor')
+        output=_TrainingCollator(self.dataset,self.args,epoch,skip=number-1)(items)
+        output['_process_stats']={'prepare_sec':row_seconds+time.perf_counter()-started,
+            'cache_scope':'worker_process','cache':self.dataset.cache_stats() if hasattr(self.dataset,'cache_stats') else {}}
+        return output
+
+
+def _process_worker_init(worker_id):
+    torch.set_num_threads(1)
+
+
+def _shutdown_process_loader(ds):
+    loader=getattr(ds,'_process_loader',None)
+    iterator=getattr(loader,'_iterator',None)
+    if iterator is not None:iterator._shutdown_workers()
+    for name in ('_process_loader','_process_sampler','_process_loader_key'):
+        ds.__dict__.pop(name,None)
+
+
+class _ProcessPrepared:
+    def __init__(self,loader):
+        started=time.perf_counter();self.source=iter(loader)
+        self.wait=time.perf_counter()-started;self.prepare=0.;self.count=0;self.cache={}
+        self.depth=loader.prefetch_factor
+        if not getattr(loader,'_parent_cache_released',False):
+            dataset=loader.dataset.dataset
+            if hasattr(dataset,'release_hot_caches'):dataset.release_hot_caches(include_audio=True)
+            loader._parent_cache_released=True
+    def __iter__(self):return self
+    def __next__(self):
+        started=time.perf_counter()
+        try:batch=next(self.source)
+        finally:self.wait+=time.perf_counter()-started
+        stats=batch.pop('_process_stats',{})
+        self.prepare+=stats.get('prepare_sec',0.);self.count+=1;self.cache=stats.get('cache',{})
+        return batch
+    def stats(self):
+        return dict(mode='persistent_process',depth=self.depth,sample_workers=1,prepared_batches=self.count,
+            prepare_sec=round(self.prepare,3),consumer_wait_sec=round(self.wait,3),cache_scope='worker_process',cache=self.cache)
+
+
 def _loader(ds,args,epoch,skip=0,validation=False):
+    # Ordered archives are shared across rows and departure/landing queries.
+    # Collation owns their physical packing; standalone dataset rows remain eager.
+    ds.defer_phrase_sequence_packing=True
     # DataLoader iterator creation must not consume the model/dropout RNG on
     # resume, where the number of loader constructions differs from a full run.
     generator=torch.Generator().manual_seed(args.seed+epoch*1000003+1729)
@@ -304,12 +386,28 @@ def _loader(ds,args,epoch,skip=0,validation=False):
             selected=np.linspace(0,len(ds)-1,budget,dtype=np.int64).tolist()
             ds=Subset(ds,selected)
         return DataLoader(ds,batch_size=args.validation_batch_size,collate_fn=collate_stream,num_workers=0,generator=generator)
+    if getattr(args,'data_workers',0):
+        key=(args.batch_size,args.seed,getattr(args,'prefix_augmentation_rate',0.),
+             getattr(args,'prefix_augmentation_input_policy','causal_window_config_time_first_decision_v3'),
+             args.device,min(args.prefetch_batches or 2,4))
+        if getattr(ds,'_process_loader_key',None)!=key:
+            _shutdown_process_loader(ds)
+            sampler=_ProcessBatches(ds,args,epoch,skip)
+            loader=DataLoader(_ProcessRows(ds),batch_sampler=sampler,collate_fn=_ProcessCollator(ds,args),
+                num_workers=1,persistent_workers=True,multiprocessing_context='spawn',pin_memory=True,
+                prefetch_factor=min(args.prefetch_batches or 2,4),worker_init_fn=_process_worker_init,generator=generator)
+            # StreamDataset serialization excludes parent loader/sampler state.
+            ds._process_loader=loader;ds._process_sampler=sampler;ds._process_loader_key=key
+        else:ds._process_sampler.reset(epoch,skip)
+        return ds._process_loader
     return DataLoader(ds,batch_sampler=_LocalBatches(ds,args.batch_size,args.seed,epoch,skip),
         collate_fn=_TrainingCollator(ds,args,epoch,skip),num_workers=0,pin_memory=args.device.startswith('cuda'),generator=generator)
 
 @contextmanager
 def _prepared_batches(loader,args):
-    if args.prefetch_batches:
+    if getattr(loader,'num_workers',0):
+        yield _ProcessPrepared(loader)
+    elif args.prefetch_batches:
         with LayoutBatchPrefetch(loader,depth=args.prefetch_batches,sample_workers=1) as prepared:
             yield prepared
     else:
@@ -347,6 +445,32 @@ def _cuda_memory(device):
     return {'allocated_gib':torch.cuda.memory_allocated(device)/scale,
             'reserved_gib':torch.cuda.memory_reserved(device)/scale,
             'peak_allocated_gib':torch.cuda.max_memory_allocated(device)/scale}
+
+def _resume_batch_mapping(old_args,state,args,sample_count):
+    old_bs=int(old_args['batch_size']);old_acc=int(old_args['grad_accumulation'])
+    old_batches=math.ceil(sample_count/old_bs)
+    if int(old_args.get('max_steps',0)):old_batches=min(old_batches,int(old_args['max_steps']))
+    _validate_resume_cursor(state,old_batches,old_acc)
+    changed=(old_bs,old_acc)!=(args.batch_size,args.grad_accumulation)
+    if not changed:return int(state['batch_in_epoch']) if not state.get('epoch_complete') else 0,None
+    if not getattr(args,'rebatch_resume',False):raise ValueError('Resume batch changes require --rebatch-resume')
+    if old_bs*old_acc!=args.batch_size*args.grad_accumulation:
+        raise ValueError('Rebatch resume requires unchanged effective batch size')
+    if int(old_args.get('max_steps',0)) or args.max_steps:
+        raise ValueError('Rebatch resume requires max_steps=0 to preserve epoch coverage')
+    consumed=0 if state.get('epoch_complete') else min(int(state['batch_in_epoch'])*old_bs,sample_count)
+    if consumed==sample_count:
+        cursor=math.ceil(sample_count/args.batch_size)
+    else:
+        if consumed%args.batch_size:raise ValueError('Resume sample cursor is not divisible by new batch size')
+        cursor=consumed//args.batch_size
+        if cursor%args.grad_accumulation:raise ValueError('Rebatch cursor must remain at a complete optimizer boundary')
+    return cursor,dict(previous_batch_size=old_bs,previous_grad_accumulation=old_acc,
+        batch_size=args.batch_size,grad_accumulation=args.grad_accumulation,
+        previous_batch_cursor=int(state['batch_in_epoch']),batch_cursor=cursor,
+        consumed_samples=consumed,epoch_complete=bool(state.get('epoch_complete',False)),
+        sample_order_batch_size=int(old_args.get('sample_order_batch_size',old_bs)))
+
 
 def _validate_resume_cursor(state,batches,accumulation):
     cursor=int(state.get('batch_in_epoch',0))
@@ -713,6 +837,11 @@ def _train(args):
     from .stream_data_identity import dataset_content_identity
     content_identity=dataset_content_identity(args.manifest,ds,cache_dir=args.cache_dir)
     state=(old or {}).get('training_state') or {};fingerprint=_fingerprint(args,ds)
+    args.sample_order_batch_size=int((old or {}).get('args',{}).get('sample_order_batch_size',
+        (old or {}).get('args',{}).get('batch_size',args.batch_size))) if args.resume else args.batch_size
+    ds._sample_order_batch_size=args.sample_order_batch_size
+    rebatch_changes=list(state.get('rebatch_changes') or [])
+    rebatch_mapping=None
     steps=0;start_epoch=1;skip=0
     if args.resume:
         if not old.get('optimizer_state_dict') or not state:
@@ -728,18 +857,29 @@ def _train(args):
             if not (legacy_grid or pre_blank):raise ValueError('Resume data/codec contract changed')
         optimizer.load_state_dict(old['optimizer_state_dict']);steps=int(old['optimizer_steps'])
         start_epoch=int(old['epoch'])+int(state.get('epoch_complete',False));skip=0 if state.get('epoch_complete') else int(state['batch_in_epoch'])
-        if int(old['args']['batch_size'])!=args.batch_size or int(old['args']['grad_accumulation'])!=args.grad_accumulation:
-            raise ValueError('Resume keeps batch size and accumulation')
+        skip,rebatch_mapping=_resume_batch_mapping(old['args'],state,args,len(ds))
+        if rebatch_mapping is not None:
+            rebatch_mapping.update(optimizer_step=steps,epoch=int(old['epoch']))
+            rebatch_changes.append(rebatch_mapping)
+            _emit('composer_rebatch_resume',**rebatch_mapping)
         for name in ('seed','symbolic_pretrain_epochs','max_steps','recovery_interval','recovery_samples','recovery_steps','recovery_weight','plan_weight'):
             if old['args'].get(name,getattr(args,name))!=getattr(args,name):
                 raise ValueError(f'Resume inherits {name}; use finetune for objective changes')
         random.setstate(state['python_rng']);np.random.set_state(state['numpy_rng']);torch.set_rng_state(state['torch_rng'])
         if args.device.startswith('cuda') and state.get('cuda_rng') is not None:torch.cuda.set_rng_state(state['cuda_rng'],device=args.device)
         restore_recovery_state(model,state.get('recovery_episodes'))
+    if old is not None:
+        # load() materializes the complete checkpoint on CPU before copying
+        # model/optimizer tensors to the training device. Only metadata is
+        # needed below; retaining these dictionaries wastes host RAM throughout
+        # every epoch (especially with a separate data-preparation process).
+        old.pop('model_state_dict',None)
+        old.pop('optimizer_state_dict',None)
     batches_per_epoch=math.ceil(len(ds)/args.batch_size)
     if args.max_steps:batches_per_epoch=min(batches_per_epoch,args.max_steps)
     if args.resume:
-        _validate_resume_cursor(state,batches_per_epoch,args.grad_accumulation)
+        mapped_state={**state,'batch_in_epoch':skip}
+        _validate_resume_cursor(mapped_state,batches_per_epoch,args.grad_accumulation)
         if not state.get('epoch_complete') and skip==batches_per_epoch:
             start_epoch+=1;skip=0
     reset_lr=bool(getattr(args,'reset_learning_rate',False))
@@ -755,15 +895,18 @@ def _train(args):
         for group in optimizer.param_groups:group['lr']=learning_rate(lr_plan,steps)
         _emit('composer_learning_rate_changed',**lr_changes[-1])
     model._sparse_timing_enabled=getattr(args,'timing_compute','supervised')=='supervised'
+    model._packed_detail_enabled=getattr(args,'detail_compute','serial')=='packed'
     stop_at_update=steps+args.stop_after_updates if getattr(args,'stop_after_updates',0) else None
     defaults=(old or {}).get('condition_defaults') or _condition_defaults(ds)
     _emit('composer_runtime',family=checkpoint.FAMILY,architecture_profile=checkpoint.PROFILE,
         training_semantics='causal_event_set_stream_v1',samples=len(ds),batch_size=args.batch_size,
-        grad_accumulation=args.grad_accumulation,history_events=args.history_events,rollout_steps=args.rollout_steps,
+        grad_accumulation=args.grad_accumulation,sample_order_batch_size=args.sample_order_batch_size,history_events=args.history_events,rollout_steps=args.rollout_steps,
         parameters=sum(p.numel() for p in model.parameters()),codec_coverage=ds.codec.coverage,
         effective_lr=optimizer.param_groups[0]['lr'],start_epoch=start_epoch,end_epoch=args.epochs,
         resume_sample_cursor=skip*args.batch_size,precision=args.precision,device=args.device,
         cpu_threads=args.effective_cpu_threads,validation_enabled=dev is not None,
+        data_workers=getattr(args,'data_workers',0),
+        detail_compute=getattr(args,'detail_compute','serial'),
         timing_compute=getattr(args,'timing_compute','supervised'),stop_at_update=stop_at_update,
         validation_manifest=args.validation_manifest,generation_eval_settings=generation_settings,
         epoch_target=args.epochs,learning_rate_schedule=lr_plan,audio_grid_seconds=args.audio_grid_seconds,
@@ -785,7 +928,7 @@ def _train(args):
             dataset_content_identity=content_identity,
             python_rng=random.getstate(),numpy_rng=np.random.get_state(),torch_rng=torch.get_rng_state(),
             cuda_rng=torch.cuda.get_rng_state(device=args.device) if args.device.startswith('cuda') else None,
-            lr_schedule=lr_plan,learning_rate_changes=lr_changes,recovery_episodes=recovery_state(model),learning_policies=learning_policies,
+            lr_schedule=lr_plan,learning_rate_changes=lr_changes,rebatch_changes=rebatch_changes,recovery_episodes=recovery_state(model),learning_policies=learning_policies,
             parent_stage={'checkpoint':str(args.init_checkpoint),'optimizer_steps':int(old.get('optimizer_steps',0)),
                           'learning_policies':{key:getattr(StreamComposerConfig.from_dict(old['model_config']),key) for key in learning_policies}} if args.init_checkpoint else state.get('parent_stage'))
         kwargs=dict(epoch=epoch,optimizer_steps=steps,args=vars(args),metrics=metrics,
@@ -793,7 +936,7 @@ def _train(args):
         checkpoint.save(directory/'composer_last.pt',model,optimizer,state=s,**kwargs)
         checkpoint.save(directory/'composer_inference.pt',model,**kwargs)
         _emit('composer_checkpoint',epoch=epoch,optimizer_steps=steps,path=str(directory/'composer_last.pt'))
-    if reset_lr:
+    if reset_lr or rebatch_mapping is not None:
         # Make an explicitly changed plan durable before another update. A
         # later ordinary resume must not silently recover the old schedule.
         persist(start_epoch,skip,False,(old or {}).get('metrics',{}))
@@ -838,7 +981,10 @@ def _train(args):
                 backward_loss=loss/divisor
                 window_finite=window_finite & _forward_finite_flags(out,loss,backward_loss)
                 backward_loss.backward()
-                window_metrics.add(metrics);window_metrics.add(_exit_coverage(b));window_batches+=1
+                combined_metrics=dict(metrics)
+                for name,value in _exit_coverage(b).items():
+                    combined_metrics[name]=combined_metrics[name]+value if name in combined_metrics else value
+                window_metrics.add(combined_metrics);window_batches+=1
                 update=bi%args.grad_accumulation==0 or bi==batches_per_epoch
                 updated=False
                 if update:
@@ -890,7 +1036,8 @@ def _train(args):
                         effective_targets_per_sec=effective_target_budget/max(elapsed,1e-6),
                         effective_target_budget_scope='consumed_authored_batches_current_epoch_execution_since_resume',
                         prefetch=loader.stats() if hasattr(loader,'stats') else {'mode':'off'},
-                        cache=ds.cache_stats() if hasattr(ds,'cache_stats') else {},
+                        cache=(loader.cache if isinstance(loader,_ProcessPrepared) else ds.cache_stats() if hasattr(ds,'cache_stats') else {}),
+                        cache_scope='worker_process' if isinstance(loader,_ProcessPrepared) else 'training_process',
                         exit_coverage={key:value for key,value in totals.as_floats().items() if key.startswith('exit_')},
                         augmentation=augmentation_totals,
                         timing_queries=dict(evaluated=timing_queries,total=timing_queries_total),
@@ -900,6 +1047,7 @@ def _train(args):
                 if stopping:
                     _emit('composer_bounded_stop',epoch=epoch,batch=bi,optimizer_steps=steps,
                           reason='requested_additional_update_budget',checkpoint=str(directory/'composer_last.pt'))
+                    _shutdown_process_loader(ds)
                     return 0
         avg=_averages(totals,n)
         training_elapsed=time.perf_counter()-started
@@ -923,6 +1071,7 @@ def _train(args):
                     count=args.generation_eval_songs,seeds=[int(s) for s in args.generation_eval_seeds.split(',')],device=args.device,
                     temperature=args.generation_eval_temperature,generation_settings=generation_settings)
             _emit('composer_generation_validation',**panel)
+    _shutdown_process_loader(ds)
     return 0
 
 def main(argv=None):

@@ -14,6 +14,7 @@ class MetricTotals:
     def __init__(self):
         self.names = ()
         self.values = None
+        self._indices = {}
 
     @torch.no_grad()
     def add(self, metrics):
@@ -31,13 +32,20 @@ class MetricTotals:
         elif self.names == names:
             self.values.add_(values)
         else:
-            # Optional diagnostics can appear/disappear. Preserve dictionary
-            # addition semantics without transferring any values to the CPU.
-            combined = dict(zip(self.names, self.values.unbind()))
-            for name, value in zip(names, values.unbind()):
-                combined[name] = combined[name] + value if name in combined else value
-            self.names = tuple(combined)
-            self.values = torch.stack(list(combined.values()))
+            # Names keep their first-seen order. One packed indexed addition
+            # handles optional/recovery subsets without a kernel per scalar.
+            index=self._indices.get(names)
+            if index is None:
+                positions={name:i for i,name in enumerate(self.names)}
+                added=tuple(name for name in names if name not in positions)
+                if added:
+                    offset=len(self.names)
+                    positions.update((name,offset+i) for i,name in enumerate(added))
+                    self.names=self.names+added
+                    self.values=torch.cat((self.values,self.values.new_zeros(len(added))))
+                index=torch.tensor([positions[name] for name in names],device=self.values.device,dtype=torch.long)
+                self._indices[names]=index
+            self.values.index_add_(0,index,values)
 
     def as_floats(self):
         if self.values is None:

@@ -2025,14 +2025,23 @@ def stream_loss(model, output, batch):
     sparse_groups = batch.get('_detail_phase_groups')
     groups = batch['_detail_groups'] if sparse_groups is None else sparse_groups
     detail_bank=model.shared_details.encode_catalog() if hasattr(model,'shared_details') else None
-    for group in groups:
+    packed_detail_results=None
+    if (getattr(model,'_packed_detail_enabled',False) and sparse_groups is not None
+            and hasattr(model,'shared_details') and model.config.detail_policy!='independent_v1'):
+        from .stream_detail_compute import packed_regular_detail_log_probs
+        packed_detail_results=packed_regular_detail_log_probs(model,context,details,groups,detail_bank,
+            output.get('duration_audio_context'))
+    for group_number,group in enumerate(groups):
         shape, indices = group[:2]
-        ctx = context.index_select(0, indices)
+        # The packed path already gathered contexts, targets and duration
+        # rows. Do not launch the same gathers again only to discard them.
+        ctx = context.index_select(0, indices) if packed_detail_results is None else None
         duration_context=None
-        if output.get('duration_audio_context') is not None:
+        if packed_detail_results is None and output.get('duration_audio_context') is not None:
             from .stream_duration import select_duration_context
             duration_context=select_duration_context(output['duration_audio_context'],indices)
-        target, mass = details.index_select(0, indices), flat_weights.index_select(0, indices)
+        target = details.index_select(0, indices) if packed_detail_results is None else None
+        mass = flat_weights.index_select(0, indices)
         if model.config.detail_policy=='independent_v1':
             for slot, head in enumerate(model.detail_heads[shape]):
                 logits=model.duration_detail_logits(head(ctx),shape,slot,duration_context)
@@ -2051,10 +2060,11 @@ def stream_loss(model, output, batch):
                     duration_context=expanded_duration,detail_bank=detail_bank).reshape(-1,8)
             else:
                 rows, phases = group[2:]
-                packed = model.regular_detail_log_probs(ctx.index_select(0, rows), shape,
-                    phases, target.index_select(0, rows),duration_context=(select_duration_context(duration_context,rows)
-                        if duration_context is not None else None),detail_bank=detail_bank)
-                phase_details = packed.new_full((ctx.size(0), 8), -torch.inf).index_put(
+                packed = (packed_detail_results[group_number] if packed_detail_results is not None else
+                    model.regular_detail_log_probs(ctx.index_select(0, rows), shape,
+                        phases, target.index_select(0, rows),duration_context=(select_duration_context(duration_context,rows)
+                            if duration_context is not None else None),detail_bank=detail_bank))
+                phase_details = packed.new_full((indices.numel(), 8), -torch.inf).index_put(
                     (rows, phases), packed)
             phase_log_probs=output['phase_logits'].flatten(0,1).index_select(0,indices).float().log_softmax(-1)
             allowed=phase_mask.flatten(0,1).index_select(0,indices)

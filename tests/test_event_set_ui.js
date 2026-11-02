@@ -391,3 +391,38 @@ test('validation inputs follow the selected source without changing selection on
   e('#composerValidationSource').value='off';c.updateEventSetControls();assert.equal(e('#composerValidationManifest').disabled,true);assert.equal(e('#composerHoldoutFraction').disabled,true);
   c.currentTrainingMode=()=> 'resume';c.updateEventSetControls();assert.equal(e('#composerValidationSource').disabled,true);assert.equal(e('#composerValidationManifest').disabled,true);
 });
+
+
+test('data worker process is an editable runtime setting on resume',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  assert.equal(c.chartComposerTrainingPayload().data_workers,0);
+  e('#composerDataWorkers').value='1';c.currentTrainingMode=()=> 'resume';c.updateEventSetControls();
+  assert.equal(e('#composerDataWorkers').disabled,false);assert.equal(c.chartComposerTrainingPayload().data_workers,1);
+});
+
+
+test('independent data process requires backend capability before submission',async()=>{
+  const {context:c}=harness();const calls=[];
+  Object.assign(c,{setWorkspaceMode(){},datasetUploading:false,assertTrainingSelection(){},assertDatasetBackend:async()=>{},
+    trainingPayload:()=>({model_family:'chart_composer_v1',architecture_profile:'event_set_stream_v1',manifest:'train.json',data_workers:1}),
+    api:async path=>{calls.push(path);return {capabilities:{event_set_stream:true},training_capabilities:{composer_detail_compute:'packed_v1'}};}});
+  vm.runInContext('async '+fn('submitTrain'),c);
+  await assert.rejects(c.submitTrain(),/尚未加载独立数据准备进程/);assert.deepEqual(calls,['/api/status']);
+});
+
+
+test('event-set rebatch is explicit and survives checkpoint reinspection',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';c.currentTrainingMode=()=> 'resume';
+  e('#composerRebatchResume').checked=true;e('#batchSize').value='16';e('#gradAccumulation').value='4';
+  c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{batch_size:32,grad_accumulation:2}},'resume',true);
+  const payload=c.chartComposerTrainingPayload();assert.equal(payload.rebatch_resume,true);assert.equal(payload.batch_size,16);assert.equal(payload.grad_accumulation,4);
+  e('#composerRebatchResume').checked=false;assert.equal(c.chartComposerTrainingPayload().rebatch_resume,undefined);
+});
+
+
+test('detail compute is editable during resume and passed to trainer',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  assert.equal(c.chartComposerTrainingPayload().detail_compute,'serial');
+  e('#composerDetailCompute').value='packed';c.currentTrainingMode=()=> 'resume';c.updateEventSetControls();
+  assert.equal(e('#composerDetailCompute').disabled,false);assert.equal(c.chartComposerTrainingPayload().detail_compute,'packed');
+});
