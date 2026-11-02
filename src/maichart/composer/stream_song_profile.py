@@ -77,30 +77,70 @@ class SongProfileCompleter(nn.Module):
         mask=known_mask.to(condition.dtype)
         out=self.network(torch.cat((audio,condition*mask,mask),-1)).float().reshape(-1,self.components,1+15*self.bins)
         return dict(mixture_logits=out[:,:,0],bin_logits=out[:,:,1:].reshape(-1,self.components,15,self.bins))
-    def loss(self,audio,condition,known_mask=None, reduction="mean"):
+    def loss_parts(self,audio,condition,known_mask=None):
+        """Proper joint categorical score plus ordered marginal CRPS per chart."""
         if known_mask is None:
             known_mask=torch.rand_like(condition)<torch.rand((len(condition),1),device=condition.device)
             known_mask[:,0]=True
         condition,known_mask=self.bind_known(condition,known_mask)
         out=self(audio,condition,known_mask)
         targets=(condition[:,1:].clamp(0,1)*(self.bins-1)).round().long()
-        logp=out['bin_logits'].log_softmax(-1).gather(-1,targets[:,None,:,None].expand(-1,self.components,-1,1)).squeeze(-1)
+        log_probs=out['bin_logits'].log_softmax(-1)
+        logp=log_probs.gather(-1,targets[:,None,:,None].expand(-1,self.components,-1,1)).squeeze(-1)
         unknown=(~known_mask[:,1:].bool()).to(logp.dtype)
-        unknown[:,11]=0  # chord_bias duplicates chord; score the physical statistic once
-        joint=(logp*unknown[:,None]).sum(-1)+out['mixture_logits'].log_softmax(-1)
-        loss=-joint.logsumexp(-1)/unknown.sum(-1).clamp_min(1)
+        unknown[:,11]=0  # The tied chord statistic contributes once.
+        normalizer=unknown.sum(-1).clamp_min(1)
+        mixture=out['mixture_logits'].log_softmax(-1)
+        joint=(logp*unknown[:,None]).sum(-1)+mixture
+        joint_nll=-joint.logsumexp(-1)/normalizer
+        marginal=(log_probs.exp()*mixture.exp()[:,:,None,None]).sum(1)
+        grid=torch.linspace(0,1,self.bins,device=condition.device,dtype=marginal.dtype)
+        observed=(grid[None,None,:]>=condition[:,1:,None]).to(marginal.dtype)
+        # The terminal CDF is identically one. Uniform-grid integration gives
+        # a numerical proper score that distinguishes nearby from distant bins.
+        crps_fields=(marginal.cumsum(-1)[...,:-1]-observed[...,:-1]).square().sum(-1)/(self.bins-1)
+        crps=(crps_fields*unknown).sum(-1)/normalizer
+        return dict(joint_nll=joint_nll,crps=crps)
+    def loss(self,audio,condition,known_mask=None,reduction='mean',crps_weight=0.):
+        weight=float(crps_weight)
+        if not np.isfinite(weight) or weight<0:raise ValueError('Invalid profile CRPS weight')
+        parts=self.loss_parts(audio,condition,known_mask)
+        loss=parts['joint_nll']+weight*parts['crps']
         return loss if reduction=='none' else loss.mean()
     @torch.no_grad()
-    def sample(self,audio,condition,known_mask,generator=None):
+    def sample(self,audio,condition,known_mask,generator=None,*,policy='component_mean_v2',return_diagnostics=False):
+        if policy not in ('component_mean_v2','categorical_v1'):raise ValueError('Invalid profile sampling policy')
         condition,known_mask=self.bind_known(condition,known_mask)
         out=self(audio,condition,known_mask)
-        modes=torch.multinomial(out['mixture_logits'].softmax(-1),1,generator=generator).squeeze(-1)
+        mixture=out['mixture_logits'].softmax(-1)
+        modes=torch.multinomial(mixture,1,generator=generator).squeeze(-1)
         logits=out['bin_logits'][torch.arange(len(condition),device=condition.device),modes]
-        draws=torch.multinomial(logits.softmax(-1).reshape(-1,self.bins),1,generator=generator).reshape(-1,15)/(self.bins-1)
+        probabilities=logits.softmax(-1)
+        grid=torch.linspace(0,1,self.bins,device=condition.device,dtype=probabilities.dtype)
+        means=(probabilities*grid).sum(-1)
+        variance=(probabilities*(grid-means[...,None]).square()).sum(-1)
+        draws=(means if policy=='component_mean_v2' else
+            torch.multinomial(probabilities.reshape(-1,self.bins),1,generator=generator).reshape(-1,15)/(self.bins-1))
         values=condition.clone();values[:,1:]=torch.where(known_mask[:,1:].bool(),condition[:,1:],draws)
         values[:,12]=values[:,7]
         projected=[feasible_profile(v,m) for v,m in zip(values.cpu().numpy(),known_mask.cpu().numpy())]
-        return torch.as_tensor(np.stack(projected),device=condition.device,dtype=condition.dtype)
+        result=torch.as_tensor(np.stack(projected),device=condition.device,dtype=condition.dtype)
+        if not return_diagnostics:return result
+        rows=[]
+        cdf=probabilities.cumsum(-1)
+        for row in range(len(condition)):
+            fields={}
+            for index,key in enumerate(CONDITION_KEYS[1:]):
+                # chord_bias reports its canonical tied chord distribution.
+                j=6 if index==11 else index
+                p=probabilities[row,j]
+                quantiles={str(q):float(grid[torch.searchsorted(cdf[row,j].contiguous(),p.new_tensor(q)).clamp_max(self.bins-1)]) for q in (.05,.5,.95)}
+                fields[key]=dict(mean=float(means[row,j]),std=float(variance[row,j].sqrt()),
+                    zero_probability=float(p[0]),one_probability=float(p[-1]),
+                    probability_ge_0_8=float(p[grid>=.8].sum()),quantiles=quantiles,
+                    locked=bool(known_mask[row,index+1]))
+            rows.append(dict(selected_component=int(modes[row]),mixture_probabilities=mixture[row].cpu().tolist(),controls=fields))
+        return result,dict(policy=policy,rows=rows)
 
 
 def resolve_song_profile(model,cache,condition,args,payload):
@@ -122,9 +162,11 @@ def resolve_song_profile(model,cache,condition,args,payload):
     available=getattr(model,'song_profile',None) is not None and getattr(model.config,'song_profile_policy','off')!='off'
     seed=getattr(args,'song_style_seed',None)
     seed=int(args.seed if seed is None else seed)
+    diagnostics=None
     if source=='auto' and available and not explicit_file:
         generator=torch.Generator(device=vector.device).manual_seed(seed)
-        vector=model.song_profile.sample(cache,vector,known,generator=generator);effective='learned_masked_joint_v1'
+        vector,diagnostics=model.song_profile.sample(cache,vector,known,generator=generator,
+            policy='component_mean_v2',return_diagnostics=True);effective='learned_masked_joint_v1'
     else:
         if locks:feasible_profile(vector[0].cpu().numpy(),known[0].cpu().numpy())
         effective='condition_file' if explicit_file else 'manual' if source=='manual' else 'checkpoint_defaults'
@@ -140,5 +182,6 @@ def resolve_song_profile(model,cache,condition,args,payload):
         result=GenerationCondition.from_dict(original)
     return result,dict(requested_source=source,effective_source=effective,seed=seed,locks=locks,
         effective_controls=result.to_dict(),frozen_for_song=True,
-        distribution=('129_bin_mixture_with_feasibility_projection' if effective=='learned_masked_joint_v1' else 'legacy_preferences'),
-        training_score='masked_preprojection_categorical_nll')
+        distribution=('mixture_component_mean_with_feasibility_projection_v2' if effective=='learned_masked_joint_v1' else 'legacy_preferences'),
+        sampling_policy=('component_mean_v2' if diagnostics else None),prediction_diagnostics=diagnostics,
+        training_score=('masked_joint_categorical_nll_plus_ordered_crps' if getattr(model.config,'song_profile_policy','off')=='masked_ordered_joint_v2' else 'masked_preprojection_categorical_nll'))

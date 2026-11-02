@@ -16,7 +16,7 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
-    'song_profile_policy': ('masked_joint_v1','off'),
+    'song_profile_policy': ('masked_ordered_joint_v2','masked_joint_v1','off'),
     'song_response_policy': ('music_response_v1','off'),
     'training_window_policy': ('phrase_complete_v1','block_v1'),
     'phrase_execution_policy': ('persistent_modes_v1','off'),
@@ -375,6 +375,9 @@ def _loader(ds,args,epoch,skip=0,validation=False):
     # Ordered archives are shared across rows and departure/landing queries.
     # Collation owns their physical packing; standalone dataset rows remain eager.
     ds.defer_phrase_sequence_packing=True
+    # Fixed per-row denominator keeps the final short batch from overweighting
+    # its charts in the whole-song profile objective.
+    ds._profile_reference_batch_size=args.validation_batch_size if validation else args.batch_size
     # DataLoader iterator creation must not consume the model/dropout RNG on
     # resume, where the number of loader constructions differs from a full run.
     generator=torch.Generator().manual_seed(args.seed+epoch*1000003+1729)
@@ -734,12 +737,13 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version=('stream_song_response_joint_v6' if model.config.song_response_policy!='off' or model.config.song_profile_policy!='off' else 'stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy=='persistent_modes_v1' else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
+    args.training_objective_recipe=dict(version=('stream_ordered_song_profile_v7' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'stream_song_response_joint_v6' if model.config.song_response_policy!='off' or model.config.song_profile_policy!='off' else 'stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy=='persistent_modes_v1' else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
         else 'stream_aligned_phrase_joint_v3' if model.config.phrase_context_policy=='aligned_phrase_v3' else 'stream_ordered_phrase_joint_v2'
         if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 'stream_causal_phrase_joint_v1'),
         song_profile_policy=model.config.song_profile_policy,song_profile_components=model.config.song_profile_components,song_profile_weight=model.config.song_profile_weight,
         song_response_policy=model.config.song_response_policy,song_response_modes=model.config.song_response_modes,song_response_group_size=model.config.song_response_group_size,
-        song_profile_objective='masked_mixture_categorical_129_bins_preprojection_unique_charts_per_batch',
+        song_profile_objective=('masked_joint_nll_plus_ordinal_crps_equal_chart_mass_v2' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'masked_mixture_categorical_129_bins_preprojection_unique_charts_per_batch'),
+        plan_metric_contract='unchanged_poisson_nll_with_saturated_floor_and_excess_diagnostics',
         song_response_objective='same_chart_distant_complete_phrase_subgroups_nested_composite_likelihood_prior_only',
         song_style_runtime='audio_condition_choice_once_immutable_across_prefix_replay',
         phrase_context_policy=model.config.phrase_context_policy,

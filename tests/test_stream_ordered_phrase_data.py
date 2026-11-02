@@ -260,3 +260,39 @@ def test_release_hot_caches_preserves_labels_rows_and_other_process_state(datase
     actual=collate_stream([dataset[2],dataset[3]])
     for key,value in baseline.items():
         if isinstance(value,torch.Tensor):assert torch.equal(actual[key],value)
+
+
+def test_profile_window_importance_gives_each_chart_equal_total_mass(dataset_pair):
+    dataset,_,_,_=dataset_pair
+    counts=dataset.profile_chart_window_counts
+    assert counts.sum()==len(dataset.samples)
+    for chart,count in enumerate(counts):
+        if count:
+            assert count*dataset.profile_chart_importance[chart]==pytest.approx(len(dataset.samples)/int(np.count_nonzero(counts)))
+    row=dataset[2]
+    assert row['_profile_chart_importance']==dataset.profile_chart_importance[row['song_index']]
+
+
+def test_profile_importance_aggregates_once_per_chart_and_keeps_partial_batch_mass(dataset_pair):
+    dataset,_,_,_=dataset_pair
+    original=dataset[2]
+    def item(chart,importance):
+        row=dict(original);length=len(row['history_kind'])
+        row.update(_training_chart_id=chart,_profile_chart_importance=importance,
+            _profile_reference_batch_size=3,_training_reference_targets=4,
+            _training_target_budget=row['loss_mask'].float(),
+            training_phrase_group=torch.zeros(length,dtype=torch.long),
+            training_phrase_position=torch.arange(length),
+            training_phrase_complete=row['loss_mask'].clone())
+        return row
+    # Four total windows: chart 0 owns three; chart 1 owns one.
+    # N_total / (N_charts*N_chart) gives 2/3 and 2 respectively.
+    first=collate_stream([item(0,2/3) for _ in range(3)])
+    last=collate_stream([item(1,2.)])
+    assert first['profile_chart_rows'].tolist()==[0]
+    assert last['profile_chart_rows'].tolist()==[0]
+    assert first['profile_chart_weights'].tolist()==pytest.approx([2/3])
+    assert last['profile_chart_weights'].tolist()==pytest.approx([2/3])
+    mixed=collate_stream([item(0,2/3),item(1,2.),item(0,2/3)])
+    assert mixed['profile_chart_rows'].tolist()==[0,1]
+    assert mixed['profile_chart_weights'].tolist()==pytest.approx([4/9,2/3])

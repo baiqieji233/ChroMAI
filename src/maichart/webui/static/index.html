@@ -313,7 +313,7 @@
 <label class="field">短句关系学习权重<input id="composerPhraseRelationWeight" type="number" min="0" step="0.05" value="0.1"></label>
 </div></div></details>
 <details id="composerSongStyleAdvanced" class="settings-section span-4" data-event-set-only hidden><summary><span>整曲风格训练</span><small>新训练自动启用；续训继承检查点</small></summary><div class="settings-content"><div class="form-grid">
-<label class="field">整曲风格学习<select id="composerSongProfilePolicy"><option value="auto">自动</option><option value="masked_joint_v1">启用</option><option value="off">关闭</option></select></label>
+<label class="field">整曲风格学习<select id="composerSongProfilePolicy"><option value="auto">自动</option><option value="masked_ordered_joint_v2">按连续数值学习（推荐）</option><option value="masked_joint_v1">旧版分类学习</option><option value="off">关闭</option></select></label>
 <label class="field">音乐响应学习<select id="composerSongResponsePolicy"><option value="auto">自动</option><option value="music_response_v1">启用</option><option value="off">关闭</option></select><small>需要新版持续短句模式。</small></label>
 <label class="field">风格分量数<input id="composerSongProfileComponents" type="number" min="1" max="16" value="4"></label>
 <label class="field">风格学习权重<input id="composerSongProfileWeight" type="number" min="0" step="0.01" value="0.1"></label>
@@ -1006,7 +1006,7 @@
 <label class="field">Touch布局<select id="composerTouchLayoutPolicy"><option value="open" selected>开放Touch布局</option><option value="legacy_two_heads">旧双头限制</option></select><small>默认开放模式，不把全部Touch算作按钮双头；仍检查时序与物理硬冲突。整拍集合的空间衔接策略随检查点加载，不使用旧版的配置关系强度等控件。</small></label>
 <div id="composerSongStyleGeneration" data-event-set-generation-only hidden style="grid-column:1/-1"><h4>整曲风格</h4><div class="form-grid">
 <label class="field">整曲风格来源<select id="composerSongStyleSource"><option value="auto">自动匹配音乐</option><option value="checkpoint">沿用检查点默认</option><option value="manual">手动设置</option></select></label>
-<p id="composerSongStyleHint" style="grid-column:1/-1">自动匹配使用模型补全，忽略其他风格滑块的默认值；手动锁定字段会保留。沿用检查点默认和手动设置使用当前生成条件滑块。</p>
+<p id="composerSongStyleHint" style="grid-column:1/-1">自动模式先选择整体写法，再使用该写法内的连续统计值，避免逐字段随机抽到极端密度；明确锁定优先。其他风格滑块的默认值不会锁定；沿用检查点默认和手动设置使用当前生成条件滑块。</p>
 </div><details><summary>整曲写法高级设置</summary><div class="form-grid">
 <label class="field">风格随机种子（留空自动）<input id="composerSongStyleSeed" type="number" min="0"></label>
 <label class="field">手动锁定（JSON 对象）<input id="composerSongStyleLocks" value="{}"><small>只填写需要锁定的字段，例如 {&quot;touch_bias&quot;:0.04}；自动匹配时其余字段由模型决定。</small></label>

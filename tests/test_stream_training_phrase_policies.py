@@ -55,7 +55,7 @@ def test_phrase_mode_eval_temperature_includes_greedy():
 
 def test_song_style_fresh_defaults_and_legacy_resume_contract():
     fresh = resolve_learning_policies(SimpleNamespace())
-    assert fresh['song_profile_policy'] == 'masked_joint_v1'
+    assert fresh['song_profile_policy'] == 'masked_ordered_joint_v2'
     assert fresh['song_response_policy'] == 'music_response_v1'
     assert (fresh['song_profile_components'], fresh['song_profile_weight']) == (4, .1)
     assert (fresh['song_response_modes'], fresh['song_response_group_size']) == (4, 4)

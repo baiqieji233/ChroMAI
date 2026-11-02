@@ -143,19 +143,90 @@ class _Curve:
         rates=values if model.config.plan_target_units=='rates_per_second_v2' else values/exposure
         counts=rates*exposure
         baseline=float((counts[:,0].sum()/float(song.audio.duration_sec)).clamp_min(.1))
-        self.controller=apply_curve_to_composer(getattr(args,'intensity_curve_file',None),
+        raw=getattr(args,'intensity_curve_file',None)
+        if isinstance(raw,(str,Path)) and str(raw):raw=json.loads(Path(raw).read_text(encoding='utf-8-sig'))
+        self.controller=apply_curve_to_composer(raw,
             duration_sec=float(song.audio.duration_sec),effective_start_sec=0.,effective_end_sec=float(song.audio.duration_sec),
             mode=getattr(args,'intensity_curve_mode','follow'),span_mode='full',
             strength=getattr(args,'intensity_curve_strength',.65),baseline_head_rate=baseline)
+        self.reference_rebased=False
+        self.reference_rebase_reason='not_required'
+        if self.controller.reference_times.size and isinstance(raw,dict) and isinstance(raw.get('condition'),dict):
+            reference=GenerationCondition.from_dict(raw['condition']).to_dict()
+            effective=condition.to_dict()
+            def same(left,right):
+                if isinstance(left,dict):return left.keys()==right.keys() and all(same(left[k],right[k]) for k in left)
+                return bool(np.isclose(float(left),float(right),atol=1e-5,rtol=0.))
+            if not same(reference,effective):
+                self.controller.reference_times=np.empty(0,dtype=np.float64)
+                self.controller.reference_values=np.empty(0,dtype=np.float64)
+                self.reference_rebased=True
+                self.reference_rebase_reason='saved_curve_condition_differs_from_effective_condition'
         self.active=self.controller.active and not self.controller._neutral()
         # Input order is event/head, while plan labels are blank/head/event.
         native=rates[:,[1,0]]
         adjusted=self.controller._adjust_rates(native,self.seconds) if self.active else native
-        self.ratio=(adjusted[:,0].clamp_min(1e-6)/native[:,0].clamp_min(1e-6)).log().clamp(-4,4).cpu().numpy()
+        self.native_event_rate=native[:,0].detach().cpu().numpy().astype(np.float64)
+        self.adjusted_event_rate=adjusted[:,0].detach().cpu().numpy().astype(np.float64)
         self.head_rate=adjusted[:,1].detach().cpu().numpy()
         self.duration=float(song.audio.duration_sec)
         self.head_counts=counts[:,0].detach().cpu().numpy()
-    def bias(self,seconds):return np.interp(seconds,self.seconds,self.ratio) if self.active else np.zeros_like(seconds,dtype=float)
+        # Constant plan cells, with explicit rest edges, give exact cached
+        # cumulative hazards and avoid another model/audio read per candidate.
+        edges=np.r_[0.,self.seconds,self.duration]
+        if self.active:
+            for low,high in self.controller.rest_regions:edges=np.r_[edges,low,high]
+        self.hazard_edges=np.unique(np.clip(edges,0.,self.duration))
+        starts=self.hazard_edges[:-1]
+        owners=np.searchsorted(self.seconds,starts,side='right')-1
+        owners=owners.clip(0,len(self.seconds)-1)
+        self.native_hazard=self.native_event_rate[owners]
+        self.adjusted_hazard=self.adjusted_event_rate[owners].copy()
+        if self.active:
+            midpoint=(self.hazard_edges[:-1]+self.hazard_edges[1:])*.5
+            self.adjusted_hazard[self.controller.rest_mask(midpoint)]=0.
+        widths=np.diff(self.hazard_edges)
+        self.native_prefix=np.r_[0.,np.cumsum(self.native_hazard*widths)]
+        self.adjusted_prefix=np.r_[0.,np.cumsum(self.adjusted_hazard*widths)]
+
+    def _integral(self,seconds,adjusted=False):
+        query=np.clip(np.asarray(seconds,dtype=np.float64),0.,self.duration)
+        index=np.searchsorted(self.hazard_edges,query,side='right')-1
+        index=index.clip(0,len(self.native_hazard)-1)
+        rates=self.adjusted_hazard if adjusted else self.native_hazard
+        prefix=self.adjusted_prefix if adjusted else self.native_prefix
+        return prefix[index]+rates[index]*(query-self.hazard_edges[index])
+
+    def timing_bias(self,start,seconds):
+        seconds=np.asarray(seconds,dtype=np.float64)
+        if not self.active:return np.zeros_like(seconds)
+        index=(np.searchsorted(self.hazard_edges,seconds,side='right')-1).clip(0,len(self.native_hazard)-1)
+        # The floor only defines finite likelihood ratios at zero-rate cells;
+        # explicit rest support is still masked by the generation caller.
+        ratio=np.log(self.adjusted_hazard[index].clip(1e-12)/self.native_hazard[index].clip(1e-12))
+        extra=(self._integral(seconds,True)-self._integral(start,True)
+               -self._integral(seconds)+self._integral(start))
+        return ratio-extra
+
+    def kind_bias(self,start,end):
+        if not self.active:return 0.,0.
+        old=max(0.,float(self._integral(end)-self._integral(start)))
+        new=max(0.,float(self._integral(end,True)-self._integral(start,True)))
+        note=float(np.log(max(-np.expm1(-new),1e-12))-np.log(max(-np.expm1(-old),1e-12)))
+        return note,old-new
+
+    def report(self):
+        width=np.diff(self.hazard_edges)
+        def summary(rate):
+            return dict(mean_per_second=float(np.dot(rate,width)/max(self.duration,1e-12)),
+                        min_per_second=float(np.min(rate)),max_per_second=float(np.max(rate)))
+        target=(self.controller._rates_at(self.hazard_edges[:-1]) if self.controller.active else
+                np.interp(self.hazard_edges[:-1],self.seconds,self.head_rate))
+        return dict(active=self.active,mode=self.controller.mode,strength=self.controller.strength,
+            reference_rebased=self.reference_rebased,reference_rebase_reason=self.reference_rebase_reason,
+            rate_integration='exact_piecewise_constant_plan_cells',timing_transform='first_arrival_likelihood_ratio',
+            target_head_rate=summary(target),native_event_rate=summary(self.native_hazard),
+            adjusted_event_rate=summary(self.adjusted_hazard))
     def allows(self,second,heads):
         if not self.active:return True
         if self.controller.is_in_rest_region(second):return False
@@ -309,7 +380,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 model_diagnostic_sums=(values.clone() if model_diagnostic_sums is None else model_diagnostic_sums+values)
                 model_diagnostic_count+=1
             kinds=kind_logits_for_audio(result['kind_logits'][0,-1],cursor,end)
-            kinds[NOTE]+=float(curve.bias(np.asarray([second_at_beat(clock,cursor)]))[0])
+            start_second=second_at_beat(clock,cursor)
+            horizon_second=second_at_beat(clock,min(cursor+2,end))
+            note_bias,tail_bias=curve.kind_bias(start_second,horizon_second)
+            kinds[NOTE]+=note_bias
+            kinds[WAIT]+=tail_bias
+            kinds[EOS]+=tail_bias
             kind=_sample(kinds,args.pointer_temperature,generator)
             if kind==EOS:
                 reason='learned_eos'
@@ -324,7 +400,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 clock,duration,first_step=step_index==0)
             seconds=np.asarray([second_at_beat(clock,cursor+d) for d in deltas])
             if curve.active:
-                timing+=torch.as_tensor(curve.bias(seconds),device=device)
+                timing+=torch.as_tensor(curve.timing_bias(start_second,seconds),device=device)
                 timing=timing.masked_fill(torch.as_tensor(curve.controller.rest_mask(seconds),device=device),-torch.inf)
             if not bool(torch.isfinite(timing).any()):
                 if end-cursor<=2:
@@ -504,7 +580,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         duration_audio_policy=getattr(model.config,'duration_audio_policy','off'),
         duration_audio_coverage=(model.duration_audio.coverage() if hasattr(model,'duration_audio') else None),
         physical_policy=guard.physical_policy,
-        curve=dict(active=curve.active,mode=args.intensity_curve_mode,strength=args.intensity_curve_strength),
+        curve=curve.report(),
         playability=physical_policy_report(physical,guard),
         quality_scope='generated_stream_requires_listening_and_playtest')
     output.with_suffix('.composer.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')

@@ -1,0 +1,1207 @@
+{
+  "date": "2026-11-02",
+  "original_generation": {
+    "checkpoint_epoch": 5,
+    "optimizer_steps": 2920,
+    "audio_duration_sec": 129.17551020408163,
+    "event_count": 1633,
+    "condition": {
+      "level": 13.70000034570694,
+      "difficulty": 5,
+      "radar": {
+        "note_density": 0.984375,
+        "peak": 0.84375,
+        "sweep": 0.0625,
+        "slide_tricky": 0.04218750074505806,
+        "slide_sequence": 0.0234375,
+        "jack": 0.2109375,
+        "chord": 0.234375
+      },
+      "style": {
+        "tap_bias": 0.846875011920929,
+        "slide_bias": 0.04218750074505806,
+        "hold_bias": 0.10000000149011612,
+        "touch_bias": 0.06093750149011612,
+        "chord_bias": 0.234375,
+        "melody_following": 0.8515625,
+        "pattern_reuse": 0.046875,
+        "directionality": 0.0390625
+      }
+    },
+    "curve": {
+      "active": true,
+      "mode": "follow",
+      "strength": 0.65
+    },
+    "pointer_temperature": 0.65,
+    "action_temperature": 0.75
+  },
+  "original_notes": 2146,
+  "generation_ab": [
+    {
+      "run": "generated_baseline_1325821585",
+      "events": 531,
+      "notes": 606,
+      "density": 0.4765625,
+      "duration": 129.17551020408163,
+      "stop": "audio_end",
+      "elapsed": 58.065368700015824,
+      "ternary": 0.2542372881355932,
+      "hard": 0,
+      "curve": {
+        "active": true,
+        "mode": "follow",
+        "strength": 0.65
+      }
+    },
+    {
+      "run": "generated_baseline_1325821586",
+      "events": 470,
+      "notes": 559,
+      "density": 0.2734375,
+      "duration": 129.17551020408163,
+      "stop": "audio_end",
+      "elapsed": 51.366082699998515,
+      "ternary": 0.027659574468085105,
+      "hard": 0,
+      "curve": {
+        "active": true,
+        "mode": "follow",
+        "strength": 0.65
+      }
+    },
+    {
+      "run": "generated_repaired_1325821585",
+      "events": 510,
+      "notes": 537,
+      "density": 0.3396570682525635,
+      "duration": 129.17551020408163,
+      "stop": "audio_end",
+      "elapsed": 90.48955610001576,
+      "ternary": 0.0,
+      "hard": 0,
+      "curve": {
+        "active": true,
+        "mode": "follow",
+        "strength": 0.65,
+        "reference_rebased": true,
+        "reference_rebase_reason": "saved_curve_condition_differs_from_effective_condition",
+        "rate_integration": "exact_piecewise_constant_plan_cells",
+        "timing_transform": "first_arrival_likelihood_ratio",
+        "target_head_rate": {
+          "mean_per_second": 4.1754092581916655,
+          "min_per_second": 0.0,
+          "max_per_second": 6.20263110007648
+        },
+        "native_event_rate": {
+          "mean_per_second": 2.3678383801162117,
+          "min_per_second": 1.1663471630124305e-16,
+          "max_per_second": 44.12752914428711
+        },
+        "adjusted_event_rate": {
+          "mean_per_second": 3.9865206713841324,
+          "min_per_second": 0.0,
+          "max_per_second": 34.56782150268555
+        }
+      }
+    },
+    {
+      "run": "generated_repaired_1325821586",
+      "events": 573,
+      "notes": 600,
+      "density": 0.35338667035102844,
+      "duration": 129.17551020408163,
+      "stop": "audio_end",
+      "elapsed": 64.63345359999221,
+      "ternary": 0.0,
+      "hard": 0,
+      "curve": {
+        "active": true,
+        "mode": "follow",
+        "strength": 0.65,
+        "reference_rebased": true,
+        "reference_rebase_reason": "saved_curve_condition_differs_from_effective_condition",
+        "rate_integration": "exact_piecewise_constant_plan_cells",
+        "timing_transform": "first_arrival_likelihood_ratio",
+        "target_head_rate": {
+          "mean_per_second": 4.1754092581916655,
+          "min_per_second": 0.0,
+          "max_per_second": 6.20263110007648
+        },
+        "native_event_rate": {
+          "mean_per_second": 2.491687205534567,
+          "min_per_second": 1.731539161490723e-16,
+          "max_per_second": 44.52266311645508
+        },
+        "adjusted_event_rate": {
+          "mean_per_second": 4.0208383744379885,
+          "min_per_second": 0.0,
+          "max_per_second": 33.453269958496094
+        }
+      }
+    }
+  ],
+  "learning_probe": {
+    "parent_step": 3000,
+    "parent_epoch": 6,
+    "train_charts": 4,
+    "dev_charts": 4,
+    "term_values": {
+      "time": 0.3284105360507965,
+      "configuration": 3.4956300258636475,
+      "plan": 1.9606339931488037,
+      "phrase": 0.12410116195678711,
+      "relations": 0.03727912902832031,
+      "profile": 0.310807466506958,
+      "ordinary_configuration": 3.9323716163635254
+    },
+    "gradient_norms": {
+      "time": {
+        "decoder": 0.0793251097202301,
+        "audio": 0.3865688443183899,
+        "detail": 0.0
+      },
+      "configuration": {
+        "decoder": 0.13088375329971313,
+        "audio": 1.2354180812835693,
+        "detail": 0.01985573023557663
+      },
+      "plan": {
+        "decoder": 3.4453279340596055e-07,
+        "audio": 1.043711543083191,
+        "detail": 2.579266578095485e-08
+      },
+      "phrase": {
+        "decoder": 2.826590730364842e-07,
+        "audio": 0.031864240765571594,
+        "detail": 2.6768502081608858e-08
+      },
+      "relations": {
+        "decoder": 0.004589581396430731,
+        "audio": 0.02256225235760212,
+        "detail": 1.7844715927139987e-08
+      },
+      "profile": {
+        "decoder": 2.7795175583378295e-07,
+        "audio": 0.0009170949342660606,
+        "detail": 2.3093678080954305e-08
+      },
+      "ordinary_configuration": {
+        "decoder": 0.15412728488445282,
+        "audio": 1.2393447160720825,
+        "detail": 0.019855724647641182
+      }
+    },
+    "gradient_cosines": {
+      "configuration__time": {
+        "decoder": 0.07281787693500519,
+        "audio": 0.03209942206740379,
+        "detail": 0.0
+      },
+      "configuration__plan": {
+        "decoder": 0.13733643293380737,
+        "audio": 0.1674879789352417,
+        "detail": -0.4239092767238617
+      },
+      "configuration__phrase": {
+        "decoder": 0.09152431041002274,
+        "audio": 0.0038125040009617805,
+        "detail": -0.6778724789619446
+      },
+      "configuration__relations": {
+        "decoder": -0.10042096674442291,
+        "audio": 0.114403635263443,
+        "detail": 0.1498441994190216
+      },
+      "configuration__profile": {
+        "decoder": 0.0068574827164411545,
+        "audio": -0.04673979803919792,
+        "detail": -0.11294891685247421
+      },
+      "plan__time": {
+        "decoder": 0.11618553102016449,
+        "audio": 0.2025941163301468,
+        "detail": 0.0
+      },
+      "plan__relations": {
+        "decoder": -0.12246330827474594,
+        "audio": 0.05758870393037796,
+        "detail": 0.3608928620815277
+      },
+      "plan__profile": {
+        "decoder": 0.7410192489624023,
+        "audio": 0.05792534723877907,
+        "detail": 0.3833986520767212
+      },
+      "phrase__time": {
+        "decoder": 0.12177940458059311,
+        "audio": 0.14843176305294037,
+        "detail": 0.0
+      },
+      "phrase__plan": {
+        "decoder": 0.8322482109069824,
+        "audio": 0.0990247055888176,
+        "detail": 0.8986511826515198
+      },
+      "phrase__relations": {
+        "decoder": -0.1272314488887787,
+        "audio": -0.13950979709625244,
+        "detail": 0.3537807762622833
+      },
+      "phrase__profile": {
+        "decoder": 0.7050406336784363,
+        "audio": -0.10580667853355408,
+        "detail": 0.45258069038391113
+      },
+      "relations__time": {
+        "decoder": 0.02216089516878128,
+        "audio": 0.11348113417625427,
+        "detail": 0.0
+      },
+      "profile__time": {
+        "decoder": 0.05716896429657936,
+        "audio": -0.028701193630695343,
+        "detail": 0.0
+      },
+      "profile__relations": {
+        "decoder": -0.070883609354496,
+        "audio": 0.055451665073633194,
+        "detail": 0.6743033528327942
+      }
+    },
+    "plan_poisson_lower_bound": 8.3114595413208,
+    "plan_weight": 0.1,
+    "probe_scope": "4 real training charts and independent validation manifest first4 charts; no augmentation",
+    "lr_probe": [
+      {
+        "lr": 0.0005,
+        "dev": {
+          "0": {
+            "loss": 7.983066558837891,
+            "detail_loss": 2.4993600845336914,
+            "configuration_loss": 5.165684640407562,
+            "time_loss": 0.5991238281130791,
+            "plan_loss": 17.64166259765625,
+            "phrase_ordered_loss": 2.916930854320526
+          },
+          "10": {
+            "loss": 8.38317084312439,
+            "detail_loss": 2.657990425825119,
+            "configuration_loss": 5.4821237325668335,
+            "time_loss": 0.6810909956693649,
+            "plan_loss": 17.68260145187378,
+            "phrase_ordered_loss": 2.8805667757987976
+          },
+          "20": {
+            "loss": 9.650956153869629,
+            "detail_loss": 3.0847509503364563,
+            "configuration_loss": 6.2992740869522095,
+            "time_loss": 0.8266760855913162,
+            "plan_loss": 17.85516119003296,
+            "phrase_ordered_loss": 2.9298847913742065
+          },
+          "40": {
+            "loss": 11.496866941452026,
+            "detail_loss": 3.8659990429878235,
+            "configuration_loss": 7.887108683586121,
+            "time_loss": 1.0770625174045563,
+            "plan_loss": 18.223538398742676,
+            "phrase_ordered_loss": 3.1289681792259216
+          }
+        },
+        "train_loss": [
+          7.017956972122192,
+          6.82723593711853,
+          6.618308424949646,
+          6.354178190231323,
+          5.969971537590027,
+          5.829354643821716,
+          5.547566056251526,
+          5.345122456550598,
+          5.043946266174316,
+          4.851749300956726,
+          4.649634122848511,
+          4.436886548995972,
+          4.233129441738129,
+          4.080554485321045,
+          3.868889331817627,
+          3.66119784116745,
+          3.5560081601142883,
+          3.3391703367233276,
+          3.2496151328086853,
+          3.0850219130516052,
+          3.029914915561676,
+          2.936632215976715,
+          2.862147033214569,
+          2.778986692428589,
+          2.7473037242889404,
+          2.6622204184532166,
+          2.66033536195755,
+          2.5810330510139465,
+          2.533714175224304,
+          2.5167303681373596,
+          2.5105403661727905,
+          2.478794753551483,
+          2.4011186957359314,
+          2.3756444454193115,
+          2.3799397945404053,
+          2.4102038741111755,
+          2.377242088317871,
+          2.342965304851532,
+          2.338597536087036,
+          2.3627195954322815
+        ],
+        "seconds": 54.29824120001285
+      },
+      {
+        "lr": 0.0002,
+        "dev": {
+          "0": {
+            "loss": 7.983066439628601,
+            "detail_loss": 2.4993600845336914,
+            "configuration_loss": 5.1656845808029175,
+            "time_loss": 0.5991238132119179,
+            "plan_loss": 17.64166259765625,
+            "phrase_ordered_loss": 2.916930854320526
+          },
+          "10": {
+            "loss": 8.063415169715881,
+            "detail_loss": 2.493333488702774,
+            "configuration_loss": 5.217436909675598,
+            "time_loss": 0.6353288888931274,
+            "plan_loss": 17.594411373138428,
+            "phrase_ordered_loss": 2.8659451007843018
+          },
+          "20": {
+            "loss": 8.462023496627808,
+            "detail_loss": 2.6744033992290497,
+            "configuration_loss": 5.547385334968567,
+            "time_loss": 0.6917578279972076,
+            "plan_loss": 17.717973709106445,
+            "phrase_ordered_loss": 2.8699814081192017
+          },
+          "40": {
+            "loss": 10.02564549446106,
+            "detail_loss": 3.1930045187473297,
+            "configuration_loss": 6.5953181982040405,
+            "time_loss": 0.8582585006952286,
+            "plan_loss": 17.838295459747314,
+            "phrase_ordered_loss": 2.9510689973831177
+          }
+        },
+        "train_loss": [
+          7.017957091331482,
+          6.928144574165344,
+          6.742798805236816,
+          6.7108986377716064,
+          6.409489393234253,
+          6.363969206809998,
+          6.153874635696411,
+          5.998972654342651,
+          5.775362491607666,
+          5.6566174030303955,
+          5.446017026901245,
+          5.320745468139648,
+          5.179480791091919,
+          5.035465240478516,
+          4.877654790878296,
+          4.70122754573822,
+          4.64989447593689,
+          4.5329749584198,
+          4.367693305015564,
+          4.201041281223297,
+          4.14584743976593,
+          4.03502881526947,
+          3.8744908571243286,
+          3.7749654054641724,
+          3.621999502182007,
+          3.5320240259170532,
+          3.4265012741088867,
+          3.3235151171684265,
+          3.239628851413727,
+          3.1681973338127136,
+          3.1174319982528687,
+          3.051477372646332,
+          2.9447593688964844,
+          2.8898643851280212,
+          2.8811442852020264,
+          2.878356099128723,
+          2.810388445854187,
+          2.7338592410087585,
+          2.716620087623596,
+          2.7044257521629333
+        ],
+        "seconds": 55.0959026000055
+      }
+    ],
+    "gradient_probe_parameter_scope": {
+      "decoder": "model.decoder.layers[-1].self_attn.in_proj_weight",
+      "audio": "model.audio_input[0].weight",
+      "detail": "model.detail_cell.weight_ih"
+    },
+    "gradient_scope_limit": "Representative parameters, not whole-module norms. Near-zero residual gradient cosines do not establish interference."
+  },
+  "stage_validation": {
+    "parent_steps": 3000,
+    "stage_steps": 40,
+    "lr": 0.0002,
+    "before": {
+      "metrics": {
+        "loss": 7.970344066619873,
+        "time_loss": 0.6631275415420532,
+        "kind_loss": 0.11464890092611313,
+        "delta_loss": 0.5484785437583923,
+        "timing_grid_loss": 0.4712628424167633,
+        "timing_within_grid_loss": 0.07721570134162903,
+        "configuration_loss": 4.657189846038818,
+        "shape_loss": 1.6429390907287598,
+        "event_family_loss": 0.8714736700057983,
+        "event_family_full_loss": 0.7991582155227661,
+        "event_family_audio_loss": 1.0884194374084473,
+        "event_route_conditional_loss": 0.7714653015136719,
+        "phase_loss": 1.5694897174835205,
+        "detail_loss": 1.788948655128479,
+        "literal_stop_loss": 0.040691908448934555,
+        "plan_loss": 22.289087295532227,
+        "plan_rate_loss": 21.916000366210938,
+        "plan_blank_loss": 0.3730906844139099,
+        "plan_rate_floor": 9.041789054870605,
+        "plan_rate_excess": 12.874207496643066,
+        "plan_weighted_loss": 2.2289092540740967,
+        "main_prediction_loss": 5.320317268371582,
+        "base_loss": 7.5492262840271,
+        "phrase_loss": 1.4131392240524292,
+        "phrase_weighted_loss": 0.07065696269273758,
+        "transition_exit_loss": 0.0,
+        "exit_count": 44.53125,
+        "exit_note_count": 42.34375,
+        "exit_wait_count": 2.1875,
+        "exit_eos_count": 0.0,
+        "recovery_loss": 0.0,
+        "phrase_relation_loss": 0.3624829053878784,
+        "phrase_relation_weighted_loss": 0.03624828904867172,
+        "phrase_complete_groups": 19.46875,
+        "phrase_mode_posterior_entropy": 0.9477881193161011,
+        "phrase_mode_prior_entropy": 1.0680752992630005,
+        "song_response_groups": 5.59375,
+        "song_response_sampled_phrases": 19.375,
+        "song_response_posterior_entropy": 1.384416937828064,
+        "song_response_prior_entropy": 1.3844181299209595,
+        "phrase_configuration_loss": 4.657189846038818,
+        "phrase_configuration_adjustment": -0.3441874384880066,
+        "song_profile_loss": 3.1421289443969727,
+        "song_profile_nll": 3.1421289443969727,
+        "song_profile_crps": 0.0,
+        "song_profile_weighted_loss": 0.3142128884792328,
+        "phrase_histogram_loss": 0.2603677213191986,
+        "phrase_ordered_cosine_loss": 2.1752805709838867,
+        "phrase_ordered_match_loss": 2.9565415382385254,
+        "phrase_ordered_query_match_loss": 3.6400227546691895,
+        "phrase_ordered_target_match_loss": 2.273059606552124,
+        "phrase_ordered_code_variance": 0.00632070004940033,
+        "phrase_ordered_loss": 2.565910816192627,
+        "phrase_reference_null_mass": 0.25153329968452454,
+        "phrase_residual_rms": 0.6411421298980713,
+        "phrase_ordered_anchor_residual_rms": 0.38876065611839294,
+        "phrase_ordered_reference_residual_rms": 0.553574800491333,
+        "phrase_ordered_actor_residual_rms": 0.3453710079193115,
+        "regular_detail_loss": 0.9424960613250732,
+        "literal_detail_loss": 0.8464527130126953,
+        "sustain_detail_loss": 1.3009586334228516,
+        "authored_detail_loss": 1.7889485359191895,
+        "augmented_detail_loss": 0.0,
+        "regular_detail_count": 117.03125,
+        "regular_detail_weight_sum": 127.28099060058594,
+        "literal_detail_count": 17.28125,
+        "literal_detail_weight_sum": 20.182785034179688,
+        "sustain_detail_count": 31.90625,
+        "sustain_detail_weight_sum": 38.76333236694336,
+        "authored_detail_count": 134.3125,
+        "authored_detail_weight_sum": 147.4637451171875,
+        "augmented_detail_count": 0.0,
+        "augmented_detail_weight_sum": 0.0,
+        "configuration_target_count": 134.3125,
+        "configuration_target_weight": 147.4637451171875,
+        "timing_only_target_count": 0.0,
+        "timing_target_weight": 162.54751586914062
+      },
+      "batches": 32,
+      "oov": {
+        "total_steps": 32721,
+        "delta_oov": 0,
+        "action_oov": 386,
+        "fallback_recovered": 98,
+        "masked_steps": 386,
+        "known_steps": 32335,
+        "known_fraction": 0.9882032945203386
+      },
+      "condition_scope": "reference-derived requested controls",
+      "scope": "authored_prefix_not_musical_quality",
+      "selection": "deterministic_spread_across_all_samples"
+    },
+    "after": {
+      "metrics": {
+        "loss": 7.868662357330322,
+        "time_loss": 0.624962329864502,
+        "kind_loss": 0.11028073728084564,
+        "delta_loss": 0.5146815776824951,
+        "timing_grid_loss": 0.4403214454650879,
+        "timing_within_grid_loss": 0.07436015456914902,
+        "configuration_loss": 4.589259624481201,
+        "shape_loss": 1.6212886571884155,
+        "event_family_loss": 0.8635566234588623,
+        "event_family_full_loss": 0.7940639853477478,
+        "event_family_audio_loss": 1.0720347166061401,
+        "event_route_conditional_loss": 0.7577320337295532,
+        "phase_loss": 1.5668922662734985,
+        "detail_loss": 1.7531241178512573,
+        "literal_stop_loss": 0.03957856819033623,
+        "plan_loss": 22.257749557495117,
+        "plan_rate_loss": 21.885435104370117,
+        "plan_blank_loss": 0.37231627106666565,
+        "plan_rate_floor": 9.041789054870605,
+        "plan_rate_excess": 12.843644142150879,
+        "plan_weighted_loss": 2.2257750034332275,
+        "main_prediction_loss": 5.214221954345703,
+        "base_loss": 7.439996719360352,
+        "phrase_loss": 1.3930476903915405,
+        "phrase_weighted_loss": 0.06965238600969315,
+        "transition_exit_loss": 0.0,
+        "exit_count": 44.53125,
+        "exit_note_count": 42.34375,
+        "exit_wait_count": 2.1875,
+        "exit_eos_count": 0.0,
+        "recovery_loss": 0.0,
+        "phrase_relation_loss": 0.3596327006816864,
+        "phrase_relation_weighted_loss": 0.0359632633626461,
+        "phrase_complete_groups": 19.46875,
+        "phrase_mode_posterior_entropy": 0.9371906518936157,
+        "phrase_mode_prior_entropy": 1.0794798135757446,
+        "song_response_groups": 5.59375,
+        "song_response_sampled_phrases": 19.375,
+        "song_response_posterior_entropy": 1.384340763092041,
+        "song_response_prior_entropy": 1.3843449354171753,
+        "phrase_configuration_loss": 4.589259624481201,
+        "phrase_configuration_adjustment": -0.3520455062389374,
+        "song_profile_loss": 3.230501651763916,
+        "song_profile_nll": 3.1916465759277344,
+        "song_profile_crps": 0.03885485231876373,
+        "song_profile_weighted_loss": 0.3230501115322113,
+        "phrase_histogram_loss": 0.2567886412143707,
+        "phrase_ordered_cosine_loss": 2.1883339881896973,
+        "phrase_ordered_match_loss": 2.870279312133789,
+        "phrase_ordered_query_match_loss": 3.5197243690490723,
+        "phrase_ordered_target_match_loss": 2.2208354473114014,
+        "phrase_ordered_code_variance": 0.006346805952489376,
+        "phrase_ordered_loss": 2.5293068885803223,
+        "phrase_reference_null_mass": 0.15763874351978302,
+        "phrase_residual_rms": 0.6377555131912231,
+        "phrase_ordered_anchor_residual_rms": 0.3872302770614624,
+        "phrase_ordered_reference_residual_rms": 0.5455176830291748,
+        "phrase_ordered_actor_residual_rms": 0.3466475307941437,
+        "regular_detail_loss": 0.9120351076126099,
+        "literal_detail_loss": 0.8410890698432922,
+        "sustain_detail_loss": 1.2692842483520508,
+        "authored_detail_loss": 1.7531242370605469,
+        "augmented_detail_loss": 0.0,
+        "regular_detail_count": 117.03125,
+        "regular_detail_weight_sum": 127.28099060058594,
+        "literal_detail_count": 17.28125,
+        "literal_detail_weight_sum": 20.182785034179688,
+        "sustain_detail_count": 31.90625,
+        "sustain_detail_weight_sum": 38.76333236694336,
+        "authored_detail_count": 134.3125,
+        "authored_detail_weight_sum": 147.4637451171875,
+        "augmented_detail_count": 0.0,
+        "augmented_detail_weight_sum": 0.0,
+        "configuration_target_count": 134.3125,
+        "configuration_target_weight": 147.4637451171875,
+        "timing_only_target_count": 0.0,
+        "timing_target_weight": 162.54751586914062
+      },
+      "batches": 32,
+      "oov": {
+        "total_steps": 32721,
+        "delta_oov": 0,
+        "action_oov": 386,
+        "fallback_recovered": 98,
+        "masked_steps": 386,
+        "known_steps": 32335,
+        "known_fraction": 0.9882032945203386
+      },
+      "condition_scope": "reference-derived requested controls",
+      "scope": "authored_prefix_not_musical_quality",
+      "selection": "deterministic_spread_across_all_samples"
+    },
+    "note": "Same independent development sample selection. Profile objective changes; compare timing/configuration/detail and plan, not total loss alone."
+  },
+  "limitations": [
+    "Original extreme generation used2920; preserved parent is3000, so new fixed-checkpoint AB does not recreate original2920.",
+    "Four-chart repeated LR experiment overfits both rates; only sensitivity evidence, not proof of globally optimal lr.",
+    "Forty full-data-order updates improve core development metrics slightly; long-run and musical quality remain unverified.",
+    "Whole-song ordered score has a new objective; old and new total losses alone are not directly comparable."
+  ],
+  "tests": {
+    "python_initial_passed": 843,
+    "python_initial_failed": 1,
+    "initial_failure": "old fresh-default assertion; updated to masked_ordered_joint_v2",
+    "focused_recheck_passed": 43,
+    "new_objective_integration_passed": 1,
+    "javascript_passed": 207
+  },
+  "formal": {
+    "task": "1e6646a84a6a",
+    "directory": "checkpoints/prism_composer_v45",
+    "parent": "v44 step3000",
+    "stage": "finetune; resume stage40; reload equivalent cleanup at epoch1 complete step584",
+    "epochs": 50,
+    "lr": 0.0002,
+    "batch_size": 16,
+    "grad_accumulation": 4,
+    "data_workers": 0,
+    "cpu_threads": 2,
+    "prefetch_batches": 2,
+    "precision": "bf16",
+    "detail_compute": "serial"
+  },
+  "first_complete_epoch_validation": {
+    "metrics": {
+      "loss": 7.919113636016846,
+      "time_loss": 0.6172686815261841,
+      "kind_loss": 0.11674413084983826,
+      "delta_loss": 0.500524640083313,
+      "timing_grid_loss": 0.42862436175346375,
+      "timing_within_grid_loss": 0.07190030813217163,
+      "configuration_loss": 4.668832778930664,
+      "shape_loss": 1.5886110067367554,
+      "event_family_loss": 0.8541150093078613,
+      "event_family_full_loss": 0.7847382426261902,
+      "event_family_audio_loss": 1.062245488166809,
+      "event_route_conditional_loss": 0.7344958782196045,
+      "phase_loss": 1.5689665079116821,
+      "detail_loss": 1.8714715242385864,
+      "literal_stop_loss": 0.03847874328494072,
+      "plan_loss": 22.088022232055664,
+      "plan_rate_loss": 21.71756362915039,
+      "plan_blank_loss": 0.37046101689338684,
+      "plan_rate_floor": 9.041789054870605,
+      "plan_rate_excess": 12.675774574279785,
+      "plan_weighted_loss": 2.2088022232055664,
+      "main_prediction_loss": 5.286102294921875,
+      "base_loss": 7.494905471801758,
+      "phrase_loss": 1.3535888195037842,
+      "phrase_weighted_loss": 0.06767943501472473,
+      "transition_exit_loss": 0.0,
+      "exit_count": 44.53125,
+      "exit_note_count": 42.34375,
+      "exit_wait_count": 2.1875,
+      "exit_eos_count": 0.0,
+      "recovery_loss": 0.0,
+      "phrase_relation_loss": 0.3581131398677826,
+      "phrase_relation_weighted_loss": 0.03581131249666214,
+      "phrase_complete_groups": 19.46875,
+      "phrase_mode_posterior_entropy": 0.8863964676856995,
+      "phrase_mode_prior_entropy": 1.065511703491211,
+      "song_response_groups": 5.59375,
+      "song_response_sampled_phrases": 19.375,
+      "song_response_posterior_entropy": 1.38419508934021,
+      "song_response_prior_entropy": 1.384197473526001,
+      "phrase_configuration_loss": 4.668832778930664,
+      "phrase_configuration_adjustment": -0.36021554470062256,
+      "song_profile_loss": 3.2071964740753174,
+      "song_profile_nll": 3.168782949447632,
+      "song_profile_crps": 0.03841368108987808,
+      "song_profile_weighted_loss": 0.3207196295261383,
+      "phrase_histogram_loss": 0.25625115633010864,
+      "phrase_ordered_cosine_loss": 2.1068849563598633,
+      "phrase_ordered_match_loss": 2.7949674129486084,
+      "phrase_ordered_query_match_loss": 3.4149084091186523,
+      "phrase_ordered_target_match_loss": 2.1750268936157227,
+      "phrase_ordered_code_variance": 0.006329805590212345,
+      "phrase_ordered_loss": 2.4509265422821045,
+      "phrase_reference_null_mass": 0.18464240431785583,
+      "phrase_residual_rms": 0.6313257217407227,
+      "phrase_ordered_anchor_residual_rms": 0.4143669009208679,
+      "phrase_ordered_reference_residual_rms": 0.572388231754303,
+      "phrase_ordered_actor_residual_rms": 0.32213521003723145,
+      "regular_detail_loss": 1.0465383529663086,
+      "literal_detail_loss": 0.8249331116676331,
+      "sustain_detail_loss": 1.3975142240524292,
+      "authored_detail_loss": 1.8714715242385864,
+      "augmented_detail_loss": 0.0,
+      "regular_detail_count": 117.03125,
+      "regular_detail_weight_sum": 127.28099060058594,
+      "literal_detail_count": 17.28125,
+      "literal_detail_weight_sum": 20.182785034179688,
+      "sustain_detail_count": 31.90625,
+      "sustain_detail_weight_sum": 38.76333236694336,
+      "authored_detail_count": 134.3125,
+      "authored_detail_weight_sum": 147.4637451171875,
+      "augmented_detail_count": 0.0,
+      "augmented_detail_weight_sum": 0.0,
+      "configuration_target_count": 134.3125,
+      "configuration_target_weight": 147.4637451171875,
+      "timing_only_target_count": 0.0,
+      "timing_target_weight": 162.54751586914062
+    },
+    "batches": 32,
+    "oov": {
+      "total_steps": 32721,
+      "delta_oov": 0,
+      "action_oov": 386,
+      "fallback_recovered": 98,
+      "masked_steps": 386,
+      "known_steps": 32335,
+      "known_fraction": 0.9882032945203386,
+      "absolute_phase_oov": 0
+    },
+    "condition_scope": "reference-derived requested controls",
+    "scope": "authored_prefix_not_musical_quality",
+    "selection": "deterministic_spread_across_all_samples",
+    "epoch": 1,
+    "optimizer_steps": 584
+  },
+  "duration_alias_audit": {
+    "all_detail_categories": 7898,
+    "simple_beat_duration_categories": 7436,
+    "alias_groups": 0,
+    "global_aliases": {},
+    "redundant_categories": 0,
+    "examples": [],
+    "scope": "Catalog counts only, not occurrence-weighted loss. Only exact simple beat fractions; tempo/seconds/slide waits left distinct."
+  },
+  "literal_route_audit": {
+    "schema": "literal_route_audit_v1",
+    "scope": "first4 actual validation charts; frozen v44 step3000 codec; no model construction; CPU1",
+    "counts": {
+      "note_events": 2032,
+      "regular": 1662,
+      "trusted_regular": 1662,
+      "literal": 322,
+      "trusted_literal": 322,
+      "masked_atom_oov": 48
+    },
+    "literal_event_fraction": 0.15846456692913385,
+    "by_note_type_set": {
+      "hold": {
+        "regular": 160
+      },
+      "slide": {
+        "literal": 150,
+        "regular": 195,
+        "masked_atom_oov": 32
+      },
+      "touch": {
+        "literal": 148
+      },
+      "tap": {
+        "regular": 1231
+      },
+      "slide+tap": {
+        "regular": 49,
+        "literal": 20,
+        "masked_atom_oov": 12
+      },
+      "hold+tap": {
+        "regular": 19
+      },
+      "hold+slide": {
+        "regular": 8,
+        "literal": 2,
+        "masked_atom_oov": 4
+      },
+      "tap+touch_hold": {
+        "literal": 1
+      },
+      "touch_hold": {
+        "literal": 1
+      }
+    },
+    "literal_reason_event_counts_nonexclusive": {
+      "regular_atoms_unseen_conditional_detail": 10,
+      "slide_pattern_not_in_proved_rotation_set": 150,
+      "touch_has_no_C8_button_position": 150,
+      "compound_or_nonbasic_slide": 12
+    },
+    "hold_plus_tap": {
+      "regular": 19
+    },
+    "examples": {
+      "regular_atoms_unseen_conditional_detail": [
+        [
+          "4z8[8:1]/6-2[8:1]",
+          1
+        ],
+        [
+          "2b-4[12:1]/8b-6[12:1]",
+          1
+        ],
+        [
+          "3v8[8:1]/7h[4:1]",
+          1
+        ],
+        [
+          "7xq5[8:3]/8xV25[8:3]",
+          1
+        ],
+        [
+          "1x-5[4:1]/6xV85[4:1]",
+          1
+        ],
+        [
+          "2xV41[4:1]/5x-1[4:1]",
+          1
+        ],
+        [
+          "7bx-4[4:1]/8bx-4[4:1]",
+          1
+        ],
+        [
+          "8V64[2:1]b",
+          1
+        ],
+        [
+          "7xv5[4:1]/8x",
+          1
+        ],
+        [
+          "1xz5[4:1]b/2x",
+          1
+        ]
+      ],
+      "slide_pattern_not_in_proved_rotation_set": [
+        [
+          "2>5[8:1]/5<8[8:1]",
+          9
+        ],
+        [
+          "2>5[8:1]",
+          5
+        ],
+        [
+          "8<5[8:1]",
+          4
+        ],
+        [
+          "6<1[4:1]b",
+          4
+        ],
+        [
+          "2>4[8:1]/5<7[8:1]",
+          4
+        ],
+        [
+          "6<8[4:1]",
+          3
+        ],
+        [
+          "4>2[8:1]/7<5[8:1]",
+          3
+        ],
+        [
+          "2pp6[4:1]",
+          3
+        ],
+        [
+          "7qq3[4:1]",
+          3
+        ],
+        [
+          "2>4[8:1]/7<5[8:1]",
+          3
+        ],
+        [
+          "1>4[8:1]",
+          2
+        ],
+        [
+          "2>5[4:1]",
+          2
+        ]
+      ],
+      "touch_has_no_C8_button_position": [
+        [
+          "E3",
+          9
+        ],
+        [
+          "E7",
+          8
+        ],
+        [
+          "E4",
+          8
+        ],
+        [
+          "C",
+          7
+        ],
+        [
+          "E5",
+          7
+        ],
+        [
+          "E6",
+          6
+        ],
+        [
+          "E2",
+          6
+        ],
+        [
+          "E8f/A8/D8",
+          6
+        ],
+        [
+          "E1",
+          5
+        ],
+        [
+          "D6",
+          4
+        ],
+        [
+          "E8",
+          4
+        ],
+        [
+          "E5f",
+          4
+        ]
+      ],
+      "hold_plus_tap_regular": [
+        [
+          "4/7h[8:1]",
+          3
+        ],
+        [
+          "3h[4:1]/4",
+          2
+        ],
+        [
+          "2h[8:1]/5",
+          2
+        ],
+        [
+          "1hbx[4:1]/5x",
+          2
+        ],
+        [
+          "2h[4:1]/4",
+          2
+        ],
+        [
+          "5/7h[4:1]",
+          2
+        ],
+        [
+          "3x/7hx[4:1]",
+          1
+        ],
+        [
+          "3h[2:1]/5",
+          1
+        ],
+        [
+          "2/4h[4:1]",
+          1
+        ],
+        [
+          "3h[8:1]/5",
+          1
+        ],
+        [
+          "3x/8hbx[4:1]",
+          1
+        ],
+        [
+          "4x/8hbx[4:1]",
+          1
+        ]
+      ],
+      "compound_or_nonbasic_slide": [
+        [
+          "2-4v6[8:3]/5h[8:5]",
+          1
+        ],
+        [
+          "3v8V24[2:1]",
+          1
+        ],
+        [
+          "1<6[8:1]*>4[8:1]",
+          1
+        ],
+        [
+          "2/6<7-1[8:1]",
+          1
+        ],
+        [
+          "7-3-5[4:1]/8V26[4:1]",
+          1
+        ],
+        [
+          "1-3[8:1]*-5[8:1]",
+          1
+        ],
+        [
+          "8-4[8:1]*-6[8:1]",
+          1
+        ],
+        [
+          "1pp3[8:1]*qq7[8:1]",
+          1
+        ],
+        [
+          "7>2[8:1]*p3[8:1]",
+          1
+        ],
+        [
+          "2<7[8:1]*q6[8:1]",
+          1
+        ],
+        [
+          "8<4[8:1]*>4[8:1]",
+          1
+        ],
+        [
+          "1-5[8:1]/7-2-4[4:1]",
+          1
+        ]
+      ]
+    },
+    "charts": [
+      {
+        "chart": 0,
+        "source": "E:\\全量官谱\\BUDDiES PLUS\\11674\\track.mp3",
+        "counts": {
+          "regular": 468,
+          "literal": 76,
+          "masked_atom_oov": 6
+        }
+      },
+      {
+        "chart": 1,
+        "source": "E:\\全量官谱\\BUDDiES PLUS\\11676\\track.mp3",
+        "counts": {
+          "masked_atom_oov": 9,
+          "regular": 533,
+          "literal": 42
+        }
+      },
+      {
+        "chart": 2,
+        "source": "E:\\全量官谱\\BUDDiES PLUS\\11689\\track.mp3",
+        "counts": {
+          "regular": 479,
+          "literal": 105,
+          "masked_atom_oov": 16
+        }
+      },
+      {
+        "chart": 3,
+        "source": "E:\\全量官谱\\CiRCLE\\11909\\track.mp3",
+        "counts": {
+          "literal": 99,
+          "regular": 182,
+          "masked_atom_oov": 17
+        }
+      }
+    ]
+  },
+  "pruning": {
+    "zero_weight_exit_backward_removed": true,
+    "shared_phrase_transfer_deduplicated": true,
+    "focused_tests_passed": 63,
+    "graph_and_exit_regression_passed": 53,
+    "formal_reload_step": 584
+  },
+  "discussion": {
+    "rounds": 3,
+    "assistant": "Antigravity",
+    "source_files": [
+      "antigravity_round1_full.txt",
+      "antigravity_round2_full.txt",
+      "antigravity_round3_tree.txt"
+    ],
+    "retracted_claims": [
+      "2146 notes is not authored reference",
+      "simple fractional-duration spelling aliases absent in actual catalog",
+      "representative parameter gradient ratio is not full-module attribution",
+      "unit-vector variance0.0063 does not establish collapse"
+    ]
+  },
+  "nearby_profile_probe": {
+    "checkpoint_steps": 3000,
+    "recorded_generation_steps": 2920,
+    "mixture": [
+      0.4025198817253113,
+      0.12922906875610352,
+      0.2397177666425705,
+      0.22853319346904755
+    ],
+    "cpu_seed_component": 0,
+    "cpu_seed_density": 0.4140625,
+    "original_density": 0.984375,
+    "elapsed_sec": 4.518133400008082,
+    "rng_limit": "CPU multinomial seed does not reproduce CUDA generator sequence; logits are CPU FP32, source generation CUDA FP32",
+    "distributions": {
+      "note_density": {
+        "mean": 0.32548093795776367,
+        "mode": 0.28125,
+        "bin126_probability": 1.3673073226527777e-05,
+        "p_ge_0_8": 0.00038175517693161964,
+        "p_ge_0_95": 0.00010188978922087699,
+        "quantiles": {
+          "0.01": 0.15625,
+          "0.05": 0.2109375,
+          "0.25": 0.2734375,
+          "0.5": 0.3203125,
+          "0.75": 0.375,
+          "0.95": 0.4609375,
+          "0.99": 0.5
+        },
+        "component_means": [
+          0.3269922435283661,
+          0.3396570682525635,
+          0.3533867299556732,
+          0.2855314314365387
+        ],
+        "component_bin126_probabilities": [
+          1.2524298654170707e-05,
+          2.801166738208849e-05,
+          1.165040612249868e-05,
+          9.71002646110719e-06
+        ]
+      },
+      "peak": {
+        "mean": 0.45255303382873535,
+        "mode": 0.40625,
+        "bin126_probability": 2.5007460862980224e-05,
+        "p_ge_0_8": 0.05125708132982254,
+        "p_ge_0_95": 0.004878737032413483,
+        "quantiles": {
+          "0.01": 0.15625,
+          "0.05": 0.21875,
+          "0.25": 0.3125,
+          "0.5": 0.40625,
+          "0.75": 0.5625,
+          "0.95": 0.8125,
+          "0.99": 0.90625
+        },
+        "component_means": [
+          0.45950648188591003,
+          0.46097955107688904,
+          0.5010449290275574,
+          0.3846755921840668
+        ],
+        "component_bin126_probabilities": [
+          2.797178785840515e-05,
+          4.5945682359160855e-05,
+          1.4175303476804402e-05,
+          1.9308663468109444e-05
+        ]
+      }
+    }
+  }
+}

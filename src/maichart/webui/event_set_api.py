@@ -165,7 +165,7 @@ def start_train(handler, payload, *, runtime):
     _arg(args,'--plan-blank-window-seconds',blank_seconds)
     # Auto policies are resolved by the trainer against the parent checkpoint.
     policy_choices = {
-        'song_profile_policy': {'auto', 'off', 'masked_joint_v1'},
+        'song_profile_policy': {'auto', 'off', 'masked_joint_v1', 'masked_ordered_joint_v2'},
         'song_response_policy': {'auto', 'off', 'music_response_v1'},
         'training_window_policy': {'auto', 'block_v1', 'phrase_complete_v1'},
         'phrase_execution_policy': {'auto', 'off', 'persistent_modes_v1'},

@@ -515,6 +515,14 @@ class StreamDataset(Dataset):
             if self.coverage['supervised_steps']!=count:
                 raise AssertionError('phrase targets must be covered exactly once')
 
+        # Equal chart mass across a complete sampler pass, independent of how
+        # many event windows a long/dense chart contributes. No source reread.
+        self.profile_chart_window_counts=np.bincount([sample[0] for sample in self.samples],minlength=len(self.streams))
+        active=int(np.count_nonzero(self.profile_chart_window_counts))
+        self.profile_chart_importance=np.divide(len(self.samples),
+            max(1,active)*self.profile_chart_window_counts,
+            out=np.zeros(len(self.streams),dtype=np.float64),where=self.profile_chart_window_counts>0)
+
     def release_hot_caches(self,include_audio=True):
         """Release this process's reloadable residents after a worker has spawned.
 
@@ -898,6 +906,9 @@ class StreamDataset(Dataset):
         row['audio_end_sec'] = torch.tensor(self._durations[song],dtype=torch.float64)
         row['audio_end_beat'] = torch.tensor(self._end_beats[song],dtype=torch.float64)
         row['song_index'] = song
+        row['_profile_chart_importance']=float(self.profile_chart_importance[song])
+        if getattr(self,'_profile_reference_batch_size',0):
+            row['_profile_reference_batch_size']=int(self._profile_reference_batch_size)
         row['_sample_index'] = int(index)
         row['_window_weight'] = self.plan_weights[index]*self.chart_weights[song]
         row['_song_bank'] = self._symbolic_bank if self.symbolic_only else self._bank(song)
@@ -949,6 +960,21 @@ def collate_stream(items):
     output = {}
     output['_sample_indices'] = [item.get('_sample_index') for item in items]
     collate_phrase_training(items,output)
+    # Aggregate all window importance onto the already deduplicated chart
+    # forward. A fixed reference batch size keeps the final partial batch
+    # from changing a chart's total epoch mass.
+    reference={int(item.get('_profile_reference_batch_size',len(items))) for item in items}
+    if len(reference)!=1 or min(reference)<=0:raise ValueError('Invalid profile batch normalizer')
+    profile_denominator=reference.pop()
+    profile_rows=output.get('profile_chart_rows')
+    if profile_rows is None:
+        output['profile_chart_weights']=torch.tensor([float(item.get('_profile_chart_importance',1.))/profile_denominator for item in items],dtype=torch.float32)
+    else:
+        masses={}
+        chart_ids=output['training_chart_id'].tolist()
+        for chart,item in zip(chart_ids,items):
+            masses[chart]=masses.get(chart,0.)+float(item.get('_profile_chart_importance',1.))/profile_denominator
+        output['profile_chart_weights']=torch.tensor([masses[chart_ids[index]] for index in profile_rows.tolist()],dtype=torch.float32)
     collate_future_relations(items,output)
     if any('phrase_progress' in item for item in items):
         if not all('phrase_progress' in item for item in items):

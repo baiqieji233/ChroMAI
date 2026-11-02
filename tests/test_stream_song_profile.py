@@ -118,3 +118,55 @@ def test_actual_generation_condition_default_preserved_and_explicit_lock_conflic
     assert actual.to_dict()==condition.to_dict()
     args.song_style_locks={'chord':0.,'chord_bias':1.}
     with pytest.raises(ValueError,match='chord'):resolve_song_profile(model,cache,condition,args,{})
+
+
+def test_component_mean_sampling_preserves_modes_without_coordinate_tail_lottery():
+    class FixedProfile(SongProfileCompleter):
+        def forward(self,audio,condition,known_mask):
+            logits=torch.full((len(condition),2,15,129),-100.)
+            logits[:,:,:,38]=0.
+            logits[:,0,0,38]=torch.log(torch.tensor(.99));logits[:,0,0,128]=torch.log(torch.tensor(.01))
+            logits[:,1,0,38]=-100.;logits[:,1,0,90]=0.
+            return dict(mixture_logits=torch.zeros(len(condition),2),bin_logits=logits)
+    module=FixedProfile(4,2);condition=torch.full((32,16),.3)
+    mask=torch.zeros_like(condition,dtype=torch.bool);mask[:,0]=True
+    result,diagnostics=module.sample(torch.zeros(32,4),condition,mask,torch.Generator().manual_seed(6),return_diagnostics=True)
+    modes={row['selected_component'] for row in diagnostics['rows']}
+    assert modes=={0,1}
+    for value,row in zip(result,diagnostics['rows']):
+        expected=.99*(38/128)+.01 if row['selected_component']==0 else 90/128
+        assert float(value[1])==pytest.approx(expected,abs=1e-6)
+        assert row['controls']['note_density']['mean']==pytest.approx(expected,abs=1e-6)
+        assert row['controls']['note_density']['std']>=0
+    assert not bool((result[:,1]==1).any())
+
+
+def test_ordered_crps_rewards_numeric_proximity_and_keeps_joint_likelihood():
+    class PointProfile(SongProfileCompleter):
+        def __init__(self,position):super().__init__(4,1);self.position=position
+        def forward(self,audio,condition,known_mask):
+            logits=torch.full((len(condition),1,15,129),-80.)
+            logits[:,:,:,self.position]=80.
+            return dict(mixture_logits=torch.zeros(len(condition),1),bin_logits=logits)
+    condition=torch.full((1,16),.25);known=torch.ones_like(condition,dtype=torch.bool);known[:,1]=False
+    near=PointProfile(40).loss_parts(torch.zeros(1,4),condition,known)
+    far=PointProfile(112).loss_parts(torch.zeros(1,4),condition,known)
+    assert near['crps'].item()<far['crps'].item()
+    assert near['joint_nll'].item()==pytest.approx(far['joint_nll'].item())
+    module=PointProfile(40)
+    assert torch.equal(module.loss(torch.zeros(1,4),condition,known,reduction='none',crps_weight=2.),near['joint_nll']+2*near['crps'])
+
+
+def test_crps_is_zero_for_exact_distribution_and_skips_known_controls():
+    class ExactProfile(SongProfileCompleter):
+        def forward(self,audio,condition,known_mask):
+            logits=torch.full((len(condition),1,15,129),-float('inf'))
+            logits[:,:,:,32]=0.
+            return dict(mixture_logits=torch.zeros(len(condition),1),bin_logits=logits)
+    module=ExactProfile(4,1);condition=torch.full((1,16),.25)
+    known=torch.zeros_like(condition,dtype=torch.bool)
+    parts=module.loss_parts(torch.zeros(1,4),condition,known)
+    assert parts['crps'].item()==0 and parts['joint_nll'].item()==0
+    # Different values in already known fields do not add a numerical target.
+    known[:]=True
+    assert module.loss_parts(torch.zeros(1,4),condition,known)['crps'].item()==0

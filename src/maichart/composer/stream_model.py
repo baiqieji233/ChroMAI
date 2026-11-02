@@ -23,15 +23,29 @@ PAD, BOS, NOTE, WAIT, EOS = range(5)
 
 def to_device_batch(batch, device, *, non_blocking=False):
     """Move tensors including CPU-prepared sparse detail groups, preserving IDs."""
-    if torch.is_tensor(batch):
-        return batch.to(device, non_blocking=non_blocking)
-    if isinstance(batch, dict):
-        return {key: to_device_batch(value, device, non_blocking=non_blocking) for key, value in batch.items()}
-    if isinstance(batch, tuple):
-        return tuple(to_device_batch(value, device, non_blocking=non_blocking) for value in batch)
-    if isinstance(batch, list):
-        return [to_device_batch(value, device, non_blocking=non_blocking) for value in batch]
-    return batch
+    moved={}
+    def transfer(value):
+        if torch.is_tensor(value):
+            identity=id(value)
+            if identity not in moved:moved[identity]=value.to(device,non_blocking=non_blocking)
+            return moved[identity]
+        if isinstance(value,dict):
+            aliases={}
+            if value.get('candidate_phrase_sequence_shared',False):
+                # DataLoader pinning can break Python tensor identity even
+                # though collation explicitly declares one reference bank.
+                # The two query-to-bank inverse tables must stay independent.
+                aliases={key:key.removeprefix('candidate_') for key in value
+                    if key.startswith('candidate_phrase_sequence_')
+                    and key!='candidate_phrase_sequence_inverse'
+                    and key.removeprefix('candidate_') in value}
+            result={key:transfer(item) for key,item in value.items() if key not in aliases}
+            result.update({key:result[source] for key,source in aliases.items()})
+            return result
+        if isinstance(value,tuple):return tuple(transfer(item) for item in value)
+        if isinstance(value,list):return [transfer(item) for item in value]
+        return value
+    return transfer(batch)
 
 
 @dataclass
@@ -107,7 +121,7 @@ class StreamComposerConfig:
     song_response_group_size: int = 4
 
     def __post_init__(self):
-        if self.song_profile_policy not in ('off','masked_joint_v1') or self.song_response_policy not in ('off','music_response_v1'):
+        if self.song_profile_policy not in ('off','masked_joint_v1','masked_ordered_joint_v2') or self.song_response_policy not in ('off','music_response_v1'):
             raise ValueError('Unsupported whole-song style policy')
         if not 1 <= self.song_profile_components <= 16 or not 1 <= self.song_response_modes <= 8 or not 2 <= self.song_response_group_size <= 4:
             raise ValueError('Invalid whole-song style size')
@@ -2119,6 +2133,7 @@ def stream_loss(model, output, batch):
     plan_loss = kind_loss.new_zeros(())
     plan_rate_loss=kind_loss.new_zeros(())
     plan_blank_loss=kind_loss.new_zeros(())
+    plan_rate_floor=kind_loss.new_zeros(())
     if 'plan_logits' in output and 'audio_plan_target' in batch:
         logits, target = output['plan_logits'].float(), batch['audio_plan_target'].float()
         blank = F.binary_cross_entropy_with_logits(logits[..., 0], target[..., 0], reduction='none')
@@ -2129,7 +2144,8 @@ def stream_loss(model, output, batch):
             if exposure is None:raise ValueError('Rate plan supervision requires real audio cell exposure')
             rates=rates*exposure.float()[...,None]
         counts = target[..., 1:]
-        poisson = rates-counts*rates.clamp_min(1e-8).log()+torch.lgamma(counts+1.)
+        count_logfactorial=torch.lgamma(counts+1.)
+        poisson = rates-counts*rates.clamp_min(1e-8).log()+count_logfactorial
         mask = batch['audio_plan_weight'].float()
         blank_mask=batch.get('audio_plan_blank_weight',mask).float()
         rate_mask=mask
@@ -2143,6 +2159,10 @@ def stream_loss(model, output, batch):
             rate_mask=(mask/safe_exposure).masked_fill(exposure<=0,0.)
         plan_blank_loss=(blank*blank_mask).sum()/max(1,mask.size(0))
         plan_rate_loss=(poisson.sum(-1)*rate_mask).sum()/max(1,mask.size(0))
+        # Poisson NLL is not zero even at its per-cell optimum. Expose this
+        # target-only floor separately, without changing a single gradient.
+        saturated=counts-counts*counts.clamp_min(1e-8).log()+count_logfactorial
+        plan_rate_floor=(saturated.sum(-1)*rate_mask).sum()/max(1,mask.size(0))
         plan_loss=plan_blank_loss+plan_rate_loss
     time_loss = kind_loss+delta_loss
     configuration_loss = shape_loss+phase_loss+detail_loss
@@ -2160,8 +2180,14 @@ def stream_loss(model, output, batch):
     exit_mask=(batch.get('transition_exit_mask',torch.zeros_like(note)).bool()
                &batch.get('transition_exit_labels',torch.zeros_like(note)).bool()
                &(note|kind.eq(WAIT)|kind.eq(EOS))&weights.gt(0))
-    joint_nll=kind_nll+delta_nll+(shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights))*configuration_mask
-    transition_exit_loss=model.config.transition_exit_weight*reduce(joint_nll*exit_mask)
+    if model.config.transition_exit_weight:
+        joint_nll=kind_nll+delta_nll+(shape_nll+phase_nll*regular+detail_per_row.reshape_as(weights))*configuration_mask
+        transition_exit_loss=model.config.transition_exit_weight*reduce(joint_nll*exit_mask)
+    else:
+        # A zero coefficient is not a reason to retain and backpropagate the
+        # entire superseded per-event objective. Keep exit diagnostics below,
+        # but omit this unused autograd branch when the objective is disabled.
+        transition_exit_loss=kind_loss.new_zeros(())
     phrase_loss = kind_loss.new_zeros(())
     phrase_metrics = {}
     if 'phrase_prediction' in output:
@@ -2186,15 +2212,27 @@ def stream_loss(model, output, batch):
         relation_loss=future_relation_loss(output['future_relation_prediction'],batch,configuration_weights,denominator)
     total = base_loss+transition_exit_loss+model.config.recovery_weight*recovery+model.config.phrase_loss_weight*phrase_loss+model.config.phrase_relation_weight*relation_loss
     profile_loss=kind_loss.new_zeros(())
+    profile_crps=kind_loss.new_zeros(())
+    profile_nll=kind_loss.new_zeros(())
     if 'song_profile_audio' in output:
         rows=batch.get('profile_chart_rows',torch.arange(batch['condition'].size(0),device=weights.device))
         controls=batch['condition'].float().index_select(0,rows)
         known=None if model.training else torch.zeros_like(controls,dtype=torch.bool)
-        per_chart=model.song_profile.loss(output['song_profile_audio'].index_select(0,rows),controls,known_mask=known,reduction='none')
-        # One forward per unique chart in this batch, not per repeated window.
-        profile_loss=per_chart.sum()/max(1,rows.numel())
+        audio=output['song_profile_audio'].index_select(0,rows)
+        if model.config.song_profile_policy=='masked_ordered_joint_v2':
+            parts=model.song_profile.loss_parts(audio,controls,known_mask=known)
+            chart_weights=batch.get('profile_chart_weights',parts['joint_nll'].new_full((rows.numel(),),1/max(1,rows.numel())))
+            profile_nll=(parts['joint_nll']*chart_weights).sum()
+            profile_crps=(parts['crps']*chart_weights).sum()
+            profile_loss=profile_nll+profile_crps
+        else:
+            per_chart=model.song_profile.loss(audio,controls,known_mask=known,reduction='none')
+            # Preserve the old learning contract when explicitly resumed.
+            profile_loss=per_chart.sum()/max(1,rows.numel())
+            profile_nll=profile_loss
         total=total+model.config.song_profile_weight*profile_loss
-    execution_metrics.update(song_profile_loss=profile_loss,song_profile_weighted_loss=model.config.song_profile_weight*profile_loss)
+    execution_metrics.update(song_profile_loss=profile_loss,song_profile_nll=profile_nll,song_profile_crps=profile_crps,
+        song_profile_weighted_loss=model.config.song_profile_weight*profile_loss)
     continuation_metrics={}
     if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
         # These are components/diagnostics of the existing joint NLL. They
@@ -2230,6 +2268,8 @@ def stream_loss(model, output, batch):
         event_route_conditional_loss=shape_loss-family_loss, phase_loss=phase_loss, detail_loss=detail_loss,
         literal_stop_loss=literal_stop_loss,
         plan_loss=plan_loss,plan_rate_loss=plan_rate_loss,plan_blank_loss=plan_blank_loss,
+        plan_rate_floor=plan_rate_floor,plan_rate_excess=plan_rate_loss-plan_rate_floor,
+        plan_weighted_loss=model.config.plan_weight*plan_loss,main_prediction_loss=time_loss+configuration_loss,
         base_loss=base_loss,phrase_loss=phrase_loss,phrase_weighted_loss=model.config.phrase_loss_weight*phrase_loss,
         transition_exit_loss=transition_exit_loss,exit_count=exit_mask.sum(),
         exit_note_count=(exit_mask&note).sum(),exit_wait_count=(exit_mask&kind.eq(WAIT)).sum(),

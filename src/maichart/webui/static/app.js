@@ -220,6 +220,11 @@ function composerTrainingView(task) {
         ['NOTE / WAIT / EOS loss',show(number(metrics,'kind_loss'),4)],['拍距 loss',show(number(metrics,'delta_loss'),4)],
         ['整拍配置 loss',show(number(metrics,'configuration_loss'),4)],['形状 loss',show(number(metrics,'shape_loss'),4)],
         ['等价相位 loss',show(number(metrics,'phase_loss'),4)],['细节 loss',show(number(metrics,'detail_loss'),4)],
+        ['主预测损失（采音与配置）',show(number(metrics,'main_prediction_loss'),4)],
+        ['物量计划损失（已乘权重）',show(number(metrics,'plan_weighted_loss'),4)],
+        ['物量计划的固定下界（原始）',show(number(metrics,'plan_rate_floor'),4)],
+        ['物量计划超额误差（原始）',show(number(metrics,'plan_rate_excess'),4)],
+        ['整曲风格连续分布误差（CRPS）',show(number(metrics,'song_profile_crps'),4)],
         ['整曲风格补全 loss',show(number(metrics,'song_profile_loss'),4)],
         ['整曲风格加权 loss',show(number(metrics,'song_profile_weighted_loss'),4)],
         ['同谱远距短句组',show(number(metrics,'song_response_groups'),2)],
@@ -2500,7 +2505,7 @@ function updateEventSetControls() {
     songStyle.hidden=!isEventSetGeneration()||(!profile&&!response);
     for(const id of ['composerSongStyleSource','composerSongStyleSeed','composerSongStyleLocks']){const node=element('#'+id);if(node){node.disabled=!profile;const field=node.closest('label.field');if(field)field.hidden=!profile;}}
     const mode=element('#composerSongResponseMode');if(mode){mode.disabled=!response;const field=mode.closest('label.field');if(field)field.hidden=!response;}
-    const hint=element('#composerSongStyleHint');if(hint)hint.textContent=profile?'自动匹配使用模型补全，忽略其他风格滑块的默认值；手动锁定字段会保留。沿用检查点默认和手动设置使用当前生成条件滑块。':'此检查点未训练自动风格补全，使用当前生成条件；音乐响应模式可单独设置。';
+    const hint=element('#composerSongStyleHint');if(hint)hint.textContent=profile?'自动模式先选择整体写法，再使用该写法内的连续统计值，避免逐字段随机抽到极端密度；明确锁定优先。其他风格滑块的默认值不会锁定；沿用检查点默认和手动设置使用当前生成条件滑块。':'此检查点未训练自动风格补全，使用当前生成条件；音乐响应模式可单独设置。';
   }
   const phraseModeField=element('#composerPhraseModeTemperature')?.closest('label.field');
   if(phraseModeField)phraseModeField.hidden=!isEventSetGeneration() || generationInspection?.data?.generation_capabilities?.persistent_phrase_modes!==true;
@@ -3149,6 +3154,8 @@ function composerGenerationSummary(task) {
   if (task.kind !== "composer_generate") return null;
   const result=task.result||{},report=result.composer_report||{},settings=result.effective_settings||{};
   const condition=report.condition||settings.condition;
+  const profile=report.song_profile||{},controls=profile.effective_controls||condition||{};
+  const profileDiagnostics=profile.prediction_diagnostics?.rows?.[0] ?? (Array.isArray(profile.prediction_diagnostics)?profile.prediction_diagnostics[0]:profile.prediction_diagnostics);
   const seed=report.seed??result.seed??"未记录",temperature=report.temperature??settings.temperature;
   const pointerTemperature=report.pointer_temperature??settings.pointer_temperature??temperature;
   const actionTemperature=report.action_temperature??settings.action_temperature??temperature;
@@ -3157,6 +3164,8 @@ function composerGenerationSummary(task) {
   const architecture=report.architecture_profile??settings.architecture_profile;
   if(architecture)parts.unshift(`训练架构：${({event_set_stream_v1:'整拍集合连续生成',audio_grounded_v3:'音频锚定',music_context_v2:'音乐上下文基线'})[architecture]??architecture}（${architecture}）；更新 ${report.optimizer_steps??'未记录'} 步`);
   if(report.checkpoint??result.checkpoint)parts.push(`检查点：${report.checkpoint??result.checkpoint}`);
+  if(controls.radar?.note_density!=null||controls.radar?.peak!=null)parts.push(`实际风格条件：整体密度 ${controls.radar?.note_density??'未记录'}；峰值密度 ${controls.radar?.peak??'未记录'}（均为归一化值）`);
+  if(profileDiagnostics?.selected_component!=null)parts.push(`自动整曲风格选中写法：${profileDiagnostics.selected_component}`);
   if(report.timing_output_policy)parts.push(`选时结构：${report.timing_output_policy==='absolute_grid_v1'?'绝对拍位与节奏网格联合预测':'相对拍距预测'}`);
   if(report.event_family_policy)parts.push(`配置类型：${report.event_family_policy==='shared_continuation_v1'?'音乐、历史与持续状态共同决定续写':report.event_family_policy==='audio_state_phrase_v4'?'音频先验与持续状态短句':report.event_family_policy==='audio_prior_transition_v3'?'音乐决定类型底座，历史只决定是否延续':report.event_family_policy==='audio_semantic_v2'?'音乐与类型历史选择类型集合，完整历史组织几何':report.event_family_policy==='semantic_mass_v1'?'先学类型集合，类内再选形状与细节':'旧形状与字面分支'}`);
   const retryPolicy=report.action_retry_policy??settings.action_retry_policy;
