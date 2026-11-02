@@ -25,7 +25,7 @@ def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
         manifest=str(manifest),holdout_fraction=0, checkpoint_dir=str(tmp_path / 'out'), cache_dir=str(tmp_path / 'cache'),
         candidate_count=999, action_slots=33, echo_prior_policy='phase_echo_v1'), runtime=runtime)
     assert runtime.args[:2] == ['-m', 'maichart.composer.stream_train']
-    for flag, expected in [('--batch-size','16'),('--grad-accumulation','1'),('--d-model','256'),('--rollout-steps','16'),('--window-seconds','8.0'),('--precision','bf16')]:
+    for flag, expected in [('--batch-size','16'),('--grad-accumulation','4'),('--d-model','256'),('--rollout-steps','16'),('--window-seconds','8.0'),('--precision','bf16')]:
         assert runtime.args[runtime.args.index(flag)+1] == expected
     assert '--candidate-count' not in runtime.args
     assert '--echo-prior-policy' not in runtime.args
@@ -35,11 +35,11 @@ def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
     assert runtime.args[runtime.args.index('--plan-weight')+1]=='0.1'
     for flag,value in [('--validation-max-batches','32'),('--validation-batch-size','4'),
                        ('--generation-eval-interval-epochs','1'),('--warmup-steps','0'),
-                       ('--prefetch-batches','2'),('--sample-workers','1'),('--audio-cache-gb','2.0'),
-                       ('--min-lr-ratio','0.1'),('--lr-schedule','constant'),('--lr','0.0005'),('--plan-blank-window-seconds','0.5'),
+                       ('--prefetch-batches','2'),('--sample-workers','1'),('--audio-cache-gb','1.0'),
+                       ('--min-lr-ratio','0.1'),('--lr-schedule','constant'),('--lr','0.0002'),('--plan-blank-window-seconds','0.5'),
                        ('--training-window-policy','phrase_complete_v1'),('--max-phrase-events','64'),('--phrase-seam-events','2'),
-                       ('--phrase-execution-policy','persistent_modes_v1'),('--phrase-modes','4'),('--phrase-relation-weight','0.1'),
-                       ('--detail-representation-policy','shared_components_v1'),('--duration-feature-policy','log_time_v2')]:
+                       ('--phrase-execution-policy','component_modes_v2'),('--phrase-modes','4'),('--phrase-relation-weight','0.1'),
+                       ('--detail-representation-policy','typed_components_v2'),('--duration-feature-policy','log_time_v2')]:
         assert runtime.args[runtime.args.index(flag)+1]==value
 
 
@@ -390,3 +390,10 @@ def test_detail_compute_runtime_setting_reaches_trainer(tmp_path):
         assert runtime.task.result['effective_settings']['detail_compute']==mode
     with pytest.raises(ValueError,match='detail compute'):
         event_set_api.start_train(Handler(),{**base,'detail_compute':'invalid'},runtime=Runtime())
+
+
+def test_unified_song_choice_uses_profile_component_count(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    runtime=Runtime();event_set_api.start_train(Handler(),dict(manifest=str(manifest),holdout_fraction=0,checkpoint_dir=str(tmp_path/'out'),song_profile_components=6,song_response_modes=3),runtime=runtime)
+    assert runtime.task.result['effective_settings']['song_response_modes']==6
+    assert runtime.args[runtime.args.index('--song-response-modes')+1]=='6'

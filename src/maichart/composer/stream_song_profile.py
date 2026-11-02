@@ -77,13 +77,7 @@ class SongProfileCompleter(nn.Module):
         mask=known_mask.to(condition.dtype)
         out=self.network(torch.cat((audio,condition*mask,mask),-1)).float().reshape(-1,self.components,1+15*self.bins)
         return dict(mixture_logits=out[:,:,0],bin_logits=out[:,:,1:].reshape(-1,self.components,15,self.bins))
-    def loss_parts(self,audio,condition,known_mask=None):
-        """Proper joint categorical score plus ordered marginal CRPS per chart."""
-        if known_mask is None:
-            known_mask=torch.rand_like(condition)<torch.rand((len(condition),1),device=condition.device)
-            known_mask[:,0]=True
-        condition,known_mask=self.bind_known(condition,known_mask)
-        out=self(audio,condition,known_mask)
+    def _evidence_scores(self,out,condition,known_mask):
         targets=(condition[:,1:].clamp(0,1)*(self.bins-1)).round().long()
         log_probs=out['bin_logits'].log_softmax(-1)
         logp=log_probs.gather(-1,targets[:,None,:,None].expand(-1,self.components,-1,1)).squeeze(-1)
@@ -100,7 +94,36 @@ class SongProfileCompleter(nn.Module):
         # a numerical proper score that distinguishes nearby from distant bins.
         crps_fields=(marginal.cumsum(-1)[...,:-1]-observed[...,:-1]).square().sum(-1)/(self.bins-1)
         crps=(crps_fields*unknown).sum(-1)/normalizer
-        return dict(joint_nll=joint_nll,crps=crps)
+        return dict(joint_nll=joint_nll,crps=crps,component_profile_nll=-(logp*unknown[:,None]).sum(-1)/normalizer[:,None])
+    def loss_parts(self,audio,condition,known_mask=None):
+        """Proper joint categorical score plus ordered marginal CRPS per chart."""
+        if known_mask is None:
+            known_mask=torch.rand_like(condition)<torch.rand((len(condition),1),device=condition.device)
+            known_mask[:,0]=True
+        condition,known_mask=self.bind_known(condition,known_mask)
+        scores=self._evidence_scores(self(audio,condition,known_mask),condition,known_mask)
+        return dict(joint_nll=scores['joint_nll'],crps=scores['crps'])
+    def unified_evidence(self,audio,condition,known_mask=None,*,only_level_probability=.5):
+        """Causal shared prior plus training-only profile evidence for one z.
+
+        Full target controls enter the score, never the deployed prior input.
+        Exactly the same mask conditions both the profile and response reads.
+        """
+        probability=float(only_level_probability)
+        if not 0<=probability<=1:raise ValueError('Invalid only-level mask probability')
+        if known_mask is None:known_mask=self.sample_known_mask(condition,probability)
+        condition,known_mask=self.bind_known(condition,known_mask)
+        output=self(audio,condition,known_mask)
+        scores=self._evidence_scores(output,condition,known_mask)
+        return dict(prior_logits=output['mixture_logits'],bin_logits=output['bin_logits'],
+            component_profile_nll=scores['component_profile_nll'],crps=scores['crps'],
+            known_mask=known_mask,causal_condition=condition*known_mask.to(condition.dtype))
+    @staticmethod
+    def sample_known_mask(condition,only_level_probability=.5):
+        known=torch.rand_like(condition)<torch.rand((len(condition),1),device=condition.device)
+        known=known & ~(torch.rand((len(condition),1),device=condition.device)<float(only_level_probability))
+        known[:,0]=True
+        return known
     def loss(self,audio,condition,known_mask=None,reduction='mean',crps_weight=0.):
         weight=float(crps_weight)
         if not np.isfinite(weight) or weight<0:raise ValueError('Invalid profile CRPS weight')
@@ -108,12 +131,15 @@ class SongProfileCompleter(nn.Module):
         loss=parts['joint_nll']+weight*parts['crps']
         return loss if reduction=='none' else loss.mean()
     @torch.no_grad()
-    def sample(self,audio,condition,known_mask,generator=None,*,policy='component_mean_v2',return_diagnostics=False):
+    def sample(self,audio,condition,known_mask,generator=None,*,policy='component_mean_v2',return_diagnostics=False,component_choice=None):
         if policy not in ('component_mean_v2','categorical_v1'):raise ValueError('Invalid profile sampling policy')
         condition,known_mask=self.bind_known(condition,known_mask)
         out=self(audio,condition,known_mask)
         mixture=out['mixture_logits'].softmax(-1)
-        modes=torch.multinomial(mixture,1,generator=generator).squeeze(-1)
+        if component_choice is None:modes=torch.multinomial(mixture,1,generator=generator).squeeze(-1)
+        else:
+            modes=torch.as_tensor(component_choice,device=condition.device,dtype=torch.long).expand(len(condition))
+            if bool(((modes<0)|(modes>=self.components)).any()):raise ValueError('Invalid unified profile component')
         logits=out['bin_logits'][torch.arange(len(condition),device=condition.device),modes]
         probabilities=logits.softmax(-1)
         grid=torch.linspace(0,1,self.bins,device=condition.device,dtype=probabilities.dtype)
@@ -163,10 +189,16 @@ def resolve_song_profile(model,cache,condition,args,payload):
     seed=getattr(args,'song_style_seed',None)
     seed=int(args.seed if seed is None else seed)
     diagnostics=None
+    unified=getattr(model.config,'song_response_policy','off')=='unified_profile_response_v2'
+    if unified and not -1<=int(getattr(args,'song_response_mode',-1))<model.config.song_response_modes:
+        raise ValueError('Invalid unified whole-song choice')
+    source_vector,source_known=model.song_profile.bind_known(vector,known) if unified else (vector,known)
     if source=='auto' and available and not explicit_file:
         generator=torch.Generator(device=vector.device).manual_seed(seed)
+        override=int(getattr(args,'song_response_mode',-1)) if unified else -1
         vector,diagnostics=model.song_profile.sample(cache,vector,known,generator=generator,
-            policy='component_mean_v2',return_diagnostics=True);effective='learned_masked_joint_v1'
+            policy='component_mean_v2',return_diagnostics=True,
+            component_choice=override if override>=0 else None);effective='learned_masked_joint_v1'
     else:
         if locks:feasible_profile(vector[0].cpu().numpy(),known[0].cpu().numpy())
         effective='condition_file' if explicit_file else 'manual' if source=='manual' else 'checkpoint_defaults'
@@ -180,8 +212,26 @@ def resolve_song_profile(model,cache,condition,args,payload):
         if 'chord' in locks:original['style']['chord_bias']=float(locks['chord'])
         elif 'chord_bias' in locks:original['radar']['chord']=float(locks['chord_bias'])
         result=GenerationCondition.from_dict(original)
+    if unified:
+        if diagnostics is not None:
+            row=diagnostics['rows'][0]
+            prior=torch.as_tensor([row['mixture_probabilities']],device=vector.device,dtype=vector.dtype).clamp_min(1e-30).log()
+            choice=int(row['selected_component'])
+        else:
+            source_vector=result.to_vector(device=vector.device)[None]
+            source_known=torch.ones_like(source_vector,dtype=torch.bool)
+            evidence=model.song_profile.unified_evidence(cache,source_vector,source_known)
+            prior=evidence['prior_logits']
+            override=int(getattr(args,'song_response_mode',-1))
+            if override>=prior.size(-1):raise ValueError('Invalid unified whole-song choice')
+            generator=torch.Generator(device=vector.device).manual_seed(seed)
+            choice=override if override>=0 else int(torch.multinomial(prior.softmax(-1),1,generator=generator)[0,0])
+        cache['unified_style']=dict(prior_logits=prior,causal_condition=source_vector*source_known,
+                                   known_mask=source_known,choice=choice)
     return result,dict(requested_source=source,effective_source=effective,seed=seed,locks=locks,
         effective_controls=result.to_dict(),frozen_for_song=True,
         distribution=('mixture_component_mean_with_feasibility_projection_v2' if effective=='learned_masked_joint_v1' else 'legacy_preferences'),
         sampling_policy=('component_mean_v2' if diagnostics else None),prediction_diagnostics=diagnostics,
-        training_score=('masked_joint_categorical_nll_plus_ordered_crps' if getattr(model.config,'song_profile_policy','off')=='masked_ordered_joint_v2' else 'masked_preprojection_categorical_nll'))
+        unified_choice=(choice if unified else None),
+        training_score=('unified_configuration_profile_generalized_em_plus_crps' if unified else
+            'masked_joint_categorical_nll_plus_ordered_crps' if getattr(model.config,'song_profile_policy','off')=='masked_ordered_joint_v2' else 'masked_preprojection_categorical_nll'))

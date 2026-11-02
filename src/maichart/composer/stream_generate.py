@@ -330,7 +330,9 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     batch['condition']=condition.to_vector(device=device)[None]
     song_response_choice=None
     response=getattr(model,'song_response',None)
-    if response is not None:
+    if getattr(model.config,'song_response_policy','off')=='unified_profile_response_v2':
+        song_response_choice=int(cache['unified_style']['choice'])
+    elif response is not None:
         scores=response.song_prior(cache['global'],cache['global_mask'],batch['condition'])
         mode=int(getattr(args,'song_response_mode',-1))
         if mode < -1 or mode >= scores.shape[-1]:raise ValueError('Invalid song_response_mode')
@@ -379,7 +381,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     if field in result else reference.new_zeros(1)) for field in diagnostic_fields]))
                 model_diagnostic_sums=(values.clone() if model_diagnostic_sums is None else model_diagnostic_sums+values)
                 model_diagnostic_count+=1
-            kinds=kind_logits_for_audio(result['kind_logits'][0,-1],cursor,end)
+            selected_mode=None
+            if getattr(model.config,'phrase_execution_policy','off')=='component_modes_v2':
+                from .stream_phrase_runtime import ensure_phrase_mode
+                selected_mode=ensure_phrase_mode(model,context,result,batch,generator,temperature=args.phrase_mode_temperature)
+            kind_values=result['execution_kind_logits'][0,-1,selected_mode] if selected_mode is not None else result['kind_logits'][0,-1]
+            kinds=kind_logits_for_audio(kind_values,cursor,end)
             start_second=second_at_beat(clock,cursor)
             horizon_second=second_at_beat(clock,min(cursor+2,end))
             note_bias,tail_bias=curve.kind_bias(start_second,horizon_second)
@@ -393,10 +400,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 break
             if kind==WAIT:
                 nxt=cursor+2
-                context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt)))
+                meta=dict(phrase_mode=selected_mode,phrase_mode_start=float(batch['phrase_start_beat'][0,-1])) if selected_mode is not None else {}
+                context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),**meta))
                 cursor=nxt;waits+=1;continue
             deltas=current_timing_deltas(model,result,cursor)
-            timing=note_delta_logits_for_audio(result['delta_logits'][0,-1],deltas,cursor,end,
+            delta_values=result['execution_delta_logits'][0,-1,selected_mode] if selected_mode is not None else result['delta_logits'][0,-1]
+            timing=note_delta_logits_for_audio(delta_values,deltas,cursor,end,
                 clock,duration,first_step=step_index==0)
             seconds=np.asarray([second_at_beat(clock,cursor+d) for d in deltas])
             if curve.active:
@@ -475,7 +484,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 if getattr(args,'search_policy','phrase_v1')!='legacy':
                     reason='physical_dead_end';break
                 kind=WAIT;nxt=cursor+2;forced_waits+=1
-            context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt)))
+            meta=dict(phrase_mode=selected_mode,phrase_mode_start=float(batch['phrase_start_beat'][0,-1])) if selected_mode is not None else {}
+            context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),**meta))
             cursor=nxt;waits+=1
     search_report={'policy':'legacy','candidate_count':1}
     if getattr(args,'search_policy','phrase_v1')=='legacy':

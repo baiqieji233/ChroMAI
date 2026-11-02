@@ -253,3 +253,60 @@ def test_music_interval_deduplication_keeps_song_identity_and_exact_boundaries()
         ids=packed['phrase_music_'+target+'_inverse']
         torch.testing.assert_close(packed['phrase_music_start_beat'][ids],batch[start].double(),atol=0,rtol=0)
         torch.testing.assert_close(packed['phrase_music_end_beat'][ids],batch[end].double(),atol=0,rtol=0)
+
+
+def test_shared_ordered_music_and_sequence_banks_are_reused_across_candidate_reads(monkeypatch):
+    model,batch,cache=ordered_fixture()
+    module=CausalPhraseContext(16,3,shared=True).eval()
+    assert not hasattr(module,'audio')
+    for key,value in list(batch.items()):
+        if key.startswith('phrase_'):batch['candidate_'+key]=value
+    batch['candidate_step_beat']=batch['step_beat']+.25
+    batch['candidate_phrase_sequence_shared']=True
+    assert not hasattr(module,'writing') and not hasattr(module,'shared')
+    calls={'music':0,'sequence':0,'audio_keys':0}
+    original=module.ordered.music_table
+    def music(*args,**kwargs):calls['music']+=1;return original(*args,**kwargs)
+    monkeypatch.setattr(module.ordered,'music_table',music)
+    monkeypatch.setattr(module,'_music',lambda *a,**kw:(_ for _ in ()).throw(AssertionError('legacy delta32 music executed')))
+    hooks=[module.ordered.sequence_gru.register_forward_hook(lambda *a:calls.__setitem__('sequence',calls['sequence']+1)),
+        module.ordered.audio_keys.register_forward_hook(lambda *a:calls.__setitem__('audio_keys',calls['audio_keys']+1))]
+    inverse=torch.tensor([0])
+    _,departure=module(model,cache,inverse,batch)
+    first=departure['_phrase_encoding_cache']
+    assert len(first)==4
+    _,candidate=module.at_candidate(model,cache,inverse,batch,encoded_cache=first)
+    second=candidate['_phrase_encoding_cache']
+    assert first[0] is second[0] and first[1] is second[1] and first[2] is second[2] and first[3] is second[3]
+    assert calls==dict(music=1,sequence=1,audio_keys=1)
+    for hook in hooks:hook.remove()
+    changed=dict(batch,candidate_target_phrase_sequence_atoms=torch.full_like(batch['target_phrase_sequence_atoms'],999999))
+    _,unchanged=module.at_candidate(model,cache,inverse,changed,encoded_cache=first)
+    assert torch.equal(candidate['phrase_intent'],unchanged['phrase_intent'])
+
+
+def test_shared_ordered_migration_drops_replaced_audio_and_statistic_projections():
+    old=CausalPhraseContext(16,3,ordered=True,aligned=True)
+    shared=CausalPhraseContext(16,3,shared=True)
+    original=old.state_dict()
+    retained={key:value for key,value in original.items() if not key.startswith(('audio.','writing.','shared.'))}
+    shared.load_state_dict(retained,strict=True)
+    assert all(torch.equal(value,shared.state_dict()[key]) for key,value in retained.items())
+
+
+def test_shared_ordered_new_inference_clock_reuses_audio_projection_and_can_track(monkeypatch):
+    model,batch,cache=ordered_fixture()
+    module=CausalPhraseContext(16,3,shared=True).eval()
+    inverse=torch.tensor([0]);_,first=module(model,cache,inverse,batch)
+    for key,value in list(batch.items()):
+        if key.startswith('phrase_'):batch['candidate_'+key]=value
+    batch['candidate_phrase_start_beat']=torch.full_like(batch['phrase_start_beat'],8.)
+    batch['candidate_phrase_end_beat']=torch.full_like(batch['phrase_end_beat'],10.)
+    batch['candidate_step_beat']=torch.full_like(batch['step_beat'],8.5)
+    batch['candidate_phrase_sequence_shared']=True
+    monkeypatch.setattr(module.ordered,'prepare_audio',lambda *_:(_ for _ in ()).throw(AssertionError('audio projection repeated')))
+    with torch.no_grad():module.tracking_output.weight.normal_(0,.05)
+    baseline,_=module.at_candidate(model,cache,inverse,batch,encoded_cache=first['_phrase_encoding_cache'])
+    tracked,output=module.at_candidate(model,cache,inverse,batch,tracking_strength=1.,encoded_cache=first['_phrase_encoding_cache'])
+    assert torch.isfinite(tracked).all() and not torch.equal(baseline,tracked)
+    assert output['phrase_music_anchor'].shape==(1,2,16)

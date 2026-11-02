@@ -178,13 +178,16 @@ class OrderedPhraseContext(nn.Module):
 
 
 class CausalPhraseContext(nn.Module):
-    def __init__(self, width, condition_dim, *, ordered=False, aligned=False):
+    def __init__(self, width, condition_dim, *, ordered=False, aligned=False, shared=False):
         super().__init__()
         model_width, width = width, min(width, 128)
         self.phrase_width = width
-        self.audio = nn.Sequential(nn.Linear(32 * 4, width), nn.GELU(), nn.LayerNorm(width))
-        self.writing = nn.Sequential(nn.Linear(PHRASE_FEATURE_DIM, width), nn.GELU(), nn.LayerNorm(width))
-        self.shared = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(), nn.LayerNorm(width))
+        self.shared_ordered=bool(shared)
+        if shared:ordered=aligned=True
+        if not shared:
+            self.audio = nn.Sequential(nn.Linear(32 * 4, width), nn.GELU(), nn.LayerNorm(width))
+            self.writing = nn.Sequential(nn.Linear(PHRASE_FEATURE_DIM, width), nn.GELU(), nn.LayerNorm(width))
+            self.shared = nn.Sequential(nn.Linear(width * 2, width), nn.GELU(), nn.LayerNorm(width))
         self.style = nn.Sequential(nn.Linear(condition_dim, width), nn.LayerNorm(width))
         self.query = nn.Linear(width * 2, width)
         self.key = nn.Linear(width, width)
@@ -219,6 +222,59 @@ class CausalPhraseContext(nn.Module):
                               values[..., 5:7, :].mean(-2), values[..., 7:, :].mean(-2)), -2)
         return self.audio(pooled.flatten(-2))
 
+    @staticmethod
+    def _music_descriptor(batch,inverse,prefix=''):
+        """Describe one CPU-collated clock table without any target configurations."""
+        names=[prefix+'phrase_music_'+field for field in ('song_inverse','start_beat','end_beat')]
+        if all(name in batch for name in names):
+            song,start,end=(batch[name] for name in names)
+            identity=tuple(id(batch[name]) for name in names)
+            rows=torch.stack((song.double(),start.double(),end.double()),-1)
+            anchor=batch[prefix+'phrase_music_anchor_inverse']
+            reference=batch[prefix+'phrase_music_reference_inverse']
+            return identity,rows,anchor,reference,tuple(batch[name] for name in names)
+        start,end=batch[prefix+'phrase_start_beat'],batch[prefix+'phrase_end_beat']
+        rs,re=batch[prefix+'phrase_memory_start_beat'],batch[prefix+'phrase_memory_end_beat']
+        identity=(id(start),id(end),id(rs),id(re),id(inverse))
+        a=torch.stack((inverse[:,None].expand_as(start).double(),start.double(),end.double()),-1).reshape(-1,3)
+        r=torch.stack((inverse[:,None,None].expand_as(rs).double(),rs.double(),re.double()),-1).reshape(-1,3)
+        rows=torch.cat((a,r),0)
+        anchor=torch.arange(start.numel(),device=start.device).reshape(start.shape)
+        reference=torch.arange(rs.numel(),device=rs.device).reshape(rs.shape)+start.numel()
+        return identity,rows,anchor,reference,(start,end,rs,re,inverse)
+
+    def _shared_music_reads(self,model,cache,inverse,batch,encoded_cache):
+        state=(encoded_cache[3] if encoded_cache is not None and len(encoded_cache)>3 else None)
+        descriptor=self._music_descriptor(batch,inverse)
+        identity,rows,anchor_index,reference_index,owners=descriptor
+        if state is None:
+            ordered_cache=self.ordered.prepare_audio(cache)
+            descriptors=[descriptor]
+            if 'candidate_phrase_start_beat' in batch:
+                descriptors.append(self._music_descriptor(batch,inverse,'candidate_'))
+            intervals,remap=torch.unique(torch.cat([item[1] for item in descriptors],0),dim=0,return_inverse=True)
+            table=dict(phrase_music_song_inverse=intervals[:,0].long(),
+                phrase_music_start_beat=intervals[:,1],phrase_music_end_beat=intervals[:,2])
+            bank=self.ordered.music_table(ordered_cache,table)
+            state=dict(ordered_cache=ordered_cache,music_bank=bank,maps={},clock_owners={})
+            offset=0
+            for key,interval_rows,anchors,references,clock_owners in descriptors:
+                mapping=remap[offset:offset+len(interval_rows)];offset+=len(interval_rows)
+                state['maps'][key]=(mapping[anchors],mapping[references])
+                state['clock_owners'][key]=clock_owners
+        elif identity not in state['maps']:
+            # Inference may propose a genuinely new landing table. Reuse the
+            # shared audio projection/sequence bank and append only this read.
+            table=dict(phrase_music_song_inverse=rows[:,0].long(),
+                phrase_music_start_beat=rows[:,1],phrase_music_end_beat=rows[:,2])
+            extra=self.ordered.music_table(state['ordered_cache'],table)
+            offset=len(state['music_bank'])
+            state['music_bank']=torch.cat((state['music_bank'],extra),0)
+            state['maps'][identity]=(anchor_index+offset,reference_index+offset)
+            state['clock_owners'][identity]=owners
+        anchor_index,reference_index=state['maps'][identity]
+        return state['music_bank'][anchor_index],state['music_bank'][reference_index],state
+
     def forward(self, model, cache, inverse, batch, tracking_strength=0., *, encoded_cache=None):
         start, end = batch['phrase_start_beat'], batch['phrase_end_beat']
         features = batch['phrase_memory_features'].float()
@@ -226,23 +282,30 @@ class CausalPhraseContext(nn.Module):
             raise ValueError('Phrase memory requires PHRASE_FEATURE_DIM features and at most four references')
         memory_start, memory_end = batch['phrase_memory_start_beat'], batch['phrase_memory_end_beat']
         valid = batch['phrase_memory_mask'].bool() & (memory_end <= start[..., None]) & (memory_end > memory_start)
-        anchor = self._music(model, cache, inverse, start, end)
-        music = self._music(model, cache, inverse, memory_start, memory_end)
-        # Mask before normalization so masked recovery rows cannot poison the path.
-        writing = self.writing(torch.nan_to_num(features).masked_fill(~valid[..., None], 0.))
-        references = self.shared(torch.cat((music, writing), -1))
         ordered_output = {}
+        music_state=None
+        if self.shared_ordered:
+            anchor_music,reference_music,music_state=self._shared_music_reads(model,cache,inverse,batch,encoded_cache)
+            anchor_increment=self.ordered.anchor_output(anchor_music)
+            anchor=anchor_music+anchor_increment
+        else:
+            anchor = self._music(model, cache, inverse, start, end)
+            music = self._music(model, cache, inverse, memory_start, memory_end)
+            # Legacy policies retain their exact writing-statistic fusion.
+            writing = self.writing(torch.nan_to_num(features).masked_fill(~valid[..., None], 0.))
+            references = self.shared(torch.cat((music, writing), -1))
         if hasattr(self, 'ordered'):
-            ordered_cache = self.ordered.prepare_audio(cache)
-            if 'phrase_music_anchor_inverse' in batch:
-                music_bank=self.ordered.music_table(ordered_cache,batch)
-                anchor_music=music_bank[batch['phrase_music_anchor_inverse']]
-                reference_music=music_bank[batch['phrase_music_reference_inverse']]
-            else:
-                anchor_music=self.ordered.music(model, ordered_cache, inverse, start, end)
-                reference_music=self.ordered.music(model, ordered_cache, inverse, memory_start, memory_end)
-            anchor_increment = self.ordered.anchor_output(anchor_music)
-            anchor = anchor+anchor_increment
+            if not self.shared_ordered:
+                ordered_cache = self.ordered.prepare_audio(cache)
+                if 'phrase_music_anchor_inverse' in batch:
+                    music_bank=self.ordered.music_table(ordered_cache,batch)
+                    anchor_music=music_bank[batch['phrase_music_anchor_inverse']]
+                    reference_music=music_bank[batch['phrase_music_reference_inverse']]
+                else:
+                    anchor_music=self.ordered.music(model, ordered_cache, inverse, start, end)
+                    reference_music=self.ordered.music(model, ordered_cache, inverse, memory_start, memory_end)
+                anchor_increment = self.ordered.anchor_output(anchor_music)
+                anchor = anchor+anchor_increment
             if self.ordered.aligned and encoded_cache is not None and batch.get('phrase_sequence_shared',False):
                 encoded = encoded_cache
             else:
@@ -254,7 +317,7 @@ class CausalPhraseContext(nn.Module):
             sequence_values = sequence_bank[(indices+1).clamp_min(0)]
             paired = self.ordered.reference_fusion(torch.cat((reference_music, sequence_values), -1))
             reference_increment = self.ordered.reference_output(paired).masked_fill(~valid[..., None], 0.)
-            references = references+reference_increment
+            references=(paired+reference_increment if self.shared_ordered else references+reference_increment)
             ordered_output = dict(phrase_ordered_anchor_residual_rms=anchor_increment.float().square().mean(-1).sqrt(),
                 phrase_ordered_reference_residual_rms=reference_increment.float().square().mean((-1,-2)).sqrt())
         references = references.masked_fill(~valid[..., None], 0.)
@@ -271,7 +334,8 @@ class CausalPhraseContext(nn.Module):
             if len(aligned)>3:ordered_output['phrase_aligned_heads']=aligned[3]
             ordered_output.update(phrase_aligned_read=aligned_read,
                                   phrase_aligned_null_weight=null_weight,
-                                  _phrase_encoding_cache=(sequence,sequence_states,projected_keys))
+                                  _phrase_encoding_cache=((sequence,sequence_states,projected_keys,music_state) if self.shared_ordered else
+                                      (sequence,sequence_states,projected_keys)))
         query = self.query(torch.cat((anchor, style), -1))
         scores = (query[..., None, :] * self.key(references)).sum(-1)/math.sqrt(anchor.size(-1))
         allowed = torch.cat((torch.ones_like(valid[..., :1]), valid), -1)
@@ -288,11 +352,10 @@ class CausalPhraseContext(nn.Module):
         tracked = anchor * self.tracking(intent).sigmoid()
         residual = residual + strength * self.tracking_output(tracked)
         prediction = self.predict(intent)
-        representation = self.shared(torch.cat((anchor, self.writing(prediction)), -1))
         if hasattr(self, 'ordered'):
             ordered_output.update(phrase_ordered_prediction=self.ordered.predict(intent), phrase_progress_repr=progress)
         return residual, dict(phrase_intent=intent, phrase_reference_weights=weights,phrase_music_anchor=anchor,
-            phrase_prediction=prediction, phrase_repr=representation,
+            phrase_prediction=prediction,
             phrase_reference_repr=references, phrase_reference_mask=allowed,
             phrase_residual_rms=residual.float().square().mean(-1).sqrt(), **ordered_output)
 

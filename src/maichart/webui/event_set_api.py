@@ -86,7 +86,7 @@ def start_train(handler, payload, *, runtime):
     args = ['-m', 'maichart.composer.stream_train']
     for name, value in [('manifest', manifest), ('checkpoint-dir', directory), ('cache-dir', cache)]:
         _arg(args, '--' + name, value)
-    integers = dict(epochs=50, batch_size=16, grad_accumulation=1, d_model=256, layers=4,
+    integers = dict(epochs=50, batch_size=16, grad_accumulation=4, d_model=256, layers=4,
         nhead=8, dim_feedforward=768, history_events=64, rollout_steps=16,
         checkpoint_interval_steps=500, log_interval=25, max_steps=0, limit_charts=0,
         prepare_workers=1, cpu_threads=2, seed=0, recovery_interval=25,
@@ -115,8 +115,8 @@ def start_train(handler, payload, *, runtime):
         raise ValueError('Event-set shared song caches require sample_workers=1')
     if settings['prefetch_batches'] > 16:
         raise ValueError('prefetch_batches cannot exceed 16')
-    for key, default in dict(lr=.0005, dropout=.1, window_seconds=8., recovery_weight=.1, plan_weight=.1,
-                            audio_cache_gb=2.,min_lr_ratio=.1).items():
+    for key, default in dict(lr=.0002, dropout=.1, window_seconds=8., recovery_weight=.1, plan_weight=.1,
+                            audio_cache_gb=1.,min_lr_ratio=.1).items():
         settings[key] = _float(payload, key, default, minimum=0.)
         _arg(args, '--' + key.replace('_', '-'), settings[key])
     if settings['d_model'] % settings['nhead'] or settings['dropout'] > 1 or settings['window_seconds'] <= 0:
@@ -165,11 +165,11 @@ def start_train(handler, payload, *, runtime):
     _arg(args,'--plan-blank-window-seconds',blank_seconds)
     # Auto policies are resolved by the trainer against the parent checkpoint.
     policy_choices = {
-        'song_profile_policy': {'auto', 'off', 'masked_joint_v1', 'masked_ordered_joint_v2'},
-        'song_response_policy': {'auto', 'off', 'music_response_v1'},
+        'song_profile_policy': {'auto', 'off', 'masked_joint_v1', 'masked_ordered_joint_v2', 'masked_deployment_joint_v3'},
+        'song_response_policy': {'auto', 'off', 'music_response_v1', 'unified_profile_response_v2'},
         'training_window_policy': {'auto', 'block_v1', 'phrase_complete_v1'},
-        'phrase_execution_policy': {'auto', 'off', 'persistent_modes_v1'},
-        'detail_representation_policy': {'auto', 'private_v1', 'shared_components_v1'},
+        'phrase_execution_policy': {'auto', 'off', 'persistent_modes_v1', 'component_modes_v2'},
+        'detail_representation_policy': {'auto', 'private_v1', 'shared_components_v1', 'typed_components_v2'},
         'duration_feature_policy': {'auto', 'legacy_v1', 'log_time_v2'},
     }
     for key, choices in policy_choices.items():
@@ -199,11 +199,23 @@ def start_train(handler, payload, *, runtime):
     requested['phrase_loss_weight']=payload.get('phrase_loss_weight')
     for key in ('song_profile_components','song_profile_weight','song_response_modes','song_response_group_size'):
         requested[key]=payload.get(key) if mode!='resume' else None
+    if mode!='resume' and learning_policy not in {'legacy','checkpoint'} and requested['song_response_policy'] in ('auto','unified_profile_response_v2'):
+        requested['song_response_modes']=requested['song_profile_components']
     parent_config=StreamComposerConfig.from_dict(parent_data['model_config']) if parent_data else None
     if learning_policy=='checkpoint' and parent_config is None:
         raise ValueError('Checkpoint learning policy requires a parent checkpoint; use finetune or resume')
     policies=resolve_learning_policies(SimpleNamespace(**requested),parent_config,
         resume=mode=='resume' or learning_policy=='checkpoint')
+    # Batch order may be resolved as a model policy by the trainer; support an
+    # independent CLI policy as well without emitting the argument twice.
+    if 'batch_order_policy' not in policies:
+        batch_order=payload.get('batch_order_policy','auto')
+        if batch_order not in {'auto','song_local_v1','interleaved_microbatches_v2'}:raise ValueError('Unknown batch_order_policy')
+        if mode=='resume':
+            inherited_order=parent_args.get('batch_order_policy','song_local_v1')
+            if batch_order not in ('auto',inherited_order):raise ValueError('Resume inherits batch_order_policy; use finetune')
+        settings['batch_order_policy']=batch_order
+        _arg(args,'--batch-order-policy',batch_order)
     inherited_temperature=(parent_data.get('args') or {}).get('generation_eval_temperature',.65) if parent_data else .65
     temperature=payload.get('generation_eval_temperature')
     if temperature is None:temperature=inherited_temperature if mode=='resume' else .65

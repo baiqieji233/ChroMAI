@@ -16,8 +16,8 @@ def ensure_song_response(model,context,output,generator):
     return choice
 
 
-def execution_options(model, context, phrase_output, batch, action, generator, *, temperature=1., beat=None):
-    if getattr(getattr(model,'config',None),'phrase_execution_policy','off')!='persistent_modes_v1':return {}
+def ensure_phrase_mode(model, context, phrase_output, batch, generator, temperature=1.):
+    if getattr(getattr(model,'config',None),'phrase_execution_policy','off') not in ('persistent_modes_v1','component_modes_v2'):return None
     temperature=float(temperature)
     if not math.isfinite(temperature) or temperature<0:raise ValueError('invalid phrase mode temperature')
     # The mode and the symbolic history share the known departure phrase.
@@ -41,7 +41,14 @@ def execution_options(model, context, phrase_output, batch, action, generator, *
                   int(torch.multinomial((scores.float()/temperature).softmax(-1),1,generator=generator)))
         if not 0<=int(mode)<int(model.config.phrase_modes):raise ValueError('Invalid committed phrase mode')
         state['pending'][start]=int(mode)
-    mode=state['pending'][start]
+    return state['pending'][start]
+
+
+def execution_options(model, context, phrase_output, batch, action, generator, *, temperature=1., beat=None):
+    mode=ensure_phrase_mode(model,context,phrase_output,batch,generator,temperature)
+    if mode is None:return {}
+    start=float(batch['phrase_start_beat'][0,-1])
+    state=context._execution_runtime
     if beat is None:beat=float(batch.get('candidate_step_beat',batch.get('target_beat',batch['step_beat']))[0,-1])
     state['at_beat'][float(beat)]=(mode,start)
     return model.execution_proposal(action,phrase_output,batch,mode)
@@ -61,6 +68,7 @@ def execution_report(steps):
         mode=getattr(step,'phrase_mode',None)
         start=getattr(step,'phrase_mode_start',None)
         if mode is not None and start is not None:
-            choices.setdefault(start,int(mode));notes[int(mode)]+=1
+            choices.setdefault(start,int(mode))
+            if getattr(step,'kind',2)==2:notes[int(mode)]+=1
     return dict(phrase_choices=len(choices),mode_phrase_counts=dict(Counter(choices.values())),
                 mode_note_counts=dict(notes),choices=[dict(start_beat=start,mode=mode) for start,mode in sorted(choices.items())])

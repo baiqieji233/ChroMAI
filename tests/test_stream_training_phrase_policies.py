@@ -10,11 +10,12 @@ from maichart.composer.stream_evaluation_settings import validate
 
 def test_fresh_training_defaults_and_new_learning_contract():
     args = parser().parse_args(['--manifest', 'data.json', '--checkpoint-dir', 'fresh'])
-    assert (args.epochs, args.lr, args.lr_schedule, args.warmup_steps) == (50, .0005, 'constant', 0)
+    assert (args.epochs, args.lr, args.lr_schedule, args.warmup_steps) == (50, .0002, 'constant', 0)
+    assert (args.batch_size,args.grad_accumulation,args.audio_cache_gb)==(16,4,1.)
     policies = resolve_learning_policies(args)
     assert policies['training_window_policy'] == 'phrase_complete_v1'
-    assert policies['phrase_execution_policy'] == 'persistent_modes_v1'
-    assert policies['detail_representation_policy'] == 'shared_components_v1'
+    assert policies['phrase_execution_policy'] == 'component_modes_v2'
+    assert policies['detail_representation_policy'] == 'typed_components_v2'
     assert policies['duration_feature_policy'] == 'log_time_v2'
     assert policies['max_phrase_events'] == 64
 
@@ -55,8 +56,8 @@ def test_phrase_mode_eval_temperature_includes_greedy():
 
 def test_song_style_fresh_defaults_and_legacy_resume_contract():
     fresh = resolve_learning_policies(SimpleNamespace())
-    assert fresh['song_profile_policy'] == 'masked_ordered_joint_v2'
-    assert fresh['song_response_policy'] == 'music_response_v1'
+    assert fresh['song_profile_policy'] == 'masked_deployment_joint_v3'
+    assert fresh['song_response_policy'] == 'unified_profile_response_v2'
     assert (fresh['song_profile_components'], fresh['song_profile_weight']) == (4, .1)
     assert (fresh['song_response_modes'], fresh['song_response_group_size']) == (4, 4)
     parent = SimpleNamespace(**{k: v for k, v in LEGACY_LEARNING_POLICIES.items()
@@ -67,3 +68,16 @@ def test_song_style_fresh_defaults_and_legacy_resume_contract():
         resolve_learning_policies(SimpleNamespace(song_profile_policy='masked_joint_v1'), parent, resume=True)
     with pytest.raises(ValueError, match='music_response_v1 requires'):
         resolve_learning_policies(SimpleNamespace(song_response_policy='music_response_v1', phrase_execution_policy='off'))
+
+
+def test_cli_marks_explicit_resume_batch_options():
+    base=['--manifest','data.json','--checkpoint-dir','out','--resume','old.pt']
+    omitted=parser().parse_args(base)
+    assert omitted._explicit_batch_controls==()
+    from maichart.composer.stream_train import _inherit_resume_batch_defaults
+    _inherit_resume_batch_defaults(omitted,{'args':{'batch_size':32,'grad_accumulation':2,'lr':.0001,'audio_cache_gb':3.}})
+    assert (omitted.batch_size,omitted.grad_accumulation,omitted.lr,omitted.audio_cache_gb)==(32,2,.0001,3.)
+    explicit=parser().parse_args(base+['--batch-size=16','--grad-accumulation','4'])
+    assert explicit._explicit_batch_controls==('batch_size','grad_accumulation')
+    _inherit_resume_batch_defaults(explicit,{'args':{'batch_size':32,'grad_accumulation':2}})
+    assert (explicit.batch_size,explicit.grad_accumulation)==(16,4)

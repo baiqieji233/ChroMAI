@@ -272,26 +272,33 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
     else:
         raw = context.current_batch()
     cached_audio_keys = {'song_audio','song_mask','song_seconds','song_beats'} if audio_cache is not None else set()
-    batch = {k:v.to(device) for k,v in raw.items() if torch.is_tensor(v) and k not in cached_audio_keys}
+    from .stream_model import to_device_batch
+    batch = to_device_batch({k:v for k,v in raw.items() if k not in cached_audio_keys},device)
     cache = audio_cache if audio_cache is not None else model.encode_audio(
         batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     result = model(batch,audio_cache=cache)
-    from .stream_phrase_runtime import ensure_song_response
+    from .stream_phrase_runtime import ensure_song_response,ensure_phrase_mode
     ensure_song_response(model,context,result,generator)
-    kind_scores = kind_logits_for_audio(result['kind_logits'][0,-1],cursor,audio_end)
+    selected_mode=None
+    if getattr(model.config,'phrase_execution_policy','off')=='component_modes_v2':
+        selected_mode=ensure_phrase_mode(model,context,result,batch,generator,temperature=temperature)
+    kind_values=result['execution_kind_logits'][0,-1,selected_mode] if selected_mode is not None else result['kind_logits'][0,-1]
+    kind_scores = kind_logits_for_audio(kind_values,cursor,audio_end)
     kind = sample_logits(kind_scores,temperature,generator)
     if kind is None: return None, 'no_legal_kind'
     if kind == EOS: return None, 'sampled_eos'
     def wait(reason):
         if audio_end-cursor <= 2: return None, reason+'_tail'
         end = cursor+2
+        meta=dict(phrase_mode=selected_mode,phrase_mode_start=float(batch['phrase_start_beat'][0,-1])) if selected_mode is not None else {}
         return StreamStep(WAIT,cursor,end,max(0.,second_at_beat(context.clock,cursor)),
-                          second_at_beat(context.clock,end)), reason
+                          second_at_beat(context.clock,end),**meta), reason
     if kind == WAIT: return wait('ok')
     absolute=getattr(getattr(model,'config',None),'timing_output_policy','relative_delta_v1')=='absolute_grid_v1'
     deltas=(current_timing_deltas(model,result,cursor) if absolute
             else (Fraction(0),*dataset.delta_vocab.values))
-    scores = note_delta_logits_for_audio(result['delta_logits'][0,-1],deltas,cursor,audio_end,
+    delta_values=result['execution_delta_logits'][0,-1,selected_mode] if selected_mode is not None else result['delta_logits'][0,-1]
+    scores = note_delta_logits_for_audio(delta_values,deltas,cursor,audio_end,
         context.clock,float(song.audio.duration_sec),first_step=not prefix)
     if not bool(torch.isfinite(scores).any()): return wait('no_legal_time')
     def action_at(delta_id,beat):

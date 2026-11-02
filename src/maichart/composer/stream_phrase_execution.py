@@ -183,3 +183,70 @@ def song_response_configuration_loss(mode_nll,prior_logits,batch,weights,normali
         song_response_sampled_phrases=active.sum().float(),
         song_response_posterior_entropy=(-(posterior.exp()*posterior).sum(-1)).masked_fill(~group_active,0).sum()/group_active.sum().clamp_min(1))
     return ordinary+adjustment,metrics
+
+
+def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,normalizer,*,
+        prior_logits,component_profile_nll,profile_chart_weights,profile_weight=1.):
+    """Shared z with exact-evidence E step and chart-budgeted prior calibration.
+
+    Complete phrases retain a persistent local mode. Other trusted targets
+    retain event-local modes, conditional on the same chart z. Numerical
+    profile evidence is charged once per chart with its explicit budget.
+    No target profile participates in the externally supplied causal prior.
+    """
+    if normalizer<=0:raise ValueError('Unified loss needs a positive target budget')
+    chart_inverse=batch['unified_chart_inverse'].long()
+    count=prior_logits.size(0)
+    if component_profile_nll.shape!=prior_logits.shape:raise ValueError('Unified profile component shape mismatch')
+    if song_phrase_logits.size(-2)!=prior_logits.size(-1):raise ValueError('Unified latent component mismatch')
+    conditional=song_phrase_logits.float().log_softmax(-1)
+    local=-torch.logsumexp(conditional-mode_nll.float()[:,:,None,:],-1)
+    chart_nll=local.new_zeros(count,local.size(-1)).index_add(0,chart_inverse,(local*weights[...,None]).sum(1))
+    zero=chart_nll.sum()*0.
+    complete_groups=zero
+    groups=batch.get('training_phrase_group')
+    complete=batch.get('training_phrase_complete')
+    group_weights=batch.get('training_phrase_group_weight')
+    if groups is not None and complete is not None and group_weights is not None and group_weights.numel():
+        group_count=group_weights.numel();index=groups.clamp_min(0).flatten()
+        valid=complete.bool()&groups.ge(0)&weights.gt(0)
+        first=valid&batch['training_phrase_position'].eq(0)
+        first_count=weights.new_zeros(group_count).index_add(0,index,first.flatten().to(weights))
+        active=first_count.eq(1)
+        mass=(weights*valid).flatten()
+        summed=mode_nll.new_zeros(group_count,mode_nll.size(-1)).index_add(0,index,mode_nll.flatten(0,1)*mass[:,None])
+        pp=conditional.new_zeros(group_count,*conditional.shape[-2:]).index_add(0,index,conditional.flatten(0,1)*first.flatten()[:,None,None])
+        phrase_nll=-torch.logsumexp(pp-summed[:,None,:],-1)
+        old=local.new_zeros(group_count,local.size(-1)).index_add(0,index,local.flatten(0,1)*mass[:,None])
+        chart_rows=chart_inverse[:,None].expand_as(groups)
+        group_chart=torch.zeros(group_count,device=index.device,dtype=torch.long).index_add(0,index,(chart_rows*first).flatten())
+        adjustment=(phrase_nll-old).masked_fill(~active[:,None],0.)
+        chart_nll=chart_nll.index_add(0,group_chart,adjustment)
+        complete_groups=active.sum().float()
+    profile_mass=profile_chart_weights.to(chart_nll)*float(profile_weight)*float(normalizer)
+    profile_nll=component_profile_nll.float()
+    prior=prior_logits.float().log_softmax(-1)
+    energy=chart_nll+profile_mass[:,None]*profile_nll
+    joint=prior-energy
+    # The E step uses complete, unaveraged phrase/chart evidence. The M step
+    # keeps its posterior fixed: data gradients match exact marginalization,
+    # while prior calibration has an explicit per-chart rather than 1/D mass.
+    # This generalized-EM objective counts the prior only in the following KL.
+    posterior=joint.log_softmax(-1).detach()
+    responsibility=posterior.exp()
+    data_term=(responsibility*energy).sum()/normalizer
+    chart_mass=profile_chart_weights.to(prior)
+    prior_ce=(-(responsibility*prior).sum(-1)*chart_mass).sum()
+    prior_kl=((responsibility*(posterior-prior)).sum(-1)*chart_mass).sum()
+    loss=data_term+prior_kl
+    metrics=dict(unified_complete_phrase_groups=complete_groups,
+        unified_chart_count=chart_nll.new_tensor(float(count)),
+        unified_exact_joint_nll=(-joint.logsumexp(-1).sum()/normalizer).detach(),
+        unified_data_term=data_term,
+        unified_prior_kl=prior_kl,unified_prior_ce=prior_ce,
+        unified_prior_weight_mass=chart_mass.sum(),
+        unified_prior_entropy=(-(prior.exp()*prior).sum(-1)*chart_mass).sum()/chart_mass.sum().clamp_min(1e-8),
+        unified_posterior_entropy=(-(responsibility*posterior).sum(-1)).mean(),
+        unified_profile_nll=(responsibility*profile_nll).sum(-1).mul(chart_mass).sum(),
+        unified_configuration_nll=(responsibility*chart_nll).sum()/normalizer)
+    return loss,metrics

@@ -187,7 +187,7 @@ def test_interrupted_cpu_training_resumes_exact_optimizer_rng_and_cursor(tmp_pat
     left=stream_checkpoint.read(complete/'composer_last.pt')
     right=stream_checkpoint.read(interrupted/'composer_last.pt')
     assert left['optimizer_steps']==right['optimizer_steps']
-    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='aligned_phrase_v3'
+    assert left['model_config']['phrase_context_policy']==right['model_config']['phrase_context_policy']=='shared_ordered_v4'
     assert left['model_config']['duration_audio_policy']==right['model_config']['duration_audio_policy']=='interval_v1'
     assert left['training_state']['batch_in_epoch']==right['training_state']['batch_in_epoch']
     assert torch.equal(left['training_state']['torch_rng'],right['training_state']['torch_rng'])
@@ -209,7 +209,7 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     parent=StreamComposerConfig.from_dict({})
     args=SimpleNamespace()
     fresh=stream_train.resolve_learning_policies(args,parent)
-    assert fresh['phrase_context_policy']=='aligned_phrase_v3'
+    assert fresh['phrase_context_policy']=='shared_ordered_v4'
     assert fresh['history_window_policy']=='block_aligned_v2'
     assert fresh['transition_exit_weight']==0
     assert fresh['lane_load_policy']=='direct_buttons_v1'
@@ -238,7 +238,7 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
     from maichart.composer.event_set_codec import EventSetCodec
     config=StreamComposerConfig.from_dict(dict(d_model=16,nhead=4,layers=1,dim_feedforward=32,motion_continuation_policy="motion_continuation_v1"))
     parent=StreamComposer(config,EventSetCodec.fit(['1','2']))
-    policies=stream_train.resolve_learning_policies(SimpleNamespace(),config)
+    policies=stream_train.resolve_learning_policies(SimpleNamespace(training_window_policy='block_v1',phrase_execution_policy='off',detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='masked_ordered_joint_v2',song_response_policy='off',phrase_context_policy='aligned_phrase_v3'),config)
     upgraded=stream_train.upgrade_learning_stage(parent,policies)
     for key,value in parent.state_dict().items():assert torch.equal(value,upgraded.state_dict()[key]),key
     additions=set(upgraded.state_dict())-set(parent.state_dict())
@@ -428,7 +428,7 @@ def test_typed_continuation_stage_expands_only_weight_prefix_without_discarding_
         continuation_policy='typed_runs_v1',motion_continuation_policy='motion_distinct_v2'))
     parent=StreamComposer(config,EventSetCodec.fit(['1','2']))
     with torch.no_grad():parent.continuation_projection.weight.copy_(torch.randn_like(parent.continuation_projection.weight))
-    policies=stream_train.resolve_learning_policies(SimpleNamespace(),config)
+    policies=stream_train.resolve_learning_policies(SimpleNamespace(training_window_policy='block_v1',phrase_execution_policy='off',detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='masked_ordered_joint_v2',song_response_policy='off',phrase_context_policy='aligned_phrase_v3'),config)
     upgraded=stream_train.upgrade_learning_stage(parent,policies)
     assert upgraded.continuation_projection.weight.shape==(16,16)
     assert torch.equal(upgraded.continuation_projection.weight[:,:8],parent.continuation_projection.weight)

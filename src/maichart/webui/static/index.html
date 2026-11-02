@@ -308,23 +308,23 @@
 <label class="field">训练窗口<select id="composerTrainingWindowPolicy"><option value="auto">自动</option><option value="block_v1">固定窗口</option><option value="phrase_complete_v1">完整短句</option></select></label>
 <label class="field">短句最多事件数<input id="composerMaxPhraseEvents" type="number" min="1" value="64"></label>
 <label class="field">短句接缝事件数<input id="composerPhraseSeamEvents" type="number" min="0" value="2"></label>
-<label class="field">整句写法<select id="composerPhraseExecutionPolicy"><option value="auto">自动</option><option value="off">关闭</option><option value="persistent_modes_v1">持续短句模式</option></select></label>
-<label class="field">短句写法数量<select id="composerPhraseModes"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label>
+<label class="field">整句写法<select id="composerPhraseExecutionPolicy"><option value="auto">自动</option><option value="off">关闭</option><option value="component_modes_v2">节奏与动作构件共同决定写法（新版）</option><option value="persistent_modes_v1">持续短句模式（旧版）</option></select></label>
+<label class="field">短句写法数量<select id="composerPhraseModes"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select><small>语境相关的写法分支，并非固定模板。</small></label>
 <label class="field">短句关系学习权重<input id="composerPhraseRelationWeight" type="number" min="0" step="0.05" value="0.1"></label>
 </div></div></details>
 <details id="composerSongStyleAdvanced" class="settings-section span-4" data-event-set-only hidden><summary><span>整曲风格训练</span><small>新训练自动启用；续训继承检查点</small></summary><div class="settings-content"><div class="form-grid">
-<label class="field">整曲风格学习<select id="composerSongProfilePolicy"><option value="auto">自动</option><option value="masked_ordered_joint_v2">按连续数值学习（推荐）</option><option value="masked_joint_v1">旧版分类学习</option><option value="off">关闭</option></select></label>
-<label class="field">音乐响应学习<select id="composerSongResponsePolicy"><option value="auto">自动</option><option value="music_response_v1">启用</option><option value="off">关闭</option></select><small>需要新版持续短句模式。</small></label>
-<label class="field">风格分量数<input id="composerSongProfileComponents" type="number" min="1" max="16" value="4"></label>
+<label class="field">整曲风格学习<select id="composerSongProfilePolicy"><option value="auto">自动</option><option value="masked_deployment_joint_v3">按实际生成条件学习（推荐）</option><option value="masked_ordered_joint_v2">按连续数值学习（旧版）</option><option value="masked_joint_v1">旧版分类学习</option><option value="off">关闭</option></select></label>
+<label class="field">音乐响应学习<select id="composerSongResponsePolicy"><option value="auto">自动</option><option value="unified_profile_response_v2">整曲风格与音乐响应共同选择（新版）</option><option value="music_response_v1">音乐响应（旧版）</option><option value="off">关闭</option></select><small>新版统一选择需要按实际生成条件学习整曲风格。</small></label>
+<label class="field">整曲写法数量<input id="composerSongProfileComponents" type="number" min="1" max="16" value="4"><small>随音乐和条件选择的分支，不是固定模板；统一策略共用这一数量。</small></label>
 <label class="field">风格学习权重<input id="composerSongProfileWeight" type="number" min="0" step="0.01" value="0.1"></label>
-<label class="field">响应模式数<input id="composerSongResponseModes" type="number" min="1" max="8" value="4"></label>
+<label class="field">旧版响应模式数<input id="composerSongResponseModes" type="number" min="1" max="8" value="4"></label>
 <label class="field">响应分组大小<input id="composerSongResponseGroupSize" type="number" min="2" max="4" value="4"></label>
 </div></div></details>
 <details id="composerDetailAdvanced" class="settings-section span-4" data-event-set-only hidden><summary><span>细节学习</span><small>普通使用保持自动</small></summary><div class="settings-content"><div class="form-grid">
-<label class="field">细节表示<select id="composerDetailRepresentationPolicy"><option value="auto">自动</option><option value="private_v1">独立细节</option><option value="shared_components_v1">共享组件</option></select></label>
+<label class="field">细节表示<select id="composerDetailRepresentationPolicy"><option value="auto">自动</option><option value="private_v1">独立细节</option><option value="typed_components_v2">按动作类型共享构件（新版）</option><option value="shared_components_v1">共享组件（旧版）</option></select></label>
 <label class="field">时长特征<select id="composerDurationFeaturePolicy"><option value="auto">自动</option><option value="legacy_v1">旧版</option><option value="log_time_v2">对数时间</option></select></label>
 </div></div></details>
-<label class="field" data-event-set-only hidden>短句组织与呼应<select id="composerPhraseContextPolicy"><option value="auto">自动（新阶段启用拍位对齐短句，续训继承）</option><option value="aligned_phrase_v3">拍位对齐的有序短句（新版）</option><option value="ordered_phrase_v2">有序配置短句（旧版）</option><option value="causal_phrase_v1">因果短句统计（旧版）</option><option value="off">关闭（对照）</option></select><small>新版按落点拍位读取短句意图；旧模型需在新目录微调或从头训练。</small></label>
+<label class="field" data-event-set-only hidden>短句组织与呼应<select id="composerPhraseContextPolicy"><option value="auto">自动（新阶段启用共享短句，续训继承）</option><option value="shared_ordered_v4">统一短句编码与双时刻读取（新版）</option><option value="aligned_phrase_v3">拍位对齐的有序短句（旧版）</option><option value="ordered_phrase_v2">有序配置短句（旧版）</option><option value="causal_phrase_v1">因果短句统计（旧版）</option><option value="off">关闭（对照）</option></select><small>新版按落点拍位读取短句意图；旧模型需在新目录微调或从头训练。</small></label>
 <label class="field" data-event-set-only hidden>持续动作区间音频<select id="composerDurationAudioPolicy"><option value="auto">自动（新阶段启用，续训继承）</option><option value="off">关闭（对照）</option><option value="interval_v1">持续区间音频</option></select><small>为支持的Hold与Slide时长细节读取其实际覆盖音乐区间。</small></label>
 <details data-event-set-only hidden><summary>短句训练高级设置</summary><label class="field">短句辅助损失权重<input id="composerPhraseLossWeight" type="number" min="0" step="0.01" value="0.05"><small>默认0.05；续训继承原值，0关闭辅助损失。</small></label></details>
 <label class="field" data-event-set-only hidden>连续生成训练修复<select id="composerLearningPolicy"><option value="auto">自动（新阶段启用新版修复，续训继承）</option><option value="legacy">旧策略基线</option><option value="checkpoint" disabled>继承检查点策略</option></select><small>新训练由共同的音乐、历史和持续状态学习续写；恢复训练分别处理时间与配置，只用可信对应的配置作为监督。旧检查点请用微调及新目录迁移；续训沿用原策略。</small></label>
@@ -391,6 +391,7 @@
 <label class="field">准备线程<input id="composerPrepareWorkers" type="number" min="0" step="1" value="4"></label>
 <label class="field">样本准备线程<input id="composerSampleWorkers" type="number" min="1" max="8" value="1"><small>默认1，减少与GPU任务提交争用CPU；可按实际样本/秒对照2或4。</small></label>
 <label class="field" title="默认2；0在CUDA训练时最多使用2线程，CPU训练保留环境设置。">CPU 算子线程<input id="composerCpuThreads" type="number" min="0" max="256" step="1" value="2"><small>默认2。0自动：CUDA训练最多2线程；CPU训练保留环境设置。与样本准备线程分别设置。</small></label>
+<label class="field" data-event-set-only hidden>训练样本排序<select id="composerBatchOrderPolicy"><option value="auto">自动（新阶段跨歌曲混排；续训继承）</option><option value="interleaved_microbatches_v2">跨歌曲混排</option><option value="song_local_v1">同歌曲相邻（旧版）</option></select><small>改变样本顺序需要新阶段或从头训练；续训沿用检查点。</small></label>
 <label class="field" data-event-set-only hidden>数据准备进程<select id="composerDataWorkers"><option value="0">0（共享线程）</option><option value="1">1（独立进程）</option></select><small>独立进程可减少线程争用，但会复制语料对象。32GB 主内存进行大语料训练建议保持 0；音频缓存上限不等于训练总内存。</small></label>
 <label class="field">后台预取 batch 数<input id="composerPrefetchBatches" type="number" min="0" max="16" value="2"><small>默认 2。共享线程模式下 0 关闭预取；独立进程模式下 0 使用 2 批缓冲，最多 4 批。</small></label>
 <label class="field">训练样本组织<select id="composerSampleSequencePolicy"><option value="auto" selected>自动（新版新训练按短句；续训继承）</option><option value="phrase_groups_v1">连续短句分组</option><option value="independent_events_v1">独立事件（旧版）</option></select><small>短句内按时间排列，最多 8 个目标、跨度 16 拍；打乱短句顺序。每个目标仍只读取自身已发生的历史；不共享双向历史编码。改变组织方式请用 finetune 和新目录。</small></label>

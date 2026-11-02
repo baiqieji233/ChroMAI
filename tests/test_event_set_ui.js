@@ -21,16 +21,16 @@ test('event-set actual UI helpers apply defaults and hide unsupported fields',()
   const {context:c,element:e}=harness();
   e('#composerArchitectureProfile').value='event_set_stream_v1';
   c.applyEventSetFreshDefaults();c.updateEventSetControls();
-  assert.equal(e('#batchSize').value,'16');assert.equal(e('#gradAccumulation').value,'1');
+  assert.equal(e('#batchSize').value,'16');assert.equal(e('#gradAccumulation').value,'4');
   assert.equal(e('#composerDModel').value,'256');assert.equal(e('#composerPrecision').value,'bf16');
   assert.equal(e('#composerCandidateCount').field.hidden,true);assert.equal(e('#composerCandidateCount').disabled,true);
   const payload=c.chartComposerTrainingPayload();assert.equal(payload.batch_size,16);assert.equal(payload.rollout_steps,16);
   assert.equal(payload.audio_grid_seconds,.01);assert.equal(e('#composerAudioGridSeconds').value,'0.01');
   assert.equal(payload.plan_weight,.1);assert.equal(e('#composerPlanWeight').value,'0.1');
   assert.equal(payload.validation_batch_size,4);assert.equal(payload.validation_max_batches,32);
-  assert.equal(payload.warmup_steps,0);assert.equal(payload.prefetch_batches,2);assert.equal(payload.audio_cache_gb,2);
+  assert.equal(payload.warmup_steps,0);assert.equal(payload.prefetch_batches,2);assert.equal(payload.audio_cache_gb,1);
   assert.equal(payload.lr_schedule,'constant');assert.equal(payload.plan_blank_window_seconds,.5);
-  assert.equal(payload.epochs,50);assert.equal(payload.lr,.0005);assert.equal(payload.training_window_policy,'auto');
+  assert.equal(payload.epochs,50);assert.equal(payload.lr,.0002);assert.equal(payload.training_window_policy,'auto');
   assert.equal(payload.max_phrase_events,64);assert.equal(payload.phrase_seam_events,2);assert.equal(payload.phrase_execution_policy,'auto');
   assert.equal(payload.phrase_modes,4);assert.equal(payload.phrase_relation_weight,.1);assert.equal(payload.detail_representation_policy,'auto');assert.equal(payload.duration_feature_policy,'auto');
   assert.equal(e('#composerSampleWorkers').disabled,true);
@@ -425,4 +425,27 @@ test('detail compute is editable during resume and passed to trainer',()=>{
   assert.equal(c.chartComposerTrainingPayload().detail_compute,'serial');
   e('#composerDetailCompute').value='packed';c.currentTrainingMode=()=> 'resume';c.updateEventSetControls();
   assert.equal(e('#composerDetailCompute').disabled,false);assert.equal(c.chartComposerTrainingPayload().detail_compute,'packed');
+});
+
+
+test('new composition policies are selectable and old batch order survives resume',()=>{
+  const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
+  for(const policy of ['masked_deployment_joint_v3','unified_profile_response_v2','shared_ordered_v4','component_modes_v2','typed_components_v2','interleaved_microbatches_v2','song_local_v1'])assert.ok(html.includes(`value="${policy}"`),policy);
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  assert.equal(c.chartComposerTrainingPayload().batch_order_policy,'auto');
+  c.currentTrainingMode=()=> 'resume';c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{}},'resume');
+  assert.equal(e('#composerBatchOrderPolicy').value,'song_local_v1');assert.equal(e('#composerBatchOrderPolicy').disabled,true);
+  assert.equal(c.chartComposerTrainingPayload().batch_order_policy,'song_local_v1');
+});
+
+
+test('unified whole-song choice binds one count and preserves legacy resume controls',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  e('#composerSongProfileComponents').value='6';e('#composerSongResponseModes').value='3';c.updateEventSetControls();
+  assert.equal(e('#composerSongResponseModes').field.hidden,true);assert.equal(e('#composerSongResponseModes').disabled,true);
+  assert.equal(c.chartComposerTrainingPayload().song_response_modes,6);
+  e('#composerSongResponsePolicy').value='music_response_v1';c.updateEventSetControls();
+  assert.equal(e('#composerSongResponseModes').field.hidden,false);assert.equal(c.chartComposerTrainingPayload().song_response_modes,3);
+  c.currentTrainingMode=()=> 'resume';c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{song_response_policy:'music_response_v1',song_response_modes:3,song_profile_components:6},args:{}},'resume');
+  assert.equal(e('#composerSongResponseModes').field.hidden,false);assert.equal(e('#composerSongResponseModes').value,'3');
 });

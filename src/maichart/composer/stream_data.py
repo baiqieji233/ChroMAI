@@ -295,7 +295,7 @@ class StreamDataset(Dataset):
         self.max_phrase_events=int(max_phrase_events)
         self.phrase_seam_events=int(phrase_seam_events)
         self.relation_policy=relation_policy
-        if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
+        if phrase_context_policy not in (*PHRASE_POLICIES,'shared_ordered_v4'):raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
         if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
             raise ValueError('invalid candidate_state_policy')
@@ -604,7 +604,7 @@ class StreamDataset(Dataset):
             if song in self._phrases:
                 self._phrases.move_to_end(song)
                 return self._phrases[song]
-            ordered = self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3')
+            ordered = self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4')
             index = PhraseIndex(self._bank(song), self._end_beats[song], self.streams[song],
                                 sequence_codec=self.codec if ordered else None,encoded=self.encoded[song] if ordered else None)
             index.supervision_valid = np.ones(len(index.boundaries)-1,dtype=np.bool_)
@@ -629,9 +629,9 @@ class StreamDataset(Dataset):
         if self.phrase_context_policy != 'off':
             index = self._phrase_index(song).edited(modified, begin, end)
             row.update(index.rows(modified, first, end))
-            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
+            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4'):
                 row.update(index.sequence_rows(np.arange(first,end),row['step_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
-            if self.phrase_context_policy=='aligned_phrase_v3':
+            if self.phrase_context_policy in ('aligned_phrase_v3','shared_ordered_v4'):
                 row.update(prepare_candidate_phrase_inputs(index,np.arange(first,end),row['target_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
                 row['candidate_step_beat'] = row['target_beat'].clone()
         return row
@@ -924,10 +924,10 @@ class StreamDataset(Dataset):
             row['target_phrase_mask'] &= trusted
             counts = torch.from_numpy(np.maximum(1,phrase_index.supervision_counts[segments]).astype(np.float32))
             row['target_phrase_weight'] *= row['sample_weight']/counts
-            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
+            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4'):
                 row.update(phrase_index.sequence_rows(row['step_index'].numpy(),row['step_beat'].numpy(),
                                                       target_mask=row['target_phrase_mask'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
-            if self.phrase_context_policy=='aligned_phrase_v3':
+            if self.phrase_context_policy in ('aligned_phrase_v3','shared_ordered_v4'):
                 # Candidate clock is kept in a separate namespace. The main
                 # timing path continues to consume the departure segment only.
                 row.update(prepare_candidate_phrase_inputs(phrase_index,row['step_index'].numpy(),
@@ -969,12 +969,27 @@ def collate_stream(items):
     profile_rows=output.get('profile_chart_rows')
     if profile_rows is None:
         output['profile_chart_weights']=torch.tensor([float(item.get('_profile_chart_importance',1.))/profile_denominator for item in items],dtype=torch.float32)
+        output['unified_chart_inverse']=torch.arange(len(items),dtype=torch.long)
+        output['unified_chart_rows']=torch.arange(len(items),dtype=torch.long)
+        output['unified_profile_chart_weights']=output['profile_chart_weights']
     else:
         masses={}
         chart_ids=output['training_chart_id'].tolist()
         for chart,item in zip(chart_ids,items):
             masses[chart]=masses.get(chart,0.)+float(item.get('_profile_chart_importance',1.))/profile_denominator
         output['profile_chart_weights']=torch.tensor([masses[chart_ids[index]] for index in profile_rows.tolist()],dtype=torch.float32)
+        unique_charts={chart_ids[index]:i for i,index in enumerate(profile_rows.tolist())}
+        unified_rows=profile_rows.tolist();unified_weights=output['profile_chart_weights'].tolist();inverse=[]
+        for index,chart in enumerate(chart_ids):
+            if chart>=0:
+                inverse.append(unique_charts[chart])
+            else:
+                # Recovery/anonymous rows must not masquerade as one chart.
+                inverse.append(len(unified_rows));unified_rows.append(index)
+                unified_weights.append(float(items[index].get('_profile_chart_importance',1.))/profile_denominator)
+        output['unified_chart_inverse']=torch.tensor(inverse,dtype=torch.long)
+        output['unified_chart_rows']=torch.tensor(unified_rows,dtype=torch.long)
+        output['unified_profile_chart_weights']=torch.tensor(unified_weights,dtype=torch.float32)
     collate_future_relations(items,output)
     if any('phrase_progress' in item for item in items):
         if not all('phrase_progress' in item for item in items):
@@ -1086,7 +1101,7 @@ class StreamInferenceContext:
         if int(max_phrase_events)<1:raise ValueError('max_phrase_events must be positive')
         self.training_window_policy=training_window_policy
         self.max_phrase_events=int(max_phrase_events)
-        if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
+        if phrase_context_policy not in (*PHRASE_POLICIES,'shared_ordered_v4'):raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
         if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
             raise ValueError('invalid candidate_state_policy')
@@ -1117,7 +1132,7 @@ class StreamInferenceContext:
             self._training_block_index=CausalPhraseBlockIndex(self._training_boundaries,self.rollout_steps,self.max_phrase_events)
             self._training_block_index.advance(0,0.)
         self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec),
-                                   sequence_codec=self.codec if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else None)
+                                   sequence_codec=self.codec if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4') else None)
                         if self.phrase_context_policy != 'off' else None)
         self._committed = []
         self._incremental_state = IncrementalState(self.song.tempo,self.song.first)
@@ -1229,7 +1244,7 @@ class StreamInferenceContext:
             first_query = len(self._committed)-length+1
             phrase_rows = self._phrase.rows_at(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
             result.update({key:value.unsqueeze(0) for key,value in phrase_rows.items()})
-            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3'):
+            if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4'):
                 sequences = self._phrase.sequence_rows(np.arange(first_query,first_query+length),result['step_beat'][0].numpy())
                 for key in ('phrase_sequence_inverse','target_phrase_sequence_inverse'):sequences[key] = sequences[key].unsqueeze(0)
                 result.update(sequences)
@@ -1256,7 +1271,7 @@ class StreamInferenceContext:
                     visible_before_beat=cutoff,visibility_version='causal_v2',include_metadata=False)
             result['candidate_action_state'] = state.unsqueeze(0).unsqueeze(0)
             result['candidate_action_state_mask'] = mask.unsqueeze(0).unsqueeze(0)
-        if self.phrase_context_policy!='aligned_phrase_v3' or self._phrase is None:
+        if self.phrase_context_policy not in ('aligned_phrase_v3','shared_ordered_v4') or self._phrase is None:
             return result
         query = np.asarray([len(self._committed)],dtype=np.int64)
         candidate = np.asarray([float(beat)],dtype=np.float64)
@@ -1293,7 +1308,7 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     batch = context.batch(prefix,cursor)
     row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in PHRASE_ROW_FIELDS or key in
            ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features')}
-    if getattr(dataset,'phrase_context_policy','off') in ('ordered_phrase_v2','aligned_phrase_v3'):
+    if getattr(dataset,'phrase_context_policy','off') in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4'):
         for key,value in batch.items():
             if key.startswith(('phrase_sequence_','target_phrase_sequence_','_phrase_sequence_','_target_phrase_sequence_')):
                 row[key] = value[0] if key in ('phrase_sequence_inverse','target_phrase_sequence_inverse') else value
@@ -1315,7 +1330,7 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     row['target_second'][-1] = target.end_second
     row['target_beat'] = row['step_beat'].clone()
     row['target_beat'][-1] = float(target.end)
-    if getattr(dataset,'phrase_context_policy','off')=='aligned_phrase_v3':
+    if getattr(dataset,'phrase_context_policy','off') in ('aligned_phrase_v3','shared_ordered_v4'):
         result = prepare_candidate_phrase_inputs(context._phrase,row['step_index'].numpy(),
             row['target_beat'].numpy())
         row.update(result)
