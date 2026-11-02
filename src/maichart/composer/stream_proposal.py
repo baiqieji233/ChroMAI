@@ -61,7 +61,7 @@ def sample_timed_event(model, timing_logits, deltas, cursor, action_context,
         action=action_context(delta_id,beat)
         context=action['context'] if isinstance(action,dict) else action
         load=action.get('button_load') if isinstance(action,dict) else None
-        family_options=({key:action[key] for key in ('family_context','family_logits','motion_keep_logit','motion_reference_shape','template_keep_logit','template_reference_shape','duration_context') if key in action} if isinstance(action,dict) else {})
+        family_options=({key:action[key] for key in ('family_context','family_logits','motion_keep_logit','motion_reference_shape','template_keep_logit','template_reference_shape','duration_context','execution_route_log_probs','execution_lane_bias') if key in action} if isinstance(action,dict) else {})
         point,failed=sample_guarded_event(model,context,
             reference_phase,beat,guard,generator,temperature=action_temperature,
             attempts=action_attempts,accepts_extra=accepts_extra,

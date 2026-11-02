@@ -16,6 +16,10 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
+    'training_window_policy': ('phrase_complete_v1','block_v1'),
+    'phrase_execution_policy': ('persistent_modes_v1','off'),
+    'detail_representation_policy': ('shared_components_v1','private_v1'),
+    'duration_feature_policy': ('log_time_v2','legacy_v1'),
     'phrase_context_policy': ('aligned_phrase_v3','ordered_phrase_v2','causal_phrase_v1','off'),
     'template_policy': ('family_preserving_v1','cross_family_v1'),
     'candidate_state_policy': ('selected_native_v1','cursor_v1'),
@@ -45,15 +49,17 @@ LEGACY_LEARNING_POLICIES = dict(phrase_context_policy='off',template_policy='cro
     history_window_policy='rolling_legacy_v1',continuation_policy='off',
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
     motion_continuation_policy='motion_continuation_v1',lane_load_policy='off',recovery_policy='persistent_v1',
-    recovery_target_policy='authored_next_v1')
+    recovery_target_policy='authored_next_v1',training_window_policy='block_v1',phrase_execution_policy='off',
+    detail_representation_policy='private_v1',duration_feature_policy='legacy_v1')
 
 
 def resolve_learning_policies(requested, parent_config=None, *, resume=False):
     result={}
     for key,choices in LEARNING_POLICIES.items():
         value=getattr(requested,key,'auto')
-        inherited=getattr(parent_config,key) if parent_config is not None else None
-        if value=='auto':value=inherited if resume else choices[0]
+        inherited=getattr(parent_config,key,LEGACY_LEARNING_POLICIES.get(key)) if parent_config is not None else None
+        inherit_auto=resume or (parent_config is not None and key in ('training_window_policy','phrase_execution_policy','detail_representation_policy','duration_feature_policy'))
+        if value=='auto':value=inherited if inherit_auto else choices[0]
         if value not in choices:raise ValueError(f'Unsupported {key}')
         if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
         result[key]=value
@@ -78,6 +84,22 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
     if phrase_weight is None:phrase_weight=saved_phrase_weight if resume else .05
     if not math.isfinite(phrase_weight) or phrase_weight<0:raise ValueError('Phrase loss weight must be finite and nonnegative')
     if resume and phrase_weight!=saved_phrase_weight:raise ValueError('Resume inherits phrase_loss_weight')
+    for key,default in dict(max_phrase_events=64,phrase_seam_events=2,phrase_modes=4,phrase_relation_weight=.1).items():
+        inherited=getattr(parent_config,key,default) if parent_config is not None else default
+        value=getattr(requested,key,None)
+        if value is None:value=inherited
+        if not math.isfinite(float(value)) or value<0:raise ValueError(f'Invalid {key}')
+        if key!='phrase_relation_weight' and (int(value)!=value or (key=='max_phrase_events' and value<1)):
+            raise ValueError(f'Invalid {key}')
+        if key=='phrase_modes' and value not in (2,4,8):raise ValueError('phrase_modes must be 2, 4 or 8')
+        if key=='phrase_seam_events' and value>16:raise ValueError('phrase_seam_events must be between 0 and 16')
+        if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
+        result[key]=value
+    if result['phrase_execution_policy']=='persistent_modes_v1':
+        if result['phrase_context_policy']!='aligned_phrase_v3' or result['event_family_policy']!='shared_continuation_v1':
+            raise ValueError('persistent_modes_v1 requires aligned_phrase_v3 and shared_continuation_v1')
+        if result['training_window_policy']!='phrase_complete_v1':
+            raise ValueError('persistent_modes_v1 requires phrase_complete_v1 training windows')
     return {**result,'transition_exit_weight':weight,'prefix_augmentation_rate':rate,'event_family_audio_weight':audio_weight,
             'phrase_loss_weight':phrase_weight}
 
@@ -97,13 +119,18 @@ def upgrade_learning_stage(model, policies, device='cpu'):
                   'literal_route_head.','literal_family_embedding.','family_audio_projection.',
                   'family_history_projection.','family_audio_norm.','audio_event_family_head.',
                   'family_continuity_head.','family_rhythm_projection.','family_state_phrase.','decoder.norm.',
-                  'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.')
+                  'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.',
+                  'shared_details.','phrase_execution.')
+    if model.config.detail_representation_policy!=upgraded.config.detail_representation_policy:
+        allowed.update(key for key in set(source)|set(target) if key.startswith('detail_embeddings.'))
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
     missing=set(target)-set(source); unexpected=set(source)-set(target)
     # Explicit baseline policies may remove only these optional projection modules.
     if missing-allowed or unexpected-allowed:
         raise ValueError(f'Unsafe stage migration: missing={sorted(missing)}, unexpected={sorted(unexpected)}')
     for key in missing:
+        if key.startswith('detail_embeddings.') and model.config.detail_representation_policy!=upgraded.config.detail_representation_policy:
+            continue
         if key=='decoder.norm.weight':
             if not torch.equal(target[key],torch.ones_like(target[key])):raise ValueError('Decoder final normalization must start at unit gain')
             continue
@@ -131,18 +158,18 @@ def parser():
     for key in ('manifest','checkpoint-dir'):p.add_argument('--'+key,required=True)
     p.add_argument('--cache-dir',default='cache/chart_composer_v1')
     p.add_argument('--validation-manifest');p.add_argument('--resume');p.add_argument('--init-checkpoint')
-    for key,default in dict(epochs=20,batch_size=16,grad_accumulation=1,d_model=256,layers=4,nhead=8,
+    for key,default in dict(epochs=50,batch_size=16,grad_accumulation=1,d_model=256,layers=4,nhead=8,
         dim_feedforward=768,history_events=64,rollout_steps=16,checkpoint_interval_steps=500,
         log_interval=25,max_steps=0,limit_charts=0,prepare_workers=1,cpu_threads=2,
         recovery_interval=25,recovery_samples=2,recovery_steps=2,symbolic_pretrain_epochs=0,
         validation_max_batches=32,validation_batch_size=4,generation_eval_songs=2,
-        generation_eval_interval_epochs=1,seed=0,warmup_steps=100,prefetch_batches=2,sample_workers=1).items():
+        generation_eval_interval_epochs=1,seed=0,warmup_steps=0,prefetch_batches=2,sample_workers=1).items():
         p.add_argument('--'+key.replace('_','-'),type=int,default=default)
-    for key,default in dict(lr=2e-4,dropout=.1,window_seconds=8.,recovery_weight=.1,
+    for key,default in dict(lr=.0005,dropout=.1,window_seconds=8.,recovery_weight=.1,
         plan_weight=.1,audio_cache_gb=2.,min_lr_ratio=.1).items():
         p.add_argument('--'+key.replace('_','-'),type=float,default=default)
     for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps','dropout'):p.set_defaults(**{key:None})
-    p.add_argument('--lr-schedule',choices=('constant','cosine'),default='cosine')
+    p.add_argument('--lr-schedule',choices=('constant','cosine'),default='constant')
     p.add_argument('--reset-learning-rate',action='store_true',
                    help='Explicitly replace a resumed LR plan while retaining optimizer/RNG/data progress')
     p.add_argument('--timing-compute',choices=('supervised','dense'),default='supervised',
@@ -159,6 +186,9 @@ def parser():
     p.add_argument('--prefix-augmentation-rate',type=float,default=None)
     p.add_argument('--event-family-audio-weight',type=float,default=None)
     p.add_argument('--phrase-loss-weight',type=float,default=None)
+    for key in ('max_phrase_events','phrase_seam_events','phrase_modes'):
+        p.add_argument('--'+key.replace('_','-'),type=int,default=None)
+    p.add_argument('--phrase-relation-weight',type=float,default=None)
     p.add_argument('--generation-eval-temperature',type=float,default=None)
     from .stream_evaluation_settings import add_arguments
     add_arguments(p)
@@ -180,6 +210,9 @@ def _dataset(args,*,codec=None,delta_vocab=None,validation=False):
         continuation_policy=('pattern_runs_v2' if getattr(args,'continuation_policy','auto')=='auto' else args.continuation_policy),
         phrase_context_policy=getattr(args,'phrase_context_policy','off'),
         candidate_state_policy=getattr(args,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(args,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(args,'max_phrase_events',64),phrase_seam_events=getattr(args,'phrase_seam_events',2),
+        relation_policy='future_sets_v1' if getattr(args,'phrase_execution_policy','off')=='persistent_modes_v1' else 'off',
         limit_charts=args.limit_charts,unknown_policy='mask' if validation else 'error')
     dataset.physical_policy=getattr(args,'physical_policy','legacy_report_v1')
     dataset.recovery_target_policy=getattr(args,'recovery_target_policy','authored_next_v1')
@@ -202,7 +235,21 @@ class _LocalBatches(Sampler):
         for k in order:
             rows=groups[keys[k]]
             perm=torch.randperm(len(rows),generator=g).tolist()
-            indices.extend(rows[i] for i in perm)
+            shuffled=[rows[i] for i in perm]
+            if getattr(self.ds,'training_window_policy','block_v1')=='phrase_complete_v1':
+                # Bounded sortish pools retain song locality and stochastic
+                # batches, while grouping similar causal sequence lengths.
+                # Fixed sample counts keep batch/optimizer cursor contracts.
+                span=max(self.bs,self.bs*16)
+                packed=[]
+                for start in range(0,len(shuffled),span):
+                    pool=shuffled[start:start+span]
+                    pool.sort(key=lambda index:self.ds.samples[index][2]-self.ds.samples[index][1])
+                    chunks=[pool[j:j+self.bs] for j in range(0,len(pool),self.bs)]
+                    chunk_order=torch.randperm(len(chunks),generator=g).tolist()
+                    packed.extend(index for j in chunk_order for index in chunks[j])
+                shuffled=packed
+            indices.extend(shuffled)
         for start in range(self.skip*self.bs,len(indices),self.bs):yield indices[start:start+self.bs]
 
 class _TrainingCollator:
@@ -303,9 +350,19 @@ def _preserve_rng(device):
 
 def _fingerprint(args,ds,*,legacy=False,pre_blank=False):
     h=hashlib.sha256(Path(args.manifest).read_bytes())
+    if getattr(args,'training_window_policy','block_v1')=='phrase_complete_v1':
+        h.update(b'causal_phrase_packed_blocks_v2')
     h.update(json.dumps(ds.codec.to_dict(),sort_keys=True).encode())
     h.update(json.dumps(ds.delta_vocab.to_dict(),sort_keys=True).encode())
     h.update(str((args.history_events,args.rollout_steps,args.window_seconds)).encode())
+    for key,default in dict(training_window_policy='block_v1',phrase_execution_policy='off',
+                            detail_representation_policy='private_v1',duration_feature_policy='legacy_v1').items():
+        value=getattr(args,key,default)
+        if value!=default:h.update((key+':'+value).encode())
+    if getattr(args,'training_window_policy','block_v1')!='block_v1':
+        h.update(json.dumps(('song_sortish_v1',getattr(args,'max_phrase_events',64),getattr(args,'phrase_seam_events',2))).encode())
+    if getattr(args,'phrase_execution_policy','off')!='off':
+        h.update(json.dumps((getattr(args,'phrase_modes',4),getattr(args,'phrase_relation_weight',.1))).encode())
     if not legacy:h.update(str(float(args.audio_grid_seconds)).encode())
     if not legacy and not pre_blank:h.update(str(float(getattr(args,'plan_blank_window_seconds',.5))).encode())
     policies=(getattr(args,'history_window_policy','rolling_legacy_v1'),getattr(args,'continuation_policy','off'))
@@ -532,10 +589,30 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version=('stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
+    args.training_objective_recipe=dict(version=('stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy=='persistent_modes_v1' else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
         else 'stream_aligned_phrase_joint_v3' if model.config.phrase_context_policy=='aligned_phrase_v3' else 'stream_ordered_phrase_joint_v2'
         if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 'stream_causal_phrase_joint_v1'),
         phrase_context_policy=model.config.phrase_context_policy,
+        training_window_policy=model.config.training_window_policy,max_phrase_events=model.config.max_phrase_events,
+        phrase_seam_events=model.config.phrase_seam_events,phrase_execution_policy=model.config.phrase_execution_policy,
+        phrase_modes=model.config.phrase_modes,phrase_relation_weight=model.config.phrase_relation_weight,
+        detail_representation_policy=model.config.detail_representation_policy,duration_feature_policy=model.config.duration_feature_policy,
+        relation_policy='future_sets_v1' if model.config.phrase_execution_policy=='persistent_modes_v1' else 'off',
+        phrase_configuration_objective=('whole_trusted_phrase_mode_marginal_replaces_configuration_nll_local_recovery_mixture'
+            if model.config.phrase_execution_policy=='persistent_modes_v1' else 'local_configuration_nll'),
+        configuration_loss_scope=('whole_phrase_weighted_composite_likelihood_complete_trusted_groups_else_local_mixture'
+            if model.config.phrase_execution_policy=='persistent_modes_v1' else 'base_head_weighted_joint_configuration_nll'),
+        configuration_base_diagnostics='shape_loss_plus_phase_loss_plus_detail_loss_base_heads_only',
+        configuration_adjustment_identity='configuration_loss_equals_shape_plus_phase_plus_detail_plus_phrase_configuration_adjustment',
+        configuration_adjustment_budget='replacement_difference_not_additional_configuration_cross_entropy',
+        phrase_group_weighting='sample_weight_inside_mode_sequence_sum_actual_effective_target_budget_normalizer',
+        phrase_mode_details='shared_conditional_detail_scores_computed_once_without_mode_axis',
+        effective_target_budget='sum_cpu_loss_normalizer_multiplicity_corrected_primary_and_seam_target_exposure',
+        effective_target_budget_scope='consumed_authored_batches_this_epoch_execution_since_resume_including_discarded_updates_excluding_recovery',
+        effective_targets_per_sec_scope='same_execution_training_loop_wall_time_including_data_transfer_compute_and_in_loop_checkpoint_io_excluding_epoch_end_validation',
+        batch_order='song_sortish_v1' if model.config.training_window_policy=='phrase_complete_v1' else 'song_local_v1',
+        phrase_history_contract='causal_phrase_packed_blocks_v2',
+        relation_query_contract='departure_decoder_hidden_no_selected_target_clock',
         phrase_loss_weight=model.config.phrase_loss_weight,
         phrase_target='ordered_segment_features_labels_only',
         ordered_phrase_target=('configuration_only_ordered_encoder_cosine_detached_symmetric_match_joint'
@@ -695,7 +772,7 @@ def _train(args):
         # later ordinary resume must not silently recover the old schedule.
         persist(start_epoch,skip,False,(old or {}).get('metrics',{}))
     for epoch in range(start_epoch,args.epochs+1):
-        model.train();totals=MetricTotals();n=0;supervised=0;sequences=0;started=time.perf_counter();timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.)
+        model.train();totals=MetricTotals();n=0;supervised=0;sequences=0;effective_target_budget=0.;started=time.perf_counter();timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.)
         optimizer.zero_grad(set_to_none=True)
         symbolic=epoch<=args.symbolic_pretrain_epochs
         # The prior epoch's producer is already joined before changing its view.
@@ -713,6 +790,10 @@ def _train(args):
                     augmentation_totals[key]=augmentation_totals.get(key,0)+value
                 timing['data_sec']+=time.perf_counter()-tick
                 supervised+=int((batch['loss_mask'] & batch['sample_weight'].gt(0)).sum())
+                # CPU collation has already corrected variable phrase lengths
+                # and repeated seams. Count consumed budget at the same point
+                # as supervised steps, even when a later update is discarded.
+                effective_target_budget+=float(batch.get('_loss_normalizer',batch['history_kind'].size(0)*model.config.rollout_steps))
                 sequences+=batch['history_kind'].size(0)
                 tick=time.perf_counter();b=to_device_batch(batch,args.device,non_blocking=args.device.startswith('cuda'))
                 timing['transfer_sec']+=time.perf_counter()-tick;tick=time.perf_counter()
@@ -779,6 +860,9 @@ def _train(args):
                         elapsed_sec=elapsed,samples_per_sec=sequences/max(elapsed,1e-6),
                         supervised_steps_per_sec=supervised/max(elapsed,1e-6),
                         supervised_steps=supervised,metric_batches=n,timing=timing,skipped_windows=skipped_windows,
+                        effective_target_budget=effective_target_budget,
+                        effective_targets_per_sec=effective_target_budget/max(elapsed,1e-6),
+                        effective_target_budget_scope='consumed_authored_batches_current_epoch_execution_since_resume',
                         prefetch=loader.stats() if hasattr(loader,'stats') else {'mode':'off'},
                         cache=ds.cache_stats() if hasattr(ds,'cache_stats') else {},
                         exit_coverage={key:value for key,value in totals.as_floats().items() if key.startswith('exit_')},
@@ -792,6 +876,7 @@ def _train(args):
                           reason='requested_additional_update_budget',checkpoint=str(directory/'composer_last.pt'))
                     return 0
         avg=_averages(totals,n)
+        training_elapsed=time.perf_counter()-started
         skip=0
         if dev is not None:
             validation=evaluate(model,dev,args);validation.update(epoch=epoch,optimizer_steps=steps)
@@ -799,6 +884,10 @@ def _train(args):
             _emit('composer_validation',**validation)
         persist(epoch,batches_per_epoch,True,avg)
         _emit('composer_epoch',epoch=epoch,optimizer_steps=steps,elapsed_sec=time.perf_counter()-started,
+            effective_target_budget=effective_target_budget,
+            effective_targets_per_sec=effective_target_budget/max(training_elapsed,1e-6),
+            effective_target_budget_elapsed_sec=training_elapsed,
+            effective_target_budget_scope='consumed_authored_batches_current_epoch_execution_since_resume',
             exit_coverage={key:value for key,value in totals.as_floats().items() if key.startswith('exit_')},
             augmentation=augmentation_totals,**avg)
         if dev is not None and args.generation_eval_songs and epoch%args.generation_eval_interval_epochs==0:

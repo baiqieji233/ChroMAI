@@ -80,13 +80,13 @@ def start_train(handler, payload, *, runtime):
     args = ['-m', 'maichart.composer.stream_train']
     for name, value in [('manifest', manifest), ('checkpoint-dir', directory), ('cache-dir', cache)]:
         _arg(args, '--' + name, value)
-    integers = dict(epochs=20, batch_size=16, grad_accumulation=1, d_model=256, layers=4,
+    integers = dict(epochs=50, batch_size=16, grad_accumulation=1, d_model=256, layers=4,
         nhead=8, dim_feedforward=768, history_events=64, rollout_steps=16,
         checkpoint_interval_steps=500, log_interval=25, max_steps=0, limit_charts=0,
         prepare_workers=1, cpu_threads=2, seed=0, recovery_interval=25,
         recovery_samples=2, recovery_steps=2, symbolic_pretrain_epochs=0,
         generation_eval_songs=2,validation_max_batches=32,validation_batch_size=4,
-        generation_eval_interval_epochs=1,warmup_steps=100,prefetch_batches=2,sample_workers=1)
+        generation_eval_interval_epochs=1,warmup_steps=0,prefetch_batches=2,sample_workers=1)
     settings = {'architecture_profile': PROFILE}
     settings['holdout_fraction'] = fraction
     settings['validation_manifest'] = payload.get('validation_manifest')
@@ -102,7 +102,7 @@ def start_train(handler, payload, *, runtime):
         raise ValueError('Event-set shared song caches require sample_workers=1')
     if settings['prefetch_batches'] > 16:
         raise ValueError('prefetch_batches cannot exceed 16')
-    for key, default in dict(lr=.0002, dropout=.1, window_seconds=8., recovery_weight=.1, plan_weight=.1,
+    for key, default in dict(lr=.0005, dropout=.1, window_seconds=8., recovery_weight=.1, plan_weight=.1,
                             audio_cache_gb=2.,min_lr_ratio=.1).items():
         settings[key] = _float(payload, key, default, minimum=0.)
         _arg(args, '--' + key.replace('_', '-'), settings[key])
@@ -110,8 +110,8 @@ def start_train(handler, payload, *, runtime):
         raise ValueError('Invalid event-set model dimensions, dropout or window')
     if settings['min_lr_ratio'] > 1:
         raise ValueError('min_lr_ratio cannot exceed 1')
-    schedule = payload.get('lr_schedule', 'cosine')
-    if schedule == 'auto': schedule = 'cosine'
+    schedule = payload.get('lr_schedule', 'constant')
+    if schedule == 'auto': schedule = 'constant'
     if mode == 'resume' and not reset_lr: schedule = (parent_data.get('args') or {}).get('lr_schedule','constant')
     if schedule not in {'constant','cosine'}: raise ValueError('Unknown learning rate schedule')
     settings['reset_learning_rate'] = reset_lr
@@ -146,12 +146,34 @@ def start_train(handler, payload, *, runtime):
     if not 0 <= blank_seconds < float('inf'): raise ValueError('Invalid blank window seconds')
     settings['plan_blank_window_seconds'] = blank_seconds
     _arg(args,'--plan-blank-window-seconds',blank_seconds)
+    # Auto policies are resolved by the trainer against the parent checkpoint.
+    policy_choices = {
+        'training_window_policy': {'auto', 'block_v1', 'phrase_complete_v1'},
+        'phrase_execution_policy': {'auto', 'off', 'persistent_modes_v1'},
+        'detail_representation_policy': {'auto', 'private_v1', 'shared_components_v1'},
+        'duration_feature_policy': {'auto', 'legacy_v1', 'log_time_v2'},
+    }
+    for key, choices in policy_choices.items():
+        value = payload.get(key, 'auto')
+        if value not in choices: raise ValueError('Unknown ' + key)
+        if mode == 'resume': value = parent_config.get(key, parent_args.get(key, 'auto'))
+        settings[key] = value
+    for key, default, minimum in [('max_phrase_events', 64, 1), ('phrase_seam_events', 2, 0), ('phrase_modes', 4, 1)]:
+        inherited = parent_config.get(key, parent_args.get(key, default))
+        values = payload if mode != 'resume' else {key: inherited}
+        value = _int(values, key, inherited, minimum=minimum)
+        if key == 'phrase_modes' and value not in {2, 4, 8}: raise ValueError('phrase_modes must be 2, 4 or 8')
+        settings[key] = value
+    inherited_relation = parent_config.get('phrase_relation_weight', parent_args.get('phrase_relation_weight', .1))
+    values = payload if mode != 'resume' else {'phrase_relation_weight': inherited_relation}
+    settings['phrase_relation_weight'] = _float(values, 'phrase_relation_weight', inherited_relation, minimum=0.)
     from types import SimpleNamespace
     from maichart.composer.stream_train import LEARNING_POLICIES, LEGACY_LEARNING_POLICIES, resolve_learning_policies
     from maichart.composer.stream_model import StreamComposerConfig
     learning_policy=payload.get('learning_policy','auto')
     if learning_policy not in {'auto','repaired','legacy','checkpoint'}:raise ValueError('Unknown learning policy')
     requested={key:payload.get(key, LEGACY_LEARNING_POLICIES[key] if learning_policy=='legacy' else 'auto') for key,choices in LEARNING_POLICIES.items()}
+    requested.update({key:settings[key] for key in ('max_phrase_events','phrase_seam_events','phrase_modes','phrase_relation_weight')})
     requested['transition_exit_weight']=payload.get('transition_exit_weight',0. if learning_policy=='legacy' else None)
     requested['prefix_augmentation_rate']=payload.get('prefix_augmentation_rate',0. if learning_policy=='legacy' else None)
     requested['event_family_audio_weight']=payload.get('event_family_audio_weight',0. if learning_policy=='legacy' else None)
@@ -175,7 +197,7 @@ def start_train(handler, payload, *, runtime):
             phrase_candidates=1, phrase_write_beats=8., phrase_commit_beats=4., phrase_step_budget=256,
             phrase_repair_budget=8, phrase_rollback_budget=4, phrase_time_budget_sec=30.,
             softcomfort_strength=1., audio_tracking_strength=0., pointer_temperature=None,
-            action_temperature=None,min_same_head_ms=50.,touch_layout_policy='open',max_events=0).items():
+            action_temperature=None,phrase_mode_temperature=1.,min_same_head_ms=50.,touch_layout_policy='open',max_events=0).items():
         field = 'generation_eval_' + key
         value = parent_args.get(field, default) if mode == 'resume' else payload.get(field, default)
         settings[field] = value
@@ -255,7 +277,7 @@ def start_generate(handler, payload, *, runtime):
         _arg(args, '--' + name, value)
     temperature = _float(payload, 'temperature', .65, minimum=0.)
     for key, default in dict(first=0., temperature=temperature, pointer_temperature=temperature,
-                              action_temperature=temperature, min_same_head_ms=50.).items():
+                              action_temperature=temperature, phrase_mode_temperature=1., min_same_head_ms=50.).items():
         values=payload if payload.get(key) is not None else {**payload,key:default}
         settings[key] = _float(values, key, default, minimum=None if key == 'first' else 0.)
         _arg(args, '--' + key.replace('_', '-'), settings[key])

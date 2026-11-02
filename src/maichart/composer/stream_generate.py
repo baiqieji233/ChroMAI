@@ -25,6 +25,7 @@ from .events import event_metadata
 from .stream_sampling import kind_logits_for_audio,note_delta_logits_for_audio
 from .stream_proposal import sample_timed_event
 from .stream_timing import current_timing_deltas
+from .stream_phrase_runtime import execution_options,execution_metadata,execution_report
 
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
@@ -46,6 +47,7 @@ def parser():
     p.add_argument('--phrase-time-budget-sec',type=float,default=30.)
     p.add_argument('--softcomfort-strength',type=float,default=1.)
     p.add_argument('--audio-tracking-strength',type=float,default=0.)
+    p.add_argument('--phrase-mode-temperature',type=float,default=1.)
     p.add_argument('--physical-policy',choices=('legacy','runtime_hard_v2'),default='runtime_hard_v2')
     return p
 
@@ -53,8 +55,8 @@ def parser():
 def resolve_temperatures(args):
     """Explicit stage temperatures override the common sampling temperature."""
     temperature=float(getattr(args,'temperature',.65))
-    for key in ('temperature','pointer_temperature','action_temperature'):
-        raw=temperature if key=='temperature' else getattr(args,key,None)
+    for key in ('temperature','pointer_temperature','action_temperature','phrase_mode_temperature'):
+        raw=temperature if key=='temperature' else getattr(args,key,1. if key=='phrase_mode_temperature' else None)
         value=temperature if raw is None else float(raw)
         if not math.isfinite(value) or value<0:
             raise ValueError(f'{key} must be finite and nonnegative')
@@ -241,7 +243,9 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
         continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
         phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
-        candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'))
+        candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(model.config,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(model.config,'max_phrase_events',64))
     batch=to_device_batch(context.current_batch(),device)
     cache=model.encode_audio(batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     if model.config.plan_kind_policy!='off':
@@ -343,6 +347,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                         proposal['template_keep_logit']=transition[2]
                         proposal['template_reference_shape']=torch.where(selected_batch['history_kind'][0,-1].eq(NOTE),
                             selected_batch['history_shape'][0,-1],selected_batch['history_shape'].new_tensor(-1))
+                    proposal.update(execution_options(model,context,selected_result,selected_batch,
+                        proposal['context'],generator,temperature=getattr(args,'phrase_mode_temperature',1.),beat=beat))
                     return proposal
                 accepted,delta_id,failed,failed_times=sample_timed_event(model,timing,deltas,cursor,at_time,
                     int(result['reference_phase'][0,-1]),result.get('reference_phase_mask',None)[0,-1]
@@ -362,7 +368,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     nxt=accepted.beat
                     heads=len(event_metadata(accepted.note_text).heads)
                     points.append(accepted);curve.commit(second_at_beat(clock,nxt),heads)
-                    context.commit(StreamStep(NOTE,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),accepted.note_text))
+                    context.commit(StreamStep(NOTE,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),accepted.note_text,
+                        **execution_metadata(context,nxt)))
                     cursor=nxt
                     if len(points)%100==0:print('composer_generation_progress '+json.dumps(dict(events=len(points),beat=float(cursor),duration_sec=duration)),flush=True)
                     continue
@@ -388,7 +395,9 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
                     continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
                     phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
-        candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'))
+        candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(model.config,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(model.config,'max_phrase_events',64))
             def guard_factory():
                 return EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
                     touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,
@@ -427,6 +436,10 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
     from .configuration_observation import configuration_observation
     from .structure_metrics import structure_metrics
     from .stream_continuation import continuation_dim
+    from .stream_rhythm_metrics import conditioned_rhythm_summary
+    phrase_index=getattr(context,'_phrase',None)
+    strata=(np.searchsorted(phrase_index.boundaries,[float(p.beat) for p in points],side='right')-1
+            if phrase_index is not None else None)
     report=dict(schema='maichart-chart-composer-generation-v2',family='chart_composer_v1',architecture_profile=PROFILE,
         checkpoint=str(Path(args.checkpoint).resolve()),checkpoint_epoch=checkpoint_epoch,optimizer_steps=optimizer_steps,
         history_window_policy=model.config.history_window_policy,continuation_policy=model.config.continuation_policy,
@@ -457,9 +470,13 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         guard=dict(checks=guard.checks,rejections=guard.rejections,reasons=dict(guard.reason_counts)),
         configuration_observation=configuration_observation(points),
         structure_metrics=structure_metrics(points),
+        rhythm_detail=conditioned_rhythm_summary([p.beat for p in points],strata),
         continuation_observation=continuation_observation(context._committed),
         phrase_search=search_report,audio_tracking_strength=tracking,
         phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
+        phrase_execution_policy=getattr(model.config,'phrase_execution_policy','off'),
+        phrase_mode_temperature=getattr(args,'phrase_mode_temperature',1.),
+        phrase_execution=execution_report(context._committed),
         duration_audio_policy=getattr(model.config,'duration_audio_policy','off'),
         duration_audio_coverage=(model.duration_audio.coverage() if hasattr(model,'duration_audio') else None),
         physical_policy=guard.physical_policy,
@@ -494,7 +511,18 @@ def evaluate_panel(checkpoint_path,dataset,directory,*,count=2,seeds=(0,1),devic
             output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)
             condfile=output.parent/'condition.json';condfile.write_text(json.dumps(condition.to_dict()),encoding='utf-8');args.condition_file=str(condfile)
             try:
-                reports.append(generate(args,song_override=song,model_override=model,payload_override=payload))
+                report=generate(args,song_override=song,model_override=model,payload_override=payload)
+                from .stream_rhythm_metrics import conditioned_rhythm_summary
+                from .stream_phrase import phrase_boundaries
+                if record[1] is not None:
+                    reference_beats=sorted({p.beat for p in record[1] if p.note_text})
+                    boundaries=phrase_boundaries(dataset._bank(i),dataset._end_beats[i])
+                    labels=np.searchsorted(boundaries,[float(b) for b in reference_beats],side='right')-1
+                    report['reference_rhythm_detail']=conditioned_rhythm_summary(reference_beats,labels)
+                    report['rhythm_comparison_scope']='same_song_audio_phrases_reference_controls_not_density_quality_score'
+                else:report['rhythm_comparison_scope']='reference_points_unavailable'
+                output.with_suffix('.composer.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
+                reports.append(report)
             except ValueError as exc:
                 # An invalid validation artifact is a failed quality check,
                 # not a reason to discard the remaining training epochs.

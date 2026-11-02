@@ -85,7 +85,7 @@ class OrderedPhraseContext(nn.Module):
         pooled = self.sequence_norm(pooled).masked_fill(~mask.any(-1)[:, None], 0.)
         return (pooled,self.sequence_norm(sequence).masked_fill(~mask[...,None],0.)) if return_states else pooled
 
-    def aligned_read(self, batch, states, anchor, style, valid, projected_keys=None):
+    def aligned_read(self, batch, states, anchor, style, valid, projected_keys=None, *, head_states=None):
         """Read bounded reference event states near the landing-relative beat.
 
         Every reference has its own duration. A learned null supports novel
@@ -121,7 +121,13 @@ class OrderedPhraseContext(nn.Module):
         weights = scores.float().softmax(-1).to(events)
         values = torch.cat((self.alignment_null.expand(*anchor.shape[:-1],1,self.width),
                             events.flatten(-3,-2)), -2)
-        return (weights[...,None]*values).sum(-2),weights[...,0],unique_keys
+        result=((weights[...,None]*values).sum(-2),weights[...,0],unique_keys)
+        if head_states is not None:
+            head_bank=torch.cat((head_states.new_zeros(1,*head_states.shape[1:]),head_states),0)
+            heads=head_bank[selected,chosen].flatten(-3,-2)
+            heads=torch.cat((heads.new_zeros(*heads.shape[:-2],1,8),heads),-2)
+            return (*result,(weights.float()[...,None]*heads).sum(-2))
+        return result
 
     def prepare_audio(self, cache):
         if 'ordered_configuration_keys' in cache:
@@ -256,8 +262,13 @@ class CausalPhraseContext(nn.Module):
         references = torch.cat((null, references), -2)
         style = self.style(batch['condition'].float())[:, None].expand_as(anchor)
         if hasattr(self,'ordered') and self.ordered.aligned:
-            aligned_read,null_weight,projected_keys = self.ordered.aligned_read(
-                batch,sequence_states,anchor,style,valid,projected_keys)
+            heads=None
+            if hasattr(model,'phrase_execution'):
+                # Only completed causal references, never target_phrase tables.
+                heads=model.atom_lanes[batch['phrase_sequence_atoms']].sum(-2).clamp_max(1)
+            aligned=self.ordered.aligned_read(batch,sequence_states,anchor,style,valid,projected_keys,head_states=heads)
+            aligned_read,null_weight,projected_keys=aligned[:3]
+            if len(aligned)>3:ordered_output['phrase_aligned_heads']=aligned[3]
             ordered_output.update(phrase_aligned_read=aligned_read,
                                   phrase_aligned_null_weight=null_weight,
                                   _phrase_encoding_cache=(sequence,sequence_states,projected_keys))

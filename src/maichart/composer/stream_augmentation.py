@@ -160,6 +160,17 @@ def _native_prefix(dataset,song,source,begin,*,first_step=None):
     return incremental,guard_prefix
 
 
+def _phrase_fallback_prefix(dataset,row,song,source,begin,local):
+    if local is not None or getattr(dataset,'training_window_policy','block_v1')!='phrase_complete_v1':return local
+    # A seam may cross the next block boundary. Replaying through the final
+    # seam query would crop away the primary block's earlier rows. Rebuild the
+    # edited suffix inside its original fixed row from the actual old prefix.
+    context=_context(dataset,song,row['_song_bank'])
+    prefix=source[:begin]
+    context.batch(prefix,prefix[-1].end if prefix else 0)
+    return context._incremental_state,prefix
+
+
 def _same_gap_steps(dataset,song,source,begin,start,end,rng,*,rotation_gap=False,rotation_gaps=None):
     """Pack a constant-gap loop into the exact existing prefix boundaries."""
     count=start-begin;left=source[begin].start;cursor=source[start].start
@@ -400,12 +411,15 @@ def _augment_phase_row(dataset,index,*,rng,row=None):
     """Rebuild a phase-shifted row with exact clocks and reachable labels."""
     song,start,end,_=dataset.samples[index];source=dataset.streams[song]
     row=dataset[index] if row is None else row
+    if getattr(dataset,'training_window_policy','block_v1')=='phrase_complete_v1':
+        end=int(row['step_index'][-1])+1
     first=max(0,start-dataset.lead_in);at=start-first
     if not bool(row['loss_mask'][at]) or not bool(row['sample_weight'][at]>0):
         raise ValueError('Phase recovery requires a known supervised first decision')
     modified,shift=_phase_shift_steps(dataset,song,source,start,end,rng)
     begin=start-1
     local=_native_prefix(dataset,song,source,begin,first_step=modified[begin])
+    local=_phrase_fallback_prefix(dataset,row,song,source,begin,local)
     guard_prefix=modified[:begin] if local is None else local[1]
     physical=getattr(dataset,'physical_policy','legacy_report_v1')
     guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix),
@@ -504,6 +518,18 @@ def _augment_timeline_row(dataset,index,*,rng,row=None,input_policy=MUSICAL_BATC
     # and without applying the existing first-decision rebalance a second time.
     result['sample_weight'].zero_()
     result['sample_weight'][-1]=row['sample_weight'].sum()
+    if 'training_phrase_group' in row:
+        length=len(result['history_kind'])
+        result['training_phrase_group']=torch.full((length,),-1,dtype=torch.long)
+        result['training_phrase_position']=torch.full((length,),-1,dtype=torch.long)
+        result['training_phrase_complete']=torch.zeros(length,dtype=torch.bool)
+        result['_training_target_budget']=torch.zeros(length,dtype=torch.float32)
+        result['_training_target_budget'][-1]=row['_training_target_budget'].sum()
+        result['_training_reference_targets']=row['_training_reference_targets']
+        if 'target_relation' in row:
+            shape=(length,*row['target_relation'].shape[1:])
+            result['target_relation']=torch.zeros(shape,dtype=row['target_relation'].dtype)
+            result['target_relation_mask']=torch.zeros(shape,dtype=torch.bool)
     for key in ('_sample_index','_window_weight','_song_bank','_song_plan','_literal_atom_types'):
         if key in row:result[key]=row[key]
     if '_plan_scale' in row:result['_plan_scale']=row['_plan_scale']
@@ -540,6 +566,9 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     song,start,end,_=dataset.samples[index]
     first=max(0,start-dataset.lead_in)
     source=dataset.streams[song]
+    row=dataset[index] if row is None else row
+    if getattr(dataset,'training_window_policy','block_v1')=='phrase_complete_v1':
+        end=int(row['step_index'][-1])+1
     available=0
     musical=input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY)
     max_history=min(128,dataset.lead_in) if musical else 12
@@ -581,6 +610,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     # Authored events before the edit are committed as context. Check edited
     # actions and the complete unchanged target block against their new state.
     local=_native_prefix(dataset,song,source,begin,first_step=modified[begin]) if timing_mode else _native_prefix(dataset,song,source,begin)
+    local=_phrase_fallback_prefix(dataset,row,song,source,begin,local)
     guard_prefix=modified[:begin] if local is None else local[1]
     physical=getattr(dataset,'physical_policy','legacy_report_v1')
     guard=_guard(dataset.base.songs[song][0],guard_prefix,len(guard_prefix),

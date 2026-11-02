@@ -106,3 +106,49 @@ def test_illegal_timeline_keeps_original_main_batch_row(monkeypatch):
     changed,stats=aug.augment_stream_items(ds,[original],rate=1.,seed=0,input_policy=aug.MUSICAL_BATCH_INPUT_POLICY)
     assert changed[0] is original
     assert stats['skipped_unreachable_or_conflict']==1 and not stats.get('applied',0)
+
+
+def _phrase_dataset(monkeypatch):
+    from maichart.composer.stream_data import StreamDataset
+    legacy=dense_dataset(monkeypatch)
+    return StreamDataset(base=legacy.base,lead_in=128,targets=16,audio_grid_seconds=.05,
+        history_window_policy='block_aligned_v2',continuation_policy='pattern_runs_v2',
+        phrase_context_policy='aligned_phrase_v3',training_window_policy='phrase_complete_v1',
+        relation_policy='future_sets_v1',max_phrase_events=64,phrase_seam_events=2)
+
+
+def test_phrase_timeline_replacement_collates_with_real_phrase_and_keeps_budget(monkeypatch):
+    ds=_phrase_dataset(monkeypatch);capture_prefix(monkeypatch)
+    index=next(i for i,(_,lo,hi,_) in enumerate(ds.samples) if lo>=550 and hi<len(ds.streams[0])-3)
+    original=ds[index];neighbor=ds[index+1]
+    changed,_,_=aug.augment_stream_row(ds,index,rng=TimelineRandom(0),mode='timeline_loop',
+        row=original,input_policy=aug.MUSICAL_BATCH_INPUT_POLICY)
+    assert changed['training_phrase_group'].eq(-1).all()
+    assert not changed['training_phrase_complete'].any()
+    assert not changed['target_relation_mask'].any()
+    torch.testing.assert_close(changed['_training_target_budget'].sum(),original['_training_target_budget'].sum())
+    before=collate_stream([original,neighbor]);after=collate_stream([changed,neighbor])
+    assert after['_loss_normalizer']==before['_loss_normalizer']
+    assert after['_phrase_budget_scale']==before['_phrase_budget_scale']
+    assert not after['training_phrase_complete'][0].any()
+    for key in ('audio_plan_weight','audio_plan_blank_weight'):
+        torch.testing.assert_close(after[key],before[key])
+    solo=collate_stream([changed])
+    assert solo['training_phrase_group_weight'].numel()==0
+
+
+def test_phrase_local_augmentation_rebuilds_supervised_seam_rows(monkeypatch):
+    ds=_phrase_dataset(monkeypatch);capture_prefix(monkeypatch)
+    index=next(i for i,(_,lo,hi,_) in enumerate(ds.samples) if lo>=550 and hi<len(ds.streams[0])-3)
+    original=ds[index]
+    original_relation_mask=original['target_relation_mask'].clone()
+    original_complete=original['training_phrase_complete'].clone()
+    changed,_,_=aug.augment_stream_row(ds,index,rng=TimelineRandom(0),mode='abab',
+        row=original,input_policy=aug.MUSICAL_BATCH_INPUT_POLICY)
+    assert len(changed['history_kind'])==len(original['history_kind'])
+    assert len(changed['phrase_start_beat'])==len(original['history_kind'])
+    assert not changed['target_relation_mask'].any()
+    assert not changed['training_phrase_complete'].any()
+    torch.testing.assert_close(original['target_relation_mask'],original_relation_mask)
+    torch.testing.assert_close(original['training_phrase_complete'],original_complete)
+    collate_stream([changed,ds[index+1]])

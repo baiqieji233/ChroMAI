@@ -302,6 +302,18 @@
 <label class="field" data-event-set-only hidden>音频窗口（秒）<input id="composerWindowSeconds" type="number" min="0.1" step="0.5" value="8"></label>
 <label class="field" data-event-set-only hidden>音频共享网格（秒）<input id="composerAudioGridSeconds" type="number" min="0.005" max="0.05" step="0.005" value="0.01"><small>默认10毫秒；继续训练和微调继承检查点网格，旧检查点缺失此字段时使用50毫秒。</small></label>
 <label class="field" data-event-set-only hidden>音频规划损失权重<input id="composerPlanWeight" type="number" min="0" step="0.05" value="0.1"><small>作用于共享音频的休止概率、每秒头数率与每秒事件率监督；0关闭该项监督。</small></label>
+<details id="composerPhraseAdvanced" class="settings-section span-4" data-event-set-only hidden><summary><span>短句组织</span><small>普通使用保持自动，继续训练继承检查点</small></summary><div class="settings-content"><div class="form-grid">
+<label class="field">训练窗口<select id="composerTrainingWindowPolicy"><option value="auto">自动</option><option value="block_v1">固定窗口</option><option value="phrase_complete_v1">完整短句</option></select></label>
+<label class="field">短句最多事件数<input id="composerMaxPhraseEvents" type="number" min="1" value="64"></label>
+<label class="field">短句接缝事件数<input id="composerPhraseSeamEvents" type="number" min="0" value="2"></label>
+<label class="field">整句写法<select id="composerPhraseExecutionPolicy"><option value="auto">自动</option><option value="off">关闭</option><option value="persistent_modes_v1">持续短句模式</option></select></label>
+<label class="field">短句写法数量<select id="composerPhraseModes"><option value="2">2</option><option value="4" selected>4</option><option value="8">8</option></select></label>
+<label class="field">短句关系学习权重<input id="composerPhraseRelationWeight" type="number" min="0" step="0.05" value="0.1"></label>
+</div></div></details>
+<details id="composerDetailAdvanced" class="settings-section span-4" data-event-set-only hidden><summary><span>细节学习</span><small>普通使用保持自动</small></summary><div class="settings-content"><div class="form-grid">
+<label class="field">细节表示<select id="composerDetailRepresentationPolicy"><option value="auto">自动</option><option value="private_v1">独立细节</option><option value="shared_components_v1">共享组件</option></select></label>
+<label class="field">时长特征<select id="composerDurationFeaturePolicy"><option value="auto">自动</option><option value="legacy_v1">旧版</option><option value="log_time_v2">对数时间</option></select></label>
+</div></div></details>
 <label class="field" data-event-set-only hidden>短句组织与呼应<select id="composerPhraseContextPolicy"><option value="auto">自动（新阶段启用拍位对齐短句，续训继承）</option><option value="aligned_phrase_v3">拍位对齐的有序短句（新版）</option><option value="ordered_phrase_v2">有序配置短句（旧版）</option><option value="causal_phrase_v1">因果短句统计（旧版）</option><option value="off">关闭（对照）</option></select><small>新版按落点拍位读取短句意图；旧模型需在新目录微调或从头训练。</small></label>
 <label class="field" data-event-set-only hidden>持续动作区间音频<select id="composerDurationAudioPolicy"><option value="auto">自动（新阶段启用，续训继承）</option><option value="off">关闭（对照）</option><option value="interval_v1">持续区间音频</option></select><small>为支持的Hold与Slide时长细节读取其实际覆盖音乐区间。</small></label>
 <details data-event-set-only hidden><summary>短句训练高级设置</summary><label class="field">短句辅助损失权重<input id="composerPhraseLossWeight" type="number" min="0" step="0.01" value="0.05"><small>默认0.05；续训继承原值，0关闭辅助损失。</small></label></details>
@@ -972,6 +984,7 @@
 <label class="field">同键最短间隔（毫秒）<input id="composerMinSameHeadMs" type="number" min="0" max="200" step="5" value="50"></label>
 <label class="field checkbox-field"><input id="composerInterceptTapOnSlide" type="checkbox"><span>拦截 Slide 撞尾（TapOnSlide）</span><small>默认关闭（仅报告，不拦截也不删音符）；勾选后在生成与后处理中拦截 TapOnSlide。</small></label>
 <label class="field">选时历史权重<input id="composerPointerHistoryStrength" type="number" min="0" max="1" step="0.05" value="1"><small>仅控制选时分支：1 使用完整历史，0 使用音频分支。</small></label>
+<label class="field" data-event-set-generation-only hidden>短句写法温度<input id="composerPhraseModeTemperature" type="number" min="0" step="0.05" value="1"><small>控制整句写法选择的随机性；0 选择概率最高的写法。模型是否支持由检查点决定。</small></label>
 <label class="field">候选拍位温度<input id="composerPointerTemperature" type="number" min="0" step="0.05" placeholder="留空继承总温度" value=""><small>留空继承总温度；填写数字则独立覆盖。整拍集合架构作用于NOTE/WAIT/EOS与拍距分布；0确定性选择。audio_grounded_v3在正温度下只调整时间区间内部拍位的随机程度。明确填写的专用温度覆盖总温度；CLI/API省略时继承总温度。</small></label>
 <label class="field">节奏网格采样<select id="composerPointerGridPolicy"><option value="grid_family_coherent_v3" selected>段落节奏与32分进入校准</option><option value="grid_family_coherent_v2">按段落保持节奏（旧版）</option><option value="grid_level_mass_v1">保留各网格概率（不看段落）</option><option value="off">旧版：温度作用于整个时间区间</option></select><small>新版让孤立三连音和新进入32分的概率也响应候选拍位温度；保留已进入细分后的正常收束，不硬禁16分或32分。</small></label>
 <label class="field">重复抑制<select id="composerRepetitionGuard"><option value="official_tail_v2" selected>官谱尾部与高速成员软抑制</option><option value="legacy_v1">旧版固定抑制</option><option value="off">关闭</option></select><small>所有槽位都检查重复成员，双押交换顺序无法绕过。除过长游程外，也柔和抑制短间隔双押成员复读；不设置新的同键速度硬上限。</small></label>

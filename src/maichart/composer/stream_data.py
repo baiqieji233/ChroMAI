@@ -33,6 +33,9 @@ from .events import event_metadata
 from .stream_bank_cache import StreamBankDiskCache, bank_identity
 from .stream_continuation import ContinuationState, continuation_rows, continuation_dim, POLICIES as CONTINUATION_POLICIES
 from .stream_timing import encode_history_gap, TIMING_POLICIES
+from .stream_phrase_training import (TRAINING_WINDOW_POLICIES, RELATION_POLICIES,
+    phrase_training_blocks,CausalPhraseBlockIndex, future_relation_index, future_relation_rows, collate_phrase_training, collate_future_relations,
+    normalize_phrase_plan_weights)
 from .stream_phrase import (PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS,
     collate_phrase_sequences, collate_candidate_phrase_sequences, share_aligned_phrase_sequences,
     collate_phrase_music,
@@ -85,6 +88,8 @@ class StreamStep:
     end_second: float
     text: str | None = None
     weight: float = 1.
+    phrase_mode: int | None = None
+    phrase_mode_start: float | None = None
 
 
 def build_steps(points, clock, duration, *, views=None):
@@ -272,12 +277,21 @@ class StreamDataset(Dataset):
                  audio_grid_seconds=GRID_SECONDS, plan_blank_window_seconds=.5,
                  history_window_policy='rolling_legacy_v1',continuation_policy='off',timing_output_policy='relative_delta_v1',
                  window_balance_policy='equal_window_v1',phrase_context_policy='off',
-                 candidate_state_policy='cursor_v1'):
+                 candidate_state_policy='cursor_v1', training_window_policy='block_v1',
+                 max_phrase_events=64, phrase_seam_events=2, relation_policy='off'):
         if lead_in < 0 or targets < 1 or window_seconds <= 0:
             raise ValueError('invalid stream window settings')
         if unknown_policy not in ('error','mask'):
             raise ValueError('unknown_policy must be error or mask')
         self.unknown_policy = unknown_policy
+        if training_window_policy not in TRAINING_WINDOW_POLICIES:raise ValueError('invalid training_window_policy')
+        if relation_policy not in RELATION_POLICIES:raise ValueError('invalid relation_policy')
+        if int(max_phrase_events)<1 or not 0<=int(phrase_seam_events)<=16:
+            raise ValueError('invalid phrase training limits')
+        self.training_window_policy=training_window_policy
+        self.max_phrase_events=int(max_phrase_events)
+        self.phrase_seam_events=int(phrase_seam_events)
+        self.relation_policy=relation_policy
         if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
         if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
@@ -452,6 +466,76 @@ class StreamDataset(Dataset):
         self._phrase_bytes = 0
         self._phrase_budget = 64*1024**2
         self._phrase_uncached = 0
+        self._relation_cache=OrderedDict()
+        self._relation_bytes=0
+        self._relation_budget=min(64*1024**2,self._symbol_budget//2) if self.relation_policy!='off' else 0
+        self._symbol_budget-=self._relation_budget
+        self._relation_hits=self._relation_misses=self._relation_evictions=0
+        self.training_phrase_rows=[]
+        self._training_target_multiplicity=[]
+        if self.training_window_policy=='phrase_complete_v1':
+            from .stream_phrase import phrase_boundaries
+            self.samples=[]; self.plan_weights=[]
+            oversized=complete_targets=trusted_complete_targets=complete_phrases=total_phrases=0
+            for song,stream in enumerate(self.streams):
+                boundaries=phrase_boundaries(self._bank(song),self._end_beats[song])
+                spans,segments,positions,complete=phrase_training_blocks(stream,boundaries,self.targets,self.max_phrase_events)
+                trusted_complete=complete.copy()
+                phrase_starts=np.flatnonzero(np.r_[True,segments[1:]!=segments[:-1]])
+                total_phrases+=len(phrase_starts)
+                for lo,hi in zip(phrase_starts,np.r_[phrase_starts[1:],len(stream)]):
+                    complete_phrases+=int(complete[lo])
+                    if not all(not self.unknown_steps[song][j] and stream[j].weight>0 for j in range(lo,hi)):
+                        trusted_complete[lo:hi]=False
+                    if not complete[lo]:
+                        oversized+=sum(int(start<hi and end>lo) for start,end in spans)
+                complete_targets+=int(complete.sum())
+                trusted_complete_targets+=int(trusted_complete.sum())
+                self.training_phrase_rows.append((segments,positions,trusted_complete))
+                multiplicity=np.ones(len(stream),dtype=np.int64)
+                for start,end in spans:
+                    self.samples.append((song,start,end,1.))
+                    self.plan_weights.append(sum(self.target_window_weights[song][start:end])/self.targets)
+                    multiplicity[end:min(len(stream),end+self.phrase_seam_events)]+=1
+                self._training_target_multiplicity.append(multiplicity)
+            self.coverage.update(window_chunks=len(self.samples),
+                supervised_steps=sum(end-start for _,start,end,_ in self.samples),
+                incomplete_phrase_fragments=oversized,
+                complete_phrase_target_fraction=complete_targets/max(1,count),
+                trusted_complete_phrase_target_fraction=trusted_complete_targets/max(1,count),
+                complete_phrase_fraction=complete_phrases/max(1,total_phrases))
+            if self.coverage['supervised_steps']!=count:
+                raise AssertionError('phrase targets must be covered exactly once')
+
+    def _relation_rows(self,song,first,end):
+        with self._state_lock:
+            if song in self._relation_cache:
+                self._relation_hits+=1
+                self._relation_cache.move_to_end(song)
+                entry,size=self._relation_cache[song]
+                if isinstance(entry,dict):
+                    return future_relation_rows(self.streams[song],self.unknown_steps[song],first,end,index=entry['index'])
+                values,masks=entry
+                return values[first:end].clone(),masks[first:end].clone()
+            self._relation_misses+=1
+            count=len(self.streams[song])
+            dense_size=count*2*22*5
+            if dense_size<=self._relation_budget:
+                values,masks=future_relation_rows(self.streams[song],self.unknown_steps[song],0,count)
+                entry=(values,masks);size=dense_size
+            else:
+                relation_index=future_relation_index(self.streams[song],self.unknown_steps[song])
+                entry={'index':relation_index};size=sum(array.nbytes for array in relation_index)
+            if size<=self._relation_budget:
+                while self._relation_cache and self._relation_bytes+size>self._relation_budget:
+                    _,(_,old_size)=self._relation_cache.popitem(last=False)
+                    self._relation_bytes-=old_size
+                    self._relation_evictions+=1
+                self._relation_cache[song]=(entry,size)
+                self._relation_bytes+=size
+            if isinstance(entry,dict):
+                return future_relation_rows(self.streams[song],self.unknown_steps[song],first,end,index=entry['index'])
+            return values[first:end].clone(),masks[first:end].clone()
 
     def _phrase_index(self, song):
         with self._bank_lock, self._state_lock:
@@ -478,6 +562,8 @@ class StreamDataset(Dataset):
 
     def rebuild_phrase_row(self, row, song, modified, begin, first, end):
         """Edited prefix features are rebuilt; future auxiliary labels disabled."""
+        if 'target_relation_mask' in row:row['target_relation_mask']=torch.zeros_like(row['target_relation_mask'])
+        if 'training_phrase_complete' in row:row['training_phrase_complete']=torch.zeros_like(row['training_phrase_complete'])
         if self.phrase_context_policy != 'off':
             index = self._phrase_index(song).edited(modified, begin, end)
             row.update(index.rows(modified, first, end))
@@ -630,6 +716,9 @@ class StreamDataset(Dataset):
                               'misses':self._symbol_misses,'evictions':self._symbol_evictions},
                     'phrase':{'estimated_bytes':self._phrase_bytes,'budget_bytes':self._phrase_budget,
                               'entries':len(self._phrases),'uncached':self._phrase_uncached},
+                    'relation':{'estimated_bytes':self._relation_bytes,'budget_bytes':self._relation_budget,
+                                'entries':len(self._relation_cache),'hits':self._relation_hits,
+                                'misses':self._relation_misses,'evictions':self._relation_evictions},
                     'plan':{'bytes':sum(t.numel()*t.element_size() for plan in self.plans for t in plan),
                             'policy':'eager_labels_not_in_cache_budget'},
                     'disk_bank':self._disk_bank.stats() if self._disk_bank is not None else None,
@@ -698,6 +787,9 @@ class StreamDataset(Dataset):
 
     def __getitem__(self, index):
         song, start, end, window_weight = self.samples[index]
+        target_end=end
+        phrase_training=self.training_window_policy=='phrase_complete_v1'
+        if phrase_training:end=min(len(self.streams[song]),end+self.phrase_seam_events)
         first = max(0, start-self.lead_in)
         stream, encoded = self.streams[song], self.encoded[song]
         sequence = stream[first:end]
@@ -706,9 +798,22 @@ class StreamDataset(Dataset):
         row['loss_mask'] = torch.tensor([first+i >= start for i in range(length)], dtype=torch.bool)
         row['configuration_mask'] = torch.ones(length,dtype=torch.bool)
         row['sample_weight'] = torch.tensor([s.weight*(self.target_window_weights[song][first+i]
-                                             if self.history_window_policy == 'block_aligned_v2' or self.window_balance_policy=='sqrt_window_v2' else window_weight)*self.chart_weights[song]
+                                             if phrase_training or self.history_window_policy == 'block_aligned_v2' or self.window_balance_policy=='sqrt_window_v2' else window_weight)*self.chart_weights[song]
                                              if first+i >= start and not self.unknown_steps[song][first+i] else 0.
                                              for i,s in enumerate(sequence)], dtype=torch.float32)
+        if phrase_training:
+            segments,positions,complete=self.training_phrase_rows[song]
+            multiplicity=torch.from_numpy(self._training_target_multiplicity[song][first:end]).float()
+            row['sample_weight']/=multiplicity
+            row['_training_target_budget']=row['loss_mask'].float()/multiplicity
+            row['_training_reference_targets']=self.targets
+            row['training_phrase_group']=torch.from_numpy(segments[first:end].copy())
+            row['training_phrase_group'][row['step_index']>=target_end]=-1
+            row['training_phrase_position']=torch.from_numpy(positions[first:end].copy())
+            row['training_phrase_complete']=row['loss_mask'] & (row['step_index']<target_end) & torch.from_numpy(complete[first:end].copy())
+        if self.relation_policy!='off':
+            row['target_relation'],row['target_relation_mask']=self._relation_rows(song,first,end)
+            row['target_relation_mask'] &= (row['loss_mask'] & row['sample_weight'].gt(0))[:,None,None]
         features,exit_mask,exit_labels = self.continuations[song]
         row['continuation_features'] = features[first:end].clone()
         row['transition_exit_mask'] = exit_mask[first:end].clone() & row['loss_mask'] & row['sample_weight'].gt(0)
@@ -787,6 +892,8 @@ def collate_stream(items):
     if not items: raise ValueError('empty stream batch')
     output = {}
     output['_sample_indices'] = [item.get('_sample_index') for item in items]
+    collate_phrase_training(items,output)
+    collate_future_relations(items,output)
     if any('phrase_progress' in item for item in items):
         if not all('phrase_progress' in item for item in items):
             raise ValueError('Cannot mix phrase-enabled and legacy stream rows')
@@ -841,6 +948,7 @@ def collate_stream(items):
                                                 for item in items], batch_first=True)
     output['audio_plan_blank_weight'] = pad_sequence([item['_song_plan'][3] * item.get('_plan_scale', item['_window_weight'])
                                                       for item in items], batch_first=True)
+    normalize_phrase_plan_weights(items,output)
     unique, inverse, identities = [], [], {}
     for item in items:
         identity = id(item['_song_bank'])
@@ -889,8 +997,12 @@ class StreamInferenceContext:
     def __init__(self, song, codec, delta_vocab, condition, *, lead_in=64, audio_bank=None,
                  audio_grid_seconds=GRID_SECONDS, history_window_policy='rolling_legacy_v1',rollout_steps=16,
                  continuation_policy='off',timing_output_policy='relative_delta_v1',phrase_context_policy='off',
-                 candidate_state_policy='cursor_v1'):
+                 candidate_state_policy='cursor_v1',training_window_policy='block_v1',max_phrase_events=64):
         self.song, self.codec, self.delta_vocab = song, codec, delta_vocab
+        if training_window_policy not in TRAINING_WINDOW_POLICIES:raise ValueError('invalid training_window_policy')
+        if int(max_phrase_events)<1:raise ValueError('max_phrase_events must be positive')
+        self.training_window_policy=training_window_policy
+        self.max_phrase_events=int(max_phrase_events)
         if phrase_context_policy not in PHRASE_POLICIES:raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
         if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
@@ -911,9 +1023,16 @@ class StreamInferenceContext:
         if self.rollout_steps < 1: raise ValueError('rollout_steps must be positive')
         self.audio_grid_seconds = _grid_seconds(audio_grid_seconds)
         self.bank = audio_bank if audio_bank is not None else build_audio_bank(song, self.clock, self.audio_grid_seconds)
+        if training_window_policy=='phrase_complete_v1':
+            from .stream_phrase import phrase_boundaries
+            self._training_boundaries=phrase_boundaries(self.bank,beat_at_second(self.clock,song.audio.duration_sec))
         self._reset_prefix()
 
     def _reset_prefix(self):
+        self._execution_runtime=None
+        if getattr(self,'training_window_policy','block_v1')=='phrase_complete_v1':
+            self._training_block_index=CausalPhraseBlockIndex(self._training_boundaries,self.rollout_steps,self.max_phrase_events)
+            self._training_block_index.advance(0,0.)
         self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec),
                                    sequence_codec=self.codec if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else None)
                         if self.phrase_context_policy != 'off' else None)
@@ -954,11 +1073,18 @@ class StreamInferenceContext:
             self._continuation_rows.append(self._continuation.features())
         else:self._continuation_rows.append(torch.zeros(continuation_dim(self.continuation_policy)))
         j = len(self._committed)
-        first = max(0,(j//self.rollout_steps)*self.rollout_steps-self.lead_in) if self.history_window_policy == 'block_aligned_v2' else max(0,j-self.lead_in)
+        first=self._history_first(j,step.end)
         keep = j-first+1
         if len(self._rows) > keep:
             del self._rows[:len(self._rows)-keep]
             del self._continuation_rows[:len(self._continuation_rows)-keep]
+
+    def _history_first(self,index,cursor):
+        if self.training_window_policy=='phrase_complete_v1':
+            anchor=self._training_block_index.advance(index,cursor)
+            return max(0,anchor-self.lead_in)
+        return (max(0,(index//self.rollout_steps)*self.rollout_steps-self.lead_in)
+                if self.history_window_policy=='block_aligned_v2' else max(0,index-self.lead_in))
 
     def commit(self, step):
         """Append a previously accepted NOTE/WAIT without replaying its prefix."""
@@ -1078,7 +1204,9 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
                                      history_window_policy=dataset.history_window_policy,rollout_steps=dataset.targets,
                                      continuation_policy=policy,timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
                                      phrase_context_policy=getattr(dataset,'phrase_context_policy','off'),
-                                     candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'))
+                                     candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(dataset,'max_phrase_events',64))
     batch = context.batch(prefix,cursor)
     row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in PHRASE_ROW_FIELDS or key in
            ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features')}

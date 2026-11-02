@@ -29,14 +29,17 @@ def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
         assert runtime.args[runtime.args.index(flag)+1] == expected
     assert '--candidate-count' not in runtime.args
     assert '--echo-prior-policy' not in runtime.args
-    assert runtime.task.result['epoch_target'] == 20
-    assert runtime.dispatch['expected_epoch'] == 20
+    assert runtime.task.result['epoch_target'] == 50
+    assert runtime.dispatch['expected_epoch'] == 50
     assert runtime.args[runtime.args.index('--audio-grid-seconds')+1]=='0.01'
     assert runtime.args[runtime.args.index('--plan-weight')+1]=='0.1'
     for flag,value in [('--validation-max-batches','32'),('--validation-batch-size','4'),
-                       ('--generation-eval-interval-epochs','1'),('--warmup-steps','100'),
+                       ('--generation-eval-interval-epochs','1'),('--warmup-steps','0'),
                        ('--prefetch-batches','2'),('--sample-workers','1'),('--audio-cache-gb','2.0'),
-                       ('--min-lr-ratio','0.1'),('--lr-schedule','cosine'),('--plan-blank-window-seconds','0.5')]:
+                       ('--min-lr-ratio','0.1'),('--lr-schedule','constant'),('--lr','0.0005'),('--plan-blank-window-seconds','0.5'),
+                       ('--training-window-policy','phrase_complete_v1'),('--max-phrase-events','64'),('--phrase-seam-events','2'),
+                       ('--phrase-execution-policy','persistent_modes_v1'),('--phrase-modes','4'),('--phrase-relation-weight','0.1'),
+                       ('--detail-representation-policy','shared_components_v1'),('--duration-feature-policy','log_time_v2')]:
         assert runtime.args[runtime.args.index(flag)+1]==value
 
 
@@ -48,6 +51,7 @@ def test_stream_generate_routes_checkpoint_and_filters_old_knobs(tmp_path, monke
     composer_api.start_generate(handler,dict(checkpoint=str(checkpoint),audio=str(audio),output=str(tmp_path/'maidata.txt'),
         seed=0,level=13.,pointer_grid_policy='obsolete',density_feedback_policy='obsolete'),runtime=runtime)
     assert runtime.args[:2] == ['-m','maichart.composer.stream_generate']
+    assert runtime.args[runtime.args.index('--phrase-mode-temperature') + 1] == '1.0'
     assert '--condition-file' in runtime.args
     assert '--pointer-grid-policy' not in runtime.args
     assert '--density-feedback-policy' not in runtime.args

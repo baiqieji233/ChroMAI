@@ -17,6 +17,7 @@ CONTROLS = {
     'audio_tracking_strength': (float, 0., None),
     'pointer_temperature': (float, None, None),
     'action_temperature': (float, None, None),
+    'phrase_mode_temperature': (float, 1., None),
     'min_same_head_ms': (float, 50., None),
     'touch_layout_policy': (str, 'open', ('open', 'legacy_two_heads')),
     'max_events': (int, 0, None),

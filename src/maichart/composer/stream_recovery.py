@@ -38,6 +38,7 @@ def recovery_state(model):
             'anchor_cursor':int(getattr(model,'_stream_recovery_anchor_cursor',0)),
             'policy':getattr(model,'_stream_recovery_policy',getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')),
             'target_policy':getattr(getattr(model,'config',None),'recovery_target_policy','authored_next_v1'),
+            'phrase_execution_policy':getattr(getattr(model,'config',None),'phrase_execution_policy','off'),
             'mix_cursor':int(getattr(model,'_stream_recovery_mix_cursor',0)),
             'short_cursor':int(getattr(model,'_stream_recovery_short_cursor',0))}
 
@@ -71,11 +72,17 @@ def restore_recovery_state(model, state):
             Fraction(row['start']); Fraction(row['end'])
             if row['kind'] == NOTE and not isinstance(row.get('text'), str):
                 raise ValueError('Invalid recovery generated event')
+            mode,start=row.get('phrase_mode'),row.get('phrase_mode_start')
+            if (mode is None)!=(start is None):raise ValueError('Incomplete recovery phrase execution metadata')
+            if mode is not None and (not isinstance(mode,int) or isinstance(mode,bool) or
+                not 0<=mode<int(getattr(getattr(model,'config',None),'phrase_modes',4)) or
+                not isinstance(start,(float,int)) or not math.isfinite(start) or start>float(Fraction(row['end']))+1e-8):
+                raise ValueError('Invalid recovery phrase execution metadata')
     cursor=state.get('anchor_cursor',0)
     if not isinstance(cursor,int) or cursor<0:raise ValueError('Invalid recovery anchor cursor')
     requested=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')
     requested_target=getattr(getattr(model,'config',None),'recovery_target_policy','authored_next_v1')
-    if requested!=policy or requested_target!=target_policy:
+    if requested!=policy or requested_target!=target_policy or state.get('phrase_execution_policy','off')!=getattr(getattr(model,'config',None),'phrase_execution_policy','off'):
         restore_recovery_state(model,None)
         model._stream_recovery_policy=requested
         return
@@ -159,7 +166,8 @@ def _prefix(dataset, episode):
     for record in episode['generated']:
         start,end = Fraction(record['start']), Fraction(record['end'])
         prefix.append(StreamStep(record['kind'], start, end, max(0.,second_at_beat(clock,start)),
-                                 max(0.,second_at_beat(clock,end)), record.get('text')))
+                                 max(0.,second_at_beat(clock,end)), record.get('text'),
+                                 phrase_mode=record.get('phrase_mode'),phrase_mode_start=record.get('phrase_mode_start')))
     return prefix
 
 
@@ -253,7 +261,9 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
                                          continuation_policy=dataset.continuation_policy,
                                          timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
                                          phrase_context_policy=getattr(dataset,'phrase_context_policy','off'),
-        candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'))
+        candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(dataset,'max_phrase_events',64))
         raw = context.batch(prefix,cursor)
     else:
         raw = context.current_batch()
@@ -310,6 +320,9 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
             proposal['motion_reference_shape']=selected_result['motion_reference_shape'][0,-1]
             proposal['template_keep_logit']=transition[2]
             proposal['template_reference_shape']=selected_batch['history_shape'][0,-1].masked_fill(~selected_batch['history_kind'][0,-1].eq(NOTE),-1)
+        from .stream_phrase_runtime import execution_options
+        proposal.update(execution_options(model,context,selected_result,selected_batch,proposal['context'],
+            generator,beat=beat))
         return proposal
     point,delta_id,retries,failed_times = sample_timed_event(model,scores,deltas,cursor,action_at,
         int(result['reference_phase'][0,-1]),
@@ -324,7 +337,8 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
     if point is None: return wait('rejected_configurations')
     end = cursor+deltas[delta_id]
     a,b = max(0.,second_at_beat(context.clock,cursor)), second_at_beat(context.clock,end)
-    return StreamStep(NOTE,cursor,end,a,b,point.note_text), ('guard_retry' if retries else 'ok')
+    from .stream_phrase_runtime import execution_metadata
+    return StreamStep(NOTE,cursor,end,a,b,point.note_text,**execution_metadata(context,end)), ('guard_retry' if retries else 'ok')
 
 
 @torch.no_grad()
@@ -380,7 +394,9 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                     continuation_policy=dataset.continuation_policy,
                     timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
                     phrase_context_policy=getattr(dataset,'phrase_context_policy','off'),
-        candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'))
+        candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(dataset,'max_phrase_events',64))
                 context.batch(prefix,prefix[-1].end if prefix else Fraction(0))
                 if episode['song'] not in audio_caches:
                     audio_caches[episode['song']] = _encode_song(model,bank,device)
@@ -403,7 +419,8 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                     prefix.append(proposal); accepted += 1
                     if policy in ('greedy_mixed_v3','greedy_mixed_v4'):diagnostics['greedy_generated_steps' if options['temperature']==0 else 'sampled_generated_steps']+=1
                     episode['generated'].append(dict(kind=proposal.kind,start=str(proposal.start),
-                        end=str(proposal.end),text=proposal.text))
+                        end=str(proposal.end),text=proposal.text,
+                        phrase_mode=proposal.phrase_mode,phrase_mode_start=proposal.phrase_mode_start))
                 if accepted == 0:
                     episodes[slot] = None
                     continue
@@ -473,7 +490,9 @@ def _context(dataset,song,bank):
         rollout_steps=dataset.targets,continuation_policy=dataset.continuation_policy,
         timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
         phrase_context_policy=getattr(dataset,'phrase_context_policy','off'),
-        candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'))
+        candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
+        training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
+        max_phrase_events=getattr(dataset,'max_phrase_events',64))
 
 
 def _prepared_cache(dataset,model,song,bank,device,caches):
@@ -526,13 +545,15 @@ def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cach
         family_options['motion_reference_shape']=output['motion_reference_shape'][0,-1]
         family_options['template_keep_logit']=transition[2]
         family_options['template_reference_shape']=batch['history_shape'][0,-1].masked_fill(~batch['history_kind'][0,-1].eq(NOTE),-1)
+    from .stream_phrase_runtime import execution_options,execution_metadata
+    family_options.update(execution_options(model,context,output,batch,action[0,-1],generator,beat=source_step.end))
     point,retries=sample_guarded_event(model,action[0,-1],int(output['reference_phase'][0,-1]),
         source_step.end,guard,generator,temperature=temperature,
         reference_phase_mask=output.get('reference_phase_mask',None)[0,-1]
             if 'reference_phase_mask' in output else None,
         motion_phase_distribution=output['motion_phase_distribution'][0,-1]
             if 'motion_phase_distribution' in output else None,button_load=load,**family_options)
-    return (replace(source_step,text=point.note_text) if point is not None else None),retries
+    return (replace(source_step,text=point.note_text,**execution_metadata(context,source_step.end)) if point is not None else None),retries
 
 
 def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagnostics):

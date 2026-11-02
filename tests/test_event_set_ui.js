@@ -28,8 +28,11 @@ test('event-set actual UI helpers apply defaults and hide unsupported fields',()
   assert.equal(payload.audio_grid_seconds,.01);assert.equal(e('#composerAudioGridSeconds').value,'0.01');
   assert.equal(payload.plan_weight,.1);assert.equal(e('#composerPlanWeight').value,'0.1');
   assert.equal(payload.validation_batch_size,4);assert.equal(payload.validation_max_batches,32);
-  assert.equal(payload.warmup_steps,100);assert.equal(payload.prefetch_batches,2);assert.equal(payload.audio_cache_gb,2);
-  assert.equal(payload.lr_schedule,'cosine');assert.equal(payload.plan_blank_window_seconds,.5);
+  assert.equal(payload.warmup_steps,0);assert.equal(payload.prefetch_batches,2);assert.equal(payload.audio_cache_gb,2);
+  assert.equal(payload.lr_schedule,'constant');assert.equal(payload.plan_blank_window_seconds,.5);
+  assert.equal(payload.epochs,50);assert.equal(payload.lr,.0005);assert.equal(payload.training_window_policy,'auto');
+  assert.equal(payload.max_phrase_events,64);assert.equal(payload.phrase_seam_events,2);assert.equal(payload.phrase_execution_policy,'auto');
+  assert.equal(payload.phrase_modes,4);assert.equal(payload.phrase_relation_weight,.1);assert.equal(payload.detail_representation_policy,'auto');assert.equal(payload.duration_feature_policy,'auto');
   assert.equal(e('#composerSampleWorkers').disabled,true);
   assert.equal(payload.architecture_profile,'event_set_stream_v1');assert.ok(!('candidate_count' in payload));
   e('#composerArchitectureProfile').value='audio_grounded_v3';c.updateEventSetControls();
@@ -316,4 +319,15 @@ test('resume learning-rate reset requires backend capability while normal runs r
   assert.throws(()=>c.assertEventSetResumeLearningRateCapability(payload,{capabilities:{}}),/重载更新后的 WebUI/);
   assert.doesNotThrow(()=>c.assertEventSetResumeLearningRateCapability(payload,{capabilities:{event_set_resume_lr_reset:true}}));
   assert.doesNotThrow(()=>c.assertEventSetResumeLearningRateCapability({...payload,reset_learning_rate:false},{capabilities:{}}));
+});
+
+test('phrase mode temperature is visible only for trained phrase modes',()=>{
+  const {context:c,element:e}=harness();
+  e('#composerArchitectureProfile').value='event_set_stream_v1';
+  e('#checkpointPath').value='model.pt';
+  c.generationInspection={path:'model.pt',data:{valid:true,schema:'maichart-composer-event-set-checkpoint-v1',generation_capabilities:{persistent_phrase_modes:false}}};
+  c.updateEventSetControls();assert.equal(e('#composerPhraseModeTemperature').field.hidden,true);
+  c.generationInspection.data.generation_capabilities.persistent_phrase_modes=true;
+  c.updateEventSetControls();assert.equal(e('#composerPhraseModeTemperature').field.hidden,false);
+  e('#composerPhraseModeTemperature').value='0';assert.equal(c.chartComposerGenerationPayload().phrase_mode_temperature,0);
 });

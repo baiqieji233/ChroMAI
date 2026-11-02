@@ -82,8 +82,11 @@ def _read_intervals(cache, queries, inverse, field='local'):
 
 
 class DurationAudioScorer(nn.Module):
-    def __init__(self, width, codec):
+    def __init__(self, width, codec, *, feature_policy='legacy_v1'):
         super().__init__()
+        if feature_policy not in ('legacy_v1', 'log_time_v2'):
+            raise ValueError(f'Unknown duration feature policy: {feature_policy}')
+        self.feature_policy = feature_policy
         self.score = nn.Linear(32 * 4 + 2, 1, bias=False)
         nn.init.zeros_(self.score.weight)
         self._tables = {}
@@ -136,8 +139,14 @@ class DurationAudioScorer(nn.Module):
         audio = audio * attention
         pooled = torch.cat((audio[..., :3, :].mean(-2), audio[..., 3:6, :].mean(-2),
                             audio[..., 6:, :].mean(-2), audio[..., -1, :]-audio[..., 0, :]), -1)
-        features = torch.cat((pooled, (begin-second[:, None])[..., None],
-                              (end-begin)[..., None]), -1)
+        time_features = torch.stack((begin-second[:, None], end-begin), -1)
+        if self.feature_policy == 'log_time_v2':
+            # Physical seconds previously entered an unbounded linear score:
+            # a rare long hold could dominate both logits and weight gradients.
+            # Smooth, strictly monotone compression retains exact interval
+            # ordering without clipping durations or changing acoustic reads.
+            time_features = time_features.sign()*torch.log1p(time_features.abs())
+        features = torch.cat((pooled, time_features), -1)
         supported = table[None, :, 4].bool() & context['valid'][:, None] & (end <= context['end_second'][:, None])
         residual = self.score(features).squeeze(-1).masked_fill(~supported, 0.)
         indices = getattr(self, self._candidate_indices[shape, slot])

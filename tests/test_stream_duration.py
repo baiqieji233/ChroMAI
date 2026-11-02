@@ -73,6 +73,18 @@ def test_duration_candidate_dedup_backward_and_bf16_clock_precision():
     assert scorer(None, logits, 1, 0, None) is logits
 
 
+def test_log_time_policy_preserves_interval_evidence_with_smooth_scale():
+    scorer, context, _ = _scorer_fixture()
+    scorer.feature_policy = 'log_time_v2'
+    with torch.no_grad():
+        scorer.score.weight.zero_()
+        scorer.score.weight[0, -1] = 1.
+    actual = scorer(None, torch.zeros(2, 4), 1, 0, context)
+    expected = torch.log1p(torch.tensor([.12345, .12345, .6789, 0.])).expand(2, -1)
+    torch.testing.assert_close(actual, expected)
+    assert actual[0, 2] > actual[0, 0] > 0
+
+
 def test_real_regular_details_phase_marginalization_uses_same_intervals():
     from maichart.composer.event_set_codec import EventSetCodec
     from maichart.composer.stream_model import StreamComposer, StreamComposerConfig
