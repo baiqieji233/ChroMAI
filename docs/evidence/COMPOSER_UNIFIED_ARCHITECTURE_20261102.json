@@ -936,6 +936,38 @@
     "lr_schedule": "constant",
     "data_workers": 0,
     "cpu_threads": 2,
-    "audio_cache_gb": 1.0
-  }
+    "audio_cache_gb": 1.0,
+    "observed_running": {
+      "epoch": 1,
+      "batch": 1120,
+      "optimizer_steps": 280,
+      "elapsed_sec": 143.19238670001505,
+      "effective_targets_per_sec": 639.6673881265111,
+      "timing": {
+        "data_sec": 1.0352775000792462,
+        "transfer_sec": 1.8125664001854602,
+        "compute_sec": 140.23396840016358
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 161,
+        "prepare_sec": 128.022,
+        "consumer_wait_sec": 0.531,
+        "buffered_tensor_bytes": 83589756,
+        "max_buffered_tensor_bytes": 118960222
+      },
+      "cuda_memory": {
+        "allocated_gib": 0.904874324798584,
+        "reserved_gib": 4.818359375,
+        "peak_allocated_gib": 3.604098320007324
+      },
+      "last_gradient_norm": 4.087706089019775,
+      "skipped_windows": 0,
+      "learning_rate": 0.0002
+    },
+    "log": "webui_workspace\\logs\\20261103_001503_composer_train_2b4d7deadc60.log"
+  },
+  "implementation_commit": "bb75acb"
 }
