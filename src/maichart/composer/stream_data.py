@@ -278,7 +278,7 @@ class StreamDataset(Dataset):
                  history_window_policy='rolling_legacy_v1',continuation_policy='off',timing_output_policy='relative_delta_v1',
                  window_balance_policy='equal_window_v1',phrase_context_policy='off',
                  candidate_state_policy='cursor_v1', training_window_policy='block_v1',
-                 max_phrase_events=64, phrase_seam_events=2, relation_policy='off'):
+                 max_phrase_events=64, phrase_seam_events=2, relation_policy='off', song_response_group_size=4):
         if lead_in < 0 or targets < 1 or window_seconds <= 0:
             raise ValueError('invalid stream window settings')
         if unknown_policy not in ('error','mask'):
@@ -288,6 +288,9 @@ class StreamDataset(Dataset):
         if relation_policy not in RELATION_POLICIES:raise ValueError('invalid relation_policy')
         if int(max_phrase_events)<1 or not 0<=int(phrase_seam_events)<=16:
             raise ValueError('invalid phrase training limits')
+        if not 2<=int(song_response_group_size)<=4:
+            raise ValueError('song_response_group_size must be in [2,4]')
+        self.song_response_group_size=int(song_response_group_size)
         self.training_window_policy=training_window_policy
         self.max_phrase_events=int(max_phrase_events)
         self.phrase_seam_events=int(phrase_seam_events)
@@ -807,6 +810,8 @@ class StreamDataset(Dataset):
             row['sample_weight']/=multiplicity
             row['_training_target_budget']=row['loss_mask'].float()/multiplicity
             row['_training_reference_targets']=self.targets
+            row['_training_chart_id']=song
+            row['_song_response_group_size']=self.song_response_group_size
             row['training_phrase_group']=torch.from_numpy(segments[first:end].copy())
             row['training_phrase_group'][row['step_index']>=target_end]=-1
             row['training_phrase_position']=torch.from_numpy(positions[first:end].copy())

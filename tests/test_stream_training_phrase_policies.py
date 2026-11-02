@@ -51,3 +51,19 @@ def test_phrase_mode_eval_temperature_includes_greedy():
     assert validate({})['phrase_mode_temperature'] == 1.
     assert validate({'phrase_mode_temperature': 0.})['phrase_mode_temperature'] == 0.
     with pytest.raises(ValueError): validate({'phrase_mode_temperature': -1.})
+
+
+def test_song_style_fresh_defaults_and_legacy_resume_contract():
+    fresh = resolve_learning_policies(SimpleNamespace())
+    assert fresh['song_profile_policy'] == 'masked_joint_v1'
+    assert fresh['song_response_policy'] == 'music_response_v1'
+    assert (fresh['song_profile_components'], fresh['song_profile_weight']) == (4, .1)
+    assert (fresh['song_response_modes'], fresh['song_response_group_size']) == (4, 4)
+    parent = SimpleNamespace(**{k: v for k, v in LEGACY_LEARNING_POLICIES.items()
+                                if not k.startswith('song_')})
+    resumed = resolve_learning_policies(SimpleNamespace(), parent, resume=True)
+    assert resumed['song_profile_policy'] == resumed['song_response_policy'] == 'off'
+    with pytest.raises(ValueError, match='Resume inherits song_profile_policy'):
+        resolve_learning_policies(SimpleNamespace(song_profile_policy='masked_joint_v1'), parent, resume=True)
+    with pytest.raises(ValueError, match='music_response_v1 requires'):
+        resolve_learning_policies(SimpleNamespace(song_response_policy='music_response_v1', phrase_execution_policy='off'))

@@ -5,6 +5,17 @@ from collections import Counter
 import torch
 
 
+def ensure_song_response(model,context,output,generator):
+    """Freeze an audio/control prior choice once, including recovery entry points."""
+    choice=getattr(context,'song_response_choice',None)
+    if choice is None and 'song_response_logits' in output:
+        logits=output['song_response_logits'][0].float()
+        if not bool(torch.isfinite(logits).any()):raise ValueError('No finite whole-song response mode')
+        choice=int(torch.multinomial(logits.softmax(-1),1,generator=generator))
+        context.song_response_choice=choice
+    return choice
+
+
 def execution_options(model, context, phrase_output, batch, action, generator, *, temperature=1., beat=None):
     if getattr(getattr(model,'config',None),'phrase_execution_policy','off')!='persistent_modes_v1':return {}
     temperature=float(temperature)
@@ -22,7 +33,9 @@ def execution_options(model, context, phrase_output, batch, action, generator, *
         mode=next((s.phrase_mode for s in reversed(prefix)
                    if getattr(s,'phrase_mode_start',None)==start and getattr(s,'phrase_mode',None) is not None),None)
         if mode is None:
-            scores=model.execution_prior(phrase_output,batch)[0,-1]
+            song_choice=ensure_song_response(model,context,phrase_output,generator)
+            scores=(model.execution_prior(phrase_output,batch,song_choice=song_choice) if song_choice is not None else
+                    model.execution_prior(phrase_output,batch))[0,-1]
             if not bool(torch.isfinite(scores).any()):raise ValueError('No finite phrase execution mode')
             mode=(int(scores.argmax()) if temperature==0 else
                   int(torch.multinomial((scores.float()/temperature).softmax(-1),1,generator=generator)))

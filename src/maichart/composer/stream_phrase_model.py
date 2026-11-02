@@ -291,7 +291,7 @@ class CausalPhraseContext(nn.Module):
         representation = self.shared(torch.cat((anchor, self.writing(prediction)), -1))
         if hasattr(self, 'ordered'):
             ordered_output.update(phrase_ordered_prediction=self.ordered.predict(intent), phrase_progress_repr=progress)
-        return residual, dict(phrase_intent=intent, phrase_reference_weights=weights,
+        return residual, dict(phrase_intent=intent, phrase_reference_weights=weights,phrase_music_anchor=anchor,
             phrase_prediction=prediction, phrase_repr=representation,
             phrase_reference_repr=references, phrase_reference_mask=allowed,
             phrase_residual_rms=residual.float().square().mean(-1).sqrt(), **ordered_output)

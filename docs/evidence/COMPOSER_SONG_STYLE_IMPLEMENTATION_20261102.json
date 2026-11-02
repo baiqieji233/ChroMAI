@@ -1,0 +1,41 @@
+{
+  "date": "2026-11-02",
+  "base_commit": "44341e0",
+  "scope": "automatic song controls and music response priors over persistent phrase modes; same-chart distant phrase groups; no cross-difficulty multi-chart contrast",
+  "checkpoint_backup": ".scratch/song_style_20261102/v41_before",
+  "parent_full_sha256": "EA582C9954BC4ED77E7E1EA1DAA0E20A7730C730DF624422E3F0B210F9A3BD44",
+  "formal_training_started": false,
+  "active_training_process_at_start": false,
+  "webui": "http://127.0.0.1:7862",
+  "tests": {
+    "full_suite_first": {"passed": 4523, "failed": 1, "skipped": 13, "failure": "stale migration addition whitelist, corrected"},
+    "full_suite_second": {"passed": 4524, "failed": 4, "skipped": 13, "failure": "same missing chart identity initialization defect, corrected"},
+    "after_fixes_stream_regression": {"passed": 913, "failed": 0},
+    "final_targeted": {"passed": 58, "failed": 0},
+    "javascript": {"passed": 201, "failed": 0},
+    "logs": ".scratch/song_style_20261102"
+  },
+  "performance": {
+    "scope": "four actual charts; full v41 vocabulary; B32 T174; 384d 8 layers; BF16; 3 warmup and 20 optimizer updates each; fixed batch excludes preparation/recovery/checkpoint I/O",
+    "baseline_targets_per_second": 1803.4792076257947,
+    "new_targets_per_second": 1723.590586173587,
+    "throughput_ratio": 0.9557030537893599,
+    "baseline_peak_gib": 4.96002721786499,
+    "new_peak_gib": 5.016230583190918,
+    "baseline_parameters": 62733075,
+    "new_parameters": 66013833,
+    "measured_song_response_groups": 25,
+    "test_weights_saved": false,
+    "musical_quality_verified": false
+  },
+  "contracts": {
+    "style_condition_dim": 16,
+    "profile_distribution": "129_bin_categorical_mixture_then_feasibility_projection",
+    "profile_score": "masked_preprojection_joint_score; not exact projected likelihood",
+    "profile_budget": "unique charts per consumed batch; repeated batches still contribute",
+    "response_input": "audio and controls; phrase response adds causal phrase intent",
+    "response_actor": "same four actor modes reused; song choice changes only priors",
+    "response_grouping": "2..4 distant complete trusted phrases sharing chart identity, never audio identity",
+    "runtime": "immutable song choice preserved across search reconstruction and persistent recovery episodes"
+  }
+}

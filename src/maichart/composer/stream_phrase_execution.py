@@ -58,7 +58,14 @@ class PhraseExecution(nn.Module):
         if reference is not None:
             transformed=reference.float()[...,self.transforms]
             options=torch.cat((transformed.new_zeros(*transformed.shape[:-2],1,8),transformed),-2)
-            probabilities=self.reference_choice(chosen).float().softmax(-1)
+            choice_logits=self.reference_choice(chosen).float()
+            if hasattr(self,'reference_evidence'):
+                null=phrase.get('phrase_aligned_null_weight',torch.ones_like(intent[...,0]))
+                weights=phrase.get('phrase_reference_weights')
+                available=1-weights[...,0] if weights is not None else torch.zeros_like(null)
+                evidence=torch.stack((1-null,available),-1).to(chosen)
+                choice_logits=choice_logits+self.reference_evidence(evidence)[...,None,:]
+            probabilities=choice_logits.softmax(-1)
             lanes=lanes+self.reference_gain*(probabilities@options)
         lanes=lanes-lanes.mean(-1,keepdim=True)
         return dict(prior_logits=self.prior(intent).float(),route_bias=self.route(state).float(),lane_bias=lanes)
@@ -70,13 +77,17 @@ class PhraseExecution(nn.Module):
         return (sets[...,None,:,:]*lanes[...,None,:]).sum(-1)
 
 
-def whole_phrase_configuration_loss(mode_nll,prior_logits,batch,weights,normalizer):
+def whole_phrase_configuration_loss(mode_nll,prior_logits,batch,weights,normalizer, *,
+                                    song_logits=None,song_phrase_logits=None):
     """Marginalize one mode after accumulating a complete trusted phrase.
 
     Weighted event scores preserve the existing chart/window budget. For
     fragments or ambiguous recovery rows only the local mixture is trained;
     they are never called complete-phrase likelihood observations.
     """
+    if song_logits is not None and song_phrase_logits is not None:
+        return song_response_configuration_loss(mode_nll,prior_logits,batch,weights,normalizer,
+                                                song_logits,song_phrase_logits)
     prior=prior_logits.float().log_softmax(-1)
     local=-torch.logsumexp(prior-mode_nll.float(),-1)
     groups=batch.get('training_phrase_group')
@@ -118,3 +129,57 @@ def future_relation_loss(prediction,batch,weights,normalizer):
     error=torch.cat((classification[...,:16],timing,classification[...,18:]),-1)
     per_event=(error*mask).sum((-1,-2))/mask.sum((-1,-2)).clamp_min(1)
     return (per_event*weights).sum()/normalizer
+
+
+def song_response_configuration_loss(mode_nll,prior_logits,batch,weights,normalizer,song_logits,song_phrase_logits):
+    """Nested likelihood of sampled complete phrases, never a whole-chart claim.
+
+    Each target retains its original weight. The song prior is charged once
+    per sampled group; complete phrase modes are marginalized inside it.
+    """
+    # Unpaired, incomplete and recovery observations use a local mixture of
+    # response-conditioned phrase priors, without claiming song evidence.
+    phrase_conditional=song_phrase_logits.float().log_softmax(-1)
+    effective_prior=torch.logsumexp(song_logits.float().log_softmax(-1)[:,None,:,None]+phrase_conditional,-2)
+    ordinary,metrics=whole_phrase_configuration_loss(mode_nll,effective_prior,batch,weights,normalizer)
+    song_logp=song_logits.float().log_softmax(-1)
+    zero=ordinary.detach()*0
+    metrics.update(song_response_groups=zero,song_response_sampled_phrases=zero,
+        song_response_posterior_entropy=zero,
+        song_response_prior_entropy=-(song_logp.exp()*song_logp).sum(-1).mean())
+    response=batch.get('training_song_response_group')
+    count=int(batch.get('_song_response_group_count',0))
+    if response is None or not count:return ordinary,metrics
+    groups=batch['training_phrase_group'];complete=batch['training_phrase_complete'].bool()
+    n=response.numel();index=groups.clamp_min(0).flatten()
+    valid=complete & groups.ge(0) & weights.gt(0)
+    first=valid & batch['training_phrase_position'].eq(0)
+    mass=(weights*valid).flatten()
+    summed=mode_nll.new_zeros(n,mode_nll.size(-1)).index_add(0,index,mode_nll.flatten(0,1)*mass[:,None])
+    first_count=weights.new_zeros(n).index_add(0,index,first.flatten().to(weights))
+    eligible=response.ge(0)&first_count.eq(1)
+    phrase_prior=song_phrase_logits.float().log_softmax(-1)
+    shape=(n,*phrase_prior.shape[-2:])
+    pp=phrase_prior.new_zeros(shape).index_add(0,index,phrase_prior.flatten(0,1)*first.flatten()[:,None,None])
+    base=effective_prior
+    bp=base.new_zeros(n,base.size(-1)).index_add(0,index,base.flatten(0,1)*first.flatten()[:,None])
+    old=-torch.logsumexp(bp-summed,-1)
+    conditional=-torch.logsumexp(pp-summed[:,None,:],-1)
+    rid=response.clamp_min(0)
+    group_sizes=weights.new_zeros(count).index_add(0,rid,eligible.to(weights))
+    active=eligible & group_sizes[rid].ge(2)
+    conditional_sum=conditional.new_zeros(count,conditional.size(-1)).index_add(0,rid,conditional*active[:,None])
+    song_rows=song_logits[:,None,:].expand(*groups.shape,song_logits.size(-1)).float().log_softmax(-1)
+    sp=song_rows.new_zeros(n,song_rows.size(-1)).index_add(0,index,song_rows.flatten(0,1)*first.flatten()[:,None])
+    # All rows in one chart have the same audio+condition prior; average is
+    # invariant to which phrase the CPU grouping lists first.
+    group_prior=sp.new_zeros(count,sp.size(-1)).index_add(0,rid,sp*active[:,None])/group_sizes.clamp_min(1)[:,None]
+    group_active=group_sizes.ge(2)
+    joint=group_prior-conditional_sum
+    nested=-torch.logsumexp(joint,-1)
+    adjustment=(nested.masked_fill(~group_active,0).sum()-old.masked_fill(~active,0).sum())/normalizer
+    posterior=joint.log_softmax(-1)
+    metrics.update(song_response_groups=group_active.sum().float(),
+        song_response_sampled_phrases=active.sum().float(),
+        song_response_posterior_entropy=(-(posterior.exp()*posterior).sum(-1)).masked_fill(~group_active,0).sum()/group_active.sum().clamp_min(1))
+    return ordinary+adjustment,metrics

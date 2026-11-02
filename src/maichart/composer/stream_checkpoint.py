@@ -57,6 +57,8 @@ def inspect_payload(payload):
         atom_vocab_size=codec.num_atoms,event_shapes=codec.num_shapes,codec_coverage=codec.coverage,
         generation_capabilities=dict(composer_generation=True,event_set_stream=True,rational_event_positions=True,
             phrase_search=True,phrase_candidates=(1,2,4),transactional_sustain_repair=True,
+            song_profile=getattr(config,'song_profile_policy','off')=='masked_joint_v1',
+            song_response=getattr(config,'song_response_policy','off')=='music_response_v1',
             persistent_phrase_modes=getattr(config,'phrase_execution_policy','off')=='persistent_modes_v1',
             shared_detail_components=getattr(config,'detail_representation_policy','private_v1')=='shared_components_v1',
             logarithmic_duration_features=getattr(config,'duration_feature_policy','legacy_v1')=='log_time_v2',

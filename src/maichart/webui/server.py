@@ -232,6 +232,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "multi_dataset_training": True,
                                               "composer_training": True,
                                               "composer_phrase_contract": "phrase_modes_v1",
+                                              "composer_song_style_contract": "masked_joint_response_v1",
                                               "composer_training_runtime": "music_context_shared_slots_v2",
                                               "composer_training_controls": "causal_motif_runtime_controls_v11_fresh_training_defaults",
                                               "composer_learning_rate_schedule": "optimizer_updates_v1",

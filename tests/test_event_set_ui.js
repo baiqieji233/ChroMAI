@@ -331,3 +331,37 @@ test('phrase mode temperature is visible only for trained phrase modes',()=>{
   c.updateEventSetControls();assert.equal(e('#composerPhraseModeTemperature').field.hidden,false);
   e('#composerPhraseModeTemperature').value='0';assert.equal(c.chartComposerGenerationPayload().phrase_mode_temperature,0);
 });
+
+
+test('whole-song controls follow checkpoint capabilities and retain explicit locks',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  let training=c.chartComposerTrainingPayload();assert.equal(training.song_profile_policy,'auto');assert.equal(training.song_response_policy,'auto');assert.equal(training.song_profile_weight,.1);
+  e('#checkpointPath').value='song.pt';c.generationInspection={path:'song.pt',data:{valid:true,schema:'maichart-composer-event-set-checkpoint-v1',generation_capabilities:{}}};
+  let payload=c.chartComposerGenerationPayload();assert.ok(!('song_style_source' in payload));
+  c.generationInspection.data.generation_capabilities={song_profile:true,song_response:true};
+  e('#composerSongStyleSource').value='manual';e('#composerSongStyleLocks').value='{"tap_bias":0.2}';e('#composerSongResponseMode').value='2';
+  payload=c.chartComposerGenerationPayload();assert.equal(payload.song_style_source,'manual');assert.equal(payload.song_style_locks.tap_bias,.2);assert.equal(payload.song_response_mode,2);
+  e('#composerSongStyleLocks').value='[]';assert.throws(()=>c.chartComposerGenerationPayload(),/JSON 对象/);
+});
+
+
+test('whole-song controls persist and expose bounded training inputs',()=>{
+  const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
+  const generationFields=source.slice(source.indexOf('const GENERATION_PARAM_FIELDS ='),source.indexOf('];',source.indexOf('const GENERATION_PARAM_FIELDS =')));
+  for(const id of ['composerSongStyleSource','composerSongStyleSeed','composerSongStyleLocks','composerSongResponseMode'])assert.ok(generationFields.includes(`"${id}"`));
+  for(const [id,min,max] of [['composerSongProfileComponents',1,16],['composerSongResponseModes',1,8],['composerSongResponseGroupSize',2,4]])
+    assert.match(html,new RegExp(`id="${id}"[^>]*min="${min}"[^>]*max="${max}"`));
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.currentTrainingMode=()=> 'resume';c.updateEventSetControls();assert.equal(e('#composerSongProfilePolicy').disabled,true);assert.equal(e('#composerSongProfileWeight').disabled,true);
+  c.currentTrainingMode=()=> 'fresh';c.updateEventSetControls();assert.equal(e('#composerSongProfilePolicy').disabled,false);assert.equal(e('#composerSongProfileWeight').disabled,false);
+});
+
+
+test('response-only checkpoints expose and submit response mode without profile settings',()=>{
+  const {context:c,element:e}=harness();e('#checkpointPath').value='response.pt';
+  c.generationInspection={path:'response.pt',data:{valid:true,schema:'maichart-composer-event-set-checkpoint-v1',generation_capabilities:{song_profile:false,song_response:true}}};
+  e('#composerSongResponseMode').value='2';c.updateEventSetControls();
+  assert.equal(e('#composerSongStyleGeneration').hidden,false);
+  assert.equal(e('#composerSongStyleSource').disabled,true);assert.equal(e('#composerSongResponseMode').disabled,false);
+  const payload=c.chartComposerGenerationPayload();assert.equal(payload.song_response_mode,2);assert.ok(!('song_style_source' in payload));
+});

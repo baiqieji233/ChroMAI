@@ -220,6 +220,10 @@ function composerTrainingView(task) {
         ['NOTE / WAIT / EOS loss',show(number(metrics,'kind_loss'),4)],['拍距 loss',show(number(metrics,'delta_loss'),4)],
         ['整拍配置 loss',show(number(metrics,'configuration_loss'),4)],['形状 loss',show(number(metrics,'shape_loss'),4)],
         ['等价相位 loss',show(number(metrics,'phase_loss'),4)],['细节 loss',show(number(metrics,'detail_loss'),4)],
+        ['整曲风格补全 loss',show(number(metrics,'song_profile_loss'),4)],
+        ['整曲风格加权 loss',show(number(metrics,'song_profile_weighted_loss'),4)],
+        ['同谱远距短句组',show(number(metrics,'song_response_groups'),2)],
+        ['整曲响应选择熵',show(number(metrics,'song_response_prior_entropy'),4)],
         ['音频规划 loss（未乘权重）',show(number(metrics,'plan_loss'),4)],
         ['转折 loss（已乘权重）',show(number(metrics,'transition_exit_loss'),4)],
         ['自产历史恢复 loss（已乘权重）',show(number(metrics,'recovery_loss'),4)],
@@ -840,6 +844,7 @@ const GENERATION_PARAM_FIELDS = [
   "streamMaxDenominator", "streamMaxIntervalDenominator", "streamMinSpacingMs",
   "streamStyleBalanceStrength", "streamSectionTypeStrength", "streamPlanIntentStrength", "streamLocalChordStrength", "streamPhysicalStrength",
   "streamConfigurationCandidates",
+  "composerSongStyleSource", "composerSongStyleSeed", "composerSongStyleLocks", "composerSongResponseMode",
   "composerMaxEvents", "composerConditionFile", "composerCurveStrength", "composerPointerTemperature", "composerActionTemperature", "composerPhraseModeTemperature", "composerActionHistoryStrength", "composerActionTypeTemperature", "composerActionTypeMinP", "composerMinSameHeadMs", "composerPointerHistoryStrength", "composerActionRetryPolicy",
   "composerPointerGridPolicy", "composerRepetitionGuard", "composerSurvivalCalibration", "composerDensityFeedbackOverride",
   "composerInterceptTapOnSlide", "composerTouchHistoryGuard", "composerTouchHistoryBound",
@@ -2157,8 +2162,11 @@ function chartComposerTrainingPayload(options = {}) {
     if(mode==='resume' && element('#composerResetLearningRate')?.checked)payload.reset_learning_rate=true;
     for(const [key,id,fallback] of [['training_window_policy','composerTrainingWindowPolicy','auto'],['phrase_execution_policy','composerPhraseExecutionPolicy','auto'],['detail_representation_policy','composerDetailRepresentationPolicy','auto'],['duration_feature_policy','composerDurationFeaturePolicy','auto']]) payload[key]=valueOrDefault('#'+id,fallback);
     for(const [key,id,fallback] of [['max_phrase_events','composerMaxPhraseEvents',64],['phrase_seam_events','composerPhraseSeamEvents',2],['phrase_modes','composerPhraseModes',4],['phrase_relation_weight','composerPhraseRelationWeight',.1]]) payload[key]=Number(valueOrDefault('#'+id,fallback));
+    for(const [key,id] of [['song_profile_policy','composerSongProfilePolicy'],['song_response_policy','composerSongResponsePolicy']])payload[key]=valueOrDefault('#'+id,'auto');
+    for(const [key,id,fallback] of [['song_profile_components','composerSongProfileComponents',4],['song_profile_weight','composerSongProfileWeight',.1],['song_response_modes','composerSongResponseModes',4],['song_response_group_size','composerSongResponseGroupSize',4]])payload[key]=Number(valueOrDefault('#'+id,fallback));
     payload.timing_compute=valueOrDefault('#composerTimingCompute','supervised');
     payload.learning_policy=valueOrDefault('#composerLearningPolicy','auto');
+    if(mode!=='resume' && payload.learning_policy==='legacy'){payload.song_profile_policy='off';payload.song_response_policy='off';}
     payload.transition_exit_weight=Number(valueOrDefault('#composerTransitionExitWeight',0));
     payload.event_family_audio_weight=Number(valueOrDefault('#composerEventFamilyAudioWeight',.25));
     payload.phrase_loss_weight=Number(valueOrDefault('#composerPhraseLossWeight',.05));
@@ -2392,12 +2400,20 @@ function chartComposerGenerationPayload() {
   for(const key of ['pointer_temperature','action_temperature'])if(payload[key]===null)delete payload[key];
   if(isEventSetGeneration()) {
     for(const [key,id,fallback] of [['phrase_candidates','composerPhraseCandidates',1],['audio_tracking_strength','composerAudioTrackingStrength',0],['softcomfort_strength','composerSoftcomfortStrength',1],['phrase_write_beats','composerPhraseWriteBeats',8],['phrase_commit_beats','composerPhraseCommitBeats',4],['phrase_step_budget','composerPhraseStepBudget',256],['phrase_repair_budget','composerPhraseRepairBudget',8],['phrase_rollback_budget','composerPhraseRollbackBudget',4],['phrase_time_budget_sec','composerPhraseTimeBudgetSec',30]])payload[key]=Number(valueOrDefault('#'+id,fallback));
+    const songCaps=generationInspection?.data?.generation_capabilities||{};
+    if(songCaps.song_profile===true){
+      payload.song_style_source=valueOrDefault('#composerSongStyleSource','auto');
+      payload.song_style_seed=valueOrDefault('#composerSongStyleSeed','').trim()===''?null:Number(valueOrDefault('#composerSongStyleSeed',0));
+      try{payload.song_style_locks=JSON.parse(valueOrDefault('#composerSongStyleLocks','{}'));}catch{throw new Error('整曲风格手动锁定必须是有效的 JSON 对象');}
+      if(!payload.song_style_locks || Array.isArray(payload.song_style_locks) || typeof payload.song_style_locks!=='object')throw new Error('整曲风格手动锁定必须是 JSON 对象');
+    }
+    if(songCaps.song_response===true)payload.song_response_mode=Number(valueOrDefault('#composerSongResponseMode',-1));
     payload.phrase_mode_temperature=Number(valueOrDefault('#composerPhraseModeTemperature',1));
     payload.search_policy=valueOrDefault('#composerSearchPolicy','phrase_v1');
     payload.physical_policy=valueOrDefault('#composerPhysicalPolicy','runtime_hard_v2');
     if(generationInspection?.data?.generation_capabilities?.optional_audio_tracking!==true)payload.audio_tracking_strength=0;
     const allowed=new Set(['model_family','checkpoint','audio','output','bpm','first','level','condition','tempo_map','meter_map','temperature','pointer_temperature','action_temperature','seed','max_events','device','min_same_head_ms','touch_layout_policy','condition_file','intensity_curve_enabled','intensity_curve','intensity_curve_file','intensity_curve_strength','intensity_curve_mode']);
-    for(const key of ['phrase_mode_temperature','phrase_candidates','audio_tracking_strength','softcomfort_strength','phrase_write_beats','phrase_commit_beats','phrase_step_budget','phrase_repair_budget','phrase_rollback_budget','phrase_time_budget_sec','search_policy','physical_policy'])allowed.add(key);
+    for(const key of ['phrase_mode_temperature','phrase_candidates','audio_tracking_strength','softcomfort_strength','phrase_write_beats','phrase_commit_beats','phrase_step_budget','phrase_repair_budget','phrase_rollback_budget','phrase_time_budget_sec','search_policy','physical_policy','song_style_source','song_style_seed','song_style_locks','song_response_mode'])allowed.add(key);
     return Object.fromEntries(Object.entries(payload).filter(([key])=>allowed.has(key)));
   }
   return payload;
@@ -2432,7 +2448,7 @@ function initializeEventSetParameterGroups() {
   for(const id of sections){const node=element('#'+id);if(node)node.hidden=stream;}
   const ids={basic:['composerArchitectureProfile','composerPrecision','composerResetLearningRate','composerLrSchedule','composerWarmupSteps','composerMinLrRatio'],learning:['composerLearningPolicy','composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerEventFamilyAudioWeight','composerPlanWeight'],recovery:['composerPrefixAugmentationRate','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerSymbolicPretrainEpochs'],validation:['composerValidationManifest','composerHoldoutFraction','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalSongs','composerGenerationEvalIntervalEpochs','composerGenerationEvalSeeds','composerGenerationEvalTemperature','composerCheckpointIntervalSteps'],model:['composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanBlankWindowSeconds','composerDropout'],performance:['composerTimingCompute','composerPrepareWorkers','composerSampleWorkers','composerCpuThreads','composerPrefetchBatches','composerAudioCacheGb','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCacheDir']};
   for(const [group,list] of Object.entries(ids))for(const id of list){const node=element('#'+id),field=node?.closest('label.field');if(!field)continue;if(stream){if(!field._eventSetHome){const anchor=document.createComment('event-set-home');field.before(anchor);field._eventSetHome=anchor;}element('#eventSetGroup_'+group).append(field);}else if(field._eventSetHome){field._eventSetHome.after(field);}}
-  for(const id of ['composerPhraseAdvanced','composerDetailAdvanced']){const node=element('#'+id);if(!node)continue;if(stream){if(!node._eventSetHome){const anchor=document.createComment('event-set-home');node.before(anchor);node._eventSetHome=anchor;}element('#eventSetGroup_learning').append(node);}else if(node._eventSetHome)node._eventSetHome.after(node);}
+  for(const id of ['composerPhraseAdvanced','composerSongStyleAdvanced','composerDetailAdvanced']){const node=element('#'+id);if(!node)continue;if(stream){if(!node._eventSetHome){const anchor=document.createComment('event-set-home');node.before(anchor);node._eventSetHome=anchor;}element('#eventSetGroup_learning').append(node);}else if(node._eventSetHome)node._eventSetHome.after(node);}
   if(stream){const resetField=element('#composerResetLearningRate')?.closest('label.field');if(resetField)element('#eventSetBasicAdvancedGrid').append(resetField);element('#eventSetGroup_validation').append(element('#eventSetValidationGeneration'));const field=element('#composerTransitionExitWeight')?.closest('label.field');if(field){if(!field._eventSetHome){const anchor=document.createComment('event-set-home');field.before(anchor);field._eventSetHome=anchor;}element('#eventSetAdvancedPolicies').append(field);}}else{const field=element('#composerTransitionExitWeight')?.closest('label.field');if(field?._eventSetHome)field._eventSetHome.after(field);}
 }
 
@@ -2441,7 +2457,7 @@ function updateEventSetControls() {
   initializeEventSetParameterGroups();
   if(stream){
     const mode=currentTrainingMode();
-    for(const id of ['composerTrainingWindowPolicy','composerPhraseExecutionPolicy','composerDetailRepresentationPolicy','composerDurationFeaturePolicy']){const node=element('#'+id);if(node)node.disabled=mode==='resume';}
+    for(const id of ['composerTrainingWindowPolicy','composerPhraseExecutionPolicy','composerDetailRepresentationPolicy','composerDurationFeaturePolicy','composerSongProfilePolicy','composerSongResponsePolicy','composerSongProfileComponents','composerSongProfileWeight','composerSongResponseModes','composerSongResponseGroupSize']){const node=element('#'+id);if(node)node.disabled=mode==='resume';}
     for(const id of ['composerMaxPhraseEvents','composerPhraseSeamEvents','composerPhraseModes','composerPhraseRelationWeight']){const node=element('#'+id);if(node)node.disabled=mode!=='fresh';}
     const reset=element('#composerResetLearningRate');
     if(reset){const field=reset.closest('label.field');if(field)field.hidden=mode!=='resume';if(mode!=='resume')reset.checked=false;}
@@ -2452,6 +2468,7 @@ function updateEventSetControls() {
   }
   const fp16=element('#composerPrecision option[value=fp16]');if(fp16){fp16.hidden=stream;fp16.disabled=stream;if(stream&&element('#composerPrecision').value==='fp16')element('#composerPrecision').value='bf16';}
   const allowed=new Set(['composerTrainingWindowPolicy','composerMaxPhraseEvents','composerPhraseSeamEvents','composerPhraseExecutionPolicy','composerPhraseModes','composerPhraseRelationWeight','composerDetailRepresentationPolicy','composerDurationFeaturePolicy','composerHoldoutFraction','composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight','composerLearningPolicy','composerTransitionExitWeight','composerPrefixAugmentationRate','composerGenerationEvalTemperature','composerPlanBlankWindowSeconds','composerValidationMaxBatches','composerValidationBatchSize','composerGenerationEvalIntervalEpochs','composerWarmupSteps','composerPrefetchBatches','composerSampleWorkers','composerAudioCacheGb','composerMinLrRatio','composerLrSchedule','composerPlanWeight','composerAudioGridSeconds','composerArchitectureProfile','composerPrecision','composerDModel','composerLayers','composerNhead','composerDimFeedforward','composerHistoryEvents','composerDropout','composerRolloutSteps','composerWindowSeconds','composerAudioGridSeconds','composerPlanWeight','composerPlanBlankWindowSeconds','composerSymbolicPretrainEpochs','composerRecoveryInterval','composerRecoverySamples','composerRecoverySteps','composerRecoveryWeight','composerPrepareWorkers','composerCpuThreads','composerSeed','composerMaxSteps','composerLimitCharts','composerLogInterval','composerCheckpointIntervalSteps','composerCacheDir','composerValidationManifest','composerGenerationEvalSongs','composerGenerationEvalSeeds']);
+  for(const id of ['composerSongProfilePolicy','composerSongResponsePolicy','composerSongProfileComponents','composerSongProfileWeight','composerSongResponseModes','composerSongResponseGroupSize'])allowed.add(id);
   allowed.add('composerEventFamilyAudioWeight');allowed.add('composerResetLearningRate');allowed.add('composerTimingCompute');
   for(const id of ['composerPhraseContextPolicy','composerDurationAudioPolicy','composerPhraseLossWeight'])allowed.add(id);
   document.querySelectorAll('#chartComposerTrainingControls input,#chartComposerTrainingControls select,#chartComposerTrainingControls textarea').forEach(control=>{
@@ -2463,6 +2480,14 @@ function updateEventSetControls() {
   const workerHint=element('#composerEventSetWorkerHint');if(workerHint)workerHint.hidden=!stream;
   const hint=element('#composerEventSetHint');if(hint)hint.hidden=!stream;
   document.querySelectorAll('[data-event-set-generation-only]').forEach(node=>{node.hidden=!isEventSetGeneration();});
+  const songStyle=element('#composerSongStyleGeneration');
+  if(songStyle){
+    const caps=generationInspection?.data?.generation_capabilities||{},profile=caps.song_profile===true,response=caps.song_response===true;
+    songStyle.hidden=!isEventSetGeneration()||(!profile&&!response);
+    for(const id of ['composerSongStyleSource','composerSongStyleSeed','composerSongStyleLocks']){const node=element('#'+id);if(node){node.disabled=!profile;const field=node.closest('label.field');if(field)field.hidden=!profile;}}
+    const mode=element('#composerSongResponseMode');if(mode){mode.disabled=!response;const field=mode.closest('label.field');if(field)field.hidden=!response;}
+    const hint=element('#composerSongStyleHint');if(hint)hint.textContent=profile?'自动匹配使用模型补全，忽略其他风格滑块的默认值；手动锁定字段会保留。沿用检查点默认和手动设置使用当前生成条件滑块。':'此检查点未训练自动风格补全，使用当前生成条件；音乐响应模式可单独设置。';
+  }
   const phraseModeField=element('#composerPhraseModeTemperature')?.closest('label.field');
   if(phraseModeField)phraseModeField.hidden=!isEventSetGeneration() || generationInspection?.data?.generation_capabilities?.persistent_phrase_modes!==true;
   const phraseHint=element('#composerPhraseCapabilityHint');
@@ -3923,6 +3948,7 @@ function applyChartComposerCheckpointConfig(data, mode, preserveEditable = false
     const args=data.args||{};
     const fields={composerTrainingWindowPolicy:'training_window_policy',composerMaxPhraseEvents:'max_phrase_events',composerPhraseSeamEvents:'phrase_seam_events',composerPhraseExecutionPolicy:'phrase_execution_policy',composerPhraseModes:'phrase_modes',composerPhraseRelationWeight:'phrase_relation_weight',composerDetailRepresentationPolicy:'detail_representation_policy',composerDurationFeaturePolicy:'duration_feature_policy',composerSeed:'seed',composerMaxSteps:'max_steps',composerLimitCharts:'limit_charts',composerRecoveryInterval:'recovery_interval',composerRecoverySamples:'recovery_samples',composerRecoverySteps:'recovery_steps',composerRecoveryWeight:'recovery_weight',learningRate:'lr',composerGenerationEvalSeeds:'generation_eval_seeds',composerValidationManifest:'validation_manifest',composerArchitectureProfile:'architecture_profile',composerDModel:'d_model',composerDimFeedforward:'dim_feedforward',composerLayers:'layers',composerNhead:'nhead',composerHistoryEvents:'history_events',composerRolloutSteps:'rollout_steps',composerWindowSeconds:'window_seconds',composerAudioGridSeconds:'audio_grid_seconds',composerPlanWeight:'plan_weight',composerPlanBlankWindowSeconds:'plan_blank_window_seconds',composerLrSchedule:'lr_schedule',composerWarmupSteps:'warmup_steps',composerMinLrRatio:'min_lr_ratio',composerValidationMaxBatches:'validation_max_batches',composerValidationBatchSize:'validation_batch_size',composerGenerationEvalIntervalEpochs:'generation_eval_interval_epochs',composerGenerationEvalSongs:'generation_eval_songs',composerPrefetchBatches:'prefetch_batches',composerAudioCacheGb:'audio_cache_gb',composerDropout:'dropout',composerSymbolicPretrainEpochs:'symbolic_pretrain_epochs',batchSize:'batch_size',gradAccumulation:'grad_accumulation'};
     for(const [id,key] of Object.entries(fields)){const node=element('#'+id),value=config[key]??args[key];const retainReset=mode==='resume' && preserveEditable && element('#composerResetLearningRate')?.checked && ['learningRate','composerLrSchedule','composerWarmupSteps','composerMinLrRatio'].includes(id);if(node&&value!==undefined&&!retainReset){node.value=String(value);node.disabled=mode==='resume';}}
+    for(const [id,key,fallback] of [['composerSongProfilePolicy','song_profile_policy','off'],['composerSongResponsePolicy','song_response_policy','off'],['composerSongProfileComponents','song_profile_components',4],['composerSongProfileWeight','song_profile_weight',.1],['composerSongResponseModes','song_response_modes',4],['composerSongResponseGroupSize','song_response_group_size',4]]){const node=element('#'+id);if(node){node.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)node.value=String(mode==='resume'?(config[key]??fallback):(key.endsWith('_policy')?'auto':fallback));}}
     for(const [id,key,fallback] of [['composerTrainingWindowPolicy','training_window_policy','block_v1'],['composerPhraseExecutionPolicy','phrase_execution_policy','off'],['composerDetailRepresentationPolicy','detail_representation_policy','private_v1'],['composerDurationFeaturePolicy','duration_feature_policy','legacy_v1']]){const node=element('#'+id);if(node && (mode==='resume'||!preserveEditable))node.value=String(mode==='resume'?(config[key]??args[key]??fallback):'auto');}
     const policy=element('#composerLearningPolicy'),weight=element('#composerTransitionExitWeight');
     if(policy){policy.disabled=mode==='resume';if(mode==='resume'||!preserveEditable)policy.value=mode==='resume'?'checkpoint':'auto';policy.dataset.savedPolicies=JSON.stringify({transition_policy:config.transition_policy??'off',timing_group_policy:config.timing_group_policy??'phase_only_v1',literal_output_policy:config.literal_output_policy??'flat_family_v1',decoder_policy:config.decoder_policy??'postnorm_v1',window_balance_policy:config.window_balance_policy??'equal_window_v1',history_window_policy:config.history_window_policy??'rolling_legacy_v1',continuation_policy:config.continuation_policy??'off',sensor_load_policy:config.sensor_load_policy??'button_only_v1',gap_continuation_policy:config.gap_continuation_policy??'additive_v1',motion_continuation_policy:config.motion_continuation_policy??'off',lane_load_policy:config.lane_load_policy??'off',recovery_policy:config.recovery_policy??'persistent_v1',timing_output_policy:config.timing_output_policy??'relative_delta_v1',event_family_policy:config.event_family_policy??'legacy_v1',recovery_target_policy:config.recovery_target_policy??'authored_next_v1',prefix_augmentation_input_policy:config.prefix_augmentation_input_policy??'causal_window_config_time_first_decision_v3',timing_grid_audio_policy:config.timing_grid_audio_policy??'off',phrase_context_policy:config.phrase_context_policy??'off',duration_audio_policy:config.duration_audio_policy??'off',physical_policy:config.physical_policy??'legacy_report_v1'});}
@@ -4679,6 +4705,7 @@ async function submitTrain(options = {}) {
     if(payload.architecture_profile==='event_set_stream_v1'&&backend.capabilities?.event_set_stream!==true)
       throw new Error('当前后台尚未加载整拍集合架构。请连接更新后的 WebUI 后台；保留正在训练的旧服务，不要在旧端口启动新架构。');
     if(payload.reset_learning_rate===true)assertEventSetResumeLearningRateCapability(payload,backend);
+    if(payload.architecture_profile==='event_set_stream_v1' && backend.training_capabilities?.composer_song_style_contract!=='masked_joint_response_v1') throw new Error('当前后台尚未加载整曲风格训练，请重启 WebUI 后台。');
     if(payload.architecture_profile==='event_set_stream_v1' && backend.training_capabilities?.composer_phrase_contract!=='phrase_modes_v1') throw new Error('当前后台尚未加载短句与细节学习策略，请更新 WebUI 后台。');
     if (backend.training_capabilities?.composer_training_runtime!=='music_context_shared_slots_v2'
         || backend.training_capabilities?.composer_training_controls!=='causal_motif_runtime_controls_v11_fresh_training_defaults')
@@ -5585,6 +5612,7 @@ async function submitGenerate() {
     if (payload.contact_policy==='contact_groups_v1'
         && status.training_capabilities?.composer_contact_budget!=='conservative_groups_v1')
       throw new Error('当前服务尚未加载接触预算策略，请重启更新后的 WebUI 服务。');
+    if(isEventSetGeneration() && generationInspection?.data?.generation_capabilities?.song_profile===true && status.training_capabilities?.composer_song_style_contract!=='masked_joint_response_v1') throw new Error('当前后台尚未加载整曲风格生成，请重启 WebUI 后台。');
     if(isEventSetGeneration() && status.training_capabilities?.composer_phrase_contract!=='phrase_modes_v1') throw new Error('当前后台尚未加载短句写法温度，请更新 WebUI 后台。');
     if (status.composer_generation_contract !== "composer_generation_controls_v13_cooperative_quality") {
       throw new Error("当前服务尚未加载 Composer 独立曲线控件。请使用更新后的 WebUI 服务；有活动训练时保留原服务监控训练。");

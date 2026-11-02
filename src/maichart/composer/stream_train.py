@@ -16,6 +16,8 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
+    'song_profile_policy': ('masked_joint_v1','off'),
+    'song_response_policy': ('music_response_v1','off'),
     'training_window_policy': ('phrase_complete_v1','block_v1'),
     'phrase_execution_policy': ('persistent_modes_v1','off'),
     'detail_representation_policy': ('shared_components_v1','private_v1'),
@@ -50,7 +52,7 @@ LEGACY_LEARNING_POLICIES = dict(phrase_context_policy='off',template_policy='cro
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
     motion_continuation_policy='motion_continuation_v1',lane_load_policy='off',recovery_policy='persistent_v1',
     recovery_target_policy='authored_next_v1',training_window_policy='block_v1',phrase_execution_policy='off',
-    detail_representation_policy='private_v1',duration_feature_policy='legacy_v1')
+    detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='off',song_response_policy='off')
 
 
 def resolve_learning_policies(requested, parent_config=None, *, resume=False):
@@ -63,6 +65,9 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
         if value not in choices:raise ValueError(f'Unsupported {key}')
         if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
         result[key]=value
+    if (not resume and getattr(requested,'song_response_policy','auto')=='auto'
+            and (result['phrase_execution_policy']!='persistent_modes_v1' or result['phrase_context_policy']!='aligned_phrase_v3')):
+        result['song_response_policy']='off'
     weight=getattr(requested,'transition_exit_weight',None)
     inherited=getattr(parent_config,'transition_exit_weight',0.) if parent_config is not None else None
     if weight is None:weight=inherited if resume else 0.
@@ -95,6 +100,16 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
         if key=='phrase_seam_events' and value>16:raise ValueError('phrase_seam_events must be between 0 and 16')
         if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
         result[key]=value
+    for key,default in dict(song_profile_components=4,song_profile_weight=.1,song_response_modes=4,song_response_group_size=4).items():
+        inherited=getattr(parent_config,key,default) if parent_config is not None else default
+        value=getattr(requested,key,None)
+        if value is None:value=inherited if resume else default
+        if not math.isfinite(float(value)) or value<0 or (key!='song_profile_weight' and (int(value)!=value or value<1)):
+            raise ValueError(f'Invalid {key}')
+        if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
+        result[key]=value
+    if result['song_response_policy']!='off' and (result['phrase_execution_policy']!='persistent_modes_v1' or result['phrase_context_policy']!='aligned_phrase_v3'):
+        raise ValueError('music_response_v1 requires persistent_modes_v1 and aligned_phrase_v3')
     if result['phrase_execution_policy']=='persistent_modes_v1':
         if result['phrase_context_policy']!='aligned_phrase_v3' or result['event_family_policy']!='shared_continuation_v1':
             raise ValueError('persistent_modes_v1 requires aligned_phrase_v3 and shared_continuation_v1')
@@ -120,7 +135,7 @@ def upgrade_learning_stage(model, policies, device='cpu'):
                   'family_history_projection.','family_audio_norm.','audio_event_family_head.',
                   'family_continuity_head.','family_rhythm_projection.','family_state_phrase.','decoder.norm.',
                   'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.',
-                  'shared_details.','phrase_execution.')
+                  'shared_details.','phrase_execution.','song_profile.','song_response.')
     if model.config.detail_representation_policy!=upgraded.config.detail_representation_policy:
         allowed.update(key for key in set(source)|set(target) if key.startswith('detail_embeddings.'))
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
@@ -186,9 +201,10 @@ def parser():
     p.add_argument('--prefix-augmentation-rate',type=float,default=None)
     p.add_argument('--event-family-audio-weight',type=float,default=None)
     p.add_argument('--phrase-loss-weight',type=float,default=None)
-    for key in ('max_phrase_events','phrase_seam_events','phrase_modes'):
+    for key in ('max_phrase_events','phrase_seam_events','phrase_modes','song_profile_components','song_response_modes','song_response_group_size'):
         p.add_argument('--'+key.replace('_','-'),type=int,default=None)
     p.add_argument('--phrase-relation-weight',type=float,default=None)
+    p.add_argument('--song-profile-weight',type=float,default=None)
     p.add_argument('--generation-eval-temperature',type=float,default=None)
     from .stream_evaluation_settings import add_arguments
     add_arguments(p)
@@ -212,6 +228,7 @@ def _dataset(args,*,codec=None,delta_vocab=None,validation=False):
         candidate_state_policy=getattr(args,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(args,'training_window_policy','block_v1'),
         max_phrase_events=getattr(args,'max_phrase_events',64),phrase_seam_events=getattr(args,'phrase_seam_events',2),
+        song_response_group_size=getattr(args,'song_response_group_size',4),
         relation_policy='future_sets_v1' if getattr(args,'phrase_execution_policy','off')=='persistent_modes_v1' else 'off',
         limit_charts=args.limit_charts,unknown_policy='mask' if validation else 'error')
     dataset.physical_policy=getattr(args,'physical_policy','legacy_report_v1')
@@ -363,6 +380,10 @@ def _fingerprint(args,ds,*,legacy=False,pre_blank=False):
         h.update(json.dumps(('song_sortish_v1',getattr(args,'max_phrase_events',64),getattr(args,'phrase_seam_events',2))).encode())
     if getattr(args,'phrase_execution_policy','off')!='off':
         h.update(json.dumps((getattr(args,'phrase_modes',4),getattr(args,'phrase_relation_weight',.1))).encode())
+    if getattr(args,'song_profile_policy','off')!='off':
+        h.update(json.dumps(('song_profile',args.song_profile_policy,args.song_profile_components,args.song_profile_weight)).encode())
+    if getattr(args,'song_response_policy','off')!='off':
+        h.update(json.dumps(('song_response',args.song_response_policy,args.song_response_modes,args.song_response_group_size)).encode())
     if not legacy:h.update(str(float(args.audio_grid_seconds)).encode())
     if not legacy and not pre_blank:h.update(str(float(getattr(args,'plan_blank_window_seconds',.5))).encode())
     policies=(getattr(args,'history_window_policy','rolling_legacy_v1'),getattr(args,'continuation_policy','off'))
@@ -589,9 +610,14 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version=('stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy=='persistent_modes_v1' else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
+    args.training_objective_recipe=dict(version=('stream_song_response_joint_v6' if model.config.song_response_policy!='off' or model.config.song_profile_policy!='off' else 'stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy=='persistent_modes_v1' else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
         else 'stream_aligned_phrase_joint_v3' if model.config.phrase_context_policy=='aligned_phrase_v3' else 'stream_ordered_phrase_joint_v2'
         if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3') else 'stream_causal_phrase_joint_v1'),
+        song_profile_policy=model.config.song_profile_policy,song_profile_components=model.config.song_profile_components,song_profile_weight=model.config.song_profile_weight,
+        song_response_policy=model.config.song_response_policy,song_response_modes=model.config.song_response_modes,song_response_group_size=model.config.song_response_group_size,
+        song_profile_objective='masked_mixture_categorical_129_bins_preprojection_unique_charts_per_batch',
+        song_response_objective='same_chart_distant_complete_phrase_subgroups_nested_composite_likelihood_prior_only',
+        song_style_runtime='audio_condition_choice_once_immutable_across_prefix_replay',
         phrase_context_policy=model.config.phrase_context_policy,
         training_window_policy=model.config.training_window_policy,max_phrase_events=model.config.max_phrase_events,
         phrase_seam_events=model.config.phrase_seam_events,phrase_execution_policy=model.config.phrase_execution_policy,

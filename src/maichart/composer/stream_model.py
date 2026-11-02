@@ -99,8 +99,22 @@ class StreamComposerConfig:
     phrase_relation_weight: float = .1
     detail_representation_policy: str = 'private_v1'
     duration_feature_policy: str = 'legacy_v1'
+    song_profile_policy: str = 'off'
+    song_profile_components: int = 4
+    song_profile_weight: float = .1
+    song_response_policy: str = 'off'
+    song_response_modes: int = 4
+    song_response_group_size: int = 4
 
     def __post_init__(self):
+        if self.song_profile_policy not in ('off','masked_joint_v1') or self.song_response_policy not in ('off','music_response_v1'):
+            raise ValueError('Unsupported whole-song style policy')
+        if not 1 <= self.song_profile_components <= 16 or not 1 <= self.song_response_modes <= 8 or not 2 <= self.song_response_group_size <= 4:
+            raise ValueError('Invalid whole-song style size')
+        if not math.isfinite(self.song_profile_weight) or self.song_profile_weight < 0:
+            raise ValueError('Invalid song profile loss weight')
+        if self.song_response_policy != 'off' and (self.phrase_execution_policy != 'persistent_modes_v1' or self.training_window_policy != 'phrase_complete_v1'):
+            raise ValueError('Whole-song response requires complete persistent phrases')
         if self.training_window_policy not in ('block_v1','phrase_complete_v1'):
             raise ValueError('Unsupported training window policy')
         if self.phrase_execution_policy not in ('off','persistent_modes_v1'):
@@ -379,6 +393,14 @@ class StreamComposer(nn.Module):
         if config.phrase_execution_policy=='persistent_modes_v1':
             from .stream_phrase_execution import PhraseExecution
             self.phrase_execution=PhraseExecution(d,min(d,128),codec,config.phrase_modes)
+        if config.song_response_policy != 'off':
+            from .stream_song_response import SongResponse
+            self.song_response=SongResponse(d,min(d,128),config.condition_dim,config.song_response_modes,config.phrase_modes)
+            self.phrase_execution.reference_evidence=nn.Linear(2,17,bias=False)
+            nn.init.zeros_(self.phrase_execution.reference_evidence.weight)
+        if config.song_profile_policy != 'off':
+            from .stream_song_profile import SongProfileCompleter
+            self.song_profile=SongProfileCompleter(d,components=config.song_profile_components)
         self.literal_cell = nn.GRU(d, d, batch_first=True)
         self.literal_start = nn.Parameter(torch.zeros(d))
         self.literal_head = nn.Linear(d, codec.num_atoms)
@@ -742,9 +764,14 @@ class StreamComposer(nn.Module):
             raise ValueError('Shared family logits require shared_continuation_v1')
         return self.event_family_head(action).float().masked_fill(~self.semantic_family_supported,-1e4)
 
-    def execution_prior(self,phrase_output,batch=None):
+    def execution_prior(self,phrase_output,batch=None,*,song_choice=None):
         """A causal music/reference prior; no future chart labels or progress."""
         intent=phrase_output.get('execution_phrase_intent',phrase_output['phrase_intent'])
+        if 'song_response_phrase_logits' in phrase_output:
+            priors=phrase_output['song_response_phrase_logits'].float().log_softmax(-1)
+            if song_choice is not None:
+                return priors[:,:,int(song_choice),:]
+            return torch.logsumexp(priors+phrase_output['song_response_logits'].float().log_softmax(-1)[:,None,:,None],-2)
         return self.phrase_execution.prior(intent).float()
 
     def execution_outputs(self,action,phrase_output,base_routes):
@@ -757,7 +784,7 @@ class StreamComposer(nn.Module):
     def execution_proposal(self,context,phrase_output,selected_batch,mode):
         context=context.reshape(1,1,-1)
         phrase={k:(v[:,-1:] if torch.is_tensor(v) and v.ndim>=3 else v)
-                for k,v in phrase_output.items() if k in ('phrase_intent','phrase_aligned_heads','execution_phrase_intent')}
+                for k,v in phrase_output.items() if k in ('phrase_intent','phrase_aligned_heads','execution_phrase_intent','phrase_reference_weights','phrase_aligned_null_weight')}
         base=self.event_route_log_probs(context,family_logits=self.family_logits_for_action(context))
         execution=self.execution_outputs(context,phrase,base)
         routes=execution['routes'][0,0,int(mode)]
@@ -1263,6 +1290,16 @@ class StreamComposer(nn.Module):
                   'hidden': hidden, 'action_context': action, 'reference_phase': reference_phase,
                   'reference_phase_mask':reference_phase_mask,'repeat_delta_id':repeat_delta_id}
         result.update(phrase_output)
+        if hasattr(self,'song_profile'):
+            valid=cache['global_mask'].to(cache['global'].dtype)[...,None]
+            pooled=(cache['global']*valid).sum(1)/valid.sum(1).clamp_min(1)
+            result['song_profile_audio']=pooled[inverse]
+        if hasattr(self,'song_response'):
+            position=(batch['phrase_start_beat']/batch['audio_end_beat'][:,None].clamp_min(1)).float().clamp(0,1)
+            result.update(self.song_response(cache['global'][inverse],cache['global_mask'][inverse],
+                batch['condition'].float(),phrase_output['phrase_music_anchor'],position,
+                self.phrase_execution.prior(phrase_output['phrase_intent']).float(),
+                global_audio=self.song_response.pool_audio(cache['global'],cache['global_mask'])[inverse]))
         if hasattr(self,'phrase_execution'):
             result['execution_phrase_intent']=phrase_output['phrase_intent']
             from .stream_phrase_training import RELATION_HORIZONS,RELATION_DIM
@@ -2104,7 +2141,8 @@ def stream_loss(model, output, batch):
         from .stream_phrase_execution import whole_phrase_configuration_loss
         ordinary_configuration=configuration_loss
         configuration_loss,execution_metrics=whole_phrase_configuration_loss(mode_nll,output['execution_prior_logits'],
-            batch,configuration_weights,denominator)
+            batch,configuration_weights,denominator,song_logits=output.get('song_response_logits'),
+            song_phrase_logits=output.get('song_response_phrase_logits'))
         execution_metrics.update(phrase_configuration_loss=configuration_loss,
             phrase_configuration_adjustment=configuration_loss-ordinary_configuration)
     recovery = output.get('recovery_loss', kind_loss.new_zeros(()))
@@ -2137,6 +2175,16 @@ def stream_loss(model, output, batch):
         from .stream_phrase_execution import future_relation_loss
         relation_loss=future_relation_loss(output['future_relation_prediction'],batch,configuration_weights,denominator)
     total = base_loss+transition_exit_loss+model.config.recovery_weight*recovery+model.config.phrase_loss_weight*phrase_loss+model.config.phrase_relation_weight*relation_loss
+    profile_loss=kind_loss.new_zeros(())
+    if 'song_profile_audio' in output:
+        rows=batch.get('profile_chart_rows',torch.arange(batch['condition'].size(0),device=weights.device))
+        controls=batch['condition'].float().index_select(0,rows)
+        known=None if model.training else torch.zeros_like(controls,dtype=torch.bool)
+        per_chart=model.song_profile.loss(output['song_profile_audio'].index_select(0,rows),controls,known_mask=known,reduction='none')
+        # One forward per unique chart in this batch, not per repeated window.
+        profile_loss=per_chart.sum()/max(1,rows.numel())
+        total=total+model.config.song_profile_weight*profile_loss
+    execution_metrics.update(song_profile_loss=profile_loss,song_profile_weighted_loss=model.config.song_profile_weight*profile_loss)
     continuation_metrics={}
     if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
         # These are components/diagnostics of the existing joint NLL. They

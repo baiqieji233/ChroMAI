@@ -26,6 +26,7 @@ from .stream_sampling import kind_logits_for_audio,note_delta_logits_for_audio
 from .stream_proposal import sample_timed_event
 from .stream_timing import current_timing_deltas
 from .stream_phrase_runtime import execution_options,execution_metadata,execution_report
+from .stream_song_profile import resolve_song_profile
 
 def parser():
     p=argparse.ArgumentParser(description=__doc__)
@@ -48,6 +49,11 @@ def parser():
     p.add_argument('--softcomfort-strength',type=float,default=1.)
     p.add_argument('--audio-tracking-strength',type=float,default=0.)
     p.add_argument('--phrase-mode-temperature',type=float,default=1.)
+    p.add_argument('--condition-file-defaults',action='store_true',help=argparse.SUPPRESS)
+    p.add_argument('--song-style-source',choices=('auto','checkpoint','manual'),default='auto')
+    p.add_argument('--song-style-seed',type=int)
+    p.add_argument('--song-style-locks',help='JSON object of exact control locks')
+    p.add_argument('--song-response-mode',type=int,default=-1)
     p.add_argument('--physical-policy',choices=('legacy','runtime_hard_v2'),default='runtime_hard_v2')
     return p
 
@@ -248,6 +254,22 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         max_phrase_events=getattr(model.config,'max_phrase_events',64))
     batch=to_device_batch(context.current_batch(),device)
     cache=model.encode_audio(batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
+    condition,song_profile_report=resolve_song_profile(model,cache,condition,args,payload)
+    context.condition=condition.to_vector()
+    batch['condition']=condition.to_vector(device=device)[None]
+    song_response_choice=None
+    response=getattr(model,'song_response',None)
+    if response is not None:
+        scores=response.song_prior(cache['global'],cache['global_mask'],batch['condition'])
+        mode=int(getattr(args,'song_response_mode',-1))
+        if mode < -1 or mode >= scores.shape[-1]:raise ValueError('Invalid song_response_mode')
+        response_seed=int(song_profile_report['seed']) ^ 0x5A17C9
+        response_generator=torch.Generator(device=device).manual_seed(response_seed)
+        song_profile_report['response_seed']=response_seed
+        song_response_choice=(int(torch.multinomial(scores.softmax(-1),1,generator=response_generator)[0,0]) if mode==-1 else mode)
+    elif int(getattr(args,'song_response_mode',-1))!=-1:
+        raise ValueError('This checkpoint has no trained whole-song response modes')
+    context.song_response_choice=song_response_choice
     if model.config.plan_kind_policy!='off':
         cache=model.prepare_plan_cache(cache,batch['condition'],batch['song_inverse'],batch['audio_end_sec'])
     curve=_Curve(args,song,model,cache,condition)
@@ -390,7 +412,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         def rollout(prefix,seed,stop_beat,deadline=None):
             nonlocal points,cursor,waits,retries,timing_retries,forced_waits,reason,step_index,context,guard,curve,generator,model_diagnostic_sums,model_diagnostic_count
             def context_factory():
-                return StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
+                rebuilt=StreamInferenceContext(song,model.codec,vocab,condition,lead_in=model.config.history_events,
                     audio_bank=audio_bank,audio_grid_seconds=model.config.audio_grid_seconds,
                     history_window_policy=model.config.history_window_policy,rollout_steps=model.config.rollout_steps,
                     continuation_policy=model.config.continuation_policy,timing_output_policy=model.config.timing_output_policy,
@@ -398,6 +420,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(model.config,'training_window_policy','block_v1'),
         max_phrase_events=getattr(model.config,'max_phrase_events',64))
+                rebuilt.song_response_choice=song_response_choice
+                return rebuilt
             def guard_factory():
                 return EventGuard(song.tempo,song.first,duration,min_same_head_sec=args.min_same_head_ms/1000.,
                     touch_layout_policy=args.touch_layout_policy,intercept_tap_on_slide=True,
@@ -461,7 +485,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         continuation_feature_dim=continuation_dim(model.config.continuation_policy),
         transition_exit_weight=getattr(model.config,'transition_exit_weight',0.),
         history_events=model.config.history_events,rollout_steps=model.config.rollout_steps,
-        event_count=len(points),seed=args.seed,condition=condition.to_dict(),stop_reason=reason,device=device,
+        event_count=len(points),seed=args.seed,condition=condition.to_dict(),song_profile=song_profile_report,song_response_choice=song_response_choice,stop_reason=reason,device=device,
         temperature=args.temperature,pointer_temperature=args.pointer_temperature,action_temperature=args.action_temperature,
         stream_steps=(step_index+1 if search_report['policy']=='legacy' else len(context._committed)),wait_steps=waits,forced_waits=forced_waits,configuration_retries=retries,
         rejected_onset_attempts=timing_retries,

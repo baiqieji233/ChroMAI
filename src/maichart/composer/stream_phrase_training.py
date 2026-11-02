@@ -142,7 +142,17 @@ def collate_phrase_training(items, output):
     if not any('training_phrase_group' in item for item in items): return
     if not all('training_phrase_group' in item for item in items):
         raise ValueError('Cannot mix phrase training window policies')
+    if any('_training_chart_id' in item for item in items):
+        chart_ids=[int(item.get('_training_chart_id',-1)) for item in items]
+        output['training_chart_id']=torch.tensor(chart_ids,dtype=torch.long)
+        seen_charts=set();first_chart=[]
+        for chart in chart_ids:
+            first_chart.append(chart>=0 and chart not in seen_charts)
+            if chart>=0:seen_charts.add(chart)
+        output['profile_chart_first']=torch.tensor(first_chart,dtype=torch.bool)
+        output['profile_chart_rows']=torch.tensor([i for i,first in enumerate(first_chart) if first],dtype=torch.long)
     groups, positions, complete, weights = [], [], [], []
+    chart_phrases = {}
     for item in items:
         active = item['loss_mask'] & item['sample_weight'].gt(0) & item['training_phrase_group'].ge(0)
         mapped=torch.full_like(item['training_phrase_group'],-1)
@@ -156,12 +166,39 @@ def collate_phrase_training(items, output):
             mapped[valid]=len(weights)
             whole_trusted=bool(trusted[members].all())
             completed |= item['training_phrase_complete'] & valid & whole_trusted
+            group_id=len(weights)
+            if whole_trusted and bool((item['training_phrase_complete'] & valid).any()):
+                chart=item.get('_training_chart_id')
+                if chart is not None:
+                    chart_phrases.setdefault(int(chart), []).append((int(segment),group_id))
             weights.append(item['sample_weight'][valid].sum())
         groups.append(mapped);complete.append(completed)
     output['training_phrase_group'] = pad_sequence(groups,batch_first=True,padding_value=-1)
     output['training_phrase_position'] = pad_sequence(positions,batch_first=True,padding_value=-1)
     output['training_phrase_complete'] = pad_sequence(complete,batch_first=True)
     output['training_phrase_group_weight'] = torch.stack(weights) if weights else torch.zeros(0)
+    # Separate chart identity from shared audio identity. Spread each small
+    # group over its available phrase range rather than adjacent windows.
+    response=torch.full((len(weights),),-1,dtype=torch.long)
+    response_count=0
+    sizes={int(item.get('_song_response_group_size',4)) for item in items}
+    if len(sizes)!=1:raise ValueError('Cannot mix song response group sizes')
+    group_size=sizes.pop()
+    if not 2<=group_size<=4:raise ValueError('Invalid song response group size')
+    for entries in chart_phrases.values():
+        entries=sorted(entries)
+        # Repeated seam observations of a phrase cannot become separate evidence.
+        unique=[];seen=set()
+        for segment,gid in entries:
+            if segment not in seen:unique.append((segment,gid));seen.add(segment)
+        partitions=max(1,(len(unique)+group_size-1)//group_size)
+        for offset in range(partitions):
+            selected=unique[offset::partitions]
+            if len(selected)<2 or selected[-1][0]-selected[0][0]<2:continue
+            for _,gid in selected:response[gid]=response_count
+            response_count+=1
+    output['training_song_response_group']=response
+    output['_song_response_group_count']=response_count
     # Variable K must be normalized by the actual primary target budget.
     output['_loss_normalizer'] = sum(float(item['_training_target_budget'].sum()) for item in items)
 

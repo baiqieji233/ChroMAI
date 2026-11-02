@@ -285,10 +285,15 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         'phrase_context.ordered.alignment_output.weight'})
     expected={name for name in expected if not name.startswith((
         'keep_gap_audio.','family_continuity_head.','family_state_phrase.','family_rhythm_projection.','music_exit_head.'))}
+    expected.update({'song_profile.network.0.weight','song_profile.network.0.bias',
+                     'song_profile.network.2.weight','song_profile.network.2.bias'})
     assert additions==expected
     assert_ordered_parameter_initialization(upgraded.state_dict())
     for key in additions:
         value=upgraded.state_dict()[key]
+        if key.startswith('song_profile.'):
+            assert torch.isfinite(value).all(),key
+            continue  # Newly trained control distribution; does not alter the actor forward.
         if key in ordered:
             continue  # Exact individual initialization contracts checked above.
         elif key.startswith('phrase_context.'):

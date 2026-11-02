@@ -39,6 +39,7 @@ def recovery_state(model):
             'policy':getattr(model,'_stream_recovery_policy',getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')),
             'target_policy':getattr(getattr(model,'config',None),'recovery_target_policy','authored_next_v1'),
             'phrase_execution_policy':getattr(getattr(model,'config',None),'phrase_execution_policy','off'),
+            'song_response_policy':getattr(getattr(model,'config',None),'song_response_policy','off'),
             'mix_cursor':int(getattr(model,'_stream_recovery_mix_cursor',0)),
             'short_cursor':int(getattr(model,'_stream_recovery_short_cursor',0))}
 
@@ -60,6 +61,9 @@ def restore_recovery_state(model, state):
     for episode in state['episodes']:
         if episode is None:
             continue
+        choice=episode.get('song_response_choice')
+        if choice is not None and (not isinstance(choice,int) or isinstance(choice,bool) or not 0<=choice<int(getattr(model.config,'song_response_modes',4))):
+            raise ValueError('Invalid recovery song response choice')
         if (not isinstance(episode, dict) or not isinstance(episode.get('song'), int)
                 or not isinstance(episode.get('anchor'), int) or episode['song'] < 0 or episode['anchor'] < 0
                 or not isinstance(episode.get('generated'), list) or len(episode['generated']) > _episode_limit(policy)):
@@ -82,7 +86,7 @@ def restore_recovery_state(model, state):
     if not isinstance(cursor,int) or cursor<0:raise ValueError('Invalid recovery anchor cursor')
     requested=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1')
     requested_target=getattr(getattr(model,'config',None),'recovery_target_policy','authored_next_v1')
-    if requested!=policy or requested_target!=target_policy or state.get('phrase_execution_policy','off')!=getattr(getattr(model,'config',None),'phrase_execution_policy','off'):
+    if requested!=policy or requested_target!=target_policy or state.get('phrase_execution_policy','off')!=getattr(getattr(model,'config',None),'phrase_execution_policy','off') or state.get('song_response_policy','off')!=getattr(getattr(model,'config',None),'song_response_policy','off'):
         restore_recovery_state(model,None)
         model._stream_recovery_policy=requested
         return
@@ -272,6 +276,8 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
     cache = audio_cache if audio_cache is not None else model.encode_audio(
         batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     result = model(batch,audio_cache=cache)
+    from .stream_phrase_runtime import ensure_song_response
+    ensure_song_response(model,context,result,generator)
     kind_scores = kind_logits_for_audio(result['kind_logits'][0,-1],cursor,audio_end)
     kind = sample_logits(kind_scores,temperature,generator)
     if kind is None: return None, 'no_legal_kind'
@@ -398,6 +404,7 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
         training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
         max_phrase_events=getattr(dataset,'max_phrase_events',64))
                 context.batch(prefix,prefix[-1].end if prefix else Fraction(0))
+                context.song_response_choice=episode.get('song_response_choice')
                 if episode['song'] not in audio_caches:
                     audio_caches[episode['song']] = _encode_song(model,bank,device)
                     if getattr(getattr(model,'config',None),'plan_kind_policy','off') != 'off':
@@ -411,6 +418,7 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                     options=({'temperature':episode.get('decode_temperature',.65)} if policy in ('greedy_mixed_v3','greedy_mixed_v4') else {})
                     proposal, reason = _propose(dataset,model,episode['song'],prefix,guard,generator,device,
                         context=context,audio_cache=audio_caches[episode['song']],**options)
+                    episode['song_response_choice']=getattr(context,'song_response_choice',None)
                     if proposal is None:
                         diagnostics[reason] += 1
                         break
@@ -513,6 +521,8 @@ def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cach
     batch={k:v.to(device) for k,v in raw.items() if torch.is_tensor(v) and k not in
            ('song_audio','song_mask','song_seconds','song_beats')}
     output=model(batch,audio_cache=cache)
+    from .stream_phrase_runtime import ensure_song_response
+    ensure_song_response(model,context,output,generator)
     from .stream_proposal import prepare_selected_candidate
     batch,output=prepare_selected_candidate(model,context,batch,output,source_step.end,cache)
     times=torch.full_like(batch['step_second'],source_step.end_second)

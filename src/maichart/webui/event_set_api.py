@@ -148,6 +148,8 @@ def start_train(handler, payload, *, runtime):
     _arg(args,'--plan-blank-window-seconds',blank_seconds)
     # Auto policies are resolved by the trainer against the parent checkpoint.
     policy_choices = {
+        'song_profile_policy': {'auto', 'off', 'masked_joint_v1'},
+        'song_response_policy': {'auto', 'off', 'music_response_v1'},
         'training_window_policy': {'auto', 'block_v1', 'phrase_complete_v1'},
         'phrase_execution_policy': {'auto', 'off', 'persistent_modes_v1'},
         'detail_representation_policy': {'auto', 'private_v1', 'shared_components_v1'},
@@ -178,6 +180,8 @@ def start_train(handler, payload, *, runtime):
     requested['prefix_augmentation_rate']=payload.get('prefix_augmentation_rate',0. if learning_policy=='legacy' else None)
     requested['event_family_audio_weight']=payload.get('event_family_audio_weight',0. if learning_policy=='legacy' else None)
     requested['phrase_loss_weight']=payload.get('phrase_loss_weight')
+    for key in ('song_profile_components','song_profile_weight','song_response_modes','song_response_group_size'):
+        requested[key]=payload.get(key) if mode!='resume' else None
     parent_config=StreamComposerConfig.from_dict(parent_data['model_config']) if parent_data else None
     if learning_policy=='checkpoint' and parent_config is None:
         raise ValueError('Checkpoint learning policy requires a parent checkpoint; use finetune or resume')
@@ -281,6 +285,19 @@ def start_generate(handler, payload, *, runtime):
         values=payload if payload.get(key) is not None else {**payload,key:default}
         settings[key] = _float(values, key, default, minimum=None if key == 'first' else 0.)
         _arg(args, '--' + key.replace('_', '-'), settings[key])
+    style_source=payload.get('song_style_source','auto')
+    if style_source not in {'auto','checkpoint','manual'}:raise ValueError('Unknown song_style_source')
+    locks=payload.get('song_style_locks',{})
+    if isinstance(locks,str):
+        try:locks=json.loads(locks or '{}')
+        except ValueError as exc:raise ValueError('song_style_locks must be a JSON object') from exc
+    if not isinstance(locks,dict):raise ValueError('song_style_locks must be a JSON object')
+    settings['song_style_source']=style_source;settings['song_style_locks']=locks
+    _arg(args,'--song-style-source',style_source);_arg(args,'--song-style-locks',json.dumps(locks,ensure_ascii=False,allow_nan=False))
+    if payload.get('song_style_seed') not in (None,''):
+        settings['song_style_seed']=_int(payload,'song_style_seed',0,minimum=0);_arg(args,'--song-style-seed',settings['song_style_seed'])
+    settings['song_response_mode']=_int(payload,'song_response_mode',-1,minimum=-1)
+    _arg(args,'--song-response-mode',settings['song_response_mode'])
     _arg(args, '--max-events', _int(payload, 'max_events', 0, minimum=0))
     touch = payload.get('touch_layout_policy', 'open')
     if touch not in {'open', 'legacy_two_heads'}: raise ValueError('Unknown touch layout')
@@ -307,6 +324,9 @@ def start_generate(handler, payload, *, runtime):
         bpm = _float(payload, 'bpm', 120., minimum=0.)
         if bpm <= 0: raise ValueError('bpm must be positive')
         _arg(args, '--bpm', bpm)
+    # The generated snapshot also contains defaults; it is not an explicit lock.
+    # A user-provided file retains the CLI's all-known semantics.
+    if condition_file is None: args.append('--condition-file-defaults')
     snapshots = {'condition-file': condition.to_dict()}
     if payload.get('tempo_map') is not None: snapshots['tempo-map'] = serialize_tempo_map(payload['tempo_map'])
     meters = [meter.to_dict() for meter in normalize_meter_map(payload.get('meter_map'))]

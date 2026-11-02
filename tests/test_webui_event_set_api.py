@@ -336,3 +336,18 @@ def test_resume_learning_rate_override_and_timing_compute(tmp_path, monkeypatch)
         event_set_api.start_train(Handler(), {**payload,'mode':'fresh','reset_learning_rate':True}, runtime=Runtime())
     with pytest.raises(ValueError,match='Unknown timing compute'):
         event_set_api.start_train(Handler(), {**payload,'timing_compute':'invalid'}, runtime=Runtime())
+
+
+def test_song_style_default_snapshot_and_explicit_file_are_distinct(tmp_path):
+    checkpoint=tmp_path/'model.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    condition=tmp_path/'condition.json';condition.write_text('{}')
+    base=dict(checkpoint=str(checkpoint),audio=str(audio),output=str(tmp_path/'out.txt'),seed=0,
+              song_style_source='auto',song_style_locks={'tap_bias':.2},song_response_mode=2)
+    default=Runtime();event_set_api.start_generate(Handler(),base,runtime=default)
+    assert '--condition-file-defaults' in default.args
+    assert default.args[default.args.index('--song-style-source')+1]=='auto'
+    assert 'tap_bias' in default.args[default.args.index('--song-style-locks')+1]
+    assert default.args[default.args.index('--song-response-mode')+1]=='2'
+    explicit=Runtime();event_set_api.start_generate(Handler(),{**base,'condition_file':str(condition)},runtime=explicit)
+    assert '--condition-file-defaults' not in explicit.args
