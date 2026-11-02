@@ -365,3 +365,29 @@ test('response-only checkpoints expose and submit response mode without profile 
   assert.equal(e('#composerSongStyleSource').disabled,true);assert.equal(e('#composerSongResponseMode').disabled,false);
   const payload=c.chartComposerGenerationPayload();assert.equal(payload.song_response_mode,2);assert.ok(!('song_style_source' in payload));
 });
+
+
+test('validation source prevents stale checkpoint split from being submitted for new stages',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  e('#composerValidationManifest').value='old/data_split/dev.json';
+  let payload=c.chartComposerTrainingPayload();assert.equal(payload.validation_manifest,null);assert.equal(payload.holdout_fraction,.05);
+  e('#composerValidationSource').value='manual';payload=c.chartComposerTrainingPayload();assert.equal(payload.validation_manifest,'old/data_split/dev.json');
+  e('#composerValidationManifest').value='';assert.throws(()=>c.chartComposerTrainingPayload(),/填写验证集清单/);
+  e('#composerValidationManifest').value='custom.json';e('#composerValidationSource').value='off';payload=c.chartComposerTrainingPayload();assert.equal(payload.validation_manifest,null);assert.equal(payload.holdout_fraction,0);assert.equal(e('#composerValidationManifest').value,'custom.json');
+  c.currentTrainingMode=()=> 'finetune';e('#composerValidationSource').value='manual';
+  c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{validation_manifest:'parent/dev.json'}},'finetune');
+  assert.equal(e('#composerValidationManifest').value,'custom.json');assert.equal(c.chartComposerTrainingPayload().validation_manifest,'custom.json');
+  c.currentTrainingMode=()=> 'resume';c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{validation_manifest:'parent/dev.json'}},'resume');
+  assert.equal(e('#composerValidationManifest').value,'parent/dev.json');assert.equal(c.chartComposerTrainingPayload().validation_manifest,null);
+  c.currentTrainingMode=()=> 'fresh';c.applyEventSetFreshDefaults();assert.equal(e('#composerValidationSource').value,'auto');assert.equal(c.chartComposerTrainingPayload().validation_manifest,null);
+});
+
+
+test('validation inputs follow the selected source without changing selection on refresh',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  e('#composerValidationSource').value='auto';c.updateEventSetControls();assert.equal(e('#composerValidationManifest').disabled,true);assert.equal(e('#composerHoldoutFraction').disabled,false);
+  e('#composerValidationSource').value='manual';e('#composerValidationManifest').value='explicit.json';c.updateEventSetControls();c.updateEventSetControls();
+  assert.equal(e('#composerValidationSource').value,'manual');assert.equal(e('#composerValidationManifest').disabled,false);assert.equal(e('#composerHoldoutFraction').disabled,true);assert.equal(c.chartComposerTrainingPayload().validation_source,'manual');
+  e('#composerValidationSource').value='off';c.updateEventSetControls();assert.equal(e('#composerValidationManifest').disabled,true);assert.equal(e('#composerHoldoutFraction').disabled,true);
+  c.currentTrainingMode=()=> 'resume';c.updateEventSetControls();assert.equal(e('#composerValidationSource').disabled,true);assert.equal(e('#composerValidationManifest').disabled,true);
+});

@@ -287,7 +287,8 @@
 <label class="field">学习率变化方式<select id="composerLrSchedule"><option value="auto" selected>自动（整拍集合余弦，旧架构恒定；续训继承）</option><option value="constant">恒定学习率</option><option value="cosine">预热后余弦退火</option></select><small>余弦方案逐渐降低学习率。续训默认继承原曲线；整拍集合可明确勾选调整本次续训学习率。</small></label>
 </div></div></details>
 <details id="composerTrainingEvaluation" class="settings-section" open><summary><span>验证与生成对照</span><small>观察留出误差和固定歌曲，发现退化</small></summary><div class="settings-content"><div class="form-grid">
-<label class="field">独立验证集清单<textarea id="composerValidationManifest" class="path-input" rows="2" placeholder="留空：按下方比例自动留出"></textarea><small>留空且留出比例大于0时，按歌曲与音频内容分组生成训练、开发和最终留出清单；比例0且留空则不验证。填写时必须与训练集没有同曲或同音频重叠。</small></label>
+<label class="field">验证数据来源<select id="composerValidationSource"><option value="auto" selected>自动按歌曲划分</option><option value="manual">使用指定独立验证集</option><option value="off">不验证</option></select><small>续训继承检查点的数据划分。自动模式会重新划分当前训练数据；手动模式要求验证集与训练集无重叠。</small></label>
+<label class="field">独立验证集清单<textarea id="composerValidationManifest" class="path-input" rows="2" placeholder="留空：按下方比例自动留出"></textarea><small>仅选择“使用指定独立验证集”时使用此路径；必须与训练集没有同曲或同音频重叠。自动模式保留此文本但不会使用。</small></label>
 <label class="field">自动留出比例<input id="composerHoldoutFraction" type="number" value="0.05" min="0" step="0.01" max="0.49"><small>默认0.05，将约5%的歌曲组分给开发集与最终留出集；不是每张谱随机切5%。填写独立验证集时不使用该比例。0关闭自动留出。</small></label>
 <label class="field">每轮验证批次上限<input id="composerValidationMaxBatches" type="number" value="32" min="0" step="1"><small>默认32；0验证全部留出样本。增加会延长每轮验证时间。</small></label>
 <label class="field">验证批大小<input id="composerValidationBatchSize" type="number" value="8" min="1" step="1"><small>仅影响验证显存和速度，不改变训练批大小；显存紧张可降至4。</small></label>

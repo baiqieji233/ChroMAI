@@ -219,7 +219,12 @@ def assert_unseen(training_manifest, holdout_manifest, *, cache_dir=None):
         return result
     overlap = keys(training_manifest) & keys(holdout_manifest)
     if overlap:
-        raise ValueError(f'training and holdout overlap ({len(overlap)} identities); unseen claim rejected')
+        raise ValueError(
+            f'training and holdout overlap ({len(overlap)} identities); unseen claim rejected. '
+            f'训练清单：{Path(training_manifest).resolve()}；验证清单：{Path(holdout_manifest).resolve()}。'
+            '这表示同曲或相同音频同时进入训练和验证，身份数不等于歌曲数。'
+            '新训练请将“验证数据来源”设为“自动按歌曲划分”，或使用与该验证清单配套且互不重叠的训练清单；'
+            '不要将旧开发集与包含它的全量训练清单一起使用。')
     return True
 
 
