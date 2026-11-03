@@ -235,21 +235,28 @@ class _Curve:
         prefix=self.adjusted_prefix if adjusted else self.native_prefix
         return prefix[index]+rates[index]*(query-self.hazard_edges[index])
 
-    def timing_bias(self,start,seconds):
+    def _arranged_integral(self,start,seconds,adjusted=False,*,arrangement_gain=1.,arrangement_end_second=None):
+        total=self._integral(seconds,adjusted)-self._integral(start,adjusted)
+        if arrangement_end_second is None:return total
+        middle=np.maximum(start,np.minimum(seconds,arrangement_end_second))
+        local=self._integral(middle,adjusted)-self._integral(start,adjusted)
+        return total+(arrangement_gain-1)*local
+
+    def timing_bias(self,start,seconds,**arrangement):
         seconds=np.asarray(seconds,dtype=np.float64)
         if not self.active:return np.zeros_like(seconds)
         index=(np.searchsorted(self.hazard_edges,seconds,side='right')-1).clip(0,len(self.native_hazard)-1)
         # The floor only defines finite likelihood ratios at zero-rate cells;
         # explicit rest support is still masked by the generation caller.
         ratio=np.log(self.adjusted_hazard[index].clip(1e-12)/self.native_hazard[index].clip(1e-12))
-        extra=(self._integral(seconds,True)-self._integral(start,True)
-               -self._integral(seconds)+self._integral(start))
+        extra=(self._arranged_integral(start,seconds,True,**arrangement)
+               -self._arranged_integral(start,seconds,False,**arrangement))
         return ratio-extra
 
-    def kind_bias(self,start,end):
+    def kind_bias(self,start,end,**arrangement):
         if not self.active:return 0.,0.
-        old=max(0.,float(self._integral(end)-self._integral(start)))
-        new=max(0.,float(self._integral(end,True)-self._integral(start,True)))
+        old=max(0.,float(self._arranged_integral(start,end,False,**arrangement)))
+        new=max(0.,float(self._arranged_integral(start,end,True,**arrangement)))
         note=float(np.log(max(-np.expm1(-new),1e-12))-np.log(max(-np.expm1(-old),1e-12)))
         return note,old-new
 
@@ -430,7 +437,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
             kinds=kind_logits_for_audio(kind_values,cursor,end)
             start_second=second_at_beat(clock,cursor)
             horizon_second=second_at_beat(clock,min(cursor+2,end))
-            note_bias,tail_bias=curve.kind_bias(start_second,horizon_second)
+            arrangement={}
+            if curve.active and 'occurrence_arrangement_gain' in result:
+                gain,boundary=torch.stack((result['occurrence_arrangement_gain'][0,-1].double(),
+                    result['occurrence_arrangement_end_second'][0,-1])).detach().cpu().tolist()
+                arrangement=dict(arrangement_gain=gain,arrangement_end_second=boundary)
+            note_bias,tail_bias=curve.kind_bias(start_second,horizon_second,**arrangement)
             kinds[NOTE]+=note_bias
             kinds[WAIT]+=tail_bias
             kinds[EOS]+=tail_bias
@@ -450,7 +462,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 clock,duration,first_step=step_index==0)
             seconds=np.asarray([second_at_beat(clock,cursor+d) for d in deltas])
             if curve.active:
-                timing+=torch.as_tensor(curve.timing_bias(start_second,seconds),device=device)
+                timing+=torch.as_tensor(curve.timing_bias(start_second,seconds,**arrangement),device=device)
                 timing=timing.masked_fill(torch.as_tensor(curve.controller.rest_mask(seconds),device=device),-torch.inf)
             if not bool(torch.isfinite(timing).any()):
                 if end-cursor<=2:
@@ -614,7 +626,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         configuration_retry_semantics='joint_event_rejection_v2',sampling_observation=sampling_observation,
         training_objective_recipe=(payload.get('args') or {}).get('training_objective_recipe','legacy_joint_event_objective'),
         plan_kind_policy=model.config.plan_kind_policy,
-        occurrence_source=('audio_condition_interval_survival' if model.config.plan_kind_policy=='audio_hazard_v3' else 'legacy_decoder_plus_plan'),
+        occurrence_source=('music_and_NOTE_only_phrase_arrangement' if model.config.plan_kind_policy=='phrase_arranged_hazard_v4' else
+            'audio_condition_interval_survival' if model.config.plan_kind_policy=='audio_hazard_v3' else 'legacy_decoder_plus_plan'),
         gap_continuation_policy=model.config.gap_continuation_policy,sensor_load_policy=model.config.sensor_load_policy,
         lane_load_policy=model.config.lane_load_policy,
         motion_continuation_policy=model.config.motion_continuation_policy,

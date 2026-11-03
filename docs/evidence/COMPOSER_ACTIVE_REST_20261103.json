@@ -1,0 +1,324 @@
+{
+  "scope": "implementation_and_real_data_runtime_not_playtest_quality",
+  "python_tests": 1032,
+  "python_failures": 0,
+  "javascript_tests": 34,
+  "runtime": {
+    "parent_step": 3504,
+    "formal_training_started": false,
+    "batch_size": 16,
+    "real_dataset_samples": 17,
+    "effective_targets": 554.0,
+    "song_seconds": 150.6655625,
+    "sequence_length": 173,
+    "scope": "real_B16_BF16_forward_loss_backward_no_optimizer_no_full_epoch_claim",
+    "producer": {
+      "musical_entry_recovery_v9": {
+        "median_sec": 0.06776095001259819,
+        "total_sec": 2.1368985000881366,
+        "diagnostics": {
+          "selected": 29,
+          "attempted": 29,
+          "skipped_unreachable_or_conflict": 16,
+          "applied": 13,
+          "applied_timeline_loop": 1,
+          "edited_notes": 209,
+          "configuration_trusted": 45,
+          "time_only": 353,
+          "timeline_loop_events": 128,
+          "timeline_same_key": 1,
+          "applied_same_gap": 1,
+          "rebalanced_rows": 11,
+          "first_decision_count": 11,
+          "first_decision_mass": 186.7282190322876,
+          "applied_rotation_gap": 2,
+          "applied_abab": 4,
+          "applied_rest_control": 1,
+          "entry_missing_events": 0,
+          "entry_wait_beats": 2.0,
+          "applied_phase_shift": 1,
+          "correspondence_phase_shift_same_configuration": 45,
+          "phase_shift_rows": 1,
+          "phase_shift_abs_beats": 0.125,
+          "phase_shift_local_rows": 1,
+          "phase_shift_rebuild_sec": 0.02220639999723062,
+          "applied_touch": 1,
+          "applied_same_key": 1,
+          "applied_rotation": 1
+        }
+      },
+      "musical_arrangement_recovery_v10": {
+        "median_sec": 0.07101534999674186,
+        "total_sec": 1.4051124000689015,
+        "diagnostics": {
+          "selected": 29,
+          "attempted": 29,
+          "skipped_unreachable_or_conflict": 15,
+          "applied": 14,
+          "applied_timeline_loop": 1,
+          "edited_notes": 209,
+          "configuration_trusted": 45,
+          "time_only": 353,
+          "timeline_loop_events": 128,
+          "timeline_same_key": 1,
+          "applied_same_gap": 1,
+          "rebalanced_rows": 11,
+          "first_decision_count": 11,
+          "first_decision_mass": 186.7282190322876,
+          "applied_rotation_gap": 2,
+          "applied_abab": 4,
+          "applied_rest_control": 1,
+          "entry_missing_events": 0,
+          "entry_wait_beats": 2.0,
+          "applied_phase_shift": 1,
+          "correspondence_phase_shift_same_configuration": 45,
+          "phase_shift_rows": 1,
+          "phase_shift_abs_beats": 0.125,
+          "phase_shift_local_rows": 1,
+          "phase_shift_rebuild_sec": 0.02199719997588545,
+          "applied_touch": 1,
+          "applied_authored_rest": 1,
+          "authored_rest_rows": 1,
+          "authored_internal_rest_rows": 1,
+          "authored_rest_rms": 0.30174482092263305,
+          "applied_same_key": 1,
+          "applied_rotation": 1
+        }
+      }
+    },
+    "real_entry_examples": [
+      {
+        "mode": "missed_entry",
+        "missing_events": 23,
+        "wait_beats": 14.0,
+        "target_kind": 2,
+        "target_beat": 44.0,
+        "cursor": 43.0
+      },
+      {
+        "mode": "rest_control",
+        "missing_events": 4,
+        "wait_beats": 10.0,
+        "target_kind": 3,
+        "target_beat": 24.0,
+        "cursor": 22.0
+      }
+    ],
+    "arrangement_parameters": 26309,
+    "runtime": {
+      "music_only": {
+        "median_sec": 0.3588488499808591,
+        "mean_sec": 0.35966434999136254,
+        "samples_per_sec": 44.48592138860648,
+        "effective_targets_per_sec": 1540.3250280804991,
+        "peak_allocated_bytes": 2551531520,
+        "finite_loss_and_gradients": true,
+        "first_loss": 7.199814319610596
+      },
+      "arranged": {
+        "median_sec": 0.4538936000026297,
+        "mean_sec": 0.4558414999919478,
+        "samples_per_sec": 35.09991959986669,
+        "effective_targets_per_sec": 1215.3347161453842,
+        "peak_allocated_bytes": 2547830784,
+        "finite_loss_and_gradients": true,
+        "first_loss": 7.199814319610596
+      }
+    },
+    "compute_ratio_new_over_old": 1.2674080708941404
+  },
+  "interleaved_runtime": {
+    "scope": "interleaved_ABBA_real_B16_forward_loss_backward_no_optimizer",
+    "means": {
+      "music_only": 0.3889599625035771,
+      "arranged": 0.35516547500446904,
+      "ratio": 0.9131157683130503
+    },
+    "rows": [
+      {
+        "cycle": 0,
+        "model": "music_only",
+        "seconds": 0.37551829998847097
+      },
+      {
+        "cycle": 0,
+        "model": "arranged",
+        "seconds": 0.3810279000317678
+      },
+      {
+        "cycle": 0,
+        "model": "arranged",
+        "seconds": 0.3916855999850668
+      },
+      {
+        "cycle": 0,
+        "model": "music_only",
+        "seconds": 0.3831378999748267
+      },
+      {
+        "cycle": 1,
+        "model": "music_only",
+        "seconds": 0.5366339999600314
+      },
+      {
+        "cycle": 1,
+        "model": "arranged",
+        "seconds": 0.34918580000521615
+      },
+      {
+        "cycle": 1,
+        "model": "arranged",
+        "seconds": 0.32063859998015687
+      },
+      {
+        "cycle": 1,
+        "model": "music_only",
+        "seconds": 0.34741960000246763
+      },
+      {
+        "cycle": 2,
+        "model": "music_only",
+        "seconds": 0.36256970005342737
+      },
+      {
+        "cycle": 2,
+        "model": "arranged",
+        "seconds": 0.35248760000104085
+      },
+      {
+        "cycle": 2,
+        "model": "arranged",
+        "seconds": 0.3421022000256926
+      },
+      {
+        "cycle": 2,
+        "model": "music_only",
+        "seconds": 0.36268260003998876
+      },
+      {
+        "cycle": 3,
+        "model": "music_only",
+        "seconds": 0.3675346000236459
+      },
+      {
+        "cycle": 3,
+        "model": "arranged",
+        "seconds": 0.3743216000148095
+      },
+      {
+        "cycle": 3,
+        "model": "arranged",
+        "seconds": 0.3298744999920018
+      },
+      {
+        "cycle": 3,
+        "model": "music_only",
+        "seconds": 0.3761829999857582
+      }
+    ]
+  },
+  "training": {
+    "task_id": "4782dc19de84",
+    "mode": "finetune",
+    "parent_optimizer_steps": 3504,
+    "directory": "checkpoints/prism_composer_v48",
+    "lr": 0.0005,
+    "lr_schedule": "constant",
+    "warmup_steps": 0,
+    "epochs": 50,
+    "batch_size": 16,
+    "grad_accumulation": 4,
+    "status": "running",
+    "optimizer_update_verified": true,
+    "last_observed": {
+      "epoch": 1,
+      "batch": 80,
+      "total": 2334,
+      "optimizer_steps": 20,
+      "learning_rate": 0.0005,
+      "last_gradient_norm": 13.927875518798828,
+      "skipped_windows": 0,
+      "loss": 7.192545318603516,
+      "kind_loss": 0.24946222305297852,
+      "detail_loss": 1.4887224197387696,
+      "occurrence_arrangement_gain": 1.300462532043457,
+      "occurrence_wait_nll": 0.15902034044265748,
+      "occurrence_authored_rest_nll": 0.04150525033473969,
+      "samples_per_sec": 17.847539297423168,
+      "effective_targets_per_sec": 636.5994173149626,
+      "timing": {
+        "data_sec": 0.945558000006713,
+        "transfer_sec": 1.0769339002436027,
+        "compute_sec": 69.61247259989614
+      },
+      "prefetch": {
+        "mode": "shared_audio_ordered_batches",
+        "depth": 2,
+        "sample_workers": 1,
+        "prepared_batches": 82,
+        "prepare_sec": 67.075,
+        "consumer_wait_sec": 0.683,
+        "buffered_tensor_bytes": 106883232,
+        "max_buffered_tensor_bytes": 128976074
+      },
+      "cuda_memory": {
+        "allocated_gib": 0.8774724006652832,
+        "reserved_gib": 3.826171875,
+        "peak_allocated_gib": 3.391274929046631
+      },
+      "augmentation": {
+        "selected": 177,
+        "attempted": 177,
+        "applied": 140,
+        "applied_rest_control": 13,
+        "entry_missing_events": 570,
+        "entry_wait_beats": 392.0,
+        "edited_notes": 2458,
+        "configuration_trusted": 440,
+        "time_only": 2592,
+        "applied_same_gap": 4,
+        "rebalanced_rows": 83,
+        "first_decision_count": 83,
+        "first_decision_mass": 1763.2968440055847,
+        "applied_timeline_loop": 13,
+        "timeline_loop_events": 983,
+        "timeline_rotation_gap": 3,
+        "applied_missed_entry": 19,
+        "applied_touch": 14,
+        "applied_authored_rest": 12,
+        "authored_rest_rows": 12,
+        "authored_internal_rest_rows": 12,
+        "authored_rest_rms": 7.156988939269096,
+        "applied_rotation": 11,
+        "skipped_unreachable_or_conflict": 37,
+        "applied_same_key": 12,
+        "applied_phase_shift": 13,
+        "correspondence_phase_shift_same_configuration": 440,
+        "phase_shift_rows": 13,
+        "phase_shift_abs_beats": 0.7083333333333334,
+        "phase_shift_local_rows": 13,
+        "phase_shift_rebuild_sec": 0.2999150000978261,
+        "timeline_same_shape": 3,
+        "applied_abab": 15,
+        "applied_rotation_gap": 6,
+        "applied_same_shape": 8,
+        "timeline_touch": 4,
+        "timeline_rotation": 1,
+        "timeline_same_key": 1,
+        "timeline_abab": 1
+      }
+    }
+  },
+  "stage_initialization": {
+    "parent_optimizer_steps": 3504,
+    "new_stage_optimizer_steps": 0,
+    "shared_tensors": 451,
+    "changed_shared_tensors": [],
+    "new_policy": "phrase_arranged_hazard_v4",
+    "new_curriculum": "musical_arrangement_recovery_v10",
+    "lr": 0.0005,
+    "schedule": "constant",
+    "warmup": 0,
+    "mode": "finetune"
+  }
+}

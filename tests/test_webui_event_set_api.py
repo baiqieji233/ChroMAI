@@ -135,8 +135,8 @@ def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_pat
     assert policies['continuation_policy']==('off' if mode=='resume' else 'pattern_runs_v2')
     assert policies['motion_continuation_policy']==('motion_continuation_v1' if mode=='resume' else 'context_motion_v3')
     assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'greedy_mixed_v4')
-    assert policies['prefix_augmentation_input_policy']==('causal_window_config_time_first_decision_v3' if mode=='resume' else 'musical_entry_recovery_v9')
-    assert policies['plan_kind_policy']==('off' if mode=='resume' else 'audio_hazard_v3')
+    assert policies['prefix_augmentation_input_policy']==('causal_window_config_time_first_decision_v3' if mode=='resume' else 'musical_arrangement_recovery_v10')
+    assert policies['plan_kind_policy']==('off' if mode=='resume' else 'phrase_arranged_hazard_v4')
     assert runtime.args[runtime.args.index('--plan-kind-policy')+1]==policies['plan_kind_policy']
     assert policies['timing_grid_audio_policy']==('off' if mode=='resume' else 'query_pool_v3')
     assert policies['transition_policy']=='off'

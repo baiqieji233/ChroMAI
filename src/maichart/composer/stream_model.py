@@ -187,10 +187,10 @@ class StreamComposerConfig:
             ('sensor_load_policy',{'button_only_v1','separate_touch_v1'}),
             ('lane_load_policy',{'off','direct_buttons_v1'}),
             ('gap_continuation_policy',{'off','additive_v1','probability_v2'}),
-            ('plan_kind_policy',{'off','rate_integral_v2','audio_hazard_v3'}),
+            ('plan_kind_policy',{'off','rate_integral_v2','audio_hazard_v3','phrase_arranged_hazard_v4'}),
             ('recovery_policy',{'persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'}),
             ('recovery_target_policy',{'authored_next_v1','causal_correspondence_v1'}),
-            ('prefix_augmentation_input_policy',{'musical_entry_recovery_v9','musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
+            ('prefix_augmentation_input_policy',{'musical_arrangement_recovery_v10','musical_entry_recovery_v9','musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
             ('motion_continuation_policy',{'off','motion_continuation_v1','motion_distinct_v2','context_motion_v3'})):
             if getattr(self,name) not in allowed:raise ValueError(f'Unsupported {name}')
         if self.attention_policy not in ('auto_v1','bf16_dropout_math_v1'):raise ValueError('Unsupported attention policy')
@@ -204,8 +204,12 @@ class StreamComposerConfig:
             raise ValueError('Event family audio weight must be finite in [0, 1]')
         if self.plan_target_units not in ('counts_per_audio_cell','rates_per_second_v2'):
             raise ValueError('Unsupported stream plan target units')
-        if self.plan_kind_policy=='audio_hazard_v3' and self.plan_target_units!='rates_per_second_v2':
+        if self.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4') and self.plan_target_units!='rates_per_second_v2':
             raise ValueError('Audio hazard requires rates_per_second_v2')
+        if self.plan_kind_policy=='phrase_arranged_hazard_v4' and self.phrase_context_policy=='off':
+            raise ValueError('Phrase arrangement requires phrase context')
+        if self.plan_kind_policy=='phrase_arranged_hazard_v4' and self.timing_output_policy!='absolute_grid_v1':
+            raise ValueError('Phrase arrangement requires absolute timing')
         if self.plan_loss_normalization not in ('cell_mean_v1','per_second_v2'):
             raise ValueError('Unsupported stream plan loss normalization')
         if not math.isfinite(self.plan_blank_window_seconds) or self.plan_blank_window_seconds<0:
@@ -458,6 +462,9 @@ class StreamComposer(nn.Module):
             self.register_buffer('literal_type_local',local,persistent=False)
         self.plan_head = nn.Linear(d, 3)
         if config.plan_kind_policy=='rate_integral_v2':self.plan_kind_features=nn.Linear(3,5)
+        if config.plan_kind_policy=='phrase_arranged_hazard_v4':
+            from .stream_arrangement import PhraseArrangementRate
+            self.occurrence_arrangement=PhraseArrangementRate(self.phrase_context.phrase_width,config.condition_dim)
         lanes = torch.zeros(codec.num_atoms, 8)
         touch_lanes = torch.zeros(codec.num_atoms,33)
         literal_bits=[0]*codec.num_atoms
@@ -840,7 +847,7 @@ class StreamComposer(nn.Module):
         # A phrase mode selects a writing style, not a second veto over music.
         # In the hazard contract every mode uses the same occurrence law.
         kinds=(kind_logits[...,None,:].expand(*kind_logits.shape[:-1],self.config.phrase_modes,5)
-               if self.config.plan_kind_policy=='audio_hazard_v3' else kind_logits[...,None,:]+bias[...,:5])
+               if self.config.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4') else kind_logits[...,None,:]+bias[...,:5])
         return kinds,delta_logits[...,None,:]+timing
 
     def action_context_for_delta(self, output, batch, delta_ids, audio_cache, *, event_seconds=None,return_button_load=False):
@@ -889,19 +896,21 @@ class StreamComposer(nn.Module):
         result['conditioned_plan']={'logits':logits,**self._plan_integral_state(logits,cache,song_inverse,audio_end_sec)}
         return result
 
-    def _plan_at_cursor(self,logits,cache,batch,inverse,state=None):
-        music_only=self.config.plan_kind_policy=='audio_hazard_v3'
+    def _plan_at_cursor(self,logits,cache,batch,inverse,state=None,*,arrangement=None):
+        music_only=self.config.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4')
         state=state or self._plan_integral_state(logits,cache,inverse,batch['audio_end_sec'],detach=not music_only)
         start=batch['step_second'].double()
         future_beat=torch.minimum(batch['step_beat']+2,batch['audio_end_beat'][:,None])
         seconds_cache={**cache,'second_values':cache['seconds'][...,None]}
-        stop=self._read_audio(seconds_cache,future_beat,inverse,clock='beats',field='second_values').squeeze(-1).double()
         last=cache['mask'].sum(-1)[inverse].clamp_min(1)-1
         last_beat=cache['beats'][inverse].gather(1,last[:,None])
         last_second=cache['seconds'][inverse].gather(1,last[:,None])
-        tail_mix=((future_beat-last_beat)/(batch['audio_end_beat'][:,None]-last_beat).clamp_min(1e-10)).clamp(0,1)
-        tail_second=last_second+tail_mix*(batch['audio_end_sec'][:,None]-last_second)
-        stop=torch.where(future_beat>=last_beat,tail_second,stop)
+        def clock_at(beats):
+            values=self._read_audio(seconds_cache,beats,inverse,clock='beats',field='second_values').squeeze(-1).double()
+            mix=((beats-last_beat)/(batch['audio_end_beat'][:,None]-last_beat).clamp_min(1e-10)).clamp(0,1)
+            tail=last_second+mix*(batch['audio_end_sec'][:,None]-last_second)
+            return torch.where(beats>=last_beat,tail,values)
+        stop=clock_at(future_beat)
         def integral(query):
             query=torch.minimum(query,batch['audio_end_sec'][:,None]).clamp_min(0)
             times=state['seconds'].masked_fill(~state['valid'],torch.inf).contiguous()
@@ -911,6 +920,14 @@ class StreamComposer(nn.Module):
             return state['prefix'].gather(1,gathered)+state['rates'].gather(1,gathered)*(query-times.gather(1,index))[...,None]
         intensity=(integral(stop)-integral(start)).clamp_min(0).float()
         event=intensity[...,1]
+        if arrangement is not None:
+            boundary=clock_at(torch.minimum(arrangement['phrase_end_beat'],batch['audio_end_beat'][:,None]))
+            middle=torch.minimum(stop,boundary).maximum(start)
+            local=(integral(middle)-integral(start)).clamp_min(0).float()[...,1]
+            arrangement['native_expected_events']=event
+            arrangement['end_second']=boundary
+            arrangement['local_expected_events']=local
+            event=(event+(arrangement['gain']-1)*local).clamp_min(0)
         prior=torch.zeros(*event.shape,5,device=event.device,dtype=event.dtype)
         prior[...,WAIT]=-event
         prior[...,NOTE]=(-torch.expm1(-event)).clamp_min(1e-8).log()
@@ -919,7 +936,7 @@ class StreamComposer(nn.Module):
                     'mask':cache['mask'][inverse]}
         identity=torch.arange(inverse.size(0),device=inverse.device)
         rest=self._read_audio(plan_cache,start,identity)[...,0].sigmoid()
-        features=torch.cat((intensity.log1p(),rest[...,None]),-1)
+        features=torch.cat((torch.stack((intensity[...,0],event),-1).log1p(),rest[...,None]),-1)
         return (prior if music_only else prior.detach()),features.detach(),state['widths'].float()
 
     def _plan_candidate_expected_counts(self,state,cache,batch,inverse,candidate_beats):
@@ -1208,7 +1225,7 @@ class StreamComposer(nn.Module):
             hidden = hidden+ordered_residual
             phrase_output['phrase_ordered_actor_residual_rms'] = ordered_residual.float().square().mean(-1).sqrt()
         # target_second is intentionally read only after time logits exist.
-        music_occurrence=self.config.plan_kind_policy=='audio_hazard_v3' and not symbolic_only
+        music_occurrence=self.config.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4') and not symbolic_only
         kind_logits=(hidden.new_zeros(*hidden.shape[:-1],5,dtype=torch.float32) if music_occurrence
                      else self.kind_head(hidden).float())
         delta_logits=self.delta_head(hidden).float()
@@ -1222,18 +1239,21 @@ class StreamComposer(nn.Module):
             delta_logits=delta_logits+self.keep_gap_head(hidden).float()*matches
         if self.config.timing_output_policy=='relative_delta_v1' and hasattr(self,'delta_audio_key') and not symbolic_only:
             delta_logits=delta_logits+self.timing_audio_scores(hidden,batch['step_beat'],cache,inverse)
-        plan=None;plan_exposure=None;plan_state=None
+        plan=None;plan_exposure=None;plan_state=None;arrangement=None
         if not symbolic_only and (self.config.plan_kind_policy!='off' or 'audio_plan_target' in batch):
             prepared=cache.get('conditioned_plan')
             if prepared is not None and self.training:raise ValueError('Conditioned plan cache is inference-only')
             plan=prepared['logits'] if prepared is not None else self._condition_plan(cache,batch['condition'],inverse)
             plan_state=prepared
-            if self.config.timing_output_policy=='absolute_grid_v1' and self.config.timing_group_policy=='phase_gap_v2' and plan_state is None:
+            if self.config.timing_output_policy=='absolute_grid_v1' and (self.config.timing_group_policy=='phase_gap_v2'
+                    or self.config.plan_kind_policy=='phrase_arranged_hazard_v4') and plan_state is None:
                 plan_state=self._plan_integral_state(plan,cache,inverse,batch['audio_end_sec'],
-                    detach=self.config.plan_kind_policy!='audio_hazard_v3')
-            if self.config.plan_kind_policy in ('rate_integral_v2','audio_hazard_v3'):
-                prior,features,plan_exposure=self._plan_at_cursor(plan,cache,batch,inverse,plan_state)
-                if self.config.plan_kind_policy=='audio_hazard_v3':
+                    detach=self.config.plan_kind_policy not in ('audio_hazard_v3','phrase_arranged_hazard_v4'))
+            if self.config.plan_kind_policy=='phrase_arranged_hazard_v4':
+                arrangement=self.occurrence_arrangement(phrase_output,batch,causal_condition)
+            if self.config.plan_kind_policy in ('rate_integral_v2','audio_hazard_v3','phrase_arranged_hazard_v4'):
+                prior,features,plan_exposure=self._plan_at_cursor(plan,cache,batch,inverse,plan_state,arrangement=arrangement)
+                if music_occurrence:
                     # There is one learned music/condition event rate. NOTE,
                     # WAIT and terminal no-event mass all derive from it; the
                     # symbolic decoder cannot multiply in another WAIT prior.
@@ -1295,10 +1315,21 @@ class StreamComposer(nn.Module):
                     grid_cache={**cache,'grid_audio_keys':F.pad(local,(0,max(0,32-local.size(-1))))[...,:32]}
                     candidate_audio=self._read_audio(grid_cache,timing_beats,inverse,clock='beats',field='grid_audio_keys').float()
             expected=(self._plan_candidate_expected_counts(plan_state,cache,timing_batch,inverse,timing_beats)
-                if self.config.timing_group_policy=='phase_gap_v2' and plan_state is not None else None)
+                if (self.config.timing_group_policy=='phase_gap_v2' or arrangement is not None) and plan_state is not None else None)
             timing_logits,_,_=self.timing_grid(timing_hidden,timing_cursor,
                 timing_relative,self.delta_values,query,audio_scores,delta_allowed,candidate_audio=candidate_audio,
                 candidate_expected_count=expected)
+            if arrangement is not None:
+                gain=select(arrangement['gain']) if sparse_timing else arrangement['gain']
+                boundary=select(arrangement['phrase_end_beat']) if sparse_timing else arrangement['phrase_end_beat']
+                local=select(arrangement['local_expected_events']) if sparse_timing else arrangement['local_expected_events']
+                # Apply the same rate envelope to onset choice. A closing
+                # rest must not merely move a NOTE back inside that rest, nor
+                # suppress the first onset of the next music phrase.
+                inside=timing_beats<boundary[...,None]
+                rate_ratio=torch.where(inside,gain[...,None].clamp_min(1e-12).log(),0.)
+                extra=(gain[...,None]-1)*torch.minimum(expected,local.detach()[...,None])
+                timing_logits=timing_logits+rate_ratio-extra
             if sparse_timing:
                 # Unsupervised rows remain finite for the public loss and
                 # diagnostics. Only valid packed queries enter the scatter.
@@ -1436,8 +1467,13 @@ class StreamComposer(nn.Module):
         if plan is not None:
             result['plan_logits'] = plan
             if plan_exposure is not None:result['plan_exposure']=plan_exposure
-            if self.config.plan_kind_policy=='audio_hazard_v3':
+            if self.config.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4'):
                 result['occurrence_expected_events']=features[...,1].expm1()
+            if arrangement is not None:
+                result.update(occurrence_arrangement_gain=arrangement['gain'],
+                    occurrence_arrangement_history_support=arrangement['history_support'],
+                    occurrence_arrangement_end_second=arrangement['end_second'],
+                    occurrence_audio_expected_events=arrangement['native_expected_events'])
         return result
 
     def _family_history_features(self,batch,event_seconds):
@@ -2491,6 +2527,12 @@ def stream_loss(model, output, batch):
             occurrence_metrics['occurrence_'+label+'_nll']=reduce(kind_nll*selected)
             occurrence_metrics['occurrence_'+label+'_weight']=(weights*selected).sum()
         occurrence_metrics['occurrence_expected_events']=reduce(output['occurrence_expected_events'])
+        if 'occurrence_arrangement_gain' in output:
+            occurrence_metrics['occurrence_arrangement_gain']=reduce(output['occurrence_arrangement_gain'])
+            occurrence_metrics['occurrence_arrangement_history_support']=reduce(output['occurrence_arrangement_history_support'])
+            occurrence_metrics['occurrence_audio_expected_events']=reduce(output['occurrence_audio_expected_events'])
+            authored=batch.get('authored_rest_row_mask',torch.zeros(weights.size(0),device=weights.device,dtype=torch.bool))[:,None]
+            occurrence_metrics['occurrence_authored_rest_nll']=reduce(kind_nll*authored*kind.ne(NOTE))
     metrics = {name: value.detach() for name, value in dict(loss=total, time_loss=time_loss,
         kind_loss=kind_loss, delta_loss=delta_loss, timing_grid_loss=timing_grid_loss,
         timing_within_grid_loss=timing_within_grid_loss, configuration_loss=configuration_loss,

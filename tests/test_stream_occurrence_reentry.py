@@ -84,8 +84,8 @@ def test_phrase_mode_cannot_reinstate_an_arbitrary_wait_veto():
 def test_new_stage_selects_new_occurrence_and_entry_curriculum_without_rewriting_old_config():
     old=StreamComposerConfig.from_dict({'plan_kind_policy':'rate_integral_v2'})
     fresh=resolve_learning_policies(SimpleNamespace(),old,resume=False)
-    assert fresh['plan_kind_policy']=='audio_hazard_v3'
-    assert fresh['prefix_augmentation_input_policy']==aug.MUSICAL_ENTRY_INPUT_POLICY
+    assert fresh['plan_kind_policy']=='phrase_arranged_hazard_v4'
+    assert fresh['prefix_augmentation_input_policy']==aug.MUSICAL_ARRANGEMENT_INPUT_POLICY
     saved=resolve_learning_policies(SimpleNamespace(),old,resume=True)
     assert saved['plan_kind_policy']=='rate_integral_v2'
     assert old.plan_kind_policy=='rate_integral_v2'

@@ -849,9 +849,12 @@ class StreamDataset(Dataset):
 
     def __getitem__(self, index):
         song, start, end, window_weight = self.samples[index]
+        return self._sample_row(index,song,start,end,window_weight)
+
+    def _sample_row(self,index,song,start,end,window_weight,*,include_seam=True):
         target_end=end
         phrase_training=self.training_window_policy=='phrase_complete_v1'
-        if phrase_training:end=min(len(self.streams[song]),end+self.phrase_seam_events)
+        if phrase_training and include_seam:end=min(len(self.streams[song]),end+self.phrase_seam_events)
         first = max(0, start-self.lead_in)
         stream, encoded = self.streams[song], self.encoded[song]
         sequence = stream[first:end]
@@ -959,6 +962,7 @@ def collate_stream(items):
     if not items: raise ValueError('empty stream batch')
     output = {}
     output['_sample_indices'] = [item.get('_sample_index') for item in items]
+    output['authored_rest_row_mask']=torch.tensor([item.get('_augmentation_authored_rest',False) for item in items],dtype=torch.bool)
     collate_phrase_training(items,output)
     # Aggregate all window importance onto the already deduplicated chart
     # forward. A fixed reference batch size keeps the final partial batch

@@ -32,6 +32,7 @@ MUSICAL_RESIDUAL_INPUT_POLICY='musical_loop_recovery_v6'
 MUSICAL_BATCH_INPUT_POLICY='musical_loop_recovery_v7'
 MUSICAL_AUTHORED_EXIT_INPUT_POLICY='musical_loop_recovery_v8'
 MUSICAL_ENTRY_INPUT_POLICY='musical_entry_recovery_v9'
+MUSICAL_ARRANGEMENT_INPUT_POLICY='musical_arrangement_recovery_v10'
 _LOOP_MODES=('same_key','abab','touch','same_shape','same_gap')
 
 
@@ -42,6 +43,8 @@ def _augmentation_modes(input_policy):
     if input_policy in (MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY):return (*_LOOP_MODES,'phase_shift','rotation','rotation_gap','timeline_loop')
     if input_policy==MUSICAL_ENTRY_INPUT_POLICY:
         return (*_augmentation_modes(MUSICAL_BATCH_INPUT_POLICY),'missed_entry','rest_control')
+    if input_policy==MUSICAL_ARRANGEMENT_INPUT_POLICY:
+        return (*_augmentation_modes(MUSICAL_ENTRY_INPUT_POLICY),'authored_rest')
     raise ValueError('Unknown prefix augmentation input policy')
 
 
@@ -584,6 +587,61 @@ def _augment_entry_row(dataset,index,*,rng,row=None,rest=False):
     raise ValueError('No reachable missed-entry history for this chart')
 
 
+def _authored_rest_choices(dataset,song):
+    """Prefer real internal rests with measured music, without a silence cut."""
+    import numpy as np
+    cache=getattr(dataset,'_arrangement_rest_choices',None)
+    if cache is None:cache=dataset._arrangement_rest_choices={}
+    if song in cache:return cache[song]
+    source=dataset.streams[song]
+    last_note=next((step.end for step in reversed(source) if step.kind==NOTE),Fraction(0))
+    all_rests=_entry_targets(dataset,song,True)
+    internal=[at for at in all_rests if source[at].kind==WAIT and source[at].start<last_note]
+    pool=internal or all_rests
+    if not pool:raise ValueError('No trusted authored rest')
+    bank=dataset._bank(song);features=bank[0].numpy();times=bank[1].numpy()
+    duration=float(dataset.base.songs[song][0].audio.duration_sec)
+    rms=np.maximum(0.,features[:,198]) if features.shape[-1]>198 else np.zeros(len(times))
+    widths=np.diff(np.r_[times,duration])
+    prefix=np.r_[0.,np.cumsum(rms*widths)]
+    clock=dataset.clocks[song]
+    def integral(query):
+        query=np.clip(query,0.,duration)
+        idx=(np.searchsorted(times,query,side='right')-1).clip(0,len(times)-1)
+        return prefix[idx]+rms[idx]*(query-times[idx])
+    starts=np.asarray([max(0.,second_at_beat(clock,source[at].start)) for at in pool])
+    ends=np.asarray([max(0.,second_at_beat(clock,source[at].end)) for at in pool])
+    energy=(integral(ends)-integral(starts))/np.maximum(ends-starts,1e-8)
+    mean=float(prefix[-1]/max(duration,1e-8))
+    weights=(energy+mean).tolist() if mean>0 else [1.]*len(pool)
+    cache[song]=(pool,weights,energy.tolist(),bool(internal))
+    return cache[song]
+
+
+def _augment_authored_rest_row(dataset,index,*,rng,row=None):
+    import numpy as np
+    row=dataset[index] if row is None else row
+    song=dataset.samples[index][0];source=dataset.streams[song]
+    pool,weights,energy,internal=_authored_rest_choices(dataset,song)
+    selected=rng.choices(range(len(pool)),weights=weights,k=1)[0]
+    at=pool[selected]
+    # Keep the actual writing leading into a rest. Changed-history rest
+    # controls remain a separate task, with the same authored target law.
+    # Unchanged histories can use the existing symbol/state/phrase indices.
+    # Never replay thousands of old notes just to supervise one real rest.
+    result=dataset._sample_row(index,song,at,at+1,1.,include_seam=False)
+    result['configuration_mask'].zero_()
+    if 'target_phrase_mask' in result:
+        result['target_phrase_mask'].zero_();result['target_phrase_weight'].zero_()
+    if '_target_phrase_sequence_segments' in result:
+        result['_target_phrase_sequence_segments']=np.full_like(result['_target_phrase_sequence_segments'],-1)
+    _inherit_counterfactual_budget(result,row)
+    result['_augmentation_authored_rest']=True
+    result['_authored_rest_internal']=internal
+    result['_authored_rest_rms']=energy[selected]
+    return result,'authored_rest',0
+
+
 def _augment_timeline_row(dataset,index,*,rng,row=None,input_policy=MUSICAL_BATCH_INPUT_POLICY):
     """Use real inference layout for a long wrong prefix and one real target.
 
@@ -644,12 +702,13 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     modes=_augmentation_modes(input_policy)
     # Preserve the old policy's random draw order exactly. The new recipe may
     # choose a one-note phase edit before requiring a 4--12-note loop window.
-    if mode is None and input_policy in (PHASE_INPUT_POLICY,MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY):mode=modes[rng.randrange(len(modes))]
+    if mode is None and input_policy in (PHASE_INPUT_POLICY,MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY,MUSICAL_ARRANGEMENT_INPUT_POLICY):mode=modes[rng.randrange(len(modes))]
     if mode is not None and mode not in modes:raise ValueError('Unknown augmentation mode for this input policy')
     if mode=='phase_shift':return _augment_phase_row(dataset,index,rng=rng,row=row)
     if mode=='timeline_loop':return _augment_timeline_row(dataset,index,rng=rng,row=row,input_policy=input_policy)
     if mode in ('missed_entry','rest_control'):
         return _augment_entry_row(dataset,index,rng=rng,row=row,rest=mode=='rest_control')
+    if mode=='authored_rest':return _augment_authored_rest_row(dataset,index,rng=rng,row=row)
     song,start,end,_=dataset.samples[index]
     first=max(0,start-dataset.lead_in)
     source=dataset.streams[song]
@@ -657,7 +716,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     if getattr(dataset,'training_window_policy','block_v1')=='phrase_complete_v1':
         end=int(row['step_index'][-1])+1
     available=0
-    musical=input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY)
+    musical=input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY,MUSICAL_ARRANGEMENT_INPUT_POLICY)
     max_history=min(128,dataset.lead_in) if musical else 12
     for step in reversed(source[max(0,start-max_history):start]):
         if step.kind!=NOTE:break
@@ -672,7 +731,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     timing_mode=mode in ('same_gap','rotation_gap')
     if timing_mode:
         modified=_same_gap_steps(dataset,song,source,begin,start,end,rng,rotation_gap=mode=='rotation_gap',
-            rotation_gaps=('1/4','1/2','1','2') if input_policy in (MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY) else None)
+            rotation_gaps=('1/4','1/2','1','2') if input_policy in (MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY,MUSICAL_ARRANGEMENT_INPUT_POLICY) else None)
     else:
         modified=list(source[:end])
     if mode!='same_gap':
@@ -780,6 +839,10 @@ def augment_stream_items(dataset,items,*,rate=.15,seed=0,input_policy=LEGACY_INP
             if replacement.get('_augmentation_entry_recovery',False):
                 diagnostics['entry_missing_events']+=replacement['_entry_missing_events']
                 diagnostics['entry_wait_beats']+=replacement['_entry_wait_beats']
+            if replacement.get('_augmentation_authored_rest',False):
+                diagnostics['authored_rest_rows']+=1
+                diagnostics['authored_internal_rest_rows']+=int(replacement['_authored_rest_internal'])
+                diagnostics['authored_rest_rms']+=replacement['_authored_rest_rms']
             diagnostics['edited_notes']+=count
             _record_configuration_qualification(diagnostics,replacement)
             _record_first_decision(diagnostics,replacement,row)

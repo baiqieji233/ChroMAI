@@ -7,7 +7,7 @@ import torch
 SCHEMA='maichart-composer-event-set-checkpoint-v1'
 FAMILY='chart_composer_v1'
 PROFILE='event_set_stream_v1'
-UNIFIED_OBJECTIVE_VERSION='stream_audio_hazard_entry_recovery_v10'
+UNIFIED_OBJECTIVE_VERSION='stream_phrase_arrangement_hazard_v11'
 
 
 def training_objective_compatible(payload):
