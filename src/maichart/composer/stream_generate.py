@@ -392,6 +392,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         physical_policy=getattr(args,'physical_policy','runtime_hard_v2'))
     points=[];cursor=Fraction(0);waits=0;retries=0;timing_retries=0;forced_waits=0;reason='budget'
     model_diagnostic_sums=None;model_diagnostic_count=0
+    timing_observation=dict(total=None,samples=0,decisions=0)
     sampling_observation=dict(retry_policy='joint_event_rejection_v2',
         scope='all_trial_rollouts_including_rejected_candidates_not_only_exported_notes')
     diagnostic_fields=('phrase_residual_rms','phrase_ordered_anchor_residual_rms',
@@ -497,6 +498,16 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     proposal.update(execution_options(model,context,selected_result,selected_batch,
                         proposal['context'],generator,temperature=getattr(args,'phrase_mode_temperature',1.),beat=beat))
                     return proposal
+                if 'timing_grid_ids' in result:
+                    if timing_observation['decisions']%16==0:
+                        from .stream_timing import ternary_probability_stages
+                        ids=result['timing_grid_ids']
+                        if ids.ndim==3:ids=ids[0,-1]
+                        values=ternary_probability_stages(result['delta_logits'][0,-1],delta_values,timing,
+                            ids)
+                        timing_observation['total']=(values if timing_observation['total'] is None else timing_observation['total']+values)
+                        timing_observation['samples']+=1
+                    timing_observation['decisions']+=1
                 accepted,delta_id,failed,failed_times=sample_timed_event(model,timing,deltas,cursor,at_time,
                     int(result['reference_phase'][0,-1]),result.get('reference_phase_mask',None)[0,-1]
                         if 'reference_phase_mask' in result else None,guard,generator,
@@ -632,6 +643,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         physical_policy=guard.physical_policy,
         curve=curve.report(),
         playability=physical_policy_report(physical,guard),
+        timing_probability_stages=dict(fields=['raw','phrase_mode','curve'],
+            ternary_mean=((timing_observation['total']/timing_observation['samples']).cpu().tolist() if timing_observation['samples'] else None),
+            samples=timing_observation['samples'],scope='every_16_legal_time_decisions_including_trial_rollouts_before_temperature'),
+        clock_settings=dict(bpm=float(song.tempo[0].bpm),first=float(song.first),
+            bpm_source='explicit_map' if getattr(args,'tempo_map',None) else 'explicit' if args.bpm else 'audio_estimate',
+            first_source='supplied_seconds_not_inferred_from_onset_phase'),
         quality_scope='generated_stream_requires_listening_and_playtest')
     output.with_suffix('.composer.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     return report

@@ -19,6 +19,13 @@ GRID_DENOMINATORS = (1, 2, 4, 8, 16, 32, 3, 6, 12, 24)
 GRID_FAMILIES = (*map(str, GRID_DENOMINATORS), 'other')
 
 
+def ternary_probability_stages(raw, mode, curved, group_ids):
+    """Read stage probability mass; never modify support or sampling."""
+    ids=group_ids.remainder(len(GRID_FAMILIES))
+    ternary=(ids>=GRID_DENOMINATORS.index(3))&(ids<=GRID_DENOMINATORS.index(24))
+    return (torch.stack((raw,mode,curved)).float().softmax(-1)*ternary).sum(-1)
+
+
 def timing_phases(delta_beats, explicit=()):
     return tuple(sorted({Fraction(str(x)) % 1 for x in (*delta_beats, *explicit)} | {Fraction(0)}))
 
