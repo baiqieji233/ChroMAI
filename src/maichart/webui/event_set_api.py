@@ -40,6 +40,10 @@ def start_train(handler, payload, *, runtime):
         parent_data = read(parent)
         if parent_data.get('schema') != SCHEMA:
             raise ValueError('Event-set stream requires a new event-set checkpoint; old Composer weights are incompatible')
+        if mode=='resume':
+            from maichart.composer.stream_checkpoint import training_objective_compatible
+            if not training_objective_compatible(parent_data):
+                raise ValueError('整曲与短句训练目标已修正，请选择已有模型加强训练（finetune）并使用新目录。')
     payload = dict(payload)
     rebatch = payload.get('rebatch_resume', False)
     if not isinstance(rebatch, bool) or (rebatch and mode != 'resume'):

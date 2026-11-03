@@ -113,6 +113,7 @@ class StreamComposerConfig:
     phrase_relation_weight: float = .1
     detail_representation_policy: str = 'private_v1'
     duration_feature_policy: str = 'legacy_v1'
+    detail_mode_parameterization: str = 'centered_v2'
     song_profile_policy: str = 'off'
     song_profile_components: int = 4
     song_profile_weight: float = .1
@@ -137,6 +138,8 @@ class StreamComposerConfig:
             raise ValueError('Unsupported phrase execution policy')
         if self.detail_representation_policy not in ('private_v1','shared_components_v1','typed_components_v2'):
             raise ValueError('Unsupported detail representation policy')
+        if self.detail_mode_parameterization not in ('legacy_v1','centered_v2'):
+            raise ValueError('Unsupported detail mode parameterization')
         if self.duration_feature_policy not in ('legacy_v1','log_time_v2'):
             raise ValueError('Unsupported duration feature policy')
         if self.phrase_modes not in (2,4,8) or not 2<=self.max_phrase_events<=256 or not 0<=self.phrase_seam_events<=8:
@@ -224,7 +227,7 @@ class StreamComposerConfig:
     @classmethod
     def from_dict(cls, values):
         # Initial scratch checkpoints encoded audio at 50 ms before this field.
-        return cls(**{'audio_grid_seconds':.05,'history_phase_policy':'canonical_v1',
+        return cls(**{'detail_mode_parameterization':'legacy_v1','audio_grid_seconds':.05,'history_phase_policy':'canonical_v1',
                       'phase_output_policy':'legacy_canonical_v1','clock_policy':'legacy_v1',
                       'timing_audio_policy':'legacy_v1','detail_policy':'independent_v1','literal_output_policy':'flat_family_v1','event_family_policy':'legacy_v1',
                       'timing_output_policy':'relative_delta_v1','timing_phase_catalog':(),
@@ -414,7 +417,7 @@ class StreamComposer(nn.Module):
             self.phrase_execution=PhraseExecution(d,min(d,128),codec,config.phrase_modes)
             if config.phrase_execution_policy=='component_modes_v2':
                 from .stream_detail_modes import ModeDetailControl
-                self.detail_mode_control=ModeDetailControl(config.phrase_modes,32,rank=8)
+                self.detail_mode_control=ModeDetailControl(config.phrase_modes,32,rank=8,parameterization=config.detail_mode_parameterization)
                 self.phrase_execution.timing=nn.Linear(min(d,128),config.phrase_modes*(5+self.timing_grid.num_groups))
                 nn.init.zeros_(self.phrase_execution.timing.weight);nn.init.zeros_(self.phrase_execution.timing.bias)
         if config.song_response_policy != 'off':
@@ -1696,6 +1699,44 @@ class StreamComposer(nn.Module):
         counts=torch.as_tensor(block_counts,device=self.literal_stop_head.bias.device,dtype=torch.float32).reshape(5)
         extras=torch.as_tensor(extra_atom_counts,device=counts.device,dtype=torch.float32).reshape(5)
         self.literal_stop_head.bias.copy_((counts+.5).log()-(extras+.5).log())
+
+    @torch.no_grad()
+    def absorb_legacy_detail_mode_mean(self):
+        """Reparameterize imported legacy logits exactly at a new-stage boundary.
+
+        Call only after loading legacy choices into a centered_v2 model. Every
+        candidate-constant mode mean moves to an existing base bias, including
+        the supported-literal mask. Hidden/recurrent weights remain unchanged.
+        """
+        if self.config.detail_mode_parameterization!='centered_v2':
+            raise ValueError('Detail mode mean migration requires centered_v2')
+        if not hasattr(self,'detail_mode_control'):return dict(regular_slots=0,literal_candidates=0,stop_types=0)
+        control=self.detail_mode_control
+        mean=control.choices.mean(0)
+        bank=self.shared_details.encode_catalog() if hasattr(self,'shared_details') else None
+        slots=0
+        for shape,candidates in enumerate(self.codec.detail_sizes):
+            for slot in range(len(candidates)):
+                weight=(self.shared_details.candidate_weights(shape,slot,bank) if hasattr(self,'shared_details') else
+                        self.detail_embeddings[shape][slot].weight)
+                common=control.features(weight)@mean
+                self.detail_bias[shape][slot].add_(common.to(self.detail_bias[shape][slot]))
+                slots+=1
+        if self.literal_head.bias is None:
+            raise ValueError('Cannot absorb literal mode mean without an existing base bias')
+        if hasattr(self,'shared_details') and hasattr(self.shared_details,'literal_indices'):
+            components=self.shared_details.literal_weights(bank)
+        else:components=F.linear(self.literal_head.weight,self.detail_input.weight.T)
+        common=control.features(components)@mean
+        if hasattr(self,'shared_details') and hasattr(self.shared_details,'literal_supported'):
+            common=common*self.shared_details.literal_supported
+        self.literal_head.bias.add_(common.to(self.literal_head.bias))
+        if not hasattr(self,'literal_stop_head') or self.literal_stop_head.bias is None:
+            raise ValueError('Cannot absorb STOP mode mean without an existing base bias')
+        self.literal_stop_head.bias.add_(control.stop.mean(0).to(self.literal_stop_head.bias))
+        control.choices.sub_(control.choices.mean(0,keepdim=True))
+        control.stop.sub_(control.stop.mean(0,keepdim=True))
+        return dict(regular_slots=slots,literal_candidates=self.codec.num_atoms,stop_types=control.stop.size(1))
 
     def literal_catalog_weights(self,detail_bank=None):
         if hasattr(self,'shared_details') and hasattr(self.shared_details,'literal_indices'):

@@ -163,17 +163,54 @@ class _Curve:
                 self.reference_rebased=True
                 self.reference_rebase_reason='saved_curve_condition_differs_from_effective_condition'
         self.active=self.controller.active and not self.controller._neutral()
-        # Input order is event/head, while plan labels are blank/head/event.
+        # The curve describes a seconds-scale envelope, whereas the plan grid
+        # retains sharp music-aligned peaks. Edit the exact time-weighted mean
+        # per curve bin, then apply that bin's ratio to every fine cell. Rest
+        # boundaries are integrated separately below, not used as bin edges.
         native=rates[:,[1,0]]
-        adjusted=self.controller._adjust_rates(native,self.seconds) if self.active else native
-        self.native_event_rate=native[:,0].detach().cpu().numpy().astype(np.float64)
-        self.adjusted_event_rate=adjusted[:,0].detach().cpu().numpy().astype(np.float64)
-        self.head_rate=adjusted[:,1].detach().cpu().numpy()
         self.duration=float(song.audio.duration_sec)
+        self.native_event_rate=native[:,0].detach().cpu().numpy().astype(np.float64)
+        native_values=native.detach().cpu().numpy().astype(np.float64)
+        supplied_edges=raw.get('interval_edges_sec') if isinstance(raw,dict) else None
+        if supplied_edges is not None:
+            curve_edges=np.asarray(supplied_edges,dtype=np.float64)
+            if curve_edges.ndim!=1 or len(curve_edges)<2 or not np.isfinite(curve_edges).all() or np.any(np.diff(curve_edges)<=0):
+                raise ValueError('interval_edges_sec must contain increasing finite times')
+            if curve_edges[0]>0 or curve_edges[-1]<self.duration:
+                raise ValueError('interval_edges_sec must cover the audio duration')
+            curve_edges=np.unique(np.clip(curve_edges,0.,self.duration))
+            self.curve_scale_source='interval_edges_sec'
+            self.curve_bin_seconds=None
+        else:
+            width=float(raw.get('curve_bin_seconds',2.) if isinstance(raw,dict) else 2.)
+            if not math.isfinite(width) or width<=0:raise ValueError('curve_bin_seconds must be positive and finite')
+            curve_edges=np.r_[np.arange(0.,self.duration,width),self.duration]
+            self.curve_scale_source='curve_bin_seconds'
+            self.curve_bin_seconds=width
+        # Integrate piecewise-constant native plan cells exactly at all bin edges.
+        cell_edges=np.unique(np.clip(np.r_[0.,self.seconds,self.duration],0.,self.duration))
+        owners=(np.searchsorted(self.seconds,cell_edges[:-1],side='right')-1).clip(0,len(self.seconds)-1)
+        widths=np.diff(cell_edges)
+        prefix=np.vstack((np.zeros((1,2)),np.cumsum(native_values[owners]*widths[:,None],axis=0)))
+        edge_owners=(np.searchsorted(cell_edges,curve_edges,side='right')-1).clip(0,len(widths)-1)
+        integrals=prefix[edge_owners]+native_values[owners[edge_owners]]*(curve_edges-cell_edges[edge_owners])[:,None]
+        means=np.diff(integrals,axis=0)/np.diff(curve_edges)[:,None]
+        centers=(curve_edges[:-1]+curve_edges[1:])*.5
+        if self.active:
+            mean_tensor=torch.as_tensor(means,device=native.device,dtype=native.dtype)
+            adjusted_means=self.controller._adjust_rates(mean_tensor,centers).detach().cpu().numpy().astype(np.float64)
+            ratios=np.divide(adjusted_means,means,out=np.ones_like(means),where=means>0.)
+            bins=(np.searchsorted(curve_edges,self.seconds,side='right')-1).clip(0,len(means)-1)
+            adjusted=native_values*ratios[bins]
+        else:
+            ratios=np.ones_like(means)
+            adjusted=native_values
+        self.adjusted_event_rate=adjusted[:,0]
+        self.head_rate=adjusted[:,1]
         self.head_counts=counts[:,0].detach().cpu().numpy()
         # Constant plan cells, with explicit rest edges, give exact cached
         # cumulative hazards and avoid another model/audio read per candidate.
-        edges=np.r_[0.,self.seconds,self.duration]
+        edges=np.r_[0.,self.seconds,self.duration,curve_edges]
         if self.active:
             for low,high in self.controller.rest_regions:edges=np.r_[edges,low,high]
         self.hazard_edges=np.unique(np.clip(edges,0.,self.duration))
@@ -181,7 +218,8 @@ class _Curve:
         owners=np.searchsorted(self.seconds,starts,side='right')-1
         owners=owners.clip(0,len(self.seconds)-1)
         self.native_hazard=self.native_event_rate[owners]
-        self.adjusted_hazard=self.adjusted_event_rate[owners].copy()
+        hazard_bins=(np.searchsorted(curve_edges,starts,side='right')-1).clip(0,len(means)-1)
+        self.adjusted_hazard=self.native_hazard*ratios[hazard_bins,0]
         if self.active:
             midpoint=(self.hazard_edges[:-1]+self.hazard_edges[1:])*.5
             self.adjusted_hazard[self.controller.rest_mask(midpoint)]=0.
@@ -225,6 +263,8 @@ class _Curve:
         return dict(active=self.active,mode=self.controller.mode,strength=self.controller.strength,
             reference_rebased=self.reference_rebased,reference_rebase_reason=self.reference_rebase_reason,
             rate_integration='exact_piecewise_constant_plan_cells',timing_transform='first_arrival_likelihood_ratio',
+            curve_application='bin_mean_multiplicative_v1',curve_scale_source=self.curve_scale_source,
+            curve_bin_seconds=self.curve_bin_seconds,
             target_head_rate=summary(target),native_event_rate=summary(self.native_hazard),
             adjusted_event_rate=summary(self.adjusted_hazard))
     def allows(self,second,heads):

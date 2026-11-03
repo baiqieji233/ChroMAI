@@ -8,13 +8,14 @@ from maichart.composer.stream_generate import _Curve
 from maichart.generation.conditions import GenerationCondition
 
 
-def fixture(target=.25,reference=.5,strength=.65,native_heads=4.,condition=None,saved=None,rests=None):
+def fixture(target=.25,reference=.5,strength=.65,native_heads=4.,condition=None,saved=None,rests=None,edges=None):
     condition=condition or GenerationCondition(level=13.7,radar={'note_density':.329})
     saved=saved or condition
     raw=dict(schema='maichart-intensity-curve-v1',duration_sec=4.,baseline_head_rate=4.,
         intensity_mapping_policy='legacy_linear_v1',points=[{'time_sec':0.,'intensity':target},{'time_sec':4.,'intensity':target}],
         reference_points=[{'time_sec':0.,'intensity':reference},{'time_sec':4.,'intensity':reference}],
         condition=saved.to_dict(),rest_regions=rests or [])
+    if edges is not None:raw['interval_edges_sec']=edges
     head=torch.nn.Linear(1,3)
     with torch.no_grad():
         head.weight.zero_();head.bias.copy_(torch.tensor([0.,np.log(np.expm1(native_heads)),np.log(np.expm1(native_heads/2))]))
@@ -68,3 +69,37 @@ def test_rest_boundaries_and_zero_rates_keep_finite_biases():
     assert np.isfinite(curve.kind_bias(0.,4.)).all()
     assert curve._integral(1.5,True)-curve._integral(.5,True)==pytest.approx(0.)
     assert curve._integral(4.,True)>=0
+
+
+def test_curve_rebase_keeps_native_pulse_odds_and_applies_absolute_bin_target():
+    condition=GenerationCondition(level=14.)
+    saved=GenerationCondition(level=13.)
+    raw=dict(schema='maichart-intensity-curve-v1',duration_sec=4.,baseline_head_rate=4.,curve_bin_seconds=2.,
+        intensity_mapping_policy='legacy_linear_v1',points=[{'time_sec':0.,'intensity':.5},{'time_sec':4.,'intensity':.5}],
+        reference_points=[{'time_sec':0.,'intensity':.5},{'time_sec':4.,'intensity':.5}],condition=saved.to_dict())
+    # Two seconds of low background with one 10ms high pulse, repeated.
+    native=np.full(400,.01,dtype=np.float32);native[[50,250]]=100.
+    inverse=np.log(np.expm1(native.astype(np.float64))).astype(np.float32)
+    local=torch.as_tensor(inverse)[None,:,None]
+    head=torch.nn.Linear(1,3,bias=False)
+    with torch.no_grad():head.weight.copy_(torch.tensor([[0.],[1.],[1.]]))
+    model=SimpleNamespace(plan_head=head,condition=lambda x:x.new_zeros(x.size(0),1),config=SimpleNamespace(plan_target_units='rates_per_second_v2'))
+    cache={'local':local,'seconds':torch.arange(400,dtype=torch.float64)[None]/100}
+    args=SimpleNamespace(intensity_curve_file=raw,intensity_curve_mode='follow',intensity_curve_strength=.65)
+    curve=_Curve(args,SimpleNamespace(audio=SimpleNamespace(duration_sec=4.)),model,cache,condition)
+    assert curve.reference_rebased and curve.active
+    # Every native cell in a bin receives the same multiplier; the pulse
+    # retains its relative likelihood against nearby background.
+    i=np.searchsorted(curve.hazard_edges,.5,side='right')-1
+    j=np.searchsorted(curve.hazard_edges,.51,side='right')-1
+    assert curve.adjusted_hazard[i]/curve.adjusted_hazard[j]==pytest.approx(curve.native_hazard[i]/curve.native_hazard[j],rel=1e-5)
+    assert curve.adjusted_hazard[i]>curve.adjusted_hazard[j]
+    assert curve.report()['curve_application']=='bin_mean_multiplicative_v1'
+    assert curve.report()['curve_bin_seconds']==2.
+
+
+def test_curve_envelope_honors_explicit_edges_and_rest_integrates_exactly():
+    curve=fixture(rests=[{'start_sec':.5,'end_sec':1.5}],edges=[0.,1.25,4.])
+    assert curve._integral(1.5,True)-curve._integral(.5,True)==pytest.approx(0.)
+    assert 1.25 in curve.hazard_edges
+    assert curve.report()['curve_scale_source']=='interval_edges_sec'

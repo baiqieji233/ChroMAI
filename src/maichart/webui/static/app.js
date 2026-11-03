@@ -230,6 +230,8 @@ function composerTrainingView(task) {
         ['同谱远距短句组',show(number(metrics,'song_response_groups'),2)],
         ['整曲响应选择熵',show(number(metrics,'song_response_prior_entropy'),4)],
         ['联合事件目标',show(number(metrics,'unified_event_nll'),4)],
+        ['平衡短句与整曲目标',show(number(metrics,'unified_balanced_variational_objective'),4)],
+        ['短句选择校准',show(number(metrics,'unified_phrase_mode_prior_kl'),4)],
         ['整曲选择校准',show(number(metrics,'unified_prior_kl'),4)],
         ['整曲先验不确定性',show(number(metrics,'unified_prior_entropy'),4)],
         ['整曲后验不确定性',show(number(metrics,'unified_posterior_entropy'),4)],

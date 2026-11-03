@@ -129,6 +129,7 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
 
 
 def upgrade_learning_stage(model, policies, device='cpu'):
+    policies={**policies,'detail_mode_parameterization':policies.get('detail_mode_parameterization','centered_v2')}
     # New output interfaces start at zero; the small musical exit MLP keeps
     # random hidden features. Temporary draws must not shift dropout RNG.
     with torch.random.fork_rng(devices=[]):
@@ -184,6 +185,12 @@ def upgrade_learning_stage(model, policies, device='cpu'):
             transferred[key]=expanded
         else:raise ValueError(f'Unsafe stage migration shape: {key}: {tuple(value.shape)} -> {tuple(target[key].shape)}')
     upgraded.load_state_dict(transferred,strict=False)
+    if (getattr(model.config,'detail_mode_parameterization','legacy_v1')=='legacy_v1'
+            and upgraded.config.detail_mode_parameterization=='centered_v2'
+            and hasattr(model,'detail_mode_control') and hasattr(upgraded,'detail_mode_control')):
+        if model.config.detail_representation_policy!=upgraded.config.detail_representation_policy:
+            raise ValueError('Center legacy detail modes before changing their candidate feature representation')
+        upgraded.absorb_legacy_detail_mode_mean()
     return upgraded
 
 
@@ -748,6 +755,25 @@ def _inherit_resume_batch_defaults(args, old):
             if name not in explicit and name in old.get('args',{}):setattr(args,name,old['args'][name])
 
 
+def _validation_improvement(validation,previous,epoch,steps):
+    metrics=validation.get('metrics',{})
+    field=('unified_balanced_variational_objective' if 'unified_balanced_variational_objective' in metrics
+           else 'main_prediction_loss')
+    score=float(metrics.get(field,float('inf')))
+    if not math.isfinite(score):return None
+    if previous and previous.get('field')==field and score>=previous['score']:return None
+    return dict(field=field,score=score,epoch=int(epoch),optimizer_steps=int(steps),
+        scope='development_authored_prefix_objective_not_playtest_quality')
+
+
+def _retain_best_files(directory):
+    import os,shutil
+    for source,target in (('composer_last.pt','composer_best.pt'),('composer_inference.pt','composer_best_inference.pt')):
+        path=Path(directory)/target;temporary=path.with_suffix('.tmp')
+        shutil.copyfile(Path(directory)/source,temporary)
+        os.replace(temporary,path)
+
+
 def _train(args):
     from .learning_rate import resolve_plan,learning_rate
     from .stream_recovery import recovery_batch,recovery_state,restore_recovery_state
@@ -774,6 +800,8 @@ def _train(args):
     old=None
     if args.resume or args.init_checkpoint:model,old=checkpoint.load(args.resume or args.init_checkpoint,args.device,include_optimizer=bool(args.resume))
     if args.resume:
+        if not checkpoint.training_objective_compatible(old):
+            raise ValueError('Unified training objective changed: use --init-checkpoint in a new directory instead of --resume')
         # CLI omissions inherit the checkpoint; explicit changes still pass
         # through the complete-boundary rebatch validation below.
         _inherit_resume_batch_defaults(args,old)
@@ -824,7 +852,7 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version=('stream_unified_song_rhythm_configuration_v8' if model.config.song_response_policy=='unified_profile_response_v2' else
+    args.training_objective_recipe=dict(version=(checkpoint.UNIFIED_OBJECTIVE_VERSION if model.config.song_response_policy=='unified_profile_response_v2' else
         ('stream_ordered_song_profile_v7' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'stream_song_response_joint_v6' if model.config.song_response_policy!='off' or model.config.song_profile_policy!='off' else 'stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy in ('persistent_modes_v1','component_modes_v2') else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
         else 'stream_aligned_phrase_joint_v3' if model.config.phrase_context_policy=='aligned_phrase_v3' else 'stream_ordered_phrase_joint_v2'
         if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4') else 'stream_causal_phrase_joint_v1')),
@@ -832,7 +860,7 @@ def _train(args):
         song_response_policy=model.config.song_response_policy,song_response_modes=model.config.song_response_modes,song_response_group_size=model.config.song_response_group_size,
         song_profile_objective=('unified_z_profile_evidence_once_chart_budget_CRPS_50_percent_only_level_v3' if model.config.song_profile_policy=='masked_deployment_joint_v3' else 'masked_joint_nll_plus_ordinal_crps_equal_chart_mass_v2' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'masked_mixture_categorical_129_bins_preprojection_unique_charts_per_batch'),
         plan_metric_contract='unchanged_poisson_nll_with_saturated_floor_and_excess_diagnostics',
-        song_response_objective=('one_shared_profile_response_z_chart_prior_KL_stopgrad_exact_joint_posterior' if model.config.song_response_policy=='unified_profile_response_v2' else 'same_chart_distant_complete_phrase_subgroups_nested_composite_likelihood_prior_only'),
+        song_response_objective=('balanced_hierarchical_variational_risk_consistent_phrase_and_chart_evidence_budgets' if model.config.song_response_policy=='unified_profile_response_v2' else 'same_chart_distant_complete_phrase_subgroups_nested_composite_likelihood_prior_only'),
         time_configuration_budget=('unified_event_nll_once' if model.config.song_response_policy=='unified_profile_response_v2' else 'separate_time_and_configuration_joint_terms'),
         song_style_runtime='audio_condition_choice_once_immutable_across_prefix_replay',
         phrase_context_policy=model.config.phrase_context_policy,
@@ -840,13 +868,15 @@ def _train(args):
         phrase_seam_events=model.config.phrase_seam_events,phrase_execution_policy=model.config.phrase_execution_policy,
         phrase_modes=model.config.phrase_modes,phrase_relation_weight=model.config.phrase_relation_weight,
         detail_representation_policy=model.config.detail_representation_policy,duration_feature_policy=model.config.duration_feature_policy,
+        detail_mode_parameterization=model.config.detail_mode_parameterization,
         relation_policy='future_sets_v1' if model.config.phrase_execution_policy in ('persistent_modes_v1','component_modes_v2') else 'off',
-        phrase_configuration_objective=('unified_shared_z_joint_rhythm_configuration_whole_phrase_mode_likelihood_once' if model.config.song_response_policy=='unified_profile_response_v2' else 'whole_trusted_phrase_mode_marginal_replaces_configuration_nll_local_recovery_mixture'
+        phrase_configuration_objective=('whole_phrase_mean_event_risk_with_prior_KL_scaled_by_phrase_weight_mass' if model.config.song_response_policy=='unified_profile_response_v2' else 'whole_trusted_phrase_mode_marginal_replaces_configuration_nll_local_recovery_mixture'
             if model.config.phrase_execution_policy in ('persistent_modes_v1','component_modes_v2') else 'local_configuration_nll'),
         configuration_loss_scope=('sampled_chart_joint_event_nll_one_time_configuration_budget' if model.config.song_response_policy=='unified_profile_response_v2' else 'whole_phrase_weighted_composite_likelihood_complete_trusted_groups_else_local_mixture'
             if model.config.phrase_execution_policy in ('persistent_modes_v1','component_modes_v2') else 'base_head_weighted_joint_configuration_nll'),
         configuration_base_diagnostics='shape_loss_plus_phase_loss_plus_detail_loss_base_heads_only',
         unified_event_nll_field='unified_event_nll' if model.config.song_response_policy=='unified_profile_response_v2' else None,
+        unified_event_nll_scope=('legacy_metric_alias_for_balanced_conditional_phrase_risk_including_inner_mode_KL' if model.config.song_response_policy=='unified_profile_response_v2' else None),
         configuration_adjustment_identity=('unified_event_joint_replaces_separate_time_and_configuration_budget' if model.config.song_response_policy=='unified_profile_response_v2' else 'configuration_loss_equals_shape_plus_phase_plus_detail_plus_phrase_configuration_adjustment'),
         configuration_adjustment_budget=('single_unified_event_nll_no_duplicate_separate_time_or_configuration' if model.config.song_response_policy=='unified_profile_response_v2' else 'replacement_difference_not_additional_configuration_cross_entropy'),
         phrase_group_weighting='sample_weight_inside_mode_sequence_sum_actual_effective_target_budget_normalizer',
@@ -1018,8 +1048,10 @@ def _train(args):
     if args.device.startswith('cuda'):torch.cuda.reset_peak_memory_stats(args.device)
     finite_items=_model_finite_items(model)
     _assert_model_finite(model,finite_items)
+    best_validation=state.get('best_validation')
     def persist(epoch,batch,complete,metrics):
         s=dict(epoch_complete=complete,batch_in_epoch=batch,dataset_fingerprint=fingerprint,
+            best_validation=best_validation,
             dataset_content_identity=content_identity,
             python_rng=random.getstate(),numpy_rng=np.random.get_state(),torch_rng=torch.get_rng_state(),
             cuda_rng=torch.cuda.get_rng_state(device=args.device) if args.device.startswith('cuda') else None,
@@ -1035,6 +1067,13 @@ def _train(args):
         # Make an explicitly changed plan durable before another update. A
         # later ordinary resume must not silently recover the old schedule.
         persist(start_epoch,skip,False,(old or {}).get('metrics',{}))
+    if not args.resume and dev is not None:
+        with _preserve_rng(args.device):initial_validation=evaluate(model,dev,args)
+        best_validation=_validation_improvement(initial_validation,None,0,steps)
+        if best_validation:
+            persist(0,0,True,initial_validation['metrics'])
+            _retain_best_files(directory)
+            _emit('composer_best_checkpoint',**best_validation,path=str(directory/'composer_best_inference.pt'))
     for epoch in range(start_epoch,args.epochs+1):
         model.train();totals=MetricTotals();n=0;supervised=0;sequences=0;effective_target_budget=0.;started=time.perf_counter();timing=dict(data_sec=0.,transfer_sec=0.,compute_sec=0.)
         optimizer.zero_grad(set_to_none=True)
@@ -1160,11 +1199,17 @@ def _train(args):
         avg=_averages(totals,n)
         training_elapsed=time.perf_counter()-started
         skip=0
+        improvement=None
         if dev is not None:
             validation=evaluate(model,dev,args);validation.update(epoch=epoch,optimizer_steps=steps)
             (directory/'validation_latest.json').write_text(json.dumps(validation,ensure_ascii=False,indent=2),encoding='utf-8')
             _emit('composer_validation',**validation)
+            improvement=_validation_improvement(validation,best_validation,epoch,steps)
+            if improvement:best_validation=improvement
         persist(epoch,batches_per_epoch,True,avg)
+        if improvement:
+            _retain_best_files(directory)
+            _emit('composer_best_checkpoint',**best_validation,path=str(directory/'composer_best_inference.pt'))
         _emit('composer_epoch',epoch=epoch,optimizer_steps=steps,elapsed_sec=time.perf_counter()-started,
             effective_target_budget=effective_target_budget,
             effective_targets_per_sec=effective_target_budget/max(training_elapsed,1e-6),

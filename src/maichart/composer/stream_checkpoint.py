@@ -7,6 +7,14 @@ import torch
 SCHEMA='maichart-composer-event-set-checkpoint-v1'
 FAMILY='chart_composer_v1'
 PROFILE='event_set_stream_v1'
+UNIFIED_OBJECTIVE_VERSION='stream_balanced_hierarchical_configuration_v9'
+
+
+def training_objective_compatible(payload):
+    if (payload.get('model_config') or {}).get('song_response_policy')!='unified_profile_response_v2':
+        return True
+    recipe=(payload.get('args') or {}).get('training_objective_recipe') or {}
+    return recipe.get('version')==UNIFIED_OBJECTIVE_VERSION
 
 def read(path):
     try:return torch.load(path,map_location='cpu',weights_only=False,mmap=True)
@@ -48,11 +56,13 @@ def inspect_payload(payload):
     content_identity=training_state.get('dataset_content_identity') if isinstance(training_state,dict) else None
     content_verified=(isinstance(content_identity,dict) and
         content_identity.get('schema')=='stream_content_identity_v1' and bool(content_identity.get('fingerprint')))
+    objective_verified=training_objective_compatible(payload)
     return dict(valid=True,family=FAMILY,schema=SCHEMA,model_config=config.to_dict(),
         epoch=payload.get('epoch',0),optimizer_steps=payload.get('optimizer_steps',0),
-        args=payload.get('args',{}),can_resume=bool(payload.get('optimizer_state_dict') and payload.get('training_state') and content_verified),
+        args=payload.get('args',{}),can_resume=bool(payload.get('optimizer_state_dict') and payload.get('training_state') and content_verified and objective_verified),
         dataset_content_identity=content_identity,
-        training_migration=(None if content_verified else '旧检查点缺少数据内容指纹，不能直接续训；请在新目录使用 finetune。检查点仍可用于生成。'),
+        training_migration=('旧整曲/短句目标的预算已修正，请在新目录使用 finetune；旧权重仍可生成。' if not objective_verified else
+            None if content_verified else '旧检查点缺少数据内容指纹，不能直接续训；请在新目录使用 finetune。检查点仍可用于生成。'),
         can_init=True,checkpoint_kind=payload.get('checkpoint_kind'),
         atom_vocab_size=codec.num_atoms,event_shapes=codec.num_shapes,codec_coverage=codec.coverage,
         generation_capabilities=dict(composer_generation=True,event_set_stream=True,rational_event_positions=True,

@@ -186,13 +186,14 @@ def song_response_configuration_loss(mode_nll,prior_logits,batch,weights,normali
 
 
 def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,normalizer,*,
-        prior_logits,component_profile_nll,profile_chart_weights,profile_weight=1.):
-    """Shared z with exact-evidence E step and chart-budgeted prior calibration.
+        prior_logits,component_profile_nll,profile_chart_weights,profile_weight=1.,raw_joint_diagnostics=False):
+    """Balanced hierarchical variational objective, not raw sequence joint NLL.
 
-    Complete phrases retain a persistent local mode. Other trusted targets
-    retain event-local modes, conditional on the same chart z. Numerical
-    profile evidence is charged once per chart with its explicit budget.
-    No target profile participates in the externally supplied causal prior.
+    One persistent m explains a complete phrase. Its variational data term
+    and prior KL both carry the phrase's weight W: F_gz = W * softmin_q(mean
+    weighted event NLL). Shared z uses the corresponding chart data/KL budget.
+    Numerical profile evidence enters once per chart, only as supervision.
+    Optional raw sequence-joint diagnostics are detached and off by default.
     """
     if normalizer<=0:raise ValueError('Unified loss needs a positive target budget')
     chart_inverse=batch['unified_chart_inverse'].long()
@@ -202,8 +203,10 @@ def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,norm
     conditional=song_phrase_logits.float().log_softmax(-1)
     local=-torch.logsumexp(conditional-mode_nll.float()[:,:,None,:],-1)
     chart_nll=local.new_zeros(count,local.size(-1)).index_add(0,chart_inverse,(local*weights[...,None]).sum(1))
+    raw_chart_nll=chart_nll.detach().clone() if raw_joint_diagnostics else None
     zero=chart_nll.sum()*0.
     complete_groups=zero
+    phrase_mode_scores=None
     groups=batch.get('training_phrase_group')
     complete=batch.get('training_phrase_complete')
     group_weights=batch.get('training_phrase_group_weight')
@@ -216,37 +219,86 @@ def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,norm
         mass=(weights*valid).flatten()
         summed=mode_nll.new_zeros(group_count,mode_nll.size(-1)).index_add(0,index,mode_nll.flatten(0,1)*mass[:,None])
         pp=conditional.new_zeros(group_count,*conditional.shape[-2:]).index_add(0,index,conditional.flatten(0,1)*first.flatten()[:,None,None])
-        phrase_nll=-torch.logsumexp(pp-summed[:,None,:],-1)
+        phrase_mass=weights.new_zeros(group_count).index_add(0,index,mass)
+        mean_mode_nll=summed/phrase_mass.clamp_min(1e-8)[:,None]
+        phrase_mode_scores=pp-mean_mode_nll[:,None,:]
+        phrase_nll=(-phrase_mode_scores.logsumexp(-1)*phrase_mass[:,None] if mode_nll.size(-1)>1 else
+                    summed[:,0,None].expand(-1,conditional.size(-2)))
         old=local.new_zeros(group_count,local.size(-1)).index_add(0,index,local.flatten(0,1)*mass[:,None])
         chart_rows=chart_inverse[:,None].expand_as(groups)
         group_chart=torch.zeros(group_count,device=index.device,dtype=torch.long).index_add(0,index,(chart_rows*first).flatten())
         adjustment=(phrase_nll-old).masked_fill(~active[:,None],0.)
         chart_nll=chart_nll.index_add(0,group_chart,adjustment)
+        if raw_joint_diagnostics:
+            with torch.no_grad():
+                raw_phrase=-torch.logsumexp(pp.detach()-summed.detach()[:,None,:],-1)
+                raw_adjustment=(raw_phrase-old.detach()).masked_fill(~active[:,None],0.)
+                raw_chart_nll=raw_chart_nll.index_add(0,group_chart,raw_adjustment)
         complete_groups=active.sum().float()
     profile_mass=profile_chart_weights.to(chart_nll)*float(profile_weight)*float(normalizer)
     profile_nll=component_profile_nll.float()
     prior=prior_logits.float().log_softmax(-1)
     energy=chart_nll+profile_mass[:,None]*profile_nll
-    joint=prior-energy
-    # The E step uses complete, unaveraged phrase/chart evidence. The M step
-    # keeps its posterior fixed: data gradients match exact marginalization,
-    # while prior calibration has an explicit per-chart rather than 1/D mass.
-    # This generalized-EM objective counts the prior only in the following KL.
-    posterior=joint.log_softmax(-1).detach()
-    responsibility=posterior.exp()
-    data_term=(responsibility*energy).sum()/normalizer
     chart_mass=profile_chart_weights.to(prior)
+    if chart_mass.shape!=(count,):raise ValueError('Unified chart weights must match unique charts')
+    valid_mass=torch.isfinite(chart_mass)&chart_mass.ge(0)
+    if chart_mass.device.type=='cuda':torch._assert_async(valid_mass.all(),'Invalid unified chart weight')
+    elif not bool(valid_mass.all()):raise ValueError('Invalid unified chart weight')
+    positive=chart_mass.gt(0)
+    # L_c = E_r[energy_c]/D + w_c KL(r||q_c). Its exact minimizing
+    # posterior uses energy/(D*w), AFTER the balanced persistent-m objective.
+    # The inner m and outer z therefore obey their actual variational budgets.
+    budget=(chart_mass*float(normalizer)).masked_fill(~positive,1.)
+    scores=prior-energy/budget[:,None]
+    minimum=energy.amin(-1)
+    # At w=0 the KL vanishes, so the exact limit is any distribution on the
+    # minimum-energy components. Prior-relative tie breaking also gives q when
+    # there is no evidence. Event evidence is retained rather than dropped.
+    zero_mass_scores=prior.masked_fill(energy>minimum[:,None],-torch.inf)
+    scores=torch.where(positive[:,None],scores,zero_mass_scores)
+    posterior=scores.log_softmax(-1).detach()
+    responsibility=posterior.exp()
+    safe_posterior=posterior.masked_fill(responsibility.eq(0),0.)
+    data_term=(responsibility*energy).sum()/normalizer
     prior_ce=(-(responsibility*prior).sum(-1)*chart_mass).sum()
-    prior_kl=((responsibility*(posterior-prior)).sum(-1)*chart_mass).sum()
+    prior_kl=((responsibility*(safe_posterior-prior)).sum(-1)*chart_mass).sum()
     loss=data_term+prior_kl
+    # Independent closed-form minimum of the same variational objective.
+    optimum=(-scores.logsumexp(-1)*chart_mass).masked_fill(~positive,0.)
+    optimum=optimum+minimum.masked_fill(positive,0.)/normalizer
+    chart_event_mass=weights.new_zeros(count).index_add(0,chart_inverse,weights.sum(1))
     metrics=dict(unified_complete_phrase_groups=complete_groups,
         unified_chart_count=chart_nll.new_tensor(float(count)),
-        unified_exact_joint_nll=(-joint.logsumexp(-1).sum()/normalizer).detach(),
+        unified_balanced_variational_objective=optimum.sum().detach(),
+        unified_zero_prior_mass_charts=(~positive).sum().float(),
+        unified_zero_prior_mass_event_charts=((~positive)&chart_event_mass.gt(0)).sum().float(),
         unified_data_term=data_term,
         unified_prior_kl=prior_kl,unified_prior_ce=prior_ce,
         unified_prior_weight_mass=chart_mass.sum(),
         unified_prior_entropy=(-(prior.exp()*prior).sum(-1)*chart_mass).sum()/chart_mass.sum().clamp_min(1e-8),
-        unified_posterior_entropy=(-(responsibility*posterior).sum(-1)).mean(),
+        unified_posterior_entropy=(-(responsibility*safe_posterior).sum(-1)).mean(),
         unified_profile_nll=(responsibility*profile_nll).sum(-1).mul(chart_mass).sum(),
         unified_configuration_nll=(responsibility*chart_nll).sum()/normalizer)
+    with torch.no_grad():
+        metrics.update(unified_phrase_mode_prior_kl=zero.detach(),
+            unified_phrase_mode_posterior_entropy=zero.detach(),
+            unified_phrase_mode_prior_entropy=zero.detach(),unified_phrase_mode_weight_mass=zero.detach())
+        if phrase_mode_scores is not None:
+            mode_logp=phrase_mode_scores.detach().log_softmax(-1)
+            mode_p=mode_logp.exp()
+            mode_prior=pp.detach()
+            group_z=responsibility[group_chart]
+            group_mass=phrase_mass.masked_fill(~active,0.)
+            probability_mass=group_mass[:,None]*group_z
+            kl=(mode_p*(mode_logp-mode_prior)).sum(-1)
+            entropy=-(mode_p*mode_logp).sum(-1)
+            prior_entropy=-(mode_prior.exp()*mode_prior).sum(-1)
+            mass_total=group_mass.sum().clamp_min(1e-8)
+            metrics.update(unified_phrase_mode_prior_kl=(kl*probability_mass).sum()/normalizer,
+                unified_phrase_mode_posterior_entropy=(entropy*probability_mass).sum()/mass_total,
+                unified_phrase_mode_prior_entropy=(prior_entropy*probability_mass).sum()/mass_total,
+                unified_phrase_mode_weight_mass=group_mass.sum()/normalizer)
+        if raw_joint_diagnostics:
+            raw_energy=raw_chart_nll+profile_mass.detach()[:,None]*profile_nll.detach()
+            metrics['unified_original_sequence_joint_nll']=-(prior.detach()-raw_energy).logsumexp(-1).sum()/normalizer
     return loss,metrics
