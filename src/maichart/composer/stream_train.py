@@ -16,6 +16,7 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
+    'plan_kind_policy': ('audio_hazard_v3','rate_integral_v2','off'),
     'song_profile_policy': ('masked_deployment_joint_v3','masked_ordered_joint_v2','masked_joint_v1','off'),
     'song_response_policy': ('unified_profile_response_v2','music_response_v1','off'),
     'training_window_policy': ('phrase_complete_v1','block_v1'),
@@ -36,7 +37,7 @@ LEARNING_POLICIES = {
     'literal_output_policy': ('type_blocks_v1','flat_family_v1'),
     'event_family_policy': ('shared_continuation_v1','audio_state_phrase_v4','audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
     'recovery_target_policy': ('causal_correspondence_v1','authored_next_v1'),
-    'prefix_augmentation_input_policy': ('musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
+    'prefix_augmentation_input_policy': ('musical_entry_recovery_v9','musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
     'history_window_policy': ('block_aligned_v2','rolling_legacy_v1'),
     'continuation_policy': ('pattern_runs_v2','typed_runs_v1','off'),
     'sensor_load_policy': ('separate_touch_v1','button_only_v1'),
@@ -46,7 +47,7 @@ LEARNING_POLICIES = {
     'recovery_policy': ('greedy_mixed_v4','greedy_mixed_v3','mixed_exit_v2','persistent_v1'),
 }
 
-LEGACY_LEARNING_POLICIES = dict(phrase_context_policy='off',template_policy='cross_family_v1',candidate_state_policy='cursor_v1',duration_audio_policy='off',physical_policy='legacy_report_v1',transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
+LEGACY_LEARNING_POLICIES = dict(plan_kind_policy='off',phrase_context_policy='off',template_policy='cross_family_v1',candidate_state_policy='cursor_v1',duration_audio_policy='off',physical_policy='legacy_report_v1',transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
     prefix_augmentation_input_policy='causal_window_config_time_first_decision_v3',
     history_window_policy='rolling_legacy_v1',continuation_policy='off',
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
@@ -146,7 +147,7 @@ def upgrade_learning_stage(model, policies, device='cpu'):
                   'family_continuity_head.','family_rhythm_projection.','family_state_phrase.','decoder.norm.',
                   'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.',
                   'shared_details.','phrase_execution.','song_profile.','song_response.',
-                  'detail_mode_control.','literal_component_projection.')
+                  'detail_mode_control.','literal_component_projection.','plan_kind_features.')
     if model.config.detail_representation_policy!=upgraded.config.detail_representation_policy:
         allowed.update(key for key in set(source)|set(target) if key.startswith('detail_embeddings.'))
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
@@ -860,6 +861,11 @@ def _train(args):
         song_response_policy=model.config.song_response_policy,song_response_modes=model.config.song_response_modes,song_response_group_size=model.config.song_response_group_size,
         song_profile_objective=('unified_z_profile_evidence_once_chart_budget_CRPS_50_percent_only_level_v3' if model.config.song_profile_policy=='masked_deployment_joint_v3' else 'masked_joint_nll_plus_ordinal_crps_equal_chart_mass_v2' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'masked_mixture_categorical_129_bins_preprojection_unique_charts_per_batch'),
         plan_metric_contract='unchanged_poisson_nll_with_saturated_floor_and_excess_diagnostics',
+        plan_kind_policy=model.config.plan_kind_policy,
+        occurrence_objective=('differentiable_audio_rate_interval_survival_NOTE_WAIT_EOS_no_symbolic_or_mode_veto'
+            if model.config.plan_kind_policy=='audio_hazard_v3' else 'legacy_decoder_plus_detached_plan_prior'),
+        entry_recovery=('missed_NOTE_entry_and_authored_WAIT_EOS_controls_with_original_row_budget'
+            if args.prefix_augmentation_input_policy=='musical_entry_recovery_v9' else 'legacy_loop_augmentation'),
         song_response_objective=('balanced_hierarchical_variational_risk_consistent_phrase_and_chart_evidence_budgets' if model.config.song_response_policy=='unified_profile_response_v2' else 'same_chart_distant_complete_phrase_subgroups_nested_composite_likelihood_prior_only'),
         time_configuration_budget=('unified_event_nll_once' if model.config.song_response_policy=='unified_profile_response_v2' else 'separate_time_and_configuration_joint_terms'),
         song_style_runtime='audio_condition_choice_once_immutable_across_prefix_replay',
@@ -939,12 +945,13 @@ def _train(args):
         recovery_long_sources=('alternating_persistent_8_steps_and_constructed_authored_exit'
             if model.config.recovery_policy=='greedy_mixed_v4' else 'policy_defined'),
         counterfactual_span=('variable_event_count_loops_32_64_128_with_first_trusted_authored_target'
-            if args.prefix_augmentation_input_policy in ('musical_loop_recovery_v7','musical_loop_recovery_v8') else 'all_loop_modes_up_to_history_events'
+            if args.prefix_augmentation_input_policy in ('musical_entry_recovery_v9','musical_loop_recovery_v7','musical_loop_recovery_v8') else 'all_loop_modes_up_to_history_events'
             if args.prefix_augmentation_input_policy in ('musical_loop_recovery_v5','musical_loop_recovery_v6')
             else 'short_legacy_loops_with_policy_defined_phase_edits'),
         counterfactual_budget=('preserve_source_row_total_sample_weight'
-            if args.prefix_augmentation_input_policy in ('musical_loop_recovery_v7','musical_loop_recovery_v8') else 'policy_defined'),
-        counterfactual_selection=('authored_exits3to1positivecontrols_within_existing_rate'
+            if args.prefix_augmentation_input_policy in ('musical_entry_recovery_v9','musical_loop_recovery_v7','musical_loop_recovery_v8') else 'policy_defined'),
+        counterfactual_selection=('missed_entry_and_true_rest_controls_within_existing_rate'
+            if args.prefix_augmentation_input_policy=='musical_entry_recovery_v9' else 'authored_exits3to1positivecontrols_within_existing_rate'
             if args.prefix_augmentation_input_policy=='musical_loop_recovery_v8' else 'within_existing_prefix_augmentation_rate'
             if args.prefix_augmentation_input_policy=='musical_loop_recovery_v7' else 'policy_defined'),
         time_target='exact_authored_onset',prefix_input=args.prefix_augmentation_input_policy)

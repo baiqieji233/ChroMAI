@@ -13,7 +13,8 @@ def fixture(*,timing_output_policy='relative_delta_v1',event_family_policy='lega
     config = StreamComposerConfig(d_model=16, nhead=4, layers=1, dim_feedforward=32,
         dropout=0., audio_dim=6, condition_dim=3, audio_summary_tokens=4,rollout_steps=4,
         delta_beats=('0', '0', '1/2', '1', '2'), max_event_atoms=4,
-        timing_output_policy=timing_output_policy,event_family_policy=event_family_policy)
+        timing_output_policy=timing_output_policy,event_family_policy=event_family_policy,
+        plan_kind_policy='rate_integral_v2')
     model = StreamComposer(config, codec).eval()
     regular, literal = codec.encode('1/5'), codec.encode('A1/Cf')
     details = torch.full((1, 4, 3), -1, dtype=torch.long)

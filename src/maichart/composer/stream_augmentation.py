@@ -9,6 +9,7 @@ from collections import Counter
 from dataclasses import replace
 import random
 from fractions import Fraction
+from bisect import bisect_left
 import time
 
 import torch
@@ -30,6 +31,7 @@ MUSICAL_INPUT_POLICY='musical_loop_recovery_v5'
 MUSICAL_RESIDUAL_INPUT_POLICY='musical_loop_recovery_v6'
 MUSICAL_BATCH_INPUT_POLICY='musical_loop_recovery_v7'
 MUSICAL_AUTHORED_EXIT_INPUT_POLICY='musical_loop_recovery_v8'
+MUSICAL_ENTRY_INPUT_POLICY='musical_entry_recovery_v9'
 _LOOP_MODES=('same_key','abab','touch','same_shape','same_gap')
 
 
@@ -38,6 +40,8 @@ def _augmentation_modes(input_policy):
     if input_policy==PHASE_INPUT_POLICY:return (*_LOOP_MODES,'phase_shift')
     if input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY):return (*_LOOP_MODES,'phase_shift','rotation','rotation_gap')
     if input_policy in (MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY):return (*_LOOP_MODES,'phase_shift','rotation','rotation_gap','timeline_loop')
+    if input_policy==MUSICAL_ENTRY_INPUT_POLICY:
+        return (*_augmentation_modes(MUSICAL_BATCH_INPUT_POLICY),'missed_entry','rest_control')
     raise ValueError('Unknown prefix augmentation input policy')
 
 
@@ -481,6 +485,105 @@ def _authored_timeline_exit(source,index):
         or pattern_event(target.text)[0]!=pattern_event(previous.text)[0])
 
 
+def _inherit_counterfactual_budget(result,row):
+    """Keep a replacement's original chart, event and plan learning mass."""
+    result['sample_weight'].zero_()
+    result['sample_weight'][-1]=row['sample_weight'].sum()
+    if 'training_phrase_group' in row:
+        length=len(result['history_kind'])
+        result['training_phrase_group']=torch.full((length,),-1,dtype=torch.long)
+        result['training_phrase_position']=torch.full((length,),-1,dtype=torch.long)
+        result['training_phrase_complete']=torch.zeros(length,dtype=torch.bool)
+        result['_training_target_budget']=torch.zeros(length,dtype=torch.float32)
+        result['_training_target_budget'][-1]=row['_training_target_budget'].sum()
+        result['_training_reference_targets']=row['_training_reference_targets']
+        if 'target_relation' in row:
+            shape=(length,*row['target_relation'].shape[1:])
+            result['target_relation']=torch.zeros(shape,dtype=row['target_relation'].dtype)
+            result['target_relation_mask']=torch.zeros(shape,dtype=torch.bool)
+    for key in ('_sample_index','_window_weight','_song_bank','_song_plan','_literal_atom_types',
+                '_training_chart_id','_song_response_group_size',
+                '_profile_chart_importance','_profile_reference_batch_size'):
+        if key in row:result[key]=row[key]
+    if '_plan_scale' in row:result['_plan_scale']=row['_plan_scale']
+    else:result.pop('_plan_scale',None)
+    result['condition']=row['condition']
+    return result
+
+
+def _entry_targets(dataset,song,rest):
+    """One small per-chart target index, reused by producer-side augmentation."""
+    cache=getattr(dataset,'_entry_recovery_targets',None)
+    if cache is None:cache=dataset._entry_recovery_targets={}
+    if song not in cache:
+        pools={False:[],True:[]}
+        for i,step in enumerate(dataset.streams[song]):
+            if step.weight>0 and not dataset.unknown_steps[song][i] and step.kind in (NOTE,WAIT,EOS):
+                pools[step.kind!=NOTE].append(i)
+        cache[song]=pools
+    return cache[song][rest]
+
+
+def _missed_entry_prefix(source,index,span):
+    """Drop only past events, ending at the unchanged authored decision cursor.
+
+    Every replacement WAIT is exactly two beats, as in generation. A real
+    prefix anchor with the same phase is retained, including its sustains.
+    No future target atom is inspected or inserted into this history.
+    """
+    from .stream_data import StreamStep
+    target=source[index];cursor=target.start
+    low=max(Fraction(0),cursor-span)
+    first=bisect_left(source,low,hi=index,key=lambda step:step.end)
+    for keep in range(first,index):
+        anchor=source[keep-1].end if keep else Fraction(0)
+        gap=cursor-anchor
+        if gap<2 or (gap/2).denominator!=1:continue
+        prefix=list(source[:keep]);previous=anchor
+        # Source clocks can change BPM; callers fill seconds with TempoClock.
+        while previous<cursor:
+            nxt=previous+2
+            prefix.append(StreamStep(WAIT,previous,nxt,0.,0.))
+            previous=nxt
+        removed=sum(step.kind==NOTE for step in source[keep:index])
+        return prefix,keep,removed,gap
+    raise ValueError('No two-beat missed-entry history fits this authored cursor')
+
+
+def _augment_entry_row(dataset,index,*,rng,row=None,rest=False):
+    from .stream_data import recovery_sample
+    row=dataset[index] if row is None else row
+    song,start,_,_=dataset.samples[index];source=dataset.streams[song]
+    active=row['loss_mask'].bool()&row['sample_weight'].gt(0)
+    eligible=[int(row['step_index'][at]) for at in active.nonzero(as_tuple=False).flatten()
+              if source[int(row['step_index'][at])].kind in ((WAIT,EOS) if rest else (NOTE,))]
+    # Rest controls remain available in active windows of the same chart.
+    # This never substitutes a different chart's numerical style or budget.
+    pool=eligible or _entry_targets(dataset,song,rest)
+    if not pool:raise ValueError('No trusted entry-recovery target')
+    clock=dataset.clocks[song]
+    offset=rng.randrange(len(pool))
+    for attempt in range(min(8,len(pool))):
+        at=pool[(offset+attempt)%len(pool)]
+        try:prefix,keep,removed,gap=_missed_entry_prefix(source,at,Fraction(rng.choice((2,4,8,16,32))))
+        except ValueError:continue
+        if not rest and not removed:continue
+        prefix=prefix[:keep]+[replace(step,start_second=max(0.,second_at_beat(clock,step.start)),
+            end_second=max(0.,second_at_beat(clock,step.end))) for step in prefix[keep:]]
+        # A changed configuration prefix does not certify the authored hand
+        # choice. Teach its real occurrence/time; keep configuration targets
+        # and future geometry unqualified, as in causal loop recovery.
+        result=recovery_sample(dataset,song,prefix,source[at],configuration_trusted=False,
+            correspondence='missed_entry_time_only')
+        _inherit_counterfactual_budget(result,row)
+        result['_augmentation_entry_recovery']=True
+        result['_entry_rest_control']=bool(rest)
+        result['_entry_missing_events']=removed
+        result['_entry_wait_beats']=float(gap)
+        return result,('rest_control' if rest else 'missed_entry'),removed
+    raise ValueError('No reachable missed-entry history for this chart')
+
+
 def _augment_timeline_row(dataset,index,*,rng,row=None,input_policy=MUSICAL_BATCH_INPUT_POLICY):
     """Use real inference layout for a long wrong prefix and one real target.
 
@@ -516,25 +619,7 @@ def _augment_timeline_row(dataset,index,*,rng,row=None,input_policy=MUSICAL_BATC
     # recovery_sample already supplies one active final target. Assign the
     # window's complete mass directly, without target/chart double weighting
     # and without applying the existing first-decision rebalance a second time.
-    result['sample_weight'].zero_()
-    result['sample_weight'][-1]=row['sample_weight'].sum()
-    if 'training_phrase_group' in row:
-        length=len(result['history_kind'])
-        result['training_phrase_group']=torch.full((length,),-1,dtype=torch.long)
-        result['training_phrase_position']=torch.full((length,),-1,dtype=torch.long)
-        result['training_phrase_complete']=torch.zeros(length,dtype=torch.bool)
-        result['_training_target_budget']=torch.zeros(length,dtype=torch.float32)
-        result['_training_target_budget'][-1]=row['_training_target_budget'].sum()
-        result['_training_reference_targets']=row['_training_reference_targets']
-        if 'target_relation' in row:
-            shape=(length,*row['target_relation'].shape[1:])
-            result['target_relation']=torch.zeros(shape,dtype=row['target_relation'].dtype)
-            result['target_relation_mask']=torch.zeros(shape,dtype=torch.bool)
-    for key in ('_sample_index','_window_weight','_song_bank','_song_plan','_literal_atom_types'):
-        if key in row:result[key]=row[key]
-    if '_plan_scale' in row:result['_plan_scale']=row['_plan_scale']
-    else:result.pop('_plan_scale',None)
-    result['condition']=row['condition']
+    _inherit_counterfactual_budget(result,row)
     result['_augmentation_timeline_loop']=True
     if input_policy==MUSICAL_AUTHORED_EXIT_INPUT_POLICY:
         target=source[target_index]
@@ -559,10 +644,12 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     modes=_augmentation_modes(input_policy)
     # Preserve the old policy's random draw order exactly. The new recipe may
     # choose a one-note phase edit before requiring a 4--12-note loop window.
-    if mode is None and input_policy in (PHASE_INPUT_POLICY,MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY):mode=modes[rng.randrange(len(modes))]
+    if mode is None and input_policy in (PHASE_INPUT_POLICY,MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY):mode=modes[rng.randrange(len(modes))]
     if mode is not None and mode not in modes:raise ValueError('Unknown augmentation mode for this input policy')
     if mode=='phase_shift':return _augment_phase_row(dataset,index,rng=rng,row=row)
     if mode=='timeline_loop':return _augment_timeline_row(dataset,index,rng=rng,row=row,input_policy=input_policy)
+    if mode in ('missed_entry','rest_control'):
+        return _augment_entry_row(dataset,index,rng=rng,row=row,rest=mode=='rest_control')
     song,start,end,_=dataset.samples[index]
     first=max(0,start-dataset.lead_in)
     source=dataset.streams[song]
@@ -570,7 +657,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     if getattr(dataset,'training_window_policy','block_v1')=='phrase_complete_v1':
         end=int(row['step_index'][-1])+1
     available=0
-    musical=input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY)
+    musical=input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY)
     max_history=min(128,dataset.lead_in) if musical else 12
     for step in reversed(source[max(0,start-max_history):start]):
         if step.kind!=NOTE:break
@@ -585,7 +672,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     timing_mode=mode in ('same_gap','rotation_gap')
     if timing_mode:
         modified=_same_gap_steps(dataset,song,source,begin,start,end,rng,rotation_gap=mode=='rotation_gap',
-            rotation_gaps=('1/4','1/2','1','2') if input_policy in (MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY) else None)
+            rotation_gaps=('1/4','1/2','1','2') if input_policy in (MUSICAL_RESIDUAL_INPUT_POLICY,MUSICAL_BATCH_INPUT_POLICY,MUSICAL_AUTHORED_EXIT_INPUT_POLICY,MUSICAL_ENTRY_INPUT_POLICY) else None)
     else:
         modified=list(source[:end])
     if mode!='same_gap':
@@ -690,6 +777,9 @@ def augment_stream_items(dataset,items,*,rate=.15,seed=0,input_policy=LEGACY_INP
             replacement,mode,count=augment_stream_row(dataset,index,rng=rng,row=row,input_policy=input_policy)
             result[slot]=replacement
             diagnostics['applied']+=1;diagnostics['applied_'+mode]+=1
+            if replacement.get('_augmentation_entry_recovery',False):
+                diagnostics['entry_missing_events']+=replacement['_entry_missing_events']
+                diagnostics['entry_wait_beats']+=replacement['_entry_wait_beats']
             diagnostics['edited_notes']+=count
             _record_configuration_qualification(diagnostics,replacement)
             _record_first_decision(diagnostics,replacement,row)

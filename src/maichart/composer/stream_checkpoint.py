@@ -7,7 +7,7 @@ import torch
 SCHEMA='maichart-composer-event-set-checkpoint-v1'
 FAMILY='chart_composer_v1'
 PROFILE='event_set_stream_v1'
-UNIFIED_OBJECTIVE_VERSION='stream_balanced_hierarchical_configuration_v9'
+UNIFIED_OBJECTIVE_VERSION='stream_audio_hazard_entry_recovery_v10'
 
 
 def training_objective_compatible(payload):
@@ -61,7 +61,7 @@ def inspect_payload(payload):
         epoch=payload.get('epoch',0),optimizer_steps=payload.get('optimizer_steps',0),
         args=payload.get('args',{}),can_resume=bool(payload.get('optimizer_state_dict') and payload.get('training_state') and content_verified and objective_verified),
         dataset_content_identity=content_identity,
-        training_migration=('旧整曲/短句目标的预算已修正，请在新目录使用 finetune；旧权重仍可生成。' if not objective_verified else
+        training_migration=('训练目标已更新，包括音乐决定出音与休止的分工；请在新目录使用 finetune，旧权重仍可生成。' if not objective_verified else
             None if content_verified else '旧检查点缺少数据内容指纹，不能直接续训；请在新目录使用 finetune。检查点仍可用于生成。'),
         can_init=True,checkpoint_kind=payload.get('checkpoint_kind'),
         atom_vocab_size=codec.num_atoms,event_shapes=codec.num_shapes,codec_coverage=codec.coverage,

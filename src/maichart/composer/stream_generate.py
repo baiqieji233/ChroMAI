@@ -613,6 +613,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         timing_grid_audio_policy=getattr(model.config,'timing_grid_audio_policy','off'),
         configuration_retry_semantics='joint_event_rejection_v2',sampling_observation=sampling_observation,
         training_objective_recipe=(payload.get('args') or {}).get('training_objective_recipe','legacy_joint_event_objective'),
+        plan_kind_policy=model.config.plan_kind_policy,
+        occurrence_source=('audio_condition_interval_survival' if model.config.plan_kind_policy=='audio_hazard_v3' else 'legacy_decoder_plus_plan'),
         gap_continuation_policy=model.config.gap_continuation_policy,sensor_load_policy=model.config.sensor_load_policy,
         lane_load_policy=model.config.lane_load_policy,
         motion_continuation_policy=model.config.motion_continuation_policy,

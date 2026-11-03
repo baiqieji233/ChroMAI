@@ -80,12 +80,12 @@ class StreamComposerConfig:
     template_policy: str = 'family_preserving_v1'
     window_balance_policy: str = 'sqrt_window_v2'
     button_load_policy: str = 'target_fast_v2'
-    plan_kind_policy: str = 'rate_integral_v2'
+    plan_kind_policy: str = 'audio_hazard_v3'
     motion_continuation_policy: str = 'context_motion_v3'
     recovery_policy: str = 'mixed_exit_v2'
     recovery_target_policy: str = 'causal_correspondence_v1'
     prefix_augmentation_rate: float = .15
-    prefix_augmentation_input_policy: str = 'phase_recovery_v4'
+    prefix_augmentation_input_policy: str = 'musical_entry_recovery_v9'
     attention_policy: str = 'bf16_dropout_math_v1'
     decoder_policy: str = 'prenorm_independent_v2'
     transition_policy: str = 'off'
@@ -187,10 +187,10 @@ class StreamComposerConfig:
             ('sensor_load_policy',{'button_only_v1','separate_touch_v1'}),
             ('lane_load_policy',{'off','direct_buttons_v1'}),
             ('gap_continuation_policy',{'off','additive_v1','probability_v2'}),
-            ('plan_kind_policy',{'off','rate_integral_v2'}),
+            ('plan_kind_policy',{'off','rate_integral_v2','audio_hazard_v3'}),
             ('recovery_policy',{'persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'}),
             ('recovery_target_policy',{'authored_next_v1','causal_correspondence_v1'}),
-            ('prefix_augmentation_input_policy',{'musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
+            ('prefix_augmentation_input_policy',{'musical_entry_recovery_v9','musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
             ('motion_continuation_policy',{'off','motion_continuation_v1','motion_distinct_v2','context_motion_v3'})):
             if getattr(self,name) not in allowed:raise ValueError(f'Unsupported {name}')
         if self.attention_policy not in ('auto_v1','bf16_dropout_math_v1'):raise ValueError('Unsupported attention policy')
@@ -204,6 +204,8 @@ class StreamComposerConfig:
             raise ValueError('Event family audio weight must be finite in [0, 1]')
         if self.plan_target_units not in ('counts_per_audio_cell','rates_per_second_v2'):
             raise ValueError('Unsupported stream plan target units')
+        if self.plan_kind_policy=='audio_hazard_v3' and self.plan_target_units!='rates_per_second_v2':
+            raise ValueError('Audio hazard requires rates_per_second_v2')
         if self.plan_loss_normalization not in ('cell_mean_v1','per_second_v2'):
             raise ValueError('Unsupported stream plan loss normalization')
         if not math.isfinite(self.plan_blank_window_seconds) or self.plan_blank_window_seconds<0:
@@ -835,7 +837,11 @@ class StreamComposer(nn.Module):
         bias=self.phrase_execution.timing(intent).float().reshape(*intent.shape[:-1],self.config.phrase_modes,width)
         groups=group_ids.expand_as(delta_logits)
         timing=bias[...,5:].gather(-1,groups[...,None,:].expand(*groups.shape[:-1],self.config.phrase_modes,groups.size(-1)))
-        return kind_logits[...,None,:]+bias[...,:5],delta_logits[...,None,:]+timing
+        # A phrase mode selects a writing style, not a second veto over music.
+        # In the hazard contract every mode uses the same occurrence law.
+        kinds=(kind_logits[...,None,:].expand(*kind_logits.shape[:-1],self.config.phrase_modes,5)
+               if self.config.plan_kind_policy=='audio_hazard_v3' else kind_logits[...,None,:]+bias[...,:5])
+        return kinds,delta_logits[...,None,:]+timing
 
     def action_context_for_delta(self, output, batch, delta_ids, audio_cache, *, event_seconds=None,return_button_load=False):
         """Condition actions on sampled time; exact TempoClock seconds may override interpolation."""
@@ -863,13 +869,14 @@ class StreamComposer(nn.Module):
         return base[inverse]+F.linear(self.condition(condition.float()),self.plan_head.weight)[:,None]
 
     @staticmethod
-    def _plan_integral_state(logits,cache,inverse,end_seconds):
+    def _plan_integral_state(logits,cache,inverse,end_seconds,*,detach=True):
         seconds=cache['seconds'][inverse].double()
         valid=cache['mask'][inverse]
         last=valid.sum(-1).clamp_min(1)-1
         widths=torch.cat(((seconds[:,1:]-seconds[:,:-1]).clamp_min(0),seconds.new_zeros(seconds.size(0),1)),1)
         widths=widths.scatter(1,last[:,None],(end_seconds.double()-seconds.gather(1,last[:,None]).squeeze(1)).clamp_min(0)[:,None])*valid
-        rates=F.softplus(logits[...,1:].detach().double())*valid[...,None]
+        source=logits[...,1:].detach() if detach else logits[...,1:]
+        rates=F.softplus(source.double())*valid[...,None]
         prefix=torch.cat((rates.new_zeros(rates.size(0),1,2),(rates*widths[...,None]).cumsum(1)),1)
         return {'rates':rates,'prefix':prefix,'widths':widths,'seconds':seconds,'valid':valid}
 
@@ -883,7 +890,8 @@ class StreamComposer(nn.Module):
         return result
 
     def _plan_at_cursor(self,logits,cache,batch,inverse,state=None):
-        state=state or self._plan_integral_state(logits,cache,inverse,batch['audio_end_sec'])
+        music_only=self.config.plan_kind_policy=='audio_hazard_v3'
+        state=state or self._plan_integral_state(logits,cache,inverse,batch['audio_end_sec'],detach=not music_only)
         start=batch['step_second'].double()
         future_beat=torch.minimum(batch['step_beat']+2,batch['audio_end_beat'][:,None])
         seconds_cache={**cache,'second_values':cache['seconds'][...,None]}
@@ -906,12 +914,13 @@ class StreamComposer(nn.Module):
         prior=torch.zeros(*event.shape,5,device=event.device,dtype=event.dtype)
         prior[...,WAIT]=-event
         prior[...,NOTE]=(-torch.expm1(-event)).clamp_min(1e-8).log()
+        if music_only:prior[...,EOS]=-event
         plan_cache={'local':logits.detach(),'seconds':cache['seconds'][inverse],
                     'mask':cache['mask'][inverse]}
         identity=torch.arange(inverse.size(0),device=inverse.device)
         rest=self._read_audio(plan_cache,start,identity)[...,0].sigmoid()
         features=torch.cat((intensity.log1p(),rest[...,None]),-1)
-        return prior.detach(),features.detach(),state['widths'].float()
+        return (prior if music_only else prior.detach()),features.detach(),state['widths'].float()
 
     def _plan_candidate_expected_counts(self,state,cache,batch,inverse,candidate_beats):
         """Reuse detached plan prefix sums for candidate interval evidence.
@@ -1199,8 +1208,11 @@ class StreamComposer(nn.Module):
             hidden = hidden+ordered_residual
             phrase_output['phrase_ordered_actor_residual_rms'] = ordered_residual.float().square().mean(-1).sqrt()
         # target_second is intentionally read only after time logits exist.
-        kind_logits, delta_logits = self.kind_head(hidden).float(), self.delta_head(hidden).float()
-        if hasattr(self,'kind_continuation_projection'):
+        music_occurrence=self.config.plan_kind_policy=='audio_hazard_v3' and not symbolic_only
+        kind_logits=(hidden.new_zeros(*hidden.shape[:-1],5,dtype=torch.float32) if music_occurrence
+                     else self.kind_head(hidden).float())
+        delta_logits=self.delta_head(hidden).float()
+        if not music_occurrence and hasattr(self,'kind_continuation_projection'):
             kind_logits=kind_logits+self.kind_continuation_projection(self._continuation_input(batch,hidden)).float()
         if self.config.timing_output_policy=='relative_delta_v1' and hasattr(self,'keep_gap_head') and self.config.gap_continuation_policy=='additive_v1':
             positions=torch.arange(kinds.size(1),device=kinds.device)[None].expand_as(kinds)
@@ -1217,10 +1229,16 @@ class StreamComposer(nn.Module):
             plan=prepared['logits'] if prepared is not None else self._condition_plan(cache,batch['condition'],inverse)
             plan_state=prepared
             if self.config.timing_output_policy=='absolute_grid_v1' and self.config.timing_group_policy=='phase_gap_v2' and plan_state is None:
-                plan_state=self._plan_integral_state(plan,cache,inverse,batch['audio_end_sec'])
-            if self.config.plan_kind_policy=='rate_integral_v2':
+                plan_state=self._plan_integral_state(plan,cache,inverse,batch['audio_end_sec'],
+                    detach=self.config.plan_kind_policy!='audio_hazard_v3')
+            if self.config.plan_kind_policy in ('rate_integral_v2','audio_hazard_v3'):
                 prior,features,plan_exposure=self._plan_at_cursor(plan,cache,batch,inverse,plan_state)
-                kind_logits=kind_logits+prior+self.plan_kind_features(features).float()
+                if self.config.plan_kind_policy=='audio_hazard_v3':
+                    # There is one learned music/condition event rate. NOTE,
+                    # WAIT and terminal no-event mass all derive from it; the
+                    # symbolic decoder cannot multiply in another WAIT prior.
+                    kind_logits=prior
+                else:kind_logits=kind_logits+prior+self.plan_kind_features(features).float()
         # Match the generation support without infinities in padded/zero-loss
         # frames. WAIT is a fixed two-beat transition; EOS owns the final tail.
         remaining = end_beat.to(batch['step_beat'])[:, None]-batch['step_beat']
@@ -1418,6 +1436,8 @@ class StreamComposer(nn.Module):
         if plan is not None:
             result['plan_logits'] = plan
             if plan_exposure is not None:result['plan_exposure']=plan_exposure
+            if self.config.plan_kind_policy=='audio_hazard_v3':
+                result['occurrence_expected_events']=features[...,1].expm1()
         return result
 
     def _family_history_features(self,batch,event_seconds):
@@ -2462,6 +2482,15 @@ def stream_loss(model, output, batch):
             keep=model.template_keep_mask(output['template_reference_shape'],output['event_route_log_probs'])
             describe('template',output['event_route_log_probs'],keep,
                 F.one_hot(routes,output['event_route_log_probs'].size(-1)).bool(),note&weights.gt(0))
+    occurrence_metrics={}
+    if 'occurrence_expected_events' in output:
+        # Partition the existing occurrence NLL; this is diagnostic, not a
+        # second loss that would silently multiply NOTE or rest supervision.
+        for label,value in (('note',NOTE),('wait',WAIT),('eos',EOS)):
+            selected=kind.eq(value)&weights.gt(0)
+            occurrence_metrics['occurrence_'+label+'_nll']=reduce(kind_nll*selected)
+            occurrence_metrics['occurrence_'+label+'_weight']=(weights*selected).sum()
+        occurrence_metrics['occurrence_expected_events']=reduce(output['occurrence_expected_events'])
     metrics = {name: value.detach() for name, value in dict(loss=total, time_loss=time_loss,
         kind_loss=kind_loss, delta_loss=delta_loss, timing_grid_loss=timing_grid_loss,
         timing_within_grid_loss=timing_within_grid_loss, configuration_loss=configuration_loss,
@@ -2478,7 +2507,7 @@ def stream_loss(model, output, batch):
         exit_eos_count=(exit_mask&kind.eq(EOS)).sum(),
         recovery_loss=model.config.recovery_weight*recovery,phrase_relation_loss=relation_loss,
         phrase_relation_weighted_loss=model.config.phrase_relation_weight*relation_loss,
-        **execution_metrics,**continuation_metrics,**phrase_metrics,**detail_metrics).items()}
+        **occurrence_metrics,**execution_metrics,**continuation_metrics,**phrase_metrics,**detail_metrics).items()}
     metrics.update(configuration_target_count=(note&configuration_weights.gt(0)).sum().detach().float(),
                    configuration_target_weight=(configuration_weights*note).sum().detach(),
                    timing_only_target_count=(note&weights.gt(0)&~configuration_mask).sum().detach().float(),

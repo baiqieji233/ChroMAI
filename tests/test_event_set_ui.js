@@ -148,7 +148,7 @@ test('music type budget is submitted, inherited on resume and preserved on finet
 
 test('resume retains the residual musical exit version recorded by the checkpoint',()=>{
   for(const transitionPolicy of ['music_exit_v2','music_exit_v3']){
-  for(const prefixPolicy of ['musical_loop_recovery_v6','musical_loop_recovery_v7','musical_loop_recovery_v8']){
+  for(const prefixPolicy of ['musical_entry_recovery_v9','musical_loop_recovery_v6','musical_loop_recovery_v7','musical_loop_recovery_v8']){
     const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
     c.currentTrainingMode=()=> 'resume';
     c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',

@@ -238,7 +238,7 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
     from maichart.composer.event_set_codec import EventSetCodec
     config=StreamComposerConfig.from_dict(dict(d_model=16,nhead=4,layers=1,dim_feedforward=32,motion_continuation_policy="motion_continuation_v1"))
     parent=StreamComposer(config,EventSetCodec.fit(['1','2']))
-    policies=stream_train.resolve_learning_policies(SimpleNamespace(training_window_policy='block_v1',phrase_execution_policy='off',detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='masked_ordered_joint_v2',song_response_policy='off',phrase_context_policy='aligned_phrase_v3'),config)
+    policies=stream_train.resolve_learning_policies(SimpleNamespace(plan_kind_policy='off',training_window_policy='block_v1',phrase_execution_policy='off',detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='masked_ordered_joint_v2',song_response_policy='off',phrase_context_policy='aligned_phrase_v3'),config)
     upgraded=stream_train.upgrade_learning_stage(parent,policies)
     for key,value in parent.state_dict().items():assert torch.equal(value,upgraded.state_dict()[key]),key
     additions=set(upgraded.state_dict())-set(parent.state_dict())
@@ -428,7 +428,7 @@ def test_typed_continuation_stage_expands_only_weight_prefix_without_discarding_
         continuation_policy='typed_runs_v1',motion_continuation_policy='motion_distinct_v2'))
     parent=StreamComposer(config,EventSetCodec.fit(['1','2']))
     with torch.no_grad():parent.continuation_projection.weight.copy_(torch.randn_like(parent.continuation_projection.weight))
-    policies=stream_train.resolve_learning_policies(SimpleNamespace(training_window_policy='block_v1',phrase_execution_policy='off',detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='masked_ordered_joint_v2',song_response_policy='off',phrase_context_policy='aligned_phrase_v3'),config)
+    policies=stream_train.resolve_learning_policies(SimpleNamespace(plan_kind_policy='off',training_window_policy='block_v1',phrase_execution_policy='off',detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='masked_ordered_joint_v2',song_response_policy='off',phrase_context_policy='aligned_phrase_v3'),config)
     upgraded=stream_train.upgrade_learning_stage(parent,policies)
     assert upgraded.continuation_projection.weight.shape==(16,16)
     assert torch.equal(upgraded.continuation_projection.weight[:,:8],parent.continuation_projection.weight)

@@ -280,7 +280,7 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
     from .stream_phrase_runtime import ensure_song_response,ensure_phrase_mode
     ensure_song_response(model,context,result,generator)
     selected_mode=None
-    if getattr(model.config,'phrase_execution_policy','off')=='component_modes_v2':
+    if getattr(getattr(model,'config',None),'phrase_execution_policy','off')=='component_modes_v2':
         selected_mode=ensure_phrase_mode(model,context,result,batch,generator,temperature=temperature)
     kind_values=result['execution_kind_logits'][0,-1,selected_mode] if selected_mode is not None else result['kind_logits'][0,-1]
     kind_scores = kind_logits_for_audio(kind_values,cursor,audio_end)

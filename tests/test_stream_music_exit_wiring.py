@@ -89,11 +89,12 @@ def test_new_training_stage_defaults_use_shared_state_without_exit_override():
     assert policies['recovery_target_policy']=='causal_correspondence_v1'
     assert policies['gap_continuation_policy']=='off'
     assert policies['timing_grid_audio_policy']=='query_pool_v3'
-    assert policies['prefix_augmentation_input_policy']=='musical_loop_recovery_v7'
+    assert policies['prefix_augmentation_input_policy']=='musical_entry_recovery_v9'
+    assert policies['plan_kind_policy']=='audio_hazard_v3'
     assert policies['recovery_policy']=='greedy_mixed_v4'
 
 
-@pytest.mark.parametrize('prefix_policy',['musical_loop_recovery_v6','musical_loop_recovery_v7','musical_loop_recovery_v8'])
+@pytest.mark.parametrize('prefix_policy',['musical_entry_recovery_v9','musical_loop_recovery_v6','musical_loop_recovery_v7','musical_loop_recovery_v8'])
 @pytest.mark.parametrize('transition_policy',['music_exit_v1','music_exit_v2','music_exit_v3'])
 def test_resume_inherits_saved_long_history_course_version(prefix_policy,transition_policy):
     from maichart.composer.stream_model import StreamComposerConfig
