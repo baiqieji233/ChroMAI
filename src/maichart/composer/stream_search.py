@@ -127,7 +127,7 @@ def _duration_signature(raw):
     return re.sub(r'\[[^\]]+\]', '[]', raw)
 
 
-def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None,duration_catalog=None,deadline=None,committed_steps=None):
+def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None,duration_catalog=None,deadline=None,committed_steps=None,private_only=False):
     """Yield one edit/withdrawal at a time, with its entire suffix invalidated."""
     guard=result['guard'];steps=result['steps'];points=result['points']
     proposal=getattr(guard,'last_proposal',None)
@@ -170,7 +170,9 @@ def _repair_prefix(result,song,clock,metrics,lifetimes,withdraw=False,codec=None
         if committed_steps is not None:
             # Global history budgets protect precisely the authoritative log;
             # private branch notes are handled by bounded phrase-local retries.
-            if step_index>=len(committed_steps) or steps[step_index]!=committed_steps[step_index]:continue
+            if private_only:
+                if steps[:len(committed_steps)]!=committed_steps or step_index<len(committed_steps):continue
+            elif step_index>=len(committed_steps) or steps[step_index]!=committed_steps[step_index]:continue
         if withdraw:
             # Withdraw exactly the implicated child. Same-onset protected and
             # unrelated children remain authoritative while the suffix is rebuilt.
@@ -392,6 +394,30 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                 retry_record=dict(operation='private_tail_retry',beat=str(start),accepted=bool(valid))
                 private_tail_retries.append(retry_record)
                 if valid:changes.append(retry_record)
+        if not valid:
+            # Greedy resampling repeats the same private sustain indefinitely.
+            # Repair its duration (or withdraw it) transactionally, proving the
+            # counterfactual just as for history, but preserve every committed step.
+            for withdraw in (False,True):
+                if valid or time.perf_counter()>=deadline:break
+                for failed in list(failures):
+                    if valid or time.perf_counter()>=deadline:break
+                    budget_used=rollbacks_used if withdraw else repairs_used
+                    budget_limit=rollback_budget if withdraw else repair_budget
+                    if budget_used>=budget_limit:break
+                    for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,
+                            withdraw=withdraw,codec=codec,duration_catalog=duration_catalog,
+                            deadline=deadline,committed_steps=committed,private_only=True):
+                        if valid or time.perf_counter()>=deadline:break
+                        used=rollbacks_used if withdraw else repairs_used
+                        if used>=budget_limit:break
+                        key=('private',edit['operation'],_step_fingerprint(prefix))
+                        if key in attempted_historical_edits:continue
+                        attempted_historical_edits.add(key)
+                        if withdraw:rollbacks_used+=1
+                        else:repairs_used+=1
+                        run(prefix,origin='private_sustain_withdrawal' if withdraw else 'private_sustain_edit')
+                        if valid:changes.append({**edit,'scope':'private_uncommitted_suffix'})
         if not history_priority:
             try_historical_repair()
         if not valid:
@@ -457,7 +483,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
         repairs_used=repairs_used,rollbacks_used=rollbacks_used,search_totals={**aggregate,**native_metrics},
         current_event_retries_used=current_retries_used,current_event_retry_limit_per_phrase=2,
         private_tail_retries_used=private_tail_retries_used,private_tail_retry_limit_per_phrase=2,
-        repair_counter_scope='historical_sustain_edit_attempts_excludes_current_event_retry',
+        repair_counter_scope='committed_and_private_sustain_edit_attempts_excludes_sampling_retries',
         native_metric_scope='candidate_gate_and_edit_counterfactuals_excludes_proposal_guard',
         capabilities=dict(shared_readonly_audio_cache=True,independent_prefix_guard_curve_rng=True,
             complete_equal_span_selection=True,full_state_replay=True,sustain_withdrawal=True,retained_winner_tail=True,

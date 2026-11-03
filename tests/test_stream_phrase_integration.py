@@ -98,3 +98,27 @@ def test_sustain_withdrawal_removes_its_dependent_suffix():
     assert edits and len(edits[0][0])==1
     assert edits[0][0][0].text=='3h[8:1]'
     assert codec.encode(edits[0][0][0].text)
+
+
+def test_private_sustain_can_be_withdrawn_without_changing_committed_prefix():
+    from maichart.composer.stream_data import NOTE,StreamStep
+    from maichart.composer.stream_search import _repair_prefix
+    from maichart.tempo_clock import TempoClock
+    song=SimpleNamespace(tempo=[EventTempo(Fraction(0),200.)],first=0.)
+    guard=EventGuard(song.tempo,0.,10.,physical_policy='runtime_hard_v2')
+    points=[EventPoint(Fraction(0),'1'),EventPoint(Fraction(1),'3h[4:2]'),EventPoint(Fraction(3,2),'7')]
+    steps=[StreamStep(NOTE,Fraction(0),Fraction(0),0.,0.,'1'),
+        StreamStep(NOTE,Fraction(0),Fraction(1),0.,.3,'3h[4:2]'),
+        StreamStep(NOTE,Fraction(1),Fraction(3,2),.3,.45,'7')]
+    for p in points:
+        assert guard.accepts(p);guard.commit(p)
+    assert not guard.accepts(EventPoint(Fraction(2),'3'))
+    result=dict(steps=steps,points=points,guard=guard,anchor_second=.45)
+    common=dict(withdraw=True,committed_steps=steps[:1])
+    assert not list(_repair_prefix(result,song,TempoClock(song.tempo,0.),dict(native_calls=0,native_sec=0.),{},**common))
+    private=list(_repair_prefix(result,song,TempoClock(song.tempo,0.),dict(native_calls=0,native_sec=0.),{},private_only=True,**common))
+    assert private and private[0][0]==steps[:1]
+    assert private[0][1]['beat']=='1'
+    # Once the sustain is committed, private repair must not touch it.
+    common['committed_steps']=steps[:2]
+    assert not list(_repair_prefix(result,song,TempoClock(song.tempo,0.),dict(native_calls=0,native_sec=0.),{},private_only=True,**common))
