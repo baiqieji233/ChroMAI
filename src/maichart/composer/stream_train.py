@@ -16,13 +16,17 @@ from .metric_totals import MetricTotals
 from maichart.form.layout_prefetch import LayoutBatchPrefetch
 
 LEARNING_POLICIES = {
-    'plan_kind_policy': ('phrase_arranged_hazard_v4','audio_hazard_v3','rate_integral_v2','off'),
+    'curve_preview_policy': ('audio_counts_v1','off'),
+    'plan_kind_policy': ('unified_first_arrival_v6','unified_first_arrival_v5','phrase_arranged_hazard_v4','audio_hazard_v3','rate_integral_v2','off'),
+    'draft_policy': ('beat_ordered_draft_v1','off'),
+    'draft_objective_policy': ('sequence_evidence_v2','balanced_mean_v1'),
     'song_profile_policy': ('masked_deployment_joint_v3','masked_ordered_joint_v2','masked_joint_v1','off'),
     'song_response_policy': ('unified_profile_response_v2','music_response_v1','off'),
     'training_window_policy': ('phrase_complete_v1','block_v1'),
     'phrase_execution_policy': ('component_modes_v2','persistent_modes_v1','off'),
     'detail_representation_policy': ('typed_components_v2','shared_components_v1','private_v1'),
     'duration_feature_policy': ('log_time_v2','legacy_v1'),
+    'duration_objective_policy': ('hold_crps_v2','categorical_v1'),
     'phrase_context_policy': ('shared_ordered_v4','aligned_phrase_v3','ordered_phrase_v2','causal_phrase_v1','off'),
     'template_policy': ('family_preserving_v1','cross_family_v1'),
     'candidate_state_policy': ('selected_native_v1','cursor_v1'),
@@ -35,25 +39,28 @@ LEARNING_POLICIES = {
     'timing_grid_audio_policy': ('query_pool_v3','query_pool_v2','candidate_pool_v1','off'),
     'timing_group_policy': ('phase_gap_v2','phase_only_v1'),
     'literal_output_policy': ('type_blocks_v1','flat_family_v1'),
-    'event_family_policy': ('shared_continuation_v1','audio_state_phrase_v4','audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
+    'literal_set_policy': ('permuted_unique_v1','canonical_v1'),
+    'event_family_policy': ('shared_music_mixture_v2','shared_continuation_v1','audio_state_phrase_v4','audio_prior_transition_v3','audio_semantic_v2','semantic_mass_v1','legacy_v1'),
     'recovery_target_policy': ('causal_correspondence_v1','authored_next_v1'),
-    'prefix_augmentation_input_policy': ('musical_arrangement_recovery_v10','musical_entry_recovery_v9','musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
+    'prefix_augmentation_input_policy': ('continuous_draft_recovery_v11','musical_arrangement_recovery_v10','musical_entry_recovery_v9','musical_loop_recovery_v7','musical_loop_recovery_v8','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'),
     'history_window_policy': ('block_aligned_v2','rolling_legacy_v1'),
     'continuation_policy': ('pattern_runs_v2','typed_runs_v1','off'),
     'sensor_load_policy': ('separate_touch_v1','button_only_v1'),
     'gap_continuation_policy': ('off','probability_v2','additive_v1'),
     'motion_continuation_policy': ('context_motion_v3','motion_distinct_v2','motion_continuation_v1','off'),
     'lane_load_policy': ('direct_buttons_v1','off'),
-    'recovery_policy': ('greedy_mixed_v4','greedy_mixed_v3','mixed_exit_v2','persistent_v1'),
+    'recovery_policy': ('first_step_phrase_v6','certified_phrase_v5','greedy_mixed_v4','greedy_mixed_v3','mixed_exit_v2','persistent_v1'),
+    'song_choice_objective_policy': ('event_credit_v1','profile_only_v1'),
 }
 
 LEGACY_LEARNING_POLICIES = dict(plan_kind_policy='off',phrase_context_policy='off',template_policy='cross_family_v1',candidate_state_policy='cursor_v1',duration_audio_policy='off',physical_policy='legacy_report_v1',transition_policy='off',decoder_policy='postnorm_v1',window_balance_policy='equal_window_v1',timing_output_policy='relative_delta_v1',timing_grid_audio_policy='off',timing_group_policy='phase_only_v1',literal_output_policy='flat_family_v1',event_family_policy='legacy_v1',
+    draft_objective_policy='balanced_mean_v1',song_choice_objective_policy='profile_only_v1',
     prefix_augmentation_input_policy='causal_window_config_time_first_decision_v3',
     history_window_policy='rolling_legacy_v1',continuation_policy='off',
     sensor_load_policy='button_only_v1',gap_continuation_policy='additive_v1',
     motion_continuation_policy='motion_continuation_v1',lane_load_policy='off',recovery_policy='persistent_v1',
-    recovery_target_policy='authored_next_v1',training_window_policy='block_v1',phrase_execution_policy='off',
-    detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',song_profile_policy='off',song_response_policy='off')
+    recovery_target_policy='authored_next_v1',training_window_policy='block_v1',phrase_execution_policy='off',draft_policy='off',curve_preview_policy='off',
+    detail_representation_policy='private_v1',duration_feature_policy='legacy_v1',duration_objective_policy='categorical_v1',song_profile_policy='off',song_response_policy='off',literal_set_policy='canonical_v1')
 
 
 def resolve_learning_policies(requested, parent_config=None, *, resume=False):
@@ -82,6 +89,13 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
     if rate is None:rate=inherited if resume else .15
     if not math.isfinite(rate) or not 0<=rate<=1:raise ValueError('Prefix augmentation rate must be finite in [0, 1]')
     if resume and rate!=inherited:raise ValueError('Resume inherits prefix_augmentation_rate; use finetune')
+    deployment_fraction=getattr(requested,'deployment_condition_fraction',None)
+    inherited_fraction=getattr(parent_config,'deployment_condition_fraction',1.) if parent_config is not None else 1.
+    if deployment_fraction is None:deployment_fraction=inherited_fraction if resume else .25
+    if not math.isfinite(float(deployment_fraction)) or not 0<=deployment_fraction<=1:
+        raise ValueError('Deployment condition fraction must be in [0,1]')
+    if resume and deployment_fraction!=inherited_fraction:
+        raise ValueError('Resume inherits deployment_condition_fraction; use finetune')
     audio_weight=getattr(requested,'event_family_audio_weight',None)
     inherited=getattr(parent_config,'event_family_audio_weight',0.) if parent_config is not None else 0.
     if audio_weight is None:audio_weight=inherited if resume else .25
@@ -93,17 +107,24 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
     if phrase_weight is None:phrase_weight=saved_phrase_weight if resume else .05
     if not math.isfinite(phrase_weight) or phrase_weight<0:raise ValueError('Phrase loss weight must be finite and nonnegative')
     if resume and phrase_weight!=saved_phrase_weight:raise ValueError('Resume inherits phrase_loss_weight')
-    for key,default in dict(max_phrase_events=64,phrase_seam_events=2,phrase_modes=4,phrase_relation_weight=.1).items():
+    for key,default in dict(draft_loss_weight=.1,draft_responsibility_temperature=1.,curve_preview_weight=.05,duration_calibration_weight=.1,max_phrase_events=64,phrase_seam_events=2,phrase_modes=4,phrase_relation_weight=.1).items():
         inherited=getattr(parent_config,key,default) if parent_config is not None else default
         value=getattr(requested,key,None)
         if value is None:value=inherited
         if not math.isfinite(float(value)) or value<0:raise ValueError(f'Invalid {key}')
-        if key!='phrase_relation_weight' and (int(value)!=value or (key=='max_phrase_events' and value<1)):
+        if key not in ('phrase_relation_weight','draft_loss_weight','draft_responsibility_temperature','curve_preview_weight','duration_calibration_weight') and (int(value)!=value or (key=='max_phrase_events' and value<1)):
             raise ValueError(f'Invalid {key}')
         if key=='phrase_modes' and value not in (2,4,8):raise ValueError('phrase_modes must be 2, 4 or 8')
         if key=='phrase_seam_events' and value>16:raise ValueError('phrase_seam_events must be between 0 and 16')
         if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
         result[key]=value
+    for key in ('configuration_recovery_steps','recovery_bridge_steps'):
+        inherited=getattr(parent_config,key,8) if parent_config is not None else 8
+        value=getattr(requested,key,None)
+        if value is None:value=inherited if resume else 8
+        if not math.isfinite(float(value)) or int(value)!=value or not 1<=value<=16:raise ValueError(f'Invalid {key}')
+        if resume and value!=inherited:raise ValueError(f'Resume inherits {key}; use finetune')
+        result[key]=int(value)
     for key,default in dict(song_profile_components=4,song_profile_weight=.1,song_response_modes=4,song_response_group_size=4).items():
         inherited=getattr(parent_config,key,default) if parent_config is not None else default
         value=getattr(requested,key,None)
@@ -117,7 +138,7 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
     if result['song_response_policy']!='off' and (result['phrase_execution_policy'] not in executions or result['phrase_context_policy'] not in contexts):
         raise ValueError('music_response_v1 requires persistent_modes_v1/component_modes_v2 and aligned_phrase_v3/shared_ordered_v4')
     if result['phrase_execution_policy'] in executions:
-        if result['phrase_context_policy'] not in contexts or result['event_family_policy']!='shared_continuation_v1':
+        if result['phrase_context_policy'] not in contexts or result['event_family_policy'] not in ('shared_continuation_v1','shared_music_mixture_v2'):
             raise ValueError('Phrase execution requires aligned_phrase_v3/shared_ordered_v4 and shared_continuation_v1')
         if result['training_window_policy']!='phrase_complete_v1':
             raise ValueError('Phrase execution requires phrase_complete_v1 training windows')
@@ -128,8 +149,17 @@ def resolve_learning_policies(requested, parent_config=None, *, resume=False):
             raise ValueError('Unified response requires masked_deployment_joint_v3')
         if result['song_profile_components']!=result['song_response_modes']:
             raise ValueError('Unified profile and response require the same latent count')
+    if result['draft_policy']!='off' and (result['phrase_context_policy']!='shared_ordered_v4' or result['phrase_execution_policy']!='component_modes_v2'):
+        if getattr(requested,'draft_policy','auto')=='auto':result['draft_policy']='off'
+        else:raise ValueError('Draft requires shared ordered component execution')
+    if result['draft_policy']!='off':
+        result['phrase_loss_weight']=0.;result['phrase_relation_weight']=0.
+        phrase_weight=0.
+    if not resume and getattr(requested,'song_choice_objective_policy','auto')=='auto' and (
+            result['draft_policy']=='off' or result['song_response_policy']!='unified_profile_response_v2'):
+        result['song_choice_objective_policy']='profile_only_v1'
     return {**result,'transition_exit_weight':weight,'prefix_augmentation_rate':rate,'event_family_audio_weight':audio_weight,
-            'phrase_loss_weight':phrase_weight}
+            'phrase_loss_weight':phrase_weight,'deployment_condition_fraction':float(deployment_fraction)}
 
 
 def upgrade_learning_stage(model, policies, device='cpu'):
@@ -150,7 +180,9 @@ def upgrade_learning_stage(model, policies, device='cpu'):
                   'family_continuity_head.','family_rhythm_projection.','family_state_phrase.','decoder.norm.',
                   'literal_stop_head.','literal_type_embedding.','music_exit_head.','phrase_context.','duration_audio.',
                   'shared_details.','phrase_execution.','song_profile.','song_response.',
-                  'detail_mode_control.','literal_component_projection.','plan_kind_features.','occurrence_arrangement.')
+                  'detail_mode_control.','literal_component_projection.','plan_kind_features.','occurrence_arrangement.',
+                  'draft_action_projection.','draft_rate_projection.','draft_detail_projection.','draft_time_query.','curve_preview_',
+                  'arrival_history_norm.','song_choice_')
     if model.config.detail_representation_policy!=upgraded.config.detail_representation_policy:
         allowed.update(key for key in set(source)|set(target) if key.startswith('detail_embeddings.'))
     allowed.update(key for key in set(source)|set(target) if key.startswith(new_prefixes))
@@ -230,14 +262,14 @@ def parser():
     p.add_argument('--detail-compute',choices=('serial','packed'),default='serial',
         help='Batch equivalent detail recurrence across shapes; serial is a diagnostic reference')
     p.add_argument('--validation-manifest');p.add_argument('--resume');p.add_argument('--init-checkpoint')
-    for key,default in dict(epochs=50,batch_size=16,grad_accumulation=4,d_model=256,layers=4,nhead=8,
-        dim_feedforward=768,history_events=64,rollout_steps=16,checkpoint_interval_steps=500,
+    for key,default in dict(epochs=50,batch_size=16,grad_accumulation=4,d_model=384,layers=8,nhead=8,
+        dim_feedforward=1536,history_events=128,rollout_steps=32,checkpoint_interval_steps=500,
         log_interval=25,max_steps=0,limit_charts=0,prepare_workers=1,cpu_threads=2,
         recovery_interval=25,recovery_samples=2,recovery_steps=2,symbolic_pretrain_epochs=0,
-        validation_max_batches=32,validation_batch_size=4,generation_eval_songs=2,
+        validation_max_batches=32,validation_batch_size=4,generation_eval_songs=0,
         generation_eval_interval_epochs=1,seed=0,warmup_steps=0,prefetch_batches=2,sample_workers=1).items():
         p.add_argument('--'+key.replace('_','-'),type=int,default=default)
-    for key,default in dict(lr=.0002,dropout=.1,window_seconds=8.,recovery_weight=.1,
+    for key,default in dict(lr=.0005,dropout=.1,window_seconds=8.,recovery_weight=.1,
         plan_weight=.1,audio_cache_gb=1.,min_lr_ratio=.1).items():
         p.add_argument('--'+key.replace('_','-'),type=float,default=default)
     for key in ('d_model','layers','nhead','dim_feedforward','history_events','rollout_steps','dropout'):p.set_defaults(**{key:None})
@@ -258,9 +290,15 @@ def parser():
     p.add_argument('--prefix-augmentation-rate',type=float,default=None)
     p.add_argument('--event-family-audio-weight',type=float,default=None)
     p.add_argument('--phrase-loss-weight',type=float,default=None)
-    for key in ('max_phrase_events','phrase_seam_events','phrase_modes','song_profile_components','song_response_modes','song_response_group_size'):
+    for key in ('max_phrase_events','phrase_seam_events','phrase_modes','song_profile_components','song_response_modes','song_response_group_size','configuration_recovery_steps','recovery_bridge_steps'):
         p.add_argument('--'+key.replace('_','-'),type=int,default=None)
     p.add_argument('--phrase-relation-weight',type=float,default=None)
+    p.add_argument('--draft-loss-weight',type=float,default=None)
+    p.add_argument('--curve-preview-weight',type=float,default=None)
+    p.add_argument('--duration-calibration-weight',type=float,default=None)
+    p.add_argument('--deployment-condition-fraction',type=float,default=None,
+        help='Fraction of chart groups using predicted automatic controls; other groups retain explicit source preferences')
+    p.add_argument('--draft-responsibility-temperature',type=float,default=None)
     p.add_argument('--song-profile-weight',type=float,default=None)
     p.add_argument('--generation-eval-temperature',type=float,default=None)
     from .stream_evaluation_settings import add_arguments
@@ -282,15 +320,19 @@ def _dataset(args,*,codec=None,delta_vocab=None,validation=False):
         history_window_policy=('block_aligned_v2' if getattr(args,'history_window_policy','auto')=='auto' else args.history_window_policy),
         continuation_policy=('pattern_runs_v2' if getattr(args,'continuation_policy','auto')=='auto' else args.continuation_policy),
         phrase_context_policy=getattr(args,'phrase_context_policy','off'),
+        draft_policy=getattr(args,'draft_policy','off'),
+        unified_arrival=getattr(args,'plan_kind_policy','off') in ('unified_first_arrival_v5','unified_first_arrival_v6'),
         candidate_state_policy=getattr(args,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(args,'training_window_policy','block_v1'),
         max_phrase_events=getattr(args,'max_phrase_events',64),phrase_seam_events=getattr(args,'phrase_seam_events',2),
         song_response_group_size=getattr(args,'song_response_group_size',4),
-        relation_policy='future_sets_v1' if getattr(args,'phrase_execution_policy','off') in ('persistent_modes_v1','component_modes_v2') else 'off',
+        relation_policy='future_sets_v1' if getattr(args,'draft_policy','off')=='off' and getattr(args,'phrase_execution_policy','off') in ('persistent_modes_v1','component_modes_v2') else 'off',
         limit_charts=args.limit_charts,unknown_policy='mask' if validation else 'error')
     dataset.physical_policy=getattr(args,'physical_policy','legacy_report_v1')
     dataset.recovery_target_policy=getattr(args,'recovery_target_policy','authored_next_v1')
     dataset._batch_order_policy=getattr(args,'batch_order_policy','song_local_v1')
+    dataset.unified_arrival=getattr(args,'plan_kind_policy','off') in ('unified_first_arrival_v5','unified_first_arrival_v6')
+    dataset.draft_policy=getattr(args,'draft_policy','off')
     return dataset
 
 class _LocalBatches(Sampler):
@@ -373,6 +415,8 @@ class _TrainingCollator:
             items,diagnostics=augment_stream_items(self.dataset,items,rate=self.rate,
                 seed=self.seed+self.batch_number,input_policy=self.input_policy)
         batch=collate_stream(items)
+        # Local batch identity, independent of producer scheduling/global RNG.
+        batch['_literal_order_seed']=self.seed+self.batch_number
         batch['augmented_row_mask']=torch.tensor([item is not original for item,original in zip(items,original_items)],dtype=torch.bool)
         batch['_augmentation']=diagnostics
         return batch
@@ -651,37 +695,52 @@ def _initialize_structured_heads(model,ds,parent_config=None,*,resume=False):
     from .stream_timing import phase_group
     absolute=model.config.timing_output_policy=='absolute_grid_v1'
     semantic=model.config.event_family_policy!='legacy_v1'
+    intensity_prior=getattr(model.config,'plan_kind_policy','off')=='unified_first_arrival_v6'
     init_timing=absolute and not resume and (parent_config is None or parent_config.timing_output_policy!='absolute_grid_v1'
-        or parent_config.timing_group_policy!=model.config.timing_group_policy)
+        or parent_config.timing_group_policy!=model.config.timing_group_policy
+        or (intensity_prior and getattr(parent_config,'plan_kind_policy','off')!='unified_first_arrival_v6'))
     preserve_family_prior=(parent_config is not None
-        and parent_config.event_family_policy=='audio_prior_transition_v3'
-        and model.config.event_family_policy=='audio_state_phrase_v4')
+        and ((parent_config.event_family_policy=='audio_prior_transition_v3'
+              and model.config.event_family_policy=='audio_state_phrase_v4')
+             or (parent_config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2')
+                 and model.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2'))))
     init_family=(semantic and not resume and not preserve_family_prior
         and (parent_config is None or parent_config.event_family_policy!=model.config.event_family_policy))
     init_literal=semantic and model.config.literal_output_policy=='type_blocks_v1' and not resume and (
         parent_config is None or parent_config.literal_output_policy!='type_blocks_v1')
+    init_detail=not resume and parent_config is None
     phases={Fraction(value)%1 for value in model.config.delta_beats} if absolute else set()
     grid_counts=torch.zeros(11,dtype=torch.float64)
     bucket_counts=torch.zeros(22,dtype=torch.float64)
     literal_blocks=torch.zeros(5,dtype=torch.float64);literal_extras=torch.zeros(5,dtype=torch.float64)
     family_counts=torch.zeros(31,dtype=torch.float64);literal_counts=torch.zeros(31,dtype=torch.float64)
     atom_families=model.semantic_atom_families.detach().cpu().tolist() if semantic else None
+    # Python numbers avoid millions of scalar Torch dispatches in this existing
+    # CPU label scan; convert each compact classifier table only once below.
+    detail_counts=[[[0.]*size for size in slots] for slots in ds.codec.detail_sizes]
+    atom_counts=[0.]*ds.codec.num_atoms
     for song,stream in enumerate(ds.streams):
         encoded=ds.encoded[song];unknown=ds.unknown_steps[song]
         for position,step in enumerate(stream):
             if step.kind!=NOTE:continue
             phase=step.end%1
             if absolute:phases.add(phase)
-            if not (init_timing or init_family or init_literal) or unknown[position]:continue
+            if not (init_timing or init_family or init_literal or init_detail) or unknown[position]:continue
             mass=float(step.weight)*ds.target_window_weights[song][position]*ds.chart_weights[song]
             if mass<=0:continue
             if init_timing:
                 group=phase_group(phase)
                 grid_counts[group]+=mass
                 bucket_counts[group+11*int(step.end-step.start>=1)]+=mass
-            if init_family or init_literal:
+            if init_family or init_literal or init_detail:
                 event=encoded[position][1]
                 if event is None:continue
+                if init_detail:
+                    if event['shape']:
+                        for slot,detail in enumerate(event['details']):detail_counts[event['shape']][slot][detail]+=mass
+                    else:
+                        for atom in event['atoms']:atom_counts[atom]+=mass
+                if not (init_family or init_literal):continue
                 family=0
                 for atom in event['atoms']:family|=int(atom_families[atom])
                 if not 1<=family<=31:raise ValueError('Encoded event has no semantic family')
@@ -697,7 +756,15 @@ def _initialize_structured_heads(model,ds,parent_config=None,*,resume=False):
             raise ValueError('Resume requires its saved absolute timing catalog')
         if not resume:model.configure_timing_phases(sorted(phases))
         ds.timing_phase_catalog=model.config.timing_phase_catalog
-    if init_timing:
+    timing_prior={}
+    if init_timing and intensity_prior:
+        from .stream_timing import initialize_timing_prior
+        timing_prior=initialize_timing_prior(model.timing_grid,ds)
+        # The static intensity prior owns the baseline. The existing plan
+        # channel learns music deviations around zero in the new contract.
+        with torch.no_grad():
+            model.plan_head.weight[2].zero_();model.plan_head.bias[2].zero_()
+    elif init_timing:
         with torch.no_grad():
             prior=(grid_counts+.5)/(grid_counts.sum()+.5*len(grid_counts))
             model.timing_grid.grid_head.bias.copy_(prior.log().to(model.timing_grid.grid_head.bias))
@@ -706,7 +773,9 @@ def _initialize_structured_heads(model,ds,parent_config=None,*,resume=False):
                 model.timing_grid.bucket_head.bias.copy_((bucket_prior.log()-prior.log().repeat(2)).to(model.timing_grid.bucket_head.bias))
     if init_family:model.initialize_event_family_prior(family_counts,literal_counts)
     if init_literal:model.initialize_literal_stop_prior(literal_blocks,literal_extras)
-    return dict(scope='weighted_authored_training_labels_only',timing_prior_initialized=init_timing,
+    detail_prior=model.initialize_detail_prior(detail_counts,atom_counts) if init_detail else {}
+    return dict(scope='weighted_authored_training_labels_only',timing_prior_initialized=init_timing,**timing_prior,
+        detail_prior_initialized=init_detail,detail_prior_policy='weighted_authored_frequency_v1' if init_detail else 'parent_unchanged',**detail_prior,
         semantic_prior_initialized=init_family,timing_phases=len(phases),
         grid_counts=grid_counts.tolist() if init_timing else None,
         bucket_counts=bucket_counts.tolist() if init_timing else None,
@@ -745,7 +814,7 @@ def evaluate(model,ds,args):
                 n+=1
     finally:model.train(was)
     return dict(metrics=_averages(totals,n),batches=n,oov=ds.oov,
-        condition_scope='reference-derived requested controls',scope='authored_prefix_not_musical_quality',
+        condition_scope=('deterministic_deployment_component_argmax_and_completed_controls' if model.config.draft_policy!='off' else 'reference-derived requested controls'),scope='authored_prefix_not_musical_quality',
         selection='deterministic_spread_across_all_samples' if args.validation_max_batches else 'all_samples')
 
 def _autocast(args):
@@ -813,11 +882,12 @@ def _train(args):
         next_epoch=int(old.get('epoch',0))+int(saved.get('epoch_complete',False))
         if next_epoch>args.epochs:
             raise ValueError(f'epochs is the total target, not added epochs; next epoch is {next_epoch}, requested target is {args.epochs}')
-    for key,default in dict(d_model=256,layers=4,nhead=8,dim_feedforward=768,history_events=64,rollout_steps=16,dropout=.1).items():
+    for key,default in dict(d_model=384,layers=8,nhead=8,dim_feedforward=1536,history_events=128,rollout_steps=32,dropout=.1).items():
         if getattr(args,key) is None:setattr(args,key,getattr(model.config,key) if old else default)
     if args.rollout_steps<1 or args.history_events<1:raise ValueError('Invalid history/rollout controls')
     learning_policies=resolve_learning_policies(args,model.config if old else None,resume=bool(args.resume))
     for key,value in learning_policies.items():setattr(args,key,value)
+    if args.plan_kind_policy in ('unified_first_arrival_v5','unified_first_arrival_v6'):args.plan_weight=0.
     args.batch_order_policy=resolve_batch_order_policy(getattr(args,'batch_order_policy','auto'),(old or {}).get('args'),resume=bool(args.resume))
     inherited_temperature=((old or {}).get('args') or {}).get('generation_eval_temperature',.65)
     if args.generation_eval_temperature is None:args.generation_eval_temperature=inherited_temperature if args.resume else .65
@@ -856,11 +926,16 @@ def _train(args):
             model.config.plan_weight=args.plan_weight;model.config.recovery_weight=args.recovery_weight
     output_initialization=_initialize_structured_heads(model,ds,
         StreamComposerConfig.from_dict(old['model_config']) if old else None,resume=bool(args.resume))
-    args.training_objective_recipe=dict(version=(checkpoint.UNIFIED_OBJECTIVE_VERSION if model.config.song_response_policy=='unified_profile_response_v2' else
-        ('stream_ordered_song_profile_v7' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'stream_song_response_joint_v6' if model.config.song_response_policy!='off' or model.config.song_profile_policy!='off' else 'stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy in ('persistent_modes_v1','component_modes_v2') else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy=='shared_continuation_v1'
+    args.training_objective_recipe=dict(version=(checkpoint.objective_version_for_config(model.config) if model.config.song_response_policy=='unified_profile_response_v2' or model.config.draft_policy!='off' or model.config.plan_kind_policy in ('unified_first_arrival_v5','unified_first_arrival_v6') else
+        ('stream_ordered_song_profile_v7' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'stream_song_response_joint_v6' if model.config.song_response_policy!='off' or model.config.song_profile_policy!='off' else 'stream_persistent_phrase_joint_v5' if model.config.phrase_execution_policy in ('persistent_modes_v1','component_modes_v2') else 'stream_shared_causal_correspondence_v4' if model.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2')
         else 'stream_aligned_phrase_joint_v3' if model.config.phrase_context_policy=='aligned_phrase_v3' else 'stream_ordered_phrase_joint_v2'
         if model.config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4') else 'stream_causal_phrase_joint_v1')),
         song_profile_policy=model.config.song_profile_policy,song_profile_components=model.config.song_profile_components,song_profile_weight=model.config.song_profile_weight,
+        deployment_condition_fraction=model.config.deployment_condition_fraction,
+        song_choice_objective_policy=model.config.song_choice_objective_policy,
+        execution_condition_contract='per_chart_explicit_source_or_deployment_completion_profile_score_masked_once',
+        curve_preview_policy=model.config.curve_preview_policy,curve_preview_weight=model.config.curve_preview_weight,
+        curve_preview_objective='detached_head_event_counts_two_second_exposure_bins_no_actor_feedback',
         song_response_policy=model.config.song_response_policy,song_response_modes=model.config.song_response_modes,song_response_group_size=model.config.song_response_group_size,
         song_profile_objective=('unified_z_profile_evidence_once_chart_budget_CRPS_50_percent_only_level_v3' if model.config.song_profile_policy=='masked_deployment_joint_v3' else 'masked_joint_nll_plus_ordinal_crps_equal_chart_mass_v2' if model.config.song_profile_policy=='masked_ordered_joint_v2' else 'masked_mixture_categorical_129_bins_preprojection_unique_charts_per_batch'),
         plan_metric_contract='unchanged_poisson_nll_with_saturated_floor_and_excess_diagnostics',
@@ -923,12 +998,20 @@ def _train(args):
             if model.config.timing_grid_audio_policy=='query_pool_v3' else 'policy_defined'),
         timing_group_policy=model.config.timing_group_policy,literal_output_policy=model.config.literal_output_policy,
         event_family_policy=model.config.event_family_policy,
-        family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1') else 0.),
-        family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1') else 1.),
+        literal_set_policy=model.config.literal_set_policy,
+        duration_objective_policy=model.config.duration_objective_policy,
+        duration_calibration_weight=model.config.duration_calibration_weight,
+        duration_calibration_scope='fully_parsed_regular_hold_final_mode_probabilities_conditional_on_authored_heads_no_literal_claim',
+        literal_set_objective=('stateless_seeded_permutation_and_prefix_unique_support' if model.config.literal_set_policy=='permuted_unique_v1'
+            else 'canonical_serialization_likelihood'),
+        family_probability_contract=('deployed_audio_probability_mix_after_mode' if model.config.event_family_policy=='shared_music_mixture_v2'
+            else 'separate_weighted_family_supervision'),
+        family_audio_budget=(model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2') else 0.),
+        family_full_budget=(1-model.config.event_family_audio_weight if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2') else 1.),
         family_mixture_gradient=('audio_prior_detached_context_residual_live' if model.config.event_family_policy=='audio_state_phrase_v4' else
             'audio_prior_detached_when_audio_budget_positive' if model.config.event_family_policy=='audio_prior_transition_v3' else 'joint'),
         family_context_inputs=('shared_causal_history_landing_music_phrase_progress_native_state'
-            if model.config.event_family_policy=='shared_continuation_v1' else
+            if model.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2') else
             'music_phrase_intent_candidate_state_gap' if model.config.event_family_policy=='audio_state_phrase_v4' else 'policy_default'),
         conditional_geometry=('joint_phase_detail_with_learned_motion_exit'
             if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3') else 'unchanged_joint_phase_detail'),
@@ -961,6 +1044,48 @@ def _train(args):
             if args.prefix_augmentation_input_policy=='musical_loop_recovery_v8' else 'within_existing_prefix_augmentation_rate'
             if args.prefix_augmentation_input_policy=='musical_loop_recovery_v7' else 'policy_defined'),
         time_target='exact_authored_onset',prefix_input=args.prefix_augmentation_input_policy)
+    if model.config.draft_policy!='off':
+        args.training_objective_recipe.update(
+            draft_policy=model.config.draft_policy,draft_loss_weight=model.config.draft_loss_weight,
+            draft_responsibility_temperature=model.config.draft_responsibility_temperature,
+            occurrence_objective='one_exposure_weighted_first_arrival_mass_and_censored_tail_no_separate_raw_count_veto',
+            plan_metric_contract='raw_plan_is_final_rate_feature_not_independently_supervised',
+            entry_recovery='continuous_authored_rest_and_teacher_forced_reentry_with_per_target_budget',
+            counterfactual_budget='actual_target_weights_no_single_decision_window_mass_transfer',
+            phrase_budget='ordered_draft_replaces_histogram_ordered_prediction_and_future_relation_auxiliaries',
+            song_response_objective='deployed_selected_component_conditional_event_risk_profile_mixture_once',
+            condition_contract=('explicit_source_controls_and_masked_deployment_completion_separate_profile_score'
+                if model.config.deployment_condition_fraction<1 else 'known_only_prior_explicit_plus_predicted_component_mean_executor'),
+            phrase_configuration_objective='persistent_mode_time_departure_mark_landing_owner_balanced_risk',
+            configuration_base_diagnostics='base_head_only_not_deployed_mode_marginal',
+            relation_policy='draft_ordered_geometry',plan_weight=0.,
+            configuration_loss_scope='selected_song_component_persistent_phrase_mode_time_and_mark_risk',
+            ordered_phrase_target='predicted_draft_actual_landing_geometry_sustain_and_note_transition_labels_only',
+            ordered_memory_max_events=64,
+            phrase_loss_normalization='component_exposure_time_plus_trusted_NOTE_mark_over_primary_target_budget')
+        if model.config.draft_objective_policy=='sequence_evidence_v2':
+            args.training_objective_recipe.update(
+                draft_objective_policy='sequence_evidence_v2',
+                phrase_configuration_objective='whole_sequence_joint_evidence_one_sampling_importance_prior_budget',
+                phrase_loss_normalization='deduplicated_real_decisions_sampling_importance_time_mark_once')
+        if model.config.recovery_policy=='certified_phrase_v5':
+            args.training_objective_recipe.update(
+                recovery_long_sources='actual_persistent_rollouts_with_private_certified_teacher_seam_continuations',
+                configuration_recovery_steps=model.config.configuration_recovery_steps,
+                recovery_bridge_steps=model.config.recovery_bridge_steps,
+                recovery_target_budget='one_per_trajectory_shared_over_certified_continuation_targets',
+                recovery_teacher_bridge='conditioning_only_not_model_generated_and_not_uncertified_gold_labels')
+        if model.config.recovery_policy=='first_step_phrase_v6':
+            args.training_objective_recipe.update(
+                recovery_long_sources='actual_prefix_first_type_witness_then_certified_continuation',
+                configuration_recovery_steps=model.config.configuration_recovery_steps,
+                recovery_bridge_steps=model.config.recovery_bridge_steps,
+                recovery_target_budget='one_per_trajectory_including_bridge_time_and_first_family',
+                recovery_teacher_bridge='time_targets_first_native_NOTE_type_only_until_configuration_certified')
+        if model.config.song_choice_objective_policy=='event_credit_v1':
+            args.training_objective_recipe['song_response_objective']='executed_component_event_risk_with_unbiased_sampled_choice_credit_profile_once'
+        if model.config.plan_kind_policy=='unified_first_arrival_v6':
+            args.training_objective_recipe['timing_history']='shared_NOTE_BOS_memory_current_clock_and_occupancy_no_WAIT_keys'
     dev=_dataset(args,codec=ds.codec,delta_vocab=ds.delta_vocab,validation=True) if args.validation_manifest else None
     if dev is not None:
         _validation_timing_support(dev,model)
@@ -973,7 +1098,11 @@ def _train(args):
         **({'fused':True} if args.device.startswith('cuda') else {}))
     from .stream_data_identity import dataset_content_identity
     content_identity=dataset_content_identity(args.manifest,ds,cache_dir=args.cache_dir)
-    state=(old or {}).get('training_state') or {};fingerprint=_fingerprint(args,ds)
+    # A finetune is a new stage, with its own objective/validation scale.
+    # Inheriting the parent's best score can suppress every new best save;
+    # cursors, LR-change records and episode state also belong to resume only.
+    state=((old or {}).get('training_state') or {}) if args.resume else {}
+    fingerprint=_fingerprint(args,ds)
     args.sample_order_batch_size=int((old or {}).get('args',{}).get('sample_order_batch_size',
         (old or {}).get('args',{}).get('batch_size',args.batch_size))) if args.resume else args.batch_size
     ds._sample_order_batch_size=args.sample_order_batch_size
@@ -1138,6 +1267,10 @@ def _train(args):
                 for name,value in _exit_coverage(b).items():
                     combined_metrics[name]=combined_metrics[name]+value if name in combined_metrics else value
                 window_metrics.add(combined_metrics);window_batches+=1
+                # Backward and detached metric packing are complete. Release
+                # logits and input references before recovery or the next
+                # forward, rather than overlapping two batches' live tensors.
+                del out,loss,backward_loss,metrics,combined_metrics,b,batch
                 update=bi%args.grad_accumulation==0 or bi==batches_per_epoch
                 updated=False
                 if update:
@@ -1148,20 +1281,37 @@ def _train(args):
                         if recovered is not None:
                             # A recovery row has one target, not K authored ones.
                             recovered['_loss_normalizer']=recovered['target_kind'].size(0)
+                            recovered['_literal_order_seed']=args.seed+(steps+1)*1000003+9871
                             recovered=to_device_batch(recovered,args.device,non_blocking=args.device.startswith('cuda'))
                             with _autocast(args):rout=model(recovered);rloss,_=model.loss(rout,recovered)
                             weighted_recovery=args.recovery_weight*rloss
                             window_finite=window_finite & _forward_finite_flags(rout,rloss,weighted_recovery)
                             weighted_recovery.backward()
                             _record_recovery_metrics(window_metrics,weighted_recovery,window_batches)
+                            # Recovery runs infrequently; retaining these locals
+                            # otherwise pins its outputs until the next episode.
+                            del rout,rloss,weighted_recovery
+                        del recovered
                         _emit('composer_recovery',optimizer_step=steps+1,outcomes=diagnostics)
-                    norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.,error_if_nonfinite=False)
+                    # Preview gradients must not enlarge the actor's clipping
+                    # denominator. Its detached auxiliary is optimized alone.
+                    preview=getattr(model,'curve_preview_head',None)
+                    if preview is None:
+                        norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.,error_if_nonfinite=False)
+                        finite_norm=torch.isfinite(norm.detach())
+                    else:
+                        preview_parameters=list(preview.parameters());preview_ids={id(parameter) for parameter in preview_parameters}
+                        norm=torch.nn.utils.clip_grad_norm_((parameter for parameter in model.parameters() if id(parameter) not in preview_ids),1.,error_if_nonfinite=False)
+                        preview_norm=torch.nn.utils.clip_grad_norm_(preview_parameters,1.,error_if_nonfinite=False)
+                        finite_norm=torch.isfinite(norm.detach())&torch.isfinite(preview_norm.detach())
                     # One host transfer checks outputs, both losses and the
                     # entire accumulated gradient before optimizer mutation.
-                    health=torch.cat((window_finite,torch.isfinite(norm.detach()).reshape(1))).cpu().tolist()
+                    health=torch.cat((window_finite,finite_norm.reshape(1))).cpu().tolist()
                     if all(health):
                         for group in optimizer.param_groups:group['lr']=learning_rate(lr_plan,steps)
                         optimizer.step();steps+=1;updated=True
+                        if preview is not None and model.config.curve_preview_weight>0 and not symbolic:
+                            model.curve_preview_trained_updates.add_(1)
                         last_optimizer_unique_charts=len(window_chart_ids)
                         optimizer_chart_counts.append(last_optimizer_unique_charts)
                         _assert_model_finite(model,finite_items)

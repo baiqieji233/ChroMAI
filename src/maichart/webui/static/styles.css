@@ -115,6 +115,8 @@ h3 { margin: 0 0 12px; font-size: 14px; }
 .control-list { display: grid; gap: 10px; }
 .control-row { display: grid; grid-template-columns: 130px minmax(80px, 1fr) 62px; gap: 8px; align-items: center; }
 .control-row label { color: #5e5a52; font-size: 12px; }
+.v2-condition-row .v2-condition-mode { grid-column: 1 / -1; grid-row: 2; }
+.v2-condition-row > small { grid-column: 1 / -1; grid-row: 3; }
 .control-row input[type=number] { width: 62px; border: 1px solid var(--line); border-radius: 4px; padding: 4px; }
 input[type=range] { accent-color: var(--teal); width: 100%; }
 .notice { margin: 18px 0 0; padding: 10px 12px; border-left: 3px solid var(--yellow); background: #fff8dc; color: #6d5b25; font-size: 12px; }
@@ -264,3 +266,10 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .log-task { min-width: 110px; color: var(--muted); }
 .log-link { margin-left: auto; }
 .log-error { color: #8a6814; overflow-wrap: anywhere; }
+.v2-epoch-table { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+.v2-epoch-table th, .v2-epoch-table td { padding: 6px 8px; border-bottom: 1px solid var(--line); text-align: right; }
+.v2-epoch-table th:first-child, .v2-epoch-table td:first-child { text-align: left; }
+.progress.indeterminate { overflow: hidden; }
+.progress.indeterminate #progressBar { width: 30% !important; animation: v2-progress-wait 1.8s ease-in-out infinite alternate; }
+@keyframes v2-progress-wait { from { transform: translateX(-100%); } to { transform: translateX(330%); } }
+@media (prefers-reduced-motion: reduce) { .progress.indeterminate #progressBar { animation: none; transform: translateX(100%); } }

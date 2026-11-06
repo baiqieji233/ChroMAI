@@ -10,8 +10,9 @@ from maichart.composer.stream_evaluation_settings import validate
 
 def test_fresh_training_defaults_and_new_learning_contract():
     args = parser().parse_args(['--manifest', 'data.json', '--checkpoint-dir', 'fresh'])
-    assert (args.epochs, args.lr, args.lr_schedule, args.warmup_steps) == (50, .0002, 'constant', 0)
+    assert (args.epochs, args.lr, args.lr_schedule, args.warmup_steps) == (50, .0005, 'constant', 0)
     assert (args.batch_size,args.grad_accumulation,args.audio_cache_gb)==(16,4,1.)
+    assert args.generation_eval_songs == 0
     policies = resolve_learning_policies(args)
     assert policies['training_window_policy'] == 'phrase_complete_v1'
     assert policies['phrase_execution_policy'] == 'component_modes_v2'

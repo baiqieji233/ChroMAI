@@ -22,15 +22,16 @@ from .stream_sampling import (kind_logits_for_audio, note_delta_logits_for_audio
                               sample_logits, sample_guarded_event)
 from .stream_proposal import sample_timed_event
 from .stream_timing import current_timing_deltas
-from .stream_target_correspondence import corresponding_shift, rotated_text, rotation_boundary_clear
+from .stream_target_correspondence import corresponding_shift, rotated_text, rotation_boundary_clear, authored_seam_corresponds
 
 SCHEMA = 'event_set_stream_recovery_v1'
 MAX_EPISODE_STEPS = 128
 LEGACY_EPISODE_STEPS = 64
+MUSICAL_RECOVERY_POLICIES=('greedy_mixed_v3','greedy_mixed_v4','certified_phrase_v5','first_step_phrase_v6')
 
 
 def _episode_limit(policy):
-    return MAX_EPISODE_STEPS if policy in ('greedy_mixed_v3','greedy_mixed_v4') else LEGACY_EPISODE_STEPS
+    return MAX_EPISODE_STEPS if policy in MUSICAL_RECOVERY_POLICIES else LEGACY_EPISODE_STEPS
 
 
 def recovery_state(model):
@@ -57,7 +58,7 @@ def restore_recovery_state(model, state):
     target_policy=state.get('target_policy','authored_next_v1')
     if target_policy not in ('authored_next_v1','causal_correspondence_v1'):
         raise ValueError('Invalid recovery target policy state')
-    if policy not in ('persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'):raise ValueError('Invalid recovery policy state')
+    if policy not in ('persistent_v1','mixed_exit_v2',*MUSICAL_RECOVERY_POLICIES):raise ValueError('Invalid recovery policy state')
     for episode in state['episodes']:
         if episode is None:
             continue
@@ -234,6 +235,8 @@ def _qualified_continuation(dataset,song,prefix,target,guard,anchor,reference_in
         return target,False,'time_only'
     shift=corresponding_shift(source[anchor:reference_index],prefix[anchor:])
     if shift is None:
+        if authored_seam_corresponds(source[:reference_index],prefix,guard) and guard.accepts(EventPoint(target.end,target.text)):
+            return target,True,'authored_seam'
         return target,False,'time_only'
     if shift == 0:
         return (target,True,'exact_history') if guard.accepts(EventPoint(target.end,target.text)) else (
@@ -248,6 +251,118 @@ def _qualified_continuation(dataset,song,prefix,target,guard,anchor,reference_in
     except (ValueError,KeyError):
         return target,False,'time_only'
     return replace(target,text=transformed),True,'rotation_correspondence'
+
+
+def _configuration_recovery_row(dataset,model,song,prefix,target,guard,context,anchor,reference_index,
+                                trusted,correspondence,diagnostics):
+    """A bounded teacher-assisted seam followed by certified real continuation.
+
+    The caller's rollout is finished. Only this disposable context advances;
+    the persisted generated episode and supplied prefix list remain unchanged.
+    V5 bridge notes are conditioning only. V6 retains their time decisions
+    in the supervised sequence, with coarse family evidence on the native
+    first NOTE only. Neither version claims unproved exact configurations.
+    No bridge can release an earlier sustain.
+    """
+    recovery_policy=getattr(getattr(model,'config',None),'recovery_policy','')
+    first_step=recovery_policy=='first_step_phrase_v6'
+    if recovery_policy not in ('certified_phrase_v5','first_step_phrase_v6'):
+        return recovery_sample(dataset,song,prefix,target,weight=target.weight,
+            configuration_trusted=trusted,correspondence=correspondence,context=context)
+    from .stream_data import recovery_sequence_sample
+    source=dataset.streams[song]
+    actual=list(prefix);bridge=0
+    index=reference_index
+    maximum=int(getattr(model.config,'configuration_recovery_steps',8))
+    bridge_budget=int(getattr(model.config,'recovery_bridge_steps',8))
+    targets=[];weights=[];configuration=[]
+    local_guard=copy.copy(guard)
+    local_guard.prefix=list(guard.prefix)
+    local_guard.last_head_seconds=dict(guard.last_head_seconds)
+    local_guard.reason_counts=Counter(guard.reason_counts)
+    local_guard._before_cache=None
+    while index is not None and index<len(source) and len(targets)-(bridge if first_step else 0)<maximum:
+        candidate=source[index]
+        cursor=actual[-1].end if actual else Fraction(0)
+        if candidate.end<cursor or (candidate.end==cursor and actual):break
+        if dataset.unknown_steps[song][index] or candidate.weight<=0:break
+        if candidate.kind==EOS:break
+        if candidate.end-cursor>2:break
+        if candidate.kind==WAIT and candidate.start!=cursor:break
+        candidate=replace(candidate,start=cursor,start_second=max(0.,second_at_beat(context.clock,cursor)))
+        candidate,is_trusted,reason=_qualified_continuation(dataset,song,actual,candidate,
+            local_guard,anchor,index,getattr(model.config,'recovery_target_policy','causal_correspondence_v1'))
+        if candidate.kind==NOTE and not local_guard.accepts(EventPoint(candidate.end,candidate.text)):break
+        if first_step and not is_trusted:
+            # Keep the real rollout's first decision in the loss. Its exact
+            # configuration is unknown; subsequent authored bridge actions
+            # are explicitly teacher forcing, not sampled model recovery.
+            if bridge>=bridge_budget and targets:break
+            bridge+=1
+        elif not targets and not is_trusted:
+            if bridge>=bridge_budget:break
+            if candidate.kind==NOTE:local_guard.commit(EventPoint(candidate.end,candidate.text))
+            context.commit(candidate);actual.append(candidate);bridge+=1;index+=1
+            continue
+        if candidate.kind==NOTE and not is_trusted and not first_step:break
+        # Keep the source's real confidence and known interval, with one
+        # trajectory budget regardless of how many targets were certified.
+        upper=min(candidate.end_second,np.nextafter(dataset.views[song].end_sec,-np.inf))
+        confidence=float(dataset.views[song].window_weight(candidate.start_second,upper))
+        if confidence<=0:break
+        targets.append(candidate);weights.append(candidate.weight*confidence)
+        configuration.append(bool(candidate.kind==NOTE and is_trusted))
+        actual.append(candidate)
+        if candidate.kind==NOTE:local_guard.commit(EventPoint(candidate.end,candidate.text))
+        index+=1
+    if targets:
+        supervised_prefix=actual[:-len(targets)]
+        count=len(targets)
+        row=recovery_sequence_sample(dataset,song,supervised_prefix,targets,
+            target_weights=[weight/count for weight in weights],target_budgets=[1./count]*count,
+            configuration_trusted=configuration,context=context)
+        diagnostics['continuation_rows']+=1
+        if not first_step or any(configuration):diagnostics['certified_continuation_rows']+=1
+        diagnostics['teacher_bridge_steps']+=bridge
+        diagnostics['certified_configuration_targets']+=sum(configuration)
+        diagnostics['continuation_targets']+=count
+        row['_configuration_correspondence']=('first_step_then_teacher_seam_continuation' if first_step
+            else 'certified_teacher_seam_continuation')
+    else:
+        # Failed certification retains the actual pre-bridge trajectory.
+        # Reconstruct only this rare fallback; never silently supervise a
+        # fictional state reached during an unsuccessful teacher bridge.
+        if bridge:
+            context._sync_prefix(prefix,prefix[-1].end if prefix else Fraction(0))
+        row=recovery_sequence_sample(dataset,song,prefix,[target],target_weights=[target.weight],
+            target_budgets=[1.],configuration_trusted=[trusted],context=context)
+        diagnostics['uncertified_single_target_rows']+=1
+    row['_recovery_target_count']=int(row['loss_mask'].sum())
+    row['_recovery_configuration_count']=int((row['configuration_mask']&row['loss_mask']).sum())
+    row['_recovery_teacher_bridge_steps']=bridge
+    if first_step:
+        active=row['loss_mask'].nonzero(as_tuple=False).flatten()
+        first=int(active[0])
+        # The known authored event at this musical time witnesses only its
+        # coarse family. It does not certify location, shape, duration, STOP,
+        # or a unique good continuation after an arbitrary generated prefix.
+        known_source=(reference_index is not None and 0<=reference_index<len(source) and
+                      not dataset.unknown_steps[song][reference_index] and
+                      source[reference_index].weight>0 and source[reference_index].kind==NOTE and
+                      source[reference_index].end==target.end)
+        upper=min(target.end_second,np.nextafter(dataset.views[song].end_sec,-np.inf))
+        known_source=known_source and float(dataset.views[song].window_weight(target.start_second,upper))>0
+        family_only=(known_source and int(row['target_kind'][first])==NOTE and
+                     not bool(row['configuration_mask'][first]) and
+                     float(row['sample_weight'][first])>0)
+        row['configuration_family_mask'][first]=family_only
+        row['_recovery_native_first_step_count']=1
+        row['_recovery_native_first_configuration_count']=int(row['configuration_mask'][first])
+        row['_recovery_native_first_family_count']=int(family_only)
+        diagnostics['native_first_step_targets']+=1
+        diagnostics['native_first_configuration_targets']+=int(row['configuration_mask'][first])
+        diagnostics['native_first_family_targets']+=int(family_only)
+    return row
 
 
 @torch.no_grad()
@@ -268,14 +383,20 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
         candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
         max_phrase_events=getattr(dataset,'max_phrase_events',64))
+        context.set_draft_policy(getattr(model.config,'draft_policy','off'))
         raw = context.batch(prefix,cursor)
     else:
         raw = context.current_batch()
-    cached_audio_keys = {'song_audio','song_mask','song_seconds','song_beats'} if audio_cache is not None else set()
     from .stream_model import to_device_batch
+    from .stream_phrase_runtime import attach_draft_runtime,freeze_recovery_song_style
+    # Complete/freeze controls before the first draft is read. The encoded
+    # audio is song-shared; conditioned plans and z remain episode-local.
+    cached_audio_keys={'song_audio','song_mask','song_seconds','song_beats'}
+    cache=audio_cache if audio_cache is not None else model.encode_audio(
+        *(raw[key].to(device) for key in ('song_audio','song_mask','song_seconds','song_beats')))
+    raw,cache=freeze_recovery_song_style(model,context,raw,cache,generator)
+    raw=attach_draft_runtime(context,raw,model)
     batch = to_device_batch({k:v for k,v in raw.items() if k not in cached_audio_keys},device)
-    cache = audio_cache if audio_cache is not None else model.encode_audio(
-        batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     result = model(batch,audio_cache=cache)
     from .stream_phrase_runtime import ensure_song_response,ensure_phrase_mode
     ensure_song_response(model,context,result,generator)
@@ -306,12 +427,14 @@ def _propose(dataset, model, song_index, prefix, guard, generator, device, *,
         selected_batch,selected_result=prepare_selected_candidate(model,context,batch,result,beat,cache)
         ids=torch.full_like(selected_batch['history_delta'],delta_id)
         times=torch.full_like(selected_batch['step_second'],second_at_beat(context.clock,beat))
-        shared=getattr(getattr(model,'config',None),'event_family_policy','legacy_v1')=='shared_continuation_v1'
+        shared=getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('shared_continuation_v1','shared_music_mixture_v2')
         if shared:
             action,load,selected_result=model.candidate_action_state(selected_result,selected_batch,cache,times,
                 return_button_load=True)
             proposal=dict(context=action[0,-1],button_load=load[0,-1],
-                family_logits=model.family_logits_for_action(action)[0,-1])
+                family_logits=model.family_logits_for_action(action,
+                    **({'audio_logits':selected_result['_execution_audio_family_logits']}
+                       if model.config.event_family_policy=='shared_music_mixture_v2' and not hasattr(model,'phrase_execution') else {}))[0,-1])
         elif hasattr(model,'lane_load_projection'):
             action,load=model.action_context_for_delta(selected_result,selected_batch,ids,cache,event_seconds=times,return_button_load=True)
             proposal=dict(context=action[0,-1],button_load=load[0,-1])
@@ -386,7 +509,7 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
             episode = episodes[slot]
             if episode is None or len(episode['generated']) >= limit:
                 episode = _new_episode(dataset,rng,slot,rotation=anchor_cursor)
-                if episode is not None and policy in ('greedy_mixed_v3','greedy_mixed_v4'):
+                if episode is not None and policy in MUSICAL_RECOVERY_POLICIES:
                     episode['decode_temperature']=0. if anchor_cursor%2==0 else .65
                 anchor_cursor+=1
                 diagnostics['new_episode']+=int(episode is not None)
@@ -410,8 +533,11 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
         candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
         max_phrase_events=getattr(dataset,'max_phrase_events',64))
+                context.set_draft_policy(getattr(dataset,'draft_policy','off'))
                 context.batch(prefix,prefix[-1].end if prefix else Fraction(0))
                 context.song_response_choice=episode.get('song_response_choice')
+                if episode.get('frozen_style') is not None:
+                    context._recovery_frozen_style=episode['frozen_style']
                 if episode['song'] not in audio_caches:
                     audio_caches[episode['song']] = _encode_song(model,bank,device)
                     if getattr(getattr(model,'config',None),'plan_kind_policy','off') != 'off':
@@ -422,17 +548,19 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                                 torch.tensor([float(song.audio.duration_sec)],dtype=torch.float64,device=device))
                 accepted = 0
                 for _ in range(min(steps,limit-len(episode['generated']))):
-                    options=({'temperature':episode.get('decode_temperature',.65)} if policy in ('greedy_mixed_v3','greedy_mixed_v4') else {})
+                    options=({'temperature':episode.get('decode_temperature',.65)} if policy in MUSICAL_RECOVERY_POLICIES else {})
                     proposal, reason = _propose(dataset,model,episode['song'],prefix,guard,generator,device,
                         context=context,audio_cache=audio_caches[episode['song']],**options)
                     episode['song_response_choice']=getattr(context,'song_response_choice',None)
+                    if getattr(context,'_recovery_frozen_style',None) is not None:
+                        episode['frozen_style']=context._recovery_frozen_style
                     if proposal is None:
                         diagnostics[reason] += 1
                         break
                     if reason != 'ok': diagnostics[reason] += 1
                     context.commit(proposal)
                     prefix.append(proposal); accepted += 1
-                    if policy in ('greedy_mixed_v3','greedy_mixed_v4'):diagnostics['greedy_generated_steps' if options['temperature']==0 else 'sampled_generated_steps']+=1
+                    if policy in MUSICAL_RECOVERY_POLICIES:diagnostics['greedy_generated_steps' if options['temperature']==0 else 'sampled_generated_steps']+=1
                     episode['generated'].append(dict(kind=proposal.kind,start=str(proposal.start),
                         end=str(proposal.end),text=proposal.text,
                         phrase_mode=proposal.phrase_mode,phrase_mode_start=proposal.phrase_mode_start))
@@ -453,13 +581,18 @@ def _persistent_recovery_batch(dataset, model, device, step, *, samples=2, steps
                     target,trusted,correspondence=_qualified_continuation(dataset,episode['song'],prefix,
                         target,guard,episode['anchor'],reference_index,
                         getattr(getattr(model,'config',None),'recovery_target_policy','authored_next_v1'))
-                    row=recovery_sample(dataset,episode['song'],prefix,target,weight=target.weight,
-                        configuration_trusted=trusted,correspondence=correspondence)
+                    row=_configuration_recovery_row(dataset,model,episode['song'],prefix,target,guard,
+                        context,episode['anchor'],reference_index,trusted,correspondence,diagnostics)
                     rows.append(row)
-                    diagnostics['configuration_trusted' if trusted else 'time_only']+=1
+                    count=row.get('_recovery_target_count',1)
+                    configurations=row.get('_recovery_configuration_count',int(trusted))
+                    diagnostics['configuration_trusted']+=configurations
+                    family_count=int(row.get('_recovery_native_first_family_count',0))
+                    diagnostics['family_only']+=family_count
+                    diagnostics['time_only']+=count-configurations-family_count
                     diagnostics['correspondence_'+correspondence]+=1
                     diagnostics['actual_exit_supervised']+=int(row['transition_exit_mask'][-1] and row['transition_exit_labels'][-1])
-                    diagnostics['supervised'] += 1
+                    diagnostics['supervised'] += count
                     diagnostics['target_'+str(target.kind)] += 1
                 episodes[slot] = episode if len(episode['generated']) < limit else None
             except (ValueError,KeyError) as exc:
@@ -499,7 +632,7 @@ def _risk_exits(dataset):
 
 
 def _context(dataset,song,bank):
-    return StreamInferenceContext(dataset.base.songs[song][0],dataset.codec,dataset.delta_vocab,
+    context=StreamInferenceContext(dataset.base.songs[song][0],dataset.codec,dataset.delta_vocab,
         dataset.conditions[song],lead_in=dataset.lead_in,audio_bank=bank,
         audio_grid_seconds=dataset.audio_grid_seconds,history_window_policy=dataset.history_window_policy,
         rollout_steps=dataset.targets,continuation_policy=dataset.continuation_policy,
@@ -508,6 +641,8 @@ def _context(dataset,song,bank):
         candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
         max_phrase_events=getattr(dataset,'max_phrase_events',64))
+    context.set_draft_policy(getattr(dataset,'draft_policy','off'))
+    return context
 
 
 def _prepared_cache(dataset,model,song,bank,device,caches):
@@ -525,15 +660,19 @@ def _prepared_cache(dataset,model,song,bank,device,caches):
 def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cache,*,temperature=.8):
     """Sample configuration at an authored onset; never sample or shift time."""
     raw=context.current_batch()
-    batch={k:v.to(device) for k,v in raw.items() if torch.is_tensor(v) and k not in
-           ('song_audio','song_mask','song_seconds','song_beats')}
+    from .stream_phrase_runtime import attach_draft_runtime,freeze_recovery_song_style
+    from .stream_model import to_device_batch
+    raw,cache=freeze_recovery_song_style(model,context,raw,cache,generator)
+    raw=attach_draft_runtime(context,raw,model)
+    batch=to_device_batch({k:v for k,v in raw.items() if k not in
+           ('song_audio','song_mask','song_seconds','song_beats')},device)
     output=model(batch,audio_cache=cache)
     from .stream_phrase_runtime import ensure_song_response
     ensure_song_response(model,context,output,generator)
     from .stream_proposal import prepare_selected_candidate
     batch,output=prepare_selected_candidate(model,context,batch,output,source_step.end,cache)
     times=torch.full_like(batch['step_second'],source_step.end_second)
-    shared=getattr(getattr(model,'config',None),'event_family_policy','legacy_v1')=='shared_continuation_v1'
+    shared=getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('shared_continuation_v1','shared_music_mixture_v2')
     if shared:
         action,load,output=model.candidate_action_state(output,batch,cache,times,return_button_load=True)
         load=load[0,-1]
@@ -545,7 +684,9 @@ def _propose_fixed(dataset,model,context,source_step,guard,generator,device,cach
         action=model.action_context_at(output['hidden'],times,cache,batch['song_inverse'],batch)
         load=None
     family_options={}
-    if shared:family_options['family_logits']=model.family_logits_for_action(action)[0,-1]
+    if shared:family_options['family_logits']=model.family_logits_for_action(action,
+        **({'audio_logits':output['_execution_audio_family_logits']}
+           if model.config.event_family_policy=='shared_music_mixture_v2' and not hasattr(model,'phrase_execution') else {}))[0,-1]
     if hasattr(model,'duration_context_at'):
         duration_context=model.duration_context_at(output,batch,times,cache)
         if duration_context is not None:
@@ -582,7 +723,7 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
     diagnostics['new_episode']+=1;diagnostics['new_short_episode']+=1
     diagnostics['new_anchor_'+name]+=1
     source=dataset.streams[song];target=source[index]
-    musical=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1') in ('greedy_mixed_v3','greedy_mixed_v4')
+    musical=getattr(getattr(model,'config',None),'recovery_policy','persistent_v1') in MUSICAL_RECOVERY_POLICIES
     count=min(min(5,max(4,steps)) if musical else min(2,max(1,steps)),index)
     # Only immediately preceding NOTE actions are corrupted. A WAIT remains an
     # authored boundary, so crossing one would not be a short fixed-time run.
@@ -615,11 +756,16 @@ def _short_exit_row(dataset,model,device,rng,generator,cursor,steps,caches,diagn
         diagnostics['skip_reference_conflict']+=1;return None
     target,trusted,correspondence=_qualified_continuation(dataset,song,prefix,target,guard,anchor,index,
         getattr(getattr(model,'config',None),'recovery_target_policy','authored_next_v1'))
-    row=recovery_sample(dataset,song,prefix,target,weight=target.weight,
-        configuration_trusted=trusted,correspondence=correspondence)
-    diagnostics['configuration_trusted' if trusted else 'time_only']+=1
+    row=_configuration_recovery_row(dataset,model,song,prefix,target,guard,context,
+        anchor,index,trusted,correspondence,diagnostics)
+    count=row.get('_recovery_target_count',1)
+    configurations=row.get('_recovery_configuration_count',int(trusted))
+    diagnostics['configuration_trusted']+=configurations
+    family_count=int(row.get('_recovery_native_first_family_count',0))
+    diagnostics['family_only']+=family_count
+    diagnostics['time_only']+=count-configurations-family_count
     diagnostics['correspondence_'+correspondence]+=1
-    diagnostics['supervised']+=1;diagnostics['target_'+str(target.kind)]+=1
+    diagnostics['supervised']+=count;diagnostics['target_'+str(target.kind)]+=1
     diagnostics['authored_exit_supervised']+=1
     diagnostics['actual_exit_supervised']+=int(row['transition_exit_mask'][-1] and row['transition_exit_labels'][-1])
     return row
@@ -764,7 +910,7 @@ def recovery_batch(dataset,model,device,step,*,samples=2,steps=2):
     model._stream_recovery_policy=policy
     if policy=='persistent_v1':
         return _persistent_recovery_batch(dataset,model,device,step,samples=samples,steps=steps)
-    if policy not in ('mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'):raise ValueError('Unsupported recovery policy')
+    if policy not in ('mixed_exit_v2',*MUSICAL_RECOVERY_POLICIES):raise ValueError('Unsupported recovery policy')
     if not 0<=samples<=16 or not 0<=steps<=64:raise ValueError('Invalid recovery budget')
     if not steps or not samples:return None,{'new_episode':0,'actual_exit_supervised':0}
     rng=random.Random(int(step));device=torch.device(device)
@@ -797,7 +943,7 @@ def recovery_batch(dataset,model,device,step,*,samples=2,steps=2):
                 diagnostics['synthetic_long_slots']+=long_count-persistent_count
             if persistent_count:
                 _,long_diagnostics=_persistent_recovery_batch(dataset,model,device,step,
-                    samples=persistent_count,steps=(8 if policy in ('greedy_mixed_v3','greedy_mixed_v4') else steps),_rows_out=rows,_audio_caches=caches)
+                    samples=persistent_count,steps=(8 if policy in MUSICAL_RECOVERY_POLICIES else steps),_rows_out=rows,_audio_caches=caches)
                 for key,value in long_diagnostics.items():
                     if isinstance(value,(int,float)):diagnostics[key]+=value
                     else:diagnostics[key]=value

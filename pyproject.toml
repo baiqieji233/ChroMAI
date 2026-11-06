@@ -30,6 +30,15 @@ training = [
 training-speed = [
   "numba>=0.61"
 ]
+composer-v2-music = [
+  "librosa>=0.10",
+  "torch>=2.4",
+  "torchaudio>=2.4",
+  "numpy>=1.24",
+  "soundfile>=0.12",
+  "transformers>=4.38,<4.40",
+  "huggingface_hub>=0.20,<1"
+]
 music-structure = [
   "beat-this==1.1.0",
   "torchaudio>=2.0",

@@ -52,6 +52,8 @@ class PhraseExecution(nn.Module):
             else:raise ValueError('Phrase and action query layouts differ')
         anchor=self.intent(intent)
         chosen=anchor[...,None,:]+self.choices
+        if '_draft_anchor' in phrase:
+            chosen=chosen+phrase['_draft_anchor'].to(chosen)
         state=self.executor(self.current(action)[...,None,:]+chosen)
         lanes=self.lanes(state).float()
         reference=phrase.get('phrase_aligned_heads')
@@ -186,7 +188,7 @@ def song_response_configuration_loss(mode_nll,prior_logits,batch,weights,normali
 
 
 def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,normalizer,*,
-        prior_logits,component_profile_nll,profile_chart_weights,profile_weight=1.,raw_joint_diagnostics=False):
+        prior_logits,component_profile_nll,profile_chart_weights,profile_weight=1.,raw_joint_diagnostics=False,temperature=1.):
     """Balanced hierarchical variational objective, not raw sequence joint NLL.
 
     One persistent m explains a complete phrase. Its variational data term
@@ -221,8 +223,8 @@ def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,norm
         pp=conditional.new_zeros(group_count,*conditional.shape[-2:]).index_add(0,index,conditional.flatten(0,1)*first.flatten()[:,None,None])
         phrase_mass=weights.new_zeros(group_count).index_add(0,index,mass)
         mean_mode_nll=summed/phrase_mass.clamp_min(1e-8)[:,None]
-        phrase_mode_scores=pp-mean_mode_nll[:,None,:]
-        phrase_nll=(-phrase_mode_scores.logsumexp(-1)*phrase_mass[:,None] if mode_nll.size(-1)>1 else
+        phrase_mode_scores=pp-mean_mode_nll[:,None,:]/temperature
+        phrase_nll=(-temperature*phrase_mode_scores.logsumexp(-1)*phrase_mass[:,None] if mode_nll.size(-1)>1 else
                     summed[:,0,None].expand(-1,conditional.size(-2)))
         old=local.new_zeros(group_count,local.size(-1)).index_add(0,index,local.flatten(0,1)*mass[:,None])
         chart_rows=chart_inverse[:,None].expand_as(groups)
@@ -301,4 +303,144 @@ def unified_profile_response_loss(mode_nll,song_phrase_logits,batch,weights,norm
         if raw_joint_diagnostics:
             raw_energy=raw_chart_nll+profile_mass.detach()[:,None]*profile_nll.detach()
             metrics['unified_original_sequence_joint_nll']=-(prior.detach()-raw_energy).logsumexp(-1).sum()/normalizer
+    return loss,metrics
+
+
+def draft_joint_sequence_loss(time_mode_nll, configuration_mode_nll,
+        departure_priors, landing_priors, batch, weights, configuration_weights,
+        normalizer, *, temperature=1.,objective_policy='balanced_mean_v1', choice_credit=None):
+    """One persistent mode per real music phrase, across event ownership.
+
+    The decision to wait/select an onset belongs to its departure phrase;
+    the mark at that onset belongs to its landing phrase. A cross-boundary
+    NOTE must not force the old and new phrase to share one latent choice.
+    CPU collation supplies owner groups and their causal entry-prior source.
+
+    Group exposure is explicit time + NOTE-mark exposure. The temperature
+    changes the mixture's evidence strength, never multiplies the data term.
+    With one mode this is exactly the original weighted time+mark objective.
+    Partial/counterfactual fragments use one mode over their observed scope,
+    but are reported separately from complete authored phrases.
+    A mode already committed by an actual generated prefix is observed, not
+    latent: its continuation pays only that mode's data energy. Choosing it
+    again, or charging its entry prior again, would train a different policy.
+    """
+    if normalizer<=0 or not math.isfinite(float(temperature)) or temperature<=0:
+        raise ValueError('Draft sequence loss needs positive finite budgets')
+    if objective_policy not in ('balanced_mean_v1','sequence_evidence_v2'):
+        raise ValueError('Unsupported draft objective policy')
+    if time_mode_nll.shape!=configuration_mode_nll.shape or time_mode_nll.ndim!=3:
+        raise ValueError('Draft time and mark energies must share [batch,time,mode]')
+    if departure_priors.shape!=time_mode_nll.shape or landing_priors.shape!=time_mode_nll.shape:
+        raise ValueError('Draft priors must match their causal decision layouts')
+    names=('draft_departure_group','draft_landing_group','draft_loss_group_count',
+           'draft_loss_group_rows','draft_loss_group_positions','draft_loss_group_side')
+    if any(name not in batch for name in names):
+        raise ValueError('Draft sequence owner groups must be packed on CPU')
+    count=int(batch['draft_loss_group_count'])
+    departure=batch['draft_departure_group'].long()
+    landing=batch['draft_landing_group'].long()
+    time_weight=weights.float()
+    mark_weight=configuration_weights.float()*batch['target_kind'].eq(2)
+    if departure.shape!=weights.shape or landing.shape!=weights.shape:
+        raise ValueError('Draft owner groups must preserve decision axes')
+    valid=((departure.ge(0)&departure.lt(count))|time_weight.le(0))
+    valid=valid & ((landing.ge(0)&landing.lt(count))|mark_weight.le(0))
+    valid=valid & torch.isfinite(time_weight) & time_weight.ge(0) & torch.isfinite(mark_weight) & mark_weight.ge(0)
+    if valid.device.type=='cuda':
+        torch._assert_async(valid.all(),'A weighted draft target has no phrase owner')
+    elif not bool(valid.all()):
+        raise ValueError('A weighted draft target has no phrase owner')
+    zero=(time_mode_nll.sum()+configuration_mode_nll.sum())*0.
+    if not count:
+        return zero,dict(draft_joint_sequence_objective=zero.detach(),
+            draft_complete_phrase_groups=zero.detach(),draft_partial_phrase_groups=zero.detach(),
+            draft_phrase_mode_prior_entropy=zero.detach(),draft_phrase_mode_posterior_entropy=zero.detach(),
+            draft_phrase_mode_kl=zero.detach(),draft_time_weight_mass=zero.detach(),
+            draft_configuration_weight_mass=zero.detach(),draft_group_weight_mass=zero.detach(),
+            draft_committed_mode_groups=zero.detach(),draft_latent_mode_groups=zero.detach())
+    device=time_mode_nll.device
+    row=batch['draft_loss_group_rows'].long().to(device)
+    position=batch['draft_loss_group_positions'].long().to(device)
+    side=batch['draft_loss_group_side'].long().to(device)
+    if row.numel()!=count or position.numel()!=count or side.numel()!=count:
+        raise ValueError('Each draft phrase owner requires one causal prior source')
+    committed_mode=batch.get('draft_loss_group_mode')
+    if committed_mode is None:
+        committed_mode=torch.full((count,),-1,device=device,dtype=torch.long)
+    else:
+        committed_mode=committed_mode.to(device=device,dtype=torch.long)
+    if committed_mode.shape!=(count,):
+        raise ValueError('Each draft phrase owner requires one committed-mode flag')
+    valid_mode=committed_mode.ge(-1)&committed_mode.lt(time_mode_nll.size(-1))
+    if valid_mode.device.type=='cuda':
+        torch._assert_async(valid_mode.all(),'Invalid committed draft phrase mode')
+    elif not bool(valid_mode.all()):
+        raise ValueError('Invalid committed draft phrase mode')
+    committed=committed_mode.ge(0)
+    prior=torch.where(side[:,None].eq(0),departure_priors[row,position],landing_priors[row,position])
+    log_prior=prior.float().log_softmax(-1)
+    dt=departure.clamp(0,count-1).flatten();dl=landing.clamp(0,count-1).flatten()
+    tw=time_weight.masked_fill(departure.lt(0),0.)
+    cw=mark_weight.masked_fill(landing.lt(0),0.)
+    summed=time_mode_nll.new_zeros(count,time_mode_nll.size(-1),dtype=torch.float32)
+    summed=summed.index_add(0,dt,(time_mode_nll.float()*tw[...,None]).flatten(0,1))
+    summed=summed.index_add(0,dl,(configuration_mode_nll.float()*cw[...,None]).flatten(0,1))
+    mass=tw.new_zeros(count).index_add(0,dt,tw.flatten()).index_add(0,dl,cw.flatten())
+    active=mass.gt(0)
+    evidence_budget=mass
+    if objective_policy=='sequence_evidence_v2':
+        # Sampling importance is not a per-event KL charge. Distinct original
+        # decisions provide joint evidence for one persistent phrase mode.
+        # Time and mark at the same decision are two factors of that evidence,
+        # while seam duplicates must not invent extra observations.
+        shared=departure.eq(landing)&tw.gt(0)&cw.gt(0)
+        decision_mass=tw.new_zeros(count).index_add(0,dt,tw.flatten()).index_add(
+            0,dl,(cw-torch.minimum(tw,cw)*shared).flatten())
+        decisions=batch.get('draft_loss_group_decisions')
+        if decisions is None:raise ValueError('Sequence evidence needs CPU-deduplicated decision counts')
+        decisions=decisions.to(device=device,dtype=mass.dtype)
+        if decisions.shape!=(count,):raise ValueError('Draft decision counts must match phrase owners')
+        evidence_budget=decision_mass/decisions.clamp_min(1)
+    mean=summed/evidence_budget.clamp_min(1e-8)[:,None]
+    scores=log_prior-mean/float(temperature)
+    if time_mode_nll.size(-1)==1:
+        # Do not even introduce divide/multiply rounding through phrase mass.
+        loss=((time_mode_nll[...,0].float()*tw).sum()+
+              (configuration_mode_nll[...,0].float()*cw).sum())/float(normalizer)
+        group_energy=summed[:,0]
+    else:
+        latent_energy=-float(temperature)*scores.logsumexp(-1)*evidence_budget
+        committed_energy=summed.gather(-1,committed_mode.clamp_min(0)[:,None]).squeeze(-1)
+        group_energy=torch.where(committed,committed_energy,latent_energy)
+        loss=group_energy.sum()/float(normalizer)
+    if choice_credit is not None:
+        # The song choice receives the cost of the execution that actually
+        # used its controls. Do not rerun, or pretend another z shared them.
+        choice_credit.update(energy=group_energy.detach(),mass=mass.detach(),
+            chart=batch['draft_loss_group_chart'].to(device))
+    with torch.no_grad():
+        posterior=scores.log_softmax(-1);responsibility=posterior.exp()
+        total_mass=mass.sum().clamp_min(1e-8)
+        complete=batch.get('draft_loss_group_complete',torch.zeros(count,device=device,dtype=torch.bool)).to(device).bool()
+        if complete.numel()!=count:raise ValueError('Draft completion flags do not match owners')
+        prior_entropy=-(log_prior.exp()*log_prior).sum(-1)
+        posterior_entropy=-(responsibility*posterior).sum(-1)
+        kl=(responsibility*(posterior-log_prior)).sum(-1)
+        # For an observed mode the posterior is a point mass, but its prior
+        # cost was paid when the rollout selected it, outside this target.
+        posterior_entropy=posterior_entropy.masked_fill(committed,0.)
+        kl=kl.masked_fill(committed,0.)
+        metrics=dict(draft_joint_sequence_objective=loss.detach(),
+            draft_complete_phrase_groups=(complete&active).sum().float(),
+            draft_partial_phrase_groups=(~complete&active).sum().float(),
+            draft_phrase_mode_prior_entropy=(prior_entropy*mass).sum()/total_mass,
+            draft_phrase_mode_posterior_entropy=(posterior_entropy*mass).sum()/total_mass,
+            draft_phrase_mode_kl=(kl*evidence_budget).sum()/float(normalizer),
+            draft_time_weight_mass=tw.sum()/float(normalizer),
+            draft_configuration_weight_mass=cw.sum()/float(normalizer),
+            draft_group_weight_mass=mass.sum()/float(normalizer),
+            draft_mode_prior_budget=evidence_budget.sum()/float(normalizer),
+            draft_committed_mode_groups=(committed&active).sum().float(),
+            draft_latent_mode_groups=(~committed&active).sum().float())
     return loss,metrics

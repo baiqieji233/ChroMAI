@@ -33,10 +33,13 @@ MUSICAL_BATCH_INPUT_POLICY='musical_loop_recovery_v7'
 MUSICAL_AUTHORED_EXIT_INPUT_POLICY='musical_loop_recovery_v8'
 MUSICAL_ENTRY_INPUT_POLICY='musical_entry_recovery_v9'
 MUSICAL_ARRANGEMENT_INPUT_POLICY='musical_arrangement_recovery_v10'
+CONTINUOUS_DRAFT_INPUT_POLICY='continuous_draft_recovery_v11'
 _LOOP_MODES=('same_key','abab','touch','same_shape','same_gap')
 
 
 def _augmentation_modes(input_policy):
+    if input_policy==CONTINUOUS_DRAFT_INPUT_POLICY:
+        return (*_LOOP_MODES,'phase_shift','rotation','rotation_gap','missed_entry','rest_control','authored_rest','retained_seam')
     if input_policy==LEGACY_INPUT_POLICY:return _LOOP_MODES
     if input_policy==PHASE_INPUT_POLICY:return (*_LOOP_MODES,'phase_shift')
     if input_policy in (MUSICAL_INPUT_POLICY,MUSICAL_RESIDUAL_INPUT_POLICY):return (*_LOOP_MODES,'phase_shift','rotation','rotation_gap')
@@ -389,7 +392,7 @@ def _rebuild_local_row(dataset,row,source,modified,song,begin,start,end,incremen
         row['candidate_action_state']=pad_sequence(candidate_states,batch_first=True)
         row['candidate_action_state_mask']=pad_sequence(candidate_masks,batch_first=True,padding_value=True)
     if getattr(dataset,'phrase_context_policy','off') != 'off':
-        dataset.rebuild_phrase_row(row,song,modified,begin,first,end)
+        dataset.rebuild_phrase_row(row,song,modified,begin,first,end,state_index=incremental)
     return row
 
 
@@ -467,7 +470,8 @@ def _augment_phase_row(dataset,index,*,rng,row=None):
     if local is None:
         _rebuild_fallback_candidate_states(dataset,result,modified,song,first,end)
     if getattr(dataset,'phrase_context_policy','off') != 'off':
-        dataset.rebuild_phrase_row(result,song,modified,begin,first,end)
+        dataset.rebuild_phrase_row(result,song,modified,begin,first,end,
+            state_index=local[0] if local is not None else context._incremental_state)
     if getattr(dataset,'recovery_target_policy','authored_next_v1')=='causal_correspondence_v1':
         # Only the preceding clock changes: its event text and the entire
         # authored target structure stay intact, and _validate_window proved
@@ -642,6 +646,142 @@ def _augment_authored_rest_row(dataset,index,*,rng,row=None):
     return result,'authored_rest',0
 
 
+def _continuous_metadata(result,original):
+    """Retain identity, never replace a short span's individual target mass."""
+    for key in ('_sample_index','_profile_chart_importance','_profile_reference_batch_size',
+                '_training_chart_id','_song_response_group_size','_unified_arrival'):
+        if key in original:result[key]=original[key]
+    result['_continuation_teacher_forced']=True
+    return result
+
+
+def _rest_span(source,at,*,maximum=64):
+    start=max(0,at-3);end=at+1;notes=0
+    while end<len(source) and end-start<maximum:
+        step=source[end];end+=1;notes+=int(step.kind==NOTE)
+        if step.kind==EOS or notes>=3:break
+    return start,end,notes<3 and end<len(source)
+
+
+def _continuous_authored_rest(dataset,index,rng,row):
+    song=dataset.samples[index][0];source=dataset.streams[song]
+    pool,weights,energy,internal=_authored_rest_choices(dataset,song)
+    selected=rng.choices(range(len(pool)),weights=weights,k=1)[0]
+    start,end,censored=_rest_span(source,pool[selected])
+    result=dataset._sample_row(index,song,start,end,1.,include_seam=False)
+    _continuous_metadata(result,row)
+    result.update(_augmentation_authored_rest=True,_authored_rest_internal=internal,
+        _authored_rest_rms=energy[selected],_continuation_censored=censored,
+        _continuation_target_count=end-start,_counterfactual_history=False)
+    return result,'authored_rest',0
+
+
+def _source_span_supervision(dataset,song,start,end):
+    """Read the original target mass without building an unused full sample."""
+    weighted=(dataset.training_window_policy=='phrase_complete_v1' or
+        dataset.history_window_policy=='block_aligned_v2' or dataset.window_balance_policy=='sqrt_window_v2')
+    weights=torch.tensor([step.weight*(dataset.target_window_weights[song][position] if weighted else 1.)
+        *dataset.chart_weights[song] if not dataset.unknown_steps[song][position] else 0.
+        for position,step in enumerate(dataset.streams[song][start:end],start)],dtype=torch.float32)
+    budgets=torch.ones(end-start,dtype=torch.float32)
+    if dataset.training_window_policy=='phrase_complete_v1':
+        counts=torch.from_numpy(dataset._training_target_multiplicity[song][start:end]).float()
+        weights/=counts;budgets/=counts
+    return weights,budgets
+
+
+def _continuous_entry(dataset,index,rng,row,*,rest=False):
+    from .stream_data import recovery_sequence_sample
+    song=dataset.samples[index][0];source=dataset.streams[song]
+    pool=_entry_targets(dataset,song,rest)
+    if not pool:raise ValueError('No continuous entry target')
+    offset=rng.randrange(len(pool));clock=dataset.clocks[song]
+    for attempt in range(min(8,len(pool))):
+        at=pool[(offset+attempt)%len(pool)]
+        try:prefix,keep,removed,gap=_missed_entry_prefix(source,at,Fraction(rng.choice((2,4,8,16,32))))
+        except ValueError:continue
+        if not rest and not removed:continue
+        prefix=prefix[:keep]+[replace(step,start_second=max(0.,second_at_beat(clock,step.start)),
+            end_second=max(0.,second_at_beat(clock,step.end))) for step in prefix[keep:]]
+        end=min(len(source),at+8)
+        for position in range(at,end):
+            if dataset.unknown_steps[song][position]:end=position;break
+            if source[position].kind==EOS:end=position+1;break
+        if end<=at:continue
+        weights,budgets=_source_span_supervision(dataset,song,at,end)
+        # A later real seam can certify continuation even when all older
+        # history is not a global rotation. Removed sustains must have ended.
+        lifetime_guard=_guard(dataset.base.songs[song][0],[],0)
+        old_end=-float('inf')
+        for step in source[keep:at]:
+            if step.kind!=NOTE:continue
+            try:_s,last,_h,errors=lifetime_guard._lifetime(EventPoint(step.end,step.text))
+            except (ValueError,TypeError):old_end=float('inf');break
+            old_end=max(old_end,float('inf') if errors else last)
+        trusted=[];seen_notes=0
+        for step in source[at:end]:
+            trusted.append(seen_notes>=3 and old_end<lifetime_guard.interaction_start(step.start_second))
+            seen_notes+=int(step.kind==NOTE)
+        try:
+            result=recovery_sequence_sample(dataset,song,prefix,source[at:end],
+                target_weights=weights,target_budgets=budgets,
+                unchanged_count=keep,configuration_trusted=trusted)
+        except (ValueError,KeyError):continue
+        _continuous_metadata(result,row)
+        result.update(_augmentation_entry_recovery=True,_entry_rest_control=rest,
+            _entry_missing_events=removed,_entry_wait_beats=float(gap),
+            _continuation_target_count=end-at,_continuation_censored=end<len(source))
+        result['_configuration_correspondence']='authored_seam' if any(trusted) else 'time_only'
+        return result,('rest_control' if rest else 'missed_entry'),removed
+    raise ValueError('No reachable continuous entry span')
+
+
+def _retained_seam_row(dataset,index,rng,row):
+    """Disturb old history while retaining a real recent source seam."""
+    from .stream_target_correspondence import authored_seam_corresponds
+    song,start,end,_=dataset.samples[index];source=dataset.streams[song]
+    end=int(row['step_index'][-1])+1;first=int(row['step_index'][0])
+    seam=max(first,start-8);begin=max(first,seam-8)
+    if seam-begin<3:raise ValueError('Insufficient older prefix for a retained seam')
+    modified=list(source[:end]);shift=rng.randrange(1,8);changed=0
+    for position in range(begin,seam):
+        step=source[position]
+        if step.kind!=NOTE or event_is_sustained(step.text):continue
+        text=rotated_text(step.text,shift);dataset.codec.encode(text)
+        modified[position]=replace(step,text=text);changed+=int(text!=step.text)
+    if changed<2:raise ValueError('No distinct old-prefix edit')
+    local=_native_prefix(dataset,song,source,begin)
+    if local is None:raise ValueError('Retained seam needs the parsed native prefix index')
+    guard=_guard(dataset.base.songs[song][0],local[1],len(local[1]),
+        physical_policy=getattr(dataset,'physical_policy','legacy_report_v1'))
+    _validate_window(guard,modified[begin:end])
+    if not authored_seam_corresponds(source[:start],modified[:start],guard):
+        raise ValueError('Changed old action still affects the real seam')
+    result=_rebuild_local_row(dataset,row,source,modified,song,begin,start,end,local[0])
+    result=_set_configuration_qualification(result,start,first,end,trusted=True,reason='authored_seam')
+    _continuous_metadata(result,row)
+    result['_counterfactual_history']=True;result['_continuation_target_count']=end-start
+    return result,'retained_seam',changed
+
+
+def _augment_continuous_row(dataset,index,rng,row,mode=None):
+    modes=_augmentation_modes(CONTINUOUS_DRAFT_INPUT_POLICY)
+    mode=modes[rng.randrange(len(modes))] if mode is None else mode
+    if mode not in modes:raise ValueError('Unknown continuous augmentation mode')
+    if mode=='authored_rest':return _continuous_authored_rest(dataset,index,rng,row)
+    if mode in ('missed_entry','rest_control'):
+        return _continuous_entry(dataset,index,rng,row,rest=mode=='rest_control')
+    if mode=='retained_seam':return _retained_seam_row(dataset,index,rng,row)
+    result,name,count=augment_stream_row(dataset,index,rng=rng,row=row,mode=mode,
+        input_policy=MUSICAL_ARRANGEMENT_INPUT_POLICY)
+    # All targets remain their source per-event mass, not a concentrated exit.
+    result['sample_weight']=row['sample_weight'].clone()
+    for key in tuple(result):
+        if key.startswith('_augmentation_first_decision'):result.pop(key)
+    _continuous_metadata(result,row);result['_counterfactual_history']=True
+    return result,name,count
+
+
 def _augment_timeline_row(dataset,index,*,rng,row=None,input_policy=MUSICAL_BATCH_INPUT_POLICY):
     """Use real inference layout for a long wrong prefix and one real target.
 
@@ -699,6 +839,8 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     """
     if dataset.history_window_policy!='block_aligned_v2':
         raise ValueError('Augmentation requires block-aligned rows')
+    if input_policy==CONTINUOUS_DRAFT_INPUT_POLICY:
+        return _augment_continuous_row(dataset,index,rng,dataset[index] if row is None else row,mode)
     modes=_augmentation_modes(input_policy)
     # Preserve the old policy's random draw order exactly. The new recipe may
     # choose a one-note phase edit before requiring a 4--12-note loop window.
@@ -812,7 +954,7 @@ def augment_stream_row(dataset,index,*,rng,mode=None,row=None,input_policy=LEGAC
     if timing_mode:row['_augmentation_timing_replay_sec']=time.perf_counter()-replay_started
     _rebuild_fallback_candidate_states(dataset,row,modified,song,first,end)
     if getattr(dataset,'phrase_context_policy','off') != 'off':
-        dataset.rebuild_phrase_row(row,song,modified,begin,first,end)
+        dataset.rebuild_phrase_row(row,song,modified,begin,first,end,state_index=context._incremental_state)
     if target_policy=='causal_correspondence_v1':
         if shift is not None and shift!=0:row=_replace_rotated_targets(dataset,row,modified,start,first,end)
         row=_set_configuration_qualification(row,start,first,end,

@@ -56,8 +56,7 @@ def collate_phrase_music(batch):
         phrase_music_reference_inverse=torch.from_numpy(inverse[split:].reshape(reference_start.shape).copy()))
 
 
-def _sequence_arrays(count,atom_width=1):
-    length = PHRASE_SEQUENCE_LENGTH
+def _sequence_arrays(count,atom_width=1,length=PHRASE_SEQUENCE_LENGTH):
     return dict(kind=np.zeros((count,length),dtype=np.int64),shape=np.zeros((count,length),dtype=np.int64),
         phase_mask=np.zeros((count,length,8),dtype=np.bool_),atoms=np.zeros((count,length,max(1,atom_width)),dtype=np.int64),
         beats=np.zeros((count,length),dtype=np.float64),seconds=np.zeros((count,length),dtype=np.float64),
@@ -67,11 +66,12 @@ def _sequence_arrays(count,atom_width=1):
 
 def _pack_sequences(sequences,prefix):
     width = max((sequence['atoms'].shape[-1] for sequence in sequences),default=1)
-    arrays = _sequence_arrays(len(sequences),width)
+    length=max((len(sequence['kind']) for sequence in sequences),default=PHRASE_SEQUENCE_LENGTH)
+    arrays = _sequence_arrays(len(sequences),width,length)
     for i,sequence in enumerate(sequences):
         for field in PHRASE_SEQUENCE_FIELDS:
-            if field=='atoms':arrays[field][i,:,:sequence[field].shape[-1]] = sequence[field]
-            else:arrays[field][i] = sequence[field]
+            if field=='atoms':arrays[field][i,:len(sequence[field]),:sequence[field].shape[-1]] = sequence[field]
+            else:arrays[field][i,:len(sequence[field])] = sequence[field]
     return {prefix+field:torch.from_numpy(value) for field,value in arrays.items()}
 
 
@@ -88,7 +88,7 @@ def _visible_sequence_fingerprint(sequence):
     """Positive identity follows only the configuration actually encoded.
 
     Unselected events remain in the full provenance fingerprint, but cannot
-    distinguish contrastive labels whose 32-event encoder inputs are equal.
+    distinguish contrastive labels whose bounded encoder inputs are equal.
     Padding widths and absolute song positions are deliberately excluded.
     """
     digest = hashlib.blake2b(digest_size=16,person=b'phrasevisiblev2')
@@ -364,7 +364,7 @@ class PhraseIndex:
     Each event stores one cumulative feature vector, never R memory tensors.
     Query reads are logarithmic and only expose indices strictly before q.
     """
-    def __init__(self, bank, end_beat, steps=(), *, sequence_codec=None, encoded=None):
+    def __init__(self, bank, end_beat, steps=(), *, sequence_codec=None, encoded=None,sequence_length=PHRASE_SEQUENCE_LENGTH):
         self.layout = music_phrase_layout(bank,end_beat)
         self.boundaries,self.audio,self.references = self.layout.boundaries,self.layout.audio,self.layout.references
         count = len(self.boundaries)-1
@@ -375,6 +375,8 @@ class PhraseIndex:
         self.count = 0
         self._feature_cache = {}
         self.sequence_codec = sequence_codec
+        self.sequence_length=int(sequence_length)
+        if not 1<=self.sequence_length<=128:raise ValueError('Invalid phrase archive length')
         self.sequence_events = [[] for _ in range(count)] if sequence_codec is not None else None
         self._sequence_cache = {}
         self._sequence_atom_count = 0
@@ -385,7 +387,7 @@ class PhraseIndex:
     def nbytes(self):
         # Include Python/list overhead conservatively in the cache budget.
         sequences = (self.count*512+self._sequence_atom_count*16
-                     +len(self.indices)*PHRASE_SEQUENCE_LENGTH*(128+self._max_sequence_atoms*8)
+                     +len(self.indices)*self.sequence_length*(128+self._max_sequence_atoms*8)
                      if self.sequence_events is not None else 0)
         return self.count*(PHRASE_FEATURE_DIM*8+336)+len(self.boundaries)*256+sequences
 
@@ -430,6 +432,7 @@ class PhraseIndex:
         result.count = begin
         result._feature_cache = {}
         result.sequence_codec = self.sequence_codec
+        result.sequence_length=self.sequence_length
         result._sequence_cache = {}
         result._sequence_atom_count = 0
         result._max_sequence_atoms = 1
@@ -456,21 +459,22 @@ class PhraseIndex:
         if cached is not None:return cached
         events = self.sequence_events[segment]
         count = len(events)
-        if count>PHRASE_SEQUENCE_LENGTH:
+        length=self.sequence_length
+        if count>length:
             # Nearest real event to equal-time anchors, with strict progression
             # and explicit first/last retention even for simultaneous events.
             times = np.asarray([event[4] for event in events])
-            anchors = np.linspace(times[0],times[-1],PHRASE_SEQUENCE_LENGTH)
+            anchors = np.linspace(times[0],times[-1],length)
             candidates = np.searchsorted(times,anchors).clip(0,count-1)
             left = np.maximum(0,candidates-1)
             candidates = np.where(np.abs(times[left]-anchors)<np.abs(times[candidates]-anchors),left,candidates)
             chosen = [0]
-            for i in range(1,PHRASE_SEQUENCE_LENGTH-1):
-                chosen.append(min(count-(PHRASE_SEQUENCE_LENGTH-i),max(chosen[-1]+1,int(candidates[i]))))
+            for i in range(1,length-1):
+                chosen.append(min(count-(length-i),max(chosen[-1]+1,int(candidates[i]))))
             chosen.append(count-1)
         else:chosen = list(range(count))
         width = max((len(event[3]) for event in events),default=1)
-        arrays = {key:value[0] for key,value in _sequence_arrays(1,width).items()}
+        arrays = {key:value[0] for key,value in _sequence_arrays(1,width,length).items()}
         for i,position in enumerate(chosen):
             event = events[position]
             arrays['kind'][i],arrays['shape'][i] = event[:2]

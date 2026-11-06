@@ -75,6 +75,7 @@ class StreamComposerConfig:
     timing_group_policy: str = 'phase_gap_v2'
     detail_policy: str = 'phase_autoregressive_v2'
     literal_output_policy: str = 'type_blocks_v1'
+    literal_set_policy: str = 'canonical_v1'
     event_family_policy: str = 'audio_state_phrase_v4'
     event_family_audio_weight: float = .25
     template_policy: str = 'family_preserving_v1'
@@ -95,6 +96,8 @@ class StreamComposerConfig:
     max_event_atoms: int = 32
     delta_beats: tuple[str, ...] = ('0', '1/4', '1/2', '1', '2')
     plan_weight: float = .1
+    curve_preview_policy: str = 'off'
+    curve_preview_weight: float = .05
     plan_target_units: str = 'rates_per_second_v2'
     plan_loss_normalization: str = 'per_second_v2'
     plan_blank_window_seconds: float = .5
@@ -102,6 +105,12 @@ class StreamComposerConfig:
     transition_exit_weight: float = .5
     phrase_context_policy: str = 'off'
     phrase_loss_weight: float = .05
+    draft_policy: str = 'off'
+    draft_loss_weight: float = .1
+    draft_responsibility_temperature: float = 1.
+    draft_objective_policy: str = 'balanced_mean_v1'
+    configuration_recovery_steps: int = 8
+    recovery_bridge_steps: int = 8
     duration_audio_policy: str = 'off'
     physical_policy: str = 'legacy_report_v1'
     candidate_state_policy: str = 'selected_native_v1'
@@ -113,21 +122,47 @@ class StreamComposerConfig:
     phrase_relation_weight: float = .1
     detail_representation_policy: str = 'private_v1'
     duration_feature_policy: str = 'legacy_v1'
+    duration_objective_policy: str = 'categorical_v1'
+    duration_calibration_weight: float = .1
     detail_mode_parameterization: str = 'centered_v2'
     song_profile_policy: str = 'off'
     song_profile_components: int = 4
     song_profile_weight: float = .1
+    deployment_condition_fraction: float = 1.
     song_response_policy: str = 'off'
+    song_choice_objective_policy: str = 'profile_only_v1'
     song_response_modes: int = 4
     song_response_group_size: int = 4
 
     def __post_init__(self):
+        if self.song_choice_objective_policy not in ('profile_only_v1','event_credit_v1'):
+            raise ValueError('Unsupported song choice objective')
+        if self.song_choice_objective_policy=='event_credit_v1' and (self.song_response_policy!='unified_profile_response_v2' or self.draft_policy=='off'):
+            raise ValueError('Song event credit requires unified response and ordered drafts')
+        if self.draft_objective_policy not in ('balanced_mean_v1','sequence_evidence_v2'):
+            raise ValueError('Unsupported draft objective policy')
+        if not 1<=self.configuration_recovery_steps<=16 or not 1<=self.recovery_bridge_steps<=16:
+            raise ValueError('Configuration recovery budgets must be in 1..16')
+        if self.curve_preview_policy not in ('off','audio_counts_v1'):
+            raise ValueError('Unsupported curve preview policy')
+        if not math.isfinite(self.curve_preview_weight) or self.curve_preview_weight<0:
+            raise ValueError('Invalid curve preview weight')
+        if self.draft_policy not in ('off','beat_ordered_draft_v1'):
+            raise ValueError('Unsupported draft policy')
+        if not math.isfinite(self.draft_loss_weight) or self.draft_loss_weight<0 or not math.isfinite(self.draft_responsibility_temperature) or self.draft_responsibility_temperature<=0:
+            raise ValueError('Invalid draft loss or responsibility temperature')
+        if self.draft_policy!='off' and (self.phrase_context_policy!='shared_ordered_v4' or self.phrase_execution_policy!='component_modes_v2'):
+            raise ValueError('Ordered draft requires shared ordered component execution')
+        if self.plan_kind_policy in ('unified_first_arrival_v5','unified_first_arrival_v6') and (self.phrase_context_policy=='off' or self.timing_output_policy!='absolute_grid_v1'):
+            raise ValueError('Unified arrival requires musical phrase context and absolute timing')
         if self.song_profile_policy not in ('off','masked_joint_v1','masked_ordered_joint_v2','masked_deployment_joint_v3') or self.song_response_policy not in ('off','music_response_v1','unified_profile_response_v2'):
             raise ValueError('Unsupported whole-song style policy')
         if not 1 <= self.song_profile_components <= 16 or not 1 <= self.song_response_modes <= 8 or not 2 <= self.song_response_group_size <= 4:
             raise ValueError('Invalid whole-song style size')
         if not math.isfinite(self.song_profile_weight) or self.song_profile_weight < 0:
             raise ValueError('Invalid song profile loss weight')
+        if not math.isfinite(self.deployment_condition_fraction) or not 0<=self.deployment_condition_fraction<=1:
+            raise ValueError('Deployment condition fraction must be in [0,1]')
         if self.song_response_policy != 'off' and (self.phrase_execution_policy not in ('persistent_modes_v1','component_modes_v2') or self.training_window_policy != 'phrase_complete_v1'):
             raise ValueError('Whole-song response requires complete persistent phrases')
         if self.song_response_policy=='unified_profile_response_v2' and (self.song_profile_policy!='masked_deployment_joint_v3' or self.song_response_modes!=self.song_profile_components):
@@ -142,11 +177,17 @@ class StreamComposerConfig:
             raise ValueError('Unsupported detail mode parameterization')
         if self.duration_feature_policy not in ('legacy_v1','log_time_v2'):
             raise ValueError('Unsupported duration feature policy')
+        if self.duration_objective_policy not in ('categorical_v1','hold_crps_v2'):
+            raise ValueError('Unsupported duration objective policy')
+        if not math.isfinite(self.duration_calibration_weight) or self.duration_calibration_weight<0:
+            raise ValueError('Invalid duration calibration weight')
         if self.phrase_modes not in (2,4,8) or not 2<=self.max_phrase_events<=256 or not 0<=self.phrase_seam_events<=8:
             raise ValueError('Invalid phrase execution size/budget')
         if not math.isfinite(self.phrase_relation_weight) or self.phrase_relation_weight<0:
             raise ValueError('Invalid phrase relation weight')
-        if self.phrase_execution_policy!='off' and (self.phrase_context_policy not in ('aligned_phrase_v3','shared_ordered_v4') or self.event_family_policy!='shared_continuation_v1'):
+        if self.literal_set_policy not in ('canonical_v1','permuted_unique_v1'):
+            raise ValueError('Unsupported literal set policy')
+        if self.phrase_execution_policy!='off' and (self.phrase_context_policy not in ('aligned_phrase_v3','shared_ordered_v4') or self.event_family_policy not in ('shared_continuation_v1','shared_music_mixture_v2')):
             raise ValueError('Phrase execution requires aligned phrase memory and shared continuation')
         if self.phrase_execution_policy!='off' and self.detail_policy!='phase_autoregressive_v2':
             raise ValueError('Phrase execution requires joint phase/detail likelihood')
@@ -179,7 +220,7 @@ class StreamComposerConfig:
             ('timing_audio_policy',{'legacy_v1','delta_local_v2'}),
             ('detail_policy',{'independent_v1','phase_autoregressive_v2'}),
             ('literal_output_policy',{'flat_family_v1','type_blocks_v1'}),
-            ('event_family_policy',{'legacy_v1','semantic_mass_v1','audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'}),
+            ('event_family_policy',{'legacy_v1','semantic_mass_v1','audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'}),
             ('window_balance_policy',{'sqrt_window_v2','equal_window_v1'}),
             ('button_load_policy',{'prefix_v1','target_fast_v2'}),
             ('history_window_policy',{'rolling_legacy_v1','block_aligned_v2'}),
@@ -187,10 +228,10 @@ class StreamComposerConfig:
             ('sensor_load_policy',{'button_only_v1','separate_touch_v1'}),
             ('lane_load_policy',{'off','direct_buttons_v1'}),
             ('gap_continuation_policy',{'off','additive_v1','probability_v2'}),
-            ('plan_kind_policy',{'off','rate_integral_v2','audio_hazard_v3','phrase_arranged_hazard_v4'}),
-            ('recovery_policy',{'persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4'}),
+            ('plan_kind_policy',{'off','rate_integral_v2','audio_hazard_v3','phrase_arranged_hazard_v4','unified_first_arrival_v5','unified_first_arrival_v6'}),
+            ('recovery_policy',{'persistent_v1','mixed_exit_v2','greedy_mixed_v3','greedy_mixed_v4','certified_phrase_v5','first_step_phrase_v6'}),
             ('recovery_target_policy',{'authored_next_v1','causal_correspondence_v1'}),
-            ('prefix_augmentation_input_policy',{'musical_arrangement_recovery_v10','musical_entry_recovery_v9','musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
+            ('prefix_augmentation_input_policy',{'continuous_draft_recovery_v11','musical_arrangement_recovery_v10','musical_entry_recovery_v9','musical_loop_recovery_v8','musical_loop_recovery_v7','musical_loop_recovery_v6','musical_loop_recovery_v5','phase_recovery_v4','causal_window_config_time_first_decision_v3'}),
             ('motion_continuation_policy',{'off','motion_continuation_v1','motion_distinct_v2','context_motion_v3'})):
             if getattr(self,name) not in allowed:raise ValueError(f'Unsupported {name}')
         if self.attention_policy not in ('auto_v1','bf16_dropout_math_v1'):raise ValueError('Unsupported attention policy')
@@ -265,12 +306,26 @@ class StreamComposer(nn.Module):
         if config.duration_audio_policy == 'interval_v1':
             from .stream_duration import DurationAudioScorer
             self.duration_audio = DurationAudioScorer(d, codec,feature_policy=config.duration_feature_policy)
+        if config.duration_objective_policy=='hold_crps_v2':
+            from .stream_duration import HoldDurationCalibration
+            self.hold_duration_calibration=HoldDurationCalibration(codec)
         if config.phrase_context_policy in ('causal_phrase_v1', 'ordered_phrase_v2', 'aligned_phrase_v3','shared_ordered_v4'):
             from .stream_phrase_model import CausalPhraseContext
             self.phrase_context = CausalPhraseContext(d, config.condition_dim,
                 ordered=config.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4'),
                 aligned=config.phrase_context_policy in ('aligned_phrase_v3','shared_ordered_v4'),
-                shared=config.phrase_context_policy=='shared_ordered_v4')
+                shared=config.phrase_context_policy=='shared_ordered_v4',
+                **(dict(draft=True,modes=config.phrase_modes,codec=codec) if config.draft_policy!='off' else {}))
+        if config.draft_policy!='off':
+            self.draft_action_projection=nn.Linear(96,min(d,128),bias=False)
+            self.draft_rate_projection=nn.Linear(96,1,bias=False)
+            self.draft_detail_projection=nn.Linear(96,8,bias=False)
+            self.draft_time_query=nn.Linear(min(d,128),d)
+            nn.init.zeros_(self.draft_action_projection.weight)
+            nn.init.zeros_(self.draft_rate_projection.weight)
+            nn.init.zeros_(self.draft_detail_projection.weight)
+        elif config.plan_kind_policy in ('unified_first_arrival_v5','unified_first_arrival_v6'):
+            self.draft_time_query=nn.Linear(min(d,128),d)
         if config.candidate_state_policy == 'selected_native_v1':
             self.candidate_state_projection = nn.Linear(101, d, bias=False)
             nn.init.zeros_(self.candidate_state_projection.weight)
@@ -295,6 +350,8 @@ class StreamComposer(nn.Module):
             nn.init.zeros_(self.music_exit_head[2].weight);nn.init.zeros_(self.music_exit_head[2].bias)
         self.cursor_clock = nn.Linear(18 if config.clock_policy=='musical_v2' else 8, d)
         self.state_projection = nn.Linear(config.state_dim, d)
+        if config.plan_kind_policy=='unified_first_arrival_v6':
+            self.arrival_history_norm=nn.LayerNorm(d)
         self.load_projection = nn.Linear(32 if config.button_load_policy=='target_fast_v2' else 16, d)
         if config.lane_load_policy=='direct_buttons_v1':
             self.lane_load_projection=nn.Linear(4,1,bias=False)
@@ -361,13 +418,13 @@ class StreamComposer(nn.Module):
             for module in (self.event_family_head,self.literal_route_head):
                 nn.init.zeros_(module.weight);nn.init.zeros_(module.bias)
             nn.init.zeros_(self.literal_family_embedding.weight)
-            if config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+            if config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
                 # Current music is the nonzero identity basis. New projections
                 # start at zero, without creating a double-zero gradient path.
                 self.family_audio_projection=nn.Linear(5*d,d,bias=False)
                 self.audio_event_family_head=nn.Linear(d,31)
                 modules=[self.family_audio_projection,self.audio_event_family_head]
-                if config.event_family_policy=='shared_continuation_v1':
+                if config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2'):
                     pass
                 elif config.event_family_policy=='audio_semantic_v2':
                     self.family_history_projection=nn.Linear(30,d,bias=False)
@@ -424,8 +481,13 @@ class StreamComposer(nn.Module):
             if config.phrase_execution_policy=='component_modes_v2':
                 from .stream_detail_modes import ModeDetailControl
                 self.detail_mode_control=ModeDetailControl(config.phrase_modes,32,rank=8,parameterization=config.detail_mode_parameterization)
-                self.phrase_execution.timing=nn.Linear(min(d,128),config.phrase_modes*(5+self.timing_grid.num_groups))
-                nn.init.zeros_(self.phrase_execution.timing.weight);nn.init.zeros_(self.phrase_execution.timing.bias)
+                if config.draft_policy!='off':
+                    self.detail_mode_control.context_stop=nn.Linear(8,5,bias=False)
+                    nn.init.zeros_(self.detail_mode_control.context_stop.weight)
+                    del self.phrase_execution.relations
+                if config.plan_kind_policy!='unified_first_arrival_v6':
+                    self.phrase_execution.timing=nn.Linear(min(d,128),config.phrase_modes*(5+self.timing_grid.num_groups))
+                    nn.init.zeros_(self.phrase_execution.timing.weight);nn.init.zeros_(self.phrase_execution.timing.bias)
         if config.song_response_policy != 'off':
             from .stream_song_response import SongResponse
             self.song_response=SongResponse(d,min(d,128),config.condition_dim,config.song_response_modes,config.phrase_modes,
@@ -435,6 +497,9 @@ class StreamComposer(nn.Module):
         if config.song_profile_policy != 'off':
             from .stream_song_profile import SongProfileCompleter
             self.song_profile=SongProfileCompleter(d,components=config.song_profile_components)
+        if config.song_choice_objective_policy=='event_credit_v1':
+            self.register_buffer('song_choice_cost_baseline',torch.zeros(()))
+            self.register_buffer('song_choice_baseline_ready',torch.tensor(False))
         self.literal_cell = nn.GRU(d, d, batch_first=True)
         self.literal_start = nn.Parameter(torch.zeros(d))
         self.literal_head = nn.Linear(d, codec.num_atoms)
@@ -461,6 +526,9 @@ class StreamComposer(nn.Module):
                 self._literal_type_ids.append(tuple(ids.tolist()))
             self.register_buffer('literal_type_local',local,persistent=False)
         self.plan_head = nn.Linear(d, 3)
+        if config.curve_preview_policy=='audio_counts_v1':
+            self.curve_preview_head=nn.Linear(d,2)
+            self.register_buffer('curve_preview_trained_updates',torch.zeros((),dtype=torch.long))
         if config.plan_kind_policy=='rate_integral_v2':self.plan_kind_features=nn.Linear(3,5)
         if config.plan_kind_policy=='phrase_arranged_hazard_v4':
             from .stream_arrangement import PhraseArrangementRate
@@ -506,6 +574,8 @@ class StreamComposer(nn.Module):
         self.register_buffer('motion_rotation_differences',(angles[:,None]-angles[None,:])%8,persistent=False)
         self._literal_bits=literal_bits
         self.register_buffer('literal_head_bits',torch.tensor(literal_bits,dtype=torch.long),persistent=False)
+        self.register_buffer('literal_head_masks',torch.cat((lanes,touch_lanes),-1).bool(),persistent=False)
+        self.register_buffer('literal_head_powers',torch.ones(41,dtype=torch.long)<<torch.arange(41),persistent=False)
 
     def _clock(self,seconds, beats):
         if self.config.clock_policy=='musical_v2':
@@ -576,6 +646,20 @@ class StreamComposer(nn.Module):
         bank = cache[field]
         a, b = bank[inverse[:, None], left], bank[inverse[:, None], right]
         return (a+(b-a)*mix[..., None]).reshape(*queries.shape, bank.size(-1))
+
+    @staticmethod
+    def _note_history_clock(kinds, seconds, beats):
+        """NOTE-to-NOTE clocks and ordinal, independent of intervening WAITs."""
+        positions=torch.arange(kinds.size(1),device=kinds.device)[None].expand_as(kinds)
+        note=kinds.eq(NOTE)
+        last=positions.masked_fill(~note,-1).cummax(-1).values
+        previous=torch.cat((last.new_full((last.size(0),1),-1),last[:,:-1]),-1)
+        def age(values,index):
+            old=values.gather(1,index.clamp_min(0))*index.ge(0)
+            return (values-old).clamp_min(0)
+        return dict(last=last,ordinal=note.long().cumsum(-1),
+            gap=age(beats,previous),elapsed=age(seconds,previous),
+            since_note=age(seconds,last),since_note_beats=age(beats,last))
 
     def _prefix_load(self, atoms, kinds, seconds,query_seconds=None):
         return self._pad_load(self.atom_lanes,atoms,kinds,seconds,query_seconds,
@@ -768,7 +852,7 @@ class StreamComposer(nn.Module):
         if hasattr(self,'touch_load_projection') and batch is not None:
             result=result+self.touch_load_projection(self._pad_load(self.atom_touch,
                 batch['history_atoms'],batch['history_kind'],batch['step_second'],event_seconds)).to(result)
-        if self.config.event_family_policy=='shared_continuation_v1':
+        if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2'):
             result=F.layer_norm(result,(result.size(-1),))
         return (result,button_load) if return_button_load else result
 
@@ -782,15 +866,25 @@ class StreamComposer(nn.Module):
         residual,phrase=self.phrase_context.at_candidate(self,audio_cache,batch['song_inverse'],batch,
             tracking_strength=batch.get('audio_tracking_strength',self._audio_tracking_strength),
             encoded_cache=output.get('_phrase_encoding_cache'))
+        if self.config.draft_policy!='off' and hasattr(self,'song_response'):
+            view=self.phrase_context._candidate_view(batch)
+            prior=output.get('_shared_song_prior_logits',output.get('song_response_logits'))
+            position=(view['phrase_start_beat']/batch['audio_end_beat'][:,None].clamp_min(1)).float()
+            phrase.update(self.song_response(audio_cache['global'][batch['song_inverse']],
+                audio_cache['global_mask'][batch['song_inverse']],batch['condition'].float(),
+                phrase['phrase_music_anchor'],position,
+                self.phrase_execution.prior(phrase['phrase_intent']).float()+phrase.get('draft_mode_logits',0.),
+                prior_logits=prior,causal_condition=batch['condition'].float()))
+            phrase['execution_phrase_intent']=phrase['phrase_intent']
         base=output.get('decoder_hidden',output['hidden'])
         # In inference the CPU query contains only the selected final position.
         tail=phrase['phrase_intent'].size(1)==1 and base.size(1)>1
         actor=self.phrase_context.candidate_actor_residual(base[:,-1:] if tail else base,phrase,batch)
         old=output.get('departure_phrase_residual',torch.zeros_like(base))
         if tail:
-            last=base[:,-1:]+actor+residual-(0 if self.config.event_family_policy=='shared_continuation_v1' else old[:,-1:])
+            last=base[:,-1:]+actor+residual-(0 if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2') else old[:,-1:])
             hidden=torch.cat((base[:,:-1],last),1)
-        else:hidden=base+actor+residual-(0 if self.config.event_family_policy=='shared_continuation_v1' else old)
+        else:hidden=base+actor+residual-(0 if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2') else old)
         return hidden,{**output,**phrase,'hidden':hidden,'_action_phrase_ready':True}
 
     def candidate_action_state(self,output,batch,audio_cache,event_seconds,*,return_button_load=False):
@@ -798,16 +892,25 @@ class StreamComposer(nn.Module):
         hidden,prepared=self.prepare_action_phrase(output,batch,audio_cache)
         action=self.action_context_at(hidden,event_seconds,audio_cache,batch['song_inverse'],batch,
             return_button_load=return_button_load)
+        if self.config.event_family_policy=='shared_music_mixture_v2':
+            controls=prepared.get('_causal_profile_condition',batch['condition'])
+            family=self.family_context_at(audio_cache,event_seconds,batch['song_inverse'],{**batch,'condition':controls},phrase_output=prepared)
+            prepared={**prepared,'_execution_audio_family_logits':family['audio_logits'],
+                '_execution_audio_family_context':family}
         if return_button_load:
             context,load=action
             return context,load,prepared
         return action,prepared
 
-    def family_logits_for_action(self,action):
+    def family_logits_for_action(self,action,*,audio_logits=None):
         """Semantic type decision from the same state used by shape and phase."""
-        if self.config.event_family_policy!='shared_continuation_v1':
+        if self.config.event_family_policy not in ('shared_continuation_v1','shared_music_mixture_v2'):
             raise ValueError('Shared family logits require shared_continuation_v1')
-        return self.event_family_head(action).float().masked_fill(~self.semantic_family_supported,-1e4)
+        full=self.event_family_head(action).float().masked_fill(~self.semantic_family_supported,-1e4)
+        if self.config.event_family_policy=='shared_music_mixture_v2' and audio_logits is not None:
+            from .stream_actions import mix_family_logits
+            return mix_family_logits(full,audio_logits,self.config.event_family_audio_weight)
+        return full
 
     def execution_prior(self,phrase_output,batch=None,*,song_choice=None):
         """A causal music/reference prior; no future chart labels or progress."""
@@ -817,25 +920,38 @@ class StreamComposer(nn.Module):
             if song_choice is not None:
                 return priors[:,:,int(song_choice),:]
             return torch.logsumexp(priors+phrase_output['song_response_logits'].float().log_softmax(-1)[:,None,:,None],-2)
-        return self.phrase_execution.prior(intent).float()
+        return self.phrase_execution.prior(intent).float()+phrase_output.get('draft_mode_logits',0.)
 
     def execution_outputs(self,action,phrase_output,base_routes):
+        if 'draft_context' in phrase_output:
+            phrase_output={**phrase_output,'_draft_anchor':self.draft_action_projection(phrase_output['draft_context'])}
         if 'execution_phrase_intent' in phrase_output:
             phrase_output={**phrase_output,'phrase_intent':phrase_output['execution_phrase_intent']}
         execution=self.phrase_execution(action,phrase_output)
+        if 'draft_mode_logits' in phrase_output:execution['prior_logits']=execution['prior_logits']+phrase_output['draft_mode_logits']
         execution['routes']=(base_routes[...,None,:]+execution['route_bias']).log_softmax(-1)
+        if self.config.event_family_policy=='shared_music_mixture_v2':
+            from .stream_actions import mix_family_route_log_probs
+            execution['routes']=mix_family_route_log_probs(execution['routes'],
+                phrase_output['_execution_audio_family_logits'][...,None,:],
+                self.semantic_route_families,self.config.event_family_audio_weight)
         return execution
 
     def execution_proposal(self,context,phrase_output,selected_batch,mode):
         context=context.reshape(1,1,-1)
         phrase={k:(v[:,-1:] if torch.is_tensor(v) and v.ndim>=3 else v)
-                for k,v in phrase_output.items() if k in ('phrase_intent','phrase_aligned_heads','execution_phrase_intent','phrase_reference_weights','phrase_aligned_null_weight')}
+                for k,v in phrase_output.items() if k in ('phrase_intent','phrase_aligned_heads','execution_phrase_intent','phrase_reference_weights','phrase_aligned_null_weight','draft_context','_execution_audio_family_logits')}
         base=self.event_route_log_probs(context,family_logits=self.family_logits_for_action(context))
         execution=self.execution_outputs(context,phrase,base)
         routes=execution['routes'][0,0,int(mode)]
+        detail_choice=int(mode)
+        if 'draft_context' in phrase:
+            values=self.draft_detail_projection(phrase['draft_context'])
+            values=values-values.mean(-2,keepdim=True)
+            detail_choice=dict(index=int(mode),context=values[0,0,int(mode)])
         return dict(execution_route_log_probs=routes,execution_lane_bias=execution['lane_bias'][0,0,int(mode)],
                     family_logits=grouped_logsumexp(routes,self.semantic_route_families-1,groups=31),
-                    **({'detail_mode':int(mode)} if hasattr(self,'detail_mode_control') else {}))
+                    **({'detail_mode':detail_choice} if hasattr(self,'detail_mode_control') else {}))
 
     def execution_timing_outputs(self,phrase_output,kind_logits,delta_logits,group_ids):
         """One small causal readout; modes never rerun the audio/decoder trunk."""
@@ -870,6 +986,13 @@ class StreamComposer(nn.Module):
         action_hidden,_=self.prepare_action_phrase(output,batch,audio_cache)
         return self.action_context_at(action_hidden, event_seconds, audio_cache, batch['song_inverse'],batch,
                                       return_button_load=return_button_load)
+
+    def curve_preview_logits(self,audio_cache,condition,song_inverse):
+        """Head/event rates for display; this branch cannot alter the actor."""
+        if not hasattr(self,'curve_preview_head'):
+            raise ValueError('This checkpoint has no independently trained curve preview head')
+        features=(audio_cache['local'][song_inverse]+self.condition(condition.float())[:,None]).detach()
+        return self.curve_preview_head(features).float()
 
     def _condition_plan(self,cache,condition,inverse):
         base=cache['plan_base_logits'] if 'plan_base_logits' in cache else self.plan_head(cache['local'])
@@ -968,6 +1091,43 @@ class StreamComposer(nn.Module):
             return result.reshape(shape)
         expected=(integral(stops)-integral(batch['step_second'].double())[...,None]).clamp_min(0)
         return expected.float().detach()
+
+    def unified_arrival_outputs(self,timing_logits,candidate_beats,allowed,cache,batch,inverse,plan,phrase):
+        """Pointwise musical evidence + local draft, one normalized arrival law.
+
+        Nothing in this interface reads a target or a virtual WAIT count. The
+        base plan channel is a feature of this ONE law, not separately scored.
+        """
+        from .stream_arrival import first_arrival
+        clock={**cache,'second_values':cache['seconds'][...,None]}
+        seconds=self._read_audio(clock,candidate_beats,inverse,clock='beats',field='second_values').squeeze(-1).double()
+        future=torch.minimum(batch['step_beat']+2,batch['audio_end_beat'][:,None])
+        stop=self._read_audio(clock,future,inverse,clock='beats',field='second_values').squeeze(-1).double()
+        last=cache['mask'].sum(-1)[inverse].clamp_min(1)-1
+        last_beat=cache['beats'][inverse].gather(1,last[:,None]);last_sec=cache['seconds'][inverse].gather(1,last[:,None])
+        fraction=((future-last_beat)/(batch['audio_end_beat'][:,None]-last_beat).clamp_min(1e-10)).clamp(0,1)
+        stop=torch.where(future>=last_beat,last_sec+fraction*(batch['audio_end_sec'][:,None]-last_sec),stop)
+        mix=((candidate_beats-last_beat[...,None])/(batch['audio_end_beat'][:,None,None]-last_beat[...,None]).clamp_min(1e-10)).clamp(0,1)
+        seconds=torch.where(candidate_beats>=last_beat[...,None],last_sec[...,None]+mix*(batch['audio_end_sec'][:,None,None]-last_sec[...,None]),seconds)
+        base=self._read_audio({'local':plan[...,2:3],'seconds':cache['seconds'][inverse],
+            'beats':cache['beats'][inverse],'mask':cache['mask'][inverse]},candidate_beats,
+            torch.arange(inverse.size(0),device=inverse.device),clock='beats').squeeze(-1)
+        shape=timing_logits.float().masked_fill(~allowed,-1e4)
+        rates=(base+shape)[...,None,:].expand(*base.shape[:-1],self.config.phrase_modes,base.size(-1))
+        if 'draft_context' in phrase:
+            from .stream_draft import read_draft
+            adjustment=read_draft(phrase,batch,candidate_beats,projection=self.draft_rate_projection).squeeze(-1).transpose(-1,-2)
+            rates=rates+adjustment
+        start=batch['step_second'].double()
+        law=first_arrival(rates,seconds[...,None,:],start[...,None],stop[...,None],allowed[...,None,:])
+        kinds=rates.new_full((*rates.shape[:-1],5),-1e4)
+        kinds[...,NOTE]=law['log_note'];kinds[...,WAIT]=law['log_tail'];kinds[...,EOS]=law['log_tail']
+        remaining=batch['audio_end_beat'][:,None]-batch['step_beat']
+        kinds[...,EOS]=kinds[...,EOS].masked_fill(remaining[...,None]>2,-1e4)
+        kinds[...,WAIT]=kinds[...,WAIT].masked_fill(remaining[...,None]<=2,-1e4)
+        return kinds,law['conditional'],dict(arrival_log_rates=rates,arrival_seconds=seconds,
+            arrival_allowed=allowed,arrival_start=start,arrival_stop=stop,
+            occurrence_expected_hazard=law['expected_hazard'].mean(-1))
 
     def event_phase_logits(self, context, shape, reference_phase, reference_phase_mask=None,motion_phase_distribution=None,button_load=None,
                            motion_keep_logit=None,motion_reference_shape=None):
@@ -1087,7 +1247,7 @@ class StreamComposer(nn.Module):
         A bank cell straddling a tempo change has an averaged beat length. This
         auxiliary score never replaces the native parser's physical timings.
         """
-        if not hasattr(self, 'duration_audio'): return None
+        if not hasattr(self, 'duration_audio') and not hasattr(self,'hold_duration_calibration'): return None
         inverse = batch.get('song_inverse')
         if inverse is None:
             inverse = torch.arange(event_seconds.size(0), device=event_seconds.device)
@@ -1141,21 +1301,78 @@ class StreamComposer(nn.Module):
         inverse = batch.get('song_inverse')
         if inverse is None:
             inverse = torch.arange(batch['history_kind'].size(0), device=batch['history_kind'].device)
-        unified=None;causal_condition=None
+        unified=None;profile_loss_evidence=None;causal_condition=None;selected_song_component=None
+        manual_condition_charts=None
         if self.config.song_response_policy=='unified_profile_response_v2':
             if not self.training and 'unified_style' in cache:
                 frozen=cache['unified_style']
                 causal_condition=frozen['causal_condition'].expand(batch['condition'].size(0),-1)
                 unified=dict(prior_logits=frozen['prior_logits'],causal_condition=causal_condition)
+                if self.config.draft_policy!='off':
+                    selected_song_component=torch.full((frozen['prior_logits'].size(0),),int(frozen['choice']),device=inverse.device,dtype=torch.long)
+                    causal_condition=batch['condition'].float()
             else:
                 from .stream_song_profile import pool_audio
                 rows=batch.get('unified_chart_rows',batch.get('profile_chart_rows',torch.arange(batch['condition'].size(0),device=inverse.device)))
                 controls=batch['condition'].float().index_select(0,rows)
                 known=None if self.training else torch.zeros_like(controls,dtype=torch.bool)
-                unified=self.song_profile.unified_evidence(pool_audio(cache)[inverse].index_select(0,rows),controls,
-                    known_mask=known,only_level_probability=.5 if self.training else 0.)
+                committed=batch.get('committed_song_component') if self.config.draft_policy!='off' else None
+                if committed is not None:
+                    if committed.shape!=(controls.size(0),):
+                        raise ValueError('Committed song choices must match chart groups')
+                    frozen=committed.ge(0)
+                    if known is None:known=self.song_profile.sample_known_mask(controls,only_level_probability=.5)
+                    known=torch.where(frozen[:,None],batch['committed_known_mask'].bool(),known)
+                prior_controls=(None if committed is None else
+                    torch.where(frozen[:,None],batch['committed_execution_controls'].float(),controls))
+                profile_audio=pool_audio(cache)[inverse].index_select(0,rows)
+                unified=self.song_profile.unified_evidence(profile_audio,controls,
+                    known_mask=known,only_level_probability=.5 if self.training else 0.,prior_condition=prior_controls)
+                completion_evidence=unified
+                if self.training and self.config.draft_policy!='off' and self.config.deployment_condition_fraction<1.:
+                    # Explicit-control examples and automatic deployment are
+                    # distinct input contracts. Keep the masked numerical
+                    # task on every chart; otherwise complete-control rows
+                    # would contribute no unknown fields to its proper score.
+                    profile_loss_evidence=unified
+                    manual_condition_charts=torch.rand(controls.size(0),device=controls.device)>=self.config.deployment_condition_fraction
+                    if committed is not None:manual_condition_charts &= ~frozen
+                    actor_known=torch.where(manual_condition_charts[:,None],
+                        torch.ones_like(unified['known_mask']),unified['known_mask'])
+                    unified=self.song_profile.unified_evidence(profile_audio,controls,
+                        known_mask=actor_known,only_level_probability=0.,prior_condition=prior_controls)
                 chart_inverse=batch.get('unified_chart_inverse',torch.arange(controls.size(0),device=inverse.device))
                 causal_condition=unified['causal_condition'].index_select(0,chart_inverse)
+                if self.config.draft_policy!='off':
+                    probabilities=unified['prior_logits'].float().softmax(-1)
+                    selected_song_component=(torch.multinomial(probabilities,1).squeeze(-1) if self.training else probabilities.argmax(-1))
+                    if committed is not None:
+                        valid_choice=committed.lt(probabilities.size(-1)) & committed.ge(-1)
+                        if committed.device.type=='cuda':torch._assert_async(valid_choice.all(),'Invalid committed song choice')
+                        elif not bool(valid_choice.all()):raise ValueError('Invalid committed song choice')
+                        selected_song_component=torch.where(frozen,committed,selected_song_component)
+                    # Manual generation preserves provided preferences; they
+                    # are not 16 exact probability/simplex locks. Complete
+                    # only deployment rows using their masked evidence, then
+                    # retain the source vector verbatim for controlled rows.
+                    completion_known=completion_evidence['known_mask']
+                    if manual_condition_charts is not None:
+                        completion_known=completion_known & ~manual_condition_charts[:,None]
+                    completed=self.song_profile.execution_controls(
+                        {**completion_evidence,'known_mask':completion_known},controls,selected_song_component)
+                    if manual_condition_charts is not None:
+                        completed=torch.where(manual_condition_charts[:,None],controls,completed)
+                    if committed is not None:
+                        # Recovery must execute the controls that produced its
+                        # actual prefix, even if newer weights now predict a
+                        # different completion. Gold controls stay loss-only.
+                        completed=torch.where(frozen[:,None],batch['committed_execution_controls'].float(),completed)
+                    causal_condition=completed.index_select(0,chart_inverse)
+            if self.config.draft_policy!='off':
+                # Explicit-control rows retain their source preferences;
+                # automatic rows receive only explicit-plus-predicted values.
+                # Every downstream branch consumes that same contract.
+                batch={**batch,'condition':causal_condition}
         kinds, atoms = batch['history_kind'], batch['history_atoms']
         valid = batch['step_mask'].bool()
         phase = batch['history_phase'].clamp_min(0)
@@ -1170,16 +1387,21 @@ class StreamComposer(nn.Module):
                 distinct=self.config.motion_continuation_policy in ('motion_distinct_v2','context_motion_v3'),
                 adjacent=self.config.motion_continuation_policy=='context_motion_v3')
         atom_emb = self.atom_embedding(atoms).sum(-2) / atoms.ne(0).sum(-1).clamp_min(1)[..., None]
-        x = self.kind_embedding(kinds) + self.delta_embedding(batch['history_delta'].clamp_min(0))
+        invariant_history=self.config.plan_kind_policy=='unified_first_arrival_v6'
+        x = self.kind_embedding(kinds)
+        if not invariant_history:x=x+self.delta_embedding(batch['history_delta'].clamp_min(0))
         x = x + (self.shape_embedding(batch['history_shape'].clamp_min(0)) + phase_context + atom_emb)*note[..., None] + movement
         sec, beat = batch['step_second'].float(), batch['step_beat'].float()
+        note_clock=self._note_history_clock(kinds,sec,beat) if invariant_history else None
         history_gap=batch.get('history_gap_beats',self.delta_values[batch['history_delta'].clamp_min(0)])
+        if invariant_history:history_gap=note_clock['gap']
         if hasattr(self,'history_gap_projection'):
             periods=history_gap.new_tensor([.25,.5,1.,2.,3.,4.])
             angles=2*math.pi*history_gap[...,None]/periods
             gap_features=torch.cat((history_gap.clamp_min(0).log1p()[...,None],angles.sin(),angles.cos()),-1).float()
             x=x+self.history_gap_projection(gap_features).to(x)
         elapsed = torch.cat((sec.new_zeros(sec.size(0), 1), sec[:, 1:]-sec[:, :-1]), -1)
+        if invariant_history:elapsed=note_clock['elapsed']
         end_sec = (batch['audio_end_sec'] if 'audio_end_sec' in batch else batch['song_seconds'].amax(-1)[inverse]).float()
         end_beat = (batch['audio_end_beat'] if 'audio_end_beat' in batch else batch['song_beats'].amax(-1)[inverse]).to(batch['step_beat'])
         clock = torch.cat((self._clock(sec, beat), elapsed.clamp_min(0).log1p()[..., None],
@@ -1190,16 +1412,20 @@ class StreamComposer(nn.Module):
         if self.config.clock_policy=='musical_v2':
             index=batch.get('step_index')
             if index is None:index=torch.arange(kinds.size(1),device=kinds.device)[None].expand_as(kinds)
+            if invariant_history:index=note_clock['ordinal']
             x=x+self._step_position(index).to(x)
+        current_state=torch.zeros_like(x)
         if 'action_state' in batch:
             state = batch['action_state'].float()
             state_valid = ~batch['action_state_mask'].bool()
             pooled = (state * state_valid[..., None]).sum(-2)/state_valid.sum(-1).clamp_min(1)[..., None]
-            x = x + self.state_projection(pooled)
-        x = x + self.load_projection(self._prefix_load(atoms, kinds, sec))
+            current_state=self.state_projection(pooled)
+            x = x + current_state
+        current_load=self.load_projection(self._prefix_load(atoms, kinds, sec))
+        x = x + current_load
         if hasattr(self,'touch_load_projection'):
             x=x+self.touch_load_projection(self._pad_load(self.atom_touch,atoms,kinds,sec)).to(x)
-        if hasattr(self,'continuation_projection'):
+        if hasattr(self,'continuation_projection') and not invariant_history:
             x=x+self.continuation_projection(self._continuation_input(batch,x)).to(x)
         offsets = self.near_offsets.to(x)
         nearby = self._read_audio(cache, beat[..., None]+offsets, inverse, clock='beats')
@@ -1214,6 +1440,12 @@ class StreamComposer(nn.Module):
         t = x.size(1)
         causal = torch.ones(t, t, device=x.device, dtype=torch.bool).triu(1)
         safe_valid = valid.clone()
+        if invariant_history:
+            safe_valid=valid&(kinds.eq(NOTE)|kinds.eq(BOS))
+            # A cropped prefix may begin with WAIT and have no earlier key.
+            # Its fallback is a fixed BOS, never that WAIT's content/state.
+            fallback=~safe_valid[:,0]
+            x=torch.cat((torch.where(fallback[:,None],self.kind_embedding.weight[BOS][None].to(x),x[:,0])[:,None],x[:,1:]),1)
         safe_valid[:, 0] = True
         with self.attention_context(x.device.type):
             hidden = self.decoder(x, cache['global'][inverse], tgt_mask=causal,
@@ -1225,7 +1457,8 @@ class StreamComposer(nn.Module):
             hidden = hidden+ordered_residual
             phrase_output['phrase_ordered_actor_residual_rms'] = ordered_residual.float().square().mean(-1).sqrt()
         # target_second is intentionally read only after time logits exist.
-        music_occurrence=self.config.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4') and not symbolic_only
+        unified_arrival=self.config.plan_kind_policy in ('unified_first_arrival_v5','unified_first_arrival_v6') and not symbolic_only
+        music_occurrence=self.config.plan_kind_policy in ('audio_hazard_v3','phrase_arranged_hazard_v4','unified_first_arrival_v5','unified_first_arrival_v6') and not symbolic_only
         kind_logits=(hidden.new_zeros(*hidden.shape[:-1],5,dtype=torch.float32) if music_occurrence
                      else self.kind_head(hidden).float())
         delta_logits=self.delta_head(hidden).float()
@@ -1271,9 +1504,10 @@ class StreamComposer(nn.Module):
         values = self.delta_values.to(batch['step_beat'])
         first = kinds.eq(BOS) & batch['step_beat'].eq(0)
         candidate_beats=candidate_deltas=None
+        arrival_output={};arrival_kinds=arrival_deltas=None
         if absolute_timing:
             candidate_beats,candidate_deltas=self.timing_grid.candidates(batch['step_beat'])
-            sparse_timing=(self.training and getattr(self,'_sparse_timing_enabled',True)
+            sparse_timing=((self.training and getattr(self,'_sparse_timing_enabled',True) or batch.get('_inference_last_query',False))
                 and self.config.transition_policy=='off' and '_timing_query_positions' in batch
                 and '_timing_packed_flat' in batch and '_timing_original_flat' in batch)
             if sparse_timing:
@@ -1287,7 +1521,7 @@ class StreamComposer(nn.Module):
                 timing_first=select(first)
                 timing_beats=select(candidate_beats)
                 timing_deltas=select(candidate_deltas)
-                timing_batch={**batch,'step_second':select(batch['step_second'])}
+                timing_batch={**batch,'step_second':select(batch['step_second']),'step_beat':select(batch['step_beat'])}
             else:
                 timing_hidden=hidden
                 timing_cursor=batch['step_beat']
@@ -1296,6 +1530,28 @@ class StreamComposer(nn.Module):
                 timing_beats=candidate_beats
                 timing_deltas=candidate_deltas
                 timing_batch=batch
+            if invariant_history and unified_arrival:
+                last=decoder_hidden.gather(1,note_clock['last'].clamp_min(0)[...,None].expand_as(decoder_hidden))
+                last=last*note_clock['last'].ge(0)[...,None]
+                age_clock=torch.cat((self._clock(sec,beat),note_clock['since_note'].log1p()[...,None],
+                    note_clock['since_note_beats'].log1p()[...,None],
+                    (end_sec[:,None]-sec).clamp_min(0).log1p()[...,None],
+                    (end_beat.float()[:,None]-beat).clamp_min(0).log1p()[...,None]),-1)
+                musical=self.arrival_history_norm(last+self.draft_time_query(phrase_output['phrase_music_anchor'])
+                    +self.cursor_clock(age_clock)+current_state+current_load)
+                timing_hidden=select(musical) if sparse_timing else musical
+                timing_relative=self.delta_head(timing_hidden).float()
+            elif unified_arrival:
+                # Unlike the configuration decoder, occurrence never receives
+                # literal WAIT tokens or virtual decision-position embeddings.
+                musical=self.draft_time_query(phrase_output['phrase_music_anchor'])
+                indices=torch.arange(kinds.size(1),device=kinds.device)[None].expand_as(kinds)
+                last_note=indices.masked_fill(~kinds.eq(NOTE),-1).cummax(-1).values
+                notes=atom_emb+self.shape_embedding(batch['history_shape'].clamp_min(0))
+                last=notes.gather(1,last_note.clamp_min(0)[...,None].expand_as(notes))*last_note.ge(0)[...,None]
+                musical=musical+last
+                timing_hidden=select(musical) if sparse_timing else musical
+                timing_relative=self.delta_head(timing_hidden).float()
             delta_allowed=(timing_deltas>0)|(timing_deltas.eq(0)&timing_first[...,None])
             delta_allowed=delta_allowed&(timing_beats<end_beat[:,None,None])
             delta_allowed[...,0]=False
@@ -1315,10 +1571,10 @@ class StreamComposer(nn.Module):
                     grid_cache={**cache,'grid_audio_keys':F.pad(local,(0,max(0,32-local.size(-1))))[...,:32]}
                     candidate_audio=self._read_audio(grid_cache,timing_beats,inverse,clock='beats',field='grid_audio_keys').float()
             expected=(self._plan_candidate_expected_counts(plan_state,cache,timing_batch,inverse,timing_beats)
-                if (self.config.timing_group_policy=='phase_gap_v2' or arrangement is not None) and plan_state is not None else None)
+                if not unified_arrival and (self.config.timing_group_policy=='phase_gap_v2' or arrangement is not None) and plan_state is not None else None)
             timing_logits,_,_=self.timing_grid(timing_hidden,timing_cursor,
                 timing_relative,self.delta_values,query,audio_scores,delta_allowed,candidate_audio=candidate_audio,
-                candidate_expected_count=expected)
+                candidate_expected_count=expected,**({'return_intensity':True} if unified_arrival else {}))
             if arrangement is not None:
                 gain=select(arrangement['gain']) if sparse_timing else arrangement['gain']
                 boundary=select(arrangement['phrase_end_beat']) if sparse_timing else arrangement['phrase_end_beat']
@@ -1330,6 +1586,18 @@ class StreamComposer(nn.Module):
                 rate_ratio=torch.where(inside,gain[...,None].clamp_min(1e-12).log(),0.)
                 extra=(gain[...,None]-1)*torch.minimum(expected,local.detach()[...,None])
                 timing_logits=timing_logits+rate_ratio-extra
+            if unified_arrival:
+                if sparse_timing:
+                    # The bank is shared, only query-to-bank indices are packed.
+                    timing_phrase={**phrase_output}
+                    if '_draft_query_inverse' in timing_phrase:
+                        timing_phrase['_draft_query_inverse']=select(timing_phrase['_draft_query_inverse'])
+                    for key in ('phrase_start_beat','phrase_end_beat'):
+                        timing_batch[key]=select(batch[key])
+                else:timing_phrase=phrase_output
+                arrival_kinds,arrival_deltas,arrival_output=self.unified_arrival_outputs(
+                    timing_logits,timing_beats,delta_allowed,cache,timing_batch,inverse,plan,timing_phrase)
+                timing_logits=arrival_deltas.logsumexp(-2)-math.log(self.config.phrase_modes)
             if sparse_timing:
                 # Unsupervised rows remain finite for the public loss and
                 # diagnostics. Only valid packed queries enter the scatter.
@@ -1340,6 +1608,19 @@ class StreamComposer(nn.Module):
                     timing_logits.flatten(0,1).index_select(0,packed)).view(*hidden.shape[:2],-1)
             else:
                 delta_logits=timing_logits
+            if unified_arrival:
+                if sparse_timing:
+                    def scatter_queries(value,fill):
+                        shape=(*hidden.shape[:2],*value.shape[2:])
+                        return value.new_full(shape,fill).flatten(0,1).index_copy(0,original,
+                            value.flatten(0,1).index_select(0,packed)).reshape(shape)
+                    arrival_kinds=scatter_queries(arrival_kinds,-1e4)
+                    arrival_deltas=scatter_queries(arrival_deltas,-1e4)
+                    # Large per-candidate laws are needed by inference curves,
+                    # never by the training loss or its finite checks.
+                    if self.training:
+                        arrival_output={k:scatter_queries(v,0.) for k,v in arrival_output.items() if k=='occurrence_expected_hazard'}
+                kind_logits=arrival_kinds.logsumexp(-2)-math.log(self.config.phrase_modes)
         else:
             delta_allowed = (values[None, None] > 0) | (values[None, None].eq(0) & first[..., None])
             delta_allowed = delta_allowed & (batch['step_beat'][..., None]+values < end_beat[:, None, None])
@@ -1367,6 +1648,7 @@ class StreamComposer(nn.Module):
         action_source={**phrase_output,'hidden':hidden,'decoder_hidden':decoder_hidden,
              'departure_phrase_residual':phrase_residual}
         if causal_condition is not None:action_source['_causal_profile_condition']=causal_condition
+        if unified is not None:action_source['_shared_song_prior_logits']=unified['prior_logits'].index_select(0,chart_inverse) if 'chart_inverse' in locals() else unified['prior_logits']
         if hasattr(self,'phrase_execution'):action_source['execution_phrase_intent']=phrase_output['phrase_intent']
         if hasattr(self,'lane_load_projection'):
             action,button_load,action_phrase_output=self.candidate_action_state(action_source,batch,cache,
@@ -1379,14 +1661,19 @@ class StreamComposer(nn.Module):
         event_routes=None
         family_context=None
         if self.config.event_family_policy!='legacy_v1':
-            if self.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
-                family_context=self.family_context_at(cache,batch.get('target_second',batch['step_second']),inverse,batch,phrase_output=action_phrase_output)
+            if self.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
+                family_context=action_phrase_output.get('_execution_audio_family_context')
+                if family_context is None:family_context=self.family_context_at(cache,batch.get('target_second',batch['step_second']),inverse,batch,phrase_output=action_phrase_output)
             selected_family_logits=(self.family_logits_for_action(action)
-                if self.config.event_family_policy=='shared_continuation_v1' else
+                if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2') else
                 family_context['full_logits'] if family_context is not None and 'full_logits' in family_context else None)
             event_routes=self.event_route_log_probs(action,
                 family_context=family_context['full'] if family_context is not None else None,
                 family_logits=selected_family_logits,**transition_options)
+            if self.config.event_family_policy=='shared_music_mixture_v2' and not hasattr(self,'phrase_execution'):
+                from .stream_actions import mix_family_route_log_probs
+                event_routes=mix_family_route_log_probs(event_routes,family_context['audio_logits'],
+                    self.semantic_route_families,self.config.event_family_audio_weight)
             event_routes=event_routes.masked_fill(~torch.isfinite(event_routes),-1e4)
             # Preserve the public shape view for diagnostics. The supervised
             # likelihood below uses the exact semantic literal route.
@@ -1402,9 +1689,19 @@ class StreamComposer(nn.Module):
                   'hidden': hidden, 'action_context': action, 'reference_phase': reference_phase,
                   'reference_phase_mask':reference_phase_mask,'repeat_delta_id':repeat_delta_id}
         result.update(phrase_output)
+        result.update(arrival_output)
+        if 'draft_context' in action_phrase_output:
+            result['draft_action_context']=action_phrase_output['draft_context']
+            result['action_execution_prior_logits']=action_phrase_output.get('song_response_phrase_logits',self.phrase_execution.prior(action_phrase_output['phrase_intent'])+action_phrase_output.get('draft_mode_logits',0.))
+            result['departure_execution_prior_logits']=self.phrase_execution.prior(phrase_output['phrase_intent'])+phrase_output.get('draft_mode_logits',0.)
+        if self.config.event_family_policy=='shared_music_mixture_v2':
+            result['_execution_audio_family_logits']=action_phrase_output['_execution_audio_family_logits']
         if causal_condition is not None:
             result['_causal_profile_condition']=causal_condition
             result['unified_profile_evidence']=unified
+            if profile_loss_evidence is not None:result['profile_loss_evidence']=profile_loss_evidence
+            if manual_condition_charts is not None:result['manual_condition_chart_mask']=manual_condition_charts
+            if selected_song_component is not None:result['selected_song_component']=selected_song_component
         if hasattr(self,'song_profile'):
             valid=cache['global_mask'].to(cache['global'].dtype)[...,None]
             pooled=(cache['global']*valid).sum(1)/valid.sum(1).clamp_min(1)
@@ -1417,7 +1714,7 @@ class StreamComposer(nn.Module):
                 options=dict(prior_logits=unified['prior_logits'].index_select(0,chart_inverse),causal_condition=causal_condition)
             result.update(self.song_response(cache['global'][inverse],cache['global_mask'][inverse],
                 batch['condition'].float(),phrase_output['phrase_music_anchor'],position,
-                self.phrase_execution.prior(phrase_output['phrase_intent']).float(),
+                (self.phrase_execution.prior(phrase_output['phrase_intent']).float()+phrase_output.get('draft_mode_logits',0.)),
                 global_audio=self.song_response.pool_audio(cache['global'],cache['global_mask'])[inverse],**options))
         if hasattr(self,'phrase_execution'):
             result['execution_phrase_intent']=phrase_output['phrase_intent']
@@ -1429,15 +1726,27 @@ class StreamComposer(nn.Module):
                 execution_phase_logits=result['phase_logits'][...,None,:]+self.phrase_execution.phase_bias(execution['lane_bias'],shapes),
                 # Predict future clocks/geometry from the departure prefix,
                 # not action conditioned on the teacher-selected next onset.
-                future_relation_prediction=self.phrase_execution.relations(decoder_hidden).reshape(
-                    *decoder_hidden.shape[:-1],RELATION_HORIZONS,RELATION_DIM))
-            if hasattr(self.phrase_execution,'timing'):
+                **({} if self.config.draft_policy!='off' else dict(future_relation_prediction=self.phrase_execution.relations(decoder_hidden).reshape(
+                    *decoder_hidden.shape[:-1],RELATION_HORIZONS,RELATION_DIM))))
+            if unified_arrival or hasattr(self.phrase_execution,'timing'):
                 group_ids=self.timing_grid.candidate_groups(candidate_deltas)
-                result['execution_kind_logits'],result['execution_delta_logits']=self.execution_timing_outputs(
-                    phrase_output,kind_logits,delta_logits,group_ids)
-        if hasattr(self, 'duration_audio'):
+                if unified_arrival:
+                    result['execution_kind_logits'],result['execution_delta_logits']=arrival_kinds,arrival_deltas
+                else:
+                    result['execution_kind_logits'],result['execution_delta_logits']=self.execution_timing_outputs(
+                        phrase_output,kind_logits,delta_logits,group_ids)
+            elif self.config.plan_kind_policy=='unified_first_arrival_v6':
+                # Optional symbolic pretraining has no acoustic arrival law.
+                # Reuse its existing causal time head across phrase modes.
+                result['execution_kind_logits']=kind_logits[...,None,:].expand(*kind_logits.shape[:-1],self.config.phrase_modes,kind_logits.size(-1))
+                result['execution_delta_logits']=delta_logits[...,None,:].expand(*delta_logits.shape[:-1],self.config.phrase_modes,delta_logits.size(-1))
+        if hasattr(self, 'duration_audio') or hasattr(self,'hold_duration_calibration'):
             result['duration_audio_context'] = self.duration_context_at(action_phrase_output, batch,
                 batch.get('target_second', batch['step_second']), cache)
+        if hasattr(self,'curve_preview_head') and 'audio_plan_target' in batch and not symbolic_only:
+            rows=batch.get('unified_chart_rows',batch.get('profile_chart_rows',torch.arange(inverse.size(0),device=inverse.device)))
+            result['curve_preview_rows']=rows
+            result['curve_preview_logits']=self.curve_preview_logits(cache,batch['condition'].index_select(0,rows),inverse.index_select(0,rows))
         if motion_distribution is not None:result['motion_phase_distribution']=motion_distribution
         if time_keep_mask is not None:
             result.update(timing_keep_mask=time_keep_mask,**motion_options,**transition_options)
@@ -1516,7 +1825,7 @@ class StreamComposer(nn.Module):
 
     def family_context_at(self,audio_cache,event_seconds,song_inverse,batch,*,phrase_output=None):
         """Music-first semantic input, separate from the geometry decoder."""
-        if self.config.event_family_policy not in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+        if self.config.event_family_policy not in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
             raise ValueError('Music-first family context requires an audio semantic policy')
         music=self._read_audio(audio_cache,event_seconds,song_inverse)
         beat_cache={**audio_cache,'family_beat_values':audio_cache['beats'][...,None]}
@@ -1538,7 +1847,7 @@ class StreamComposer(nn.Module):
             rhythm=self._family_rhythm_features(audio_cache,event_seconds,beats,song_inverse,batch,condition)
             projected=projected+self.family_rhythm_projection(rhythm).to(projected)
         audio=F.layer_norm(music+condition.to(music)+projected,(self.config.d_model,))
-        if self.config.event_family_policy=='shared_continuation_v1':
+        if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2'):
             audio_logits=self.audio_event_family_head(audio).float().masked_fill(~self.semantic_family_supported,-1e4)
             return dict(full=audio,audio=audio,audio_logits=audio_logits)
         if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4'):
@@ -1627,8 +1936,8 @@ class StreamComposer(nn.Module):
     @torch.no_grad()
     def sample_event_family(self,family_context=None,*,family_logits=None,temperature=1.,generator=None):
         if family_logits is None:
-            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
-                requirement=('candidate' if self.config.event_family_policy=='shared_continuation_v1' else 'mixed')
+            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
+                requirement=('candidate' if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2') else 'mixed')
                 raise ValueError(f'{self.config.event_family_policy} requires {requirement} family_logits')
             if family_context is None:raise ValueError('Semantic family selection requires its own context')
             family_logits=self.event_family_scores(family_context)
@@ -1656,8 +1965,8 @@ class StreamComposer(nn.Module):
             family_id=torch.as_tensor(family_override,device=scores.device,dtype=torch.long)
             scores=scores.masked_fill(self.semantic_route_families!=family_id[...,None],-torch.inf)
         if family_logits is None:
-            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
-                requirement=('candidate' if self.config.event_family_policy=='shared_continuation_v1' else 'mixed')
+            if self.config.event_family_policy in ('audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
+                requirement=('candidate' if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2') else 'mixed')
                 raise ValueError(f'{self.config.event_family_policy} requires {requirement} family_logits')
             if self.config.event_family_policy=='audio_semantic_v2' and family_context is None:
                 raise ValueError('audio_semantic_v2 requires candidate music family_context')
@@ -1736,7 +2045,7 @@ class StreamComposer(nn.Module):
         counts=torch.as_tensor(family_counts,device=self.active_event_family_head.bias.device,dtype=torch.float32).reshape(31)
         prior=(counts+.5).log()
         self.active_event_family_head.bias.copy_(prior-prior.logsumexp(-1))
-        if self.config.event_family_policy=='shared_continuation_v1':
+        if self.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2'):
             self.audio_event_family_head.bias.copy_(prior-prior.logsumexp(-1))
         if literal_counts is None:return
         literals=torch.as_tensor(literal_counts,device=counts.device,dtype=torch.float32).reshape(31)
@@ -1747,6 +2056,27 @@ class StreamComposer(nn.Module):
                 reference=self.shape_head.bias[regular].float().logsumexp(0)-self.shape_head.bias[0].float()
                 self.literal_route_head.bias[family-1].copy_(
                     (literals[family-1]+.5).log()-(regular_mass+.5*regular.sum()).log()+reference)
+
+    @torch.no_grad()
+    def initialize_detail_prior(self,detail_counts,atom_counts):
+        """Learnable fresh priors from actual weighted authored details."""
+        slots=0
+        for shape,counts in enumerate(detail_counts):
+            if not shape:continue
+            for slot,values in enumerate(counts):
+                bias=self.detail_heads[shape][slot].bias if hasattr(self,'detail_heads') else self.detail_bias[shape][slot]
+                prior=torch.as_tensor(values,device=bias.device,dtype=torch.float32).add(.5).log()
+                bias.copy_(prior-prior.logsumexp(0));slots+=1
+        observed=0
+        if hasattr(self,'literal_stop_head'):
+            counts=torch.as_tensor(atom_counts,device=self.literal_head.bias.device,dtype=torch.float32)
+            for type_id in range(5):
+                ids=getattr(self,f'literal_type_atoms_{type_id}')
+                if not ids.numel():continue
+                prior=counts.index_select(0,ids).add(.5).log()
+                self.literal_head.bias.index_copy_(0,ids,(prior-prior.logsumexp(0)).to(self.literal_head.bias))
+                observed+=int(counts.index_select(0,ids).gt(0).sum())
+        return dict(detail_prior_slots=slots,literal_prior_observed_atoms=observed)
 
     @torch.no_grad()
     def initialize_literal_stop_prior(self,block_counts,extra_atom_counts):
@@ -1818,7 +2148,8 @@ class StreamComposer(nn.Module):
             bias=bias*self.shared_details.literal_supported.index_select(0,ids)
         return bias
 
-    def literal_block_nll(self,contexts,targets,families=None,groups=None,*,return_stop=False,return_modes=False,detail_bank=None):
+    def literal_block_nll(self,contexts,targets,families=None,groups=None,*,return_stop=False,return_modes=False,detail_bank=None,mode_context=None,
+                          permutation_seed=None,return_support=False):
         """Exact typed-block NLL with a separately learned continuation law.
 
         All real atoms remain supervised. Stopping a Touch block can be
@@ -1833,8 +2164,15 @@ class StreamComposer(nn.Module):
         mode_result=contexts.new_zeros(contexts.size(0),self.config.phrase_modes,dtype=torch.float32) if return_modes else None
         catalog=self.literal_catalog_weights(detail_bank)
         stop_result=contexts.sum(-1)*0.
+        support_conflicts=targets.new_zeros(())
+        unordered=self.config.literal_set_policy=='permuted_unique_v1'
+        order_generator=(torch.Generator(device=contexts.device).manual_seed(int(permutation_seed))
+                         if unordered and self.training and permutation_seed is not None else None)
         for type_id,(rows,target,prefix) in enumerate(groups):
             if not rows.numel() or not self._literal_type_ids[type_id]:continue
+            if unordered and self.training:
+                from .stream_literal import permute_literal_targets
+                target=permute_literal_targets(target,order_generator)
             ids=getattr(self,f'literal_type_atoms_{type_id}')
             base=contexts.index_select(0,rows)+self.literal_family_embedding(families.index_select(0,rows))
             present=prefix.gt(0)
@@ -1845,6 +2183,12 @@ class StreamComposer(nn.Module):
             hidden,_=self.literal_cell(shifted,base[None])
             logits=F.linear(hidden,catalog.index_select(0,ids),self.literal_head.bias.index_select(0,ids))
             local=self.literal_type_local[target.clamp_min(0)]
+            if unordered:
+                from .stream_literal import literal_identity_support
+                available,conflicts=literal_identity_support(target,prefix,local,ids,
+                    self.literal_head_masks,self.literal_head_bits,self.literal_head_powers)
+                support_conflicts=support_conflicts+conflicts
+                logits=logits.masked_fill(~available,-1e4)
             identity=F.cross_entropy(logits.flatten(0,1).float(),local.flatten(),reduction='none').reshape_as(target)
             stop=F.linear(hidden,self.literal_stop_head.weight[type_id:type_id+1],
                 self.literal_stop_head.bias[type_id:type_id+1]).squeeze(-1).float()
@@ -1854,10 +2198,12 @@ class StreamComposer(nn.Module):
             stop_nll=(hazard*(target.ge(0)&later)).sum(-1)*valid_block
             nll=(identity*target.gt(0)).sum(-1)*valid_block+stop_nll
             if return_modes:
-                mode_logits=logits.float()[...,None,:]+self.literal_mode_bias(ids,detail_bank=detail_bank)[None,None]
+                bias=self.literal_mode_bias(ids,mode_context.index_select(0,rows) if mode_context is not None else None,detail_bank=detail_bank)
+                mode_logits=logits.float()[...,None,:]+(bias[:,None] if mode_context is not None else bias[None,None])
                 mode_identity=-mode_logits.log_softmax(-1).gather(-1,
                     local[...,None,None].expand(*local.shape,self.config.phrase_modes,1)).squeeze(-1)
-                mode_stop=stop[...,None]+self.detail_mode_control.stop_bias(type_id)
+                stop_bias=self.detail_mode_control.stop_bias(type_id,mode_context.index_select(0,rows) if mode_context is not None else None)
+                mode_stop=stop[...,None]+(stop_bias[:,None] if mode_context is not None else stop_bias)
                 mode_hazard=F.binary_cross_entropy_with_logits(mode_stop,
                     target.eq(0).float()[...,None].expand_as(mode_stop),reduction='none')
                 mode_nll=(mode_identity*target.gt(0)[...,None]).sum(1)
@@ -1865,8 +2211,9 @@ class StreamComposer(nn.Module):
                 mode_result=mode_result.index_add(0,rows,mode_nll)
             result=result.index_add(0,rows,nll)
             stop_result=stop_result.index_add(0,rows,stop_nll)
-        if return_modes:return (result,stop_result,mode_result) if return_stop else (result,mode_result)
-        return (result,stop_result) if return_stop else result
+        packed=((result,stop_result,mode_result) if return_stop else (result,mode_result)) if return_modes else ((result,stop_result) if return_stop else result)
+        if return_support:return (*packed,support_conflicts) if isinstance(packed,tuple) else (packed,support_conflicts)
+        return packed
 
     def _decode_literal_blocks(self,context,family,choose,temperature,detail_mode=None):
         details=[];used_heads=0
@@ -1930,19 +2277,25 @@ class StreamComposer(nn.Module):
             logits=logits.float().masked_fill(~allowed,-1e4)
         return logits
 
-    def regular_detail_log_probs(self,context,shape,phases,targets,duration_context=None,detail_bank=None,return_modes=False):
+    def regular_detail_log_probs(self,context,shape,phases,targets,duration_context=None,detail_bank=None,return_modes=False,mode_context=None,
+                                 return_calibration=False):
         """Exact teacher-forced detail sequence likelihood at each real phase."""
         count=context.size(0)
         if self.config.detail_policy=='independent_v1':
             result=context.new_zeros(count)
+            calibration=context.new_zeros(count,dtype=torch.float32)
             for slot,head in enumerate(self.detail_heads[shape]):
                 logits=self.duration_detail_logits(head(context),shape,slot,duration_context)
                 result=result-F.cross_entropy(logits.float(),targets[:,slot],reduction='none')
-            return result
+                if return_calibration and (shape,slot) in self.hold_duration_calibration._tables:
+                    calibration=calibration+self.hold_duration_calibration(logits.float().softmax(-1),shape,slot,duration_context,targets[:,slot])
+            return (result,calibration) if return_calibration else result
         hidden=context+self.shape_embedding.weight[shape]+self.phase_embedding(phases)
         previous=self.detail_start.expand(count,-1)
         result=context.new_zeros(count,dtype=torch.float32)
         mode_result=context.new_zeros(count,self.config.phrase_modes,dtype=torch.float32) if return_modes else None
+        calibration=context.new_zeros(count,dtype=torch.float32)
+        mode_calibration=torch.zeros_like(mode_result) if return_modes else None
         if hasattr(self,'shared_details') and detail_bank is None:detail_bank=self.shared_details.encode_catalog()
         for slot in range(len(self.codec.detail_sizes[shape])):
             weight=(self.shared_details.candidate_weights(shape,slot,detail_bank) if hasattr(self,'shared_details')
@@ -1951,11 +2304,17 @@ class StreamComposer(nn.Module):
             logits=F.linear(self.detail_output(hidden),weight,self.detail_bias[shape][slot])
             logits=self.duration_detail_logits(logits,shape,slot,duration_context)
             result=result-F.cross_entropy(logits.float(),targets[:,slot],reduction='none')
+            if return_calibration and (shape,slot) in self.hold_duration_calibration._tables:
+                calibration=calibration+self.hold_duration_calibration(logits.float().softmax(-1),shape,slot,duration_context,targets[:,slot])
             if return_modes:
-                mode_logits=logits.float()[:,None,:]+self.detail_mode_control.bias(weight)[None]
+                bias=self.detail_mode_control.bias(weight,mode_context)
+                mode_logits=logits.float()[:,None,:]+(bias if mode_context is not None else bias[None])
                 mode_result=mode_result+mode_logits.log_softmax(-1).gather(-1,
                     targets[:,slot,None,None].expand(count,self.config.phrase_modes,1)).squeeze(-1)
+                if return_calibration and (shape,slot) in self.hold_duration_calibration._tables:
+                    mode_calibration=mode_calibration+self.hold_duration_calibration(mode_logits.softmax(-1),shape,slot,duration_context,targets[:,slot])
             previous=self.detail_input(F.embedding(targets[:,slot],weight))
+        if return_calibration:return (result,mode_result,calibration,mode_calibration) if return_modes else (result,calibration)
         return (result,mode_result) if return_modes else result
 
     def loss(self, output, batch):
@@ -2153,13 +2512,20 @@ class StreamComposer(nn.Module):
 
 
 def stream_loss(model, output, batch):
-    """Joint sequence likelihood, uniform-time plan and optional recovery group."""
+    """Checkpoint-defined time/mark objective and explicitly budgeted auxiliaries.
+
+    The ordered-draft contract uses one first-arrival law and persistent
+    phrase-mode risk; legacy uniform-count losses are disabled in that path.
+    """
     weights = batch['loss_mask'].float()*batch.get('sample_weight', torch.ones_like(batch['loss_mask'])).float()
     # A changed prefix can have a trustworthy musical time without a unique
     # authored spatial continuation. Never train that arbitrary answer through
     # a second configuration head after masking the first one.
     configuration_mask = batch.get('configuration_mask', torch.ones_like(batch['loss_mask'])).bool()
     configuration_weights = weights*configuration_mask
+    family_only=(batch.get('configuration_family_mask',torch.zeros_like(configuration_mask)).bool()
+                 & ~configuration_mask & batch['target_kind'].eq(NOTE))
+    mark_weights=weights*(configuration_mask|family_only)
     # Dataset target weights total K per fixed time window. Renormalizing by
     # their sum here would cancel that balancing in homogeneous/single batches.
     denominator = float(batch.get('_loss_normalizer', weights.size(0)*model.config.rollout_steps))
@@ -2203,10 +2569,10 @@ def stream_loss(model, output, batch):
         family_nll=F.cross_entropy(output['event_family_logits'].flatten(0,1),
             (families.clamp_min(1)-1).flatten(),reduction='none').reshape_as(weights)
         family_full_loss=reduce_configuration(family_nll*note)
-        if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+        if model.config.event_family_policy in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
             audio_family_nll=F.cross_entropy(output['event_family_audio_logits'].flatten(0,1),
                 (families.clamp_min(1)-1).flatten(),reduction='none').reshape_as(weights)
-            alpha=model.config.event_family_audio_weight
+            alpha=0. if model.config.event_family_policy=='shared_music_mixture_v2' else model.config.event_family_audio_weight
             # Reallocate the existing family budget; do not stack a second
             # full family CE onto the configuration objective. Exit targets
             # below consume this same budgeted shape_nll.
@@ -2225,9 +2591,12 @@ def stream_loss(model, output, batch):
         # configuration objective, not an extra second copy of the event CE.
         mode_families=grouped_logsumexp(mode_routes,model.semantic_route_families-1,groups=31)
         mode_family_nll=-mode_families.gather(-1,(families.clamp_min(1)-1)[...,None,None].expand(*families.shape,mode_routes.size(-2),1)).squeeze(-1)
-        alpha=model.config.event_family_audio_weight
+        alpha=0. if model.config.event_family_policy=='shared_music_mixture_v2' else model.config.event_family_audio_weight
         mode_nll=mode_nll+alpha*(audio_family_nll[...,None]-mode_family_nll)
         mode_nll=mode_nll.masked_fill(~(note&configuration_weights.gt(0))[...,None],0.)
+        # Source music witnesses only the coarse type after an unmatched
+        # prefix. No spatial, duration, literal STOP or shape target is added.
+        mode_nll=torch.where(family_only[...,None],mode_family_nll,mode_nll)
     phase_mask = batch['target_phase_mask'].bool()
     regular = note & batch['target_shape'].gt(0) & configuration_weights.gt(0)
     # Give non-NOTE/fallback rows a finite dummy marginal before masking them.
@@ -2236,6 +2605,8 @@ def stream_loss(model, output, batch):
     phase_loss = reduce(phase_nll*regular)
     detail_sum = output['action_context'].sum()*0.
     context = output['action_context'].flatten(0, 1)
+    draft_detail=(model.draft_detail_projection(output['draft_action_context']).flatten(0,1)
+                  if 'draft_action_context' in output else None)
     details = batch['target_details'].flatten(0, 1)
     flat_weights = configuration_weights.flatten()
     detail_per_row=context.sum(-1)*0.
@@ -2245,9 +2616,13 @@ def stream_loss(model, output, batch):
     groups = batch['_detail_groups'] if sparse_groups is None else sparse_groups
     detail_bank=model.shared_details.encode_catalog() if hasattr(model,'shared_details') else None
     mode_details_enabled=mode_nll is not None and hasattr(model,'detail_mode_control')
+    calibration_enabled=hasattr(model,'hold_duration_calibration') and model.config.duration_calibration_weight>0
+    duration_per_row=context.sum(-1)*0.
+    duration_mode_per_row=context.new_zeros(context.size(0),model.config.phrase_modes,dtype=torch.float32) if mode_details_enabled else None
+    duration_terms=context.new_zeros((),dtype=torch.float32)
     packed_detail_results=None
     if (getattr(model,'_packed_detail_enabled',False) and sparse_groups is not None
-            and hasattr(model,'shared_details') and model.config.detail_policy!='independent_v1' and not mode_details_enabled):
+            and hasattr(model,'shared_details') and model.config.detail_policy!='independent_v1' and not mode_details_enabled and not calibration_enabled):
         from .stream_detail_compute import packed_regular_detail_log_probs
         packed_detail_results=packed_regular_detail_log_probs(model,context,details,groups,detail_bank,
             output.get('duration_audio_context'))
@@ -2256,20 +2631,30 @@ def stream_loss(model, output, batch):
         # The packed path already gathered contexts, targets and duration
         # rows. Do not launch the same gathers again only to discard them.
         ctx = context.index_select(0, indices) if packed_detail_results is None else None
+        mode_context=draft_detail.index_select(0,indices) if draft_detail is not None else None
         duration_context=None
         if packed_detail_results is None and output.get('duration_audio_context') is not None:
             from .stream_duration import select_duration_context
             duration_context=select_duration_context(output['duration_audio_context'],indices)
         target = details.index_select(0, indices) if packed_detail_results is None else None
         mass = flat_weights.index_select(0, indices)
+        if calibration_enabled:
+            supported_slots=sum((shape,slot) in model.hold_duration_calibration._tables for slot in range(len(model.codec.detail_sizes[shape])))
+            if duration_context is not None and supported_slots:
+                duration_terms=duration_terms+duration_context['valid'].float().sum()*supported_slots
         if model.config.detail_policy=='independent_v1':
             for slot, head in enumerate(model.detail_heads[shape]):
                 logits=model.duration_detail_logits(head(ctx),shape,slot,duration_context)
                 slot_nll=F.cross_entropy(logits.float(), target[:, slot], reduction='none')
+                if calibration_enabled and (shape,slot) in model.hold_duration_calibration._tables:
+                    score=model.hold_duration_calibration(logits.float().softmax(-1),shape,slot,duration_context,target[:,slot])
+                    slot_nll=slot_nll+model.config.duration_calibration_weight*score
+                    duration_per_row=duration_per_row.index_add(0,indices,score)
                 detail_sum = detail_sum + (slot_nll*mass).sum()
                 detail_per_row=detail_per_row.index_add(0,indices,slot_nll)
         else:
             mode_phase_details=None
+            phase_calibration=mode_phase_calibration=None
             if sparse_groups is None:
                 phases=torch.arange(8,device=ctx.device)[None].expand(ctx.size(0),-1)
                 expanded_duration=(select_duration_context(duration_context,
@@ -2278,9 +2663,17 @@ def stream_loss(model, output, batch):
                 phase_details=model.regular_detail_log_probs(
                     ctx[:,None].expand(-1,8,-1).reshape(-1,ctx.size(-1)),shape,phases.reshape(-1),
                     target[:,None].expand(-1,8,-1).reshape(-1,target.size(-1)),
-                    duration_context=expanded_duration,detail_bank=detail_bank,return_modes=mode_details_enabled)
+                    duration_context=expanded_duration,detail_bank=detail_bank,return_modes=mode_details_enabled,
+                    mode_context=(mode_context.repeat_interleave(8,0) if mode_context is not None else None),
+                    return_calibration=calibration_enabled)
+                if calibration_enabled:
+                    if mode_details_enabled:
+                        phase_details,mode_phase_details,phase_calibration,mode_phase_calibration=phase_details
+                        mode_phase_calibration=mode_phase_calibration.reshape(-1,8,model.config.phrase_modes).transpose(1,2)
+                    else:phase_details,phase_calibration=phase_details
+                    phase_calibration=phase_calibration.reshape(-1,8)
                 if mode_details_enabled:
-                    phase_details,mode_phase_details=phase_details
+                    if not calibration_enabled:phase_details,mode_phase_details=phase_details
                     mode_phase_details=mode_phase_details.reshape(-1,8,model.config.phrase_modes).transpose(1,2)
                 phase_details=phase_details.reshape(-1,8)
             else:
@@ -2288,9 +2681,18 @@ def stream_loss(model, output, batch):
                 packed = (packed_detail_results[group_number] if packed_detail_results is not None else
                     model.regular_detail_log_probs(ctx.index_select(0, rows), shape,
                         phases, target.index_select(0, rows),duration_context=(select_duration_context(duration_context,rows)
-                            if duration_context is not None else None),detail_bank=detail_bank,return_modes=mode_details_enabled))
+                            if duration_context is not None else None),detail_bank=detail_bank,return_modes=mode_details_enabled,
+                        mode_context=mode_context.index_select(0,rows) if mode_context is not None else None,
+                        return_calibration=calibration_enabled))
+                if calibration_enabled:
+                    if mode_details_enabled:
+                        packed,mode_packed,packed_calibration,mode_packed_calibration=packed
+                        mode_phase_calibration=mode_packed_calibration.new_zeros(indices.numel(),8,model.config.phrase_modes).index_put(
+                            (rows,phases),mode_packed_calibration).transpose(1,2)
+                    else:packed,packed_calibration=packed
+                    phase_calibration=packed_calibration.new_zeros(indices.numel(),8).index_put((rows,phases),packed_calibration)
                 if mode_details_enabled:
-                    packed,mode_packed=packed
+                    if not calibration_enabled:packed,mode_packed=packed
                     mode_phase_details=mode_packed.new_full((indices.numel(),8,model.config.phrase_modes),-torch.inf).index_put(
                         (rows,phases),mode_packed).transpose(1,2)
                 phase_details = packed.new_full((indices.numel(), 8), -torch.inf).index_put(
@@ -2298,6 +2700,13 @@ def stream_loss(model, output, batch):
             phase_log_probs=output['phase_logits'].flatten(0,1).index_select(0,indices).float().log_softmax(-1)
             allowed=phase_mask.flatten(0,1).index_select(0,indices)
             joint=-(phase_log_probs+phase_details).masked_fill(~allowed,-torch.inf).logsumexp(-1)
+            if calibration_enabled:
+                # Equivalent true head serializations describe the same event.
+                # Score their conditional duration laws without letting a head
+                # probability dodge calibration by moving onto a wrong head.
+                score=(phase_calibration*allowed).sum(-1)/allowed.sum(-1).clamp_min(1)
+                duration_per_row=duration_per_row.index_add(0,indices,score)
+                joint=joint+model.config.duration_calibration_weight*score
             independent=phase_nll.flatten().index_select(0,indices)
             # phase_loss + this conditional increment is exactly the joint
             # orbit likelihood; no separately averaged canonical-detail loss.
@@ -2307,9 +2716,14 @@ def stream_loss(model, output, batch):
                 mode_phase=output['execution_phase_logits'].flatten(0,1).index_select(0,indices).float().log_softmax(-1)
                 conditional_detail=mode_phase_details if mode_phase_details is not None else phase_details[:,None,:]
                 mode_joint=-(mode_phase+conditional_detail).masked_fill(~allowed[:,None,:],-torch.inf).logsumexp(-1)
+                if calibration_enabled:
+                    score=(mode_phase_calibration*allowed[:,None,:]).sum(-1)/allowed.sum(-1).clamp_min(1)[:,None]
+                    duration_mode_per_row=duration_mode_per_row.index_add(0,indices,score)
+                    mode_joint=mode_joint+model.config.duration_calibration_weight*score
                 mode_nll=mode_nll.flatten(0,1).index_add(0,indices,mode_joint).reshape_as(mode_nll)
     literal = batch['_literal_indices']
     literal_stop_loss=detail_sum.new_zeros(())
+    literal_support_conflicts=details.new_zeros(())
     if literal.numel():
         target = details.index_select(0, literal)
         literal_families=(families.flatten().index_select(0,literal) if model.config.event_family_policy!='legacy_v1' else None)
@@ -2317,9 +2731,12 @@ def stream_loss(model, output, batch):
         if hasattr(model,'literal_stop_head'):
             literal_result=model.literal_block_nll(context.index_select(0,literal),target,
                 literal_families,batch.get('_literal_type_blocks'),return_stop=True,
-                return_modes=mode_details_enabled,detail_bank=detail_bank)
+                    return_modes=mode_details_enabled,detail_bank=detail_bank,
+                    mode_context=draft_detail.index_select(0,literal) if draft_detail is not None else None,
+                    permutation_seed=batch.get('_literal_order_seed'),return_support=True)
             literal_nll,stop_nll=literal_result[:2]
             literal_mode_nll=literal_result[2] if mode_details_enabled else None
+            literal_support_conflicts=literal_result[-1]
             literal_stop_loss=(stop_nll*flat_weights.index_select(0,literal)).sum()/denominator
         else:
             logits = model.literal_logits(context.index_select(0, literal), target,literal_families)
@@ -2355,7 +2772,7 @@ def stream_loss(model, output, batch):
     plan_rate_loss=kind_loss.new_zeros(())
     plan_blank_loss=kind_loss.new_zeros(())
     plan_rate_floor=kind_loss.new_zeros(())
-    if 'plan_logits' in output and 'audio_plan_target' in batch:
+    if 'plan_logits' in output and 'audio_plan_target' in batch and model.config.plan_kind_policy not in ('unified_first_arrival_v5','unified_first_arrival_v6'):
         logits, target = output['plan_logits'].float(), batch['audio_plan_target'].float()
         blank = F.binary_cross_entropy_with_logits(logits[..., 0], target[..., 0], reduction='none')
         # Predict counts for the same real cell exposure as the dataset labels.
@@ -2408,14 +2825,65 @@ def stream_loss(model, output, batch):
                 delta_targets[...,None].expand(*kind.shape,mode_count).reshape(-1),reduction='none').reshape_as(mode_nll)
             joint_mode=mode_kind+mode_delta*note[...,None]+mode_nll*configuration_mask[...,None]
         else:joint_mode=mode_nll
-        if model.config.song_response_policy=='unified_profile_response_v2':
+        if model.config.draft_policy!='off':
+            from .stream_draft import draft_mode_nll
+            draft_error=draft_mode_nll(model,output,batch)
+            joint_mode=joint_mode+model.config.draft_loss_weight*draft_error
+            execution_metrics['draft_loss']=reduce(draft_error.mean(-1))
+        if model.config.draft_policy!='off':
+            from .stream_phrase_execution import draft_joint_sequence_loss
+            departure=output.get('song_response_phrase_logits',output['departure_execution_prior_logits'])
+            landing=output['action_execution_prior_logits']
+            if departure.ndim==4:
+                chart_inverse=batch.get('unified_chart_inverse',torch.arange(weights.size(0),device=weights.device))
+                selected=output['selected_song_component'][chart_inverse]
+                indices=selected[:,None,None,None].expand(-1,weights.size(1),1,model.config.phrase_modes)
+                departure=departure.gather(-2,indices).squeeze(-2)
+                landing=landing.gather(-2,indices).squeeze(-2)
+            choice_credit={} if model.config.song_choice_objective_policy=='event_credit_v1' else None
+            event_objective,unified_metrics=draft_joint_sequence_loss(
+                mode_kind+mode_delta*note[...,None],mode_nll+model.config.draft_loss_weight*draft_error,
+                departure,landing,batch,weights,mark_weights,denominator,
+                temperature=model.config.draft_responsibility_temperature,objective_policy=model.config.draft_objective_policy,
+                choice_credit=choice_credit)
+            if choice_credit and model.training:
+                from .stream_song_profile import sampled_event_choice_credit
+                credit,credit_metrics=sampled_event_choice_credit(
+                    output['unified_profile_evidence']['prior_logits'],output['selected_song_component'],
+                    choice_credit['energy'],choice_credit['mass'],choice_credit['chart'],denominator,
+                    committed=batch.get('committed_song_component'),baseline=model.song_choice_cost_baseline.detach().clone())
+                event_objective=event_objective+credit
+                unified_metrics.update(credit_metrics)
+                with torch.no_grad():
+                    observed=credit_metrics['song_choice_credit_unit_cost']
+                    has_credit=credit_metrics['song_choice_credit_charts'].gt(0)&torch.isfinite(observed)
+                    updated=torch.where(model.song_choice_baseline_ready,.95*model.song_choice_cost_baseline+.05*observed,observed)
+                    model.song_choice_cost_baseline.copy_(torch.where(has_credit,updated,model.song_choice_cost_baseline))
+                    model.song_choice_baseline_ready.logical_or_(has_credit)
+            evidence=output.get('profile_loss_evidence',output.get('unified_profile_evidence'))
+            actor_evidence=output.get('unified_profile_evidence')
+            chart_weights=batch.get('unified_profile_chart_weights',batch.get('profile_chart_weights'))
+            profile_nll=((evidence['joint_profile_nll']*chart_weights).sum() if evidence is not None else event_objective*0.)
+            unified_metrics.update(unified_balanced_variational_objective=(event_objective+model.config.song_profile_weight*profile_nll).detach(),
+                unified_configuration_nll=event_objective,unified_profile_nll=profile_nll,
+                unified_prior_entropy=(-(actor_evidence['prior_logits'].log_softmax(-1).exp()*actor_evidence['prior_logits'].log_softmax(-1)).sum(-1).mean() if actor_evidence is not None else event_objective*0.))
+            execution_metrics.update(unified_metrics,unified_event_nll=event_objective)
+        elif model.config.song_response_policy=='unified_profile_response_v2':
             from .stream_phrase_execution import unified_profile_response_loss
             evidence=output['unified_profile_evidence']
             chart_weights=batch.get('unified_profile_chart_weights',batch['profile_chart_weights'])
+            selected=output.get('selected_song_component')
+            deployed=selected is not None and model.config.draft_policy!='off'
+            event_prior=(torch.full_like(evidence['prior_logits'],-1e4).scatter(-1,selected[:,None],0.)
+                         if deployed else evidence['prior_logits'])
             event_objective,unified_metrics=unified_profile_response_loss(joint_mode,output['song_response_phrase_logits'],
                 batch,weights if 'execution_kind_logits' in output else configuration_weights,denominator,
-                prior_logits=evidence['prior_logits'],component_profile_nll=evidence['component_profile_nll'],
-                profile_chart_weights=chart_weights,profile_weight=model.config.song_profile_weight)
+                prior_logits=event_prior,component_profile_nll=(torch.zeros_like(evidence['component_profile_nll']) if deployed else evidence['component_profile_nll']),
+                profile_chart_weights=chart_weights,profile_weight=0. if deployed else model.config.song_profile_weight,
+                temperature=model.config.draft_responsibility_temperature if model.config.draft_policy!='off' else 1.)
+            if deployed:
+                unified_metrics['unified_profile_nll']=(evidence['joint_profile_nll']*chart_weights).sum()
+                unified_metrics['deployed_component_objective']=event_objective.detach()
             if 'execution_kind_logits' not in output:event_objective=event_objective+time_loss
             execution_metrics.update(unified_metrics)
             execution_metrics['unified_event_nll']=unified_metrics['unified_configuration_nll']
@@ -2464,12 +2932,13 @@ def stream_loss(model, output, batch):
     profile_crps=kind_loss.new_zeros(())
     profile_nll=kind_loss.new_zeros(())
     if model.config.song_response_policy=='unified_profile_response_v2':
-        evidence=output['unified_profile_evidence']
+        evidence=output.get('profile_loss_evidence',output['unified_profile_evidence'])
         profile_nll=execution_metrics['unified_profile_nll']
         profile_crps=(evidence['crps']*batch.get('unified_profile_chart_weights',batch['profile_chart_weights'])).sum()
         profile_loss=profile_nll+profile_crps
         # Numerical likelihood already belongs to the one shared z objective.
         total=total+model.config.song_profile_weight*profile_crps
+        if model.config.draft_policy!='off':total=total+model.config.song_profile_weight*profile_nll
     elif 'song_profile_audio' in output:
         rows=batch.get('profile_chart_rows',torch.arange(batch['condition'].size(0),device=weights.device))
         controls=batch['condition'].float().index_select(0,rows)
@@ -2491,6 +2960,11 @@ def stream_loss(model, output, batch):
         total=total+model.config.song_profile_weight*profile_loss
     execution_metrics.update(song_profile_loss=profile_loss,song_profile_nll=profile_nll,song_profile_crps=profile_crps,
         song_profile_weighted_loss=model.config.song_profile_weight*profile_loss)
+    if 'manual_condition_chart_mask' in output:
+        manual=output['manual_condition_chart_mask']
+        execution_metrics.update(manual_condition_chart_count=manual.sum().float(),
+            deployment_condition_chart_count=(~manual).sum().float(),
+            manual_condition_chart_fraction=manual.float().mean())
     continuation_metrics={}
     if model.config.transition_policy in ('music_exit_v1','music_exit_v2','music_exit_v3'):
         # These are components/diagnostics of the existing joint NLL. They
@@ -2519,27 +2993,41 @@ def stream_loss(model, output, batch):
             describe('template',output['event_route_log_probs'],keep,
                 F.one_hot(routes,output['event_route_log_probs'].size(-1)).bool(),note&weights.gt(0))
     occurrence_metrics={}
-    if 'occurrence_expected_events' in output:
+    if 'occurrence_expected_events' in output or 'occurrence_expected_hazard' in output:
         # Partition the existing occurrence NLL; this is diagnostic, not a
         # second loss that would silently multiply NOTE or rest supervision.
         for label,value in (('note',NOTE),('wait',WAIT),('eos',EOS)):
             selected=kind.eq(value)&weights.gt(0)
             occurrence_metrics['occurrence_'+label+'_nll']=reduce(kind_nll*selected)
             occurrence_metrics['occurrence_'+label+'_weight']=(weights*selected).sum()
-        occurrence_metrics['occurrence_expected_events']=reduce(output['occurrence_expected_events'])
+        field='occurrence_expected_hazard' if 'occurrence_expected_hazard' in output else 'occurrence_expected_events'
+        occurrence_metrics[field]=reduce(output[field])
         if 'occurrence_arrangement_gain' in output:
             occurrence_metrics['occurrence_arrangement_gain']=reduce(output['occurrence_arrangement_gain'])
             occurrence_metrics['occurrence_arrangement_history_support']=reduce(output['occurrence_arrangement_history_support'])
             occurrence_metrics['occurrence_audio_expected_events']=reduce(output['occurrence_audio_expected_events'])
             authored=batch.get('authored_rest_row_mask',torch.zeros(weights.size(0),device=weights.device,dtype=torch.bool))[:,None]
             occurrence_metrics['occurrence_authored_rest_nll']=reduce(kind_nll*authored*kind.ne(NOTE))
+    preview_loss=total.new_zeros(());preview_metrics={}
+    if 'curve_preview_logits' in output and model.config.curve_preview_weight>0:
+        from .stream_curve_preview import preview_count_loss
+        preview_loss,preview_metrics=preview_count_loss(output['curve_preview_logits'],batch,
+            output['curve_preview_rows'],audio_grid_seconds=model.config.audio_grid_seconds)
+        total=total+model.config.curve_preview_weight*preview_loss
     metrics = {name: value.detach() for name, value in dict(loss=total, time_loss=time_loss,
+        curve_preview_loss=preview_loss,curve_preview_weighted_loss=model.config.curve_preview_weight*preview_loss,
+        **preview_metrics,
         kind_loss=kind_loss, delta_loss=delta_loss, timing_grid_loss=timing_grid_loss,
         timing_within_grid_loss=timing_within_grid_loss, configuration_loss=configuration_loss,
         shape_loss=shape_loss, event_family_loss=family_loss,
+        first_step_family_targets=(family_only&weights.gt(0)).sum().float(),
+        first_step_family_reference_nll=(reduce(mode_family_nll.mean(-1)*family_only) if mode_nll is not None else total.new_zeros(())),
         event_family_full_loss=family_full_loss,event_family_audio_loss=family_audio_loss,
         event_route_conditional_loss=shape_loss-family_loss, phase_loss=phase_loss, detail_loss=detail_loss,
-        literal_stop_loss=literal_stop_loss,
+        literal_stop_loss=literal_stop_loss,literal_support_target_conflicts=literal_support_conflicts,
+        duration_calibration_base_score=reduce_configuration(duration_per_row.reshape_as(weights)),
+        duration_calibration_mean_mode_score=(reduce_configuration(duration_mode_per_row.mean(-1).reshape_as(weights)) if duration_mode_per_row is not None else total.new_zeros(())),
+        duration_calibration_target_count=duration_terms,
         plan_loss=plan_loss,plan_rate_loss=plan_rate_loss,plan_blank_loss=plan_blank_loss,
         plan_rate_floor=plan_rate_floor,plan_rate_excess=plan_rate_loss-plan_rate_floor,
         plan_weighted_loss=model.config.plan_weight*plan_loss,main_prediction_loss=time_loss+configuration_loss,

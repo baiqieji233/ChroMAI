@@ -215,9 +215,13 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     assert fresh['lane_load_policy']=='direct_buttons_v1'
     assert fresh['continuation_policy']=='pattern_runs_v2'
     assert fresh['motion_continuation_policy']=='context_motion_v3'
-    assert fresh['recovery_policy']=='greedy_mixed_v4'
+    assert fresh['recovery_policy']=='first_step_phrase_v6'
+    assert fresh['song_choice_objective_policy']=='event_credit_v1'
     assert fresh['transition_policy']=='off'
-    assert fresh['event_family_policy']=='shared_continuation_v1'
+    assert fresh['event_family_policy']=='shared_music_mixture_v2'
+    assert fresh['literal_set_policy']=='permuted_unique_v1'
+    assert fresh['duration_objective_policy']=='hold_crps_v2'
+    assert fresh['curve_preview_policy']=='audio_counts_v1'
     assert fresh['recovery_target_policy']=='causal_correspondence_v1'
     assert fresh['gap_continuation_policy']=='off'
     assert fresh['prefix_augmentation_rate']==.15
@@ -227,6 +231,9 @@ def test_learning_stage_auto_repairs_finetune_and_resume_keeps_legacy():
     assert resumed['transition_exit_weight']==0
     assert resumed['lane_load_policy']=='off'
     assert resumed['recovery_policy']=='persistent_v1'
+    assert resumed['literal_set_policy']=='canonical_v1'
+    assert resumed['duration_objective_policy']=='categorical_v1'
+    assert resumed['curve_preview_policy']=='off'
     assert resumed['transition_policy']=='off'
     assert resumed['prefix_augmentation_rate']==0
     with pytest.raises(ValueError,match='Resume inherits'):
@@ -287,6 +294,7 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         'keep_gap_audio.','family_continuity_head.','family_state_phrase.','family_rhythm_projection.','music_exit_head.'))}
     expected.update({'song_profile.network.0.weight','song_profile.network.0.bias',
                      'song_profile.network.2.weight','song_profile.network.2.bias'})
+    expected.update({'curve_preview_head.weight','curve_preview_head.bias','curve_preview_trained_updates'})
     assert additions==expected
     assert_ordered_parameter_initialization(upgraded.state_dict())
     for key in additions:
@@ -294,6 +302,9 @@ def test_learning_stage_migration_preserves_all_parent_tensors_and_zero_initiali
         if key.startswith('song_profile.'):
             assert torch.isfinite(value).all(),key
             continue  # Newly trained control distribution; does not alter the actor forward.
+        if key.startswith('curve_preview_head.'):
+            assert torch.isfinite(value).all() and torch.count_nonzero(value)>0,key
+            continue  # Detached readout; parent actor tensors above remain exact.
         if key in ordered:
             continue  # Exact individual initialization contracts checked above.
         elif key.startswith('phrase_context.'):

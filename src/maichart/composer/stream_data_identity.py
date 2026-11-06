@@ -47,7 +47,8 @@ def _annotation_path(manifest, payload):
     if not path.exists() and isinstance(payload.get('split_metadata'),dict):
         source=payload['split_metadata'].get('source_manifest')
         if source:
-            path=Path(source).with_name('quality_annotations.json')
+            from maichart.portable_paths import material_path
+            path=material_path(source).with_name('quality_annotations.json')
     return path.resolve() if path.exists() else None
 
 

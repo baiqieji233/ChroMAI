@@ -57,3 +57,30 @@ def rotation_boundary_clear(authored_prefix, first_changed_second, guard):
         if errors or end >= cutoff:
             return False
     return True
+
+
+def authored_seam_corresponds(authored,actual,guard,*,minimum_notes=3):
+    """Certify a real recent seam after all differing actions have expired.
+
+    This is a source witness, not a comfort-score label. The same contiguous
+    timed suffix (including WAITs) must exist in the authored chart. Both
+    removed and inserted old actions must be outside the native interaction
+    cutoff; any surviving different sustain makes the proof fail.
+    """
+    if not authored or not actual or authored[-1].end!=actual[-1].end:return False
+    def equal(a,b):
+        return a.kind==b.kind and a.start==b.start and a.end==b.end and (
+            a.kind!=NOTE or _atoms(a.text)==_atoms(b.text))
+    a=len(authored);b=len(actual);notes=0
+    while a and b and equal(authored[a-1],actual[b-1]):
+        a-=1;b-=1;notes+=int(authored[a].kind==NOTE)
+    if notes<minimum_notes:return False
+    cutoff=guard.interaction_start(float(actual[-1].end_second))
+    common=0
+    while common<min(a,b) and equal(authored[common],actual[common]):common+=1
+    for step in (*authored[common:a],*actual[common:b]):
+        if step.kind!=NOTE:continue
+        try:_start,end,_sustained,errors=guard._lifetime(EventPoint(step.end,step.text))
+        except (ValueError,TypeError):return False
+        if errors or end>=cutoff:return False
+    return True

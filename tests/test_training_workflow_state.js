@@ -140,10 +140,11 @@ test("unsupported onset guidance disables the control without erasing its saved 
 test("manual edit metadata is retained with saved settings", () => {
   const learningRate = {dataset: {touched: "1"}};
   const contextTokens = {dataset: {touched: "1"}};
-  const collect = new Function("settingsFields", "element",
+  const collect = new Function("settingsFields", "element", "v2ConditionState", "v2ConditionActive", "otherFamilyConditionValues",
     functionSource("collectSettings", "saveSettings") + "; return collectSettings;")(
       () => [],
       selector => selector === "#learningRate" ? learningRate : contextTokens,
+      {}, false, {},
     );
   assert.deepEqual(collect().__manualTouched, {learningRate: true, contextTokens: true});
 });

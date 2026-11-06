@@ -128,7 +128,7 @@ def sample_guarded_event(model, context, reference_phase, beat, guard, generator
                 template_keep_logit=template_keep_logit,template_reference_shape=template_reference_shape,
                 temperature=temperature,generator=generator,
                 **({'decision_chooser':frontier.choose} if frontier is not None else {}))
-        elif getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1'):
+        elif getattr(getattr(model,'config',None),'event_family_policy','legacy_v1') in ('audio_semantic_v2','audio_prior_transition_v3','audio_state_phrase_v4','shared_continuation_v1','shared_music_mixture_v2'):
             sampled_family=True
             if family_context is None and family_logits is None:raise ValueError('Audio semantic decoding requires candidate music context')
             family_options={'family_logits':family_logits} if family_logits is not None else {}
@@ -141,7 +141,7 @@ def sample_guarded_event(model, context, reference_phase, beat, guard, generator
         options = dict(reference_phase=reference_phase, temperature=temperature, generator=generator)
         if execution_route_log_probs is not None:options['execution_route_log_probs']=execution_route_log_probs
         if execution_lane_bias is not None:options['execution_lane_bias']=execution_lane_bias
-        if detail_mode is not None:options['detail_mode']=int(detail_mode)
+        if detail_mode is not None:options['detail_mode']=detail_mode if isinstance(detail_mode,dict) else int(detail_mode)
         if duration_context is not None:options['duration_context']=duration_context
         if family is not None:options.update(family_context=family_context,family_override=family)
         if family_logits is not None:options['family_logits']=family_logits

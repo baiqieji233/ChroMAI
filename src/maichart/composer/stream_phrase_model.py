@@ -20,7 +20,7 @@ class OrderedPhraseContext(nn.Module):
     exclusively encoded by ordered_phrase_auxiliary_loss. Contrastive label
     gradients never turn future configurations into decoder inputs.
     """
-    def __init__(self, model_width, width, *, aligned=False):
+    def __init__(self, model_width, width, *, aligned=False, supervision=True):
         super().__init__()
         self.width = width
         self.audio_keys = nn.Linear(model_width, 64)
@@ -34,7 +34,8 @@ class OrderedPhraseContext(nn.Module):
         self.actor_input = nn.Sequential(nn.Linear(model_width, width), nn.LayerNorm(width))
         self.interaction = nn.Sequential(nn.Linear(4*width+1, width), nn.GELU(), nn.LayerNorm(width))
         self.interaction_output = nn.Linear(width, model_width, bias=False)
-        self.predict = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.LayerNorm(width), nn.Linear(width, width))
+        if supervision:
+            self.predict = nn.Sequential(nn.Linear(width, width), nn.GELU(), nn.LayerNorm(width), nn.Linear(width, width))
         self.aligned = aligned
         if aligned:
             self.alignment_query = nn.Linear(2*width+1,width)
@@ -178,12 +179,13 @@ class OrderedPhraseContext(nn.Module):
 
 
 class CausalPhraseContext(nn.Module):
-    def __init__(self, width, condition_dim, *, ordered=False, aligned=False, shared=False):
+    def __init__(self, width, condition_dim, *, ordered=False, aligned=False, shared=False,
+                 draft=False, modes=4, codec=None, draft_width=96, draft_max_anchors=16):
         super().__init__()
         model_width, width = width, min(width, 128)
         self.phrase_width = width
         self.shared_ordered=bool(shared)
-        if shared:ordered=aligned=True
+        if shared or draft:ordered=aligned=True
         if not shared:
             self.audio = nn.Sequential(nn.Linear(32 * 4, width), nn.GELU(), nn.LayerNorm(width))
             self.writing = nn.Sequential(nn.Linear(PHRASE_FEATURE_DIM, width), nn.GELU(), nn.LayerNorm(width))
@@ -194,7 +196,8 @@ class CausalPhraseContext(nn.Module):
         self.null_reference = nn.Parameter(torch.zeros(width))
         self.intent = nn.Sequential(nn.Linear(width * 3, width), nn.GELU(), nn.LayerNorm(width))
         self.progress = nn.Sequential(nn.Linear(PHRASE_FEATURE_DIM, width), nn.GELU(), nn.LayerNorm(width))
-        self.predict = nn.Linear(width, PHRASE_FEATURE_DIM)
+        if not draft:
+            self.predict = nn.Linear(width, PHRASE_FEATURE_DIM)
         self.intent_output = nn.Linear(width, model_width, bias=False)
         self.progress_output = nn.Linear(width, model_width, bias=False)
         self.style_output = nn.Linear(width, model_width, bias=False)
@@ -204,7 +207,12 @@ class CausalPhraseContext(nn.Module):
         for layer in (self.intent_output, self.progress_output, self.style_output, self.tracking_output):
             nn.init.zeros_(layer.weight)
         if ordered or aligned:
-            self.ordered = OrderedPhraseContext(model_width, width, aligned=aligned)
+            self.ordered = OrderedPhraseContext(model_width, width, aligned=aligned, supervision=not draft)
+        if draft:
+            if codec is None:raise ValueError('Ordered drafts require the actual event codec')
+            from .stream_draft import OrderedPhraseDraft
+            self.draft = OrderedPhraseDraft(width, condition_dim, codec, width=draft_width,
+                modes=modes, max_anchors=draft_max_anchors)
 
     def _music(self, model, cache, inverse, start, end):
         fractions = start.new_tensor([0., .125, .25, .375, .5, .625, .75, .875, 1.])
@@ -351,11 +359,16 @@ class CausalPhraseContext(nn.Module):
         if strength.ndim == 2: strength = strength[..., None]
         tracked = anchor * self.tracking(intent).sigmoid()
         residual = residual + strength * self.tracking_output(tracked)
-        prediction = self.predict(intent)
+        if hasattr(self, 'predict'):
+            ordered_output['phrase_prediction'] = self.predict(intent)
         if hasattr(self, 'ordered'):
-            ordered_output.update(phrase_ordered_prediction=self.ordered.predict(intent), phrase_progress_repr=progress)
+            ordered_output['phrase_progress_repr'] = progress
+            if hasattr(self.ordered, 'predict'):
+                ordered_output['phrase_ordered_prediction'] = self.ordered.predict(intent)
+        if hasattr(self, 'draft'):
+            prepared = music_state['ordered_cache'] if self.shared_ordered else ordered_cache
+            ordered_output.update(self.draft(model, prepared, inverse, batch, sequence_states, music_state))
         return residual, dict(phrase_intent=intent, phrase_reference_weights=weights,phrase_music_anchor=anchor,
-            phrase_prediction=prediction,
             phrase_reference_repr=references, phrase_reference_mask=allowed,
             phrase_residual_rms=residual.float().square().mean(-1).sqrt(), **ordered_output)
 
@@ -364,6 +377,8 @@ class CausalPhraseContext(nn.Module):
         candidate = {key[len('candidate_'):]:value for key,value in batch.items()
                      if key.startswith('candidate_')}
         candidate['condition'] = batch['condition']
+        for key in ('_draft_runtime_cache', '_draft_runtime_key'):
+            if key in batch:candidate[key] = batch[key]
         candidate['step_mask'] = batch['step_mask'] if batch['step_mask'].shape == candidate['phrase_start_beat'].shape else batch['step_mask'][:,-1:]
         if 'step_beat' not in candidate:
             raise ValueError('candidate_step_beat is required')

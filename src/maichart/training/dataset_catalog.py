@@ -11,6 +11,7 @@ import tempfile
 import threading
 from pathlib import Path
 from typing import Any
+from maichart.portable_paths import material_path
 
 
 SCHEMA = "maichart-training-manifest-v1"
@@ -52,12 +53,12 @@ def _source_root(manifest: Path, data: dict[str, Any]) -> Path:
     value = str(data.get("source_root") or ".")
     if value.startswith("<"):
         return manifest.parent
-    path = Path(value)
+    path = material_path(value)
     return (path if path.is_absolute() else manifest.parent / path).resolve()
 
 
 def _source_asset(value: Any, manifest: Path, data: dict[str, Any]) -> Path:
-    path = Path(str(value))
+    path = material_path(str(value))
     if path.is_absolute():
         return path.resolve()
     bases = (manifest.parent, _source_root(manifest, data), manifest.parent.parent)

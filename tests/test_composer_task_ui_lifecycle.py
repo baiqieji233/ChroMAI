@@ -26,6 +26,12 @@ let activeTaskId=null, datasetUploading=false, preprocessStarting=false, trainin
     trainingPreflight=false;
 const liveComposerTrainingTasks=new Set(), pendingTaskCancellations=new Set(), taskWatchers=new Map();
 const datasetWorkspaceState={applying:false}, TASK_KIND_LABEL={};
+const intensityCurveState={projectRoot:'',profile:null};
+let curveContextChecks=0;
+const invalidateLearnedCurveForCheckpoint=()=>{
+ curveContextChecks++;
+ assert.equal(intensityCurveState.projectRoot,'E:\\simai_transformer');
+};
 const buttons=new Map(['#trainButton','#cancelButton','#taskMessage'].map(k=>[k,{}]));
 const element=k=>buttons.get(k), window={}, currentTrainingMode=()=> 'fresh',
  selectedTrainingManifests=()=>[], trainingEpochStatus=()=>null,
@@ -37,7 +43,7 @@ const timers=[]; const setTimeout=fn=>timers.push(fn);
 const task=(id,status)=>({task_id:id,kind:'composer_train',status,result:{},logs:[]});
 const tasks=new Map([['a',task('a','cancelling')],['b',task('b','running')]]);
 const api=async(url,body)=>{
- if(url==='/api/status') return {tasks:[...tasks.values()]};
+ if(url==='/api/status') return {project_root:'E:\\simai_transformer',tasks:[...tasks.values()]};
  if(url==='/api/cancel') {calls++;return await new Promise(resolve=>pendingReply=resolve);}
  return tasks.get(new URL(url,'http://stub').searchParams.get('id'));
 };
@@ -46,6 +52,8 @@ const api=async(url,body)=>{
     script += r'''
 (async()=>{
  await loadStatus();
+ assert.equal(curveContextChecks,1,'status bootstrap refreshes the curve project-root identity');
+ assert.equal(intensityCurveState.projectRoot,'E:\\simai_transformer');
  assert.equal(buttons.get('#trainButton').disabled,true);
  assert.equal(taskWatchers.size,2);
  assert.match(buttons.get('#trainButton').title,/Composer/);

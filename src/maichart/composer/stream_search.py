@@ -68,6 +68,25 @@ def _step_fingerprint(steps):
     return tuple((step.kind, str(step.start), str(step.end), step.text) for step in steps)
 
 
+def _failed_proposal_scope(result):
+    """Deduplicate the exact failed transaction, not every use of an edit.
+
+    Two rejected configurations at the same beat can have different blockers.
+    Failure of one repaired candidate must not ban that repair for the other.
+    """
+    guard=result['guard']
+    trials=getattr(guard,'failure_trials',()) or ()
+    proposals=tuple((str(point.beat),point.note_text,
+                     tuple(sorted((str(issue.conflict_type),tuple(sorted((str(note.beat),note.raw)
+                         for note in getattr(issue,'notes',())))) for issue in issues)))
+                    for point,issues in trials)
+    last=getattr(guard,'last_proposal',None)
+    intent=tuple((getattr(step,'phrase_mode_start',None),getattr(step,'phrase_mode',None))
+                 for step in result.get('steps',()) if getattr(step,'phrase_mode',None) is not None)
+    return (str(result.get('cursor')),proposals,
+            None if last is None else (str(last.beat),last.note_text),intent)
+
+
 def _advances(steps,start):
     """A rewritten history may have fewer steps yet reach a later beat."""
     return bool(steps and steps[-1].end>start)
@@ -323,7 +342,8 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                     for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,
                                                     codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
                         if repairs_used>=repair_budget or time.perf_counter()>=deadline:break
-                        edit_key=(edit['operation'],edit['beat'],edit.get('raw'),edit.get('replacement'),_step_fingerprint(prefix))
+                        edit_key=(edit['operation'],edit['beat'],edit.get('raw'),edit.get('replacement'),
+                                  _step_fingerprint(prefix),_failed_proposal_scope(failed))
                         if edit_key in attempted_historical_edits:continue
                         attempted_historical_edits.add(edit_key)
                         repairs_used+=1;run(prefix,origin='historical_sustain_edit')
@@ -334,7 +354,8 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                     for prefix,edit in _repair_prefix(failed,song,clock,native_metrics,lifetimes,withdraw=True,
                                                     codec=codec,duration_catalog=duration_catalog,deadline=deadline,committed_steps=committed):
                         if rollbacks_used>=rollback_budget or time.perf_counter()>=deadline:break
-                        edit_key=(edit['operation'],edit['beat'],edit.get('raw'),edit.get('replacement'),_step_fingerprint(prefix))
+                        edit_key=(edit['operation'],edit['beat'],edit.get('raw'),edit.get('replacement'),
+                                  _step_fingerprint(prefix),_failed_proposal_scope(failed))
                         if edit_key in attempted_historical_edits:continue
                         attempted_historical_edits.add(edit_key)
                         rollbacks_used+=1;run(prefix,origin='historical_sustain_withdrawal')
@@ -411,7 +432,7 @@ def search_stream(rollout,song,condition,args,end,clock,curve,audio_bank=None,co
                         if valid or time.perf_counter()>=deadline:break
                         used=rollbacks_used if withdraw else repairs_used
                         if used>=budget_limit:break
-                        key=('private',edit['operation'],_step_fingerprint(prefix))
+                        key=('private',edit['operation'],_step_fingerprint(prefix),_failed_proposal_scope(failed))
                         if key in attempted_historical_edits:continue
                         attempted_historical_edits.add(key)
                         if withdraw:rollbacks_used+=1

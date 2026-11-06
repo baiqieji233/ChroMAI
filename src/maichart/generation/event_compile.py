@@ -45,7 +45,8 @@ def compile_event_points(
     designer: str = "",
     tail_step: Fraction = Fraction(1, 4),
     strict_notes: bool = False,
-) -> tuple[str, ChartIR]:
+    build_ir: bool = True,
+) -> tuple[str, ChartIR | None]:
     """Compile a full Maidata document and verify its exact event roundtrip.
 
     Each EventPoint is one whole comma-delimited note group. Duplicate heads
@@ -54,6 +55,8 @@ def compile_event_points(
     Arbitrary positive integer grids are allowed. An omitted end leaves one
     tail_step after the last note or tempo anchor, without inferring durations.
     strict_notes rejects the whole chart on any unsupported note token.
+    Set build_ir=False for text-only consumers; exact roundtrip verification
+    still runs.
     """
 
     bpm = _finite_number(bpm, "bpm", positive=True)
@@ -167,7 +170,7 @@ def compile_event_points(
                 differences.append(f"{field}: expected={left!r} reparsed={right!r}")
         detail = "; ".join(differences[:4])
         raise ValueError(f"Compiled Maidata does not preserve exact events, tempos, or metadata. {detail}")
-    return maidata_text, _build_ir(reparsed, inote, designer)
+    return maidata_text, _build_ir(reparsed, inote, designer) if build_ir else None
 
 
 def build_event_chart_ir(

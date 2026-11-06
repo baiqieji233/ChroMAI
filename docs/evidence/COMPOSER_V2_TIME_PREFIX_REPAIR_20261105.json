@@ -1,0 +1,2268 @@
+{
+  "training_untouched": true,
+  "training_status": "running",
+  "training_task": "08c0db1e73fa",
+  "baseline_exact_prefix_match": true,
+  "baseline_last_failure": {
+    "reason": "Component grammar has no legal continuation",
+    "after": "46655/192",
+    "grammar": {
+      "after": "46655/192",
+      "audio_end_beat": "6820000409722221/20000000000000",
+      "target_prefix_length": 156,
+      "fixed_beat": null,
+      "token_count": 4,
+      "proposal_token_ids": [
+        11,
+        557,
+        559,
+        557
+      ],
+      "proposal_tokens": [
+        "[AT]",
+        "NUM:2",
+        "NUM:4",
+        "NUM:2"
+      ],
+      "allowed_token_count": 0,
+      "context_cursor": "471/2"
+    }
+  },
+  "step400": {
+    "events": 387,
+    "strict_parse": true,
+    "longest_gap": {
+      "start": "43/4",
+      "end": "112",
+      "seconds": 38.69426751592356
+    }
+  },
+  "step400_report": {
+    "family": "chart_composer_v2",
+    "sequence_policy": "continuous_events_v1",
+    "eos_policy": "actual_chart_end_only",
+    "checkpoint": "webui_workspace/training_monitor/20261104_2259/checkpoint.pt",
+    "audio": "E:\\后训练（官谱）\\BUDDiES\\11616\\track.mp3",
+    "output": "E:\\simai_transformer\\.scratch\\v2_time_repair_20261104\\repaired_recovery.txt",
+    "seed": 0,
+    "events": 387,
+    "context_refreshes": 25,
+    "refresh_events": 16,
+    "history_beats": 16,
+    "timing": {
+      "bpm_auto": false,
+      "first_auto": false,
+      "tempo_source": "manual_bpm",
+      "first_source": "manual",
+      "limitations": [
+        "Automatic detection estimates one global BPM, not a variable-tempo map.",
+        "Half/double tempo and integer beat/bar origin can be ambiguous; no meter is inferred.",
+        "Automatic first is a canonical phase modulo the initial beat period, not the first sound time."
+      ],
+      "backend": {
+        "name": "manual"
+      },
+      "cache_hit": false,
+      "effective_bpm": 157.0,
+      "effective_first": 0.0,
+      "effective_tempo_map": [
+        {
+          "beat": "0",
+          "bpm": 157.0
+        }
+      ]
+    },
+    "condition": {
+      "policy": "radar_style_v1",
+      "values": [
+        0.8666666746139526,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "known": [
+        true,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false,
+        false
+      ],
+      "overrides": {},
+      "automatic_keys": [
+        "note_density",
+        "peak",
+        "sweep",
+        "slide_tricky",
+        "slide_sequence",
+        "jack",
+        "chord",
+        "tap_bias",
+        "slide_bias",
+        "hold_bias",
+        "touch_bias",
+        "chord_bias",
+        "melody_following",
+        "pattern_reuse",
+        "directionality"
+      ],
+      "unsupported_keys": []
+    },
+    "first": 0.0,
+    "end_beat": "16369/48",
+    "duration_sec": 130.31847916666666,
+    "repairs": [
+      {
+        "beat": "135",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "135"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "25919/192",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "4319/32"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "25919/192",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "4319/32"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2531/12",
+        "note_text": "5",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "1687/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "6751/32",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "6751/32"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "6540/31",
+        "note_text": "3",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "40505/192"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "6751/32",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "6751/32"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "3567/16",
+        "note_text": "5",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "2675/12"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "3567/16",
+        "note_text": "2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "3567/16"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "5797/26",
+        "note_text": "7/2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "5797/26"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "4459/20",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "2675/12"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "46439/192",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "46439/192"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "3871/16",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "3871/16"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "242",
+        "note_text": "1",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "30975/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "242",
+        "note_text": "5",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "242"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "242",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "30975/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "242",
+        "note_text": "1",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "30975/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "242",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "30975/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "31103/128",
+        "note_text": "4",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "6317/26"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "46651/192",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "6317/26"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "46651/192",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "6317/26"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "46651/192",
+        "note_text": "3",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "6317/26"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "31103/128",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "31103/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2071/8",
+        "note_text": "6/8/3",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "1553/6"
+            ]
+          },
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "2071/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2135/8",
+        "note_text": "4",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "2135/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2135/8",
+        "note_text": "4",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "2135/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "8399/30",
+        "note_text": "2/1",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "17917/64"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "35967/128",
+        "note_text": "1",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "8148/29"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2295/8",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "2295/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2455/8",
+        "note_text": "1",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "1841/6"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "29465/96",
+        "note_text": "7b",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "29465/96"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "40703/128",
+        "note_text": "7/5",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "61051/192",
+        "note_text": "2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "61051/192"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "9539/30",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "40703/128",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "8903/28",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "15263/48",
+        "note_text": "4",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "20351/64",
+        "note_text": "2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "20351/64"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "61051/192",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "30527/96",
+        "note_text": "3",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "30527/96"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "9857/31",
+        "note_text": "5",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          },
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "9857/31"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "61055/192",
+        "note_text": "5/4",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "8903/28",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "9539/30",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "40703/128",
+        "note_text": "2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "40703/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "15263/48",
+        "note_text": "2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "15263/48"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "9539/30",
+        "note_text": "3",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "9539/30"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "61051/192",
+        "note_text": "1",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "9539/30",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "7631/24"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "61049/192",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "5723/18"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "61051/192",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "5723/18"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "2567/8",
+        "note_text": "5",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "2567/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "3279/10",
+        "note_text": "8b/2",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_MultiTouch",
+            "note_beats": [
+              "2623/8"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "20987/64",
+        "note_text": "6",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "20987/64"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "8199/25",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "8199/25"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "8527/26",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "8527/26"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "41981/128",
+        "note_text": "7",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "41981/128"
+            ]
+          }
+        ]
+      },
+      {
+        "beat": "41983/128",
+        "note_text": "4",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "note_beats": [
+              "41983/128"
+            ]
+          }
+        ]
+      }
+    ],
+    "repair_count": 58,
+    "rollbacks": [
+      {
+        "source_beat": "7631/24",
+        "revoked_events": 2,
+        "reason": "latest_native_conflicting_event"
+      }
+    ],
+    "candidates": 1,
+    "candidate_policy": "next_complete_event_same_onset_atom_count",
+    "temperature": 0.9,
+    "top_p": 0.95,
+    "audio_identity": {
+      "schema": "composer_v2_audio_v1",
+      "backend": "mert",
+      "audio_sha256": "a2346ddc419aba29d69d817e8752f53c051ca2ce6f408d751128cb38c527b59a",
+      "model": {
+        "repo": "m-a-p/MERT-v1-330M",
+        "revision": "5240c2708a5acaee1007f43fb9735c7dcd0b78c9"
+      },
+      "sample_rate": 24000,
+      "mono": "native_channel_mean_float32",
+      "resample": "torchaudio_sinc_interp_hann_default",
+      "mel": {
+        "n_fft": 1024,
+        "hop": 240,
+        "bands": 96,
+        "center": true,
+        "power": 2.0,
+        "log": "log1p"
+      },
+      "semantic": {
+        "layer": 8,
+        "hop": 320,
+        "receptive_field": 400,
+        "center_samples": 199.5,
+        "chunk_frames": 225,
+        "context_frames": 75,
+        "dtype": "float16",
+        "weightnorm_compat": "legacy_gv_to_parametrizations_v1"
+      }
+    },
+    "hard_guard": "runtime_hard_v2"
+  },
+  "step900": {
+    "events": 21,
+    "strict_parse": true,
+    "longest_gap": {
+      "start": "20",
+      "end": "321",
+      "seconds": 115.03184713375796
+    }
+  },
+  "step900_txt_unchanged": true,
+  "probes": {
+    "prefix_probe": [
+      {
+        "after": "43/4",
+        "integer_prefix": "1",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.2861056923866272,
+        "digit_probabilities": {
+          "NUM:0": 0.4218411445617676,
+          "NUM:1": 0.21363073587417603,
+          "NUM:2": 0.047600749880075455,
+          "NUM:3": 0.007256187964230776,
+          "NUM:4": 0.003102182876318693,
+          "NUM:5": 0.002080709906294942,
+          "NUM:6": 0.001624290132895112,
+          "NUM:7": 0.0008070642943494022,
+          "NUM:8": 0.0037753975484520197,
+          "NUM:9": 0.01217592228204012
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.3848193883895874
+          ],
+          [
+            "1/2",
+            0.24663366377353668
+          ],
+          [
+            "3/4",
+            0.16492372751235962
+          ],
+          [
+            "1/4",
+            0.11332685500383377
+          ],
+          [
+            "1/3",
+            0.028917670249938965
+          ]
+        ]
+      },
+      {
+        "after": "43/4",
+        "integer_prefix": "11",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.2900344729423523,
+        "digit_probabilities": {
+          "NUM:0": 0.4340939521789551,
+          "NUM:1": 0.20449255406856537,
+          "NUM:2": 0.04312976077198982,
+          "NUM:3": 0.006349417846649885,
+          "NUM:4": 0.002696528099477291,
+          "NUM:5": 0.0019221658585593104,
+          "NUM:6": 0.0015610973350703716,
+          "NUM:7": 0.0007690610364079475,
+          "NUM:8": 0.003566505154594779,
+          "NUM:9": 0.011384470388293266
+        },
+        "valid_phase_probability_mass": 0.9999998211860657,
+        "top_phase": [
+          [
+            "0",
+            0.42406585812568665
+          ],
+          [
+            "1/2",
+            0.2549898326396942
+          ],
+          [
+            "3/4",
+            0.1391800194978714
+          ],
+          [
+            "1/4",
+            0.09832421690225601
+          ],
+          [
+            "1/3",
+            0.026767747476696968
+          ]
+        ]
+      },
+      {
+        "after": "43/4",
+        "integer_prefix": "112",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9897493720054626,
+        "digit_probabilities": {
+          "NUM:0": 0.007660277653485537,
+          "NUM:1": 0.001474872580729425,
+          "NUM:2": 0.0003003582532983273,
+          "NUM:3": 0.00011774879385484383,
+          "NUM:4": 0.00010538258356973529,
+          "NUM:5": 9.146676893578842e-05,
+          "NUM:6": 7.3485731263645e-05,
+          "NUM:7": 3.752224802155979e-05,
+          "NUM:8": 9.952333493856713e-05,
+          "NUM:9": 0.0002898428647313267
+        },
+        "valid_phase_probability_mass": 1.0000001192092896,
+        "top_phase": [
+          [
+            "0",
+            0.35684314370155334
+          ],
+          [
+            "1/2",
+            0.3220745325088501
+          ],
+          [
+            "3/4",
+            0.153572216629982
+          ],
+          [
+            "1/4",
+            0.10445574671030045
+          ],
+          [
+            "1/3",
+            0.017568983137607574
+          ]
+        ]
+      },
+      {
+        "after": "269/2",
+        "integer_prefix": "134",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9982393980026245,
+        "digit_probabilities": {
+          "NUM:0": 0.0003122642810922116,
+          "NUM:1": 9.540894097881392e-05,
+          "NUM:2": 0.00018580470350570977,
+          "NUM:3": 0.0004621150146704167,
+          "NUM:4": 0.0003179503255523741,
+          "NUM:5": 0.00011982915748376399,
+          "NUM:6": 0.00015513657126575708,
+          "NUM:7": 4.840206020162441e-05,
+          "NUM:8": 3.2231193472398445e-05,
+          "NUM:9": 3.1463041523238644e-05
+        },
+        "valid_phase_probability_mass": 0.19056886434555054,
+        "top_phase": [
+          [
+            "0",
+            0.36486634612083435
+          ],
+          [
+            "1/2",
+            0.29012051224708557
+          ],
+          [
+            "3/4",
+            0.15702976286411285
+          ],
+          [
+            "1/4",
+            0.1146136000752449
+          ],
+          [
+            "1/3",
+            0.02256612852215767
+          ]
+        ]
+      },
+      {
+        "after": "269/2",
+        "integer_prefix": "135",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9992690682411194,
+        "digit_probabilities": {
+          "NUM:0": 0.0001078144196071662,
+          "NUM:1": 2.6911327950074337e-05,
+          "NUM:2": 6.438089621951804e-05,
+          "NUM:3": 0.00010534743341850117,
+          "NUM:4": 0.0001378780580125749,
+          "NUM:5": 0.00010088009730679914,
+          "NUM:6": 9.668109123595059e-05,
+          "NUM:7": 3.5927841963712126e-05,
+          "NUM:8": 2.6849982532439753e-05,
+          "NUM:9": 2.8303116778261028e-05
+        },
+        "valid_phase_probability_mass": 1.0,
+        "top_phase": [
+          [
+            "0",
+            0.3609694242477417
+          ],
+          [
+            "1/2",
+            0.28743553161621094
+          ],
+          [
+            "3/4",
+            0.1609603315591812
+          ],
+          [
+            "1/4",
+            0.11665350198745728
+          ],
+          [
+            "1/3",
+            0.023019777610898018
+          ]
+        ]
+      },
+      {
+        "after": "46655/192",
+        "integer_prefix": "242",
+        "allowed": [],
+        "syntax_phase_stop_probability": 0.33070051670074463,
+        "digit_probabilities": {
+          "NUM:0": 0.0005062077543698251,
+          "NUM:1": 0.0008607780328020453,
+          "NUM:2": 0.0006227857084013522,
+          "NUM:3": 0.0022935238666832447,
+          "NUM:4": 0.6628656983375549,
+          "NUM:5": 0.0013117538765072823,
+          "NUM:6": 0.0003217727062292397,
+          "NUM:7": 0.00011041035031666979,
+          "NUM:8": 0.00017754944565240294,
+          "NUM:9": 0.00022900826297700405
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "1/2",
+            0.2912043631076813
+          ],
+          [
+            "0",
+            0.26980358362197876
+          ],
+          [
+            "3/4",
+            0.2212931364774704
+          ],
+          [
+            "1/4",
+            0.14432194828987122
+          ],
+          [
+            "1/3",
+            0.021437719464302063
+          ]
+        ]
+      },
+      {
+        "after": "46655/192",
+        "integer_prefix": "243",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9983950257301331,
+        "digit_probabilities": {
+          "NUM:0": 0.0004340129380580038,
+          "NUM:1": 0.0002628734800964594,
+          "NUM:2": 0.00023173651425167918,
+          "NUM:3": 0.00016878655878826976,
+          "NUM:4": 0.00023639276332687587,
+          "NUM:5": 6.237942579900846e-05,
+          "NUM:6": 4.063560481881723e-05,
+          "NUM:7": 2.2368634745362215e-05,
+          "NUM:8": 3.2873118470888585e-05,
+          "NUM:9": 0.0001129542215494439
+        },
+        "valid_phase_probability_mass": 0.9999999403953552,
+        "top_phase": [
+          [
+            "1/2",
+            0.3036760985851288
+          ],
+          [
+            "0",
+            0.2583094835281372
+          ],
+          [
+            "3/4",
+            0.21802949905395508
+          ],
+          [
+            "1/4",
+            0.14690741896629333
+          ],
+          [
+            "1/3",
+            0.02038070373237133
+          ]
+        ]
+      }
+    ],
+    "prefix_probe_400_same_context": [
+      {
+        "after": "20",
+        "integer_prefix": "",
+        "allowed": [
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.0028160116635262966,
+        "digit_probabilities": {
+          "NUM:0": 0.00037155739846639335,
+          "NUM:1": 0.009805374778807163,
+          "NUM:2": 0.9797491431236267,
+          "NUM:3": 0.002294630976393819,
+          "NUM:4": 0.0011701657203957438,
+          "NUM:5": 0.00023221253650262952,
+          "NUM:6": 0.00034647114807739854,
+          "NUM:7": 0.00018386542797088623,
+          "NUM:8": 0.0011020753299817443,
+          "NUM:9": 0.0019284962909296155
+        },
+        "actual_first_digit_nucleus": {
+          "NUM:2": 1.0
+        }
+      },
+      {
+        "after": "20",
+        "integer_prefix": "2",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.3223634362220764,
+        "digit_probabilities": {
+          "NUM:0": 0.42386239767074585,
+          "NUM:1": 0.1371176391839981,
+          "NUM:2": 0.08223328739404678,
+          "NUM:3": 0.021772067993879318,
+          "NUM:4": 0.004788049031049013,
+          "NUM:5": 0.0010601083049550653,
+          "NUM:6": 0.0009324430138804018,
+          "NUM:7": 0.0004171670298092067,
+          "NUM:8": 0.0008775569731369615,
+          "NUM:9": 0.004575902130454779
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.6135356426239014
+          ],
+          [
+            "1/2",
+            0.23211821913719177
+          ],
+          [
+            "3/4",
+            0.05351128429174423
+          ],
+          [
+            "1/4",
+            0.042525049299001694
+          ],
+          [
+            "1/3",
+            0.018389049917459488
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "20",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9962594509124756,
+        "digit_probabilities": {
+          "NUM:0": 0.0007327103521674871,
+          "NUM:1": 0.00037983828224241734,
+          "NUM:2": 0.0010067794937640429,
+          "NUM:3": 0.0004932443262077868,
+          "NUM:4": 0.0005030576139688492,
+          "NUM:5": 0.00015380312106572092,
+          "NUM:6": 0.00011168753553647548,
+          "NUM:7": 6.655455945292488e-05,
+          "NUM:8": 0.00010173572809435427,
+          "NUM:9": 0.00019129374413751066
+        },
+        "valid_phase_probability_mass": 0.34866151213645935,
+        "top_phase": [
+          [
+            "0",
+            0.6513383388519287
+          ],
+          [
+            "1/2",
+            0.22418002784252167
+          ],
+          [
+            "3/4",
+            0.04009212180972099
+          ],
+          [
+            "1/4",
+            0.031037185341119766
+          ],
+          [
+            "1/3",
+            0.016089100390672684
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "21",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9974390268325806,
+        "digit_probabilities": {
+          "NUM:0": 0.0008159903227351606,
+          "NUM:1": 0.00022196171630639583,
+          "NUM:2": 0.0005204553017392755,
+          "NUM:3": 0.0002136886614607647,
+          "NUM:4": 0.00019112830341327935,
+          "NUM:5": 5.981708818580955e-05,
+          "NUM:6": 6.949393718969077e-05,
+          "NUM:7": 4.074287789990194e-05,
+          "NUM:8": 8.674745913594961e-05,
+          "NUM:9": 0.0003409040509723127
+        },
+        "valid_phase_probability_mass": 1.000000238418579,
+        "top_phase": [
+          [
+            "0",
+            0.6436057090759277
+          ],
+          [
+            "1/2",
+            0.23021307587623596
+          ],
+          [
+            "3/4",
+            0.04170091450214386
+          ],
+          [
+            "1/4",
+            0.030862094834446907
+          ],
+          [
+            "1/3",
+            0.0162088330835104
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "3",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.9926250576972961,
+        "digit_probabilities": {
+          "NUM:0": 0.003320135409012437,
+          "NUM:1": 0.0011224168119952083,
+          "NUM:2": 0.0011554411612451077,
+          "NUM:3": 0.00044302319292910397,
+          "NUM:4": 0.0004108708817511797,
+          "NUM:5": 9.826288442127407e-05,
+          "NUM:6": 8.709861867828295e-05,
+          "NUM:7": 4.910148709313944e-05,
+          "NUM:8": 0.00014272004773374647,
+          "NUM:9": 0.0005459216190502048
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.607880711555481
+          ],
+          [
+            "1/2",
+            0.2311406284570694
+          ],
+          [
+            "3/4",
+            0.05514303222298622
+          ],
+          [
+            "1/4",
+            0.04433954879641533
+          ],
+          [
+            "1/3",
+            0.01941758580505848
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "32",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.32635757327079773,
+        "digit_probabilities": {
+          "NUM:0": 0.4198330342769623,
+          "NUM:1": 0.13584667444229126,
+          "NUM:2": 0.08196733146905899,
+          "NUM:3": 0.023042388260364532,
+          "NUM:4": 0.004898929037153721,
+          "NUM:5": 0.0010957379126921296,
+          "NUM:6": 0.0009233164601027966,
+          "NUM:7": 0.0004303922178223729,
+          "NUM:8": 0.0008631612872704864,
+          "NUM:9": 0.004741505719721317
+        },
+        "valid_phase_probability_mass": 1.000000238418579,
+        "top_phase": [
+          [
+            "0",
+            0.5809102058410645
+          ],
+          [
+            "1/2",
+            0.2945667803287506
+          ],
+          [
+            "3/4",
+            0.047946006059646606
+          ],
+          [
+            "1/4",
+            0.03417917340993881
+          ],
+          [
+            "1/3",
+            0.013445014134049416
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "321",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9974529147148132,
+        "digit_probabilities": {
+          "NUM:0": 0.0008398209465667605,
+          "NUM:1": 0.00021803083654958755,
+          "NUM:2": 0.00048470337060280144,
+          "NUM:3": 0.00019653516937978566,
+          "NUM:4": 0.00018410058692097664,
+          "NUM:5": 5.986100950394757e-05,
+          "NUM:6": 7.020353223197162e-05,
+          "NUM:7": 4.373272895463742e-05,
+          "NUM:8": 9.14731208467856e-05,
+          "NUM:9": 0.0003587230748962611
+        },
+        "valid_phase_probability_mass": 1.0,
+        "top_phase": [
+          [
+            "0",
+            0.5546896457672119
+          ],
+          [
+            "1/2",
+            0.29464346170425415
+          ],
+          [
+            "3/4",
+            0.060493968427181244
+          ],
+          [
+            "1/4",
+            0.04637410491704941
+          ],
+          [
+            "1/3",
+            0.013207849115133286
+          ]
+        ]
+      }
+    ],
+    "prefix_probe_900": [
+      {
+        "after": "20",
+        "integer_prefix": "",
+        "allowed": [
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.0003238934150431305,
+        "digit_probabilities": {
+          "NUM:0": 0.0002221280592493713,
+          "NUM:1": 0.006682160776108503,
+          "NUM:2": 0.9349128007888794,
+          "NUM:3": 0.0358910970389843,
+          "NUM:4": 0.006210296880453825,
+          "NUM:5": 0.0005918863462284207,
+          "NUM:6": 0.00494372146204114,
+          "NUM:7": 0.000893142307177186,
+          "NUM:8": 0.0028210305608808994,
+          "NUM:9": 0.006507736165076494
+        },
+        "actual_first_digit_nucleus": {
+          "NUM:2": 0.9630295087202583,
+          "NUM:3": 0.03697049127974171
+        }
+      },
+      {
+        "after": "20",
+        "integer_prefix": "2",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.015615050680935383,
+        "digit_probabilities": {
+          "NUM:0": 0.1041686162352562,
+          "NUM:1": 0.08699929714202881,
+          "NUM:2": 0.1987585872411728,
+          "NUM:3": 0.05714385583996773,
+          "NUM:4": 0.1448298692703247,
+          "NUM:5": 0.0672554150223732,
+          "NUM:6": 0.14469747245311737,
+          "NUM:7": 0.022673800587654114,
+          "NUM:8": 0.05549442395567894,
+          "NUM:9": 0.10236363112926483
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.9762780070304871
+          ],
+          [
+            "1/2",
+            0.021642081439495087
+          ],
+          [
+            "1/4",
+            0.0010538086062297225
+          ],
+          [
+            "1/3",
+            0.00017590120842214674
+          ],
+          [
+            "1/8",
+            0.00012876695836894214
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "20",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9986916184425354,
+        "digit_probabilities": {
+          "NUM:0": 0.00021016655955463648,
+          "NUM:1": 2.912995478254743e-05,
+          "NUM:2": 0.00013388028310146183,
+          "NUM:3": 3.317221853649244e-05,
+          "NUM:4": 9.935237176250666e-05,
+          "NUM:5": 3.874469257425517e-05,
+          "NUM:6": 0.00015820782573428005,
+          "NUM:7": 0.0001005735612125136,
+          "NUM:8": 0.0001581857941346243,
+          "NUM:9": 0.00034681532997637987
+        },
+        "valid_phase_probability_mass": 0.9172441959381104,
+        "top_phase": [
+          [
+            "1/2",
+            0.8307796120643616
+          ],
+          [
+            "0",
+            0.0827556848526001
+          ],
+          [
+            "3/4",
+            0.038322485983371735
+          ],
+          [
+            "1/4",
+            0.01742766797542572
+          ],
+          [
+            "1/6",
+            0.005195502657443285
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "21",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9963511228561401,
+        "digit_probabilities": {
+          "NUM:0": 0.00039639175520278513,
+          "NUM:1": 9.624436643207446e-05,
+          "NUM:2": 0.0004895043675787747,
+          "NUM:3": 9.773537749424577e-05,
+          "NUM:4": 0.0002552768273744732,
+          "NUM:5": 8.184660691767931e-05,
+          "NUM:6": 0.00040563635411672294,
+          "NUM:7": 0.00019526963296812028,
+          "NUM:8": 0.0004032928845845163,
+          "NUM:9": 0.0012278975918889046
+        },
+        "valid_phase_probability_mass": 0.9999998807907104,
+        "top_phase": [
+          [
+            "0",
+            0.9677242040634155
+          ],
+          [
+            "1/2",
+            0.029929490759968758
+          ],
+          [
+            "1/4",
+            0.000676522555295378
+          ],
+          [
+            "1/3",
+            0.0003083505725953728
+          ],
+          [
+            "1/6",
+            0.00018677613115869462
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "3",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.0995878204703331,
+        "digit_probabilities": {
+          "NUM:0": 0.08839592337608337,
+          "NUM:1": 0.06541229784488678,
+          "NUM:2": 0.2404014617204666,
+          "NUM:3": 0.03563954681158066,
+          "NUM:4": 0.0825115367770195,
+          "NUM:5": 0.03364185243844986,
+          "NUM:6": 0.11627504974603653,
+          "NUM:7": 0.02212933823466301,
+          "NUM:8": 0.06320728361606598,
+          "NUM:9": 0.15279783308506012
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.9748010039329529
+          ],
+          [
+            "1/2",
+            0.02301737293601036
+          ],
+          [
+            "1/4",
+            0.001036048517562449
+          ],
+          [
+            "1/3",
+            0.00019477109890431166
+          ],
+          [
+            "1/8",
+            0.00014349525736179203
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "32",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.41583994030952454,
+        "digit_probabilities": {
+          "NUM:0": 0.10618363320827484,
+          "NUM:1": 0.055147506296634674,
+          "NUM:2": 0.09514278173446655,
+          "NUM:3": 0.02527473494410515,
+          "NUM:4": 0.07519654929637909,
+          "NUM:5": 0.03372036665678024,
+          "NUM:6": 0.08799063414335251,
+          "NUM:7": 0.01641475036740303,
+          "NUM:8": 0.03120572865009308,
+          "NUM:9": 0.057883333414793015
+        },
+        "valid_phase_probability_mass": 1.0,
+        "top_phase": [
+          [
+            "0",
+            0.977686882019043
+          ],
+          [
+            "1/2",
+            0.021016433835029602
+          ],
+          [
+            "1/4",
+            0.0005930645857006311
+          ],
+          [
+            "1/3",
+            0.0001793385890778154
+          ],
+          [
+            "1/6",
+            6.358022801578045e-05
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "321",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9990063309669495,
+        "digit_probabilities": {
+          "NUM:0": 0.00010010929690906778,
+          "NUM:1": 2.7190853870706633e-05,
+          "NUM:2": 0.000132741333800368,
+          "NUM:3": 2.8923126592417248e-05,
+          "NUM:4": 7.30205065337941e-05,
+          "NUM:5": 3.154894875478931e-05,
+          "NUM:6": 0.00014810962602496147,
+          "NUM:7": 7.678223482798785e-05,
+          "NUM:8": 0.00011139215348521248,
+          "NUM:9": 0.0002637531142681837
+        },
+        "valid_phase_probability_mass": 0.9999996423721313,
+        "top_phase": [
+          [
+            "0",
+            0.9718957543373108
+          ],
+          [
+            "1/2",
+            0.0247349813580513
+          ],
+          [
+            "1/4",
+            0.0024417778477072716
+          ],
+          [
+            "1/3",
+            0.00018719561921898276
+          ],
+          [
+            "1/8",
+            8.200917363865301e-05
+          ]
+        ]
+      }
+    ],
+    "prefix_probe_900_reference": [
+      {
+        "after": "20",
+        "integer_prefix": "",
+        "allowed": [
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.0001357359142275527,
+        "digit_probabilities": {
+          "NUM:0": 3.3258507755817845e-05,
+          "NUM:1": 0.002395950024947524,
+          "NUM:2": 0.9938033819198608,
+          "NUM:3": 0.0017422315431758761,
+          "NUM:4": 0.0006122980266809464,
+          "NUM:5": 9.810614574234933e-05,
+          "NUM:6": 0.0005363074014894664,
+          "NUM:7": 7.35506764613092e-05,
+          "NUM:8": 0.00016541170771233737,
+          "NUM:9": 0.0004038990009576082
+        },
+        "actual_first_digit_nucleus": {
+          "NUM:2": 1.0
+        }
+      },
+      {
+        "after": "20",
+        "integer_prefix": "2",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.010243247263133526,
+        "digit_probabilities": {
+          "NUM:0": 0.27756041288375854,
+          "NUM:1": 0.29216524958610535,
+          "NUM:2": 0.28169751167297363,
+          "NUM:3": 0.023935258388519287,
+          "NUM:4": 0.05672106146812439,
+          "NUM:5": 0.014241590164601803,
+          "NUM:6": 0.022704722359776497,
+          "NUM:7": 0.0026332649867981672,
+          "NUM:8": 0.0052951788529753685,
+          "NUM:9": 0.012802600860595703
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.9006586670875549
+          ],
+          [
+            "1/2",
+            0.09125367552042007
+          ],
+          [
+            "1/4",
+            0.005522505845874548
+          ],
+          [
+            "3/4",
+            0.0005701103364117444
+          ],
+          [
+            "1/8",
+            0.00045901574776507914
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "23",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9984949827194214,
+        "digit_probabilities": {
+          "NUM:0": 0.00028865362401120365,
+          "NUM:1": 0.00013345394108910114,
+          "NUM:2": 0.00040413462556898594,
+          "NUM:3": 4.7392488340847194e-05,
+          "NUM:4": 0.00014644696784671396,
+          "NUM:5": 3.886294871335849e-05,
+          "NUM:6": 0.00012140833132434636,
+          "NUM:7": 4.552677637548186e-05,
+          "NUM:8": 6.183450750540942e-05,
+          "NUM:9": 0.0002175781992264092
+        },
+        "valid_phase_probability_mass": 0.9999999403953552,
+        "top_phase": [
+          [
+            "0",
+            0.9684247970581055
+          ],
+          [
+            "1/2",
+            0.02953651174902916
+          ],
+          [
+            "1/4",
+            0.000997864524833858
+          ],
+          [
+            "1/3",
+            0.00020140325068496168
+          ],
+          [
+            "1/8",
+            0.00011118513793917373
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "3",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9"
+        ],
+        "syntax_phase_stop_probability": 0.0625050961971283,
+        "digit_probabilities": {
+          "NUM:0": 0.2413940280675888,
+          "NUM:1": 0.17993314564228058,
+          "NUM:2": 0.3265802562236786,
+          "NUM:3": 0.018336130306124687,
+          "NUM:4": 0.05097794532775879,
+          "NUM:5": 0.01706145703792572,
+          "NUM:6": 0.03384529426693916,
+          "NUM:7": 0.00502203032374382,
+          "NUM:8": 0.013281572610139847,
+          "NUM:9": 0.05106294900178909
+        },
+        "valid_phase_probability_mass": 0.0,
+        "top_phase": [
+          [
+            "0",
+            0.8924901485443115
+          ],
+          [
+            "1/2",
+            0.09969040006399155
+          ],
+          [
+            "1/4",
+            0.005076080560684204
+          ],
+          [
+            "3/4",
+            0.0005998500855639577
+          ],
+          [
+            "1/8",
+            0.00047453318256884813
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "32",
+        "allowed": [
+          "NUM:0",
+          "NUM:1",
+          "NUM:2",
+          "NUM:3",
+          "NUM:4",
+          "NUM:5",
+          "NUM:6",
+          "NUM:7",
+          "NUM:8",
+          "NUM:9",
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.6313033699989319,
+        "digit_probabilities": {
+          "NUM:0": 0.13432766497135162,
+          "NUM:1": 0.0744912400841713,
+          "NUM:2": 0.07700947672128677,
+          "NUM:3": 0.010069824755191803,
+          "NUM:4": 0.029699908569455147,
+          "NUM:5": 0.009398461319506168,
+          "NUM:6": 0.016778480261564255,
+          "NUM:7": 0.0024874138180166483,
+          "NUM:8": 0.004115217365324497,
+          "NUM:9": 0.0103189367800951
+        },
+        "valid_phase_probability_mass": 1.0000003576278687,
+        "top_phase": [
+          [
+            "0",
+            0.9614416360855103
+          ],
+          [
+            "1/2",
+            0.036498140543699265
+          ],
+          [
+            "1/4",
+            0.0013746734475716949
+          ],
+          [
+            "1/3",
+            0.00017430954903829843
+          ],
+          [
+            "1/6",
+            6.512347317766398e-05
+          ]
+        ]
+      },
+      {
+        "after": "20",
+        "integer_prefix": "321",
+        "allowed": [
+          "[PHASE]"
+        ],
+        "syntax_phase_stop_probability": 0.9992146492004395,
+        "digit_probabilities": {
+          "NUM:0": 0.0001001548080239445,
+          "NUM:1": 3.6201716284267604e-05,
+          "NUM:2": 0.0001689578202785924,
+          "NUM:3": 2.9798009563819505e-05,
+          "NUM:4": 7.234032091218978e-05,
+          "NUM:5": 2.5921790438587777e-05,
+          "NUM:6": 0.00010236635716864839,
+          "NUM:7": 4.323705434217118e-05,
+          "NUM:8": 5.884345227968879e-05,
+          "NUM:9": 0.00014755383017472923
+        },
+        "valid_phase_probability_mass": 1.0000001192092896,
+        "top_phase": [
+          [
+            "0",
+            0.9605373740196228
+          ],
+          [
+            "1/2",
+            0.032708123326301575
+          ],
+          [
+            "1/4",
+            0.0058518522419035435
+          ],
+          [
+            "3/4",
+            0.00019900080224033445
+          ],
+          [
+            "1/3",
+            0.0001424860820407048
+          ]
+        ]
+      }
+    ]
+  },
+  "cached_vs_full_logit_error": 1.9073486328125e-06,
+  "tests": {
+    "python": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "98",
+      "time": "6.173",
+      "timestamp": "2026-11-05T00:04:54.043592+08:00",
+      "hostname": "baiqieji的机革"
+    },
+    "javascript_passed": 238
+  },
+  "checkpoint_snapshots": {
+    "webui_workspace\\training_monitor\\20261104_2259\\checkpoint.pt": "3cd481acc2207f2ad1d49cd237967c4a7ce9de67e6df165a71c6a7a5061d6742",
+    "webui_workspace\\training_monitor\\20261104_2327\\checkpoint.pt": "41622256ddd2f3313170301a7924052b62ed31c9a05ddaf0a286b38a4d7b67c6"
+  },
+  "limitations": [
+    "Long silence not repaired",
+    "No musical or full playability acceptance claim",
+    "No retraining or change to current time targets"
+  ]
+}

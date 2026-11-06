@@ -1,0 +1,228 @@
+{
+  "schema": "composer_v2_exhaustion_policy_audit_v1",
+  "synthetic_test": true,
+  "description": "Known conflicting four-event fixture, not a learned model output.",
+  "report": {
+    "family": "chart_composer_v2",
+    "sequence_policy": "continuous_events_v1",
+    "eos_policy": "actual_chart_end_only",
+    "checkpoint": "untouched.pt",
+    "audio": "E:\\simai_transformer\\.scratch\\v2_exhaustion_report_20261105\\song.mp3",
+    "output": "E:\\simai_transformer\\.scratch\\v2_exhaustion_report_20261105\\maidata.txt",
+    "seed": 0,
+    "events": 4,
+    "context_refreshes": 5,
+    "refresh_events": 1,
+    "history_beats": 16,
+    "timing": {},
+    "condition": {},
+    "first": 0.0,
+    "end_beat": "200",
+    "duration_sec": 100.0,
+    "checkpoint_info": null,
+    "generation_settings": {
+      "level": 14.5,
+      "seed": 0,
+      "temperature": 0.3,
+      "top_p": 0.95,
+      "candidates": 1,
+      "cpu_threads": null,
+      "device": null,
+      "cache_dir": null,
+      "window_retries": 1,
+      "rollback_windows": 0,
+      "exhaustion_policy": "auto",
+      "max_events": 0,
+      "condition": null,
+      "bpm": null,
+      "first": null,
+      "tempo_map": null,
+      "meter_map": null,
+      "effective_device": "cpu"
+    },
+    "repairs": [
+      {
+        "beat": "11",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "time_sec": 5.655555555555556,
+            "note_beats": [
+              "11"
+            ],
+            "notes": [
+              {
+                "beat": "11",
+                "raw": "8"
+              }
+            ]
+          }
+        ],
+        "cached_rejection": false
+      },
+      {
+        "beat": "12",
+        "note_text": "8",
+        "reason": "new_miacode_runtime_hard_conflict",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "time_sec": 5.655555555555556,
+            "note_beats": [
+              "11"
+            ],
+            "notes": [
+              {
+                "beat": "11",
+                "raw": "8"
+              }
+            ]
+          },
+          {
+            "kind": "miacode_Overlap",
+            "time_sec": 6.155555555555556,
+            "note_beats": [
+              "12"
+            ],
+            "notes": [
+              {
+                "beat": "12",
+                "raw": "8"
+              }
+            ]
+          }
+        ],
+        "cached_rejection": false
+      }
+    ],
+    "repair_count": 2,
+    "rollbacks": [],
+    "candidates": 1,
+    "duration_repairs": [],
+    "hold_release_repair": false,
+    "recovery_budget": 0,
+    "recovery_budget_scope": "forward_progress_v2",
+    "recovery_used_at_frontier": 0,
+    "furthest_committed_beat": "24",
+    "hold_repair_policy": "native_hold_conflict_repair_v3",
+    "retry_policy": "native_rejected_completion_conditioning_v1",
+    "retry_stats": {
+      "native_checks": 4
+    },
+    "exhaustion_policy": "report",
+    "bypassed_events": [
+      {
+        "beat": "11",
+        "note_text": "8",
+        "after": "10",
+        "reason": "recovery_budget_exhausted",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "time_sec": 5.655555555555556,
+            "note_beats": [
+              "11"
+            ],
+            "notes": [
+              {
+                "beat": "11",
+                "raw": "8"
+              }
+            ]
+          }
+        ],
+        "recovery_budget": 0,
+        "recovery_budget_scope": "forward_progress_v2",
+        "recovery_used_at_frontier": 0,
+        "furthest_committed_beat": "10"
+      },
+      {
+        "beat": "12",
+        "note_text": "8",
+        "after": "11",
+        "reason": "recovery_budget_exhausted",
+        "conflicts": [
+          {
+            "kind": "miacode_Overlap",
+            "time_sec": 5.655555555555556,
+            "note_beats": [
+              "11"
+            ],
+            "notes": [
+              {
+                "beat": "11",
+                "raw": "8"
+              }
+            ]
+          },
+          {
+            "kind": "miacode_Overlap",
+            "time_sec": 6.155555555555556,
+            "note_beats": [
+              "12"
+            ],
+            "notes": [
+              {
+                "beat": "12",
+                "raw": "8"
+              }
+            ]
+          }
+        ],
+        "recovery_budget": 0,
+        "recovery_budget_scope": "forward_progress_v2",
+        "recovery_used_at_frontier": 0,
+        "furthest_committed_beat": "11"
+      }
+    ],
+    "accepted_with_conflicts_count": 2,
+    "physics_status": "unresolved_conflicts",
+    "candidate_policy": "next_complete_event_same_onset_atom_count",
+    "temperature": 0.3,
+    "top_p": 0.95,
+    "audio_identity": {
+      "fixture": true
+    },
+    "hard_guard": "runtime_hard_v2",
+    "conflict_report": "E:\\simai_transformer\\.scratch\\v2_exhaustion_report_20261105\\maidata.21a5ca1c53f040b5bca98cc38638b90f.conflicts.json",
+    "conflict_assessment_status": "complete",
+    "final_enforced_conflict_count": 2
+  },
+  "http_report_download_status": 200,
+  "http_report_bytes_match": true,
+  "running_backend_supports_policy_selector": false,
+  "tests": {
+    "python_passed": 138,
+    "javascript_passed": 10
+  },
+  "training": {
+    "status": "running",
+    "task_id": "08c0db1e73fa",
+    "progress": {
+      "stage": "training",
+      "epoch": 34,
+      "batch": 1512,
+      "total": 2776,
+      "optimizer_steps": 11640,
+      "loss": 0.37169679052301297,
+      "token_count": 148595822,
+      "token_weight_sum": 208034144.95776367,
+      "tokens_per_sec": 3681.172712968326,
+      "samples_per_sec": 18.45003119977166,
+      "time_loss": 0.16051340900717478,
+      "component_loss": 0.5493585867300645,
+      "data_sec": 22890.095834303822,
+      "compute_sec": 16218.927863398567,
+      "compute_measurement": "host_submission_wall_including_update_boundary_wait",
+      "prefetch": {
+        "consumer_wait_sec": 22890.095834303822,
+        "max_batches": 1
+      },
+      "elapsed_sec": 40366.435803600005,
+      "lr": 0.0002,
+      "gpu_peak_bytes": 6075245056
+    }
+  }
+}

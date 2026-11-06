@@ -11,6 +11,8 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from pathlib import Path
 import math
+import hashlib
+import json
 import threading
 import sys
 
@@ -36,6 +38,7 @@ from .stream_timing import encode_history_gap, TIMING_POLICIES
 from .stream_phrase_training import (TRAINING_WINDOW_POLICIES, RELATION_POLICIES,
     phrase_training_blocks,CausalPhraseBlockIndex, future_relation_index, future_relation_rows, collate_phrase_training, collate_future_relations,
     normalize_phrase_plan_weights)
+from .stream_phrase_training import collate_draft_loss_groups
 from .stream_phrase import (PhraseIndex, PHRASE_POLICIES, PHRASE_ROW_FIELDS,
     collate_phrase_sequences, collate_candidate_phrase_sequences, share_aligned_phrase_sequences,
     collate_phrase_music,
@@ -45,6 +48,14 @@ PROFILE = 'event_set_stream_v1'
 PAD, BOS, NOTE, WAIT, EOS = range(5)
 GRID_SECONDS = .01
 NATIVE_DYNAMICS_SECONDS = .005
+
+
+class _CachedNativeRows(tuple):
+    """Cached event states plus compact, causally indexed phrase entries."""
+    def __new__(cls,rows,draft_entry_table):
+        value=super().__new__(cls,rows)
+        value.draft_entry_table=draft_entry_table
+        return value
 
 
 def _grid_seconds(value):
@@ -278,12 +289,16 @@ class StreamDataset(Dataset):
                  history_window_policy='rolling_legacy_v1',continuation_policy='off',timing_output_policy='relative_delta_v1',
                  window_balance_policy='equal_window_v1',phrase_context_policy='off',
                  candidate_state_policy='cursor_v1', training_window_policy='block_v1',
-                 max_phrase_events=64, phrase_seam_events=2, relation_policy='off', song_response_group_size=4):
+                 max_phrase_events=64, phrase_seam_events=2, relation_policy='off', song_response_group_size=4,
+                 draft_policy='off',unified_arrival=False):
         if lead_in < 0 or targets < 1 or window_seconds <= 0:
             raise ValueError('invalid stream window settings')
         if unknown_policy not in ('error','mask'):
             raise ValueError('unknown_policy must be error or mask')
         self.unknown_policy = unknown_policy
+        if draft_policy not in ('off','beat_ordered_draft_v1'):raise ValueError('Invalid draft policy')
+        self.draft_policy=draft_policy
+        self.unified_arrival=bool(unified_arrival)
         if training_window_policy not in TRAINING_WINDOW_POLICIES:raise ValueError('invalid training_window_policy')
         if relation_policy not in RELATION_POLICIES:raise ValueError('invalid relation_policy')
         if int(max_phrase_events)<1 or not 0<=int(phrase_seam_events)<=16:
@@ -601,17 +616,35 @@ class StreamDataset(Dataset):
 
     def _phrase_index(self, song):
         with self._bank_lock, self._state_lock:
+            sequence_length=64 if self.draft_policy=='beat_ordered_draft_v1' else 32
             if song in self._phrases:
-                self._phrases.move_to_end(song)
-                return self._phrases[song]
+                cached=self._phrases[song]
+                if cached.sequence_length==sequence_length:
+                    self._phrases.move_to_end(song)
+                    return cached
+                # Explicit post-construction policy changes are supported by
+                # fixtures/tools, but may not retain a stale 32-event archive.
+                self._phrases.pop(song);self._phrase_bytes-=cached.nbytes
             ordered = self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4')
             index = PhraseIndex(self._bank(song), self._end_beats[song], self.streams[song],
-                                sequence_codec=self.codec if ordered else None,encoded=self.encoded[song] if ordered else None)
+                                sequence_codec=self.codec if ordered else None,encoded=self.encoded[song] if ordered else None,
+                                sequence_length=sequence_length)
             index.supervision_valid = np.ones(len(index.boundaries)-1,dtype=np.bool_)
             index.supervision_counts = np.zeros(len(index.boundaries)-1,dtype=np.int64)
+            index.supervision_landing_counts=np.zeros(len(index.boundaries)-1,dtype=np.int64)
+            draft_valid=np.ones(len(index.boundaries)-1,dtype=np.bool_)
             for step, unknown in zip(self.streams[song],self.unknown_steps[song]):
                 if unknown:index.supervision_valid[index.segment(step.end)] = False
+                if unknown:
+                    draft_valid[index.segment(step.start)]=False;draft_valid[index.segment(step.end)]=False
                 if not unknown and step.weight>0:index.supervision_counts[index.segment(step.start)] += 1
+                if not unknown and step.weight>0 and step.kind==NOTE:index.supervision_landing_counts[index.segment(step.end)]+=1
+            index.draft_loss_expected={
+                (float(left),float(right)):(int(index.supervision_counts[segment]),
+                    int(index.supervision_landing_counts[segment]),bool(draft_valid[segment]
+                        and index.supervision_counts[segment]<=self.max_phrase_events
+                        and index.supervision_landing_counts[segment]<=self.max_phrase_events))
+                for segment,(left,right) in enumerate(zip(index.boundaries[:-1],index.boundaries[1:]))}
             if index.nbytes > self._phrase_budget:
                 self._phrase_uncached += 1
                 return index
@@ -622,7 +655,7 @@ class StreamDataset(Dataset):
             self._phrase_bytes += index.nbytes
             return index
 
-    def rebuild_phrase_row(self, row, song, modified, begin, first, end):
+    def rebuild_phrase_row(self, row, song, modified, begin, first, end, *, state_index=None):
         """Edited prefix features are rebuilt; future auxiliary labels disabled."""
         if 'target_relation_mask' in row:row['target_relation_mask']=torch.zeros_like(row['target_relation_mask'])
         if 'training_phrase_complete' in row:row['training_phrase_complete']=torch.zeros_like(row['training_phrase_complete'])
@@ -634,6 +667,22 @@ class StreamDataset(Dataset):
             if self.phrase_context_policy in ('aligned_phrase_v3','shared_ordered_v4'):
                 row.update(prepare_candidate_phrase_inputs(index,np.arange(first,end),row['target_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
                 row['candidate_step_beat'] = row['target_beat'].clone()
+            row['draft_entry_state']=draft_entry_states(state_index,row['phrase_start_beat'],row['step_beat'])
+            prior=row['phrase_start_beat'].lt(float(modified[begin].start))
+            if prior.any():
+                original_index,cached=self._song_states(song)
+                row['draft_entry_state'][prior]=draft_entry_states(
+                    original_index if original_index is not None else cached,
+                    row['phrase_start_beat'][prior],row['step_beat'][prior])
+            if 'candidate_phrase_start_beat' in row:
+                row['candidate_draft_entry_state']=draft_entry_states(state_index,
+                    row['candidate_phrase_start_beat'],row['step_beat'])
+                prior=row['candidate_phrase_start_beat'].lt(float(modified[begin].start))
+                if prior.any():
+                    original_index,cached=self._song_states(song)
+                    row['candidate_draft_entry_state'][prior]=draft_entry_states(
+                        original_index if original_index is not None else cached,
+                        row['candidate_phrase_start_beat'][prior],row['step_beat'][prior])
         return row
 
     def __len__(self): return len(self.samples)
@@ -696,12 +745,22 @@ class StreamDataset(Dataset):
         if torch.is_tensor(value): return sys.getsizeof(value)+value.numel()*value.element_size()
         if isinstance(value,np.ndarray): return sys.getsizeof(value)+(0 if value.flags.owndata else value.nbytes)
         size=sys.getsizeof(value)
+        if isinstance(value,_CachedNativeRows):
+            return size+sum(StreamDataset._object_bytes(v,seen) for v in value)+StreamDataset._object_bytes(value.draft_entry_table,seen)
         if isinstance(value,dict): return size+sum(StreamDataset._object_bytes(k,seen)+StreamDataset._object_bytes(v,seen) for k,v in value.items())
         if isinstance(value,(list,tuple,set,frozenset)):
             return size+sum(StreamDataset._object_bytes(v,seen) for v in value)
         return size
 
     def _song_states(self,song):
+        # Take the bank/phrase lock before the native-state lock on a miss.
+        # Hot state reads do not need another archive or audio-bank lookup.
+        with self._state_lock:
+            if song in self._states:
+                self._state_hits+=1;self._states.move_to_end(song)
+                index,rows,_=self._states[song]
+                return index,rows
+        boundaries=(self._phrase_index(song).boundaries if self.phrase_context_policy!='off' else None)
         with self._state_lock:
             if song in self._states:
                 self._state_hits += 1
@@ -756,13 +815,26 @@ class StreamDataset(Dataset):
                 row_bytes += self._object_bytes(rows[-1]) + 8
                 if row_bytes > self._state_budget:
                     return index_only()
-            # Once rows are materialized the parsed index is unnecessary.
-            # It can reference large process-global judge data, which must not
-            # be retained or charged as a separate cache entry per song.
+            # The parsed index can be large. Before releasing it, retain only
+            # the distinct boundary/cutoff summaries actually queried by this
+            # immutable chart. Candidate entries ahead of a departure still
+            # use that departure's strict visibility cutoff.
+            table={}
+            if boundaries is not None:
+                pairs={(float(start),float(start)) for start in boundaries[:-1]}
+                for step in stream:
+                    segment=min(len(boundaries)-2,max(0,bisect_right(boundaries,float(step.end))-1))
+                    start=float(boundaries[segment]);pairs.add((start,min(start,float(step.start))))
+                ordered=sorted(pairs)
+                starts=torch.tensor([pair[0] for pair in ordered],dtype=torch.float64)
+                cursors=torch.tensor([pair[1] for pair in ordered],dtype=torch.float64)
+                entries=draft_entry_states(index,starts,cursors)
+                table={pair:entries[position] for position,pair in enumerate(ordered)}
+            rows=_CachedNativeRows(rows,table)
             size=self._object_bytes(rows)
             if size > self._state_budget:
                 return index_only()
-            store(None,tuple(rows),size)
+            store(None,rows,size)
             return None,rows
 
     def cache_stats(self):
@@ -862,6 +934,7 @@ class StreamDataset(Dataset):
         row = self._symbol_rows(song,first,end)
         row['loss_mask'] = torch.tensor([first+i >= start for i in range(length)], dtype=torch.bool)
         row['configuration_mask'] = torch.ones(length,dtype=torch.bool)
+        row['configuration_family_mask'] = torch.zeros(length,dtype=torch.bool)
         row['sample_weight'] = torch.tensor([s.weight*(self.target_window_weights[song][first+i]
                                              if phrase_training or self.history_window_policy == 'block_aligned_v2' or self.window_balance_policy=='sqrt_window_v2' else window_weight)*self.chart_weights[song]
                                              if first+i >= start and not self.unknown_steps[song][first+i] else 0.
@@ -913,6 +986,7 @@ class StreamDataset(Dataset):
         if getattr(self,'_profile_reference_batch_size',0):
             row['_profile_reference_batch_size']=int(self._profile_reference_batch_size)
         row['_sample_index'] = int(index)
+        row['_unified_arrival']=bool(getattr(self,'unified_arrival',False))
         row['_window_weight'] = self.plan_weights[index]*self.chart_weights[song]
         row['_song_bank'] = self._symbolic_bank if self.symbolic_only else self._bank(song)
         row['_song_plan'] = self._symbolic_plan if self.symbolic_only else self.plans[song]
@@ -920,6 +994,8 @@ class StreamDataset(Dataset):
         if self.phrase_context_policy != 'off':
             phrase_index = self._phrase_index(song)
             row.update(phrase_index.rows(stream,first,end,supervise=True))
+            row['_draft_loss_expected']=phrase_index.draft_loss_expected
+            row['draft_committed_mode']=torch.full((length,),-1,dtype=torch.long)
             trusted = row['loss_mask'] & row['sample_weight'].gt(0)
             segments = np.clip(np.searchsorted(phrase_index.boundaries,row['step_beat'].numpy(),side='right')-1,
                                0,len(phrase_index.supervision_valid)-1)
@@ -936,12 +1012,89 @@ class StreamDataset(Dataset):
                 row.update(prepare_candidate_phrase_inputs(phrase_index,row['step_index'].numpy(),
                     row['target_beat'].numpy(),pack=not getattr(self,'defer_phrase_sequence_packing',False)))
                 row['candidate_step_beat'] = row['target_beat'].clone()
+                row['candidate_draft_committed_mode']=torch.full((length,),-1,dtype=torch.long)
+            entry_source=state_index if state_index is not None else cached_states
+            row['draft_entry_state']=draft_entry_states(entry_source,row['phrase_start_beat'],row['step_beat'])
+            if 'candidate_phrase_start_beat' in row:
+                row['candidate_draft_entry_state']=draft_entry_states(entry_source,
+                    row['candidate_phrase_start_beat'],row['step_beat'])
         return row
 
 
-def pack_timing_queries(output):
-    """CPU positions for supervised NOTE timing queries and their scatter."""
-    active = output['target_kind'].eq(NOTE) & output['loss_mask'].bool() & output['sample_weight'].gt(0)
+def draft_entry_states(index, starts, cursors):
+    """Fixed phrase-boundary state, with only the actual query prefix visible.
+
+    A boundary event itself is not part of the entry snapshot. Candidate
+    phrases ahead of the cursor may see only actions already committed now.
+    """
+    result=[];cache={};table=getattr(index,'draft_entry_table',None)
+    for start,cursor in zip(starts.tolist(),cursors.tolist()):
+        key=(start,min(start,cursor))
+        if key not in cache:
+            if table is not None:
+                cache[key]=table[key]
+                result.append(cache[key]);continue
+            value=torch.zeros(STATE_DIM)
+            if index is not None and start>=0 and hasattr(index,'at'):
+                boundary=Fraction(str(start));cutoff=Fraction(str(key[1]))
+                states,mask,_=index.at(boundary,include_current=True,visible_before_beat=cutoff,
+                    visibility_version='causal_v2',include_metadata=False)
+                valid=~mask.bool()
+                value=states.float().masked_fill(~valid[...,None],0.).sum(-2)/valid.sum().clamp_min(1)
+            cache[key]=value
+        result.append(cache[key])
+    return torch.stack(result) if result else torch.zeros(0,STATE_DIM)
+
+
+def pack_draft_queries(output, prefix=''):
+    """CPU-only plans for supervised reads; inference keeps its real queries.
+
+    Drafts enter timing/action heads after the causal decoder, never its
+    history recurrence. Unsupervised history therefore needs no plan. Keep
+    their mapping valid via a dummy index, without pretending it is evidence.
+    """
+    start_key=prefix+'phrase_start_beat';end_key=prefix+'phrase_end_beat'
+    if start_key not in output:return output
+    starts=output[start_key];ends=output[end_key]
+    active=None
+    if 'target_kind' in output and 'loss_mask' in output:
+        active=output['loss_mask'].bool() & output.get('sample_weight',torch.ones_like(output['loss_mask'])).gt(0)
+        if prefix:
+            active &= output['target_kind'].eq(NOTE)
+            active &= (output.get('configuration_mask',torch.ones_like(active)).bool() |
+                       output.get('configuration_family_mask',torch.zeros_like(active)).bool())
+        active=active.tolist()
+    rows=[];positions=[];keys=[];mapping=[]
+    for row,(left,right) in enumerate(zip(starts.tolist(),ends.tolist())):
+        seen={};indices=[]
+        for position,key in enumerate(zip(left,right)):
+            if active is not None and not active[row][position]:
+                indices.append(0);continue
+            if key not in seen:
+                seen[key]=len(rows);rows.append(row);positions.append(position);keys.append((row,*key))
+            indices.append(seen[key])
+        mapping.append(indices)
+    if not rows and starts.numel():
+        # An all-time-only recovery batch may have no trusted landing marks.
+        # One finite dummy keeps the public dense tensor layout unchanged.
+        rows=[0];positions=[0];keys=[(0,float(starts[0,0]),float(ends[0,0]))]
+    output[prefix+'draft_query_rows']=torch.tensor(rows,dtype=torch.long)
+    output[prefix+'draft_query_positions']=torch.tensor(positions,dtype=torch.long)
+    output[prefix+'draft_query_inverse']=torch.tensor(mapping,dtype=torch.long).reshape(starts.shape)
+    output[prefix+'draft_query_keys']=keys
+    entry=output.get(prefix+'draft_entry_state')
+    entry_key=prefix+'draft_query_entry_keys'
+    if entry is not None:
+        output[entry_key]=[tuple(value) for value in entry[rows,positions].tolist()]
+    else:
+        output.pop(entry_key,None)
+    return output
+
+
+def pack_timing_queries(output, *, all_decisions=False):
+    """Pack only supervised arrival queries; legacy policies pack NOTE only."""
+    active = output['loss_mask'].bool() & output['sample_weight'].gt(0)
+    if not all_decisions:active &= output['target_kind'].eq(NOTE)
     counts = active.sum(1)
     width = max(1, int(counts.max()))
     positions = torch.zeros(active.size(0), width, dtype=torch.long)
@@ -958,11 +1111,48 @@ def pack_timing_queries(output):
     output['_timing_original_flat'] = torch.tensor(original, dtype=torch.long)
 
 
+def collate_committed_song_style(items,output,profile_denominator):
+    """Preserve an actual rollout's whole-song identity, apart from gold labels.
+
+    Authored chart windows can share one latent song draw. Two real recovery
+    episodes of that chart may have executed different draws or completions;
+    those forwards must remain separate even though their profile supervision
+    still belongs to the same original chart.
+    """
+    if not any('_committed_song_component' in item for item in items):return
+    chart_ids=output.get('training_chart_id',torch.full((len(items),),-1)).tolist()
+    registry={};rows=[];inverse=[];weights=[]
+    for index,(chart,item) in enumerate(zip(chart_ids,items)):
+        choice=int(item.get('_committed_song_component',-1))
+        signature=None
+        if choice>=0:
+            controls=item['_committed_execution_controls']
+            known=item['_committed_known_mask']
+            signature=(choice,tuple(controls.tolist()),tuple(known.tolist()))
+        key=(('chart',chart) if chart>=0 else ('row',index),signature)
+        if key not in registry:
+            registry[key]=len(rows);rows.append(index);weights.append(0.)
+        group=registry[key];inverse.append(group)
+        weights[group]+=float(item.get('_profile_chart_importance',1.))/profile_denominator
+    output['unified_chart_rows']=torch.tensor(rows,dtype=torch.long)
+    output['unified_chart_inverse']=torch.tensor(inverse,dtype=torch.long)
+    output['unified_profile_chart_weights']=torch.tensor(weights,dtype=torch.float32)
+    output['committed_song_component']=torch.tensor([
+        int(items[row].get('_committed_song_component',-1)) for row in rows],dtype=torch.long)
+    width=items[0]['condition'].numel()
+    output['committed_execution_controls']=torch.stack([
+        items[row].get('_committed_execution_controls',torch.zeros(width)) for row in rows])
+    output['committed_known_mask']=torch.stack([
+        items[row].get('_committed_known_mask',torch.zeros(width,dtype=torch.bool)) for row in rows])
+
+
 def collate_stream(items):
     if not items: raise ValueError('empty stream batch')
     output = {}
     output['_sample_indices'] = [item.get('_sample_index') for item in items]
     output['authored_rest_row_mask']=torch.tensor([item.get('_augmentation_authored_rest',False) for item in items],dtype=torch.bool)
+    output['counterfactual_row_mask']=torch.tensor([item.get('_counterfactual_history',False) for item in items],dtype=torch.bool)
+    output['continuation_teacher_forced_row_mask']=torch.tensor([item.get('_continuation_teacher_forced',False) for item in items],dtype=torch.bool)
     collate_phrase_training(items,output)
     # Aggregate all window importance onto the already deduplicated chart
     # forward. A fixed reference batch size keeps the final partial batch
@@ -994,6 +1184,7 @@ def collate_stream(items):
         output['unified_chart_inverse']=torch.tensor(inverse,dtype=torch.long)
         output['unified_chart_rows']=torch.tensor(unified_rows,dtype=torch.long)
         output['unified_profile_chart_weights']=torch.tensor(unified_weights,dtype=torch.float32)
+    collate_committed_song_style(items,output,profile_denominator)
     collate_future_relations(items,output)
     if any('phrase_progress' in item for item in items):
         if not all('phrase_progress' in item for item in items):
@@ -1013,10 +1204,11 @@ def collate_stream(items):
             output['candidate_'+key] = pad_sequence([item['candidate_'+key] for item in items],batch_first=True)
     for key in ('history_kind','history_delta','history_shape','history_phase','history_atoms','history_phase_mask',
                 'target_kind','target_delta','target_shape','target_phase_mask','target_details',
-                'step_beat','step_second','step_index','target_second','target_beat','history_gap_beats','loss_mask','configuration_mask','sample_weight',
+                'step_beat','step_second','step_index','target_second','target_beat','history_gap_beats','loss_mask','configuration_mask','configuration_family_mask','sample_weight',
                 'continuation_features','transition_exit_mask','transition_exit_labels'):
         if key in ('target_beat','history_gap_beats') and any(key not in item for item in items):continue
-        values = [item[key] for item in items]
+        values = [(item.get(key,torch.zeros_like(item['loss_mask'])) if key=='configuration_family_mask'
+                   else item[key]) for item in items]
         # Atom/detail widths may differ by song; preserve every member.
         if key in ('history_atoms','target_details'):
             width = max(x.size(1) for x in values)
@@ -1065,7 +1257,7 @@ def collate_stream(items):
     # Keep the song axis intact while the expensive absolute timing head sees
     # only supervised NOTE queries. Build valid scatter indices on the CPU so
     # the training forward never needs a GPU nonzero/synchronization.
-    pack_timing_queries(output)
+    pack_timing_queries(output,all_decisions=any(item.get('_unified_arrival',False) for item in items))
     active = output['target_kind'].eq(NOTE) & output['loss_mask'] & output['configuration_mask'] & output['sample_weight'].gt(0)
     flat_shapes = output['target_shape'].reshape(-1)
     flat_active = active.reshape(-1)
@@ -1087,6 +1279,17 @@ def collate_stream(items):
         candidate = {key[len('candidate_'):]:value for key,value in output.items() if key.startswith('candidate_')}
         candidate['song_inverse'] = output['song_inverse']
         output.update({'candidate_'+key:value for key,value in collate_phrase_music(candidate).items()})
+    for key in ('draft_entry_state','candidate_draft_entry_state'):
+        if any(key in item for item in items):
+            output[key]=pad_sequence([item.get(key,torch.zeros(len(item['history_kind']),STATE_DIM))
+                for item in items],batch_first=True)
+    for key in ('draft_committed_mode','candidate_draft_committed_mode'):
+        if any(key in item for item in items):
+            output[key]=pad_sequence([item.get(key,torch.full((len(item['history_kind']),),-1,dtype=torch.long))
+                for item in items],batch_first=True,padding_value=-1)
+    pack_draft_queries(output)
+    pack_draft_queries(output,'candidate_')
+    collate_draft_loss_groups(items,output)
     return output
 
 
@@ -1107,6 +1310,7 @@ class StreamInferenceContext:
         self.max_phrase_events=int(max_phrase_events)
         if phrase_context_policy not in (*PHRASE_POLICIES,'shared_ordered_v4'):raise ValueError('invalid phrase_context_policy')
         self.phrase_context_policy = phrase_context_policy
+        self.draft_policy='off'
         if candidate_state_policy not in ('cursor_v1','selected_native_v1'):
             raise ValueError('invalid candidate_state_policy')
         self.candidate_state_policy = candidate_state_policy
@@ -1132,11 +1336,16 @@ class StreamInferenceContext:
 
     def _reset_prefix(self):
         self._execution_runtime=None
+        self._draft_entry_source=None
+        self._prefix_epoch=getattr(self,'_prefix_epoch',0)+1
+        self._prefix_digests=[hashlib.sha256(b'stream-prefix-v1').hexdigest()]
+        self._committed_mode_history={}
         if getattr(self,'training_window_policy','block_v1')=='phrase_complete_v1':
             self._training_block_index=CausalPhraseBlockIndex(self._training_boundaries,self.rollout_steps,self.max_phrase_events)
             self._training_block_index.advance(0,0.)
         self._phrase = (PhraseIndex(self.bank, beat_at_second(self.clock,self.song.audio.duration_sec),
-                                   sequence_codec=self.codec if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4') else None)
+                                   sequence_codec=self.codec if self.phrase_context_policy in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4') else None,
+                                   sequence_length=64 if self.draft_policy=='beat_ordered_draft_v1' else 32)
                         if self.phrase_context_policy != 'off' else None)
         self._committed = []
         self._incremental_state = IncrementalState(self.song.tempo,self.song.first)
@@ -1168,6 +1377,11 @@ class StreamInferenceContext:
             state, mask, _ = self._incremental_state.at(step.end,include_current=True,
                 visible_before_beat=cutoff,visibility_version='causal_v2',include_metadata=False)
         self._committed.append(step)
+        self._record_committed_mode(step,len(self._committed))
+        signature=json.dumps([step.kind,str(step.start),str(step.end),step.text,
+            getattr(step,'phrase_mode',None),getattr(step,'phrase_mode_start',None)],
+            ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        self._prefix_digests.append(hashlib.sha256(bytes.fromhex(self._prefix_digests[-1])+signature).hexdigest())
         if self._phrase is not None:self._phrase.append(step,encoded=event)
         self._rows.append((step.kind,delta,event,step.end,state,mask))
         if self.continuation_policy != 'off':
@@ -1192,11 +1406,49 @@ class StreamInferenceContext:
         """Append a previously accepted NOTE/WAIT without replaying its prefix."""
         self._append_step(step)
 
+    def prefix_signature(self,count=None):
+        """O(1) identity of all committed content, including old sustain edits."""
+        count=len(self._committed) if count is None else int(count)
+        if not 0<=count<=len(self._committed):raise ValueError('Invalid prefix signature cursor')
+        return self._prefix_digests[count]
+
+    def _record_committed_mode(self,step,count):
+        mode=getattr(step,'phrase_mode',None);start=getattr(step,'phrase_mode_start',None)
+        if mode is not None and start is not None:
+            counts,modes=self._committed_mode_history.setdefault(float(start),([],[]))
+            counts.append(int(count));modes.append(int(mode))
+
+    def committed_modes(self,starts,queries):
+        """Loss metadata from a query's already committed prefix only."""
+        values=[]
+        for start,query in zip(starts.tolist(),queries.tolist()):
+            history=self._committed_mode_history.get(float(start))
+            at=bisect_right(history[0],int(query))-1 if history is not None else -1
+            values.append(history[1][at] if at>=0 else -1)
+        return torch.tensor(values,dtype=torch.long)
+
+    def set_draft_policy(self,policy):
+        if policy not in ('off','beat_ordered_draft_v1'):raise ValueError('Invalid draft policy')
+        if self.draft_policy!=policy:
+            self.draft_policy=policy
+            if self._phrase is not None:
+                self._phrase.sequence_length=64 if policy=='beat_ordered_draft_v1' else 32
+                self._phrase._sequence_cache.clear()
+
+    def draft_entry_states(self,starts,cursors):
+        values=draft_entry_states(self._incremental_state,starts,cursors)
+        if self._draft_entry_source is not None:
+            source_index,edit_cursor=self._draft_entry_source
+            unchanged=starts.lt(float(edit_cursor))
+            if unchanged.any():values[unchanged]=draft_entry_states(source_index,starts[unchanged],cursors[unchanged])
+        return values
+
     def current_batch(self):
         cursor = self._committed[-1].end if self._committed else Fraction(0)
         return self.batch(self._committed,cursor)
 
-    def batch(self, steps, cursor):
+    def _sync_prefix(self,steps,cursor):
+        """Synchronize committed state without materializing discarded tensors."""
         own_prefix = steps is self._committed
         if not own_prefix: steps = list(steps)
         cursor = _fraction(cursor)
@@ -1207,6 +1459,9 @@ class StreamInferenceContext:
         if not own_prefix:
             for step in steps[len(self._committed):]:
                 self._append_step(step)
+
+    def batch(self, steps, cursor):
+        self._sync_prefix(steps,cursor)
         length = len(self._rows)
         atom_width = self._max_atoms
         result = {key: torch.zeros(1,length,dtype=torch.long) for key in
@@ -1253,6 +1508,11 @@ class StreamInferenceContext:
                 for key in ('phrase_sequence_inverse','target_phrase_sequence_inverse'):sequences[key] = sequences[key].unsqueeze(0)
                 result.update(sequences)
                 result.update(collate_phrase_music(result))
+            result['draft_entry_state']=self.draft_entry_states(
+                result['phrase_start_beat'][0],result['step_beat'][0]).unsqueeze(0)
+            result['draft_committed_mode']=self.committed_modes(
+                result['phrase_start_beat'][0],result['step_index'][0]).unsqueeze(0)
+            pack_draft_queries(result)
         return result
 
     def candidate_batch(self, beat):
@@ -1289,19 +1549,25 @@ class StreamInferenceContext:
         candidate_music['song_inverse'] = torch.zeros(1,dtype=torch.long)
         result.update({'candidate_'+key:value for key,value in collate_phrase_music(candidate_music).items()})
         result['candidate_step_beat'] = torch.as_tensor(candidate).reshape(1,1)
+        result['candidate_draft_entry_state']=self.draft_entry_states(
+            result['candidate_phrase_start_beat'][0],torch.tensor([float(cursor)])).unsqueeze(0)
+        result['candidate_draft_committed_mode']=self.committed_modes(
+            result['candidate_phrase_start_beat'][0],torch.tensor([len(self._committed)])).unsqueeze(0)
+        pack_draft_queries(result,'candidate_')
         return result
 
     candidate_phrase_batch = candidate_batch
 
 
 def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuation_policy=None,
-                    configuration_trusted=True,correspondence='authored'):
+                    configuration_trusted=True,correspondence='authored',context=None,
+                    defer_candidates=False):
     """One supervised reference decision after a real committed prefix."""
     song = dataset.base.songs[song_index][0]
     bank = dataset._bank(song_index)
     cursor = prefix[-1].end if prefix else Fraction(0)
     policy=dataset.continuation_policy if continuation_policy is None else continuation_policy
-    context = StreamInferenceContext(song,dataset.codec,dataset.delta_vocab,dataset.conditions[song_index],
+    context = context or StreamInferenceContext(song,dataset.codec,dataset.delta_vocab,dataset.conditions[song_index],
                                      lead_in=dataset.lead_in,audio_bank=bank,audio_grid_seconds=dataset.audio_grid_seconds,
                                      history_window_policy=dataset.history_window_policy,rollout_steps=dataset.targets,
                                      continuation_policy=policy,timing_output_policy=getattr(dataset,'timing_output_policy','relative_delta_v1'),
@@ -1309,9 +1575,10 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
                                      candidate_state_policy=getattr(dataset,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(dataset,'training_window_policy','block_v1'),
         max_phrase_events=getattr(dataset,'max_phrase_events',64))
+    context.set_draft_policy(getattr(dataset,'draft_policy','off'))
     batch = context.batch(prefix,cursor)
     row = {key: value[0] for key,value in batch.items() if key.startswith('history_') or key in PHRASE_ROW_FIELDS or key in
-           ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features')}
+           ('step_beat','step_second','step_index','loss_mask','action_state','action_state_mask','continuation_features','draft_entry_state','draft_committed_mode')}
     if getattr(dataset,'phrase_context_policy','off') in ('ordered_phrase_v2','aligned_phrase_v3','shared_ordered_v4'):
         for key,value in batch.items():
             if key.startswith(('phrase_sequence_','target_phrase_sequence_','_phrase_sequence_','_target_phrase_sequence_')):
@@ -1334,12 +1601,15 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     row['target_second'][-1] = target.end_second
     row['target_beat'] = row['step_beat'].clone()
     row['target_beat'][-1] = float(target.end)
-    if getattr(dataset,'phrase_context_policy','off') in ('aligned_phrase_v3','shared_ordered_v4'):
+    if not defer_candidates and getattr(dataset,'phrase_context_policy','off') in ('aligned_phrase_v3','shared_ordered_v4'):
         result = prepare_candidate_phrase_inputs(context._phrase,row['step_index'].numpy(),
             row['target_beat'].numpy())
         row.update(result)
         row['candidate_step_beat'] = row['target_beat'].clone()
-    if getattr(dataset,'candidate_state_policy','cursor_v1')=='selected_native_v1':
+        row['candidate_draft_entry_state']=context.draft_entry_states(
+            row['candidate_phrase_start_beat'],row['step_beat'])
+        row['candidate_draft_committed_mode']=context.committed_modes(row['candidate_phrase_start_beat'],row['step_index'])
+    if not defer_candidates and getattr(dataset,'candidate_state_policy','cursor_v1')=='selected_native_v1':
         selected = context.candidate_batch(target.end)
         row['candidate_action_state'] = row['action_state'].clone()
         row['candidate_action_state_mask'] = row['action_state_mask'].clone()
@@ -1355,6 +1625,7 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     row['loss_mask'][-1] = True
     row['configuration_mask'] = torch.zeros(length,dtype=torch.bool)
     row['configuration_mask'][-1] = bool(configuration_trusted)
+    row['configuration_family_mask'] = torch.zeros(length,dtype=torch.bool)
     row['sample_weight'] = torch.zeros(length,dtype=torch.float32)
     row['sample_weight'][-1] = float(weight)*dataset.chart_weights[song_index]
     row['transition_exit_mask'] = torch.zeros(length,dtype=torch.bool)
@@ -1364,6 +1635,15 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
         row['transition_exit_mask'][-1] = eligible and row['sample_weight'][-1] > 0
         row['transition_exit_labels'][-1] = label
     row['condition'] = dataset.conditions[song_index]
+    # These are executed controls, never new gold labels. In particular a
+    # synthetic teacher-forced edit without an actual draw stays latent.
+    committed=getattr(context,'_recovery_frozen_style',None)
+    if committed is not None:
+        row['_committed_song_component']=int(committed['choice'])
+        row['_committed_execution_controls']=torch.as_tensor(
+            committed['execution_controls'],dtype=torch.float32).detach().cpu().clone()
+        row['_committed_known_mask']=torch.as_tensor(
+            committed['known_mask'],dtype=torch.bool).detach().cpu().clone()
     row['audio_end_sec'] = torch.tensor(float(song.audio.duration_sec),dtype=torch.float64)
     row['audio_end_beat'] = torch.tensor(float(beat_at_second(dataset.clocks[song_index],song.audio.duration_sec)),dtype=torch.float64)
     row['song_index'] = song_index
@@ -1372,8 +1652,125 @@ def recovery_sample(dataset, song_index, prefix, target, *, weight=1.,continuati
     row['_window_weight'] = 1.
     row['_plan_scale'] = 0.
     row['_literal_atom_types']=dataset._literal_atom_types
+    row['_unified_arrival']=bool(getattr(dataset,'unified_arrival',False))
+    row['_draft_prefix_isolated']=True
     row['_configuration_correspondence']=correspondence if configuration_trusted else 'time_only'
     if not configuration_trusted and 'target_phrase_mask' in row:
         row['target_phrase_mask'].zero_()
         row['target_phrase_weight'].zero_()
+    return row
+
+
+def seeded_recovery_context(dataset,song_index,prefix,unchanged_count):
+    """Reuse parsed authored state/archive; replay only an edited suffix.
+
+    The source prefix is immutable. Dynamic state parses only actions still
+    alive at the edit cursor; symbolic/phrase arrays reuse existing indices.
+    Unsupported custom fixtures use the ordinary incremental constructor.
+    """
+    from .stream_recovery import _context
+    bank=dataset._bank(song_index);context=_context(dataset,song_index,bank)
+    source=dataset.streams[song_index];keep=int(unchanged_count)
+    if not keep or prefix[:keep]!=list(source[:keep]):
+        context._sync_prefix(prefix,prefix[-1].end if prefix else 0);return context
+    from .stream_augmentation import _native_prefix
+    seed=replace(source[keep],end_second=source[keep].start_second)
+    local=_native_prefix(dataset,song_index,source,keep,first_step=seed)
+    if local is None:
+        context._sync_prefix(prefix,prefix[-1].end if prefix else 0);return context
+    index,cached=dataset._song_states(song_index)
+    if context.training_window_policy=='phrase_complete_v1':
+        for at in range(1,keep+1):context._training_block_index.advance(at,source[at-1].end)
+    first=context._history_first(keep,source[keep-1].end)
+    context._committed=list(source[:keep]);context._incremental_state=local[0]
+    context._draft_entry_source=(index if index is not None else cached,source[keep].start)
+    context._rows=[];context._continuation_rows=[];context._max_atoms=1
+    continuation=dataset.continuations[song_index][0]
+    for at in range(first,keep+1):
+        previous=source[at-1] if at else None
+        delta,event=dataset.encoded[song_index][at-1] if at else (0,None)
+        state,mask=(cached[at][:2] if cached is not None else dataset._state_at(index,source,at))
+        context._rows.append((previous.kind if previous else BOS,delta,event,
+            previous.end if previous else Fraction(0),state,mask))
+        context._continuation_rows.append(continuation[at])
+        if event is not None:context._max_atoms=max(context._max_atoms,len(event['atoms']))
+    for position,step in enumerate(source[:keep],1):
+        context._continuation.append(step)
+        context._record_committed_mode(step,position)
+        signature=json.dumps([step.kind,str(step.start),str(step.end),step.text,
+            getattr(step,'phrase_mode',None),getattr(step,'phrase_mode_start',None)],
+            ensure_ascii=False,separators=(',',':')).encode('utf-8')
+        context._prefix_digests.append(hashlib.sha256(bytes.fromhex(context._prefix_digests[-1])+signature).hexdigest())
+    if context._phrase is not None:context._phrase=dataset._phrase_index(song_index).edited(source,keep,keep)
+    context._sync_prefix(prefix,prefix[-1].end if prefix else 0)
+    return context
+
+
+def recovery_sequence_sample(dataset,song_index,prefix,targets,*,target_weights=None,
+                             target_budgets=None,unchanged_count=0,configuration_trusted=False,
+                             configuration_family_trusted=False,context=None):
+    """A bounded, explicitly teacher-forced continuation after altered history.
+
+    Every later query sees earlier continuation events only after commit.
+    These rows are not described as self-generated recovery rollouts. One
+    native replay and one tensor materialization serve the whole short span.
+    """
+    targets=list(targets)
+    if not targets:raise ValueError('Recovery sequence needs targets')
+    context=context or seeded_recovery_context(dataset,song_index,prefix,unchanged_count)
+    context._sync_prefix(prefix,prefix[-1].end if prefix else 0)
+    begin=len(prefix);context.lead_in+=len(targets)
+    for target in targets[:-1]:context.commit(target)
+    row=recovery_sample(dataset,song_index,context._committed,targets[-1],context=context,
+        configuration_trusted=False,correspondence='continuous_teacher_forced',defer_candidates=True)
+    length=len(row['history_kind']);positions=row['step_index']-begin
+    selected=positions.ge(0)&positions.lt(len(targets))
+    if int(selected.sum())!=len(targets):raise ValueError('Recovery span lost its first target')
+    weights=(target_weights.tolist() if hasattr(target_weights,'tolist') else target_weights)
+    budgets=(target_budgets.tolist() if hasattr(target_budgets,'tolist') else target_budgets)
+    encoded=[dataset.codec.encode(step.text) if step.kind==NOTE else None for step in targets]
+    width=max(row['target_details'].size(-1),max((len(event['details']) for event in encoded if event),default=1))
+    row['target_details']=torch.full((length,width),-1,dtype=torch.long)
+    row['loss_mask'].zero_();row['sample_weight'].zero_();row['configuration_mask'].zero_()
+    row['configuration_family_mask'].zero_()
+    row['_training_target_budget']=torch.zeros(length)
+    row['training_phrase_group']=torch.full((length,),-1,dtype=torch.long)
+    row['training_phrase_position']=torch.full((length,),-1,dtype=torch.long)
+    row['training_phrase_complete']=torch.zeros(length,dtype=torch.bool)
+    for at in selected.nonzero(as_tuple=False).flatten().tolist():
+        offset=int(positions[at]);target=targets[offset];event=encoded[offset]
+        row['target_kind'][at]=target.kind
+        row['target_delta'][at]=encode_history_gap(dataset.delta_vocab,target.end-target.start,
+            dataset.timing_output_policy) if target.kind!=EOS else 0
+        row['target_second'][at]=target.end_second;row['target_beat'][at]=float(target.end)
+        row['loss_mask'][at]=True
+        row['sample_weight'][at]=(float(weights[offset]) if weights is not None else
+            float(target.weight)*dataset.chart_weights[song_index])
+        row['_training_target_budget'][at]=float(budgets[offset]) if budgets is not None else 1.
+        row['configuration_mask'][at]=bool(configuration_trusted[offset] if isinstance(configuration_trusted,(list,tuple)) else configuration_trusted)
+        row['configuration_family_mask'][at]=bool(configuration_family_trusted[offset] if isinstance(configuration_family_trusted,(list,tuple)) else configuration_family_trusted) and target.kind==NOTE
+        if event:
+            row['target_shape'][at]=event['shape'];row['target_phase_mask'][at]=torch.tensor(event['phase_mask'])
+            row['target_details'][at,:len(event['details'])]=torch.tensor(event['details'])
+    if context._phrase is not None and dataset.phrase_context_policy in ('aligned_phrase_v3','shared_ordered_v4'):
+        row.update(prepare_candidate_phrase_inputs(context._phrase,row['step_index'].numpy(),row['target_beat'].numpy()))
+        row['candidate_step_beat']=row['target_beat'].clone()
+        row['candidate_draft_entry_state']=context.draft_entry_states(
+            row['candidate_phrase_start_beat'],row['step_beat'])
+        row['candidate_draft_committed_mode']=context.committed_modes(row['candidate_phrase_start_beat'],row['step_index'])
+    if dataset.candidate_state_policy=='selected_native_v1':
+        states=[];masks=[]
+        for at in range(length):
+            beat=Fraction(str(float(row['target_beat'][at])));cursor=Fraction(str(float(row['step_beat'][at])))
+            cutoff=min(beat,cursor+(Fraction(1,10**12) if int(row['history_kind'][at])==NOTE else 0))
+            if context._incremental_state.points:
+                state,mask,_=context._incremental_state.at(beat,include_current=True,visible_before_beat=cutoff,
+                    visibility_version='causal_v2',include_metadata=False)
+            else:state,mask=torch.zeros(1,STATE_DIM),torch.ones(1,dtype=torch.bool)
+            states.append(state);masks.append(mask)
+        row['candidate_action_state']=pad_sequence(states,batch_first=True)
+        row['candidate_action_state_mask']=pad_sequence(masks,batch_first=True,padding_value=True)
+    row['_continuation_teacher_forced']=True;row['_counterfactual_history']=True
+    row['_training_reference_targets']=dataset.targets
+    row['_training_chart_id']=song_index;row['_song_response_group_size']=dataset.song_response_group_size
     return row

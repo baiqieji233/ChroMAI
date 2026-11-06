@@ -9,6 +9,7 @@ function harness(){
     return nodes.get(selector);
   };
   const context=vm.createContext({generationInspection:null,element,initializeEventSetParameterGroups(){},
+    invalidateLearnedCurveForCheckpoint(){},
     document:{querySelectorAll:selector=>selector.includes('chartComposerTrainingControls')?[element('#composerArchitectureProfile'),element('#composerCandidateCount'),element('#composerRolloutSteps')]:[]},
     valueOrDefault:(id,value)=>element(id).value||value,currentTrainingMode:()=> 'fresh',
     trainingSourcePaths:()=>({manifest:'train.json'}),selectedTrainingManifests:()=>[],selectedDatasetItems:()=>[],
@@ -22,21 +23,63 @@ test('event-set actual UI helpers apply defaults and hide unsupported fields',()
   e('#composerArchitectureProfile').value='event_set_stream_v1';
   c.applyEventSetFreshDefaults();c.updateEventSetControls();
   assert.equal(e('#batchSize').value,'16');assert.equal(e('#gradAccumulation').value,'4');
-  assert.equal(e('#composerDModel').value,'256');assert.equal(e('#composerPrecision').value,'bf16');
+  assert.equal(e('#composerDModel').value,'384');assert.equal(e('#composerLayers').value,'8');
+  assert.equal(e('#composerDimFeedforward').value,'1536');assert.equal(e('#composerHistoryEvents').value,'128');
+  assert.equal(e('#composerPrecision').value,'bf16');
   assert.equal(e('#composerCandidateCount').field.hidden,true);assert.equal(e('#composerCandidateCount').disabled,true);
-  const payload=c.chartComposerTrainingPayload();assert.equal(payload.batch_size,16);assert.equal(payload.rollout_steps,16);
+  const payload=c.chartComposerTrainingPayload();assert.equal(payload.batch_size,16);assert.equal(payload.rollout_steps,32);
   assert.equal(payload.audio_grid_seconds,.01);assert.equal(e('#composerAudioGridSeconds').value,'0.01');
-  assert.equal(payload.plan_weight,.1);assert.equal(e('#composerPlanWeight').value,'0.1');
+  assert.equal(payload.plan_weight,0);assert.equal(e('#composerPlanWeight').value,'0');
   assert.equal(payload.validation_batch_size,4);assert.equal(payload.validation_max_batches,32);
   assert.equal(payload.warmup_steps,0);assert.equal(payload.prefetch_batches,2);assert.equal(payload.audio_cache_gb,1);
   assert.equal(payload.lr_schedule,'constant');assert.equal(payload.plan_blank_window_seconds,.5);
-  assert.equal(payload.epochs,50);assert.equal(payload.lr,.0002);assert.equal(payload.training_window_policy,'auto');
+  assert.equal(payload.epochs,50);assert.equal(payload.lr,.0005);assert.equal(payload.training_window_policy,'auto');
   assert.equal(payload.max_phrase_events,64);assert.equal(payload.phrase_seam_events,2);assert.equal(payload.phrase_execution_policy,'auto');
-  assert.equal(payload.phrase_modes,4);assert.equal(payload.phrase_relation_weight,.1);assert.equal(payload.detail_representation_policy,'auto');assert.equal(payload.duration_feature_policy,'auto');
+  assert.equal(payload.draft_policy,'auto');assert.equal(payload.draft_loss_weight,.1);assert.equal(payload.draft_responsibility_temperature,1);assert.equal(payload.generation_eval_songs,0);
+  assert.equal(payload.curve_preview_policy,'auto');assert.equal(payload.curve_preview_weight,.05);
+  assert.equal(payload.deployment_condition_fraction,.25);
+  assert.equal(payload.phrase_modes,4);assert.equal(payload.phrase_relation_weight,0);assert.equal(payload.detail_representation_policy,'auto');assert.equal(payload.duration_feature_policy,'auto');
   assert.equal(e('#composerSampleWorkers').disabled,true);
   assert.equal(payload.architecture_profile,'event_set_stream_v1');assert.ok(!('candidate_count' in payload));
   e('#composerArchitectureProfile').value='audio_grounded_v3';c.updateEventSetControls();
   assert.equal(e('#composerCandidateCount').field.hidden,false);assert.equal(e('#composerCandidateCount').disabled,false);
+});
+
+test('event-set mode and architecture changes retain the complete fresh recipe',()=>{
+  const {context:c,element:e}=harness();
+  c.currentModelFamily=()=> 'chart_composer_v1';c.updateTrainingModeHelp=()=>{};
+  vm.runInContext(source.slice(source.indexOf('const COMPOSER_FRESH_TRAINING_DEFAULTS ='),source.indexOf('function setTrainingModeDefaults(')),c);
+  vm.runInContext(fn('setTrainingModeDefaults'),c);
+  const assertRecipe=()=>{
+    const payload=c.chartComposerTrainingPayload();
+    for(const [key,value] of Object.entries({lr:.0005,batch_size:16,grad_accumulation:4,d_model:384,layers:8,
+      dim_feedforward:1536,history_events:128,rollout_steps:32,lr_schedule:'constant',warmup_steps:0}))assert.equal(payload[key],value,key);
+    assert.match(e('#learningRateHelp').textContent,/0\.0005/);
+  };
+  // The mode-change handler runs the fresh recipe and then generic rate defaults.
+  e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.setTrainingModeDefaults({resetComposer:true});assertRecipe();
+  // Switching away and back must apply the new profile rather than the legacy rate.
+  e('#composerArchitectureProfile').value='audio_grounded_v3';
+  c.setTrainingModeDefaults({resetComposer:true});assert.equal(e('#learningRate').value,'0.0002');
+  e('#composerArchitectureProfile').value='event_set_stream_v1';c.applyEventSetFreshDefaults();
+  c.setTrainingModeDefaults();assertRecipe();
+  c.currentTrainingMode=()=> 'finetune';c.setTrainingModeDefaults({resetComposer:true});
+  assert.equal(e('#learningRate').value,'0.0005');
+  c.currentTrainingMode=()=> 'fresh';c.setTrainingModeDefaults({resetComposer:true});assertRecipe();
+  e('#learningRate').value='';assert.equal(c.chartComposerTrainingPayload().lr,.0005,'empty event-set rate uses the same recipe');
+  e('#learningRate').value='0.0007';e('#learningRate').dataset.touched='1';
+  c.setTrainingModeDefaults();assert.equal(e('#learningRate').value,'0.0007','manual rate remains editable');
+});
+
+test('event-set rate defaults leave legacy Composer profiles unchanged',()=>{
+  const {context:c,element:e}=harness();
+  c.currentModelFamily=()=> 'chart_composer_v1';c.updateTrainingModeHelp=()=>{};
+  vm.runInContext(fn('setTrainingModeDefaults'),c);
+  e('#composerArchitectureProfile').value='audio_grounded_v3';
+  c.setTrainingModeDefaults();assert.equal(e('#learningRate').value,'0.0002');
+  e('#learningRate').value='';assert.equal(c.chartComposerTrainingPayload().lr,.0002);
+  c.currentTrainingMode=()=> 'finetune';c.setTrainingModeDefaults();assert.equal(e('#learningRate').value,'0.00002');
 });
 test('new architecture submissions reject an old backend before POST',async()=>{
   const {context:c,element:e}=harness();const calls=[];
@@ -176,6 +219,22 @@ test('advanced strategy overrides survive preset selection and weights reach pay
   assert.equal(payload.prefix_augmentation_input_policy,'musical_loop_recovery_v8');
   assert.equal(payload.phrase_context_policy,'ordered_phrase_v2');
   assert.equal(payload.event_family_audio_weight,.45);
+});
+
+test('curve preview training controls use fresh defaults and inherit resume contract',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.applyEventSetFreshDefaults();
+  let payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.curve_preview_policy,'auto');assert.equal(payload.curve_preview_weight,.05);
+  e('#composerCurvePreviewPolicy').value='audio_counts_v1';e('#composerCurvePreviewWeight').value='.08';
+  payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.curve_preview_policy,'audio_counts_v1');assert.equal(payload.curve_preview_weight,.08);
+  c.currentTrainingMode=()=> 'resume';
+  c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',
+    model_config:{architecture_profile:'event_set_stream_v1',curve_preview_policy:'audio_counts_v1',curve_preview_weight:.03}},'resume');
+  payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.curve_preview_policy,'audio_counts_v1');assert.equal(payload.curve_preview_weight,.03);
+  assert.equal(e('#composerCurvePreviewPolicy').disabled,true);assert.equal(e('#composerCurvePreviewWeight').disabled,true);
 });
 
 test('blank stage temperatures inherit total and explicit zero overrides it',()=>{
@@ -448,4 +507,117 @@ test('unified whole-song choice binds one count and preserves legacy resume cont
   assert.equal(e('#composerSongResponseModes').field.hidden,false);assert.equal(c.chartComposerTrainingPayload().song_response_modes,3);
   c.currentTrainingMode=()=> 'resume';c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{song_response_policy:'music_response_v1',song_response_modes:3,song_profile_components:6},args:{}},'resume');
   assert.equal(e('#composerSongResponseModes').field.hidden,false);assert.equal(e('#composerSongResponseModes').value,'3');
+});
+
+test('execution control mixture is explicit and resumes its original chart contract',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.applyEventSetFreshDefaults();
+  assert.equal(e('#composerDeploymentConditionFraction').value,'.25');
+  e('#composerDeploymentConditionFraction').value='.4';
+  assert.equal(c.chartComposerTrainingPayload().deployment_condition_fraction,.4);
+  c.currentTrainingMode=()=> 'resume';
+  c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{}},'resume');
+  assert.equal(e('#composerDeploymentConditionFraction').value,'1');
+  assert.equal(e('#composerDeploymentConditionFraction').disabled,true);
+  c.currentTrainingMode=()=> 'finetune';
+  c.applyChartComposerCheckpointConfig({schema:'maichart-composer-event-set-checkpoint-v1',model_config:{deployment_condition_fraction:1},args:{}},'finetune');
+  assert.equal(e('#composerDeploymentConditionFraction').value,'0.25');
+  assert.equal(e('#composerDeploymentConditionFraction').disabled,false);
+});
+
+test('sequence evidence and certified configuration recovery controls have real fresh payloads',()=>{
+  const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
+  for(const id of ['composerDraftObjectivePolicy','composerConfigurationRecoverySteps','composerRecoveryBridgeSteps'])assert.ok(html.includes(`id="${id}"`),id);
+  for(const value of ['sequence_evidence_v2','balanced_mean_v1'])assert.ok(html.includes(`value="${value}"`),value);
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.applyEventSetFreshDefaults();c.updateEventSetControls();
+  let payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.draft_objective_policy,'auto');
+  assert.equal(payload.configuration_recovery_steps,8);assert.equal(payload.recovery_bridge_steps,8);
+  for(const id of ['composerDraftObjectivePolicy','composerConfigurationRecoverySteps','composerRecoveryBridgeSteps']){
+    assert.equal(e('#'+id).disabled,false,id);assert.equal(e('#'+id).field.hidden,false,id);
+  }
+  e('#composerDraftObjectivePolicy').value='sequence_evidence_v2';
+  e('#composerConfigurationRecoverySteps').value='12';e('#composerRecoveryBridgeSteps').value='6';
+  e('#eventSetPolicy_event_family_policy').value='shared_music_mixture_v2';
+  e('#eventSetPolicy_literal_set_policy').value='permuted_unique_v1';
+  payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.draft_objective_policy,'sequence_evidence_v2');
+  assert.equal(payload.configuration_recovery_steps,12);assert.equal(payload.recovery_bridge_steps,6);
+  assert.equal(payload.event_family_policy,'shared_music_mixture_v2');assert.equal(payload.literal_set_policy,'permuted_unique_v1');
+  assert.equal(vm.runInContext('EVENT_SET_LEARNING_POLICIES.event_family_policy[0]',c),'shared_music_mixture_v2');
+  assert.equal(vm.runInContext('EVENT_SET_LEARNING_POLICIES.literal_set_policy[0]',c),'permuted_unique_v1');
+  assert.equal(vm.runInContext('EVENT_SET_LEARNING_POLICIES.recovery_policy[0]',c),'first_step_phrase_v6');
+  assert.match(vm.runInContext('EVENT_SET_POLICY_LABELS.shared_music_mixture_v2',c),/音乐与历史/);
+});
+
+test('new configuration objectives inherit old resume contracts and remain editable for finetune',()=>{
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  const old={schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{}};
+  c.currentTrainingMode=()=> 'resume';c.applyChartComposerCheckpointConfig(old,'resume');
+  let payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.draft_objective_policy,'balanced_mean_v1');assert.equal(payload.literal_set_policy,'canonical_v1');
+  assert.equal(payload.configuration_recovery_steps,8);assert.equal(payload.recovery_bridge_steps,8);
+  for(const id of ['composerDraftObjectivePolicy','composerConfigurationRecoverySteps','composerRecoveryBridgeSteps','eventSetPolicy_literal_set_policy'])assert.equal(e('#'+id).disabled,true,id);
+  const recent={schema:old.schema,model_config:{draft_objective_policy:'sequence_evidence_v2',literal_set_policy:'permuted_unique_v1',event_family_policy:'shared_music_mixture_v2'},
+    args:{configuration_recovery_steps:12,recovery_bridge_steps:4}};
+  c.applyChartComposerCheckpointConfig(recent,'resume');payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.draft_objective_policy,'sequence_evidence_v2');assert.equal(payload.literal_set_policy,'permuted_unique_v1');
+  assert.equal(payload.configuration_recovery_steps,12);assert.equal(payload.recovery_bridge_steps,4);
+  c.currentTrainingMode=()=> 'finetune';c.applyChartComposerCheckpointConfig(old,'finetune');
+  payload=c.chartComposerTrainingPayload();assert.equal(payload.draft_objective_policy,'auto');
+  assert.equal(payload.literal_set_policy,'auto');assert.equal(payload.configuration_recovery_steps,8);
+  for(const id of ['composerDraftObjectivePolicy','composerConfigurationRecoverySteps','composerRecoveryBridgeSteps'])assert.equal(e('#'+id).disabled,false,id);
+  e('#composerDraftObjectivePolicy').value='balanced_mean_v1';e('#composerConfigurationRecoverySteps').value='5';
+  c.applyChartComposerCheckpointConfig(old,'finetune',true);
+  assert.equal(e('#composerDraftObjectivePolicy').value,'balanced_mean_v1');assert.equal(e('#composerConfigurationRecoverySteps').value,'5');
+});
+
+test('composition objectives and recovery budgets round-trip through exported settings',()=>{
+  const values={modelFamily:'chart_composer_v1',composerArchitectureProfile:'event_set_stream_v1',trainingMode:'fresh',composerLearningPolicy:'auto',composerDraftObjectivePolicy:'sequence_evidence_v2',composerConfigurationRecoverySteps:'12',
+    composerRecoveryBridgeSteps:'6',eventSetPolicy_literal_set_policy:'permuted_unique_v1',eventSetPolicy_event_family_policy:'shared_music_mixture_v2',
+    composerDurationObjectivePolicy:'hold_crps_v2',composerDurationCalibrationWeight:'0.15'};
+  const fields=Object.entries(values).map(([id,value])=>({id,value,type:id.startsWith('eventSetPolicy')||id.endsWith('Policy')?'select-one':'number',dataset:{}}));
+  const nodes=new Map(fields.map(node=>['#'+node.id,node]));let saved;
+  const c=vm.createContext({element:key=>nodes.get(key)||null,
+    document:{querySelectorAll:selector=>selector==='input[id], select[id], textarea[id]'?fields:[]},
+    settingsStorageKey:'settings',datasetStorageKey:'datasets',datasetWorkspaceState:{selected:new Set()},
+    v2ConditionState:{},v2ConditionActive:false,otherFamilyConditionValues:{},
+    localStorage:{getItem:key=>key==='settings'?JSON.stringify(saved):null},
+    migrateSongFormQualityDefaults:()=>false,restoreLegacyDatasetPaths:()=>false});
+  for(const name of ['settingsFields','collectSettings','migrateEventSetLearningDefaults','restoreV2ConditionSettings','restoreSettings'])vm.runInContext(fn(name),c);
+  saved={version:2,values:JSON.parse(JSON.stringify(c.collectSettings()))};
+  delete saved.values.__eventSetLearningDefaults; // Imported settings predate the current marker.
+  for(const node of fields)node.value='';
+  assert.equal(c.restoreSettings(),true);
+  for(const [id,value] of Object.entries(values))assert.equal(nodes.get('#'+id).value,value,id);
+});
+
+test('duration probability calibration is separate from duration input features',()=>{
+  const html=fs.readFileSync('src/maichart/webui/static/index.html','utf8');
+  assert.match(html,/id="composerDurationObjectivePolicy"/);
+  assert.match(html,/value="hold_crps_v2"/);assert.match(html,/value="categorical_v1"/);
+  assert.match(html,/id="composerDurationCalibrationWeight"[^>]*min="0"/);
+  const {context:c,element:e}=harness();e('#composerArchitectureProfile').value='event_set_stream_v1';
+  c.applyEventSetFreshDefaults();c.updateEventSetControls();
+  let payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.duration_objective_policy,'auto');assert.equal(payload.duration_calibration_weight,.1);
+  assert.equal(payload.duration_feature_policy,'auto');assert.equal(e('#composerDurationCalibrationWeight').field.hidden,false);
+  e('#composerDurationObjectivePolicy').value='hold_crps_v2';e('#composerDurationCalibrationWeight').value='.15';
+  e('#composerDurationFeaturePolicy').value='log_time_v2';payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.duration_objective_policy,'hold_crps_v2');assert.equal(payload.duration_calibration_weight,.15);
+  assert.equal(payload.duration_feature_policy,'log_time_v2');
+  c.currentTrainingMode=()=> 'resume';
+  const old={schema:'maichart-composer-event-set-checkpoint-v1',model_config:{},args:{}};
+  c.applyChartComposerCheckpointConfig(old,'resume');payload=c.chartComposerTrainingPayload();
+  assert.equal(payload.duration_objective_policy,'categorical_v1');assert.equal(payload.duration_calibration_weight,.1);
+  assert.equal(e('#composerDurationObjectivePolicy').disabled,true);assert.equal(e('#composerDurationCalibrationWeight').field.hidden,true);
+  c.applyChartComposerCheckpointConfig({...old,model_config:{duration_objective_policy:'hold_crps_v2',duration_calibration_weight:.2}},'resume');
+  payload=c.chartComposerTrainingPayload();assert.equal(payload.duration_calibration_weight,.2);
+  assert.equal(e('#composerDurationCalibrationWeight').field.hidden,false);
+  c.currentTrainingMode=()=> 'finetune';c.applyChartComposerCheckpointConfig(old,'finetune');
+  payload=c.chartComposerTrainingPayload();assert.equal(payload.duration_objective_policy,'auto');
+  assert.equal(e('#composerDurationCalibrationWeight').disabled,false);
+  e('#composerDurationCalibrationWeight').value='.3';c.applyChartComposerCheckpointConfig(old,'finetune',true);
+  assert.equal(c.chartComposerTrainingPayload().duration_calibration_weight,.3);
 });

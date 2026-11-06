@@ -85,13 +85,13 @@ def test_new_training_stage_defaults_use_shared_state_without_exit_override():
     args=parser().parse_args(['--manifest','unused.json','--checkpoint-dir','unused'])
     policies=resolve_learning_policies(args)
     assert policies['transition_policy']=='off'
-    assert policies['event_family_policy']=='shared_continuation_v1'
+    assert policies['event_family_policy']=='shared_music_mixture_v2'
     assert policies['recovery_target_policy']=='causal_correspondence_v1'
     assert policies['gap_continuation_policy']=='off'
     assert policies['timing_grid_audio_policy']=='query_pool_v3'
-    assert policies['prefix_augmentation_input_policy']=='musical_arrangement_recovery_v10'
-    assert policies['plan_kind_policy']=='phrase_arranged_hazard_v4'
-    assert policies['recovery_policy']=='greedy_mixed_v4'
+    assert policies['prefix_augmentation_input_policy']=='continuous_draft_recovery_v11'
+    assert policies['plan_kind_policy']=='unified_first_arrival_v6'
+    assert policies['recovery_policy']=='first_step_phrase_v6'
 
 
 @pytest.mark.parametrize('prefix_policy',['musical_arrangement_recovery_v10','musical_entry_recovery_v9','musical_loop_recovery_v6','musical_loop_recovery_v7','musical_loop_recovery_v8'])

@@ -133,21 +133,28 @@ def read_text_with_encoding(
 ) -> tuple[str, str]:
     """Read text with explicit or auto-detected common Maidata encodings."""
 
-    source = Path(path)
+    return decode_text_with_encoding(Path(path).read_bytes(), encoding=encoding)
+
+
+def decode_text_with_encoding(data: bytes, encoding: str | None = None) -> tuple[str, str]:
+    """Decode a file snapshot with the same newline rules as read_text."""
+    def decode(candidate):
+        return data.decode(candidate).replace('\r\n', '\n').replace('\r', '\n')
+
     if encoding is not None:
-        return source.read_text(encoding=encoding), encoding
+        return decode(encoding), encoding
 
     errors: list[str] = []
     for candidate in DEFAULT_ENCODING_CANDIDATES:
         try:
-            return source.read_text(encoding=candidate), candidate
+            return decode(candidate), candidate
         except UnicodeDecodeError as exc:
             errors.append(f"{candidate}: {exc}")
 
     message = "; ".join(errors)
     raise UnicodeDecodeError(
         "maidata",
-        source.read_bytes(),
+        data,
         0,
         1,
         f"Unable to decode with candidate encodings: {message}",

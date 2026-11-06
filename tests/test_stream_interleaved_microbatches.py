@@ -82,7 +82,8 @@ def test_typed_stage_preserves_regular_embedding_prefix_and_retires_only_old_hea
     upgraded=upgrade_learning_stage(parent,policies);target=upgraded.state_dict()
     removed=set(source)-set(target)
     assert removed and all(key.startswith(('phrase_context.audio.','phrase_context.writing.',
-        'phrase_context.shared.','song_response.song.')) for key in removed)
+        'phrase_context.shared.','song_response.song.','phrase_context.predict.',
+        'phrase_context.ordered.predict.','phrase_execution.relations.')) for key in removed)
     grew=False
     for key,value in source.items():
         if key in removed:continue

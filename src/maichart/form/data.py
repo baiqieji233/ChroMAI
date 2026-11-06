@@ -511,10 +511,27 @@ def relation_target(target, reference, span):
     return torch.tensor([float(np.dot(x,y)/(max(np.linalg.norm(x)*np.linalg.norm(y),1e-8))) for x,y in zip(a,b)])
 
 
+def _preparation_annotation_index(annotations):
+    from maichart.portable_paths import material_path
+
+    index = {}
+    for record in (annotations or {}).get('records', []):
+        raw_source = record.get('source_path')
+        if not raw_source:
+            continue
+        try:
+            key = (int(record.get('difficulty_index', -1)), str(material_path(raw_source).resolve()))
+        except (OSError, TypeError, ValueError):
+            continue
+        index.setdefault(key, []).append(record)
+    return index
+
+
 def _preparation_annotation(annotations, source, slot, audio_path, cache, annotation_index=None):
     if not annotations:
         return None
     from maichart.training.quality_annotations import chart_sha256, audio_sha256, validate_record
+    from maichart.portable_paths import material_path
     source_identity = Path(source).resolve()
     audio_hash = None
     candidates = (annotation_index.get((slot, str(source_identity)), [])
@@ -524,9 +541,9 @@ def _preparation_annotation(annotations, source, slot, audio_path, cache, annota
         if int(record.get('difficulty_index', -1)) != slot:
             continue
         try:
-            if not record.get('source_path') or Path(record['source_path']).resolve() != source_identity:
+            if not record.get('source_path') or material_path(record['source_path']).resolve() != source_identity:
                 continue
-            if record.get('audio_path') and Path(record['audio_path']).resolve() != Path(audio_path).resolve():
+            if record.get('audio_path') and material_path(record['audio_path']).resolve() != Path(audio_path).resolve():
                 continue
         except (OSError, TypeError, ValueError):
             continue
@@ -789,21 +806,12 @@ class FormDataset(Dataset):
         if not annotation_path.exists() and isinstance(data.get('split_metadata'), dict):
             source_manifest = data['split_metadata'].get('source_manifest')
             if source_manifest:
-                annotation_path = Path(source_manifest).with_name('quality_annotations.json')
+                from maichart.portable_paths import material_path
+                annotation_path = material_path(source_manifest).with_name('quality_annotations.json')
         if quality_enabled and annotation_path.exists():
             from maichart.training.quality_annotations import load_quality_annotations
             annotations=load_quality_annotations(annotation_path)
-        annotation_index = {}
-        if annotations:
-            for record in annotations.get('records', []):
-                raw_source = record.get('source_path')
-                if not raw_source:
-                    continue
-                try:
-                    key = (int(record.get('difficulty_index', -1)), str(Path(raw_source).resolve()))
-                except (OSError, TypeError, ValueError):
-                    continue
-                annotation_index.setdefault(key, []).append(record)
+        annotation_index = _preparation_annotation_index(annotations)
         if isinstance(preparation_workers, bool) or not isinstance(preparation_workers, int) or preparation_workers < 0:
             raise ValueError('preparation_workers must be a nonnegative integer')
         entries = data.get('songs', [])

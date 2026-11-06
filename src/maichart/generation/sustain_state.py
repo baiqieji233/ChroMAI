@@ -123,6 +123,7 @@ class SustainStateIndex:
             tempo_changes=self.tempo_changes,
             bpm=bpm,
             first=self.first,
+            build_ir=False,
         )
         parsed_chart = parse_maidata_metadata(text)
         inote = parsed_chart.fields.get("inote_5")
@@ -144,6 +145,18 @@ class SustainStateIndex:
         self.markers = [m for m in self.markers if m["type"] in _TYPE_OFFSETS]
         self._references: dict[str, Any] | None = None
         self._release_index = None
+
+    @classmethod
+    def from_markers(cls, points, tempo_changes, first, markers):
+        """Restore the parsed markers while rebuilding transient indexes on demand."""
+        index = cls.__new__(cls)
+        index.points = tuple(points)
+        index.tempo_changes = tuple(tempo_changes)
+        index.first = float(first)
+        index.markers = markers
+        index._references = None
+        index._release_index = None
+        return index
 
     def at(self, start_beat: Fraction | int | str | float, *, include_current=False, visible_before_beat=None, visibility_version="legacy_v1", max_states=MAX_STATES, include_metadata: bool = True) -> tuple[torch.Tensor, torch.Tensor, dict[str, Any]]:
         if visibility_version not in {"legacy_v1", "causal_v2"}:

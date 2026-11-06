@@ -86,6 +86,7 @@ EVENT_FAMILIES = frozenset({EVENT_MODEL_FAMILY, EVENT_CTX_MODEL_FAMILY})
 ONSET_PROFILES = frozenset({"auto", "none", "chart_onsets_v1"})
 LEGACY_MODEL_FAMILY = "legacy_frame_v2"
 COMPOSER_MODEL_FAMILY = "chart_composer_v1"
+COMPOSER_V2_MODEL_FAMILY = "chart_composer_v2"
 for _directory in (UPLOAD_ROOT, DATASET_ROOT, CONDITION_ROOT, GENERATED_ROOT):
     _directory.mkdir(parents=True, exist_ok=True)
 
@@ -199,10 +200,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._serve_static("form_lab.html")
         if parsed.path == "/composer":
             return self._serve_static("composer.html")
-        if parsed.path in {"/app.js", "/styles.css", "/workspace.js", "/workspace.css",
+        if parsed.path in {"/app.js", "/chart_preview.js", "/styles.css", "/workspace.js", "/workspace.css",
                            "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css",
                            "/composer.js", "/composer.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
+        if parsed.path.startswith('/miaview/') or parsed.path.startswith('/api/preview/'):
+            return self._chart_preview(parsed)
         if parsed.path == "/api/status":
             return self._json_response(
                 {
@@ -231,6 +234,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "event_learning_rate_control": True,
                                               "multi_dataset_training": True,
                                               "composer_training": True,
+                                              "composer_v2_training": True,
+                                              "composer_v2_generation": True,
+                                              "composer_v2_api_contract": "composer_v2_continuous_events_v3",
+                                              "composer_v2_exhaustion_policy": True,
+                                              "composer_v2_memory_budgets": True,
+                                              "composer_v2_timing_recovery": True,
                                               "composer_phrase_contract": "phrase_modes_v1",
                                               "composer_process_prefetch": True,
                                               "composer_detail_compute": "packed_v1",
@@ -284,6 +293,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
         parsed = urlparse(self.path)
         try:
+            if parsed.path == '/api/preview/install':
+                from maichart.webui import preview_assets
+                if self.headers.get('Origin') and urlparse(self.headers['Origin']).netloc!=self.headers.get('Host'):
+                    raise ValueError('不允许跨站启动播放器安装')
+                self._json_body()
+                preview_assets.start_install(WEBUI_ROOT/'preview_runtime'/'miaview')
+                return self._json_response(preview_assets.status(WEBUI_ROOT/'preview_runtime'/'miaview'))
+            if parsed.path.startswith("/api/composer-v2/"):
+                from maichart.webui import composer_v2_api
+                payload = self._json_body()
+                operation = parsed.path.rsplit("/", 1)[-1]
+                if operation == "inspect": return composer_v2_api.inspect(self, payload)
+                if operation == "train": return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
+                if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])
+                return self._json_response({"error": "未知 Composer v2 操作"}, HTTPStatus.NOT_FOUND)
             if parsed.path.startswith("/api/composer/"):
                 from maichart.webui import composer_api
                 operation = parsed.path.rsplit("/", 1)[-1]
@@ -498,13 +522,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
                         _finish_cancelled_unlocked(task)
                         return
                     task.result["intensity_profile"] = profile
-                    task.result["curve_source"] = selected_source
+                    effective_curve_source=("audio" if profile.get("model_prediction_available") is False else selected_source)
+                    task.result["curve_source"] = effective_curve_source
+                    task.result["requested_curve_source"] = source
                     task.result["intensity_profile_path"] = str(output)
                     task.status = "completed"
                     task.progress = 1.0
-                    task.message = "模型负荷曲线已生成，可以拖动编辑" if selected_source == "model" else "音频参考曲线已生成，可以拖动编辑"
+                    task.message = ("当前检查点未训练物量预览，已生成音频参考曲线" if profile.get("model_prediction_available") is False else
+                        "模型负荷曲线已生成，可以拖动编辑" if effective_curve_source == "model" else "音频参考曲线已生成，可以拖动编辑")
                 task.log(f"intensity_profile method={profile.get('method')} "
-                         f"duration_sec={profile.get('duration_sec')} points={len(profile.get('points', []))}")
+                         f"duration_sec={profile.get('duration_sec')} points={len(profile.get('points', []))}"
+                         + ("；当前检查点未训练物量预览，显示音频参考" if profile.get('model_prediction_available') is False else ""))
                 _close_task_log(task, status="completed", exit_code=0)
             except Exception as exc:  # task errors are visible to its separate poller
                 with task.lock:
@@ -575,6 +603,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
 
     def do_HEAD(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
+        if parsed.path.startswith('/miaview/') or parsed.path=='/api/preview/resource':
+            return self._chart_preview(parsed,head=True)
         if parsed.path == "/api/intensity/audio":
             return self._intensity_audio(parse_qs(parsed.query).get("id", [""])[0], send_body=False)
         if parsed.path == "/api/quality/audio":
@@ -582,6 +612,29 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.NOT_FOUND)
         self.send_header("Content-Length", "0")
         self.end_headers()
+
+    def _chart_preview(self, parsed, *, head=False):
+        from maichart.webui import chart_preview, preview_assets
+        root=WEBUI_ROOT/'preview_runtime'/'miaview'
+        query=parse_qs(parsed.query)
+        try:
+            if parsed.path.startswith('/miaview/'):
+                from urllib.parse import unquote
+                path=preview_assets.asset_path(root,unquote(parsed.path[len('/miaview/'):]))
+                return chart_preview.serve_file(self,path,head=head,immutable=True)
+            if parsed.path=='/api/preview/status':
+                return self._json_response(preview_assets.status(root))
+            if parsed.path=='/api/preview/latest':
+                return self._json_response({'preview':chart_preview.latest(project=PROJECT_ROOT,log_root=LOG_ROOT)})
+            if parsed.path=='/api/preview/task':
+                task_id=query.get('id',[''])[0]
+                return self._json_response(chart_preview.describe(task_id,project=PROJECT_ROOT,log_root=LOG_ROOT,task=_get_task(task_id)))
+            if parsed.path=='/api/preview/resource':
+                path=chart_preview.resource_path(query.get('id',[''])[0])
+                return chart_preview.serve_file(self,path,head=head)
+            return self._json_response({'error':'预览接口不存在'},404)
+        except FileNotFoundError as exc:return self._json_response({'error':str(exc)},404)
+        except (OSError,ValueError,KeyError,TypeError) as exc:return self._json_response({'error':str(exc)},400)
 
     def _start_generate(self, payload: dict[str, Any]) -> None:
         checkpoint = _required_path(payload.get("checkpoint"), "checkpoint", must_exist=True)
@@ -597,6 +650,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
             form_payload.setdefault("checkpoint", str(checkpoint))
             form_payload["model_family"] = model_family
             return start_form_task(self, "generate", form_payload, runtime=sys.modules[__name__])
+        if model_family == COMPOSER_V2_MODEL_FAMILY:
+            from maichart.webui import composer_v2_api
+            return composer_v2_api.start_generate(self, {**payload, "checkpoint": str(checkpoint)}, runtime=sys.modules[__name__])
         if model_family == COMPOSER_MODEL_FAMILY:
             from maichart.webui import composer_api
             composer_payload = dict(payload)
@@ -1161,6 +1217,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response({"task_id": task.task_id})
 
     def _start_train(self, payload: dict[str, Any]) -> None:
+        if payload.get("model_family") == COMPOSER_V2_MODEL_FAMILY:
+            from maichart.webui import composer_v2_api
+            return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
         if payload.get('model_family') == 'chart_stream_v1':
             from maichart.webui.stream_api import start
             form_payload=dict(payload)
@@ -1541,6 +1600,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     detected_payload = _load_checkpoint_payload(candidate)
                 except (OSError, ValueError, RuntimeError, EOFError):
                     detected_payload = None
+                if detected_payload is not None and _checkpoint_model_family(detected_payload) == COMPOSER_V2_MODEL_FAMILY:
+                    from maichart.webui.composer_v2_api import inspection
+                    return self._json_response(inspection(candidate))
                 if detected_payload is not None and _checkpoint_model_family(detected_payload) == 'chart_stream_v1':
                     from maichart.webui.stream_api import inspect_payload
                     result = inspect_payload(detected_payload)
@@ -1565,6 +1627,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                    "can_generate": bool(result.get("valid")),
                                    "generation_entry": "/"})
                     return self._json_response(result)
+        if payload.get("model_family") == COMPOSER_V2_MODEL_FAMILY:
+            from maichart.webui import composer_v2_api
+            return composer_v2_api.inspect(self, payload)
         if payload.get('model_family') == 'chart_stream_v1':
             from maichart.webui.stream_api import start
             return start(self, 'inspect', payload, runtime=sys.modules[__name__])
@@ -1627,6 +1692,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
         ]
         difficulties = [difficulty for _, difficulty in difficulty_records]
         is_event_manifest = (data.get("preprocessing") or {}).get("target_schema") == EVENT_MODEL_FAMILY
+        use_event_qc = is_event_manifest and model_family != LEGACY_MODEL_FAMILY
         if _is_event_family(model_family) and is_event_manifest:
             event_feature_profile = (data.get("preprocessing") or {}).get("feature_profile")
             if event_feature_profile not in {None, "event_audio_v1", "event_audio_v2_rhythm"}:
@@ -1676,16 +1742,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "difficulty_count": len(difficulties),
                 "usable_difficulty_count": (
                     sum(1 for difficulty in difficulties if difficulty.get("usable_for_training"))
-                    if not (_is_event_family(model_family) and is_event_manifest)
+                    if not use_event_qc
                     else sum(1 for song, difficulty in difficulty_records if _event_difficulty_usable(song, difficulty))
                 ),
                 "filtered_difficulty_count": (
                     sum(1 for difficulty in difficulties if not difficulty.get("usable_for_training"))
-                    if not (_is_event_family(model_family) and is_event_manifest)
+                    if not use_event_qc
                     else sum(1 for song, difficulty in difficulty_records if not _event_difficulty_usable(song, difficulty))
                 ),
                 "model_family": model_family,
                 "event_manifest": bool(is_event_manifest),
+                "usable_count_basis": "event_manifest_qc" if use_event_qc else "frame_manifest_qc",
                 "top_filter_reasons": reasons.most_common(8),
                 "audio_statuses": dict(audio_statuses),
                 "preprocessing": data.get("preprocessing") or {},
@@ -1829,7 +1896,7 @@ def _create_task(kind: str, *, checkpoint_dir: Path | None = None) -> TaskState:
         if checkpoint_dir is not None:
             target = _canonical_checkpoint_dir(checkpoint_dir)
             for existing in TASKS.values():
-                if (existing.kind == "composer_train"
+                if (existing.kind in {"composer_train", "composer_v2_train"}
                         and existing.status in {"queued", "running", "cancelling"}
                         and existing.result.get("checkpoint_dir")
                         and _canonical_checkpoint_dir(existing.result["checkpoint_dir"]) == target):
@@ -1857,6 +1924,76 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     """Translate Composer's JSON progress records into the common task shape."""
 
     prefix, separator, raw = line.partition(" ")
+    if separator and prefix.startswith("composer_v2_"):
+        try:
+            data = json.loads(raw)
+            if not isinstance(data, dict): return
+        except ValueError:
+            return
+        task.result[prefix] = data
+        stage = str(data.get("stage") or "")
+        if "optimizer_steps" in data: task.result["optimizer_steps"] = data["optimizer_steps"]
+        if prefix == "composer_v2_runtime":
+            task.result["composer_v2_stage"] = stage
+            task.result["progress_indeterminate"] = stage == "preparation"
+            task.message = {"preparation": "准备谱面与音频特征", "training": "开始训练",
+                            "failed": "任务失败"}.get(stage, "更新运行配置")
+        elif prefix == "composer_v2_prepare":
+            task.result["composer_v2_stage"] = "preparation"
+            task.result["progress_indeterminate"] = True
+            label = {"charts": "检查谱面源", "vocabulary": "建立词表与事件索引",
+                     "audio": "准备音频特征"}.get(stage, "准备训练数据")
+            task.message = f"{label} {data.get('completed', 0)}/{data.get('total', '?')}"
+            if stage == 'audio' and 'cache_builds' in data:
+                task.message += f"（复用 {data.get('cache_hits', 0)}，新建 {data['cache_builds']}）"
+        elif prefix == "composer_v2_progress":
+            task.result["composer_v2_stage"] = stage
+            target = task.result.get("epoch_target")
+            epoch = data.get("epoch")
+            if stage == "training":
+                data.setdefault("loss_scope", "run_quality_weighted_token_mean")
+                task.result["composer_v2_training_metrics"] = dict(data)
+                task.result["epoch"] = epoch
+                task.result["progress_indeterminate"] = False
+                batch, total = data.get("batch"), data.get("total")
+                if target and epoch and total and batch is not None:
+                    fraction = min(1., max(0., float(batch) / float(total)))
+                    task.progress = min(.99, max(0., (float(epoch) - 1 + fraction) / float(target)))
+                task.message = f"训练第 {epoch}/{target or '?'} 轮 · batch {batch}/{total}"
+            elif stage == "epoch_complete":
+                data.setdefault("loss_scope", "epoch_validation" if data.get("validation_loss") is not None else "epoch_training")
+                task.result["composer_v2_epoch_metrics"] = dict(data)
+                history = task.result.setdefault("composer_v2_epoch_history", [])
+                history[:] = [row for row in history if row.get("epoch") != epoch]
+                history.append(dict(data))
+                del history[:-200]
+                task.result["epoch"] = epoch
+                if target and epoch is not None: task.progress = min(.99, float(epoch) / float(target))
+                task.message = f"第 {epoch}/{target or '?'} 轮完成，验证与保存结果已更新"
+            else:
+                task.message = "跳过本次非有限数值更新" if stage == "nonfinite_update_skipped" else "更新训练状态"
+        elif prefix == "composer_v2_checkpoint":
+            task.result["composer_v2_stage"] = "checkpoint"
+            # Checkpoint epoch is a completed-epoch cursor (zero during epoch 1),
+            # not the one-based epoch in training progress records.
+            task.message = f"保存检查点 · 参数更新 {data.get('optimizer_steps', 0)} 步"
+        elif prefix == "composer_v2_event":
+            task.result["progress_indeterminate"] = True
+            task.message = f"已生成 {data.get('events', 0)} 个事件 · 当前拍位 {data.get('beat', '?')}"
+        elif prefix == "composer_v2_window":
+            task.result["progress_indeterminate"] = True
+            task.message = "生成窗口已完成，继续续写"
+        elif prefix in {"composer_v2_rollback", "composer_v2_hold_release_repair"}:
+            task.result["progress_indeterminate"] = True
+            task.message = "正在回退并重试冲突位置" if prefix.endswith("rollback") else "正在修复 Hold 尾部冲突"
+        elif prefix == "composer_v2_done":
+            task.result["progress_indeterminate"] = False
+            task.message = "谱面生成结束，正在收集输出"
+        else:
+            task.message = {"composer_v2_sampling": "生成采样设置已确定", "composer_v2_timing": "分析歌曲节拍"}.get(prefix, task.message)
+        if prefix == 'composer_v2_timing' and all(isinstance(data.get(key),(int,float)) and math.isfinite(data[key]) for key in ('effective_bpm','effective_first')):
+            task.message = f"节拍已确定：BPM {float(data['effective_bpm']):.4f}，起始偏移 {float(data['effective_first']):.5f} 秒"
+        return
     if not separator or prefix not in {
         "form_prepare", "composer_prepare",
         "composer_runtime", "composer_stage", "composer_progress", "composer_epoch", "composer_checkpoint",
@@ -2252,6 +2389,14 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
             except (OSError, ValueError) as exc:
                 task.result['stream_report_error'] = str(exc)
         return
+    if task.kind == 'composer_v2_generate':
+        report_path = next((path for path in existing if path.name.endswith('.composer_v2.json')), None)
+        if report_path is not None:
+            try:
+                task.result['composer_v2_report'] = json.loads(report_path.read_text(encoding='utf-8-sig'))
+            except (OSError, ValueError) as exc:
+                task.result['composer_v2_report_error'] = str(exc)
+        return
     if task.kind == 'composer_generate':
         report_path=next((path for path in existing if path.name.endswith('.composer.json')),None)
         if report_path is not None:
@@ -2399,7 +2544,7 @@ def _prepare_training_sources(payload: dict[str, Any]) -> tuple[dict[str, Any], 
     prepared = _dataset_api().prepare(manifests, model_family=family)
     preserved_cache_dir = (
         payload.get("cache_dir")
-        if family == COMPOSER_MODEL_FAMILY and str(payload.get("cache_dir") or "").strip()
+        if family in {COMPOSER_MODEL_FAMILY, COMPOSER_V2_MODEL_FAMILY} and str(payload.get("cache_dir") or "").strip()
         else None
     )
     result = dict(payload)
@@ -2512,7 +2657,7 @@ def _is_event_family(family: str | None) -> bool:
 
 def _requested_model_family(payload: dict[str, Any]) -> str:
     family = str(payload.get("model_family", EVENT_MODEL_FAMILY)).strip().lower()
-    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1", "song_form_v2", "chart_stream_v1", COMPOSER_MODEL_FAMILY}:
+    if family not in EVENT_FAMILIES | {LEGACY_MODEL_FAMILY, "song_form_v1", "song_form_v2", "chart_stream_v1", COMPOSER_MODEL_FAMILY, COMPOSER_V2_MODEL_FAMILY}:
         raise ValueError("model family 只能是 chart_stream_v1、chart_composer_v1、song_form_v2、song_form_v1、event_v1、event_ctx_v1 或 legacy_frame_v2")
     return family
 
@@ -2912,7 +3057,7 @@ def _preprocess_args(payload: dict[str, Any], *, raw_root: Path, cache_dir: Path
                      model_family: str) -> list[str]:
     """Arguments for the preprocessing stage, shared by the two entry points."""
 
-    if _is_event_family(model_family) or model_family in {"song_form_v1", "song_form_v2", "chart_stream_v1", COMPOSER_MODEL_FAMILY}:
+    if _is_event_family(model_family) or model_family in {"song_form_v1", "song_form_v2", "chart_stream_v1", COMPOSER_MODEL_FAMILY, COMPOSER_V2_MODEL_FAMILY}:
         # song_form consumes the event source manifest and exact chart/audio
         # caches. It must never invoke the legacy fixed-frame builder.
         args = [

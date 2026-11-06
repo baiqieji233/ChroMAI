@@ -91,11 +91,10 @@ def inspect_chart(chart: Any) -> None:
         compact = "".join(point.note_text.split())
         if any(char not in NOTE_CHARACTERS for char in compact):
             raise ValueError(f"Unsupported syntax at beat {point.beat}: {compact[:100]}")
-    # The public quality helper also checks duplicate heads and unknown text.
-    from maichart.generation.event_quality import assess_event_chart
-    report = assess_event_chart(chart.points, chart.tempo_changes, first=chart.first)
-    if not report.get("syntax_valid", False):
-        errors = report.get("fatal_errors") or report.get("unsupported") or []
+    from maichart.generation.event_quality import parse_event_notes
+    parsed = parse_event_notes(chart.points, chart.tempo_changes, first=chart.first)
+    if not parsed.syntax_valid:
+        errors = parsed.fatal_errors or parsed.unsupported
         if errors:
             summary = "; ".join(
                 f"{item.get('code', 'invalid')}@{item.get('beat', '?')}: {item.get('message', '')}"

@@ -420,9 +420,11 @@ def test_every_button_is_wired_and_every_reference_exists():
     assert buttons, "the page must expose buttons"
 
     scripts = APP_JS + (ROOT / "src/maichart/webui/static/workspace.js").read_text(encoding="utf-8")
+    scripts += (ROOT / "src/maichart/webui/static/chart_preview.js").read_text(encoding="utf-8")
     referenced = set(re.findall(r'\$\("#([A-Za-z0-9_]+)"\)', scripts))
     referenced |= set(re.findall(r'\bon\("#([A-Za-z0-9_]+)"', scripts))
     referenced |= set(re.findall(r'\belement\("#([A-Za-z0-9_]+)"\)', scripts))
+    referenced |= set(re.findall(r'\bdocument\.getElementById\("([A-Za-z0-9_]+)"\)', scripts))
 
     dead = [button for button in buttons if button not in referenced]
     assert not dead, f"buttons without any handler: {dead}"
@@ -446,14 +448,14 @@ def test_composer_generation_eval_controls_are_exposed_and_wired():
     """Per-epoch closed-loop generation evaluation (composer_quality_observation) controls."""
 
     for field_id, default in (
-        ("composerGenerationEvalSongs", "2"),
+        ("composerGenerationEvalSongs", "0"),
         ("composerGenerationEvalIntervalEpochs", "1"),
     ):
         block = label_block(field_id)
         assert f'value="{default}"' in block
-    assert 'generation_eval_songs: Number(valueOrDefault("#composerGenerationEvalSongs", 2))' in APP_JS
+    assert "['generation_eval_songs','composerGenerationEvalSongs',0]" in APP_JS
     assert 'generation_eval_interval_epochs: Number(valueOrDefault("#composerGenerationEvalIntervalEpochs", 1))' in APP_JS
-    assert "生成报告" in label_block("composerGenerationEvalSongs")
+    assert "输出报告" in label_block("composerGenerationEvalSongs")
     composer_html = (ROOT / "src/maichart/webui/static/composer.html").read_text(encoding="utf-8")
     assert 'name="generation_eval_songs"' in composer_html
     assert 'name="generation_eval_interval_epochs"' in composer_html

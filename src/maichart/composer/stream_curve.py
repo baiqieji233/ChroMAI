@@ -100,24 +100,54 @@ def generate_learned_profile(audio_path, checkpoint_path, *, resolution_sec=2., 
     dev = _select_device(device)
     model, payload = load(checkpoint_path, dev)
     model.eval()
+    identity=dict(epoch=int(payload.get('epoch',0)),optimizer_steps=int(payload.get('optimizer_steps',0)))
+    unified=getattr(model.config,'plan_kind_policy','off') in ('unified_first_arrival_v5','unified_first_arrival_v6')
+    trained_updates=int(getattr(model,'curve_preview_trained_updates',0))
+    preview_trained=(getattr(model.config,'curve_preview_policy','off')=='audio_counts_v1'
+        and getattr(model.config,'curve_preview_weight',0.)>0 and trained_updates>0)
     # Release mapped model/optimizer references before audio extraction.
     payload.clear()
     audio_file, checkpoint_file = Path(audio_path), Path(checkpoint_path)
     audio = extract_rational_audio(audio_file, cache_dir=checkpoint_file.parent / 'audio_cache',
                                    evidence_profile='balanced_evidence_v1')
     tempo = normalize_tempo_map(tempo_map) if tempo_map is not None else [EventTempo(Fraction(0), float(bpm or audio.tempo_bpm))]
+    resolved = _resolve_curve_condition(condition, level)
+    metadata=dict(checkpoint=str(checkpoint_file),checkpoint_identity=identity,
+        curve_preview_trained_updates=trained_updates,
+        audio_sha256=audio_sha256(audio_file),device=str(dev),bpm=float(tempo[0].bpm),
+        first=float(first),condition=resolved.to_dict(),
+        tempo_map=[dict(beat=str(item.beat),bpm=float(item.bpm)) for item in tempo],meter_map=meter_map)
+    if unified and not preview_trained:
+        from maichart.generation.music_intensity import intensity_profile_from_event_audio
+        profile=intensity_profile_from_event_audio(audio,resolution_sec=resolution_sec,
+            local_context_sec=local_context_sec)
+        profile.update(metadata,method='audio_reference_untrained_composer_preview_v1',
+            model_family='chart_composer_v1',architecture_profile=PROFILE,
+            model_prediction_available=False,preview_only=True,edited=False,
+            readout_policy='audio_reference_missing_trained_count_preview',
+            curve_bin_seconds=float(resolution_sec),time_axis=AUDIO_CURVE_AXIS,
+            reference_points=[dict(point) for point in profile['points']],
+            rest_regions=[],reference_rest_regions=[])
+        profile.setdefault('limitations',[]).append(
+            '此检查点未训练独立物量预览头；显示音频参考，未读取旧计划通道作为模型密度。')
+        return validate_intensity_profile(profile)
     song = organize_song(audio, tempo, float(first), meters=meter_map,
                          max_seconds=999., quality_profile='musical_evidence_v1')
     grid_seconds = float(getattr(model.config, 'audio_grid_seconds', .05))
     bank = build_audio_bank(song, TempoClock(song.tempo, song.first), grid_seconds)
     features, seconds, beats = [value[None].to(dev) for value in bank]
     cache = model.encode_audio(features, torch.ones(features.shape[:2], dtype=torch.bool, device=dev), seconds, beats)
-    resolved = _resolve_curve_condition(condition, level)
     control = resolved.to_vector(device=dev)[None]
-    logits = model.plan_head(cache['local'])[0] + F.linear(model.condition(control), model.plan_head.weight)[0]
+    if unified:
+        counts=model.curve_preview_logits(cache,control,torch.zeros(1,dtype=torch.long,device=dev))[0]
+        # This is an acoustic count estimate, not the model's arrangement
+        # decision to leave a particular musical phrase empty.
+        blank=torch.exp(-F.softplus(counts[:,1])*float(getattr(model.config,'plan_blank_window_seconds',.5)))
+        logits=torch.cat((torch.logit(blank.clamp(1e-7,1-1e-7))[:,None],counts),-1)
+        metadata.update(model_prediction_available=True,readout_policy='trained_audio_count_preview_v1',
+            blank_probability_scope='poisson_audio_count_estimate_not_arrangement',preview_only=True)
+    else:
+        logits = model.plan_head(cache['local'])[0] + F.linear(model.condition(control), model.plan_head.weight)[0]
     return profile_from_predictions(bank[1].numpy(), logits, audio.duration_sec, resolution_sec,
-        plan_target_units=getattr(model.config, 'plan_target_units', 'cell_counts_v1'),
-        metadata=dict(checkpoint=str(checkpoint_file), audio_sha256=audio_sha256(audio_file),
-            device=str(dev), audio_grid_seconds=grid_seconds, bpm=float(tempo[0].bpm), first=float(first), condition=resolved.to_dict(),
-            tempo_map=[dict(beat=str(item.beat), bpm=float(item.bpm)) for item in tempo],
-            meter_map=meter_map))
+        plan_target_units='rates_per_second_v2' if unified else getattr(model.config,'plan_target_units','cell_counts_v1'),
+        metadata=dict(metadata,audio_grid_seconds=grid_seconds))

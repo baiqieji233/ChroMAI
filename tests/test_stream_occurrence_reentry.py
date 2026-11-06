@@ -84,8 +84,9 @@ def test_phrase_mode_cannot_reinstate_an_arbitrary_wait_veto():
 def test_new_stage_selects_new_occurrence_and_entry_curriculum_without_rewriting_old_config():
     old=StreamComposerConfig.from_dict({'plan_kind_policy':'rate_integral_v2'})
     fresh=resolve_learning_policies(SimpleNamespace(),old,resume=False)
-    assert fresh['plan_kind_policy']=='phrase_arranged_hazard_v4'
-    assert fresh['prefix_augmentation_input_policy']==aug.MUSICAL_ARRANGEMENT_INPUT_POLICY
+    assert fresh['plan_kind_policy']=='unified_first_arrival_v6'
+    assert fresh['prefix_augmentation_input_policy']=='continuous_draft_recovery_v11'
+    assert fresh['draft_policy']=='beat_ordered_draft_v1'
     saved=resolve_learning_policies(SimpleNamespace(),old,resume=True)
     assert saved['plan_kind_policy']=='rate_integral_v2'
     assert old.plan_kind_policy=='rate_integral_v2'
@@ -167,5 +168,7 @@ def test_changed_learning_objective_cannot_silently_resume_v47_optimizer():
     payload=dict(model_config=dict(song_response_policy='unified_profile_response_v2'),
         args=dict(training_objective_recipe=dict(version='stream_balanced_hierarchical_configuration_v9')))
     assert not training_objective_compatible(payload)
+    payload['model_config']['draft_objective_policy']='sequence_evidence_v2'
+    payload['model_config']['song_choice_objective_policy']='event_credit_v1'
     payload['args']['training_objective_recipe']['version']=UNIFIED_OBJECTIVE_VERSION
     assert training_objective_compatible(payload)

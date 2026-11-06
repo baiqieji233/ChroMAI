@@ -43,6 +43,7 @@ class ModelFamily(Enum):
     LEGACY_FRAME_V2 = "legacy_frame_v2"
     CHART_STREAM_V1 = "chart_stream_v1"
     CHART_COMPOSER_V1 = "chart_composer_v1"
+    CHART_COMPOSER_V2 = "chart_composer_v2"
     # Deprecated compatibility alias. Capability is determined from checkpoint
     # contents, never from a separate "extended" family label.
     EVENT_CTX_V1_EXTENDED = "event_ctx_v1"
@@ -50,6 +51,12 @@ class ModelFamily(Enum):
 
 def checkpoint_capabilities(checkpoint_data: dict[str, Any]) -> dict[str, Any]:
     """Derive generation capabilities from the checkpoint's declared schema."""
+    if checkpoint_data.get('schema') == 'maichart-composer-v2-checkpoint-v1':
+        valid = checkpoint_data.get('family') == 'chart_composer_v2'
+        return dict(model_family='chart_composer_v2', valid=valid,
+                    errors=[] if valid else ['Composer v2 checkpoint family mismatch'],
+                    fine_note_strength=False, local_onset_guidance=False,
+                    structured_event_generation=True)
     if checkpoint_data.get('schema') in COMPOSER_CHECKPOINT_SCHEMAS:
         schema = checkpoint_data.get('schema')
         valid = (schema == 'maichart-chart-composer-checkpoint-v2'

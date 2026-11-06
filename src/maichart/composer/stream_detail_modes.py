@@ -14,8 +14,17 @@ class ModeDetailControl(nn.Module):
         self.stop=nn.Parameter(torch.zeros(modes,5))
     def bias(self,candidates,mode=None):
         choices=self.choices-self.choices.mean(0,keepdim=True) if self.parameterization=='centered_v2' else self.choices
+        if isinstance(mode,dict):
+            return (choices[int(mode['index'])]+mode['context'])@self.features(candidates).T
+        if torch.is_tensor(mode):
+            centered=mode-mode.mean(-2,keepdim=True)
+            return (choices+centered)@self.features(candidates).T
         values=choices@self.features(candidates).T
         return values if mode is None else values[int(mode)]
     def stop_bias(self,type_id,mode=None):
         stop=self.stop-self.stop.mean(0,keepdim=True) if self.parameterization=='centered_v2' else self.stop
+        if isinstance(mode,dict):return stop[int(mode['index']),type_id]+(self.context_stop(mode['context'])[...,type_id] if hasattr(self,'context_stop') else 0.)
+        if torch.is_tensor(mode):
+            context=mode-mode.mean(-2,keepdim=True)
+            return stop[:,type_id]+(self.context_stop(context)[...,type_id] if hasattr(self,'context_stop') else context[...,0]*0.)
         return stop[:,type_id] if mode is None else stop[int(mode),type_id]

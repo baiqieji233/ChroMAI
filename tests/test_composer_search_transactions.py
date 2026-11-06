@@ -1,8 +1,10 @@
 from collections import Counter
+from copy import deepcopy
 from fractions import Fraction as F
 from types import SimpleNamespace
 
 import pytest
+import numpy as np
 import torch
 
 from maichart.composer.event_set_codec import EventSetCodec
@@ -16,6 +18,37 @@ from maichart.tempo_clock import TempoClock
 
 class Curve(_Curve):
     def __init__(self):self.counts=Counter()
+
+
+def assert_state_equal(actual,expected,path='batch'):
+    """Replay identity covers tensors AND CPU routing/clock metadata."""
+    if torch.is_tensor(actual):
+        assert torch.is_tensor(expected),path
+        assert actual.dtype==expected.dtype and actual.shape==expected.shape,path
+        assert actual.device==expected.device,path
+        assert torch.equal(actual,expected),path
+    elif isinstance(actual,np.ndarray):
+        assert isinstance(expected,np.ndarray),path
+        assert actual.dtype==expected.dtype and actual.shape==expected.shape,path
+        assert np.array_equal(actual,expected),path
+    elif isinstance(actual,dict):
+        assert isinstance(expected,dict) and actual.keys()==expected.keys(),path
+        for key in actual:assert_state_equal(actual[key],expected[key],f'{path}.{key}')
+    elif isinstance(actual,(list,tuple)):
+        assert type(actual) is type(expected) and len(actual)==len(expected),path
+        for index,(left,right) in enumerate(zip(actual,expected)):
+            assert_state_equal(left,right,f'{path}[{index}]')
+    else:
+        assert type(actual) is type(expected) and actual==expected,path
+
+
+def snapshot_state(value):
+    """Clone nested mutable routing metadata as well as tensor storage."""
+    if torch.is_tensor(value):return value.clone()
+    if isinstance(value,dict):return {key:snapshot_state(child) for key,child in value.items()}
+    if isinstance(value,list):return [snapshot_state(child) for child in value]
+    if isinstance(value,tuple):return tuple(snapshot_state(child) for child in value)
+    return deepcopy(value)
 
 
 def fixture():
@@ -123,7 +156,7 @@ def test_multiround_withdrawal_replays_all_state_and_invalidates_old_tail(monkey
         # clock, continuation and the causal phrase archive.
         fresh,fg,fc,fp=replay_stream_prefix(ctx._committed,cf,gf,base,clock)
         a,b=ctx.current_batch(),fresh.current_batch()
-        for key in a:assert torch.equal(a[key],b[key]),key
+        assert_state_equal(a,b)
         assert g.last_head_seconds==fg.last_head_seconds and curve.counts==fc.counts
         snapshots.append((list(prefix),seed,list(ctx._committed),dict(curve.counts),g))
         return dict(steps=list(ctx._committed),points=points,cursor=cursor,reason=reason,guard=g,
@@ -159,9 +192,9 @@ def test_edited_hold_slide_and_compound_slide_replace_all_occupancy(old,new):
     original=[step(0,0,old)]+[step(i-1,i,'6') for i in range(1,7)]
     edited=[step(0,0,new)]+original[1:]
     before,bg,bc,_=replay_stream_prefix(original,cf,gf,Curve(),clock)
-    original_batch={k:v.clone() for k,v in before.current_batch().items()}
+    original_batch=snapshot_state(before.current_batch())
     after,ag,ac,_=replay_stream_prefix(edited,cf,gf,bc,clock)
-    assert torch.equal(before.current_batch()['action_state'],original_batch['action_state'])
+    assert_state_equal(before.current_batch(),original_batch)
     assert before._committed[0].text==old and after._committed[0].text==new
     assert before.clock.at(F(6))==after.clock.at(F(6))
     assert bg._lifetime(EventPoint(F(0),old))[1]>ag._lifetime(EventPoint(F(0),new))[1]
@@ -170,7 +203,7 @@ def test_edited_hold_slide_and_compound_slide_replace_all_occupancy(old,new):
     # The descriptor intentionally ignores duration, and no phrase has closed
     # at beat six. Archive equality is checked against a fresh edited replay.
     fresh,_,_,_=replay_stream_prefix(edited,cf,gf,Curve(),clock)
-    assert torch.equal(after.current_batch()['phrase_memory_features'],fresh.current_batch()['phrase_memory_features'])
+    assert_state_equal(after.current_batch(),fresh.current_batch())
     assert ag.prefix is not bg.prefix and ag.last_head_seconds is not bg.last_head_seconds
     assert ac.counts is not bc.counts
 

@@ -1,0 +1,958 @@
+{
+  "date": "2026-11-04",
+  "family": "chart_composer_v2",
+  "scope": "independent family in existing main WebUI",
+  "formal_training_started": false,
+  "backup": {
+    "path": "D:\\simai_transformer_backups\\before_composer_v2_20261104",
+    "scope": "key_project_content_only_no_checkpoints_user_confirmed",
+    "files": 10266,
+    "bytes": 833148173,
+    "mismatches": [],
+    "checkpoints_copied": false
+  },
+  "tests": {
+    "python_integration": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "158",
+      "time": "37.315",
+      "timestamp": "2026-11-04T19:24:03.792146+08:00",
+      "hostname": "baiqieji的机革"
+    },
+    "additional_api_default_contract_test": "passed in final_adapter.log (12 passed; 11 overlap integration)",
+    "javascript": {
+      "passed": 235,
+      "failed": 0
+    },
+    "browser": {
+      "checks": {
+        "v2TrainingVisible": true,
+        "v1TrainingHidden": true,
+        "defaults": {
+          "v2TrainValidationSource": "auto",
+          "v2TrainHoldoutFraction": "0.05",
+          "v2TrainWindowBeats": "16",
+          "v2TrainHistoryBeats": "16",
+          "v2TrainFutureBeats": "4",
+          "v2TrainCpuThreads": "2",
+          "v2TrainAudioBackend": "mert",
+          "v2GenerateCandidates": "1",
+          "v2GenerateRollbackWindows": "2"
+        },
+        "sharedLegacyTrainHidden": true,
+        "v1SwitchVisible": true,
+        "v2SwitchHidden": true,
+        "persisted": {
+          "family": "chart_composer_v2",
+          "window": "24",
+          "validation": "manual",
+          "manualPath": "E:/ui-review/dev.json"
+        },
+        "v2GenerationVisible": true,
+        "v1GenerationHidden": true,
+        "curveHidden": true,
+        "unsupportedPreferencesHidden": true,
+        "levelStillVisible": true,
+        "payloadBuilders": {
+          "train": {
+            "model_family": "chart_composer_v2",
+            "raw_root": "",
+            "cache_dir": "cache/chart_composer_v2",
+            "manifest": "E:/ui-review/source.json",
+            "manifests": [],
+            "mode": "fresh",
+            "init_checkpoint": null,
+            "checkpoint_dir": "checkpoints/chart_composer_v2",
+            "epochs": 50,
+            "batch_size": 4,
+            "grad_accumulation": 16,
+            "lr": 0.0002,
+            "lr_schedule": "cosine",
+            "precision": "bf16",
+            "audio_backend": "mert",
+            "validation_manifest": "E:/ui-review/dev.json",
+            "prepare_device": "auto",
+            "d_model": 384,
+            "layers": 8,
+            "nhead": 8,
+            "dim_feedforward": 1536,
+            "dropout": 0.1,
+            "window_beats": 24,
+            "history_beats": 16,
+            "future_beats": 4,
+            "ticks_per_beat": 48,
+            "max_tokens": 2048,
+            "device": "auto",
+            "warmup_steps": 200,
+            "min_lr_ratio": 0.1,
+            "validation_max_batches": 32,
+            "checkpoint_interval_steps": 500,
+            "log_interval": 20,
+            "seed": 0,
+            "max_steps": 0,
+            "limit_charts": 0,
+            "cpu_threads": 2,
+            "validation_source": "manual",
+            "holdout_fraction": 0.05
+          },
+          "generate": {
+            "model_family": "chart_composer_v2",
+            "checkpoint": "E:/ui-review/model.pt",
+            "audio": "E:/ui-review/song.wav",
+            "output": "webui_workspace/generated/maidata.txt",
+            "bpm": null,
+            "first": 0,
+            "level": 13.3,
+            "seed": 19,
+            "temperature": 0.9,
+            "top_p": 0.95,
+            "candidates": 1,
+            "device": "auto",
+            "rollback_windows": 3,
+            "cache_dir": "cache/chart_composer_v2",
+            "max_events": 0,
+            "tempo_map": null,
+            "meter_map": null
+          }
+        },
+        "generationPersisted": "3",
+        "v1PreferencesRestored": true,
+        "v2GenerationHiddenAfterV1": true,
+        "v1GenerationRestored": true
+      },
+      "errors": [],
+      "efficiency_controls": {
+        "folded": [
+          {
+            "title": "常用训练设置",
+            "open": true
+          },
+          {
+            "title": "数据与音频特征",
+            "open": true
+          },
+          {
+            "title": "模型与上下文",
+            "open": false
+          },
+          {
+            "title": "验证、性能与保存",
+            "open": false
+          }
+        ],
+        "checks": {
+          "cpu": "3",
+          "payload": 3
+        },
+        "pageErrors": [],
+        "backendJobsStarted": false
+      }
+    },
+    "artifacts": {
+      "http_validation.json": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\http_validation.json",
+        "sha256": "f127e3384684ce157acca9c67e33ed002df6eb0df17014676e3ac6c93a730a9b"
+      },
+      "ui_acceptance.json": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\ui_acceptance.json",
+        "sha256": "5077dcb67bfe8883ec6c529f33fcbca3b80552e3f8777db8266754f5bb2dc60f"
+      },
+      "ui_efficiency_check.json": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\ui_efficiency_check.json",
+        "sha256": "eae02fcd420b4a7bff7f941b6076a087838b33a494b3a2d5c1bf19eec1abe43e"
+      },
+      "final_integrated.xml": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_integrated.xml",
+        "sha256": "e143b92ed5ff0adc6b7c6bf561112223583273306bd8fa0a1aa14b16fa5242ae"
+      },
+      "final_js.log": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_js.log",
+        "sha256": "00b8e7e6059f79b21e1e05d5dec03e5b1eac8865eebe5c7612e9f8467685c48c"
+      },
+      "final_adapter.log": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_adapter.log",
+        "sha256": "63a7b22b33074dff10fe474b45a4e720048e737ef617579351ed43abd41b8c59"
+      },
+      "mert_short_forward_result.json": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\mert_short_forward_result.json",
+        "sha256": "6d3465b33b3521a4b26c79870e6d8e0daaa1d7d94883d1f227de5824d84f6b58"
+      },
+      "v43_vocabulary_coverage_components_v2.json": {
+        "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\v43_vocabulary_coverage_components_v2.json",
+        "sha256": "848f294076619e19f0efadd4f7c114f84ee9aae97feeef03a17f6969f7702bf5"
+      }
+    }
+  },
+  "real_http": {
+    "http_fresh": {
+      "task_id": "8852b99b4c33",
+      "status": "completed",
+      "result": {
+        "checkpoint_dir": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint",
+        "model_family": "chart_composer_v2",
+        "family": "chart_composer_v2",
+        "schema": "maichart-composer-v2-checkpoint-v1",
+        "effective_settings": {
+          "epochs": 2,
+          "batch_size": 4,
+          "grad_accumulation": 1,
+          "lr": 0.0002,
+          "lr_schedule": "constant",
+          "warmup_steps": 0,
+          "min_lr_ratio": 0.1,
+          "d_model": 384,
+          "layers": 8,
+          "nhead": 8,
+          "dim_feedforward": 1536,
+          "dropout": 0.1,
+          "window_beats": 16,
+          "history_beats": 16,
+          "future_beats": 4,
+          "ticks_per_beat": 48,
+          "max_tokens": 2048,
+          "audio_backend": "mert",
+          "prepare_device": "cuda",
+          "device": "cuda",
+          "precision": "bf16",
+          "validation_max_batches": 32,
+          "checkpoint_interval_steps": 1,
+          "log_interval": 1,
+          "seed": 0,
+          "max_steps": 2,
+          "limit_charts": 1,
+          "cpu_threads": 2,
+          "validation_source": "off",
+          "holdout_fraction": 0.0,
+          "validation_manifest": null,
+          "source_manifest": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\real_manifest.json",
+          "split_report": null,
+          "mert_model": null,
+          "mode": "fresh",
+          "manifest": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\real_manifest.json",
+          "cache_dir": "E:\\simai_transformer\\cache\\chart_composer_v2",
+          "dataset_selection": null
+        },
+        "epoch_target": 2,
+        "log_path": "E:\\simai_transformer\\webui_workspace\\logs\\20261104_191615_composer_v2_train_8852b99b4c33.log",
+        "composer_v2_runtime": {
+          "stage": "training",
+          "device": "cuda",
+          "precision": "bf16",
+          "audio_backend": "mert",
+          "windows": 20,
+          "validation_windows": 0,
+          "model_config": {
+            "d_model": 384,
+            "layers": 8,
+            "nhead": 8,
+            "dim_feedforward": 1536,
+            "dropout": 0.1,
+            "audio_layers": 2,
+            "song_layers": 2,
+            "window_beats": 16,
+            "history_beats": 16,
+            "future_beats": 4,
+            "ticks_per_beat": 48,
+            "max_tokens": 2048,
+            "audio_backend": "mert",
+            "mert_model": null
+          },
+          "trainable_parameters": 30063143,
+          "effective_batch": 4
+        },
+        "composer_v2_prepare": {
+          "stage": "audio",
+          "completed": 1,
+          "total": 1,
+          "audio": "E:\\全量官谱\\BUDDiES\\10185\\track.mp3"
+        },
+        "total": 5,
+        "composer_v2_progress": {
+          "stage": "training",
+          "epoch": 1,
+          "batch": 2,
+          "total": 5,
+          "optimizer_steps": 2,
+          "loss": 6.8564905379219,
+          "token_count": 1274,
+          "token_weight_sum": 1274.0,
+          "tokens_per_sec": 587.3013011972445,
+          "samples_per_sec": 3.6879202586954123,
+          "time_loss": 7.434225048539201,
+          "component_loss": 6.768131363122172,
+          "data_sec": 0.10096909996354952,
+          "compute_sec": 0.6722983000217937,
+          "compute_measurement": "host_submission_wall_including_update_boundary_wait",
+          "prefetch": {
+            "consumer_wait_sec": 0.10096909996354952,
+            "max_batches": 1
+          },
+          "elapsed_sec": 2.1692442999919876,
+          "lr": 0.0002,
+          "gpu_peak_bytes": 1394454016
+        },
+        "epoch": 0,
+        "loss": 6.8564905379219,
+        "optimizer_steps": 2,
+        "batch": 2,
+        "composer_v2_checkpoint": {
+          "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_last.pt",
+          "epoch": 0,
+          "batch_cursor": 2,
+          "optimizer_steps": 2,
+          "best_basis": "training_quality_weighted_token_ce_no_validation"
+        },
+        "paths": [
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_last.pt",
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_best.pt",
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_inference.pt"
+        ],
+        "files": [
+          "composer_v2_last.pt",
+          "composer_v2_best.pt",
+          "composer_v2_inference.pt"
+        ],
+        "download_urls": [
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_http_checkpoint%5Ccomposer_v2_last.pt",
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_http_checkpoint%5Ccomposer_v2_best.pt",
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_http_checkpoint%5Ccomposer_v2_inference.pt"
+        ]
+      }
+    },
+    "http_resume": {
+      "task_id": "554f37b1525a",
+      "status": "completed",
+      "result": {
+        "checkpoint_dir": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint",
+        "model_family": "chart_composer_v2",
+        "family": "chart_composer_v2",
+        "schema": "maichart-composer-v2-checkpoint-v1",
+        "effective_settings": {
+          "epochs": 2,
+          "batch_size": 4,
+          "grad_accumulation": 1,
+          "lr": 0.0002,
+          "lr_schedule": "constant",
+          "warmup_steps": 0,
+          "min_lr_ratio": 0.1,
+          "d_model": 384,
+          "layers": 8,
+          "nhead": 8,
+          "dim_feedforward": 1536,
+          "dropout": 0.1,
+          "window_beats": 16,
+          "history_beats": 16,
+          "future_beats": 4,
+          "ticks_per_beat": 48,
+          "max_tokens": 2048,
+          "audio_backend": "mert",
+          "prepare_device": "cuda",
+          "device": "cuda",
+          "precision": "bf16",
+          "validation_max_batches": 32,
+          "checkpoint_interval_steps": 1,
+          "log_interval": 1,
+          "seed": 0,
+          "max_steps": 3,
+          "limit_charts": 1,
+          "cpu_threads": 2,
+          "validation_source": "inherited",
+          "holdout_fraction": 0.0,
+          "validation_manifest": null,
+          "source_manifest": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\real_manifest.json",
+          "split_report": null,
+          "mert_model": null,
+          "mode": "resume",
+          "manifest": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\real_manifest.json",
+          "cache_dir": "E:\\simai_transformer\\cache\\chart_composer_v2",
+          "dataset_selection": null
+        },
+        "epoch_target": 2,
+        "log_path": "E:\\simai_transformer\\webui_workspace\\logs\\20261104_191624_composer_v2_train_554f37b1525a.log",
+        "composer_v2_checkpoint": {
+          "path": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_last.pt",
+          "epoch": 0,
+          "batch_cursor": 3,
+          "optimizer_steps": 3,
+          "best_basis": "training_quality_weighted_token_ce_no_validation"
+        },
+        "composer_v2_runtime": {
+          "stage": "training",
+          "device": "cuda",
+          "precision": "bf16",
+          "audio_backend": "mert",
+          "windows": 20,
+          "validation_windows": 0,
+          "model_config": {
+            "d_model": 384,
+            "layers": 8,
+            "nhead": 8,
+            "dim_feedforward": 1536,
+            "dropout": 0.1,
+            "audio_layers": 2,
+            "song_layers": 2,
+            "window_beats": 16,
+            "history_beats": 16,
+            "future_beats": 4,
+            "ticks_per_beat": 48,
+            "max_tokens": 2048,
+            "audio_backend": "mert",
+            "mert_model": null
+          },
+          "trainable_parameters": 30063143,
+          "effective_batch": 4
+        },
+        "composer_v2_prepare": {
+          "stage": "audio",
+          "completed": 1,
+          "total": 1,
+          "audio": "E:\\全量官谱\\BUDDiES\\10185\\track.mp3"
+        },
+        "total": 5,
+        "composer_v2_progress": {
+          "stage": "training",
+          "epoch": 1,
+          "batch": 3,
+          "total": 5,
+          "optimizer_steps": 3,
+          "loss": 5.963958111504557,
+          "token_count": 631,
+          "token_weight_sum": 631.0,
+          "tokens_per_sec": 742.9209698309877,
+          "samples_per_sec": 4.709483168500714,
+          "time_loss": 7.401713754938937,
+          "component_loss": 5.7340231502757355,
+          "data_sec": 0.17820700001902878,
+          "compute_sec": 0.6700484000029974,
+          "compute_measurement": "host_submission_wall_including_update_boundary_wait",
+          "prefetch": {
+            "consumer_wait_sec": 0.17820700001902878,
+            "max_batches": 1
+          },
+          "elapsed_sec": 0.8493500999757089,
+          "lr": 0.0002,
+          "gpu_peak_bytes": 1317170176
+        },
+        "epoch": 0,
+        "loss": 5.963958111504557,
+        "optimizer_steps": 3,
+        "batch": 3,
+        "paths": [
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_last.pt",
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_best.pt",
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_inference.pt"
+        ],
+        "files": [
+          "composer_v2_last.pt",
+          "composer_v2_best.pt",
+          "composer_v2_inference.pt"
+        ],
+        "download_urls": [
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_http_checkpoint%5Ccomposer_v2_last.pt",
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_http_checkpoint%5Ccomposer_v2_best.pt",
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_http_checkpoint%5Ccomposer_v2_inference.pt"
+        ]
+      }
+    },
+    "http_generate": {
+      "task_id": "5820f7f41f3f",
+      "status": "completed",
+      "result": {
+        "model_family": "chart_composer_v2",
+        "family": "chart_composer_v2",
+        "schema": "maichart-composer-v2-checkpoint-v1",
+        "effective_settings": {
+          "checkpoint": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_last.pt",
+          "audio": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\real_clip.wav",
+          "output": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_generated.txt",
+          "cache_dir": "E:\\simai_transformer\\cache\\chart_composer_v2",
+          "first": 0.0,
+          "level": 12.8,
+          "temperature": 0.9,
+          "top_p": 0.95,
+          "seed": 17,
+          "candidates": 2,
+          "max_events": 0,
+          "rollback_windows": 2,
+          "device": "cuda",
+          "bpm": 150.0
+        },
+        "log_path": "E:\\simai_transformer\\webui_workspace\\logs\\20261104_191632_composer_v2_generate_5820f7f41f3f.log",
+        "composer_v2_sampling": {
+          "temperature": 0.9,
+          "requested_candidates": 2,
+          "effective_candidates": 2,
+          "requested_retries": 16,
+          "effective_retries": 16,
+          "requested_rollback_budget": 2,
+          "effective_rollback_budget": 2,
+          "greedy_policy": "single_deterministic_attempt_no_redundant_rollbacks"
+        },
+        "composer_v2_window": {
+          "start_beat": "16",
+          "end_beat": "20",
+          "events": 2,
+          "attempts": 10,
+          "reference_start": null,
+          "scaffold_candidates": 2,
+          "comfort": 1.0,
+          "comfort_coverage": {
+            "native_markers": 7,
+            "unknown": [],
+            "trajectory_source": "MiaCode_reference_real_path_samples",
+            "known_fraction": 1.0,
+            "unknown_count": 0,
+            "complete": true,
+            "sample_step_sec": 0.05,
+            "max_samples_per_action": 96,
+            "active_jobs": 0,
+            "touch_contact_groups": 1,
+            "hand_assignment": "beam32_unlabeled_2d_soft",
+            "lookahead_sec": 0.0,
+            "events": 2,
+            "warmup_sec": 0.6,
+            "boundary_state": "all_active_actions_plus_recent_contacts",
+            "known_fraction_scope": "relevant_native_actions_and_unknown_reports"
+          },
+          "rejected_reasons": [
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+            "parse_or_action_past_audio_end",
+            "duplicate_event_head",
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+            "duplicate_event_head",
+            "new_miacode_runtime_hard_conflict",
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+            "Generated complete window exceeds checkpoint max_tokens; no tokens truncated"
+          ]
+        },
+        "composer_v2_done": {
+          "output": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_generated.txt",
+          "events": 5,
+          "windows": 2
+        },
+        "paths": [
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_generated.txt",
+          "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_generated.composer_v2.json"
+        ],
+        "files": [
+          "final_generated.txt",
+          "final_generated.composer_v2.json"
+        ],
+        "download_urls": [
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_generated.txt",
+          "/api/download?path=E%3A%5Csimai_transformer%5C.scratch%5Ccomposer_v2_20261104%5Cfinal_generated.composer_v2.json"
+        ],
+        "composer_v2_report": {
+          "family": "chart_composer_v2",
+          "checkpoint": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_http_checkpoint\\composer_v2_last.pt",
+          "audio": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\real_clip.wav",
+          "output": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\final_generated.txt",
+          "seed": 17,
+          "level": 12.8,
+          "first": 0.0,
+          "tempo_map": [
+            {
+              "beat": "0",
+              "bpm": 150.0
+            }
+          ],
+          "meter_map": null,
+          "meter_policy": "metadata_only_no_fixed_4_4_condition",
+          "end_beat": "20",
+          "audio_end_beat": "20",
+          "end_policy": "E_ceil_to_tick_only_notes_unchanged",
+          "duration_sec": 8.0,
+          "candidates": 2,
+          "temperature": 0.9,
+          "top_p": 0.95,
+          "events": 5,
+          "windows": [
+            {
+              "start_beat": "0",
+              "end_beat": "16",
+              "events": 3,
+              "attempts": 1,
+              "reference_start": null,
+              "scaffold_candidates": 2,
+              "comfort": 0.6411803884299546,
+              "comfort_coverage": {
+                "native_markers": 5,
+                "unknown": [],
+                "trajectory_source": "MiaCode_reference_real_path_samples",
+                "known_fraction": 1.0,
+                "unknown_count": 0,
+                "complete": true,
+                "sample_step_sec": 0.05,
+                "max_samples_per_action": 96,
+                "active_jobs": 0,
+                "touch_contact_groups": 2,
+                "hand_assignment": "beam32_unlabeled_2d_soft",
+                "lookahead_sec": 0.34999999999999964,
+                "events": 5,
+                "warmup_sec": 0.6,
+                "boundary_state": "all_active_actions_plus_recent_contacts",
+                "known_fraction_scope": "relevant_native_actions_and_unknown_reports"
+              },
+              "rejected_reasons": [
+                "duplicate_event_head"
+              ]
+            },
+            {
+              "start_beat": "16",
+              "end_beat": "20",
+              "events": 2,
+              "attempts": 10,
+              "reference_start": null,
+              "scaffold_candidates": 2,
+              "comfort": 1.0,
+              "comfort_coverage": {
+                "native_markers": 7,
+                "unknown": [],
+                "trajectory_source": "MiaCode_reference_real_path_samples",
+                "known_fraction": 1.0,
+                "unknown_count": 0,
+                "complete": true,
+                "sample_step_sec": 0.05,
+                "max_samples_per_action": 96,
+                "active_jobs": 0,
+                "touch_contact_groups": 1,
+                "hand_assignment": "beam32_unlabeled_2d_soft",
+                "lookahead_sec": 0.0,
+                "events": 2,
+                "warmup_sec": 0.6,
+                "boundary_state": "all_active_actions_plus_recent_contacts",
+                "known_fraction_scope": "relevant_native_actions_and_unknown_reports"
+              },
+              "rejected_reasons": [
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+                "parse_or_action_past_audio_end",
+                "duplicate_event_head",
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+                "duplicate_event_head",
+                "new_miacode_runtime_hard_conflict",
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated",
+                "Generated complete window exceeds checkpoint max_tokens; no tokens truncated"
+              ]
+            }
+          ],
+          "eos_policy": "window_end_only",
+          "hard_guard": "runtime_hard_v2",
+          "rollbacks": [],
+          "rollback_budget": 2,
+          "sampling_policy": {
+            "temperature": 0.9,
+            "requested_candidates": 2,
+            "effective_candidates": 2,
+            "requested_retries": 16,
+            "effective_retries": 16,
+            "requested_rollback_budget": 2,
+            "effective_rollback_budget": 2,
+            "greedy_policy": "single_deterministic_attempt_no_redundant_rollbacks"
+          },
+          "window_beats": 16,
+          "history_beats": 16,
+          "future_beats": 4,
+          "candidate_policy": "shared_onset_and_atom_count_scaffold",
+          "soft_score": "native_trajectory_comfort_only_unknown_neutral_0.5",
+          "audio_identity": {
+            "schema": "composer_v2_audio_v1",
+            "backend": "mert",
+            "audio_sha256": "7b14d6e098ad337e744adac174bede140ead3894cc512b44d8e91ea0798e882d",
+            "model": {
+              "repo": "m-a-p/MERT-v1-330M",
+              "revision": "5240c2708a5acaee1007f43fb9735c7dcd0b78c9"
+            },
+            "sample_rate": 24000,
+            "mono": "native_channel_mean_float32",
+            "resample": "torchaudio_sinc_interp_hann_default",
+            "mel": {
+              "n_fft": 1024,
+              "hop": 240,
+              "bands": 96,
+              "center": true,
+              "power": 2.0,
+              "log": "log1p"
+            },
+            "semantic": {
+              "layer": 8,
+              "hop": 320,
+              "receptive_field": 400,
+              "center_samples": 199.5,
+              "chunk_frames": 225,
+              "context_frames": 75,
+              "dtype": "float16",
+              "weightnorm_compat": "legacy_gv_to_parametrizations_v1"
+            }
+          }
+        }
+      }
+    }
+  },
+  "resumed_state": {
+    "epoch": 0,
+    "batch_cursor": 3,
+    "optimizer_steps": 3,
+    "update_attempts": 3,
+    "best_loss": null,
+    "last_loss": 6.560853941108924,
+    "epoch_loss_sum": 12498.4267578125,
+    "epoch_weight_sum": 1905.0
+  },
+  "mert": {
+    "source": "E:\\simai_transformer\\examples\\training_zip_demo\\raw_dataset\\song_001\\track.wav",
+    "clip": "E:\\simai_transformer\\.scratch\\composer_v2_20261104\\mert_half_second.wav",
+    "device": "cpu",
+    "torch_threads": 2,
+    "duration_sec": 0.5,
+    "hook_hidden_states_8_max_abs_error": 0.0,
+    "hidden_state_shape": [
+      1,
+      37,
+      1024
+    ],
+    "semantic_shape": [
+      37,
+      1024
+    ],
+    "mel_shape": [
+      51,
+      98
+    ],
+    "first_semantic_time_sec": 0.0083125,
+    "last_semantic_time_sec": 0.4883125,
+    "hop_sec": 0.013333333333333334,
+    "all_frozen": true,
+    "eval_mode": true,
+    "semantic_finite_nonzero": true,
+    "read_only_memmap": true,
+    "close_then_load_identical": true,
+    "backend": "mert",
+    "checkpoint_revision": "5240c2708a5acaee1007f43fb9735c7dcd0b78c9"
+  },
+  "component_coverage": {
+    "schema": "composer_v2_components_v2",
+    "train_charts": 100,
+    "dev_charts": 57,
+    "vocab_size": 1896,
+    "fixed_codec_dev_success": true,
+    "validation_vocab_unchanged": true,
+    "prepare": false,
+    "train": {
+      "atom_occurrences": 72148,
+      "unique_atoms": 3095,
+      "unknown_components": {},
+      "uncovered_template_types": 0,
+      "uncovered_template_atom_occurrences": 0,
+      "grammar_rejected_atoms": 0,
+      "grammar_failure_tokens": {},
+      "grammar_failure_examples": [],
+      "roundtrip_mismatch_examples": []
+    },
+    "dev": {
+      "atom_occurrences": 40049,
+      "unique_atoms": 1658,
+      "unknown_components": {},
+      "uncovered_template_types": 55,
+      "uncovered_template_atom_occurrences": 112,
+      "grammar_rejected_atoms": 112,
+      "grammar_failure_tokens": {
+        "S:z": 3,
+        "S:s": 4,
+        "D:B": 10,
+        "S:-": 24,
+        "S:V": 9,
+        "S:p": 13,
+        "S:>": 6,
+        "S:*": 11,
+        "S:b": 10,
+        "S:<": 9,
+        "S:q": 5,
+        "S:pp": 2,
+        "S:v": 1,
+        "[END_NOTE]": 5
+      },
+      "grammar_failure_examples": [
+        {
+          "atom": "1-3v2-4z8[2:3]",
+          "token": "S:z",
+          "index": 8,
+          "prefix": [
+            "N:slide",
+            "P:1",
+            "S:-",
+            "P:3",
+            "S:v",
+            "P:2",
+            "S:-",
+            "P:4"
+          ]
+        },
+        {
+          "atom": "8-6v7-5s1[2:3]",
+          "token": "S:s",
+          "index": 8,
+          "prefix": [
+            "N:slide",
+            "P:8",
+            "S:-",
+            "P:6",
+            "S:v",
+            "P:7",
+            "S:-",
+            "P:5"
+          ]
+        },
+        {
+          "atom": "6b<2<6[2:1]",
+          "token": "D:B",
+          "index": 7,
+          "prefix": [
+            "N:slide",
+            "P:6",
+            "S:b",
+            "S:<",
+            "P:2",
+            "S:<",
+            "P:6"
+          ]
+        },
+        {
+          "atom": "4xV28-6[4:1]",
+          "token": "S:-",
+          "index": 6,
+          "prefix": [
+            "N:slide",
+            "P:4",
+            "S:x",
+            "S:V",
+            "P:2",
+            "P:8"
+          ]
+        },
+        {
+          "atom": "1bxV35v2V46-8[1:1]",
+          "token": "S:V",
+          "index": 9,
+          "prefix": [
+            "N:slide",
+            "P:1",
+            "S:b",
+            "S:x",
+            "S:V",
+            "P:3",
+            "P:5",
+            "S:v",
+            "P:2"
+          ]
+        },
+        {
+          "atom": "5bxV71v6V82-4[1:1]b",
+          "token": "S:V",
+          "index": 9,
+          "prefix": [
+            "N:slide",
+            "P:5",
+            "S:b",
+            "S:x",
+            "S:V",
+            "P:7",
+            "P:1",
+            "S:v",
+            "P:6"
+          ]
+        },
+        {
+          "atom": "2-5-8-3-6-1-4-7[4:5]",
+          "token": "S:-",
+          "index": 12,
+          "prefix": [
+            "N:slide",
+            "P:2",
+            "S:-",
+            "P:5",
+            "S:-",
+            "P:8",
+            "S:-",
+            "P:3",
+            "S:-",
+            "P:6",
+            "S:-",
+            "P:1"
+          ]
+        },
+        {
+          "atom": "2xp5p8[4:5]",
+          "token": "S:p",
+          "index": 5,
+          "prefix": [
+            "N:slide",
+            "P:2",
+            "S:x",
+            "S:p",
+            "P:5"
+          ]
+        },
+        {
+          "atom": "7<6v5>3[4:5]",
+          "token": "S:>",
+          "index": 6,
+          "prefix": [
+            "N:slide",
+            "P:7",
+            "S:<",
+            "P:6",
+            "S:v",
+            "P:5"
+          ]
+        },
+        {
+          "atom": "1x-3<4[16:3]*-7<6[16:3]",
+          "token": "S:*",
+          "index": 12,
+          "prefix": [
+            "N:slide",
+            "P:1",
+            "S:x",
+            "S:-",
+            "P:3",
+            "S:<",
+            "P:4",
+            "D:B",
+            "V:3",
+            "V:/",
+            "V:4",
+            "[END_DURATION]"
+          ]
+        }
+      ],
+      "roundtrip_mismatch_examples": []
+    },
+    "elapsed_sec": 28.105097300023772
+  },
+  "generation_cpu_threads": {
+    "threads2_sec": 159.2218614,
+    "baseline_log_elapsed_sec": 161,
+    "outputs_identical": true,
+    "interpretation": "No material speedup established; untrained numeric continuations reach token budget and cause retries"
+  },
+  "service": {
+    "existing_7862": "preserved; stale Python adapter requires normal restart",
+    "restart_attempt": "automatic approval review rejected, no specific reason given",
+    "latest_http_verification": "isolated ephemeral server completed and shut down"
+  },
+  "limits": [
+    "No trained musical-quality comparison",
+    "Rare unseen syntax templates and time phases have disclosed generation coverage limits",
+    "Sustains beyond input-audio end are retained and audited",
+    "No long-run throughput claim"
+  ]
+}

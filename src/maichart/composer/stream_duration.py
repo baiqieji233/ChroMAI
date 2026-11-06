@@ -156,3 +156,76 @@ class DurationAudioScorer(nn.Module):
         return {'supported': self._supported_candidates,
                 'catalog_candidates': self._catalog_candidates,
                 'literal_candidates_supported': False}
+
+
+def bounded_duration_crps(probabilities,seconds,targets):
+    """Exact discrete CDF integral in the monotone coordinate d/(1+d).
+
+    Equal-duration modifier variants own zero-width internal intervals, so
+    their probability mass is automatically pooled without another label.
+    Sorting is per physical candidate row, shared by all phrase modes.
+    """
+    coordinate=seconds.float().clamp_min(0)
+    coordinate=coordinate/(1.+coordinate)
+    ordered,index=coordinate.sort(dim=-1,stable=True)
+    extra=probabilities.ndim-coordinate.ndim
+    expanded=index.reshape(index.size(0),*([1]*extra),index.size(-1)).expand_as(probabilities)
+    cdf=probabilities.float().gather(-1,expanded).cumsum(-1)
+    actual=coordinate.gather(-1,targets.long()[:,None]).squeeze(-1)
+    step=ordered.ge(actual[:,None]).float()
+    width=ordered[:,1:]-ordered[:,:-1]
+    for _ in range(extra):
+        step=step.unsqueeze(1);width=width.unsqueeze(1)
+    return ((cdf[...,:-1]-step[...,:-1]).square()*width).sum(-1)
+
+
+@lru_cache(maxsize=65536)
+def _hold_calibration_coefficients(atom):
+    """Calibration includes native zero-Hold semantics, without old-score drift."""
+    value=_duration_coefficients(atom)
+    if value is not None:return value
+    from maichart.generation.muri.parser import parse_markers
+    for bpm in (60.,120.,180.):
+        try:markers,errors,_=parse_markers(f'({bpm}){{4}}{atom},E')
+        except (ValueError,TypeError,KeyError):return None
+        holds=[marker for marker in markers if marker.get('type')=='hold']
+        if errors or len(holds)!=1:return None
+        start,end=holds[0].get('second'),holds[0].get('end_second')
+        if start is None or end is None:return None
+        if not math.isfinite(float(start)) or not math.isfinite(float(end)) or abs(float(end)-float(start))>1e-9:
+            return None
+    return [0.,0.,0.,0.]
+
+
+class HoldDurationCalibration(nn.Module):
+    """No learned head: score the executor's final regular-Hold probabilities."""
+    def __init__(self,codec):
+        super().__init__();self._tables={};self._candidates=0
+        for shape,slots in enumerate(codec.shape_catalog):
+            if not shape:continue
+            for slot,(kind,head) in enumerate(slots):
+                if kind!='hold':continue
+                values=[_hold_calibration_coefficients(str(head+1)+suffix) for suffix in codec.detail_catalog[shape][slot]]
+                # A partial conditional distribution would allow probability
+                # to hide in unsupported durations. Keep the whole CE intact
+                # and apply calibration only to fully parsed legal catalogs.
+                if not values or any(value is None for value in values):continue
+                duration=[[value[2]-value[0],value[3]-value[1]] for value in values]
+                if any(beats<0 or seconds<0 for beats,seconds in duration):continue
+                name=f'hold_clock_{shape}_{slot}'
+                self.register_buffer(name,torch.tensor(duration,dtype=torch.float32),persistent=False)
+                self._tables[shape,slot]=name;self._candidates+=len(duration)
+
+    def forward(self,probabilities,shape,slot,context,targets):
+        name=self._tables.get((shape,slot))
+        if name is None or context is None:return probabilities.sum(-1)*0.
+        table=getattr(self,name)
+        seconds=context['seconds_per_beat'][:,None].float()*table[None,:,0]+table[None,:,1]
+        score=bounded_duration_crps(probabilities,seconds,targets)
+        valid=context['valid']
+        while valid.ndim<score.ndim:valid=valid.unsqueeze(-1)
+        return score*valid
+
+    def coverage(self):
+        return dict(regular_hold_slots=len(self._tables),catalog_candidates=self._candidates,
+            literal_candidates_supported=False,coordinate='physical_seconds_d_over_1_plus_d')

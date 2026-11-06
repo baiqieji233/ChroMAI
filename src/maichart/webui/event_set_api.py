@@ -90,12 +90,12 @@ def start_train(handler, payload, *, runtime):
     args = ['-m', 'maichart.composer.stream_train']
     for name, value in [('manifest', manifest), ('checkpoint-dir', directory), ('cache-dir', cache)]:
         _arg(args, '--' + name, value)
-    integers = dict(epochs=50, batch_size=16, grad_accumulation=4, d_model=256, layers=4,
-        nhead=8, dim_feedforward=768, history_events=64, rollout_steps=16,
+    integers = dict(epochs=50, batch_size=16, grad_accumulation=4, d_model=384, layers=8,
+        nhead=8, dim_feedforward=1536, history_events=128, rollout_steps=32,
         checkpoint_interval_steps=500, log_interval=25, max_steps=0, limit_charts=0,
         prepare_workers=1, cpu_threads=2, seed=0, recovery_interval=25,
         recovery_samples=2, recovery_steps=2, symbolic_pretrain_epochs=0,
-        generation_eval_songs=2,validation_max_batches=32,validation_batch_size=4,
+        generation_eval_songs=0,validation_max_batches=32,validation_batch_size=4,
         generation_eval_interval_epochs=1,warmup_steps=0,prefetch_batches=2,sample_workers=1,data_workers=0)
     settings = {'architecture_profile': PROFILE}
     settings['rebatch_resume'] = rebatch
@@ -119,7 +119,7 @@ def start_train(handler, payload, *, runtime):
         raise ValueError('Event-set shared song caches require sample_workers=1')
     if settings['prefetch_batches'] > 16:
         raise ValueError('prefetch_batches cannot exceed 16')
-    for key, default in dict(lr=.0002, dropout=.1, window_seconds=8., recovery_weight=.1, plan_weight=.1,
+    for key, default in dict(lr=.0005, dropout=.1, window_seconds=8., recovery_weight=.1, plan_weight=.1,
                             audio_cache_gb=1.,min_lr_ratio=.1).items():
         settings[key] = _float(payload, key, default, minimum=0.)
         _arg(args, '--' + key.replace('_', '-'), settings[key])
@@ -175,6 +175,9 @@ def start_train(handler, payload, *, runtime):
         'phrase_execution_policy': {'auto', 'off', 'persistent_modes_v1', 'component_modes_v2'},
         'detail_representation_policy': {'auto', 'private_v1', 'shared_components_v1', 'typed_components_v2'},
         'duration_feature_policy': {'auto', 'legacy_v1', 'log_time_v2'},
+        'draft_policy': {'auto', 'off', 'beat_ordered_draft_v1'},
+        'literal_set_policy': {'auto','canonical_v1','permuted_unique_v1'},
+        'duration_objective_policy': {'auto','categorical_v1','hold_crps_v2'},
     }
     for key, choices in policy_choices.items():
         value = payload.get(key, 'auto')
@@ -201,6 +204,14 @@ def start_train(handler, payload, *, runtime):
     requested['prefix_augmentation_rate']=payload.get('prefix_augmentation_rate',0. if learning_policy=='legacy' else None)
     requested['event_family_audio_weight']=payload.get('event_family_audio_weight',0. if learning_policy=='legacy' else None)
     requested['phrase_loss_weight']=payload.get('phrase_loss_weight')
+    requested['draft_loss_weight']=payload.get('draft_loss_weight')
+    requested['curve_preview_weight']=payload.get('curve_preview_weight')
+    requested['duration_calibration_weight']=payload.get('duration_calibration_weight')
+    requested['deployment_condition_fraction']=(payload.get('deployment_condition_fraction')
+        if mode!='resume' and learning_policy!='checkpoint' else None)
+    requested['draft_responsibility_temperature']=payload.get('draft_responsibility_temperature')
+    for key in ('configuration_recovery_steps','recovery_bridge_steps'):
+        requested[key]=payload.get(key)
     for key in ('song_profile_components','song_profile_weight','song_response_modes','song_response_group_size'):
         requested[key]=payload.get(key) if mode!='resume' else None
     if mode!='resume' and learning_policy not in {'legacy','checkpoint'} and requested['song_response_policy'] in ('auto','unified_profile_response_v2'):
@@ -210,6 +221,12 @@ def start_train(handler, payload, *, runtime):
         raise ValueError('Checkpoint learning policy requires a parent checkpoint; use finetune or resume')
     policies=resolve_learning_policies(SimpleNamespace(**requested),parent_config,
         resume=mode=='resume' or learning_policy=='checkpoint')
+    if policies.get('plan_kind_policy') in {'unified_first_arrival_v5', 'unified_first_arrival_v6'}:
+        settings['plan_weight']=0.
+        args[args.index('--plan-weight')+1]='0.0'
+    if policies.get('draft_policy')=='beat_ordered_draft_v1':
+        policies['phrase_loss_weight']=0.
+        policies['phrase_relation_weight']=0.
     # Batch order may be resolved as a model policy by the trainer; support an
     # independent CLI policy as well without emitting the argument twice.
     if 'batch_order_policy' not in policies:
@@ -305,9 +322,9 @@ def start_generate(handler, payload, *, runtime):
     seed, randomized = resolve_seed(payload.get('seed'))
     condition_file = _path(payload['condition_file'], 'condition-file', exists=True) if payload.get('condition_file') else None
     condition, source = resolve_condition(_float(payload, 'level', 13., minimum=1.), payload.get('condition'), condition_file)
-    task = runtime._create_task('composer_generate')
-    output = requested.parent / task.task_id / requested.name
-    output.parent.mkdir(parents=True, exist_ok=True)
+    # Validate the entire request before registering a queued task. A bad
+    # curve/path/number must not leave a permanently "waiting" phantom job.
+    output = requested
     args = ['-m', 'maichart.composer.stream_generate']
     settings = dict(architecture_profile=PROFILE, seed=seed, device=_device(payload.get('device')))
     for name, value in [('audio', audio), ('checkpoint', checkpoint), ('output', output), ('level', condition.level), ('seed', seed), ('device', settings['device'])]:
@@ -371,15 +388,23 @@ def start_generate(handler, payload, *, runtime):
     elif payload.get('intensity_curve_file'):
         curve = _path(payload['intensity_curve_file'], 'intensity curve', exists=True)
         _arg(args, '--intensity-curve-file', curve)
-    for flag, value in snapshots.items():
-        path = output.parent / (flag + '.json')
-        path.write_text(json.dumps(value, ensure_ascii=False, allow_nan=False), encoding='utf-8')
-        _arg(args, '--' + flag, path)
+    serialized={flag:json.dumps(value,ensure_ascii=False,allow_nan=False) for flag,value in snapshots.items()}
     if curve or 'intensity-curve-file' in snapshots:
         mode = payload.get('intensity_curve_mode', 'follow')
         if mode not in {'follow', 'soft', 'hard', 'strict'}: raise ValueError('Unknown curve mode')
         _arg(args, '--intensity-curve-mode', mode)
         _arg(args, '--intensity-curve-strength', _float(payload, 'intensity_curve_strength', .65, minimum=0.))
+    task=runtime._create_task('composer_generate')
+    output=requested.parent/task.task_id/requested.name
+    args[args.index('--output')+1]=str(output)
+    try:
+        output.parent.mkdir(parents=True,exist_ok=True)
+        for flag,text in serialized.items():
+            path=output.parent/(flag+'.json');path.write_text(text,encoding='utf-8')
+            _arg(args,'--'+flag,path)
+    except Exception as exc:
+        task.status='failed';task.error=str(exc)
+        raise
     task.result.update(family=FAMILY, checkpoint=str(checkpoint), output=str(output), requested_output=str(requested),
         seed=seed, seed_randomized=randomized, effective_settings={**settings, 'condition': condition.to_dict(), 'condition_source': source})
     runtime._run_subprocess_task(task, args, expected_epoch=None, result_paths=[output, output.with_suffix('.composer.json')])

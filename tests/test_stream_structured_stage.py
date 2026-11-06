@@ -27,16 +27,18 @@ def test_structured_prior_uses_actual_weighted_training_events_and_resume_keeps_
     texts=['1/5','A1/Cf']
     steps=[StreamStep(NOTE,Fraction(0),Fraction(1,2),0.,.5,texts[0]),
            StreamStep(NOTE,Fraction(1,2),Fraction(3,4),.5,.75,texts[1])]
-    ds=SimpleNamespace(streams=[steps],encoded=[[(1,model.codec.encode(text)) for text in texts]],
+    ds=SimpleNamespace(codec=model.codec,streams=[steps],encoded=[[(1,model.codec.encode(text)) for text in texts]],
         unknown_steps=[[False,False]],target_window_weights=[[1.,3.]],chart_weights=[2.])
     prior=_initialize_structured_heads(model,ds)
     assert prior['family_counts'][0]==2 and prior['family_counts'][7]==6
     assert prior['literal_counts'][0]==0 and prior['literal_counts'][7]==6
+    assert prior['detail_prior_initialized'] and prior['detail_prior_slots']>0
     assert Fraction(3,4) in model.timing_grid.phase_catalog
     before={name:parameter.detach().clone() for name,parameter in model.named_parameters()}
     saved=replace(model.config)
     restored=_initialize_structured_heads(model,ds,saved,resume=True)
     assert not restored['timing_prior_initialized'] and not restored['semantic_prior_initialized']
+    assert not restored['detail_prior_initialized']
     for name,parameter in model.named_parameters():torch.testing.assert_close(parameter,before[name],rtol=0,atol=0)
 
 

@@ -25,22 +25,32 @@ def test_stream_train_defaults_and_no_legacy_flags(tmp_path):
         manifest=str(manifest),holdout_fraction=0, checkpoint_dir=str(tmp_path / 'out'), cache_dir=str(tmp_path / 'cache'),
         candidate_count=999, action_slots=33, echo_prior_policy='phase_echo_v1'), runtime=runtime)
     assert runtime.args[:2] == ['-m', 'maichart.composer.stream_train']
-    for flag, expected in [('--batch-size','16'),('--grad-accumulation','4'),('--d-model','256'),('--rollout-steps','16'),('--window-seconds','8.0'),('--precision','bf16')]:
+    for flag, expected in [('--batch-size','16'),('--grad-accumulation','4'),('--d-model','384'),('--rollout-steps','32'),('--window-seconds','8.0'),('--precision','bf16')]:
         assert runtime.args[runtime.args.index(flag)+1] == expected
     assert '--candidate-count' not in runtime.args
     assert '--echo-prior-policy' not in runtime.args
     assert runtime.task.result['epoch_target'] == 50
     assert runtime.dispatch['expected_epoch'] == 50
     assert runtime.args[runtime.args.index('--audio-grid-seconds')+1]=='0.01'
-    assert runtime.args[runtime.args.index('--plan-weight')+1]=='0.1'
+    assert runtime.args[runtime.args.index('--plan-weight')+1]=='0.0'
     for flag,value in [('--validation-max-batches','32'),('--validation-batch-size','4'),
                        ('--generation-eval-interval-epochs','1'),('--warmup-steps','0'),
                        ('--prefetch-batches','2'),('--sample-workers','1'),('--audio-cache-gb','1.0'),
-                       ('--min-lr-ratio','0.1'),('--lr-schedule','constant'),('--lr','0.0002'),('--plan-blank-window-seconds','0.5'),
+                       ('--min-lr-ratio','0.1'),('--lr-schedule','constant'),('--lr','0.0005'),('--plan-blank-window-seconds','0.5'),
                        ('--training-window-policy','phrase_complete_v1'),('--max-phrase-events','64'),('--phrase-seam-events','2'),
-                       ('--phrase-execution-policy','component_modes_v2'),('--phrase-modes','4'),('--phrase-relation-weight','0.1'),
+                       ('--phrase-execution-policy','component_modes_v2'),('--phrase-modes','4'),('--phrase-relation-weight','0.0'),
                        ('--detail-representation-policy','typed_components_v2'),('--duration-feature-policy','log_time_v2')]:
         assert runtime.args[runtime.args.index(flag)+1]==value
+
+
+def test_explicit_execution_control_mixture_reaches_real_cli(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    handler,runtime=Handler(),Runtime()
+    event_set_api.start_train(handler,dict(manifest=str(manifest),holdout_fraction=0,
+        checkpoint_dir=str(tmp_path/'out'),cache_dir=str(tmp_path/'cache'),
+        deployment_condition_fraction=.4),runtime=runtime)
+    assert runtime.args[runtime.args.index('--deployment-condition-fraction')+1]=='0.4'
+    assert runtime.task.result['effective_settings']['deployment_condition_fraction']==.4
 
 
 def test_stream_generate_routes_checkpoint_and_filters_old_knobs(tmp_path, monkeypatch):
@@ -82,6 +92,37 @@ def test_phrase_generation_rejects_invalid_settings(tmp_path,settings):
     with pytest.raises(ValueError):
         event_set_api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),
             output=str(tmp_path/'out.txt'),seed=0,**settings),runtime=Runtime())
+
+
+@pytest.mark.parametrize('extra',[
+    {'intensity_curve_enabled':True,'intensity_curve':None},
+    {'phrase_candidates':3},
+    {'intensity_curve_enabled':True,'intensity_curve':{
+        'schema':'maichart-intensity-curve-v1','duration_sec':1.,
+        'points':[{'time_sec':0.,'intensity':.5},{'time_sec':1.,'intensity':.5}]},
+        'intensity_curve_mode':'invalid'},
+])
+def test_invalid_generation_never_registers_a_phantom_queued_task(tmp_path,extra):
+    checkpoint=tmp_path/'model.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    runtime=Runtime();created=[]
+    runtime._create_task=lambda kind:created.append(kind) or runtime.task
+    with pytest.raises(ValueError):
+        event_set_api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),
+            output=str(tmp_path/'out.txt'),seed=0,**extra),runtime=runtime)
+    assert created==[] and not hasattr(runtime,'args')
+    assert not (tmp_path/'set-test').exists()
+
+
+def test_generation_output_io_failure_is_failed_instead_of_forever_queued(tmp_path):
+    checkpoint=tmp_path/'model.pt';checkpoint.write_bytes(b'fixture')
+    audio=tmp_path/'audio.wav';audio.write_bytes(b'fixture')
+    parent=tmp_path/'blocked';parent.write_text('a file, not an output directory')
+    runtime=Runtime()
+    with pytest.raises(OSError):
+        event_set_api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),
+            output=str(parent/'out.txt'),seed=0),runtime=runtime)
+    assert runtime.task.status=='failed' and runtime.task.error
 
 
 def test_stream_rejects_old_checkpoint_initialization(tmp_path,monkeypatch):
@@ -134,14 +175,19 @@ def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_pat
     assert policies['history_window_policy']==expected
     assert policies['continuation_policy']==('off' if mode=='resume' else 'pattern_runs_v2')
     assert policies['motion_continuation_policy']==('motion_continuation_v1' if mode=='resume' else 'context_motion_v3')
-    assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'greedy_mixed_v4')
-    assert policies['prefix_augmentation_input_policy']==('causal_window_config_time_first_decision_v3' if mode=='resume' else 'musical_arrangement_recovery_v10')
-    assert policies['plan_kind_policy']==('off' if mode=='resume' else 'phrase_arranged_hazard_v4')
+    assert policies['recovery_policy']==('persistent_v1' if mode=='resume' else 'first_step_phrase_v6')
+    assert policies['prefix_augmentation_input_policy']==('causal_window_config_time_first_decision_v3' if mode=='resume' else 'continuous_draft_recovery_v11')
+    assert policies['plan_kind_policy']==('off' if mode=='resume' else 'unified_first_arrival_v6')
+    assert policies['draft_policy']==('off' if mode=='resume' else 'beat_ordered_draft_v1')
+    for key in ('draft_policy','draft_loss_weight','draft_responsibility_temperature'):
+        flag='--'+key.replace('_','-')
+        assert runtime.args.count(flag)==1
+        assert runtime.args[runtime.args.index(flag)+1]==str(policies[key])
     assert runtime.args[runtime.args.index('--plan-kind-policy')+1]==policies['plan_kind_policy']
     assert policies['timing_grid_audio_policy']==('off' if mode=='resume' else 'query_pool_v3')
     assert policies['transition_policy']=='off'
     assert policies['gap_continuation_policy']==('additive_v1' if mode=='resume' else 'off')
-    assert policies['event_family_policy']==('legacy_v1' if mode=='resume' else 'shared_continuation_v1')
+    assert policies['event_family_policy']==('legacy_v1' if mode=='resume' else 'shared_music_mixture_v2')
     assert policies['recovery_target_policy']==('authored_next_v1' if mode=='resume' else 'causal_correspondence_v1')
     assert runtime.args[runtime.args.index('--gap-continuation-policy')+1]==policies['gap_continuation_policy']
     assert policies['prefix_augmentation_rate']==(0 if mode=='resume' else .15)
@@ -152,6 +198,21 @@ def test_learning_policies_are_real_subprocess_flags_and_resume_inherits(tmp_pat
     assert runtime.args[runtime.args.index('--history-window-policy')+1]==expected
     assert runtime.args[runtime.args.index('--transition-exit-weight')+1]==str(policies['transition_exit_weight'])
     if mode!='fresh':assert policies['history_events']==96
+
+
+def test_explicit_draft_training_controls_reach_real_subprocess_once(tmp_path):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    runtime=Runtime()
+    event_set_api.start_train(Handler(),dict(mode='fresh',manifest=str(manifest),holdout_fraction=0,
+        checkpoint_dir=str(tmp_path/'out'),draft_policy='beat_ordered_draft_v1',
+        draft_loss_weight=.23,draft_responsibility_temperature=.75),runtime=runtime)
+    effective=runtime.task.result['effective_settings']
+    for key,value in dict(draft_policy='beat_ordered_draft_v1',draft_loss_weight=.23,
+                          draft_responsibility_temperature=.75).items():
+        flag='--'+key.replace('_','-')
+        assert runtime.args.count(flag)==1
+        assert runtime.args[runtime.args.index(flag)+1]==str(value)
+        assert effective[key]==value
 
 
 def test_api_rejects_resume_policy_upgrade_and_supports_explicit_old_baseline(tmp_path,monkeypatch):

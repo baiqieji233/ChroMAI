@@ -187,16 +187,18 @@ def test_causal_recovery_rotates_target_after_proved_generated_suffix(monkeypatc
 
 def test_actual_sampled_note_is_guarded_before_commit(monkeypatch):
     ds=_dataset(monkeypatch)
-    class Context:
+    class Context(stream_data.StreamInferenceContext):
         def __init__(self,song,codec,vocab,condition,**kwargs):
-            self.clock=ds.clocks[0]
+            super().__init__(song,codec,vocab,condition,**kwargs)
         def batch(self,prefix,cursor):
+            super().batch(prefix,cursor)
             return dict(song_audio=torch.zeros(1,2,238),song_mask=torch.ones(1,2,dtype=torch.bool),
                 song_seconds=torch.zeros(1,2),song_beats=torch.zeros(1,2),
                 history_delta=torch.zeros(1,1,dtype=torch.long),step_second=torch.zeros(1,1))
     monkeypatch.setattr(stream_recovery,'StreamInferenceContext',Context)
     delta=ds.delta_vocab.encode(F(1,2))
     class Model:
+        config=SimpleNamespace(draft_policy='off')
         def encode_audio(self,*args): return None
         def __call__(self,batch,audio_cache=None):
             kind=torch.full((1,1,5),-100.);kind[0,0,NOTE]=100.
@@ -221,14 +223,16 @@ def test_actual_sampled_note_is_guarded_before_commit(monkeypatch):
 
 def test_sampling_can_cross_reference_and_wait_eos_follow_audio_boundary(monkeypatch):
     ds=_dataset(monkeypatch)
-    class Context:
-        def __init__(self,song,codec,vocab,condition,**kwargs):self.clock=ds.clocks[0]
+    class Context(stream_data.StreamInferenceContext):
+        def __init__(self,song,codec,vocab,condition,**kwargs):super().__init__(song,codec,vocab,condition,**kwargs)
         def batch(self,prefix,cursor):
+            super().batch(prefix,cursor)
             return dict(song_audio=torch.zeros(1,2,238),song_mask=torch.ones(1,2,dtype=torch.bool),
                 song_seconds=torch.zeros(1,2),song_beats=torch.zeros(1,2),
                 history_delta=torch.zeros(1,1,dtype=torch.long),step_second=torch.zeros(1,1))
     monkeypatch.setattr(stream_recovery,'StreamInferenceContext',Context)
     class Model:
+        config=SimpleNamespace(draft_policy='off')
         kind=NOTE
         delta=ds.delta_vocab.encode(F(2))
         def encode_audio(self,*args):return None

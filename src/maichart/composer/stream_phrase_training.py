@@ -223,6 +223,62 @@ def collate_future_relations(items, output):
         output[key] = pad_sequence(values,batch_first=True)
 
 
+def collate_draft_loss_groups(items,output):
+    """Loss-only phrase ownership for departure time and landing marks.
+
+    Grouping never changes sample weights or primary target multiplicities.
+    A crossing NOTE can carry time evidence for one phrase and configuration
+    evidence for another. Counterfactual prefixes never share a mode group.
+    """
+    if 'phrase_start_beat' not in output:return
+    shape=output['loss_mask'].shape
+    departure=torch.full(shape,-1,dtype=torch.long);landing=torch.full_like(departure,-1)
+    registry={};entries=[]
+    charts=output.get('unified_chart_inverse',torch.arange(len(items))).tolist()
+    for row,item in enumerate(items):
+        changed=bool(item.get('_counterfactual_history',False) or item.get('_draft_prefix_isolated',False))
+        chart=int(item.get('_training_chart_id',item.get('song_index',-1)))
+        owner=('row',row) if changed or chart<0 else ('chart',chart)
+        expected=item.get('_draft_loss_expected',{})
+        active=item['loss_mask'].bool()&item['sample_weight'].gt(0)
+        kinds=item['target_kind'];trusted=item.get('configuration_mask',torch.ones_like(active)).bool()
+        # Family-only recovery evidence owns a landing decision too. This is
+        # grouping only; geometry and relation supervision keep their masks.
+        trusted=trusted|item.get('configuration_family_mask',torch.zeros_like(active)).bool()
+        indices=item.get('step_index',torch.arange(len(active)))
+        for side,prefix,mapping in ((0,'',departure),(1,'candidate_',landing)):
+            starts=item.get(prefix+'phrase_start_beat',item['phrase_start_beat'])
+            ends=item.get(prefix+'phrase_end_beat',item['phrase_end_beat'])
+            selected=active if side==0 else active&kinds.eq(2)&trusted
+            modes=item.get(prefix+'draft_committed_mode',torch.full_like(kinds,-1))
+            for position in selected.nonzero(as_tuple=False).flatten().tolist():
+                bounds=(float(starts[position]),float(ends[position]));mode=int(modes[position])
+                key=(owner,*bounds,mode)
+                if key not in registry:
+                    registry[key]=len(entries)
+                    entries.append(dict(row=row,position=position,side=side,chart=charts[row],
+                        time=float(item['step_beat'][position]),changed=changed,
+                        expected=expected.get(bounds),observed=[set(),set()],key=key,mode=mode))
+                group=registry[key];entry=entries[group];mapping[row,position]=group
+                query_time=float(item['step_beat'][position])
+                if (query_time,side)<(entry['time'],entry['side']):
+                    entry.update(row=row,position=position,side=side,time=query_time)
+                entry['observed'][side].add(int(indices[position]))
+                if entry['expected'] is None:entry['expected']=expected.get(bounds)
+    output['draft_departure_group']=departure;output['draft_landing_group']=landing
+    output['draft_loss_group_count']=len(entries)
+    for name in ('rows','positions','side','chart','mode'):
+        source={'rows':'row','positions':'position'}.get(name,name)
+        output['draft_loss_group_'+name]=torch.tensor([entry[source] for entry in entries],dtype=torch.long)
+    output['draft_loss_group_complete']=torch.tensor([
+        not entry['changed'] and entry['expected'] is not None and entry['expected'][2]
+        and len(entry['observed'][0])==entry['expected'][0]
+        and len(entry['observed'][1])==entry['expected'][1] for entry in entries],dtype=torch.bool)
+    output['draft_loss_group_keys']=[entry['key'] for entry in entries]
+    output['draft_loss_group_decisions']=torch.tensor([
+        len(entry['observed'][0]|entry['observed'][1]) for entry in entries],dtype=torch.long)
+
+
 def normalize_phrase_plan_weights(items,output):
     """Plan/phrase losses divide by B; action loss divides by target budget D.
 

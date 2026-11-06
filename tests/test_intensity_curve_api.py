@@ -87,6 +87,29 @@ def test_analysis_is_separate_and_returns_editable_profile(api, monkeypatch, tmp
     assert (webui.INTENSITY_ROOT / f"{started['task_id']}_automatic.json").exists()
 
 
+def test_untrained_composer_preview_is_honestly_reported_as_audio_reference(api,monkeypatch,tmp_path):
+    from maichart.composer import curve as composer_curve
+    audio=tmp_path/'track.wav';audio.write_bytes(b'audio')
+    point=tmp_path/'model.pt';point.write_bytes(b'checkpoint')
+    monkeypatch.setattr(webui,'_load_checkpoint_payload',lambda *a:dict(
+        schema='maichart-composer-event-set-checkpoint-v1',family='chart_composer_v1',
+        model_config={'architecture_profile':'event_set_stream_v1'}))
+    monkeypatch.setattr(composer_curve,'generate_learned_profile',lambda *a,**kw:{
+        **profile(audio), 'model_prediction_available':False,'preview_only':True,
+        'method':'audio_reference_untrained_composer_preview_v1'})
+    code,started,_=api('/api/intensity/analyze',dict(audio=str(audio),checkpoint=str(point),curve_source='auto'))
+    assert code==200
+    deadline=time.monotonic()+4
+    while time.monotonic()<deadline:
+        _,result,_=api('/api/task?id='+started['task_id'])
+        if result['status'] not in {'queued','running'}:break
+        time.sleep(.02)
+    assert result['status']=='completed',result
+    assert result['result']['curve_source']=='audio'
+    assert result['result']['requested_curve_source']=='auto'
+    assert '未训练物量预览' in result['message']
+
+
 @pytest.mark.parametrize('source', ['auto', 'audio', 'model'])
 def test_composer_curve_sources_do_not_enter_event_checkpoint_loader(api, monkeypatch, tmp_path, source):
     from maichart.generation import music_intensity, learned_curve

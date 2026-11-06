@@ -25,7 +25,7 @@ from .events import event_metadata
 from .stream_sampling import kind_logits_for_audio,note_delta_logits_for_audio
 from .stream_proposal import sample_timed_event
 from .stream_timing import current_timing_deltas
-from .stream_phrase_runtime import execution_options,execution_metadata,execution_report
+from .stream_phrase_runtime import execution_options,execution_metadata,execution_report,attach_draft_runtime
 from .stream_song_profile import resolve_song_profile
 
 def parser():
@@ -135,6 +135,9 @@ class _Curve:
     def __init__(self,args,song,model,cache,condition):
         from .curve import apply_curve_to_composer
         self.seconds=cache['seconds'][0].detach().cpu().numpy();self.counts=Counter()
+        if getattr(model.config,'plan_kind_policy','off') in ('unified_first_arrival_v5','unified_first_arrival_v6'):
+            self._init_final_rate_edits(args,song)
+            return
         control=condition.to_vector(device=cache['local'].device)[None]
         logits=model.plan_head(cache['local'])[0]+F.linear(model.condition(control),model.plan_head.weight)[0]
         values=F.softplus(logits[:,1:]).float()
@@ -151,6 +154,7 @@ class _Curve:
             strength=getattr(args,'intensity_curve_strength',.65),baseline_head_rate=baseline)
         self.reference_rebased=False
         self.reference_rebase_reason='not_required'
+        self.unified_arrival=getattr(model.config,'plan_kind_policy','off') in ('unified_first_arrival_v5','unified_first_arrival_v6')
         if self.controller.reference_times.size and isinstance(raw,dict) and isinstance(raw.get('condition'),dict):
             reference=GenerationCondition.from_dict(raw['condition']).to_dict()
             effective=condition.to_dict()
@@ -163,6 +167,10 @@ class _Curve:
                 self.reference_rebased=True
                 self.reference_rebase_reason='saved_curve_condition_differs_from_effective_condition'
         self.active=self.controller.active and not self.controller._neutral()
+        self.preview_only=(self.unified_arrival
+            and isinstance(raw,dict) and str(raw.get('method','')).startswith('learned_')
+            and raw.get('edited') is not True)
+        if self.preview_only:self.active=False
         # The curve describes a seconds-scale envelope, whereas the plan grid
         # retains sharp music-aligned peaks. Edit the exact time-weighted mean
         # per curve bin, then apply that bin's ratio to every fine cell. Rest
@@ -205,6 +213,9 @@ class _Curve:
         else:
             ratios=np.ones_like(means)
             adjusted=native_values
+        self.curve_edges=curve_edges
+        self.event_bin_ratios=ratios[:,0]
+        self._arrival_curve_tensors={}
         self.adjusted_event_rate=adjusted[:,0]
         self.head_rate=adjusted[:,1]
         self.head_counts=counts[:,0].detach().cpu().numpy()
@@ -226,6 +237,48 @@ class _Curve:
         widths=np.diff(self.hazard_edges)
         self.native_prefix=np.r_[0.,np.cumsum(self.native_hazard*widths)]
         self.adjusted_prefix=np.r_[0.,np.cumsum(self.adjusted_hazard*widths)]
+
+    def _init_final_rate_edits(self,args,song):
+        """Portable relative edits of the final law; no raw plan calibration.
+
+        A v5 plan channel is only one feature of the final intensity. Neither
+        its other untrained channels nor that partial feature define heads/s.
+        Saved reference knots remain the reference across condition changes.
+        """
+        from .curve import apply_curve_to_composer
+        raw=getattr(args,'intensity_curve_file',None)
+        if isinstance(raw,(str,Path)) and str(raw):raw=json.loads(Path(raw).read_text(encoding='utf-8-sig'))
+        self.duration=float(song.audio.duration_sec)
+        baseline=float(raw.get('baseline_head_rate',1.)) if isinstance(raw,dict) else 1.
+        if not math.isfinite(baseline) or baseline<=0:baseline=1.
+        self.controller=apply_curve_to_composer(raw,duration_sec=self.duration,
+            effective_start_sec=0.,effective_end_sec=self.duration,
+            mode=getattr(args,'intensity_curve_mode','follow'),span_mode='full',
+            strength=getattr(args,'intensity_curve_strength',.65),baseline_head_rate=baseline)
+        self.unified_arrival=True;self.relative_final_rate=True
+        self.reference_rebased=False;self.reference_rebase_reason='relative_edits_preserve_saved_reference'
+        automatic=(isinstance(raw,dict) and (str(raw.get('method','')).startswith('learned_') or raw.get('preview_only') is True))
+        # Old UI saves incorrectly set edited=true even when every knot was
+        # unchanged. Actual identity takes precedence over that stale flag.
+        identity=bool(self.controller._neutral())
+        self.preview_only=bool(automatic and (identity or
+            (not self.controller.reference_times.size and raw.get('edited') is not True)))
+        self.active=bool(self.controller.active and not identity and not self.preview_only)
+        width=float(raw.get('curve_bin_seconds',2.)) if isinstance(raw,dict) else 2.
+        if not math.isfinite(width) or width<=0:raise ValueError('curve_bin_seconds must be positive and finite')
+        self.curve_edges=np.r_[np.arange(0.,self.duration,width),self.duration]
+        self.curve_scale_source='relative_editor_bins';self.curve_bin_seconds=width
+        centers=(self.curve_edges[:-1]+self.curve_edges[1:])*.5
+        # Unit event/head rates obtain only a dimensionless edit ratio. With
+        # no reference, intensity .5 means neutral, rather than a fake Hz target.
+        unit=torch.ones(len(centers),2,dtype=torch.float32)
+        if self.active:
+            if not self.controller.reference_times.size:
+                self.controller.reference_times=self.controller.point_times.copy()
+                self.controller.reference_values=np.full_like(self.controller.point_values,.5)
+            self.event_bin_ratios=self.controller._adjust_rates(unit,centers)[:,0].numpy().astype(np.float64)
+        else:self.event_bin_ratios=np.ones(len(centers))
+        self._arrival_curve_tensors={}
 
     def _integral(self,seconds,adjusted=False):
         query=np.clip(np.asarray(seconds,dtype=np.float64),0.,self.duration)
@@ -260,16 +313,86 @@ class _Curve:
         note=float(np.log(max(-np.expm1(-new),1e-12))-np.log(max(-np.expm1(-old),1e-12)))
         return note,old-new
 
+    def first_arrival(self,result,mode=None):
+        """Explicit curve edits transform ONE final law, including its tail.
+
+        No independent kind bias/timing bias is applied to this contract.
+        Device lookup tables are built once; candidate rates never visit CPU.
+        """
+        if not self.active:
+            kinds=(result['execution_kind_logits'][0,-1,int(mode)] if mode is not None
+                   else result['kind_logits'][0,-1])
+            timing=(result['execution_delta_logits'][0,-1,int(mode)] if mode is not None
+                    else result['delta_logits'][0,-1])
+            return kinds,timing
+        from .stream_arrival import first_arrival
+        rates=result['arrival_log_rates'][0,-1]
+        seconds=result['arrival_seconds'][0,-1]
+        allowed=result['arrival_allowed'][0,-1].bool()
+        start=result['arrival_start'][0,-1]
+        stop=result['arrival_stop'][0,-1]
+        if mode is not None:rates=rates[int(mode)]
+        if self.active:
+            key=(str(rates.device),rates.dtype)
+            if key not in self._arrival_curve_tensors:
+                self._arrival_curve_tensors[key]=(
+                    torch.as_tensor(self.curve_edges,device=rates.device,dtype=seconds.dtype),
+                    torch.as_tensor(self.event_bin_ratios,device=rates.device,dtype=rates.dtype),
+                    torch.as_tensor(self.controller.rest_regions,device=rates.device,dtype=seconds.dtype).reshape(-1,2))
+            edges,ratios,rests=self._arrival_curve_tensors[key]
+            index=(torch.searchsorted(edges,seconds.contiguous(),right=True)-1).clamp(0,ratios.numel()-1)
+            factor=ratios[index]
+            if rests.numel():
+                in_rest=((seconds[:,None]>=rests[:,0])&(seconds[:,None]<rests[:,1])).any(-1)
+                factor=factor.masked_fill(in_rest,0.)
+            values=F.softplus(rates.float())*factor
+            # Stable inverse softplus, including exact zero rate for user rests.
+            rates=values+(-torch.expm1(-values)).log()
+        count=rates.size(0) if rates.ndim==2 else None
+        if count is not None:
+            law=first_arrival(rates,seconds[None],start.expand(count),stop.expand(count),allowed[None])
+            joint=law['joint'].masked_fill(~allowed[None] | torch.isneginf(rates),-torch.inf)
+            mode_note=joint.logsumexp(-1)
+            prior=result.get('execution_prior_logits')
+            log_prior=(prior[0,-1].float().log_softmax(-1) if prior is not None
+                       else rates.new_full((count,),-math.log(count)))
+            note=torch.logsumexp(log_prior+mode_note,-1)
+            tail=torch.logsumexp(log_prior+law['log_tail'],-1)
+            joint=torch.logsumexp(log_prior[:,None]+joint,-2)
+            conditional=(joint-note).masked_fill(~torch.isfinite(note),-torch.inf)
+        else:
+            law=first_arrival(rates,seconds,start,stop,allowed)
+            joint=law['joint'].masked_fill(~allowed | torch.isneginf(rates),-torch.inf)
+            note=joint.logsumexp(-1);tail=law['log_tail']
+            conditional=(joint-note).masked_fill(~torch.isfinite(note),-torch.inf)
+        kinds=result['kind_logits'][0,-1].new_full((5,),-torch.inf)
+        kinds[NOTE]=note
+        # EOS and WAIT share the same censored mass; support masking is external.
+        kinds[WAIT]=tail;kinds[EOS]=tail
+        return kinds,conditional
+
     def report(self):
+        if getattr(self,'relative_final_rate',False):
+            return dict(active=self.active,preview_only=self.preview_only,mode=self.controller.mode,
+                strength=self.controller.strength,reference_rebased=False,
+                reference_rebase_reason=self.reference_rebase_reason,
+                curve_application='relative_edit_of_final_rate_v2',
+                rate_integration='disjoint_candidate_cells_final_rate',
+                timing_transform='shared_first_arrival_reintegration',
+                curve_scale_source=self.curve_scale_source,curve_bin_seconds=self.curve_bin_seconds,
+                final_rate_multiplier=dict(min=float(self.event_bin_ratios.min()),
+                    max=float(self.event_bin_ratios.max()),mean=float(self.event_bin_ratios.mean())),
+                head_budget='not_inferred_from_partial_or_untrained_plan_channels')
         width=np.diff(self.hazard_edges)
         def summary(rate):
             return dict(mean_per_second=float(np.dot(rate,width)/max(self.duration,1e-12)),
                         min_per_second=float(np.min(rate)),max_per_second=float(np.max(rate)))
         target=(self.controller._rates_at(self.hazard_edges[:-1]) if self.controller.active else
                 np.interp(self.hazard_edges[:-1],self.seconds,self.head_rate))
-        return dict(active=self.active,mode=self.controller.mode,strength=self.controller.strength,
+        return dict(active=self.active,preview_only=getattr(self,'preview_only',False),mode=self.controller.mode,strength=self.controller.strength,
             reference_rebased=self.reference_rebased,reference_rebase_reason=self.reference_rebase_reason,
-            rate_integration='exact_piecewise_constant_plan_cells',timing_transform='first_arrival_likelihood_ratio',
+            rate_integration=('disjoint_candidate_cells_final_rate' if self.unified_arrival else 'exact_piecewise_constant_plan_cells'),
+            timing_transform=('shared_first_arrival_reintegration' if self.unified_arrival else 'first_arrival_likelihood_ratio'),
             curve_application='bin_mean_multiplicative_v1',curve_scale_source=self.curve_scale_source,
             curve_bin_seconds=self.curve_bin_seconds,
             target_head_rate=summary(target),native_event_rate=summary(self.native_hazard),
@@ -277,6 +400,7 @@ class _Curve:
     def allows(self,second,heads):
         if not self.active:return True
         if self.controller.is_in_rest_region(second):return False
+        if getattr(self,'relative_final_rate',False):return True
         if self.controller.mode not in ('hard','strict'):return True
         region=int(second//2);a=region*2;b=min(self.duration,a+2)
         times=np.r_[a,self.seconds[(self.seconds>a)&(self.seconds<b)],b]
@@ -370,6 +494,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(model.config,'training_window_policy','block_v1'),
         max_phrase_events=getattr(model.config,'max_phrase_events',64))
+    context.set_draft_policy(getattr(model.config,'draft_policy','off'))
     batch=to_device_batch(context.current_batch(),device)
     cache=model.encode_audio(batch['song_audio'],batch['song_mask'],batch['song_seconds'],batch['song_beats'])
     condition,song_profile_report=resolve_song_profile(model,cache,condition,args,payload)
@@ -420,7 +545,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
             if deadline is not None and time.perf_counter()>=deadline:reason='time_budget';break
             if len(points)>=maximum:reason='max_events';break
             if cursor>=end:reason='audio_end';break
-            batch=to_device_batch({k:v for k,v in context.current_batch().items()
+            source_batch=attach_draft_runtime(context,context.current_batch(),model)
+            batch=to_device_batch({k:v for k,v in source_batch.items()
                 if k not in ('song_audio','song_mask','song_seconds','song_beats')},device)
             result=model(batch,audio_cache=cache)
             if 'phrase_reference_weights' in result:
@@ -433,7 +559,11 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
             if getattr(model.config,'phrase_execution_policy','off')=='component_modes_v2':
                 from .stream_phrase_runtime import ensure_phrase_mode
                 selected_mode=ensure_phrase_mode(model,context,result,batch,generator,temperature=args.phrase_mode_temperature)
-            kind_values=result['execution_kind_logits'][0,-1,selected_mode] if selected_mode is not None else result['kind_logits'][0,-1]
+            unified_arrival=None
+            if getattr(model.config,'plan_kind_policy','off') in ('unified_first_arrival_v5','unified_first_arrival_v6'):
+                kind_values,unified_arrival=curve.first_arrival(result,selected_mode)
+            else:
+                kind_values=result['execution_kind_logits'][0,-1,selected_mode] if selected_mode is not None else result['kind_logits'][0,-1]
             kinds=kind_logits_for_audio(kind_values,cursor,end)
             start_second=second_at_beat(clock,cursor)
             horizon_second=second_at_beat(clock,min(cursor+2,end))
@@ -442,10 +572,11 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 gain,boundary=torch.stack((result['occurrence_arrangement_gain'][0,-1].double(),
                     result['occurrence_arrangement_end_second'][0,-1])).detach().cpu().tolist()
                 arrangement=dict(arrangement_gain=gain,arrangement_end_second=boundary)
-            note_bias,tail_bias=curve.kind_bias(start_second,horizon_second,**arrangement)
-            kinds[NOTE]+=note_bias
-            kinds[WAIT]+=tail_bias
-            kinds[EOS]+=tail_bias
+            if unified_arrival is None:
+                note_bias,tail_bias=curve.kind_bias(start_second,horizon_second,**arrangement)
+                kinds[NOTE]+=note_bias
+                kinds[WAIT]+=tail_bias
+                kinds[EOS]+=tail_bias
             kind=_sample(kinds,args.pointer_temperature,generator)
             if kind==EOS:
                 reason='learned_eos'
@@ -457,11 +588,12 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                 context.commit(StreamStep(WAIT,cursor,nxt,max(0.,second_at_beat(clock,cursor)),second_at_beat(clock,nxt),**meta))
                 cursor=nxt;waits+=1;continue
             deltas=current_timing_deltas(model,result,cursor)
-            delta_values=result['execution_delta_logits'][0,-1,selected_mode] if selected_mode is not None else result['delta_logits'][0,-1]
+            delta_values=(unified_arrival if unified_arrival is not None else
+                result['execution_delta_logits'][0,-1,selected_mode] if selected_mode is not None else result['delta_logits'][0,-1])
             timing=note_delta_logits_for_audio(delta_values,deltas,cursor,end,
                 clock,duration,first_step=step_index==0)
             seconds=np.asarray([second_at_beat(clock,cursor+d) for d in deltas])
-            if curve.active:
+            if curve.active and unified_arrival is None:
                 timing+=torch.as_tensor(curve.timing_bias(start_second,seconds,**arrangement),device=device)
                 timing=timing.masked_fill(torch.as_tensor(curve.controller.rest_mask(seconds),device=device),-torch.inf)
             if not bool(torch.isfinite(timing).any()):
@@ -476,7 +608,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                     selected_batch,selected_result=prepare_selected_candidate(model,context,batch,result,beat,cache)
                     actual_seconds=torch.full_like(selected_batch['step_second'],second_at_beat(clock,beat))
                     ids=torch.full_like(selected_batch['history_delta'],delta_id)
-                    if model.config.event_family_policy=='shared_continuation_v1':
+                    if model.config.event_family_policy in ('shared_continuation_v1','shared_music_mixture_v2'):
                         if hasattr(model,'lane_load_projection'):
                             ctx,load,selected_result=model.candidate_action_state(selected_result,selected_batch,cache,
                                 actual_seconds,return_button_load=True)
@@ -484,7 +616,9 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
                         else:
                             ctx,selected_result=model.candidate_action_state(selected_result,selected_batch,cache,actual_seconds)
                             proposal=dict(context=ctx[0,-1])
-                        proposal['family_logits']=model.family_logits_for_action(proposal['context'])
+                        proposal['family_logits']=model.family_logits_for_action(proposal['context'],
+                            **({'audio_logits':selected_result['_execution_audio_family_logits'][0,-1]}
+                               if model.config.event_family_policy=='shared_music_mixture_v2' and not hasattr(model,'phrase_execution') else {}))
                     elif hasattr(model,'lane_load_projection'):
                         ctx,load=model.action_context_for_delta(selected_result,selected_batch,ids,cache,event_seconds=actual_seconds,return_button_load=True)
                         proposal=dict(context=ctx[0,-1],button_load=load[0,-1])
@@ -569,6 +703,7 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         candidate_state_policy=getattr(model.config,'candidate_state_policy','cursor_v1'),
         training_window_policy=getattr(model.config,'training_window_policy','block_v1'),
         max_phrase_events=getattr(model.config,'max_phrase_events',64))
+                rebuilt.set_draft_policy(getattr(model.config,'draft_policy','off'))
                 rebuilt.song_response_choice=song_response_choice
                 return rebuilt
             def guard_factory():
@@ -626,7 +761,8 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         configuration_retry_semantics='joint_event_rejection_v2',sampling_observation=sampling_observation,
         training_objective_recipe=(payload.get('args') or {}).get('training_objective_recipe','legacy_joint_event_objective'),
         plan_kind_policy=model.config.plan_kind_policy,
-        occurrence_source=('music_and_NOTE_only_phrase_arrangement' if model.config.plan_kind_policy=='phrase_arranged_hazard_v4' else
+        occurrence_source=('unified_first_arrival_with_ordered_draft' if model.config.plan_kind_policy in ('unified_first_arrival_v5','unified_first_arrival_v6') else
+            'music_and_NOTE_only_phrase_arrangement' if model.config.plan_kind_policy=='phrase_arranged_hazard_v4' else
             'audio_condition_interval_survival' if model.config.plan_kind_policy=='audio_hazard_v3' else 'legacy_decoder_plus_plan'),
         gap_continuation_policy=model.config.gap_continuation_policy,sensor_load_policy=model.config.sensor_load_policy,
         lane_load_policy=model.config.lane_load_policy,
@@ -651,10 +787,13 @@ def generate(args,*,song_override=None,model_override=None,payload_override=None
         phrase_search=search_report,audio_tracking_strength=tracking,
         phrase_context_policy=getattr(model.config,'phrase_context_policy','off'),
         phrase_execution_policy=getattr(model.config,'phrase_execution_policy','off'),
+        draft_policy=getattr(model.config,'draft_policy','off'),
         phrase_mode_temperature=getattr(args,'phrase_mode_temperature',1.),
         phrase_execution=execution_report(context._committed),
         duration_audio_policy=getattr(model.config,'duration_audio_policy','off'),
         duration_audio_coverage=(model.duration_audio.coverage() if hasattr(model,'duration_audio') else None),
+        duration_objective_policy=model.config.duration_objective_policy,
+        duration_calibration_coverage=(model.hold_duration_calibration.coverage() if hasattr(model,'hold_duration_calibration') else None),
         physical_policy=guard.physical_policy,
         curve=curve.report(),
         playability=physical_policy_report(physical,guard),

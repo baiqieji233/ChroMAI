@@ -14,6 +14,28 @@ from .events import event_metadata
 TYPE_BITS = {'tap': 1, 'slide': 2, 'hold': 4, 'touch': 8, 'touch_hold': 16}
 
 
+def mix_family_logits(full,audio,weight):
+    """The actually deployed type law, rather than two separate CE targets."""
+    if weight<=0:return full.float().log_softmax(-1)
+    if weight>=1:return audio.float().log_softmax(-1)
+    import math
+    return torch.logaddexp(full.float().log_softmax(-1)+math.log1p(-weight),
+                           audio.float().log_softmax(-1)+math.log(weight))
+
+
+def mix_family_route_log_probs(routes,audio,route_families,weight):
+    """Mix type mass after mode corrections; preserve all within-type odds."""
+    if weight<=0:return routes
+    from .stream_timing import grouped_logsumexp
+    groups=route_families-1
+    full=grouped_logsumexp(routes,groups,groups=31)
+    legal=torch.isfinite(full)
+    mixed=mix_family_logits(full.masked_fill(~legal,-1e4),audio.masked_fill(~legal,-1e4),weight)
+    mixed=mixed.masked_fill(~legal,-torch.inf)
+    index=groups.expand_as(routes)
+    return routes-full.masked_fill(~torch.isfinite(full),0.).gather(-1,index)+mixed.gather(-1,index)
+
+
 def semantic_catalog(codec):
     atoms = [0]
     for text in codec.atom_catalog:

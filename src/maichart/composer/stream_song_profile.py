@@ -1,6 +1,7 @@
 """Masked mixture distribution for one immutable, whole-song control profile."""
 import itertools
 import json
+from functools import lru_cache
 import numpy as np
 import torch
 from torch import nn
@@ -48,6 +49,79 @@ def feasible_profile(values, known):
     return x
 
 
+@lru_cache(maxsize=1)
+def _profile_projection_tables():
+    """Compile all 16 lock patterns / 32 nonnegative active sets on CPU once."""
+    marginals=np.array([[1,0,0,0,0],[0,1,0,0,0],[0,0,1,0,1],[0,0,0,1,1]],dtype=np.float64)
+    full=np.concatenate((np.ones((1,5)),marginals),axis=0)
+    project=np.zeros((16,32,5,5),dtype=np.float64)
+    rhs=np.zeros_like(project)
+    patterns=list(itertools.product((False,True),repeat=4))
+    for mask,pattern in enumerate(patterns):
+        constraints=np.array([0]+[i+1 for i,locked in enumerate(pattern) if locked])
+        matrix=full[constraints]
+        for flags,free_pattern in enumerate(itertools.product((False,True),repeat=5)):
+            free=np.flatnonzero(free_pattern)
+            if not len(free):continue
+            reduced=matrix[:,free]
+            correction=reduced.T@np.linalg.pinv(reduced@reduced.T)
+            project[mask,flags][np.ix_(free,free)]=np.eye(len(free))-correction@reduced
+            rhs[mask,flags][np.ix_(free,constraints)]=correction
+    return tuple(torch.from_numpy(array) for array in
+        (project,rhs,full,np.linalg.pinv(marginals)))
+
+
+def _profile_assert(valid,message):
+    if valid.device.type=='cuda':torch._assert_async(valid.all(),message)
+    elif not bool(valid.all()):raise ValueError(message)
+
+
+def feasible_profile_tensor(values,known,*,tables=None):
+    """Batched equivalent of feasible_profile, without host transfers/solves.
+
+    The 5-class convex projection is small enough to evaluate every active
+    set in parallel. FP64 here keeps the original 1e-7 feasibility tolerance;
+    all trainable predictions are detached by the completion caller already.
+    """
+    if values.ndim!=2 or values.size(-1)!=16 or known.shape!=values.shape:
+        raise ValueError('Profile projection requires [batch,16] values and locks')
+    if tables is None:tables=tuple(table.to(device=values.device) for table in _profile_projection_tables())
+    projection,rhs,full,target_map=tables
+    x=values.double();known=known.bool()
+    _profile_assert(torch.isfinite(x)&x.ge(0)&x.le(1),'Song controls must be finite in [0,1]')
+    _profile_assert(~(known[:,7]&known[:,12])|(x[:,7]-x[:,12]).abs().le(1e-7),
+        'Contradictory chord and chord_bias locks')
+    chord=torch.where(known[:,7],x[:,7],torch.where(known[:,12],x[:,12],.5*(x[:,7]+x[:,12])))
+    lower_slide=torch.maximum(torch.where(known[:,4],x[:,4],0.),torch.where(known[:,5],x[:,5],0.))
+    lower_slide=torch.maximum(lower_slide,torch.where(known[:,3]&x[:,3].gt(0),1e-6,0.))
+    lower=torch.zeros_like(x[:,:5]);lower[:,1]=lower_slide
+    target=x[:,8:12]@target_map.T-lower
+    b=torch.cat((torch.ones_like(x[:,:1]),x[:,8:12]),-1)-lower@full.T
+    code=(known[:,8:12].long()*known.new_tensor([8,4,2,1],dtype=torch.long)).sum(-1)
+    candidate=torch.einsum('bfij,bj->bfi',projection[code],target)+torch.einsum('bfij,bj->bfi',rhs[code],b)
+    residual=candidate@full.T-b[:,None,:]
+    required=torch.cat((torch.ones_like(known[:,:1]),known[:,8:12]),-1)
+    valid=candidate.amin(-1).ge(-1e-7)&residual.masked_fill(~required[:,None,:],0.).abs().amax(-1).le(1e-7)
+    valid[:,0]=False
+    nonnegative=candidate.clamp_min(0)
+    score=(nonnegative-target[:,None,:]).square().sum(-1).masked_fill(~valid,torch.inf)
+    _profile_assert(valid.any(-1),'Contradictory note-type locks: tap/slide/hold/touch must admit five-class probabilities')
+    selected=nonnegative.gather(1,score.argmin(-1)[:,None,None].expand(-1,1,5)).squeeze(1)+lower
+    result=x.clone();result[:,8:12]=selected@full[1:].T
+    result[:,7]=chord;result[:,12]=chord
+    for index in (4,5):
+        _profile_assert(~known[:,index]|x[:,index].le(result[:,9]+1e-7),'Slide radar lock exceeds slide_bias')
+        result[:,index]=torch.where(known[:,index],x[:,index],torch.minimum(x[:,index],result[:,9]))
+    no_slide=result[:,9].le(1e-12)
+    _profile_assert(~(no_slide&known[:,3]&x[:,3].gt(0)),'Positive sweep requires a positive slide_bias')
+    result[:,3]=torch.where(no_slide,torch.zeros_like(result[:,3]),result[:,3])
+    # Marginal equalities above are solved in FP64; restore explicit inputs
+    # so float32 slider values remain bitwise unchanged where possible.
+    result=torch.where(known,x,result)
+    result[:,7]=chord;result[:,12]=chord
+    return result.to(values.dtype)
+
+
 class SongProfileCompleter(nn.Module):
     """Categorical mixture with masked joint score and feasible projected draws.
 
@@ -58,6 +132,20 @@ class SongProfileCompleter(nn.Module):
     def __init__(self,d_model,components=4):
         super().__init__();self.components=int(components)
         self.network=nn.Sequential(nn.Linear(d_model+32,d_model),nn.GELU(),nn.Linear(d_model,self.components*(1+15*self.bins)))
+        for name,table in zip(('_projection_matrix','_projection_rhs','_projection_constraints','_projection_target'),_profile_projection_tables()):
+            self.register_buffer(name,table,persistent=False)
+    def project_controls(self,values,known):
+        tables=(self._projection_matrix,self._projection_rhs,self._projection_constraints,self._projection_target)
+        # Explicit model.half()/bfloat16() also casts floating buffers. Keep
+        # the small exact projection tables in FP64, restoring them once per
+        # device from immutable CPU constants rather than quantized matrices.
+        if tables[0].dtype!=torch.float64:
+            cached=getattr(self,'_execution_projection_tables',None)
+            if cached is None or cached[0].device!=values.device:
+                cached=tuple(table.to(device=values.device) for table in _profile_projection_tables())
+                self._execution_projection_tables=cached
+            tables=cached
+        return feasible_profile_tensor(values,known,tables=tables)
     @staticmethod
     def bind_known(condition,known_mask):
         condition=condition.clone();known_mask=known_mask.bool().clone();known_mask[:,0]=True
@@ -103,7 +191,7 @@ class SongProfileCompleter(nn.Module):
         condition,known_mask=self.bind_known(condition,known_mask)
         scores=self._evidence_scores(self(audio,condition,known_mask),condition,known_mask)
         return dict(joint_nll=scores['joint_nll'],crps=scores['crps'])
-    def unified_evidence(self,audio,condition,known_mask=None,*,only_level_probability=.5):
+    def unified_evidence(self,audio,condition,known_mask=None,*,only_level_probability=.5,prior_condition=None):
         """Causal shared prior plus training-only profile evidence for one z.
 
         Full target controls enter the score, never the deployed prior input.
@@ -113,11 +201,27 @@ class SongProfileCompleter(nn.Module):
         if not 0<=probability<=1:raise ValueError('Invalid only-level mask probability')
         if known_mask is None:known_mask=self.sample_known_mask(condition,probability)
         condition,known_mask=self.bind_known(condition,known_mask)
-        output=self(audio,condition,known_mask)
+        prior_values=condition if prior_condition is None else self.bind_known(prior_condition,known_mask)[0]
+        output=self(audio,prior_values,known_mask)
         scores=self._evidence_scores(output,condition,known_mask)
         return dict(prior_logits=output['mixture_logits'],bin_logits=output['bin_logits'],
             component_profile_nll=scores['component_profile_nll'],crps=scores['crps'],
-            known_mask=known_mask,causal_condition=condition*known_mask.to(condition.dtype))
+            joint_profile_nll=scores['joint_nll'],
+            known_mask=known_mask,causal_condition=prior_values*known_mask.to(prior_values.dtype))
+
+    def execution_controls(self,evidence,condition,choice):
+        """Match the deployed component-mean completion; explicit locks win."""
+        bins=evidence['bin_logits']
+        rows=torch.arange(bins.size(0),device=bins.device)
+        grid=torch.linspace(0,1,self.bins,device=bins.device)
+        mean=(bins[rows,choice].softmax(-1)*grid).sum(-1).detach()
+        prediction=torch.cat((condition[:,:1],mean),-1)
+        completed=torch.where(evidence['known_mask'],condition,prediction)
+        # Chord radar and style are one statistic, never two conflicting locks.
+        mask=evidence['known_mask'];value=torch.where(mask[:,7],condition[:,7],
+            torch.where(mask[:,12],condition[:,12],completed[:,7]))
+        completed=completed.clone();completed[:,7]=completed[:,12]=value
+        return self.project_controls(completed,evidence['known_mask'])
     @staticmethod
     def sample_known_mask(condition,only_level_probability=.5):
         known=torch.rand_like(condition)<torch.rand((len(condition),1),device=condition.device)
@@ -149,8 +253,7 @@ class SongProfileCompleter(nn.Module):
             torch.multinomial(probabilities.reshape(-1,self.bins),1,generator=generator).reshape(-1,15)/(self.bins-1))
         values=condition.clone();values[:,1:]=torch.where(known_mask[:,1:].bool(),condition[:,1:],draws)
         values[:,12]=values[:,7]
-        projected=[feasible_profile(v,m) for v,m in zip(values.cpu().numpy(),known_mask.cpu().numpy())]
-        result=torch.as_tensor(np.stack(projected),device=condition.device,dtype=condition.dtype)
+        result=self.project_controls(values,known_mask)
         if not return_diagnostics:return result
         rows=[]
         cdf=probabilities.cumsum(-1)
@@ -235,3 +338,29 @@ def resolve_song_profile(model,cache,condition,args,payload):
         unified_choice=(choice if unified else None),
         training_score=('unified_configuration_profile_generalized_em_plus_crps' if unified else
             'masked_joint_categorical_nll_plus_ordered_crps' if getattr(model.config,'song_profile_policy','off')=='masked_ordered_joint_v2' else 'masked_preprojection_categorical_nll'))
+def sampled_event_choice_credit(prior_logits, selected, energy, mass, chart,
+        normalizer, *, committed=None, baseline=0.):
+    """Unbiased score-function credit for the *executed* song choice.
+
+    Per-chart leave-one-out costs provide a baseline independent of that
+    chart's sampled choice. A previous-batch baseline handles one-chart rows.
+    The zero-valued surrogate adds the missing selection gradient, without
+    counting the actor's event likelihood twice or fabricating another pass.
+    """
+    import torch
+    count=prior_logits.size(0)
+    costs=prior_logits.new_zeros(count,dtype=torch.float32).index_add(0,chart.long(),energy.float())
+    budgets=costs.new_zeros(count).index_add(0,chart.long(),mass.float())
+    active=budgets.gt(0)
+    if committed is not None:active=active & committed.lt(0)
+    unit=costs/budgets.clamp_min(1e-8)
+    number=active.sum()
+    others=(unit*active).sum()-unit*active
+    reference=torch.where(number>1,others/(number-1).clamp_min(1),
+        torch.as_tensor(baseline,device=costs.device,dtype=costs.dtype).detach())
+    advantage=((costs-reference*budgets)*active).detach()
+    log_probability=prior_logits.float().log_softmax(-1).gather(-1,selected[:,None]).squeeze(-1)
+    surrogate=((log_probability-log_probability.detach())*advantage).sum()/float(normalizer)
+    return surrogate,dict(song_choice_credit_charts=number.float(),
+        song_choice_credit_abs_advantage=advantage.abs().sum()/float(normalizer),
+        song_choice_credit_unit_cost=(unit*active).sum()/number.clamp_min(1))

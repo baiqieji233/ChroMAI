@@ -204,7 +204,7 @@ class AbsoluteTimingHead(nn.Module):
             centered.to(self.query_interaction_projection.weight.dtype)).float().squeeze(-1)
 
     def forward(self, hidden, cursor, relative_logits, relative_values, query, audio_scores, allowed,
-                *, candidate_audio=None,candidate_expected_count=None):
+                *, candidate_audio=None,candidate_expected_count=None,return_intensity=False):
         beats, gaps = self.candidates(cursor)
         group_ids=self.candidate_groups(gaps)
         # Preserve the old model's useful interval evidence only within a
@@ -243,6 +243,8 @@ class AbsoluteTimingHead(nn.Module):
         if interval_features is not None:
             pooled=self._group_means(interval_features,allowed,counts,group_ids)
             macro=macro+self.interval_group_projection(self._center_groups(pooled,counts)).float().squeeze(-1)
+        if return_intensity:
+            return (scores+macro.gather(-1,group_ids.expand_as(scores))).masked_fill(~allowed,-1e4),beats,gaps
         macro=macro.masked_fill(counts.eq(0), -1e4).log_softmax(-1)
         logits = masked-lse.gather(-1, group_ids.expand_as(masked))+macro.gather(-1, group_ids.expand_as(masked))
         return logits.masked_fill(~allowed, -1e4), beats, gaps
@@ -254,3 +256,90 @@ def absolute_target_indices(candidate_beats, target_beats, active):
     nearest, index = distance.min(-1)
     torch._assert_async((~active | nearest.lt(1e-7)).all(), 'Authored onset is absent from the absolute phase catalog')
     return index
+
+
+def initialize_timing_prior(head, ds, *, batch_size=256):
+    """Fit the static v6 first-arrival baseline, without audio/model forwards.
+
+    A NOTE contributes survival exposure before its midpoint cell and the
+    discrete event likelihood inside that cell. WAIT/EOS are right censored.
+    Candidate construction and seconds exposure match first_arrival; batching
+    bounds memory and avoids a Python loop over the phase catalog per target.
+    Other learned music/history scores remain evidence around this baseline.
+    """
+    import numpy as np
+    from .stream_data import NOTE, WAIT, EOS
+    phases=np.asarray([float(x) for x in head.phase_catalog],dtype=np.float64)
+    catalog=np.asarray(head.group_ids.detach().cpu(),dtype=np.int64)
+    groups=head.num_groups
+    exposure=np.zeros(groups,dtype=np.float64)
+    event_widths=[];event_groups=[];event_weights=[]
+    for song,stream in enumerate(ds.streams):
+        for begin in range(0,len(stream),batch_size):
+            rows=stream[begin:begin+batch_size]
+            cursor=np.asarray([float(s.start) for s in rows])
+            target=np.asarray([float(s.end) for s in rows])
+            kinds=np.asarray([s.kind for s in rows])
+            weights=np.asarray([float(s.weight)*ds.target_window_weights[song][begin+i]*ds.chart_weights[song]
+                if not ds.unknown_steps[song][begin+i] else 0. for i,s in enumerate(rows)])
+            weights*=np.isin(kinds,(NOTE,WAIT,EOS))
+            anchored=np.floor(cursor)[:,None]+phases
+            first=anchored+(anchored<=cursor[:,None]+1e-9)
+            beats=np.concatenate((np.repeat(cursor[:,None],2,axis=1),first,first+1),axis=1)
+            gaps=np.maximum(beats-cursor[:,None],0.)
+            end=float(ds._end_beats[song])
+            allowed=((gaps>0)|((gaps==0)&((begin+np.arange(len(rows)))==0)[:,None]&(cursor==0)[:,None]))&(beats<end)
+            allowed[:,0]=False
+            clock=ds.clocks[song]
+            seconds=clock.at_floats(beats)
+            start=np.asarray([s.start_second for s in rows])
+            stop=np.maximum(start,clock.at_floats(np.minimum(cursor+2,end)))
+            valid=allowed&(seconds>=start[:,None]-1e-9)&(seconds<=stop[:,None]+1e-9)
+            seconds=np.minimum(np.maximum(seconds,start[:,None]),stop[:,None])
+            order=np.argsort(np.where(valid,seconds,np.inf),axis=-1,kind='stable')
+            sec=np.take_along_axis(seconds,order,-1)
+            legal=np.take_along_axis(valid,order,-1)
+            future=np.where(legal,sec,np.inf)
+            following=np.concatenate((future[:,1:],np.full((len(rows),1),np.inf)),axis=1)
+            right=np.where(np.isfinite(following),.5*(sec+following),stop[:,None])
+            right=np.maximum.accumulate(np.where(legal,np.minimum(right,stop[:,None]),-np.inf),axis=-1)
+            previous=np.concatenate((start[:,None],right[:,:-1]),axis=-1)
+            previous=np.where(np.isfinite(previous),previous,start[:,None])
+            width=np.where(legal,np.maximum(right-previous,0.),0.)
+            ids=np.broadcast_to(catalog,beats.shape).copy()
+            if head.group_policy=='phase_gap_v2':ids+=(gaps>=1.-1e-9)*len(GRID_FAMILIES)
+            ids=np.take_along_axis(ids,order,-1)
+            distance=np.abs(beats-target[:,None]);distance[:,0]=np.inf
+            target_id=distance.argmin(-1)
+            target_position=(order==target_id[:,None]).argmax(-1)
+            is_note=(kinds==NOTE)&(weights>0)
+            if np.any(is_note&((distance.min(-1)>=1e-7)|~valid[np.arange(len(rows)),target_id])):
+                raise ValueError('Timing prior target absent from legal absolute catalog')
+            before=(np.arange(beats.shape[-1])[None,:]<target_position[:,None])|~is_note[:,None]
+            exposure+=np.bincount(ids.ravel(),weights=(width*before*weights[:,None]).ravel(),minlength=groups)
+            event_widths.append(width[np.arange(len(rows)),target_position][is_note])
+            event_groups.append(ids[np.arange(len(rows)),target_position][is_note])
+            event_weights.append(weights[is_note])
+    widths=np.concatenate(event_widths) if event_widths else np.empty(0)
+    ids=np.concatenate(event_groups) if event_groups else np.empty(0,dtype=np.int64)
+    weights=np.concatenate(event_weights) if event_weights else np.empty(0)
+    if np.any(widths<=0):raise ValueError('Timing prior NOTE has zero exposure')
+    # A weak Gamma(shape=1.5, rate=.5 seconds) prior makes absent/uncensored
+    # groups finite. The exact cell likelihood has a monotone derivative:
+    # sum(weight * width / expm1(rate * width)) - survival_exposure.
+    counts=np.bincount(ids,weights=weights,minlength=groups)
+    low=np.zeros(groups);high=(counts+.5)/(exposure+.5)
+    for _ in range(48):
+        rate=(low+high)*.5
+        x=rate[ids]*widths
+        derivative=np.bincount(ids,weights=weights*widths/np.expm1(np.minimum(x,700.)),minlength=groups)+.5/rate-exposure-.5
+        low=np.where(derivative>0,rate,low);high=np.where(derivative>0,high,rate)
+    rate=(low+high)*.5
+    bias=rate+np.log(-np.expm1(-rate)) # stable inverse softplus
+    with torch.no_grad():
+        head.grid_head.bias.copy_(torch.as_tensor(bias[:len(GRID_FAMILIES)],device=head.grid_head.bias.device,dtype=head.grid_head.bias.dtype))
+        if hasattr(head,'bucket_head'):
+            residual=bias-np.tile(bias[:len(GRID_FAMILIES)],2)
+            head.bucket_head.bias.copy_(torch.as_tensor(residual,device=head.bucket_head.bias.device,dtype=head.bucket_head.bias.dtype))
+    return dict(timing_prior_policy='seconds_cell_first_arrival_map_v1',timing_prior_survival_seconds=exposure.tolist(),
+        timing_prior_event_counts=counts.tolist(),timing_prior_rates=rate.tolist())

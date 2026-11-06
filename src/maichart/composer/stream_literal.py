@@ -10,6 +10,31 @@ from torch.nn.utils.rnn import pad_sequence
 TYPE_BITS=(1,2,4,8,16)
 
 
+def permute_literal_targets(target,generator=None):
+    """Sample an equivalent unordered-set serialization; STOP stays last."""
+    rank=torch.rand(target.shape,device=target.device,generator=generator)
+    rank=rank.masked_fill(target.eq(0),2.).masked_fill(target.lt(0),3.)
+    return target.gather(-1,rank.argsort(dim=-1,stable=True))
+
+
+def literal_identity_support(target,prefix,local,ids,head_masks,head_bits,head_powers):
+    """Match the decoder's head-set support using only earlier atoms.
+
+    Rare authored same-pad exceptions retain their target probability and are
+    counted explicitly; they must not turn into an invented 1e4 target error.
+    """
+    current=head_masks[target.clamp_min(0)]&target.gt(0)[...,None]
+    old=head_masks[prefix.clamp_min(0)].any(-2)
+    cumulative=current.long().cumsum(1)-current.long()
+    used=(cumulative.gt(0)|old[:,None])
+    packed=(used.long()*head_powers).sum(-1)
+    available=(packed[...,None]&head_bits[ids]).eq(0)
+    conflict=(packed&head_bits[target.clamp_min(0)]).ne(0)&target.gt(0)
+    keep=available.gather(-1,local[...,None])|target.gt(0)[...,None]
+    available=available.scatter(-1,local[...,None],keep)
+    return available,conflict.sum()
+
+
 def pack_literal_type_blocks(targets,atom_types):
     """CPU producer packing; only real blocks enter the GRU during training.
 

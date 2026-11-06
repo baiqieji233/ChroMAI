@@ -1,0 +1,168 @@
+{
+  "date": "2026-11-04",
+  "original": {
+    "task": "c2369a4b909c",
+    "optimizer_steps": 7592,
+    "events": 2471,
+    "curve": {
+      "active": true,
+      "preview_only": false,
+      "mode": "follow",
+      "strength": 0.7,
+      "reference_rebased": true,
+      "reference_rebase_reason": "saved_curve_condition_differs_from_effective_condition",
+      "rate_integration": "disjoint_candidate_cells_final_rate",
+      "timing_transform": "shared_first_arrival_reintegration",
+      "curve_application": "bin_mean_multiplicative_v1",
+      "curve_scale_source": "curve_bin_seconds",
+      "curve_bin_seconds": 2.0,
+      "target_head_rate": {
+        "mean_per_second": 5.263963998168476,
+        "min_per_second": 0.09523579403565918,
+        "max_per_second": 9.651430348432312
+      },
+      "native_event_rate": {
+        "mean_per_second": 2.9331219142188387,
+        "min_per_second": 0.09805788099765778,
+        "max_per_second": 6.443753242492676
+      },
+      "adjusted_event_rate": {
+        "mean_per_second": 12.279194982462712,
+        "min_per_second": 0.060214099109178715,
+        "max_per_second": 39.787225076395075
+      }
+    },
+    "ternary_rate": 0.16066369890732496
+  },
+  "corrected": {
+    "optimizer_steps": 8000,
+    "events": 712,
+    "curve": {
+      "active": false,
+      "preview_only": true,
+      "mode": "follow",
+      "strength": 0.7,
+      "reference_rebased": false,
+      "reference_rebase_reason": "relative_edits_preserve_saved_reference",
+      "curve_application": "relative_edit_of_final_rate_v2",
+      "rate_integration": "disjoint_candidate_cells_final_rate",
+      "timing_transform": "shared_first_arrival_reintegration",
+      "curve_scale_source": "relative_editor_bins",
+      "curve_bin_seconds": 2.0,
+      "final_rate_multiplier": {
+        "min": 1.0,
+        "max": 1.0,
+        "mean": 1.0
+      },
+      "head_budget": "not_inferred_from_partial_or_untrained_plan_channels"
+    },
+    "stop_reason": "audio_end",
+    "ternary_rate": 0.032303370786516857,
+    "artifacts": "E:\\simai_transformer\\.scratch\\curve_repair_20261104\\corrected",
+    "comparison_limit": "same audio and seed and dedicated temperatures; newer checkpoint 8000 vs original 7592, not isolated same-weight A/B"
+  },
+  "original_automatic": {
+    "method": "learned_chart_composer_event_set_stream_v1",
+    "baseline_head_rate": 0.7624876212282884,
+    "predicted_head_rate_range": [
+      0.6169604477286326,
+      0.9116259175539057
+    ]
+  },
+  "corrected_automatic": {
+    "method": "audio_reference_untrained_composer_preview_v1",
+    "model_prediction_available": false,
+    "preview_only": true,
+    "readout_policy": "audio_reference_missing_trained_count_preview",
+    "checkpoint_identity": {
+      "epoch": 14,
+      "optimizer_steps": 8000
+    }
+  },
+  "tests": {
+    "stream": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "1007",
+      "time": "88.084",
+      "timestamp": "2026-11-04T08:51:45.516276+08:00",
+      "hostname": "baiqieji的机革"
+    },
+    "targeted": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "30",
+      "time": "3.587",
+      "timestamp": "2026-11-04T08:49:25.098470+08:00",
+      "hostname": "baiqieji的机革"
+    },
+    "api_followup": {
+      "name": "pytest",
+      "errors": "0",
+      "failures": "0",
+      "skipped": "0",
+      "tests": "1",
+      "time": "2.515",
+      "timestamp": "2026-11-04T08:58:01.211690+08:00",
+      "hostname": "baiqieji的机革"
+    },
+    "javascript_passed": 220
+  },
+  "gpu_preview_smoke": {
+    "optimizer_steps": 2,
+    "curve_preview_loss": 9.206971168518066,
+    "curve_preview_weighted_loss": 0.46034857630729675,
+    "last_gradient_norm": 13.505559921264648,
+    "skipped_windows": 0,
+    "timing": {
+      "data_sec": 0.48647579993121326,
+      "transfer_sec": 0.13077340001473203,
+      "compute_sec": 6.859123499889392
+    },
+    "cuda_memory": {
+      "allocated_gib": 0.6040940284729004,
+      "reserved_gib": 3.21875,
+      "peak_allocated_gib": 3.0023794174194336
+    }
+  },
+  "remaining": {
+    "corrected_touch_atoms": 236,
+    "corrected_total_atoms": 911,
+    "corrected_touch_share": 0.25905598243688255,
+    "requested_touch_share": 0.10950294137001038,
+    "longest_hold_beats": 46.0,
+    "longest_hold_seconds": 14.526315789473685,
+    "layout_echo_rate": 0.0,
+    "recovery_targets": 609,
+    "trusted_configuration_targets": 68,
+    "timing_only_targets": 541,
+    "validation_epoch5_total": 6.145471096038818,
+    "validation_epoch13_total": 7.31873083114624,
+    "validation_epoch5_configuration": 4.402203559875488,
+    "validation_epoch13_configuration": 5.544700622558594
+  },
+  "preserved": [
+    "checkpoints/prism_composer_v50",
+    "webui_workspace/generated/c2369a4b909c"
+  ],
+  "formal_training_restarted": false,
+  "actual_webui_curve": {
+    "task_id": "3a7fc7e20bcb",
+    "status": "completed",
+    "message": "intensity_profile method=audio_reference_untrained_composer_preview_v1 duration_sec=160.73685416666666 points=82；当前检查点未训练物量预览，显示音频参考",
+    "error": null,
+    "curve_source": "audio",
+    "requested_curve_source": "auto",
+    "method": "audio_reference_untrained_composer_preview_v1",
+    "preview_only": true,
+    "model_prediction_available": false,
+    "checkpoint_identity": {
+      "epoch": 14,
+      "optimizer_steps": 8000
+    }
+  }
+}

@@ -14,8 +14,9 @@
   const selectedMode = () => value("trainingMode", "fresh");
   const taskLabels = {preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
     chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
+    composer_v2_train: "Composer v2 训练", composer_v2_generate: "Composer v2 生成",
     composer_train: "chart_composer_v1 训练", composer_generate: "chart_composer_v1 生成"};
-  const stateLabels = {queued: "排队中", running: "运行中", completed: "已完成", failed: "失败", cancelled: "已中断"};
+  const stateLabels = {queued: "排队中", running: "运行中", cancelling: "正在取消", completed: "已完成", failed: "失败", cancelled: "已中断"};
 
   function reveal(target) {
     if (!target) return;
@@ -127,13 +128,13 @@
     if (checkpointGroup) checkpointGroup.hidden = mode === "fresh";
     const sources = typeof selectedDatasetItems === "function" ? selectedDatasetItems() : [];
     const modeLabel = {fresh: "从头训练", resume: "从断点继续训练", finetune: "已有模型加强训练"}[mode];
-    const limits = Number(value("maxSteps", 0));
     const selectedFamily = value("modelFamily");
+    const limits = Number(value(selectedFamily==='chart_composer_v2'?'v2TrainMaxSteps':'maxSteps', 0));
     const formFamily = ["song_form_v1", "song_form_v2"].includes(selectedFamily);
     const streamFamily = selectedFamily === "chart_stream_v1";
     const composerFamily = selectedFamily === 'chart_composer_v1';
     const eventSetFamily = composerFamily && value('composerArchitectureProfile') === 'event_set_stream_v1';
-    const chartLimit = Number(value(composerFamily?'composerLimitCharts':'formLimitCharts', 0));
+    const chartLimit = Number(value(selectedFamily==='chart_composer_v2'?'v2TrainLimitCharts':composerFamily?'composerLimitCharts':'formLimitCharts', 0));
     list("trainingRunSummary", [
       `起点：${modeLabel}${mode !== "fresh" ? ` · ${value("trainingCheckpointPath").trim() || "尚未选择 checkpoint"}` : ""}`,
       sources.length ? `素材：${sources.map((item) => item.name || item.path).join("、")}` : `素材：当前单份清单 · ${value("manifestPath").trim() || "尚未准备"}`,
@@ -163,11 +164,21 @@
         `Slide / Touch / 细碎节奏倍率：${value("slideOversample")} / ${value("touchOversample")} / ${value("fineRhythmOversample")}`] : []),
       `输出目录：${value("checkpointDir")}`,
     ]);
+    if(selectedFamily==='chart_composer_v2')list("trainingRunSummary",[
+      `起点：${modeLabel}${mode!=="fresh"?` · ${value("trainingCheckpointPath").trim()||"尚未选择 checkpoint"}`:""}`,
+      sources.length?`素材：${sources.map(item=>item.name||item.path).join("、")}`:`素材：${value("manifestPath").trim()||"尚未准备"}`,
+      `总目标 ${value("v2TrainEpochs")} 轮 · batch ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")} · ${value("v2TrainPrecision")}`,
+      `CUDA 显存预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "默认分配"} · 音频缓存内存预算 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
+      `学习率 ${value("v2TrainLr")} · ${value("v2TrainLrSchedule")} · 音频特征 ${value("v2TrainAudioBackend")}`,
+      `验证：${mode==="resume"?"继承 checkpoint 已保存的训练与验证清单":value('v2TrainValidationSource')==='auto'?Number(value('v2TrainHoldoutFraction'))===0?'关闭（自动留出比例为0）':`自动留出 ${Number(value('v2TrainHoldoutFraction'))*100}%（开发＋最终留出合计）`:value('v2TrainValidationSource')==='manual'?`手动清单 ${value('v2TrainValidationManifest').trim()||'尚未选择'}`:'关闭'}`,
+      mode==='resume'?'严格续训继承原训练总计划；已完成计划后，新增训练请使用新目录 finetune。':`谱面上限 ${chartLimit||'不限'} · 更新尝试上限 ${limits||'不限'}`,
+      `参考跨度 ${value("v2TrainWindowBeats")} 拍 · 历史 ${value("v2TrainHistoryBeats")} 拍 · 音频前瞻 ${value("v2TrainFutureBeats")} 拍 · 整理间隔 ${value("v2TrainRefreshEvents")} 事件`,
+      `输出目录：${value("checkpointDir")}`]);
     const hint = $("#trainingRunHint");
     const problems = [];
     if (mode !== "fresh" && !value("trainingCheckpointPath").trim()) problems.push("先选择已有模型并检查兼容性。");
     if (Number(value("prepLimit")) > 0) problems.push(`当前设置了 ${value("prepLimit")} 首素材上限，正式训练前请确认。`);
-    if (limits > 0 || (formFamily && chartLimit > 0)) problems.push("当前设置了短跑上限，完成不代表已经跑完整个训练集。");
+    if (limits > 0 || ((formFamily || selectedFamily==='chart_composer_v2') && chartLimit > 0)) problems.push("当前设置了短跑上限，完成不代表已经跑完整个训练集。");
     if (hint) { hint.textContent = problems.join(" ") || "确认以上来源、轮数与输出目录后开始训练。"; hint.classList.toggle("warn", problems.length > 0); }
 
     const curve = checked("intensityCurveEnabled");
@@ -195,6 +206,14 @@
       `曲线${curve ? (saved ? "已启用并保存" : "已启用，待保存") : "未启用"} · 无理处理：${detection ? nameOf("conflictRepairMode") : "关闭"}`,
       `输出：${value("outputPath")}`,
     ]);
+    if(typeof currentGenerationFamily==="function" && currentGenerationFamily()==="chart_composer_v2")list("generationRunSummary",[
+      `歌曲：${value("audioPath").trim()||"尚未选择音频"}`,
+      `模型：${value("checkpointPath").trim()||"尚未选择 checkpoint"}`,
+      `目标等级 ${value("level")} · ${value("v2GenerateCandidates")} 个候选 · 种子 ${value("seed").trim()||"自动"}`,
+      `温度 ${value("v2GenerateTemperature")} · Top-p ${value("v2GenerateTopP")} · 单处冲突恢复预算 ${value("v2GenerateRollbackWindows")} 次`,
+      `Radar / Style：${typeof v2ConditionCapability==='function' && v2ConditionCapability().enabled ? `手动指定 ${Object.values(v2ConditionState).filter(item=>item.override).length} 项；其余自动由音乐决定` : '未训练或尚未确认条件能力'}`,
+      `时钟：${value("tempoMap").trim()?"手动 tempo map 优先":value("bpm").trim()?`手动 BPM ${value("bpm").trim()}`:"BPM 自动识别（实际结果见报告）"} · ${document.getElementById('v2GenerateAutoFirst')?.checked?'首拍相位自动识别':`手动首拍偏移 ${value("first")} 秒`}`,
+      `输出：${value("outputPath")||"outputs/composer_v2/maidata.txt"}；报告 .composer_v2.json`]);
     advancedCount("training");
   }
 
