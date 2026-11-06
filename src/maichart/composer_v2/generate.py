@@ -1,4 +1,4 @@
-"""Generate independent Composer v2 windows with native transactional checks."""
+"""Generate a Composer v2 chart using the checkpoint's sequence policy."""
 from __future__ import annotations
 
 import argparse
@@ -43,8 +43,10 @@ def parser():
     result.add_argument('--max-events', type=int, default=0)
     result.add_argument('--tempo-map', type=json.loads)
     result.add_argument('--meter-map', type=json.loads)
-    result.add_argument('--window-retries', type=int, default=16)
-    result.add_argument('--rollback-windows', type=int, default=2)
+    result.add_argument('--window-retries', type=int, default=16,
+                        help='Proposal attempts per event for continuous models or per window for older models')
+    result.add_argument('--rollback-windows', type=int, default=2,
+                        help='Recovery budget per generation frontier for continuous models or per chart for older models')
     result.add_argument('--exhaustion-policy',choices=('auto','report','stop'),default='auto',
         help='auto: continuous checkpoints continue physical conflicts with a report; old window checkpoints stop')
     return result

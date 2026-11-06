@@ -6,4 +6,4 @@
 - [工作完成报告](WORK_COMPLETION_SUMMARY.md)
 - [后续优化建议](FURTHER_OPTIMIZATION_ROADMAP.md)
 
-当前项目入口见[根目录 README](../../../README.md)，最新训练实现与证据见[配置学习效率交接](../../COMPOSER_CONFIGURATION_LEARNING_HANDOFF_20261026_ZH.md)。
+当前项目入口见[根目录 README](../../../README.md)，最新训练实现与证据见[配置学习效率交接](../../handoffs/COMPOSER_CONFIGURATION_LEARNING_HANDOFF_20261026_ZH.md)。

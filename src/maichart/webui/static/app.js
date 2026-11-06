@@ -2002,7 +2002,7 @@ function updateFamilyFields() {
   const familyHelp = element("#modelFamilyHelp");
   if (familyHelp) {
     familyHelp.textContent = family === "chart_composer_v2"
-      ? "chart_composer_v2：独立组件 token 序列，默认16拍窗口、16拍历史、4拍前瞻；检查点与 Composer v1 不互通。MERT 在准备阶段加载，依赖缺失会明确报错。"
+      ? "chart_composer_v2：新训练采用连续事件序列。默认保留16拍历史，每16个事件整理上下文，局部音乐额外前瞻4拍。旧检查点按原序列方式运行。MERT 在准备阶段加载。"
       : family === "chart_stream_v1"
       ? "chart_stream_v1：整曲连续事件流；计算块只管理显存，不产生音乐边界。音频、近期谱面、持续动作和近期历史摘要共同参与。"
       : family === "chart_composer_v1"

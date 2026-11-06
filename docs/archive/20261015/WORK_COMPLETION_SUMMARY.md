@@ -402,9 +402,9 @@ python -m maichart.form.cli generate \
 **实施者**：Claude (Opus 5.5)
 **指导者**：用户（项目负责人）
 **参考依据**：
-- `docs/SONG_FORM_QUALITY_ROOT_CAUSE_AUDIT_20261013.md`
-- `docs/SONG_FORM_FULL_CHAIN_AUDIT_20261013.md`
-- `docs/GOAL_SONG_FORM_REBUILD.md`
+- `docs/explanations/SONG_FORM_QUALITY_ROOT_CAUSE_AUDIT_20261013.md`
+- `docs/explanations/SONG_FORM_FULL_CHAIN_AUDIT_20261013.md`
+- `docs/explanations/GOAL_SONG_FORM_REBUILD.md`
 
 **工作方式**：
 - 破坏性修改，直接改动代码库

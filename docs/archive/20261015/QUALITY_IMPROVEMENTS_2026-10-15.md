@@ -5,8 +5,8 @@
 ## 改进概述
 
 基于以下审计文档的分析：
-- `docs/SONG_FORM_QUALITY_ROOT_CAUSE_AUDIT_20261013.md`
-- `docs/SONG_FORM_FULL_CHAIN_AUDIT_20261013.md`
+- `docs/explanations/SONG_FORM_QUALITY_ROOT_CAUSE_AUDIT_20261013.md`
+- `docs/explanations/SONG_FORM_FULL_CHAIN_AUDIT_20261013.md`
 
 实施了四个主要改进方向，所有修改均为破坏性更新，需要重新训练验证。
 
