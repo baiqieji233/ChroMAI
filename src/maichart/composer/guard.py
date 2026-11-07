@@ -136,8 +136,6 @@ class EventGuard:
 
     def enforced(self, issue):
         intercept=self.intercept_tap_on_slide
-        if self.physical_policy=='runtime_hard_v2' and issue.evidence.startswith('miacode_static:'):
-            intercept=False
         return enforced_native_hard_conflict(issue,intercept_tap_on_slide=intercept)
 
     def interaction_start(self,second,rows=None):

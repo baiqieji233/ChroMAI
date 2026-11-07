@@ -148,7 +148,7 @@ class EventSampler(WindowSampler):
                 used.update(_atom_heads(render_atom([self.codec.tokens[t] for t in atom])));atom=[];count+=1
 
 
-def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*,rejected=()):
+def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*,rejected=(),guard_options=None):
     """Restore committed state, checking any changed suffix with a fresh trial."""
     from maichart.generation.sustain_state import SustainStateIndex
     confirmed=set(map(Fraction,conflict_sources)) & {p.beat for p in points}
@@ -172,7 +172,7 @@ def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*
             witnesses.append(point);seen.add(key)
         if len(witnesses)==4:break
     if lower<len(points) and witnesses:
-        base=_new_guard(tempo,clock.seconds[0],duration);states={}
+        base=_new_guard(tempo,clock.seconds[0],duration,guard_options=guard_options);states={}
         for i,point in enumerate(points):
             if i>=lower:states[i]=deepcopy(base)
             # Report mode can have committed physical conflicts in this history.
@@ -191,7 +191,7 @@ def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*
                         removed_points=[dict(beat=str(p.beat),note_text=p.note_text) for p in points[i:]])
     kept=[p for p in points if p.beat<source]
     if len(kept)==len(points):return None
-    guard=_new_guard(tempo,clock.seconds[0],duration)
+    guard=_new_guard(tempo,clock.seconds[0],duration,guard_options=guard_options)
     for point in kept:
         guard.commit(point)
     return kept,guard,dict(source_beat=str(source),revoked_events=len(points)-len(kept),reason=reason,
@@ -213,7 +213,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     onset_strength=effective_strength(getattr(args,'onset_strength',None),getattr(config,'onset_readout_policy','off'))
     dataset.onset_readout_policy=getattr(config,'onset_readout_policy','off') if onset_strength else 'off'
     dataset.onset_phases=phase_values(model.codec) if onset_strength else None
-    guard=_new_guard(tempo,first,audio.duration_sec)
+    from .tail_guard import options as tail_options
+    tail_settings=tail_options(args)
+    guard=_new_guard(tempo,first,audio.duration_sec,guard_options=tail_settings)
     points=[];target=[];sampler=None;committed_in_context=0;refreshes=0;rollbacks=[];repairs=[];done=False
     duration_repairs=[];release_trials=set();bypassed_events=[]
     retry_stats={};native_memo={}
@@ -290,7 +292,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 from .release_repair import repair_hold_conflict
                 audit={}
                 repaired=repair_hold_conflict(points,rejected,tempo,clock,audio.duration_sec,model.codec,
-                    attempted=release_trials,audit=audit)
+                    attempted=release_trials,audit=audit,guard_options=tail_settings)
                 if repaired:
                     points,witness,trial,report=repaired
                     recovery.spend()
@@ -302,7 +304,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                     repairs.append(dict(reason='hold_duration_repair_unresolved',after=str(after),**audit))
         if selected is None:
             replay=restore_prefix(points,tempo,clock,audio.duration_sec,failed_beat,conflict_sources,
-                rejected=rejected) if points and budget_left and not sampling_policy['fully_greedy'] else None
+                rejected=rejected,guard_options=tail_settings) if points and budget_left and not sampling_policy['fully_greedy'] else None
             if replay:
                 recovery.spend()
                 points,guard,report=replay;report['recovery_state']=recovery.report();rollbacks.append(report);sampler=None
@@ -346,6 +348,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if len(points)%16==0:
             print('composer_v2_event '+json.dumps(dict(events=len(points),beat=str(point.beat),context_refreshes=refreshes,repairs=len(repairs))),flush=True)
         if committed_in_context>=config.refresh_events:sampler=None
+    from .tail_guard import cleanup
+    points,tail_report=cleanup(points,tempo,first,guard)
     export_end=Fraction(math.ceil(end*config.ticks_per_beat),config.ticks_per_beat)
     text,_=compile_event_points(points,tempo_changes=[t for t in tempo if t.beat<=end],bpm=tempo[0].bpm,
         first=first,end_beat=export_end,title=audio_path.stem,level=str(args.level),designer='Composer v2 continuous',strict_notes=False)
@@ -355,7 +359,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         context_refreshes=refreshes,refresh_events=config.refresh_events,history_beats=config.history_beats,
         timing=timing_report,condition=condition_report,first=first,end_beat=str(export_end),duration_sec=audio.duration_sec,
         checkpoint_info=checkpoint_info,generation_settings=_generation_settings(args,device),
-        sampling_policy=sampling_policy,
+        sampling_policy=sampling_policy,tap_on_slide=tail_report,
         repairs=repairs[-128:],repair_count=len(repairs),rollbacks=rollbacks,candidates=candidate_count,
         duration_repairs=duration_repairs,hold_release_repair=hold_release_repair,**recovery.report(),
         hold_repair_policy='native_hold_conflict_repair_v3',
@@ -387,6 +391,6 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','candidates','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

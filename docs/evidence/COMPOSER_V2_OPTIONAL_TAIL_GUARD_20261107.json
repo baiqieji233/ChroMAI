@@ -1,0 +1,274 @@
+{
+  "source": "webui_workspace\\generated\\maidata.3cbd1a7f2b704a78ab14818bf3263502.conflicts.json",
+  "source_sha256": "d60718dd02b93374435bccbac857dc1499e69d187bddf95fdc12dc6253d232f5",
+  "audio": "E:\\simai_transformer\\webui_workspace\\uploads\\68197a48cb19_濵田有共 - Cataclysm Cry.mp3",
+  "before": {
+    "miacode_TapOnSlide": 6,
+    "miacode_MultiTouch": 2,
+    "miacode_Overlap": 3
+  },
+  "after": {
+    "miacode_MultiTouch": 2,
+    "miacode_Overlap": 3
+  },
+  "events_before": 1077,
+  "events_after": 1071,
+  "cleanup": {
+    "enabled": true,
+    "threshold_ms": 200,
+    "removed": [
+      {
+        "point_index": 385,
+        "note_index": 0,
+        "operation": "delete",
+        "beat": "471/2",
+        "time_sec": 78.5,
+        "raw": "6",
+        "reason": "miacode_TapOnSlide",
+        "hard_before": 6,
+        "hard_after": 5
+      },
+      {
+        "point_index": 455,
+        "note_index": 0,
+        "operation": "delete",
+        "beat": "290",
+        "time_sec": 96.66666666666667,
+        "raw": "5h[4:1]",
+        "reason": "miacode_TapOnSlide",
+        "hard_before": 5,
+        "hard_after": 4
+      },
+      {
+        "point_index": 542,
+        "note_index": 0,
+        "operation": "delete",
+        "beat": "2009/6",
+        "time_sec": 111.61111111111111,
+        "raw": "4",
+        "reason": "miacode_TapOnSlide",
+        "hard_before": 4,
+        "hard_after": 3
+      },
+      {
+        "point_index": 681,
+        "note_index": 0,
+        "operation": "delete",
+        "beat": "1483/4",
+        "time_sec": 123.58333333333333,
+        "raw": "4",
+        "reason": "miacode_TapOnSlide",
+        "hard_before": 3,
+        "hard_after": 2
+      },
+      {
+        "point_index": 971,
+        "note_index": 0,
+        "operation": "delete",
+        "beat": "935/2",
+        "time_sec": 155.83333333333334,
+        "raw": "5",
+        "reason": "miacode_TapOnSlide",
+        "hard_before": 2,
+        "hard_after": 1
+      },
+      {
+        "point_index": 134,
+        "note_index": 0,
+        "operation": "delete",
+        "beat": "100",
+        "time_sec": 33.333333333333336,
+        "raw": "8V64[4:1]",
+        "reason": "miacode_TapOnSlide",
+        "hard_before": 1,
+        "hard_after": 0
+      }
+    ],
+    "remaining_hard": 0,
+    "policy": "miacode_exact_affected_child_v1"
+  },
+  "original_findings": [
+    {
+      "type": "miacode_TapOnSlide",
+      "severity": "hard",
+      "time": 78.47777777777777,
+      "message": "A6 提前 22.2 ms 触发；来源 note|406|1|464",
+      "evidence": "miacode_runtime:6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "action": "enforce",
+      "sources": [
+        {
+          "point_index": 385,
+          "note_index": 0,
+          "beat": "471/2",
+          "time_sec": 78.5,
+          "raw": "6",
+          "pad": "A6"
+        },
+        {
+          "point_index": 382,
+          "note_index": 0,
+          "beat": "234",
+          "time_sec": 78.0,
+          "raw": "2-6[8:1]",
+          "pad": "A2"
+        }
+      ],
+      "repair_target": [
+        385,
+        0
+      ]
+    },
+    {
+      "type": "miacode_TapOnSlide",
+      "severity": "hard",
+      "time": 96.55555555555556,
+      "message": "A5 提前 111.1 ms 触发；来源 note|478|4|559",
+      "evidence": "miacode_runtime:6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "action": "enforce",
+      "sources": [
+        {
+          "point_index": 456,
+          "note_index": 0,
+          "beat": "290",
+          "time_sec": 96.66666666666667,
+          "raw": "5h[4:1]",
+          "pad": "A5"
+        },
+        {
+          "point_index": 453,
+          "note_index": 0,
+          "beat": "287",
+          "time_sec": 95.66666666666667,
+          "raw": "1b-4-7-5[16:7]",
+          "pad": "A1"
+        }
+      ],
+      "repair_target": [
+        456,
+        0
+      ]
+    },
+    {
+      "type": "miacode_TapOnSlide",
+      "severity": "hard",
+      "time": 111.47222222222223,
+      "message": "A4 提前 138.9 ms 触发；来源 note|564|3|673",
+      "evidence": "miacode_runtime:6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "action": "enforce",
+      "sources": [
+        {
+          "point_index": 544,
+          "note_index": 0,
+          "beat": "2009/6",
+          "time_sec": 111.61111111111111,
+          "raw": "4",
+          "pad": "A4"
+        },
+        {
+          "point_index": 539,
+          "note_index": 1,
+          "beat": "333",
+          "time_sec": 111.0,
+          "raw": "7-4[8:1]",
+          "pad": "A7"
+        }
+      ],
+      "repair_target": [
+        544,
+        0
+      ]
+    },
+    {
+      "type": "miacode_TapOnSlide",
+      "severity": "hard",
+      "time": 123.48333333333333,
+      "message": "A4 提前 100.0 ms 触发；来源 note|704|1|820",
+      "evidence": "miacode_runtime:6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "action": "enforce",
+      "sources": [
+        {
+          "point_index": 684,
+          "note_index": 0,
+          "beat": "1483/4",
+          "time_sec": 123.58333333333333,
+          "raw": "4",
+          "pad": "A4"
+        },
+        {
+          "point_index": 679,
+          "note_index": 0,
+          "beat": "369",
+          "time_sec": 123.0,
+          "raw": "1>4[8:1]",
+          "pad": "A1"
+        }
+      ],
+      "repair_target": [
+        684,
+        0
+      ]
+    },
+    {
+      "type": "miacode_TapOnSlide",
+      "severity": "hard",
+      "time": 155.80555555555554,
+      "message": "A5 提前 27.8 ms 触发；来源 note|999|4|1126",
+      "evidence": "miacode_runtime:6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "action": "enforce",
+      "sources": [
+        {
+          "point_index": 975,
+          "note_index": 0,
+          "beat": "935/2",
+          "time_sec": 155.83333333333334,
+          "raw": "5",
+          "pad": "A5"
+        },
+        {
+          "point_index": 972,
+          "note_index": 0,
+          "beat": "466",
+          "time_sec": 155.33333333333334,
+          "raw": "2-5[8:1]",
+          "pad": "A2"
+        }
+      ],
+      "repair_target": [
+        975,
+        0
+      ]
+    },
+    {
+      "type": "miacode_TapOnSlide",
+      "severity": "hard",
+      "time": 33.3333333333334,
+      "message": "MiaCode TapOnSlide 判定区参考",
+      "evidence": "miacode_static:6573efb611056bccd046dd17bc2f4cceda78bf88",
+      "action": "enforce",
+      "sources": [
+        {
+          "point_index": 134,
+          "note_index": 0,
+          "beat": "100",
+          "time_sec": 33.333333333333336,
+          "raw": "8V64[4:1]",
+          "pad": "A8"
+        },
+        {
+          "point_index": 129,
+          "note_index": 0,
+          "beat": "98",
+          "time_sec": 32.666666666666664,
+          "raw": "3<8[4:1]",
+          "pad": "A3"
+        }
+      ],
+      "repair_target": [
+        134,
+        0
+      ]
+    }
+  ],
+  "output": "E:\\simai_transformer\\webui_workspace\\quality_review_20261107\\tail_guard\\maidata.txt",
+  "output_sha256": "12e4077a7658ddee04d8c1f0e0b9c7005cfdc5e87707100d9d663ed7142c5403"
+}

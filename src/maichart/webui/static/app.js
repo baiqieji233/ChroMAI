@@ -47,6 +47,7 @@ function composerV2GenerationPayload() {
     candidates:number('#v2GenerateCandidates',1,'候选数',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
     rollback_windows:number('#v2GenerateRollbackWindows',2,'冲突恢复次数',{min:0,max:8,integer:true}),
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
+    intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
     cpu_threads:number('#v2GenerateCpuThreads',2,'CPU 计算线程',{min:1,integer:true}),
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
@@ -54,6 +55,7 @@ function composerV2GenerationPayload() {
     ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
     ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
     ['onset_strength','#v2GenerateOnsetStrength','起音参考强度',{min:0,max:2}],
+    ['tap_on_slide_threshold_ms','#v2GenerateTapOnSlideThresholdMs','撞尾检测阈值（ms）',{min:0,max:250}],
   ]) {
     const raw=valueOrDefault(selector,'').trim();
     if (raw!=='' && !element(selector)?.disabled) payload[key]=v2NumericValue(raw,label,bounds);
@@ -74,6 +76,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if (payload.intercept_tap_on_slide && !status.training_capabilities?.composer_v2_tail_guard)
+    throw new Error('可选撞尾门控需要更新后的后台，请在当前任务结束后重启后台。');
   if (payload.onset_strength!=null && !status.training_capabilities?.composer_v2_onset_readout) {
     throw new Error('起音参考强度需要更新后的 WebUI 后台，请重启当前后台后提交。');
   }
@@ -1169,7 +1173,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateCandidates", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst",
+  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",

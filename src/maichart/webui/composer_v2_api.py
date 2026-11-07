@@ -204,6 +204,14 @@ def start_generate(handler,payload,*,runtime):
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy)
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop'})
+    intercept=payload.get('intercept_tap_on_slide',False)
+    if not isinstance(intercept,bool):raise ValueError('拦截Slide撞尾必须是布尔值')
+    threshold=_float(payload,'tap_on_slide_threshold_ms',200.,minimum=0)
+    if isinstance(payload.get('tap_on_slide_threshold_ms'),bool) or threshold>250:
+        raise ValueError('撞尾检测阈值必须为0–250 ms')
+    settings.update(intercept_tap_on_slide=intercept,tap_on_slide_threshold_ms=threshold)
+    if intercept:args.append('--intercept-tap-on-slide')
+    _arg(args,'--tap-on-slide-threshold-ms',threshold)
     _arg(args,'--exhaustion-policy',settings['exhaustion_policy'])
     for key in ("checkpoint", "audio", "output", "cache_dir"): _arg(args,"--"+key.replace("_","-"),settings[key])
     for key,default in dict(level=13.,temperature=.9,top_p=.95).items():

@@ -45,6 +45,8 @@ def parser():
                         help='Override configuration nucleus threshold for a continuous-event checkpoint')
     result.add_argument('--onset-strength', type=float, default=None,
                         help='Trained phase-only acoustic reference: 0 off, 1 trained setting, up to 2 experimental emphasis')
+    result.add_argument('--intercept-tap-on-slide',action='store_true',help='Enforce native hard TapOnSlide findings and clean residual affected notes')
+    result.add_argument('--tap-on-slide-threshold-ms',type=float,default=200.)
     result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=1)
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
     result.add_argument('--cpu-threads', type=int, default=2)
@@ -229,9 +231,10 @@ def _check_window(guard, points, failure_details=None):
     return trial, None
 
 
-def _new_guard(tempo, first, duration):
-    return EventGuard(tempo, first, duration, min_same_head_sec=0.,
-        touch_layout_policy='open', intercept_tap_on_slide=False, physical_policy='runtime_hard_v2')
+def _new_guard(tempo, first, duration, *, guard_options=None):
+    from .tail_guard import configure
+    return configure(EventGuard(tempo, first, duration, min_same_head_sec=0.,
+        touch_layout_policy='open', intercept_tap_on_slide=False, physical_policy='runtime_hard_v2'),guard_options)
 
 
 def _rollback_committed(points, records, tempo, clock, boundary, duration, window_beats,
@@ -315,6 +318,8 @@ def _sampling_policy(args):
 
 @torch.inference_mode()
 def generate(args, *, model_override=None, payload_override=None, audio_store_override=None):
+    from .tail_guard import options as tail_options
+    tail_options(args)
     if args.device == 'cuda':
         from maichart.webui.startup_check import require_cuda
         require_cuda(torch)
@@ -400,7 +405,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     dataset.window_beats = config.window_beats
     dataset.history_beats = config.history_beats
     dataset.future_beats = config.future_beats
-    guard = _new_guard(tempo, first, audio.duration_sec)
+    guard = _new_guard(tempo, first, audio.duration_sec,guard_options=tail_options(args))
     points, records, rollbacks = [], [], []
     index = 0
     while index < math.ceil(end_value / config.window_beats):
@@ -443,7 +448,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         if selected is None:
             if len(rollbacks) < effective_rollback_budget:
                 rollback = _rollback_committed(points, records, tempo, clock, start,
-                                               audio.duration_sec, config.window_beats)
+                                               audio.duration_sec, config.window_beats,
+                    guard_factory=lambda t,f,d:_new_guard(t,f,d,guard_options=tail_options(args)))
                 if rollback is not None:
                     points, records, guard, rewind, report = rollback
                     report['number'] = len(rollbacks) + 1
@@ -473,6 +479,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         records.append(record)
         print('composer_v2_window ' + json.dumps(record, ensure_ascii=False), flush=True)
         index += 1
+    from .tail_guard import cleanup
+    points,tail_report=cleanup(points,tempo,first,guard)
     # Remove unused future tempo directives outside the authored audio extent.
     output_tempo = [change for change in tempo if change.beat <= end]
     export_end = Fraction(math.ceil(end * config.ticks_per_beat), config.ticks_per_beat)
@@ -491,7 +499,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         end_policy='E_ceil_to_tick_only_notes_unchanged', duration_sec=audio.duration_sec, candidates=args.candidates,
         temperature=args.temperature, top_p=args.top_p, events=len(points), windows=records,
         eos_policy='window_end_only', hard_guard='runtime_hard_v2',
-        rollbacks=rollbacks, rollback_budget=effective_rollback_budget, sampling_policy=sampling_policy,
+        rollbacks=rollbacks, rollback_budget=effective_rollback_budget, sampling_policy=sampling_policy,tap_on_slide=tail_report,
         window_beats=config.window_beats, history_beats=config.history_beats, future_beats=config.future_beats,
         candidate_policy='shared_onset_and_atom_count_scaffold',
         condition=condition_report,

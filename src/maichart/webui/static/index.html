@@ -1025,7 +1025,7 @@
     <label class="field">采音 Top-p<input id="v2GenerateTopP" type="number" value="0.95" min="0" max="1" step="0.01" required><small>限制参与落点抽样的概率范围。旧窗口检查点共用此值。</small></label>
     <label class="field" data-v2-action-sampling hidden>配置 Top-p<input id="v2GenerateActionTopP" type="number" min="0" max="1" step="0.01" placeholder="留空沿用采音" disabled><small>限制参与配置抽样的概率范围。填写任一配置采样参数后，两侧独立抽样。</small></label>
     <label class="field" data-v2-onset-readout hidden>起音参考强度<input id="v2GenerateOnsetStrength" type="number" value="1" min="0" max="2" step="0.1" disabled><small>仅支持已训练声学读出的检查点。0关闭附加声学分数，1使用训练时强度，大于1增强起音参考。只调整拍内落点，不能保证整谱物量不变。</small></label>
-    <label class="field">音频特征缓存<input id="v2GenerateCacheDir" type="text" value="cache/chart_composer_v2"></label>
+    <label class="checkbox-field"><input id="v2GenerateInterceptTapOnSlide" type="checkbox">拦截并清理Slide撞尾（可选）</label><label class="field">撞尾检测阈值（ms）<input id="v2GenerateTapOnSlideThresholdMs" type="number" min="0" max="250" step="1" value="200" required><small>仅开启撞尾门控后生效。沿用MiaCode判定，警告保留；0关闭静态邻近参考，实际触发的硬撞尾仍检测。无法安全清理时会报错。</small></label><label class="field">音频特征缓存<input id="v2GenerateCacheDir" type="text" value="cache/chart_composer_v2"></label>
     <label class="field">生成设备<select id="v2GenerateDevice"><option value="auto" selected>auto</option><option value="cuda">cuda</option><option value="cpu">cpu</option></select></label>
     <label class="field">最大事件数（0不限）<input id="v2GenerateMaxEvents" type="number" value="0" min="0" step="1" required></label>
     <label class="field">候选数<select id="v2GenerateCandidates"><option value="1" selected>1</option><option value="2">2</option><option value="4">4</option></select></label>

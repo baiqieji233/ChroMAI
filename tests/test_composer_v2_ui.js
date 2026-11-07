@@ -13,6 +13,16 @@ function context(values={}){const ctx=vm.createContext({Math,valueOrDefault:(key
   v2ConditionState:{note_density:{value:.5,override:false}},v2ConditionCapability:()=>({enabled:true}),
   parseTempoMap:()=>null,parseMeterMap:()=>null});vm.runInContext(fn('v2NumericValue'),ctx);return ctx;}
 
+test('optional native tail guard and milliseconds reach main generation payload',()=>{
+ const ctx=context({'#v2GenerateInterceptTapOnSlide':true,'#v2GenerateTapOnSlideThresholdMs':'85'});
+ vm.runInContext(fn('composerV2GenerationPayload'),ctx);
+ const p=ctx.composerV2GenerationPayload();
+ assert.equal(p.intercept_tap_on_slide,true);assert.equal(p.tap_on_slide_threshold_ms,85);
+ assert.match(html,/id="v2GenerateInterceptTapOnSlide" type="checkbox">/);
+ vm.runInContext(fn('requireV2SplitSamplingSupport'),ctx);
+ assert.throws(()=>ctx.requireV2SplitSamplingSupport({},p),/撞尾门控/);
+});
+
 test('onset reference uses the main controls and cannot silently hit an older backend',()=>{
  const ctx=context({'#v2GenerateOnsetStrength':'0'});
  vm.runInContext(fn('composerV2GenerationPayload'),ctx);

@@ -152,7 +152,7 @@ def _hold_variants(points,tails,witness,details,clock,codec,sources):
     yield from _rearticulation_variants(points,tails,witness,details,clock,codec.ticks_per_beat)
 
 
-def repair_hold_conflict(points, rejected, tempo, clock, duration, codec, *, attempted=None, max_checks=32, audit=None):
+def repair_hold_conflict(points, rejected, tempo, clock, duration, codec, *, attempted=None, max_checks=32, audit=None,guard_options=None):
     """Return edited prefix, unchanged witness, and its committed guard, or None.
 
     `rejected` contains (point, native conflict details). Trial identity includes
@@ -188,7 +188,7 @@ def repair_hold_conflict(points, rejected, tempo, clock, duration, codec, *, att
             # Never commit a rewrite the checkpoint cannot read next time.
             codec.encode_points(list(replacements.values()))
             if index not in bases:
-                base = _new_guard(tempo, clock.seconds[0], duration)
+                base = _new_guard(tempo, clock.seconds[0], duration,**({'guard_options':guard_options} if guard_options is not None else {}))
                 # The unchanged prefix was already committed, possibly under
                 # continue-and-report. Validate the edited suffix below.
                 for p in points[:index]:
