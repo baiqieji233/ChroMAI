@@ -12,9 +12,14 @@
 
 ## Composer v2
 
+- [在另一台设备继续训练](compatibility/COMPOSER_V2_OTHER_DEVICE_20261107_ZH.md)说明代码克隆、需要另行搬运的材料和路径处理。
+
 - [WebUI 操作与参数](explanations/COMPOSER_V2_WEBUI_ZH.md)覆盖生成、预览、数据准备、训练和检查点。
 - [连续事件改造](explanations/COMPOSER_V2_CONTINUOUS_EVENTS_20261104_ZH.md)说明拍位编码、上下文整理、持续状态和训练目标。
 - [节奏前文纠错与成谱复查](explanations/COMPOSER_V2_QUALITY_REVIEW_20261105_ZH.md)记录修复依据、对照产物和验收边界。
+- [v6 分音纠错短训](explanations/COMPOSER_V2_PHASE_RECOVERY_TRIAL_20261106_ZH.md)记录一项未达到生成验收标准、已撤回的训练试验。
+- [独立声学读出可行性](explanations/COMPOSER_V2_ACOUSTIC_READOUT_FEASIBILITY_20261106_ZH.md)比较起音参照、混合分音与正常留白，说明已验证的能力和仍需微调验证的接入方式。
+- [拍内起音参考实验实现](explanations/COMPOSER_V2_ONSET_REFERENCE_IMPLEMENTATION_20261106_ZH.md)说明主界面控件、v6微调方式、已通过的验证及尚未完成的整谱质量对照。
 - [BPM 与自动偏移](explanations/COMPOSER_V2_TIMING_AUDIT_20261105_ZH.md)记录恒速、变速实测及需要手动确认的情况。
 - [生成后预览](explanations/MIAVIEW_GENERATION_PREVIEW_20261105_ZH.md)说明播放器、任务绑定和本地资源。
 - [冲突恢复与报告](explanations/COMPOSER_V2_EXHAUSTION_REPORT_20261105_ZH.md)说明恢复预算耗尽后的处理和诊断。

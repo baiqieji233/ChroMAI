@@ -20,7 +20,7 @@ from .codec import ComponentCodec
 from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Dataset,
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
-from . import timing_recovery
+from . import chart_dialect, timing_recovery
 
 
 def emit(kind,**values):
@@ -46,6 +46,9 @@ def parser():
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--timing-recovery',choices=timing_recovery.CHOICES,default='auto')
+    from .onset_policy import CHOICES as ONSET_CHOICES
+    result.add_argument('--onset-readout',choices=ONSET_CHOICES,default='auto',
+                        help='Experimental phase-only acoustic evidence; auto inherits the parent, otherwise off')
     result.add_argument("--condition-policy", choices=POLICIES, default=None,
         help="Fresh/init default radar_style_v1; resume inherits the checkpoint contract")
     return result
@@ -202,6 +205,20 @@ def _apply_cuda_budget(budget_gib, uses_cuda):
     return budget_gib
 
 
+def _extend_vocabulary_state(model, state, parent_size):
+    if model.codec.vocab_size == parent_size:
+        return state
+    expanded = dict(state)
+    initialized = model.state_dict()
+    for name in ('embedding.weight', 'output_bias'):
+        original = state[name]
+        target = initialized[name]
+        if original.shape != (parent_size, *target.shape[1:]):
+            raise ValueError(f'Invalid checkpoint vocabulary tensor shape for {name}: {original.shape}')
+        expanded[name] = torch.cat((original, target[parent_size:].to(original)))
+    return expanded
+
+
 def train(args):
     from .model import ComposerV2Config,ComposerV2
     from .audio import AudioFeatureStore
@@ -253,9 +270,12 @@ def train(args):
     if parent and args.sequence_policy!=parent_sequence:raise ValueError('Continuous time language requires fresh training in a new directory')
     args.condition_policy, migration = resolve_training_policy(getattr(args, 'condition_policy', None),
         (parent.get('model_config') or parent.get('config')) if parent else None, resume=bool(args.resume))
-    if migration:
+    from .onset_policy import resolve_policy as resolve_onset_policy
+    args.onset_readout_policy, onset_migration = resolve_onset_policy(getattr(args,'onset_readout','auto'),
+        (parent.get('model_config') or parent.get('config')) if parent else None, resume=bool(args.resume))
+    if migration or onset_migration:
         if directory == source_directory or any(path.exists() for path in artifacts):
-            raise ValueError('Condition migration requires a new checkpoint directory; retain the parent')
+            raise ValueError('Condition/onset migration requires a new checkpoint directory; retain the parent')
     device=torch.device("cuda" if args.device=="auto" and torch.cuda.is_available() else "cpu" if args.device=="auto" else args.device)
     if device.type=="cuda" and not torch.cuda.is_available():raise RuntimeError("CUDA requested but unavailable")
     precision=("bf16" if device.type=="cuda" and torch.cuda.is_bf16_supported() else "fp32") if args.precision=="auto" else args.precision
@@ -268,13 +288,16 @@ def train(args):
     resource_budgets = dict(cuda_memory_budget_gb=cuda_budget, audio_cache_gb=args.audio_cache_gb)
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     if torch.cuda.is_available():torch.cuda.manual_seed_all(args.seed)
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
+    if onset_migration: comparable_config['onset_readout_policy'] = parent_config['onset_readout_policy']
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
     codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
+    dialect_policy = (parent['training_contract'].get('chart_dialect', chart_dialect.LEGACY_STRICT_POLICY)
+                      if args.resume else chart_dialect.POLICY)
     if args.validation_manifest:
         from maichart.composer.evaluation import assert_unseen
         assert_unseen(args.manifest,args.validation_manifest,cache_dir=args.cache_dir)
@@ -285,13 +308,18 @@ def train(args):
     options=dict(cache_dir=args.cache_dir,codec=codec,window_beats=args.window_beats,history_beats=args.history_beats,
         future_beats=args.future_beats,ticks_per_beat=args.ticks_per_beat,max_tokens=args.max_tokens,
         audio_backend=args.audio_backend,mert_model=args.mert_model,prepare_device=prepare_device,limit_charts=args.limit_charts,
-        condition_policy=args.condition_policy,audio_store=audio_store)
+        condition_policy=args.condition_policy,audio_store=audio_store,dialect_policy=dialect_policy)
     dataset_class=ComposerV2Dataset
     if args.sequence_policy=='continuous_events_v1':
         from .stream_data import StreamDataset
         dataset_class=StreamDataset;options['refresh_events']=args.refresh_events
-        options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed)
-    dataset=dataset_class(args.manifest,**options)
+        options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed,
+                       onset_readout_policy=args.onset_readout_policy)
+    dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**options)
+    vocabulary_changed = codec is not None and dataset.codec is not codec
+    if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
+        raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
+    parent_vocab_size = codec.vocab_size if codec is not None else None
     codec=dataset.codec
     validation_options={**options,"codec":codec,"limit_charts":0}
     if args.sequence_policy=='continuous_events_v1':validation_options['timing_recovery_policy']='off'
@@ -318,19 +346,33 @@ def train(args):
         contract.update(window_policy='causal_event_slices_no_boundary_eos_v1',refresh_events=args.refresh_events,
             acoustic_policy='query_integer_beat_tiles_v1')
     if recovery_policy!='off':contract['timing_recovery']=recovery_policy
+    if args.onset_readout_policy != 'off':contract['onset_readout_policy']=args.onset_readout_policy
+    if dialect_policy != chart_dialect.LEGACY_STRICT_POLICY:
+        contract['chart_dialect'] = dialect_policy
     if args.resume and (not _same_data_identity(parent["data_identity"],identity) or parent["training_contract"]!=contract):
         raise ValueError("Exact resume data/optimizer/schedule contract changed; retain the parent and use compatible finetune in a new directory")
     model=ComposerV2(config,codec).to(device)
     if parent:
-        if migration:
-            loaded = model.load_state_dict(parent['model_state_dict'], strict=False)
-            if set(loaded.missing_keys) != {'condition_missing.weight'} or loaded.unexpected_keys:
-                raise ValueError('Unexpected state keys during condition migration: ' + str(loaded))
-            emit('runtime',stage='condition_migration',parent=str(parent_path),
+        parent_state = parent['model_state_dict']
+        if vocabulary_changed:
+            parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
+        if migration or onset_migration:
+            expected_missing = {'condition_missing.weight'} if migration else set()
+            if onset_migration:
+                if args.onset_readout_policy != 'off':
+                    expected_missing.update(k for k in model.state_dict() if k.startswith('onset_readout.'))
+                else:
+                    parent_state = {k:v for k,v in parent_state.items() if not k.startswith('onset_readout.')}
+            loaded = model.load_state_dict(parent_state, strict=False)
+            if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
+                raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
+            emit('runtime',stage='model_migration',parent=str(parent_path),
                 source_policy=parent_policy,condition_policy=args.condition_policy,
-                missing_initialization='condition_missing.weight=zeros')
+                onset_readout_policy=args.onset_readout_policy,zero_initialization=True)
         else:
-            model.load_state_dict(parent["model_state_dict"],strict=True)
+            model.load_state_dict(parent_state,strict=True)
+    if hasattr(model,'onset_readout') and (not parent or onset_migration):
+        model.onset_readout.fit_normalization(dataset.songs)
     optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=.01)
     scaler=torch.amp.GradScaler("cuda",enabled=precision=="fp16")
     state=dict(epoch=0,batch_cursor=0,optimizer_steps=0,update_attempts=0,best_loss=None,last_loss=None,epoch_loss_sum=0.,epoch_weight_sum=0.)

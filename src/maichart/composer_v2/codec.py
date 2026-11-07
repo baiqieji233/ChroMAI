@@ -69,6 +69,16 @@ def template(tokens):
         '<touch>' if t.startswith('P:') else t for t in compressed)
 
 
+def component_inventory(texts):
+    values, patterns = set(), set()
+    for text in dict.fromkeys(texts):
+        for atom in _atoms(text):
+            parts = atom_components(atom)
+            values.update(parts)
+            patterns.add(template(parts))
+    return values, patterns
+
+
 def _duration_prefix(kind,body):
     """Lexical validity only; native physics remains the final duration check."""
     if kind=='D:B':return re.fullmatch(r'[+-]?\d*(?:/(?:[1-9]\d*)?)?',body) is not None
@@ -105,10 +115,7 @@ class ComponentCodec:
 
     @classmethod
     def fit(cls,texts,ticks_per_beat=48,window_beats=16):
-        values=set();patterns=set()
-        for text in texts:
-            for atom in _atoms(text):
-                sequence=atom_components(atom);values.update(sequence);patterns.add(template(sequence))
+        values, patterns = component_inventory(texts)
         values.update('P:'+str(i) for i in range(1,9))
         values.update('P:'+area+str(i) for area in 'ABDE' for i in range(1,9));values.add('P:C')
         values.update('NUM:'+c for c in '-/0123456789')
@@ -116,6 +123,17 @@ class ComponentCodec:
         values.update(('D:B','D:R'))
         values.update('T:'+str(Fraction(i,ticks_per_beat)) for i in range(-window_beats*ticks_per_beat,window_beats*ticks_per_beat))
         return cls([*SPECIAL,*sorted(values-set(SPECIAL))],sorted(patterns),ticks_per_beat,window_beats)
+
+    def extended(self, texts, *, extra_tokens=()):
+        """Build a finetune vocabulary without moving any checkpoint IDs."""
+        values, patterns = component_inventory(texts)
+        values.update(extra_tokens)
+        tokens = sorted(values - self.ids.keys())
+        templates = sorted(patterns - set(self.templates))
+        if not tokens and not templates:
+            return self
+        return type(self)(self.tokens + tokens, self.templates + tuple(templates),
+                          self.ticks_per_beat, self.window_beats)
 
     def configure_times(self,relative_times):
         additions=sorted({'T:'+str(Fraction(x)) for x in relative_times if -self.window_beats<=Fraction(x)<self.window_beats}-self.ids.keys())

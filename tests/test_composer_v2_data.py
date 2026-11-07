@@ -115,6 +115,37 @@ def test_chart_cache_reuses_exact_points_and_sustain_and_invalidates_edits(tmp_p
     assert changed.songs[0].sustain.first == 0.375
 
 
+def test_training_dialect_filters_atoms_before_caching_without_moving_other_notes(tmp_path):
+    from maichart.composer_v2.chart_dialect import LEGACY_STRICT_POLICY
+
+    chart = tmp_path / 'maidata.txt'
+    original = ('&first=0.125\n&lv_5=13\n&inote_5=(120){16}'
+                '1b$$`2x/3?-7[8:1]/Z,4!-8[8:1],(180)5hx/Cfh[1280:1],'
+                '1@-5[8:1],3h[8:1],1^7[8:1]*v6[8:1],E\n')
+    chart.write_text(original, encoding='utf-8')
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'songs': [{
+        'maidata_path': str(chart), 'audio_path': str(tmp_path / 'audio.wav'),
+        'difficulties': [{'index': 5, 'level': '13'}],
+    }]}), encoding='utf-8')
+    options = dict(cache_dir=tmp_path / 'cache', prepare=False, audio_store=object())
+    cold = ComposerV2Dataset(manifest, **options)
+    warm = ComposerV2Dataset(manifest, **options)
+    assert warm.audit['preparation']['chart_cache_hits'] == 1
+    assert cold.audit['chart_dialect'] == warm.audit['chart_dialect']
+    changes, = warm.audit['chart_dialect']['changes']
+    assert (changes['normalized_atoms'], changes['headless_slide'], changes['unsupported']) == (4, 2, 1)
+    song, = warm.songs
+    assert song.points == [EventPoint(Fraction(0), '1b/2x'), EventPoint(Fraction(1, 2), '5x/Cf'),
+                           EventPoint(Fraction(3, 4), '1-5[8:1]'), EventPoint(Fraction(1), '3h[8:1]'),
+                           EventPoint(Fraction(5, 4), '1^7[8:1]*v6[8:1]')]
+    assert song.clock.bpms == [120., 180.]
+    assert song.authored_end_beat == Fraction(3, 2)
+    assert chart.read_text(encoding='utf-8') == original
+    with pytest.raises(ValueError, match='No usable composer_v2 charts'):
+        ComposerV2Dataset(manifest, dialect_policy=LEGACY_STRICT_POLICY, **options)
+
+
 def test_empty_window_still_supervises_eos():
     data, song = fixture_dataset()
     item = data.build_window(song, song.points, 40, training=True)

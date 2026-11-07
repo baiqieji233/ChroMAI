@@ -7,7 +7,7 @@ from float-to-Fraction conversion of an estimated audio clock.
 from fractions import Fraction
 from bisect import bisect_left,bisect_right
 from collections import OrderedDict
-from .codec import ComponentCodec, SPECIAL, atom_components, template, render_atom
+from .codec import ComponentCodec, SPECIAL, component_inventory, render_atom
 from maichart.composer.event_set_codec import _atoms
 from maichart.event_timing import EventPoint
 
@@ -38,10 +38,7 @@ class StreamCodec(ComponentCodec):
         return tokens
     @classmethod
     def fit(cls,texts,ticks_per_beat=48,window_beats=16,phases=()):
-        values=set();patterns=set()
-        for text in dict.fromkeys(texts):
-            for atom in _atoms(text):
-                parts=atom_components(atom);values.update(parts);patterns.add(template(parts))
+        values, patterns = component_inventory(texts)
         values.update('P:'+str(i) for i in range(1,9))
         values.update('P:'+a+str(i) for a in 'ABDE' for i in range(1,9));values.add('P:C')
         values.update('NUM:'+c for c in '-/0123456789')

@@ -35,8 +35,16 @@ def parser():
     result.add_argument('--condition', type=json.loads, default=None,
                         help='Explicit Radar/Style overrides as a JSON object; omitted keys are automatic')
     result.add_argument('--seed', type=int, default=0)
-    result.add_argument('--temperature', type=float, default=.9)
-    result.add_argument('--top-p', type=float, default=.95)
+    result.add_argument('--temperature', type=float, default=.9,
+                        help='Timing temperature and the default configuration temperature')
+    result.add_argument('--top-p', type=float, default=.95,
+                        help='Timing nucleus threshold and the default configuration threshold')
+    result.add_argument('--action-temperature', type=float,
+                        help='Override configuration temperature for a continuous-event checkpoint')
+    result.add_argument('--action-top-p', type=float,
+                        help='Override configuration nucleus threshold for a continuous-event checkpoint')
+    result.add_argument('--onset-strength', type=float, default=None,
+                        help='Trained phase-only acoustic reference: 0 off, 1 trained setting, up to 2 experimental emphasis')
     result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=1)
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
     result.add_argument('--cpu-threads', type=int, default=2)
@@ -280,10 +288,23 @@ def _tempo_map(value, bpm):
     return sorted(changes, key=lambda change: change.beat)
 
 
+def _action_sampling(args):
+    temperature = getattr(args, 'action_temperature', None)
+    top_p = getattr(args, 'action_top_p', None)
+    split = temperature is not None or top_p is not None
+    return (args.temperature if temperature is None else temperature,
+            getattr(args, 'top_p', .95) if top_p is None else top_p, split)
+
+
 def _sampling_policy(args):
-    greedy = args.temperature == 0
-    return dict(temperature=args.temperature, requested_candidates=args.candidates,
-        effective_candidates=1 if greedy else args.candidates,
+    action_temperature, action_top_p, split = _action_sampling(args)
+    greedy = args.temperature == action_temperature == 0
+    return dict(temperature=args.temperature, top_p=getattr(args,'top_p',.95),
+        timing_temperature=args.temperature, timing_top_p=getattr(args,'top_p',.95),
+        action_temperature=action_temperature, action_top_p=action_top_p,
+        rng_policy='separate_timing_action_v1' if split else 'shared_v1',
+        fully_greedy=greedy, requested_candidates=args.candidates,
+        effective_candidates=1 if action_temperature==0 else args.candidates,
         requested_retries=getattr(args,'window_retries',16),
         effective_retries=1 if greedy else getattr(args,'window_retries',16),
         requested_rollback_budget=getattr(args,'rollback_windows',2),
@@ -306,6 +327,10 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     if not all(math.isfinite(value) for value in (args.first, args.level, args.temperature) if value is not None):
         raise ValueError('first, level and temperature must be finite')
     sampling_policy = _sampling_policy(args)
+    if not math.isfinite(sampling_policy['action_temperature']) or sampling_policy['action_temperature'] < 0:
+        raise ValueError('action_temperature must be finite and nonnegative')
+    if not 0 < sampling_policy['action_top_p'] <= 1:
+        raise ValueError('action_top_p must be in (0,1]')
     effective_candidates = sampling_policy['effective_candidates']
     effective_retries = sampling_policy['effective_retries']
     effective_rollback_budget = sampling_policy['effective_rollback_budget']
@@ -319,6 +344,12 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
+    from .onset_readout import effective_strength
+    onset_strength=effective_strength(getattr(args,'onset_strength',None),config.onset_readout_policy)
+    print('composer_v2_onset_readout '+json.dumps(dict(policy=config.onset_readout_policy,
+        strength=onset_strength,scope='conditional_phase_only')),flush=True)
+    if sampling_policy['rng_policy']!='shared_v1' and config.sequence_policy!='continuous_events_v1':
+        raise ValueError('Separate configuration sampling requires a continuous-event checkpoint')
     from .exhaustion import resolve_policy
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     print('composer_v2_exhaustion_policy '+json.dumps(dict(requested=getattr(args,'exhaustion_policy','auto'),

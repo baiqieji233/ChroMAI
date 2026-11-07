@@ -21,6 +21,7 @@ from maichart.maidata import decode_text_with_encoding, parse_maidata_metadata
 from maichart.tempo_clock import TempoClock
 from maichart.training.dataset_catalog import _source_asset
 from maichart.training.event_dataset import inspect_chart, numeric_level
+from . import chart_dialect
 from .chart_cache import ChartCache
 from .conditions import RADAR_STYLE, condition_contract, resolve_condition, training_condition
 
@@ -74,11 +75,14 @@ class ComposerV2Dataset(Dataset):
                  prepare_device='cpu', limit_charts=0, prepare=True,
                  *, audio_store=None, min_level=12., max_level=15.,
                  min_difficulty_index=4, max_difficulty_index=6,
-                 quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1'):
+                 quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
+                 extend_vocabulary=False, dialect_policy=chart_dialect.POLICY):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
             raise ValueError('max_tokens must be at least 4')
+        if dialect_policy not in (chart_dialect.POLICY, chart_dialect.LEGACY_STRICT_POLICY):
+            raise ValueError(f'Unknown Composer v2 chart dialect policy: {dialect_policy}')
         self.manifest = Path(manifest).resolve()
         self.condition_policy = condition_policy
         self.condition_contract = condition_contract(condition_policy)
@@ -87,6 +91,7 @@ class ComposerV2Dataset(Dataset):
         self.future_beats, self.max_tokens = future_beats, int(max_tokens)
         self.songs, self.windows = [], []
         self.audit = {'skipped': [], 'filtered': [], 'charts': [], 'windows': 0}
+        self.audit['chart_dialect'] = {'policy': dialect_policy, 'changes': []}
         manifest_bytes = self.manifest.read_bytes()
         payload = json.loads(manifest_bytes.decode('utf-8-sig'))
         self.manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
@@ -105,7 +110,8 @@ class ComposerV2Dataset(Dataset):
         annotation_index = _preparation_annotation_index(annotations)
         entries = payload.get('songs', [])
         chart_start = time.perf_counter()
-        chart_cache = ChartCache(cache_dir)
+        normalize_dialect = dialect_policy == chart_dialect.POLICY
+        chart_cache = ChartCache(cache_dir, dialect_policy if normalize_dialect else None)
         prepared_charts = {}
         reused_charts = cache_hits = 0
         _report_preparation('charts', 0, len(entries), chart_start, accepted=0)
@@ -130,8 +136,6 @@ class ComposerV2Dataset(Dataset):
                         chart_bytes = chart_path.read_bytes()
                         chart_sha = hashlib.sha256(chart_bytes).hexdigest()
                         source = chart_path
-                    # Preserve authored semantic atoms, including headless slides.
-                    # Unknown syntax is explicitly rejected, never deleted as rest.
                     chart_key = (chart_sha, slot)
                     prepared_chart = prepared_charts.get(chart_key)
                     if prepared_chart is None:
@@ -144,9 +148,12 @@ class ComposerV2Dataset(Dataset):
                             text, _ = decode_text_with_encoding(chart_bytes)
                             metadata = parse_maidata_metadata(text)
                         chart = _parse_event_metadata(metadata, slot, strict_notes=False)
+                        dialect_edits = {}
+                        if normalize_dialect:
+                            chart, dialect_edits = chart_dialect.normalize_training_chart(chart)
                         inspect_chart(chart)
                     else:
-                        chart, sustain = prepared_chart
+                        chart, sustain, dialect_edits = prepared_chart
                     quality = _preparation_annotation(annotations, source, slot, audio_path, None, annotation_index)
                     if quality and (quality.get('label') in ('excluded', 'negative')
                                     or float(quality.get('weight', 1.)) <= 0):
@@ -166,13 +173,16 @@ class ComposerV2Dataset(Dataset):
                         if any('[' in p.note_text for p in song.points):
                             from maichart.generation.sustain_state import SustainStateIndex
                             sustain = SustainStateIndex(song.points, chart.tempo_changes, chart.audio_first)
-                        chart_cache.save(*chart_key, chart, sustain)
-                    prepared_charts[chart_key] = (chart, sustain)
+                        chart_cache.save(*chart_key, chart, sustain, dialect_edits)
+                    prepared_charts[chart_key] = (chart, sustain, dialect_edits)
                     song.sustain = sustain
                     self.songs.append(song)
                     self.audit['charts'].append({'source': str(source), 'difficulty': slot,
                         'chart_sha256': chart_sha,
                         'first': chart.audio_first, 'quality': quality})
+                    if any(dialect_edits.values()):
+                        self.audit['chart_dialect']['changes'].append({
+                            'source': str(source), 'difficulty': slot, **dialect_edits})
                 except (OSError, ValueError, KeyError) as error:
                     rejected = {'song': entry.get('song_id'), 'difficulty': slot, 'reason': str(error)}
                     self.audit['skipped'].append(rejected)
@@ -204,6 +214,19 @@ class ComposerV2Dataset(Dataset):
                                   for phase in phases for integer in range(-history_beats, window_beats)}
                 codec.configure_times(relative_times)
             self.audit['vocabulary_policy'] = 'fit_training_components_and_phases_once'
+        elif extend_vocabulary:
+            parent_codec = codec
+            phases = {p.beat % 1 for song in self.songs for p in song.points} if continuous else ()
+            codec = parent_codec.extended((p.note_text for song in self.songs for p in song.points),
+                                          extra_tokens=('F:' + str(phase) for phase in phases))
+            self.audit['vocabulary_policy'] = 'extend_checkpoint_for_finetune'
+            added_tokens = codec.tokens[parent_codec.vocab_size:]
+            self.audit['vocabulary_added_tokens'] = added_tokens
+            self.audit['vocabulary_added_templates'] = len(codec.templates) - len(parent_codec.templates)
+            _report_preparation('vocabulary_extension', len(self.songs), len(self.songs), vocabulary_start,
+                                added_token_count=len(added_tokens),
+                                added_components=[token for token in added_tokens if not token.startswith('F:')],
+                                added_templates=self.audit['vocabulary_added_templates'])
         else:
             self.audit['vocabulary_policy'] = 'checkpoint_fixed_no_extension'
         unknown_phases = set()

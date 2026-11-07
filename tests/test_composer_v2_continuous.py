@@ -1,4 +1,5 @@
 from fractions import Fraction
+import json
 from pathlib import Path
 import numpy as np
 import pytest
@@ -43,6 +44,33 @@ def test_exact_unusual_phases_cross_arbitrary_computational_boundaries():
     for phase in (Fraction(1,5),Fraction(3,7),Fraction(9,13),Fraction(1,101)):
         time=Fraction(16)+phase;ids=codec._time(time)
         for i,token in enumerate(ids):assert token in codec.time_choices(ids[:i],Fraction(15),Fraction(19))
+
+
+def test_finetune_extends_checkpoint_vocabulary_with_authored_components_and_phases(tmp_path):
+    chart = tmp_path / 'maidata.txt'
+    chart.write_text('&lv_5=13.0\n&inote_5=(120){101},1^7[8:1],E\n', encoding='utf-8')
+    manifest = tmp_path / 'manifest.json'
+    manifest.write_text(json.dumps({'songs': [{'maidata_path': str(chart),
+        'audio_path': str(tmp_path / 'track.wav'),
+        'difficulties': [{'index': 5, 'level': '13.0'}]}]}), encoding='utf-8')
+    parent = StreamCodec.fit(['1', '1-5[8:1]'])
+    options = dict(cache_dir=tmp_path, codec=parent, prepare=False, audio_store=object())
+    with pytest.raises(ValueError, match='Unseen exact phase 4/101'):
+        StreamDataset(manifest, **options)
+
+    data = StreamDataset(manifest, extend_vocabulary=True, **options)
+    codec = data.codec
+    assert codec.tokens[:parent.vocab_size] == parent.tokens
+    assert codec.tokens[parent.vocab_size:] == ['F:4/101', 'S:^']
+    assert data.audit['vocabulary_added_templates'] == 1
+    points = data.songs[0].points
+    assert codec.decode_points(codec.encode_points(points)) == points
+    atom = codec.encode_atom('1^7[8:1]')
+    for i, token in enumerate(atom):
+        assert token in codec.allowed_atom_next(atom[:i])
+    restored = StreamCodec.from_dict(codec.to_dict())
+    fixed = StreamDataset(manifest, **{**options, 'codec': restored})
+    assert fixed.codec.to_dict() == codec.to_dict()
 
 
 def test_codec_serializes_after_populating_note_token_cache():

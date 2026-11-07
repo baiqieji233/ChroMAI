@@ -34,6 +34,23 @@ def test_component_binding_and_exact_clock_roundtrip():
     assert codec.token_clocks(encoded)[-1]==float(old.beat)
 
 
+def test_finetune_vocabulary_extension_preserves_checkpoint_rows():
+    from maichart.composer_v2.train import _extend_vocabulary_state
+
+    codec, parent, _ = fixture()
+    expanded_codec = codec.extended(['1^7[8:1]'])
+    expanded = ComposerV2(parent.config, expanded_codec)
+    initial_rows = expanded.embedding.weight[codec.vocab_size:].detach().clone()
+    state = parent.state_dict()
+    expanded.load_state_dict(_extend_vocabulary_state(expanded, state, codec.vocab_size))
+    for name, weights in expanded.state_dict().items():
+        if name in ('embedding.weight', 'output_bias'):
+            weights = weights[:codec.vocab_size]
+        assert torch.equal(weights, state[name]), name
+    assert torch.equal(expanded.embedding.weight[codec.vocab_size:], initial_rows)
+    assert expanded.embedding.weight.data_ptr() != parent.embedding.weight.data_ptr()
+
+
 def test_grammar_matches_every_authored_component_and_allows_empty_windows():
     codec,_,_=fixture()
     target=codec.encode_points([EventPoint(Fraction(0),'A1/B2/Cf'),EventPoint(Fraction(1),'3-7[8:1]')],0)+[codec.eos_id]

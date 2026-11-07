@@ -70,13 +70,11 @@ def normalize_note_text(text: str) -> str:
     Applied once, where raw cell text becomes note text, so event charts, V1
     notes, the quality checker and the training vocabulary all see one spelling:
 
-    * ``1`2`` -- the "pseudo double press": the charter writes a backtick where
-      a simultaneity separator belongs, and ``1/2`` is exactly equivalent, so
-      the backtick is rewritten to ``/``;
+    * ``1`2`` -- pseudo EACH, whose small timing offset is collapsed to a
+      single onset ``1/2`` for this event representation;
     * ``EE`` -- a repeated identical touch area is a typo for a single ``E``.
 
-    Anything else (``?``, ``!``, ``$``, a mid-cell ``{division}``, an unknown
-    timing pair) is deliberately left untouched and stays rejected.
+    Other dialect markers (``?``, ``!``, ``$``) are left to the note consumer.
     """
 
     return _collapse_repeated_touch_area(text.replace(_PSEUDO_CHORD_SEPARATOR, "/"))

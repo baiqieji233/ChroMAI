@@ -273,6 +273,31 @@ def test_rollback_does_not_blame_a_later_unrelated_event():
     assert kept==[] and report['source_beat']=='179'
 
 
+@pytest.mark.parametrize('probe',[False,True])
+def test_rollback_rebuilds_committed_history_containing_a_reported_conflict(probe):
+    from maichart.composer_v2.exhaustion import admit_physical_conflict
+    from maichart.composer_v2.stream_generate import restore_prefix
+
+    tempo=[EventTempo(F(0),157.)];clock=TempoClock(tempo)
+    old=[EventPoint(F(10),'8h[4:12]'),EventPoint(F(11),'1/2')]
+    failures,guard=rejected(old[:1],old[1],tempo,clock)
+    _,guard,_=admit_physical_conflict(guard,failures,old[0].beat)
+    points=[*old,EventPoint(F(179),'6h[4:4]'),EventPoint(F(180),'4'),EventPoint(F(181),'4h[4:7]')]
+    witness=EventPoint(F(182),'3')
+    for point in points[2:]:
+        assert guard.accepts(point)
+        guard.commit(point)
+    details=[]
+    assert _check_window(guard,[witness],details)[0] is None
+    kept,replayed,report=restore_prefix(points,tempo,clock,100.,witness.beat,['179'],
+        rejected=[(witness,details)] if probe else ())
+    assert kept==(points[:4] if probe else old)
+    assert report['source_beat']==('181' if probe else '179')
+    expected=_new_guard(tempo,0.,100.)
+    for point in kept:expected.commit(point)
+    assert replayed.prefix==expected.prefix and replayed.last_head_seconds==expected.last_head_seconds
+
+
 @pytest.mark.parametrize('stalled',[False,True])
 def test_separate_dead_ends_recover_but_regenerating_old_range_still_exhausts(tmp_path,monkeypatch,stalled):
     import maichart.composer_v2.stream_generate as generation

@@ -9,7 +9,7 @@ import torch
 from .codec import render_atom
 from .stream_data import StreamDataset,collate_stream
 from .retry_sampling import RejectedEventTree,RetrySpaceExhausted
-from .generate import WindowSampler,_sample,_atom_heads,_new_guard,_check_window,_comfort
+from .generate import WindowSampler,_sample,_atom_heads,_new_guard,_check_window,_comfort,_action_sampling,_sampling_policy
 from maichart.event_timing import EventPoint
 from maichart.generation.event_compile import compile_event_points
 from maichart.composer.event_set_codec import _atoms
@@ -41,17 +41,22 @@ class GrammarDeadEnd(ValueError):
 
 
 class EventSampler(WindowSampler):
-    def __init__(self,model,dataset,song,points,device,rng,args):
+    def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None):
         self.model=model;self.codec=model.codec;self.dataset=dataset;self.song=song
         self.device=device;self.generator=rng;self.temperature=args.temperature;self.top_p=args.top_p
+        self.action_temperature,self.action_top_p,_=_action_sampling(args)
+        self.action_generator=rng if action_generator is None else action_generator
         self.cursor=points[-1].beat if points else Fraction(0)
         item=dataset.build_stream(song,points,self.cursor)
         self.prefix=item['input_ids'].tolist();self.anchors=list(item['anchors'])
         self.anchor_ids={a:i for i,a in enumerate(self.anchors)}
         self.batch={k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in collate_stream([item]).items()}
+        from .onset_readout import effective_strength
+        self.batch['onset_strength'] = effective_strength(getattr(args,'onset_strength',None),
+            getattr(model.config,'onset_readout_policy','off'))
         self.max_tokens=model.config.max_tokens;self.cache=model.encode_audio(self.batch)
         self.retry_stats={};self._retry_scope=None
-    def next(self,target,allowed):
+    def next(self,target,allowed,*,action=False):
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
         if not allowed:
             scope=getattr(self,'proposal_scope',{})
@@ -70,30 +75,42 @@ class EventSampler(WindowSampler):
         else:
             self._retry_cache_dirty=True
             self.retry_stats['decoder_cache_hits']=self.retry_stats.get('decoder_cache_hits',0)+1
+        if action:
+            generator,temperature,top_p=self.action_generator,self.action_temperature,self.action_top_p
+        else:
+            generator,temperature,top_p=self.generator,self.temperature,self.top_p
         if tree is not None:
-            logits=tree.remember(relative,getattr(self,'_free_choices',allowed),logits)
+            logits=tree.remember(relative,getattr(self,'_free_choices',allowed),logits,temperature=temperature)
             if self._retry_condition:
-                logits,allowed,scaled=tree.condition(relative,allowed,self.temperature)
+                logits,allowed,scaled=tree.condition(relative,allowed,temperature)
                 if scaled:
                     self.retry_stats['conditioned_draws']=self.retry_stats.get('conditioned_draws',0)+1
-                    return _sample(logits,allowed,self.generator,1.,self.top_p)
-        return _sample(logits,allowed,self.generator,self.temperature,self.top_p)
+                    temperature=1.
+        return _sample(logits,allowed,generator,temperature,top_p)
     def _logits(self,target):
         ids=self.prefix+list(target)
         clocks=self.codec.token_clocks(ids,cursor=self.cursor)
         missing=sorted({math.floor(t) for t in clocks}-self.anchor_ids.keys())
         if missing:
             tiles=[self.dataset.tile(self.song,a) for a in missing]
-            query={**self.batch,**{k:torch.stack([t[k] for t in tiles]).to(self.device) for k in tiles[0]},
+            query={**self.batch,**{k:torch.stack([t[k] for t in tiles]).to(self.device) for k in tiles[0] if not k.startswith('onset_')},
                 'tile_owner':torch.zeros(len(missing),dtype=torch.long,device=self.device)}
-            for key in ('bank_audio','bank_semantic','bank_semantic_mask','bank_owner','tile_frames'):query.pop(key,None)
+            if 'onset_audio' in tiles[0]:
+                from .onset_readout import collate_tiles
+                onset=collate_tiles([{k:v[None] for k,v in t.items() if k.startswith('onset_')} for t in tiles])
+                query.update({k:v.to(self.device) for k,v in onset.items()})
+            for key in ('bank_audio','bank_semantic','bank_semantic_mask','bank_semantic_right','bank_semantic_weight','bank_owner','tile_frames'):query.pop(key,None)
             encoded=self.model.encode_audio(query)
             for key in ('local','local_mask','local_beats'):self.cache[key]=torch.cat((self.cache[key],encoded[key]),0)
+            if 'onset_scores' in encoded:self.cache['onset_scores']=torch.cat((self.cache['onset_scores'],encoded['onset_scores']),0)
             for a in missing:self.anchor_ids[a]=len(self.anchors);self.anchors.append(a)
         query={**self.batch,'input_ids':torch.tensor([ids],device=self.device),
             'token_beats':torch.tensor([clocks],dtype=torch.float32,device=self.device),
             'token_mask':torch.ones((1,len(ids)),dtype=torch.bool,device=self.device),
             'tile_ids_cpu':[[self.anchor_ids[math.floor(t)] for t in clocks]]}
+        if getattr(self.dataset,'onset_readout_policy','off') != 'off':
+            from .onset_readout import query_rows
+            query['phase_queries_cpu']=query_rows(ids,query['tile_ids_cpu'][0],self.codec.ids['[PHASE]'])
         return self.model.decode(query,self.cache)[0,-1]
     def reject(self,ids):return self._retry_tree.reject(ids)
     def propose(self,target,after,end,fixed=None):
@@ -124,7 +141,7 @@ class EventSampler(WindowSampler):
                 self._free_choices=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count else ())
             else:
                 allowed=self._head_choices(self.codec.allowed_atom_next(atom),atom,used);self._free_choices=allowed
-            token=self.next(target+out,allowed);out.append(token)
+            token=self.next(target+out,allowed,action=True);out.append(token)
             if token==self.codec.event_end_id:return out
             atom.append(token)
             if token==self.codec.end_note_id:
@@ -132,7 +149,7 @@ class EventSampler(WindowSampler):
 
 
 def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*,rejected=()):
-    """Prefer the latest committed event explicitly involved in the dead end."""
+    """Restore committed state, checking any changed suffix with a fresh trial."""
     from maichart.generation.sustain_state import SustainStateIndex
     confirmed=set(map(Fraction,conflict_sources)) & {p.beat for p in points}
     if confirmed:source=max(confirmed);reason='latest_native_conflicting_event'
@@ -158,7 +175,7 @@ def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*
         base=_new_guard(tempo,clock.seconds[0],duration);states={}
         for i,point in enumerate(points):
             if i>=lower:states[i]=deepcopy(base)
-            if not base.accepts(point):raise RuntimeError('Previously accepted prefix failed rollback probe replay')
+            # Report mode can have committed physical conflicts in this history.
             base.commit(point)
         checks=0
         for i in range(len(points)-1,lower-1,-1):
@@ -176,7 +193,6 @@ def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*
     if len(kept)==len(points):return None
     guard=_new_guard(tempo,clock.seconds[0],duration)
     for point in kept:
-        if not guard.accepts(point):raise RuntimeError('Previously accepted prefix failed exact replay')
         guard.commit(point)
     return kept,guard,dict(source_beat=str(source),revoked_events=len(points)-len(kept),reason=reason,
         removed_points=[dict(beat=str(p.beat),note_text=p.note_text) for p in points[len(kept):]])
@@ -193,17 +209,27 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     dataset=StreamDataset.__new__(StreamDataset)
     dataset.codec=model.codec;dataset.max_tokens=config.max_tokens;dataset.history_beats=config.history_beats
     dataset.window_beats=config.window_beats;dataset.future_beats=config.future_beats
+    from .onset_readout import effective_strength,phase_values
+    onset_strength=effective_strength(getattr(args,'onset_strength',None),getattr(config,'onset_readout_policy','off'))
+    dataset.onset_readout_policy=getattr(config,'onset_readout_policy','off') if onset_strength else 'off'
+    dataset.onset_phases=phase_values(model.codec) if onset_strength else None
     guard=_new_guard(tempo,first,audio.duration_sec)
     points=[];target=[];sampler=None;committed_in_context=0;refreshes=0;rollbacks=[];repairs=[];done=False
     duration_repairs=[];release_trials=set();bypassed_events=[]
     retry_stats={};native_memo={}
     recovery=RecoveryBudget(args.rollback_windows)
     hold_release_repair=args.rollback_windows>0
-    attempts=1 if args.temperature==0 else args.window_retries
-    candidate_count=1 if args.temperature==0 else args.candidates
+    sampling_policy=_sampling_policy(args)
+    attempts=sampling_policy['effective_retries']
+    candidate_count=sampling_policy['effective_candidates']
+    sampler_options={}
+    if sampling_policy['rng_policy']=='separate_timing_action_v1':
+        # Keep both streams alive across context refreshes and conflict retries.
+        action_seed=rng.initial_seed() ^ 0x9E3779B97F4A7C15
+        sampler_options['action_generator']=torch.Generator(device=device).manual_seed(action_seed)
     while not done:
         if sampler is None:
-            sampler=EventSampler(model,dataset,song,points,device,rng,args);target=[];committed_in_context=0;refreshes+=1
+            sampler=EventSampler(model,dataset,song,points,device,rng,args,**sampler_options);target=[];committed_in_context=0;refreshes+=1
             sampler.retry_stats=retry_stats
         after=points[-1].beat if points else Fraction(-1)
         selected=None;failed_beat=after;need_refresh=False;conflict_sources=set();rejected=[];history_edited=False
@@ -276,7 +302,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                     repairs.append(dict(reason='hold_duration_repair_unresolved',after=str(after),**audit))
         if selected is None:
             replay=restore_prefix(points,tempo,clock,audio.duration_sec,failed_beat,conflict_sources,
-                rejected=rejected) if points and budget_left and args.temperature!=0 else None
+                rejected=rejected) if points and budget_left and not sampling_policy['fully_greedy'] else None
             if replay:
                 recovery.spend()
                 points,guard,report=replay;report['recovery_state']=recovery.report();rollbacks.append(report);sampler=None
@@ -294,7 +320,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if selected is None:
             from .diagnostics import write_failure_snapshot
             diagnostic=write_failure_snapshot(args.output,dict(after=str(after),checkpoint=str(args.checkpoint),seed=args.seed,
-                temperature=args.temperature,top_p=args.top_p,timing=timing_report,audio=str(audio_path),
+                temperature=args.temperature,top_p=args.top_p,sampling_policy=sampling_policy,
+                timing=timing_report,audio=str(audio_path),
                 audio_end_beat=str(end),context_cursor=str(sampler.cursor),committed_in_context=committed_in_context,
                 checkpoint_info=checkpoint_info,condition=condition_report,generation_settings=_generation_settings(args,device),
                 rollbacks=rollbacks,duration_repairs=duration_repairs,**recovery.report(),
@@ -328,6 +355,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         context_refreshes=refreshes,refresh_events=config.refresh_events,history_beats=config.history_beats,
         timing=timing_report,condition=condition_report,first=first,end_beat=str(export_end),duration_sec=audio.duration_sec,
         checkpoint_info=checkpoint_info,generation_settings=_generation_settings(args,device),
+        sampling_policy=sampling_policy,
         repairs=repairs[-128:],repair_count=len(repairs),rollbacks=rollbacks,candidates=candidate_count,
         duration_repairs=duration_repairs,hold_release_repair=hold_release_repair,**recovery.report(),
         hold_repair_policy='native_hold_conflict_repair_v3',
@@ -336,7 +364,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         accepted_with_conflicts_count=len(bypassed_events),
         physics_status='unresolved_conflicts' if bypassed_events else 'no_bypassed_conflicts',
         candidate_policy='next_complete_event_same_onset_atom_count',temperature=args.temperature,top_p=args.top_p,
-        audio_identity=audio.identity,hard_guard='runtime_hard_v2')
+        audio_identity=audio.identity,hard_guard='runtime_hard_v2',
+        onset_readout=dict(policy=getattr(config,'onset_readout_policy','off'),strength=onset_strength,
+                           scope='conditional_phase_only',phase_mass_preserved=True))
     if bypassed_events:
         from .diagnostics import write_conflict_snapshot
         assessment=conflict_assessment(points,tempo,first,guard)
@@ -357,6 +387,6 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','candidates','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','candidates','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

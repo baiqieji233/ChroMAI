@@ -40,6 +40,10 @@ def inspect_payload(payload):
     config=payload.get("model_config") or payload.get("config")
     if not isinstance(config,dict): errors.append("缺少模型配置")
     if isinstance(config,dict):
+        from .onset_policy import POLICY as ONSET_POLICY
+        onset_policy = config.get('onset_readout_policy','off')
+        if onset_policy not in ('off',ONSET_POLICY) or (onset_policy != 'off' and config.get('sequence_policy') != 'continuous_events_v1'):
+            errors.append('独立声学读出配置与连续事件合同不匹配')
         try:
             policy=policy_from_config(config)
             expected_condition_contract=condition_contract(policy)
@@ -82,6 +86,7 @@ def inspect_payload(payload):
         condition_contract=capabilities_contract,
         sequence_policy=(config or {}).get('sequence_policy','window_v1'),
         generation_capabilities=dict(component_sequence=True,fine_note_strength=False,local_onset_guidance=False,
+            onset_readout=(config or {}).get('onset_readout_policy','off')=='phase_audio_v1',
             continuous_time=(config or {}).get('sequence_policy')=='continuous_events_v1',
             condition_policy=policy,condition_keys=capabilities_contract.get('supported_keys',[]),
             radar_style=policy==RADAR_STYLE,automatic_conditions=policy==RADAR_STYLE),

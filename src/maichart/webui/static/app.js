@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery"];
+const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -20,7 +20,7 @@ function composerV2TrainingPayload(options={}) {
     manifests:selectedTrainingManifests(),mode:currentTrainingMode(),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery"]);
+  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -38,18 +38,27 @@ function composerV2GenerationPayload() {
   for(const [key,state] of Object.entries(v2ConditionState))if(state.override)
     condition[key]=v2NumericValue(state.value,key,{min:0,max:1});
   if(Object.keys(condition).length && !v2ConditionCapability().enabled)throw new Error("当前 checkpoint 未训练 Radar / Style 条件；请先检查支持 radar_style_v1 的 checkpoint。");
-  return {model_family:"chart_composer_v2",checkpoint:valueOrDefault("#checkpointPath","").trim(),
+  const payload={model_family:"chart_composer_v2",checkpoint:valueOrDefault("#checkpointPath","").trim(),
     audio:valueOrDefault("#audioPath","").trim(),output:valueOrDefault("#outputPath","").trim()||null,
     bpm:valueOrDefault("#bpm","").trim()===""?null:number('#bpm',120,'BPM',{min:.001}),
     first:element('#v2GenerateAutoFirst')?.checked?null:number('#first',0,'首拍偏移'),level:number('#level',13.3,'目标等级',{min:12,max:15}),
     seed:seed===""?Math.floor(Math.random()*2147483647):v2NumericValue(seed,'随机种子',{min:0,integer:true}),
-    temperature:number('#v2GenerateTemperature',.9,'温度',{min:0}),top_p:number('#v2GenerateTopP',.95,'Top-p',{min:0,max:1,exclusiveMin:true}),
+    temperature:number('#v2GenerateTemperature',.9,'采音温度',{min:0}),top_p:number('#v2GenerateTopP',.95,'采音 Top-p',{min:0,max:1,exclusiveMin:true}),
     candidates:number('#v2GenerateCandidates',1,'候选数',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
     rollback_windows:number('#v2GenerateRollbackWindows',2,'冲突恢复次数',{min:0,max:8,integer:true}),
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
     cpu_threads:number('#v2GenerateCpuThreads',2,'CPU 计算线程',{min:1,integer:true}),
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
+  for (const [key,selector,label,bounds] of [
+    ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
+    ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
+    ['onset_strength','#v2GenerateOnsetStrength','起音参考强度',{min:0,max:2}],
+  ]) {
+    const raw=valueOrDefault(selector,'').trim();
+    if (raw!=='' && !element(selector)?.disabled) payload[key]=v2NumericValue(raw,label,bounds);
+  }
+  return payload;
 }
 function composerV2CompletionMessage(task) {
   const report=task.result?.composer_v2_report||{},timing=report.timing;
@@ -64,6 +73,15 @@ function requireV2ExhaustionSupport(status,payload) {
   if(payload.exhaustion_policy==='stop' && !status.training_capabilities?.composer_v2_exhaustion_policy)
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
+function requireV2SplitSamplingSupport(status,payload) {
+  if (payload.onset_strength!=null && !status.training_capabilities?.composer_v2_onset_readout) {
+    throw new Error('起音参考强度需要更新后的 WebUI 后台，请重启当前后台后提交。');
+  }
+  if ((payload.action_temperature!=null || payload.action_top_p!=null)
+      && !status.training_capabilities?.composer_v2_split_sampling) {
+    throw new Error('独立配置采样需要更新后的 WebUI 后台。请重启当前使用的后台后再提交。');
+  }
+}
 function composerV2GenerationMessage(task) {
   if(task.status!=='running')return task.message||'';
   const labels={composer_v2_rollback:'正在回退并重试冲突位置',composer_v2_hold_release_repair:'正在修复 Hold 尾部冲突',
@@ -76,6 +94,7 @@ function composerV2GenerationMessage(task) {
 function applyComposerV2Inspection(data) {
   if(!data?.valid)return;
   const saved={...(data.args||{}),...(data.model_config||{})};
+  saved.onset_readout=data.model_config?.onset_readout_policy||'off';
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   for(const key of COMPOSER_V2_FIELDS) {
     if (key === 'cuda_memory_budget_gb' || key === 'audio_cache_gb') continue;
@@ -1071,7 +1090,7 @@ function updateV2ConditionControls() {
     const range=element('#'+key), row=range?.closest('.control-row');if(!row)continue;
     const state=v2ConditionState[key],reference=v2ConditionReference(key);
     if(active) {
-      if(!state.edited)state.value=reference.value;
+      if(!state.override)state.value=reference.value;
       range.value=String(state.value);
       const mirror=row.querySelector('input[type=number]');if(mirror)mirror.value=String(state.value);
     }
@@ -1110,7 +1129,7 @@ function updateV2ConditionControls() {
   }
   const hint=element('#v2ConditionStatus');
   if(hint) {hint.hidden=!active;hint.textContent=caps.enabled
-    ? '每项默认由模型根据音乐与历史决定，仅勾选「手动指定」的项会发送。首次开启采用该字段的历史谱面参考，参考不等于本次训练集或当前 checkpoint 的校准。手动值与开关会保存；恢复默认会清除全部手动指定。条件是软输入，仍需试听与游玩。'
+    ? '每项默认由模型根据音乐与历史决定，仅勾选「手动指定」的项会发送。关闭手动指定后，显示值恢复为随等级变化的历史参考。参考不等于本次训练集或当前 checkpoint 的校准。手动值与开关会保存；恢复默认会清除全部手动指定。条件是软输入，仍需试听与游玩。'
     : '当前 checkpoint 尚未确认 Radar / Style 能力，或仅训练了等级（level_only_v1）；这些滑块不会生效。请检查 checkpoint；旧权重需在新目录 finetune 才能学习新条件。';}
 }
 
@@ -1150,7 +1169,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateCandidates", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst",
+  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateCandidates", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
@@ -1944,6 +1963,16 @@ function updateSongFormGenerationOptions() {
 
 function updateFamilyFields() {
   const v2Generation=currentGenerationFamily()==="chart_composer_v2";
+  const splitSampling=v2Generation && generationInspection.path===valueOrDefault("#checkpointPath","").trim()
+    && generationInspection.data?.valid && generationInspection.data?.generation_capabilities?.continuous_time;
+  for (const field of document.querySelectorAll('[data-v2-action-sampling]')) {
+    field.hidden=!splitSampling;
+    field.querySelector('input').disabled=!splitSampling;
+  }
+  const onsetSupported=splitSampling && generationInspection.data?.generation_capabilities?.onset_readout;
+  for (const field of document.querySelectorAll('[data-v2-onset-readout]')) {
+    field.hidden=!onsetSupported; field.querySelector('input').disabled=!onsetSupported;
+  }
   updateV2ConditionControls();
   document.querySelectorAll("#generationTargetGroup .condition-presets > :not(.level-recipe-row)").forEach(target=>{target.hidden=v2Generation;});
   document.querySelectorAll('#generationTargetGroup .condition-advanced').forEach(target=>{target.hidden=v2Generation && !target.querySelector('#v2ConditionStatus');});
@@ -3617,7 +3646,11 @@ function composerGenerationSummary(task) {
   if(task.kind==="composer_v2_generate") {
     const report=task.result?.composer_v2_report||{},settings=task.result?.effective_settings||{};
     const scope=report.recovery_budget_scope==="forward_progress_v2"?"单处":"全曲";
-    return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
+    const sampling=report.sampling_policy;
+    const settingsSummary=sampling?.rng_policy==='separate_timing_action_v1'
+      ? `采音 ${sampling.timing_temperature} / ${sampling.timing_top_p}，配置 ${sampling.action_temperature} / ${sampling.action_top_p}（温度 / Top-p）；`
+      : '';
+    return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；${settingsSummary}候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
   }
   if (task.kind !== "composer_generate") return null;
   const result=task.result||{},report=result.composer_report||{},settings=result.effective_settings||{};
@@ -5237,6 +5270,8 @@ async function submitTrain(options = {}) {
     validateV2NumericInputs('#composerV2TrainingControls');
     if(options.autoPreprocess)throw new Error("Composer v2 请先准备训练 manifest");
     const backend=await api("/api/status");
+    if(payload.onset_readout && payload.onset_readout!=='auto' && !backend.training_capabilities?.composer_v2_onset_readout)
+      throw new Error('独立起音参考训练需要更新后的 WebUI 后台，请重启当前后台后提交。');
     if(backend.training_capabilities?.composer_v2_api_contract!=="composer_v2_continuous_events_v3")throw new Error("当前后台不支持 Composer v2 条件与自动节拍合同，请重启为更新后的 WebUI 后台再提交；请先妥善处理正在运行的任务。");
     if (backend.training_capabilities?.composer_v2_memory_budgets !== true &&
         ((payload.cuda_memory_budget_gb ?? 0) !== 0 || (payload.audio_cache_gb ?? 0.25) !== 0.25)) {
@@ -6264,6 +6299,7 @@ async function submitGenerate() {
     const status=await api("/api/status");
     if(status.training_capabilities?.composer_v2_api_contract!=="composer_v2_continuous_events_v3")throw new Error("当前后台不支持 Composer v2 条件与自动节拍合同，请重启为更新后的 WebUI 后台再提交；请先妥善处理正在运行的任务。");
     requireV2ExhaustionSupport(status,payload);
+    requireV2SplitSamplingSupport(status,payload);
     const data=await api("/api/composer-v2/generate",payload);
     watchTask(data.task_id,task=>{if(task.status==="completed")setAcceptanceStatus(composerV2CompletionMessage(task),task.result?.composer_v2_report?.accepted_with_conflicts_count>0?"warn":"good");});
     return;

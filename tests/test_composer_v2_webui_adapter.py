@@ -16,6 +16,31 @@ class Runtime:
 class Handler:
     def _json_response(self,result): self.result=result;return result
 
+
+def test_onset_readout_training_and_generation_cli_wiring(tmp_path,monkeypatch):
+    manifest=tmp_path/'manifest.json';manifest.write_text('{}')
+    parent=tmp_path/'parent.pt';parent.touch()
+    audio=tmp_path/'audio.wav';audio.touch()
+    info=dict(valid=True,can_init=True,can_resume=True,sequence_policy='continuous_events_v1',
+              model_config={'sequence_policy':'continuous_events_v1'})
+    monkeypatch.setattr(api,'inspection',lambda _:info)
+    runtime=Runtime()
+    api.start_train(Handler(),dict(manifest=str(manifest),checkpoint_dir=str(tmp_path/'trial'),
+        init_checkpoint=str(parent),mode='finetune',validation_source='off',
+        onset_readout='phase_audio_v1'),runtime=runtime)
+    from maichart.composer_v2.train import parser as training_parser
+    options=training_parser().parse_args(runtime.launched[-1][1][2:])
+    assert options.onset_readout=='phase_audio_v1'
+    runtime=Runtime()
+    with pytest.raises(ValueError,match='微调'):
+        api.start_generate(Handler(),dict(checkpoint=str(parent),audio=str(audio),onset_strength=1),runtime=runtime)
+    assert not runtime.created
+    info['model_config']['onset_readout_policy']='phase_audio_v1'
+    api.start_generate(Handler(),dict(checkpoint=str(parent),audio=str(audio),onset_strength=0),runtime=runtime)
+    from maichart.composer_v2.generate import parser as generation_parser
+    options=generation_parser().parse_args(runtime.launched[-1][1][2:])
+    assert options.onset_strength==0
+
 def test_condition_and_timing_contract_before_task(tmp_path, monkeypatch):
     checkpoint=tmp_path/'model.pt';checkpoint.touch()
     audio=tmp_path/'song.wav';audio.touch()
@@ -87,6 +112,33 @@ def test_invalid_generate_candidate_has_no_task(tmp_path,monkeypatch):
     with pytest.raises(ValueError,match="候选"):
         api.start_generate(Handler(),dict(checkpoint=str(ckpt),audio=str(audio),bpm=180,candidates=3),runtime=runtime)
     assert not runtime.created
+
+def test_split_generation_settings_reach_cli_including_zero(tmp_path,monkeypatch):
+    from maichart.composer_v2.generate import parser
+
+    checkpoint=tmp_path/'model.pt';checkpoint.touch()
+    audio=tmp_path/'song.wav';audio.touch()
+    monkeypatch.setattr(api,'inspection',lambda _:dict(valid=True,sequence_policy='continuous_events_v1'))
+    runtime=Runtime()
+    request=dict(checkpoint=str(checkpoint),audio=str(audio),temperature=.65,top_p=.93,
+        action_temperature=0.,action_top_p=.98)
+    api.start_generate(Handler(),request,runtime=runtime)
+    task,command,_=runtime.launched[0]
+    args=parser().parse_args(command[2:])
+    for key in ('temperature','top_p','action_temperature','action_top_p'):
+        assert getattr(args,key)==task.result['effective_settings'][key]==request[key]
+
+
+def test_split_sampling_rejects_window_checkpoints_before_launch(tmp_path,monkeypatch):
+    checkpoint=tmp_path/'model.pt';checkpoint.touch()
+    audio=tmp_path/'song.wav';audio.touch()
+    monkeypatch.setattr(api,'inspection',lambda _:dict(valid=True,sequence_policy='window_v1'))
+    runtime=Runtime()
+    with pytest.raises(ValueError,match='连续事件'):
+        api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),
+            action_temperature=1.1),runtime=runtime)
+    assert not runtime.created
+
 
 def test_fresh_mert_contract_is_separate(tmp_path):
     manifest=tmp_path/"manifest.json";manifest.write_text("{}")

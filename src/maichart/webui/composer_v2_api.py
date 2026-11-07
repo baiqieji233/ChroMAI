@@ -86,8 +86,8 @@ def start_train(handler,payload,*,runtime):
         if mode=="resume":
             saved_args=checked.get("args") or {}
             payload={**{key:value for key,value in saved_args.items() if key in TRAIN_DEFAULTS},**payload}
-        # Both weight initialization and exact resume retain the parent's model,
-        # codec and audio contract. Only the new-stage optimizer settings differ.
+        # Both modes retain the parent's model and audio configuration.
+        # The trainer may append observed vocabulary entries during finetune.
         fixed=checked.get("model_config") or checked.get("config") or {}
         for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model"):
             if key in fixed:payload[key]=fixed[key]
@@ -99,6 +99,14 @@ def start_train(handler,payload,*,runtime):
     recovery_policy=_choice(payload,'timing_recovery','auto',CHOICES)
     _arg(args,'--timing-recovery',recovery_policy)
     settings['timing_recovery']=recovery_policy
+    from maichart.composer_v2.onset_policy import CHOICES as ONSET_CHOICES,resolve_policy as resolve_onset_policy
+    onset_requested=_choice(payload,'onset_readout','auto',ONSET_CHOICES)
+    onset_policy,_=resolve_onset_policy(onset_requested,
+        (checked.get('model_config') or {}) if parent else None,resume=mode=='resume')
+    if onset_policy!='off' and sequence_policy!='continuous_events_v1':
+        raise ValueError('独立声学读出仅适用于连续事件检查点')
+    _arg(args,'--onset-readout',onset_requested)
+    settings.update(onset_readout=onset_requested,onset_readout_policy=onset_policy)
     refresh_events=_integer(payload,'refresh_events',16,minimum=1)
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
@@ -202,6 +210,29 @@ def start_generate(handler,payload,*,runtime):
         settings[key]=_float(payload,key,default)
         _arg(args,"--"+key.replace("_","-"),settings[key])
     if settings["temperature"]<0 or not 0<settings["top_p"]<=1: raise ValueError("temperature/top_p 超出范围")
+    from maichart.composer_v2.onset_policy import effective_strength
+    raw_onset=payload.get('onset_strength')
+    if isinstance(raw_onset,bool):raise ValueError('起音参考强度必须是数字')
+    onset_strength=effective_strength(None if raw_onset in (None,'') else raw_onset,
+        (checked.get('model_config') or {}).get('onset_readout_policy','off'))
+    if raw_onset not in (None,''):
+        settings['onset_strength']=onset_strength
+        _arg(args,'--onset-strength',onset_strength)
+    for key in ("action_temperature", "action_top_p"):
+        raw = payload.get(key)
+        if raw is None or raw == "":
+            continue
+        if checked.get("sequence_policy") != "continuous_events_v1":
+            raise ValueError("独立配置采样适用于 Composer v2 连续事件检查点")
+        if isinstance(raw, bool):
+            raise ValueError(f"{key} 必须是数值")
+        value = _float(payload, key, 0.)
+        if key == "action_temperature" and value < 0:
+            raise ValueError("配置温度必须不小于 0")
+        if key == "action_top_p" and not 0 < value <= 1:
+            raise ValueError("配置 Top-p 必须大于 0 且不大于 1")
+        settings[key] = value
+        _arg(args, "--" + key.replace("_", "-"), value)
     if not 1<=settings["level"]<=15:raise ValueError("level 必须在1到15之间")
     for key,default in dict(seed=0,candidates=1,max_events=0,rollback_windows=2,cpu_threads=2).items():
         settings[key]=_integer(payload,key,default,minimum=0)

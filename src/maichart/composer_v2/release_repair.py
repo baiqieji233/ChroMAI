@@ -189,9 +189,9 @@ def repair_hold_conflict(points, rejected, tempo, clock, duration, codec, *, att
             codec.encode_points(list(replacements.values()))
             if index not in bases:
                 base = _new_guard(tempo, clock.seconds[0], duration)
+                # The unchanged prefix was already committed, possibly under
+                # continue-and-report. Validate the edited suffix below.
                 for p in points[:index]:
-                    if not base.accepts(p):
-                        raise RuntimeError('Committed prefix failed release-repair replay')
                     base.commit(p)
                 bases[index] = base
             audit['native_checks'] += 1

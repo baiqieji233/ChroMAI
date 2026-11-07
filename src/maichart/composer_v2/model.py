@@ -29,6 +29,7 @@ class ComposerV2Config:
     condition_policy: str = 'radar_style_v1'
     sequence_policy: str = 'continuous_events_v1'
     refresh_events: int = 16
+    onset_readout_policy: str = 'off'
     def __post_init__(self):
         if self.d_model%self.nhead or min(self.d_model,self.layers,self.nhead,self.dim_feedforward,self.window_beats,self.max_tokens)<1:
             raise ValueError('Invalid Composer v2 dimensions')
@@ -37,6 +38,9 @@ class ComposerV2Config:
         if self.condition_policy not in ('level_only_v1','radar_style_v1'):
             raise ValueError('Invalid Composer v2 condition policy')
         if self.sequence_policy not in ('window_v1','continuous_events_v1') or self.refresh_events<1:raise ValueError('Invalid stream policy')
+        from .onset_policy import POLICY
+        if self.onset_readout_policy not in ('off', POLICY) or (self.onset_readout_policy != 'off' and self.sequence_policy != 'continuous_events_v1'):
+            raise ValueError('Phase audio readout requires continuous events')
     def to_dict(self):return asdict(self)
     @classmethod
     def from_dict(cls,value):return cls(**{'condition_policy':'level_only_v1','sequence_policy':'window_v1',**value})
@@ -157,6 +161,11 @@ class ComposerV2(nn.Module):
         self.output_bias=nn.Parameter(torch.zeros(codec.vocab_size))
         self._song_cache={}
         self.register_buffer('time_tokens',torch.tensor([t.startswith(('T:','F:')) or t in ('[AT]','[PHASE]','[TIME_EXT]','[TIME_END]') or t.startswith('NUM:') for t in codec.tokens]),persistent=False)
+        if c.onset_readout_policy != 'off':
+            from .onset_readout import PhaseAudioReadout
+            with torch.random.fork_rng(devices=[]):
+                self.onset_readout = PhaseAudioReadout()
+            self.register_buffer('phase_token_ids', torch.tensor(sorted(codec.phases)), persistent=False)
     def train(self,mode=True):
         self._song_cache.clear()
         return super().train(mode)
@@ -200,7 +209,10 @@ class ComposerV2(nn.Module):
                 if len(self._song_cache)>=4:self._song_cache.clear()
                 self._song_cache[key]=(song.detach(),song_mask)
         else:song,song_mask=cached
-        return dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask)
+        result = dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask)
+        if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
+            result['onset_scores'] = self.onset_readout(batch)
+        return result
     @staticmethod
     def reset_decode_cache(cache):cache.pop('decode_state',None)
     @staticmethod
@@ -246,6 +258,10 @@ class ComposerV2(nn.Module):
         for i,layer in enumerate(self.decoder):
             x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
         logits=F.linear(self.norm(x),self.embedding.weight,self.output_bias)
+        if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
+            from .onset_readout import apply_phase_evidence
+            logits = apply_phase_evidence(logits, cache['onset_scores'], batch['phase_queries_cpu'],
+                self.phase_token_ids, start=start, strength=batch.get('onset_strength', 1.))
         if use_cache:
             state['length']=length;cache['decode_state']=state
         return logits

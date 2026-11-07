@@ -12,6 +12,24 @@ function context(values={}){const ctx=vm.createContext({Math,valueOrDefault:(key
   currentTrainingMode:()=> 'fresh',trainingSourcePaths:()=>({manifest:'source.json'}),selectedTrainingManifests:()=>[],
   v2ConditionState:{note_density:{value:.5,override:false}},v2ConditionCapability:()=>({enabled:true}),
   parseTempoMap:()=>null,parseMeterMap:()=>null});vm.runInContext(fn('v2NumericValue'),ctx);return ctx;}
+
+test('onset reference uses the main controls and cannot silently hit an older backend',()=>{
+ const ctx=context({'#v2GenerateOnsetStrength':'0'});
+ vm.runInContext(fn('composerV2GenerationPayload'),ctx);
+ assert.equal(ctx.composerV2GenerationPayload().onset_strength,0);
+ ctx.element=()=>({disabled:true});
+ assert.equal('onset_strength' in ctx.composerV2GenerationPayload(),false);
+ vm.runInContext(fn('requireV2SplitSamplingSupport'),ctx);
+ assert.throws(()=>ctx.requireV2SplitSamplingSupport({}, {onset_strength:1}),/起音参考强度/);
+ assert.doesNotThrow(()=>ctx.requireV2SplitSamplingSupport({training_capabilities:{composer_v2_onset_readout:true}}, {onset_strength:1}));
+ assert.match(html,/id="v2TrainOnsetReadout"/);
+ assert.match(html,/data-v2-onset-readout hidden/);
+ assert.match(html,/id="v2GenerateOnsetStrength"[^>]*value="1"[^>]*disabled/);
+ assert.match(source,/generation_capabilities\?\.onset_readout/);
+ const tr=context({'#v2TrainOnsetReadout':'phase_audio_v1'});
+ vm.runInContext('const COMPOSER_V2_FIELDS=["onset_readout"];'+fn('v2FieldId')+fn('composerV2TrainingPayload'),tr);
+ assert.equal(tr.composerV2TrainingPayload().onset_readout,'phase_audio_v1');
+});
 test('v2 payload includes rollback and excludes legacy curve/condition controls',()=>{
  const ctx=context({'#v2GenerateRollbackWindows':'5','#seed':'17','#bpm':'180'});
  vm.runInContext(fn('composerV2GenerationPayload'),ctx);
@@ -20,6 +38,29 @@ test('v2 payload includes rollback and excludes legacy curve/condition controls'
  assert.equal(p.exhaustion_policy,'auto');
  assert.equal(Object.keys(p.condition).length,0);
  for(const key of ['curve_strength','intensity_curve','action_slots'])assert.equal(key in p,false);
+});
+test('continuous configuration sampling values are optional and independent of timing',()=>{
+ const ctx=context({'#v2GenerateTemperature':'.65','#v2GenerateTopP':'.93',
+   '#v2GenerateActionTemperature':'0','#v2GenerateActionTopP':'.98'});
+ vm.runInContext(fn('composerV2GenerationPayload'),ctx);
+ const result=ctx.composerV2GenerationPayload();
+ assert.equal(result.temperature,.65);assert.equal(result.top_p,.93);
+ assert.equal(result.action_temperature,0);assert.equal(result.action_top_p,.98);
+ ctx.element=key=>({disabled:key.startsWith('#v2GenerateAction')});
+ const legacy=ctx.composerV2GenerationPayload();
+ assert.equal('action_temperature' in legacy,false);
+ assert.equal('action_top_p' in legacy,false);
+ for(const id of ['v2GenerateActionTemperature','v2GenerateActionTopP']) {
+   assert.match(html,new RegExp('id="'+id+'"[^>]*disabled'));
+   assert.ok(source.includes('"'+id+'",'));
+ }
+});
+test('old backend cannot silently ignore a split configuration sampling request',()=>{
+ const ctx=vm.createContext({});vm.runInContext(fn('requireV2SplitSamplingSupport'),ctx);
+ assert.doesNotThrow(()=>ctx.requireV2SplitSamplingSupport({}, {}));
+ assert.throws(()=>ctx.requireV2SplitSamplingSupport({}, {action_temperature:0}),/需要更新/);
+ assert.doesNotThrow(()=>ctx.requireV2SplitSamplingSupport({training_capabilities:{
+   composer_v2_split_sampling:true}}, {action_top_p:.98}));
 });
 test('v2 timing auto is explicit and sends only enabled overrides',()=>{
  const ctx=context();vm.runInContext(fn('composerV2GenerationPayload'),ctx);

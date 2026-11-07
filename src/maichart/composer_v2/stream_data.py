@@ -25,8 +25,12 @@ def _song_cache_key(song):
 
 
 class StreamDataset(ComposerV2Dataset):
-    def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,**kwargs):
+    def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',**kwargs):
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
+        from .onset_readout import POLICY as ONSET_POLICY, phase_values
+        if onset_readout_policy not in ('off', ONSET_POLICY):raise ValueError('Unknown onset readout policy')
+        self.onset_readout_policy = onset_readout_policy
+        self.onset_phases = phase_values(self.codec) if onset_readout_policy != 'off' else None
         if not isinstance(self.codec,StreamCodec):raise ValueError('Continuous training requires a new vocabulary and fresh checkpoint')
         self.refresh_events=int(refresh_events)
         if self.refresh_events<1:raise ValueError('refresh_events must be positive')
@@ -125,6 +129,9 @@ class StreamDataset(ComposerV2Dataset):
             local_semantic=torch.as_tensor(sem,dtype=torch.float32),local_semantic_mask=torch.as_tensor(valid,dtype=torch.bool),
             local_mask=torch.as_tensor((seconds>=0)&(seconds<=song.audio.duration_sec),dtype=torch.bool),
             local_beats=torch.tensor(beats,dtype=torch.float32))
+        if getattr(self, 'onset_readout_policy', 'off') != 'off':
+            from .onset_readout import audio_tiles
+            result.update({k:v[0] for k,v in audio_tiles(song,[anchor],self.onset_phases).items()})
         self.tile_cache[key]=result
         while len(self.tile_cache)>64:self.tile_cache.popitem(last=False)
         return result
@@ -245,6 +252,10 @@ class StreamDataset(ComposerV2Dataset):
         if sample_frames is not None:
             out['bank_semantic_right'] = torch.as_tensor(semantic_right)
             out['bank_semantic_weight'] = torch.as_tensor(semantic_weight)
+        if getattr(self, 'onset_readout_policy', 'off') != 'off':
+            from .onset_readout import audio_tiles, query_rows
+            out.update(audio_tiles(song, anchors, self.onset_phases))
+            out['phase_queries_cpu'] = query_rows(ids, out['tile_ids'], self.codec.ids['[PHASE]'])
         return out
     def __getitem__(self,index):
         source = self.recovery_sources.get(index)
@@ -314,4 +325,12 @@ def collate_stream(items):
     out['tile_owner']=torch.tensor(owners);out['tile_ids_cpu']=ids
     out['bank_owner']=torch.tensor(bank_owners);out['tile_frames']=torch.cat(frames)
     out['cursor']=[item['cursor'] for item in items]
+    if 'onset_audio' in items[0]:
+        from .onset_readout import collate_tiles
+        out.update(collate_tiles(items))
+        queries=[];offset=0
+        for row,item in enumerate(items):
+            queries.extend((row,p,tile+offset) for _,p,tile in item['phase_queries_cpu'])
+            offset+=len(item['anchors'])
+        out['phase_queries_cpu']=queries
     return out

@@ -22,7 +22,7 @@ def test_public_default_resolves_to_report_for_continuous_and_stop_for_old_windo
     with pytest.raises(ValueError):resolve_policy('report','window_v1')
 
 
-def generate_fixture(tmp_path,monkeypatch,policy,points):
+def generate_fixture(tmp_path,monkeypatch,policy,points,*,rollback_windows=0,temperature=.3):
     import maichart.composer_v2.stream_generate as generation
     codec=StreamCodec.fit([p.note_text for p in points]);seen=[]
     class Audio:
@@ -39,7 +39,7 @@ def generate_fixture(tmp_path,monkeypatch,policy,points):
     monkeypatch.setattr(generation,'EventSampler',Sampler)
     model=SimpleNamespace(codec=codec,config=SimpleNamespace(max_tokens=2048,history_beats=16,
         window_beats=16,future_beats=4,refresh_events=1,ticks_per_beat=48,sequence_policy='continuous_events_v1'))
-    args=SimpleNamespace(temperature=.3,top_p=.95,window_retries=1,candidates=1,rollback_windows=0,
+    args=SimpleNamespace(temperature=temperature,top_p=.95,window_retries=1,candidates=1,rollback_windows=rollback_windows,
         level=14.5,seed=0,max_events=0,exhaustion_policy=policy,checkpoint='untouched.pt',output=str(tmp_path/'maidata.txt'))
     report=generation.generate_continuous(model,Audio(),tmp_path/'song.mp3',[EventTempo(F(0),120.)],0.,{},
         np.zeros(16,'float32'),np.zeros(16,bool),{},args,torch.Generator(),'cpu',F(200))
@@ -70,6 +70,21 @@ def test_stop_mode_still_aborts_at_the_same_physical_conflict(tmp_path,monkeypat
     assert not (tmp_path/'maidata.txt').exists()
     failure=json.loads((tmp_path/'maidata.failure.json').read_text(encoding='utf-8'))
     assert failure['exhaustion_policy']=='stop' and failure['bypassed_events']==[]
+
+
+def test_report_mode_repairs_later_hold_after_admitting_an_earlier_conflict(tmp_path,monkeypatch):
+    points=[EventPoint(F(10),'8h[4:12]'),EventPoint(F(11),'1/2'),
+            EventPoint(F(40),'8h[4:1]'),EventPoint(F(41),'8'),EventPoint(F(60),'2')]
+    report,seen=generate_fixture(tmp_path,monkeypatch,'report',points,rollback_windows=8,temperature=0.)
+    assert report['accepted_with_conflicts_count']==1
+    assert report['bypassed_events'][0]['beat']=='11'
+    repair,=report['duration_repairs']
+    assert repair['source_beat']=='40' and repair['witness']['beat']=='41'
+    exported=parse_event_chart(tmp_path/'maidata.txt',5,strict_notes=True).points
+    assert exported[:2]==points[:2] and exported[3:]==points[3:]
+    assert exported[2]==EventPoint(F(40),repair['replacement_note_text'])
+    assert exported[:4] in seen
+    assert report['final_enforced_conflict_count']>0
 
 
 @pytest.mark.parametrize('text',['1/1','8h[4:400]'])

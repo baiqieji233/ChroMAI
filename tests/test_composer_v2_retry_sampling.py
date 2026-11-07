@@ -25,6 +25,32 @@ def test_exclusion_removes_only_failed_complete_answer_and_keeps_other_same_time
     assert not tree.reject([0,2])
 
 
+def test_retry_survival_uses_the_temperature_of_each_decision():
+    tree=RejectedEventTree()
+    timing=torch.tensor([.9,.1,1.,1.]).log()
+    action=torch.tensor([1.,1.,.8,.2]).log()
+    tree.remember([], (0,1), timing, temperature=.6)
+    tree.remember([0], (2,3), action, temperature=1.3)
+    assert tree.reject([0,2])
+    logits,allowed,scaled=tree.condition([], (0,1),.6)
+    expected=torch.softmax(timing[:2]/.6,0)
+    expected[0]*=torch.softmax(action[2:]/1.3,0)[1]
+    expected/=expected.sum()
+    assert scaled
+    torch.testing.assert_close(torch.softmax(logits[list(allowed)],0),expected)
+
+
+def test_greedy_timing_can_keep_a_beat_with_remaining_action_choices():
+    tree=RejectedEventTree()
+    tree.remember([], (0,1), torch.tensor([2.,0.,0.,0.]), temperature=0.)
+    tree.remember([0], (2,3), torch.tensor([0.,0.,2.,0.]), temperature=1.1)
+    assert tree.reject([0,2])
+    assert tree.condition([], (0,1),0.)[1:]==((0,1),False)
+    assert tree.condition([0], (2,3),1.1)[1]==(3,)
+    assert tree.reject([0,3])
+    assert tree.condition([], (0,1),0.)[1:]==((1,),False)
+
+
 def test_near_certain_failed_sequence_does_not_cancel_remaining_probability_to_zero():
     tree=RejectedEventTree()
     tree.remember([], (0,1),torch.tensor([1000.,0.]))
@@ -131,3 +157,35 @@ def test_physical_failure_cannot_finish_the_chart_by_retrying_eos(tmp_path,monke
     latest=json.loads((tmp_path/'maidata.failure.json').read_text(encoding='utf-8'))
     assert any(r['reason']=='eos_is_not_physical_recovery' for r in latest['repairs'])
     assert Path(latest['failure_snapshot_path']).exists()
+
+
+def test_continuous_event_routes_timing_and_configuration_to_independent_draws(monkeypatch):
+    from test_composer_v2_continuous import setup
+    import maichart.composer_v2.stream_generate as generation
+    from maichart.event_timing import EventPoint
+
+    dataset,song=setup()
+    codec=dataset.codec
+    model=SimpleNamespace(codec=codec,config=SimpleNamespace(max_tokens=256),
+        encode_audio=lambda batch:None)
+    timing_generator=torch.Generator().manual_seed(11)
+    action_generator=torch.Generator().manual_seed(12)
+    options=SimpleNamespace(temperature=.65,top_p=.93,action_temperature=1.1,action_top_p=.97)
+    sampler=generation.EventSampler(model,dataset,song,[],'cpu',timing_generator,options,
+        action_generator=action_generator)
+    beat=F(1,6)
+    expected=codec.encode_points([EventPoint(beat,'3h[4:1]')])
+    draws=[]
+
+    def sample(logits,allowed,generator,temperature,top_p):
+        token=expected[len(draws)]
+        assert token in allowed
+        draws.append((generator,temperature,top_p))
+        return token
+
+    monkeypatch.setattr(generation,'_sample',sample)
+    monkeypatch.setattr(sampler,'_logits',lambda target:torch.zeros(codec.vocab_size))
+    assert sampler.propose([],F(-1),F(10))==expected
+    timing_tokens=len(codec._time(beat))
+    assert draws[:timing_tokens]==[(timing_generator,.65,.93)]*timing_tokens
+    assert draws[timing_tokens:]==[(action_generator,1.1,.97)]*(len(expected)-timing_tokens)

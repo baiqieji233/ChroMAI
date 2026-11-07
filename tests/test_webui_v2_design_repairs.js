@@ -87,6 +87,44 @@ test('loaded level reference initializes an override without later overwriting t
  assert.equal(p.ctx.composerV2GenerationPayload().condition.note_density,expected);
 });
 
+test('cleared radar and style overrides follow difficulty again through level controls and reload',()=>{
+ const p=page(),handlers=new Map();
+ p.ctx.levelPresetProfile=JSON.parse(fs.readFileSync('src/maichart/webui/static/generation_presets.json','utf8'));
+ vm.runInContext(fn('applyConditionPreset'),p.ctx);
+ p.ctx.on=(id,event,handler)=>handlers.set(id,handler);
+ for(const id of ['level','levelRange'])
+  vm.runInContext(source.split('\n').find(line=>line.startsWith(`on("#${id}",`)),p.ctx);
+ p.ctx.updateV2ConditionControls();
+ const keys=['note_density','tap_bias'];
+ for(const key of keys){
+  const toggle=p.toggle(key);toggle.checked=true;toggle.fire('change');
+  p.mirrors.get(key).value='.87';p.mirrors.get(key).fire('input');
+  toggle.checked=false;toggle.fire('change');
+ }
+ function check(level){
+  const reference=p.ctx.interpolateLevelPreset(p.ctx.levelPresetProfile,level);
+  for(const key of keys){
+   const expected=Number((reference.radar[key]??reference.style[key]).toFixed(3));
+   assert.equal(p.state[key].value,expected);
+   assert.equal(Number(p.ids.get(key).value),expected);
+   assert.equal(Number(p.mirrors.get(key).value),expected);
+   assert.equal(p.ids.get(key).disabled,true);
+   assert.equal(p.ctx.composerV2GenerationPayload().condition[key],undefined);
+  }
+ }
+ check(13.3);
+ p.ids.get('levelRange').value='14.2';handlers.get('#levelRange')({target:p.ids.get('levelRange')});check(14.2);
+ p.ids.get('level').value='13';handlers.get('#level')();check(13);
+ const reloaded=page({version:2,values:p.ctx.collectSettings()});
+ reloaded.ctx.levelPresetProfile=p.ctx.levelPresetProfile;
+ reloaded.ids.get('level').value='14.2';reloaded.ctx.updateV2ConditionControls();
+ for(const key of keys){
+  assert.equal(reloaded.state[key].value,reloaded.ctx.v2ConditionReference(key).value);
+  reloaded.toggle(key).checked=true;reloaded.toggle(key).fire('change');
+  assert.equal(reloaded.ctx.composerV2GenerationPayload().condition[key],reloaded.state[key].value);
+ }
+});
+
 test('manual condition edits, refresh, and family switching preserve separate values',()=>{
  const p=page();const t=p.toggle('note_density');t.checked=true;t.fire('change');
  p.mirrors.get('note_density').value='.42';p.mirrors.get('note_density').fire('input');
@@ -128,7 +166,11 @@ test('empty, out-of-range and fractional generation numbers fail before submissi
 
 test('v2 numeric fields specify useful steps, required values and bounds',()=>{
  const inputs=[...html.matchAll(/<input\b[^>]*\bid="v2[^"]*"[^>]*>/g)].map(m=>m[0]).filter(t=>t.includes('type="number"'));
- for(const tag of inputs){assert.ok(!tag.includes('step="any"'),tag);assert.ok(tag.includes(' min='),tag);assert.ok(tag.includes(' required'),tag);}
+ const optional=new Set(['v2GenerateActionTemperature','v2GenerateActionTopP','v2GenerateOnsetStrength']);
+ for(const tag of inputs){
+  assert.ok(!tag.includes('step="any"'),tag);assert.ok(tag.includes(' min='),tag);
+  if(!optional.has(tag.match(/\bid="([^"]+)"/)[1]))assert.ok(tag.includes(' required'),tag);
+ }
  assert.match(inputs.find(t=>t.includes('id="v2GenerateTemperature"')),/step="0\.05"/);
  assert.match(inputs.find(t=>t.includes('id="v2TrainLr"')),/step="0\.000001"/);
 });
