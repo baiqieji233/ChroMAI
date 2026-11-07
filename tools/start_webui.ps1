@@ -184,14 +184,17 @@ Write-Host "Python: $Python ($($pythonInfo.Version))"
 
 # Run the shared check in the interpreter that will launch all task children.
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectRoot\src;$env:PYTHONPATH" } else { "$ProjectRoot\src" }
+
+$DependencyArgs = @("--profile", "composer-v2")
+if ($Cuda) { $DependencyArgs += "--require-cuda" }
 Push-Location $ProjectRoot
 try {
-    & $Python -m maichart.webui.startup_check --profile composer-v2
+    & $Python -m maichart.webui.startup_check @DependencyArgs
     if ($LASTEXITCODE -ne 0) {
         if ($CheckOnly -or $NoInstall) {
             Fail "Composer v2 dependencies are incomplete. See the interpreter and repair command above."
         }
-        & $Python -m maichart.webui.startup_check --profile composer-v2 --install
+        & $Python -m maichart.webui.startup_check @DependencyArgs --install
         if ($LASTEXITCODE -ne 0) { Fail "Composer v2 dependency installation/check failed. See details above." }
     }
 } finally { Pop-Location }

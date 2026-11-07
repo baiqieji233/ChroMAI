@@ -315,6 +315,9 @@ def _sampling_policy(args):
 
 @torch.inference_mode()
 def generate(args, *, model_override=None, payload_override=None, audio_store_override=None):
+    if args.device == 'cuda':
+        from maichart.webui.startup_check import require_cuda
+        require_cuda(torch)
     threads=int(getattr(args,'cpu_threads',2))
     if threads<1:raise ValueError('cpu_threads must be positive')
     torch.set_num_threads(threads)

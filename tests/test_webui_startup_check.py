@@ -38,6 +38,25 @@ def test_valid_environment_and_explicit_basic_profile():
     assert inspect_environment('basic',importer=imports(missing='torchaudio'))['ok']
 
 
+def test_cpu_build_is_valid_for_cpu_but_not_explicit_cuda(monkeypatch):
+    from maichart.webui.startup_check import require_cuda
+    cpu=NS(version=NS(cuda=None))
+    with pytest.raises(RuntimeError,match='CPU-only'):require_cuda(cpu)
+    with pytest.raises(RuntimeError,match='NVIDIA driver'):
+        require_cuda(NS(version=NS(cuda='12.8'),cuda=NS(is_available=lambda:False)))
+    monkeypatch.setenv('MAICHART_TORCH_INDEX_URL','https://download.pytorch.org/whl/cu128')
+    command=install_command(dict(profile='composer-v2',torch='2.7.0+cpu',cuda=None,cuda_required=True))
+    assert 'torch==2.7.0+cpu' not in command
+    assert '--index-url' in command and 'torch' in command and 'torchaudio' in command
+
+
+def test_generation_rejects_cpu_build_before_checkpoint_or_audio(monkeypatch):
+    from maichart.composer_v2 import generate
+    monkeypatch.setattr(generate.torch.version,'cuda',None)
+    with pytest.raises(RuntimeError,match='CPU-only'):
+        generate.generate(NS(device='cuda'))
+
+
 def test_server_does_not_bind_port_when_dependencies_fail(monkeypatch):
     from maichart.webui import server,startup_check
     monkeypatch.setattr(startup_check,'main',lambda _:1)

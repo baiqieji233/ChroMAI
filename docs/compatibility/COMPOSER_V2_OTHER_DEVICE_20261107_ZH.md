@@ -15,6 +15,8 @@ GPU训练需要可用的CUDA版PyTorch。安装后确认 `torch.cuda.is_availabl
 
 ## 另外搬运哪些文件
 
+CPU版PyTorch也能通过普通依赖检查，但不能选择CUDA生成。计划使用NVIDIA GPU时，额外运行 `START_WEBUI.bat --cuda --check`，检查CUDA构建和设备是否可用。CPU版需要换成CUDA版；CUDA版但设备不可用则应检查驱动及设备可见性。自动切换GPU版前需要显式设置 `MAICHART_TORCH_INDEX_URL` 为适合该设备的官方wheel索引，脚本不会自行猜测驱动支持的CUDA版本。`--no-install`和`--check`均不会安装。
+
 部署后先运行 `START_WEBUI.bat --check`，或使用启动解释器运行 `python -m maichart.webui.server --check`。检查包含真实导入、PyTorch／torchaudio版本及构建匹配、音频重采样和MERT所需类，不会下载模型或启动服务。双击脚本正常启动时可补装；直接命令行启动遇到缺失时会退出并显示修复参数。只维护基础界面时可显式使用服务参数 `--dependency-profile basic`，该模式不证明MERT环境可用。
 
 Git仓库包含源码、配置示例、测试和文档。以下本机材料没有上传：
