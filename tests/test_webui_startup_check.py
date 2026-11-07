@@ -44,10 +44,6 @@ def test_cpu_build_is_valid_for_cpu_but_not_explicit_cuda(monkeypatch):
     with pytest.raises(RuntimeError,match='CPU-only'):require_cuda(cpu)
     with pytest.raises(RuntimeError,match='NVIDIA driver'):
         require_cuda(NS(version=NS(cuda='12.8'),cuda=NS(is_available=lambda:False)))
-    monkeypatch.setenv('MAICHART_TORCH_INDEX_URL','https://download.pytorch.org/whl/cu128')
-    command=install_command(dict(profile='composer-v2',torch='2.7.0+cpu',cuda=None,cuda_required=True))
-    assert 'torch==2.7.0+cpu' not in command
-    assert '--index-url' in command and 'torch' in command and 'torchaudio' in command
 
 
 def test_generation_rejects_cpu_build_before_checkpoint_or_audio(monkeypatch):

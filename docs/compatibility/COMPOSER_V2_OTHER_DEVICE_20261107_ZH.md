@@ -15,7 +15,11 @@ GPU训练需要可用的CUDA版PyTorch。安装后确认 `torch.cuda.is_availabl
 
 ## 另外搬运哪些文件
 
-CPU版PyTorch也能通过普通依赖检查，但不能选择CUDA生成。计划使用NVIDIA GPU时，额外运行 `START_WEBUI.bat --cuda --check`，检查CUDA构建和设备是否可用。CPU版需要换成CUDA版；CUDA版但设备不可用则应检查驱动及设备可见性。自动切换GPU版前需要显式设置 `MAICHART_TORCH_INDEX_URL` 为适合该设备的官方wheel索引，脚本不会自行猜测驱动支持的CUDA版本。`--no-install`和`--check`均不会安装。
+启动脚本默认自动检测NVIDIA显卡和驱动。已有CUDA环境通过实际小型矩阵运算后保留；CPU版或尚未安装PyTorch时，自动查询官方索引，选择当前Python／系统有配套wheel、且适合显卡架构和驱动的torch与torchaudio。优先保留已有公开版本，其次优先项目验证过的2.7.1；找不到时才选择符合条件的其他稳定配套版本。不会修改NVIDIA驱动，也不要求自行安装CUDA Toolkit。
+
+直接运行 `START_WEBUI.bat` 可完成检查、必要安装和启动，无需手填下载源。`START_WEBUI.bat --cuda --check`只检查GPU部署；`--cpu`明确使用CPU，`--cuda`要求GPU可用。`--no-install`和`--check`均不会安装。没有NVIDIA设备时，默认允许CPU环境；检测到显卡但无法确认架构或找到匹配包时会明确停止。显存不足、设备被隐藏等错误不会触发自动重装。
+
+选择过程参考[PyTorch官方安装索引](https://pytorch.org/get-started/previous-versions/)和[NVIDIA兼容性说明](https://docs.nvidia.com/deploy/cuda-compatibility/minor-version-compatibility.html)。为避免PTX等功能的驱动限制，自动选择不超过驱动报告的CUDA上限；混合显卡需所有已检测架构都满足条件。安装只用官方CUDA索引的精确配套版本，随后补齐项目依赖并在新进程中重查，失败不会循环尝试大批版本。
 
 部署后先运行 `START_WEBUI.bat --check`，或使用启动解释器运行 `python -m maichart.webui.server --check`。检查包含真实导入、PyTorch／torchaudio版本及构建匹配、音频重采样和MERT所需类，不会下载模型或启动服务。双击脚本正常启动时可补装；直接命令行启动遇到缺失时会退出并显示修复参数。只维护基础界面时可显式使用服务参数 `--dependency-profile basic`，该模式不证明MERT环境可用。
 

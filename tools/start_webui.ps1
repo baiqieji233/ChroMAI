@@ -186,7 +186,9 @@ Write-Host "Python: $Python ($($pythonInfo.Version))"
 $env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectRoot\src;$env:PYTHONPATH" } else { "$ProjectRoot\src" }
 
 $DependencyArgs = @("--profile", "composer-v2")
-if ($Cuda) { $DependencyArgs += "--require-cuda" }
+if ($Cpu) { $env:CUDA_VISIBLE_DEVICES = "" }
+elseif ($Cuda) { $DependencyArgs += "--require-cuda" }
+else { $DependencyArgs += "--auto-device" }
 Push-Location $ProjectRoot
 try {
     & $Python -m maichart.webui.startup_check @DependencyArgs
