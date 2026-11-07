@@ -164,4 +164,3 @@ def _segment(t,bpm,first,flux=None,ft=None,alternate=None):
         start,k=backs[end];ranges.append(dict(start=start,end=end,**{key:hs[k][key] for key in ('p','phase')}));end=start
     ranges=list(reversed(ranges))
     return ranges, float(prefix[0,-1]-dp[n])
-

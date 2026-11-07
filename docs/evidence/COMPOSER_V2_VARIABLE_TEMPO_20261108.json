@@ -10524,7 +10524,7 @@
     }
   ],
   "source_sha256": {
-    "src\\maichart\\composer_v2\\tempo_map_fit.py": "9bb4da7a0522fc55f2b639c886c9bdef6389b72fdcf0c21bd27557451b2d16e1",
+    "src\\maichart\\composer_v2\\tempo_map_fit.py": "61e53591db5a67d87360a5092978ed640a62c43e3c0fd65a3ab1a40d58a62b86",
     "src\\maichart\\composer_v2\\tempo.py": "7cd70a79f91cd3b8f7b362d2f1b8822c360a8c28efceca550caf45e35e73a8c0"
   },
   "librosa_version": "0.11.0"
