@@ -1,4 +1,4 @@
-[CmdletBinding()]
+﻿[CmdletBinding()]
 param(
     [Parameter(ValueFromRemainingArguments = $true)]
     [string[]] $ScriptArgs
@@ -182,28 +182,19 @@ if (-not (Test-SupportedPython $pythonInfo)) {
 }
 Write-Host "Python: $Python ($($pythonInfo.Version))"
 
-function Test-PythonImports {
-    & $Python -c "import torch, librosa, numpy, scipy, soundfile, pytest"
-    return ($LASTEXITCODE -eq 0)
-}
-
-if (-not (Test-PythonImports)) {
-    if ($CheckOnly -or $NoInstall) {
-        Write-Error "Required Python modules are missing. Run without --check/--no-install to install them."
-        exit 1
+# Run the shared check in the interpreter that will launch all task children.
+$env:PYTHONPATH = if ($env:PYTHONPATH) { "$ProjectRoot\src;$env:PYTHONPATH" } else { "$ProjectRoot\src" }
+Push-Location $ProjectRoot
+try {
+    & $Python -m maichart.webui.startup_check --profile composer-v2
+    if ($LASTEXITCODE -ne 0) {
+        if ($CheckOnly -or $NoInstall) {
+            Fail "Composer v2 dependencies are incomplete. See the interpreter and repair command above."
+        }
+        & $Python -m maichart.webui.startup_check --profile composer-v2 --install
+        if ($LASTEXITCODE -ne 0) { Fail "Composer v2 dependency installation/check failed. See details above." }
     }
-    $pipArgs = @("-m", "pip", "install", "-e", ".[$([string]::Join(',', @('dev','audio','training')))]")
-    if ($Reinstall) { $pipArgs += "--upgrade" }
-    if ($env:MAICHART_TORCH_INDEX_URL) {
-        $pipArgs += @("--extra-index-url", $env:MAICHART_TORCH_INDEX_URL)
-    }
-    Write-Host "Installing project dependencies..."
-    Push-Location $ProjectRoot
-    try { & $Python @pipArgs } finally { Pop-Location }
-    if ($LASTEXITCODE -ne 0) { Fail "Dependency installation failed." }
-    if (-not (Test-PythonImports)) { Fail "Dependencies are still incomplete after installation." }
-}
-Write-Host "Python dependencies: OK"
+} finally { Pop-Location }
 
 if ($Cpu) {
     $env:CUDA_VISIBLE_DEVICES = ""

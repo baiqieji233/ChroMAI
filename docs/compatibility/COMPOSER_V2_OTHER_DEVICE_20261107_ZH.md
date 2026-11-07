@@ -15,6 +15,8 @@ GPU训练需要可用的CUDA版PyTorch。安装后确认 `torch.cuda.is_availabl
 
 ## 另外搬运哪些文件
 
+部署后先运行 `START_WEBUI.bat --check`，或使用启动解释器运行 `python -m maichart.webui.server --check`。检查包含真实导入、PyTorch／torchaudio版本及构建匹配、音频重采样和MERT所需类，不会下载模型或启动服务。双击脚本正常启动时可补装；直接命令行启动遇到缺失时会退出并显示修复参数。只维护基础界面时可显式使用服务参数 `--dependency-profile basic`，该模式不证明MERT环境可用。
+
 Git仓库包含源码、配置示例、测试和文档。以下本机材料没有上传：
 
 - 要继续的训练目录，尤其 `composer_v2_last.pt`。严格续训需要包含优化器和随机状态的完整检查点，`composer_v2_inference.pt`只适合生成或初始化微调。

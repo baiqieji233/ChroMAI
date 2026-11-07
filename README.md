@@ -14,7 +14,7 @@ py -3.12 -m venv .venv
 
 打开 [本地 WebUI](http://127.0.0.1:7860)，运行任务时保持终端开启。端口占用时，把命令和浏览器地址中的 `7860` 改为同一个可用端口。第一次使用默认的 MERT 音频特征时，程序可能需要下载预训练音频模型并建立缓存。
 
-也可以用 `.\START_WEBUI.bat --port 7860` 启动。它会检查基础依赖，并在终端显示所用的 Python 路径。要用 MERT，在这个 Python 环境里安装上面相同的 `composer-v2-music` 依赖。CUDA 安装、指定 Python 和环境排查见 [环境与兼容性](docs/compatibility/README.md)。
+也可以用 `.\START_WEBUI.bat --port 7860` 启动。它会显示实际Python路径，检查默认Composer v2所需的依赖，并尝试补装缺失部分；已有PyTorch会固定版本，torchaudio按对应版本安装。使用 `--check` 或 `--no-install` 时只检查。命令行启动也会检查依赖，失败时给出修复命令；检查不会下载MERT模型。CUDA安装、指定Python和环境排查见[环境与兼容性](docs/compatibility/README.md)。
 
 仓库提供源码和小型演示数据。生成需要另外准备可信来源的 Composer v2 `.pt` 检查点，或者用自己的谱面训练一个。
 

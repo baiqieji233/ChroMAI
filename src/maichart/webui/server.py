@@ -176,7 +176,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument('--dependency-profile',choices=('composer-v2','basic'),default='composer-v2')
+    parser.add_argument('--check',action='store_true',help='Check this interpreter without starting the server')
     args = parser.parse_args(argv)
+    from .startup_check import main as check_environment
+    checked=check_environment(['--profile',args.dependency_profile])
+    if checked or args.check:return checked
     server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
     print(f"maichart WebUI: http://{args.host}:{args.port}", flush=True)
     print(f"workspace: {WEBUI_ROOT}", flush=True)
