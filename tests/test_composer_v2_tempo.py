@@ -95,7 +95,7 @@ def test_fallback_backend_and_failure_reasons_are_explicit(tmp_path, monkeypatch
         {'name': 'native_multicycle_v1', 'fallback': 'local weights unavailable'})
     monkeypatch.setattr(timing, '_acoustic', lambda *args: (_beats(), {'acoustic_confidence': .5}))
     report = timing.resolve_timing(_audio(tmp_path), tmp_path)[2]
-    assert report['backend']['name'] == 'librosa_flux_global_bpm_v1'
+    assert report['backend']['name'] == 'librosa_flux_dynamic_bpm_v2'
     assert report['fallback_reasons'] == ['local weights unavailable']
 
 
@@ -196,7 +196,7 @@ def test_measure_only_cli_uses_same_manual_precedence(tmp_path, monkeypatch, cap
     monkeypatch.setattr(timing,'_detect',lambda *args: (_beats(),{}))
     report=tmp_path/'measurement.json'
     assert timing.main(['--audio',str(_audio(tmp_path)),'--bpm','95',
-        '--output',str(report)]) == 0
+        '--output',str(report),'--tempo-detection','legacy']) == 0
     payload=json.loads(report.read_text(encoding='utf-8'))
     assert payload['effective_bpm'] == 95.
     assert payload['effective_first'] == pytest.approx(.137,abs=.005)

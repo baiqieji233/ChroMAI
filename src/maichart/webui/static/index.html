@@ -1019,7 +1019,7 @@
   <h3>Composer v2 生成</h3>
   <p>按检查点的序列合同续写。连续模型可分别调整采音与配置。多候选在同一落点和同拍音符数下比较配置；仍需试听与游玩检查。</p>
   <div class="form-grid">
-    <label class="checkbox-field"><input id="v2GenerateAutoFirst" type="checkbox"> 自动识别首拍偏移（默认关闭，关闭时使用手动首拍值）</label>
+    <label class="field">自动BPM分析<select id="v2GenerateTempoDetection"><option value="auto" selected>识别变速并校准全曲</option><option value="constant">仅恒定BPM，校准全曲</option><option value="legacy">旧版恒速估计（对照）</option></select><small>检测变速请将BPM留空；填写BPM即固定恒速，手动tempo map整表优先。自动变速只应用通过连续性检查的结果，其余候选写入报告。复杂变速仍需试听核对。</small></label><label class="checkbox-field"><input id="v2GenerateAutoFirst" type="checkbox"> 自动识别首拍偏移（默认关闭，关闭时使用手动首拍值）</label>
     <label class="field">采音温度<input id="v2GenerateTemperature" type="number" value="0.9" min="0" step="0.05" required><small>控制何时落音与结束整谱。旧窗口检查点共用此温度。</small></label>
     <label class="field" data-v2-action-sampling hidden>配置温度<input id="v2GenerateActionTemperature" type="number" min="0" step="0.05" placeholder="留空沿用采音" disabled><small>控制音符类型、键位、同拍组合与时值。0 为配置贪心。</small></label>
     <label class="field">采音 Top-p<input id="v2GenerateTopP" type="number" value="0.95" min="0" max="1" step="0.01" required><small>限制参与落点抽样的概率范围。旧窗口检查点共用此值。</small></label>

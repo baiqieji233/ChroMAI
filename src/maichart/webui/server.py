@@ -245,6 +245,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_split_sampling": True,
                                               "composer_v2_onset_readout": True,
                                               "composer_v2_tail_guard": True,
+                                              "composer_v2_variable_tempo": True,
                                               "composer_v2_exhaustion_policy": True,
                                               "composer_v2_memory_budgets": True,
                                               "composer_v2_timing_recovery": True,

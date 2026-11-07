@@ -18,6 +18,7 @@
 | Composer v2 生成 | 采音温度／采音 Top-p | 默认 `0.9`／`0.95`。控制何时落音、具体拍内位置和何时结束谱面。 |
 | Composer v2 生成 | 配置温度／配置 Top-p | 连续事件检查点可单独控制音符类型、键位、同拍组合和时值。每项留空时沿用对应的采音值。 |
 | Composer v2 生成 | 起音参考强度 | 仅已启用独立声学读出的检查点可见。`0`关闭附加分数，`1`沿用训练强度，最大`2`。实验功能，不是物量控制器。 |
+| Composer v2 生成 | 自动BPM分析 | 默认识别变速并校准全曲；也可只校准恒速或使用旧版对照。自动变速请将BPM留空，手动BPM及tempo map优先。[逐曲测试](COMPOSER_V2_VARIABLE_TEMPO_20261108_ZH.md) |
 | Composer v2 生成 | 拦截并清理Slide撞尾（可选）／撞尾检测阈值（ms） | 默认关闭，阈值200，范围0—250。开启后使用MiaCode硬撞尾规则拦截及清理；警告保留。0关闭静态邻近参考，实际触发的硬撞尾仍检测。无需重训。[验证说明](COMPOSER_V2_OPTIONAL_TAIL_GUARD_20261107_ZH.md) |
 | Composer v2 生成 | 音频特征缓存 | 默认 `cache/chart_composer_v2`。相同音频和匹配的特征设置可以复用缓存。 |
 | Composer v2 生成 | 生成设备 | 默认 `auto`。优先使用可用的 CUDA，亦可明确选 `cpu` 或 `cuda`。 |
@@ -40,7 +41,7 @@
 
 恒速时，`音频秒数 = 首拍偏移 + 谱面拍位 × 60 / BPM`。例如 BPM 为 120 且偏移为 0.5 秒，第 4 拍对应音频 2.5 秒。谱面可从更晚的拍位才开始落音。
 
-自动 BPM 会给出一个全曲速度和可能变速的位置提示。自动偏移只对齐节拍相位，整拍编号、小节起点和前奏留白需要结合原谱或试听确认。全曲越来越错拍时先核对 BPM，整体偏移几乎相同时先核对首拍，只有部分段落错位时检查是否确实变速。[逐曲测试和限制](COMPOSER_V2_TIMING_AUDIT_20261105_ZH.md)
+“自动BPM分析”默认选择“识别变速并校准全曲”：先校准恒速误差，再对通过检查的段落应用连续变速表；其余候选保留在报告中。还可选择“仅恒定BPM，校准全曲”或“旧版恒速估计（对照）”。检测变速时请将BPM留空，手动BPM锁定恒速，手动tempo map整表优先。自动偏移只对齐节拍相位，整拍编号、小节起点和前奏留白需要结合原谱或试听确认。全曲越来越错拍时先核对 BPM，整体偏移几乎相同时先核对首拍，只有部分段落错位时检查是否确实变速。[逐曲测试和限制](COMPOSER_V2_TIMING_AUDIT_20261105_ZH.md)
 
 下面的变速表从第 0 拍以 180 BPM 开始，在第 32 拍起改为 150 BPM。拍位以四分音符拍为单位，可填写精确分数。
 
@@ -167,4 +168,4 @@
 .\.venv\Scripts\python.exe -m maichart.composer_v2.train --manifest "manifests/training_manifest.json" --checkpoint-dir "checkpoints/v2_smoke" --audio-backend native --precision auto --batch-size 2 --grad-accumulation 1 --max-steps 5
 ```
 
-正式训练可以传入 `--validation-manifest` 指定独立开发清单。只测歌曲时钟时可运行 `python -m maichart.composer_v2.tempo --audio "songs/track.mp3"`，程序会输出 BPM、首拍相位和变速提示。
+正式训练可以传入 `--validation-manifest` 指定独立开发清单。只测歌曲时钟时可运行 `python -m maichart.composer_v2.tempo --audio "songs/track.mp3"`，程序会输出BPM、首拍相位、实际应用的变速表和未采纳候选；可加 `--tempo-detection constant` 或 `--tempo-detection legacy` 对照。

@@ -1,7 +1,7 @@
-"""Audio-derived global tempo and beat phase, with explicit manual precedence.
+"""Audio-derived constant or piecewise tempo, with explicit manual precedence.
 
-No default BPM, implicit model download, inferred meter, or invented tempo map.
-Only detector outputs are cached; user timing requests are resolved each call.
+Only detector outputs are cached; requested clocks are resolved each call.
+Piecewise clocks require periodic support and continuous phase boundaries.
 """
 from __future__ import annotations
 from fractions import Fraction
@@ -91,8 +91,10 @@ def _acoustic(path, cache_dir, digest):
     bpm, confidence = detect_global_bpm(onset, fps=target / hop)
     if not math.isfinite(bpm) or bpm <= 0:
         raise ValueError('Acoustic global BPM detection failed')
+    dynamic = librosa.feature.tempo(onset_envelope=onset,sr=target,hop_length=hop,
+        start_bpm=bpm,aggregate=None,max_tempo=500.)
     _, frames = librosa.beat.beat_track(onset_envelope=onset, sr=target,
-        hop_length=hop, bpm=bpm, trim=False)
+        hop_length=hop, bpm=dynamic, trim=False)
     beats = librosa.frames_to_time(frames, sr=target, hop_length=hop)
     return _validate_beats(beats), dict(acoustic_bpm=float(bpm), acoustic_confidence=float(confidence))
 
@@ -105,7 +107,7 @@ def _detect(path, cache_dir, device):
         acoustic_version = importlib.metadata.version('librosa')
     except importlib.metadata.PackageNotFoundError:
         acoustic_version = 'unavailable'
-    acoustic = dict(name='librosa_flux_global_bpm_v1',
+    acoustic = dict(name='librosa_flux_dynamic_bpm_v2',
         package_version=acoustic_version, waveform_policy='native_mono_float32_v1')
     identities = [primary, acoustic] if primary['name'] == 'beat_this_raw_logits_v1' else [acoustic]
     failures = [] if len(identities) == 2 else [primary.get('fallback', 'BeatThis unavailable')]
@@ -154,7 +156,22 @@ def _phase(beats, tempo):
     return fit_phase(_validate_beats(beats), TempoClock(tempo, 0.))
 
 
-def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, device='cpu'):
+def _timing_envelope(path,cache_dir):
+    """Read native-rate flux without downloading or running a music encoder."""
+    from .audio import AudioFeatureStore
+    store=AudioFeatureStore(cache_dir or 'cache/chart_composer_v2',backend='mert',device='cpu')
+    try:
+        try:audio=store.load(path)
+        except (OSError,ValueError):
+            store.close()
+            store=AudioFeatureStore(cache_dir or 'cache/chart_composer_v2',backend='native',device='cpu')
+            audio=store.prepare(path)
+        return np.array(audio.mel_times_sec),np.array(audio.mel[:,96])
+    finally:store.close()
+
+
+def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, device='cpu',tempo_detection='legacy'):
+    if tempo_detection not in ('auto','constant','legacy'):raise ValueError('Unknown tempo detection mode')
     path = Path(audio_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -172,10 +189,10 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
         TempoClock(tempo, 0.)
     else:
         tempo = [EventTempo(Fraction(0), manual_bpm)] if manual_bpm is not None else None
-    report = dict(bpm_auto=tempo is None, first_auto=manual_first is None,
+    report = dict(bpm_auto=tempo is None, first_auto=manual_first is None,tempo_detection=tempo_detection,
         tempo_source='manual_tempo_map' if tempo_map is not None else 'manual_bpm' if manual_bpm is not None else 'audio_global_consensus',
         first_source='manual' if manual_first is not None else 'detected_beat_phase',
-        warnings=[], limitations=['Automatic detection estimates a global BPM and diagnostic local tempo regions, not an authored variable-tempo map.',
+        warnings=[], automatic_tempo_map_applied=False,limitations=['Automatic maps estimate periodic audio clocks; they do not recover an authored tempo map uniquely.',
             'Half/double tempo and integer beat/bar origin can be ambiguous; no meter is inferred.',
             'Automatic first is a canonical phase modulo the initial beat period, not the first sound time.'])
     if tempo is None or manual_first is None:
@@ -189,14 +206,48 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
             from .tempo_fit import inspect_tempo_regions
             report.update(inspect_tempo_regions(beats, measured))
             if report['variable_tempo_suspected']:
-                report['warnings'].append('检测到持续的局部速度变化；单一 BPM 无法覆盖这些片段。变速位置仅为检测提示，尚未自动应用，请核对并填写手动 tempo map。')
+                report['warnings'].append('检测到局部脉冲速度变化，可能是真实变速或拍层切换；这些候选尚未自动应用，请核对时间轴。')
             if report['global_fit_coverage'] < .65:
-                report['warnings'].append('全曲节拍一致性偏低，可能存在变速、细分拍或漏拍；请核对 BPM 与半速／倍速候选。')
+                report['warnings'].append('恒速拟合的一致性偏低，可能存在变速、细分拍或漏拍；请核对 BPM 与半速／倍速候选。')
         phase, diagnostics = _phase(beats, tempo)
         report.update(diagnostics, detected_phase_first=phase)
         if report['phase_fit_coverage'] < .65:
             report['warnings'].append('首拍相位仅由主要一致节拍拟合；其他峰可能属于细分拍、变速或检测误差，请试听确认。')
         effective_first = phase if manual_first is None else manual_first
+        if tempo_detection!='legacy' and tempo_map is None:
+            from .tempo_map_fit import refine_acoustic,fit_variable_clock
+            envelope=None
+            try:
+                ft,flux=_timing_envelope(path,cache_dir);envelope=(ft,flux)
+                refined,audio_phase,calibration=refine_acoustic(ft,flux,tempo[0].bpm,phase,fixed_bpm=manual_bpm is not None)
+                report['acoustic_clock_calibration']=calibration
+                if manual_bpm is None:tempo=[EventTempo(Fraction(0),refined)]
+                if manual_first is None:
+                    effective_first=audio_phase
+                    if calibration.get('applied'):report['first_source']='acoustic_refined_phase'
+            except (ImportError,OSError,ValueError,RuntimeError) as exc:
+                report['acoustic_clock_calibration']=dict(applied=False,error=str(exc))
+                report['warnings'].append('细粒度起音校准不可用，沿用节拍峰拟合；请核对时间轴。')
+            if tempo_detection=='auto' and manual_bpm is None:
+                ft,flux=envelope if envelope is not None else (None,None)
+                changes,map_first,analysis=fit_variable_clock(beats,tempo[0].bpm,effective_first,
+                    flux,ft,first_override=manual_first)
+                report['variable_clock_analysis']=analysis
+                report['automatic_tempo_map_applied']=changes is not None
+                if changes is not None:
+                    tempo=changes;effective_first=map_first
+                    report['tempo_source']='audio_piecewise_consensus'
+                    if manual_first is None:report['first_source']='piecewise_audio_phase'
+                    report['warnings']=[w for w in report['warnings'] if '尚未自动应用' not in w]
+                    report['warnings'].append('已应用音频估计的变速表；边界在候选位置附近细化，搜索范围不代表真实误差界限，半速／倍速仍需试听核对。')
+                elif report.get('variable_tempo_suspected'):
+                    report['warnings'].append('变速候选未通过连续性或覆盖检查，保留候选段信息；本次仍使用恒速校准。')
+            clock=TempoClock(tempo,effective_first)
+            ix=np.clip(np.searchsorted(clock._seconds_arr,beats,side='right')-1,0,len(tempo)-1)
+            q=clock._beat_floats[ix]+(beats-clock._seconds_arr[ix])/clock._scale_arr[ix]
+            residual=abs(q-np.round(q))*clock._scale_arr[ix]
+            report['effective_clock_peak_coverage']=float((residual<.05).mean())
+            report['effective_clock_residual_p90_sec']=float(np.quantile(residual,.9))
     else:
         effective_first = manual_first
         report.update(backend={'name': 'manual'}, cache_hit=False)
@@ -214,6 +265,7 @@ def main(argv=None):
     parser.add_argument('--bpm', type=float)
     parser.add_argument('--first', type=float)
     parser.add_argument('--tempo-map', type=json.loads)
+    parser.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
     parser.add_argument('--output', help='Optional JSON report path; no chart files are modified')
     parser.add_argument('--cpu-threads', type=int, default=2)
     args = parser.parse_args(argv)
@@ -222,7 +274,7 @@ def main(argv=None):
     import torch
     torch.set_num_threads(args.cpu_threads)
     _, _, report = resolve_timing(args.audio, args.cache_dir, bpm=args.bpm,
-        first=args.first, tempo_map=args.tempo_map, device='cpu')
+        first=args.first, tempo_map=args.tempo_map, device='cpu',tempo_detection=args.tempo_detection)
     content = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
     if args.output:
         target = Path(args.output)

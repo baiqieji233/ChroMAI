@@ -392,5 +392,5 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

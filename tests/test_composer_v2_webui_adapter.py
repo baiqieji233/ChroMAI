@@ -20,10 +20,11 @@ class Handler:
 def test_optional_tail_policy_reaches_generator_cli(tmp_path,monkeypatch):
     checkpoint=tmp_path/'c.pt';checkpoint.touch();audio=tmp_path/'a.wav';audio.touch()
     monkeypatch.setattr(api,'inspection',lambda _:dict(valid=True))
-    r=Runtime();api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),intercept_tap_on_slide=True,tap_on_slide_threshold_ms=85),runtime=r)
+    r=Runtime();api.start_generate(Handler(),dict(checkpoint=str(checkpoint),audio=str(audio),intercept_tap_on_slide=True,tap_on_slide_threshold_ms=85,tempo_detection='constant'),runtime=r)
     from maichart.composer_v2.generate import parser
     args=parser().parse_args(r.launched[0][1][2:])
     assert args.intercept_tap_on_slide and args.tap_on_slide_threshold_ms==85
+    assert args.tempo_detection=='constant'
 
 
 def test_onset_readout_training_and_generation_cli_wiring(tmp_path,monkeypatch):

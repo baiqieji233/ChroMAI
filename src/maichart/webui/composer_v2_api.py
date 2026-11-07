@@ -204,6 +204,8 @@ def start_generate(handler,payload,*,runtime):
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy)
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop'})
+    settings['tempo_detection']=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'})
+    _arg(args,'--tempo-detection',settings['tempo_detection'])
     intercept=payload.get('intercept_tap_on_slide',False)
     if not isinstance(intercept,bool):raise ValueError('拦截Slide撞尾必须是布尔值')
     threshold=_float(payload,'tap_on_slide_threshold_ms',200.,minimum=0)

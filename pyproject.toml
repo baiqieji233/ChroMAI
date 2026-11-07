@@ -31,7 +31,7 @@ training-speed = [
   "numba>=0.61"
 ]
 composer-v2-music = [
-  "librosa>=0.10",
+  "librosa>=0.10.2",
   "torch>=2.4",
   "torchaudio>=2.4",
   "numpy>=1.24",

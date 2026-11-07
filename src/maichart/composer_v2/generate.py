@@ -52,6 +52,7 @@ def parser():
     result.add_argument('--cpu-threads', type=int, default=2)
     result.add_argument('--max-events', type=int, default=0)
     result.add_argument('--tempo-map', type=json.loads)
+    result.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
     result.add_argument('--meter-map', type=json.loads)
     result.add_argument('--window-retries', type=int, default=16,
                         help='Proposal attempts per event for continuous models or per window for older models')
@@ -368,7 +369,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     audio_path = Path(args.audio).resolve()
     from .tempo import resolve_timing
     tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
-        first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu')
+        first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',tempo_detection=getattr(args,'tempo_detection','auto'))
     print('composer_v2_timing '+json.dumps(timing_report,ensure_ascii=False),flush=True)
     for warning in timing_report.get('warnings', ()):
         print('composer_v2_timing_warning '+warning,flush=True)

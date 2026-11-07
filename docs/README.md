@@ -12,6 +12,8 @@
 
 ## Composer v2
 
+- [自动变速与恒速精度](explanations/COMPOSER_V2_VARIABLE_TEMPO_20261108_ZH.md)记录175／200 BPM校准、现成方案比较及逐首变速测试和试听材料。
+
 - [可选撞尾门控](explanations/COMPOSER_V2_OPTIONAL_TAIL_GUARD_20261107_ZH.md)说明开关、毫秒阈值、精确子音符清理和实际生成回归。
 
 - [在另一台设备继续训练](compatibility/COMPOSER_V2_OTHER_DEVICE_20261107_ZH.md)说明代码克隆、需要另行搬运的材料和路径处理。

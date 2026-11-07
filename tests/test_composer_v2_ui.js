@@ -13,6 +13,15 @@ function context(values={}){const ctx=vm.createContext({Math,valueOrDefault:(key
   v2ConditionState:{note_density:{value:.5,override:false}},v2ConditionCapability:()=>({enabled:true}),
   parseTempoMap:()=>null,parseMeterMap:()=>null});vm.runInContext(fn('v2NumericValue'),ctx);return ctx;}
 
+test('automatic tempo mode reaches request and applied map is shown as multiple tempos',()=>{
+ const ctx=context({'#v2GenerateTempoDetection':'constant'});
+ vm.runInContext(fn('composerV2GenerationPayload')+fn('composerV2CompletionMessage'),ctx);
+ assert.equal(ctx.composerV2GenerationPayload().tempo_detection,'constant');
+ const text=ctx.composerV2CompletionMessage({result:{composer_v2_report:{timing:{automatic_tempo_map_applied:true,effective_tempo_map:[{beat:'0',bpm:170},{beat:'184',bpm:180}]}}}});
+ assert.match(text,/170\.000.*180\.000/);assert.match(text,/已应用自动变速表/);
+ assert.match(html,/id="v2GenerateTempoDetection"/);
+});
+
 test('optional native tail guard and milliseconds reach main generation payload',()=>{
  const ctx=context({'#v2GenerateInterceptTapOnSlide':true,'#v2GenerateTapOnSlideThresholdMs':'85'});
  vm.runInContext(fn('composerV2GenerationPayload'),ctx);
@@ -20,7 +29,7 @@ test('optional native tail guard and milliseconds reach main generation payload'
  assert.equal(p.intercept_tap_on_slide,true);assert.equal(p.tap_on_slide_threshold_ms,85);
  assert.match(html,/id="v2GenerateInterceptTapOnSlide" type="checkbox">/);
  vm.runInContext(fn('requireV2SplitSamplingSupport'),ctx);
- assert.throws(()=>ctx.requireV2SplitSamplingSupport({},p),/撞尾门控/);
+ assert.throws(()=>ctx.requireV2SplitSamplingSupport({},p),/撞尾门控|自动变速/);
 });
 
 test('onset reference uses the main controls and cannot silently hit an older backend',()=>{

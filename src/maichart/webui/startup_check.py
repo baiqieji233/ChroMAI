@@ -5,6 +5,7 @@ import os
 import shlex
 import subprocess
 import sys
+import re
 
 
 def require_cuda(torch):
@@ -52,6 +53,10 @@ def inspect_environment(profile='composer-v2', importer=importlib.import_module,
             if not (4,38)<=v<(4,40):errors.append('MERT requires transformers>=4.38,<4.40 (project dependency contract)')
             getattr(modules['transformers'],'AutoModel');getattr(modules['transformers'],'Wav2Vec2FeatureExtractor')
         except Exception as exc:errors.append(f'MERT imports: {type(exc).__name__}: {exc}')
+    if profile=='composer-v2' and hasattr(modules.get('librosa'),'__version__'):
+        match=re.match(r'(\d+)\.(\d+)\.(\d+)',modules['librosa'].__version__)
+        if match and tuple(map(int,match.groups()))<(0,10,2):
+            errors.append('Dynamic tempo tracking requires librosa>=0.10.2')
     return dict(ok=not errors,python=sys.executable,profile=profile,torch=version,
         torchaudio=str(audio.__version__) if audio is not None else None,
         cuda=getattr(getattr(torch,'version',None),'cuda',None),cuda_required=cuda_required,gpu_ok=gpu_ok,errors=errors)

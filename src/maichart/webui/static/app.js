@@ -47,6 +47,7 @@ function composerV2GenerationPayload() {
     candidates:number('#v2GenerateCandidates',1,'候选数',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
     rollback_windows:number('#v2GenerateRollbackWindows',2,'冲突恢复次数',{min:0,max:8,integer:true}),
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
+    tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),
     intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
     cpu_threads:number('#v2GenerateCpuThreads',2,'CPU 计算线程',{min:1,integer:true}),
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
@@ -66,6 +67,10 @@ function composerV2CompletionMessage(task) {
   const report=task.result?.composer_v2_report||{},timing=report.timing;
   const count=Number(report.accepted_with_conflicts_count||0);
   const base=count>0?`Composer v2 生成完成（放行 ${count} 个冲突事件）`:"Composer v2 生成完成";
+  if(timing?.automatic_tempo_map_applied) {
+    const map=timing.effective_tempo_map||[];
+    return `${base}；已应用自动变速表（${map.length}段）：${map.map(x=>`${Number(x.bpm).toFixed(3)} BPM @ ${x.beat}拍`).join(' → ')}。请试听核对变速边界与半速／倍速；详情见生成报告。`;
+  }
   if(!timing||!Number.isFinite(timing.effective_bpm)||!Number.isFinite(timing.effective_first))return base+"；查看谱面与 .composer_v2.json，仍需试听与游玩检查。";
   const source=timing.tempo_source==="manual_tempo_map"?"变速表":timing.bpm_auto?"自动识别":"手动";
   const warning=timing.variable_tempo_suspected?"检测到局部变速，当前仍采用单一 BPM；请核对并填写手动 tempo map。":Array.isArray(timing.warnings)&&timing.warnings.length?"检测一致性偏低，请查看日志中的时钟警告。":"";
@@ -76,6 +81,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if (payload.tempo_detection && !status.training_capabilities?.composer_v2_variable_tempo)
+    throw new Error('自动变速与全曲校准需要更新后的后台，请在当前任务结束后重启后台。');
   if (payload.intercept_tap_on_slide && !status.training_capabilities?.composer_v2_tail_guard)
     throw new Error('可选撞尾门控需要更新后的后台，请在当前任务结束后重启后台。');
   if (payload.onset_strength!=null && !status.training_capabilities?.composer_v2_onset_readout) {
@@ -1173,7 +1180,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst",
+  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
