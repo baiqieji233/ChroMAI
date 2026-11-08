@@ -6093,6 +6093,7 @@ async function generateIntensityCurve() {
     condition: generation.condition, condition_file: generation.condition_file,
     level: generation.level, bpm: generation.bpm,
     first: generation.first, tempo_mode: generation.tempo_mode,
+    tempo_detection:generation.tempo_detection,cache_dir:generation.cache_dir,
     tempo_map: generation.tempo_map,
     meter_map: generation.meter_map,
   });

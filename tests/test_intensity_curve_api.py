@@ -63,6 +63,35 @@ def profile(audio):
             "spectrogram": {"times": [0, 10], "frequencies_hz": [100], "values": [[0, 255]]}}
 
 
+@pytest.mark.parametrize('first',[None,'',0.])
+def test_curve_auto_offset_accepts_null_and_preserves_manual_zero(api,monkeypatch,tmp_path,first):
+    from maichart.generation import music_intensity
+    from maichart.composer_v2 import tempo
+    audio=tmp_path/'song.mp3';audio.write_bytes(b'fixture')
+    monkeypatch.setattr(music_intensity,'generate_intensity_profile',lambda *a,**kw:profile(audio))
+    calls=[]
+    def resolve(*args,**kwargs):
+        calls.append((args,kwargs));return [],.125,{'effective_first':.125,'effective_bpm':175.}
+    monkeypatch.setattr(tempo,'resolve_timing',resolve)
+    code,started,_=api('/api/intensity/analyze',dict(audio=str(audio),model_family='chart_composer_v2',
+        curve_source='audio',first=first,bpm=None,resolution_sec=None,local_context_sec=None,
+        tempo_detection='constant',tempo_mode=None,cache_dir=str(tmp_path/'cache')))
+    assert code==200
+    deadline=time.monotonic()+4
+    while time.monotonic()<deadline:
+        _,result,_=api('/api/task?id='+started['task_id'])
+        if result['status'] not in ('queued','running'):break
+        time.sleep(.02)
+    assert result['status']=='completed',result
+    p=result['result']['intensity_profile']
+    if first in (None,''):
+        assert p['first']==.125 and p['first_auto']
+        assert calls[0][1]['tempo_detection']=='constant'
+        assert calls[0][0][1]==str(tmp_path/'cache')
+    else:
+        assert p['first']==0 and not p['first_auto'] and not calls
+
+
 def test_analysis_is_separate_and_returns_editable_profile(api, monkeypatch, tmp_path):
     from maichart.generation import music_intensity
     audio = tmp_path / "external_song.mp3"

@@ -406,10 +406,17 @@ class WebUIHandler(BaseHTTPRequestHandler):
                            if source != "audio" and payload.get("checkpoint") else None)
         if source == "model" and checkpoint_path is None:
             raise ValueError("模型预测曲线需要选择支持曲线预测的 event、song_form、chart_stream 或 chart_composer checkpoint")
-        resolution = float(payload.get("resolution_sec", 2.0))
-        context = float(payload.get("local_context_sec", 12.0))
-        first = float(payload.get("first", 0.0))
-        tempo_mode = str(payload.get("tempo_mode", "constant")).strip().lower()
+        def number(key,default,allow_auto=False):
+            raw=payload.get(key,default)
+            if raw is None or raw=='':return None if allow_auto else float(default)
+            if isinstance(raw,bool):raise ValueError(f'{key} 必须是数值')
+            try:return float(raw)
+            except (TypeError,ValueError) as exc:raise ValueError(f'{key} 必须是数值') from exc
+        resolution = number('resolution_sec',2.)
+        context = number('local_context_sec',12.)
+        # Explicit null means automatic phase; a manual zero remains zero.
+        requested_first = number('first',0.,allow_auto=True)
+        tempo_mode = str(payload.get("tempo_mode") or "constant").strip().lower()
         explicit_tempo_map = (serialize_tempo_map(payload["tempo_map"])
                               if payload.get("tempo_map") is not None else None)
         from maichart.form.timing import normalize_meter_map
@@ -422,7 +429,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             raise ValueError("曲线时间间隔必须在 0.5–16 秒之间")
         if not math.isfinite(context) or not 2 <= context <= 120:
             raise ValueError("局部比较范围必须在 2–120 秒之间")
-        if not math.isfinite(first):
+        if requested_first is not None and not math.isfinite(requested_first):
             raise ValueError("首拍偏移必须是有限值")
         if tempo_mode not in {"auto", "constant"}:
             raise ValueError("tempo-mode 只能是 auto 或 constant")
@@ -435,6 +442,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
         task.result["audio_preview_url"] = f"/api/intensity/audio?id={task.task_id}"
 
         def worker() -> None:
+            first=requested_first
+            resolved_timing=None
             _open_task_log(task, ["intensity_analyze", str(audio),
                                   f"resolution_sec={resolution}", f"local_context_sec={context}"])
             with task.lock:
@@ -457,6 +466,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                        else "audio")
                 if _finish_if_cancelled(task):
                     return
+                if first is None:
+                    from maichart.composer_v2.tempo import resolve_timing
+                    _,first,resolved_timing=resolve_timing(audio,
+                        payload.get('cache_dir') or str(PROJECT_ROOT/'cache'/'chart_composer_v2'),
+                        bpm=payload.get('bpm') or None,first=None,tempo_map=explicit_tempo_map,
+                        tempo_detection=payload.get('tempo_detection') or 'auto',device='cpu')
                 if selected_source == "model":
                     if checkpoint_family == COMPOSER_MODEL_FAMILY:
                         from maichart.composer.curve import generate_learned_profile
@@ -516,6 +531,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 profile["tempo_map_sha256"] = tempo_map_hash
                 profile["tempo_mode"] = tempo_mode
                 profile["first"] = first
+                profile['first_auto']=requested_first is None
+                if resolved_timing is not None:profile['timing']=resolved_timing
                 profile["meter_map"] = meter_map
                 profile["bpm_input"] = (float(payload["bpm"])
                                         if payload.get("bpm") not in {None, ""} else None)
