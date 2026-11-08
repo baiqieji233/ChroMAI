@@ -30,6 +30,7 @@ class ComposerV2Config:
     sequence_policy: str = 'continuous_events_v1'
     refresh_events: int = 16
     onset_readout_policy: str = 'off'
+    structure_policy: str = 'off'
     def __post_init__(self):
         if self.d_model%self.nhead or min(self.d_model,self.layers,self.nhead,self.dim_feedforward,self.window_beats,self.max_tokens)<1:
             raise ValueError('Invalid Composer v2 dimensions')
@@ -41,6 +42,9 @@ class ComposerV2Config:
         from .onset_policy import POLICY
         if self.onset_readout_policy not in ('off', POLICY) or (self.onset_readout_policy != 'off' and self.sequence_policy != 'continuous_events_v1'):
             raise ValueError('Phase audio readout requires continuous events')
+        from .rhythm_structure import POLICIES
+        if self.structure_policy not in POLICIES or (self.structure_policy != 'off' and self.sequence_policy != 'continuous_events_v1'):
+            raise ValueError('Rhythm structure requires continuous events')
     def to_dict(self):return asdict(self)
     @classmethod
     def from_dict(cls,value):return cls(**{'condition_policy':'level_only_v1','sequence_policy':'window_v1',**value})
@@ -160,15 +164,58 @@ class ComposerV2(nn.Module):
         self.norm=nn.LayerNorm(d);self.dropout=nn.Dropout(c.dropout)
         self.output_bias=nn.Parameter(torch.zeros(codec.vocab_size))
         self._song_cache={}
+        self._structured_weight_cache={}
+        self.register_buffer('phase_targets',torch.tensor([t.startswith('F:') for t in codec.tokens]),persistent=False)
         self.register_buffer('time_tokens',torch.tensor([t.startswith(('T:','F:')) or t in ('[AT]','[PHASE]','[TIME_EXT]','[TIME_END]') or t.startswith('NUM:') for t in codec.tokens]),persistent=False)
         if c.onset_readout_policy != 'off':
             from .onset_readout import PhaseAudioReadout
             with torch.random.fork_rng(devices=[]):
                 self.onset_readout = PhaseAudioReadout()
             self.register_buffer('phase_token_ids', torch.tensor(sorted(codec.phases)), persistent=False)
+        if c.structure_policy != 'off':
+            # Zero-initialized residual inputs: an upgraded parent starts from
+            # exactly its original function and learns only what finetune adds.
+            from .rhythm_structure import PHASE_FEATURES,TRUST_FEATURES,ENVELOPE_FEATURES,phase_token_table
+            with torch.random.fork_rng(devices=[]):
+                self.phase_position=nn.Linear(PHASE_FEATURES,d,bias=False)
+                self.audio_phase_position=nn.Linear(PHASE_FEATURES,d,bias=False)
+                self.phase_token=nn.Linear(PHASE_FEATURES,d,bias=False)
+                self.audio_envelope=nn.Linear(ENVELOPE_FEATURES,d,bias=False)
+                self.reference_trust=nn.Linear(TRUST_FEATURES,d,bias=False)
+                self.segment=nn.Embedding(5,d)
+            for module in (self.phase_position,self.audio_phase_position,self.phase_token,
+                           self.audio_envelope,self.reference_trust,self.segment):
+                nn.init.zeros_(module.weight)
+            from .rhythm_structure import HARMONICS, EVIDENCE_FEATURES, POLICY as LATEST
+            self.register_buffer('phase_harmonics',torch.tensor(HARMONICS,dtype=torch.float32),persistent=False)
+            if c.structure_policy==LATEST:
+                with torch.random.fork_rng(devices=[]):
+                    self.reference_evidence=nn.Linear(EVIDENCE_FEATURES,d,bias=False)
+                nn.init.zeros_(self.reference_evidence.weight)
+            self.register_buffer('phase_token_features',phase_token_table(codec),persistent=False)
+            code=torch.zeros(codec.vocab_size,dtype=torch.long)
+            for value,name in ((1,'carry_id'),(2,'ctx_id'),(3,'ref_id'),(4,'tgt_id')):code[getattr(codec,name)]=value
+            self.register_buffer('segment_code',code,persistent=False)
+    def token_weight(self):
+        """Tied input/output table; phase tokens share subdivision-family structure."""
+        device_type=self.embedding.weight.device.type
+        key=(device_type,torch.get_autocast_dtype(device_type) if torch.is_autocast_enabled(device_type) else None)
+        cacheable=not self.training and not torch.is_grad_enabled()
+        if cacheable and key in self._structured_weight_cache:return self._structured_weight_cache[key]
+        weight=self.embedding.weight
+        if hasattr(self,'phase_token'):
+            weight=weight+self.phase_token(self.phase_token_features).to(weight.dtype)
+        if cacheable:self._structured_weight_cache[key]=weight
+        return weight
     def train(self,mode=True):
-        self._song_cache.clear()
+        self._song_cache.clear();self._structured_weight_cache.clear()
         return super().train(mode)
+    def _apply(self,fn,recurse=True):
+        self._song_cache.clear();self._structured_weight_cache.clear()
+        return super()._apply(fn,recurse=recurse)
+    def load_state_dict(self,*args,**kwargs):
+        self._song_cache.clear();self._structured_weight_cache.clear()
+        return super().load_state_dict(*args,**kwargs)
     def _audio_input(self,mel,semantic,valid,keep):
         return self.mel(mel.float())+self.semantic(semantic.float())*(valid&keep[:,None])[...,None]
     def encode_audio(self,batch):
@@ -185,10 +232,16 @@ class ComposerV2(nn.Module):
                 semantic=(semantic.double()*(1.-fraction)
                           +batch['bank_semantic_right'].float().double()*fraction).float()
             bank=self.mel(mel.float())+self.semantic(semantic)*(batch['bank_semantic_mask']&keep[batch['bank_owner']])[:,None]
+            if hasattr(self,'audio_envelope'):bank=bank+self.audio_envelope(batch['bank_envelope'].float())
             frames=batch['tile_frames']
             local=bank.index_select(0,frames.flatten()).reshape(*frames.shape,bank.size(-1))
-        else:local=self._audio_input(mel,batch['local_semantic'],batch['local_semantic_mask'],keep if owners is None else keep[owners])
+        else:
+            local=self._audio_input(mel,batch['local_semantic'],batch['local_semantic_mask'],keep if owners is None else keep[owners])
+            if hasattr(self,'audio_envelope'):local=local+self.audio_envelope(batch['local_envelope'].float())
         local=local+positions(batch['local_beats'],self.config.d_model)
+        if hasattr(self,'audio_phase_position'):
+            from .rhythm_structure import phase_features
+            local=local+self.audio_phase_position(phase_features(batch['local_beats'],self.phase_harmonics))
         local=local*batch['local_mask'][...,None]
         local=self.local_conv(local.transpose(1,2)).transpose(1,2)
         mask=F.max_pool1d(batch['local_mask'].float()[:,None],3,2,1).squeeze(1).bool()
@@ -225,6 +278,7 @@ class ComposerV2(nn.Module):
             if 'self_kv' in layer:
                 layer['self_kv']=tuple(value[:,:,:length] for value in layer['self_kv'])
         state['length']=length
+        state.pop('last_segment',None)
     def condition_context(self,batch):
         values=batch['condition'].float()
         if not hasattr(self,'condition_missing'):return self.condition(values)
@@ -250,14 +304,35 @@ class ComposerV2(nn.Module):
         value=ids[:,start:];beats=batch['token_beats'][:,start:]
         index=torch.arange(start,length,device=ids.device)[None].expand_as(value)
         starts=torch.tensor([float(s) for s in batch.get('start_beat',[0.]*ids.size(0))],device=ids.device)
-        x=self.embedding(value)*math.sqrt(self.config.d_model)
+        structured=hasattr(self,'phase_position')
+        weight=self.token_weight() if structured else self.embedding.weight
+        x=(F.embedding(value,weight,padding_idx=self.codec.pad_id) if structured else self.embedding(value))*math.sqrt(self.config.d_model)
         x=x+positions(index,self.config.d_model)+positions(beats,self.config.d_model)
         if self.config.sequence_policy=='window_v1':x=x+positions(beats+starts[:,None],self.config.d_model)
+        if structured:
+            from .rhythm_structure import phase_features
+            # Sub-beat phase of each token's clock, its stream region (carry,
+            # history, aligned reference, target) and the reference trust.
+            x=x+self.phase_position(phase_features(beats,self.phase_harmonics))
+            codes=self.segment_code[value]
+            if start and 'last_segment' in state:
+                segment=torch.maximum(codes.cummax(1).values,state['last_segment'][:,None])
+            elif start:segment=torch.maximum(codes.cummax(1).values,self.segment_code[ids[:,:start]].amax(1)[:,None])
+            else:segment=codes.cummax(1).values
+            if use_cache:state['last_segment']=segment[:,-1]
+            x=x+self.segment(segment)
+            trust=self.reference_trust(batch['reference_trust'].float())
+            x=x+trust[:,None,:]*(segment==3)[...,None].to(trust.dtype)
+        if hasattr(self,'reference_evidence'):
+            evidence=batch.get('reference_evidence')
+            if evidence is not None:
+                offset=int(batch.get('reference_evidence_start',0))
+                x=x+self.reference_evidence(evidence[:,start-offset:].float())
         x=self.dropout(x);condition=self.condition_context(batch)
         groups=query_groups(batch['tile_ids_cpu'],start,ids.device) if 'tile_ids_cpu' in batch else None
         for i,layer in enumerate(self.decoder):
             x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
-        logits=F.linear(self.norm(x),self.embedding.weight,self.output_bias)
+        logits=F.linear(self.norm(x),weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence
             logits = apply_phase_evidence(logits, cache['onset_scores'], batch['phase_queries_cpu'],
@@ -277,4 +352,5 @@ class ComposerV2(nn.Module):
         def mean(mask):
             w=weights*mask;return (costs*w).sum()/w.sum().clamp_min(1)
         return loss,dict(loss=loss.detach(),time_loss=mean(timing).detach(),
-            component_loss=mean(active&~timing).detach(),token_count=active.sum().detach())
+            component_loss=mean(active&~timing).detach(),
+            phase_loss=mean(self.phase_targets[labels.clamp_min(0)]&active).detach(),token_count=active.sum().detach())

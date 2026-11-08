@@ -48,6 +48,9 @@ class EventSampler(WindowSampler):
         self.action_generator=rng if action_generator is None else action_generator
         self.cursor=points[-1].beat if points else Fraction(0)
         item=dataset.build_stream(song,points,self.cursor)
+        self.reference=dict(cursor=str(self.cursor),shift=item.get('reference_shift'),score=item.get('reference_score'),
+            checked_start=item.get('reference_checked_start'),checked_end=item.get('reference_checked_end'))
+        self.reference_refresh_beat=math.floor(self.cursor)+dataset.window_beats
         self.prefix=item['input_ids'].tolist();self.anchors=list(item['anchors'])
         self.anchor_ids={a:i for i,a in enumerate(self.anchors)}
         self.batch={k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in collate_stream([item]).items()}
@@ -99,7 +102,7 @@ class EventSampler(WindowSampler):
                 from .onset_readout import collate_tiles
                 onset=collate_tiles([{k:v[None] for k,v in t.items() if k.startswith('onset_')} for t in tiles])
                 query.update({k:v.to(self.device) for k,v in onset.items()})
-            for key in ('bank_audio','bank_semantic','bank_semantic_mask','bank_semantic_right','bank_semantic_weight','bank_owner','tile_frames'):query.pop(key,None)
+            for key in ('bank_audio','bank_semantic','bank_semantic_mask','bank_semantic_right','bank_semantic_weight','bank_owner','tile_frames','bank_envelope'):query.pop(key,None)
             encoded=self.model.encode_audio(query)
             for key in ('local','local_mask','local_beats'):self.cache[key]=torch.cat((self.cache[key],encoded[key]),0)
             if 'onset_scores' in encoded:self.cache['onset_scores']=torch.cat((self.cache['onset_scores'],encoded['onset_scores']),0)
@@ -111,6 +114,19 @@ class EventSampler(WindowSampler):
         if getattr(self.dataset,'onset_readout_policy','off') != 'off':
             from .onset_readout import query_rows
             query['phase_queries_cpu']=query_rows(ids,query['tile_ids_cpu'][0],self.codec.ids['[PHASE]'])
+        if self.dataset._evidence_v2():
+            from .rhythm_structure import local_evidence
+            state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
+            start=int(state['length']) if state and state['length']<len(ids) else 0
+            boundary=max(start,len(self.prefix))
+            pieces=[]
+            if start<len(self.prefix):pieces.append(self.batch['reference_evidence'][:,start:len(self.prefix)])
+            if boundary<len(ids):
+                values=local_evidence(self.dataset._profile(self.song),clocks[boundary:],self.reference['shift'],
+                    start=math.floor(self.cursor)-4,end=self.reference_refresh_beat)
+                pieces.append(torch.as_tensor(values,device=self.device)[None])
+            query['reference_evidence']=torch.cat(pieces,1)
+            query['reference_evidence_start']=start
         return self.model.decode(query,self.cache)[0,-1]
     def reject(self,ids):return self._retry_tree.reject(ids)
     def propose(self,target,after,end,fixed=None):
@@ -213,6 +229,15 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     onset_strength=effective_strength(getattr(args,'onset_strength',None),getattr(config,'onset_readout_policy','off'))
     dataset.onset_readout_policy=getattr(config,'onset_readout_policy','off') if onset_strength else 'off'
     dataset.onset_phases=phase_values(model.codec) if onset_strength else None
+    # Same aligned reference and phase inputs as training, never the training-only
+    # reference augmentation.
+    dataset.structure_policy=getattr(config,'structure_policy','off')
+    dataset.reference_augmentation=False;dataset.refresh_events=config.refresh_events
+    requested_selection=getattr(args,'reference_selection','auto') or 'auto'
+    # Older checkpoints keep their REF layout; 'aligned' only changes which
+    # earlier passage fills it and omits it when nothing repeats.
+    dataset.reference_selection='aligned' if requested_selection=='aligned' and dataset.structure_policy=='off' else 'model'
+    references=[]
     from .tail_guard import options as tail_options
     tail_settings=tail_options(args)
     guard=_new_guard(tempo,first,audio.duration_sec,guard_options=tail_settings)
@@ -233,6 +258,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if sampler is None:
             sampler=EventSampler(model,dataset,song,points,device,rng,args,**sampler_options);target=[];committed_in_context=0;refreshes+=1
             sampler.retry_stats=retry_stats
+            if dataset.structure_policy!='off' or dataset.reference_selection=='aligned':references.append(sampler.reference)
         after=points[-1].beat if points else Fraction(-1)
         selected=None;failed_beat=after;need_refresh=False;conflict_sources=set();rejected=[];history_edited=False
         prefix_key=tuple((p.beat,p.note_text) for p in points) if native_memo else None
@@ -347,7 +373,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             sampler._rewind(target);target.extend(encoded);committed_in_context+=1
         if len(points)%16==0:
             print('composer_v2_event '+json.dumps(dict(events=len(points),beat=str(point.beat),context_refreshes=refreshes,repairs=len(repairs))),flush=True)
-        if committed_in_context>=config.refresh_events:sampler=None
+        refresh_due=committed_in_context>=config.refresh_events
+        if sampler is not None and dataset._evidence_v2():refresh_due|=point.beat>=sampler.reference_refresh_beat
+        if refresh_due:sampler=None
     from .tail_guard import cleanup
     points,tail_report=cleanup(points,tempo,first,guard)
     export_end=Fraction(math.ceil(end*config.ticks_per_beat),config.ticks_per_beat)
@@ -370,7 +398,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         candidate_policy='next_complete_event_same_onset_atom_count',temperature=args.temperature,top_p=args.top_p,
         audio_identity=audio.identity,hard_guard='runtime_hard_v2',
         onset_readout=dict(policy=getattr(config,'onset_readout_policy','off'),strength=onset_strength,
-                           scope='conditional_phase_only',phase_mass_preserved=True))
+                           scope='conditional_phase_only',phase_mass_preserved=True),
+        rhythm_structure=_reference_report(dataset.structure_policy,references,
+                                           requested=requested_selection,selection=dataset.reference_selection))
     if bypassed_events:
         from .diagnostics import write_conflict_snapshot
         assessment=conflict_assessment(points,tempo,first,guard)
@@ -390,7 +420,20 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     return report
 
 
+def _reference_report(policy,references,*,requested='auto',selection='model'):
+    if policy=='off' and selection!='aligned':
+        return dict(policy='off',reference_selection=requested,reference='checkpoint_trained_mean_pooled_v1')
+    from .rhythm_structure import REF_MIN_SCORE
+    used=[r for r in references if r['shift'] is not None]
+    scores=[r['score'] for r in used]
+    layout=('per_beat_evidence_full_coverage_v2' if policy=='aligned_rhythm_v2' else 'aligned_integer_beat_shift_trust_v1') if policy!='off' else 'aligned_choice_legacy_layout_training_free_v1'
+    return dict(policy=policy,reference_selection=requested,reference=layout,min_score=REF_MIN_SCORE,
+        context_refreshes=len(references),refreshes_with_reference=len(used),
+        mean_reference_score=float(np.mean(scores)) if scores else None,
+        recent=references[-64:])
+
+
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

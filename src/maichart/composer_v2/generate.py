@@ -61,6 +61,9 @@ def parser():
                         help='Proposal attempts per event for continuous models or per window for older models')
     result.add_argument('--rollback-windows', type=int, default=2,
                         help='Recovery budget per generation frontier for continuous models or per chart for older models')
+    result.add_argument('--reference-selection',choices=('auto','aligned'),default='auto',
+        help='auto: the reference the checkpoint was trained with; aligned: beat-synchronous aligned choice '
+             '(training-free for older continuous checkpoints, already built into aligned_rhythm_v1)')
     result.add_argument('--exhaustion-policy',choices=('auto','report','stop'),default='auto',
         help='auto: continuous checkpoints continue physical conflicts with a report; old window checkpoints stop')
     return result
@@ -361,6 +364,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         strength=onset_strength,scope='conditional_phase_only')),flush=True)
     if sampling_policy['rng_policy']!='shared_v1' and config.sequence_policy!='continuous_events_v1':
         raise ValueError('Separate configuration sampling requires a continuous-event checkpoint')
+    if getattr(args,'reference_selection','auto')=='aligned' and config.sequence_policy!='continuous_events_v1':
+        raise ValueError('对齐参考检索仅适用于连续事件检查点')
     from .exhaustion import resolve_policy
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     print('composer_v2_exhaustion_policy '+json.dumps(dict(requested=getattr(args,'exhaustion_policy','auto'),

@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout"];
+const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -20,7 +20,7 @@ function composerV2TrainingPayload(options={}) {
     manifests:selectedTrainingManifests(),mode:currentTrainingMode(),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout"]);
+  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -64,6 +64,8 @@ function composerV2GenerationPayload() {
     if (raw!=='' && !element(selector)?.disabled) payload[key]=v2NumericValue(raw,label,bounds);
     else if(raw==='' && key.startsWith('action_') && !element(selector)?.disabled)payload[key]=null;
   }
+  const referenceSelection=element('#v2GenerateReferenceSelection');
+  if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
   return payload;
 }
 function composerV2CompletionMessage(task) {
@@ -74,7 +76,10 @@ function composerV2CompletionMessage(task) {
   }
   const report=task.result?.composer_v2_report||{},timing=report.timing;
   const count=Number(report.accepted_with_conflicts_count||0);
-  const base=count>0?`Composer v2 生成完成（放行 ${count} 个冲突事件）`:"Composer v2 生成完成";
+  const references=report.rhythm_structure;
+  const referenceNote=references && Number.isFinite(Number(references.context_refreshes))
+    ?`，对齐参考 ${references.refreshes_with_reference}/${references.context_refreshes} 次${references.mean_reference_score!=null?`（平均可信度 ${Number(references.mean_reference_score).toFixed(2)}）`:''}`:'';
+  const base=(count>0?`Composer v2 生成完成（放行 ${count} 个冲突事件）`:"Composer v2 生成完成")+referenceNote;
   if(timing?.automatic_tempo_map_applied) {
     const map=timing.effective_tempo_map||[];
     return `${base}；已应用自动变速表（${map.length}段）：${map.map(x=>`${Number(x.bpm).toFixed(3)} BPM @ ${x.beat}拍`).join(' → ')}。请试听核对变速边界与半速／倍速；详情见生成报告。`;
@@ -98,6 +103,9 @@ function requireV2SplitSamplingSupport(status,payload) {
   if (payload.onset_strength!=null && !status.training_capabilities?.composer_v2_onset_readout) {
     throw new Error('起音参考强度需要更新后的 WebUI 后台，请重启当前后台后提交。');
   }
+  if (payload.reference_selection && !status.training_capabilities?.composer_v2_reference_selection) {
+    throw new Error('对齐参考检索需要更新后的 WebUI 后台，请重启当前后台后提交。');
+  }
   if ((payload.action_temperature!=null || payload.action_top_p!=null)
       && !status.training_capabilities?.composer_v2_split_sampling) {
     throw new Error('独立配置采样需要更新后的 WebUI 后台。请重启当前使用的后台后再提交。');
@@ -118,6 +126,7 @@ function applyComposerV2Inspection(data) {
   if(!data?.valid)return;
   const saved={...(data.args||{}),...(data.model_config||{})};
   saved.onset_readout=data.model_config?.onset_readout_policy||'off';
+  saved.rhythm_structure=data.model_config?.structure_policy||'off';
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   for(const key of COMPOSER_V2_FIELDS) {
     if (key === 'cuda_memory_budget_gb' || key === 'audio_cache_gb') continue;
@@ -586,9 +595,11 @@ function composerV2TrainingView(task) {
   const cards=[['学习指标',[
     ['累计训练 loss（本次运行，加权 token 均值）',show(n(metrics,'loss'))],
     ['时间 token loss（同一累计范围）',show(n(metrics,'time_loss'))],
+    ['拍内落点 loss',show(n(metrics,'phase_loss'))],
     ['配置 token loss（同一累计范围）',show(n(metrics,'component_loss'))],
     [`完整轮训练 loss（${latestEpoch}）`,show(trainEpoch)],
     [`验证 loss（${latestEpoch}）`,show(n(complete,'validation_loss'))],
+    [`验证拍内落点 loss（${latestEpoch}）`,show(n(complete,'validation_phase_loss'))],
     ['best 选择依据',bestBasis.startsWith('validation')?'独立开发集验证 loss':bestBasis.startsWith('training')?'训练 loss（未配置验证集）':'等待记录'],
     ['每轮验证预算',settings.validation_max_batches===0?'完整开发集':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准']]],
     ['训练进度',[
@@ -2017,6 +2028,18 @@ function updateFamilyFields() {
   for (const field of document.querySelectorAll('[data-v2-onset-readout]')) {
     field.hidden=!v2Generation; field.querySelector('input').disabled=!onsetSupported;
   }
+  const capabilities=checked?generationInspection.data?.generation_capabilities:null;
+  const builtInReference=!!capabilities?.rhythm_structure;
+  const referenceChoice=v2Generation && (!checked || capabilities?.continuous_time) && !builtInReference;
+  for (const field of document.querySelectorAll('[data-v2-reference-selection]')) {
+    field.hidden=!v2Generation; field.querySelector('select').disabled=!referenceChoice;
+  }
+  const referenceHelp=element('#v2ReferenceSelectionHelp');
+  if(referenceHelp && v2Generation)referenceHelp.textContent=builtInReference
+    ?'此模型已训练「节拍结构与对齐参考」：生成时按检查点的参考策略提供证据，无需选择；新版逐拍对照，旧版保持原合同。'
+    :(checked && !capabilities?.continuous_time)
+      ?'旧版窗口模型不支持对齐检索。'
+      :'仅供试听对比：旧模型免训练改用逐拍对齐选取前文参考，音乐不重复时不提供参考。验证集上旧模型用此方式的交叉熵略高于默认（0.328 对 0.319），不保证改善；完整改善需在新目录 finetune 启用「节拍结构与对齐参考」。';
   updateV2ConditionControls();
   document.querySelectorAll("#generationTargetGroup .condition-presets > :not(.level-recipe-row)").forEach(target=>{target.hidden=v2Generation;});
   document.querySelectorAll('#generationTargetGroup .condition-advanced').forEach(target=>{target.hidden=v2Generation && !target.querySelector('#v2ConditionStatus');});
@@ -5317,6 +5340,8 @@ async function submitTrain(options = {}) {
     const backend=await api("/api/status");
     if(payload.onset_readout && payload.onset_readout!=='auto' && !backend.training_capabilities?.composer_v2_onset_readout)
       throw new Error('独立起音参考训练需要更新后的 WebUI 后台，请重启当前后台后提交。');
+    if(payload.rhythm_structure && !backend.training_capabilities?.composer_v2_rhythm_evidence_v2)
+      throw new Error('逐拍参考证据与混合分音学习需要更新后的 WebUI 后台，请重启当前后台后提交。');
     if(backend.training_capabilities?.composer_v2_api_contract!=="composer_v2_continuous_events_v3")throw new Error("当前后台不支持 Composer v2 条件与自动节拍合同，请重启为更新后的 WebUI 后台再提交；请先妥善处理正在运行的任务。");
     if (backend.training_capabilities?.composer_v2_memory_budgets !== true &&
         ((payload.cuda_memory_budget_gb ?? 0) !== 0 || (payload.audio_cache_gb ?? 0.25) !== 0.25)) {

@@ -101,6 +101,14 @@ def start_train(handler,payload,*,runtime):
         raise ValueError('独立声学读出仅适用于连续事件检查点')
     _arg(args,'--onset-readout',onset_requested)
     settings.update(onset_readout=onset_requested,onset_readout_policy=onset_policy)
+    from maichart.composer_v2.rhythm_structure import CHOICES as STRUCTURE_CHOICES,resolve_policy as resolve_structure_policy
+    structure_requested=_choice(payload,'rhythm_structure','auto',STRUCTURE_CHOICES)
+    structure_parent=(checked.get('model_config') or {}) if parent else None
+    if structure_requested not in ('auto','off') and sequence_policy!='continuous_events_v1':
+        raise ValueError('节拍结构与对齐参考仅适用于连续事件检查点')
+    structure_policy,_=resolve_structure_policy(structure_requested,structure_parent,resume=mode=='resume')
+    _arg(args,'--rhythm-structure',structure_requested)
+    settings.update(rhythm_structure=structure_requested,structure_policy=structure_policy)
     refresh_events=_integer(payload,'refresh_events',16,minimum=1)
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
@@ -222,6 +230,12 @@ def start_generate(handler,payload,*,runtime):
     if raw_onset not in (None,''):
         settings['onset_strength']=onset_strength
         _arg(args,'--onset-strength',onset_strength)
+    reference_selection=_choice(payload,'reference_selection','auto',{'auto','aligned'})
+    if reference_selection=='aligned':
+        if checked.get('sequence_policy')!='continuous_events_v1':
+            raise ValueError('对齐参考检索仅适用于 Composer v2 连续事件检查点')
+        _arg(args,'--reference-selection',reference_selection)
+    settings['reference_selection']=reference_selection
     for key in ("action_temperature", "action_top_p"):
         raw = payload.get(key, GENERATION_DEFAULTS[key] if checked.get('sequence_policy') == 'continuous_events_v1' else None)
         if raw is None or raw == "":

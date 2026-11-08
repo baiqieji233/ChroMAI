@@ -42,3 +42,33 @@ def timing_ids(codec):
     return frozenset(i for i, token in enumerate(codec.tokens)
         if token.startswith(('T:', 'F:', 'NUM:'))
         or token in ('[AT]', '[PHASE]', '[TIME_EXT]', '[TIME_END]', '[EOS]'))
+
+
+def perturb_phase_prefix(points, phases, seed, *, next_beat, span=SPAN):
+    """Equal-volume quarter/sixth-phase history changes; true future stays ahead.
+
+    Only Tap times change. Sustains, key choices, rests and future targets are
+    retained. This is a timing-only recovery view, not a label that all other
+    legal chart interpretations are musically wrong.
+    """
+    if not points:return None
+    cursor=points[-1].beat
+    candidates=[i for i,p in enumerate(points) if p.beat>=cursor-span and is_tap(p)
+                and ((4*(p.beat%1)).denominator==1 or (6*(p.beat%1)).denominator==1)]
+    rng=np.random.default_rng(seed)
+    changed=list(points);edits=0
+    for i in rng.permutation(candidates):
+        point=changed[i];phase=point.beat%1
+        denominator=6 if (4*phase).denominator==1 else 4
+        options=[Fraction(j,denominator) for j in range(denominator)
+                 if Fraction(j,denominator) in phases and Fraction(j,denominator)!=phase]
+        lower=changed[i-1].beat if i else Fraction(-1)
+        upper=changed[i+1].beat if i+1<len(changed) else Fraction(next_beat)
+        options=[point.beat-phase+p for p in options if lower<point.beat-phase+p<upper]
+        if not options:continue
+        closest=min(abs(p-point.beat) for p in options)
+        options=[p for p in options if abs(p-point.beat)==closest]
+        changed[i]=EventPoint(options[int(rng.integers(len(options)))],point.note_text)
+        edits+=1
+        if edits==2:break
+    return changed if edits else None

@@ -25,8 +25,13 @@ def _song_cache_key(song):
 
 
 class StreamDataset(ComposerV2Dataset):
-    def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',**kwargs):
+    def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',
+                 structure_policy='off',reference_augmentation=False,**kwargs):
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
+        from .rhythm_structure import POLICIES
+        if structure_policy not in POLICIES:raise ValueError('Unknown rhythm structure policy')
+        self.structure_policy=structure_policy
+        self.reference_augmentation=bool(reference_augmentation) and structure_policy!='off'
         from .onset_readout import POLICY as ONSET_POLICY, phase_values
         if onset_readout_policy not in ('off', ONSET_POLICY):raise ValueError('Unknown onset readout policy')
         self.onset_readout_policy = onset_readout_policy
@@ -47,6 +52,10 @@ class StreamDataset(ComposerV2Dataset):
                     length=token_lengths[end]
                     if tokens+length+1>self.max_tokens//2:break
                     tokens+=length;end+=1
+                    # Computational refresh only: no note, rest or EOS is added.
+                    if self._evidence_v2():
+                        origin=math.floor(song.points[begin-1].beat) if begin else 0
+                        if song.points[end-1].beat>=origin+self.window_beats:break
                 if end==begin:raise ValueError(f'One whole event exceeds target budget: {song.source_path}, {song.points[begin].beat}')
                 self.windows.append((song_index,begin));self.ranges.append(end);self.lengths.append(tokens+1)
                 begin=end
@@ -79,9 +88,63 @@ class StreamDataset(ComposerV2Dataset):
             segmentation='whole_events_compute_only',refresh_events=self.refresh_events,eos='true_chart_end_only')
         self.audit['timing_recovery'] = dict(policy=timing_recovery_policy, views=len(self.recovery_sources),
             original_windows=len(self.windows)-len(self.recovery_sources),target='authored_future_time_only')
+        if structure_policy!='off':
+            from . import rhythm_structure as rs
+            self.audit['rhythm_structure']=dict(policy=structure_policy,reference='per_beat_evidence_full_coverage_v2' if self._evidence_v2() else 'aligned_integer_beat_shift_trust_v1',
+                min_score=rs.REF_MIN_SCORE,lead_beats=rs.REF_LEAD_BEATS,match_ahead_beats=self.window_beats if self._evidence_v2() else rs.REF_MATCH_AHEAD_BEATS,
+                display_ahead_beats=self.window_beats,augmentation=self.reference_augmentation,
+                drop_probability=rs.REF_DROP_PROBABILITY if self.reference_augmentation else 0.,
+                alternative_probability=rs.REF_ALTERNATIVE_PROBABILITY if self.reference_augmentation else 0.,
+                history_budget='low_trust_uses_spare_only' if self._evidence_v2() else 'reference_first',
+                learning='mixed_phase_authored_gaps_v1' if self._evidence_v2() and self.reference_augmentation else 'off')
 
     def set_epoch(self, epoch):
         self.training_epoch = int(epoch)
+    def _structured(self):
+        return getattr(self,'structure_policy','off')!='off'
+    def _evidence_v2(self):
+        return getattr(self,'structure_policy','off')=='aligned_rhythm_v2'
+    def _profile(self,song):
+        from .rhythm_structure import ProfileCache,song_profile
+        cache=getattr(self,'_profiles',None)
+        if cache is None:cache=self._profiles=ProfileCache()
+        if song.stream_cache_key is None:song.stream_cache_key=_song_cache_key(song)
+        return cache.get(song.stream_cache_key,lambda:song_profile(song.audio,song.clock,song.end_beat))
+    def _aligned_match(self,song,cursor,alternative_draw=None):
+        """Audio-only search; committed chart notes are only read after the match."""
+        from .rhythm_structure import match_reference
+        return match_reference(self._profile(song),cursor,min_shift=self.window_beats,alternative_draw=alternative_draw,
+            ahead_beats=self.window_beats if self._evidence_v2() else 8)
+    def _aligned_legacy_start(self,song,cursor):
+        """Training-free aligned choice for checkpoints that learned the legacy
+        REF layout: same original-position 16-beat window, chosen by the
+        beat-synchronous match and omitted when the music does not repeat."""
+        from .rhythm_structure import match_reference,REF_MIN_SCORE
+        match=match_reference(self._profile(song),cursor,min_shift=self.history_beats+self.window_beats)
+        if match is None or match['best_score']<REF_MIN_SCORE:
+            self._last_aligned=None;return None
+        self._last_aligned=(match['best_shift'],match['best_score'])
+        return Fraction(math.floor(Fraction(cursor)))-match['best_shift']
+    def _selected_reference(self,song,cursor):
+        from .rhythm_structure import REF_MIN_SCORE
+        match=self._aligned_match(song,cursor)
+        if match is None or match['best_score']<REF_MIN_SCORE:return None
+        return (match['best_shift'],match['best_score'])
+    def _reference_argument(self,index):
+        if not self._structured():return self._prepare_reference(index)
+        from . import rhythm_structure as rs
+        info=self._prepare_reference(index)
+        if info is None:return None
+        if getattr(self,'reference_augmentation',False):
+            # Deterministic per window and epoch: occasionally hide the match or
+            # show an arbitrary passage with its true (usually low) trust, so
+            # trust, not mere presence, decides how much is reused.
+            draw=float(np.random.default_rng((self.augmentation_seed,index,self.training_epoch,7)).random())
+            if draw<rs.REF_DROP_PROBABILITY:return None
+            if draw<rs.REF_DROP_PROBABILITY+rs.REF_ALTERNATIVE_PROBABILITY:
+                return (info['alternative_shift'],info['alternative_score'])
+        if info['best_score']<rs.REF_MIN_SCORE:return None
+        return (info['best_shift'],info['best_score'])
     def _reference_stream(self, song, points, cursor, *, prefix_end=None):
         stop = cursor - self.history_beats - self.window_beats
         if prefix_end is None:
@@ -129,6 +192,9 @@ class StreamDataset(ComposerV2Dataset):
             local_semantic=torch.as_tensor(sem,dtype=torch.float32),local_semantic_mask=torch.as_tensor(valid,dtype=torch.bool),
             local_mask=torch.as_tensor((seconds>=0)&(seconds<=song.audio.duration_sec),dtype=torch.bool),
             local_beats=torch.tensor(beats,dtype=torch.float32))
+        if self._structured():
+            from .rhythm_structure import onset_envelope
+            result['local_envelope']=torch.as_tensor(onset_envelope(song.audio,song.clock,beats))
         if getattr(self, 'onset_readout_policy', 'off') != 'off':
             from .onset_readout import audio_tiles
             result.update({k:v[0] for k,v in audio_tiles(song,[anchor],self.onset_phases).items()})
@@ -161,8 +227,18 @@ class StreamDataset(ComposerV2Dataset):
                 if m['source_beat']<=cursor and float(m['end_second'])>second}
         older=active_sources(boundary)
         active=active_sources(cursor)
-        if reference_start is _SELECT_REFERENCE:
-            reference_start = self._reference_stream(song, known, cursor, prefix_end=_prefix_end)
+        structured=self._structured()
+        aligned=None
+        if structured:
+            aligned=self._selected_reference(song,cursor) if reference_start is _SELECT_REFERENCE else reference_start
+            reference_start=None
+        legacy_aligned=None
+        if not structured and reference_start is _SELECT_REFERENCE:
+            if getattr(self,'reference_selection','model')=='aligned':
+                reference_start = self._aligned_legacy_start(song, cursor)
+                legacy_aligned = self._last_aligned
+            else:
+                reference_start = self._reference_stream(song, known, cursor, prefix_end=_prefix_end)
         reference = []
         if _prefix_end is None:
             carry = [p for p in known if p.beat < boundary and p.beat in older]
@@ -181,14 +257,44 @@ class StreamDataset(ComposerV2Dataset):
                 end = bisect.bisect_left(beats, reference_start + self.window_beats, lo=first, hi=history_index)
                 reference = known[first:end]
         codec = self.codec
+        budget = self.max_tokens // 2
+        evidence_v2=self._evidence_v2()
+        checked_start=math.floor(cursor)-4
+        checked_end=math.floor(cursor)+self.window_beats
+        if aligned is not None:
+            from .rhythm_structure import reference_points,REF_LEAD_BEATS
+            shift,score=aligned
+            ahead=2*getattr(self,'refresh_events',16)
+            if _prefix_end is None:
+                reference=reference_points(known,cursor,shift,display_ahead=min(self.window_beats,max(0,self._profile(song).beats-math.floor(cursor))) if evidence_v2 else self.window_beats,max_ahead_events=ahead)
+            else:
+                reference=reference_points(known,cursor,shift,display_ahead=min(self.window_beats,max(0,self._profile(song).beats-math.floor(cursor))) if evidence_v2 else self.window_beats,max_ahead_events=ahead,
+                                           beats=song.point_beats,end=_prefix_end)
+            # Low-trust examples teach rejection, without destroying the true
+            # history needed to learn it. Strong references retain the v1 cap.
+            from .rhythm_structure import REF_MIN_SCORE
+            reference_budget=budget//3
+            if evidence_v2 and score<REF_MIN_SCORE:
+                reference_budget=min(reference_budget,max(0,budget-5-
+                    len(codec.encode_points(carry))-len(codec.encode_points(history))))
+            lengths=[len(codec.encode_points([p])) for p in reference]
+            total=sum(lengths);left=0;right=len(reference)
+            while total>reference_budget and left<right:
+                if reference[right-1].beat>cursor:
+                    right-=1;total-=lengths[right]
+                else:
+                    total-=lengths[left];left+=1
+            reference=reference[left:right]
+            reference_start=Fraction(math.floor(cursor))-REF_LEAD_BEATS-shift
+            if evidence_v2 and not reference and lengths:aligned=None;reference_start=None
         carry_ids = codec.encode_points(carry)
         history_ids = codec.encode_points(history)
         reference_ids = codec.encode_points(reference)
         prefix_length = 5 + len(carry_ids) + len(history_ids) + len(reference_ids)
-        budget = self.max_tokens // 2
         if prefix_length > budget:
-            prefix_length -= len(reference_ids)
-            reference_ids = []
+            if not structured:
+                prefix_length -= len(reference_ids)
+                reference_ids = []
             kept_start = 0
             carried_beats = {point.beat for point in carry}
             while prefix_length > budget and kept_start < len(history):
@@ -199,6 +305,10 @@ class StreamDataset(ComposerV2Dataset):
                     carried_beats.add(removed.beat)
                 else:
                     prefix_length -= len(codec.encode_points([removed]))
+            if structured and prefix_length > budget and aligned is not None:
+                # A trusted reference outranks the oldest history, not mandatory carry.
+                prefix_length -= len(reference_ids)
+                reference_ids = [];aligned=None;reference_start=None
             if prefix_length > budget:
                 raise ValueError('Mandatory sustained context exceeds token budget; increase max_tokens')
             if kept_start:
@@ -228,6 +338,10 @@ class StreamDataset(ComposerV2Dataset):
         all_ticks=np.asarray(anchors)[:,None]*24+relative[None,:]
         ticks=np.unique(all_ticks);tile_frames=np.searchsorted(ticks,all_ticks)
         seconds=song.clock.at_floats(ticks/24.)
+        envelope=None
+        if structured:
+            from .rhythm_structure import onset_envelope
+            envelope=onset_envelope(song.audio,song.clock,ticks/24.)
         sample_frames = getattr(song.audio, 'sample_for_training', None) if training else None
         if sample_frames is not None:
             mel, semantic, semantic_right, semantic_weight, valid = sample_frames(seconds)
@@ -249,9 +363,31 @@ class StreamDataset(ComposerV2Dataset):
             song_mask=torch.ones(len(summary['times_sec']),dtype=torch.bool),start_beat=Fraction(0),cursor=cursor,
             song_id=song.song_id,reference_start=reference_start,pad_id=self.codec.pad_id,
             song_cache_key=song.stream_cache_key or _song_cache_key(song))
+        if evidence_v2:
+            from .rhythm_structure import local_evidence
+            evidence=local_evidence(self._profile(song),clocks,aligned[0] if aligned else None,
+                                    start=checked_start,end=checked_end)
+            evidence[:prefix.index(codec.ref_id)]=0
+            out['reference_evidence']=torch.as_tensor(evidence)
+            out['reference_checked_start']=checked_start
+            out['reference_checked_end']=min(checked_end,self._profile(song).beats)
+            if training and getattr(self,'reference_augmentation',False):
+                from .rhythm_learning import supervision_weights
+                out['token_weights']=torch.as_tensor(weights*supervision_weights(codec,ids,labels,target,cursor,weights,
+                    context_phases=[p.beat%1 for p in history if p.beat>=cursor-2]))
         if sample_frames is not None:
             out['bank_semantic_right'] = torch.as_tensor(semantic_right)
             out['bank_semantic_weight'] = torch.as_tensor(semantic_weight)
+        if structured:
+            from .rhythm_structure import trust_features
+            out['bank_envelope']=torch.as_tensor(envelope)
+            out['reference_trust']=torch.as_tensor(trust_features(aligned[1] if aligned is not None else None))
+            out['reference_shift']=aligned[0] if aligned is not None else None
+            out['reference_score']=aligned[1] if aligned is not None else None
+        elif getattr(self,'reference_selection','model')=='aligned':
+            last=legacy_aligned if reference_start is not None else None
+            out['reference_shift']=last[0] if last else None
+            out['reference_score']=last[1] if last else None
         if getattr(self, 'onset_readout_policy', 'off') != 'off':
             from .onset_readout import audio_tiles, query_rows
             out.update(audio_tiles(song, anchors, self.onset_phases))
@@ -263,7 +399,7 @@ class StreamDataset(ComposerV2Dataset):
             return self._recovery_item(source)
         si,begin=self.windows[index];song=self.songs[si];end=self.ranges[index]
         cursor=song.points[begin-1].beat if begin else Fraction(0)
-        reference_start=self._prepare_reference(index)
+        reference_start=self._reference_argument(index)
         if song.stream_cache_key is None:
             song.stream_cache_key = _song_cache_key(song)
         return self.build_stream(song, song.points, cursor, target=song.points[begin:end],
@@ -273,6 +409,17 @@ class StreamDataset(ComposerV2Dataset):
     def _prepare_reference(self,index):
         si,begin=self.windows[index];song=self.songs[si]
         cursor=song.points[begin-1].beat if begin else Fraction(0)
+        if self._structured():
+            if not self._reference_ready[index]:
+                draw=float(np.random.default_rng((self.augmentation_seed,index,11)).random())
+                self._reference_starts[index]=self._aligned_match(song,cursor,alternative_draw=draw)
+                self._reference_ready[index]=1
+            return self._reference_starts[index]
+        if getattr(self,'reference_selection','model')=='aligned':
+            if not self._reference_ready[index]:
+                self._reference_starts[index]=self._aligned_legacy_start(song,cursor)
+                self._reference_ready[index]=1
+            return self._reference_starts[index]
         if not self._reference_ready[index]:
             self._reference_starts[index] = self._reference_stream(song, song.points, cursor, prefix_end=begin)
             self._reference_ready[index] = 1
@@ -297,8 +444,13 @@ class StreamDataset(ComposerV2Dataset):
         if changed is None:
             raise RuntimeError('Timing recovery view lost its eligible committed prefix')
         prefix,_=changed
+        if self._evidence_v2() and (source//8+self.training_epoch)%3==0:
+            phase=timing_recovery.perturb_phase_prefix(song.points[:begin],self._recovery_phases,
+                seed,next_beat=song.points[begin].beat,span=self._recovery_span)
+            if phase is not None:prefix=phase
+        cursor=prefix[-1].beat
         item=self.build_stream(song,prefix,cursor,target=song.points[begin:end],
-            ended=end==len(song.points),training=True,reference_start=self._prepare_reference(source))
+            ended=end==len(song.points),training=True,reference_start=self._reference_argument(source))
         keep=torch.tensor([int(token) in self._timing_ids for token in item['labels']],dtype=torch.bool)
         item['labels']=item['labels'].masked_fill(~keep,-100)
         item['token_weights']=item['token_weights']*keep*2.
@@ -312,6 +464,12 @@ def collate_stream(items):
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
     out=collate_composer_v2(temporary)
     for k in ('bank_audio','bank_semantic','bank_semantic_mask','local_mask','local_beats'):out[k]=torch.cat([item[k] for item in items],0)
+    if 'bank_envelope' in items[0]:out['bank_envelope']=torch.cat([item['bank_envelope'] for item in items],0)
+    if 'reference_trust' in items[0]:out['reference_trust']=torch.stack([item['reference_trust'] for item in items])
+    if 'reference_evidence' in items[0]:
+        from torch.nn import functional as F
+        width=out['input_ids'].size(1)
+        out['reference_evidence']=torch.stack([F.pad(item['reference_evidence'],(0,0,0,width-len(item['input_ids']))) for item in items])
     if any('bank_semantic_right' in item for item in items):
         out['bank_semantic_right'] = torch.cat([item.get('bank_semantic_right', item['bank_semantic']) for item in items])
         out['bank_semantic_weight'] = torch.cat([item['bank_semantic_weight']

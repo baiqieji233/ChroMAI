@@ -44,6 +44,9 @@ def parser():
     from .onset_policy import CHOICES as ONSET_CHOICES
     result.add_argument('--onset-readout',choices=ONSET_CHOICES,default='auto',
                         help='Phase-only acoustic evidence; auto enables fresh/continuous finetune and inherits exact resume')
+    from .rhythm_structure import CHOICES as STRUCTURE_CHOICES
+    result.add_argument('--rhythm-structure',choices=STRUCTURE_CHOICES,default='auto',
+                        help='Sub-beat phase geometry and aligned trusted references; auto enables fresh/continuous finetune and inherits exact resume')
     result.add_argument("--condition-policy", choices=POLICIES, default=None,
         help="Fresh/init default radar_style_v1; resume inherits the checkpoint contract")
     return result
@@ -162,8 +165,18 @@ def _cpu_budget(batch,time_tokens=None):
     timing=time_tokens[batch["labels"].clamp_min(0)]&active if time_tokens is not None else active
     return int(active.sum()),mass,float((weights*timing).sum()),float((weights*(active&~timing)).sum())
 
+def _phase_budget(batch,phase_tokens):
+    active=batch['labels'].ne(-100)
+    weights=batch.get('token_weights',active.float()).float()*active
+    weights=weights*batch.get('sample_weight',weights.new_ones(weights.size(0)))[:,None]
+    return float((weights*phase_tokens[batch['labels'].clamp_min(0)]).sum())
+
+
 def _validate(model,loader,device,precision,maximum):
+    model.validation_phase_loss=None
     if loader is None:return None
+    phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
+    phase_tokens=model.phase_targets.detach().cpu()
     model.eval();numerator=torch.zeros((),device=device);mass_sum=0.
     finite=torch.ones((),device=device,dtype=torch.bool)
     with torch.inference_mode():
@@ -175,15 +188,18 @@ def _validate(model,loader,device,precision,maximum):
                 known=torch.zeros_like(batch['condition'],dtype=torch.bool)
                 known[:,0]=True;batch={**batch,'condition_known':known}
             _,mass,_,_=_cpu_budget(batch)
+            phase_mass=_phase_budget(batch,phase_tokens)
             if not math.isfinite(mass) or mass<0:raise ValueError("Invalid validation token weight budget")
             batch=_device_batch(batch,device)
             with _autocast(device,precision):
-                loss,_=model.loss(model(batch),batch)
+                loss,metrics=model.loss(model(batch),batch)
             finite=finite&torch.isfinite(loss)
             numerator+=loss.detach()*max(1.,mass);mass_sum+=mass
+            phase_numerator+=metrics["phase_loss"]*phase_mass;phase_mass_sum+=phase_mass
     if not bool(finite):raise RuntimeError("Nonfinite validation loss")
     if mass_sum<=0:raise ValueError("Validation has no positive quality-weighted target tokens")
     result=float(numerator)/max(1.,mass_sum)
+    model.validation_phase_loss=float(phase_numerator)/phase_mass_sum if phase_mass_sum else None
     model.train()
     return result
 
@@ -268,9 +284,14 @@ def train(args):
     from .onset_policy import resolve_policy as resolve_onset_policy
     args.onset_readout_policy, onset_migration = resolve_onset_policy(getattr(args,'onset_readout','auto'),
         (parent.get('model_config') or parent.get('config')) if parent else None, resume=bool(args.resume))
-    if migration or onset_migration:
+    from .rhythm_structure import resolve_policy as resolve_structure_policy
+    args.structure_policy, structure_migration = resolve_structure_policy(getattr(args,'rhythm_structure','auto'),
+        (parent.get('model_config') or parent.get('config')) if parent else None, resume=bool(args.resume))
+    if args.structure_policy!='off' and args.sequence_policy!='continuous_events_v1':
+        raise ValueError('Rhythm structure requires continuous event training')
+    if migration or onset_migration or structure_migration:
         if directory == source_directory or any(path.exists() for path in artifacts):
-            raise ValueError('Condition/onset migration requires a new checkpoint directory; retain the parent')
+            raise ValueError('Condition/onset/rhythm-structure migration requires a new checkpoint directory; retain the parent')
     device=torch.device("cuda" if args.device=="auto" and torch.cuda.is_available() else "cpu" if args.device=="auto" else args.device)
     if device.type=="cuda" and not torch.cuda.is_available():raise RuntimeError("CUDA requested but unavailable")
     precision=("bf16" if device.type=="cuda" and torch.cuda.is_bf16_supported() else "fp32") if args.precision=="auto" else args.precision
@@ -283,11 +304,12 @@ def train(args):
     resource_budgets = dict(cuda_memory_budget_gb=cuda_budget, audio_cache_gb=args.audio_cache_gb)
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     if torch.cuda.is_available():torch.cuda.manual_seed_all(args.seed)
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
     if onset_migration: comparable_config['onset_readout_policy'] = parent_config['onset_readout_policy']
+    if structure_migration: comparable_config['structure_policy'] = parent_config['structure_policy']
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
     codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
@@ -309,8 +331,10 @@ def train(args):
         from .stream_data import StreamDataset
         dataset_class=StreamDataset;options['refresh_events']=args.refresh_events
         options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed,
-                       onset_readout_policy=args.onset_readout_policy)
-    dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**options)
+                       onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy)
+    train_options=dict(options)
+    if args.sequence_policy=='continuous_events_v1':train_options['reference_augmentation']=True
+    dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
     vocabulary_changed = codec is not None and dataset.codec is not codec
     if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
         raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
@@ -342,6 +366,10 @@ def train(args):
             acoustic_policy='query_integer_beat_tiles_v1')
     if recovery_policy!='off':contract['timing_recovery']=recovery_policy
     if args.onset_readout_policy != 'off':contract['onset_readout_policy']=args.onset_readout_policy
+    if args.structure_policy != 'off':contract['structure_policy']=args.structure_policy
+    if args.structure_policy=='aligned_rhythm_v2':
+        from .rhythm_learning import POLICY as LEARNING_POLICY
+        contract['rhythm_learning']=LEARNING_POLICY
     if dialect_policy != chart_dialect.LEGACY_STRICT_POLICY:
         contract['chart_dialect'] = dialect_policy
     if args.resume and (not _same_data_identity(parent["data_identity"],identity) or parent["training_contract"]!=contract):
@@ -351,19 +379,24 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration:
+        if migration or onset_migration or structure_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if onset_migration:
                 if args.onset_readout_policy != 'off':
                     expected_missing.update(k for k in model.state_dict() if k.startswith('onset_readout.'))
                 else:
                     parent_state = {k:v for k,v in parent_state.items() if not k.startswith('onset_readout.')}
+            if structure_migration:
+                from .rhythm_structure import migration_state
+                parent_state, missing_structure = migration_state(model,parent_state)
+                expected_missing.update(missing_structure)
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
             emit('runtime',stage='model_migration',parent=str(parent_path),
                 source_policy=parent_policy,condition_policy=args.condition_policy,
-                onset_readout_policy=args.onset_readout_policy,zero_initialization=True)
+                onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
+                zero_initialization=True)
         else:
             model.load_state_dict(parent_state,strict=True)
     if hasattr(model,'onset_readout') and (not parent or onset_migration):
@@ -423,13 +456,14 @@ def train(args):
          train_charts=len(dataset.songs),validation_charts=len(validation.songs) if validation else 0,
          preparation=dataset.audit.get('preparation', {}), batch_order=batch_order, **resource_budgets,
          timing_recovery=dataset.audit.get('timing_recovery'),
+         rhythm_structure=dataset.audit.get('rhythm_structure'),
         best_basis=best_basis)
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
-    running=torch.zeros(3,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.
-    group_metrics=torch.zeros(3,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
-    group_mass=0.;group_time_mass=0.;group_component_mass=0.;stop=False
-    time_tokens=model.time_tokens.detach().cpu()
+    running=torch.zeros(4,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
+    group_metrics=torch.zeros(4,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
+    group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;stop=False
+    time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
     if device.type=="cuda":torch.cuda.reset_peak_memory_stats(device)
     for epoch in range(int(state["epoch"]),args.epochs):
         sampler.set_epoch(epoch)
@@ -439,6 +473,7 @@ def train(args):
         for batch_index,batch in _batches(loader,cursor):
             now=time.perf_counter();data_sec+=now-previous
             tokens,mass,time_mass,component_mass=_cpu_budget(batch,time_tokens)
+            phase_mass=_phase_budget(batch,phase_tokens)
             cpu_valid=math.isfinite(mass) and mass>=0
             # Keep the unnormalized numerator numerically modest for FP16;
             # divide by the complete update's quality-weighted token budget below.
@@ -449,10 +484,11 @@ def train(args):
             scaler.scale(loss*(budget/1024.)).backward()
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
             group_metrics+=torch.stack((loss.detach()*budget,
-                metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass)))
+                metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*phase_mass))
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
             group_component_mass+=component_mass if cpu_valid else 0.
+            group_phase_mass+=phase_mass if cpu_valid else 0.
             seen_samples+=len(batch["input_ids"]);seen_tokens+=tokens
             boundary=(batch_index+1)%args.grad_accumulation==0 or batch_index+1==len(loader)
             if boundary:
@@ -471,11 +507,11 @@ def train(args):
                     scaler.step(optimizer);state["optimizer_steps"]+=1
                     epoch_loss_gpu+=group_metrics[0];epoch_mass+=group_mass
                     running+=group_metrics;running_mass+=group_mass
-                    running_time_mass+=group_time_mass;running_component_mass+=group_component_mass
+                    running_time_mass+=group_time_mass;running_component_mass+=group_component_mass;running_phase_mass+=group_phase_mass
                 else:emit("progress",stage="nonfinite_update_skipped",epoch=epoch,batch=batch_index+1,optimizer_steps=state["optimizer_steps"])
                 scaler.update();optimizer.zero_grad(set_to_none=True)
                 group_metrics.zero_();group_finite.fill_(True)
-                group_mass=0.;group_time_mass=0.;group_component_mass=0.
+                group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.
                 state.update(epoch=epoch,batch_cursor=batch_index+1,update_attempts=attempt+1)
             ended=time.perf_counter();compute_sec+=ended-now
             if boundary and (state["update_attempts"]%args.log_interval==0 or batch_index+1==len(loader)):
@@ -486,7 +522,7 @@ def train(args):
                     loss_scope="run_quality_weighted_token_mean",
                     token_count=seen_tokens,token_weight_sum=running_mass,
                     tokens_per_sec=seen_tokens/max(elapsed,1e-9),samples_per_sec=seen_samples/max(elapsed,1e-9),
-                    time_loss=values[1]/max(1.,running_time_mass),component_loss=values[2]/max(1.,running_component_mass),
+                    time_loss=values[1]/max(1.,running_time_mass),component_loss=values[2]/max(1.,running_component_mass),phase_loss=values[3]/max(1.,running_phase_mass),
                     data_sec=data_sec,compute_sec=compute_sec,compute_measurement="host_submission_wall_including_update_boundary_wait",
                     prefetch={"consumer_wait_sec":data_sec,"max_batches":1},elapsed_sec=elapsed,lr=optimizer.param_groups[0]["lr"],
                     audio_banks=dataset.audio_store.mapping_stats(),
@@ -505,6 +541,7 @@ def train(args):
             if improved:state["best_loss"]=score
             emit("progress",stage="epoch_complete",epoch=epoch+1,total=args.epochs,loss=score,
                 epoch_train_loss=state["last_loss"],validation_loss=validation_loss,
+                validation_phase_loss=getattr(model,"validation_phase_loss",None),
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
                 best_basis=best_basis,optimizer_steps=state["optimizer_steps"])
