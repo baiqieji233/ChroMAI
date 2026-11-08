@@ -92,4 +92,4 @@ v44 第 4→5 轮，训练总 loss 从 7.166 降到 7.061，但验证配置 loss
 
 **完整轮次观察没有完全保住短程收益。** 第 1 轮验证：选时 0.6173、配置 4.6688、细节 1.8715。选时仍在改善，配置与细节已回升，不能宣称学习效率根因全部解决。后续三轮 Antigravity 讨论、反证和架构精简方向见 [学习设计审查](COMPOSER_LEARNING_DESIGN_REVIEW_20261102_ZH.md)。
 
-原始指标与实验条件见 [证据 JSON](../evidence/COMPOSER_DENSITY_AND_LEARNING_REPAIR_20261102.json)。固定生成对照保存在 `.scratch/density_audit_20261102/generated_baseline_*` 和 `generated_repaired_*`。
+原始指标与实验条件见 证据 JSON（本地开发资料，不随源码发布）。固定生成对照保存在 `.scratch/density_audit_20261102/generated_baseline_*` 和 `generated_repaired_*`。

@@ -47,7 +47,7 @@ START_WEBUI.bat --check
 
 全局环境也能启动，但项目及依赖必须安装到那个全局Python。项目采用`src`布局，仅切换到根目录不能让另一个Python自动找到包。`No module named 'maichart'`通常表示选错环境或尚未安装项目；找不到`maichart-gui`通常表示命令所在的Scripts目录不在PATH，或原Python已被卸载。
 
-升级 Python 后，先检查 `.venv\pyvenv.cfg` 及 `.\START_WEBUI.bat --check` 的输出。如果虚拟环境依赖已卸载的解释器，需要创建新环境并重新安装依赖。选择 Python 时，也要确认 PyTorch、torchaudio 和音频库有适配的安装包。[本机历史恢复记录](../handoffs/WINDOWS_RUNTIME_RECOVERY_20261026_ZH.md)
+升级 Python 后，先检查 `.venv\pyvenv.cfg` 及 `.\START_WEBUI.bat --check` 的输出。如果虚拟环境依赖已卸载的解释器，需要创建新环境并重新安装依赖。选择 Python 时，也要确认 PyTorch、torchaudio 和音频库有适配的安装包。本机历史恢复记录（本地开发资料，不随源码发布）
 
 运行测试：
 

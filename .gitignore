@@ -30,7 +30,6 @@ coverage.xml
 /checkpoints/
 /cache/
 /manifests/*
-!/manifests/training_manifest_limit2.json
 /generated/
 /outputs/
 /examples/training_zip_demo/cache/
@@ -86,6 +85,22 @@ coverage.xml
 Thumbs.db
 Desktop.ini
 
-# Keep src/, tests/, tools/, docs/, configs/, and examples/ under version
-# control, including examples/maimai_training_demo.zip. Do not ignore all ZIP,
-# JSON, TXT, or audio files globally: small examples and fixtures need them.
+# Shipped source, tools, usage guides and demo data remain tracked. Never
+# ignore JSON, TXT, ZIP or audio globally: runtime reference data needs them.
+
+# Local development material is deliberately excluded from release source.
+/tests/
+/scripts/
+/docs/handoffs/
+/docs/evidence/
+/docs/audits/
+/docs/archive/
+**/*_HANDOFF_*.md
+/docs/explanations/EVENT_TEST_CASES.md
+/docs/explanations/QUALITY_REBUILD_ADDITIONAL_TESTS_*.md
+/docs/explanations/COMPOSER_V2_PHASE_RECOVERY_TRIAL_*.md
+/tools/benchmark_*.py
+/tools/bench_train_step.py
+/tools/probe_composer_touch.py
+/AUDIT_WORKING_TREE_*.md
+/C*Usersmywor.claudeprojects*

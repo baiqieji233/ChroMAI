@@ -1,6 +1,6 @@
 # Composer 独立审查复核：BF16 注意力反向误差与历史记忆保护
 
-日期：2026-10-26。修改前源码基准：`7363634`；实际模型：`chart_composer_v1 / audio_grounded_v3`。本文接续[退化根因调查](COMPOSER_INSTABILITY_ROOT_CAUSE_20261026_ZH.md)，优先于其中“保护尚未进入生产路径”的历史状态。机器可读结果见[本轮证据](../evidence/COMPOSER_SDPA_STABILITY_FIX_20261026.json)。
+日期：2026-10-26。修改前源码基准：`7363634`；实际模型：`chart_composer_v1 / audio_grounded_v3`。本文接续[退化根因调查](COMPOSER_INSTABILITY_ROOT_CAUSE_20261026_ZH.md)，优先于其中“保护尚未进入生产路径”的历史状态。机器可读结果见本轮证据（本地开发资料，不随源码发布）。
 
 **审查最有价值的新发现已独立复现：本机 PyTorch 2.7.0+cu128 / RTX 5070 Ti Laptop GPU 的 BF16 融合注意力，在带 dropout 的反向传播中会产生错误的查询/键梯度。** 历史记忆异常放大与这个数值误差共同构成了已经验证的失稳通路。此前只比较 FP32/BF16 前向，不能排除反向算子问题；本轮补上了这项证据。
 

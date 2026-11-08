@@ -21,4 +21,4 @@ CLI对应 `--intercept-tap-on-slide --tap-on-slide-threshold-ms 200`。API对应
 
 最新生成谱面中的两处TapOnSlide静态警告不属于运行时硬无理，保留不删。
 
-修复版测试谱面在 `webui_workspace/quality_review_20261107/tail_guard/maidata.txt`，没有覆盖原输出。输入快照和输出SHA256、具体移除位置及前后计数见[验证记录](../evidence/COMPOSER_V2_OPTIONAL_TAIL_GUARD_20261107.json)。相关Python回归233项、JS界面测试30项通过。清理若引入新的其他类别硬无理，会拒绝导出，避免以消除撞尾换来其他错误。
+修复版测试谱面在 `webui_workspace/quality_review_20261107/tail_guard/maidata.txt`，没有覆盖原输出。输入快照和输出SHA256、具体移除位置及前后计数见验证记录（本地开发资料，不随源码发布）。相关Python回归233项、JS界面测试30项通过。清理若引入新的其他类别硬无理，会拒绝导出，避免以消除撞尾换来其他错误。

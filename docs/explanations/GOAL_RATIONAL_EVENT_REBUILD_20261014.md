@@ -59,7 +59,7 @@ P0 主体备份：`backups/rational_event_rebuild_20261014/source_before_rebuild
 
 186 项定向 Python 和 28 项前端检查通过，4 张官谱/8 个配置批次 CUDA 微调链路探针完成，旧模型生成入口保留。正式任务 d69dff3da685 已停止，完整 epoch 4 与 epoch 5 起始检查点均保留并额外备份；未自动重启正式训练。
 
-实际固定 checkpoint 整曲对照消除了数字前缀提前截断，但仍有约 32 秒空白与异常分音；可选搜索未获得稳定整曲质量优势，默认不强制开启。**工程修复已交付，当前 checkpoint 的音乐质量仍未验收通过。** 修复思路、目的、证据、限制和续训方式见 [专项修复记录](SONG_FORM_V2_QUALITY_REPAIR_20261015.md) 及 [证据 JSON](../evidence/SONG_FORM_V2_QUALITY_FIX_20261015.json)。
+实际固定 checkpoint 整曲对照消除了数字前缀提前截断，但仍有约 32 秒空白与异常分音；可选搜索未获得稳定整曲质量优势，默认不强制开启。**工程修复已交付，当前 checkpoint 的音乐质量仍未验收通过。** 修复思路、目的、证据、限制和续训方式见 [专项修复记录](SONG_FORM_V2_QUALITY_REPAIR_20261015.md) 及 证据 JSON（本地开发资料，不随源码发布）。
 
 ## 全链路再审查与数值节奏合同（2026-10-15）
 

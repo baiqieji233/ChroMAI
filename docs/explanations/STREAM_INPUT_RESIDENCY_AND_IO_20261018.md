@@ -74,4 +74,4 @@ GPU不满载有独立原因：近期生产数据等待仅约0.9%，而batch4的�
 - 新控件在训练主页面「连续整曲事件流参数」→「训练运行与缓存」附近，和原缓存控件同页；检查过Edge页面实际存在控件且payload包含全部字段。
 - 最终代码已通过新服务7862提供（`resident_pipeline_v3`）。7860/7861旧服务保持；使用新设置请打开7862，或者之后手动重启7860。历史自动审批拒绝重启旧服务，本轮未再尝试停止它们。
 - 没有自动启动正式训练，旧checkpoint/语义合同和数据指纹保留。输入预算不再要求修改代码；自动默认值仍有明确计算规则。
-- 证据：[STREAM_INPUT_RESIDENCY_EVIDENCE_20261018.json](../audits/STREAM_INPUT_RESIDENCY_EVIDENCE_20261018.json)。原始盘点、短负载脚本和日志在`.scratch/stream_io_20261018/`。
+- 证据：STREAM_INPUT_RESIDENCY_EVIDENCE_20261018.json（本地开发资料，不随源码发布）。原始盘点、短负载脚本和日志在`.scratch/stream_io_20261018/`。

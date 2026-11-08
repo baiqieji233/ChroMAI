@@ -57,7 +57,7 @@
 
 验证结束时训练任务 `08c0db1e73fa` 仍在运行，第 24 轮、8240 步，学习率维持原任务的 0.0002。本轮未停止或重启训练，也未改训练参数。6900 步副本 SHA256 为 `68d13f805a6eb5941ccd53d06aa992840e0a4017f51c3ebe6794c9c5f14fd414`，验证前后不变。
 
-证据目录：`.scratch/v2_hold_recovery_20261105/`。其中 `baseline.log` 保存旧恢复两次撤回的具体内容，`native_audit.json` 保存局部反事实与状态一致性结果，`fixed/maidata.txt` 是修复后的完整输出。机器可读记录见 [验收证据](../evidence/COMPOSER_V2_HOLD_RELEASE_RECOVERY_20261105.json)。
+证据目录：`.scratch/v2_hold_recovery_20261105/`。其中 `baseline.log` 保存旧恢复两次撤回的具体内容，`native_audit.json` 保存局部反事实与状态一致性结果，`fixed/maidata.txt` 是修复后的完整输出。机器可读记录见 验收证据（本地开发资料，不随源码发布）。
 
 ## 仍需独立处理的问题
 

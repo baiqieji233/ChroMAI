@@ -7,7 +7,7 @@ checkpoint：`maichart-chart-stream-checkpoint-v1`
 
 **2026-10-18实现边界补充**：最新根因审查见 [STREAM_TRAINING_SHORTCUT_ROOT_AUDIT_20261018.md](STREAM_TRAINING_SHORTCUT_ROOT_AUDIT_20261018.md)。当前全曲音频最多1024节点，未按每个当前事件重新查询局部细节；router为全曲计算而非逐事件意图路由；summary只来自近期history，档案检索未作为已训练分支接入；没有独立事件/音频对齐目标。下文各阶段的“实现”记录不能当成这些原设计目标均已完成的证明。
 
-后续实测与修正：本文下方各阶段记录是当时的工程进度，不能代替质量验收。生成设备／缓存修复见 [STREAM_GENERATION_FIXES_20261017.md](../handoffs/STREAM_GENERATION_FIXES_20261017.md)；最新实际谱面的异常拍位、EOF 分母、训练块重叠与完整 Fraction 搜索修复及对照见 [STREAM_TIMING_QUALITY_AUDIT_20261017.md](STREAM_TIMING_QUALITY_AUDIT_20261017.md)。特别是“音频对齐辅助已完成”和“复用旧自动无理修复”不能从本设计文档推定为当前已实现能力。
+后续实测与修正：本文下方各阶段记录是当时的工程进度，不能代替质量验收。生成设备／缓存修复见 STREAM_GENERATION_FIXES_20261017.md（本地开发资料，不随源码发布）；最新实际谱面的异常拍位、EOF 分母、训练块重叠与完整 Fraction 搜索修复及对照见 [STREAM_TIMING_QUALITY_AUDIT_20261017.md](STREAM_TIMING_QUALITY_AUDIT_20261017.md)。特别是“音频对齐辅助已完成”和“复用旧自动无理修复”不能从本设计文档推定为当前已实现能力。
 
 持续动作训练时钟、提交前参考检查、尾部边界及实际 GPU 复核的后续修复见 [STREAM_QUALITY_REAUDIT_AND_ENDING_20261017.md](STREAM_QUALITY_REAUDIT_AND_ENDING_20261017.md)。旧训练应通过 finetune 迁移到前缀时钟监督；旧 checkpoint 的生成仍兼容。
 

@@ -72,7 +72,7 @@ AudioLens 使用卷积、LayerNorm 和确定性激活，没有随机 dropout 或
 
 两个版本的计时窗口中，最大数据等待均约 1ms，支持上一位关于消除样本供应长停顿的优化方向。但这里是预热后的窗口，未再次证明整个首轮训练或全部 465 个缓存的构建性能；不直接用本文吞吐除以上一份文档的 591 samples/s。
 
-汇总证据：[COMPOSER_UNIQUE_AUDIO_PERFORMANCE_20261028.json](../evidence/COMPOSER_UNIQUE_AUDIO_PERFORMANCE_20261028.json)。原始日志、源码基线、完整 pytest 日志、BF16 探针与脚本保存在 `.scratch/composer_unique_audio_20261028/`。复现对照：
+汇总证据：COMPOSER_UNIQUE_AUDIO_PERFORMANCE_20261028.json（本地开发资料，不随源码发布）。原始日志、源码基线、完整 pytest 日志、BF16 探针与脚本保存在 `.scratch/composer_unique_audio_20261028/`。复现对照：
 
 ```powershell
 $env:OMP_NUM_THREADS='2'

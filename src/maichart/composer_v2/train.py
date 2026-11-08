@@ -27,12 +27,7 @@ def emit(kind,**values):
     print("composer_v2_"+kind+" "+json.dumps(values,ensure_ascii=False,allow_nan=False),flush=True)
 
 def parser():
-    TRAIN_DEFAULTS=dict(epochs=50,batch_size=8,grad_accumulation=8,lr=.0002,
-        lr_schedule="cosine",warmup_steps=200,min_lr_ratio=.1,d_model=384,layers=8,nhead=8,
-        dim_feedforward=1536,dropout=.1,window_beats=16,history_beats=16,future_beats=4,
-        ticks_per_beat=48,max_tokens=2048,audio_backend="mert",prepare_device="auto",device="auto",
-        precision="bf16",validation_max_batches=32,checkpoint_interval_steps=500,log_interval=20,
-        seed=0,max_steps=0,limit_charts=0,cpu_threads=2,cuda_memory_budget_gb=0.0,audio_cache_gb=0.25)
+    from .defaults import TRAIN_DEFAULTS
     result=argparse.ArgumentParser(description=__doc__)
     result.add_argument("--manifest",required=True)
     result.add_argument("--validation-manifest")
@@ -48,7 +43,7 @@ def parser():
     result.add_argument('--timing-recovery',choices=timing_recovery.CHOICES,default='auto')
     from .onset_policy import CHOICES as ONSET_CHOICES
     result.add_argument('--onset-readout',choices=ONSET_CHOICES,default='auto',
-                        help='Experimental phase-only acoustic evidence; auto inherits the parent, otherwise off')
+                        help='Phase-only acoustic evidence; auto enables fresh/continuous finetune and inherits exact resume')
     result.add_argument("--condition-policy", choices=POLICIES, default=None,
         help="Fresh/init default radar_style_v1; resume inherits the checkpoint contract")
     return result

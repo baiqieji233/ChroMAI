@@ -66,4 +66,4 @@ Python样本构造还会与主线程争用GIL，拖慢GPU提交，因此收益�
 - 每轮遮罩在缓存加载后重新产生。不要手工修改映射工件；需要清理时可在停止训练后仅删除缓存目录下的`stream_training_inputs`，原压缩缓存仍可转换重建。
 - 「原压缩查询（对照）」可以关闭磁盘映射；「时钟与状态内存缓存」为独立预算，0关闭该内存LRU；映射缓存仍可读取。额外磁盘占用换取重复训练速度，全部浮点特征保留原精度。
 - 没有强行重排歌曲/长度分桶，没有更换输出节拍网格，没有引入未经验证的注意力kernel。GPU剖析确认原attention已经使用高效CUDA实现，本次主要消除CPU/GIL、存储和损失布局开销。
-- 机器可读证据：[STREAM_PIPELINE_OPTIMIZATION_EVIDENCE_20261018.json](../audits/STREAM_PIPELINE_OPTIMIZATION_EVIDENCE_20261018.json)。剖析、快照、对照脚本、页面截图及小型测试权重位于`.scratch/stream_efficiency_20261018/`，不入Git。
+- 机器可读证据：STREAM_PIPELINE_OPTIMIZATION_EVIDENCE_20261018.json（本地开发资料，不随源码发布）。剖析、快照、对照脚本、页面截图及小型测试权重位于`.scratch/stream_efficiency_20261018/`，不入Git。

@@ -1,7 +1,7 @@
 # 少量数据流式谱面生成：学习瓶颈根因剖析与下一代架构设计（Antigravity 独立审查）
 
 日期：2026-10-30  
-审查范围：只读审查当前源码（`v27` 最新状态）、[COMPOSER_LOW_DATA_STREAMING_DESIGN_20261030_ZH.md](COMPOSER_LOW_DATA_STREAMING_DESIGN_20261030_ZH.md)、[COMPOSER_V27_EFFICIENCY_AND_LEARNING_REVIEW_20261030_ZH.md](COMPOSER_V27_EFFICIENCY_AND_LEARNING_REVIEW_20261030_ZH.md)、[COMPOSER_V26_REST_MICROSTEP_REPAIR_20261030_ZH.md](../handoffs/COMPOSER_V26_REST_MICROSTEP_REPAIR_20261030_ZH.md) 及早期 `event_ctx`（[event_model.py](../../src/maichart/generation/event_model.py)、[event_ctx.py](../../src/maichart/generation/event_ctx.py)、[STAGE_E_LOCAL_ONSET_QUALITY.md](STAGE_E_LOCAL_ONSET_QUALITY.md)）。未修改任何源码、未触碰正在 `7864` 运行的 `v27` 训练任务 `5fbb4701c0a4`。
+审查范围：只读审查当前源码（`v27` 最新状态）、[COMPOSER_LOW_DATA_STREAMING_DESIGN_20261030_ZH.md](COMPOSER_LOW_DATA_STREAMING_DESIGN_20261030_ZH.md)、[COMPOSER_V27_EFFICIENCY_AND_LEARNING_REVIEW_20261030_ZH.md](COMPOSER_V27_EFFICIENCY_AND_LEARNING_REVIEW_20261030_ZH.md)、COMPOSER_V26_REST_MICROSTEP_REPAIR_20261030_ZH.md（本地开发资料，不随源码发布） 及早期 `event_ctx`（[event_model.py](../../src/maichart/generation/event_model.py)、[event_ctx.py](../../src/maichart/generation/event_ctx.py)、[STAGE_E_LOCAL_ONSET_QUALITY.md](STAGE_E_LOCAL_ONSET_QUALITY.md)）。未修改任何源码、未触碰正在 `7864` 运行的 `v27` 训练任务 `5fbb4701c0a4`。
 
 ---
 

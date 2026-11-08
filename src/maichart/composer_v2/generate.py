@@ -25,6 +25,7 @@ from .conditions import resolve_generation_condition
 
 
 def parser():
+    from .defaults import GENERATION_DEFAULTS
     result = argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint', 'audio', 'output'):
         result.add_argument('--' + name, required=True)
@@ -35,9 +36,9 @@ def parser():
     result.add_argument('--condition', type=json.loads, default=None,
                         help='Explicit Radar/Style overrides as a JSON object; omitted keys are automatic')
     result.add_argument('--seed', type=int, default=0)
-    result.add_argument('--temperature', type=float, default=.9,
+    result.add_argument('--temperature', type=float, default=GENERATION_DEFAULTS['temperature'],
                         help='Timing temperature and the default configuration temperature')
-    result.add_argument('--top-p', type=float, default=.95,
+    result.add_argument('--top-p', type=float, default=GENERATION_DEFAULTS['top_p'],
                         help='Timing nucleus threshold and the default configuration threshold')
     result.add_argument('--action-temperature', type=float,
                         help='Override configuration temperature for a continuous-event checkpoint')
@@ -45,9 +46,11 @@ def parser():
                         help='Override configuration nucleus threshold for a continuous-event checkpoint')
     result.add_argument('--onset-strength', type=float, default=None,
                         help='Trained phase-only acoustic reference: 0 off, 1 trained setting, up to 2 experimental emphasis')
-    result.add_argument('--intercept-tap-on-slide',action='store_true',help='Enforce native hard TapOnSlide findings and clean residual affected notes')
-    result.add_argument('--tap-on-slide-threshold-ms',type=float,default=200.)
-    result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=1)
+    result.add_argument('--intercept-tap-on-slide',action=argparse.BooleanOptionalAction,default=GENERATION_DEFAULTS['intercept_tap_on_slide'],help='Enforce native hard TapOnSlide findings and clean residual affected notes')
+    result.add_argument('--tap-on-slide-threshold-ms',type=float,default=GENERATION_DEFAULTS['tap_on_slide_threshold_ms'])
+    result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=GENERATION_DEFAULTS['candidates'])
+    result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts; sequential seeds, shared model/audio')
+    result.add_argument('--batch-manifest', help=argparse.SUPPRESS)
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
     result.add_argument('--cpu-threads', type=int, default=2)
     result.add_argument('--max-events', type=int, default=0)
@@ -318,7 +321,7 @@ def _sampling_policy(args):
 
 
 @torch.inference_mode()
-def generate(args, *, model_override=None, payload_override=None, audio_store_override=None):
+def generate(args, *, model_override=None, payload_override=None, audio_store_override=None, prepared_override=None):
     from .tail_guard import options as tail_options
     tail_options(args)
     if args.device == 'cuda':
@@ -327,7 +330,6 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     threads=int(getattr(args,'cpu_threads',2))
     if threads<1:raise ValueError('cpu_threads must be positive')
     torch.set_num_threads(threads)
-    from .audio import AudioFeatureStore
     from .model import ComposerV2Config, ComposerV2
     if args.temperature < 0 or not 0 < args.top_p <= 1:
         raise ValueError('temperature must be nonnegative and top_p in (0,1]')
@@ -367,21 +369,15 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     if device == 'auto':
         device = 'cuda' if torch.cuda.is_available() else 'cpu'
     audio_path = Path(args.audio).resolve()
-    from .tempo import resolve_timing
-    tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
-        first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',tempo_detection=getattr(args,'tempo_detection','auto'))
+    if prepared_override is None:
+        tempo,first,timing_report,audio = prepare_inputs(args,config,device,audio_store_override)
+    else:
+        tempo,first,timing_report,audio = prepared_override
     print('composer_v2_timing '+json.dumps(timing_report,ensure_ascii=False),flush=True)
     for warning in timing_report.get('warnings', ()):
         print('composer_v2_timing_warning '+warning,flush=True)
     bpm=float(tempo[0].bpm)
     clock = TempoClock(tempo, first)
-    store = audio_store_override if audio_store_override is not None else AudioFeatureStore(
-        args.cache_dir, backend=config.audio_backend, model_path=config.mert_model, device=device)
-    try:
-        store.prepare(audio_path)
-        audio = store.load(audio_path)
-    finally:
-        store.close()
     model = model_override if model_override is not None else ComposerV2(config, codec)
     if model_override is None:
         model.load_state_dict(payload['model_state_dict'], strict=True)
@@ -513,8 +509,33 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     return metadata
 
 
+def prepare_inputs(args,config,device,audio_store_override=None):
+    """Read once per batch; feature preparation is independent of chart seed."""
+    from .audio import AudioFeatureStore
+    from .tempo import resolve_timing
+    audio_path=Path(args.audio).resolve()
+    tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
+        first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',
+        tempo_detection=getattr(args,'tempo_detection','auto'))
+    store=audio_store_override if audio_store_override is not None else AudioFeatureStore(
+        args.cache_dir,backend=config.audio_backend,model_path=config.mert_model,device=device)
+    try:
+        store.prepare(audio_path)
+        audio=store.load(audio_path)
+    finally:
+        store.close()
+    return tempo,first,timing_report,audio
+
+
 def main(argv=None):
-    return generate(parser().parse_args(argv))
+    args=parser().parse_args(argv)
+    from .defaults import MAX_BATCH_COUNT
+    if not 1<=args.count<=MAX_BATCH_COUNT:
+        raise ValueError(f'count must be in 1..{MAX_BATCH_COUNT}')
+    if args.count>1:
+        from .batch_generate import generate_batch
+        return generate_batch(args)
+    return generate(args)
 
 
 if __name__ == '__main__':

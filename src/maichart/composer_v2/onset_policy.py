@@ -7,7 +7,10 @@ CHOICES = ('auto', 'off', POLICY)
 
 def resolve_policy(requested, parent=None, *, resume=False):
     previous = (parent or {}).get('onset_readout_policy', 'off')
-    policy = previous if requested in (None, 'auto') else requested
+    # Resume replays the original contract. Fresh and continuous finetune use
+    # the latest readout; legacy window checkpoints have no compatible input.
+    latest = POLICY if parent is None or parent.get('sequence_policy') == 'continuous_events_v1' else previous
+    policy = (previous if resume else latest) if requested in (None, 'auto') else requested
     if policy not in ('off', POLICY):
         raise ValueError('Unknown onset readout policy')
     if resume and policy != previous:

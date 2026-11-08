@@ -1,0 +1,9 @@
+# Development artifacts stay local even when setuptools builds an sdist.
+prune tests
+prune scripts
+prune .scratch
+prune docs/handoffs
+prune docs/evidence
+prune docs/audits
+prune docs/archive
+global-exclude *.py[cod] *.tmp *.bak

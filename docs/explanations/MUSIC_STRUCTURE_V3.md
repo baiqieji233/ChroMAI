@@ -4,7 +4,7 @@
 
 > 日期：2026-10-10
 > 提交：`5e44148`
-> 上游文档：[PROGRESS_AND_NEXT_STEPS.md](../handoffs/PROGRESS_AND_NEXT_STEPS.md) 的「阶段 A」
+> 上游文档：PROGRESS_AND_NEXT_STEPS.md（本地开发资料，不随源码发布） 的「阶段 A」
 
 阶段 A 的目标是把细碎节奏从「训练时多看一眼」变成「模型能表示、能被要求」。
 本文记录它的实现与实测结论。

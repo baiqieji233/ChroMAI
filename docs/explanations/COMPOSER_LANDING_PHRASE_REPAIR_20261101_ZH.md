@@ -94,4 +94,4 @@
 - 构建wheel确认含14个WebUI静态资源，含index.html与app.js。
 - 原v38完整点与推理点再次核对SHA256一致。正式训练保持停止，没有把这48步实验当正式训练继续。
 
-参数、源码哈希、首次失败、最终四次结果、浏览器与性能证据见 [验证记录](../evidence/COMPOSER_LANDING_PHRASE_REPAIR_20261101.json)。实验目录为 `.scratch/phrase_contract_repair_20261101/`；最终谱面在其中 `generations_final/`，首次失败及修后复验单独保留。
+参数、源码哈希、首次失败、最终四次结果、浏览器与性能证据见 验证记录（本地开发资料，不随源码发布）。实验目录为 `.scratch/phrase_contract_repair_20261101/`；最终谱面在其中 `generations_final/`，首次失败及修后复验单独保留。

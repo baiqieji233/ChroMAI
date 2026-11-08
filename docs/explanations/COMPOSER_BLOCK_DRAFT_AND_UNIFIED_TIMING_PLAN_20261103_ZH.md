@@ -319,7 +319,7 @@ W 是该短句的有效监督预算，D 是明确的批次预算。内部责任�
 
 ## 12. 咨询采纳情况与剩余决策
 
-通过 Antigravity 的 Copy 功能保存了两轮完整回复：[咨询原文](../evidence/COMPOSER_BLOCK_DRAFT_ANTIGRAVITY_20261103.md)。
+通过 Antigravity 的 Copy 功能保存了两轮完整回复：咨询原文（本地开发资料，不随源码发布）。
 
 | 咨询建议 | 最终处理 |
 | --- | --- |

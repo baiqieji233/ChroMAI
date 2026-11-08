@@ -4,7 +4,7 @@
 
 > Latest follow-up: five reproduced generation/export implementation issues are fixed; 230 related Python checks and 16 frontend checks pass. Original checkpoints remain unchanged. Epoch 3 has resumed into `Prism_composer_v8_resume_20261024` from step 5000 (task `ee3b216288c4`, port 7862). See [implementation fixes and resume evidence](COMPOSER_IMPLEMENTATION_FIXES_AND_RESUME_20261024_ZH.md). Strategy changes remain deferred.
 
-> Follow-up: v9 real-data short finetuning and a four-run, fixed-audio/two-seed generation comparison are complete. Full-data training is running in `Prism_composer_v8` (task `7aac408a2f9e`, WebUI port 7862). The v7 checkpoint remains unchanged. Additional verified launch/runtime fixes, measured results, report-only conflicts and outstanding quality checks are documented in [the v9 validation follow-up](../handoffs/COMPOSER_V9_VALIDATION_AND_TRAINING_20261024_ZH.md). Full training and musical/playability acceptance are not complete.
+> Follow-up: v9 real-data short finetuning and a four-run, fixed-audio/two-seed generation comparison are complete. Full-data training is running in `Prism_composer_v8` (task `7aac408a2f9e`, WebUI port 7862). The v7 checkpoint remains unchanged. Additional verified launch/runtime fixes, measured results, report-only conflicts and outstanding quality checks are documented in the v9 validation follow-up（本地开发资料，不随源码发布）. Full training and musical/playability acceptance are not complete.
 
 ## 1. Confirmed Defects & Deep Root Causes Repaired
 

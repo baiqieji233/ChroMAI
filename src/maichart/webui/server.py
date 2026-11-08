@@ -241,6 +241,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_training": True,
                                               "composer_v2_training": True,
                                               "composer_v2_generation": True,
+                                              "composer_v2_batch_generation": True,
                                               "composer_v2_api_contract": "composer_v2_continuous_events_v3",
                                               "composer_v2_split_sampling": True,
                                               "composer_v2_onset_readout": True,
@@ -2003,6 +2004,10 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
             # Checkpoint epoch is a completed-epoch cursor (zero during epoch 1),
             # not the one-based epoch in training progress records.
             task.message = f"保存检查点 · 参数更新 {data.get('optimizer_steps', 0)} 步"
+        elif prefix == "composer_v2_batch":
+            task.result['composer_v2_batch_progress'] = dict(data)
+            task.progress = min(.99, (data.get('completed', 0) + data.get('failed', 0)) / max(1, data.get('count', 1)))
+            task.message = f"批量生成 · 第 {data.get('index', 1)}/{data.get('count', 1)} 张 · 已成功 {data.get('completed', 0)} 张"
         elif prefix == "composer_v2_event":
             task.result["progress_indeterminate"] = True
             task.message = f"已生成 {data.get('events', 0)} 个事件 · 当前拍位 {data.get('beat', '?')}"
@@ -2395,6 +2400,19 @@ def _persisted_logs(limit: int = 100) -> list[dict[str, Any]]:
 
 def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
     paths = list(result_paths)
+    if task.kind == 'composer_v2_generate':
+        batch_path = next((p for p in paths if p.name.endswith('.composer_v2_batch.json') and p.is_file()), None)
+        if batch_path is not None:
+            try:
+                batch = json.loads(batch_path.read_text(encoding='utf-8'))
+                task.result['composer_v2_batch'] = batch
+                for chart in batch.get('charts', []):
+                    if chart.get('status') == 'completed':
+                        paths.extend(Path(chart[key]) for key in ('output', 'report') if chart.get(key))
+                    elif chart.get('diagnostic'):
+                        paths.append(Path(chart['diagnostic']))
+            except (OSError, ValueError, TypeError) as exc:
+                task.result['composer_v2_batch_error'] = str(exc)
     if task.kind == "train" and _is_event_family(task.result.get("model_family")):
         paths.extend(sorted(Path(task.result["checkpoint_dir"]).glob("event_epoch_[0-9][0-9][0-9].pt")))
     existing = list(dict.fromkeys(path for path in paths if path.is_file()))
@@ -2416,6 +2434,15 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
                 task.result['stream_report_error'] = str(exc)
         return
     if task.kind == 'composer_v2_generate':
+        batch = task.result.get('composer_v2_batch', {})
+        labels = {}
+        for chart in batch.get('charts', []):
+            for key in ('output', 'report', 'diagnostic'):
+                if chart.get(key):
+                    path = Path(chart[key])
+                    labels[path] = f"第{chart['index']}张 · seed {chart['seed']} · {path.name}"
+        if labels:
+            task.result['files'] = [labels.get(path, path.name) for path in existing]
         report_path = next((path for path in existing if path.name.endswith('.composer_v2.json')), None)
         if report_path is not None:
             try:

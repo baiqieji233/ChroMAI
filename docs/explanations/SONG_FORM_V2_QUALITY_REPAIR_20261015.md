@@ -52,7 +52,7 @@
 
 ## 4. 实际对照：没有掩盖未解决部分
 
-对照使用固定备份 `form_epoch_004_before_fixes.pt`、同一音频和 seed `1689461005`；两者复用相同曲线作为固定输入，旨在比较解码器，不冒充原 epoch 3 输出的精确复现。比较数据及 checkpoint SHA256 见 [证据 JSON](../evidence/SONG_FORM_V2_QUALITY_FIX_20261015.json)。
+对照使用固定备份 `form_epoch_004_before_fixes.pt`、同一音频和 seed `1689461005`；两者复用相同曲线作为固定输入，旨在比较解码器，不冒充原 epoch 3 输出的精确复现。比较数据及 checkpoint SHA256 见 证据 JSON（本地开发资料，不随源码发布）。
 
 | 测量项 | 旧解码器 | 修复 + 可选 beam=4 / 简洁偏好=0.5 |
 | --- | ---: | ---: |

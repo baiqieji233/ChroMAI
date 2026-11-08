@@ -4,7 +4,7 @@
 
 本轮按“确实存在架构问题”的假设做了修复原型，而不止复述审查意见。冻结的v13推理点为 **step29664**，文件SHA256为`cd7d8990caeb5585ca0cb32aa928f30018c0907f591e3b13e24d0c6a488eb232`。原训练与检查点保留。
 
-全面架构入口见[架构与全链路排查交接](../handoffs/COMPOSER_FULL_ARCHITECTURE_AUDIT_HANDOFF_20261027_ZH.md)；机器可读结果见[证据JSON](../evidence/COMPOSER_INDEPENDENT_REVIEW_VALIDATION_20261027.json)。
+全面架构入口见架构与全链路排查交接（本地开发资料，不随源码发布）；机器可读结果见证据JSON（本地开发资料，不随源码发布）。
 
 ## 1. 单步过量复制的解释应撤回
 

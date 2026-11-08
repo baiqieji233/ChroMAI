@@ -40,7 +40,7 @@
 
 ### 固定配置评估的加权和追溯问题
 
-新增[配置指标累加器](../../src/maichart/composer/capability_metrics.py)与[只读CPU审查脚本](../../scripts/audit_composer_capabilities.py)：
+新增[配置指标累加器](../../src/maichart/composer/capability_metrics.py)与只读CPU审查脚本（本地开发资料，不随源码发布）：
 
 - 按真实分母合并批次，分别记录行数、权重和、首槽、后续非STOP及首个STOP；末尾padding不计分。
 - 动作loss保持每行真实槽权重1、首STOP权重0.35的归一口径；类别、精确原子CE及类型概率矩阵分别报告，不改变训练loss。
@@ -136,4 +136,4 @@ python scripts/audit_composer_capabilities.py --checkpoint checkpoints/prism_com
 
 下一步优先从16,000完整点保留相同optimizer与样本/更新预算，分别比较原学习率与较小学习率的短程稳定性，再决定恢复配置；较小LR尚非本轮已经验收的方案。同时扩大按歌曲/类型分层的固定probe和真实生成前缀对照。若要研究类型辅助监督或跨拍头，分别在新目录显式finetune；不要与优化稳定性实验同时变更后归因。尚未解决的是退化机制、配置泛化与实际音乐质量，而不是已经证明存在某个统一loss计算错误。
 
-项目与训练全貌见[配置学习交接](../handoffs/COMPOSER_CONFIGURATION_LEARNING_HANDOFF_20261026_ZH.md)；此前证据见[loss深审](COMPOSER_LOSS_DEEP_AUDIT_20261026_ZH.md)。
+项目与训练全貌见配置学习交接（本地开发资料，不随源码发布）；此前证据见[loss深审](COMPOSER_LOSS_DEEP_AUDIT_20261026_ZH.md)。

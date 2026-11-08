@@ -103,6 +103,6 @@ CPU或GPU预处理都可选择；GPU预处理应安排在正式训练空闲时�
 
 仍待验证的是：长时间训练后是否减少单键长链、交替堆砌和错误细分；结构估计在特殊节拍上是否可靠；Touch与双手是否自然。当前只对有限接触模板做诊断，完整手部轨迹仍未实现。训练loss、合法性检查通过、人工听感是三种不同的证据。
 
-原始技术记录见[结构改造](COMPOSER_METRICAL_UPGRADE_20261027_ZH.md)、[GPU吞吐记录](COMPOSER_GPU_THROUGHPUT_20261027_ZH.md)、[结构查询优化](COMPOSER_STRUCTURE_PERFORMANCE_20261027_ZH.md)。本次审查与测试证据见[结果JSON](../evidence/COMPOSER_PUBLISH_REVIEW_20261027.json)。本地详细日志在`.scratch/composer_publish_review_20261027/`；不要整体删除`.scratch`，其中还有实际Python环境和保留检查点。
+原始技术记录见[结构改造](COMPOSER_METRICAL_UPGRADE_20261027_ZH.md)、[GPU吞吐记录](COMPOSER_GPU_THROUGHPUT_20261027_ZH.md)、[结构查询优化](COMPOSER_STRUCTURE_PERFORMANCE_20261027_ZH.md)。本次审查与测试证据见结果JSON（本地开发资料，不随源码发布）。本地详细日志在`.scratch/composer_publish_review_20261027/`；不要整体删除`.scratch`，其中还有实际Python环境和保留检查点。
 
 本轮先完成Composer、Form、rational相关检查：1313项通过、13项跳过；补上诊断修复后，最终完整Composer集合656项通过、11项跳过。全部JavaScript测试155项通过，PowerShell启动器语法检查通过。真实浏览器确认了结构后端、学习率控件和刷新保存行为，没有提交新的训练请求。跳过项不计为通过，已有GPU测量也没有冒充本轮重跑结果。

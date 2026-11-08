@@ -80,6 +80,18 @@ def describe(task_id, *, project, log_root, task=None):
     output=_argument(argv,'--output') or result.get('output') or settings.get('output')
     audio=_argument(argv,'--audio') or settings.get('audio') or result.get('audio')
     candidates=list(result.get('paths') or [])
+    # Persisted task logs contain argv even after the server has restarted.
+    # The batch manifest keeps every chart's seed and original, isolated path.
+    batch_path=_argument(argv,'--batch-manifest') or settings.get('batch_manifest')
+    batch_labels={}
+    if batch_path:
+        manifest=_path(batch_path,project)
+        batch=json.loads(manifest.read_text(encoding='utf-8-sig'))
+        for item in batch.get('charts', []):
+            if item.get('status')!='completed':continue
+            path=_path(item['output'],project)
+            candidates.append(path)
+            batch_labels[path]=f"第 {item['index']}/{batch['count']} 张 · seed {item['seed']}"
     discovered_repair=None
     if output:
         target=_path(output,project)
@@ -108,7 +120,7 @@ def describe(task_id, *, project, log_root, task=None):
         with path.open('r',encoding='utf-8-sig',errors='replace') as stream:header=stream.read(65536)
         if not re.search(r'(?im)^\s*&inote_\d+\s*=',header):continue
         title=re.search(r'(?im)^\s*&title\s*=([^\r\n]*)',header)
-        charts.append(dict(label=('修正版 · ' if '.repaired.' in path.name else '生成谱面 · ')+path.name,
+        charts.append(dict(label=batch_labels.get(path) or ('修正版 · ' if '.repaired.' in path.name else '生成谱面 · ')+path.name,
             title=title.group(1).strip() if title else path.stem,path=str(path),url=_resource(path),
             audio_url=audio_url,audio_name=audio_path.name if audio_url else None))
     if not charts:raise FileNotFoundError('本任务没有可预览的谱面文件，或原文件已被覆盖')

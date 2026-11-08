@@ -88,7 +88,7 @@
 
 这两次实曲没有触发完整撤回；**完整撤回的一致性由前述强制冲突、多轮事务测试覆盖**，不能写成已经在这两次实曲中观察到了完整撤回。最终检查遵循“运行证据硬冲突”策略，不等于零人体工学风险或全部静态提示为空。
 
-原 `checkpoints/prism_composer_v35/composer_inference.pt` 的前后大小、修改时间、SHA256 完全一致：`1b9497fd0ca3a8c968bdafa6609a6a60965d75ea2360bd0ccbcbcfbfee72747f`。没有覆盖原模型或正式训练输出。运行日志和生成谱在 `.scratch/phrase_validation_20261031/`，可随时检查；汇总证据见 [JSON 记录](../evidence/COMPOSER_PHRASE_VALIDATION_20261031.json)。
+原 `checkpoints/prism_composer_v35/composer_inference.pt` 的前后大小、修改时间、SHA256 完全一致：`1b9497fd0ca3a8c968bdafa6609a6a60965d75ea2360bd0ccbcbcfbfee72747f`。没有覆盖原模型或正式训练输出。运行日志和生成谱在 `.scratch/phrase_validation_20261031/`，可随时检查；汇总证据见 JSON 记录（本地开发资料，不随源码发布）。
 
 本轮生成仅检验零更新迁移后的真实运行路径、完整性和物理检查，不能代表新短句模块已经训练好。没有把自动分数或测试通过当作试玩验收。
 

@@ -19,7 +19,7 @@
 
 ## 实测结果
 
-原始日志和脚本在 `.scratch/perf_stream_20261030/`，机器可读证据见[性能记录](../evidence/COMPOSER_STREAM_EFFICIENCY_20261030.json)。
+原始日志和脚本在 `.scratch/perf_stream_20261030/`，机器可读证据见性能记录（本地开发资料，不随源码发布）。
 
 ### 数据准备与数值一致性
 

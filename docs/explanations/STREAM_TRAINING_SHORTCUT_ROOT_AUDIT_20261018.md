@@ -179,7 +179,7 @@ EOS已有26/32正确，故“完全没训练到EOS”也不成立。
 
 ## 工件与复现
 
-随文保存的机器可读证据：[audits/STREAM_TRAINING_SHORTCUT_EVIDENCE_20261018.json](../audits/STREAM_TRAINING_SHORTCUT_EVIDENCE_20261018.json)。包含抽样统计、全部32个末尾对照、几何覆盖和五组前40事件，避免只依赖未提交的scratch文件。
+随文保存的机器可读证据：audits/STREAM_TRAINING_SHORTCUT_EVIDENCE_20261018.json（本地开发资料，不随源码发布）。包含抽样统计、全部32个末尾对照、几何覆盖和五组前40事件，避免只依赖未提交的scratch文件。
 
 所有诊断位于`.scratch/stream_training_root_20261018/`：
 

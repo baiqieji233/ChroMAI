@@ -94,4 +94,4 @@
 - 新合同checkpoint可resume。只生成旧模型时可直接使用；建议先将额外Style平衡设为0做基准。
 - 新训练看完整拍位/配置/事件准确率与选音覆盖率，不能仅看字符准确率和总loss；这些仍是有答案前缀下的训练指标。
 
-已保存机器可读证据：[STREAM_GROUNDED_CONTEXT_EVIDENCE_20261018.json](../audits/STREAM_GROUNDED_CONTEXT_EVIDENCE_20261018.json)。脚本、实际小权重和截图在`.scratch/stream_grounded_20261018/`，不入Git。生产训练后的尾段控制、配置多样性及音乐取舍仍待实测，新模块不能立即改变旧权重已学到的行为。
+已保存机器可读证据：STREAM_GROUNDED_CONTEXT_EVIDENCE_20261018.json（本地开发资料，不随源码发布）。脚本、实际小权重和截图在`.scratch/stream_grounded_20261018/`，不入Git。生产训练后的尾段控制、配置多样性及音乐取舍仍待实测，新模块不能立即改变旧权重已学到的行为。

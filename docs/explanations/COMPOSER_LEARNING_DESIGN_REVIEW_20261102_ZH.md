@@ -73,4 +73,4 @@
 
 v44 原点和 v45 第 1 轮完整点均保留。v45 已从完整点继续，批大小 16、梯度累积 4、固定学习率 0.0002，目标 50 轮。此次大方向讨论尚未转化为新的大规模架构改造；已落地的是密度/曲线/风格目标修复和两项无效计算清理。
 
-原始三轮请求和回复、词表及 literal 扫描在 `.scratch/density_audit_20261102/antigravity_*`、`duration_alias_audit.json`、`literal_route_audit.json`。汇总指标在 [修复证据](../evidence/COMPOSER_DENSITY_AND_LEARNING_REPAIR_20261102.json)。后续优先验证上述三个实验，不以增加模块数量作为进展。
+原始三轮请求和回复、词表及 literal 扫描在 `.scratch/density_audit_20261102/antigravity_*`、`duration_alias_audit.json`、`literal_route_audit.json`。汇总指标在 修复证据（本地开发资料，不随源码发布）。后续优先验证上述三个实验，不以增加模块数量作为进展。

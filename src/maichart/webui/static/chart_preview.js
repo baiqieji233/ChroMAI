@@ -108,19 +108,23 @@
   function show(value) {
     if (!value?.charts?.length) return;
     if (entry?.task_id === value.task_id && entry?.revision === value.revision) return;
-    release(); failedKey = ""; entry = value; selected = 0;
+    const previousPath=entry?.task_id===value.task_id?entry.charts[selected]?.path:null;
+    release(); failedKey = ""; entry = value;
+    selected=Math.max(0,value.charts.findIndex(chart=>chart.path===previousPath));
     selector.replaceChildren();
     value.charts.forEach((chart, index) => {
       const option = document.createElement("option");
       option.value = String(index); option.textContent = chart.label;
       selector.appendChild(option);
     });
+    selector.value=String(selected);
     selector.disabled = value.charts.length < 2;
-    source.textContent = `任务 ${value.task_id} · ${value.charts[0].title} · ${value.charts[0].audio_name ? `音频：${value.charts[0].audio_name}` : "无对应音频"}`;
-    source.title = value.charts[0].path;
+    const chart=value.charts[selected];
+    source.textContent = `任务 ${value.task_id} · ${chart.title} · ${chart.label} · ${chart.audio_name ? `音频：${chart.audio_name}` : "无对应音频"}`;
+    source.title = chart.path;
     reloadButton.disabled = false;
-    badge.textContent = `${value.charts[0].title} · 展开预览`;
-    badge.title = value.charts[0].title;
+    badge.textContent = `${chart.title} · ${value.charts.length} 张可预览`;
+    badge.title = chart.title;
     message("谱面已就绪，展开即可载入；播放器载入后保持暂停。");
     void activate();
   }
@@ -163,7 +167,7 @@
   selector.addEventListener("change", () => {
     selected = Number(selector.value);
     const chart = entry?.charts[selected];
-    if (chart) { source.textContent = `任务 ${entry.task_id} · ${chart.title} · ${chart.audio_name || "静音预览"}`; source.title = chart.path; }
+    if (chart) { source.textContent = `任务 ${entry.task_id} · ${chart.title} · ${chart.label} · ${chart.audio_name || "静音预览"}`; source.title = chart.path; }
     void activate(true);
   });
   reloadButton.addEventListener("click", () => {

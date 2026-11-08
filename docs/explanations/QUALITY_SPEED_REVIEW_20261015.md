@@ -90,9 +90,9 @@
 
 以下文档包含已撤回或错误的结论（Flash Attention / torch.compile 加速、重复惩罚“推荐 0.1–0.15”、分阶段扰动表等），应以本记录为准：
 
-- [工作完成报告](../archive/20261015/WORK_COMPLETION_SUMMARY.md)
-- [质量改进记录](../archive/20261015/QUALITY_IMPROVEMENTS_2026-10-15.md)
-- [后续优化建议](../archive/20261015/FURTHER_OPTIMIZATION_ROADMAP.md)
+- 工作完成报告（本地开发资料，不随源码发布）
+- 质量改进记录（本地开发资料，不随源码发布）
+- 后续优化建议（本地开发资料，不随源码发布）
 - `docs/compatibility/TRAINING_PARAMETERS_GUIDE.md`
 - `docs/handoffs/QUALITY_CONTROLS_WEBUI_HANDOFF_20261015.md` 中“默认全部关闭”的描述
 

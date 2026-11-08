@@ -77,7 +77,7 @@ CUDA 训练没有启用逐位确定性。新旧损失序列最大差约 0.021，
 - GPU 音频及本轮专项先通过；起音计算修正完成后再验证所有受影响路径：**25 项通过，包含 CUDA 检查**。
 - 未运行正式训练，未修改原检查点；本轮没有使用子代理。
 
-证据汇总：[COMPOSER_PERFORMANCE_FOLLOWUP_20261028.json](../evidence/COMPOSER_PERFORMANCE_FOLLOWUP_20261028.json)。源码快照、四轮原始输出、基准脚本、完整测试日志均在 `.scratch/composer_perf_followup_20261028/`。复现最终对照：
+证据汇总：COMPOSER_PERFORMANCE_FOLLOWUP_20261028.json（本地开发资料，不随源码发布）。源码快照、四轮原始输出、基准脚本、完整测试日志均在 `.scratch/composer_perf_followup_20261028/`。复现最终对照：
 
 ```powershell
 $env:OMP_NUM_THREADS='2'

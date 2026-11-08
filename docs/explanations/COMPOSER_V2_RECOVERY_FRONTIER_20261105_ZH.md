@@ -67,7 +67,7 @@
 - 8500：`c40b98dd280115d6bc7365cf2ecfbf35d7c739f8233d03fd5823bc4132b61811`
 - 9100：`6089ada9fc34f6a31dd0327a82ff47769578d948436dd4ad6ec7b048f0517437`
 
-证据目录为 `.scratch/v2_recovery_frontier_20261105/`。最终输出为 `fixed_final_8500/maidata.txt` 与 `fixed_final_9100/maidata.txt`；`causal_probe.json`、`8500_causal_probe.json` 记录修复前的反事实检查，`before_*.py` 保留诊断时的实现。初步版本的 `fixed_8500/` 是完善撤回定位之前的中间实验，请以 `fixed_final_*` 为准。汇总见 [机器可读验收证据](../evidence/COMPOSER_V2_RECOVERY_FRONTIER_20261105.json)。
+证据目录为 `.scratch/v2_recovery_frontier_20261105/`。最终输出为 `fixed_final_8500/maidata.txt` 与 `fixed_final_9100/maidata.txt`；`causal_probe.json`、`8500_causal_probe.json` 记录修复前的反事实检查，`before_*.py` 保留诊断时的实现。初步版本的 `fixed_8500/` 是完善撤回定位之前的中间实验，请以 `fixed_final_*` 为准。汇总见 机器可读验收证据（本地开发资料，不随源码发布）。
 
 本轮不改变原生物理判据、温度、休止规则或训练目标，不改变检查点。正在运行的训练保持运行。恢复成功不代表模型已经学会长期占手的合理衔接，完整谱面的音乐性和手感仍需独立验收。
 

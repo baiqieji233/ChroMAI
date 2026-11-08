@@ -64,7 +64,7 @@ body { font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-s
 .generation-preview-toolbar select { width: 100%; min-width: 0; min-height: 38px; }
 .generation-preview-toolbar button { min-height: 38px; }
 .generation-preview-source { margin: 0 0 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.generation-preview-player { flex: 1 1 360px; min-width: 0; width: 100%; max-width: 440px; margin: 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: #111827; }
+.generation-preview-player { flex: 2 1 540px; min-width: 0; width: 100%; max-width: 720px; margin: 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: #111827; }
 .generation-preview-player iframe { display: block; }
 .generation-preview-credit { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .generation-preview-credit a { color: var(--teal); }

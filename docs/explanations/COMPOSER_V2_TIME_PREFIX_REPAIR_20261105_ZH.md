@@ -58,4 +58,4 @@
 - `prefix_probe_400_same_context.json`、`prefix_probe_900.json`：相同生成前文下的模型概率。
 - `prefix_probe_900_reference.json`：真实谱面前文对照。
 
-机器可读记录见 [验收证据](../evidence/COMPOSER_V2_TIME_PREFIX_REPAIR_20261105.json)。
+机器可读记录见 验收证据（本地开发资料，不随源码发布）。

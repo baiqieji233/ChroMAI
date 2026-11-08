@@ -72,4 +72,4 @@ step 80 到 6500，模式偏置在同一候选表内的最大跨度从约 0.014 
 
 新版后台已在 **http://127.0.0.1:7862** 重载。实际检查点检查接口确认 v46 可生成、可作为新阶段初始权重，不能按旧目标直接 resume；没有运行中的正式任务。曲线修复可以立即作用于旧权重，重新生成即可生效；训练目标修复不能自动抹除已经学坏的部分。后续应从保留的早期点（例如 `.scratch/architecture_v46_20261102/v46_step240/composer_last.pt`）在新目录开启学习阶段，或另行 fresh，再观察完整轮次与实际谱面。
 
-汇总见 [证据 JSON](../evidence/COMPOSER_V46_FAILURE_REPAIR_20261103.json)。对照谱面与原始探针在 `.scratch/v46_failure_20261103/`；`generated_after_1798404246/maidata.txt`、`generated_after_1798404247/maidata.txt` 是本轮修复后的两个输出。早期误取了并发修改后源码的两份“before”记录已经作废，最终对照以 Git 原始源码重新运行，不使用那两份错误基线。
+汇总见 证据 JSON（本地开发资料，不随源码发布）。对照谱面与原始探针在 `.scratch/v46_failure_20261103/`；`generated_after_1798404246/maidata.txt`、`generated_after_1798404247/maidata.txt` 是本轮修复后的两个输出。早期误取了并发修改后源码的两份“before”记录已经作废，最终对照以 Git 原始源码重新运行，不使用那两份错误基线。

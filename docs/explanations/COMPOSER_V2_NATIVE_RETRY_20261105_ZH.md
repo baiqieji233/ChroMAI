@@ -66,6 +66,6 @@
 
 关键代码：`composer_v2/retry_sampling.py` 负责失败完整候选的概率与前缀缓存；`stream_generate.py` 接入重试和恢复状态；`diagnostics.py` 保存独立快照。没有新增界面或必须手填的参数，新建生成任务会自动使用本策略。
 
-证据目录为 `.scratch/v2_native_retry_20261105/`：`baseline/` 是恢复的 10410 步故障，`fixed/maidata.txt` 是修复输出。`later_10500.failure.json` 是被覆盖后误读到的另一任务，不能当作本次故障。汇总见 [验收证据](../evidence/COMPOSER_V2_NATIVE_RETRY_20261105.json)。
+证据目录为 `.scratch/v2_native_retry_20261105/`：`baseline/` 是恢复的 10410 步故障，`fixed/maidata.txt` 是修复输出。`later_10500.failure.json` 是被覆盖后误读到的另一任务，不能当作本次故障。汇总见 验收证据（本地开发资料，不随源码发布）。
 
 这次验证解决的是重复尝试已知坏答案、恢复后再次走同一死路，以及失败证据覆盖。它不代表模型已经学会所有连续配置，也不把所有原生合法输出都视为高质量谱面。此前记录的异常数字时值和学习侧长期配置问题仍需单独跟进。

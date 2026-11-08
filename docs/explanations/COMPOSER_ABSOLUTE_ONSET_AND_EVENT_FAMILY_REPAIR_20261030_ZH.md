@@ -201,6 +201,6 @@ v32 原完整点和推理点已保留在 `checkpoints/prism_composer_v32/snapsho
 
 主界面新进程在 http://127.0.0.1:7862 ，实际API已确认600步、PreNorm、22桶、类型块及V3类型策略均加载成功。自动审批拒绝了停止/重启7860的命令，原服务没有被停止，也没有换方式强停。刷新旧页面会取得新静态文件，但旧进程可能仍缓存旧Python类；请用7862验证本轮点。
 
-机器证据：[JSON汇总](../evidence/COMPOSER_ABSOLUTE_ONSET_AND_EVENT_FAMILY_REPAIR_20261030.json)。[固定双种子的原始谱面与报告](../evidence/composer_absolute_family_20261030/)已放入版本库；音频、训练集、缓存与模型权重不上传。全部实验脚本、完整日志和中间点继续留在`.scratch/absolute_semantic_repair_20261030/`。
+机器证据：JSON汇总（本地开发资料，不随源码发布）。[固定双种子的原始谱面与报告](../evidence/composer_absolute_family_20261030/)已放入版本库；音频、训练集、缓存与模型权重不上传。全部实验脚本、完整日志和中间点继续留在`.scratch/absolute_semantic_repair_20261030/`。
 
 提交会包含接手时已有的未提交连续生成路线基础；本轮新增修复以本文策略和源文件证据为准，没有回退其他协作者的工作。

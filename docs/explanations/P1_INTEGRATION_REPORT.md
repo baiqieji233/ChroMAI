@@ -73,7 +73,7 @@
 
 ## 五、验证
 
-- 新增 [tests/test_playability_post_process.py](../../tests/test_playability_post_process.py)：11 项，覆盖按键布局、Hold-Tap 硬冲突、Slide 头和弦、半转轨迹、弧线方向、和弦不误报、短颤音不误报、reject/none 语义、模型族识别与能力门控。
+- 新增 tests/test_playability_post_process.py（本地开发资料，不随源码发布）：11 项，覆盖按键布局、Hold-Tap 硬冲突、Slide 头和弦、半转轨迹、弧线方向、和弦不误报、短颤音不误报、reject/none 语义、模型族识别与能力门控。
 - 同步更新 `tests/test_event_ctx.py` 的合同期望并补细碎节奏参数断言。
 - 全量：`784 passed, 11 skipped`。
 

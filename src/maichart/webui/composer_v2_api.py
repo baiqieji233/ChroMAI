@@ -9,13 +9,7 @@ from .composer_api import _path, _int, _float, _arg
 FAMILY = "chart_composer_v2"
 SCHEMA = "maichart-composer-v2-checkpoint-v1"
 API_CONTRACT = "composer_v2_continuous_events_v3"
-TRAIN_DEFAULTS = dict(epochs=50,batch_size=8,grad_accumulation=8,lr=.0002,
-    lr_schedule="cosine",warmup_steps=200,min_lr_ratio=.1,d_model=384,layers=8,
-    nhead=8,dim_feedforward=1536,dropout=.1,window_beats=16,history_beats=16,
-    future_beats=4,ticks_per_beat=48,max_tokens=2048,audio_backend="mert",
-    prepare_device="auto",device="auto",precision="bf16",validation_max_batches=32,
-    checkpoint_interval_steps=500,log_interval=20,seed=0,max_steps=0,limit_charts=0,cpu_threads=2,
-    cuda_memory_budget_gb=0.0,audio_cache_gb=0.25)
+from maichart.composer_v2.defaults import TRAIN_DEFAULTS, GENERATION_DEFAULTS, MAX_BATCH_COUNT
 
 def inspection(path):
     from maichart.composer_v2.checkpoint import inspect as inspect_checkpoint
@@ -206,13 +200,13 @@ def start_generate(handler,payload,*,runtime):
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop'})
     settings['tempo_detection']=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'})
     _arg(args,'--tempo-detection',settings['tempo_detection'])
-    intercept=payload.get('intercept_tap_on_slide',False)
+    intercept=payload.get('intercept_tap_on_slide',GENERATION_DEFAULTS['intercept_tap_on_slide'])
     if not isinstance(intercept,bool):raise ValueError('拦截Slide撞尾必须是布尔值')
     threshold=_float(payload,'tap_on_slide_threshold_ms',200.,minimum=0)
     if isinstance(payload.get('tap_on_slide_threshold_ms'),bool) or threshold>250:
         raise ValueError('撞尾检测阈值必须为0–250 ms')
     settings.update(intercept_tap_on_slide=intercept,tap_on_slide_threshold_ms=threshold)
-    if intercept:args.append('--intercept-tap-on-slide')
+    args.append('--intercept-tap-on-slide' if intercept else '--no-intercept-tap-on-slide')
     _arg(args,'--tap-on-slide-threshold-ms',threshold)
     _arg(args,'--exhaustion-policy',settings['exhaustion_policy'])
     for key in ("checkpoint", "audio", "output", "cache_dir"): _arg(args,"--"+key.replace("_","-"),settings[key])
@@ -229,14 +223,14 @@ def start_generate(handler,payload,*,runtime):
         settings['onset_strength']=onset_strength
         _arg(args,'--onset-strength',onset_strength)
     for key in ("action_temperature", "action_top_p"):
-        raw = payload.get(key)
+        raw = payload.get(key, GENERATION_DEFAULTS[key] if checked.get('sequence_policy') == 'continuous_events_v1' else None)
         if raw is None or raw == "":
             continue
         if checked.get("sequence_policy") != "continuous_events_v1":
             raise ValueError("独立配置采样适用于 Composer v2 连续事件检查点")
         if isinstance(raw, bool):
             raise ValueError(f"{key} 必须是数值")
-        value = _float(payload, key, 0.)
+        value = _float({key:raw}, key, 0.)
         if key == "action_temperature" and value < 0:
             raise ValueError("配置温度必须不小于 0")
         if key == "action_top_p" and not 0 < value <= 1:
@@ -244,9 +238,10 @@ def start_generate(handler,payload,*,runtime):
         settings[key] = value
         _arg(args, "--" + key.replace("_", "-"), value)
     if not 1<=settings["level"]<=15:raise ValueError("level 必须在1到15之间")
-    for key,default in dict(seed=0,candidates=1,max_events=0,rollback_windows=2,cpu_threads=2).items():
+    for key,default in dict(seed=0,candidates=GENERATION_DEFAULTS["candidates"],max_events=0,rollback_windows=2,window_retries=16,cpu_threads=2).items():
         settings[key]=_integer(payload,key,default,minimum=0)
         _arg(args,"--"+key.replace("_","-"),settings[key])
+    if not 1<=settings["window_retries"]<=128:raise ValueError("每事件提议重试次数必须在1到128之间")
     if settings["cpu_threads"]<1:raise ValueError("cpu_threads 必须是正整数")
     if settings["rollback_windows"]>8:raise ValueError("rollback_windows 必须在0到8之间")
     if settings["candidates"] not in {1,2,4}: raise ValueError("候选数只能是1、2、4")
@@ -267,4 +262,18 @@ def start_generate(handler,payload,*,runtime):
             if not isinstance(value,list): raise ValueError(f"{key} 必须是 JSON 数组")
             _arg(args,"--"+key.replace("_","-"),json.dumps(value,ensure_ascii=False))
             settings[key]=value
-    return _start(handler,runtime,"composer_v2_generate",args,settings,[output,output.with_suffix(".composer_v2.json")])
+    count=_integer(payload,'count',GENERATION_DEFAULTS['count'],minimum=1)
+    if count>MAX_BATCH_COUNT:raise ValueError(f'一次最多生成 {MAX_BATCH_COUNT} 张谱面')
+    settings['count']=count
+    paths=[output,output.with_suffix('.composer_v2.json')]
+    if count>1:
+        # Separate task directories also protect previews from later overwrites.
+        import uuid
+        root=output.parent/(output.stem+'_batch_'+uuid.uuid4().hex[:12])
+        output=root/output.name
+        manifest=root/'batch.composer_v2_batch.json'
+        args[args.index('--output')+1]=str(output)
+        _arg(args,'--count',count);_arg(args,'--batch-manifest',manifest)
+        settings.update(output=str(output),batch_manifest=str(manifest))
+        paths=[manifest]  # Successful chart artifacts are collected from it.
+    return _start(handler,runtime,"composer_v2_generate",args,settings,paths)

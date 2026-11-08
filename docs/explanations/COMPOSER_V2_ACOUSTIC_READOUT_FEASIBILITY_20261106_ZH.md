@@ -114,7 +114,7 @@
 
 实验只写入 `.scratch/v2_acoustic_readout_20261106/` 和本报告对应资料，未启动正式训练，未改正式模型代码。完成所有实验后统一检查了脚本语法、音频分组隔离、结果计数、三个种子的四处比较及原检查点哈希。未重复全项目测试，未运行整谱生成对照，所以尚未验证自由生成中的休止、混用和配置衔接得到改善。
 
-- 汇总证据：[JSON](../evidence/COMPOSER_V2_ACOUSTIC_READOUT_FEASIBILITY_20261106.json)。
+- 汇总证据：JSON（本地开发资料，不随源码发布）。
 - 本机复现：`.scratch/python312_runtime/Scripts/python.exe .scratch/v2_acoustic_readout_20261106/probe.py`；其他对照脚本及哈希见JSON。
-- 上一轮：[未达到验收标准的分音纠错试验](COMPOSER_V2_PHASE_RECOVERY_TRIAL_20261106_ZH.md)。
+- 上一轮：未达到验收标准的分音纠错试验（本地开发资料，不随源码发布）。
 - 外部原始资料：[DDC作者公开实现](https://github.com/chrisdonahue/ddc_onset)、[DDC论文](https://proceedings.mlr.press/v70/donahue17a.html)。本轮固定实现提交为 `d02aad36297a90e00848c32f6492fad1b43b7912`；仅在实验目录下载，未安装到项目环境。

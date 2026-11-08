@@ -121,4 +121,4 @@
 
 下一次正式训练应使用新目录和新目标；不能把这次改动当作旧检查点无需学习就能获得的质量提升。
 
-完整记录：[本轮证据](../evidence/COMPOSER_CORE_LEARNING_REPAIR_20261104.json)。临时更新仅写入`.scratch/core_learning_20261104/v13_baseline`和`v14_core`，两个窗口都已结束，未留下后台训练。
+完整记录：本轮证据（本地开发资料，不随源码发布）。临时更新仅写入`.scratch/core_learning_20261104/v13_baseline`和`v14_core`，两个窗口都已结束，未留下后台训练。

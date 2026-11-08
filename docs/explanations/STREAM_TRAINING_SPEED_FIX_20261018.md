@@ -60,4 +60,4 @@
 - 增加「训练数据准备线程」（默认4、范围1–8，实际不超过batch大小）和「CPU算子线程」（0自动：CUDA用2，CPU最多4）；「准备线程」仍是开头结构准备，二者作用不同。
 - 日志新增`recent_batches_per_sec`、`data_wait_sec`、`transfer_host_sec`、`compute_host_sec`、`save_sec`、预取统计及各查询种类的准备时间。主机时间不是CUDA kernel时间，多个数据线程累计耗时可大于墙钟时间。
 - 自动审批拒绝停止并重启7860 WebUI服务，返回`blocked by policy`；没有尝试绕过。保留现有服务，通过其API创建的新训练子进程已加载最终代码及正确默认值。新增控件的自定义传参需要日后重启服务；前端会检测旧服务版本，防止参数被忽略。**当前训练正在运行，不应为刷新控件立即重启服务。**
-- 机器可读结果：[STREAM_TRAINING_SPEED_EVIDENCE_20261018.json](../audits/STREAM_TRAINING_SPEED_EVIDENCE_20261018.json)。现场采样、基线源码副本、对照脚本和运行快照位于`.scratch/stream_speed_20261018/`，不入Git。
+- 机器可读结果：STREAM_TRAINING_SPEED_EVIDENCE_20261018.json（本地开发资料，不随源码发布）。现场采样、基线源码副本、对照脚本和运行快照位于`.scratch/stream_speed_20261018/`，不入Git。

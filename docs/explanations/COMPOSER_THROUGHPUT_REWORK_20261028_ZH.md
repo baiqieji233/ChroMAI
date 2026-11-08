@@ -46,7 +46,7 @@
 
 新任务`e1946d613215`从第16000步接续，保留Adam状态、数据顺序和训练配置；目标仍为第80轮，不是再额外运行80轮。主界面为[http://127.0.0.1:7860](http://127.0.0.1:7860)，目录仍为`checkpoints/prism_composer_v18`。
 
-正式进程已确认`action_projection=active_slots_v1`、`audio_query_execution=device_banks_v1`及规划共享策略。核验时已运行到16107步，第16100步配置恢复接受2个样本，保留的自产历史长度为66和82，峰值已分配显存约5.69 GiB。实际结果收录在[证据文件](../evidence/COMPOSER_THROUGHPUT_REWORK_20261028.json)。原始脚本、日志与对照副本在`.scratch/composer_throughput_rework_20261028/`。
+正式进程已确认`action_projection=active_slots_v1`、`audio_query_execution=device_banks_v1`及规划共享策略。核验时已运行到16107步，第16100步配置恢复接受2个样本，保留的自产历史长度为66和82，峰值已分配显存约5.69 GiB。实际结果收录在证据文件（本地开发资料，不随源码发布）。原始脚本、日志与对照副本在`.scratch/composer_throughput_rework_20261028/`。
 
 ## 尚未做的工作
 

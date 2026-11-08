@@ -17,7 +17,7 @@
 | 同键最短间隔／拦截 Slide 撞尾（TapOnSlide） | 旧路线的局部冲突处理设置。它们分别作用于同键过快重复和 Slide 撞尾。 |
 | 学习负荷曲线引导强度／强度曲线指导强度 | 分别调节模型预测的负荷与手绘曲线。适用范围由架构和检查点决定。 |
 
-候选拍位和动作配置的温度可分别设置。两项都设为 `0` 才是全程贪心。CLI 在省略专用温度时可回退到 `--temperature`。各历史策略的含义见[温度说明](COMPOSER_GENERATION_TEMPERATURE_CONTROLS_20261023_ZH.md)和[曲线与目标记录](../handoffs/COMPOSER_CURVE_AND_OBJECTIVE_HANDOFF_20261028_ZH.md)。
+候选拍位和动作配置的温度可分别设置。两项都设为 `0` 才是全程贪心。CLI 在省略专用温度时可回退到 `--temperature`。各历史策略的含义见[温度说明](COMPOSER_GENERATION_TEMPERATURE_CONTROLS_20261023_ZH.md)和曲线与目标记录（本地开发资料，不随源码发布）。
 
 ## 条件 JSON
 

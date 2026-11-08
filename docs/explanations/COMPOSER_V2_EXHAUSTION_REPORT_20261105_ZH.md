@@ -41,4 +41,4 @@
 
 这是功能测试，不是模型音乐质量验证。测试没有使用 GPU，也没有停止训练或改动检查点。
 
-证据在 `.scratch/v2_exhaustion_report_20261105/`，机器可读记录见 [验收证据](../evidence/COMPOSER_V2_EXHAUSTION_REPORT_20261105.json)。
+证据在 `.scratch/v2_exhaustion_report_20261105/`，机器可读记录见 验收证据（本地开发资料，不随源码发布）。
