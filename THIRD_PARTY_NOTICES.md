@@ -49,6 +49,8 @@ explicit developer workflow uses Qt or a native library. Its binaries remain
 under ignored `.native/`; production generation uses neither. The Python port
 does not build or launch an editor, font, sound, skin, audio or video backend.
 
+## MiaCode upstream MIT license text
+
 MIT License
 
 Copyright (c) 2026 fanfaredash
@@ -70,3 +72,30 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
+
+
+## Pretrained music encoder
+
+Composer v2 defaults to [m-a-p/MERT-v1-330M](https://huggingface.co/m-a-p/MERT-v1-330M).
+Its model card declares **CC BY-NC 4.0**. The encoder weights are downloaded
+separately and are not relicensed by this project's MIT source license.
+Keep upstream attribution and consult the model card and license when using
+or redistributing these weights. A local model override retains its own terms.
+
+## Optional MiaView preview player
+
+The player is downloaded separately from [MiaView_Web](https://github.com/Team-MiaCode/MiaView_Web).
+The installer requires its artifact's `LICENSE`, `LICENSE_SCOPE.md` and
+`THIRD_PARTY_NOTICES.md` and retains them in the local player installation.
+The locally verified preview artifact also states a non-commercial scope for
+packaged assets/releases unless an individual license says otherwise.
+The player's source, runtime assets and bundled dependencies retain the terms
+in those files; this project's MIT license does not override them.
+
+## Composer checkpoints and user content
+
+No Composer checkpoint license is granted by the source license. Checkpoints
+are distributed separately and need their own model card and license, with
+training-data and dependency restrictions reviewed before publication.
+User-supplied songs, charts and generated outputs are not automatically
+relicensed as MIT by this repository.

@@ -37,7 +37,7 @@ Git仓库包含源码、配置示例、测试和文档。以下本机材料没�
 
 **加强训练／finetune**：需要改数据、批大小或启用独立起音参考时，使用新输出目录。可以从原v6完整点或推理点初始化，但不会继承原优化器进度。
 
-独立起音参考仍属于实验能力。`auto`继承检查点，新建和旧v6默认关闭；只有显式微调启用，才能得到带该分支的新点。上传代码不会使已有模型自动获得它。[操作说明](../explanations/COMPOSER_V2_ONSET_REFERENCE_IMPLEMENTATION_20261106_ZH.md)
+独立声学起音参考在 `auto` 模式下：新训练和连续模型加强训练（`finetune`）默认启用 `phase_audio_v1`，严格续训（`resume`）继承原检查点设置。旧检查点不会在不训练的情况下自动获得该分支，需通过 `finetune` 在新输出目录训练启用。[操作说明](COMPOSER_V2_ONSET_REFERENCE_IMPLEMENTATION_20261106_ZH.md)
 
 ## 处理设备间路径差异
 

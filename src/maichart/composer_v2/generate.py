@@ -30,7 +30,7 @@ def parser():
     for name in ('checkpoint', 'audio', 'output'):
         result.add_argument('--' + name, required=True)
     result.add_argument('--cache-dir', default='cache/chart_composer_v2')
-    result.add_argument('--bpm', type=float, default=None, help='Omit for robust global BPM detection and local tempo-change diagnostics; variable tempo requires --tempo-map')
+    result.add_argument('--bpm', type=float, default=None, help='Omit for automatic tempo analysis (detects variable tempo when --tempo-detection=auto, or constant BPM when constant); manual --tempo-map overrides')
     result.add_argument('--first', type=float, default=None, help='Omit to detect beat phase; explicit zero is preserved')
     result.add_argument('--level', type=float, default=13.)
     result.add_argument('--condition', type=json.loads, default=None,

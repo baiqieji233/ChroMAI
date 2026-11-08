@@ -60,7 +60,7 @@
   }
 
   function isFamilyHidden(control) {
-    return Boolean(control.closest("[hidden]"));
+    return Boolean(control.closest("[hidden], [data-retired-curve], #generationCurveGroup, .intensity-panel"));
   }
 
   function searchParameters(input) {
@@ -203,7 +203,7 @@
       `模型：${value("checkpointPath").trim() || "尚未选择 checkpoint"}`,
       `目标等级 ${value("level")} · ${value("candidates")} 个候选 · 种子 ${value("seed").trim() || "自动"}`,
       `时钟：${value("tempoMap").trim() ? "手动 tempo map 优先" : `BPM ${value("bpm").trim() || "自动估计"}`} · 首拍偏移 ${value("first")} 秒`,
-      `曲线${curve ? (saved ? "已启用并保存" : "已启用，待保存") : "未启用"} · 无理处理：${detection ? nameOf("conflictRepairMode") : "关闭"}`,
+      `无理处理：${detection ? nameOf("conflictRepairMode") : "关闭"}`,
       `输出：${value("outputPath")}`,
     ]);
     if(typeof currentGenerationFamily==="function" && currentGenerationFamily()==="chart_composer_v2")list("generationRunSummary",[

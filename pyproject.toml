@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "maimai-ai-chart"
-version = "0.2.0"
+version = "1.0.0"
 description = "Audio-conditioned maimai chart research framework with Simai generation."
 readme = "README.md"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { file = "LICENSE" }
 authors = [
   { name = "maimai-ai-chart contributors" }
 ]
@@ -51,6 +51,9 @@ maichart = "maichart.cli:main"
 maichart-train = "maichart.training.train_generator:main"
 maichart-generate = "maichart.generation.cli:main"
 maichart-gui = "maichart.webui.server:main"
+
+[tool.setuptools]
+license-files = ["LICENSE", "LICENSE_SCOPE.md", "THIRD_PARTY_NOTICES.md"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

@@ -1152,7 +1152,7 @@ function updateV2ConditionControls() {
   }
   const hint=element('#v2ConditionStatus');
   if(hint) {hint.hidden=!active;hint.textContent=caps.enabled
-    ? '每项默认由模型根据音乐与历史决定，仅勾选「手动指定」的项会发送。关闭手动指定后，显示值恢复为随等级变化的历史参考。参考不等于本次训练集或当前 checkpoint 的校准。手动值与开关会保存；恢复默认会清除全部手动指定。条件是软输入，仍需试听与游玩。'
+    ? '默认全部保持「自动由音乐决定」，让模型顺应音乐段落安排手法；只需对想专门干预的项（如减少 Touch、增加 Slide 或多押）勾选「手动指定」并拖动滑块作为软目标，其余项继续自动跟歌。关闭手动指定后显示值恢复为该等级的语料参考。'
     : '当前 checkpoint 尚未确认 Radar / Style 能力，或仅训练了等级（level_only_v1）；这些滑块不会生效。请检查 checkpoint；旧权重需在新目录 finetune 才能学习新条件。';}
 }
 
@@ -1337,7 +1337,7 @@ function on(selector, eventName, handler) {
 // one very long scroll of unrelated controls.
 // ---------------------------------------------------------------------------
 function setWorkspaceMode(mode) {
-  const value = ["generation", "intensity", "quality"].includes(mode) ? mode : "training";
+  const value = mode === "intensity" ? "generation" : ["generation", "quality"].includes(mode) ? mode : "training";
   document.body.dataset.workspace = value;
   element("#trainingModeTab")?.classList.toggle("active", value === "training");
   element("#qualityModeTab")?.classList.toggle("active", value === "quality");
@@ -1350,7 +1350,7 @@ function setWorkspaceMode(mode) {
 }
 
 function initialWorkspace() {
-  try { return localStorage.getItem(workspaceStorageKey) || "training"; } catch (_) { return "training"; }
+  try { return localStorage.getItem(workspaceStorageKey) || "generation"; } catch (_) { return "generation"; }
 }
 
 function loadIntensityCurveState(validateContext = true) {
@@ -2022,7 +2022,7 @@ function updateFamilyFields() {
   document.querySelectorAll('#generationTargetGroup .condition-advanced').forEach(target=>{target.hidden=v2Generation && !target.querySelector('#v2ConditionStatus');});
   const legacyConditionHint=element('#v2ConditionStatus')?.closest('details')?.querySelector('p:not(#v2ConditionStatus)');
   if(legacyConditionHint)legacyConditionHint.hidden=v2Generation;
-  const bpmInput=element('#bpm');if(bpmInput)bpmInput.placeholder='留空则自动估计';
+  const bpmInput=element('#bpm');if(bpmInput)bpmInput.placeholder='留空则自动估计';const genDeviceField=element("#generationDevice")?.closest(".field");if(genDeviceField)genDeviceField.hidden=v2Generation;const firstInput=element("#first");if(firstInput)firstInput.disabled=v2Generation && checkedOrDefault("#v2GenerateAutoFirst",true);
   const targetHeading=element("#generationTargetGroup .workflow-group-heading h3");
   if(targetHeading)targetHeading.textContent=v2Generation?"选择目标等级":"选择等级与偏好";
   const targetHint=element("#generationTargetGroup .workflow-group-heading p");
@@ -2075,7 +2075,7 @@ function updateFamilyFields() {
   const familyHelp = element("#modelFamilyHelp");
   if (familyHelp) {
     familyHelp.textContent = family === "chart_composer_v2"
-      ? "chart_composer_v2：新训练采用连续事件序列。默认保留16拍历史，每16个事件整理上下文，局部音乐额外前瞻4拍。旧检查点按原序列方式运行。MERT 在准备阶段加载。"
+      ? "chart_composer_v2（当前主路线）：连续生成整曲事件序列，默认保留16拍历史、每16个事件整理上下文、局部音乐额外前瞻4拍。MERT 在准备阶段自动加载。"
       : family === "chart_stream_v1"
       ? "chart_stream_v1：整曲连续事件流；计算块只管理显存，不产生音乐边界。音频、近期谱面、持续动作和近期历史摘要共同参与。"
       : family === "chart_composer_v1"
@@ -2106,7 +2106,7 @@ function updateFamilyFields() {
   }
   const bpmHelp = element("#bpmHelp");
   if (bpmHelp) {
-    bpmHelp.textContent = v2Generation ? "留空按全曲一致节拍估计恒定 BPM；检测到局部变速时在日志和报告中提示，不会自动写入变速表。填写 BPM 则使用手动值，手动 tempo map 优先。勾选“自动识别首拍偏移”后会单独分析节拍相位；其结果不是第一声出现的时间，也不能确定整拍或小节编号。" : currentGenerationFamily() === "legacy_frame_v2"
+    bpmHelp.textContent = v2Generation ? "留空时按上方「自动BPM分析」设置识别节拍：选「识别变速并校准全曲」时采用通过连续性检查的变速段，选恒定模式时不会自动写入变速表。填写 BPM 则使用手动恒定值，手动 tempo map 整表优先。勾选“自动识别首拍偏移”后会单独分析节拍相位（勾选时右侧手动首拍偏移停用）。" : currentGenerationFamily() === "legacy_frame_v2"
       ? "旧基线：留空自动分析；填写则覆盖为单一 BPM，tempo map 可进一步覆盖。"
       : "未填 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外使用高置信度变速点。填写 tempo map 后，其 beat 0 BPM 与变速点优先。";
   }
@@ -4267,8 +4267,7 @@ async function loadStatus() {
         : "当前后端仍使用旧版 MiaCode 运行时；重启 WebUI 服务后启用 Python 检测。")
       : state.playability_engine?.error || "Python 检测模块或路径数据不可用，请检查项目文件并重启 WebUI 服务。";
   }
-  const intensityNotice = state.intensity_curve_capability === true ? " · 多维强度曲线可用" : " · 多维强度曲线需重启后端";
-  setStatus(`本地服务正常 · workspace: ${state.workspace}${intensityNotice}`, state.intensity_curve_capability === true);
+  setStatus(`本地服务正常 · workspace: ${state.workspace}`, true);
   populateDatasets(state.datasets || []);
   await loadDatasetCatalog();
   const running = (state.tasks || []).find((task) => ["queued", "running", "cancelling"].includes(task.status)
@@ -5081,7 +5080,7 @@ async function inspectGenerationCheckpoint() {
   updateEventSetControls();
   if(data.model_family==="chart_composer_v2") {
     setGenerationStatus(data.valid?`Composer v2 checkpoint 可用于生成；${data.generation_capabilities?.continuous_time?'连续事件（无固定拍数输出边界）':'旧窗口方式'}；条件策略 ${data.condition_contract?.policy||'level_only_v1'}${data.condition_contract?.policy==='radar_style_v1'?'':'；未训练 Radar / Style 能力'}`:data.error||(data.errors||[]).join("；")||"Composer v2 checkpoint 不可用",data.valid?"good":"warn");
-    const box=element("#generationPlannerStatus");if(box)box.textContent=`模型族：chart_composer_v2；${data.generation_capabilities?.continuous_time?"连续事件；仅歌曲结束有EOS":"旧点：固定窗口结束符"}；无默认强度曲线指导`;
+    const box=element("#generationPlannerStatus");if(box)box.textContent=`模型族：chart_composer_v2；${data.generation_capabilities?.continuous_time?"连续事件；仅歌曲结束有EOS":"旧点：固定窗口结束符"}`;
     window.MaichartWorkflow?.refresh();
     return data;
   }
@@ -6929,7 +6928,7 @@ on("#checkpointFile", "change", async (event) => {
     generationInspection = { path: "", data: null };
     updateFamilyFields();
     updateEventSetControls();
-    if (element("#generationPlannerStatus")) element("#generationPlannerStatus").textContent = "checkpoint 已更换，请重新检查 planner 类型。";
+    if (element("#generationPlannerStatus")) element("#generationPlannerStatus").textContent = "checkpoint 已更换，点击上方检查按钮或直接提交生成可确认模型能力。";
     setGenerationStatus("已上传 checkpoint；点击『检查生成 checkpoint 类型』确认模型族。", "warn");
   }
 });
@@ -6939,7 +6938,7 @@ on("#checkpointPath", "input", () => {
   generationInspection = { path: "", data: null };
   updateFamilyFields();
   updateEventSetControls();
-  if (element("#generationPlannerStatus")) element("#generationPlannerStatus").textContent = "checkpoint 路径已修改，请重新检查 planner 类型。";
+  if (element("#generationPlannerStatus")) element("#generationPlannerStatus").textContent = "checkpoint 路径已修改，点击上方检查按钮或直接提交生成可确认模型能力。";
 });
 document.querySelectorAll("[data-fine-note-value]").forEach((button) => {
   button.addEventListener("click", () => {
@@ -6951,7 +6950,7 @@ document.querySelectorAll("[data-fine-note-value]").forEach((button) => {
     saveSettings();
   });
 });
-on("#generationInspectButton", "click", inspectGenerationCheckpoint);
+on("#generationInspectButton", "click", inspectGenerationCheckpoint);on("#v2GenerateAutoFirst", "change", updateFamilyFields);
 on("#openIntensityCurveButton", "click", () => { setIntensitySong(intensityAudioPath()); setWorkspaceMode("intensity"); drawIntensityCurve(); restoreIntensityBackdrop(); });
 on("#intensityBackToGeneration", "click", () => setWorkspaceMode("generation"));
 on("#generateIntensityCurveButton", "click", generateIntensityCurve);
