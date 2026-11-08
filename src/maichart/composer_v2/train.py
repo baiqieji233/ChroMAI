@@ -15,7 +15,7 @@ import time
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-from .checkpoint import FAMILY,SCHEMA,read,save,inspect_payload
+from .checkpoint import FAMILY,SCHEMA,read,save,save_epoch_snapshot,inspect_payload
 from .codec import ComponentCodec
 from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Dataset,
                    collate_composer_v2, LengthBucketBatchSampler)
@@ -47,6 +47,9 @@ def parser():
     from .rhythm_structure import CHOICES as STRUCTURE_CHOICES
     result.add_argument('--rhythm-structure',choices=STRUCTURE_CHOICES,default='auto',
                         help='Sub-beat phase geometry and aligned trusted references; auto enables fresh/continuous finetune and inherits exact resume')
+    from .intensity import CHOICES as CURVE_CHOICES
+    result.add_argument('--intensity-curve',choices=CURVE_CHOICES,default='auto',
+                        help='Train low-frequency event/object rate curves; resume inherits its parent policy')
     result.add_argument("--condition-policy", choices=POLICIES, default=None,
         help="Fresh/init default radar_style_v1; resume inherits the checkpoint contract")
     return result
@@ -174,11 +177,15 @@ def _phase_budget(batch,phase_tokens):
 
 def _validate(model,loader,device,precision,maximum):
     model.validation_phase_loss=None
+    model.validation_curve_loss=None
+    model.validation_curve_mae=None
     if loader is None:return None
     phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
     phase_tokens=model.phase_targets.detach().cpu()
     model.eval();numerator=torch.zeros((),device=device);mass_sum=0.
     finite=torch.ones((),device=device,dtype=torch.bool)
+    curve_numerator=torch.zeros((),device=device)
+    curve_error=torch.zeros(2,device=device);curve_exposure=torch.zeros((),device=device)
     with torch.inference_mode():
         for index,batch in _batches(loader):
             if maximum and index>=maximum:break
@@ -192,14 +199,23 @@ def _validate(model,loader,device,precision,maximum):
             if not math.isfinite(mass) or mass<0:raise ValueError("Invalid validation token weight budget")
             batch=_device_batch(batch,device)
             with _autocast(device,precision):
-                loss,metrics=model.loss(model(batch),batch)
+                output=model(batch);loss,metrics=model.loss(output,batch)
             finite=finite&torch.isfinite(loss)
-            numerator+=loss.detach()*max(1.,mass);mass_sum+=mass
+            numerator+=metrics['token_loss']*max(1.,mass);mass_sum+=mass
+            curve_numerator+=metrics['curve_loss']*max(1.,mass)
+            if hasattr(model,'intensity'):
+                widths=batch['curve_widths'].float()
+                # Rate MAE is independent of token CE and measured in real units.
+                curve_error+=((output['curve_rates']-batch['curve_counts']/widths[...,None].clamp_min(1e-6)).abs()*widths[...,None]).sum((0,1))
+                curve_exposure+=widths.sum()
             phase_numerator+=metrics["phase_loss"]*phase_mass;phase_mass_sum+=phase_mass
     if not bool(finite):raise RuntimeError("Nonfinite validation loss")
     if mass_sum<=0:raise ValueError("Validation has no positive quality-weighted target tokens")
     result=float(numerator)/max(1.,mass_sum)
     model.validation_phase_loss=float(phase_numerator)/phase_mass_sum if phase_mass_sum else None
+    if hasattr(model,'intensity'):
+        model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
+        model.validation_curve_mae=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
     model.train()
     return result
 
@@ -236,6 +252,8 @@ def train(args):
 
     args.cuda_memory_budget_gb = getattr(args, 'cuda_memory_budget_gb', 0.0)
     args.audio_cache_gb = getattr(args, 'audio_cache_gb', 0.25)
+    args.save_every = getattr(args, 'save_every', 5)
+    args.early_stopping_patience=getattr(args,'early_stopping_patience',5)
     for key in ('cuda_memory_budget_gb', 'audio_cache_gb'):
         value = getattr(args, key)
         if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1024:
@@ -244,7 +262,7 @@ def train(args):
     torch.set_num_threads(args.cpu_threads)
     if min(args.epochs,args.batch_size,args.grad_accumulation,args.log_interval,args.checkpoint_interval_steps)<=0:raise ValueError("epochs/batch/accumulation/log/save intervals must be positive")
     if args.lr<=0 or not 0<=args.min_lr_ratio<=1 or not 0<=args.dropout<1:raise ValueError("Invalid optimizer/dropout settings")
-    if min(args.warmup_steps,args.validation_max_batches,args.seed,args.max_steps,args.limit_charts)<0:raise ValueError("Training limits and seed must be nonnegative")
+    if min(args.warmup_steps,args.validation_max_batches,args.seed,args.max_steps,args.limit_charts,args.save_every,args.early_stopping_patience)<0:raise ValueError("Training limits, seed and save_every must be nonnegative")
     if args.device not in {"auto","cpu","cuda"} or args.prepare_device not in {"auto","cpu","cuda"}:raise ValueError("Device must be auto/cpu/cuda")
     if args.lr_schedule not in {"cosine","constant"}:raise ValueError("Unknown lr_schedule")
     if args.audio_backend not in {"mert","native"}:raise ValueError("audio_backend must be mert or explicit native")
@@ -287,9 +305,17 @@ def train(args):
     from .rhythm_structure import resolve_policy as resolve_structure_policy
     args.structure_policy, structure_migration = resolve_structure_policy(getattr(args,'rhythm_structure','auto'),
         (parent.get('model_config') or parent.get('config')) if parent else None, resume=bool(args.resume))
+    from .intensity import resolve_policy as resolve_curve_policy
+    args.intensity_policy,curve_migration=resolve_curve_policy(getattr(args,'intensity_curve','auto'),
+        (parent.get('model_config') or parent.get('config')) if parent else None,resume=bool(args.resume))
+    from .rhythm_learning import POLICY as LEGACY_LEARNING,PROPER_POLICY
+    args.rhythm_learning_policy=(parent['training_contract'].get('rhythm_learning',LEGACY_LEARNING)
+                                if args.resume else PROPER_POLICY)
+    if args.intensity_policy!='off' and args.sequence_policy!='continuous_events_v1':
+        raise ValueError('Intensity curves require continuous event training')
     if args.structure_policy!='off' and args.sequence_policy!='continuous_events_v1':
         raise ValueError('Rhythm structure requires continuous event training')
-    if migration or onset_migration or structure_migration:
+    if migration or onset_migration or structure_migration or curve_migration:
         if directory == source_directory or any(path.exists() for path in artifacts):
             raise ValueError('Condition/onset/rhythm-structure migration requires a new checkpoint directory; retain the parent')
     device=torch.device("cuda" if args.device=="auto" and torch.cuda.is_available() else "cpu" if args.device=="auto" else args.device)
@@ -304,12 +330,13 @@ def train(args):
     resource_budgets = dict(cuda_memory_budget_gb=cuda_budget, audio_cache_gb=args.audio_cache_gb)
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     if torch.cuda.is_available():torch.cuda.manual_seed_all(args.seed)
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
     if onset_migration: comparable_config['onset_readout_policy'] = parent_config['onset_readout_policy']
     if structure_migration: comparable_config['structure_policy'] = parent_config['structure_policy']
+    if curve_migration: comparable_config['intensity_policy'] = parent_config['intensity_policy']
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
     codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
@@ -331,7 +358,8 @@ def train(args):
         from .stream_data import StreamDataset
         dataset_class=StreamDataset;options['refresh_events']=args.refresh_events
         options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed,
-                       onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy)
+                       onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
+                       intensity_policy=args.intensity_policy,rhythm_learning_policy=args.rhythm_learning_policy)
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':train_options['reference_augmentation']=True
     dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
@@ -367,9 +395,9 @@ def train(args):
     if recovery_policy!='off':contract['timing_recovery']=recovery_policy
     if args.onset_readout_policy != 'off':contract['onset_readout_policy']=args.onset_readout_policy
     if args.structure_policy != 'off':contract['structure_policy']=args.structure_policy
+    if args.intensity_policy!='off':contract['intensity_policy']=args.intensity_policy
     if args.structure_policy=='aligned_rhythm_v2':
-        from .rhythm_learning import POLICY as LEARNING_POLICY
-        contract['rhythm_learning']=LEARNING_POLICY
+        contract['rhythm_learning']=args.rhythm_learning_policy
     if dialect_policy != chart_dialect.LEGACY_STRICT_POLICY:
         contract['chart_dialect'] = dialect_policy
     if args.resume and (not _same_data_identity(parent["data_identity"],identity) or parent["training_contract"]!=contract):
@@ -379,7 +407,7 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration or structure_migration:
+        if migration or onset_migration or structure_migration or curve_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if onset_migration:
                 if args.onset_readout_policy != 'off':
@@ -390,12 +418,16 @@ def train(args):
                 from .rhythm_structure import migration_state
                 parent_state, missing_structure = migration_state(model,parent_state)
                 expected_missing.update(missing_structure)
+            if curve_migration:
+                if args.intensity_policy!='off':
+                    expected_missing.update(k for k in model.state_dict() if k.startswith('intensity.'))
+                else:parent_state={k:v for k,v in parent_state.items() if not k.startswith('intensity.')}
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
             emit('runtime',stage='model_migration',parent=str(parent_path),
                 source_policy=parent_policy,condition_policy=args.condition_policy,
-                onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
+                onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 zero_initialization=True)
         else:
             model.load_state_dict(parent_state,strict=True)
@@ -457,11 +489,12 @@ def train(args):
          preparation=dataset.audit.get('preparation', {}), batch_order=batch_order, **resource_budgets,
          timing_recovery=dataset.audit.get('timing_recovery'),
          rhythm_structure=dataset.audit.get('rhythm_structure'),
+         intensity_policy=args.intensity_policy,
         best_basis=best_basis)
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
-    running=torch.zeros(4,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
-    group_metrics=torch.zeros(4,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
+    running=torch.zeros(6,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
+    group_metrics=torch.zeros(6,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
     group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;stop=False
     time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
     if device.type=="cuda":torch.cuda.reset_peak_memory_stats(device)
@@ -483,8 +516,9 @@ def train(args):
                 loss,metrics=model.loss(model(batch),batch)
             scaler.scale(loss*(budget/1024.)).backward()
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
-            group_metrics+=torch.stack((loss.detach()*budget,
-                metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*phase_mass))
+            group_metrics+=torch.stack((metrics['token_loss']*budget,
+                metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*phase_mass,
+                metrics['curve_loss']*budget,loss.detach()*budget))
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
             group_component_mass+=component_mass if cpu_valid else 0.
@@ -520,6 +554,7 @@ def train(args):
                 emit("progress",stage="training",epoch=epoch+1,batch=batch_index+1,total=len(loader),
                     optimizer_steps=state["optimizer_steps"],loss=values[0]/max(1.,running_mass),
                     loss_scope="run_quality_weighted_token_mean",
+                    curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
                     token_count=seen_tokens,token_weight_sum=running_mass,
                     tokens_per_sec=seen_tokens/max(elapsed,1e-9),samples_per_sec=seen_samples/max(elapsed,1e-9),
                     time_loss=values[1]/max(1.,running_time_mass),component_loss=values[2]/max(1.,running_component_mass),phase_loss=values[3]/max(1.,running_phase_mass),
@@ -539,9 +574,13 @@ def train(args):
             score=validation_loss if validation_loss is not None else state["last_loss"]
             improved=score is not None and (state["best_loss"] is None or score<state["best_loss"])
             if improved:state["best_loss"]=score
+            if validation_loss is not None:
+                state['bad_validation_epochs']=0 if improved else int(state.get('bad_validation_epochs',0))+1
             emit("progress",stage="epoch_complete",epoch=epoch+1,total=args.epochs,loss=score,
                 epoch_train_loss=state["last_loss"],validation_loss=validation_loss,
                 validation_phase_loss=getattr(model,"validation_phase_loss",None),
+                validation_curve_loss=getattr(model,'validation_curve_loss',None),
+                validation_curve_mae=getattr(model,'validation_curve_mae',None),
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
                 best_basis=best_basis,optimizer_steps=state["optimizer_steps"])
@@ -549,6 +588,17 @@ def train(args):
             # Checkpoint's next-epoch accumulator must agree with its zero cursor.
             epoch_loss_gpu.zero_();epoch_mass=0.
             checkpoint(improved)
+            snapshot_started=time.perf_counter()
+            snapshot=save_epoch_snapshot(artifacts[0],state["epoch"],args.save_every)
+            if snapshot is not None:
+                emit("checkpoint",stage="epoch_snapshot",path=str(snapshot),epoch=state["epoch"],
+                     batch_cursor=0,optimizer_steps=state["optimizer_steps"],
+                     save_sec=time.perf_counter()-snapshot_started)
+            if (validation_loss is not None and args.early_stopping_patience and
+                    state.get('bad_validation_epochs',0)>=args.early_stopping_patience):
+                emit('runtime',stage='early_stopped',epoch=state['epoch'],best_loss=state['best_loss'],
+                     reason='validation_no_improvement',patience=args.early_stopping_patience)
+                stop=True
         elif stop:checkpoint()
         previous=time.perf_counter()
         if stop:break

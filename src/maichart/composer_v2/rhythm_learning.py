@@ -3,6 +3,7 @@ from fractions import Fraction
 import numpy as np
 
 POLICY = 'mixed_phase_authored_gaps_v1'
+PROPER_POLICY = 'authored_mixed_context_proper_ce_v2'
 
 
 def supervision_weights(codec, ids, labels, target, cursor, base_weights=None, context_phases=()):

@@ -31,7 +31,11 @@ class ComposerV2Config:
     refresh_events: int = 16
     onset_readout_policy: str = 'off'
     structure_policy: str = 'off'
+    intensity_policy: str = 'off'
     def __post_init__(self):
+        from .intensity import POLICY as CURVE_POLICY
+        if self.intensity_policy not in ('off',CURVE_POLICY) or (self.intensity_policy!='off' and self.sequence_policy!='continuous_events_v1'):
+            raise ValueError('Intensity curves require continuous events')
         if self.d_model%self.nhead or min(self.d_model,self.layers,self.nhead,self.dim_feedforward,self.window_beats,self.max_tokens)<1:
             raise ValueError('Invalid Composer v2 dimensions')
         if self.audio_backend not in ('mert','native') or not 0<=self.dropout<1:
@@ -165,6 +169,9 @@ class ComposerV2(nn.Module):
         self.output_bias=nn.Parameter(torch.zeros(codec.vocab_size))
         self._song_cache={}
         self._structured_weight_cache={}
+        if c.intensity_policy!='off':
+            from .intensity import IntensityContext
+            with torch.random.fork_rng(devices=[]):self.intensity=IntensityContext(d)
         self.register_buffer('phase_targets',torch.tensor([t.startswith('F:') for t in codec.tokens]),persistent=False)
         self.register_buffer('time_tokens',torch.tensor([t.startswith(('T:','F:')) or t in ('[AT]','[PHASE]','[TIME_EXT]','[TIME_END]') or t.startswith('NUM:') for t in codec.tokens]),persistent=False)
         if c.onset_readout_policy != 'off':
@@ -263,6 +270,9 @@ class ComposerV2(nn.Module):
                 self._song_cache[key]=(song.detach(),song_mask)
         else:song,song_mask=cached
         result = dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask)
+        if hasattr(self,'intensity'):
+            result['condition']=self.condition_context(batch)
+            result['curve_rates'],result['curve_context']=self.intensity.plan(song,batch,training=self.training)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             result['onset_scores'] = self.onset_readout(batch)
         return result
@@ -328,7 +338,9 @@ class ComposerV2(nn.Module):
             if evidence is not None:
                 offset=int(batch.get('reference_evidence_start',0))
                 x=x+self.reference_evidence(evidence[:,start-offset:].float())
-        x=self.dropout(x);condition=self.condition_context(batch)
+        if hasattr(self,'intensity'):
+            x=x+self.intensity(cache['curve_context'],batch,start=start)
+        x=self.dropout(x);condition=cache['condition'] if 'condition' in cache else self.condition_context(batch)
         groups=query_groups(batch['tile_ids_cpu'],start,ids.device) if 'tile_ids_cpu' in batch else None
         for i,layer in enumerate(self.decoder):
             x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
@@ -341,7 +353,9 @@ class ComposerV2(nn.Module):
             state['length']=length;cache['decode_state']=state
         return logits
     def forward(self,batch):
-        return {'logits':self.decode(batch,self.encode_audio(batch),incremental=False)}
+        cache=self.encode_audio(batch)
+        return {'logits':self.decode(batch,cache,incremental=False),
+                **({'curve_rates':cache['curve_rates']} if 'curve_rates' in cache else {})}
     def loss(self,output,batch):
         logits=output['logits'].float();labels=batch['labels'];active=labels.ne(-100)
         weights=batch.get('token_weights',active.float()).float()*active
@@ -351,6 +365,12 @@ class ComposerV2(nn.Module):
         timing=self.time_tokens[labels.clamp_min(0)]&active
         def mean(mask):
             w=weights*mask;return (costs*w).sum()/w.sum().clamp_min(1)
-        return loss,dict(loss=loss.detach(),time_loss=mean(timing).detach(),
+        auxiliary=loss.new_zeros(())
+        if 'curve_rates' in output:
+            from .intensity import curve_loss,AUX_WEIGHT
+            auxiliary=curve_loss(output['curve_rates'],batch)
+            objective=loss+AUX_WEIGHT*auxiliary
+        else:objective=loss
+        return objective,dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),
             phase_loss=mean(self.phase_targets[labels.clamp_min(0)]&active).detach(),token_count=active.sum().detach())

@@ -57,7 +57,11 @@ class EventSampler(WindowSampler):
         from .onset_readout import effective_strength
         self.batch['onset_strength'] = effective_strength(getattr(args,'onset_strength',None),
             getattr(model.config,'onset_readout_policy','off'))
+        self.batch['intensity_strength']=getattr(args,'intensity_strength',1.)
         self.max_tokens=model.config.max_tokens;self.cache=model.encode_audio(self.batch)
+        if getattr(model.config,'intensity_policy','off')!='off' and not hasattr(dataset,'intensity_profile'):
+            from .intensity import serialize
+            dataset.intensity_profile=serialize(self.cache['curve_context'][0].expm1(),song)
         self.retry_stats={};self._retry_scope=None
     def next(self,target,allowed,*,action=False):
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
@@ -111,6 +115,12 @@ class EventSampler(WindowSampler):
             'token_beats':torch.tensor([clocks],dtype=torch.float32,device=self.device),
             'token_mask':torch.ones((1,len(ids)),dtype=torch.bool,device=self.device),
             'tile_ids_cpu':[[self.anchor_ids[math.floor(t)] for t in clocks]]}
+        if getattr(self.dataset,'intensity_policy','off')!='off':
+            from .intensity import query_indices
+            state=self.cache.get('decode_state')
+            start=int(state['length']) if state and state['length']<len(ids) else 0
+            query.update({k:v[None].to(self.device) for k,v in query_indices(self.song,clocks[start:]).items()})
+            query['curve_query_start']=start
         if getattr(self.dataset,'onset_readout_policy','off') != 'off':
             from .onset_readout import query_rows
             query['phase_queries_cpu']=query_rows(ids,query['tile_ids_cpu'][0],self.codec.ids['[PHASE]'])
@@ -232,6 +242,10 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     # Same aligned reference and phase inputs as training, never the training-only
     # reference augmentation.
     dataset.structure_policy=getattr(config,'structure_policy','off')
+    dataset.intensity_policy=getattr(config,'intensity_policy','off')
+    if getattr(args,'intensity_curve',None):
+        from .intensity import profile_rates
+        song.intensity_override=profile_rates(json.loads(Path(args.intensity_curve).read_text(encoding='utf-8')),song)
     dataset.reference_augmentation=False;dataset.refresh_events=config.refresh_events
     requested_selection=getattr(args,'reference_selection','auto') or 'auto'
     # Older checkpoints keep their REF layout; 'aligned' only changes which
@@ -401,6 +415,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                            scope='conditional_phase_only',phase_mass_preserved=True),
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
+    report['intensity_curve']=dict(policy=dataset.intensity_policy,
+        source='off' if dataset.intensity_policy=='off' else 'edited' if getattr(args,'intensity_curve',None) else 'model',
+        strength=getattr(args,'intensity_strength',1.),profile=getattr(dataset,'intensity_profile',None))
     if bypassed_events:
         from .diagnostics import write_conflict_snapshot
         assessment=conflict_assessment(points,tempo,first,guard)
@@ -434,6 +451,6 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

@@ -26,11 +26,14 @@ def _song_cache_key(song):
 
 class StreamDataset(ComposerV2Dataset):
     def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',
-                 structure_policy='off',reference_augmentation=False,**kwargs):
+                 structure_policy='off',reference_augmentation=False,intensity_policy='off',rhythm_learning_policy=None,**kwargs):
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
         from .rhythm_structure import POLICIES
         if structure_policy not in POLICIES:raise ValueError('Unknown rhythm structure policy')
         self.structure_policy=structure_policy
+        self.intensity_policy=intensity_policy
+        from .rhythm_learning import POLICY as LEGACY_LEARNING
+        self.rhythm_learning_policy=rhythm_learning_policy or LEGACY_LEARNING
         self.reference_augmentation=bool(reference_augmentation) and structure_policy!='off'
         from .onset_readout import POLICY as ONSET_POLICY, phase_values
         if onset_readout_policy not in ('off', ONSET_POLICY):raise ValueError('Unknown onset readout policy')
@@ -96,7 +99,7 @@ class StreamDataset(ComposerV2Dataset):
                 drop_probability=rs.REF_DROP_PROBABILITY if self.reference_augmentation else 0.,
                 alternative_probability=rs.REF_ALTERNATIVE_PROBABILITY if self.reference_augmentation else 0.,
                 history_budget='low_trust_uses_spare_only' if self._evidence_v2() else 'reference_first',
-                learning='mixed_phase_authored_gaps_v1' if self._evidence_v2() and self.reference_augmentation else 'off')
+                learning=self.rhythm_learning_policy if self._evidence_v2() and self.reference_augmentation else 'off')
 
     def set_epoch(self, epoch):
         self.training_epoch = int(epoch)
@@ -372,9 +375,10 @@ class StreamDataset(ComposerV2Dataset):
             out['reference_checked_start']=checked_start
             out['reference_checked_end']=min(checked_end,self._profile(song).beats)
             if training and getattr(self,'reference_augmentation',False):
-                from .rhythm_learning import supervision_weights
-                out['token_weights']=torch.as_tensor(weights*supervision_weights(codec,ids,labels,target,cursor,weights,
-                    context_phases=[p.beat%1 for p in history if p.beat>=cursor-2]))
+                from .rhythm_learning import supervision_weights,POLICY as LEGACY_LEARNING
+                if getattr(self,'rhythm_learning_policy',LEGACY_LEARNING)==LEGACY_LEARNING:
+                    out['token_weights']=torch.as_tensor(weights*supervision_weights(codec,ids,labels,target,cursor,weights,
+                        context_phases=[p.beat%1 for p in history if p.beat>=cursor-2]))
         if sample_frames is not None:
             out['bank_semantic_right'] = torch.as_tensor(semantic_right)
             out['bank_semantic_weight'] = torch.as_tensor(semantic_weight)
@@ -392,6 +396,9 @@ class StreamDataset(ComposerV2Dataset):
             from .onset_readout import audio_tiles, query_rows
             out.update(audio_tiles(song, anchors, self.onset_phases))
             out['phase_queries_cpu'] = query_rows(ids, out['tile_ids'], self.codec.ids['[PHASE]'])
+        if getattr(self,'intensity_policy','off')!='off':
+            from .intensity import add_item
+            add_item(out,song,clocks,training=training)
         return out
     def __getitem__(self,index):
         source = self.recovery_sources.get(index)
@@ -463,6 +470,9 @@ def collate_stream(items):
         'local_semantic':item['bank_semantic'][:1],'local_semantic_mask':item['bank_semantic_mask'][:1],
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
     out=collate_composer_v2(temporary)
+    if 'curve_left' in items[0]:
+        from .intensity import collate
+        collate(items,out)
     for k in ('bank_audio','bank_semantic','bank_semantic_mask','local_mask','local_beats'):out[k]=torch.cat([item[k] for item in items],0)
     if 'bank_envelope' in items[0]:out['bank_envelope']=torch.cat([item['bank_envelope'] for item in items],0)
     if 'reference_trust' in items[0]:out['reference_trust']=torch.stack([item['reference_trust'] for item in items])

@@ -205,7 +205,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._serve_static("form_lab.html")
         if parsed.path == "/composer":
             return self._serve_static("composer.html")
-        if parsed.path in {"/app.js", "/chart_preview.js", "/styles.css", "/workspace.js", "/workspace.css",
+        if parsed.path in {"/app.js", "/v2_intensity.js", "/chart_preview.js", "/styles.css", "/workspace.js", "/workspace.css",
                            "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css",
                            "/composer.js", "/composer.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
@@ -247,6 +247,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_onset_readout": True,
                                               "composer_v2_rhythm_structure": True,
                                               "composer_v2_rhythm_evidence_v2": True,
+                                              "composer_v2_intensity_curve": True,
                                               "composer_v2_reference_selection": True,
                                               "composer_v2_tail_guard": True,
                                               "composer_v2_variable_tempo": True,
@@ -320,6 +321,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if operation == "inspect": return composer_v2_api.inspect(self, payload)
                 if operation == "train": return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
                 if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])
+                if operation == "curve": return composer_v2_api.start_curve(self, payload, runtime=sys.modules[__name__])
                 return self._json_response({"error": "未知 Composer v2 操作"}, HTTPStatus.NOT_FOUND)
             if parsed.path.startswith("/api/composer/"):
                 from maichart.webui import composer_api
@@ -2403,6 +2405,9 @@ def _persisted_logs(limit: int = 100) -> list[dict[str, Any]]:
 
 def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
     paths = list(result_paths)
+    if task.kind=='composer_v2_curve':
+        curve_path=next((p for p in paths if p.is_file()),None)
+        if curve_path is not None:task.result['intensity_profile']=json.loads(curve_path.read_text(encoding='utf-8'))
     if task.kind == 'composer_v2_generate':
         batch_path = next((p for p in paths if p.name.endswith('.composer_v2_batch.json') and p.is_file()), None)
         if batch_path is not None:

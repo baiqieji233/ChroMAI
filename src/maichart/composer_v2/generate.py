@@ -35,6 +35,8 @@ def parser():
     result.add_argument('--level', type=float, default=13.)
     result.add_argument('--condition', type=json.loads, default=None,
                         help='Explicit Radar/Style overrides as a JSON object; omitted keys are automatic')
+    result.add_argument('--intensity-curve',default=None,help='Edited Composer v2 rate profile JSON; omitted uses the trained audio prediction')
+    result.add_argument('--intensity-strength',type=float,default=1.,help='Blend of edited and automatically predicted curves, 0–1')
     result.add_argument('--seed', type=int, default=0)
     result.add_argument('--temperature', type=float, default=GENERATION_DEFAULTS['temperature'],
                         help='Timing temperature and the default configuration temperature')
@@ -325,6 +327,8 @@ def _sampling_policy(args):
 
 @torch.inference_mode()
 def generate(args, *, model_override=None, payload_override=None, audio_store_override=None, prepared_override=None):
+    strength=getattr(args,'intensity_strength',1.)
+    if not math.isfinite(strength) or not 0<=strength<=1:raise ValueError('intensity_strength must be in 0–1')
     from .tail_guard import options as tail_options
     tail_options(args)
     if args.device == 'cuda':
@@ -358,6 +362,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
+    if getattr(args,'intensity_curve',None) and config.intensity_policy=='off':
+        raise ValueError('This checkpoint has not learned intensity curves; use a new training stage')
     from .onset_readout import effective_strength
     onset_strength=effective_strength(getattr(args,'onset_strength',None),config.onset_readout_policy)
     print('composer_v2_onset_readout '+json.dumps(dict(policy=config.onset_readout_policy,

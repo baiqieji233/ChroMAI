@@ -89,6 +89,11 @@ def start_train(handler,payload,*,runtime):
     sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
     settings={}
+    from maichart.composer_v2.intensity import CHOICES as CURVE_CHOICES,resolve_policy as resolve_curve_policy
+    curve_requested=_choice(payload,'intensity_curve','auto',CURVE_CHOICES)
+    curve_policy,_=resolve_curve_policy(curve_requested,(checked.get('model_config') or {}) if parent else None,resume=mode=='resume')
+    _arg(args,'--intensity-curve',curve_requested)
+    settings.update(intensity_curve=curve_requested,intensity_policy=curve_policy)
     from maichart.composer_v2.timing_recovery import CHOICES
     recovery_policy=_choice(payload,'timing_recovery','auto',CHOICES)
     _arg(args,'--timing-recovery',recovery_policy)
@@ -113,7 +118,7 @@ def start_train(handler,payload,*,runtime):
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
     choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device={"auto","cuda","cpu"},device={"auto","cuda","cpu"},precision={"bf16","fp16","fp32","auto"})
-    zeros={"warmup_steps","future_beats","history_beats","validation_max_batches","seed","max_steps","limit_charts"}
+    zeros={"warmup_steps","future_beats","history_beats","validation_max_batches","seed","max_steps","limit_charts","save_every","early_stopping_patience"}
     for key,default in TRAIN_DEFAULTS.items():
         if key in ('cuda_memory_budget_gb', 'audio_cache_gb') and isinstance(payload.get(key), bool):
             raise ValueError(f'{key} 必须是数字')
@@ -280,6 +285,20 @@ def start_generate(handler,payload,*,runtime):
     if count>MAX_BATCH_COUNT:raise ValueError(f'一次最多生成 {MAX_BATCH_COUNT} 张谱面')
     settings['count']=count
     paths=[output,output.with_suffix('.composer_v2.json')]
+    profile=payload.get('intensity_profile')
+    if profile is not None:
+        from maichart.composer_v2.intensity import validate_profile
+        validate_profile(profile)
+        if (checked.get('model_config') or {}).get('intensity_policy','off')=='off':
+            raise ValueError('此检查点未训练强度曲线，不能使用编辑曲线')
+        strength=_float(payload,'intensity_strength',1.,minimum=0)
+        if strength>1:raise ValueError('编辑曲线强度必须在0–1之间')
+        import uuid
+        profile_path=runtime.INTENSITY_ROOT/(uuid.uuid4().hex+'.composer_v2_curve.json')
+        profile_path.parent.mkdir(parents=True,exist_ok=True)
+        profile_path.write_text(json.dumps(profile,ensure_ascii=False),encoding='utf-8')
+        _arg(args,'--intensity-curve',profile_path);_arg(args,'--intensity-strength',strength)
+        settings.update(intensity_curve=str(profile_path),intensity_strength=strength)
     if count>1:
         # Separate task directories also protect previews from later overwrites.
         import uuid
@@ -291,3 +310,28 @@ def start_generate(handler,payload,*,runtime):
         settings.update(output=str(output),batch_manifest=str(manifest))
         paths=[manifest]  # Successful chart artifacts are collected from it.
     return _start(handler,runtime,"composer_v2_generate",args,settings,paths)
+
+
+def start_curve(handler,payload,*,runtime):
+    """Run prediction in a cancellable subprocess rather than the HTTP thread."""
+    _family(payload)
+    checkpoint=_path(payload.get('checkpoint'),'checkpoint',exists=True)
+    checked=inspection(checkpoint)
+    if not checked.get('valid') or (checked.get('model_config') or {}).get('intensity_policy','off')!='rate_curve_v1':
+        raise ValueError('此检查点尚未训练新版强度曲线；请从头训练或在新目录微调开启')
+    audio=_path(payload.get('audio'),'audio',exists=True)
+    import uuid
+    output=runtime.INTENSITY_ROOT/(uuid.uuid4().hex+'.composer_v2_curve.json')
+    args=['-m','maichart.composer_v2.intensity','--checkpoint',str(checkpoint),'--audio',str(audio),'--output',str(output)]
+    settings={'checkpoint':str(checkpoint),'audio':str(audio),'output':str(output)}
+    settings.update(cache_dir=str(_path(payload.get('cache_dir') or 'cache/chart_composer_v2','cache_dir')),
+        device=_choice(payload,'device','auto',{'auto','cuda','cpu'}),
+        tempo_detection=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'}),
+        cpu_threads=_integer(payload,'cpu_threads',2,minimum=1),level=_float(payload,'level',13.,minimum=1))
+    if settings['level']>15:raise ValueError('level 必须在1到15之间')
+    for key in ('cache_dir','device','tempo_detection','cpu_threads','level'):
+        _arg(args,'--'+key.replace('_','-'),settings[key])
+    for key in ('bpm','first','tempo_map','condition'):
+        value=payload.get(key)
+        if value is not None and value!='':_arg(args,'--'+key.replace('_','-'),json.dumps(value,ensure_ascii=False) if isinstance(value,(dict,list)) else value)
+    return _start(handler,runtime,'composer_v2_curve',args,settings,[output])

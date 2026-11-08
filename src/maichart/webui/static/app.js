@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure"];
+const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -20,7 +20,7 @@ function composerV2TrainingPayload(options={}) {
     manifests:selectedTrainingManifests(),mode:currentTrainingMode(),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure"]);
+  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -30,7 +30,7 @@ function composerV2TrainingPayload(options={}) {
   if(payload.validation_source && payload.validation_source!=='auto')delete payload.holdout_fraction;
   return payload;
 }
-function composerV2GenerationPayload() {
+function composerV2GenerationPayload(options={}) {
   const seed=valueOrDefault("#seed","").trim();
   const number=(selector,fallback,label,bounds)=>v2NumericValue(valueOrDefault(selector,fallback),label,bounds);
   const tempoMap=parseTempoMap();
@@ -66,6 +66,7 @@ function composerV2GenerationPayload() {
   }
   const referenceSelection=element('#v2GenerateReferenceSelection');
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
+  if(!options.omitCurve && typeof v2CurvePayload==='function')Object.assign(payload,v2CurvePayload());
   return payload;
 }
 function composerV2CompletionMessage(task) {
@@ -127,6 +128,7 @@ function applyComposerV2Inspection(data) {
   const saved={...(data.args||{}),...(data.model_config||{})};
   saved.onset_readout=data.model_config?.onset_readout_policy||'off';
   saved.rhythm_structure=data.model_config?.structure_policy||'off';
+  saved.intensity_curve=data.model_config?.intensity_policy||'off';
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   for(const key of COMPOSER_V2_FIELDS) {
     if (key === 'cuda_memory_budget_gb' || key === 'audio_cache_gb') continue;
@@ -3393,7 +3395,7 @@ function updateTrainingControls() {
   const v2Fixed=new Set(['d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
   for(const key of (typeof COMPOSER_V2_FIELDS!=="undefined"?COMPOSER_V2_FIELDS:[])){
     const node=element("#"+v2FieldId(key));if(node){
-      const resourceBudget = key === 'cuda_memory_budget_gb' || key === 'audio_cache_gb';
+      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience'].includes(key);
       node.disabled=(v2Resume && !resourceBudget) || (currentModelFamily()==='chart_composer_v2' && currentTrainingMode()==='finetune' && v2Fixed.has(key));
       node.title=node.disabled?'继承 checkpoint 的固定设置；模型合同变化需要从头训练。':'';
     }
@@ -5340,6 +5342,7 @@ async function submitTrain(options = {}) {
     const backend=await api("/api/status");
     if(payload.onset_readout && payload.onset_readout!=='auto' && !backend.training_capabilities?.composer_v2_onset_readout)
       throw new Error('独立起音参考训练需要更新后的 WebUI 后台，请重启当前后台后提交。');
+    if(payload.intensity_curve && !backend.training_capabilities?.composer_v2_intensity_curve)throw new Error('新版强度曲线训练需要更新后的 WebUI 后台，请重启后台后提交。');
     if(payload.rhythm_structure && !backend.training_capabilities?.composer_v2_rhythm_evidence_v2)
       throw new Error('逐拍参考证据与混合分音学习需要更新后的 WebUI 后台，请重启当前后台后提交。');
     if(backend.training_capabilities?.composer_v2_api_contract!=="composer_v2_continuous_events_v3")throw new Error("当前后台不支持 Composer v2 条件与自动节拍合同，请重启为更新后的 WebUI 后台再提交；请先妥善处理正在运行的任务。");
@@ -6375,6 +6378,7 @@ async function submitGenerate() {
     validateV2NumericInputs('#composerV2GenerationControls');validateV2NumericInputs('#generationTargetGroup');
     const status=await api("/api/status");
     if(status.training_capabilities?.composer_v2_api_contract!=="composer_v2_continuous_events_v3")throw new Error("当前后台不支持 Composer v2 条件与自动节拍合同，请重启为更新后的 WebUI 后台再提交；请先妥善处理正在运行的任务。");
+    if(payload.intensity_profile && !status.training_capabilities?.composer_v2_intensity_curve)throw new Error('编辑曲线需要更新后的 WebUI 后台。');
     requireV2ExhaustionSupport(status,payload);
     requireV2SplitSamplingSupport(status,payload);
     const data=await api("/api/composer-v2/generate",payload);

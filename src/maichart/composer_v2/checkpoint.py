@@ -1,6 +1,7 @@
 """Independent Composer v2 checkpoints with atomic writes and safe CPU reads."""
 from __future__ import annotations
 import os
+import shutil
 from pathlib import Path
 import tempfile
 import torch
@@ -33,6 +34,24 @@ def save(path,payload):
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
 
+def save_epoch_snapshot(last_path, epoch, interval):
+    """Archive a completed epoch without serializing GPU tensors a second time."""
+    if interval <= 0 or epoch <= 0 or epoch % interval:
+        return None
+    last_path = Path(last_path)
+    target = last_path.with_name(f"composer_v2_epoch_{epoch:03d}.pt")
+    descriptor, temporary = tempfile.mkstemp(prefix=target.name+".", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(descriptor, "wb") as destination, last_path.open("rb") as source:
+            shutil.copyfileobj(source, destination, length=1024*1024)
+            destination.flush()
+            os.fsync(destination.fileno())
+        os.replace(temporary, target)
+    finally:
+        if os.path.exists(temporary): os.unlink(temporary)
+    return target
+
+
 def inspect_payload(payload):
     errors=[]
     if payload.get("schema")!=SCHEMA: errors.append("独立 Composer v2 checkpoint schema 不匹配")
@@ -40,6 +59,10 @@ def inspect_payload(payload):
     config=payload.get("model_config") or payload.get("config")
     if not isinstance(config,dict): errors.append("缺少模型配置")
     if isinstance(config,dict):
+        from .intensity import POLICY as CURVE_POLICY
+        curve_policy=config.get('intensity_policy','off')
+        if curve_policy not in ('off',CURVE_POLICY) or (curve_policy!='off' and config.get('sequence_policy')!='continuous_events_v1'):
+            errors.append('强度曲线配置与连续事件合同不匹配')
         from .onset_policy import POLICY as ONSET_POLICY
         onset_policy = config.get('onset_readout_policy','off')
         if onset_policy not in ('off',ONSET_POLICY) or (onset_policy != 'off' and config.get('sequence_policy') != 'continuous_events_v1'):
@@ -90,6 +113,7 @@ def inspect_payload(payload):
         condition_contract=capabilities_contract,
         sequence_policy=(config or {}).get('sequence_policy','window_v1'),
         generation_capabilities=dict(component_sequence=True,fine_note_strength=False,local_onset_guidance=False,
+            intensity_curve=(config or {}).get('intensity_policy','off')=='rate_curve_v1',
             onset_readout=(config or {}).get('onset_readout_policy','off')=='phase_audio_v1',
             rhythm_structure=(config or {}).get('structure_policy','off')!='off',
             continuous_time=(config or {}).get('sequence_policy')=='continuous_events_v1',
