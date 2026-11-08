@@ -2,7 +2,7 @@
 
 Pad constants and adjacency are ported from MiaCode (MIT), commit
 6573efb611056bccd046dd17bc2f4cceda78bf88, MuriConfig.h / MuriAnalyzer.cpp.
-See THIRD_PARTY_NOTICES.md and docs/explanations/MAIMAI_MECHANICS_RESEARCH.md.
+See THIRD_PARTY_NOTICES.md.
 """
 from __future__ import annotations
 
