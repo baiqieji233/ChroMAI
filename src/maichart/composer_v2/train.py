@@ -31,13 +31,19 @@ def parser():
     result=argparse.ArgumentParser(description=__doc__)
     result.add_argument("--manifest",required=True)
     result.add_argument("--validation-manifest")
+    result.add_argument('--quality-enabled', action=argparse.BooleanOptionalAction, default=True,
+                        help='Read saved chart/region weights; required for reviewed-only sources')
     result.add_argument("--checkpoint-dir",required=True)
     result.add_argument("--cache-dir",default="cache/chart_composer_v2")
     parents=result.add_mutually_exclusive_group()
     parents.add_argument("--resume");parents.add_argument("--init-checkpoint")
     for key,value in TRAIN_DEFAULTS.items():
+        if key in ('audio_layers','song_layers','music_context'):continue
         result.add_argument("--"+key.replace("_","-"),default=value,type=type(value))
     result.add_argument("--mert-model")
+    result.add_argument('--audio-layers',type=int,default=None,help='Fresh: 4; parent: inherit. Init may append identity blocks.')
+    result.add_argument('--song-layers',type=int,default=None,help='Fresh: 2; parent: inherit.')
+    result.add_argument('--music-context',choices=('auto','off','song_detail_v1'),default='auto')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--timing-recovery',choices=timing_recovery.CHOICES,default='auto')
@@ -308,6 +314,19 @@ def train(args):
     from .intensity import resolve_policy as resolve_curve_policy
     args.intensity_policy,curve_migration=resolve_curve_policy(getattr(args,'intensity_curve','auto'),
         (parent.get('model_config') or parent.get('config')) if parent else None,resume=bool(args.resume))
+    parent_model=(parent.get('model_config') or parent.get('config')) if parent else {}
+    previous_music=parent_model.get('music_context_policy','off')
+    requested_music=getattr(args,'music_context','auto')
+    args.music_context_policy=(previous_music if args.resume else 'song_detail_v1') if requested_music=='auto' else requested_music
+    music_migration=bool(parent and args.music_context_policy!=previous_music)
+    if music_migration and (args.resume or args.music_context_policy=='off'):
+        raise ValueError('Music context changes require init-checkpoint upgrading to song_detail_v1')
+    for key,fresh in (('audio_layers',4),('song_layers',2)):
+        requested=getattr(args,key,None)
+        setattr(args,key,(parent_model.get(key,2) if parent else fresh) if requested is None else requested)
+    depth_migration=bool(parent and args.audio_layers!=parent_model.get('audio_layers',2))
+    if depth_migration and (args.resume or args.audio_layers<parent_model.get('audio_layers',2)):
+        raise ValueError('Audio encoder expansion requires init-checkpoint and a greater audio_layers')
     from .rhythm_learning import POLICY as LEGACY_LEARNING,PROPER_POLICY
     args.rhythm_learning_policy=(parent['training_contract'].get('rhythm_learning',LEGACY_LEARNING)
                                 if args.resume else PROPER_POLICY)
@@ -315,7 +334,7 @@ def train(args):
         raise ValueError('Intensity curves require continuous event training')
     if args.structure_policy!='off' and args.sequence_policy!='continuous_events_v1':
         raise ValueError('Rhythm structure requires continuous event training')
-    if migration or onset_migration or structure_migration or curve_migration:
+    if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration:
         if directory == source_directory or any(path.exists() for path in artifacts):
             raise ValueError('Condition/onset/rhythm-structure migration requires a new checkpoint directory; retain the parent')
     device=torch.device("cuda" if args.device=="auto" and torch.cuda.is_available() else "cpu" if args.device=="auto" else args.device)
@@ -330,13 +349,15 @@ def train(args):
     resource_budgets = dict(cuda_memory_budget_gb=cuda_budget, audio_cache_gb=args.audio_cache_gb)
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     if torch.cuda.is_available():torch.cuda.manual_seed_all(args.seed)
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
     if onset_migration: comparable_config['onset_readout_policy'] = parent_config['onset_readout_policy']
     if structure_migration: comparable_config['structure_policy'] = parent_config['structure_policy']
     if curve_migration: comparable_config['intensity_policy'] = parent_config['intensity_policy']
+    if music_migration: comparable_config['music_context_policy'] = parent_config['music_context_policy']
+    if depth_migration: comparable_config['audio_layers'] = parent_config['audio_layers']
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
     codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
@@ -352,7 +373,8 @@ def train(args):
     options=dict(cache_dir=args.cache_dir,codec=codec,window_beats=args.window_beats,history_beats=args.history_beats,
         future_beats=args.future_beats,ticks_per_beat=args.ticks_per_beat,max_tokens=args.max_tokens,
         audio_backend=args.audio_backend,mert_model=args.mert_model,prepare_device=prepare_device,limit_charts=args.limit_charts,
-        condition_policy=args.condition_policy,audio_store=audio_store,dialect_policy=dialect_policy)
+        condition_policy=args.condition_policy,audio_store=audio_store,dialect_policy=dialect_policy,
+        quality_enabled=getattr(args,'quality_enabled',True))
     dataset_class=ComposerV2Dataset
     if args.sequence_policy=='continuous_events_v1':
         from .stream_data import StreamDataset
@@ -387,6 +409,7 @@ def train(args):
         epochs=args.epochs,total_updates=total_updates,precision=precision,device_type=device.type,
         window_policy="stable_beat_window_components_v2",sampler=batch_order,
         loss_normalization="quality_weighted_token_mass_per_update_v1",cpu_threads=args.cpu_threads)
+    if not getattr(args,'quality_enabled',True): contract['quality_enabled']=False
     if args.condition_policy != LEVEL_ONLY:
         contract['condition_contract'] = condition_contract(args.condition_policy)
     if args.sequence_policy=='continuous_events_v1':
@@ -407,8 +430,17 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration or structure_migration or curve_migration:
+        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
+            if music_migration:
+                expected_missing.update(k for k in model.state_dict() if k=='song_detail.weight' or k.endswith('.relative_beat'))
+            if depth_migration:
+                for index in range(parent_config['audio_layers'],config.audio_layers):
+                    block=model.audio_blocks[index]
+                    # Both residual branches are exactly zero at initialization.
+                    for projection in (block.attention.out,block.ff[-1]):
+                        torch.nn.init.zeros_(projection.weight);torch.nn.init.zeros_(projection.bias)
+                    expected_missing.update(k for k in model.state_dict() if k.startswith(f'audio_blocks.{index}.'))
             if onset_migration:
                 if args.onset_readout_policy != 'off':
                     expected_missing.update(k for k in model.state_dict() if k.startswith('onset_readout.'))
@@ -428,6 +460,7 @@ def train(args):
             emit('runtime',stage='model_migration',parent=str(parent_path),
                 source_policy=parent_policy,condition_policy=args.condition_policy,
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
+                music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
                 zero_initialization=True)
         else:
             model.load_state_dict(parent_state,strict=True)

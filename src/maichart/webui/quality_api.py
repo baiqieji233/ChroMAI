@@ -111,7 +111,24 @@ def _catalog(manifest: Path) -> list[CatalogChart]:
 class QualityAPI:
     """Stateless quality annotation operations for one local WebUI."""
 
+    def __init__(self, workspace_root=None):
+        self.workspace_root=Path(workspace_root) if workspace_root else Path(__file__).resolve().parents[3]/'webui_workspace'
+
     def post(self, endpoint: str, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        if endpoint == '/api/quality/chart-preview':return self.chart_preview(payload)
+        if endpoint == '/api/quality/source-feedback':return self.source_feedback(payload)
+        if endpoint == "/api/quality/generation-feedback":
+            return self.generation_feedback(payload)
+        if endpoint == "/api/quality/candidate-feedback":
+            return self.candidate_feedback(payload)
+        if endpoint in {"/api/quality/reviewed-collection", "/api/quality/export-reviewed"}:
+            from maichart.training.reviewed_generation import export_reviewed, library_state, update_library
+            root=self.workspace_root/'reviewed_training'
+            inspect=endpoint.endswith("reviewed-collection")
+            result = export_reviewed(payload.get("candidates"),root,inspect_only=inspect,allow_empty=True)
+            if inspect:result.update(library_state(root,payload.get('task_id'),result))
+            else:result=update_library(result,payload.get('task_id'),root)
+            return HTTPStatus.OK, result
         if endpoint == "/api/quality/catalog":
             return self.catalog(payload)
         if endpoint == "/api/quality/selection":
@@ -123,6 +140,125 @@ class QualityAPI:
         if endpoint == "/api/quality/preview":
             return self.preview(payload)
         return HTTPStatus.NOT_FOUND, {"error": "Not found"}
+
+    def chart_preview(self, payload):
+        """Open one actual dataset slot in the same chart review workbench."""
+        import hashlib
+        from maichart.maidata import resolve_chart_first
+        from maichart.webui.chart_preview import _resource
+        from maichart.webui.chart_timeline import timeline
+        manifest=_required_manifest(payload)
+        row=next((row for row in _catalog(manifest) if row.chart_id==payload.get('chart_id')),None)
+        if row is None:raise ValueError('谱面不属于当前训练来源')
+        identity=_feedback_chart(dict(path=row.source_path,difficulty_index=row.difficulty_index))
+        parsed=parse_maidata_file(row.source_path)
+        difficulty=next(item for item in parsed.difficulties if item.index==row.difficulty_index)
+        # The renderer opens the first populated slot. Make a read-only view of
+        # the chosen slot, never accidentally play an easier slot in the file.
+        text=f'&title={parsed.title or "训练素材"}\n&wholebpm={parsed.wholebpm or 120}\n&first={resolve_chart_first(parsed,row.difficulty_index) or 0}\n&lv_5={difficulty.level or ""}\n&inote_5={difficulty.inote or ""}\n'
+        digest=hashlib.sha256(text.encode()).hexdigest()
+        root=self.workspace_root/'preview_resources'
+        root.mkdir(parents=True,exist_ok=True);view=root/f'training_{digest}.txt'
+        if not view.exists():view.write_text(text,encoding='utf-8')
+        audio=_feedback_audio(dict(audio_path=row.audio_path)) if row.audio_path else {}
+        notes=timeline(row.source_path,row.difficulty_index)
+        _feedback_chart(identity)  # Reject replacement while building the view.
+        version=dict(**identity,**audio,title=parsed.title or row.song_id,label=f'训练素材 · {difficulty.level or ""}',
+                     version_id=digest[:24],content_kind='complete_chart',url=_resource(view),timeline=notes,
+                     audio_url=_resource(Path(row.audio_path)) if row.audio_path else None,
+                     audio_name=Path(row.audio_path).name if row.audio_path else None)
+        annotation=find_annotation(row,load_annotations(manifest)['records']) or {}
+        return HTTPStatus.OK,dict(task_id='source-'+row.chart_id,revision=identity['file_sha256'],annotations=annotation.get('regions',[]),
+            source_kind='training_source',training_context=dict(manifest=str(manifest),chart_id=row.chart_id),charts=[version])
+
+    def source_feedback(self,payload):
+        manifest=_required_manifest(payload)
+        row=next((row for row in _catalog(manifest) if row.chart_id==payload.get('chart_id')),None)
+        if row is None:raise ValueError('谱面不属于当前训练来源')
+        _feedback_chart({**payload,'path':row.source_path,'difficulty_index':row.difficulty_index})
+        span=_feedback_span(payload)
+        if 'start_sec' not in span:raise ValueError('请先在谱面时间轴圈选片段；整谱质量可在素材管理中设置')
+        label=payload.get('label');reason=_feedback_reason(payload)
+        if label not in {'good','problem','uncertain'}:raise ValueError('未知片段评价')
+        old=find_annotation(row,load_annotations(manifest)['records']) or {}
+        region=dict(start_sec=span['start_sec'],end_sec=span['end_sec'],label=label,reason=reason,weight=1.)
+        if old.get('unmarked_weight')==0:
+            from maichart.training.reviewed_generation import approved_regions
+            from maichart.training.quality_annotations import region_component_weights
+            approvals=[]
+            for previous in old.get('regions',[]):
+                timing,components=region_component_weights(previous)
+                if timing or components:
+                    approvals.append({**previous,'scope':'region','label':'good','training_use':'both' if timing and components else 'timing' if timing else 'layout'})
+            action={**region,'scope':'region'}
+            if label=='good':action['training_use']='timing' if reason=='timing' else 'layout' if reason in {'layout','comfort'} else 'both'
+            approvals.append(action)
+            return self.save(dict(manifest=str(manifest),chart_ids=[row.chart_id],regions=approved_regions(approvals),
+                                  label=old.get('label','normal'),weight=old.get('weight',1.)))
+        if label=='good' and reason:
+            region.update(timing_weight=1.5 if reason=='timing' else 1.,component_weight=1. if reason=='timing' else 1.5)
+        regions=[]
+        for previous in old.get('regions',[]):
+            a,b=previous['start_sec'],previous['end_sec']
+            if b<=region['start_sec'] or a>=region['end_sec']:regions.append(previous);continue
+            if a<region['start_sec']:regions.append({**previous,'end_sec':region['start_sec']})
+            if b>region['end_sec']:regions.append({**previous,'start_sec':region['end_sec']})
+        regions.append(region);regions.sort(key=lambda item:item['start_sec'])
+        return self.save(dict(manifest=str(manifest),chart_ids=[row.chart_id],regions=regions,
+                              label=old.get('label','normal'),weight=old.get('weight',1.)))
+
+    def candidate_feedback(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Compare real complete versions; save evidence outside training labels."""
+        import hashlib
+        from datetime import datetime, timezone
+        candidates = payload.get("candidates")
+        if not isinstance(candidates, list) or len(candidates) != 2:
+            raise ValueError("candidates 必须包含 A、B 两个谱面")
+        preferred = payload.get("preferred")
+        if preferred not in {"a", "b", "both_good", "both_bad", "uncertain"}:
+            raise ValueError("未知候选反馈")
+        reason = _feedback_reason(payload)
+        identities = [_feedback_chart(candidate) for candidate in candidates]
+        if (identities[0]['path'],identities[0]['difficulty_index']) == (identities[1]['path'],identities[1]['difficulty_index']):
+            raise ValueError("请选择两个不同的完整谱面版本")
+        audio_identity = _feedback_audio(payload)
+        candidate_audio = [_feedback_audio(candidate) for candidate in candidates]
+        audio_hashes = {item['audio_sha256'] for item in [audio_identity,*candidate_audio] if item}
+        if len(audio_hashes)>1:
+            raise ValueError("A、B 必须对应同一份音频")
+        if not audio_identity:
+            audio_identity=next((item for item in candidate_audio if item),{})
+        for identity,audio in zip(identities,candidate_audio):identity.update(audio)
+        span = _feedback_span(payload)
+        identity = dict(candidates=identities, **span, **audio_identity)
+        pair_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+        record = dict(**identity, pair_id=pair_id, client_pair_id=payload.get("pair_id"),
+                      scope="region" if 'start_sec' in span else "whole_chart",
+                      preferred=preferred, reason=reason,
+                      created_at=datetime.now(timezone.utc).isoformat())
+        path = Path(identities[0]["path"]).with_name("candidate_feedback.json")
+        _append_feedback(path,"composer-v2-candidate-feedback-v1",record)
+        return HTTPStatus.OK, {"feedback_path": str(path), "record": record}
+
+    def generation_feedback(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        """Mark one complete output, optionally within a region, for later review."""
+        import hashlib
+        from datetime import datetime, timezone
+        label=payload.get('label')
+        if label not in {'good','problem','uncertain'}:
+            raise ValueError('未知谱面反馈')
+        identity=dict(**_feedback_chart(payload),**_feedback_audio(payload),**_feedback_span(payload))
+        feedback_id=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()
+        record=dict(**identity,feedback_id=feedback_id,label=label,reason=_feedback_reason(payload),
+                    scope='region' if 'start_sec' in identity else 'whole_chart',
+                    created_at=datetime.now(timezone.utc).isoformat())
+        if 'training_use' in payload:
+            if label != 'good' or 'start_sec' not in identity or payload['training_use'] not in {'none','timing','layout','both'}:
+                raise ValueError('训练示范需要圈选片段，并明确选择学习内容')
+            record['training_use'] = payload['training_use']
+        path=Path(identity['path']).with_name('generation_feedback.json')
+        _append_feedback(path,'maichart-generation-feedback-v1',record)
+        return HTTPStatus.OK, {"feedback_path": str(path), "record": record}
 
     def get_audio(self, query: dict[str, Any], *, method: str = "GET", range_header: str | None = None) -> tuple[int, dict[str, str], Path | None, tuple[int, int] | None]:
         manifest = _required_manifest(query)
@@ -388,8 +524,106 @@ def quality_audio(query: dict[str, Any], *, method: str = "GET", range_header: s
     return _DEFAULT_API.get_audio(query, method=method, range_header=range_header)
 
 
+def _feedback_reason(payload: dict[str, Any]) -> str:
+    reason=str(payload.get('reason',''))
+    if reason not in {'','timing','layout','comfort'}:
+        raise ValueError('未知反馈原因')
+    return reason
+
+
+def _feedback_chart(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value,dict) or not value.get('path'):
+        raise ValueError('反馈缺少谱面文件')
+    path=Path(value['path']).resolve()
+    if not path.is_file() or path.suffix.lower() not in {'.txt','.maidata'}:
+        raise ValueError('反馈谱面文件不存在或格式不支持')
+    if value.get('partial_preview') or 'phrase_candidates' in {part.casefold() for part in path.parts}:
+        raise ValueError('试写片段不能作为完整谱面反馈')
+    if value.get('content_kind','complete_chart')!='complete_chart':
+        raise ValueError('请选择完整谱面')
+    before=path.stat()
+    raw_index=value.get('difficulty_index',5)
+    try:index=int(raw_index)
+    except (TypeError,ValueError):raise ValueError('difficulty_index 必须是整数')
+    if isinstance(raw_index,bool) or str(index)!=str(raw_index):
+        raise ValueError('difficulty_index 必须是整数')
+    chart=parse_maidata_file(path)
+    difficulty=next((item for item in chart.difficulties if item.index==index),None)
+    if difficulty is None or not (difficulty.inote or '').strip():
+        raise ValueError('反馈谱面缺少指定难度槽位')
+    identity=dict(path=str(path),difficulty_index=index,chart_sha256=chart_sha256(path,index),
+                  file_sha256=audio_sha256(path))
+    after=path.stat()
+    if (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):
+        raise ValueError('谱面文件已改变，请重新载入后反馈')
+    for key in ('chart_sha256','file_sha256'):
+        if value.get(key) and value[key]!=identity[key]:
+            raise ValueError('谱面文件已改变，请重新载入后反馈')
+    if value.get('version_id'):
+        version_id=value['version_id']
+        if not isinstance(version_id,str) or len(version_id)>128:
+            raise ValueError('version_id 无效')
+        identity['version_id']=version_id
+    return identity
+
+
+def _feedback_audio(value: dict[str, Any]) -> dict[str, Any]:
+    if not value.get('audio_path'):
+        if value.get('audio_sha256'):raise ValueError('音频身份缺少 audio_path')
+        return {}
+    path=Path(value['audio_path']).resolve()
+    if not path.is_file():raise ValueError('原任务音频不存在，请重新载入后反馈')
+    before=path.stat()
+    digest=audio_sha256(path)
+    after=path.stat()
+    if (before.st_mtime_ns,before.st_size)!=(after.st_mtime_ns,after.st_size):
+        raise ValueError('音频文件已改变，请重新载入后反馈')
+    if value.get('audio_sha256') and value['audio_sha256']!=digest:
+        raise ValueError('音频文件已改变，请重新载入后反馈')
+    return dict(audio_path=str(path),audio_sha256=digest)
+
+
+def _feedback_span(payload: dict[str, Any]) -> dict[str, float]:
+    from maichart.training.quality_annotations import _finite
+    span={}
+    for left,right in [('start_sec','end_sec'),('context_start_sec','context_end_sec')]:
+        if left not in payload and right not in payload:continue
+        if left not in payload or right not in payload:
+            raise ValueError(f'{left}、{right} 必须一起提供')
+        if isinstance(payload[left],bool) or isinstance(payload[right],bool):
+            raise ValueError('反馈区间必须是有限数字')
+        start,end=_finite(payload[left],left),_finite(payload[right],right)
+        if not 0<=start<end:raise ValueError(f'反馈区间必须满足 0 <= {left} < {right}')
+        span.update({left:start,right:end})
+    if 'context_start_sec' in span:
+        if 'start_sec' not in span or not (span['context_start_sec']<=span['start_sec']<span['end_sec']<=span['context_end_sec']):
+            raise ValueError('上下文播放区间必须包含标记区间')
+    return span
+
+
+def _append_feedback(path: Path, schema: str, record: dict[str, Any]) -> None:
+    """Publish one atomic sidecar update without touching dataset annotations."""
+    import os
+    import tempfile
+    from maichart.training.quality_annotations import _lock_for
+    with _lock_for(path):
+        data=json.loads(path.read_text(encoding='utf-8')) if path.exists() else dict(schema=schema,records=[])
+        if data.get('schema')!=schema or not isinstance(data.get('records'),list):
+            raise ValueError('反馈文件 schema 不兼容')
+        data['records'].append(record)
+        fd,temporary=tempfile.mkstemp(prefix='.feedback-',suffix='.tmp',dir=path.parent)
+        try:
+            with os.fdopen(fd,'w',encoding='utf-8') as handle:
+                json.dump(data,handle,ensure_ascii=False,indent=2)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary,path)
+        finally:
+            if os.path.exists(temporary):os.unlink(temporary)
+
+
 def _required_manifest(payload: dict[str, Any]) -> Path:
-    value = payload.get("manifest")
+    value = _first(payload.get("manifest"))
     if not value:
         raise ValueError("manifest 不能为空")
     path = Path(str(value)).resolve()

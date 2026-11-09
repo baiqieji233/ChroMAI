@@ -120,7 +120,30 @@ class AudioFeatures:
             for index, (lo, hi) in enumerate(zip(boundaries[:-1], boundaries[1:])):
                 if hi > lo:
                     target[index] = np.asarray(values[lo:hi], dtype=np.float32).mean(axis=0)
-        return dict(mel=mel, semantic=semantic, semantic_valid=valid,
+        # Eight spectral-band standard deviations and four onset time cells
+        # (mean and peak) retain within-bin changes erased by mean pooling.
+        detail = np.zeros((count, 16), dtype=np.float32)
+        boundaries = np.searchsorted(self.mel_times_sec, edges)
+        boundaries[-1] = np.searchsorted(self.mel_times_sec, edges[-1], side='right')
+        for index, (lo, hi) in enumerate(zip(boundaries[:-1], boundaries[1:])):
+            if hi <= lo:
+                continue
+            values = np.asarray(self.mel[lo:hi], dtype=np.float32)
+            bands = values[:, :96].reshape(len(values), 8, 12).mean(-1)
+            detail[index, :8] = np.log1p(bands.std(0))
+            # Flux uses the preceding bank frame too, preserving boundary attacks.
+            previous = np.asarray(self.mel[max(0, lo-1):hi-1], dtype=np.float32)
+            if len(previous) != len(values):
+                previous = np.concatenate((values[:1], values[:-1]), axis=0)
+            flux = np.maximum(values[:, :96]-previous[:, :96], 0.).mean(-1)
+            cells = np.minimum(3, ((self.mel_times_sec[lo:hi]-edges[index]) /
+                                   max(edges[index+1]-edges[index], 1e-12)*4).astype(int))
+            for cell in range(4):
+                selected = flux[cells == cell]
+                if len(selected):
+                    detail[index, 8+cell] = np.log1p(selected.mean())
+                    detail[index, 12+cell] = np.log1p(selected.max())
+        return dict(mel=mel, semantic=semantic, semantic_valid=valid, detail=detail,
                     times_sec=times.astype(np.float32),
                     position=(times / max(self.duration_sec, 1e-12)).astype(np.float32))
 
@@ -308,11 +331,11 @@ class AudioFeatureStore:
             return self._mapped(directory, identity).summary(max_tokens)
         # Derived sidecar for the fixed training summary. Existing immutable
         # feature banks acquire it on demand; feature identities stay unchanged.
-        path = directory / 'summary_160_v1.npz'
+        path = directory / 'summary_160_v2.npz'
         count = min(160, max(1, int(np.ceil(duration_sec))))
         fields = dict(mel=((count, 98), np.float32), semantic=((count, 1024), np.float32),
                       semantic_valid=((count,), np.bool_), times_sec=((count,), np.float32),
-                      position=((count,), np.float32))
+                      position=((count,), np.float32), detail=((count, 16), np.float32))
         bank_signature = None
         try:
             bank_signature = self._bank_signature(directory)

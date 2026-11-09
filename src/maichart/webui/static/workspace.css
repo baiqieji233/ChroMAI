@@ -3,6 +3,14 @@ body { font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-s
 .layout { width: min(1600px, calc(100% - 40px)); grid-template-columns: minmax(0, 1fr) 360px; }
 .main-column { gap: 16px; }
 .mode-tabs { position: sticky; top: 0; z-index: 12; padding: 12px 0 8px; background: var(--paper, #f5f2ec); }
+.shared-preview-panel { padding:12px; }
+.shared-preview-panel > .generation-preview { margin:0; }
+.preview-empty { padding:20px; display:flex; flex-wrap:wrap; align-items:center; gap:10px 18px; background:#f4f7fb; border-top:1px solid var(--line); }
+.preview-empty p { margin:0; flex:1 1 300px; font-size:13px; color:var(--muted); }
+.training-preview-navigation { display:flex; align-items:center; gap:6px; flex:1 1 300px; max-width:520px; min-width:0; }
+#trainingPreviewPosition { flex:1; min-width:0; font-size:12px; color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.quality-table tr[aria-current=true] { background:#eaf4f4; }
+.quality-table .quality-detail-button[aria-pressed=true] { color:var(--teal); border-color:var(--teal); }
 .workflow-group { margin: 24px 0; padding: 20px; border: 1px solid var(--line); border-radius: 9px; background: #fffefa; scroll-margin-top: 80px; }
 .workflow-group-heading { display: flex; align-items: baseline; gap: 14px; margin-bottom: 18px; }
 .workflow-group-heading .step { min-width: 26px; }
@@ -57,14 +65,14 @@ body { font-family: "Microsoft YaHei UI", "Microsoft YaHei", system-ui, -apple-s
 .generation-preview > summary::before { content: "▸"; font-size: 12px; color: var(--teal); }
 .generation-preview[open] > summary::before { content: "▾"; }
 .generation-preview > summary small { margin-left: auto; max-width: 55%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); font-size: 11px; font-weight: 400; }
-.generation-preview-body { display: flex; flex-wrap: wrap; align-items: start; gap: 14px; padding: 0 12px 12px; }
-.generation-preview-info { flex: 1 1 210px; min-width: 0; }
+.generation-preview-body { display: grid; grid-template-columns: minmax(0,1fr); align-items: start; gap: 14px; padding: 0 12px 12px; }
+.generation-preview-info { min-width: 0; }
 .generation-preview-toolbar { display: flex; flex-wrap: wrap; gap: 10px; align-items: end; }
 .generation-preview-toolbar > label { display: grid; flex: 1 1 220px; min-width: 0; gap: 6px; font-size: 12px; color: var(--muted); }
 .generation-preview-toolbar select { width: 100%; min-width: 0; min-height: 38px; }
 .generation-preview-toolbar button { min-height: 38px; }
 .generation-preview-source { margin: 0 0 8px; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; }
-.generation-preview-player { flex: 2 1 540px; min-width: 0; width: 100%; max-width: 720px; margin: 0; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: #111827; }
+.generation-preview-player { min-width: 0; width: 100%; max-width: 600px; margin: 0 auto; border: 1px solid var(--line); border-radius: 5px; overflow: hidden; background: #111827; }
 .generation-preview-player iframe { display: block; }
 .generation-preview-credit { margin: 12px 0 0; color: var(--muted); font-size: 11px; line-height: 1.7; }
 .generation-preview-credit a { color: var(--teal); }
@@ -128,3 +136,122 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 /* Curve editing is withheld until the current generation route supports it.
    Keep the DOM for compatibility with saved state and existing event handlers. */
 #intensityModeTab, .intensity-panel, #generationCurveGroup, [data-retired-curve] { display: none !important; }
+
+/* Audio-aligned v2 curve editor; independent from the retired v1 controller. */
+#v2IntensityControls .v2-curve-canvas { display:block; width:100%; border-radius:7px; touch-action:none; margin:5px 0; }
+#v2IntensityControls .v2-curve-canvas[hidden] { display:none; }
+.v2-curve-overview { height:40px; cursor:crosshair; }
+.v2-curve-wave { height:84px; cursor:crosshair; }
+.v2-curve-spec { height:96px; cursor:crosshair; }
+.v2-curve-plot { height:220px; cursor:crosshair; }
+.v2-curve-audio-row,.v2-curve-navigation,.v2-curve-window-row,.v2-curve-tools,.v2-curve-batch { display:flex; align-items:center; flex-wrap:wrap; gap:7px; margin:8px 0; }
+.v2-curve-audio-row audio { flex:1 1 240px; height:38px; min-width:180px; }
+#v2IntensityControls .v2-curve-window-row label,#v2IntensityControls .v2-curve-audio-row label { display:flex; align-items:center; gap:5px; font-size:12px; }
+#v2IntensityControls .v2-curve-window-row input[type=number] { width:92px; padding:6px; }
+#v2IntensityControls .v2-curve-window-row input[type=checkbox] { width:auto; }
+#v2IntensityControls .v2-curve-batch input { width:105px; }
+#v2IntensityControls .v2-curve-batch small { flex-basis:100%; color:var(--muted); }
+#v2CurveScroll { width:100%; margin:0; padding:0; }
+.v2-curve-position { margin-left:auto; font-variant-numeric:tabular-nums; }
+#v2IntensityControls .secondary-button { min-height:32px; padding:6px 10px; }
+#v2CurveViewLabel,#v2CurveSelectedCount { color:var(--muted); font-size:12px; }
+@media(max-width:600px) { .v2-curve-audio-row audio { flex-basis:100%; } .v2-curve-tools button { flex:1 1 auto; } }
+
+/* Compact local quality feedback, beside the existing preview. */
+#candidateFeedbackPanel input[type=number] { width: 90px; }
+.quality-region-row { grid-template-columns: repeat(3, minmax(60px, 1fr)) repeat(2,minmax(90px,1fr)) repeat(2,minmax(60px,1fr)) auto; }
+@media(max-width:900px) { .quality-region-row { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+.quality-region-row { grid-template-columns:90px 90px minmax(80px,1fr) minmax(80px,1fr) auto auto; }
+.quality-span-weights { font-size:12px; }
+.quality-span-weights input { width:75px; margin:4px; }
+#qualitySpanWave { border:1px solid var(--line); border-radius:5px; cursor:crosshair; }
+@media(max-width:700px) { .quality-region-row { grid-template-columns:repeat(2,minmax(0,1fr)); } }
+
+/* Complete-chart review shares one selected range across versions. */
+.preview-review { margin-top:12px; padding:12px; border-top:1px solid var(--line); }
+.preview-review .generation-preview-toolbar { margin:7px 0; gap:7px; }
+.preview-review .generation-preview-toolbar label { display:flex; align-items:center; gap:5px; font-size:12px; }
+.preview-review .generation-preview-toolbar select { max-width:230px; padding:6px; }
+.preview-review .checkbox-field { white-space:normal; }
+.preview-review .checkbox-field input { width:auto; }
+#feedbackWave { width:100%; touch-action:none; cursor:crosshair; border:1px solid var(--line); border-radius:5px; }
+#feedbackRange { font-size:12px; font-variant-numeric:tabular-nums; }
+.preview-review-exact,#feedbackComparison { margin:8px 0; font-size:12px; }
+.preview-review-exact summary,#feedbackComparison summary { cursor:pointer; color:var(--teal); padding:5px 0; }
+.preview-review-exact label { margin-right:10px; }
+.preview-review-exact input { width:90px; padding:5px; }
+#feedbackStatus,#feedbackAuditionRange { margin:6px 0; font-size:12px; }
+@media(max-width:600px) { .preview-review .generation-preview-toolbar select { max-width:180px; } .preview-review .generation-preview-toolbar { align-items:flex-start; } }
+
+/* Read the chart itself, with audio available only as an optional backdrop. */
+#feedbackTimeline,#feedbackOverview { display:block; width:100%; border:1px solid #cdd7e5; border-radius:6px; touch-action:none; cursor:crosshair; }
+#feedbackTimeline { height:252px; }
+#feedbackOverview { height:38px; margin-top:8px; }
+#feedbackScroll { width:100%; margin:4px 0; padding:0; }
+.feedback-note-legend { display:flex; flex-wrap:wrap; gap:10px; font-size:11px; color:#677486; margin:6px 0; }
+.feedback-note-legend .tap { color:#d84b89; }.feedback-note-legend .hold {color:#ad7b13;}.feedback-note-legend .slide {color:#218ec9;}.feedback-note-legend .touch {color:#8e61c9;}
+#feedbackCurrentVersion { font-size:12px; color:#314775; padding:4px 7px; background:#edf2fc; border-radius:4px; }
+#feedbackPreviewA[aria-pressed=true],#feedbackPreviewB[aria-pressed=true] { background:#dfe9ff; border-color:#6586c5; color:#234878; }
+.feedback-selected-source { max-height:160px; overflow:auto; white-space:pre-wrap; padding:8px; background:#f1f4f8; font:11px/1.6 ui-monospace,monospace; }
+#feedbackTimelineStatus { margin:5px 0; font-size:11px; }
+.review-main { display:grid; grid-template-columns:minmax(0,1fr); gap:8px; min-width:0; }
+.review-tools { min-width:0; padding:16px; border:1px solid #dce3ed; border-radius:9px; background:#f5f7fb; }
+.review-tools-heading { display:flex; flex-direction:column; gap:5px; margin-bottom:14px; }
+.review-tools-heading strong { font-size:15px; }
+.review-tools-heading span { color:var(--muted); font-size:11px; }
+.review-tool-group { margin:0 0 12px; padding:12px; background:#fffefa; border:1px solid #e1e6ef; border-radius:7px; }
+.review-tool-group h4 { margin:0 0 9px; font-size:13px; }
+.review-tools .generation-preview-toolbar { gap:6px; margin:8px 0; }
+.review-tools .generation-preview-toolbar button { min-height:32px; padding:6px 9px; }
+.review-tools .generation-preview-toolbar > label { flex-basis:100%; gap:4px; }
+.review-tools .checkbox-field { display:flex; align-items:center; gap:6px; font-size:12px; }
+.review-tools .checkbox-field input { width:auto; }
+.review-reason { display:grid; grid-template-columns:auto minmax(0,1fr); align-items:center; gap:8px; margin-top:10px; font-size:12px; color:var(--muted); }
+.review-tools select { min-width:0; width:100%; min-height:32px; padding:5px 7px; font-size:12px; }
+.review-tools .preview-review-exact label { display:inline-flex; align-items:center; gap:4px; margin-top:8px; }
+.review-tools #feedbackComparison { padding:0 4px; }
+.review-tools #generationPreviewStatus { font-size:11px; line-height:1.5; overflow-wrap:anywhere; }
+.review-training { margin:12px 4px; font-size:12px; }
+.review-training > summary { cursor:pointer; padding:6px 0; color:var(--teal); font-weight:600; }
+.review-training p { font-size:11px; line-height:1.6; }
+.review-training-steps { padding-left:19px; margin:8px 0; line-height:1.8; }
+.review-training-scope { display:grid; gap:5px; margin:10px 0; }
+.review-training-list { list-style:none; padding:0; margin:10px 0; max-height:160px; overflow:auto; }
+.review-training-list li { display:flex; align-items:start; gap:4px; margin:5px 0; }
+.review-training-list li button:first-child { flex:1; text-align:left; font-size:11px; overflow-wrap:anywhere; }
+.generation-preview.review-expanded { position:fixed; inset:8px; z-index:1000; margin:0; height:calc(100dvh - 16px); background:#fffefa; box-shadow:0 0 0 100vmax #101a2c99; overflow:hidden; border-radius:10px; }
+.generation-preview.review-expanded > summary { height:44px; box-sizing:border-box; padding:10px 16px; background:#f3f5fa; border-bottom:1px solid var(--line); }
+.review-expanded .generation-preview-body { display:grid; grid-template-columns:minmax(0,1fr) 300px; gap:16px; padding:10px 14px; height:calc(100dvh - 62px); box-sizing:border-box; align-items:stretch; overflow:hidden; }
+.review-expanded .review-main { grid-template-rows:max-content max-content 20px max-content; align-content:start; overflow:auto; min-height:0; padding-right:2px; }
+/* Keep the same iframe in place: only its grid position and width change. */
+.review-expanded .generation-preview-info { display:contents; }
+.review-expanded .generation-preview-source { display:none; }
+.review-expanded .generation-preview-info > .generation-preview-toolbar { grid-row:1; position:sticky; top:0; z-index:2; gap:6px; padding:0 0 4px; background:#fffefa; }
+.review-expanded .generation-preview-info > .generation-preview-toolbar > label { display:flex; align-items:center; flex:1 1 220px; max-width:420px; }
+.review-expanded .generation-preview-info > .generation-preview-toolbar > label select { flex:1; }
+.review-expanded .generation-preview-info > .generation-preview-toolbar button { min-height:34px; padding:6px 9px; }
+.review-expanded .generation-preview-player { grid-row:2; width:min(100%,1020px,calc((clamp(220px,var(--review-preview-height,clamp(220px,calc(100dvh - 510px),48vh)),68vh) - 80px) * 1.777778)); min-height:min-content; align-self:start; max-width:none; position:static; margin:0 auto; }
+.review-expanded #generationReviewResize { grid-row:3; }
+.review-expanded .preview-review { grid-row:4; width:100%; min-width:0; margin:0; padding:0; }
+.review-expanded .review-tools { min-height:0; overflow:auto; }
+.review-expanded.review-tools-hidden .generation-preview-body { grid-template-columns:minmax(0,1fr); }
+.review-expanded.review-tools-hidden .review-tools { display:none; }
+.review-resize { display:flex; align-items:center; justify-content:center; gap:12px; min-height:20px; color:#78859a; font-size:11px; cursor:row-resize; touch-action:none; user-select:none; }
+.review-resize::before,.review-resize::after { content:''; height:1px; background:#d6deea; flex:1; }
+.review-resize:focus-visible { outline:2px solid var(--teal); outline-offset:2px; }
+.review-expanded .preview-review .generation-preview-toolbar > label { flex:0 1 auto; }
+.review-expanded #feedbackTimeline { height:clamp(162px,20vh,230px); }
+.review-expanded #feedbackOverview { height:26px; margin-top:5px; }
+.review-expanded .feedback-note-legend { gap:8px; margin:4px 0; font-size:10px; }
+.review-expanded .preview-review .generation-preview-toolbar { margin:4px 0; gap:6px; }
+.review-expanded .preview-review .generation-preview-toolbar button { min-height:30px; padding:5px 8px; }
+.review-expanded #feedbackViewRange { font-size:11px; }
+#generationPreviewDownload { text-decoration:none; display:inline-flex; align-items:center; min-height:38px; }
+@media(max-width:1000px) {
+  .generation-preview.review-expanded { overflow:auto; }
+  .review-expanded .generation-preview-body { grid-template-columns:minmax(0,1fr); height:auto; overflow:visible; }
+  .review-expanded .review-main { overflow:visible; }
+  .review-expanded .review-tools { overflow:visible; }
+}
+@media(max-width:600px) { .generation-preview.review-expanded { inset:3px; height:calc(100dvh - 6px); } .review-expanded .generation-preview-body { padding:8px; } #feedbackTimeline { height:252px; } .review-tools { padding:10px; } }

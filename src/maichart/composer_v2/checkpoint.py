@@ -59,6 +59,12 @@ def inspect_payload(payload):
     config=payload.get("model_config") or payload.get("config")
     if not isinstance(config,dict): errors.append("缺少模型配置")
     if isinstance(config,dict):
+        if config.get('music_context_policy','off') not in ('off','song_detail_v1'):
+            errors.append('Unknown Composer v2 music context policy')
+        for key in ('audio_layers','song_layers'):
+            value=config.get(key,2)
+            if not isinstance(value,int) or isinstance(value,bool) or value<1:
+                errors.append('Invalid encoder depth: '+key)
         from .intensity import POLICY as CURVE_POLICY
         curve_policy=config.get('intensity_policy','off')
         if curve_policy not in ('off',CURVE_POLICY) or (curve_policy!='off' and config.get('sequence_policy')!='continuous_events_v1'):
@@ -116,6 +122,7 @@ def inspect_payload(payload):
             intensity_curve=(config or {}).get('intensity_policy','off')=='rate_curve_v1',
             onset_readout=(config or {}).get('onset_readout_policy','off')=='phase_audio_v1',
             rhythm_structure=(config or {}).get('structure_policy','off')!='off',
+            music_context=(config or {}).get('music_context_policy','off')!='off',
             continuous_time=(config or {}).get('sequence_policy')=='continuous_events_v1',
             condition_policy=policy,condition_keys=capabilities_contract.get('supported_keys',[]),
             radar_style=policy==RADAR_STYLE,automatic_conditions=policy==RADAR_STYLE),

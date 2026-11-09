@@ -51,6 +51,8 @@ def _choice(payload,key,default,choices):
 def _start(handler,runtime,kind,args,settings,paths,checkpoint_dir=None):
     task=runtime._create_task(kind,checkpoint_dir=checkpoint_dir)
     task.result.update(model_family=FAMILY,family=FAMILY,schema=SCHEMA,effective_settings=settings)
+    if kind in ('composer_v2_curve','composer_v2_media'):
+        task.result.update(audio=settings['audio'],audio_preview_url=f'/api/intensity/audio?id={task.task_id}')
     if kind.endswith("_train"): task.result["epoch_target"]=settings["epochs"]
     try:
         runtime._run_subprocess_task(task,args,expected_epoch=settings.get("epochs"),result_paths=paths)
@@ -83,12 +85,16 @@ def start_train(handler,payload,*,runtime):
         # Both modes retain the parent's model and audio configuration.
         # The trainer may append observed vocabulary entries during finetune.
         fixed=checked.get("model_config") or checked.get("config") or {}
-        for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model"):
-            if key in fixed:payload[key]=fixed[key]
+        for key in ("audio_layers","song_layers","d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model"):
+            if key in fixed and not (key=="audio_layers" and mode=="finetune" and payload.get(key) is not None):payload[key]=fixed[key]
         payload['refresh_events']=fixed.get('refresh_events',16)
     sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
     settings={}
+    quality=payload.get('quality_enabled',((checked.get('args') or {}).get('quality_enabled',True) if mode=='resume' else True))
+    if not isinstance(quality,bool): raise ValueError('质量加权必须是布尔值')
+    args.append('--quality-enabled' if quality else '--no-quality-enabled')
+    settings['quality_enabled']=quality
     from maichart.composer_v2.intensity import CHOICES as CURVE_CHOICES,resolve_policy as resolve_curve_policy
     curve_requested=_choice(payload,'intensity_curve','auto',CURVE_CHOICES)
     curve_policy,_=resolve_curve_policy(curve_requested,(checked.get('model_config') or {}) if parent else None,resume=mode=='resume')
@@ -114,6 +120,14 @@ def start_train(handler,payload,*,runtime):
     structure_policy,_=resolve_structure_policy(structure_requested,structure_parent,resume=mode=='resume')
     _arg(args,'--rhythm-structure',structure_requested)
     settings.update(rhythm_structure=structure_requested,structure_policy=structure_policy)
+    music_context=_choice(payload,'music_context','auto',{'auto','off','song_detail_v1'})
+    _arg(args,'--music-context',music_context)
+    settings['music_context']=music_context
+    for capacity_key,capacity_default in (('audio_layers',4),('song_layers',2)):
+        if capacity_key not in TRAIN_DEFAULTS:
+            capacity_value=_integer(payload,capacity_key,capacity_default,minimum=1)
+            _arg(args,'--'+capacity_key.replace('_','-'),capacity_value)
+            settings[capacity_key]=capacity_value
     refresh_events=_integer(payload,'refresh_events',16,minimum=1)
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
@@ -210,6 +224,17 @@ def start_generate(handler,payload,*,runtime):
     args=["-m","maichart.composer_v2.generate"]
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy)
+    phrase_search=_choice(payload,'phrase_search','layout',{'event','layout','joint'})
+    phrase_beats=_float(payload,'phrase_beats',4.,minimum=1.)
+    phrase_commit_beats=_float(payload,'phrase_commit_beats',2.,minimum=0.)
+    if isinstance(payload.get('phrase_beats'),bool) or isinstance(payload.get('phrase_commit_beats'),bool):
+        raise ValueError('提前试写长度和每次保留长度必须是数字')
+    if phrase_beats>16 or not 0<phrase_commit_beats<=phrase_beats:
+        raise ValueError('提前试写长度须为1–16拍；每次保留长度须大于0，且不能超过提前试写长度')
+    if checked.get('sequence_policy')=='window_v1' and phrase_search!='event':
+        raise ValueError('这个旧模型不支持比较整段写法，请选择“逐步生成（速度优先）”')
+    settings.update(phrase_search=phrase_search,phrase_beats=phrase_beats,phrase_commit_beats=phrase_commit_beats)
+    for key in ('phrase_search','phrase_beats','phrase_commit_beats'):_arg(args,'--'+key.replace('_','-'),settings[key])
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop'})
     settings['tempo_detection']=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'})
     _arg(args,'--tempo-detection',settings['tempo_detection'])
@@ -335,3 +360,13 @@ def start_curve(handler,payload,*,runtime):
         value=payload.get(key)
         if value is not None and value!='':_arg(args,'--'+key.replace('_','-'),json.dumps(value,ensure_ascii=False) if isinstance(value,(dict,list)) else value)
     return _start(handler,runtime,'composer_v2_curve',args,settings,[output])
+
+
+def start_media(handler,payload,*,runtime):
+    _family(payload)
+    audio=_path(payload.get('audio'),'audio',exists=True)
+    cache=_path(payload.get('cache_dir') or 'cache/chart_composer_v2','cache_dir')
+    import uuid
+    output=runtime.INTENSITY_ROOT/(uuid.uuid4().hex+'.editor_media.json')
+    args=['-m','maichart.webui.audio_overview','--audio',str(audio),'--cache-dir',str(cache),'--output',str(output)]
+    return _start(handler,runtime,'composer_v2_media',args,dict(audio=str(audio),cache_dir=str(cache)),[output])

@@ -17,7 +17,7 @@ class ComposerV2Config:
     nhead: int = 8
     dim_feedforward: int = 1536
     dropout: float = .1
-    audio_layers: int = 2
+    audio_layers: int = 4
     song_layers: int = 2
     window_beats: int = 16
     history_beats: int = 16
@@ -32,7 +32,10 @@ class ComposerV2Config:
     onset_readout_policy: str = 'off'
     structure_policy: str = 'off'
     intensity_policy: str = 'off'
+    music_context_policy: str = 'off'
     def __post_init__(self):
+        if self.music_context_policy not in ('off','song_detail_v1') or min(self.audio_layers,self.song_layers)<1:
+            raise ValueError('Invalid music context/encoder depth')
         from .intensity import POLICY as CURVE_POLICY
         if self.intensity_policy not in ('off',CURVE_POLICY) or (self.intensity_policy!='off' and self.sequence_policy!='continuous_events_v1'):
             raise ValueError('Intensity curves require continuous events')
@@ -51,7 +54,7 @@ class ComposerV2Config:
             raise ValueError('Rhythm structure requires continuous events')
     def to_dict(self):return asdict(self)
     @classmethod
-    def from_dict(cls,value):return cls(**{'condition_policy':'level_only_v1','sequence_policy':'window_v1',**value})
+    def from_dict(cls,value):return cls(**{'condition_policy':'level_only_v1','sequence_policy':'window_v1','audio_layers':2,**value})
 
 
 def positions(values,width):
@@ -61,11 +64,13 @@ def positions(values,width):
 
 
 class Attention(nn.Module):
-    def __init__(self,width,heads,*,local=False):
+    def __init__(self,width,heads,*,local=False,relative=False):
         super().__init__();self.heads=heads;self.dim=width//heads;self.local=local
         self.q=nn.Linear(width,width);self.k=nn.Linear(width,width);self.v=nn.Linear(width,width);self.out=nn.Linear(width,width)
         if local:
             self.past=nn.Parameter(torch.full((heads,),-1.5));self.future=nn.Parameter(torch.full((heads,),-1.5))
+        if relative:
+            self.relative_beat=nn.Parameter(torch.zeros(heads,2))
     def split(self,value):return value.reshape(value.size(0),value.size(1),self.heads,self.dim).transpose(1,2)
     def memory(self,value):return self.split(self.k(value)),self.split(self.v(value))
     def forward(self,query,memory=None,*,kv=None,key_mask=None,causal=False,past_length=0,query_beats=None,key_beats=None):
@@ -75,6 +80,12 @@ class Attention(nn.Module):
         if causal:
             allowed=torch.arange(k.size(-2),device=q.device)[None,:] <= (torch.arange(q.size(-2),device=q.device)[:,None]+past_length)
             mask=allowed[None,None] if mask is None else mask&allowed[None,None]
+        if hasattr(self,'relative_beat'):
+            gap=key_beats[:,None,:]-query_beats[:,:,None]
+            features=torch.stack((torch.log1p((-gap).clamp_min(0)),torch.log1p(gap.clamp_min(0))),-1)
+            bias=torch.einsum('bqkf,hf->bhqk',features,self.relative_beat)
+            mask=bias.masked_fill(~mask,-torch.inf) if mask is not None else bias
+            mask=mask.to(q.dtype)
         if self.local:
             gap=key_beats[:,None,:]-query_beats[:,:,None]
             bias=-(F.softplus(self.past)[None,:,None,None]*(-gap[:,None]).clamp_min(0)
@@ -112,7 +123,7 @@ class DecoderBlock(nn.Module):
     def __init__(self,c,*,song=True):
         super().__init__();self.norms=nn.ModuleList([nn.LayerNorm(c.d_model) for _ in range(4)])
         self.self_attention=Attention(c.d_model,c.nhead);self.local_attention=Attention(c.d_model,c.nhead,local=True)
-        self.song_attention=Attention(c.d_model,c.nhead) if song else None
+        self.song_attention=Attention(c.d_model,c.nhead,relative=c.music_context_policy!='off') if song else None
         self.ff=nn.Sequential(nn.Linear(c.d_model,c.dim_feedforward),nn.GELU(),nn.Dropout(c.dropout),nn.Linear(c.dim_feedforward,c.d_model))
         self.drop=nn.Dropout(c.dropout)
     def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None):
@@ -145,7 +156,7 @@ class DecoderBlock(nn.Module):
             if song_kv is None:
                 song_kv=self.song_attention.memory(audio['song'])
                 if state is not None:state['song_kv']=song_kv
-            x=x+self.drop(self.song_attention(self.norms[2](x+condition[:,None]),kv=song_kv,key_mask=audio['song_mask']))
+            x=x+self.drop(self.song_attention(self.norms[2](x+condition[:,None]),kv=song_kv,key_mask=audio['song_mask'],query_beats=beats,key_beats=audio.get('song_beats')))
         return x+self.drop(self.ff(self.norms[3](x)))
 
 
@@ -169,11 +180,14 @@ class ComposerV2(nn.Module):
         self.output_bias=nn.Parameter(torch.zeros(codec.vocab_size))
         self._song_cache={}
         self._structured_weight_cache={}
+        if c.music_context_policy!='off':
+            with torch.random.fork_rng(devices=[]):self.song_detail=nn.Linear(16,d,bias=False)
+            nn.init.zeros_(self.song_detail.weight)
         if c.intensity_policy!='off':
             from .intensity import IntensityContext
             with torch.random.fork_rng(devices=[]):self.intensity=IntensityContext(d)
         self.register_buffer('phase_targets',torch.tensor([t.startswith('F:') for t in codec.tokens]),persistent=False)
-        self.register_buffer('time_tokens',torch.tensor([t.startswith(('T:','F:')) or t in ('[AT]','[PHASE]','[TIME_EXT]','[TIME_END]') or t.startswith('NUM:') for t in codec.tokens]),persistent=False)
+        self.register_buffer('time_tokens',torch.tensor([t.startswith(('T:','F:')) or t in ('[AT]','[PHASE]','[TIME_EXT]','[TIME_END]','[EOS]') or t.startswith('NUM:') for t in codec.tokens]),persistent=False)
         if c.onset_readout_policy != 'off':
             from .onset_readout import PhaseAudioReadout
             with torch.random.fork_rng(devices=[]):
@@ -261,6 +275,8 @@ class ComposerV2(nn.Module):
         cached=self._song_cache.get(key) if key is not None else None
         if cached is None:
             song=self._audio_input(batch['song_audio'],batch['song_semantic'],batch['song_semantic_mask'],keep)
+            if hasattr(self,'song_detail'):
+                song=song+self.song_detail(batch['song_detail'].float())
             starts=torch.tensor([float(s) for s in batch.get('start_beat',[0.]*b)],device=mel.device)
             song=song+positions(batch['song_beats']+starts[:,None],self.config.d_model)
             song_mask=batch['song_mask'].clone();song_mask[:,0]|=~song_mask.any(-1)
@@ -269,7 +285,7 @@ class ComposerV2(nn.Module):
                 if len(self._song_cache)>=4:self._song_cache.clear()
                 self._song_cache[key]=(song.detach(),song_mask)
         else:song,song_mask=cached
-        result = dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask)
+        result = dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask,song_beats=batch['song_beats'])
         if hasattr(self,'intensity'):
             result['condition']=self.condition_context(batch)
             result['curve_rates'],result['curve_context']=self.intensity.plan(song,batch,training=self.training)

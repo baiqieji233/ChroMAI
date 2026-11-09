@@ -46,6 +46,9 @@ class StreamDataset(ComposerV2Dataset):
         self._remaining_references = []
         for song_index,song in enumerate(self.songs):
             first_window = len(self.windows)
+            reviewed = (song.quality or {}).get('unmarked_weight') == 0
+            if reviewed:
+                song.reviewed_event_seconds = song.clock.at_floats(np.asarray(song.point_beats, dtype=np.float64))
             token_lengths = song.event_token_lengths
             song.event_token_lengths = []
             begin=0
@@ -60,7 +63,13 @@ class StreamDataset(ComposerV2Dataset):
                         origin=math.floor(song.points[begin-1].beat) if begin else 0
                         if song.points[end-1].beat>=origin+self.window_beats:break
                 if end==begin:raise ValueError(f'One whole event exceeds target budget: {song.source_path}, {song.points[begin].beat}')
-                self.windows.append((song_index,begin));self.ranges.append(end);self.lengths.append(tokens+1)
+                keep = not reviewed or any(
+                    region['start_sec'] <= stamp < region['end_sec']
+                    for region in song.quality.get('regions', [])
+                    if max(region.get('timing_weight', 1), region.get('component_weight', 1)) * region.get('weight', 1) > 0
+                    for stamp in song.reviewed_event_seconds[begin:end])
+                if keep:
+                    self.windows.append((song_index,begin));self.ranges.append(end);self.lengths.append(tokens+1)
                 begin=end
             # Empty charts and actual song endings still have one real EOS target.
             if not song.points:self.windows.append((song_index,0));self.ranges.append(0);self.lengths.append(1)
@@ -134,6 +143,8 @@ class StreamDataset(ComposerV2Dataset):
         if match is None or match['best_score']<REF_MIN_SCORE:return None
         return (match['best_shift'],match['best_score'])
     def _reference_argument(self,index):
+        if (self.songs[self.windows[index][0]].quality or {}).get('unmarked_weight') == 0:
+            return None
         if not self._structured():return self._prepare_reference(index)
         from . import rhythm_structure as rs
         info=self._prepare_reference(index)
@@ -231,6 +242,8 @@ class StreamDataset(ComposerV2Dataset):
         older=active_sources(boundary)
         active=active_sources(cursor)
         structured=self._structured()
+        if (song.quality or {}).get('unmarked_weight') == 0:
+            reference_start=None
         aligned=None
         if structured:
             aligned=self._selected_reference(song,cursor) if reference_start is _SELECT_REFERENCE else reference_start
@@ -328,12 +341,52 @@ class StreamDataset(ComposerV2Dataset):
         clocks = full_clocks[:-1] if training else full_clocks
         labels=np.full(len(ids),-100,dtype=np.int64)
         if training:labels[len(prefix)-1:]=full[len(prefix):]
-        weights=(labels!=-100).astype(np.float32)
+        active=(labels!=-100).astype(np.float32)
+        unmarked=float((song.quality or {}).get('unmarked_weight',1.))
+        weights=active*unmarked
         regions = (song.quality or {}).get('regions', [])
         if training and regions:
-            seconds = song.clock.at_floats(np.asarray(full_clocks[1:]))
+            from maichart.training.quality_annotations import region_component_weights
+            # Causal query clocks intentionally stay at the preceding event
+            # while its successor's time is written. Supervision ownership is
+            # different: every token of a complete event owns its final time.
+            ownership = np.asarray(full_clocks, dtype=np.float64).copy()
+            event_start = None
+            for position, token in enumerate(full):
+                if token == codec.at_id:
+                    event_start = position
+                elif token == codec.event_end_id and event_start is not None:
+                    ownership[event_start:position + 1] = full_clocks[position]
+                    event_start = None
+            seconds = song.clock.at_floats(ownership[1:])
+            timing_ids = {codec.at_id, codec.phase_id, codec.eos_id, *codec.digits, *codec.phases}
+            timing = np.asarray([int(token) in timing_ids for token in full[1:]])
             for region in regions:
-                weights[(seconds>=float(region['start_sec']))&(seconds<float(region['end_sec']))]*=float(region.get('weight',1.))
+                selected = (seconds >= float(region['start_sec'])) & (seconds < float(region['end_sec']))
+                timing_weight, component_weight = region_component_weights(region)
+                weights[selected & timing] = active[selected & timing] * timing_weight
+                weights[selected & ~timing] = active[selected & ~timing] * component_weight
+            if unmarked == 0:
+                # Keep contiguous approved timing across layout-only boundaries.
+                stamps=getattr(song,'reviewed_event_seconds',None)
+                if stamps is None:
+                    stamps=song.clock.at_floats(np.asarray([float(p.beat) for p in song.points]))
+                    song.reviewed_event_seconds=stamps
+                spans=[]
+                for region in regions:
+                    if region_component_weights(region)[0]<=0:continue
+                    a,b=float(region['start_sec']),float(region['end_sec'])
+                    if spans and a<=spans[-1][1]:spans[-1][1]=max(spans[-1][1],b)
+                    else:spans.append([a,b])
+                previous=np.searchsorted(stamps,seconds,side='left')-1
+                prior=np.where(previous>=0,stamps[np.maximum(previous,0)],0.) if len(stamps) else np.zeros_like(seconds)
+                trusted=np.zeros(len(seconds),dtype=bool)
+                for a,b in spans:trusted|=(seconds>=a)&(seconds<b)&(prior>=a)
+                # The integer jump may cross unreviewed material, while this
+                # approved onset's absolute sub-beat phase is still trustworthy.
+                coarse=np.isin(labels,[codec.at_id,codec.eos_id,*codec.digits])
+                weights[coarse & ~trusted]=0
+                weights[labels==codec.eos_id]=0
         anchors=sorted({math.floor(t) for t in clocks});lookup={a:i for i,a in enumerate(anchors)}
         # Adjacent query tiles overlap heavily. Read/project each source frame
         # once; gather the small learned vectors into independent encoder tiles.
@@ -366,6 +419,8 @@ class StreamDataset(ComposerV2Dataset):
             song_mask=torch.ones(len(summary['times_sec']),dtype=torch.bool),start_beat=Fraction(0),cursor=cursor,
             song_id=song.song_id,reference_start=reference_start,pad_id=self.codec.pad_id,
             song_cache_key=song.stream_cache_key or _song_cache_key(song))
+        if 'detail' in summary:
+            out['song_detail'] = torch.as_tensor(summary['detail'], dtype=torch.float32)
         if evidence_v2:
             from .rhythm_structure import local_evidence
             evidence=local_evidence(self._profile(song),clocks,aligned[0] if aligned else None,

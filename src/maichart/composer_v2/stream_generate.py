@@ -60,8 +60,9 @@ class EventSampler(WindowSampler):
         self.batch['intensity_strength']=getattr(args,'intensity_strength',1.)
         self.max_tokens=model.config.max_tokens;self.cache=model.encode_audio(self.batch)
         if getattr(model.config,'intensity_policy','off')!='off' and not hasattr(dataset,'intensity_profile'):
-            from .intensity import serialize
-            dataset.intensity_profile=serialize(self.cache['curve_context'][0].expm1(),song)
+            from .intensity import serialize,blend_profile
+            dataset.intensity_profile=blend_profile(serialize(self.cache['curve_context'][0].expm1(),song),
+                getattr(song,'intensity_input_profile',None),self.batch['intensity_strength'])
         self.retry_stats={};self._retry_scope=None
     def next(self,target,allowed,*,action=False):
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
@@ -228,6 +229,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     from .data import ComposerV2Song,_beats_at_seconds
     from maichart.tempo_clock import TempoClock
     config=model.config;clock=TempoClock(tempo,first)
+    from .phrase_search import settings as phrase_settings,trial_search,write_previews
+    phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
     from .exhaustion import resolve_policy,admit_physical_conflict,conflict_assessment
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     song=ComposerV2Song(audio_path.stem,audio_path,audio_path,5,args.level,[],clock,end,condition,audio=audio,condition_known=known)
@@ -245,7 +248,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     dataset.intensity_policy=getattr(config,'intensity_policy','off')
     if getattr(args,'intensity_curve',None):
         from .intensity import profile_rates
-        song.intensity_override=profile_rates(json.loads(Path(args.intensity_curve).read_text(encoding='utf-8')),song)
+        profile=json.loads(Path(args.intensity_curve).read_text(encoding='utf-8'))
+        profile_rates(profile,song)  # Validate source identity and numeric contract once.
+        song.intensity_input_profile=profile
     dataset.reference_augmentation=False;dataset.refresh_events=config.refresh_events
     requested_selection=getattr(args,'reference_selection','auto') or 'auto'
     # Older checkpoints keep their REF layout; 'aligned' only changes which
@@ -257,7 +262,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     guard=_new_guard(tempo,first,audio.duration_sec,guard_options=tail_settings)
     points=[];target=[];sampler=None;committed_in_context=0;refreshes=0;rollbacks=[];repairs=[];done=False
     duration_repairs=[];release_trials=set();bypassed_events=[]
-    retry_stats={};native_memo={}
+    retry_stats={};native_memo={};pending_phrase=[];phrase_trials=[];phrase_count=0
     recovery=RecoveryBudget(args.rollback_windows)
     hold_release_repair=args.rollback_windows>0
     sampling_policy=_sampling_policy(args)
@@ -281,14 +286,29 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         for attempt in range(attempts):
             try:
                 sampler.retry_allow_eos=not failed_any and not known_failed and recovery.used==0
-                ids=sampler.propose(target,after,end)
+                queued=pending_phrase.pop(0) if pending_phrase and attempt==0 else None
+                if attempt:pending_phrase.clear()
+                ids=queued[1] if queued else sampler.propose(target,after,end)
                 if ids==[model.codec.eos_id]:
                     if not sampler.retry_allow_eos and model.codec.at_id in model.codec.time_choices([],after,end):
                         repairs.append(dict(reason='eos_is_not_physical_recovery',after=str(after)));continue
                     done=True;break
                 proposal=model.codec.decode_points(ids)[0];failed_beat=proposal.beat
                 candidates=[(proposal,ids)]
-                for _ in range(candidate_count-1):
+                used_phrase=False
+                if queued is None and phrase_mode!='event' and candidate_count>1:
+                    def make_sampler(history):
+                        value=EventSampler(model,dataset,song,history,device,rng,args,**sampler_options)
+                        value.retry_stats=retry_stats
+                        return value
+                    planned,evidence,trials=trial_search(sampler,target,points,guard,(proposal,ids),
+                        args=args,song=song,tempo=tempo,end=end,count=candidate_count,
+                        make_sampler=make_sampler,check_window=_check_window)
+                    write_previews(args.output,phrase_count,points,trials,evidence,song,tempo,args.level)
+                    phrase_count+=1;phrase_trials.append(evidence);phrase_trials=phrase_trials[-16:]
+                    if planned:
+                        candidates=planned[:1];pending_phrase=planned[1:];used_phrase=True
+                for _ in range(candidate_count-1 if not used_phrase and queued is None else 0):
                     alternative=sampler.propose(target,after,end,fixed=proposal)
                     candidates.append((model.codec.decode_points(alternative)[0],alternative))
                 feasible=[]
@@ -302,6 +322,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         details=[];trial,reason=_check_window(guard,[point],details)
                         retry_stats['native_checks']=retry_stats.get('native_checks',0)+1
                     if trial is None:
+                        pending_phrase.clear()
                         failed_any=True
                         if prefix_key is None:prefix_key=tuple((p.beat,p.note_text) for p in points)
                         native_memo.setdefault(prefix_key,known_failed)
@@ -311,7 +332,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         if reason=='new_miacode_runtime_hard_conflict':rejected.append((point,details))
                         repairs.append(dict(beat=str(point.beat),note_text=point.note_text,reason=reason,
                             conflicts=details,cached_rejection=cached));continue
-                    score=.5 if candidate_count==1 else _comfort(points,[point],tempo,clock,max(Fraction(0),after),min(end,point.beat+1),audio.duration_sec)[0]
+                    score=.5 if candidate_count==1 or used_phrase or queued is not None else _comfort(points,[point],tempo,clock,max(Fraction(0),after),min(end,point.beat+1),audio.duration_sec)[0]
                     feasible.append((score,point,encoded,trial))
                 if feasible:selected=max(feasible,key=lambda row:row[0]);break
             except RetrySpaceExhausted:
@@ -334,6 +355,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 repaired=repair_hold_conflict(points,rejected,tempo,clock,audio.duration_sec,model.codec,
                     attempted=release_trials,audit=audit,guard_options=tail_settings)
                 if repaired:
+                    pending_phrase.clear()
                     points,witness,trial,report=repaired
                     recovery.spend()
                     report['recovery_state_before_commit']=recovery.report()
@@ -346,12 +368,14 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             replay=restore_prefix(points,tempo,clock,audio.duration_sec,failed_beat,conflict_sources,
                 rejected=rejected,guard_options=tail_settings) if points and budget_left and not sampling_policy['fully_greedy'] else None
             if replay:
+                pending_phrase.clear()
                 recovery.spend()
                 points,guard,report=replay;report['recovery_state']=recovery.report();rollbacks.append(report);sampler=None
                 print('composer_v2_rollback '+json.dumps(report),flush=True);continue
             if exhaustion_policy=='report':
                 admitted=admit_physical_conflict(guard,rejected,after)
                 if admitted:
+                    pending_phrase.clear()
                     point,trial,details=admitted
                     warning=dict(beat=str(point.beat),note_text=point.note_text,after=str(after),
                         reason='recovery_budget_exhausted' if not recovery.available else 'recovery_unavailable',
@@ -415,6 +439,11 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                            scope='conditional_phase_only',phase_mass_preserved=True),
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
+    report['phrase_search']=dict(mode=phrase_mode,lookahead_beats=float(phrase_beats),
+        commit_beats=float(phrase_commit_beats),decisions=phrase_count,trials=phrase_trials,
+        scoring='native_trajectory_and_selected_attack_support_no_density_reward',
+        speculative_suffix_is_committed=False)
+    if phrase_mode!='event':report['candidate_policy']='continuous_phrase_'+phrase_mode
     report['intensity_curve']=dict(policy=dataset.intensity_policy,
         source='off' if dataset.intensity_policy=='off' else 'edited' if getattr(args,'intensity_curve',None) else 'model',
         strength=getattr(args,'intensity_strength',1.),profile=getattr(dataset,'intensity_profile',None))
@@ -451,6 +480,6 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','phrase_search','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

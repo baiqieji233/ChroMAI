@@ -158,8 +158,15 @@ def _validate_regions(regions: Any, duration: float | None = None) -> list[dict[
         weight = _finite(region.get("weight", 1.0), "region.weight")
         if weight < 0 or weight > 4:
             raise ValueError("region.weight 必须在 0–4 之间")
-        result.append({"start_sec": start, "end_sec": end, "label": label,
-                       "reason": reason, "weight": weight})
+        item = {"start_sec": start, "end_sec": end, "label": label,
+                "reason": reason, "weight": weight}
+        for component in ("timing_weight", "component_weight"):
+            if component in region:
+                value = _finite(region[component], f"region.{component}")
+                if not 0 <= value <= 4:
+                    raise ValueError(f"region.{component} 必须在 0–4 之间")
+                item[component] = value
+        result.append(item)
         previous_end = end
     return result
 
@@ -178,6 +185,11 @@ def validate_record(record: dict[str, Any]) -> dict[str, Any]:
     out["weight"] = weight
     out["reason"] = str(record.get("reason", ""))
     out["regions"] = _validate_regions(record.get("regions", []))
+    if "unmarked_weight" in record:
+        value = _finite(record["unmarked_weight"], "unmarked_weight")
+        if not 0 <= value <= 4:
+            raise ValueError("unmarked_weight 必须在 0–4 之间")
+        out["unmarked_weight"] = value
     for key in ("chart_id", "song_id", "source_path", "audio_path", "chart_sha256", "audio_sha256"):
         if key in out and out[key] is not None:
             out[key] = str(out[key])
@@ -483,3 +495,19 @@ def chart_duration(maidata_path: str | Path, difficulty_index: int) -> float | N
     except Exception:
         return None
 
+
+
+def region_component_weights(region: dict[str, Any]) -> tuple[float, float]:
+    """Ordinary CE multipliers; negative feedback never reverses CE gradients.
+
+    Explicit legacy weight-only regions retain their original meaning. Light
+    labels provide conservative defaults and can be overridden per component.
+    """
+    label = region.get("label")
+    reason = region.get("reason", "")
+    default = (1.5, 1.5) if label == "good" else (1., 1.) if label == "uncertain" else (1., 1.)
+    if label == "problem":
+        default = (0., 1.) if reason == "timing" else (1., 0.) if reason in ("layout", "comfort") else (0., 0.)
+    base = float(region.get("weight", 1.))
+    return tuple(base * float(region.get(key, value)) for key, value in
+                 zip(("timing_weight", "component_weight"), default))

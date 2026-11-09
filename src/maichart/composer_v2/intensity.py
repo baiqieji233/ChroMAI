@@ -83,8 +83,15 @@ def query_indices(song, clocks):
     right=np.clip(np.searchsorted(times,queries,side='right'),0,len(times)-1)
     left=np.maximum(0,right-1)
     weight=np.clip((queries-times[left])/np.maximum(times[right]-times[left],1e-8),0.,1.)
-    return dict(curve_left=torch.as_tensor(left),curve_right=torch.as_tensor(right),
+    result=dict(curve_left=torch.as_tensor(left),curve_right=torch.as_tensor(right),
                 curve_mix=torch.as_tensor(weight,dtype=torch.float32))
+    edited=getattr(song,'intensity_input_profile',None)
+    if edited is not None:
+        points=edited['points'];stamps=[p['time_sec'] for p in points]
+        event=np.interp(queries,stamps,[p['event_rate'] for p in points])
+        extra=np.interp(queries,stamps,[p['object_rate']-p['event_rate'] for p in points])
+        result['curve_override_queries']=torch.as_tensor(np.stack((event,extra),-1),dtype=torch.float32)
+    return result
 
 
 def validate_profile(profile):
@@ -130,13 +137,31 @@ def add_item(item,song,clocks,*,training):
         targets=authored_targets(song)
         item['curve_counts']=torch.as_tensor(targets['counts'])
         item['curve_widths']=torch.as_tensor(targets['widths'])
+        # Never turn an untrusted chart span into an observed zero-count rest.
+        # A boundary bin is masked conservatively rather than estimating its
+        # partial event count; genuine unannotated rests remain supervised.
+        from maichart.training.quality_annotations import region_component_weights
+        unmarked=float((song.quality or {}).get('unmarked_weight',1.))
+        exposure = np.full((len(grid['times']), 2), unmarked, dtype=np.float32)
+        for region in (song.quality or {}).get('regions', []):
+            overlap = (grid['edges'][:-1] < float(region['end_sec'])) & (grid['edges'][1:] > float(region['start_sec']))
+            timing, components = region_component_weights(region)
+            if unmarked == 0:
+                # Full counts are known only for bins contained in the approval.
+                inside=(grid['edges'][:-1] >= float(region['start_sec'])) & (grid['edges'][1:] <= float(region['end_sec']))
+                exposure[inside, 0] = timing
+                exposure[inside, 1] = min(timing, components)
+            else:
+                exposure[overlap, 0] *= timing
+                exposure[overlap, 1] *= min(timing, components)
+        item['curve_quality_weights'] = torch.as_tensor(exposure)
     override=getattr(song,'intensity_override',None)
     if override is not None:item['curve_override']=override
 
 
 def collate(items,out):
     for key in ('curve_left','curve_right','curve_mix','curve_counts','curve_widths','curve_override',
-                'curve_memory_left','curve_memory_right','curve_memory_mix'):
+                'curve_memory_left','curve_memory_right','curve_memory_mix','curve_override_queries','curve_quality_weights'):
         if key in items[0]:
             out[key]=nn.utils.rnn.pad_sequence([item[key] for item in items],batch_first=True)
 
@@ -163,14 +188,15 @@ class IntensityContext(nn.Module):
         if training and 'curve_counts' in batch:
             # Coarse, slightly noisy hints are present for half the examples.
             # No exact beat/grid labels or chart-derived hints in validation.
-            widths=batch['curve_widths'].float()[:,None]
+            quality = batch.get('curve_quality_weights', torch.ones_like(batch['curve_counts']))
+            widths=batch['curve_widths'].float()[:,None] * quality.transpose(1,2)
             # Pool counts and exposure separately: a 40ms tail with one note
             # must not contribute an equal-weight 25 notes/s spike.
-            smooth=(F.avg_pool1d(batch['curve_counts'].float().transpose(1,2),3,1,1)/
+            smooth=(F.avg_pool1d((batch['curve_counts'].float()*quality).transpose(1,2),3,1,1)/
                     F.avg_pool1d(widths,3,1,1).clamp_min(1e-6)).transpose(1,2)
             scale=torch.exp(torch.randn((rates.size(0),1,2),device=rates.device)*.15)
             use=torch.rand((rates.size(0),1,1),device=rates.device)<.5
-            context=torch.where(use,smooth*scale,context)
+            context=torch.where(use & (quality > 0),smooth*scale,context)
         elif 'curve_override' in batch:
             strength=float(batch.get('intensity_strength',1.))
             context=context*(1-strength)+batch['curve_override']*strength
@@ -184,7 +210,26 @@ class IntensityContext(nn.Module):
             values.append(torch.gather(context,1,indices.flatten(1)[...,None].expand(-1,-1,2))
                           .reshape(*indices.shape,2))
         mix=batch['curve_mix'][:,start-offset:, :,None]
-        return self.projection((values[0]*(1-mix)+values[1]*mix).flatten(-2))
+        sampled=values[0]*(1-mix)+values[1]*mix
+        strength=float(batch.get('intensity_strength',1.))
+        if 'curve_override_queries' in batch and strength>0:
+            edited=batch['curve_override_queries'][:,start-offset:]
+            sampled=torch.log1p(sampled.expm1()*(1-strength)+edited*strength)
+        return self.projection(sampled.flatten(-2))
+
+
+def blend_profile(automatic,edited,strength):
+    """Record the same rate-space blend used at actual decoding query times."""
+    if not edited or strength==0:return automatic
+    auto=automatic['points'];manual=edited['points']
+    times=sorted({p['time_sec'] for p in auto+manual})
+    def values(points,key,*,log=False):
+        raw=np.asarray([p[key] if key=='event_rate' else p['object_rate']-p['event_rate'] for p in points])
+        value=np.interp(times,[p['time_sec'] for p in points],np.log1p(raw) if log else raw)
+        return np.expm1(value) if log else value
+    event=values(auto,'event_rate',log=True)*(1-strength)+values(manual,'event_rate')*strength
+    extra=values(auto,'extra',log=True)*(1-strength)+values(manual,'extra')*strength
+    return {**automatic,'points':[dict(time_sec=t,event_rate=float(e),object_rate=float(e+x)) for t,e,x in zip(times,event,extra)]}
 
 
 def curve_loss(rates,batch):
@@ -195,8 +240,12 @@ def curve_loss(rates,batch):
     expected=rates*widths[...,None]
     dev=expected-target+target*(torch.log(target.clamp_min(1e-8))-torch.log(expected.clamp_min(1e-8)))
     valid=widths>0
-    per_sample=(dev*valid[...,None]).sum((1,2))/widths.sum(1).clamp_min(1e-6)
+    region_quality=batch.get('curve_quality_weights',torch.ones_like(target))
+    exposure=widths[...,None]*region_quality*valid[...,None]
+    per_sample=(dev*region_quality*valid[...,None]).sum((1,2))/exposure.sum((1,2)).clamp_min(1e-6)*2
+    observed=exposure.sum((1,2))>0
     quality=batch.get('sample_weight',torch.ones_like(per_sample))
+    quality=quality*observed
     return (per_sample*quality).sum()/quality.sum().clamp_min(1e-6)
 
 

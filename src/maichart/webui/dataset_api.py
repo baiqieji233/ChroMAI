@@ -82,12 +82,15 @@ class DatasetAPI:
         card = {"path": str(root), "source_root": str(root), "raw_root": str(root),
                 "manifest": str(manifest), "name": str(entry.get("name") or root.name),
                 "cache_dir": str(root / "cache"), "prepared": False}
+        if entry.get('review_group'):card['review_group']=entry['review_group']
         if manifest.is_file():
             try:
                 card.update(catalog_datasets([manifest])[0])
                 card.update({"path": str(root), "raw_root": str(root), "manifest": str(manifest),
                              "name": str(entry.get("name") or root.name), "prepared": True})
                 data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+                if data.get('reviewed_training'):
+                    card['reviewed_regions']=data['reviewed_training'].get('regions',0)
                 cache = Path(str(data.get("cache_dir") or "cache"))
                 card["cache_dir"] = str((cache if cache.is_absolute() else manifest.parent / cache).resolve())
             except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -154,10 +157,19 @@ class DatasetAPI:
         else:
             raise ValueError(f"训练素材目录不存在：{path}")
         entry = {"path": str(root), "name": str(payload.get("name") or root.name)}
+        group=payload.get('review_group')
+        if group:
+            if not manifest or not isinstance(group,str) or len(group)>256:
+                raise ValueError('校准素材组需要有效的训练清单与任务标识')
+            data=json.loads(manifest.read_text(encoding='utf-8-sig'))
+            if data.get('reviewed_training',{}).get('policy')!='approved_regions_only_v1':
+                raise ValueError('只有已确认片段素材可以更新校准素材组')
+            entry['review_group']=group
         if manifest:
             entry["manifest"] = str(manifest)
         with _REGISTRY_LOCK:
-            entries = [row for row in self._registry() if self._resolve(row["path"]) != root]
+            entries = [row for row in self._registry() if self._resolve(row["path"]) != root
+                       and not (group and row.get('review_group')==group)]
             entries.append(entry)
             self._save_registry(entries)
         card = self._card(entry)

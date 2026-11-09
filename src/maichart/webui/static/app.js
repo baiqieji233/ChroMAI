@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience"];
+const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -18,9 +18,10 @@ function validateV2NumericInputs(scope) {
 function composerV2TrainingPayload(options={}) {
   const payload={model_family:"chart_composer_v2", ...trainingSourcePaths(options),
     manifests:selectedTrainingManifests(),mode:currentTrainingMode(),
+    quality_enabled:checkedOrDefault('#v2TrainQualityEnabled',true),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve"]);
+  const strings=new Set(["music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -46,7 +47,10 @@ function composerV2GenerationPayload(options={}) {
     temperature:number('#v2GenerateTemperature',.9,'采音温度',{min:0}),top_p:number('#v2GenerateTopP',.95,'采音 Top-p',{min:0,max:1,exclusiveMin:true}),
     count:number('#v2GenerateCount',1,'生成张数',{min:1,max:32,integer:true}),
     window_retries:number('#v2GenerateWindowRetries',16,'每事件提议重试次数',{min:1,max:128,integer:true}),
-    candidates:number('#v2GenerateCandidates',2,'候选数',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
+    phrase_search:element('#v2GeneratePhraseSearch')?.disabled?'event':valueOrDefault('#v2GeneratePhraseSearch','layout'),
+    phrase_beats:number('#v2GeneratePhraseBeats',4,'提前试写长度',{min:1,max:16}),
+    phrase_commit_beats:number('#v2GeneratePhraseCommitBeats',2,'每次保留长度',{min:0,exclusiveMin:true,max:16}),
+    candidates:number('#v2GenerateCandidates',2,'每次比较几种写法',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
     rollback_windows:number('#v2GenerateRollbackWindows',2,'冲突恢复次数',{min:0,max:8,integer:true}),
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
     tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),
@@ -54,6 +58,7 @@ function composerV2GenerationPayload(options={}) {
     cpu_threads:number('#v2GenerateCpuThreads',2,'CPU 计算线程',{min:1,integer:true}),
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
+  if(payload.phrase_commit_beats>payload.phrase_beats)throw new Error("每次保留长度不能超过提前试写长度。");
   for (const [key,selector,label,bounds] of [
     ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
     ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
@@ -111,6 +116,8 @@ function requireV2SplitSamplingSupport(status,payload) {
       && !status.training_capabilities?.composer_v2_split_sampling) {
     throw new Error('独立配置采样需要更新后的 WebUI 后台。请重启当前使用的后台后再提交。');
   }
+  if(payload.phrase_search && payload.phrase_search!=='event' && !status.training_capabilities?.composer_v2_phrase_search)
+    throw new Error('比较多种写法需要更新后的后台；请在当前任务结束后重启 WebUI，或选择“逐步生成（速度优先）”。');
 }
 function composerV2GenerationMessage(task) {
   if(task.status!=='running')return task.message||'';
@@ -129,7 +136,11 @@ function applyComposerV2Inspection(data) {
   saved.onset_readout=data.model_config?.onset_readout_policy||'off';
   saved.rhythm_structure=data.model_config?.structure_policy||'off';
   saved.intensity_curve=data.model_config?.intensity_policy||'off';
+  saved.music_context=data.model_config?.music_context_policy||'off';
+  saved.audio_layers=data.model_config?.audio_layers??2;
+  saved.song_layers=data.model_config?.song_layers??2;
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
+  if(currentTrainingMode()==='resume' && element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=saved.quality_enabled!==false;
   for(const key of COMPOSER_V2_FIELDS) {
     if (key === 'cuda_memory_budget_gb' || key === 'audio_cache_gb') continue;
     const node=element("#"+v2FieldId(key));
@@ -1359,6 +1370,7 @@ function setWorkspaceMode(mode) {
   if (value === "intensity") requestAnimationFrame(drawIntensityCurve);
   window.MaichartWorkflow?.setLogsExpanded(false);
   window.MaichartWorkflow?.refresh();
+  window.dispatchEvent(new CustomEvent('workspace-mode-changed',{detail:{mode:value}}));
   try { localStorage.setItem(workspaceStorageKey, value); } catch (_) { /* storage disabled */ }
 }
 
@@ -1433,6 +1445,7 @@ function collectSettings() {
   values.__eventSetSharedContinuationDefaults = 1;
   values.__eventSetLearningDefaults = 2;
   values.__composerV2ReleaseDefaults = 1;
+  values.__composerV2PhraseMusicDefaults = 1;
   return values;
 }
 
@@ -1487,7 +1500,9 @@ function migrateEventSetLearningDefaults(values) {
 }
 
 function migrateComposerV2ReleaseDefaults(values) {
-  if(!values || values.__composerV2ReleaseDefaults===1)return false;
+  if(!values)return false;
+  let changed=false;
+  if(values.__composerV2ReleaseDefaults!==1) {
   // One release migration; subsequent deliberate overrides are persisted.
   values.v2GenerateAutoFirst=true;
   values.v2GenerateInterceptTapOnSlide=true;
@@ -1496,7 +1511,14 @@ function migrateComposerV2ReleaseDefaults(values) {
   if(values.v2GenerateCandidates==null || String(values.v2GenerateCandidates)==='1')values.v2GenerateCandidates='2';
   if(values.trainingMode!=='resume' && [undefined,'off','auto'].includes(values.v2TrainOnsetReadout))values.v2TrainOnsetReadout='auto';
   values.__composerV2ReleaseDefaults=1;
-  return true;
+  changed=true;
+  }
+  if(values.__composerV2PhraseMusicDefaults!==1) {
+    Object.assign(values,{v2GeneratePhraseSearch:'layout',v2GeneratePhraseBeats:'4',v2GeneratePhraseCommitBeats:'2'});
+    if(values.trainingMode==='fresh' || !values.trainingMode)Object.assign(values,{v2TrainAudioLayers:'4',v2TrainSongLayers:'2',v2TrainMusicContext:'auto'});
+    values.__composerV2PhraseMusicDefaults=1;changed=true;
+  }
+  return changed;
 }
 
 function restoreSettings() {
@@ -1529,7 +1551,7 @@ function restoreSettings() {
   }
   if(migrateComposerV2ReleaseDefaults(values)) {
     try { localStorage.setItem(settingsStorageKey,JSON.stringify(saved)); } catch (_) {}
-    restoredSettingNotice='Composer v2 已启用新版默认：自动首拍、独立配置采样、2个配置候选及撞尾检测。手动BPM、条件偏好和训练断点保持原值。';
+    restoredSettingNotice='Composer v2 已更新默认：先定节奏，再比较配置；提前试写4拍，每次保留前2拍。新训练采用4层音频编码及全曲音乐上下文，续训沿用检查点设置。';
   }
   migrateSongFormQualityDefaults(values);
   migrateEventSetLearningDefaults(values);
@@ -2026,6 +2048,12 @@ function updateFamilyFields() {
     field.hidden=!v2Generation;
     field.querySelector('input').disabled=!splitSampling;
   }
+  for(const field of document.querySelectorAll('[data-v2-phrase-search]')) {
+    field.hidden=!v2Generation;
+    field.querySelector('input,select').disabled=!splitSampling;
+  }
+  const phraseHelp=element('#v2PhraseSearchHelp');
+  if(phraseHelp)phraseHelp.textContent=checked && !splitSampling?'这个旧模型不支持比较整段写法，将使用“逐步生成”。':'默认先确定一小段音符出现的时间和数量，再比较不同键位与动作组合；“节奏与配置一起选”还会尝试不同的出音时间。增加比较会更慢。';
   const onsetSupported=v2Generation && (!checked || generationInspection.data?.generation_capabilities?.onset_readout);
   for (const field of document.querySelectorAll('[data-v2-onset-readout]')) {
     field.hidden=!v2Generation; field.querySelector('input').disabled=!onsetSupported;
@@ -2038,10 +2066,10 @@ function updateFamilyFields() {
   }
   const referenceHelp=element('#v2ReferenceSelectionHelp');
   if(referenceHelp && v2Generation)referenceHelp.textContent=builtInReference
-    ?'此模型已训练「节拍结构与对齐参考」：生成时按检查点的参考策略提供证据，无需选择；新版逐拍对照，旧版保持原合同。'
+    ?'这个模型已经学过如何参考前面相似音乐段的写法，会自动使用对应方式，无需在这里调整。'
     :(checked && !capabilities?.continuous_time)
-      ?'旧版窗口模型不支持对齐检索。'
-      :'仅供试听对比：旧模型免训练改用逐拍对齐选取前文参考，音乐不重复时不提供参考。验证集上旧模型用此方式的交叉熵略高于默认（0.328 对 0.319），不保证改善；完整改善需在新目录 finetune 启用「节拍结构与对齐参考」。';
+      ?'这个旧模型不支持按相似音乐寻找前文。'
+      :'让模型参考前面相似音乐段的写法，帮助前后呼应。通常保持推荐项；实验项会改变旧模型寻找参考的方式，效果可能变好也可能变差。';
   updateV2ConditionControls();
   document.querySelectorAll("#generationTargetGroup .condition-presets > :not(.level-recipe-row)").forEach(target=>{target.hidden=v2Generation;});
   document.querySelectorAll('#generationTargetGroup .condition-advanced').forEach(target=>{target.hidden=v2Generation && !target.querySelector('#v2ConditionStatus');});
@@ -2068,6 +2096,7 @@ function updateFamilyFields() {
   for(const id of ["epochs","learningRate","batchSize","gradAccumulation","device","qualityEnabled","resetOptimizer"]) {
     const field=element("#"+id)?.closest(".field, .checkbox-field");if(field)field.hidden=currentModelFamily()==="chart_composer_v2";
   }
+  if(element('#trainingQuality'))element('#trainingQuality').hidden=currentModelFamily()==='chart_composer_v2';
   const quickSettings=element("#trainingRunGroup")?.querySelector?.(".quick-settings");if(quickSettings)quickSettings.hidden=currentModelFamily()==="chart_composer_v2";
   ["#dModel", "#nhead", "#numLayers", "#dimFeedforward", "#trainMaxTokens", "#segmentBeats", "#maxAudioTokens",
    "#conditionMaskProb", "#conditionDefault", "#conditionDropout", "#contextDropout", "#dropout", "#weightDecay",
@@ -3392,7 +3421,8 @@ function updateDatasetButtons() {
 
 function updateTrainingControls() {
   const v2Resume=currentModelFamily()==="chart_composer_v2" && currentTrainingMode()==="resume";
-  const v2Fixed=new Set(['d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
+  if(element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').disabled=v2Resume;
+  const v2Fixed=new Set(['song_layers','d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
   for(const key of (typeof COMPOSER_V2_FIELDS!=="undefined"?COMPOSER_V2_FIELDS:[])){
     const node=element("#"+v2FieldId(key));if(node){
       const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience'].includes(key);
@@ -4051,7 +4081,7 @@ function datasetCardHtml(item) {
   return `<article class="dataset-card${active ? " active" : ""}" data-dataset-path="${escapeHtml(item.path || "")}" data-dataset-manifest="${escapeHtml(item.manifest || "")}">
     <label class="dataset-card-check"><input class="dataset-select-checkbox" type="checkbox" data-dataset-key="${escapeHtml(key)}" ${checked ? "checked" : ""}> <strong>加入训练</strong></label>
     <button class="dataset-card-open" type="button" data-dataset-path="${escapeHtml(item.path || "")}"><strong>${escapeHtml(item.name || "未命名数据集")}</strong></button>
-    <div class="dataset-card-meta">${item.prepared ? "已预处理" : "待预处理"} · 谱面 ${escapeHtml(String(charts))}</div>
+    <div class="dataset-card-meta">${item.prepared ? "已预处理" : "待预处理"} · 谱面 ${escapeHtml(String(charts))}${item.reviewed_regions!=null?` · 已确认 ${escapeHtml(String(item.reviewed_regions))} 段`:''}</div>
     <div class="dataset-card-path">${escapeHtml(item.path || item.manifest || "")}</div>${preprocessAction}
   </article>`;
 }
@@ -4132,6 +4162,28 @@ function selectedDatasetItems() {
   return datasetWorkspaceState.items.filter((item) => datasetWorkspaceState.selected.has(datasetKey(item)));
 }
 
+async function addReviewedTrainingSource(result) {
+  // Preserve implicit single-dataset selection before explicitly adding one.
+  const existing=selectedDatasetItems().length?null:datasetPaths().manifest;
+  const register=async(manifest,name,reviewGroup)=>{
+    const response=await api('/api/datasets/register',{path:manifest,name,review_group:reviewGroup});
+    const item=response.dataset;
+    if(!item?.manifest)throw new Error('素材登记没有返回训练清单，请刷新后重试。');
+    const key=datasetKey(item);
+    if(reviewGroup)for(const row of datasetWorkspaceState.items)if(row.review_group===reviewGroup)datasetWorkspaceState.selected.delete(datasetKey(row));
+    datasetWorkspaceState.items=[...datasetWorkspaceState.items.filter(row=>datasetKey(row)!==key && !(reviewGroup && row.review_group===reviewGroup)),item];
+    datasetWorkspaceState.selected.add(key);
+    return item;
+  };
+  if(existing && existing!==result.manifest)await register(existing);
+  await register(result.manifest,result.name,result.review_group);
+  if(!result.regions)datasetWorkspaceState.selected.delete(datasetKey(datasetWorkspaceState.items.find(item=>item.manifest===result.manifest)));
+  datasetWorkspaceState.selectionTouched=true;
+  if(element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=true;
+  datasetWorkspaceState.prepared=null;renderDatasetWorkspace();saveDatasetWorkspace();saveSettings();
+  return {sources:selectedDatasetItems().length};
+}
+
 async function composeSelectedDatasets() {
   if (datasetWorkspaceState.applying) return;
   datasetWorkspaceState.selectionTouched = true;
@@ -4198,11 +4250,14 @@ async function openDataset(item) {
   if (!item) return;
   if (item.prepared === false || !item.manifest) throw new Error("这个数据集尚未预处理，请点击卡片上的“去训练页预处理”。");
   datasetWorkspaceState.activePath = item.path || item.manifest || "";
+  globalThis.ChartPreview?.setTrainingDataset(item.manifest);
   datasetWorkspaceState.view = "catalog";
   renderDatasetWorkspace();
   saveDatasetWorkspace();
   qualityState.catalogRequest += 1;
   qualityState.detailRequest += 1;
+  qualityState.previewLoading=false;
+  qualityState.previewError='';
   qualityState.items = []; qualityState.page = 1; qualityState.pages = 1; qualityState.total = 0;
   qualityState.folderTotal = 0; qualityState.selectionRequest += 1; qualityState.selectionLoading = false; qualityState.saving = false; qualityState.editedWeights.clear();
   qualityState.selected.clear(); qualityState.detail = null; qualityState.regions = []; qualityState.correctedPath = "";
@@ -4221,6 +4276,7 @@ function showDatasetCards() {
   datasetWorkspaceState.view = "cards";
   qualityState.catalogRequest += 1;
   qualityState.detailRequest += 1;
+  qualityState.previewLoading=false;
   renderDatasetWorkspace();
 }
 
@@ -5509,7 +5565,7 @@ function qualityRowHtml(item) {
     + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}</td>`
     + `<td>${escapeHtml(item.designer || item.chart_designer || "未标注")}</td><td><span class="quality-label ${escapeHtml(label)}">${escapeHtml(qualityLabelText(label))}</span></td>`
     + `<td><input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}" ${disabled}></td>`
-    + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">查看</button></td></tr>`;
+    + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">预览与标注</button></td></tr>`;
 }
 
 function renderQualityCatalog() {
@@ -5521,7 +5577,76 @@ function renderQualityCatalog() {
   if (element("#qualityPrevButton")) element("#qualityPrevButton").disabled = qualityState.page <= 1;
   if (element("#qualityNextButton")) element("#qualityNextButton").disabled = qualityState.page >= pageCount;
   updateQualitySelectionControls();
+  updateTrainingPreviewNavigation();
 }
+
+function updateTrainingPreviewNavigation() {
+  const navigation=element('#trainingPreviewNavigation');if(!navigation)return;
+  const preview=globalThis.ChartPreview?.getEntry(),context=preview?.training_context;
+  const training=preview?.source_kind==='training_source';
+  navigation.hidden=!training;
+  const matches=training && context?.manifest===qualityManifest();
+  const index=matches?qualityState.items.findIndex(item=>String(item.chart_id)===context.chart_id):-1;
+  const busy=qualityState.previewLoading || qualityState.previewNavigating;
+  element('#trainingPreviewPrevious').disabled=!!busy || index<0 || (index===0 && qualityState.page<=1);
+  element('#trainingPreviewNext').disabled=!!busy || index<0 || (index===qualityState.items.length-1 && qualityState.page>=qualityState.pages);
+  const label=element('#trainingPreviewPosition');
+  label.textContent=qualityState.previewError?'载入失败，可重试':index<0?'请选择目录中的谱面':`${(qualityState.page-1)*qualityState.pageSize+index+1} / ${qualityState.total} 张 · ${qualityState.items[index].title||qualityState.items[index].song_id||''}`;
+  label.title=qualityState.previewError || (index<0?'':`${qualityState.items[index].title||''} · 难度 ${qualityState.items[index].level||''}`);
+  for(const row of document.querySelectorAll('#qualityCatalogBody tr[data-chart-id]')) {
+    const current=matches && row.dataset.chartId===context.chart_id;
+    if(current)row.setAttribute('aria-current','true');else row.removeAttribute('aria-current');
+    row.querySelector('.quality-detail-button')?.setAttribute('aria-pressed',String(current));
+  }
+}
+
+async function navigateTrainingPreview(direction) {
+  if(qualityState.previewLoading || qualityState.previewNavigating)return;
+  const context=globalThis.ChartPreview?.getEntry()?.training_context,manifest=qualityManifest();
+  if(context?.manifest!==manifest)return;
+  const index=qualityState.items.findIndex(item=>String(item.chart_id)===context.chart_id);
+  if(index<0)return;
+  const request=qualityState.detailRequest;
+  let navigationRequest=request;
+  const originalPage=qualityState.page;
+  qualityState.previewNavigating=true;qualityState.previewError='';updateTrainingPreviewNavigation();
+  try {
+    let row=qualityState.items[index+direction];
+    if(!row) {
+      const page=qualityState.page+direction;
+      if(page<1 || page>qualityState.pages)return;
+      qualityState.page=page;await loadQualityCatalog(false);
+      if(manifest!==qualityManifest() || request!==qualityState.detailRequest)return;
+      row=direction>0?qualityState.items[0]:qualityState.items.at(-1);
+    }
+    if(row) {
+      const opening=openQualityDetail(row.chart_id,{scroll:false});
+      navigationRequest=qualityState.detailRequest;await opening;
+    }
+  } catch(error) {
+    if(manifest===qualityManifest() && navigationRequest===qualityState.detailRequest) {
+      qualityState.page=originalPage;qualityState.previewError=error.message;renderQualityCatalog();
+    }
+    throw error;
+  } finally {qualityState.previewNavigating=false;updateTrainingPreviewNavigation();}
+}
+
+async function browseTrainingPreview() {
+  if(!element('#generationPreviewCollapse')?.hidden)element('#generationPreviewCollapse').click();
+  setWorkspaceMode('quality');
+  if(datasetWorkspaceState.view==='catalog') {
+    const id=globalThis.ChartPreview?.getEntry()?.training_context?.chart_id;
+    const row=[...document.querySelectorAll('#qualityCatalogBody tr[data-chart-id]')].find(row=>row.dataset.chartId===id);
+    (row||element('#datasetCatalogPanel'))?.scrollIntoView({behavior:'smooth',block:row?'center':'start'});
+  } else {
+    await loadDatasetCatalog();element('#datasetCardsPanel')?.scrollIntoView({behavior:'smooth',block:'start'});
+  }
+}
+element('#trainingPreviewBrowse')?.addEventListener('click',guard(browseTrainingPreview));
+element('#trainingPreviewCatalog')?.addEventListener('click',guard(browseTrainingPreview));
+element('#trainingPreviewPrevious')?.addEventListener('click',guard(()=>navigateTrainingPreview(-1)));
+element('#trainingPreviewNext')?.addEventListener('click',guard(()=>navigateTrainingPreview(1)));
+window.addEventListener('chart-preview-updated',updateTrainingPreviewNavigation);
 
 function updateQualitySelectionControls() {
   const busy = qualityState.selectionLoading || qualityState.saving;
@@ -5599,25 +5724,52 @@ function updateQualityDetail() {
   const preview = previewParts.join("\n\n") || "";
   if (element("#qualityDetailTitle")) element("#qualityDetailTitle").textContent = `${detail.title || detail.chart_id || "谱面详情"} · ${detail.level || ""}`;
   if (element("#qualityDetailPreview")) element("#qualityDetailPreview").textContent = preview;
-  const audio = element("#qualityDetailAudio"); if (audio && detail.audio_url) audio.src = detail.audio_url;
+  const audio = element("#qualityDetailAudio"); if (audio && detail.audio_url && audio.getAttribute("src")!==detail.audio_url) audio.src = detail.audio_url;
   const list = element("#qualityRegionsList"); if (!list) return;
-  list.innerHTML = qualityState.regions.map((region, index) => `<div class="quality-region-row" data-region-index="${index}"><input type="number" min="0" step="0.01" value="${Number(region.start_sec ?? region.start ?? 0)}" data-region-field="start_sec"><input type="number" min="0" step="0.01" value="${Number(region.end_sec ?? region.end ?? 0)}" data-region-field="end_sec"><input type="number" min="0" max="4" step="0.05" value="${Number(region.weight ?? 0)}" data-region-field="weight"><input type="text" value="${escapeHtml(region.reason || "")}" data-region-field="reason" placeholder="理由"><button class="small-button quality-remove-region" type="button">删除</button></div>`).join("") || `<span class="muted">暂无局部标注。负例/排除片段会跳过交叠训练窗口。</span>`;
+  list.innerHTML = qualityState.regions.map((region, index) => `<div class="quality-region-row" data-region-index="${index}"><input type="number" min="0" step="0.01" value="${Number(region.start_sec ?? region.start ?? 0)}" data-region-field="start_sec"><input type="number" min="0" step="0.01" value="${Number(region.end_sec ?? region.end ?? 0)}" data-region-field="end_sec"><select aria-label="片段评价" data-region-field="label">${[['good','优秀'],['problem','有问题'],['uncertain','不确定']].map(([value,label])=>`<option value="${value}" ${(region.label||'uncertain')===value?'selected':''}>${label}</option>`).join('')}</select><select aria-label="问题类型" data-region-field="reason">${[['','未指定'],['timing','采音'],['layout','配置'],['comfort','手感']].map(([value,label])=>`<option value="${value}" ${region.reason===value?'selected':''}>${label}</option>`).join('')}</select><details class="quality-span-weights"><summary>高级权重</summary><input type="number" min="0" max="4" step="0.05" value="${Number(region.weight ?? 0)}" data-region-field="weight"><input aria-label="采音权重" title="采音权重" type="number" min="0" max="4" step="0.05" value="${Number(region.timing_weight ?? (region.label==='good'?1.5:region.label==='problem' && region.reason==='timing'?0:1))}" data-region-field="timing_weight"><input aria-label="配置权重" title="配置权重" type="number" min="0" max="4" step="0.05" value="${Number(region.component_weight ?? (region.label==='good'?1.5:region.label==='problem' && ['layout','comfort'].includes(region.reason)?0:1))}" data-region-field="component_weight"></details><button class="small-button quality-remove-region" type="button">删除</button></div>`).join("") || `<span class="muted">暂无局部标注。片段评价会调整对应的采音或配置监督，其余前文仍保留。</span>`;
 }
 
-async function openQualityDetail(chartId) {
+async function openQualityDetail(chartId,{scroll=true}={}) {
   const manifest = qualityManifest();
+  const workspace=document.body.dataset.workspace;
   const request = ++qualityState.detailRequest;
-  const data = await api("/api/quality/detail", { manifest, chart_id: chartId });
-  if (request !== qualityState.detailRequest || manifest !== qualityManifest()) return;
-  qualityState.detail = { ...data, chart_id: chartId };
-  const record = data.record || {};
-  qualityState.regions = Array.isArray(record.regions) ? JSON.parse(JSON.stringify(record.regions)) : [];
-  qualityState.correctedPath = record.corrected_path || "";
-  if (element("#qualityCorrectedPath")) element("#qualityCorrectedPath").textContent = qualityState.correctedPath;
-  const panel = element("#qualityDetail"); if (panel) panel.hidden = false;
-  updateQualityDetail();
-  panel?.scrollIntoView({ behavior: "smooth", block: "start" });
+  qualityState.previewLoading=true;qualityState.previewError='';updateTrainingPreviewNavigation();
+  try {
+    const [data,preview]=await Promise.all([
+      api('/api/quality/detail',{manifest,chart_id:chartId}),
+      api('/api/quality/chart-preview',{manifest,chart_id:chartId}),
+    ]);
+    if(request!==qualityState.detailRequest || manifest!==qualityManifest() || workspace!==document.body.dataset.workspace)return;
+    qualityState.detail={...data,chart_id:chartId};
+    const record=data.record||{};
+    qualityState.regions=Array.isArray(record.regions)?structuredClone(record.regions):[];
+    qualityState.correctedPath=record.corrected_path||'';
+    if(element('#qualityCorrectedPath'))element('#qualityCorrectedPath').textContent=qualityState.correctedPath;
+    if(element('#qualityDetail'))element('#qualityDetail').hidden=false;
+    updateQualityDetail();globalThis.ChartPreview?.openSource(preview,{scroll});
+  } catch(error) {
+    if(request===qualityState.detailRequest)qualityState.previewError=error.message;
+    throw error;
+  } finally {if(request===qualityState.detailRequest)qualityState.previewLoading=false;updateTrainingPreviewNavigation();}
 }
+
+async function openQualityReview(manifest=qualityManifest(),chartId=qualityState.detail?.chart_id,request=qualityState.detailRequest,{scroll=true}={}) {
+  if(!chartId)return;
+  const workspace=document.body.dataset.workspace;
+  const preview=await api('/api/quality/chart-preview',{manifest,chart_id:chartId});
+  if(request===qualityState.detailRequest && manifest===qualityManifest() && workspace===document.body.dataset.workspace)globalThis.ChartPreview?.openSource(preview,{scroll});
+}
+element('#qualityOpenReview')?.addEventListener('click',()=>void openQualityReview().catch(error=>setStatus(error.message,false)));
+
+window.addEventListener('training-source-annotated',event=>{
+  const {manifest,chart_id,result}=event.detail;
+  if(manifest!==qualityManifest())return;
+  if(qualityState.detail?.chart_id===chart_id) {
+    const record=result.records?.find(row=>row.chart_id===chart_id);
+    if(record) {qualityState.detail.record=record;qualityState.regions=structuredClone(record.regions||[]);updateQualityDetail();}
+  }
+  qualityState.summary=result.summary;renderQualitySummary();
+});
 
 async function saveQualitySelection() {
   if (qualityState.selectionLoading || qualityState.saving) throw new Error("请等待当前选择或保存操作完成。");
@@ -5653,17 +5805,34 @@ async function saveQualitySelection() {
 function collectQualityRegions() {
   return [...document.querySelectorAll(".quality-region-row")].map((row) => {
     const value = name => row.querySelector(`[data-region-field="${name}"]`)?.value;
-    return { start_sec: Number(value("start_sec")), end_sec: Number(value("end_sec")), weight: Math.max(0, Math.min(4, Number(value("weight")))), reason: value("reason") || "" };
+    return { start_sec: Number(value("start_sec")), end_sec: Number(value("end_sec")), weight: Math.max(0, Math.min(4, Number(value("weight")))), label:value("label")||"uncertain",timing_weight:Number(value("timing_weight")),component_weight:Number(value("component_weight")), reason: value("reason") || "" };
   }).filter((item) => Number.isFinite(item.start_sec) && Number.isFinite(item.end_sec) && item.end_sec > item.start_sec);
+}
+
+function replaceQualityRegionSpan(regions, replacement) {
+  const start=replacement.start_sec,end=replacement.end_sec,result=[];
+  for(const region of regions) {
+    const a=Number(region.start_sec),b=Number(region.end_sec);
+    if(b<=start || a>=end)result.push({...region});
+    else {
+      if(a<start)result.push({...region,end_sec:start});
+      if(b>end)result.push({...region,start_sec:end});
+    }
+  }
+  result.push({...replacement});
+  return result.sort((a,b)=>a.start_sec-b.start_sec);
 }
 
 async function saveQualityRegions() {
   if (!qualityState.detail?.chart_id) throw new Error("请先打开一张谱面。");
+  const chartId=qualityState.detail.chart_id,manifest=qualityManifest(),request=qualityState.detailRequest;
   const record = qualityState.detail.record || {};
-  const data = await api("/api/quality/save", { manifest: qualityManifest(), chart_ids: [qualityState.detail.chart_id], label: record.label || "normal", weight: Number(record.weight ?? 1), reason: record.reason || "", regions: collectQualityRegions() });
+  const data = await api("/api/quality/save", { manifest, chart_ids: [chartId], label: record.label || "normal", weight: Number(record.weight ?? 1), reason: record.reason || "", regions: collectQualityRegions() });
+  if(chartId!==qualityState.detail?.chart_id || manifest!==qualityManifest() || request!==qualityState.detailRequest)return;
   qualityState.annotationPath = data.annotation_path || qualityState.annotationPath; qualityState.summary = data.summary || qualityState.summary;
   qualityState.annotationManifest = qualityManifest();
-  renderQualitySummary(); await loadQualityCatalog(false); await openQualityDetail(qualityState.detail.chart_id);
+  renderQualitySummary(); await loadQualityCatalog(false);
+  if(chartId===qualityState.detail?.chart_id && manifest===qualityManifest() && request===qualityState.detailRequest)await openQualityDetail(chartId);
 }
 
 async function saveQualityCorrection() {
@@ -6728,7 +6897,10 @@ window.addEventListener("beforeunload", flushSettings);
 
 // Mode tabs
 on("#trainingModeTab", "click", () => setWorkspaceMode("training"));
-on("#qualityModeTab", "click", openDatasetWorkspace);
+on("#qualityModeTab", "click", async()=>{
+  setWorkspaceMode('quality');await loadDatasetCatalog();
+  if(datasetWorkspaceState.view==='catalog' && qualityManifest() && !qualityState.items.length)await loadQualityCatalog(false);
+});
 on("#generationModeTab", "click", () => setWorkspaceMode("generation"));
 on("#intensityModeTab", "click", () => { setIntensitySong(intensityAudioPath()); setWorkspaceMode("intensity"); drawIntensityCurve(); });
 on("#conflictPreset", "change", () => {
@@ -6833,11 +7005,19 @@ on("#qualityPageJumpButton", "click", async () => {
 on("#qualityPageInput", "keydown", async (event) => { if (event.key === "Enter") element("#qualityPageJumpButton")?.click(); });
 on("#qualitySelectAll", "change", (event) => { qualityState.items.forEach((item) => { const id = String(item.chart_id || item.id); if (event.target.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); }); renderQualityCatalog(); });
 on("#qualityCloseDetailButton", "click", () => { const panel = element("#qualityDetail"); if (panel) panel.hidden = true; });
-on("#qualityAddRegionButton", "click", () => { qualityState.regions.push({ start_sec: 0, end_sec: 1, weight: 0, reason: "" }); updateQualityDetail(); });
+on("#qualityAddRegionButton", "click", () => { qualityState.regions.push({ start_sec: Number(element("#qualityDetailAudio")?.currentTime||0), end_sec: Number(element("#qualityDetailAudio")?.currentTime||0)+1, weight: 1, label:"uncertain", reason: "", timing_weight:1, component_weight:1 }); updateQualityDetail(); });
 on("#qualitySaveRegionsButton", "click", saveQualityRegions);
 on("#qualitySaveCorrectionButton", "click", saveQualityCorrection);
 on("#qualityBulkLabel", "change", (event) => { const weight = element("#qualityBulkWeight"); if (weight) weight.value = QUALITY_DEFAULT_WEIGHTS[event.target.value] ?? 1; });
 document.addEventListener("change", (event) => {
+  const regionRow=event.target.closest?.('.quality-region-row');
+  if(regionRow && ['label','reason'].includes(event.target.dataset.regionField)) {
+    const field=name=>regionRow.querySelector(`[data-region-field="${name}"]`);
+    const label=field('label').value,reason=field('reason').value;
+    field('weight').value=1;
+    field('timing_weight').value=label==='good'?1.5:label==='problem' && (!reason || reason==='timing')?0:1;
+    field('component_weight').value=label==='good'?1.5:label==='problem' && (!reason || reason==='layout' || reason==='comfort')?0:1;
+  }
   const row = event.target.closest?.(".quality-row-select");
   if (row) { const id = row.dataset.chartId; if (row.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); updateQualitySelectionControls(); }
   const weight = event.target.closest?.(".quality-weight");
@@ -6860,7 +7040,7 @@ document.addEventListener("click", (event) => {
     if (item) guard(() => openDataset(item))();
   }
   const button = event.target.closest?.(".quality-detail-button");
-  if (button) openQualityDetail(button.dataset.chartId);
+  if (button) guard(()=>openQualityDetail(button.dataset.chartId))();
   const remove = event.target.closest?.(".quality-remove-region");
   if (remove) { const row = remove.closest(".quality-region-row"); const index = Number(row?.dataset.regionIndex); if (Number.isInteger(index)) { qualityState.regions.splice(index, 1); updateQualityDetail(); } }
 });

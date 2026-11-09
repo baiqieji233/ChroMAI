@@ -5,6 +5,7 @@ from collections import OrderedDict
 from datetime import datetime
 import hashlib
 import json
+import math
 import mimetypes
 from pathlib import Path
 import re
@@ -14,6 +15,7 @@ from urllib.parse import quote
 
 GENERATION_KINDS = {'generate','form_generate','composer_generate','composer_v2_generate','chart_stream_generate'}
 _resources = OrderedDict()
+_hashes = OrderedDict()
 _lock = threading.Lock()
 
 
@@ -53,6 +55,31 @@ def resource_path(token):
     return path
 
 
+def _identities(path, difficulty_index=None):
+    """Hash immutable preview inputs once, rechecking their file stamp."""
+    stat=path.stat()
+    key=(str(path),stat.st_mtime_ns,stat.st_size,difficulty_index)
+    with _lock:
+        cached=_hashes.get(key)
+        if cached is not None:
+            _hashes.move_to_end(key)
+            return cached
+    digest=hashlib.sha256()
+    with path.open('rb') as source:
+        for block in iter(lambda:source.read(1024*1024),b''):digest.update(block)
+    value={'file_sha256':digest.hexdigest()}
+    if difficulty_index is not None:
+        from maichart.training.quality_annotations import chart_sha256
+        value['chart_sha256']=chart_sha256(path,difficulty_index)
+    current=path.stat()
+    if (current.st_mtime_ns,current.st_size)!=(stat.st_mtime_ns,stat.st_size):
+        raise ValueError('预览源文件已改变，请重新载入谱面')
+    with _lock:
+        _hashes[key]=value
+        while len(_hashes)>256:_hashes.popitem(last=False)
+    return value
+
+
 def _saved(task_id, log_root):
     if not re.fullmatch(r'[0-9a-f]{6,64}',str(task_id)):
         raise FileNotFoundError('生成任务不存在')
@@ -76,57 +103,121 @@ def describe(task_id, *, project, log_root, task=None):
     result=record.get('result') or {}
     argv=record.get('argv') or []
     settings=result.get('effective_settings') or {}
+    audio_duration=None
+    for metadata in [result,result.get('composer_v2_report'),result.get('composer_report'),result.get('stream_report')]:
+        if not isinstance(metadata,dict):continue
+        try:duration=float(metadata.get('duration_sec'))
+        except (TypeError,ValueError):continue
+        if math.isfinite(duration) and duration>0:
+            audio_duration=duration
+            break
     # Actual child-process arguments win over editable current UI fields.
     output=_argument(argv,'--output') or result.get('output') or settings.get('output')
     audio=_argument(argv,'--audio') or settings.get('audio') or result.get('audio')
-    candidates=list(result.get('paths') or [])
+    result_paths=list(result.get('paths') or [])
     # Persisted task logs contain argv even after the server has restarted.
     # The batch manifest keeps every chart's seed and original, isolated path.
     batch_path=_argument(argv,'--batch-manifest') or settings.get('batch_manifest')
     batch_labels={}
+    batch=result.get('composer_v2_batch')
     if batch_path:
         manifest=_path(batch_path,project)
-        batch=json.loads(manifest.read_text(encoding='utf-8-sig'))
+        if manifest.is_file():batch=json.loads(manifest.read_text(encoding='utf-8-sig'))
+    candidates=[]
+    if isinstance(batch,dict):
+        audio=audio or batch.get('audio')
         for item in batch.get('charts', []):
-            if item.get('status')!='completed':continue
+            if item.get('status')!='completed' or not item.get('output'):continue
             path=_path(item['output'],project)
             candidates.append(path)
-            batch_labels[path]=f"第 {item['index']}/{batch['count']} 张 · seed {item['seed']}"
-    discovered_repair=None
-    if output:
-        target=_path(output,project)
-        discovered_repair=target.with_name(target.stem+'.repaired.txt')
-        candidates.extend([target,discovered_repair])
+            batch_labels[path]=f"本次第 {item.get('index',len(candidates))} 张" + (f" · seed {item['seed']}" if 'seed' in item else '')
+    elif output:
+        candidates.append(_path(output,project))
+    # Composer v2's task output or completed batch entries are authoritative.
+    # Phrase-search snapshots have only a prefix and a trial, never a complete
+    # alternative continuation. Do not open their reports or offer them here.
+    if record.get('kind')!='composer_v2_generate' or (not output and not isinstance(batch,dict)):
+        candidates.extend(result_paths)
+    explicit_paths={_path(value,project) for value in result_paths}
+    discovered_repairs=set()
+    repair_originals={}
+    for value in list(candidates):
+        target=_path(value,project)
+        if target.suffix.lower() not in {'.txt','.maidata'} or '.repaired.' in target.name:continue
+        repair=target.with_name(target.stem+'.repaired.txt')
+        repair_originals[repair]=target
+        if repair not in explicit_paths:discovered_repairs.add(repair)
+        candidates.append(repair)
     def timestamp(key):
         try:return datetime.strptime(record.get(key,''),'%Y-%m-%d %H:%M:%S').timestamp()
         except (ValueError,TypeError):return None
     started,ended=timestamp('started'),timestamp('ended')
     audio_path=_path(audio,project) if audio else None
     audio_url=_resource(audio_path) if audio_path is not None and audio_path.is_file() else None
+    audio_hash=_identities(audio_path)['file_sha256'] if audio_url else None
     charts=[]
     seen=set()
     for value in candidates:
         path=_path(value,project)
+        if 'phrase_candidates' in {part.casefold() for part in path.parts}:continue
         if path in seen or path.suffix.lower() not in {'.txt','.maidata'} or not path.is_file():continue
         seen.add(path)
         # Persisted logs may refer to old non-isolated output paths. Never pair
         # a subsequently overwritten chart with that old task's music.
-        modified=path.stat().st_mtime
+        file_stat=path.stat()
+        modified=file_stat.st_mtime
         # Log timestamps have one-second precision; allow its final fraction,
         # without accepting files left by an earlier generation.
         if ended is not None and modified>ended+1:continue
         if started is not None and modified<started:continue
-        if path==discovered_repair and (started is None or ended is None):continue
-        with path.open('r',encoding='utf-8-sig',errors='replace') as stream:header=stream.read(65536)
-        if not re.search(r'(?im)^\s*&inote_\d+\s*=',header):continue
-        title=re.search(r'(?im)^\s*&title\s*=([^\r\n]*)',header)
-        charts.append(dict(label=batch_labels.get(path) or ('修正版 · ' if '.repaired.' in path.name else '生成谱面 · ')+path.name,
-            title=title.group(1).strip() if title else path.stem,path=str(path),url=_resource(path),
-            audio_url=audio_url,audio_name=audio_path.name if audio_url else None))
+        if path in discovered_repairs and (started is None or ended is None):continue
+        from maichart.maidata import parse_maidata_file
+        metadata=parse_maidata_file(path)
+        difficulty=next((item for item in metadata.difficulties if (item.inote or '').strip()),None)
+        if difficulty is None:continue
+        index=difficulty.index
+        hashes=_identities(path,index)
+        current=path.stat()
+        if (current.st_mtime_ns,current.st_size)!=(file_stat.st_mtime_ns,file_stat.st_size):
+            raise ValueError('预览源文件已改变，请重新载入谱面')
+        repaired='.repaired.' in path.name
+        original=repair_originals.get(path,path.with_name(path.name.replace('.repaired.','.'))) if repaired else path
+        label=batch_labels.get(original) or '完整谱面'
+        if repaired:label+=' · 修复版'
+        identity=dict(task_id=str(task_id),path=str(path),difficulty_index=index,**hashes,audio_sha256=audio_hash)
+        version_id=hashlib.sha256(json.dumps(identity,sort_keys=True).encode()).hexdigest()[:24]
+        charts.append(dict(label=label,content_kind='complete_chart',version_id=version_id,**hashes,
+            title=metadata.title or path.stem,path=str(path),url=_resource(path),
+            audio_url=audio_url,audio_name=audio_path.name if audio_url else None, audio_path=str(audio_path) if audio_path else None,
+            audio_sha256=audio_hash,audio_duration_sec=audio_duration,difficulty_index=index,
+            timeline_url='/api/preview/timeline?id='+quote(str(task_id))+'&version='+version_id))
     if not charts:raise FileNotFoundError('本任务没有可预览的谱面文件，或原文件已被覆盖')
+    if not batch_labels:
+        def original_path(chart):
+            path=Path(chart['path'])
+            return repair_originals.get(path,path.with_name(path.name.replace('.repaired.','.')))
+        originals=list(dict.fromkeys(original_path(chart) for chart in charts))
+        if len(originals)>1:
+            for chart in charts:
+                number=originals.index(original_path(chart))+1
+                chart['label']=f'本次第 {number} 张'+(' · 修复版' if '.repaired.' in Path(chart['path']).name else '')
     revision=hashlib.sha256(json.dumps(charts,sort_keys=True).encode()).hexdigest()[:20]
     return dict(task_id=task_id,revision=revision,charts=charts,
         message='' if audio_url else '未找到本任务的对应音频，可静音预览谱面。')
+
+
+def describe_timeline(task_id, version_id, *, project, log_root, task=None):
+    """Resolve one complete, unchanged task output before reading its notes."""
+    from maichart.webui.chart_timeline import timeline
+    value=describe(task_id,project=project,log_root=log_root,task=task)
+    chart=next((item for item in value['charts'] if item['version_id']==version_id),None)
+    if chart is None:raise FileNotFoundError('完整谱面版本已改变或不存在，请重新载入')
+    result=timeline(chart['path'],chart['difficulty_index'],audio_duration_sec=chart.get('audio_duration_sec'))
+    # The timeline parser is cached by the exact same file stamp as resources.
+    # Revalidate after parsing so a concurrent replacement cannot mix versions.
+    token=chart['url'].split('id=',1)[1]
+    resource_path(token)
+    return dict(result,task_id=task_id,version_id=version_id)
 
 
 def latest(*, project, log_root):

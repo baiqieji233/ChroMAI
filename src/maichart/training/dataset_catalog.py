@@ -160,7 +160,7 @@ def merge_training_manifests(
             f"{key}: {reference[key]!r} != {contract[key]!r}"
             for key in reference
             if reference[key] != contract[key]
-            and not (model_family == "song_form_v2"
+            and not (model_family in {"song_form_v2", "chart_composer_v2"}
                      and key in SONG_FORM_V2_IGNORED_AUDIO_CONTRACT_KEYS)
             and (key in {"target_schema", "feature_profile"}
                  or reference[key] is not None and contract[key] is not None)

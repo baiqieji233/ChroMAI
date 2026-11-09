@@ -51,6 +51,10 @@ def parser():
     result.add_argument('--intercept-tap-on-slide',action=argparse.BooleanOptionalAction,default=GENERATION_DEFAULTS['intercept_tap_on_slide'],help='Enforce native hard TapOnSlide findings and clean residual affected notes')
     result.add_argument('--tap-on-slide-threshold-ms',type=float,default=GENERATION_DEFAULTS['tap_on_slide_threshold_ms'])
     result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=GENERATION_DEFAULTS['candidates'])
+    result.add_argument('--phrase-search', choices=('event','layout','joint'), default=GENERATION_DEFAULTS['phrase_search'],
+        help='layout: compare continuous configurations on shared timings; joint: compare timing and configuration; event: fast single-event trials')
+    result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
+    result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
     result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts; sequential seeds, shared model/audio')
     result.add_argument('--batch-manifest', help=argparse.SUPPRESS)
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')

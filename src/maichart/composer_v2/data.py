@@ -116,6 +116,10 @@ class ComposerV2Dataset(Dataset):
         reused_charts = cache_hits = 0
         _report_preparation('charts', 0, len(entries), chart_start, accepted=0)
         for examined, entry in enumerate(entries, 1):
+            if entry.get('reviewed_only') and not quality_enabled:
+                raise ValueError('人工确认片段必须启用质量加权；未确认部分仅作上下文，不能作为整谱训练')
+            if entry.get('reviewed_only') and sequence_policy != 'continuous_events_v1':
+                raise ValueError('人工确认片段当前仅支持 Composer v2 连续事件训练')
             if limit_charts and len(self.songs) >= limit_charts:
                 break
             source = None
@@ -155,6 +159,8 @@ class ComposerV2Dataset(Dataset):
                     else:
                         chart, sustain, dialect_edits = prepared_chart
                     quality = _preparation_annotation(annotations, source, slot, audio_path, None, annotation_index)
+                    if entry.get('reviewed_only') and (quality is None or quality.get('unmarked_weight') != 0):
+                        raise ValueError('人工确认片段的范围标注缺失或已失效，请重新整理校准素材')
                     if quality and (quality.get('label') in ('excluded', 'negative')
                                     or float(quality.get('weight', 1.)) <= 0):
                         self.audit['skipped'].append({'source': str(source), 'reason': 'quality_excluded'})
@@ -350,6 +356,11 @@ class ComposerV2Dataset(Dataset):
             self.audit.setdefault('audio_extents', []).append(dict(source=str(song.source_path),
                 difficulty=song.difficulty, authored_end_beat=str(song.authored_end_beat),
                 window_end_beat=str(audio_end)))
+            if (song.quality or {}).get('unmarked_weight') == 0:
+                # An unreviewed remainder cannot define chart-wide radar/style.
+                song.condition, song.condition_known = resolve_condition(song.level, policy=self.condition_policy)
+                usable.append(song)
+                continue
             condition_key = (song.chart_sha256 or song.source_path, song.difficulty, song.level, audio_key)
             if condition_key not in conditions:
                 conditions[condition_key] = training_condition(song.points,
@@ -483,13 +494,16 @@ class ComposerV2Dataset(Dataset):
             labels[first:] = full[len(prefix_ids):]
         weights = np.zeros(len(ids), dtype=np.float32)
         if training:
-            weights[labels != -100] = 1.
+            active = (labels != -100).astype(np.float32)
+            weights = active * float((song.quality or {}).get('unmarked_weight', 1.))
             # Excluded targets remain visible teacher-forcing context, with zero CE.
             target_clocks = clocks[1:]
             for region in (song.quality or {}).get('regions', []):
                 sec = song.clock.at_floats(float(start) + target_clocks)
                 mask = ((sec >= float(region['start_sec'])) & (sec < float(region['end_sec'])))
-                weights[mask] *= float(region.get('weight', 1.))
+                weights[mask] = active[mask] * float(region.get('weight', 1.))
+            if (song.quality or {}).get('unmarked_weight') == 0:
+                weights[labels == codec.eos_id] = 0
         if song.audio is None:
             raise RuntimeError('Audio features are not prepared; call dataset.prepare()')
         local_beats = np.arange(-self.history_beats, self.window_beats + self.future_beats,
@@ -519,6 +533,8 @@ class ComposerV2Dataset(Dataset):
             'start_beat': start, 'song_id': song.song_id,
             'song_cache_key': hashlib.sha256((str(song.audio_path.resolve())+str(song.clock.beats)+str(song.clock.bpms)+str(song.clock.seconds)+json.dumps(getattr(song.audio,'identity',{}),sort_keys=True,default=str)).encode()).hexdigest(),
             'reference_start': reference_start, 'pad_id': codec.pad_id}
+        if 'detail' in summary:
+            output['song_detail']=torch.as_tensor(np.asarray(summary['detail']),dtype=torch.float32)
         return output
 
     def __getitem__(self, index):
@@ -538,6 +554,8 @@ def collate_composer_v2(items):
         fill = items[0]['pad_id'] if key == 'input_ids' else (-100 if key == 'labels' else 0)
         output[key] = torch.nn.utils.rnn.pad_sequence([item[key] for item in items],
             batch_first=True, padding_value=fill)
+    if all('song_detail' in item for item in items):
+        output['song_detail'] = torch.nn.utils.rnn.pad_sequence([item['song_detail'] for item in items], batch_first=True)
     for key in ('condition', 'condition_known', 'sample_weight'):
         output[key] = torch.stack([item[key] for item in items])
     for key in ('start_beat', 'song_id', 'reference_start'):
