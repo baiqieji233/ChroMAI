@@ -34,6 +34,7 @@ function composerV2TrainingPayload(options={}) {
 function composerV2GenerationPayload(options={}) {
   const seed=valueOrDefault("#seed","").trim();
   const number=(selector,fallback,label,bounds)=>v2NumericValue(valueOrDefault(selector,fallback),label,bounds);
+  const count=number('#v2GenerateCount',1,'生成张数',{min:1,max:32,integer:true});
   const tempoMap=parseTempoMap();
   const condition={};
   for(const [key,state] of Object.entries(v2ConditionState))if(state.override)
@@ -45,7 +46,7 @@ function composerV2GenerationPayload(options={}) {
     first:element('#v2GenerateAutoFirst')?.checked?null:number('#first',0,'首拍偏移'),level:number('#level',13.3,'目标等级',{min:12,max:15}),
     seed:seed===""?Math.floor(Math.random()*2147483647):v2NumericValue(seed,'随机种子',{min:0,integer:true}),
     temperature:number('#v2GenerateTemperature',.9,'采音温度',{min:0}),top_p:number('#v2GenerateTopP',.95,'采音 Top-p',{min:0,max:1,exclusiveMin:true}),
-    count:number('#v2GenerateCount',1,'生成张数',{min:1,max:32,integer:true}),
+    count,parallel:count>1?number('#v2GenerateParallel',1,'同时生成数',{min:1,max:32,integer:true}):1,
     window_retries:number('#v2GenerateWindowRetries',16,'每事件提议重试次数',{min:1,max:128,integer:true}),
     phrase_search:element('#v2GeneratePhraseSearch')?.disabled?'event':valueOrDefault('#v2GeneratePhraseSearch','layout'),
     phrase_beats:number('#v2GeneratePhraseBeats',4,'提前试写长度',{min:1,max:16}),
@@ -55,7 +56,7 @@ function composerV2GenerationPayload(options={}) {
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
     tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),
     intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
-    cpu_threads:number('#v2GenerateCpuThreads',2,'CPU 计算线程',{min:1,integer:true}),
+    cpu_threads:number('#v2GenerateCpuThreads',0,'CPU 计算线程',{min:0,integer:true}),
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
   if(payload.phrase_commit_beats>payload.phrase_beats)throw new Error("每次保留长度不能超过提前试写长度。");
@@ -100,6 +101,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if(payload.count>1 && payload.parallel>1 && !status.training_capabilities?.composer_v2_parallel_generation)
+    throw new Error('同时生成多张需要新版后台，请重启 WebUI 后提交。');
   if(payload.count>1 && !status.training_capabilities?.composer_v2_batch_generation)
     throw new Error('批量生成需要更新后的后台，请在当前任务结束后重启 WebUI。');
   if (payload.tempo_detection && !status.training_capabilities?.composer_v2_variable_tempo)
@@ -118,11 +121,17 @@ function requireV2SplitSamplingSupport(status,payload) {
   }
   if(payload.phrase_search && payload.phrase_search!=='event' && !status.training_capabilities?.composer_v2_phrase_search)
     throw new Error('比较多种写法需要更新后的后台；请在当前任务结束后重启 WebUI，或选择“逐步生成（速度优先）”。');
+  if(payload.cpu_threads===0 && !status.training_capabilities?.composer_v2_cpu_auto_threads)
+    throw new Error('自动分配CPU线程需要新版后台；请在当前任务结束后重启 WebUI，或先手动填写线程数。');
 }
 function composerV2GenerationMessage(task) {
   if(task.status!=='running')return task.message||'';
   const batch=task.result?.composer_v2_batch_progress;
-  if(batch?.count>1)return `第 ${batch.index}/${batch.count} 张 · 已成功 ${batch.completed} 张、失败 ${batch.failed} 张 · ${task.message||'正在生成'}`;
+  if(batch?.count>1) {
+    if(batch.status==='preparing')return '正在准备音频和模型';
+    if(batch.parallel>1)return `并行 ${batch.active?.length||0}/${batch.parallel} 张 · 已完成 ${batch.completed+batch.failed}/${batch.count}（成功 ${batch.completed}、失败 ${batch.failed}）`;
+    return `第 ${batch.index}/${batch.count} 张 · 已成功 ${batch.completed} 张、失败 ${batch.failed} 张 · ${task.message||'正在生成'}`;
+  }
   const labels={composer_v2_rollback:'正在回退并重试冲突位置',composer_v2_hold_release_repair:'正在修复 Hold 尾部冲突',
     composer_v2_sampling:'生成采样设置已确定',composer_v2_window:'已完成一个生成窗口，继续续写',composer_v2_done:'谱面生成结束，正在收集输出'};
   if(labels[task.message])return labels[task.message];
@@ -1216,7 +1225,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection",
+  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
@@ -1943,6 +1952,7 @@ function currentGenerationFamily() {
 }
 
 function updateGenerationCapabilityControls() {
+  updateV2BatchControls();
   const data = generationInspection.data;
   const caps = data?.generation_capabilities || {};
   const checked = generationInspection.path === valueOrDefault("#checkpointPath", "").trim()
@@ -1984,6 +1994,13 @@ function updateGenerationCapabilityControls() {
   const retries = element("#conflictRetries");
   if (retries) retries.disabled = !(conflictEnabled && valueOrDefault("#conflictRepairMode", "none") !== "none");
 
+}
+
+function updateV2BatchControls() {
+  const field=element('#v2GenerateParallel');if(!field)return;
+  const count=Number(valueOrDefault('#v2GenerateCount',1));field.disabled=count<=1;
+  const active=Math.min(count,Number(field.value)||1),help=element('#v2GenerateParallelHelp');
+  if(help)help.textContent=count<=1?'生成多张时，可设置同时运行的张数。':`最多同时运行 ${active} 张，其余排队；并行数越高，显存占用越大。`;
 }
 
 // A field marked for one family applies to its descendants too: the
@@ -6953,6 +6970,8 @@ on("#modelFamily", "change", () => {
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
 on("#v2TrainValidationSource", "change", () => {updateTrainingControls();saveSettings();});
+on('#v2GenerateCount','input',()=>{updateV2BatchControls();saveSettings();});
+on('#v2GenerateParallel','input',()=>{updateV2BatchControls();saveSettings();});
 on("#trainingMode", "change", () => { const validationField=element('#composerValidationManifest');if(currentTrainingMode()!=='resume' && validationField?.dataset.validationInherited==='1'){validationField.value=validationField.dataset.beforeResumeValidation??'';delete validationField.dataset.validationInherited;delete validationField.dataset.beforeResumeValidation;} applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerEchoPriorPolicy','composerTimingDistributionPolicy','composerButtonLoadPolicy','composerFineTimingPolicy','composerDensityFeedbackPolicy','composerActionHeadPolicy','composerConfigurationQualityPolicy','composerSampleSequencePolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerStructurePolicy','composerStructureBackend','composerContactPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults({resetComposer:true}); updateTrainingControls(); });
 on("#composerApplyFreshDefaults",'click',()=>{if(applyComposerFreshTrainingDefaults()){updateTrainingControls();saveSettings();setStatus(valueOrDefault('#composerArchitectureProfile','')==='event_set_stream_v1'?'已应用整拍集合默认值：50轮、固定学习率0.0005、batch16短段×累积4、历史128、展开32事件、有序草稿。':'已应用 Composer 重训默认值：20轮、batch64×累积4，启用动机与配置恢复。',true);}});
 on('#composerLearningPolicy','change',()=>{const legacy=valueOrDefault('#composerLearningPolicy','auto')==='legacy';for(const [id,value] of [['composerTransitionExitWeight',0],['composerPrefixAugmentationRate',legacy?0:.15]]){const node=element('#'+id);if(node&&!node.disabled)node.value=String(value);}updateEventSetControls();saveSettings();});

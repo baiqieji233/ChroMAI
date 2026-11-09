@@ -439,6 +439,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                            scope='conditional_phase_only',phase_mass_preserved=True),
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
+    report['cpu_runtime']=getattr(args,'cpu_runtime',None)
     report['phrase_search']=dict(mode=phrase_mode,lookahead_beats=float(phrase_beats),
         commit_beats=float(phrase_commit_beats),decisions=phrase_count,trials=phrase_trials,
         scoring='native_trajectory_and_selected_attack_support_no_density_reward',

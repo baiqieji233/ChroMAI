@@ -242,6 +242,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_training": True,
                                               "composer_v2_generation": True,
                                               "composer_v2_batch_generation": True,
+                                              "composer_v2_parallel_generation": True,
+                                              "composer_v2_cpu_auto_threads": True,
                                               "composer_v2_api_contract": "composer_v2_continuous_events_v3",
                                               "composer_v2_split_sampling": True,
                                               "composer_v2_phrase_search": True,
@@ -2020,7 +2022,11 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         elif prefix == "composer_v2_batch":
             task.result['composer_v2_batch_progress'] = dict(data)
             task.progress = min(.99, (data.get('completed', 0) + data.get('failed', 0)) / max(1, data.get('count', 1)))
-            task.message = f"批量生成 · 第 {data.get('index', 1)}/{data.get('count', 1)} 张 · 已成功 {data.get('completed', 0)} 张"
+            task.result['progress_indeterminate']=False
+            if data.get('status')=='preparing':task.message='批量生成 · 正在准备音频和模型'
+            elif data.get('parallel',1)>1:
+                task.message=f"批量并行 · 同时运行 {len(data.get('active',[]))}/{data['parallel']} 张 · 成功 {data.get('completed',0)}、失败 {data.get('failed',0)}"
+            else:task.message = f"批量生成 · 第 {data.get('index', 1)}/{data.get('count', 1)} 张 · 已成功 {data.get('completed', 0)} 张"
         elif prefix == "composer_v2_event":
             task.result["progress_indeterminate"] = True
             task.message = f"已生成 {data.get('events', 0)} 个事件 · 当前拍位 {data.get('beat', '?')}"
@@ -2426,6 +2432,7 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
                 batch = json.loads(batch_path.read_text(encoding='utf-8'))
                 task.result['composer_v2_batch'] = batch
                 for chart in batch.get('charts', []):
+                    if chart.get('log'):paths.append(Path(chart['log']))
                     if chart.get('status') == 'completed':
                         paths.extend(Path(chart[key]) for key in ('output', 'report') if chart.get(key))
                     elif chart.get('diagnostic'):

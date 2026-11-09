@@ -14,5 +14,5 @@ TRAIN_DEFAULTS = dict(epochs=50, batch_size=8, grad_accumulation=8, lr=.0002,
 ENCODER_DEFAULTS = dict(audio_layers=4,song_layers=2)
 GENERATION_DEFAULTS = dict(temperature=.9, top_p=.95, action_temperature=.9,
     action_top_p=.95, candidates=2, intercept_tap_on_slide=True,
-    tap_on_slide_threshold_ms=200., count=1,phrase_search='layout',phrase_beats=4.,phrase_commit_beats=2.)
+    tap_on_slide_threshold_ms=200., count=1,parallel=1,cpu_threads=0,phrase_search='layout',phrase_beats=4.,phrase_commit_beats=2.)
 MAX_BATCH_COUNT = 32

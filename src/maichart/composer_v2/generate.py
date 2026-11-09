@@ -55,10 +55,13 @@ def parser():
         help='layout: compare continuous configurations on shared timings; joint: compare timing and configuration; event: fast single-event trials')
     result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
     result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
-    result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts; sequential seeds, shared model/audio')
+    result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts with independent consecutive seeds')
+    result.add_argument('--parallel', type=int, default=GENERATION_DEFAULTS['parallel'],
+                        help='Maximum independent generation processes; 1 shares one model sequentially')
     result.add_argument('--batch-manifest', help=argparse.SUPPRESS)
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
-    result.add_argument('--cpu-threads', type=int, default=2)
+    result.add_argument('--cpu-threads', type=int, default=GENERATION_DEFAULTS['cpu_threads'],
+                        help='CPU operator threads per process; 0 automatically budgets across parallel charts')
     result.add_argument('--max-events', type=int, default=0)
     result.add_argument('--tempo-map', type=json.loads)
     result.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
@@ -338,9 +341,10 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     if args.device == 'cuda':
         from maichart.webui.startup_check import require_cuda
         require_cuda(torch)
-    threads=int(getattr(args,'cpu_threads',2))
-    if threads<1:raise ValueError('cpu_threads must be positive')
-    torch.set_num_threads(threads)
+    device=args.device
+    if device=='auto':device='cuda' if torch.cuda.is_available() else 'cpu'
+    from .inference_runtime import configure_threads
+    args.cpu_runtime=configure_threads(getattr(args,'cpu_threads',0),device,getattr(args,'cpu_parallelism',1))
     from .model import ComposerV2Config, ComposerV2
     if args.temperature < 0 or not 0 < args.top_p <= 1:
         raise ValueError('temperature must be nonnegative and top_p in (0,1]')
@@ -380,9 +384,6 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     print('composer_v2_exhaustion_policy '+json.dumps(dict(requested=getattr(args,'exhaustion_policy','auto'),
         effective=exhaustion_policy)),flush=True)
-    device = args.device
-    if device == 'auto':
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
     audio_path = Path(args.audio).resolve()
     if prepared_override is None:
         tempo,first,timing_report,audio = prepare_inputs(args,config,device,audio_store_override)
@@ -503,7 +504,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding='utf-8')
     metadata = dict(family='chart_composer_v2', checkpoint=str(Path(args.checkpoint).resolve()),
-        checkpoint_info=checkpoint_info,
+        checkpoint_info=checkpoint_info,cpu_runtime=args.cpu_runtime,
         audio=str(audio_path), output=str(output), seed=args.seed, level=args.level,
         first=first,timing=timing_report,tempo_map=[dict(beat=str(t.beat), bpm=t.bpm) for t in tempo],
         meter_map=getattr(args, 'meter_map', None), meter_policy='metadata_only_no_fixed_4_4_condition',
@@ -547,6 +548,8 @@ def main(argv=None):
     from .defaults import MAX_BATCH_COUNT
     if not 1<=args.count<=MAX_BATCH_COUNT:
         raise ValueError(f'count must be in 1..{MAX_BATCH_COUNT}')
+    if not 1<=args.parallel<=MAX_BATCH_COUNT:
+        raise ValueError(f'parallel must be in 1..{MAX_BATCH_COUNT}')
     if args.count>1:
         from .batch_generate import generate_batch
         return generate_batch(args)

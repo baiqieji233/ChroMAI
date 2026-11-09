@@ -77,7 +77,7 @@ class Attention(nn.Module):
         q=self.split(self.q(query));k,v=self.memory(memory) if kv is None else kv
         mask=None
         if key_mask is not None:mask=key_mask[:,None,None,:]
-        if causal:
+        if causal and not (q.size(-2)==1 and past_length+1==k.size(-2)):
             allowed=torch.arange(k.size(-2),device=q.device)[None,:] <= (torch.arange(q.size(-2),device=q.device)[:,None]+past_length)
             mask=allowed[None,None] if mask is None else mask&allowed[None,None]
         if hasattr(self,'relative_beat'):
@@ -126,11 +126,27 @@ class DecoderBlock(nn.Module):
         self.song_attention=Attention(c.d_model,c.nhead,relative=c.music_context_policy!='off') if song else None
         self.ff=nn.Sequential(nn.Linear(c.d_model,c.dim_feedforward),nn.GELU(),nn.Dropout(c.dropout),nn.Linear(c.dim_feedforward,c.d_model))
         self.drop=nn.Dropout(c.dropout)
+        self.cache_capacity=c.max_tokens
+    def _append_cpu_kv(self,kv,state):
+        """Append into reusable storage; rewinding only changes the live views."""
+        old=state.get('self_kv');old_length=old[0].size(-2) if old is not None else 0
+        length=old_length+kv[0].size(-2)
+        storage=state.get('self_kv_storage')
+        if storage is None or storage[0].size(-2)<length:
+            capacity=max(length,min(self.cache_capacity,max(64,2*storage[0].size(-2) if storage else length+64)))
+            storage=tuple(value.new_empty((*value.shape[:-2],capacity,value.size(-1))) for value in kv)
+            if old is not None:
+                for buffer,value in zip(storage,old):buffer[...,:old_length,:].copy_(value)
+            state['self_kv_storage']=storage
+        for buffer,value in zip(storage,kv):buffer[...,old_length:length,:].copy_(value)
+        return tuple(buffer[...,:length,:] for buffer in storage),old_length
     def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None):
         value=self.norms[0](x+condition[:,None]);kv=self.self_attention.memory(value)
         old_length=0
         if state is not None:
-            if 'self_kv' in state:
+            if kv[0].device.type=='cpu':
+                kv,old_length=self._append_cpu_kv(kv,state)
+            elif 'self_kv' in state:
                 old_length=state['self_kv'][0].size(-2)
                 kv=tuple(torch.cat((old,new),dim=-2) for old,new in zip(state['self_kv'],kv))
             state['self_kv']=kv
@@ -143,6 +159,12 @@ class DecoderBlock(nn.Module):
         query=self.norms[1](x+condition[:,None])
         if groups is None:
             attended=self.local_attention(query,kv=local_kv,key_mask=audio['local_mask'],query_beats=beats,key_beats=audio['local_beats'])
+        elif isinstance(groups,int):
+            # One CPU token reads one tile. Slices share the cached memory;
+            # packing, copying the whole K/V tile, and scattering are redundant.
+            tile=slice(groups,groups+1)
+            attended=self.local_attention(query,kv=tuple(v[tile] for v in local_kv),
+                key_mask=audio['local_mask'][tile],query_beats=beats,key_beats=audio['local_beats'][tile])
         else:
             tiles,indices,valid=groups
             packed=query.flatten(0,1).index_select(0,indices.flatten()).reshape(*indices.shape,query.size(-1))
@@ -357,7 +379,11 @@ class ComposerV2(nn.Module):
         if hasattr(self,'intensity'):
             x=x+self.intensity(cache['curve_context'],batch,start=start)
         x=self.dropout(x);condition=cache['condition'] if 'condition' in cache else self.condition_context(batch)
-        groups=query_groups(batch['tile_ids_cpu'],start,ids.device) if 'tile_ids_cpu' in batch else None
+        groups=None
+        if 'tile_ids_cpu' in batch:
+            tiles=batch['tile_ids_cpu']
+            groups=(int(tiles[0][start]) if use_cache and ids.device.type=='cpu' and ids.size(0)==1
+                    and length-start==1 and tiles[0][start]>=0 else query_groups(tiles,start,ids.device))
         for i,layer in enumerate(self.decoder):
             x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
         logits=F.linear(self.norm(x),weight,self.output_bias)

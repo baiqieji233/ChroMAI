@@ -1089,14 +1089,15 @@
     <label class="checkbox-field"><input id="v2GenerateInterceptTapOnSlide" type="checkbox" checked>拦截并清理Slide撞尾（默认开启，可关闭）</label><label class="field">撞尾检测阈值（ms）<input id="v2GenerateTapOnSlideThresholdMs" type="number" min="0" max="250" step="1" value="200" required><small>仅开启撞尾门控后生效。沿用MiaCode判定，警告保留；0关闭静态邻近参考，实际触发的硬撞尾仍检测。无法安全清理时会报错。</small></label><label class="field">音频特征缓存<input id="v2GenerateCacheDir" type="text" value="cache/chart_composer_v2"></label>
     <label class="field">生成设备<select id="v2GenerateDevice"><option value="auto" selected>auto</option><option value="cuda">cuda</option><option value="cpu">cpu</option></select></label>
     <label class="field">最大事件数（0不限）<input id="v2GenerateMaxEvents" type="number" value="0" min="0" step="1" required></label>
-    <label class="field">生成张数<input id="v2GenerateCount" type="number" min="1" max="32" step="1" value="1" required><small>最终要生成几张完整谱面，最多32张。每张独立保存，完成后可在顶部预览切换；下面的“生成时自动尝试的写法数”只影响每张谱面内部的选择。</small></label>
+    <label class="field">生成张数<input id="v2GenerateCount" type="number" min="1" max="32" step="1" value="1" required><small>同一首歌生成1–32张完整谱面，独立保存并在预览中切换。</small></label>
+    <label class="field">同时生成数<input id="v2GenerateParallel" type="number" min="1" max="32" step="1" value="1" required disabled><small id="v2GenerateParallelHelp">生成多张时，可设置同时运行的张数。1为逐张生成；可先试2。</small></label>
     <label class="field">生成时自动尝试的写法数<select id="v2GenerateCandidates"><option value="1">1种（不比较）</option><option value="2" selected>2种（推荐）</option><option value="4">4种（更慢）</option></select><small>生成内部比较后只保留成品，不会在预览中列出试写片段。想手动比较完整版本，请把「生成张数」设为 2 或更多。</small></label>
   </div>
   <details class="settings-section" data-advanced>
     <summary>高级生成设置</summary>
     <label class="field">恢复仍失败时<select id="v2GenerateExhaustionPolicy"><option value="auto" selected>继续生成并报告（连续模型默认）</option><option value="stop">严格停止</option></select><small>当某处物理冲突超出重采与恢复预算时：默认保留当前最佳候选继续写完谱面，并在报告中列出冲突位置；选「严格停止」则立即中止报错。</small></label>
     <label class="field">单步冲突重采次数<input id="v2GenerateWindowRetries" type="number" min="1" max="128" step="1" value="16" required><small>每个事件遇到语法或物理手法检查失败时的最大重新采样次数，默认 16。</small></label>
-    <label class="field">CPU计算线程<input id="v2GenerateCpuThreads" type="number" min="1" step="1" value="2" required><small>限制生成时 CPU 算子线程，默认2。</small></label>
+    <label class="field">CPU计算线程<input id="v2GenerateCpuThreads" type="number" min="0" step="1" value="0" required><small>0自动分配：CPU推理每张最多8线程，并按同时生成数分配；GPU推理使用2线程。也可手动填写每张使用的线程数，通常先试4或8；线程更多不一定更快。</small></label>
     <label class="field">单处冲突恢复次数<input id="v2GenerateRollbackWindows" type="number" min="0" max="8" step="1" value="2" required><small>同一处连续重采仍冲突时，可修复Hold松手边界、在同键重击冲突时缩短此前Hold时值，或撤回重写附近相关事件。两者共用此预算，0关闭。生成推进超过此前最远拍位后预算自动重置；预算耗尽后是否放行由上方「恢复仍失败时」决定。</small></label>
   </details>
 </section>

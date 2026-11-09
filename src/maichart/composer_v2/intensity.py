@@ -268,12 +268,12 @@ def predict(args):
     from .stream_data import StreamDataset,collate_stream
     from maichart.tempo_clock import TempoClock
     from fractions import Fraction
-    if args.cpu_threads<1:raise ValueError('cpu_threads must be positive')
     if args.device not in ('auto','cuda','cpu'):raise ValueError('Invalid curve prediction device')
     payload=read(args.checkpoint);config=ComposerV2Config.from_dict(payload['model_config'])
     if config.intensity_policy!=POLICY:raise ValueError('此检查点尚未训练强度曲线，请新建训练或在新目录微调')
-    torch.set_num_threads(args.cpu_threads)
     device=args.device if args.device!='auto' else 'cuda' if torch.cuda.is_available() else 'cpu'
+    from .inference_runtime import configure_threads
+    cpu_runtime=configure_threads(args.cpu_threads,device)
     model=ComposerV2(config,ComponentCodec.from_dict(payload['codec']));model.load_state_dict(payload['model_state_dict'])
     model=model.to(device).eval()
     tempo,first,timing,audio=prepare_inputs(args,config,device)
@@ -293,7 +293,7 @@ def predict(args):
     # Curve prediction itself does not need the phase-readout branch.
     batch['onset_strength']=0.
     rates=model.encode_audio(batch)['curve_rates'][0]
-    profile=serialize(rates,song,checkpoint=str(args.checkpoint),condition=report,timing=timing,
+    profile=serialize(rates,song,checkpoint=str(args.checkpoint),condition=report,timing=timing,cpu_runtime=cpu_runtime,
                       checkpoint_epoch=(payload.get('training_state') or {}).get('epoch'))
     validate_profile(profile)
     output=Path(args.output);output.parent.mkdir(parents=True,exist_ok=True)

@@ -282,11 +282,10 @@ def start_generate(handler,payload,*,runtime):
         settings[key] = value
         _arg(args, "--" + key.replace("_", "-"), value)
     if not 1<=settings["level"]<=15:raise ValueError("level 必须在1到15之间")
-    for key,default in dict(seed=0,candidates=GENERATION_DEFAULTS["candidates"],max_events=0,rollback_windows=2,window_retries=16,cpu_threads=2).items():
+    for key,default in dict(seed=0,candidates=GENERATION_DEFAULTS["candidates"],max_events=0,rollback_windows=2,window_retries=16,cpu_threads=GENERATION_DEFAULTS['cpu_threads']).items():
         settings[key]=_integer(payload,key,default,minimum=0)
         _arg(args,"--"+key.replace("_","-"),settings[key])
     if not 1<=settings["window_retries"]<=128:raise ValueError("每事件提议重试次数必须在1到128之间")
-    if settings["cpu_threads"]<1:raise ValueError("cpu_threads 必须是正整数")
     if settings["rollback_windows"]>8:raise ValueError("rollback_windows 必须在0到8之间")
     if settings["candidates"] not in {1,2,4}: raise ValueError("候选数只能是1、2、4")
     settings["device"]=_choice(payload,"device","auto",{"auto","cuda","cpu"})
@@ -309,6 +308,10 @@ def start_generate(handler,payload,*,runtime):
     count=_integer(payload,'count',GENERATION_DEFAULTS['count'],minimum=1)
     if count>MAX_BATCH_COUNT:raise ValueError(f'一次最多生成 {MAX_BATCH_COUNT} 张谱面')
     settings['count']=count
+    parallel=_integer(payload,'parallel',GENERATION_DEFAULTS['parallel'],minimum=1)
+    if parallel>MAX_BATCH_COUNT:raise ValueError(f'同时生成数不能超过 {MAX_BATCH_COUNT}')
+    settings.update(parallel=parallel,effective_parallel=min(count,parallel))
+    _arg(args,'--parallel',parallel)
     paths=[output,output.with_suffix('.composer_v2.json')]
     profile=payload.get('intensity_profile')
     if profile is not None:
@@ -352,7 +355,7 @@ def start_curve(handler,payload,*,runtime):
     settings.update(cache_dir=str(_path(payload.get('cache_dir') or 'cache/chart_composer_v2','cache_dir')),
         device=_choice(payload,'device','auto',{'auto','cuda','cpu'}),
         tempo_detection=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'}),
-        cpu_threads=_integer(payload,'cpu_threads',2,minimum=1),level=_float(payload,'level',13.,minimum=1))
+        cpu_threads=_integer(payload,'cpu_threads',GENERATION_DEFAULTS['cpu_threads'],minimum=0),level=_float(payload,'level',13.,minimum=1))
     if settings['level']>15:raise ValueError('level 必须在1到15之间')
     for key in ('cache_dir','device','tempo_detection','cpu_threads','level'):
         _arg(args,'--'+key.replace('_','-'),settings[key])
