@@ -57,6 +57,8 @@ def _generate_one(item,index,**overrides):
         entry=dict(index=index,seed=item.seed,output=item.output,status='completed',
             report=str(output.with_suffix('.composer_v2.json')),events=metadata.get('events'),
             sha256=_digest(output),accepted_with_conflicts_count=metadata.get('accepted_with_conflicts_count',0))
+        audit=metadata.get('candidate_probability_audit') or {}
+        if audit.get('path'):entry['candidate_audit']=audit['path']
     except Exception as exc:
         traceback.print_exc();entry=_failed(item,index,exc)
     entry.update(worker_pid=os.getpid(),started_at=started,
@@ -201,7 +203,7 @@ def generate_batch(args):
     items=[]
     for index in range(args.count):
         item=copy(args)
-        item.count=1;item.parallel=1;item.device=device;item.cpu_parallelism=parallel
+        item.count=1;item.parallel=1;item.device=device;item.cpu_parallelism=parallel;item.checkpoint_sha256=digest
         item.seed=int(args.seed)+index
         item.output=str(manifest.parent/f'{index+1:02d}_seed_{item.seed}'/target.name)
         items.append(item)

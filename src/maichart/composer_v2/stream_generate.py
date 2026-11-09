@@ -64,6 +64,10 @@ class EventSampler(WindowSampler):
             dataset.intensity_profile=blend_profile(serialize(self.cache['curve_context'][0].expm1(),song),
                 getattr(song,'intensity_input_profile',None),self.batch['intensity_strength'])
         self.retry_stats={};self._retry_scope=None
+        self.record_probabilities=bool(getattr(args,'record_candidate_probabilities',False)
+            and getattr(args,'phrase_search','layout')!='event' and getattr(args,'candidates',2)>1
+            and getattr(args,'_candidate_audit_active',True))
+        self.last_probability_event=None;self._probability=None
     def next(self,target,allowed,*,action=False):
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
         if not allowed:
@@ -87,6 +91,8 @@ class EventSampler(WindowSampler):
             generator,temperature,top_p=self.action_generator,self.action_temperature,self.action_top_p
         else:
             generator,temperature,top_p=self.generator,self.temperature,self.top_p
+        raw_logits=logits
+        grammar=getattr(self,'_audit_grammar',None) or getattr(self,'_free_choices',allowed)
         if tree is not None:
             logits=tree.remember(relative,getattr(self,'_free_choices',allowed),logits,temperature=temperature)
             if self._retry_condition:
@@ -94,8 +100,12 @@ class EventSampler(WindowSampler):
                 if scaled:
                     self.retry_stats['conditioned_draws']=self.retry_stats.get('conditioned_draws',0)+1
                     temperature=1.
-        return _sample(logits,allowed,generator,temperature,top_p)
-    def _logits(self,target):
+        token=_sample(logits,allowed,generator,temperature,top_p)
+        if getattr(self,'_probability',None) is not None:
+            self._probability.record(raw_logits,token,grammar,role='configuration' if action else 'timing',
+                proposal_logits=logits,allowed=allowed,temperature=temperature,top_p=top_p)
+        return token
+    def _logits(self,target,*,all_new=False):
         ids=self.prefix+list(target)
         clocks=self.codec.token_clocks(ids,cursor=self.cursor)
         missing=sorted({math.floor(t) for t in clocks}-self.anchor_ids.keys())
@@ -138,9 +148,27 @@ class EventSampler(WindowSampler):
                 pieces.append(torch.as_tensor(values,device=self.device)[None])
             query['reference_evidence']=torch.cat(pieces,1)
             query['reference_evidence_start']=start
-        return self.model.decode(query,self.cache)[0,-1]
+        logits=self.model.decode(query,self.cache)[0]
+        return logits if all_new else logits[-1]
+    def _forced_time_probability(self,target,tokens,after,end):
+        if self._probability is None:return
+        # _rewind leaves the last prefix token live. A single incremental pass
+        # obtains every forced-time conditional, including the phase readout.
+        values=self._logits(target+tokens[:-1],all_new=True)[-len(tokens):]
+        if len(values)!=len(tokens):raise RuntimeError('Forced-time probability prefix is incomplete')
+        for index,(token,logits) in enumerate(zip(tokens,values)):
+            self._probability.record(logits,token,self.codec.time_choices(tokens[:index],after,end),
+                role='timing',forced=True)
+    def _finish_probability(self):
+        self.last_probability_event=self._probability
     def reject(self,ids):return self._retry_tree.reject(ids)
     def propose(self,target,after,end,fixed=None):
+        if getattr(self,'record_probabilities',False):
+            from .probability_audit import EventProbability
+            self._probability=EventProbability()
+        else:self._probability=None
+        self.last_probability_event=None
+        self._audit_grammar=None
         self.proposal_scope=dict(after=str(after),audio_end_beat=str(end),target_prefix_length=len(target),
             fixed_beat=str(fixed.beat) if fixed is not None else None)
         scope=(tuple(target),after,end)
@@ -152,24 +180,35 @@ class EventSampler(WindowSampler):
             time=[]
             while not time or time[-1] not in self.codec.phases:
                 allowed=self.codec.time_choices(time,after,end)
+                self._audit_grammar=allowed
                 if not time and not getattr(self,'retry_allow_eos',True) and self.codec.at_id in allowed:
                     allowed=tuple(t for t in allowed if t!=self.codec.eos_id)
                 self._free_choices=allowed
                 token=self.next(target+time,allowed);time.append(token)
-                if token==self.codec.eos_id:return time
-        else:time=self.codec._time(fixed.beat)
+                if token==self.codec.eos_id:self._finish_probability();return time
+        else:
+            time=self.codec._time(fixed.beat)
+            self._forced_time_probability(target,time,after,end)
         out=list(time);used=set();atom=[];count=0
         wanted=len(_atoms(fixed.note_text)) if fixed else None
         while True:
             if not atom:
                 if wanted is not None and count==wanted:
+                    if self._probability is not None:
+                        if getattr(self,'_retry_cache_dirty',False):self._rewind(self._retry_base)
+                        logits=self._logits(target+out)
+                        self._retry_cache_dirty=False
+                        self._probability.record(logits,self.codec.event_end_id,
+                            (*self.codec.kind_ids,self.codec.event_end_id),role='configuration',forced=True)
+                    self._finish_probability()
                     out.append(self.codec.event_end_id);return out
                 allowed=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count and wanted is None else ())
                 self._free_choices=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count else ())
             else:
                 allowed=self._head_choices(self.codec.allowed_atom_next(atom),atom,used);self._free_choices=allowed
+            self._audit_grammar=self._free_choices
             token=self.next(target+out,allowed,action=True);out.append(token)
-            if token==self.codec.event_end_id:return out
+            if token==self.codec.event_end_id:self._finish_probability();return out
             atom.append(token)
             if token==self.codec.end_note_id:
                 used.update(_atom_heads(render_atom([self.codec.tokens[t] for t in atom])));atom=[];count+=1
@@ -231,6 +270,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     config=model.config;clock=TempoClock(tempo,first)
     from .phrase_search import settings as phrase_settings,trial_search,write_previews
     phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
+    if getattr(args,'record_candidate_probabilities',False):
+        audit_path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
+        audit_path.parent.mkdir(parents=True,exist_ok=True);audit_path.write_text('',encoding='utf-8')
     from .exhaustion import resolve_policy,admit_physical_conflict,conflict_assessment
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     song=ComposerV2Song(audio_path.stem,audio_path,audio_path,5,args.level,[],clock,end,condition,audio=audio,condition_known=known)
@@ -268,6 +310,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     sampling_policy=_sampling_policy(args)
     attempts=sampling_policy['effective_retries']
     candidate_count=sampling_policy['effective_candidates']
+    args._candidate_audit_active=phrase_mode!='event' and candidate_count>1
     sampler_options={}
     if sampling_policy['rng_policy']=='separate_timing_action_v1':
         # Keep both streams alive across context refreshes and conflict retries.
@@ -306,6 +349,16 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         make_sampler=make_sampler,check_window=_check_window)
                     write_previews(args.output,phrase_count,points,trials,evidence,song,tempo,args.level)
                     phrase_count+=1;phrase_trials.append(evidence);phrase_trials=phrase_trials[-16:]
+                    if getattr(args,'record_candidate_probabilities',False):
+                        path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
+                        path.parent.mkdir(parents=True,exist_ok=True)
+                        evidence.update(pool_index=phrase_count,
+                            audio_sha256=audio.identity.get('audio_sha256'),checkpoint_info=checkpoint_info,
+                            generation_settings=_generation_settings(args,device),
+                            selection_scope='trial_decision_not_final_chart_commit')
+                        record=dict(schema='composer-v2-candidate-pool-v1',**evidence)
+                        with path.open('w' if phrase_count==1 else 'a',encoding='utf-8') as handle:
+                            handle.write(json.dumps(record,ensure_ascii=False,allow_nan=False)+'\n')
                     if planned:
                         candidates=planned[:1];pending_phrase=planned[1:];used_phrase=True
                 for _ in range(candidate_count-1 if not used_phrase and queued is None else 0):
@@ -440,6 +493,14 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
+    report['candidate_probability_audit']=dict(requested=bool(getattr(args,'record_candidate_probabilities',False)),
+        status='recorded' if getattr(args,'record_candidate_probabilities',False) and phrase_count else
+            'no_trial_competition' if getattr(args,'record_candidate_probabilities',False) else 'disabled',
+        pools=phrase_count if getattr(args,'record_candidate_probabilities',False) else 0,
+        path=str(Path(args.output).resolve().with_suffix('.candidate_audit.jsonl'))
+            if getattr(args,'record_candidate_probabilities',False) and phrase_count else None,
+        scope='trial_search_only; last 16 pools embedded, complete pool history in JSONL',
+        ranking_changed=False)
     report['phrase_search']=dict(mode=phrase_mode,lookahead_beats=float(phrase_beats),
         commit_beats=float(phrase_commit_beats),decisions=phrase_count,trials=phrase_trials,
         scoring='native_trajectory_and_selected_attack_support_no_density_reward',
@@ -482,5 +543,5 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','phrase_search','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','record_candidate_probabilities')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

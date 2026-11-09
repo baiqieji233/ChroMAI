@@ -9,7 +9,7 @@ from .composer_api import _path, _int, _float, _arg
 FAMILY = "chart_composer_v2"
 SCHEMA = "maichart-composer-v2-checkpoint-v1"
 API_CONTRACT = "composer_v2_continuous_events_v3"
-from maichart.composer_v2.defaults import TRAIN_DEFAULTS, GENERATION_DEFAULTS, MAX_BATCH_COUNT
+from maichart.composer_v2.defaults import TRAIN_DEFAULTS, GENERATION_DEFAULTS, EVALUATION_DEFAULTS, MAX_BATCH_COUNT
 
 def inspection(path):
     from maichart.composer_v2.checkpoint import inspect as inspect_checkpoint
@@ -224,6 +224,13 @@ def start_generate(handler,payload,*,runtime):
     args=["-m","maichart.composer_v2.generate"]
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy)
+    record_probabilities=payload.get('record_candidate_probabilities',GENERATION_DEFAULTS['record_candidate_probabilities'])
+    if not isinstance(record_probabilities,bool):
+        raise ValueError('record_candidate_probabilities 必须是布尔值')
+    if record_probabilities and checked.get('sequence_policy')=='window_v1':
+        raise ValueError('记录候选评估数据仅支持连续事件模型；这个旧窗口模型不支持')
+    settings['record_candidate_probabilities']=record_probabilities
+    if record_probabilities:args.append('--record-candidate-probabilities')
     phrase_search=_choice(payload,'phrase_search','layout',{'event','layout','joint'})
     phrase_beats=_float(payload,'phrase_beats',4.,minimum=1.)
     phrase_commit_beats=_float(payload,'phrase_commit_beats',2.,minimum=0.)
@@ -313,6 +320,7 @@ def start_generate(handler,payload,*,runtime):
     settings.update(parallel=parallel,effective_parallel=min(count,parallel))
     _arg(args,'--parallel',parallel)
     paths=[output,output.with_suffix('.composer_v2.json')]
+    if record_probabilities:paths.append(output.with_suffix('.candidate_audit.jsonl'))
     profile=payload.get('intensity_profile')
     if profile is not None:
         from maichart.composer_v2.intensity import validate_profile
@@ -373,3 +381,67 @@ def start_media(handler,payload,*,runtime):
     output=runtime.INTENSITY_ROOT/(uuid.uuid4().hex+'.editor_media.json')
     args=['-m','maichart.webui.audio_overview','--audio',str(audio),'--cache-dir',str(cache),'--output',str(output)]
     return _start(handler,runtime,'composer_v2_media',args,dict(audio=str(audio),cache_dir=str(cache)),[output])
+
+
+def _evaluation_integer(payload, key, default, minimum=0):
+    value = payload.get(key, default)
+    if type(value) is not int or value < minimum:
+        raise ValueError(f'{key} 必须是大于等于 {minimum} 的整数')
+    return value
+
+
+def start_evaluate(handler, payload, *, runtime):
+    """Launch bounded CPU-only diagnostics without touching any running task."""
+    _family(payload)
+    checkpoint = _path(payload.get('checkpoint'), 'checkpoint', exists=True)
+    if not checkpoint.is_file(): raise ValueError('checkpoint 必须是文件')
+    checked = inspection(checkpoint)
+    if not checked.get('valid') or (checked.get('model_config') or {}).get('sequence_policy') != 'continuous_events_v1':
+        raise ValueError('离线评估只支持有效的 Composer v2 continuous_events_v1 检查点')
+    manifest_value = payload.get('manifest')
+    manifest = (_path(manifest_value, 'manifest', exists=True) if manifest_value
+                else checkpoint.parent / 'data_split' / 'dev_manifest.json')
+    if not manifest.is_file():
+        raise ValueError(f'未找到验证清单，请指定 manifest；默认仅查找 {manifest}，不会使用训练清单代替')
+    overlap = payload.get('check_training_overlap', EVALUATION_DEFAULTS['check_training_overlap'])
+    if type(overlap) is not bool: raise ValueError('check_training_overlap 必须是布尔值')
+    settings = dict(checkpoint=str(checkpoint), manifest=str(manifest.resolve()),
+        cache_dir=str(_path(payload.get('cache_dir') or 'cache/chart_composer_v2', 'cache_dir')),
+        device='cpu', check_training_overlap=overlap,
+        window_sampling=_choice(payload, 'window_sampling', EVALUATION_DEFAULTS['window_sampling'], {'spread', 'prefix'}))
+    for key, minimum in (('limit_charts', 0), ('max_batches', 0), ('timing_rollouts', 0), ('cpu_threads', 1)):
+        settings[key] = _evaluation_integer(payload, key, EVALUATION_DEFAULTS[key], minimum)
+    training = checkpoint.parent / 'data_split' / 'train_manifest.json'
+    if overlap and not training.is_file():
+        raise ValueError(f'无法审计训练重叠：缺少同检查点目录清单 {training}')
+    import uuid
+    output = runtime.INTENSITY_ROOT / uuid.uuid4().hex / 'quality_eval.json'
+    settings['output'] = str(output)
+    args = ['-m', 'maichart.composer_v2.evaluate', 'teacher-forced']
+    for key in ('checkpoint', 'manifest', 'cache_dir', 'limit_charts', 'max_batches',
+                'timing_rollouts', 'cpu_threads', 'window_sampling', 'output'):
+        _arg(args, '--' + key.replace('_', '-'), settings[key])
+    if overlap:
+        _arg(args, '--training-manifest', training)
+        settings['training_manifest'] = str(training)
+    return _start(handler, runtime, 'composer_v2_evaluate', args, settings, [output])
+
+
+def start_candidate_audit(handler, payload, *, runtime):
+    """Audit existing candidate logs; never generates candidates or uses CUDA."""
+    _family(payload)
+    source = _path(payload.get('input'), 'input', exists=True)
+    root = Path(getattr(runtime, 'PROJECT_ROOT', Path(__file__).resolve().parents[3])).resolve()
+    if not source.is_file() or source.suffix.lower() not in {'.json', '.jsonl'}:
+        raise ValueError('input 必须是已存在的 JSON 或 JSONL 文件')
+    try:
+        source.relative_to(root)
+    except ValueError as exc:
+        raise ValueError('input 必须位于当前项目允许路径内') from exc
+    import uuid
+    directory = runtime.INTENSITY_ROOT / uuid.uuid4().hex
+    output = directory / 'candidate_audit.json'; markdown = directory / 'candidate_audit.md'
+    args = ['-m', 'maichart.composer_v2.candidate_audit', '--input', str(source),
+            '--output', str(output), '--markdown', str(markdown)]
+    settings = dict(input=str(source), output=str(output), markdown=str(markdown), device='cpu')
+    return _start(handler, runtime, 'composer_v2_candidate_audit', args, settings, [output, markdown])

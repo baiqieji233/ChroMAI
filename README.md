@@ -120,6 +120,8 @@ python -m maichart.webui.server --host 127.0.0.1 --port 7860
 
 训练素材与生成结果的预览、片段标注及人工确认示范库，见 [谱面审阅与标注说明](docs/explanations/COMPOSER_V2_PREVIEW_ZH.md)。
 
+排查采音入口、16/24分落点及候选选优偏向，见 [采音与候选评估说明](docs/explanations/COMPOSER_V2_QUALITY_EVALUATION_ZH.md)。诊断默认关闭，不改变训练目标或生成选优方式。
+
 训练输出目录会保存以下权重文件：
 - `composer_v2_best.pt`：验证集（或训练损失）表现最好的检查点，推荐用于生成或微调。
 - `composer_v2_inference.pt`：不含优化器状态的轻量级推理快照，体积最小，最适合发布分享、直接生成谱面或作为微调起点。

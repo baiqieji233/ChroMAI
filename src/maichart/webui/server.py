@@ -244,6 +244,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_batch_generation": True,
                                               "composer_v2_parallel_generation": True,
                                               "composer_v2_cpu_auto_threads": True,
+                                              "composer_v2_probability_audit": True,
                                               "composer_v2_api_contract": "composer_v2_continuous_events_v3",
                                               "composer_v2_split_sampling": True,
                                               "composer_v2_phrase_search": True,
@@ -253,6 +254,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_rhythm_evidence_v2": True,
                                               "composer_v2_intensity_curve": True,
                                               "composer_v2_editor_media": True,
+                                              "composer_v2_quality_evaluation": True,
                                               "composer_v2_reference_selection": True,
                                               "composer_v2_tail_guard": True,
                                               "composer_v2_variable_tempo": True,
@@ -319,7 +321,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 self._json_body()
                 preview_assets.start_install(WEBUI_ROOT/'preview_runtime'/'miaview')
                 return self._json_response(preview_assets.status(WEBUI_ROOT/'preview_runtime'/'miaview'))
-            if parsed.path.startswith("/api/composer-v2/"):
+            if parsed.path.startswith(("/api/composer-v2/", "/api/composer_v2/")):
                 from maichart.webui import composer_v2_api
                 payload = self._json_body()
                 operation = parsed.path.rsplit("/", 1)[-1]
@@ -328,6 +330,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])
                 if operation == "curve": return composer_v2_api.start_curve(self, payload, runtime=sys.modules[__name__])
                 if operation == "media": return composer_v2_api.start_media(self, payload, runtime=sys.modules[__name__])
+                if operation == "evaluate": return composer_v2_api.start_evaluate(self, payload, runtime=sys.modules[__name__])
+                if operation == "candidate_audit": return composer_v2_api.start_candidate_audit(self, payload, runtime=sys.modules[__name__])
                 return self._json_response({"error": "未知 Composer v2 操作"}, HTTPStatus.NOT_FOUND)
             if parsed.path.startswith("/api/composer/"):
                 from maichart.webui import composer_api
@@ -2165,6 +2169,8 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
             task.status = "running"
             task.message = "启动任务"
         env = os.environ.copy()
+        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit"):
+            env["CUDA_VISIBLE_DEVICES"] = ""
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         current_pythonpath = env.get("PYTHONPATH", "")
@@ -2419,6 +2425,13 @@ def _persisted_logs(limit: int = 100) -> list[dict[str, Any]]:
 
 def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
     paths = list(result_paths)
+    if task.kind in ('composer_v2_evaluate', 'composer_v2_candidate_audit'):
+        report_path = next((path for path in paths if path.suffix.lower() == '.json' and path.is_file()), None)
+        if report_path is not None:
+            key = ('composer_v2_evaluation' if task.kind == 'composer_v2_evaluate'
+                   else 'composer_v2_candidate_audit')
+            task.result[key] = json.loads(report_path.read_text(encoding='utf-8-sig'))
+            task.result['evaluation_scope'] = '离线诊断与参考一致度，不代表音乐质量或可玩性改善'
     if task.kind=='composer_v2_curve':
         curve_path=next((p for p in paths if p.is_file()),None)
         if curve_path is not None:task.result['intensity_profile']=json.loads(curve_path.read_text(encoding='utf-8'))
@@ -2433,6 +2446,7 @@ def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
                 task.result['composer_v2_batch'] = batch
                 for chart in batch.get('charts', []):
                     if chart.get('log'):paths.append(Path(chart['log']))
+                    if chart.get('candidate_audit'):paths.append(Path(chart['candidate_audit']))
                     if chart.get('status') == 'completed':
                         paths.extend(Path(chart[key]) for key in ('output', 'report') if chart.get(key))
                     elif chart.get('diagnostic'):

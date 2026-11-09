@@ -64,6 +64,7 @@ def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     names=('_retry_scope','_retry_base','_retry_tree','_retry_condition','_retry_cache_dirty',
            'proposal_scope','_free_choices')
     saved={name:deepcopy(getattr(sampler,name)) for name in names if hasattr(sampler,name)}
+    probability=getattr(sampler,'last_probability_event',None)
     try:
         return _trial_search(sampler,target,prefix,guard,primary,args=args,song=song,
             tempo=tempo,end=end,count=count,make_sampler=make_sampler,
@@ -75,6 +76,7 @@ def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             elif hasattr(sampler,name):delattr(sampler,name)
         # Rewind materializes the original prefix; no divergent KV suffix survives.
         sampler._retry_cache_dirty=False
+        if hasattr(sampler,'last_probability_event'):sampler.last_probability_event=probability
 
 
 def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
@@ -94,12 +96,15 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     trials = []
     began = time.perf_counter()
     motion_cache = OrderedDict()
+    primary_probability=getattr(sampler,'last_probability_event',None)
+    record=bool(getattr(args,'record_candidate_probabilities',False))
     for branch in range(count):
         sampler._rewind(target)
         for name,value in retry_snapshot.items():setattr(sampler,name,deepcopy(value))
         active = sampler
         current = list(target)
         rows = []
+        probabilities=[];termination_probability=None
         trial_guard = deepcopy(guard)
         cursor = after
         complete = False
@@ -118,11 +123,15 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                         break
                     if branch == 0 and step == 0 and retry == 0:
                         point, ids = primary
+                        probability=primary_probability
                     else:
                         ids = active.propose(current, cursor, end, fixed=fixed)
+                        probability=getattr(active,'last_probability_event',None)
                         if ids == [active.codec.eos_id]:
+                            termination_probability=probability
                             complete = True
                             ended = True
+                            reason = None
                             break
                         point = active.codec.decode_points(ids)[0]
                     details = []
@@ -149,6 +158,7 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             if point is None:
                 break
             rows.append((point, ids))
+            probabilities.append(probability)
             if branch == 0:
                 skeleton.append(point)
             current.extend(ids)
@@ -166,6 +176,15 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                                  motion_cache=motion_cache) if rows else (.5, {})
         trials.append(dict(rows=rows, complete=complete, ended=ended, reason=reason,
                            score=score, components=components))
+        if record:
+            from .probability_audit import summarize,span_diagnostics
+            inside=[log for (point,_),log in zip(rows,probabilities) if start<=point.beat<stop]
+            outside=[log for (point,_),log in zip(rows,probabilities) if not start<=point.beat<stop]
+            excluded=sum(len(ids) for point,ids in rows if not start<=point.beat<stop)
+            trials[-1].update(probability=summarize(inside,boundary_tokens=excluded),
+                boundary_probability=summarize(outside),
+                termination_probability=summarize([termination_probability]) if ended else None,
+                diagnostics=span_diagnostics([p for p,_ in rows],sampler.codec,start,stop))
     eligible = [i for i, trial in enumerate(trials) if trial['complete'] and trial['rows']]
     selected = max(eligible, key=lambda i: trials[i]['score']) if eligible else None
     if selected is not None and 0 in eligible and trials[selected]['score'] < trials[0]['score'] + .02:
@@ -179,11 +198,12 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             queued.append(row)
     evidence = dict(start_beat=str(start), end_beat=str(stop),
                     start_sec=float(song.clock.at(start)), end_sec=float(song.clock.at(stop)),
-                    selected=selected, partial_preview=True,
+                    selected=selected,mode=mode,partial_preview=True,
                     elapsed_sec=time.perf_counter()-began,
                     candidates=[dict(score=t['score'], components=t['components'],
                         events=len(t['rows']), complete=t['complete'], ended=t['ended'],
-                        reason=t['reason']) for t in trials])
+                        eligible=bool(t['complete'] and t['rows']),
+                        reason=t['reason'],**{k:t[k] for k in ('probability','boundary_probability','termination_probability','diagnostics') if k in t}) for t in trials])
     return queued, evidence, trials
 
 

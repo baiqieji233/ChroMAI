@@ -1095,6 +1095,24 @@
   </div>
   <details class="settings-section" data-advanced>
     <summary>高级生成设置</summary>
+    <details id="v2QualityEvaluation" class="settings-section">
+      <summary>采音与选优评估</summary>
+      <p>使用当前模型和音频特征缓存，在 CPU 后台检查，不进行训练。参考结果不等于唯一正确写法。</p>
+      <div class="form-grid">
+        <label class="field">评估数据清单（可选）<input id="v2EvalManifest" type="text" placeholder="自动使用模型目录开发集"></label>
+        <label class="field">评估谱面数<input id="v2EvalLimitCharts" type="number" value="2" min="0" step="1"><small>0 表示不限。</small></label>
+        <label class="field">抽查片段数<input id="v2EvalMaxBatches" type="number" value="8" min="0" step="1"><small>0 表示不限。</small></label>
+        <label class="field">独立选时检查数<input id="v2EvalTimingRollouts" type="number" value="2" min="0" step="1"><small>0 表示跳过独立选时检查。</small></label>
+        <label class="field">CPU计算线程<input id="v2EvalCpuThreads" type="number" value="2" min="1" step="1"></label>
+        <label class="field">抽查位置<select id="v2EvalWindowSampling"><option value="spread" selected>均匀覆盖全曲</option><option value="prefix">从开头连续检查</option></select></label>
+        <label class="checkbox-field"><input id="v2EvalCheckTrainingOverlap" type="checkbox">检查与原训练集是否重叠<small>会额外读取音频。</small></label>
+      </div>
+      <button id="v2EvaluateButton" type="button" class="small-button">检查模型采音</button>
+      <label class="field">候选评估记录<input id="v2AuditInput" type="text" placeholder="谱面旁 .candidate_audit.jsonl"><small>先勾选「记录候选评估数据」并生成谱面，才会保存候选池 JSONL。</small></label>
+      <button id="v2AuditButton" type="button" class="small-button">分析候选选优</button>
+      <p id="v2EvaluationStatus" class="inline-status">提交后，进度、日志与报告会显示在当前任务区。</p>
+    </details>
+    <label class="checkbox-field" data-v2-probability-audit><input id="v2GenerateRecordCandidateProbabilities" type="checkbox">记录候选评估数据<small>记录试写比较中的模型概率和候选差异，供离线评估；会增加计算与报告体积，不改变选优方式。选择逐步生成或只尝试1种写法时，不产生候选池。</small></label>
     <label class="field">恢复仍失败时<select id="v2GenerateExhaustionPolicy"><option value="auto" selected>继续生成并报告（连续模型默认）</option><option value="stop">严格停止</option></select><small>当某处物理冲突超出重采与恢复预算时：默认保留当前最佳候选继续写完谱面，并在报告中列出冲突位置；选「严格停止」则立即中止报错。</small></label>
     <label class="field">单步冲突重采次数<input id="v2GenerateWindowRetries" type="number" min="1" max="128" step="1" value="16" required><small>每个事件遇到语法或物理手法检查失败时的最大重新采样次数，默认 16。</small></label>
     <label class="field">CPU计算线程<input id="v2GenerateCpuThreads" type="number" min="0" step="1" value="0" required><small>0自动分配：CPU推理每张最多8线程，并按同时生成数分配；GPU推理使用2线程。也可手动填写每张使用的线程数，通常先试4或8；线程更多不一定更快。</small></label>

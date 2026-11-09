@@ -56,6 +56,7 @@ function composerV2GenerationPayload(options={}) {
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
     tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),
     intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
+    record_candidate_probabilities:!!element('#v2GenerateRecordCandidateProbabilities')?.checked,
     cpu_threads:number('#v2GenerateCpuThreads',0,'CPU 计算线程',{min:0,integer:true}),
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
@@ -74,6 +75,54 @@ function composerV2GenerationPayload(options={}) {
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
   if(!options.omitCurve && typeof v2CurvePayload==='function')Object.assign(payload,v2CurvePayload());
   return payload;
+}
+function composerV2EvaluationPayload() {
+  const checkpoint=valueOrDefault('#checkpointPath','').trim();
+  if(!checkpoint)throw new Error('请先填写当前模型 checkpoint 路径。');
+  const integer=(selector,fallback,label,min=0)=>v2NumericValue(valueOrDefault(selector,fallback),label,{min,integer:true});
+  const windowSampling=valueOrDefault('#v2EvalWindowSampling','spread');
+  if(!['spread','prefix'].includes(windowSampling))throw new Error('请选择有效的抽查位置。');
+  return {model_family:'chart_composer_v2',checkpoint,manifest:valueOrDefault('#v2EvalManifest','').trim()||null,
+    cache_dir:valueOrDefault('#v2GenerateCacheDir','cache/chart_composer_v2').trim(),
+    limit_charts:integer('#v2EvalLimitCharts',2,'评估谱面数'),
+    max_batches:integer('#v2EvalMaxBatches',8,'抽查片段数'),
+    timing_rollouts:integer('#v2EvalTimingRollouts',2,'独立选时检查数'),
+    cpu_threads:integer('#v2EvalCpuThreads',2,'CPU计算线程',1),window_sampling:windowSampling,
+    check_training_overlap:!!element('#v2EvalCheckTrainingOverlap')?.checked};
+}
+async function startV2QualityEvaluation(kind='evaluate') {
+  const audit=kind==='candidate_audit';
+  const button=element(audit?'#v2AuditButton':'#v2EvaluateButton');
+  if(button?.disabled)return;
+  const input=valueOrDefault('#v2AuditInput','').trim();
+  if(audit && !input)throw new Error('请填写谱面旁的 .candidate_audit.jsonl 路径。');
+  const payload=audit?{input}:composerV2EvaluationPayload();
+  if(button)button.disabled=true;
+  const status=element('#v2EvaluationStatus');
+  try {
+    const backend=await api('/api/status');
+    if(backend.training_capabilities?.composer_v2_quality_evaluation!==true)
+      throw new Error('采音与选优评估需要更新后的后台；请在当前任务结束后重启 WebUI。');
+    saveSettings();
+    const data=await api('/api/composer_v2/'+kind,payload);
+    if(status)status.textContent='已提交评估；进度、日志和输出报告显示在当前任务区。';
+    watchTask(data.task_id,task=>{
+      if(status)status.textContent=task.status==='completed'?v2EvaluationSummary(task):'评估未完成；请在当前任务区查看日志。';
+    });
+  } catch(error) {
+    if(status)status.textContent=error.message;
+    throw error;
+  } finally {if(button)button.disabled=false;}
+}
+function v2EvaluationSummary(task) {
+  const report=task.result?.composer_v2_evaluation;
+  if(report) {
+    const selections=report.sample_selection||[],charts=new Set(selections.map(row=>`${row.source}:${row.difficulty}`));
+    const phase=report.metrics?.phase,checks=(report.joint_timing?.samples||[]).filter(row=>row.status==='measured');
+    return `评估完成：${charts.size}张谱面、${selections.length}段；真实前文下拍内落点正确率${phase?.accuracy!=null?(phase.accuracy*100).toFixed(1)+'%':'未测'}；独立选时${checks.length?checks.filter(row=>row.joint_exact_beat).length+'/'+checks.length+'次匹配参考':'未测'}。详情与报告在当前任务区。`;
+  }
+  const audit=task.result?.composer_v2_candidate_audit;
+  return audit?`选优分析完成：${audit.pools?.length||0}个候选池${audit.status==='unavailable'?'，记录不足':''}。请在当前任务区查看或下载报告。`:'评估完成；请在当前任务区查看或下载输出报告。';
 }
 function composerV2CompletionMessage(task) {
   const batch=task.result?.composer_v2_batch;
@@ -101,6 +150,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if(payload.record_candidate_probabilities===true && status.training_capabilities?.composer_v2_probability_audit!==true)
+    throw new Error('记录候选评估数据需要更新后的后台；请在当前任务结束后重启 WebUI。');
   if(payload.count>1 && payload.parallel>1 && !status.training_capabilities?.composer_v2_parallel_generation)
     throw new Error('同时生成多张需要新版后台，请重启 WebUI 后提交。');
   if(payload.count>1 && !status.training_capabilities?.composer_v2_batch_generation)
@@ -1225,7 +1276,8 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection",
+  "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2AuditInput",
+  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
@@ -2060,6 +2112,7 @@ function updateFamilyFields() {
     && generationInspection.data?.valid;
   // Start with the newest route. Inspection can disable unsupported old
   // capabilities, but never removes their controls from the v2 workbench.
+  for(const field of document.querySelectorAll('[data-v2-probability-audit]'))field.hidden=!v2Generation;
   const splitSampling=v2Generation && (!checked || generationInspection.data?.generation_capabilities?.continuous_time);
   for (const field of document.querySelectorAll('[data-v2-action-sampling]')) {
     field.hidden=!v2Generation;
@@ -7273,6 +7326,8 @@ for (const [key] of [...radarKeys, ...styleKeys]) {
   on(`#${key}`, "input", markManual);
   document.querySelector(`[data-number-for="${key}"]`)?.addEventListener("input", markManual);
 }
+on("#v2EvaluateButton", "click", () => startV2QualityEvaluation());
+on("#v2AuditButton", "click", () => startV2QualityEvaluation("candidate_audit"));
 on("#generateButton", "click", startGenerate);
 on("#clearGenerate", "click", clearGenerate);
 on("#acceptanceButton", "click", startAcceptance);

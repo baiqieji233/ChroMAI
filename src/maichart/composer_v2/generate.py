@@ -59,6 +59,8 @@ def parser():
     result.add_argument('--parallel', type=int, default=GENERATION_DEFAULTS['parallel'],
                         help='Maximum independent generation processes; 1 shares one model sequentially')
     result.add_argument('--batch-manifest', help=argparse.SUPPRESS)
+    result.add_argument('--record-candidate-probabilities',action='store_true',default=GENERATION_DEFAULTS['record_candidate_probabilities'],
+                        help='Record diagnostic candidate probabilities; does not change ranking (extra work and output)')
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
     result.add_argument('--cpu-threads', type=int, default=GENERATION_DEFAULTS['cpu_threads'],
                         help='CPU operator threads per process; 0 automatically budgets across parallel charts')
@@ -361,15 +363,25 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     effective_retries = sampling_policy['effective_retries']
     effective_rollback_budget = sampling_policy['effective_rollback_budget']
     print('composer_v2_sampling '+json.dumps(sampling_policy,ensure_ascii=False),flush=True)
+    audit=bool(getattr(args,'record_candidate_probabilities',False))
+    digest=getattr(args,'checkpoint_sha256',None)
+    if audit and payload_override is None:
+        from .probability_audit import file_digest
+        digest=file_digest(args.checkpoint)
     payload = payload_override if payload_override is not None else read(args.checkpoint)
+    if audit and payload_override is None and file_digest(args.checkpoint)!=digest:
+        raise ValueError('Checkpoint changed during audit loading; use an epoch snapshot or retry')
     inspected = inspect_payload(payload)
     if not inspected['can_generate']:
         raise ValueError(inspected['error'])
     checkpoint_info=dict(path=str(Path(args.checkpoint).resolve()),optimizer_steps=inspected['optimizer_steps'],
         epoch=inspected['epoch'],inference_only=inspected['inference_only'],family=inspected['family'])
+    if digest is not None:checkpoint_info['sha256']=digest
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
+    if getattr(args,'record_candidate_probabilities',False) and config.sequence_policy!='continuous_events_v1':
+        raise ValueError('Candidate probability recording requires a continuous-event checkpoint')
     if getattr(args,'intensity_curve',None) and config.intensity_policy=='off':
         raise ValueError('This checkpoint has not learned intensity curves; use a new training stage')
     from .onset_readout import effective_strength
