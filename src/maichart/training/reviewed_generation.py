@@ -8,10 +8,38 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
+from contextlib import contextmanager
+import errno
+import os
+import time
 from pathlib import Path
 
 from maichart.maidata import parse_maidata_file
 from maichart.training.quality_annotations import chart_sha256, audio_sha256, region_component_weights
+
+
+@contextmanager
+def library_file_lock(path):
+    """Coordinate separate WebUI/worker processes; OS releases on cancellation."""
+    path=Path(path);path.parent.mkdir(parents=True,exist_ok=True)
+    with path.open('a+b') as handle:
+        handle.seek(0,os.SEEK_END)
+        if handle.tell()==0:handle.write(b'\0');handle.flush()
+        handle.seek(0)
+        if os.name=='nt':
+            import msvcrt
+            while True:
+                try:msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1);break
+                except OSError as exc:
+                    if exc.errno not in (errno.EACCES,errno.EAGAIN,errno.EDEADLK):raise
+                    time.sleep(.05)
+            try:yield
+            finally:handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+        else:
+            import fcntl
+            fcntl.flock(handle.fileno(),fcntl.LOCK_EX)
+            try:yield
+            finally:fcntl.flock(handle.fileno(),fcntl.LOCK_UN)
 
 
 def approved_regions(records):
@@ -168,7 +196,7 @@ def update_library(collection, task_id, root):
     if not isinstance(task_id,str) or not task_id or len(task_id)>256:
         raise ValueError('示范库缺少有效的生成任务标识')
     root=Path(root).resolve();index=root/'library.json';root.mkdir(parents=True,exist_ok=True)
-    with _lock_for(index):
+    with _lock_for(index),library_file_lock(root/'library.lock'):
         tasks=json.loads(index.read_text(encoding='utf-8')).get('tasks',{}) if index.exists() else {}
         if collection.get('manifest'):
             tasks[task_id]=dict(manifest=collection['manifest'],collection_id=collection['collection_id'],

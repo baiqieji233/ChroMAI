@@ -72,7 +72,7 @@ def _undo(manifest, chart_id, token):
         save_annotations(manifest, records)
         values.pop(token)
         _write(path, values)
-    return dict(undone=True, chart_id=chart_id)
+    return dict(undone=True, chart_id=chart_id, records=records)
 
 
 def _registered(runtime):
@@ -194,9 +194,11 @@ def post(endpoint, payload, *, runtime):
         return 200, result
     if operation == 'queue':
         offset, limit = int(payload.get('offset', 0)), int(payload.get('limit', 1))
+        status=payload.get('candidate_status') or None
+        if status not in (None,'error','suspicious','ok','pending','stale'):raise ValueError('未知自动检查状态')
         if offset < 0 or not 1 <= limit <= 100:
             raise ValueError('审阅位置或数量无效')
-        return 200, pools.review_queue(path, offset=offset, limit=limit)
+        return 200, pools.review_queue(path, offset=offset, limit=limit,status=status)
     if operation == 'excluded':
         data = json.loads((path / 'pool.json').read_text(encoding='utf-8'))
         return 200, dict(items=data.get('excluded', []))

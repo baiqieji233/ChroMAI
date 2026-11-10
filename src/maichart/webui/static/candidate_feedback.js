@@ -1,4 +1,19 @@
 "use strict";
+function candidateSavedReviews(records) {
+  const positive=records.filter(row=>row.label==='good'),rest=[];
+  for(const row of records.filter(item=>item.label==='uncertain')) {
+    let pieces=[[row.start_sec,row.end_sec]];
+    for(const approved of positive)pieces=pieces.flatMap(([start,end])=>{
+      if(approved.end_sec<=start||approved.start_sec>=end)return [[start,end]];
+      return [...(start<approved.start_sec?[[start,approved.start_sec]]:[]),...(end>approved.end_sec?[[approved.end_sec,end]]:[])];
+    });
+    for(const [start_sec,end_sec] of pieces)rest.push({...row,start_sec,end_sec});
+  }
+  const seen=new Set();
+  return [...positive,...rest].sort((a,b)=>a.start_sec-b.start_sec).filter(row=>{
+    const key=JSON.stringify([row.label,row.start_sec,row.end_sec,row.reason||'']);if(seen.has(key))return false;seen.add(key);return true;
+  });
+}
 // Review complete charts first; one shared audio timeline defines an optional span.
 (() => {
   const node=id=>document.getElementById(id),canvas=node('feedbackTimeline');
@@ -168,7 +183,7 @@
     const source=entry.source_kind==='training_source';
     node('feedbackTraining').hidden=source;node('feedbackComparison').hidden=source;
     status(source?'训练素材 · 圈选后保存片段标注。':'生成结果 · 记录评价，或展开下方“收集训练示范”。');
-    renderSaved(source?entry.annotations||[]:[]);
+    renderSaved(source?entry.saved_reviews||entry.annotations||[]:[]);
     if(!source)void loadCollection();
   }
   async function choose(index,{comparison=false}={}) {
@@ -183,6 +198,14 @@
     } catch(error) {status(error.message);} finally {comparisonSwitch=false;}
   }
   window.addEventListener('chart-preview-updated',event=>refresh(event.detail));
+  window.addEventListener('training-source-annotated',event=>{
+    const detail=event.detail;if(entry?.source_kind!=='training_source'||entry.training_context?.manifest!==detail.manifest||entry.training_context?.chart_id!==detail.chart_id)return;
+    if(!Array.isArray(detail.result?.records))return;
+    const record=detail.result.records.find(row=>row.chart_id===detail.chart_id);
+    entry.annotations=record?.regions||[];
+    entry.saved_reviews=entry.training_context?.candidate_pool?[...entry.annotations,...(record?.candidate_reviews||[]).filter(row=>row.label==='uncertain')]:entry.annotations;
+    renderSaved(entry.saved_reviews);
+  });
   window.addEventListener('chart-preview-versionchanged',event=>{
     const index=Number(event.detail?.index);if(!entry?.charts[index])return;
     resetNavigation();
@@ -298,6 +321,7 @@
     } else setRange(null);
   }
   function renderSaved(records) {
+    if(entry?.training_context?.candidate_pool)records=candidateSavedReviews(records);
     const list=node('feedbackSavedList');list.replaceChildren();
     const names={good:'好',problem:'有问题',uncertain:'不确定'},reasons={timing:'采音',layout:'配置',comfort:'手感'};
     for(const item of records) {
@@ -312,6 +336,7 @@
   function trainingButtons() {
     node('feedbackCollectTraining').disabled=trainingBusy || !validRange() || !selectedNotes().length || !node('feedbackTrainingUse').value;
     node('feedbackAddTraining').disabled=trainingBusy || !(collection.regions || collection.published);
+    if(node('feedbackExportBundle'))node('feedbackExportBundle').disabled=trainingBusy||!collection.regions;
     const entryChoice=node('feedbackLearnEntry');
     if(entryChoice) {
       const key=validRange()?`${chart()?.path}:${chart()?.file_sha256}:${range.start_sec}:${range.end_sec}`:'';
@@ -338,7 +363,7 @@
       const result=await trainingRequest('reviewed-collection',{candidates:collectionCandidates(),task_id:task});
       if(request!==collectionSerial || task!==entry.task_id)return;
       collection={...result,items:result.items||[],regions:result.regions||0};
-      renderSaved(result.reviews||[]);
+      if(entry?.source_kind!=='training_source')renderSaved(result.reviews||[]);
       const list=node('feedbackTrainingList');list.replaceChildren();
       for(const item of collection.items) {
         const li=document.createElement('li'),view=document.createElement('button'),remove=document.createElement('button');
@@ -370,6 +395,8 @@
     if(!validRange() || !selectedNotes().length)return;
     void changeCollection(reviewPayload(chart(),{start_sec:range.start_sec,end_sec:range.end_sec}),node('feedbackTrainingUse').value,!!node('feedbackLearnEntry')?.checked);
   });
+  node('feedbackExportBundle')?.addEventListener('click',()=>void globalThis.ReviewExchange?.export({candidates:collectionCandidates()},
+    {status:node('feedbackBundleStatus'),download:node('feedbackBundleDownload')}));
   node('feedbackAddTraining').addEventListener('click',async()=>{
     if(trainingBusy)return;
     const task=entry?.task_id;trainingBusy=true;trainingButtons();
@@ -408,7 +435,7 @@
       busy=true;feedbackButtons();
       const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),result=await response.json();
       if(!response.ok)throw new Error(result.error||'保存失败');
-      if(chart()?.path===identity && entry.task_id===task)status(sourceContext?'已保存片段标注，下次质量加权训练时读取。':'已记录评价。若要学习这段，请展开“收集训练示范”。');
+      if(chart()?.path===identity && entry.task_id===task)status(sourceContext?'已保存质量标注。导出时，在训练素材勾选该来源，点“导出已确认片段”。':'已记录评价。要学习或导出这段，请展开“收集训练示范”。');
       if(sourceContext) {
         const record=result.records?.find(row=>row.chart_id===sourceContext.chart_id);
         if(chart()?.path===identity && entry.task_id===task) {entry.annotations=record?.regions||[];renderSaved(entry.annotations);}
@@ -515,7 +542,7 @@
     $('candidatePoolUndo').disabled=busy||!undo;
     for(const id of ['candidatePoolNext','candidatePoolSync','candidatePoolExcluded'])$(id).disabled=busy||!enabled;
     $('candidatePoolBudget').disabled=budgetPending||!enabled;
-    if(scanning)$('candidatePoolNext').disabled=true;
+    if(scanning||$('candidatePoolStatusFilter')?.value==='error')$('candidatePoolNext').disabled=true;
   }
   function summary(data) {
     const counts=data.counts||data;
@@ -564,14 +591,14 @@
       // Requery from the beginning: confirmation can shrink the server queue.
       let offset=0,total=Infinity;
       while(!queue.length&&offset<total) {
-        const data=await api('/api/candidates/queue',{manifest,offset,limit:100});
+        const data=await api('/api/candidates/queue',{manifest,offset,limit:100,candidate_status:$('candidatePoolStatusFilter')?.value||''});
         if(request!==serial)return;
         const items=data.items||[];total=Number(data.total??items.length);
         queue=items.filter(item=>!seen.has(token(item)));offset+=items.length;
         if(!items.length)break;
       }
     }
-    if(!queue.length){message('当前队列已审阅完；同步后可继续检查新增或变化的谱面。');return;}
+    if(!queue.length){message($('candidatePoolStatusFilter')?.value==='error'?'错误谱面请先在目录查看原因，修正源资料后再同步；修正前不确认学习。':'这个筛选下暂无未审片段。可换一个检查状态，或在目录打开整谱自行圈选。');return;}
     if(current) {const same=queue.findIndex(item=>item.chart_id===current.chart_id);if(same>0)queue.unshift(...queue.splice(same,1));}
     const item=queue.shift();
     if(current?.chart_id!==item.chart_id||globalThis.ChartPreview?.getEntry()?.training_context?.manifest!==manifest||globalThis.ChartPreview?.getEntry()?.training_context?.chart_id!==item.chart_id) {
@@ -618,7 +645,8 @@
     badge(item) {
       if(!item.candidate_status)return '';
       const names={error:'错误',suspicious:'待核对',ok:'低风险',pending:'待扫描'};
-      return `<br><span class="quality-label">${escapeHtml(names[item.candidate_status]||item.candidate_status)}</span> <span class="muted">已确认 ${escapeHtml(String(item.confirmed_regions??item.reviewed_regions??item.record?.regions?.length??0))} 段</span>`;
+      const issues=item.candidate_issues||[];
+      return `<br><span class="quality-label">${escapeHtml(names[item.candidate_status]||item.candidate_status)}</span> <span class="muted">已确认 ${escapeHtml(String(item.confirmed_regions??item.reviewed_regions??item.record?.regions?.length??0))} 段</span>${issues.length?`<details class="candidate-issues"><summary>查看 ${issues.length} 项检查提示</summary>${issues.map(issue=>`<p>${escapeHtml(issue.message||issue.code||'待核对')}</p>`).join('')}</details>`:''}`;
     },
     card(item) {
       if(!item.manifest||item.prepared===false)return '';
@@ -633,7 +661,7 @@
       if(selectedDatasetItems().some(isPool)){const input=$('v2TrainQualityEnabled');if(input)input.checked=true;}
       controls();
     },
-    activate(item) {++serial;if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);scanTimer=null;active=isPool(item)?item:null;current=null;queue=[];seen.clear();$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
+    activate(item) {++serial;if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);scanTimer=null;active=isPool(item)?item:null;current=null;queue=[];seen.clear();if($('candidatePoolStatusFilter'))$('candidatePoolStatusFilter').value='';$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
   };
   document.addEventListener('click',event=>{
     const create=event.target.closest?.('.candidate-pool-create');if(!create)return;
@@ -700,12 +728,23 @@
     finally{button.disabled=false;}
   });
   $('candidatePoolNext').addEventListener('click',()=>void run(next));
+  $('candidatePoolStatusFilter')?.addEventListener('change',()=>void run(async()=>{queue=[];seen.clear();
+    if(globalThis.maichartLastStatus&&!globalThis.maichartLastStatus.training_capabilities?.candidate_review_filters){$('candidatePoolStatusFilter').value='';throw new Error('当前后台尚未载入检查状态筛选，请使用已更新的 WebUI 实例。');}
+    await loadQualityCatalog(true);
+    message($('candidatePoolStatusFilter').value==='error'?'在目录展开检查提示，先修正源资料，再重新扫描。':'已切换筛选；点“继续审阅”试听下一段。');}));
   $('candidatePoolSync').addEventListener('click',()=>void run(async()=>{const manifest=identity(),result=await api('/api/candidates/sync',{manifest});queue=[];seen.clear();message('正在后台重新扫描／同步；源谱变化会使旧确认失效。');if(result.task_id)watchTask(result.task_id,()=>{if(identity()===manifest)void refresh();});await refresh();}));
   $('candidatePoolExcluded').addEventListener('click',()=>void run(async()=>{const manifest=identity(),request=serial,data=await api('/api/candidates/excluded',{manifest});if(request!==serial)return;const list=$('candidatePoolExcludedList');list.hidden=false;list.replaceChildren();for(const item of data.items||[]){const row=document.createElement('p');row.textContent=`${item.title||item.source_path||item.chart_id||item.path||'谱面'}${item.slot!==undefined?` · 槽位${item.slot}`:''}：${describe(item.reason||item.issues||item)}`;list.append(row);}if(!list.children.length)list.textContent='暂无排除项。';}));
   for(const button of document.querySelectorAll('[data-pool-learn]'))button.addEventListener('click',()=>void run(()=>save(button.dataset.poolLearn)));
   $('candidatePoolWhole').addEventListener('click',()=>void run(()=>save('both',true)));
   $('candidatePoolUndo').addEventListener('click',()=>void run(async()=>{const last=undo;if(!last)return;const result=await api('/api/candidates/undo',last);undo=null;if(identity()===last.manifest){queue=[];seen.clear();await refresh();}window.dispatchEvent(new CustomEvent('training-source-annotated',{detail:{...last,result}}));message('已撤销上次保存。');}));
-  window.addEventListener('chart-preview-updated',controls);window.addEventListener('chart-preview-versionchanged',controls);
+  window.addEventListener('chart-preview-updated',event=>{
+    const context=(event?.detail||globalThis.ChartPreview?.getEntry())?.training_context;
+    if(active&&context?.manifest===identity()&&context.chart_id&&context.chart_id!==current?.chart_id){
+      current={...context};$('candidatePoolWhy').textContent='在时间轴圈选一段完整写法，带前后文试听，再确认值得学习的内容。';
+      $('candidatePoolIssues').textContent=(context.issues||[]).map(describe).join('；')||'没有自动提示，请结合歌曲核对采音、衔接和手顺。';
+    }
+    controls();
+  });window.addEventListener('chart-preview-versionchanged',controls);
   globalThis.CandidatePool.render();
   if(globalThis.maichartLastStatus)globalThis.CandidatePool.capabilities(globalThis.maichartLastStatus);
 })();

@@ -12,7 +12,7 @@
     return control?.selectedOptions?.[0]?.textContent.trim() || value(id);
   };
   const selectedMode = () => value("trainingMode", "fresh");
-  const taskLabels = {candidate_budget: "训练来源学习份额估算", preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
+  const taskLabels = {review_bundle_export:'导出已确认片段',review_bundle_preview:'预览片段包',review_bundle_import:'导入片段包',candidate_budget: "训练来源学习份额估算", preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
     chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
     composer_v2_train: "Composer v2 训练", composer_v2_generate: "Composer v2 生成",
     composer_train: "chart_composer_v1 训练", composer_generate: "chart_composer_v1 生成"};

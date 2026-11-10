@@ -10,6 +10,7 @@
 - **[Intel 核显与 NPU 加速](explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)**：MERT 加速、写谱后端自动测速、编译缓存与 XPU 训练。
 - **[成对音乐参考与衔接示范](explanations/COMPOSER_V2_PAIRED_MUSIC_ZH.md)**：新音乐输入的用途、旧模型微调接入、人工确认前文衔接的操作。
 - **[候选库与片段审阅](explanations/COMPOSER_V2_CANDIDATE_POOL_ZH.md)**：独立检查更多资料、确认可学习片段、查看监督占比并加入下一阶段微调。
+- **[审阅、标注和片段包操作指南](explanations/COMPOSER_V2_ANNOTATION_GUIDE_ZH.md)**：按界面顺序处理检查结果、审核素材与生成成品、收集亮眼片段、导入导出并加入后续训练。
 
 ## 许可证与第三方资源说明
 

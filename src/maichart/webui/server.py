@@ -130,7 +130,7 @@ class TaskState:
             elif self.kind == 'chart_stream_train':
                 from maichart.webui.stream_api import update_stream_progress
                 update_stream_progress(self, line)
-            elif self.kind.startswith('composer_') or self.kind in ('candidate_scan','candidate_budget'):
+            elif self.kind.startswith(('composer_','review_bundle_')) or self.kind in ('candidate_scan','candidate_budget'):
                 _update_composer_progress(self, line)
             epoch_match = re.search(r"epoch=(\d+)", line)
             if epoch_match:
@@ -143,6 +143,8 @@ class TaskState:
             if self.kind == 'composer_v2_generate':
                 from maichart.composer_v2.generation_progress import readable_line
                 display_line = readable_line(line)
+            elif self.kind.startswith('review_bundle_') and line.startswith('review_bundle '):
+                display_line=self.message
             self.logs.append(f"[{stamp}] {display_line}")
             # The in-memory ring drops old lines; the file keeps them all.
             self.logs = self.logs[-300:]
@@ -209,7 +211,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._serve_static("form_lab.html")
         if parsed.path == "/composer":
             return self._serve_static("composer.html")
-        if parsed.path in {"/app.js", "/v2_intensity.js", "/chart_preview.js", "/candidate_feedback.js", "/styles.css", "/workspace.js", "/workspace.css",
+        if parsed.path in {"/app.js", "/v2_intensity.js", "/chart_preview.js", "/candidate_feedback.js", "/review_exchange.js", "/styles.css", "/workspace.js", "/workspace.css",
                            "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css",
                            "/composer.js", "/composer.css"}:
             return self._serve_static(parsed.path.lstrip("/"))
@@ -245,6 +247,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_training": True,
                                               "composer_v2_training": True,
                                               "candidate_pools": True,
+                                              'candidate_review_filters': True,
+                                              'review_bundles': True,
                                               "composer_v2_generation": True,
                                               "composer_v2_batch_generation": True,
                                               "composer_v2_parallel_generation": True,
@@ -357,6 +361,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 from maichart.webui import candidate_api
                 status, result = candidate_api.post(parsed.path, self._json_body(), runtime=sys.modules[__name__])
                 return self._json_response(result, HTTPStatus(status))
+            if parsed.path.startswith('/api/review-bundles/'):
+                from maichart.webui import review_bundle_api
+                status,result=review_bundle_api.post(parsed.path,self._json_body(),runtime=sys.modules[__name__])
+                return self._json_response(result,HTTPStatus(status))
             if parsed.path.startswith('/api/chart-stream/'):
                 from maichart.webui.stream_api import start
                 return start(self, parsed.path.rsplit('/', 1)[-1], self._json_body(), runtime=sys.modules[__name__])
@@ -1871,6 +1879,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "checkpoint": {".pt", ".pth"},
                 "condition": {".json"},
                 "maidata": {".txt", ".maidata"},
+                'review_bundle': {'.zip'},
             }
             suffix = Path(safe_name).suffix.lower()
             if kind not in allowed or suffix not in allowed[kind]:
@@ -1903,13 +1912,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._json_response({"error": "只允许下载项目目录中的文件"}, HTTPStatus.FORBIDDEN)
         if not path.is_file():
             return self._json_response({"error": "文件不存在"}, HTTPStatus.NOT_FOUND)
-        data = path.read_bytes()
+        size = path.stat().st_size
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", mimetypes.guess_type(path.name)[0] or "application/octet-stream")
-        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Content-Length", str(size))
         self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(path.name)}")
         self.end_headers()
-        self.wfile.write(data)
+        with path.open('rb') as source:
+            while chunk:=source.read(1024*1024):self.wfile.write(chunk)
 
     def _serve_static(self, name: str) -> None:
         path = (STATIC_ROOT / name).resolve()
@@ -1979,6 +1989,15 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     """Translate Composer's JSON progress records into the common task shape."""
 
     prefix, separator, raw = line.partition(" ")
+    if separator and prefix=='review_bundle':
+        try:data=json.loads(raw)
+        except (ValueError,TypeError):return
+        task.result['review_bundle_progress']=data
+        done,total=int(data.get('completed',0)),int(data.get('total',0))
+        task.progress=min(.99,done/total) if total else 0.
+        label=dict(collecting='整理已确认片段',packing='打包谱面与音频',verifying='核对片段包',importing='保存导入示范').get(data.get('stage'),'处理片段包')
+        task.message=label+(f' {done}/{total}' if total else '')
+        return
     if separator and prefix in ('candidate_scan','candidate_budget'):
         try:
             data = json.loads(raw)
@@ -2228,9 +2247,9 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
             task.status = "running"
             task.message = "启动任务"
         env = os.environ.copy()
-        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit", "candidate_scan", "candidate_budget"):
+        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit", "candidate_scan", "candidate_budget") or task.kind.startswith('review_bundle_'):
             env["CUDA_VISIBLE_DEVICES"] = ""
-        if task.kind in ('candidate_scan','candidate_budget'):
+        if task.kind in ('candidate_scan','candidate_budget') or task.kind.startswith('review_bundle_'):
             env.update(OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
@@ -2259,7 +2278,7 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 encoding="utf-8",
                 bufsize=1,
                 start_new_session=os.name != 'nt',
-                creationflags=(subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == 'nt' and task.kind in ('candidate_scan','candidate_budget') else 0),
+                creationflags=(subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == 'nt' and (task.kind in ('candidate_scan','candidate_budget') or task.kind.startswith('review_bundle_')) else 0),
             )
             with task.lock:
                 task.process = process
@@ -2487,6 +2506,9 @@ def _persisted_logs(limit: int = 100) -> list[dict[str, Any]]:
 
 def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
     paths = list(result_paths)
+    if task.kind.startswith('review_bundle_'):
+        report=next((p for p in paths if p.is_file()),None)
+        if report is not None:task.result['review_bundle']=json.loads(report.read_text(encoding='utf-8'))
     if task.kind=='candidate_budget':
         report_path=next((p for p in paths if p.is_file()),None)
         if report_path is not None:task.result['supervision']=json.loads(report_path.read_text(encoding='utf-8'))

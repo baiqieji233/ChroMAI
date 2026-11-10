@@ -174,8 +174,17 @@ class QualityAPI:
                      audio_url=_resource(Path(row.audio_path)) if row.audio_path else None,
                      audio_name=Path(row.audio_path).name if row.audio_path else None)
         annotation=find_annotation(row,load_annotations(manifest)['records']) or {}
+        context=dict(manifest=str(manifest),chart_id=row.chart_id,
+            candidate_pool=bool(json.loads(manifest.read_text(encoding='utf-8-sig')).get('candidate_pool')))
+        visible=annotation.get('regions',[])
+        if context['candidate_pool']:
+            from .dataset_api import _json_data
+            scan_path=manifest.parent/'scan'/'results.json'
+            scanned=next((item for item in _json_data(scan_path).get('charts',[]) if item.get('chart_id')==row.chart_id),{}) if scan_path.is_file() else {}
+            context.update(candidate_status=scanned.get('status','pending'),issues=scanned.get('issues',[]))
+            visible=[*visible,*[item for item in annotation.get('candidate_reviews',[]) if item.get('label')=='uncertain']]
         return HTTPStatus.OK,dict(task_id='source-'+row.chart_id,revision=identity['file_sha256'],annotations=annotation.get('regions',[]),
-            source_kind='training_source',training_context=dict(manifest=str(manifest),chart_id=row.chart_id),charts=[version])
+            source_kind='training_source',training_context=context,charts=[version],saved_reviews=visible)
 
     def source_feedback(self,payload):
         manifest = _required_manifest(payload)
@@ -361,12 +370,20 @@ class QualityAPI:
         annotation_by_id = {row.chart_id: lookup.find(row) for row in all_rows}
         catalog_values = [row.to_dict(annotation_by_id[row.chart_id]) for row in all_rows]
         manifest_data = json.loads(manifest.read_text(encoding='utf-8-sig'))
+        candidate_filter=payload.get('candidate_status') or ''
+        if candidate_filter not in ('','pending','error','suspicious','ok','stale'):
+            raise ValueError('未知自动检查状态')
         if manifest_data.get('candidate_pool'):
             statuses = {(str(Path(song['maidata_path']).resolve()), int(d.get('difficulty_index', d.get('index', -1)))): d.get('candidate_status', 'pending')
                 for song in manifest_data.get('songs', []) for d in song.get('difficulties', [])}
+            from .dataset_api import _json_data
+            scan_path=manifest.parent/'scan'/'results.json'
+            scan_values=_json_data(scan_path).get('charts',[]) if scan_path.is_file() else []
+            issues={(str(row.get('source_path','')).casefold(),row.get('difficulty_index')):row.get('issues',[]) for row in scan_values}
             for value in catalog_values:
                 value['candidate_status'] = statuses.get((value['source_path'], value['difficulty_index']), 'pending')
                 value['confirmed_regions'] = len((value.get('annotation') or {}).get('regions', []))
+                value['candidate_issues']=issues.get((value['source_path'].casefold(),value['difficulty_index']),[])
         rows = []
         for value in catalog_values:
             haystack = " ".join(str(value.get(key, "")) for key in ("song_id", "title", "maidata_title", "artist", "level", "designer", "folder_name", "source_dataset", "source_path")).casefold()
@@ -374,6 +391,7 @@ class QualityAPI:
                 continue
             if label_filter and value["label"] != label_filter:
                 continue
+            if candidate_filter and value.get('candidate_status')!=candidate_filter:continue
             rows.append(value)
         _sort_catalog_rows(rows, sort_by, sort_order == "desc")
         total = len(rows)

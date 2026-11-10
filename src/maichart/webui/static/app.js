@@ -3654,6 +3654,7 @@ function updateComposerRecoverySamplingControls() {
 // Task handling
 // ---------------------------------------------------------------------------
 const TASK_KIND_LABEL = {
+  review_bundle_export:'导出已确认片段',review_bundle_preview:'预览片段包',review_bundle_import:'导入片段包',
   candidate_budget: "训练来源学习份额估算",
   chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
   composer_v2_train: "Composer v2 训练", composer_v2_generate: "Composer v2 生成",
@@ -5969,7 +5970,8 @@ async function loadQualityCatalog(resetPage = false) {
   const sortByUi = valueOrDefault("#qualitySortBy", "difficulty");
   const sortBy = sortByUi === "difficulty" ? "level" : sortByUi;
   const sortDirection = valueOrDefault("#qualitySortDirection", "asc");
-  const data = await api("/api/quality/catalog", { manifest, query: qualityState.query, page: qualityState.page, page_size: qualityState.pageSize, label_filter: qualityState.label || null, sort_by: sortBy, sort_order: sortDirection });
+  const data = await api("/api/quality/catalog", { manifest, query: qualityState.query, page: qualityState.page, page_size: qualityState.pageSize, label_filter: qualityState.label || null, sort_by: sortBy, sort_order: sortDirection,
+    candidate_status:valueOrDefault('#candidatePoolStatusFilter','') });
   if (request !== qualityState.catalogRequest || manifest !== qualityManifest()) return;
   qualityState.items = Array.isArray(data.items) ? data.items : [];
   qualityState.page = Math.max(1, Number(data.page ?? qualityState.page) || 1);

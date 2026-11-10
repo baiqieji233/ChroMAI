@@ -295,3 +295,8 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .generation-chart-progress[data-status="failed"] .generation-chart-track > div { background: #c34838; }
 .generation-chart-progress[data-status="failed"] .generation-chart-heading span { color: #a73328; }
 .generation-chart-log { font-size: 11px; color: var(--teal); }
+#reviewBundleItems { max-height: 260px; overflow-y: auto; }
+#reviewBundlePanel > .button-row { flex-wrap: wrap; }
+#candidatePoolStatusFilter { max-width: 100%; }
+.candidate-issues { margin-top: 5px; font-size: 12px; }
+.candidate-issues p { white-space: normal; overflow-wrap: anywhere; }

@@ -578,7 +578,7 @@ def pool_status(pool_dir):
                 layout_regions=sum(region_component_weights(r)[1] > 0 for r in regions))
 
 
-def review_queue(pool_dir, offset=0, limit=1):
+def review_queue(pool_dir, offset=0, limit=1, *, status=None):
     root = _pool(pool_dir)
     metadata = _read(root / "pool.json")
     if not metadata.get("scan_complete"):
@@ -588,6 +588,7 @@ def review_queue(pool_dir, offset=0, limit=1):
     records = _records(root / "training_manifest.json")
     groups = {}
     for result in _read(root / "scan" / "results.json").get("charts", []):
+        if status and result.get('status')!=status:continue
         key = _key(result["source_path"], result["difficulty_index"])
         if key not in charts or not result.get("chart_id") or result.get("status") == "error":
             continue
@@ -624,7 +625,7 @@ def review_queue(pool_dir, offset=0, limit=1):
                 continue
             seen.add(segment["start_sec"])
             choices.append(dict(segment, chart_id=result["chart_id"], source_path=result["source_path"],
-                                difficulty_index=result["difficulty_index"], title=result.get("title"), why=why,
+                                difficulty_index=result["difficulty_index"], title=result.get("title"), why=why,candidate_status=result['status'],
                                 issues=result.get("issues", []), context_start_sec=max(0, segment["start_sec"] - 4),
                                 context_end_sec=min(result.get("audio_duration_sec", segment["end_sec"] + 4), segment["end_sec"] + 4)))
         try:
