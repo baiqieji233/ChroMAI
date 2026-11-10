@@ -1,5 +1,6 @@
 """CPU-only, throttled progress. Positions always describe committed events."""
 from contextlib import contextmanager
+from collections import deque
 import json
 import time
 
@@ -45,6 +46,7 @@ def _chart_text(value):
         percent=100 if value.get('status') in {'completed','failed'} else min(99,int(100*float(value.get('progress',0))))
         text+=f" · {_clock(value.get('audio_sec',0))}/{_clock(value['audio_duration_sec'])}（{percent}%）"
     if 'events' in value:text+=f" · {value['events']} 个事件"
+    if value.get('eta_sec') is not None:text+=' · 预计还需约 '+_clock(value['eta_sec'])
     return text
 
 
@@ -54,11 +56,14 @@ class GenerationProgress:
         self.last_emit = float('-inf')
         self.interval = interval
         self.emit = emit
+        self.positions = deque(maxlen=16)
         self.state = dict(index=index, count=count, seed=int(seed), status='running',
                           stage='starting', events=0, progress=0., started_unix=time.time())
 
     def update(self, *, force=False, **values):
         self.state.update(values)
+        if self.state.get('stage') in {'exporting','completed','failed','cancelled'}:
+            self.state['eta_sec'] = None
         now = time.monotonic()
         if not force and now - self.last_emit < self.interval:
             return
@@ -76,8 +81,19 @@ class GenerationProgress:
 
     def position(self, clock, beat, duration, *, events, stage='generating', force=False):
         seconds = min(float(duration), max(0., float(clock.at(beat)))) if events else 0.
+        now = time.monotonic()
+        # Estimate from recent committed movement, excluding model/audio setup.
+        # A rollback resets the sample window rather than producing negative ETA.
+        if self.positions and seconds < self.positions[-1][1]:
+            self.positions.clear()
+        if not self.positions or now-self.positions[-1][0]>=1.:
+            self.positions.append((now, seconds))
+        first = self.positions[0]
+        eta = ((duration-seconds)*(now-first[0])/(seconds-first[1])
+               if events>=8 and now-first[0]>=5 and seconds>first[1] else None)
         self.update(force=force, stage=stage, events=int(events), beat=str(beat),
                     audio_sec=seconds, audio_duration_sec=float(duration),
+                    eta_sec=eta,
                     progress=min(.995, seconds / duration) if duration > 0 else 0.)
 
 

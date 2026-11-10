@@ -629,6 +629,9 @@ function composerV2TrainingView(task) {
   const progress=result.composer_v2_progress||{};
   let metrics=result.composer_v2_training_metrics||(progress.stage==='training'?progress:null);
   let complete=result.composer_v2_epoch_metrics||(progress.stage==='epoch_complete'?progress:null);
+  let epochStart=result.composer_v2_epoch_start,validation=result.composer_v2_validation;
+  let position=result.composer_v2_position;
+  const timingSamples=[],saveSamples=[];
   const epochs=new Map();
   const addEpoch=row=>{if(trainingMetricNumber(row,'epoch')!==null)epochs.set(Number(row.epoch),row);};
   if(Array.isArray(result.composer_v2_epoch_history))result.composer_v2_epoch_history.forEach(addEpoch);
@@ -636,28 +639,34 @@ function composerV2TrainingView(task) {
   // log ring still supplies recent completed epochs and the last training mean.
   let lastPrefix='',lastStage='';
   for(const line of task.logs||[]) {
-    const match=String(line).match(/(?:^|\s)(composer_v2_progress|composer_v2_prepare|composer_v2_checkpoint|composer_v2_runtime)\s+(\{.*\})\s*$/);
+    const match=String(line).match(/(?:^|\s)(composer_v2_progress|composer_v2_prepare|composer_v2_checkpoint|composer_v2_runtime|composer_v2_position)\s+(\{.*\})\s*$/);
     if(!match)continue;
     let row;try{row=JSON.parse(match[2]);}catch(_){continue;}
     if(!row || typeof row!=='object' || Array.isArray(row))continue;
     lastPrefix=match[1];lastStage=row.stage||'';
+    if(match[1]==='composer_v2_position')position=row;
+    if(match[1]==='composer_v2_checkpoint'&&trainingMetricNumber(row,'save_sec')!==null)saveSamples.push(Number(row.save_sec));
     if(match[1]!=='composer_v2_progress')continue;
+    if(row.stage==='epoch_start')epochStart=row;
+    if(row.stage==='validation')validation=row;
+    if(row.stage==='training')timingSamples.push(row);
     if(row.stage==='training' && (!metrics || Number(row.optimizer_steps)>=Number(metrics.optimizer_steps||0)))metrics=row;
     if(row.stage==='epoch_complete'){addEpoch(row);if(!complete || Number(row.epoch)>=Number(complete.epoch))complete=row;}
   }
   if(complete)addEpoch(complete);
   const history=[...epochs.values()].sort((a,b)=>Number(a.epoch)-Number(b.epoch));
   const stage=result.composer_v2_stage||(lastPrefix==='composer_v2_checkpoint'?'checkpoint':lastStage)||progress.stage||runtime.stage||'queued';
-  const target=trainingMetricNumber(result,'epoch_target');
+  const target=trainingMetricNumber(result,'epoch_target')??trainingMetricNumber(runtime,'epoch_target')??trainingMetricNumber(result.effective_settings||{},'epochs');
   const finished=trainingMetricNumber(complete,'epoch')||0;
-  const activeEpoch=trainingMetricNumber(metrics,'epoch')||0;
-  const batch=trainingMetricNumber(metrics,'batch'),total=trainingMetricNumber(metrics,'total');
+  const activeEpoch=Math.max(trainingMetricNumber(metrics,'epoch')||0,trainingMetricNumber(epochStart,'epoch')||0,trainingMetricNumber(position,'epoch')||0);
+  const activeMetrics=[position,metrics,epochStart].filter(row=>Number(row?.epoch)===activeEpoch).sort((a,b)=>Number(b.batch||0)-Number(a.batch||0))[0];
+  const batch=trainingMetricNumber(activeMetrics,'batch'),total=trainingMetricNumber(activeMetrics,'total')??trainingMetricNumber(runtime,'batches_per_epoch');
   const fraction=total>0 && batch!==null?Math.max(0,Math.min(1,batch/total)):0;
   const done=Math.max(finished,activeEpoch>0?activeEpoch-1+fraction:0);
   const amount=target>0?Math.max(0,Math.min(1,done/target)):0;
   const epoch=Math.max(finished,activeEpoch);
-  const preparing=stage==='preparation' || (!metrics && !complete);
-  const phaseNames={queued:'等待启动',preparation:'准备谱面与音频',training:'训练中',checkpoint:'保存检查点',epoch_complete:'本轮完成',failed:'运行失败',nonfinite_update_skipped:'已跳过非有限更新'};
+  const preparing=stage==='preparation' || (!metrics && !complete && !epochStart && !position);
+  const phaseNames={queued:'等待启动',preparation:'准备谱面与音频',epoch_start:'训练中',training:'训练中',validation:'验证中',checkpoint:'保存检查点',epoch_complete:'本轮完成',failed:'运行失败',nonfinite_update_skipped:'已跳过非有限更新'};
   let status=phaseNames[stage]||'准备训练';
   if (preparing && prepared.total) {
     const label = {charts:'检查谱面源', vocabulary:'建立词表与事件索引', audio:'音频'}[prepared.stage] || '音频';
@@ -667,7 +676,7 @@ function composerV2TrainingView(task) {
     }
   }
   if(epoch>0)status+=` · 第 ${epoch}/${target||'?'} 轮`;
-  if(metrics && activeEpoch>finished && total>0)status+=` · 本轮 batch ${batch}/${total}（${(fraction*100).toFixed(1)}%）`;
+  if(activeMetrics && activeEpoch>finished && total>0)status+=` · 本轮 batch ${batch}/${total}（${(fraction*100).toFixed(1)}%）`;
   if(target>0 && !preparing)status+=` · 总计划 ${(amount*100).toFixed(1)}%`;
   if(['completed','cancelled','failed'].includes(task.status))status=`${({completed:'本次任务已结束',cancelled:'任务已中断',failed:'任务失败'})[task.status]} · ${status}${task.status==='completed' && amount<1?'；原定轮数尚未全部跑完':''}`;
   const show=(value,digits=4)=>value===null||value===undefined?'未记录':Number(value).toFixed(digits);
@@ -675,8 +684,45 @@ function composerV2TrainingView(task) {
   const latestEpoch=complete?`第 ${complete.epoch} 轮`:'尚无完整轮次';
   const trainEpoch=n(complete,'epoch_train_loss') ?? (complete?.validation_loss==null?n(complete,'loss'):null);
   const settings=result.effective_settings||{},config=runtime.model_config||{};
+  const duration=value=>{if(value==null||!Number.isFinite(value))return '正在估算';const sec=Math.max(0,Math.ceil(value)),minutes=Math.ceil(sec/60);return sec>=3600?`${Math.floor(minutes/60)} 小时 ${minutes%60} 分钟`:sec>=60?`${minutes} 分钟`:`${sec} 秒`;};
+  const preparationEta=n(prepared,'eta_sec')??(prepared.completed>=3&&prepared.total>prepared.completed&&prepared.elapsed_sec>=3?
+    prepared.elapsed_sec*(prepared.total-prepared.completed)/prepared.completed:null);
+  const mean=values=>values.length?values.reduce((a,b)=>a+b,0)/values.length:null;
+  const terminal=['completed','cancelled','failed','archived'].includes(task.status);
+  let batchSeconds=null,epochEta=null,taskEta=null;
+  const processed=n(activeMetrics,'epoch_processed_batches'),elapsed=n(activeMetrics,'epoch_elapsed_sec');
+  if(processed>=3&&elapsed>0)batchSeconds=elapsed/processed;
+  // Old tasks can estimate from two real log samples. The elapsed difference
+  // excludes earlier epochs and never counts skipped batches on resume.
+  if(batchSeconds===null&&metrics) {
+    const samples=timingSamples.filter(row=>Number(row.epoch)===Number(metrics.epoch)&&Number(row.batch)<Number(metrics.batch)&&
+      Number(row.elapsed_sec)<Number(metrics.elapsed_sec)).slice(-6);
+    const first=samples[0];
+    if(first&&metrics.batch-first.batch>=3)batchSeconds=(metrics.elapsed_sec-first.elapsed_sec)/(metrics.batch-first.batch);
+  }
+  if(batchSeconds===null)batchSeconds=mean(history.slice(-3).filter(row=>row.epoch_processed_batches>0&&row.epoch_train_sec>0)
+    .map(row=>row.epoch_train_sec/row.epoch_processed_batches));
+  const validationMean=mean(history.slice(-3).map(row=>n(row,'validation_sec')).filter(value=>value!==null&&value>=0));
+  const validationKnown=validationMean!==null||runtime.validation_windows===0||settings.validation_source==='off';
+  const saveMean=mean(saveSamples.slice(-5))||0;
+  if(batchSeconds!==null&&total>0) {
+    const currentDone=activeEpoch<=finished;
+    const trainingLeft=['validation','epoch_complete'].includes(stage)||currentDone?0:Math.max(0,total-(batch||0))*batchSeconds;
+    const validationElapsed=stage==='validation'&&Number.isFinite(validation?.started_unix)?Math.max(0,Date.now()/1000-validation.started_unix):0;
+    const validationLeft=currentDone?0:Math.max(0,(validationMean||0)-validationElapsed);
+    epochEta=trainingLeft+validationLeft;
+    if(target>0)taskEta=epochEta+Math.max(0,target-Math.max(activeEpoch,finished))*(total*batchSeconds+(validationMean||0)+saveMean)+saveMean;
+    const attempts=n(activeMetrics,'update_attempts');
+    if(settings.max_steps>0&&attempts!==null)taskEta=Math.min(taskEta??Infinity,Math.max(0,settings.max_steps-attempts)*Number(settings.grad_accumulation||1)*batchSeconds+saveMean);
+  }
+  if(terminal){epochEta=null;taskEta=null;}
+  const etaPending=terminal?'本次任务已结束':stage==='validation'&&!validationKnown?'首次验证，正在估算':'正在估算';
+  const epochEtaText=epochEta===null||stage==='validation'&&!validationKnown?etaPending:`约 ${duration(epochEta)}`;
+  const taskEtaText=taskEta===null?etaPending:`约 ${duration(taskEta)}${!validationKnown?'（验证用时待首轮记录）':''}`;
+  if(!terminal&&!preparing&&epochEta!==null&&!(stage==='validation'&&!validationKnown))status+=` · 本轮预计剩余 ${duration(epochEta)}`;
+  if(!terminal&&preparing&&preparationEta!==null)status+=` · 本阶段预计剩余 ${duration(preparationEta)}`;
   const coverage=complete?.validation_coverage||runtime.validation_coverage;
-  const stepRecords=[n(result,'optimizer_steps'),n(metrics,'optimizer_steps'),n(complete,'optimizer_steps'),n(result.composer_v2_checkpoint,'optimizer_steps')].filter(value=>value!==null);
+  const stepRecords=[n(result,'optimizer_steps'),n(metrics,'optimizer_steps'),n(position,'optimizer_steps'),n(complete,'optimizer_steps'),n(result.composer_v2_checkpoint,'optimizer_steps')].filter(value=>value!==null);
   const bestBasis=complete?.best_basis||runtime.best_basis||result.composer_v2_checkpoint?.best_basis||'';
   const cards=[['学习指标',[
     ['累计训练 loss（本次运行，加权 token 均值）',show(n(metrics,'loss'))],
@@ -691,11 +737,14 @@ function composerV2TrainingView(task) {
       ['实际验证覆盖',coverage?`${coverage.selected_windows}/${coverage.total_windows} 片段 · ${coverage.selected_audio}/${coverage.total_audio} 首音频`:'旧进程未记录'],
       ['验证抽查方式',coverage?.policy==='audio_balanced_spread_v1'?'歌曲均衡、曲内分散':coverage?.policy==='manifest_prefix_v1'?'旧版清单前缀':'以训练日志为准']]],
     ['训练进度',[
+      ['本轮预计剩余',preparing?'准备数据中':epochEtaText],
+      ['整个任务预计剩余',preparing?'准备完成后估算':taskEtaText],
+      ['准备阶段预计剩余',preparing?duration(preparationEta):'已完成'],
       ['计划轮数 / 已完成轮数',`${target??'未知'} / ${finished}`],
       ['参数更新步',show(stepRecords.length?Math.max(...stepRecords):null,0)],
       ['当前学习率',n(metrics,'lr')===null?'未记录':Number(metrics.lr).toExponential(3)],
       ['累计 token',show(n(metrics,'token_count'),0)],
-      ['数据准备',prepared.total?`${prepared.completed??0}/${prepared.total} 份音频`:'等待记录']]],
+      ['数据准备',prepared.total?`${prepared.completed??0}/${prepared.total} ${{charts:'份谱面源',vocabulary:'项索引',audio:'份音频'}[prepared.stage]||'项'}`:'等待记录']]],
     ['实际运行配置',[
       ['设备 / 精度',`${runtime.device||'未记录'} / ${runtime.precision||'未记录'}`],
       ['模型宽度 / 层数',`${config.d_model??'未记录'} / ${config.layers??'未记录'}`],
@@ -3649,11 +3698,23 @@ function composerV2ProgressState(task) {
     const progress=Number.isFinite(batch.progress)?batch.progress:
       (finished+rows.filter(row=>row.status==='running').reduce((sum,row)=>sum+Math.min(.995,Math.max(0,Number(row.progress)||0)),0))/count;
     rows=rows.map(row=>({audio_sec:0,...row,log:row.log||null}));
-    return {batch,rows,progress:Math.min(1,Math.max(0,progress)),elapsed:batch.elapsed_sec,
+    const running=rows.filter(row=>row.status==='running'),times=rows.filter(row=>row.status==='completed'&&row.elapsed_sec>0).map(row=>row.elapsed_sec);
+    for(const row of running)if(Number.isFinite(row.eta_sec)&&row.elapsed_sec>0)times.push(row.elapsed_sec+row.eta_sec);
+    const average=times.length?times.reduce((a,b)=>a+b,0)/times.length:null;
+    const lanes=running.map(row=>Number.isFinite(row.eta_sec)?Math.max(0,row.eta_sec):average!==null?Math.max(0,average-(row.elapsed_sec||0)):null);
+    let eta=null;
+    if(average!==null&&!lanes.includes(null)&&batch.status!=='preparing') {
+      while(lanes.length<Math.max(1,Number(batch.parallel)||1))lanes.push(0);
+      for(let queued=Math.max(0,count-finished-running.length);queued>0;queued--){const lane=lanes.indexOf(Math.min(...lanes));lanes[lane]+=average;}
+      eta=Math.max(0,...lanes);
+    }
+    if(!['queued','running'].includes(task.status))eta=null;
+    return {batch,rows,progress:Math.min(1,Math.max(0,progress)),elapsed:batch.elapsed_sec,eta,
       indeterminate:batch.status==='preparing'};
   }
   return {batch:null,rows:single&&single.index!==0?[single]:[],progress:Math.min(1,Math.max(0,Number(single?.progress)||0)),
-    elapsed:single?.elapsed_sec,indeterminate:!single?.audio_duration_sec&&single?.status!=='completed'};
+    elapsed:single?.elapsed_sec,eta:task.status==='running'&&Number.isFinite(single?.eta_sec)?single.eta_sec:null,
+    indeterminate:!single?.audio_duration_sec&&single?.status!=='completed'};
 }
 
 function renderGenerationProgress(task) {
@@ -3664,7 +3725,7 @@ function renderGenerationProgress(task) {
   const state=composerV2ProgressState(task),signature=JSON.stringify([task.task_id,task.status,state]);
   if(panel._signature===signature)return;
   panel._signature=signature;
-  summary.textContent=`${state.batch?`并行 ${state.batch.active?.length||0}/${state.batch.parallel||1} 张 · `:''}${state.elapsed!=null?`已用 ${generationTime(state.elapsed)} · `:''}按已写歌曲位置估算进度`;
+  summary.textContent=`${state.batch?`已完成 ${state.batch.completed||0}/${state.batch.count} 张 · 并行 ${state.batch.active?.length||0}/${state.batch.parallel||1} 张 · `:''}${state.elapsed!=null?`已用 ${generationTime(state.elapsed)} · `:''}${state.eta!==null?`预计还需约 ${generationTime(state.eta)} · `:['queued','running'].includes(task.status)?'剩余时间正在估算 · ':''}按已写歌曲位置估算进度`;
   list.replaceChildren();
   const order={running:0,failed:1,queued:2,unknown:2,cancelled:3,completed:4};
   for(const row of [...state.rows].sort((a,b)=>(order[a.status]??2)-(order[b.status]??2)||(a.index||0)-(b.index||0))) {
@@ -3675,7 +3736,8 @@ function renderGenerationProgress(task) {
     const detail=document.createElement('p');
     const percent=['completed','failed'].includes(row.status)?100:Math.min(99,Math.floor((row.progress||0)*100));
     detail.textContent=[row.audio_duration_sec?`${generationTime(row.audio_sec)} / ${generationTime(row.audio_duration_sec)}（${percent}%）`:null,
-      row.events!=null?`${row.events} 个事件`:null,row.elapsed_sec!=null?`用时 ${generationTime(row.elapsed_sec)}`:null].filter(Boolean).join(' · ');
+      row.events!=null?`${row.events} 个事件`:null,row.elapsed_sec!=null?`用时 ${generationTime(row.elapsed_sec)}`:null,
+      row.status==='running'&&Number.isFinite(row.eta_sec)?`预计还需约 ${generationTime(row.eta_sec)}`:null].filter(Boolean).join(' · ');
     if(row.status==='running'&&row.updated_at&&Date.now()/1000-row.updated_at>10)detail.textContent+=` · 上次进度更新 ${Math.floor(Date.now()/1000-row.updated_at)} 秒前`;
     if(row.error)detail.textContent+=` · ${row.error}`;
     card.append(detail);

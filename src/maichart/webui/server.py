@@ -1987,7 +1987,16 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
             return
         task.result[prefix] = data
         task.progress = min(.99, completed / total) if total else 0.
-        task.message = (f'估算学习份额 {completed}/{total}' if total else '正在读取所选资料') if prefix=='candidate_budget' else f'检查候选谱面 {completed}/{total}'
+        if prefix=='candidate_budget':
+            task.message = f'估算学习份额 {completed}/{total}' if total else '正在读取所选资料'
+        else:
+            stage = data.get('stage', 'scanning')
+            name = dict(starting='启动检查',references='核对已有资料',identities='核对源谱与音频',
+                        annotations='整理已有标注',scanning='检查谱面与音频',finalizing='汇总检查结果',complete='检查完成').get(stage, '检查候选谱面')
+            task.message = name + (f' {completed}/{total}' if total else '')
+            task.result['progress_indeterminate'] = not total
+            if data.get('eta_sec') is not None:
+                task.message += f'，本阶段预计剩余 {max(1, round(data["eta_sec"]/60))} 分钟'
         return
     if separator and prefix.startswith("composer_v2_"):
         try:
@@ -2006,16 +2015,42 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         elif prefix == "composer_v2_prepare":
             task.result["composer_v2_stage"] = "preparation"
             task.result["progress_indeterminate"] = True
+            clock = task.result.get('_composer_v2_prepare_clock', {})
+            now = time.monotonic()
+            done, total = int(data.get('completed', 0)), int(data.get('total', 0))
+            if clock.get('stage') != stage or done < clock.get('last', 0):
+                clock = dict(stage=stage, started=now, initial=done)
+            clock['last'] = done
+            task.result['_composer_v2_prepare_clock'] = clock
+            phase_elapsed = max(0., now-clock['started'])
+            data.setdefault('elapsed_sec', phase_elapsed)
+            if done-clock['initial'] >= 3 and phase_elapsed >= 3 and total > done:
+                data['eta_sec'] = phase_elapsed*(total-done)/(done-clock['initial'])
             label = {"charts": "检查谱面源", "vocabulary": "建立词表与事件索引",
                      "audio": "准备音频特征"}.get(stage, "准备训练数据")
             task.message = f"{label} {data.get('completed', 0)}/{data.get('total', '?')}"
             if stage == 'audio' and 'cache_builds' in data:
                 task.message += f"（复用 {data.get('cache_hits', 0)}，新建 {data['cache_builds']}）"
+        elif prefix == 'composer_v2_position':
+            task.result['composer_v2_stage'] = 'training'
+            task.result['progress_indeterminate'] = False
+            target = task.result.get('epoch_target')
+            epoch, batch, total = data.get('epoch'), data.get('batch'), data.get('total')
+            if target and epoch and total and batch is not None:
+                task.progress = min(.99, max(0., (float(epoch)-1+min(1., float(batch)/float(total)))/float(target)))
+            task.message = f'训练第 {epoch}/{target or "?"} 轮 · batch {batch}/{total}'
         elif prefix == "composer_v2_progress":
             task.result["composer_v2_stage"] = stage
             target = task.result.get("epoch_target")
             epoch = data.get("epoch")
-            if stage == "training":
+            if stage == 'epoch_start':
+                task.result['composer_v2_epoch_start'] = dict(data)
+                task.result['progress_indeterminate'] = False
+                task.message = f'训练第 {epoch}/{target or "?"} 轮 · 正在估算剩余时间'
+            elif stage == 'validation':
+                task.result['composer_v2_validation'] = dict(data)
+                task.message = f'验证第 {epoch} 轮'
+            elif stage == "training":
                 data.setdefault("loss_scope", "run_quality_weighted_token_mean")
                 task.result["composer_v2_training_metrics"] = dict(data)
                 task.result["epoch"] = epoch

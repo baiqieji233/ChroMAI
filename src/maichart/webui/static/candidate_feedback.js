@@ -496,6 +496,7 @@
   const $=id=>document.getElementById(id);
   let enabled=false,active=null,current=null,queue=[],seen=new Set(),undo=null,busy=false,scanning=false,serial=0;
   let budgetPending=false,budgetTaskId=null;
+  let scanTimer=null;
   const isPool=item=>!!(item?.candidate_pool || item?.candidate_pool_summary);
   const identity=()=>active?.manifest;
   const message=text=>{$('candidatePoolReviewStatus').textContent=text;};
@@ -520,14 +521,37 @@
     const counts=data.counts||data;
     const scan=data.scan_state||data.scan?.state||'';
     scanning=['queued','running'].includes(scan)||data.scan_complete===false;
-    const scanMessage=data.scan_complete===false&&scan==='interrupted'?'上次检查已中断，点击“重新扫描／同步”继续。 ':['queued','running'].includes(scan)?`扫描${scan==='queued'?'排队中':'进行中'}，完成后可开始审阅。 `:'';
+    const progress=data.scan_task?.progress||{},stage=progress.stage;
+    const stages={starting:'启动检查',references:'核对已有资料',identities:'核对源谱与音频',annotations:'整理已有标注',scanning:'检查谱面与音频',finalizing:'汇总检查结果',complete:'检查完成'};
+    const duration=seconds=>seconds<60?`${Math.max(1,Math.ceil(seconds))} 秒`:`${Math.ceil(seconds/60)} 分钟`;
+    let scanMessage='';
+    if(['queued','running'].includes(scan)) {
+      scanMessage=stage?`${stages[stage]||'正在检查'}${progress.total>0?` ${progress.completed||0}/${progress.total}`:''}`:`扫描${scan==='queued'?'排队中':'进行中'}`;
+      if(Number.isFinite(progress.eta_sec))scanMessage+=` · 本阶段预计剩余 ${duration(progress.eta_sec)}`;
+      else scanMessage+=' · 正在估算用时';
+      if(stage==='scanning'&&progress.workers>1)scanMessage+=` · ${progress.workers} 路并行`;
+      if(progress.title)scanMessage+=` · ${progress.title}`;
+      scanMessage+='，完成后可开始审阅。 ';
+    } else if(data.scan_complete===false) {
+      scanMessage=scan==='failed'?'检查失败，查看任务日志或点击“重新扫描／同步”重试。 ':'上次检查已中断，点击“重新扫描／同步”继续。 ';
+    }
+    if(stage==='scanning'&&['queued','running'].includes(scan)&&progress.counts) {
+      Object.assign(counts,progress.counts,{pending:Math.max(0,Number(progress.total||0)-Number(progress.completed||0))});
+    }
     $('candidatePoolSummary').textContent=scanMessage+`只学习已确认片段 · 已确认 ${data.confirmed_regions??data.reviewed_regions??0} 段 · 未检查 ${counts.pending??0}／错误 ${counts.error??0}／待核对 ${counts.suspicious??0}／低风险 ${counts.ok??0} · 可审阅 ${data.reviewable??data.reviewable_charts??'待扫描'} 张`;
     controls();
   }
   async function refresh() {
     const manifest=identity(),request=serial;if(!manifest||!enabled)return;
     const data=await api('/api/candidates/status',{manifest});
-    if(request===serial&&manifest===identity())summary(data);
+    if(request===serial&&manifest===identity()) {
+      summary(data);
+      if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);
+      scanTimer=null;
+      if(['queued','running'].includes(data.scan_state)&&typeof setTimeout==='function')scanTimer=setTimeout(()=>{
+        scanTimer=null;void refresh().catch(error=>message(`读取检查进度失败：${error.message}`));
+      },2000);
+    }
   }
   async function run(action) {
     if(busy)return;busy=true;controls();
@@ -609,7 +633,7 @@
       if(selectedDatasetItems().some(isPool)){const input=$('v2TrainQualityEnabled');if(input)input.checked=true;}
       controls();
     },
-    activate(item) {++serial;active=isPool(item)?item:null;current=null;queue=[];seen.clear();$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
+    activate(item) {++serial;if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);scanTimer=null;active=isPool(item)?item:null;current=null;queue=[];seen.clear();$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
   };
   document.addEventListener('click',event=>{
     const create=event.target.closest?.('.candidate-pool-create');if(!create)return;

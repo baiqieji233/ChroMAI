@@ -10,8 +10,10 @@ import copy
 import hashlib
 import json
 import math
+import os
 import random
 import re
+import time
 import unicodedata
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -180,7 +182,7 @@ def pool_identity(manifest, workspace_root):
     return dict(pool_id=pool_id, pool_dir=str(root), manifest=str(root / "training_manifest.json"))
 
 
-def create_pool(manifest, workspace_root, name=None, reference_manifests=()):
+def create_pool(manifest, workspace_root, name=None, reference_manifests=(), *, progress=None):
     source = Path(manifest).resolve()
     payload = _read(source)
     if payload.get("schema") != "maichart-training-manifest-v1":
@@ -197,26 +199,40 @@ def create_pool(manifest, workspace_root, name=None, reference_manifests=()):
                         if Path(p).resolve() != source], scan_policy=None, policy=POLICY,
                     created_at=_now(), updated_at=_now(), excluded=[])
     _write_json(root / "pool.json", metadata)
-    _synchronize(root)
+    _synchronize(root, progress=progress)
     return pool_status(root)
 
 
-def _synchronize(root):
+def _synchronize(root, progress=None):
     """Explicitly rebuild from the source, archiving invalidated review records."""
     metadata = _read(root / "pool.json")
     source = Path(metadata["source_manifest"])
     payload = _read(source)
     old_records = _records(root / "training_manifest.json")
+    # Preserve the previous first-match rule, without searching all records
+    # (and resolving their Windows paths) once for every chart.
+    old_by_key = {}
+    for record in old_records:
+        old_by_key.setdefault(_key(record.get("source_path", ""), record.get("difficulty_index", -1)), record)
     hash_cache = _read(root / "identity_cache.json")
     reference_cache_path = root.parent / "_reference_index.json"
     reference_cache = _read(reference_cache_path)
+    reference_dirty = False
     reference_keys, reference_hashes, reference_contents, reference_titles = {}, {}, {}, {}
+    references = []
     for reference in metadata.get("reference_manifests", []):
         if not Path(reference).is_file():
             raise ValueError(f"参考清单已不存在：{reference}")
-        if _read(reference).get("candidate_pool"):
+        reference_payload = _read(reference)
+        if reference_payload.get("candidate_pool"):
             continue
-        for song, difficulty, index in _charts(reference):
+        references.append((reference, reference_payload))
+    total_references = sum(len(s.get('difficulties', [])) for _, data in references for s in data.get('songs', []))
+    completed_references = 0
+    if progress:
+        progress(dict(stage='references', completed=0, total=total_references))
+    for reference, reference_payload in references:
+        for song, difficulty, index in _charts(reference, reference_payload):
             path = song.get("maidata_path", "")
             reference_keys[_key(path, index)] = dict(manifest=reference, source_path=path, slot=index,
                                                     audio_path=song.get("audio_path"))
@@ -231,6 +247,7 @@ def _synchronize(root):
                     except (OSError, ValueError, UnicodeError):
                         entry["features"] = {}
                     reference_cache[cache_key] = entry
+                    reference_dirty = True
                 match_entry = dict(reference_keys[_key(path, index)], features=entry.get("features", {}))
                 if not match_entry["features"].get("title") and song.get("title"):
                     match_entry["features"] = dict(match_entry["features"], title=_title_key(song["title"]))
@@ -242,14 +259,26 @@ def _synchronize(root):
                     reference_titles.setdefault(title, []).append(match_entry)
             except (OSError, ValueError, UnicodeError, StopIteration):
                 pass
-    _write_json(reference_cache_path, reference_cache)
+            completed_references += 1
+            if progress:
+                progress(dict(stage='references', completed=completed_references, total=total_references))
+    if reference_dirty:
+        _write_json(reference_cache_path, reference_cache)
     songs, excluded, identities = [], [], {}
+    total_source = sum(len(s.get('difficulties', [])) for s in payload.get('songs', []))
+    completed_source = 0
+    if progress:
+        progress(dict(stage='identities', completed=0, total=total_source))
     for original in payload.get("songs", []):
         song = copy.deepcopy(original)
         _absolutize_song_paths(song, source, payload)
         song.update(reviewed_only=True, candidate_pool=metadata["pool_id"])
         kept = []
         for difficulty in song.get("difficulties", []):
+            completed_source += 1
+            if progress:
+                progress(dict(stage='identities', completed=completed_source - 1, total=total_source,
+                              title=song.get('title') or Path(song.get('maidata_path', '')).parent.name))
             index = int(difficulty.get("difficulty_index", difficulty.get("index", -1)))
             path = song.get("maidata_path", "")
             try:
@@ -319,11 +348,13 @@ def _synchronize(root):
                                usable_difficulty_count=prepared["usable_difficulty_count"], reviewed_only=True)
     _write_json(output, prepared)
     records, invalid = [], []
+    if progress:
+        progress(dict(stage='annotations', completed=0, total=len(identities)))
     catalog = iter_catalog(output)
     for row in catalog:
-        identity = identities[_key(row.source_path, row.difficulty_index)]
-        prior = next((r for r in old_records if _key(r.get("source_path", ""), r.get("difficulty_index", -1)) ==
-                      _key(row.source_path, row.difficulty_index)), None)
+        key = _key(row.source_path, row.difficulty_index)
+        identity = identities[key]
+        prior = old_by_key.get(key)
         if prior and (prior.get("chart_sha256") != identity["chart_sha256"] or
                       prior.get("audio_sha256") != identity["audio_sha256"]):
             invalid.append(prior)
@@ -332,6 +363,8 @@ def _synchronize(root):
         record.pop("annotation", None)
         record.update(chart_id=row.chart_id, audio_sha256=identity["audio_sha256"], unmarked_weight=0.)
         records.append(record)
+        if progress:
+            progress(dict(stage='annotations', completed=len(records), total=len(identities)))
     active_keys = {_key(r["source_path"], r["difficulty_index"]) for r in records}
     invalid.extend(r for r in old_records if _key(r.get("source_path", ""), r.get("difficulty_index", -1)) not in active_keys)
     if invalid:
@@ -383,43 +416,100 @@ def review_guard(manifest, chart_id, *, positive=True):
     raise ValueError("候选谱不存在")
 
 
-def scan_pool(pool_dir, progress=None):
+def _scan_job(job):
+    """Isolated process: native chart analysis has process-global state."""
+    from maichart.training import candidate_scan
+    root, path, index, audio, identity = job
+    root = Path(root)
+    cache_identity = dict(identity, source_stat=None, audio_stat=None,
+                          file_sha256=audio_sha256(path) if not identity.get('chart_sha256') and Path(path).is_file() else None,
+                          policy=candidate_scan.POLICY, slot=index)
+    cache_key = hashlib.sha256(json.dumps(cache_identity, sort_keys=True).encode()).hexdigest()
+    cached = root / 'scan' / 'charts' / f'{cache_key}.json'
+    result = _read(cached)
+    hit = bool(result)
+    if not hit:
+        result = candidate_scan.scan_chart(path, index, audio, cache_dir=root / 'scan' / 'cache')
+        _write_json(cached, result)
+    return result, hit
+
+
+def _scan_worker_init():
+    import torch
+    torch.set_num_threads(1)
+
+
+def scan_pool(pool_dir, progress=None, *, workers=1, synchronize=True):
     from maichart.training import candidate_scan
     root = _pool(pool_dir)
-    prepared = _synchronize(root)
+    prepared = _synchronize(root, progress=progress) if synchronize else _read(root / 'training_manifest.json')
     metadata = _read(root / "pool.json")
     rows = {_key(r.source_path, r.difficulty_index): r for r in iter_catalog(root / "training_manifest.json")}
     results = []
     count = sum(len(s["difficulties"]) for s in prepared["songs"])
-    for song in prepared["songs"]:
-        for difficulty in song["difficulties"]:
-            index = int(difficulty.get("difficulty_index", difficulty.get("index")))
-            identity = difficulty["candidate_identity"]
-            # Include full source content for malformed charts with no slot hash.
-            cache_identity = dict(identity, source_stat=None, audio_stat=None,
-                                  file_sha256=audio_sha256(song["maidata_path"]) if not identity.get("chart_sha256") and Path(song["maidata_path"]).is_file() else None,
-                                  policy=candidate_scan.POLICY, slot=index)
-            cache_key = hashlib.sha256(json.dumps(cache_identity, sort_keys=True).encode()).hexdigest()
-            cached = root / "scan" / "charts" / f"{cache_key}.json"
-            result = _read(cached)
-            if not result:
-                result = candidate_scan.scan_chart(song["maidata_path"], index, song.get("audio_path"), cache_dir=root / "scan" / "cache")
-                _write_json(cached, result)
-            row = rows.get(_key(song["maidata_path"], index))
-            result.update(chart_id=row.chart_id if row else None, song_id=song.get("song_id"), identity=identity)
-            if difficulty.get("similar_reference"):
-                # Similarity depends on the reference selection, not the
-                # per-chart scanner cache. Always append it after cache load.
-                result.setdefault("issues", []).append(dict(severity="suspicious", code="similar_reference",
-                    message="与同标题参考谱的事件集合高度相似，仅供人工核对，不自动排除或定性搬运",
-                    matches=difficulty["similar_reference"]))
-                result["similar_reference"] = difficulty["similar_reference"]
-                if result["status"] != "error":
-                    result["status"] = "suspicious"
-            difficulty["candidate_status"] = result["status"]
-            results.append(result)
-            if progress:
-                progress(dict(done=len(results), total=count, status=result["status"]))
+    work = [(song, difficulty) for song in prepared['songs'] for difficulty in song['difficulties']]
+    cached_count = 0
+    counts = dict(error=0, suspicious=0, ok=0)
+    def report(**extra):
+        if progress:
+            progress(dict(stage='scanning', done=len(results), completed=len(results), total=count,
+                          counts=dict(counts), cache_hits=cached_count, workers=max(1, workers), **extra))
+    def attach(song, difficulty, result, hit):
+        nonlocal cached_count
+        cached_count += int(hit)
+        index = int(difficulty.get('difficulty_index', difficulty.get('index')))
+        identity = difficulty['candidate_identity']
+        row = rows.get(_key(song['maidata_path'], index))
+        result.update(chart_id=row.chart_id if row else None, song_id=song.get('song_id'), identity=identity)
+        if difficulty.get('similar_reference'):
+            result.setdefault('issues', []).append(dict(severity='suspicious', code='similar_reference',
+                message='与同标题参考谱的事件集合高度相似，仅供人工核对，不自动排除或定性搬运',
+                matches=difficulty['similar_reference']))
+            result['similar_reference'] = difficulty['similar_reference']
+            if result['status'] != 'error':
+                result['status'] = 'suspicious'
+        difficulty['candidate_status'] = result['status']
+        counts[result['status']] += 1
+        return result
+    def job(song, difficulty):
+        return (str(root), song['maidata_path'], int(difficulty.get('difficulty_index', difficulty.get('index'))),
+                song.get('audio_path'), difficulty['candidate_identity'])
+    report()
+    if workers <= 1:
+        for song, difficulty in work:
+            result, hit = _scan_job(job(song, difficulty))
+            results.append(attach(song, difficulty, result, hit))
+            report(title=result.get('title') or song.get('title'))
+    else:
+        import multiprocessing
+        from concurrent.futures import ProcessPoolExecutor, wait, FIRST_COMPLETED
+        # Process isolation avoids unsafe threads in native analysis; bound the
+        # pending queue and restore source ordering before publishing results.
+        ordered = {}
+        with ProcessPoolExecutor(max_workers=workers, mp_context=multiprocessing.get_context('spawn'),
+                                 initializer=_scan_worker_init) as executor:
+            pending = {}
+            iterator = iter(enumerate(work))
+            def fill():
+                while len(pending) < workers * 2:
+                    item = next(iterator, None)
+                    if item is None:break
+                    number, (song, difficulty) = item
+                    pending[executor.submit(_scan_job, job(song, difficulty))] = (number, song, difficulty)
+            fill()
+            while pending:
+                done, _ = wait(pending, timeout=1., return_when=FIRST_COMPLETED)
+                if not done:report()
+                for future in done:
+                    number, song, difficulty = pending.pop(future)
+                    result, hit = future.result()
+                    ordered[number] = attach(song, difficulty, result, hit)
+                    results.append(ordered[number])
+                    report(title=result.get('title') or song.get('title'))
+                fill()
+        results = [ordered[number] for number in range(len(work))]
+    report()
+    if progress:progress(dict(stage='finalizing', completed=0, total=1, counts=counts))
     _write_json(root / "scan" / "results.json", dict(policy=candidate_scan.POLICY, charts=results))
     _write_json(root / "training_manifest.json", prepared)
     metadata.update(scan_policy=candidate_scan.POLICY, scan_complete=True, updated_at=_now())
@@ -733,6 +823,36 @@ def supervision_budget(manifests, *, _accepted=None, progress=None):
                 sources=sources, timing_note_heads=total_t, layout_note_heads=total_c, warnings=warnings)
 
 
+class _ScanProgress:
+    """Durable, throttled progress also works after refreshing the browser."""
+    def __init__(self, root):
+        self.path = Path(root) / 'scan_state.json'
+        self.state = _read(self.path)
+        self.started = self.stage_started = time.monotonic()
+        self.stage = None
+        self.last = -math.inf
+
+    def __call__(self, value):
+        now = time.monotonic()
+        stage = value.get('stage', 'scanning')
+        changed = stage != self.stage
+        if changed:
+            self.stage, self.stage_started = stage, now
+        completed, total = int(value.get('completed', value.get('done', 0))), int(value.get('total', 0))
+        if not changed and now - self.last < 1. and completed != total:
+            return
+        self.last = now
+        elapsed = now - self.stage_started
+        progress = dict(value, stage=stage, completed=completed, done=completed,
+                        elapsed_sec=round(now - self.started, 1), stage_elapsed_sec=round(elapsed, 1))
+        if completed >= 3 and elapsed >= 3 and total > completed:
+            progress['eta_sec'] = round(elapsed * (total - completed) / completed)
+        self.state.update(status='completed' if stage == 'complete' else 'running',
+                          progress=progress, updated_at=_now())
+        _write_json(self.path, self.state)
+        print('candidate_scan ' + json.dumps(progress, ensure_ascii=False), flush=True)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("command", choices=["scan", "build"])
@@ -741,17 +861,27 @@ def main(argv=None):
     parser.add_argument("--name")
     parser.add_argument("--reference-manifest", action="append", default=[])
     parser.add_argument("--threads", type=int, default=1)
+    parser.add_argument('--workers', type=int, default=0, help='0: 自动最多 4 个独立检查进程；1: 串行')
     args = parser.parse_args(argv)
     import torch
     torch.set_num_threads(max(1, args.threads))
+    workers = max(1, min(4, (os.cpu_count() or 2) // 2)) if args.workers == 0 else max(1, min(8, args.workers))
     if args.command == "build":
         if not args.workspace_root:
             parser.error("build requires --workspace-root")
-        created = create_pool(args.target, args.workspace_root, args.name, args.reference_manifest)
-        target = created["pool_dir"]
+        target = pool_identity(args.target, args.workspace_root)['pool_dir']
+        report = _ScanProgress(target)
+        report(dict(stage='starting', completed=0, total=0, workers=workers))
+        exists = (Path(target) / 'pool.json').is_file()
+        if not exists:
+            create_pool(args.target, args.workspace_root, args.name, args.reference_manifest, progress=report)
     else:
         target = args.target
-    result = scan_pool(target, progress=lambda p: print("candidate_scan " + json.dumps(dict(p, completed=p["done"])), flush=True))
+        report = _ScanProgress(target)
+        report(dict(stage='starting', completed=0, total=0, workers=workers))
+        exists = True
+    result = scan_pool(target, progress=report, workers=workers, synchronize=exists)
+    report(dict(stage='complete', completed=result['counts']['charts'], total=result['counts']['charts'], counts=result['counts']))
     print(json.dumps(result, ensure_ascii=False))
     return 0
 

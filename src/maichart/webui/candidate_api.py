@@ -115,7 +115,10 @@ def _start(runtime, pool_dir, args):
         _write(pool_dir / 'scan_state.json', dict(status='queued', task_id=task.task_id))
 
         def finished():
-            _write(pool_dir / 'scan_state.json', dict(status=task.status, error=task.error, task_id=task.task_id))
+            state_path = pool_dir / 'scan_state.json'
+            state = json.loads(state_path.read_text(encoding='utf-8')) if state_path.is_file() else {}
+            state.update(status=task.status, error=task.error, task_id=task.task_id)
+            _write(state_path, state)
 
         runtime._run_subprocess_task(task, args, expected_epoch=None,
             result_paths=[pool_dir / 'pool.json', pool_dir / 'training_manifest.json', pool_dir / 'scan/results.json'],

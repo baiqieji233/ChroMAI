@@ -565,6 +565,8 @@ def train(args):
              save_sec=time.perf_counter()-save_started)
     emit("runtime",stage="training",device=str(device),precision=precision,audio_backend=args.audio_backend,
         windows=len(dataset),validation_windows=len(validation) if validation else 0,model_config=config.to_dict(),
+        epoch_target=args.epochs,batches_per_epoch=len(loader),resume_epoch=int(state['epoch']),
+        resume_batch_cursor=int(state['batch_cursor']),
         trainable_parameters=sum(p.numel() for p in model.parameters()),effective_batch=args.batch_size*args.grad_accumulation,
          train_charts=len(dataset.songs),validation_charts=len(validation.songs) if validation else 0,
          preparation=dataset.audit.get('preparation', {}), batch_order=batch_order, **resource_budgets,
@@ -584,6 +586,10 @@ def train(args):
     for epoch in range(int(state["epoch"]),args.epochs):
         sampler.set_epoch(epoch)
         cursor=int(state["batch_cursor"]) if epoch==state["epoch"] else 0
+        epoch_started=time.perf_counter()
+        last_position=epoch_started-5.
+        emit('progress',stage='epoch_start',epoch=epoch+1,batch=cursor,total=len(loader),
+             optimizer_steps=state['optimizer_steps'])
         epoch_loss_gpu=torch.tensor(float(state.get("epoch_loss_sum",0.)),device=device)
         epoch_mass=float(state.get("epoch_weight_sum",0.))
         for batch_index,batch in _batches(loader,cursor):
@@ -631,10 +637,18 @@ def train(args):
                 group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.
                 state.update(epoch=epoch,batch_cursor=batch_index+1,update_attempts=attempt+1)
             ended=time.perf_counter();compute_sec+=ended-now
+            if boundary and ended-last_position>=5.:
+                emit('position',stage='training',epoch=epoch+1,batch=batch_index+1,total=len(loader),
+                     optimizer_steps=state['optimizer_steps'],update_attempts=state['update_attempts'],
+                     epoch_elapsed_sec=ended-epoch_started,epoch_start_batch=cursor,
+                     epoch_processed_batches=batch_index+1-cursor)
+                last_position=ended
             if boundary and (state["update_attempts"]%args.log_interval==0 or batch_index+1==len(loader)):
                 _sync(device)
                 values=running.cpu().tolist();flush_epoch();elapsed=time.perf_counter()-began
                 emit("progress",stage="training",epoch=epoch+1,batch=batch_index+1,total=len(loader),
+                    epoch_elapsed_sec=time.perf_counter()-epoch_started,epoch_start_batch=cursor,
+                    epoch_processed_batches=batch_index+1-cursor,update_attempts=state['update_attempts'],
                     optimizer_steps=state["optimizer_steps"],loss=values[0]/max(1.,running_mass),
                     loss_scope="run_quality_weighted_token_mean",
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
@@ -652,6 +666,10 @@ def train(args):
             previous=time.perf_counter()
         if state["batch_cursor"]>=len(loader):
             validation_started = time.perf_counter()
+            epoch_train_sec=validation_started-epoch_started
+            if validation_loader is not None:
+                emit('progress',stage='validation',epoch=epoch+1,total=len(validation_loader),
+                     epoch_train_sec=epoch_train_sec,started_unix=time.time())
             validation_loss=_validate(model,validation_loader,device,precision,args.validation_max_batches)
             validation_sec = time.perf_counter() - validation_started if validation_loader is not None else 0.
             flush_epoch()
@@ -661,6 +679,8 @@ def train(args):
             if validation_loss is not None:
                 state['bad_validation_epochs']=0 if improved else int(state.get('bad_validation_epochs',0))+1
             emit("progress",stage="epoch_complete",epoch=epoch+1,total=args.epochs,loss=score,
+                epoch_train_sec=epoch_train_sec,epoch_start_batch=cursor,
+                epoch_processed_batches=len(loader)-cursor,epoch_total_batches=len(loader),
                 epoch_train_loss=state["last_loss"],validation_loss=validation_loss,
                 validation_phase_loss=getattr(model,"validation_phase_loss",None),
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),

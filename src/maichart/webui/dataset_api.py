@@ -64,7 +64,7 @@ def _pool_card(root, data):
             if record.get('chart_sha256')==identity.get('chart_sha256') and record.get('audio_sha256')==identity.get('audio_sha256'):
                 regions+=len(record.get('regions',[]))
     return dict(pool_id=data['candidate_pool']['pool_id'],counts=counts,confirmed_regions=regions,
-                scan_complete=bool(metadata.get('scan_complete')),scan_state=state.get('status'),
+                scan_complete=bool(metadata.get('scan_complete')),scan_state=state.get('status'),scan_task=state,
                 reviewable_charts=counts['ok']+counts['suspicious'] if metadata.get('scan_complete') else 0,
                 summary_only=True)
 
