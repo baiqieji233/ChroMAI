@@ -33,7 +33,13 @@ from maichart.training.quality_annotations import (
 )
 
 _CATALOG_LOCK = threading.RLock()
+_MUTATION_LOCKS = {}
 _CATALOGS: dict[str, tuple[int, int, list[CatalogChart], dict[str, tuple[int, int]]]] = {}
+
+
+def _mutation_lock(manifest):
+    with _CATALOG_LOCK:
+        return _MUTATION_LOCKS.setdefault(str(Path(manifest).resolve()), threading.RLock())
 
 
 class _AnnotationLookup:
@@ -172,6 +178,18 @@ class QualityAPI:
             source_kind='training_source',training_context=dict(manifest=str(manifest),chart_id=row.chart_id),charts=[version])
 
     def source_feedback(self,payload):
+        manifest = _required_manifest(payload)
+        from .candidate_api import _is_pool, remember_undo
+        with _mutation_lock(manifest):
+            candidate = _is_pool(manifest)
+            old = next((r for r in load_annotations(manifest)['records'] if r.get('chart_id') == payload.get('chart_id')), None)
+            status, result = self._source_feedback(payload)
+            if candidate and status == HTTPStatus.OK:
+                current = next((r for r in result['records'] if r.get('chart_id') == payload.get('chart_id')), None)
+                result['undo_token'] = remember_undo(manifest, payload['chart_id'], old, current)
+            return status, result
+
+    def _source_feedback(self,payload):
         manifest=_required_manifest(payload)
         row=next((row for row in _catalog(manifest) if row.chart_id==payload.get('chart_id')),None)
         if row is None:raise ValueError('谱面不属于当前训练来源')
@@ -180,8 +198,32 @@ class QualityAPI:
         if 'start_sec' not in span:raise ValueError('请先在谱面时间轴圈选片段；整谱质量可在素材管理中设置')
         label=payload.get('label');reason=_feedback_reason(payload)
         if label not in {'good','problem','uncertain'}:raise ValueError('未知片段评价')
+        from .candidate_api import _is_pool
+        candidate = _is_pool(manifest)
+        if candidate:
+            if any(not payload.get(key) for key in ('file_sha256', 'chart_sha256', 'audio_sha256')):
+                raise ValueError('请重新打开候选谱面与音频，再保存已试听的片段')
+            _feedback_audio(dict(audio_path=row.audio_path, audio_sha256=payload['audio_sha256']))
+            from maichart.training.candidate_pool import review_guard
+            review_guard(manifest, row.chart_id, positive=label=='good')
+            if label == 'good':
+                from maichart.webui.chart_timeline import timeline
+                notes = timeline(row.source_path, row.difficulty_index)['notes']
+                if not any(note.get('has_head', True) and span['start_sec'] <= note['start_sec'] < span['end_sec'] for note in notes):
+                    raise ValueError('这个范围没有新的音符头，请带上休止两端的音符再确认学习范围')
         old=find_annotation(row,load_annotations(manifest)['records']) or {}
+        if candidate:
+            old = {**old, 'unmarked_weight': 0.}
         region=dict(start_sec=span['start_sec'],end_sec=span['end_sec'],label=label,reason=reason,weight=1.)
+        learn_entry = payload.get('learn_entry', False)
+        if not isinstance(learn_entry, bool):
+            raise ValueError('学习前文接入须为布尔值')
+        if learn_entry:
+            if label != 'good' or reason in {'layout', 'comfort'} or not row.audio_path:
+                raise ValueError('确认接入需要对应音频，并选择学习采音')
+            region.update(learn_entry=True, entry_start_sec=span['start_sec'])
+        if payload.get('note'):
+            region['note'] = str(payload['note'])[:500]
         if old.get('unmarked_weight')==0:
             from maichart.training.reviewed_generation import approved_regions
             from maichart.training.quality_annotations import region_component_weights
@@ -194,7 +236,8 @@ class QualityAPI:
             if label=='good':action['training_use']='timing' if reason=='timing' else 'layout' if reason in {'layout','comfort'} else 'both'
             approvals.append(action)
             return self.save(dict(manifest=str(manifest),chart_ids=[row.chart_id],regions=approved_regions(approvals),
-                                  label=old.get('label','normal'),weight=old.get('weight',1.)))
+                                  label=old.get('label','normal'),weight=old.get('weight',1.),
+                                  candidate_review=region if candidate else None))
         if label=='good' and reason:
             region.update(timing_weight=1.5 if reason=='timing' else 1.,component_weight=1. if reason=='timing' else 1.5)
         regions=[]
@@ -317,6 +360,13 @@ class QualityAPI:
         lookup = _AnnotationLookup(records)
         annotation_by_id = {row.chart_id: lookup.find(row) for row in all_rows}
         catalog_values = [row.to_dict(annotation_by_id[row.chart_id]) for row in all_rows]
+        manifest_data = json.loads(manifest.read_text(encoding='utf-8-sig'))
+        if manifest_data.get('candidate_pool'):
+            statuses = {(str(Path(song['maidata_path']).resolve()), int(d.get('difficulty_index', d.get('index', -1)))): d.get('candidate_status', 'pending')
+                for song in manifest_data.get('songs', []) for d in song.get('difficulties', [])}
+            for value in catalog_values:
+                value['candidate_status'] = statuses.get((value['source_path'], value['difficulty_index']), 'pending')
+                value['confirmed_regions'] = len((value.get('annotation') or {}).get('regions', []))
         rows = []
         for value in catalog_values:
             haystack = " ".join(str(value.get(key, "")) for key in ("song_id", "title", "maidata_title", "artist", "level", "designer", "folder_name", "source_dataset", "source_path")).casefold()
@@ -348,7 +398,13 @@ class QualityAPI:
                                "total": len(chart_ids), "scope": "current_dataset"}
 
     def save(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+        with _mutation_lock(_required_manifest(payload)):
+            return self._save(payload)
+
+    def _save(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
         manifest = _required_manifest(payload)
+        from .candidate_api import _is_pool
+        candidate = _is_pool(manifest)
         chart_ids = payload.get("chart_ids")
         if isinstance(chart_ids, str):
             chart_ids = [chart_ids]
@@ -372,7 +428,18 @@ class QualityAPI:
         for chart_id in chart_ids:
             row = by_id[chart_id]
             duration = chart_duration(row.source_path, row.difficulty_index)
+            if candidate:
+                from maichart.webui.chart_timeline import timeline
+                notes = timeline(row.source_path, row.difficulty_index)['notes']
+                duration = max(float(duration or 0.), max((float(n.get('end_sec', n['start_sec'])) for n in notes), default=0.) + .25)
             previous = lookup.find(row, by_record) or {}
+            if candidate:
+                from maichart.training.candidate_pool import review_guard
+                from maichart.training.quality_annotations import region_component_weights
+                proposed = payload.get('regions', previous.get('regions', []))
+                positive = any(any(region_component_weights(r)) for r in proposed)
+                review_guard(manifest, chart_id, positive=positive)
+                previous = {**previous, 'unmarked_weight': 0.}
             # If this is an old or differently namespaced id, replace it with
             # the current identity on save instead of leaving duplicate rows.
             old_id = previous.get("chart_id")
@@ -382,6 +449,8 @@ class QualityAPI:
             # Validate against exact chart duration before writing anything.
             record = validate_record({**previous, "chart_id": chart_id,
                                       "regions": regions, "label": label, "weight": weight})
+            if candidate and payload.get('candidate_review'):
+                record['candidate_reviews'] = [*previous.get('candidate_reviews', []), payload['candidate_review']]
             if duration is not None:
                 from maichart.training.quality_annotations import _validate_regions
                 record["regions"] = _validate_regions(regions, duration)

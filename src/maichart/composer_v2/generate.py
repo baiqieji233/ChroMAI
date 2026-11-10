@@ -345,6 +345,9 @@ def _sampling_policy(args):
 
 @torch.inference_mode()
 def generate(args, *, model_override=None, payload_override=None, audio_store_override=None, prepared_override=None):
+    from .generation_progress import get_progress
+    progress=get_progress(args)
+    progress.update(force=True,stage='loading_checkpoint' if payload_override is None else 'generating')
     strength=getattr(args,'intensity_strength',1.)
     if not math.isfinite(strength) or not 0<=strength<=1:raise ValueError('intensity_strength must be in 0–1')
     from .tail_guard import options as tail_options
@@ -415,6 +418,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         print('composer_v2_timing_warning '+warning,flush=True)
     bpm=float(tempo[0].bpm)
     clock = TempoClock(tempo, first)
+    progress.update(force=True,stage='loading_model' if model_override is None else 'generating')
     model = model_override if model_override is not None else ComposerV2(config, codec)
     if model_override is None:
         model.load_state_dict(payload['model_state_dict'], strict=True)
@@ -546,6 +550,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         json.dumps(metadata, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     print('composer_v2_done ' + json.dumps({'output': str(output), 'events': len(points),
                                            'windows': len(records)}, ensure_ascii=False), flush=True)
+    progress.update(force=True,stage='completed',status='completed',progress=1.,events=len(points))
     return metadata
 
 
@@ -554,6 +559,9 @@ def prepare_inputs(args,config,device,audio_store_override=None):
     from .audio import AudioFeatureStore
     from .tempo import resolve_timing
     from .acceleration import audio_runtime
+    from .generation_progress import get_progress
+    progress=get_progress(args)
+    progress.update(force=True,stage='detecting_timing')
     audio_path=Path(args.audio).resolve()
     tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
         first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',
@@ -562,6 +570,7 @@ def prepare_inputs(args,config,device,audio_store_override=None):
         args.cache_dir,backend=config.audio_backend,model_path=config.mert_model,
         device=audio_runtime(getattr(args,'audio_device','auto'),device))
     try:
+        progress.update(force=True,stage='preparing_audio')
         store.prepare(audio_path)
         audio=store.load(audio_path)
     finally:

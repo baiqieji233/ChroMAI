@@ -67,7 +67,7 @@
 <p id="feedbackAuditionRange" class="muted">反馈范围与试听范围分开记录；带前后文只影响播放。</p>
 <details class="preview-review-exact"><summary>精确范围／播放点标记</summary><button id="feedbackMarkStart" class="small-button" type="button">播放点 → 起点</button><button id="feedbackMarkEnd" class="small-button" type="button">播放点 → 终点</button><label>起点 <input id="feedbackStart" type="number" min="0" step="0.01" placeholder="全曲"></label><label>终点 <input id="feedbackEnd" type="number" min="0" step="0.01" placeholder="全曲"></label></details>
 </section>
-<section class="review-tool-group"><h4>记录意见</h4><div class="generation-preview-toolbar"><button data-generation-feedback="good" class="secondary-button" type="button">好</button><button data-generation-feedback="problem" class="secondary-button" type="button">有问题</button><button data-generation-feedback="uncertain" class="small-button" type="button">不确定</button></div><label class="review-reason">原因（可选）<select id="feedbackReason"><option value="">不填写</option><option value="timing">采音</option><option value="layout">配置</option><option value="comfort">手感</option></select></label><p id="feedbackStatus" class="muted" role="status">记录对当前范围的评价。</p></section>
+<section id="candidatePoolReview" class="candidate-pool-panel" hidden><h4>确认当前片段的学习内容</h4><p id="candidatePoolWhy"></p><p id="candidatePoolIssues"></p><div class="button-row"><button type="button" data-pool-learn="both" class="primary-button">采音和配置都学</button><button type="button" data-pool-learn="timing" class="secondary-button">只学采音</button><button type="button" data-pool-learn="layout" class="secondary-button">只学配置</button><button type="button" data-pool-learn="uncertain" class="small-button">暂不学习</button></div><label>问题原因（可选）<input id="candidatePoolReason" type="text" maxlength="300"></label><label class="checkbox-field"><input id="candidatePoolEntry" type="checkbox"><span>包含进入本段的第一步（带前文试听确认后勾选）</span></label><label class="checkbox-field"><input id="candidatePoolAutoNext" type="checkbox" checked><span>保存后下一段</span></label><div class="button-row"><button id="candidatePoolWhole" type="button" class="small-button">整首都学…</button><button id="candidatePoolUndo" type="button" class="small-button" disabled>撤销上次保存</button></div><p id="candidatePoolReviewStatus" role="status"></p></section><section class="review-tool-group"><h4>记录意见</h4><div class="generation-preview-toolbar"><button data-generation-feedback="good" class="secondary-button" type="button">好</button><button data-generation-feedback="problem" class="secondary-button" type="button">有问题</button><button data-generation-feedback="uncertain" class="small-button" type="button">不确定</button></div><label class="review-reason">原因（可选）<select id="feedbackReason"><option value="">不填写</option><option value="timing">采音</option><option value="layout">配置</option><option value="comfort">手感</option></select></label><p id="feedbackStatus" class="muted" role="status">记录对当前范围的评价。</p></section>
 <details id="feedbackComparison"><summary>比较另一张</summary><p id="feedbackComparisonNotice" class="muted">有同一音频的另一张完整谱面时，可以在同一范围比较；这里不会生成新谱面。</p><div id="feedbackComparisonControls" class="generation-preview-toolbar"><label>版本 A<select id="feedbackCandidateA"></select></label><label>版本 B<select id="feedbackCandidateB"></select></label><button id="feedbackPreviewA" class="secondary-button" type="button">试听版本 A</button><button id="feedbackPreviewB" class="secondary-button" type="button">试听版本 B</button></div><div id="feedbackPairChoices" class="generation-preview-toolbar" hidden><button data-feedback-choice="a" class="secondary-button" type="button">版本 A 更好</button><button data-feedback-choice="b" class="secondary-button" type="button">版本 B 更好</button><button data-feedback-choice="both_good" class="small-button" type="button">都可以</button><button data-feedback-choice="both_bad" class="small-button" type="button">都不好</button><button data-feedback-choice="uncertain" class="small-button" type="button">不确定</button></div></details>
 <details id="feedbackSavedRegions" class="review-training"><summary id="feedbackSavedSummary">已保存的标注（0）</summary><ul id="feedbackSavedList" class="review-training-list"></ul><p id="feedbackSavedEmpty" class="muted">圈选并评价后，标注会显示在这里。</p></details>
 <details id="feedbackTraining" class="review-training"><summary>收集训练示范（可选）</summary><p class="muted">把确认好的片段收进同一个示范库。</p><ol class="review-training-steps"><li>在时间轴拖选片段，带前后文试听。</li><li>选择值得学习的内容，再收集。</li><li>积累几个片段后，加入下次训练来源。</li></ol><p id="feedbackTrainingRange" class="muted">请先在谱面时间轴选择片段。</p><label class="review-training-scope">这段值得学什么？<select id="feedbackTrainingUse"><option value="">请选择学习内容</option><option value="timing">只学采音（落点与取舍）</option><option value="layout">只学配置（键位与动作）</option><option value="both">采音和配置都学</option></select></label><label class="checkbox-field"><input id="feedbackLearnEntry" type="checkbox" disabled><span>同时学习如何接入前文</span></label><p class="muted">带前文试听，确认第一组音符的接入时机和衔接都合适后勾选。选择“只学配置”时无需勾选。</p><button id="feedbackCollectTraining" class="secondary-button" type="button" disabled>收为训练示范</button><p id="feedbackTrainingStatus" class="muted" role="status">拖选并试听后，选择值得学习的内容。</p><ul id="feedbackTrainingList" class="review-training-list"></ul><button id="feedbackAddTraining" class="secondary-button" type="button" disabled>加入下次训练来源</button><p class="muted">在训练页同时勾选原训练集和示范库，使用 finetune。</p></details>
@@ -940,14 +940,24 @@
       <section class="panel quality-panel">
         <div class="section-heading">
 <div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">浏览与标注素材，独立选择训练来源</span></div>
-        <p class="param-intro">勾选本次训练要使用的数据集，再点进某个数据集浏览谱面。训练使用全部勾选的来源；质量标注保存在当前打开的原数据集。</p>
+        <p class="param-intro">先勾选要用于下一次训练的来源，再点“应用勾选的数据集”。点击卡片名称只会打开素材供你浏览，不会改变训练选择。</p>
+        <details class="settings-section"><summary>使用说明：普通训练集和待审候选怎么用</summary><div class="settings-content">
+          <p><strong>普通训练集：</strong>适合已经决定整体用于训练的素材。预处理后勾选即可；需要时可在谱面目录调整质量标注。</p>
+          <p><strong>待审候选库：</strong>适合还没确认质量的素材。在普通训练集卡片上点“作为候选库审查”，会另外建立候选库并扫描，原训练集和标注保留。候选库起初没有可学习内容，审阅确认的片段才会加入。</p>
+          <ol><li>打开候选库，点“继续审阅（下一段）”，播放音频并查看谱面；也可以在时间轴自己圈选一段。</li><li>选择“采音和配置都学”（认可音符时机和写法）、“只学采音”（只认可音符时机）、“只学配置”（只认可写法），或“暂不学习”（还不能确认）。点击即保存当前范围；可撤销上次保存。</li><li>只有连同前文听过并认可进入本段的衔接，才勾“包含进入本段的第一步”。“整首都学”用于已经完整听过并认可的整首。</li><li>返回列表，勾选普通训练集和已审候选库，点“应用勾选的数据集”准备下一次训练来源。这一步不会开始训练，也不会改变正在运行的训练。</li></ol>
+          <p>候选库只想学习确认片段时，请不要同时勾选它对应的原训练集，否则原训练集仍会提供整谱内容。源谱修改后用“重新扫描／同步”更新，再检查需要重新确认的片段。</p>
+          <p>“估算所选来源的学习份额”用来查看各来源预计提供多少采音和配置学习内容；它考虑确认范围和权重，不是谱面质量分。可以一边估算一边继续审阅，估算框会显示进度。</p>
+          <p>普通训练集按预处理记录估算，改过源谱后先重新预处理。BPM或偏移有误时先修正对齐；“只学配置”用于保留写法，不是跳过时间对齐检查。</p>
+        </div></details>
         <div class="dataset-workspace-actions"><button id="datasetComposeButton" class="primary-button" type="button">应用勾选的数据集</button><button id="datasetImportButton" class="secondary-button" type="button">导入新数据集</button><span id="datasetSelectionSummary" class="muted">尚未选择数据集</span></div>
+        <div class="button-row"><button id="candidatePoolBudget" class="small-button" type="button">估算所选来源的学习份额</button><button id="candidatePoolBudgetCancel" class="small-button" type="button" hidden>取消估算</button></div><div id="candidatePoolBudgetResult" class="inline-status" role="status" aria-live="polite" hidden></div>
         <div id="datasetCompositionSummary" class="inline-status" role="status" aria-live="polite" hidden></div>
         <section id="datasetCardsPanel" class="dataset-workspace" aria-labelledby="datasetWorkspaceTitle">
           <div class="section-heading">
 <div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
           <p class="muted">勾选表示加入下一次训练；点击卡片进入该数据集的谱面目录。可以同时勾选多份，例如“full训练集 + 优质自制谱精选”。</p>
           <div id="datasetWorkspaceStatus" class="inline-status">正在读取数据集目录...</div>
+          <p id="candidatePoolCapability" class="inline-status" role="status">候选库：正在读取后台能力…</p>
           <div id="datasetCards" class="dataset-cards"></div>
           <p class="muted">多选按可训练窗口混合，并非每个数据集各占相同比例。复制到不同目录的相同谱面会增加其学习份额；可信标杆也可用质量权重加强学习。</p>
         </section>
@@ -955,6 +965,12 @@
         <div class="section-heading">
 <div><span class="step">CATALOG</span><h3 id="datasetCatalogTitle">数据集谱面目录</h3></div><button id="datasetBackButton" class="secondary-button" type="button">返回数据集列表</button></div>
         <p class="param-intro">搜索、排序后，点击“预览与标注”查看谱面。可在顶部预览中连续切换上一张、下一张。</p>
+        <section id="candidatePoolPanel" class="candidate-pool-panel" hidden>
+          <h3>候选库审阅</h3><p id="candidatePoolSummary" role="status"></p>
+          <p class="muted">未确认部分默认不参与监督。自动扫描仅帮助定位；正常休止、重复和少物量不代表错误。</p>
+          <div class="button-row"><button id="candidatePoolNext" type="button" class="primary-button">继续审阅（下一段）</button><button id="candidatePoolSync" type="button" class="secondary-button">重新扫描／同步</button><button id="candidatePoolExcluded" type="button" class="secondary-button">查看排除项</button></div>
+          <div id="candidatePoolExcludedList" hidden></div>
+        </section>
         <div class="quality-toolbar">
           <input id="qualitySearch" type="search" placeholder="搜索歌曲标题、文件夹、谱师、难度">
           <select id="qualitySortBy" aria-label="目录排序字段"><option value="level">按难度</option><option value="title">按歌曲标题</option><option value="folder">按文件夹名</option><option value="designer">按谱师</option></select>
@@ -1825,6 +1841,10 @@
         <div class="progress">
 <div id="progressBar"></div></div>
         <p id="taskMessage" class="task-message">导入文件或填写路径后开始操作。</p>
+        <section id="taskGenerationProgress" class="task-generation-progress" hidden aria-label="逐张生成进度">
+          <h3>逐张生成进度</h3><p id="taskGenerationSummary" class="muted"></p>
+          <div id="taskGenerationCharts" class="generation-chart-list"></div>
+        </section>
         <p id="taskEpoch" class="inline-status" hidden></p>
         <section id="taskTrainingMetrics" class="task-training-metrics" hidden aria-label="训练指标">
           <h3>训练指标</h3>

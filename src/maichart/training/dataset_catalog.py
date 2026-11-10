@@ -151,7 +151,7 @@ def merge_training_manifests(
         if id_counts[source_id] > 1:
             source_id = f"{source_id}-{hashlib.sha1(str(path).encode('utf-8')).hexdigest()[:8]}"
         normalized_loaded.append((path, payload, source_id, source_name))
-    loaded = sorted(normalized_loaded, key=lambda item: str(item[0]).casefold())
+    loaded = sorted(normalized_loaded, key=lambda item: (bool(item[1].get("candidate_pool")), str(item[0]).casefold()))
 
     contracts = [_contract(payload, manifest_path) for manifest_path, payload, _, _ in loaded]
     reference = contracts[0]
@@ -181,6 +181,8 @@ def merge_training_manifests(
     duplicate_count = 0
     multi_source = len(loaded) > 1
     for manifest_path, payload, source_id, source_name in loaded:
+        is_candidate = bool(payload.get("candidate_pool"))
+        candidate_records = []
         source_root_path = _source_root(manifest_path, payload)
         source_entries.append({
             "dataset_id": source_id, "name": source_name,
@@ -204,6 +206,7 @@ def merge_training_manifests(
                                 if copied_record.get(key):
                                     copied_record[key] = str(_source_asset(copied_record[key], manifest_path, payload))
                             annotation_records.append(copied_record)
+                            candidate_records.append(copied_record)
                 except (OSError, json.JSONDecodeError) as exc:
                     raise ValueError(f"无法读取质量标注 {annotation_file}：{exc}") from exc
         for song in payload.get("songs", []):
@@ -230,6 +233,12 @@ def merge_training_manifests(
                 except (TypeError, ValueError):
                     index = -1
                 chart_key = (str(maidata_path), index)
+                if is_candidate:
+                    from maichart.training.candidate_pool import candidate_record
+                    if candidate_record(manifest_path, copied, difficulty, candidate_records) is None:
+                        warnings.append({"reason": "candidate_not_approved_or_stale", "source_path": str(maidata_path),
+                                         "difficulty_index": index, "source_manifest": str(manifest_path)})
+                        continue
                 if chart_key in seen_charts:
                     duplicate_count += 1
                     if owners[chart_key].get("audio_path") != copied.get("audio_path"):
@@ -256,7 +265,7 @@ def merge_training_manifests(
     training_fields = ("label", "weight", "regions", "chart_sha256", "audio_sha256",
                        "corrected_path", "corrected_difficulty", "corrected_sha256")
     for record in annotation_records:
-        record.pop("_annotation_manifest", None)
+        annotation_manifest = record.pop("_annotation_manifest", None)
         try:
             index = int(record.get("difficulty_index"))
         except (TypeError, ValueError):
@@ -267,6 +276,12 @@ def merge_training_manifests(
         owner = owners.get(key)
         # A sidecar may also annotate charts outside this selected split.
         if owner is None:
+            continue
+        # Candidate sidecars deliberately contain zero-weight unknown records.
+        # They must never override a duplicate owned by an ordinary source.
+        if annotation_manifest != owner.get("source_manifest") and any(
+            str(p) == annotation_manifest and data.get("candidate_pool") for p, data, _, _ in loaded
+        ):
             continue
         try:
             valid_hash = chart_sha256(record_path, index)
@@ -333,6 +348,7 @@ def merge_training_manifests(
             ),
             "duplicate_source_charts": duplicate_count,
             "quality_records": len(annotation_records),
+            "candidate_pool_charts": sum(len(song.get("difficulties", [])) for song in songs if song.get("candidate_pool")),
             "stale_quality_annotations": sum(item["reason"] in {"stale_quality_annotation", "quality_audio_changed"} for item in warnings),
         },
         "warnings": warnings,
@@ -353,6 +369,12 @@ def merge_training_manifests(
             "merged_from": [str(path) for path, _, _, _ in loaded],
         })
         merged["quality_annotations"] = str(annotation_output)
+    if any(payload.get("candidate_pool") for _, payload, _, _ in loaded):
+        from maichart.training.candidate_pool import supervision_budget
+        merged["summary"]["supervision"] = supervision_budget(
+            [path for path, _, _, _ in loaded],
+            _accepted={(owner["source_manifest"], (key[0].casefold(), key[1])) for key, owner in owners.items()},
+        )
     _write_json(output, merged)
     return merged
 
@@ -377,7 +399,7 @@ def compose_datasets(
             raise ValueError(f"{path.parent.name} 不是事件模型预处理清单，请选择当前模型族重新预处理")
         if model_family == "legacy_frame_v2" and target == "event_v1":
             raise ValueError("事件模型清单不能用于旧固定帧模型，请重新预处理")
-    if len(manifests) == 1:
+    if len(manifests) == 1 and not json.loads(Path(manifests[0]).read_text(encoding="utf-8-sig")).get("candidate_pool"):
         # Selecting one prepared dataset must not rewrite song ids, paths, or
         # checkpoint contracts.  The trainer can consume its original file
         # directly; composition is only needed when sources are combined.
@@ -414,6 +436,16 @@ def compose_datasets(
             annotation = _quality_annotation_path(Path(value))
             if annotation.is_file():
                 identity.update(annotation.read_bytes())
+            candidate_payload = json.loads(Path(value).read_text(encoding="utf-8-sig"))
+            if candidate_payload.get("candidate_pool"):
+                # A changed source must never reuse and overwrite the output
+                # identity of an earlier frozen selection.
+                from maichart.training.candidate_pool import _charts, _digest, _stat
+                for song, difficulty, index in _charts(value):
+                    for asset in (song.get("maidata_path"), song.get("audio_path")):
+                        identity.update(str(_stat(asset)).encode())
+                        if asset and Path(asset).is_file():
+                            identity.update(_digest(asset).encode())
         # A saved label change creates a new snapshot, so checking or preparing
         # another run cannot overwrite a running trainer's annotation file.
         target = target / f"composed_{identity.hexdigest()[:16]}" / "training_manifest.json"

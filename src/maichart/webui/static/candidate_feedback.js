@@ -43,6 +43,8 @@
   function clearLoop() {globalThis.ChartPreview?.clearRange();}
   function resetEntryChoice() {const input=node('feedbackLearnEntry');if(input)input.checked=false;}
   function setRange(value) {clearLoop();resetEntryChoice();range=value;updateRange();}
+  globalThis.FeedbackRange={get:()=>validRange()?{...range}:null,set:value=>{setRange(value);if(validRange())navigate(range.start_sec);}};
+  window.addEventListener('feedback-set-range',event=>globalThis.FeedbackRange.set(event.detail));
   function setView(start,span) {
     const full=duration();if(!full)return;
     const width=Math.min(full,Math.max(.25,span));viewStart=Math.max(0,Math.min(full-width,start));viewEnd=viewStart+width;draw();
@@ -486,3 +488,202 @@
     } catch(error) {if(chartId===qualityState.detail?.chart_id && detailRequest===qualityState.detailRequest)status(error.message);} finally {saving=false;quickButtons.forEach(node=>node.disabled=false);}
   });
 })();
+
+// BEGIN CANDIDATE POOL WORKBENCH
+"use strict";
+// Candidate regions navigate a complete source chart; the shared timeline owns selection.
+(() => {
+  const $=id=>document.getElementById(id);
+  let enabled=false,active=null,current=null,queue=[],seen=new Set(),undo=null,busy=false,scanning=false,serial=0;
+  let budgetPending=false,budgetTaskId=null;
+  const isPool=item=>!!(item?.candidate_pool || item?.candidate_pool_summary);
+  const identity=()=>active?.manifest;
+  const message=text=>{$('candidatePoolReviewStatus').textContent=text;};
+  const describe=value=>Array.isArray(value)?value.map(describe).join('；'):typeof value==='string'?
+    ({existing_exact_chart:'与已有资料为同一张谱面',duplicate_source_chart:'与已有资料指向同一谱面槽位'}[value]||value):
+    value?.message||value?.label||'需要结合音频核对';
+  const token=item=>`${item.chart_id}:${item.start_sec}:${item.end_sec}`;
+  function controls() {
+    const source=globalThis.ChartPreview?.getEntry();
+    const matches=current && source?.training_context?.manifest===identity() && source?.training_context?.chart_id===current.chart_id;
+    $('candidatePoolReview').hidden=!matches;
+    const ordinary=$('feedbackStatus')?.closest('.review-tool-group');if(ordinary)ordinary.hidden=!!matches;
+    const error=current?.candidate_status==='error'||current?.status==='error';
+    for(const button of document.querySelectorAll('[data-pool-learn]'))button.disabled=busy||scanning||!matches||error;
+    $('candidatePoolWhole').disabled=busy||scanning||!matches||error;
+    $('candidatePoolUndo').disabled=busy||!undo;
+    for(const id of ['candidatePoolNext','candidatePoolSync','candidatePoolExcluded'])$(id).disabled=busy||!enabled;
+    $('candidatePoolBudget').disabled=budgetPending||!enabled;
+    if(scanning)$('candidatePoolNext').disabled=true;
+  }
+  function summary(data) {
+    const counts=data.counts||data;
+    const scan=data.scan_state||data.scan?.state||'';
+    scanning=['queued','running'].includes(scan)||data.scan_complete===false;
+    const scanMessage=data.scan_complete===false&&scan==='interrupted'?'上次检查已中断，点击“重新扫描／同步”继续。 ':['queued','running'].includes(scan)?`扫描${scan==='queued'?'排队中':'进行中'}，完成后可开始审阅。 `:'';
+    $('candidatePoolSummary').textContent=scanMessage+`只学习已确认片段 · 已确认 ${data.confirmed_regions??data.reviewed_regions??0} 段 · 未检查 ${counts.pending??0}／错误 ${counts.error??0}／待核对 ${counts.suspicious??0}／低风险 ${counts.ok??0} · 可审阅 ${data.reviewable??data.reviewable_charts??'待扫描'} 张`;
+    controls();
+  }
+  async function refresh() {
+    const manifest=identity(),request=serial;if(!manifest||!enabled)return;
+    const data=await api('/api/candidates/status',{manifest});
+    if(request===serial&&manifest===identity())summary(data);
+  }
+  async function run(action) {
+    if(busy)return;busy=true;controls();
+    try {await action();}catch(error){message(error.message);if($('candidatePoolReview').hidden)$('candidatePoolSummary').textContent=error.message;}
+    finally {busy=false;controls();}
+  }
+  async function next() {
+    const manifest=identity(),request=serial;if(!manifest)return;
+    if(!queue.length) {
+      // Requery from the beginning: confirmation can shrink the server queue.
+      let offset=0,total=Infinity;
+      while(!queue.length&&offset<total) {
+        const data=await api('/api/candidates/queue',{manifest,offset,limit:100});
+        if(request!==serial)return;
+        const items=data.items||[];total=Number(data.total??items.length);
+        queue=items.filter(item=>!seen.has(token(item)));offset+=items.length;
+        if(!items.length)break;
+      }
+    }
+    if(!queue.length){message('当前队列已审阅完；同步后可继续检查新增或变化的谱面。');return;}
+    if(current) {const same=queue.findIndex(item=>item.chart_id===current.chart_id);if(same>0)queue.unshift(...queue.splice(same,1));}
+    const item=queue.shift();
+    if(current?.chart_id!==item.chart_id||globalThis.ChartPreview?.getEntry()?.training_context?.manifest!==manifest||globalThis.ChartPreview?.getEntry()?.training_context?.chart_id!==item.chart_id) {
+      const preview=await api('/api/quality/chart-preview',{manifest,chart_id:item.chart_id});
+      if(request!==serial)return;
+      globalThis.ChartPreview?.openSource(preview,{scroll:true});
+    }
+    if(request!==serial)return;
+    current=item;seen.add(token(item));
+    $('feedbackContext').checked=true;
+    globalThis.FeedbackRange?.set({start_sec:Number(item.start_sec),end_sec:Number(item.end_sec)});
+    $('candidatePoolWhy').textContent=`${Number(item.start_sec).toFixed(2)}–${Number(item.end_sec).toFixed(2)} 秒 · ${describe(item.why||'代表性片段')}。可在时间轴微调，预览始终保留整谱。`;
+    $('candidatePoolIssues').textContent=(Array.isArray(item.issues)?item.issues:[item.issues]).filter(Boolean).map(describe).join('；')||'扫描未列出问题；请结合音频与前后文判断。';
+    $('candidatePoolEntry').checked=false;message('试听后选择学习内容；只有明确确认的范围才进入监督。');controls();
+    await globalThis.ChartPreview?.seek?.(Number(item.start_sec));
+  }
+  async function save(use,whole=false) {
+    const manifest=identity(),item=current,request=serial;
+    const context=globalThis.ChartPreview?.getEntry()?.training_context;
+    if(context?.manifest!==manifest||context?.chart_id!==item?.chart_id)throw new Error('预览已切换，请重新打开候选片段。');
+    if(!item)throw new Error('请先打开候选片段。');
+    const version=globalThis.ChartPreview?.getEntry()?.charts?.[0];
+    if(!version?.file_sha256||!version?.chart_sha256||!version?.audio_sha256||!version?.audio_path)throw new Error('预览缺少谱面或音频身份，请重新打开候选片段后再保存。');
+    if(item.candidate_status==='error'||item.status==='error')throw new Error('该谱有阻断错误，请修正源谱并同步后再审阅。');
+    let range=globalThis.FeedbackRange?.get();
+    if(whole) {
+      const source=globalThis.ChartPreview?.getEntry(),version=source?.charts?.find(chart=>chart.chart_id===item.chart_id)||source?.charts?.[0];
+      let timeline=version?.timeline;
+      if(!timeline && version?.timeline_url){const response=await fetch(version.timeline_url);timeline=await response.json();if(!response.ok)throw new Error(timeline.error||'无法读取整谱范围');}
+      const notes=timeline?.notes||[];
+      if(!notes.length)throw new Error('尚未取得整谱音符范围，请使用时间轴圈选。');
+      range={start_sec:Math.min(...notes.map(n=>Number(n.start_sec))),end_sec:Math.max(...notes.map(n=>Number(n.end_sec??n.start_sec)))+.25};
+      if(!confirm('只有听过整首才应使用。确认将首个起音至最后动作结束后的整首范围同时用于采音和配置学习？'))return;
+    }
+    if(!range||!Number.isFinite(range.start_sec)||!Number.isFinite(range.end_sec)||range.end_sec<=range.start_sec)throw new Error('请在时间轴选择有效片段。');
+    const result=await api('/api/quality/source-feedback',{manifest,chart_id:item.chart_id,file_sha256:version.file_sha256,chart_sha256:version.chart_sha256,audio_sha256:version.audio_sha256,audio_path:version.audio_path,...range,label:use==='uncertain'?'uncertain':'good',reason:['timing','layout'].includes(use)?use:'',note:$('candidatePoolReason').value.trim(),learn_entry:use!=='layout'&&use!=='uncertain'&&$('candidatePoolEntry').checked,context_start_sec:Math.max(0,range.start_sec-4),context_end_sec:range.end_sec+4});
+    undo=result.undo_token?{manifest,chart_id:item.chart_id,undo_token:result.undo_token}:null;
+    window.dispatchEvent(new CustomEvent('training-source-annotated',{detail:{manifest,chart_id:item.chart_id,result}}));
+    if(request!==serial)return;
+    message('已保存。');$('candidatePoolReason').value='';await refresh();
+    if($('candidatePoolAutoNext').checked)await next();
+  }
+  globalThis.CandidatePool={
+    badge(item) {
+      if(!item.candidate_status)return '';
+      const names={error:'错误',suspicious:'待核对',ok:'低风险',pending:'待扫描'};
+      return `<br><span class="quality-label">${escapeHtml(names[item.candidate_status]||item.candidate_status)}</span> <span class="muted">已确认 ${escapeHtml(String(item.confirmed_regions??item.reviewed_regions??item.record?.regions?.length??0))} 段</span>`;
+    },
+    card(item) {
+      if(!item.manifest||item.prepared===false)return '';
+      if(item.reviewed_regions!=null)return '<p class="muted">人工确认的片段示范，勾选后可加入训练。</p>';
+      const pool=isPool(item),info=item.candidate_pool_summary||item.candidate_pool||{},counts=info.counts||info;
+      return `<div class="candidate-pool-card"><p class="muted">${pool?`候选库 · 已确认 ${escapeHtml(String(info.confirmed_regions??info.reviewed_regions??0))} 段 · 未检查 ${escapeHtml(String(counts.pending??0))}／错误 ${escapeHtml(String(counts.error??0))}／待核对 ${escapeHtml(String(counts.suspicious??0))}／低风险 ${escapeHtml(String(counts.ok??0))}`:'可独立建立候选库，保留源谱与原标注'}</p>${pool?'':`<button type="button" class="small-button candidate-pool-create" data-manifest="${escapeHtml(item.manifest)}" ${enabled?'':'disabled'}>作为候选库审查</button>`}</div>`;
+    },
+    capabilities(state) {enabled=state.training_capabilities?.candidate_pools===true||state.capabilities?.candidate_pools===true;this.render();},
+    render() {
+      $('candidatePoolCapability').textContent=enabled?'候选库已启用：先审阅片段，再加入下一次训练。':'候选库需要重启后台后启用。当前训练可以继续；请在训练妥善结束后再重启。';
+      for(const button of document.querySelectorAll('.candidate-pool-create'))button.disabled=!enabled;
+      if(selectedDatasetItems().some(isPool)){const input=$('v2TrainQualityEnabled');if(input)input.checked=true;}
+      controls();
+    },
+    activate(item) {++serial;active=isPool(item)?item:null;current=null;queue=[];seen.clear();$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
+  };
+  document.addEventListener('click',event=>{
+    const create=event.target.closest?.('.candidate-pool-create');if(!create)return;
+    void run(async()=>{
+      if(!enabled)throw new Error('重启后台后启用候选库。');
+      const source=datasetWorkspaceState.items.find(item=>item.manifest===create.dataset.manifest);
+      const name=(source?.name||'素材')+' · 候选库';
+      const result=await api('/api/candidates/create',{manifest:create.dataset.manifest,name});
+      $('candidatePoolCapability').textContent='候选库已建立，正在后台扫描；默认零监督。';
+      await loadDatasetCatalog();
+      let item=datasetWorkspaceState.items.find(item=>item.manifest===result.manifest);
+      if(!item) {
+        // The build runs asynchronously; keep its manifest visible before pool.json exists.
+        item={name,manifest:result.manifest,path:result.pool_dir||result.manifest,prepared:true,candidate_pool:{pool_id:result.pool_id,scan_state:'queued'}};
+        datasetWorkspaceState.items.push(item);renderDatasetWorkspace();
+      }
+      if(result.task_id)watchTask(result.task_id,async task=>{
+        await loadDatasetCatalog();
+        if(identity()===result.manifest){if(task.status==='completed'){const built=datasetWorkspaceState.items.find(row=>row.manifest===result.manifest);if(built&&!current&&!busy&&qualityState.annotationManifest!==result.manifest)await openDataset(built);}await refresh();if(task.status!=='completed')message(`扫描${task.status==='cancelled'?'已取消':'失败'}：${task.error||'请检查任务日志'}`);}
+      });
+      if(item.candidate_pool?.scan_state==='queued'){datasetWorkspaceState.activePath=item.path;datasetWorkspaceState.view='catalog';globalThis.CandidatePool.activate(item);renderDatasetWorkspace();}
+      else await openDataset(item);
+    });
+  });
+  function showBudget(data) {
+    const result=$('candidatePoolBudgetResult');result.replaceChildren();
+    const hint=document.createElement('p');hint.textContent='以下是所选来源的估算学习份额，分别计算采音和配置；百分比不是谱面质量评分，也不是实际训练损失占比。';result.append(hint);
+    const share=value=>{const percent=100*Number(value||0);return percent>0&&percent<.1?'<0.1%':percent.toFixed(1)+'%';};
+    for(const source of data.sources||[]) {const row=document.createElement('p');const name=datasetWorkspaceState.items.find(item=>item.manifest===source.manifest)?.name||source.manifest;row.textContent=`${name}${source.candidate_pool&&!name.includes('候选库')?'（候选库）':''}：采音 ${share(source.timing_share)} ／ 配置 ${share(source.layout_share)}`;result.append(row);}
+    if(!(data.sources||[]).length){const empty=document.createElement('p');empty.textContent='当前没有可计入的学习内容，请先确认候选片段或检查所选来源。';result.append(empty);}
+    if(data.warnings?.length){const warning=document.createElement('details'),title=document.createElement('summary');title.textContent=`${data.warnings.length} 项未计入，查看原因`;warning.append(title);for(const item of data.warnings.slice(0,30)){const row=document.createElement('p'),empty=String(item.reason||'').match(/No inote for difficulty (\d+) found/);row.textContent=`${item.source_path||item.manifest||'来源'}：${empty?`难度槽位 ${empty[1]} 为空，未计入估算`:item.reason||'请检查源资料'}`;warning.append(row);}if(data.warnings.length>30){const more=document.createElement('p');more.textContent='其余记录见右侧任务结果中的 result.json。';warning.append(more);}result.append(warning);}
+  }
+  function budgetProgress(task) {
+    if(!['queued','running','cancelling'].includes(task.status))return;
+    const progress=task.result?.candidate_budget||{},total=Number(progress.total),done=Number(progress.completed)||0;
+    const stages={queued:'等待开始',checking:'检查资料是否变化',loading:'读取来源',scanning:'统计谱面',counting:'统计学习内容',estimating:'估算学习份额',complete:'统计完成',completed:'统计完成'};
+    const stage=stages[progress.stage]||progress.stage||'正在估算';
+    const sourceName=datasetWorkspaceState.items.find(item=>item.manifest===progress.source)?.name||progress.source;
+    $('candidatePoolBudgetResult').textContent=`${task.status==='cancelling'?'正在取消':stage}${total>0?` · ${Math.min(100,Math.round(done/total*100))}%（${done}/${total}）`:''}${sourceName?` · ${sourceName}`:''}${!progress.stage&&task.message?` · ${task.message}`:''}`;
+    $('candidatePoolBudgetCancel').hidden=false;
+  }
+  function finishBudget(task) {
+    budgetPending=false;budgetTaskId=null;$('candidatePoolBudgetCancel').hidden=true;controls();
+    if(task.status==='completed')showBudget(task.result?.supervision||task.result?.summary?.supervision||task.result?.summary||task.result||{});
+    else $('candidatePoolBudgetResult').textContent=task.status==='cancelled'?'估算已取消，可重新选择来源后再估算。':`估算失败：${task.error||task.message||'请重试或查看任务日志'}`;
+  }
+  $('candidatePoolBudget').addEventListener('click',async()=>{
+    if(budgetPending)return;
+    const result=$('candidatePoolBudgetResult');result.hidden=false;
+    const manifests=selectedDatasetItems().map(item=>item.manifest).filter(Boolean);
+    if(!manifests.length){result.textContent='请先勾选要估算的训练来源。';return;}
+    budgetPending=true;controls();result.textContent='正在提交估算；接下来会显示阶段和进度，可以继续浏览和审阅素材。';
+    try {
+      const response=await api('/api/candidates/budget',{manifests});
+      if(response.task_id){budgetTaskId=response.task_id;budgetProgress(response);watchTask(response.task_id,finishBudget,budgetProgress);}
+      else finishBudget({status:'completed',result:response});
+    } catch(error){finishBudget({status:'failed',error:error.message||String(error)});}
+  });
+  $('candidatePoolBudgetCancel').addEventListener('click',async()=>{
+    if(!budgetTaskId)return;
+    const button=$('candidatePoolBudgetCancel');button.disabled=true;
+    try {await api('/api/cancel',{task_id:budgetTaskId});$('candidatePoolBudgetResult').textContent='已申请取消估算，正在等待后台停止。';}
+    catch(error){$('candidatePoolBudgetResult').textContent=`取消失败：${error.message||error}。可重试取消。`;}
+    finally{button.disabled=false;}
+  });
+  $('candidatePoolNext').addEventListener('click',()=>void run(next));
+  $('candidatePoolSync').addEventListener('click',()=>void run(async()=>{const manifest=identity(),result=await api('/api/candidates/sync',{manifest});queue=[];seen.clear();message('正在后台重新扫描／同步；源谱变化会使旧确认失效。');if(result.task_id)watchTask(result.task_id,()=>{if(identity()===manifest)void refresh();});await refresh();}));
+  $('candidatePoolExcluded').addEventListener('click',()=>void run(async()=>{const manifest=identity(),request=serial,data=await api('/api/candidates/excluded',{manifest});if(request!==serial)return;const list=$('candidatePoolExcludedList');list.hidden=false;list.replaceChildren();for(const item of data.items||[]){const row=document.createElement('p');row.textContent=`${item.title||item.source_path||item.chart_id||item.path||'谱面'}${item.slot!==undefined?` · 槽位${item.slot}`:''}：${describe(item.reason||item.issues||item)}`;list.append(row);}if(!list.children.length)list.textContent='暂无排除项。';}));
+  for(const button of document.querySelectorAll('[data-pool-learn]'))button.addEventListener('click',()=>void run(()=>save(button.dataset.poolLearn)));
+  $('candidatePoolWhole').addEventListener('click',()=>void run(()=>save('both',true)));
+  $('candidatePoolUndo').addEventListener('click',()=>void run(async()=>{const last=undo;if(!last)return;const result=await api('/api/candidates/undo',last);undo=null;if(identity()===last.manifest){queue=[];seen.clear();await refresh();}window.dispatchEvent(new CustomEvent('training-source-annotated',{detail:{...last,result}}));message('已撤销上次保存。');}));
+  window.addEventListener('chart-preview-updated',controls);window.addEventListener('chart-preview-versionchanged',controls);
+  globalThis.CandidatePool.render();
+  if(globalThis.maichartLastStatus)globalThis.CandidatePool.capabilities(globalThis.maichartLastStatus);
+})();
+
+// END CANDIDATE POOL WORKBENCH

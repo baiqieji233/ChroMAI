@@ -42,6 +42,7 @@ class GrammarDeadEnd(ValueError):
 
 class EventSampler(WindowSampler):
     def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None):
+        self.progress=getattr(args,'_generation_progress',None)
         self.model=model;self.codec=model.codec;self.dataset=dataset;self.song=song
         self.device=device;self.generator=rng;self.temperature=args.temperature;self.top_p=args.top_p
         self.action_temperature,self.action_top_p,_=_action_sampling(args)
@@ -69,6 +70,7 @@ class EventSampler(WindowSampler):
             and getattr(args,'_candidate_audit_active',True))
         self.last_probability_event=None;self._probability=None
     def next(self,target,allowed,*,action=False):
+        if getattr(self,'progress',None) is not None:self.progress.pulse()
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
         if not allowed:
             scope=getattr(self,'proposal_scope',{})
@@ -287,6 +289,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     from .data import ComposerV2Song,_beats_at_seconds
     from maichart.tempo_clock import TempoClock
     config=model.config;clock=TempoClock(tempo,first)
+    from .generation_progress import get_progress
+    progress=get_progress(args)
+    progress.update(force=True,stage='encoding_audio',audio_duration_sec=float(audio.duration_sec))
     from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content
     phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
     if getattr(args,'record_candidate_probabilities',False):
@@ -337,6 +342,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         action_seed=rng.initial_seed() ^ 0x9E3779B97F4A7C15
         sampler_options['action_generator']=torch.Generator(device=device).manual_seed(action_seed)
     while not done:
+        progress.position(clock,points[-1].beat if points else Fraction(0),audio.duration_sec,events=len(points))
         if sampler is None:
             sampler=EventSampler(model,dataset,song,points,device,rng,args,**sampler_options);target=[];committed_in_context=0;refreshes+=1
             sampler.retry_stats=retry_stats
@@ -347,6 +353,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         known_failed=native_memo.get(prefix_key,{}) if prefix_key is not None else {}
         failed_any=False
         for attempt in range(attempts):
+            if attempt:progress.update(stage='retrying')
             try:
                 sampler.retry_allow_eos=not failed_any and not known_failed and recovery.used==0
                 queued=pending_phrase.pop(0) if pending_phrase and attempt==0 else None
@@ -360,6 +367,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 candidates=[(proposal,ids)]
                 used_phrase=False
                 if queued is None and phrase_mode!='event' and candidate_count>1:
+                    progress.update(stage='comparing')
                     def make_sampler(history):
                         value=EventSampler(model,dataset,song,history,device,rng,args,**sampler_options)
                         value.retry_stats=retry_stats
@@ -475,6 +483,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if args.max_events and len(points)>=args.max_events:raise ValueError('max_events would truncate the chart; increase the limit')
         # Alternatives may have changed decoder KV: retain only the unchanged prefix.
         points.append(point)
+        progress.position(clock,point.beat,audio.duration_sec,events=len(points))
         if recovery.commit(point.beat):release_trials.clear();native_memo.clear()
         if history_edited:
             # Discard symbolic KV, REF/CARRY, and clock queries together. The
@@ -487,6 +496,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         refresh_due=committed_in_context>=config.refresh_events
         if sampler is not None and dataset._evidence_v2():refresh_due|=point.beat>=sampler.reference_refresh_beat
         if refresh_due:sampler=None
+    progress.update(force=True,stage='exporting',events=len(points))
     from .tail_guard import cleanup
     points,tail_report=cleanup(points,tempo,first,guard)
     export_end=Fraction(math.ceil(end*config.ticks_per_beat),config.ticks_per_beat)
@@ -547,6 +557,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     output.with_suffix('.composer_v2.json').write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding='utf-8')
     print('composer_v2_done '+json.dumps(dict(output=str(output),events=len(points),context_refreshes=refreshes,
         accepted_with_conflicts_count=len(bypassed_events),conflict_report=report.get('conflict_report'))),flush=True)
+    progress.update(force=True,stage='completed',status='completed',progress=1.,events=len(points))
     return report
 
 

@@ -130,7 +130,7 @@ class TaskState:
             elif self.kind == 'chart_stream_train':
                 from maichart.webui.stream_api import update_stream_progress
                 update_stream_progress(self, line)
-            elif self.kind.startswith('composer_'):
+            elif self.kind.startswith('composer_') or self.kind in ('candidate_scan','candidate_budget'):
                 _update_composer_progress(self, line)
             epoch_match = re.search(r"epoch=(\d+)", line)
             if epoch_match:
@@ -139,7 +139,11 @@ class TaskState:
                 target_epoch = self.result.get("epoch_target")
                 if target_epoch:
                     self.result["epoch_progress"] = min(1.0, current_epoch / int(target_epoch))
-            self.logs.append(f"[{stamp}] {line}")
+            display_line = line
+            if self.kind == 'composer_v2_generate':
+                from maichart.composer_v2.generation_progress import readable_line
+                display_line = readable_line(line)
+            self.logs.append(f"[{stamp}] {display_line}")
             # The in-memory ring drops old lines; the file keeps them all.
             self.logs = self.logs[-300:]
             handle = self._handle
@@ -240,6 +244,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "multi_dataset_training": True,
                                               "composer_training": True,
                                               "composer_v2_training": True,
+                                              "candidate_pools": True,
                                               "composer_v2_generation": True,
                                               "composer_v2_batch_generation": True,
                                               "composer_v2_parallel_generation": True,
@@ -348,6 +353,10 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 from maichart.webui.form_api import start_form_task
                 return start_form_task(self, parsed.path.rsplit("/",1)[-1], self._json_body(),
                                        runtime=sys.modules[__name__])
+            if parsed.path.startswith('/api/candidates/'):
+                from maichart.webui import candidate_api
+                status, result = candidate_api.post(parsed.path, self._json_body(), runtime=sys.modules[__name__])
+                return self._json_response(result, HTTPStatus(status))
             if parsed.path.startswith('/api/chart-stream/'):
                 from maichart.webui.stream_api import start
                 return start(self, parsed.path.rsplit('/', 1)[-1], self._json_body(), runtime=sys.modules[__name__])
@@ -1970,6 +1979,16 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
     """Translate Composer's JSON progress records into the common task shape."""
 
     prefix, separator, raw = line.partition(" ")
+    if separator and prefix in ('candidate_scan','candidate_budget'):
+        try:
+            data = json.loads(raw)
+            completed, total = int(data.get('completed', 0)), int(data.get('total', 0))
+        except (ValueError, TypeError, AttributeError):
+            return
+        task.result[prefix] = data
+        task.progress = min(.99, completed / total) if total else 0.
+        task.message = (f'估算学习份额 {completed}/{total}' if total else '正在读取所选资料') if prefix=='candidate_budget' else f'检查候选谱面 {completed}/{total}'
+        return
     if separator and prefix.startswith("composer_v2_"):
         try:
             data = json.loads(raw)
@@ -2025,12 +2044,17 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
             task.message = f"保存检查点 · 参数更新 {data.get('optimizer_steps', 0)} 步"
         elif prefix == "composer_v2_batch":
             task.result['composer_v2_batch_progress'] = dict(data)
-            task.progress = min(.99, (data.get('completed', 0) + data.get('failed', 0)) / max(1, data.get('count', 1)))
+            task.progress = min(.99, max(0., float(data.get('progress',
+                (data.get('completed', 0) + data.get('failed', 0)) / max(1, data.get('count', 1))))))
             task.result['progress_indeterminate']=False
             if data.get('status')=='preparing':task.message='批量生成 · 正在准备音频和模型'
             elif data.get('parallel',1)>1:
                 task.message=f"批量并行 · 同时运行 {len(data.get('active',[]))}/{data['parallel']} 张 · 成功 {data.get('completed',0)}、失败 {data.get('failed',0)}"
             else:task.message = f"批量生成 · 第 {data.get('index', 1)}/{data.get('count', 1)} 张 · 已成功 {data.get('completed', 0)} 张"
+        elif prefix == 'composer_v2_generation_progress':
+            task.result['progress_indeterminate'] = not bool(data.get('audio_duration_sec'))
+            task.progress = min(.99,max(0.,float(data.get('progress',0))))
+            task.message = str(data.get('stage') or 'generating')
         elif prefix == "composer_v2_event":
             task.result["progress_indeterminate"] = True
             task.message = f"已生成 {data.get('events', 0)} 个事件 · 当前拍位 {data.get('beat', '?')}"
@@ -2169,8 +2193,10 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
             task.status = "running"
             task.message = "启动任务"
         env = os.environ.copy()
-        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit"):
+        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit", "candidate_scan", "candidate_budget"):
             env["CUDA_VISIBLE_DEVICES"] = ""
+        if task.kind in ('candidate_scan','candidate_budget'):
+            env.update(OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
         env["PYTHONUNBUFFERED"] = "1"
         env["PYTHONIOENCODING"] = "utf-8"
         current_pythonpath = env.get("PYTHONPATH", "")
@@ -2198,6 +2224,7 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 encoding="utf-8",
                 bufsize=1,
                 start_new_session=os.name != 'nt',
+                creationflags=(subprocess.BELOW_NORMAL_PRIORITY_CLASS if os.name == 'nt' and task.kind in ('candidate_scan','candidate_budget') else 0),
             )
             with task.lock:
                 task.process = process
@@ -2425,6 +2452,9 @@ def _persisted_logs(limit: int = 100) -> list[dict[str, Any]]:
 
 def _collect_task_results(task: TaskState, result_paths: list[Path]) -> None:
     paths = list(result_paths)
+    if task.kind=='candidate_budget':
+        report_path=next((p for p in paths if p.is_file()),None)
+        if report_path is not None:task.result['supervision']=json.loads(report_path.read_text(encoding='utf-8'))
     if task.kind in ('composer_v2_evaluate', 'composer_v2_candidate_audit'):
         report_path = next((path for path in paths if path.suffix.lower() == '.json' and path.is_file()), None)
         if report_path is not None:

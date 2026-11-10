@@ -6,14 +6,67 @@ import os
 import re
 import tempfile
 import threading
+from collections import OrderedDict
 from http import HTTPStatus
 from pathlib import Path
 from typing import Any
 
-from maichart.training.dataset_catalog import catalog_datasets, compose_datasets
+from maichart.training.dataset_catalog import catalog_datasets, compose_datasets, manifest_dataset_id
 
 _REGISTRY_LOCK = threading.Lock()
 _MANIFEST_NAMES = ("pretrain_manifest.json", "training_manifest.json")
+_JSON_CACHE = OrderedDict()
+_JSON_LOCK = threading.RLock()
+
+
+def _json_data(path):
+    """Cache immutable JSON snapshots; never parse or hash source charts here."""
+    path = Path(path)
+    stat = path.stat()
+    key = (str(path), stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns)
+    with _JSON_LOCK:
+        if key in _JSON_CACHE:
+            _JSON_CACHE.move_to_end(key)
+            return _JSON_CACHE[key][0]
+    value = json.loads(path.read_text(encoding='utf-8-sig'))
+    with _JSON_LOCK:
+        for old in list(_JSON_CACHE):
+            if old[0] == key[0]:_JSON_CACHE.pop(old)
+        if stat.st_size <= 16*1024*1024:_JSON_CACHE[key] = (value,stat.st_size)
+        while len(_JSON_CACHE)>16 or sum(item[1] for item in _JSON_CACHE.values())>16*1024*1024:
+            _JSON_CACHE.popitem(last=False)
+    return value
+
+
+def _display_root(manifest, data):
+    if data.get('candidate_pool') or data.get('reviewed_training'):
+        return manifest.parent
+    value = Path(str(data.get('source_root') or '.'))
+    return (value if value.is_absolute() else manifest.parent / value).resolve()
+
+
+def _pool_card(root, data):
+    """Last-scan counts, not a full identity/geometry audit during page loading."""
+    metadata = _json_data(root / 'pool.json') if (root / 'pool.json').is_file() else {}
+    state = _json_data(root / 'scan_state.json') if (root / 'scan_state.json').is_file() else {}
+    annotations = _json_data(root / 'quality_annotations.json') if (root / 'quality_annotations.json').is_file() else {}
+    counts = dict(charts=0,error=0,suspicious=0,ok=0,pending=0,duplicate=len(metadata.get('excluded',[])))
+    by_source = {(str(record.get('source_path','')).casefold(),record.get('difficulty_index')):record for record in annotations.get('records',[])}
+    regions = 0
+    for song in data.get('songs',[]):
+        for difficulty in song.get('difficulties',[]):
+            counts['charts'] += 1
+            status = difficulty.get('candidate_status','pending')
+            counts[status] = counts.get(status,0)+1
+            index=difficulty.get('difficulty_index',difficulty.get('index'))
+            record=by_source.get((str(song.get('maidata_path','')).casefold(),index),{})
+            identity=difficulty.get('candidate_identity',{})
+            if record.get('chart_sha256')==identity.get('chart_sha256') and record.get('audio_sha256')==identity.get('audio_sha256'):
+                regions+=len(record.get('regions',[]))
+    return dict(pool_id=data['candidate_pool']['pool_id'],counts=counts,confirmed_regions=regions,
+                scan_complete=bool(metadata.get('scan_complete')),scan_state=state.get('status'),
+                reviewable_charts=counts['ok']+counts['suspicious'] if metadata.get('scan_complete') else 0,
+                summary_only=True)
 
 
 class DatasetAPI:
@@ -82,13 +135,30 @@ class DatasetAPI:
         card = {"path": str(root), "source_root": str(root), "raw_root": str(root),
                 "manifest": str(manifest), "name": str(entry.get("name") or root.name),
                 "cache_dir": str(root / "cache"), "prepared": False}
+        if entry.get('candidate_pool'):
+            card['candidate_pool'] = dict(entry['candidate_pool'])
+            state = root / 'scan_state.json'
+            if state.is_file():
+                card['candidate_pool']['scan_state'] = json.loads(state.read_text(encoding='utf-8')).get('status')
         if entry.get('review_group'):card['review_group']=entry['review_group']
         if manifest.is_file():
             try:
-                card.update(catalog_datasets([manifest])[0])
+                data = _json_data(manifest)
+                if data.get('schema') != 'maichart-training-manifest-v1':
+                    raise ValueError('这份文件不是可用的训练清单')
+                songs=[song for song in data.get('songs',[]) if isinstance(song,dict)]
+                difficulties=[d for song in songs for d in song.get('difficulties',[]) if isinstance(d,dict)]
+                card.update(dataset_id=manifest_dataset_id(manifest,data),song_count=len(songs),
+                    difficulty_count=len(difficulties),usable_difficulty_count=sum(bool(d.get('usable_for_training') or d.get('event_usable_for_training')) for d in difficulties),
+                    annotation_path=str(manifest.with_name('quality_annotations.json')),
+                    annotation_exists=manifest.with_name('quality_annotations.json').is_file(),
+                    preprocessing=data.get('preprocessing') or {},merged=bool(data.get('merged_from')))
                 card.update({"path": str(root), "raw_root": str(root), "manifest": str(manifest),
                              "name": str(entry.get("name") or root.name), "prepared": True})
-                data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+                if data.get('candidate_pool'):
+                    summary = _pool_card(manifest.parent,data)
+                    card['candidate_pool'] = {**data['candidate_pool'], **summary}
+                    card['candidate_pool_summary'] = summary
                 if data.get('reviewed_training'):
                     card['reviewed_regions']=data['reviewed_training'].get('regions',0)
                 cache = Path(str(data.get("cache_dir") or "cache"))
@@ -104,6 +174,7 @@ class DatasetAPI:
         current = self._resolve(payload["current_manifest"]) if payload.get("current_manifest") else None
         current_root = None
         entries = self._roots()
+        warnings = []
         values = payload.get("manifests") or []
         if not isinstance(values, list):
             raise ValueError("manifests 必须是数组")
@@ -111,18 +182,20 @@ class DatasetAPI:
             if value:
                 path = self._resolve(value)
                 if path.is_file():
-                    data = json.loads(path.read_text(encoding="utf-8-sig"))
+                    try:
+                        data = _json_data(path)
+                    except (OSError,ValueError,TypeError) as exc:
+                        warnings.append(dict(manifest=str(path),error=str(exc)))
+                        continue
                     if data.get("schema") != "maichart-training-manifest-v1" or data.get("merged_from"):
                         continue
-                    root = Path(str(data.get("source_root") or "."))
-                    root = (root if root.is_absolute() else path.parent / root).resolve()
+                    root = _display_root(path,data)
                     entries.append({"path": str(root), "manifest": str(path)})
         if current is not None and current.is_file():
             try:
-                data = json.loads(current.read_text(encoding="utf-8-sig"))
+                data = _json_data(current)
                 if not data.get("merged_from") and data.get("schema") == "maichart-training-manifest-v1":
-                    source = Path(str(data.get("source_root") or "."))
-                    source = (source if source.is_absolute() else current.parent / source).resolve()
+                    source = _display_root(current,data)
                     current_root = source
                     entries.append({"path": str(source), "manifest": str(current)})
             except (OSError, ValueError, TypeError):
@@ -134,10 +207,16 @@ class DatasetAPI:
                 key = str(path).casefold()
                 if key not in unique or entry.get("manifest"):
                     unique[key] = {**unique.get(key, {}), **entry}
-        cards = [self._card({**entry, "manifest": str(current)} if current_root == self._resolve(entry["path"]) else entry, current)
-                 for entry in unique.values()]
+        cards=[]
+        for entry in unique.values():
+            try:
+                cards.append(self._card({**entry,'manifest':str(current)} if current_root==self._resolve(entry['path']) else entry,current))
+            except (OSError,ValueError,TypeError,KeyError) as exc:
+                cards.append(dict(path=entry['path'],name=entry.get('name') or Path(entry['path']).name,
+                                  manifest=entry.get('manifest',''),prepared=False,error=str(exc)))
         cards.sort(key=lambda row: (not row.get("current"), str(row["name"]).casefold(), row["path"].casefold()))
         return HTTPStatus.OK, {"datasets": cards, "items": cards, "total": len(cards),
+                               "warnings": warnings,
                                "current_manifest": str(current) if current else ""}
 
     def register(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:

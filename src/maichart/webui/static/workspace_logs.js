@@ -7,7 +7,33 @@
 
   const KEY_EVENT = /\b(epoch|loss|best|checkpoint|saved|saving|validation|generation|sample|complete|finished|failed|resume)\b|form_|playability_|action_state_|audio_bounds|prewarm|event_audio_loads|已完成|保存|验证|生成|采样|失败|轮次|预热/i;
 
+  function formatGenerationLine(value) {
+    const line=String(value);
+    if(line.length>64*1024)return line;
+    const match=/^(\[[^\]]+\]\s*)?(composer_v2_batch|composer_v2_generation_progress)\s+/.exec(line.slice(0,256));
+    if(!match)return line;
+    const stages={starting:'正在启动',queued:'等待开始',loading_checkpoint:'读取检查点',loading_model:'载入模型',
+      freezing_checkpoint:'准备检查点副本',detecting_timing:'识别 BPM 和偏移',preparing_audio:'准备音频特征',
+      encoding_audio:'读取歌曲上下文',generating:'正在写谱',comparing:'比较候选写法',retrying:'调整冲突位置',
+      exporting:'导出谱面',completed:'已完成',failed:'生成失败',cancelled:'已中止'};
+    const clock=value=>{const n=Math.max(0,Math.floor(Number(value)||0));return `${Math.floor(n/60).toString().padStart(2,'0')}:${(n%60).toString().padStart(2,'0')}`;};
+    const chart=row=>`第 ${row.index||1} 张 · seed ${row.seed??'—'} · ${stages[row.stage]||'正在生成'}${row.audio_duration_sec?` · ${clock(row.audio_sec)}/${clock(row.audio_duration_sec)}（${['completed','failed'].includes(row.status)?100:Math.min(99,Math.floor((row.progress||0)*100))}%）`:''}${row.events!=null?` · ${row.events} 个事件`:''}`;
+    try {
+      const data=JSON.parse(line.slice(match[0].length));
+      if(!data||typeof data!=='object')return line;
+      if(match[2]==='composer_v2_generation_progress')return (match[1]||'')+'生成进度 · '+chart(data);
+      const failed=Number(data.failed)||0,rows=(data.chart_progress||[]).filter(row=>row.status==='running');
+      let text=`批量生成 · 已结束 ${(Number(data.completed)||0)+failed}/${data.count} 张（成功 ${data.completed||0}${failed?`，失败 ${failed}`:''}）`;
+      text+=data.status==='preparing'?` · ${stages[data.stage]||'准备音频和模型'}`:` · 正在进行 ${data.active?.length||0} 张 · 等待 ${data.queued||0} 张`;
+      if(data.elapsed_sec!=null)text+=` · 已用 ${clock(data.elapsed_sec)}`;
+      if(rows.length)text+=' ｜ '+rows.slice(0,4).map(chart).join(' ｜ ');
+      if(rows.length>4)text+=` ｜ 另 ${rows.length-4} 张详见逐张进度`;
+      return (match[1]||'')+text;
+    }catch(_){return line;}
+  }
+
   function severityOf(line) {
+    line=formatGenerationLine(line);
     if (/\b(error|exception|traceback|failed|fatal)\b|\b\w*(?:Error|Exception):|错误|失败|异常/i.test(line)) return "error";
     if (/\b(warn(?:ing)?)\b|警告/i.test(line)) return "warning";
     if (/\b(debug|trace)\b/i.test(line)) return "debug";
@@ -49,7 +75,7 @@
   // Bound work before signatures, filtering and layout. Inspect at most a small
   // prefix to detect oversized JSON lines; never parse their complete payloads.
   function displayLine(value) {
-    const text = String(value);
+    const text = formatGenerationLine(value);
     let prefixEnd = Math.min(text.length, LINE_BYTE_LIMIT);
     if (prefixEnd < text.length && /[\uD800-\uDBFF]/.test(text[prefixEnd - 1])) prefixEnd -= 1;
     const prefix = text.slice(0, prefixEnd);
@@ -228,5 +254,5 @@
     }
   }
 
-  return { severityOf, isKeyEvent, filterLines, downloadUrl, renderTask, boundedDisplayLines };
+  return { severityOf, isKeyEvent, filterLines, downloadUrl, renderTask, boundedDisplayLines, formatGenerationLine };
 });

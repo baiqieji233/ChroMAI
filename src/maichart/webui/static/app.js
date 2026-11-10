@@ -179,6 +179,16 @@ function requireV2SplitSamplingSupport(status,payload) {
 }
 function composerV2GenerationMessage(task) {
   if(task.status!=='running')return task.message||'';
+  const detailed=composerV2ProgressState(task);
+  if(detailed.batch) {
+    const b=detailed.batch;
+    const failed=Number(b.failed)||0;
+    return `${generationStageLabel(b.status==='preparing'?b.stage||'preparing_audio':'generating')} · 已结束 ${(Number(b.completed)||0)+failed}/${b.count} 张（成功 ${b.completed||0}${failed?`，失败 ${failed}`:''}） · ${Math.min(99,Math.floor(detailed.progress*100))}%`;
+  }
+  if(detailed.rows.length) {
+    const row=detailed.rows[0];
+    return `${generationStageLabel(row.stage)}${row.audio_duration_sec?` · ${generationTime(row.audio_sec)} / ${generationTime(row.audio_duration_sec)}`:''}${row.events?` · ${row.events} 个事件`:''}`;
+  }
   const batch=task.result?.composer_v2_batch_progress;
   if(batch?.count>1) {
     if(batch.status==='preparing')return '正在准备音频和模型';
@@ -3595,6 +3605,7 @@ function updateComposerRecoverySamplingControls() {
 // Task handling
 // ---------------------------------------------------------------------------
 const TASK_KIND_LABEL = {
+  candidate_budget: "训练来源学习份额估算",
   chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
   composer_v2_train: "Composer v2 训练", composer_v2_generate: "Composer v2 生成",
   composer_train: "chart_composer_v1 训练", composer_generate: "chart_composer_v1 生成",
@@ -3602,6 +3613,82 @@ const TASK_KIND_LABEL = {
 };
 const taskWatchers = new Map();
 const trainingMetricSupportCache = new Map();
+
+function generationTime(value) {
+  const sec=Math.max(0,Math.floor(Number(value)||0));
+  return `${Math.floor(sec/60).toString().padStart(2,'0')}:${(sec%60).toString().padStart(2,'0')}`;
+}
+
+function generationStageLabel(stage) {
+  return ({queued:'等待开始',starting:'正在启动',loading_checkpoint:'读取检查点',loading_model:'载入模型',
+    freezing_checkpoint:'准备检查点副本',detecting_timing:'识别 BPM 和偏移',preparing_audio:'准备音频特征',
+    encoding_audio:'读取歌曲上下文',generating:'正在写谱',comparing:'比较候选写法',retrying:'调整冲突位置',
+    exporting:'导出谱面',completed:'已完成',failed:'生成失败',cancelled:'已中止',unknown:'等待详细进度'})[stage]||'正在生成';
+}
+
+function composerV2ProgressState(task) {
+  const result=task.result||{},settings=result.effective_settings||{};
+  const batch=result.composer_v2_batch_progress||result.composer_v2_batch;
+  const single=result.composer_v2_generation_progress;
+  if(batch?.count>1) {
+    let rows=batch.chart_progress||[];
+    if(!rows.length) {
+      const terminal=result.composer_v2_batch?.charts||[];
+      const base=String(settings.batch_manifest||settings.output||'').replace(/[\\/][^\\/]*$/,'');
+      const stem=String(settings.output||'maidata.txt').split(/[\\/]/).pop().replace(/\.[^.]+$/,'');
+      rows=Array.from({length:Math.min(32,batch.count)},(_,i)=>{
+        const index=i+1,done=terminal.find(row=>row.index===index),seed=Number(settings.seed||0)+i;
+        if(done)return {...done,stage:done.status,progress:1};
+        const active=batch.active?.includes(index);
+        return {index,seed,status:active?'running':'unknown',stage:active?'generating':'unknown',
+          log:base?`${base}/${String(index).padStart(2,'0')}_seed_${seed}/${stem}.generation.log`:null};
+      });
+    }
+    const count=Number(batch.count)||1;
+    const finished=Math.max((Number(batch.completed)||0)+(Number(batch.failed)||0),rows.filter(row=>['completed','failed'].includes(row.status)).length);
+    const progress=Number.isFinite(batch.progress)?batch.progress:
+      (finished+rows.filter(row=>row.status==='running').reduce((sum,row)=>sum+Math.min(.995,Math.max(0,Number(row.progress)||0)),0))/count;
+    rows=rows.map(row=>({audio_sec:0,...row,log:row.log||null}));
+    return {batch,rows,progress:Math.min(1,Math.max(0,progress)),elapsed:batch.elapsed_sec,
+      indeterminate:batch.status==='preparing'};
+  }
+  return {batch:null,rows:single&&single.index!==0?[single]:[],progress:Math.min(1,Math.max(0,Number(single?.progress)||0)),
+    elapsed:single?.elapsed_sec,indeterminate:!single?.audio_duration_sec&&single?.status!=='completed'};
+}
+
+function renderGenerationProgress(task) {
+  const panel=element('#taskGenerationProgress'),list=element('#taskGenerationCharts'),summary=element('#taskGenerationSummary');
+  if(!panel||!list||!summary)return;
+  panel.hidden=task.kind!=='composer_v2_generate';
+  if(panel.hidden){panel._signature=null;return;}
+  const state=composerV2ProgressState(task),signature=JSON.stringify([task.task_id,task.status,state]);
+  if(panel._signature===signature)return;
+  panel._signature=signature;
+  summary.textContent=`${state.batch?`并行 ${state.batch.active?.length||0}/${state.batch.parallel||1} 张 · `:''}${state.elapsed!=null?`已用 ${generationTime(state.elapsed)} · `:''}按已写歌曲位置估算进度`;
+  list.replaceChildren();
+  const order={running:0,failed:1,queued:2,unknown:2,cancelled:3,completed:4};
+  for(const row of [...state.rows].sort((a,b)=>(order[a.status]??2)-(order[b.status]??2)||(a.index||0)-(b.index||0))) {
+    const card=document.createElement('div');card.className='generation-chart-progress';card.dataset.status=row.status||'running';
+    const heading=document.createElement('div'),name=document.createElement('strong'),stage=document.createElement('span');
+    heading.className='generation-chart-heading';name.textContent=`第 ${row.index||1} 张 · seed ${row.seed??'—'}`;
+    stage.textContent=generationStageLabel(row.stage);heading.append(name,stage);card.append(heading);
+    const detail=document.createElement('p');
+    const percent=['completed','failed'].includes(row.status)?100:Math.min(99,Math.floor((row.progress||0)*100));
+    detail.textContent=[row.audio_duration_sec?`${generationTime(row.audio_sec)} / ${generationTime(row.audio_duration_sec)}（${percent}%）`:null,
+      row.events!=null?`${row.events} 个事件`:null,row.elapsed_sec!=null?`用时 ${generationTime(row.elapsed_sec)}`:null].filter(Boolean).join(' · ');
+    if(row.status==='running'&&row.updated_at&&Date.now()/1000-row.updated_at>10)detail.textContent+=` · 上次进度更新 ${Math.floor(Date.now()/1000-row.updated_at)} 秒前`;
+    if(row.error)detail.textContent+=` · ${row.error}`;
+    card.append(detail);
+    const track=document.createElement('div'),bar=document.createElement('div');track.className='generation-chart-track';
+    bar.style.width=`${percent}%`;track.append(bar);card.append(track);
+    if(row.log&&row.status!=='queued'&&row.stage!=='starting') {
+      const link=document.createElement('a');link.href=`/api/download?path=${encodeURIComponent(row.log)}`;
+      link.textContent='详细日志';link.className='generation-chart-log';card.append(link);
+    }
+    list.append(card);
+  }
+  if(!state.rows.length)list.textContent='正在准备，收到进度后会显示每张谱面。';
+}
 
 function trainingSupportPaths(task) {
   if (task?.kind !== "form_train") return null;
@@ -3707,15 +3794,16 @@ async function viewArchivedTrainingLog(entry, button) {
   }
 }
 
-function watchTask(taskId, onFinished = null) {
+function watchTask(taskId, onFinished = null, onUpdate = null) {
   activeTaskId = taskId;
   const existing = taskWatchers.get(taskId);
   if (existing) {
     if (onFinished) existing.callbacks.add(onFinished);
+    if (onUpdate) (existing.updates ||= new Set()).add(onUpdate);
     if (existing.task) renderTask(existing.task);
     return;
   }
-  taskWatchers.set(taskId, { callbacks: new Set(onFinished ? [onFinished] : []), task: null });
+  taskWatchers.set(taskId, { callbacks: new Set(onFinished ? [onFinished] : []), updates: new Set(onUpdate ? [onUpdate] : []), task: null });
   pollTask(taskId);
 }
 
@@ -3725,6 +3813,7 @@ async function pollTask(taskId) {
   try {
     const task = await api(`/api/task?id=${encodeURIComponent(taskId)}`);
     watcher.task = task;
+    for (const update of watcher.updates || []) update(task);
     trackComposerTrainingTask(task);
     if (activeTaskId === taskId) renderTask(task);
     else window.MaichartWorkflow?.recordTask(task);
@@ -3783,10 +3872,12 @@ function renderTask(task) {
   if (progress) {
     const unknownTrainingTarget = task.kind === "train" && !epochStatus?.knownTarget;
     if (progress.parentElement) progress.parentElement.hidden = unknownTrainingTarget || task.status === "archived";
+    const generation=task.kind==='composer_v2_generate'?composerV2ProgressState(task):null;
     const amount = ["train","composer_v2_train"].includes(task.kind) && epochStatus?.knownTarget
-      ? epochStatus.progress : task.progress || 0;
-    progress.style.width = `${Math.round(amount * 100)}%`;
-    const indeterminate=['queued','running'].includes(task.status) && (task.kind==='composer_v2_train'?epochStatus?.indeterminate:task.kind==='composer_v2_generate');
+      ? epochStatus.progress : generation?.rows.length?generation.progress:task.progress||0;
+    const percentage=generation&&['queued','running'].includes(task.status)?Math.min(99,Math.floor(amount*100)):Math.round(amount*100);
+    progress.style.width = `${percentage}%`;
+    const indeterminate=['queued','running'].includes(task.status) && (task.kind==='composer_v2_train'?epochStatus?.indeterminate:generation?.indeterminate);
     progress.parentElement?.classList?.toggle('indeterminate',!!indeterminate);
     if(task.kind==='composer_v2_train')progress.parentElement?.setAttribute?.('aria-label','训练总计划进度');
   }
@@ -3803,6 +3894,7 @@ function renderTask(task) {
   }
   hydrateTrainingMetricHistory(task);
   renderTaskTrainingMetrics(task);
+  renderGenerationProgress(task);
   if (window.MaichartLogs) window.MaichartLogs.renderTask(task);
   else if (logs) logs.textContent = (task.logs || []).join("\n") || "暂无日志";
   window.MaichartWorkflow?.recordTask(task);
@@ -4164,18 +4256,19 @@ function datasetCardHtml(item) {
   const active = item.path === datasetWorkspaceState.activePath || item.manifest === datasetWorkspaceState.activePath;
   const charts = item.chart_count ?? item.charts ?? item.difficulty_count ?? "?";
   const preprocessAction = item.prepared ? "" : `<button class="small-button dataset-card-preprocess" type="button" data-dataset-path="${escapeHtml(item.path || "") }">去训练页预处理</button>`;
+  const errorMessage = item.error ? `<p class="inline-status warn">这个来源读取失败：${escapeHtml(String(item.error))}。请检查路径或文件后刷新。</p>` : "";
   return `<article class="dataset-card${active ? " active" : ""}" data-dataset-path="${escapeHtml(item.path || "")}" data-dataset-manifest="${escapeHtml(item.manifest || "")}">
     <label class="dataset-card-check"><input class="dataset-select-checkbox" type="checkbox" data-dataset-key="${escapeHtml(key)}" ${checked ? "checked" : ""}> <strong>加入训练</strong></label>
     <button class="dataset-card-open" type="button" data-dataset-path="${escapeHtml(item.path || "")}"><strong>${escapeHtml(item.name || "未命名数据集")}</strong></button>
     <div class="dataset-card-meta">${item.prepared ? "已预处理" : "待预处理"} · 谱面 ${escapeHtml(String(charts))}${item.reviewed_regions!=null?` · 已确认 ${escapeHtml(String(item.reviewed_regions))} 段`:''}</div>
-    <div class="dataset-card-path">${escapeHtml(item.path || item.manifest || "")}</div>${preprocessAction}
+    <div class="dataset-card-path">${escapeHtml(item.path || item.manifest || "")}</div>${errorMessage}${preprocessAction}${globalThis.CandidatePool?.card(item)||""}
   </article>`;
 }
 
 function renderDatasetWorkspace() {
   const cards = element("#datasetCards");
   if (!cards) return;
-  cards.innerHTML = datasetWorkspaceState.items.map(datasetCardHtml).join("") || `<div class="muted dataset-empty">尚未发现可用数据集。请先上传 ZIP，或在训练页填写原始数据集目录并预处理。</div>`;
+  cards.innerHTML = datasetWorkspaceState.items.map(datasetCardHtml).join("") || `<div class="muted dataset-empty">${datasetWorkspaceState.catalogLoading ? "正在读取训练素材，请稍候…" : datasetWorkspaceState.catalogError ? "素材列表读取失败，请点击“刷新数据集”重试。" : "尚未发现可用数据集。请先上传 ZIP，或在训练页填写原始数据集目录并预处理。"}</div>`;
   const summary = element("#datasetSelectionSummary");
   if (summary) summary.textContent = datasetWorkspaceState.selected.size ? `已选择 ${datasetWorkspaceState.selected.size} 个数据集` : "尚未选择数据集";
   const trainingSources = element("#trainingDatasetSelection");
@@ -4187,11 +4280,13 @@ function renderDatasetWorkspace() {
     ? `已准备的训练清单（只读）：${datasetWorkspaceState.prepared.manifest}`
     : "训练清单将在检查所选来源或开始训练时自动准备；当前预处理输出保持独立。";
   const status = element("#datasetWorkspaceStatus");
-  if (status && datasetWorkspaceState.items.length) status.textContent = `共发现 ${datasetWorkspaceState.items.length} 个数据集；点击卡片查看目录，勾选后用于训练。`;
+  if (status) status.textContent = datasetWorkspaceState.catalogLoading ? "正在刷新素材列表；已有卡片仍可浏览。" : datasetWorkspaceState.catalogError ? `素材列表读取失败：${datasetWorkspaceState.catalogError}。已有卡片已保留，请点击“刷新数据集”重试。` : `共发现 ${datasetWorkspaceState.items.length} 个数据集；点击卡片查看目录，勾选后用于训练。`;
+  if (status && !datasetWorkspaceState.catalogLoading && !datasetWorkspaceState.catalogError && datasetWorkspaceState.catalogWarnings?.length) status.textContent += ` 部分来源读取失败：${datasetWorkspaceState.catalogWarnings.map(warning => typeof warning === "string" ? warning : `${warning.manifest || warning.path || "来源"}：${warning.error || warning.message || "读取失败"}`).join("；")}。其他来源仍可使用。`;
   const cardsPanel = element("#datasetCardsPanel");
   const catalogPanel = element("#datasetCatalogPanel");
   if (cardsPanel) cardsPanel.hidden = datasetWorkspaceState.view !== "cards";
   if (catalogPanel) catalogPanel.hidden = datasetWorkspaceState.view !== "catalog";
+  globalThis.CandidatePool?.render();
   updateDatasetButtons();
 }
 
@@ -4199,8 +4294,17 @@ function activeDatasetItem() {
   return datasetWorkspaceState.items.find((item) => item.path === datasetWorkspaceState.activePath || item.manifest === datasetWorkspaceState.activePath) || null;
 }
 
-async function loadDatasetCatalog() {
+let datasetCatalogFlight = null;
+function loadDatasetCatalog() {
+  if (datasetCatalogFlight) return datasetCatalogFlight;
+  datasetCatalogFlight = fetchDatasetCatalog().finally(() => { datasetCatalogFlight = null; });
+  return datasetCatalogFlight;
+}
+async function fetchDatasetCatalog() {
   const request = ++datasetWorkspaceState.catalogRequest;
+  datasetWorkspaceState.catalogLoading = true;
+  datasetWorkspaceState.catalogError = "";
+  renderDatasetWorkspace();
   try {
     const data = await api("/api/datasets/catalog", {
       current_manifest: valueOrDefault("#manifestPath", "").trim() || null,
@@ -4208,6 +4312,8 @@ async function loadDatasetCatalog() {
     });
     if (request !== datasetWorkspaceState.catalogRequest) return;
     const items = Array.isArray(data.datasets) ? data.datasets : (Array.isArray(data.items) ? data.items : null);
+    if (!items) throw new Error("后台未返回素材列表");
+    datasetWorkspaceState.catalogWarnings = Array.isArray(data.warnings) ? data.warnings : [];
     if (items) {
       datasetWorkspaceState.items = items.map((item) => ({ ...item, path: item.path || item.raw_root || item.root || "", manifest: item.manifest || item.manifest_path || "", manifest_hint: item.manifest || item.manifest_path || "", name: item.name || item.dataset_name || item.path || "未命名数据集" })).filter((item) => item.path || item.manifest);
       const known = new Set(datasetWorkspaceState.items.map(datasetKey));
@@ -4215,8 +4321,13 @@ async function loadDatasetCatalog() {
       if (!activeDatasetItem()) { datasetWorkspaceState.activePath = ""; datasetWorkspaceState.view = "cards"; }
       renderDatasetWorkspace();
     }
-  } catch (_) {
-    // Older servers expose the same uploaded list through /api/status.
+  } catch (error) {
+    if (request === datasetWorkspaceState.catalogRequest) datasetWorkspaceState.catalogError = error.message || String(error);
+  } finally {
+    if (request === datasetWorkspaceState.catalogRequest) {
+      datasetWorkspaceState.catalogLoading = false;
+      renderDatasetWorkspace();
+    }
   }
 }
 
@@ -4336,6 +4447,7 @@ async function openDataset(item) {
   if (!item) return;
   if (item.prepared === false || !item.manifest) throw new Error("这个数据集尚未预处理，请点击卡片上的“去训练页预处理”。");
   datasetWorkspaceState.activePath = item.path || item.manifest || "";
+  globalThis.CandidatePool?.activate(item);
   globalThis.ChartPreview?.setTrainingDataset(item.manifest);
   datasetWorkspaceState.view = "catalog";
   renderDatasetWorkspace();
@@ -4359,6 +4471,7 @@ async function openDataset(item) {
 }
 
 function showDatasetCards() {
+  globalThis.CandidatePool?.activate(null);
   datasetWorkspaceState.view = "cards";
   qualityState.catalogRequest += 1;
   qualityState.detailRequest += 1;
@@ -4420,8 +4533,15 @@ function currentCheckpointKey() {
 // ---------------------------------------------------------------------------
 // Status bootstrap
 // ---------------------------------------------------------------------------
+let datasetWorkspaceBootstrapped = false;
 async function loadStatus() {
   const state = await api("/api/status");
+  if (!datasetWorkspaceBootstrapped) {
+    datasetWorkspaceBootstrapped = true;
+    if (datasetWorkspaceState.view === "catalog" && !qualityState.annotationManifest) datasetWorkspaceState.view = "cards";
+  }
+  globalThis.maichartLastStatus = state;
+  globalThis.CandidatePool?.capabilities(state);
   intensityCurveState.projectRoot = String(state.project_root || "");
   invalidateLearnedCurveForCheckpoint();
   const engineStatus = element("#playabilityEngineStatus");
@@ -4435,8 +4555,8 @@ async function loadStatus() {
       : state.playability_engine?.error || "Python 检测模块或路径数据不可用，请检查项目文件并重启 WebUI 服务。";
   }
   setStatus(`本地服务正常 · workspace: ${state.workspace}`, true);
-  populateDatasets(state.datasets || []);
-  await loadDatasetCatalog();
+  if (!datasetWorkspaceState.items.length) populateDatasets(state.datasets || []);
+  void loadDatasetCatalog();
   const running = (state.tasks || []).find((task) => ["queued", "running", "cancelling"].includes(task.status)
     && !String(task.kind || "").startsWith("intensity"));
   window.MaichartWorkflow?.renderTasks(state.tasks || []);
@@ -5648,7 +5768,7 @@ function qualityRowHtml(item) {
   const selectedId = String(item.chart_id || item.id || "");
   const disabled = qualityState.selectionLoading || qualityState.saving ? "disabled" : "";
   return `<tr data-chart-id="${id}"><td><input class="quality-row-select" type="checkbox" data-chart-id="${id}" ${qualityState.selected.has(selectedId) ? "checked" : ""} ${disabled}></td>`
-    + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}</td>`
+    + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}${globalThis.CandidatePool?.badge(item)||""}</td>`
     + `<td>${escapeHtml(item.designer || item.chart_designer || "未标注")}</td><td><span class="quality-label ${escapeHtml(label)}">${escapeHtml(qualityLabelText(label))}</span></td>`
     + `<td><input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}" ${disabled}></td>`
     + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">预览与标注</button></td></tr>`;
@@ -7138,6 +7258,7 @@ document.addEventListener("change", (event) => {
   datasetWorkspaceState.selectionTouched = true;
   const key = checkbox.dataset.datasetKey;
   if (checkbox.checked) datasetWorkspaceState.selected.add(key); else datasetWorkspaceState.selected.delete(key);
+  if(selectedDatasetItems().some(item=>item.candidate_pool)) { const quality=element("#v2TrainQualityEnabled");if(quality)quality.checked=true; }
   datasetWorkspaceState.prepared = null;
   const compositionSummary = element("#datasetCompositionSummary");
   if (compositionSummary) {

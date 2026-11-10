@@ -273,3 +273,25 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .progress.indeterminate #progressBar { width: 30% !important; animation: v2-progress-wait 1.8s ease-in-out infinite alternate; }
 @keyframes v2-progress-wait { from { transform: translateX(-100%); } to { transform: translateX(330%); } }
 @media (prefers-reduced-motion: reduce) { .progress.indeterminate #progressBar { animation: none; transform: translateX(100%); } }
+
+.candidate-pool-panel { border: 1px solid #b8c9e2; background: #f5f8fd; border-radius: 10px; padding: 14px; margin: 12px 0; }
+.candidate-pool-panel .button-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; }
+.candidate-pool-panel label { display: block; margin: 8px 0; }
+.candidate-pool-panel .checkbox-field { display: flex; }
+.candidate-pool-card { border-top: 1px solid #dce4ef; margin-top: 10px; padding-top: 6px; }
+#candidatePoolExcludedList { max-height: 280px; overflow: auto; white-space: pre-wrap; }
+#candidatePoolIssues, #candidatePoolReviewStatus { white-space: pre-wrap; }
+.task-generation-progress { margin: 12px 0; }
+.task-generation-progress[hidden] { display: none; }
+.task-generation-progress h3 { margin: 0 0 5px; font-size: 14px; }
+.task-generation-progress > p { margin: 4px 0 9px; font-size: 12px; }
+.generation-chart-list { display: grid; gap: 8px; max-height: 310px; overflow-y: auto; }
+.generation-chart-progress { border: 1px solid var(--line); border-radius: 7px; padding: 9px; min-width: 0; }
+.generation-chart-heading { display: flex; flex-wrap: wrap; align-items: baseline; justify-content: space-between; gap: 5px; font-size: 12px; }
+.generation-chart-heading span { color: var(--teal); }
+.generation-chart-progress p { font-size: 11px; color: var(--muted); margin: 5px 0; overflow-wrap: anywhere; }
+.generation-chart-track { height: 4px; overflow: hidden; border-radius: 3px; background: var(--line); margin: 6px 0; }
+.generation-chart-track > div { height: 100%; background: var(--teal); transition: width .2s ease; }
+.generation-chart-progress[data-status="failed"] .generation-chart-track > div { background: #c34838; }
+.generation-chart-progress[data-status="failed"] .generation-chart-heading span { color: #a73328; }
+.generation-chart-log { font-size: 11px; color: var(--teal); }
