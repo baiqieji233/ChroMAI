@@ -8,6 +8,7 @@
 - **[Composer v2 主界面（WebUI）与参数完整说明](explanations/COMPOSER_V2_WEBUI_ZH.md)**：WebUI 各工作区操作流程、生成与训练参数详解、Radar / Style 偏好微调、多数据集素材管理与跨设备路径配置。
 - **[采音与候选评估](explanations/COMPOSER_V2_QUALITY_EVALUATION_ZH.md)**：主界面评估入口、采音检查参数、候选概率记录与选优偏向分析。
 - **[Intel 核显与 NPU 加速](explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)**：MERT 加速、写谱后端自动测速、编译缓存与 XPU 训练。
+- **[成对音乐参考与衔接示范](explanations/COMPOSER_V2_PAIRED_MUSIC_ZH.md)**：新音乐输入的用途、旧模型微调接入、人工确认前文衔接的操作。
 
 ## 许可证与第三方资源说明
 

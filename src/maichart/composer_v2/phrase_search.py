@@ -9,6 +9,9 @@ from fractions import Fraction
 from pathlib import Path
 import math
 import time
+import hashlib
+import json
+import uuid
 import numpy as np
 
 
@@ -198,7 +201,7 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             queued.append(row)
     evidence = dict(start_beat=str(start), end_beat=str(stop),
                     start_sec=float(song.clock.at(start)), end_sec=float(song.clock.at(stop)),
-                    selected=selected,mode=mode,partial_preview=True,
+                    selected=selected,mode=mode,partial_preview=True,preview_files_exported=False,
                     elapsed_sec=time.perf_counter()-began,
                     candidates=[dict(score=t['score'], components=t['components'],
                         events=len(t['rows']), complete=t['complete'], ended=t['ended'],
@@ -207,12 +210,41 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     return queued, evidence, trials
 
 
+def attach_candidate_content(evidence, prefix, trials, *, tempo=None, first=None):
+    """Keep audit candidates immutable without compiling whole-prefix previews.
+
+    Called only when recording is enabled. The exact committed-prefix identity
+    distinguishes candidates produced after rollback or duration repair; trial
+    deltas include their crossing-boundary event for faithful inspection.
+    """
+    def events(points):
+        return [dict(beat=str(point.beat), note_text=point.note_text) for point in points]
+    prefix_events=events(prefix)
+    encoded=json.dumps(prefix_events,ensure_ascii=False,separators=(',',':')).encode('utf-8')
+    evidence['candidate_content_schema']='composer-v2-candidate-events-v1'
+    evidence['common_prefix']=dict(sha256=hashlib.sha256(encoded).hexdigest(),
+        events=len(prefix_events),last_beat=prefix_events[-1]['beat'] if prefix_events else None,
+        identity='ordered_exact_beats_and_note_text',source='committed_generation_prefix')
+    evidence['comparison_range']=dict(start_beat=evidence['start_beat'],end_beat=evidence['end_beat'],
+        bounds='start_inclusive_end_exclusive',boundary_event='retained_in_event_delta_excluded_from_probability')
+    if tempo is not None:
+        evidence['time_axis']=dict(first=float(first),
+            tempo_map=[dict(beat=str(change.beat),bpm=float(change.bpm)) for change in tempo])
+    for candidate,trial in zip(evidence['candidates'],trials):
+        candidate.pop('path',None)
+        candidate['event_delta']=events(point for point,_ in trial['rows'])
+    return evidence
+
+
 def write_previews(output, number, prefix, trials, evidence, song, tempo, level):
-    """Bounded retained pairs; partial clips are never called complete charts."""
+    """Explicit diagnostic export; ordinary generation never calls this helper.
+
+    Unique names preserve old references if a caller chooses to export clips.
+    """
     from maichart.generation.event_compile import compile_event_points
     directory = Path(output).with_suffix('') / 'phrase_candidates'
     directory.mkdir(parents=True, exist_ok=True)
-    slot = number % 16
+    snapshot=uuid.uuid4().hex[:12]
     for index, trial in enumerate(trials):
         if not trial['rows'] or not trial['complete']:
             continue
@@ -222,6 +254,7 @@ def write_previews(output, number, prefix, trials, evidence, song, tempo, level)
             bpm=tempo[0].bpm, first=song.clock.seconds[0], end_beat=finish,
             title=f'{song.song_id} 候选片段 {number+1}-{index+1}', level=str(level),
             designer='Composer v2 partial trial', strict_notes=False)
-        path = directory / f'trial_{slot:02d}_{index}.txt'
-        path.write_text(text, encoding='utf-8')
+        path = directory / f'trial_{number+1:06d}_{index}_{snapshot}.txt'
+        with path.open('x',encoding='utf-8') as handle:handle.write(text)
         evidence['candidates'][index]['path'] = str(path.resolve())
+        evidence['preview_files_exported'] = True

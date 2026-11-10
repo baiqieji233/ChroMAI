@@ -75,6 +75,19 @@ def sample_window_indices(count, budget, sampling='spread'):
     return list(range(size)) if sampling == 'prefix' else np.linspace(0, count - 1, size, dtype=int).tolist()
 
 
+def audio_macro_summary(per_song):
+    """Each measured audio identity has equal weight, regardless of note count."""
+    result = {}
+    names = {name for metrics in per_song.values() for name in metrics}
+    for name in sorted(names):
+        values = [_summary(metrics[name]) for metrics in per_song.values()
+                  if name in metrics and metrics[name]['count'] > 0]
+        result[name] = dict(audio_count=len(values),
+            nll=statistics.mean(value['nll'] for value in values) if values else None,
+            accuracy=statistics.mean(value['accuracy'] for value in values) if values else None)
+    return result
+
+
 def timing_rollout(model, dataset, song, begin):
     """Sample only the absolute time grammar; never decode note actions."""
     import torch
@@ -155,7 +168,7 @@ def teacher_forced(args):
                    quality_enabled=contract.get('quality_enabled', True))
     for key in ('window_beats', 'history_beats', 'future_beats', 'ticks_per_beat', 'max_tokens',
                 'audio_backend', 'mert_model', 'condition_policy', 'refresh_events',
-                'onset_readout_policy', 'structure_policy', 'intensity_policy'):
+                'onset_readout_policy', 'structure_policy', 'intensity_policy','music_context_policy'):
         options[key] = getattr(config, key)
     from . import chart_dialect
     options['dialect_policy'] = contract.get('chart_dialect', chart_dialect.LEGACY_STRICT_POLICY)
@@ -175,7 +188,9 @@ def teacher_forced(args):
     model.load_state_dict(payload['model_state_dict'], strict=True)
     totals = {key: Counter() for key in ('all', 'time', 'phase', 'time_digits_true_prefix')}
     buckets = {}; target_buckets={};confusion = Counter(); selection = []; per_song = {}; rollouts = []
-    indices = sample_window_indices(len(dataset.windows), args.max_batches, args.window_sampling)
+    from .validation_sampling import balanced_window_indices,coverage_report,POLICY as COVERAGE_POLICY
+    indices = (balanced_window_indices(dataset,args.max_batches) if args.window_sampling=='spread'
+               else sample_window_indices(len(dataset.windows),args.max_batches,'prefix'))
     rollout_positions = set(sample_window_indices(len(indices), args.timing_rollouts, 'spread')) if args.timing_rollouts else set()
     # A batch is exactly one deterministic computational slice, never a song replicate.
     try:
@@ -252,8 +267,10 @@ def teacher_forced(args):
         augmentation='off', ordering='manifest_chart_order_then_event_order', batch_size=1,
         budget=dict(limit_charts=args.limit_charts, max_batches=args.max_batches, timing_rollouts=args.timing_rollouts),
         window_sampling=args.window_sampling, sample_selection=selection,
-        sample_scope='Small diagnostic over selected charts; default one chart does not represent the full manifest',
+        sample_scope='Small diagnostic over the selected charts; chart limits restrict the manifest prefix before audio-balanced window sampling',
+        coverage=coverage_report(dataset,indices,COVERAGE_POLICY if args.window_sampling=='spread' else 'manifest_prefix_v1'),
         metrics={key: _summary(value) for key, value in totals.items()},
+        audio_macro_metrics=audio_macro_summary(per_song),
         per_song=[dict(audio_sha256=key, metrics={name: _summary(value) for name, value in metrics.items()})
                   for key, metrics in sorted(per_song.items())],
         phase_context_buckets={key: _summary(value) for key, value in buckets.items()},
@@ -265,7 +282,7 @@ def teacher_forced(args):
         time_digits_scope='Single token accuracy under true prefix; not whole-event timing accuracy',
         joint_timing=dict(status='measured' if any(row.get('status') == 'measured' for row in rollouts) else 'not_measured',
             samples=rollouts, scope='Greedy next-time head under real past only; not full-chart generation or musical quality'),
-        aggregation='token micro averages; slices are not independent songs',
+        aggregation='token micro averages plus equal-audio macro averages; slices and copied charts are not independent songs',
         dataset_audit=dataset.audit)
 
 

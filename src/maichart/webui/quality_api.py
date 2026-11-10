@@ -256,6 +256,17 @@ class QualityAPI:
             if label != 'good' or 'start_sec' not in identity or payload['training_use'] not in {'none','timing','layout','both'}:
                 raise ValueError('训练示范需要圈选片段，并明确选择学习内容')
             record['training_use'] = payload['training_use']
+        learn_entry=payload.get('learn_entry',False)
+        if not isinstance(learn_entry,bool):
+            raise ValueError('学习前文接入须为布尔值')
+        if learn_entry:
+            if label!='good' or record.get('training_use') not in {'timing','both'} or record['scope']!='region':
+                raise ValueError('学习前文接入需要收集好片段，并选择只学采音或采音和配置都学')
+            if not identity.get('audio_sha256'):
+                raise ValueError('确认前文接入需要对应音频，请重新载入谱面与音频')
+            record.update(learn_entry=True,entry_start_sec=identity['start_sec'])
+        elif 'training_use' in payload:
+            record['learn_entry']=False
         path=Path(identity['path']).with_name('generation_feedback.json')
         _append_feedback(path,'maichart-generation-feedback-v1',record)
         return HTTPStatus.OK, {"feedback_path": str(path), "record": record}

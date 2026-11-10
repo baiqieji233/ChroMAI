@@ -21,26 +21,35 @@ def approved_regions(records):
     result = []
     for start, end in zip(bounds, bounds[1:]):
         timing = components = 0.
+        entry_start = None
         for row in rows:
             if float(row["start_sec"]) > start or float(row["end_sec"]) < end:
                 continue
             label, reason = row["label"], row.get("reason", "")
             if label == "good":
                 use = row.get("training_use")
-                if use == "none": timing = components = 0.
+                if use == "none":
+                    timing = components = 0.; entry_start = None
                 elif use in {"both", "timing", "layout"}:
                     # A new explicit choice replaces the previous scope.
                     timing = float(use != "layout")
                     components = float(use != "timing")
+                    entry_start = (float(row.get('entry_start_sec', row['start_sec']))
+                        if timing and (row.get('learn_entry') is True or 'entry_start_sec' in row) else None)
             elif label == "uncertain":
-                timing = components = 0.
+                timing = components = 0.; entry_start = None
             elif label == "problem":
-                if reason not in {"layout", "comfort"}: timing = 0.
+                if reason not in {"layout", "comfort"}: timing = 0.; entry_start = None
                 if reason != "timing": components = 0.
         if not (timing or components): continue
         region = dict(start_sec=start, end_sec=end, label="good", reason="", weight=1.,
                       timing_weight=timing, component_weight=components)
-        if result and result[-1]["end_sec"] == start and region_component_weights(result[-1]) == (timing, components):
+        if entry_start is not None:
+            # Keep the ORIGINAL onset boundary after later reviews split this
+            # interval. Training resolves its unique first event, not the first
+            # event of every remaining piece.
+            region['entry_start_sec'] = entry_start
+        if result and result[-1]["end_sec"] == start and region_component_weights(result[-1]) == (timing, components) and result[-1].get('entry_start_sec') == entry_start:
             result[-1]["end_sec"] = end
         else:
             result.append(region)

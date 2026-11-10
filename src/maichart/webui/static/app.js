@@ -120,7 +120,8 @@ function v2EvaluationSummary(task) {
   if(report) {
     const selections=report.sample_selection||[],charts=new Set(selections.map(row=>`${row.source}:${row.difficulty}`));
     const phase=report.metrics?.phase,checks=(report.joint_timing?.samples||[]).filter(row=>row.status==='measured');
-    return `评估完成：${charts.size}张谱面、${selections.length}段；真实前文下拍内落点正确率${phase?.accuracy!=null?(phase.accuracy*100).toFixed(1)+'%':'未测'}；独立选时${checks.length?checks.filter(row=>row.joint_exact_beat).length+'/'+checks.length+'次匹配参考':'未测'}。详情与报告在当前任务区。`;
+    const songs=report.coverage?.selected_audio??report.per_song?.length;
+    return `评估完成：${charts.size}张谱面、${selections.length}段${songs!=null?'、'+songs+'首独立音频':''}；真实前文下拍内落点正确率${phase?.accuracy!=null?(phase.accuracy*100).toFixed(1)+'%':'未测'}；独立选时${checks.length?checks.filter(row=>row.joint_exact_beat).length+'/'+checks.length+'次匹配参考':'未测'}。歌曲等权与token均值见任务报告。`;
   }
   const audit=task.result?.composer_v2_candidate_audit;
   return audit?`选优分析完成：${audit.pools?.length||0}个候选池${audit.status==='unavailable'?'，记录不足':''}。请在当前任务区查看或下载报告。`:'评估完成；请在当前任务区查看或下载输出报告。';
@@ -664,6 +665,7 @@ function composerV2TrainingView(task) {
   const latestEpoch=complete?`第 ${complete.epoch} 轮`:'尚无完整轮次';
   const trainEpoch=n(complete,'epoch_train_loss') ?? (complete?.validation_loss==null?n(complete,'loss'):null);
   const settings=result.effective_settings||{},config=runtime.model_config||{};
+  const coverage=complete?.validation_coverage||runtime.validation_coverage;
   const stepRecords=[n(result,'optimizer_steps'),n(metrics,'optimizer_steps'),n(complete,'optimizer_steps'),n(result.composer_v2_checkpoint,'optimizer_steps')].filter(value=>value!==null);
   const bestBasis=complete?.best_basis||runtime.best_basis||result.composer_v2_checkpoint?.best_basis||'';
   const cards=[['学习指标',[
@@ -675,7 +677,9 @@ function composerV2TrainingView(task) {
     [`验证 loss（${latestEpoch}）`,show(n(complete,'validation_loss'))],
     [`验证拍内落点 loss（${latestEpoch}）`,show(n(complete,'validation_phase_loss'))],
     ['best 选择依据',bestBasis.startsWith('validation')?'独立开发集验证 loss':bestBasis.startsWith('training')?'训练 loss（未配置验证集）':'等待记录'],
-    ['每轮验证预算',settings.validation_max_batches===0?'完整开发集':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准']]],
+      ['每轮验证预算',settings.validation_max_batches===0?'完整开发集':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准'],
+      ['实际验证覆盖',coverage?`${coverage.selected_windows}/${coverage.total_windows} 片段 · ${coverage.selected_audio}/${coverage.total_audio} 首音频`:'旧进程未记录'],
+      ['验证抽查方式',coverage?.policy==='audio_balanced_spread_v1'?'歌曲均衡、曲内分散':coverage?.policy==='manifest_prefix_v1'?'旧版清单前缀':'以训练日志为准']]],
     ['训练进度',[
       ['计划轮数 / 已完成轮数',`${target??'未知'} / ${finished}`],
       ['参数更新步',show(stepRecords.length?Math.max(...stepRecords):null,0)],
@@ -701,8 +705,15 @@ function composerV2TrainingView(task) {
       ['音频特征映射打开次数',show(n(metrics?.audio_banks,'bank_opens'),0)],
       ['保留音频映射（份 / GiB）',n(metrics?.audio_banks,'mapped_bytes')===null?'未记录':`${metrics.audio_banks.open_banks} / ${(metrics.audio_banks.mapped_bytes/1024**3).toFixed(2)}`],
       ['峰值张量显存 / GiB',n(metrics,'gpu_peak_bytes')===null?'未记录':(metrics.gpu_peak_bytes/1024**3).toFixed(2)]]]];
+  if(config.intensity_policy==='rate_curve_v1' || metrics?.curve_loss!=null || complete?.validation_curve_loss!=null) {
+    const errors=complete?.validation_curve_mae||[];
+    cards.push(['疏密曲线学习',[
+      ['曲线训练 loss',show(n(metrics,'curve_loss'))],['反向传播总目标',show(n(metrics,'objective_loss'))],
+      ['曲线验证 loss',show(n(complete,'validation_curve_loss'))],
+      ['出音频率平均误差（次/秒）',show(errors[0])],['同拍额外物量平均误差（个/秒）',show(errors[1])]]]);
+  }
   return {status,progress:amount,knownTarget:target>0,indeterminate:preparing,cards,history,
-    note:'训练累计均值与完整轮训练、验证 loss 分开显示；旧日志未提供的指标保留“未记录”。验证默认按预算抽取开发集 batch，不是最终留出集成绩。训练 loss 不代表自由生成质量；主机计时与峰值张量显存不等于 GPU 内核时间或整卡占用。'};
+    note:'训练累计均值与完整轮训练、验证 loss 分开显示。验证预算为0时检查完整开发集；正数按记录的方式抽查。曲线误差单独显示，谱面质量仍需试听。'};
 }
 
 function renderComposerV2TrainingMetrics(task,panel,source,groups) {
@@ -2130,6 +2141,10 @@ function updateFamilyFields() {
     field.hidden=!v2Generation; field.querySelector('input').disabled=!onsetSupported;
   }
   const capabilities=checked?generationInspection.data?.generation_capabilities:null;
+  const musicInfo=element('#v2GenerationMusicInfo');
+  if(musicInfo)musicInfo.textContent=!checked?'音乐理解：新版模型支持成对参考与前方采音；生成时使用检查点已学到的方案。':capabilities?.paired_music
+    ?'音乐理解：已启用成对音乐参考与前方采音，随检查点自动使用。'
+    :'音乐理解：使用检查点原有方案；新能力可在新目录微调启用。';
   const builtInReference=!!capabilities?.rhythm_structure;
   const referenceChoice=v2Generation && (!checked || capabilities?.continuous_time) && !builtInReference;
   for (const field of document.querySelectorAll('[data-v2-reference-selection]')) {

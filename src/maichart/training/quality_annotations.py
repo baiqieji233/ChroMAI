@@ -166,6 +166,13 @@ def _validate_regions(regions: Any, duration: float | None = None) -> list[dict[
                 if not 0 <= value <= 4:
                     raise ValueError(f"region.{component} 必须在 0–4 之间")
                 item[component] = value
+        if 'entry_start_sec' in region:
+            entry_start = _finite(region['entry_start_sec'], 'region.entry_start_sec')
+            if not 0 <= entry_start <= start + 1e-9:
+                raise ValueError('确认的接入起点须不晚于该片段起点')
+            if label != 'good' or region_component_weights(item)[0] <= 0:
+                raise ValueError('确认前文接入需要保留采音监督的好片段')
+            item['entry_start_sec'] = entry_start
         result.append(item)
         previous_end = end
     return result

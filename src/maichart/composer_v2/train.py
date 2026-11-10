@@ -43,7 +43,8 @@ def parser():
     result.add_argument("--mert-model")
     result.add_argument('--audio-layers',type=int,default=None,help='Fresh: 4; parent: inherit. Init may append identity blocks.')
     result.add_argument('--song-layers',type=int,default=None,help='Fresh: 2; parent: inherit.')
-    result.add_argument('--music-context',choices=('auto','off','song_detail_v1'),default='auto')
+    from .music_policy import CHOICES as MUSIC_CHOICES
+    result.add_argument('--music-context',choices=MUSIC_CHOICES,default='auto')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--timing-recovery',choices=timing_recovery.CHOICES,default='auto')
@@ -172,6 +173,23 @@ def _loader(dataset,batch_size,seed,shuffle,device,*,order=GLOBAL_BATCH_ORDER):
     return DataLoader(dataset,batch_sampler=sampler,collate_fn=collate_stream if isinstance(dataset,StreamDataset) else collate_composer_v2,
         num_workers=0,pin_memory=device.type in ('cuda','xpu'),generator=generator),sampler
 
+
+def _validation_loader(dataset,batch_size,seed,device,maximum,policy):
+    from .validation_sampling import POLICY,LEGACY,balanced_window_indices,coverage_report,ValidationBatchSampler
+    if policy not in (POLICY,LEGACY):raise ValueError('Unknown validation sampling contract')
+    loader,sampler=_loader(dataset,batch_size,seed,False,device)
+    if policy==POLICY and maximum and maximum*batch_size<len(dataset):
+        indices=balanced_window_indices(dataset,maximum*batch_size)
+        from .stream_data import StreamDataset,collate_stream
+        loader=DataLoader(dataset,batch_sampler=ValidationBatchSampler(dataset,indices,batch_size),
+            collate_fn=collate_stream if isinstance(dataset,StreamDataset) else collate_composer_v2,
+            num_workers=0,pin_memory=device.type=='cuda',generator=torch.Generator().manual_seed(seed))
+    else:
+        batches=list(sampler)
+        indices=[index for batch in (batches[:maximum] if maximum else batches) for index in batch]
+    loader.validation_coverage=coverage_report(dataset,indices,policy,maximum_batches=maximum)
+    return loader
+
 def _sync(device):
     if device.type=="cuda":torch.cuda.synchronize(device)
     elif device.type=='xpu':torch.xpu.synchronize(device)
@@ -199,13 +217,14 @@ def _validate(model,loader,device,precision,maximum):
     model.validation_phase_loss=None
     model.validation_curve_loss=None
     model.validation_curve_mae=None
+    model.validation_coverage=getattr(loader,'validation_coverage',None)
     if loader is None:return None
     phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
     phase_tokens=model.phase_targets.detach().cpu()
     model.eval();numerator=torch.zeros((),device=device);mass_sum=0.
     finite=torch.ones((),device=device,dtype=torch.bool)
     curve_numerator=torch.zeros((),device=device)
-    curve_error=torch.zeros(2,device=device);curve_exposure=torch.zeros((),device=device)
+    curve_error=torch.zeros(2,device=device);curve_exposure=torch.zeros(2,device=device)
     with torch.inference_mode():
         for index,batch in _batches(loader):
             if maximum and index>=maximum:break
@@ -226,8 +245,11 @@ def _validate(model,loader,device,precision,maximum):
             if hasattr(model,'intensity'):
                 widths=batch['curve_widths'].float()
                 # Rate MAE is independent of token CE and measured in real units.
-                curve_error+=((output['curve_rates']-batch['curve_counts']/widths[...,None].clamp_min(1e-6)).abs()*widths[...,None]).sum((0,1))
-                curve_exposure+=widths.sum()
+                quality=batch.get('curve_quality_weights',torch.ones_like(batch['curve_counts'])).float()
+                sample_quality=batch.get('sample_weight',torch.ones(widths.size(0),device=device)).float()
+                exposure=widths[...,None]*quality*sample_quality[:,None,None]
+                curve_error+=((output['curve_rates']-batch['curve_counts']/widths[...,None].clamp_min(1e-6)).abs()*exposure).sum((0,1))
+                curve_exposure+=exposure.sum((0,1))
             phase_numerator+=metrics["phase_loss"]*phase_mass;phase_mass_sum+=phase_mass
     if not bool(finite):raise RuntimeError("Nonfinite validation loss")
     if mass_sum<=0:raise ValueError("Validation has no positive quality-weighted target tokens")
@@ -235,7 +257,8 @@ def _validate(model,loader,device,precision,maximum):
     model.validation_phase_loss=float(phase_numerator)/phase_mass_sum if phase_mass_sum else None
     if hasattr(model,'intensity'):
         model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
-        model.validation_curve_mae=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
+        values=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
+        model.validation_curve_mae=[value if exposure>0 else None for value,exposure in zip(values,curve_exposure.cpu().tolist())]
     model.train()
     return result
 
@@ -331,12 +354,9 @@ def train(args):
     args.intensity_policy,curve_migration=resolve_curve_policy(getattr(args,'intensity_curve','auto'),
         (parent.get('model_config') or parent.get('config')) if parent else None,resume=bool(args.resume))
     parent_model=(parent.get('model_config') or parent.get('config')) if parent else {}
-    previous_music=parent_model.get('music_context_policy','off')
-    requested_music=getattr(args,'music_context','auto')
-    args.music_context_policy=(previous_music if args.resume else 'song_detail_v1') if requested_music=='auto' else requested_music
-    music_migration=bool(parent and args.music_context_policy!=previous_music)
-    if music_migration and (args.resume or args.music_context_policy=='off'):
-        raise ValueError('Music context changes require init-checkpoint upgrading to song_detail_v1')
+    from .music_policy import resolve_policy as resolve_music_policy
+    args.music_context_policy,music_migration=resolve_music_policy(getattr(args,'music_context','auto'),
+        parent_model if parent else None,resume=bool(args.resume))
     for key,fresh in (('audio_layers',4),('song_layers',2)):
         requested=getattr(args,key,None)
         setattr(args,key,(parent_model.get(key,2) if parent else fresh) if requested is None else requested)
@@ -403,7 +423,8 @@ def train(args):
         dataset_class=StreamDataset;options['refresh_events']=args.refresh_events
         options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed,
                        onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
-                       intensity_policy=args.intensity_policy,rhythm_learning_policy=args.rhythm_learning_policy)
+                       intensity_policy=args.intensity_policy,rhythm_learning_policy=args.rhythm_learning_policy,
+                       music_context_policy=args.music_context_policy)
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':train_options['reference_augmentation']=True
     dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
@@ -423,7 +444,9 @@ def train(args):
     else:
         batch_order = AUDIO_LOCAL_BATCH_ORDER if args.sequence_policy == 'continuous_events_v1' else GLOBAL_BATCH_ORDER
     loader,sampler=_loader(dataset,args.batch_size,args.seed,True,device,order=batch_order)
-    validation_loader=_loader(validation,args.batch_size,args.seed,False,device)[0] if validation else None
+    from .validation_sampling import POLICY as VALIDATION_POLICY,LEGACY as LEGACY_VALIDATION
+    validation_policy=parent['training_contract'].get('validation_sampling',LEGACY_VALIDATION) if args.resume else VALIDATION_POLICY
+    validation_loader=_validation_loader(validation,args.batch_size,args.seed,device,args.validation_max_batches,validation_policy) if validation else None
     updates_per_epoch=math.ceil(len(loader)/args.grad_accumulation)
     total_updates=updates_per_epoch*args.epochs
     contract=dict(batch_size=args.batch_size,grad_accumulation=args.grad_accumulation,seed=args.seed,
@@ -432,6 +455,8 @@ def train(args):
         window_policy="stable_beat_window_components_v2",sampler=batch_order,
         loss_normalization="quality_weighted_token_mass_per_update_v1",cpu_threads=args.cpu_threads)
     if not getattr(args,'quality_enabled',True): contract['quality_enabled']=False
+    if validation and validation_policy!=LEGACY_VALIDATION:
+        contract.update(validation_sampling=validation_policy,validation_sampling_budget=args.validation_max_batches)
     if args.condition_policy != LEVEL_ONLY:
         contract['condition_contract'] = condition_contract(args.condition_policy)
     if args.sequence_policy=='continuous_events_v1':
@@ -455,7 +480,8 @@ def train(args):
         if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if music_migration:
-                expected_missing.update(k for k in model.state_dict() if k=='song_detail.weight' or k.endswith('.relative_beat'))
+                expected_missing.update(k for k in model.state_dict() if k not in parent_state and
+                    (k=='song_detail.weight' or k.endswith('.relative_beat') or k.startswith(('paired_music.','entry_preview.'))))
             if depth_migration:
                 for index in range(parent_config['audio_layers'],config.audio_layers):
                     block=model.audio_blocks[index]
@@ -545,6 +571,7 @@ def train(args):
          timing_recovery=dataset.audit.get('timing_recovery'),
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,
+         validation_coverage=getattr(validation_loader,'validation_coverage',None),
         best_basis=best_basis)
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
@@ -638,6 +665,7 @@ def train(args):
                 validation_phase_loss=getattr(model,"validation_phase_loss",None),
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
+                validation_coverage=getattr(model,'validation_coverage',None),
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
                 best_basis=best_basis,optimizer_steps=state["optimizer_steps"])

@@ -120,6 +120,7 @@ class EventSampler(WindowSampler):
             for key in ('bank_audio','bank_semantic','bank_semantic_mask','bank_semantic_right','bank_semantic_weight','bank_owner','tile_frames','bank_envelope'):query.pop(key,None)
             encoded=self.model.encode_audio(query)
             for key in ('local','local_mask','local_beats'):self.cache[key]=torch.cat((self.cache[key],encoded[key]),0)
+            if 'entry_context' in encoded:self.cache['entry_context']=torch.cat((self.cache['entry_context'],encoded['entry_context']),0)
             if 'onset_scores' in encoded:self.cache['onset_scores']=torch.cat((self.cache['onset_scores'],encoded['onset_scores']),0)
             for a in missing:self.anchor_ids[a]=len(self.anchors);self.anchors.append(a)
         query={**self.batch,'input_ids':torch.tensor([ids],device=self.device),
@@ -148,6 +149,18 @@ class EventSampler(WindowSampler):
                 pieces.append(torch.as_tensor(values,device=self.device)[None])
             query['reference_evidence']=torch.cat(pieces,1)
             query['reference_evidence_start']=start
+        if self.dataset._paired_music():
+            from .music_evidence import paired_music_features
+            state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
+            start=int(state['length']) if state and state['length']<len(ids) else 0
+            boundary=max(start,len(self.prefix));pieces=[]
+            if start<len(self.prefix):pieces.append(self.batch['paired_music_features'][:,start:len(self.prefix)])
+            if boundary<len(ids):
+                values=paired_music_features(self.dataset._profile(self.song),clocks[boundary:],self.reference['shift'],
+                    start=math.floor(self.cursor)-4,end=self.reference_refresh_beat)
+                pieces.append(torch.as_tensor(values,device=self.device)[None])
+            query['paired_music_features']=torch.cat(pieces,1)
+            query['paired_music_start']=start
         logits=self.model.decode(query,self.cache)[0]
         return logits if all_new else logits[-1]
     def _forced_time_probability(self,target,tokens,after,end):
@@ -190,7 +203,8 @@ class EventSampler(WindowSampler):
             time=self.codec._time(fixed.beat)
             self._forced_time_probability(target,time,after,end)
         out=list(time);used=set();atom=[];count=0
-        wanted=len(_atoms(fixed.note_text)) if fixed else None
+        # A compact Tap such as "12" is one text atom but two note heads.
+        wanted=len(_atom_heads(fixed.note_text)) if fixed else None
         while True:
             if not atom:
                 if wanted is not None and count==wanted:
@@ -206,12 +220,17 @@ class EventSampler(WindowSampler):
                 self._free_choices=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count else ())
             else:
                 allowed=self._head_choices(self.codec.allowed_atom_next(atom),atom,used);self._free_choices=allowed
+                if wanted is not None and self.codec.tokens[atom[0]]=='N:tap':
+                    positions=sum(self.codec.tokens[t].startswith('P:') for t in atom)
+                    if count+positions>=wanted:
+                        allowed=tuple(t for t in allowed if not self.codec.tokens[t].startswith('P:'))
             self._audit_grammar=self._free_choices
             token=self.next(target+out,allowed,action=True);out.append(token)
             if token==self.codec.event_end_id:self._finish_probability();return out
             atom.append(token)
             if token==self.codec.end_note_id:
-                used.update(_atom_heads(render_atom([self.codec.tokens[t] for t in atom])));atom=[];count+=1
+                heads=_atom_heads(render_atom([self.codec.tokens[t] for t in atom]))
+                used.update(heads);atom=[];count+=len(heads)
 
 
 def restore_prefix(points,tempo,clock,duration,failed_beat,conflict_sources=(),*,rejected=(),guard_options=None):
@@ -268,7 +287,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     from .data import ComposerV2Song,_beats_at_seconds
     from maichart.tempo_clock import TempoClock
     config=model.config;clock=TempoClock(tempo,first)
-    from .phrase_search import settings as phrase_settings,trial_search,write_previews
+    from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content
     phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
     if getattr(args,'record_candidate_probabilities',False):
         audit_path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
@@ -288,6 +307,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     # reference augmentation.
     dataset.structure_policy=getattr(config,'structure_policy','off')
     dataset.intensity_policy=getattr(config,'intensity_policy','off')
+    dataset.music_context_policy=getattr(config,'music_context_policy','off')
     if getattr(args,'intensity_curve',None):
         from .intensity import profile_rates
         profile=json.loads(Path(args.intensity_curve).read_text(encoding='utf-8'))
@@ -347,9 +367,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                     planned,evidence,trials=trial_search(sampler,target,points,guard,(proposal,ids),
                         args=args,song=song,tempo=tempo,end=end,count=candidate_count,
                         make_sampler=make_sampler,check_window=_check_window)
-                    write_previews(args.output,phrase_count,points,trials,evidence,song,tempo,args.level)
                     phrase_count+=1;phrase_trials.append(evidence);phrase_trials=phrase_trials[-16:]
                     if getattr(args,'record_candidate_probabilities',False):
+                        attach_candidate_content(evidence,points,trials,tempo=tempo,first=first)
                         path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
                         path.parent.mkdir(parents=True,exist_ok=True)
                         evidence.update(pool_index=phrase_count,

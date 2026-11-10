@@ -120,9 +120,12 @@ def start_train(handler,payload,*,runtime):
     structure_policy,_=resolve_structure_policy(structure_requested,structure_parent,resume=mode=='resume')
     _arg(args,'--rhythm-structure',structure_requested)
     settings.update(rhythm_structure=structure_requested,structure_policy=structure_policy)
-    music_context=_choice(payload,'music_context','auto',{'auto','off','song_detail_v1'})
+    from maichart.composer_v2.music_policy import CHOICES as MUSIC_CHOICES,resolve_policy as resolve_music_policy
+    music_context=_choice(payload,'music_context','auto',MUSIC_CHOICES)
+    music_policy,_=resolve_music_policy(music_context,(checked.get('model_config') or {}) if parent else None,resume=mode=='resume')
     _arg(args,'--music-context',music_context)
     settings['music_context']=music_context
+    settings['music_context_policy']=music_policy
     for capacity_key,capacity_default in (('audio_layers',4),('song_layers',2)):
         if capacity_key not in TRAIN_DEFAULTS:
             capacity_value=_integer(payload,capacity_key,capacity_default,minimum=1)

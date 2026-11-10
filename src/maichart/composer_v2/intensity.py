@@ -288,6 +288,7 @@ def predict(args):
     data.window_beats=config.window_beats;data.future_beats=config.future_beats;data.intensity_policy=POLICY
     data.onset_readout_policy='off';data.structure_policy=config.structure_policy
     data.reference_augmentation=False;data.refresh_events=config.refresh_events
+    data.music_context_policy=config.music_context_policy
     item=data.build_stream(song,[],Fraction(0))
     batch={k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in collate_stream([item]).items()}
     # Curve prediction itself does not need the phase-readout branch.

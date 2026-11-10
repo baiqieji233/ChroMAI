@@ -95,6 +95,12 @@ def audit_pool(pool):
         correlations[score] = {key: correlation(scores, [values[i][key] for i in eligible]) for key in ('density', 'events', 'tokens')}
     return dict(pool_index=pool.get('pool_index'), mode=pool.get('mode', 'unknown'), start_beat=pool.get('start_beat'), end_beat=pool.get('end_beat'),
         eligible=eligible, selected=selected, selected_eligible=valid_selected, baseline=0 if 0 in eligible else None,
+        common_prefix=pool.get('common_prefix'),comparison_range=pool.get('comparison_range'),time_axis=pool.get('time_axis'),
+        candidate_content=dict(schema=pool.get('candidate_content_schema'),
+            status='available' if candidates and pool.get('candidate_content_schema')=='composer-v2-candidate-events-v1' and
+                all(isinstance(c.get('event_delta'),list) for c in candidates) else 'unavailable',
+            event_deltas=[c.get('event_delta') for c in candidates],
+            scope='Exact trial event deltas, including boundary events; prefix identified by hash, not a final-chart preference label'),
         candidate_metrics=values, selected_minus_baseline=delta(values[selected], values[0]) if valid_selected and 0 in eligible else None,
         selected_minus_other_mean=delta(values[selected], other_mean) if valid_selected else None,
         shadow_rankings=ranking, probability_unavailable={str(i): r for i, r in unavailable.items() if r},
@@ -161,6 +167,7 @@ def audit(documents):
                'raw 为模型配置输出、尚未应用 grammar/retry/temperature；grammar 仅含 head 唯一性与语法，不含物理重试。',
                'proposal 为实际 retry/temperature/top-p 提议分布；强制 token 的 proposal logprob 为 0。',
                '跨 stop 事件记录在 boundary_probability，EOS 在 termination_probability；均不纳入这里的范围评分。',
+               '新版记录包含不可变候选事件增量与共同前文哈希；无需读取会被覆盖的内部预览文件。',
                '重复输入按音频/检查点 SHA、seed、pool_index、mode及拍范围去重；身份相同但证据冲突保留并提示；旧数据缺身份无法去重。',
                '概率仅描述 stop 边界前已评分范围，不声称完整联合似然或 MAP；grammar 每 token 均值仅供比较。',
                '相关性为描述统计，不说明因果；按候选池等权，缺失数据为 unavailable/null。',

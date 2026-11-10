@@ -34,8 +34,11 @@ class ComposerV2Config:
     intensity_policy: str = 'off'
     music_context_policy: str = 'off'
     def __post_init__(self):
-        if self.music_context_policy not in ('off','song_detail_v1') or min(self.audio_layers,self.song_layers)<1:
+        from .music_policy import POLICIES as MUSIC_POLICIES
+        if self.music_context_policy not in MUSIC_POLICIES or min(self.audio_layers,self.song_layers)<1:
             raise ValueError('Invalid music context/encoder depth')
+        if self.music_context_policy == 'song_paired_v2' and self.sequence_policy != 'continuous_events_v1':
+            raise ValueError('Paired music context requires continuous events')
         from .intensity import POLICY as CURVE_POLICY
         if self.intensity_policy not in ('off',CURVE_POLICY) or (self.intensity_policy!='off' and self.sequence_policy!='continuous_events_v1'):
             raise ValueError('Intensity curves require continuous events')
@@ -207,6 +210,15 @@ class ComposerV2(nn.Module):
         if c.music_context_policy!='off':
             with torch.random.fork_rng(devices=[]):self.song_detail=nn.Linear(16,d,bias=False)
             nn.init.zeros_(self.song_detail.weight)
+        if c.music_context_policy == 'song_paired_v2':
+            from .music_evidence import PAIR_FEATURES, ENTRY_FEATURES
+            with torch.random.fork_rng(devices=[]):
+                self.paired_music=nn.Linear(PAIR_FEATURES,d,bias=False)
+                self.entry_preview=nn.Linear(ENTRY_FEATURES,d,bias=False)
+            nn.init.zeros_(self.paired_music.weight)
+            nn.init.zeros_(self.entry_preview.weight)
+            self.register_buffer('entry_query_tokens',torch.tensor([
+                t in ('[AT]','[END_EVENT]','[TGT]') or t.startswith('NUM:') for t in codec.tokens]),persistent=False)
         if c.intensity_policy!='off':
             from .intensity import IntensityContext
             with torch.random.fork_rng(devices=[]):self.intensity=IntensityContext(d)
@@ -310,6 +322,8 @@ class ComposerV2(nn.Module):
                 self._song_cache[key]=(song.detach(),song_mask)
         else:song,song_mask=cached
         result = dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask,song_beats=batch['song_beats'])
+        if hasattr(self,'entry_preview'):
+            result['entry_context']=self.entry_preview(batch['entry_preview_features'].float())
         if hasattr(self,'intensity'):
             result['condition']=self.condition_context(batch)
             result['curve_rates'],result['curve_context']=self.intensity.plan(song,batch,training=self.training)
@@ -358,6 +372,13 @@ class ComposerV2(nn.Module):
         weight=self.token_weight() if structured else self.embedding.weight
         x=(F.embedding(value,weight,padding_idx=self.codec.pad_id) if structured else self.embedding(value))*math.sqrt(self.config.d_model)
         x=x+positions(index,self.config.d_model)+positions(beats,self.config.d_model)
+        if hasattr(self,'paired_music'):
+            offset=int(batch.get('paired_music_start',0))
+            x=x+self.paired_music(batch['paired_music_features'][:,start-offset:].float())
+            tiles=batch['tile_ids_cpu']
+            indices=torch.tensor([row[start:] for row in tiles],device=x.device,dtype=torch.long)
+            preview=cache['entry_context'][indices.clamp_min(0)]
+            x=x+preview*(self.entry_query_tokens[value] & indices.ge(0))[...,None]
         if self.config.sequence_policy=='window_v1':x=x+positions(beats+starts[:,None],self.config.d_model)
         if structured:
             from .rhythm_structure import phase_features

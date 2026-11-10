@@ -7,6 +7,7 @@
   let navigationTarget=null,navigationFrame=null,navigationBusy=false,navigationSerial=0;
   let playbackDuration=0;
   let collectionSerial=0,trainingBusy=false,collection={items:[],regions:0};
+  let entryChoiceKey='';
   const chart=()=>entry?.charts[currentIndex];
   const audioKey=version=>version?.audio_sha256||version?.audio_path||version?.audio_url||'';
   const complete=version=>version && !version.partial_preview && version.complete!==false && (!version.content_kind || version.content_kind==='complete_chart');
@@ -40,7 +41,8 @@
     return ` · 第${ordered[0].beat}–${last.end_beat||last.beat}拍 · ${notes.length}音符／${new Set(notes.map(note=>note.start_sec)).size}组`;
   }
   function clearLoop() {globalThis.ChartPreview?.clearRange();}
-  function setRange(value) {clearLoop();range=value;updateRange();}
+  function resetEntryChoice() {const input=node('feedbackLearnEntry');if(input)input.checked=false;}
+  function setRange(value) {clearLoop();resetEntryChoice();range=value;updateRange();}
   function setView(start,span) {
     const full=duration();if(!full)return;
     const width=Math.min(full,Math.max(.25,span));viewStart=Math.max(0,Math.min(full-width,start));viewEnd=viewStart+width;draw();
@@ -153,6 +155,7 @@
   }
   function refresh(value) {
     resetNavigation();
+    resetEntryChoice();
     playhead=0;playing=false;playbackDuration=0;
     if(entry?.task_id!==value.task_id) {range=null;clearLoop();}
     collection={items:[],regions:0};++collectionSerial;node('feedbackTrainingList').replaceChildren();
@@ -172,7 +175,7 @@
     try {
       const bounds=validRange()?{startSec:range.start_sec,endSec:range.end_sec}:{};
       await globalThis.ChartPreview?.chooseChart(index,{...bounds,restart:false,source:comparison?'comparison':'main'});
-      currentIndex=index;if(!comparison)anchorIndex=index;
+      currentIndex=index;resetEntryChoice();if(!comparison)anchorIndex=index;
       if(oldAudio!==audioKey(chart())) {range=null;media=null;mediaAudio=null;clearLoop();++mediaSerial;}
       refreshChoices();updateRange();
     } catch(error) {status(error.message);} finally {comparisonSwitch=false;}
@@ -307,6 +310,14 @@
   function trainingButtons() {
     node('feedbackCollectTraining').disabled=trainingBusy || !validRange() || !selectedNotes().length || !node('feedbackTrainingUse').value;
     node('feedbackAddTraining').disabled=trainingBusy || !(collection.regions || collection.published);
+    const entryChoice=node('feedbackLearnEntry');
+    if(entryChoice) {
+      const key=validRange()?`${chart()?.path}:${chart()?.file_sha256}:${range.start_sec}:${range.end_sec}`:'';
+      if(key!==entryChoiceKey){entryChoice.checked=false;entryChoiceKey=key;}
+      const timing=['timing','both'].includes(node('feedbackTrainingUse').value);
+      entryChoice.disabled=trainingBusy || !validRange() || !selectedNotes().length || !timing;
+      if(!timing || !validRange())entryChoice.checked=false;
+    }
   }
   async function trainingRequest(endpoint,payload) {
     const response=await fetch('/api/quality/'+endpoint,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
@@ -331,7 +342,7 @@
         const li=document.createElement('li'),view=document.createElement('button'),remove=document.createElement('button');
         const use=item.timing_weight && item.component_weight?'both':item.timing_weight?'timing':'layout';
         view.type=remove.type='button';view.className=remove.className='small-button';
-        view.textContent=`${item.start_sec.toFixed(2)}–${item.end_sec.toFixed(2)}秒 · ${trainingNames[use]}`;
+        view.textContent=`${item.start_sec.toFixed(2)}–${item.end_sec.toFixed(2)}秒 · ${trainingNames[use]}${Number.isFinite(item.entry_start_sec)?' ＋前文接入':''}`;
         view.title=`${item.title} · 点击定位这段谱面`;
         view.addEventListener('click',()=>void locateReview(item).catch(error=>{node('feedbackTrainingStatus').textContent=error.message;}));
         remove.textContent='移出';remove.title='不再将这段作为训练示范，保留原谱面';
@@ -343,11 +354,11 @@
       trainingButtons();
     } catch(error) {if(request===collectionSerial)node('feedbackTrainingStatus').textContent=error.message;}
   }
-  async function changeCollection(payload,use) {
+  async function changeCollection(payload,use,learnEntry=false) {
     if(trainingBusy)return;
     const task=entry?.task_id;trainingBusy=true;trainingButtons();
     try {
-      await trainingRequest('generation-feedback',{...payload,label:'good',reason:'',training_use:use});
+      await trainingRequest('generation-feedback',{...payload,label:'good',reason:'',training_use:use,learn_entry:learnEntry});
       if(task===entry?.task_id)await loadCollection();
     } catch(error) {if(task===entry?.task_id)node('feedbackTrainingStatus').textContent=error.message;}
     finally {trainingBusy=false;trainingButtons();}
@@ -355,7 +366,7 @@
   node('feedbackTrainingUse').addEventListener('change',trainingButtons);
   node('feedbackCollectTraining').addEventListener('click',()=>{
     if(!validRange() || !selectedNotes().length)return;
-    void changeCollection(reviewPayload(chart(),{start_sec:range.start_sec,end_sec:range.end_sec}),node('feedbackTrainingUse').value);
+    void changeCollection(reviewPayload(chart(),{start_sec:range.start_sec,end_sec:range.end_sec}),node('feedbackTrainingUse').value,!!node('feedbackLearnEntry')?.checked);
   });
   node('feedbackAddTraining').addEventListener('click',async()=>{
     if(trainingBusy)return;

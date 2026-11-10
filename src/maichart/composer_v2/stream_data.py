@@ -26,12 +26,14 @@ def _song_cache_key(song):
 
 class StreamDataset(ComposerV2Dataset):
     def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',
-                 structure_policy='off',reference_augmentation=False,intensity_policy='off',rhythm_learning_policy=None,**kwargs):
+                 structure_policy='off',reference_augmentation=False,intensity_policy='off',rhythm_learning_policy=None,
+                 music_context_policy='off',**kwargs):
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
         from .rhythm_structure import POLICIES
         if structure_policy not in POLICIES:raise ValueError('Unknown rhythm structure policy')
         self.structure_policy=structure_policy
         self.intensity_policy=intensity_policy
+        self.music_context_policy=music_context_policy
         from .rhythm_learning import POLICY as LEGACY_LEARNING
         self.rhythm_learning_policy=rhythm_learning_policy or LEGACY_LEARNING
         self.reference_augmentation=bool(reference_augmentation) and structure_policy!='off'
@@ -116,6 +118,8 @@ class StreamDataset(ComposerV2Dataset):
         return getattr(self,'structure_policy','off')!='off'
     def _evidence_v2(self):
         return getattr(self,'structure_policy','off')=='aligned_rhythm_v2'
+    def _paired_music(self):
+        return getattr(self,'music_context_policy','off')=='song_paired_v2'
     def _profile(self,song):
         from .rhythm_structure import ProfileCache,song_profile
         cache=getattr(self,'_profiles',None)
@@ -212,6 +216,9 @@ class StreamDataset(ComposerV2Dataset):
         if getattr(self, 'onset_readout_policy', 'off') != 'off':
             from .onset_readout import audio_tiles
             result.update({k:v[0] for k,v in audio_tiles(song,[anchor],self.onset_phases).items()})
+        if self._paired_music():
+            from .music_evidence import entry_preview
+            result['entry_preview_features']=torch.as_tensor(entry_preview(self._profile(song),[anchor])[0])
         self.tile_cache[key]=result
         while len(self.tile_cache)>64:self.tile_cache.popitem(last=False)
         return result
@@ -385,6 +392,13 @@ class StreamDataset(ComposerV2Dataset):
                 # The integer jump may cross unreviewed material, while this
                 # approved onset's absolute sub-beat phase is still trustworthy.
                 coarse=np.isin(labels,[codec.at_id,codec.eos_id,*codec.digits])
+                # A specifically approved incoming transition owns only the
+                # first original event at/after its saved review boundary.
+                for region in regions:
+                    if 'entry_start_sec' not in region or region_component_weights(region)[0]<=0:continue
+                    entry=int(np.searchsorted(stamps,float(region['entry_start_sec']),side='left'))
+                    if entry<len(stamps) and float(region['start_sec'])<=stamps[entry]<float(region['end_sec']):
+                        trusted|=np.abs(seconds-stamps[entry])<1e-8
                 weights[coarse & ~trusted]=0
                 weights[labels==codec.eos_id]=0
         anchors=sorted({math.floor(t) for t in clocks});lookup={a:i for i,a in enumerate(anchors)}
@@ -454,6 +468,14 @@ class StreamDataset(ComposerV2Dataset):
         if getattr(self,'intensity_policy','off')!='off':
             from .intensity import add_item
             add_item(out,song,clocks,training=training)
+        if self._paired_music():
+            from .music_evidence import paired_music_features,entry_preview
+            profile=self._profile(song)
+            paired=paired_music_features(profile,clocks,aligned[0] if aligned else None,
+                                        start=checked_start,end=checked_end)
+            paired[:prefix.index(codec.ref_id)]=0
+            out['paired_music_features']=torch.as_tensor(paired)
+            out['entry_preview_features']=torch.as_tensor(entry_preview(profile,anchors))
         return out
     def __getitem__(self,index):
         source = self.recovery_sources.get(index)
@@ -535,6 +557,9 @@ def collate_stream(items):
         from torch.nn import functional as F
         width=out['input_ids'].size(1)
         out['reference_evidence']=torch.stack([F.pad(item['reference_evidence'],(0,0,0,width-len(item['input_ids']))) for item in items])
+    if 'paired_music_features' in items[0]:
+        out['paired_music_features']=torch.nn.utils.rnn.pad_sequence([x['paired_music_features'] for x in items],batch_first=True)
+        out['entry_preview_features']=torch.cat([x['entry_preview_features'] for x in items])
     if any('bank_semantic_right' in item for item in items):
         out['bank_semantic_right'] = torch.cat([item.get('bank_semantic_right', item['bank_semantic']) for item in items])
         out['bank_semantic_weight'] = torch.cat([item['bank_semantic_weight']

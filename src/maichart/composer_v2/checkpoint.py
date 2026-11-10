@@ -1,15 +1,34 @@
 """Independent Composer v2 checkpoints with atomic writes and safe CPU reads."""
 from __future__ import annotations
 import os
+import logging
 import shutil
 from pathlib import Path
 import tempfile
+import time
 import torch
 from .codec import ComponentCodec
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
 
 FAMILY="chart_composer_v2"
 SCHEMA="maichart-composer-v2-checkpoint-v1"
+
+def _replace_checkpoint(temporary, path):
+    """Keep atomic publication while tolerating short Windows file locks."""
+    delays = (.05, .1, .2, .4, .8, 1.6, 2., 2.)
+    for attempt in range(len(delays) + 1):
+        try:
+            os.replace(temporary, path)
+            return
+        except OSError as exc:
+            if getattr(exc, 'winerror', None) not in (5, 32, 33) or attempt == len(delays):
+                raise
+            if attempt == 0:
+                logging.getLogger(__name__).warning(
+                    'Checkpoint temporarily locked (WinError %s); retrying atomic replacement: %s',
+                    exc.winerror, path)
+            time.sleep(delays[attempt])
+
 
 def read(path):
     path=Path(path)
@@ -30,7 +49,7 @@ def save(path,payload):
         with os.fdopen(descriptor,"wb") as stream:
             torch.save(payload,stream)
             stream.flush();os.fsync(stream.fileno())
-        os.replace(temporary,path)
+        _replace_checkpoint(temporary,path)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
 
@@ -46,7 +65,7 @@ def save_epoch_snapshot(last_path, epoch, interval):
             shutil.copyfileobj(source, destination, length=1024*1024)
             destination.flush()
             os.fsync(destination.fileno())
-        os.replace(temporary, target)
+        _replace_checkpoint(temporary, target)
     finally:
         if os.path.exists(temporary): os.unlink(temporary)
     return target
@@ -59,8 +78,11 @@ def inspect_payload(payload):
     config=payload.get("model_config") or payload.get("config")
     if not isinstance(config,dict): errors.append("缺少模型配置")
     if isinstance(config,dict):
-        if config.get('music_context_policy','off') not in ('off','song_detail_v1'):
+        from .music_policy import POLICIES as MUSIC_POLICIES
+        if config.get('music_context_policy','off') not in MUSIC_POLICIES:
             errors.append('Unknown Composer v2 music context policy')
+        if config.get('music_context_policy')=='song_paired_v2' and config.get('sequence_policy')!='continuous_events_v1':
+            errors.append('Paired music context requires continuous events')
         for key in ('audio_layers','song_layers'):
             value=config.get(key,2)
             if not isinstance(value,int) or isinstance(value,bool) or value<1:
@@ -123,6 +145,8 @@ def inspect_payload(payload):
             onset_readout=(config or {}).get('onset_readout_policy','off')=='phase_audio_v1',
             rhythm_structure=(config or {}).get('structure_policy','off')!='off',
             music_context=(config or {}).get('music_context_policy','off')!='off',
+            paired_music=(config or {}).get('music_context_policy')=='song_paired_v2',
+            entry_preview=(config or {}).get('music_context_policy')=='song_paired_v2',
             continuous_time=(config or {}).get('sequence_policy')=='continuous_events_v1',
             condition_policy=policy,condition_keys=capabilities_contract.get('supported_keys',[]),
             radar_style=policy==RADAR_STYLE,automatic_conditions=policy==RADAR_STYLE),
