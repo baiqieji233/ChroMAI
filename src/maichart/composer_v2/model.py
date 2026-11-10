@@ -169,7 +169,9 @@ class DecoderBlock(nn.Module):
             tiles,indices,valid=groups
             packed=query.flatten(0,1).index_select(0,indices.flatten()).reshape(*indices.shape,query.size(-1))
             attended=self.local_attention(packed,kv=tuple(v.index_select(0,tiles) for v in local_kv),
-                key_mask=audio['local_mask'][tiles],query_beats=beats.flatten()[indices],key_beats=audio['local_beats'][tiles])
+                key_mask=audio['local_mask'].index_select(0,tiles),
+                query_beats=beats.flatten().index_select(0,indices.flatten()).reshape_as(indices),
+                key_beats=audio['local_beats'].index_select(0,tiles))
             attended=(attended*valid[...,None]).flatten(0,1)
             attended=attended.new_zeros(query.numel()//query.size(-1),query.size(-1)).index_add(0,indices.flatten(),attended).reshape_as(query)
         x=x+self.drop(attended)
@@ -274,12 +276,12 @@ class ComposerV2(nn.Module):
                 fraction=batch['bank_semantic_weight'][:,None]
                 semantic=(semantic.double()*(1.-fraction)
                           +batch['bank_semantic_right'].float().double()*fraction).float()
-            bank=self.mel(mel.float())+self.semantic(semantic)*(batch['bank_semantic_mask']&keep[batch['bank_owner']])[:,None]
+            bank=self.mel(mel.float())+self.semantic(semantic)*(batch['bank_semantic_mask']&keep.index_select(0,batch['bank_owner']))[:,None]
             if hasattr(self,'audio_envelope'):bank=bank+self.audio_envelope(batch['bank_envelope'].float())
             frames=batch['tile_frames']
             local=bank.index_select(0,frames.flatten()).reshape(*frames.shape,bank.size(-1))
         else:
-            local=self._audio_input(mel,batch['local_semantic'],batch['local_semantic_mask'],keep if owners is None else keep[owners])
+            local=self._audio_input(mel,batch['local_semantic'],batch['local_semantic_mask'],keep if owners is None else keep.index_select(0,owners))
             if hasattr(self,'audio_envelope'):local=local+self.audio_envelope(batch['local_envelope'].float())
         local=local+positions(batch['local_beats'],self.config.d_model)
         if hasattr(self,'audio_phase_position'):
@@ -362,10 +364,11 @@ class ComposerV2(nn.Module):
             # Sub-beat phase of each token's clock, its stream region (carry,
             # history, aligned reference, target) and the reference trust.
             x=x+self.phase_position(phase_features(beats,self.phase_harmonics))
-            codes=self.segment_code[value]
+            codes=self.segment_code.index_select(0,value.flatten()).reshape_as(value)
             if start and 'last_segment' in state:
                 segment=torch.maximum(codes.cummax(1).values,state['last_segment'][:,None])
-            elif start:segment=torch.maximum(codes.cummax(1).values,self.segment_code[ids[:,:start]].amax(1)[:,None])
+            elif start:segment=torch.maximum(codes.cummax(1).values,
+                self.segment_code.index_select(0,ids[:,:start].flatten()).reshape(ids.size(0),start).amax(1)[:,None])
             else:segment=codes.cummax(1).values
             if use_cache:state['last_segment']=segment[:,-1]
             x=x+self.segment(segment)
@@ -384,8 +387,14 @@ class ComposerV2(nn.Module):
             tiles=batch['tile_ids_cpu']
             groups=(int(tiles[0][start]) if use_cache and ids.device.type=='cpu' and ids.size(0)==1
                     and length-start==1 and tiles[0][start]>=0 else query_groups(tiles,start,ids.device))
-        for i,layer in enumerate(self.decoder):
-            x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
+        runtime=getattr(self,'_decoder_runtime',None)
+        accelerated=(runtime.step(x,condition,beats,batch['token_mask'],cache,state,groups)
+                     if runtime is not None and use_cache else None)
+        if accelerated is not None:
+            x=accelerated
+        else:
+            for i,layer in enumerate(self.decoder):
+                x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
         logits=F.linear(self.norm(x),weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence
@@ -404,7 +413,10 @@ class ComposerV2(nn.Module):
         weights=weights*batch.get('sample_weight',weights.new_ones(weights.size(0)))[:,None]
         costs=F.cross_entropy(logits.flatten(0,1),labels.flatten(),ignore_index=-100,reduction='none').reshape_as(weights)
         mass=weights.sum().clamp_min(1);loss=(costs*weights).sum()/mass
-        timing=self.time_tokens[labels.clamp_min(0)]&active
+        indices=labels.clamp_min(0)
+        # index_select avoids the Intel XPU boolean advanced-index kernel;
+        # flatten/reshape preserves exactly the original multidimensional lookup.
+        timing=self.time_tokens.index_select(0,indices.flatten()).reshape_as(labels)&active
         def mean(mask):
             w=weights*mask;return (costs*w).sum()/w.sum().clamp_min(1)
         auxiliary=loss.new_zeros(())
@@ -415,4 +427,4 @@ class ComposerV2(nn.Module):
         else:objective=loss
         return objective,dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),
-            phase_loss=mean(self.phase_targets[labels.clamp_min(0)]&active).detach(),token_count=active.sum().detach())
+            phase_loss=mean(self.phase_targets.index_select(0,indices.flatten()).reshape_as(labels)&active).detach(),token_count=active.sum().detach())

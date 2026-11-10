@@ -131,7 +131,8 @@ def start_train(handler,payload,*,runtime):
     refresh_events=_integer(payload,'refresh_events',16,minimum=1)
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
-    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device={"auto","cuda","cpu"},device={"auto","cuda","cpu"},precision={"bf16","fp16","fp32","auto"})
+    from maichart.composer_v2.acceleration import AUDIO_DEVICES
+    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"})
     zeros={"warmup_steps","future_beats","history_beats","validation_max_batches","seed","max_steps","limit_charts","save_every","early_stopping_patience"}
     for key,default in TRAIN_DEFAULTS.items():
         if key in ('cuda_memory_budget_gb', 'audio_cache_gb') and isinstance(payload.get(key), bool):
@@ -297,6 +298,11 @@ def start_generate(handler,payload,*,runtime):
     if settings["candidates"] not in {1,2,4}: raise ValueError("候选数只能是1、2、4")
     settings["device"]=_choice(payload,"device","auto",{"auto","cuda","cpu"})
     _arg(args,"--device",settings["device"])
+    from maichart.composer_v2.acceleration import AUDIO_DEVICES
+    for key, choices in (('audio_device',set(AUDIO_DEVICES)),
+                         ('inference_backend',{'auto','torch','openvino-cpu','openvino-gpu'})):
+        settings[key]=_choice(payload,key,'auto',choices)
+        _arg(args,'--'+key.replace('_','-'),settings[key])
     settings.update(bpm=None,first=None)
     if payload.get("first") not in {None, ""}:
         settings["first"]=_float(payload,"first",0.)
@@ -365,7 +371,9 @@ def start_curve(handler,payload,*,runtime):
         tempo_detection=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'}),
         cpu_threads=_integer(payload,'cpu_threads',GENERATION_DEFAULTS['cpu_threads'],minimum=0),level=_float(payload,'level',13.,minimum=1))
     if settings['level']>15:raise ValueError('level 必须在1到15之间')
-    for key in ('cache_dir','device','tempo_detection','cpu_threads','level'):
+    from maichart.composer_v2.acceleration import AUDIO_DEVICES
+    settings['audio_device']=_choice(payload,'audio_device','auto',set(AUDIO_DEVICES))
+    for key in ('cache_dir','device','tempo_detection','cpu_threads','level','audio_device'):
         _arg(args,'--'+key.replace('_','-'),settings[key])
     for key in ('bpm','first','tempo_map','condition'):
         value=payload.get(key)

@@ -197,9 +197,13 @@ class AudioFeatureStore:
         if backend not in ('mert', 'native'):
             raise ValueError('Audio backend must be mert or native')
         self.cache_dir = Path(cache_dir)
-        self.backend, self.device = backend, str(device)
+        from .acceleration import resolve_audio_device
+        self.backend = backend
+        self.device = resolve_audio_device(str(device)) if backend == 'mert' else 'cpu'
         self.model_path = Path(model_path).resolve() if model_path else None
         self._model = self._processor = None
+        self._openvino = None
+        self._acceleration_failed = False
         self._model_identity = None
         self._banks = OrderedDict()
         self._validated_banks = OrderedDict()
@@ -384,6 +388,14 @@ class AudioFeatureStore:
             if self.model_path is None:
                 kwargs.update(revision=MODEL_REVISION, cache_dir=str(MODEL_CACHE))
             processor = Wav2Vec2FeatureExtractor.from_pretrained(source, **kwargs)
+            model = self._load_first_eight(source, kwargs)
+            if model is not None:
+                if processor.sampling_rate != SAMPLE_RATE or model.config.hidden_size != 1024:
+                    raise ValueError('Expected MERT 330M with 24kHz and 1024 hidden dimensions')
+                target = 'cpu' if self.device.startswith('openvino-') else self.device
+                self._model = model.requires_grad_(False).eval().to(target)
+                self._processor = processor
+                return self._model, self._processor
             model, loading = AutoModel.from_pretrained(source, output_loading_info=True, **kwargs)
             # Torch >=2 exposes weight_norm through parametrizations. The
             # original MERT checkpoint uses the legacy weight_g/weight_v keys;
@@ -415,9 +427,71 @@ class AudioFeatureStore:
                 raise ValueError(f'MERT checkpoint did not load exactly: {loading}')
             if processor.sampling_rate != SAMPLE_RATE or model.config.hidden_size != 1024:
                 raise ValueError('Expected MERT 330M with 24kHz and 1024 hidden dimensions')
-            model.requires_grad_(False).eval().to(self.device)
+            target = 'cpu' if self.device.startswith('openvino-') else self.device
+            model.requires_grad_(False).eval().to(target)
+            # Only block 8 is ever read. Discard unused blocks after strict load.
+            model.encoder.layers = torch.nn.ModuleList(list(model.encoder.layers[:8]))
             self._model, self._processor = model, processor
         return self._model, self._processor
+
+    def _load_first_eight(self, source, kwargs):
+        """Map just the needed blocks, avoiding initialization/copy of 24 blocks."""
+        import torch
+        from transformers import AutoConfig, AutoModel
+        config = AutoConfig.from_pretrained(source, **kwargs)
+        # DeepNorm's scaling depends on the original depth. Retain the generic
+        # loader for such custom models and for safetensors-only local sources.
+        if getattr(config, 'deepnorm', False):
+            return None
+        if self.model_path is None:
+            from huggingface_hub import hf_hub_download
+            path = hf_hub_download(MODEL_ID, 'pytorch_model.bin', revision=MODEL_REVISION,
+                                   cache_dir=str(MODEL_CACHE))
+        else:
+            path = self.model_path / 'pytorch_model.bin'
+            if not path.is_file():
+                return None
+        config.num_hidden_layers = 8
+        mapping = getattr(config, 'auto_map', {})
+        model_class = None
+        if 'AutoModel' in mapping:
+            from transformers.dynamic_module_utils import get_class_from_dynamic_module
+            code_kwargs = {k:v for k,v in kwargs.items() if k in ('revision','cache_dir')}
+            model_class = get_class_from_dynamic_module(mapping['AutoModel'], source, **code_kwargs)
+        # No random initialization or allocation of weights that will be replaced.
+        with torch.device('meta'):
+            model = model_class(config) if model_class is not None else AutoModel.from_config(config, trust_remote_code=True)
+        try:
+            state = torch.load(path, map_location='cpu', weights_only=True, mmap=True)
+        except RuntimeError as exc:
+            if 'mmap' not in str(exc).lower():
+                raise
+            state = torch.load(path, map_location='cpu', weights_only=True)
+        selected = {}
+        prefix = 'encoder.pos_conv_embed.conv.'
+        aliases = {prefix+'weight_g':prefix+'parametrizations.weight.original0',
+                   prefix+'weight_v':prefix+'parametrizations.weight.original1'}
+        for name, value in state.items():
+            if name.startswith('encoder.layers.') and int(name.split('.')[2]) >= 8:
+                continue
+            key = aliases.get(name, name)
+            if key in selected:
+                raise ValueError('Duplicate MERT positional-convolution weights: '+key)
+            selected[key] = value
+        model.load_state_dict(selected, strict=True, assign=True)
+        return model
+
+    def _semantic_processor(self):
+        if self._processor is None:
+            from transformers import Wav2Vec2FeatureExtractor
+            kwargs = dict(trust_remote_code=True)
+            source = str(self.model_path) if self.model_path else MODEL_ID
+            if self.model_path is None:
+                kwargs.update(revision=MODEL_REVISION, cache_dir=str(MODEL_CACHE))
+            self._processor = Wav2Vec2FeatureExtractor.from_pretrained(source, **kwargs)
+            if self._processor.sampling_rate != SAMPLE_RATE:
+                raise ValueError('Expected MERT with 24kHz input')
+        return self._processor
 
     def prepare(self, audio_path):
         source = Path(audio_path).resolve()
@@ -467,7 +541,9 @@ class AudioFeatureStore:
                 np.save(temporary / 'semantic.npy', np.zeros((1, 1024), dtype=np.float16), allow_pickle=False)
                 np.save(temporary / 'semantic_times_sec.npy', np.array([0.], dtype=np.float64), allow_pickle=False)
             metadata = dict(identity=identity, duration_sec=duration,
-                            runtime=dict(torch=torch.__version__, torchaudio=torchaudio.__version__))
+                            runtime=dict(torch=torch.__version__, torchaudio=torchaudio.__version__,
+                                         semantic_device=self.device,
+                                         acceleration_fallback=self._acceleration_failed))
             (temporary / 'index.json').write_text(json.dumps(metadata, sort_keys=True), encoding='utf-8')
             # Publish only complete immutable banks. Concurrent winner is safe.
             try:
@@ -484,7 +560,16 @@ class AudioFeatureStore:
 
     def _extract_semantic(self, signal, duration, directory):
         import torch
-        model, processor = self._encoder()
+        processor = self._semantic_processor()
+        model = hook = None
+        if self.device.startswith('openvino-') and not self._acceleration_failed:
+            try:
+                if self._openvino is None:
+                    from .openvino_audio import OpenVINOMERT
+                    self._openvino = OpenVINOMERT(self.cache_dir, self._model_identity, self.device, self._encoder)
+            except Exception:
+                logging.getLogger(__name__).exception('MERT OpenVINO initialization failed; using CPU')
+                self._acceleration_failed = True
         count = max(1, (len(signal) - 400) // 320 + 1)
         times = (np.arange(count, dtype=np.float64) * 320 + 199.5) / SAMPLE_RATE
         keep_count = max(1, int(np.searchsorted(times, duration, side='right')))
@@ -495,7 +580,6 @@ class AudioFeatureStore:
         def capture(_module, _inputs, outputs):
             captured.append(outputs[0].detach())
             raise _SemanticLayerReady
-        hook = model.encoder.layers[7].register_forward_hook(capture)
         try:
             with torch.inference_mode():
                 for first in range(0, keep_count, 225):
@@ -503,26 +587,44 @@ class AudioFeatureStore:
                     left, right = max(0, first - 75), min(count, last + 75)
                     chunk = signal[left * 320:(right - 1) * 320 + 400].numpy()
                     inputs = processor(chunk, sampling_rate=SAMPLE_RATE, return_tensors='pt')
-                    inputs = {key: value.to(self.device) for key, value in inputs.items()}
                     captured.clear()
-                    try:
-                        model(**inputs, output_hidden_states=False)
-                    except _SemanticLayerReady:
-                        pass
-                    if len(captured) != 1:
-                        raise RuntimeError('MERT block 8 capture failed')
-                    selected = captured[0][0, first-left:last-left]
-                    if selected.shape != (last-first, 1024):
+                    encoded = None
+                    if self._openvino is not None and not self._acceleration_failed:
+                        try:
+                            encoded = self._openvino.infer(inputs['input_values'].numpy())
+                        except Exception:
+                            logging.getLogger(__name__).exception('MERT OpenVINO inference failed; using CPU')
+                            self._acceleration_failed = True
+                    if encoded is None:
+                        if model is None:
+                            model, _ = self._encoder()
+                        hook = model.encoder.layers[7].register_forward_hook(capture)
+                        target = next(model.parameters()).device
+                        inputs = {key: value.to(target) for key, value in inputs.items()}
+                        try:
+                            model(**inputs, output_hidden_states=False)
+                        except _SemanticLayerReady:
+                            pass
+                        finally:
+                            hook.remove()
+                            hook = None
+                        if len(captured) != 1:
+                            raise RuntimeError('MERT block 8 capture failed')
+                        selected = captured[0][0, first-left:last-left]
+                        values = selected.float().cpu().numpy()
+                    else:
+                        values = encoded[0, first-left:last-left]
+                    if values.shape != (last-first, 1024):
                         raise RuntimeError('MERT output timeline differs from the pinned convolution contract')
-                    values = selected.float().cpu().numpy()
                     if not np.isfinite(values).all() or np.max(np.abs(values)) > np.finfo(np.float16).max:
                         raise ValueError('MERT produced invalid float16 cache values')
                     bank[first:last] = values
                     captured.clear()
-                    del selected, inputs
+                    del inputs
             bank.flush()
         finally:
-            hook.remove()
+            if hook is not None:
+                hook.remove()
             captured.clear()
             del bank
         np.save(directory / 'semantic_times_sec.npy', times[:keep_count], allow_pickle=False)
@@ -534,6 +636,7 @@ class AudioFeatureStore:
         self._memory_check_at = 0.
         had_encoder = self._model is not None
         self._model = self._processor = None
+        self._openvino = None
         self._spectrum = self._mel_scale = None
         if not had_encoder:
             return

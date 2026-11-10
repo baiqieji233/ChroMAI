@@ -132,6 +132,8 @@ python -m maichart.webui.server --host 127.0.0.1 --port 7860
 
 ## 三、 命令行（CLI）直接调用
 
+Intel 核显与 NPU 的可选加速、自动测速和 XPU 训练配置，见 [Intel 加速说明](docs/explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)。
+
 除 WebUI 外，也可直接在终端运行 Composer v2 的生成与训练模块（CLI 生成默认输出示例可放在 `outputs/composer_v2/`）：
 
 ```bash

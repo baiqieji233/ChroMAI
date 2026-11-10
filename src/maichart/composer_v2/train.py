@@ -76,8 +76,10 @@ def resolve_training_policy(requested, parent_config=None, *, resume=False):
 
 def rng_state():
     state=np.random.get_state()
-    return dict(python=random.getstate(),numpy=dict(kind=state[0],keys=state[1].tolist(),position=state[2],has_gauss=state[3],cached_gaussian=state[4]),
+    result=dict(python=random.getstate(),numpy=dict(kind=state[0],keys=state[1].tolist(),position=state[2],has_gauss=state[3],cached_gaussian=state[4]),
         torch=torch.get_rng_state(),cuda=torch.cuda.get_rng_state_all() if torch.cuda.is_available() else [])
+    if hasattr(torch,'xpu') and torch.xpu.is_initialized():result['xpu']=torch.xpu.get_rng_state_all()
+    return result
 
 def restore_rng(value):
     random.setstate(value["python"])
@@ -88,6 +90,10 @@ def restore_rng(value):
         if not torch.cuda.is_available() or len(value["cuda"])!=torch.cuda.device_count():
             raise ValueError("Exact resume requires the saved CUDA RNG device topology")
         torch.cuda.set_rng_state_all(value["cuda"])
+    if value.get('xpu'):
+        if not hasattr(torch,'xpu') or not torch.xpu.is_available() or len(value['xpu'])!=torch.xpu.device_count():
+            raise ValueError('Exact resume requires the saved Intel XPU RNG device topology')
+        torch.xpu.set_rng_state_all(value['xpu'])
 
 def _identity(dataset):
     value=dict(manifest_sha256=dataset.manifest_sha256,charts=dataset.audit["charts"],
@@ -150,6 +156,13 @@ def _batches(loader,skip=0):
             sampler.start_batch = previous_start
 
 def _device_batch(batch,device):
+    if device.type=='xpu' and 'bank_semantic_right' in batch:
+        # Preserve the CPU double -> float contract without depending on
+        # the client's Intel FP64 kernel support or scheduling extra GPU work.
+        batch=dict(batch)
+        fraction=batch.pop('bank_semantic_weight').double()[:,None]
+        right=batch.pop('bank_semantic_right').float().double()
+        batch['bank_semantic']=(batch['bank_semantic'].float().double()*(1.-fraction)+right*fraction).float()
     return {key:value.to(device,non_blocking=True) if isinstance(value,torch.Tensor) else value for key,value in batch.items()}
 
 def _loader(dataset,batch_size,seed,shuffle,device,*,order=GLOBAL_BATCH_ORDER):
@@ -157,10 +170,11 @@ def _loader(dataset,batch_size,seed,shuffle,device,*,order=GLOBAL_BATCH_ORDER):
     generator=torch.Generator().manual_seed(seed)
     from .stream_data import StreamDataset,collate_stream
     return DataLoader(dataset,batch_sampler=sampler,collate_fn=collate_stream if isinstance(dataset,StreamDataset) else collate_composer_v2,
-        num_workers=0,pin_memory=device.type=="cuda",generator=generator),sampler
+        num_workers=0,pin_memory=device.type in ('cuda','xpu'),generator=generator),sampler
 
 def _sync(device):
     if device.type=="cuda":torch.cuda.synchronize(device)
+    elif device.type=='xpu':torch.xpu.synchronize(device)
 
 def _autocast(device,precision):
     if precision=="fp32":return nullcontext()
@@ -269,7 +283,9 @@ def train(args):
     if min(args.epochs,args.batch_size,args.grad_accumulation,args.log_interval,args.checkpoint_interval_steps)<=0:raise ValueError("epochs/batch/accumulation/log/save intervals must be positive")
     if args.lr<=0 or not 0<=args.min_lr_ratio<=1 or not 0<=args.dropout<1:raise ValueError("Invalid optimizer/dropout settings")
     if min(args.warmup_steps,args.validation_max_batches,args.seed,args.max_steps,args.limit_charts,args.save_every,args.early_stopping_patience)<0:raise ValueError("Training limits, seed and save_every must be nonnegative")
-    if args.device not in {"auto","cpu","cuda"} or args.prepare_device not in {"auto","cpu","cuda"}:raise ValueError("Device must be auto/cpu/cuda")
+    from .acceleration import AUDIO_DEVICES
+    if args.device not in {"auto","cpu","cuda","xpu"} or args.prepare_device not in AUDIO_DEVICES:
+        raise ValueError('Invalid training/preparation device')
     if args.lr_schedule not in {"cosine","constant"}:raise ValueError("Unknown lr_schedule")
     if args.audio_backend not in {"mert","native"}:raise ValueError("audio_backend must be mert or explicit native")
     directory=Path(args.checkpoint_dir).resolve()
@@ -337,13 +353,19 @@ def train(args):
     if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration:
         if directory == source_directory or any(path.exists() for path in artifacts):
             raise ValueError('Condition/onset/rhythm-structure migration requires a new checkpoint directory; retain the parent')
-    device=torch.device("cuda" if args.device=="auto" and torch.cuda.is_available() else "cpu" if args.device=="auto" else args.device)
+    from .acceleration import training_device
+    requested_device=(parent.get('training_contract',{}).get('device_type',args.device)
+                      if args.resume and args.device=='auto' else args.device)
+    device=torch.device(training_device(requested_device))
     if device.type=="cuda" and not torch.cuda.is_available():raise RuntimeError("CUDA requested but unavailable")
-    precision=("bf16" if device.type=="cuda" and torch.cuda.is_bf16_supported() else "fp32") if args.precision=="auto" else args.precision
+    requested_precision=(parent.get('training_contract',{}).get('precision',args.precision)
+                         if args.resume and args.precision=='auto' else args.precision)
+    precision=("bf16" if device.type=='xpu' or (device.type=="cuda" and torch.cuda.is_bf16_supported()) else "fp32") if requested_precision=="auto" else requested_precision
     if precision not in {"bf16","fp16","fp32"}:raise ValueError("Unknown precision")
     if precision=="bf16" and device.type=="cuda" and not torch.cuda.is_bf16_supported():raise RuntimeError("BF16 requested but unsupported; choose precision explicitly")
     if precision=="fp16" and device.type!="cuda":raise ValueError("FP16 training requires CUDA")
-    prepare_device=("cuda" if torch.cuda.is_available() else "cpu") if args.prepare_device=="auto" else args.prepare_device
+    from .acceleration import audio_runtime
+    prepare_device=audio_runtime(args.prepare_device,'cuda' if torch.cuda.is_available() else 'cpu')
     cuda_budget = _apply_cuda_budget(args.cuda_memory_budget_gb,
         device.type == 'cuda' or (args.audio_backend == 'mert' and prepare_device == 'cuda'))
     resource_budgets = dict(cuda_memory_budget_gb=cuda_budget, audio_cache_gb=args.audio_cache_gb)
@@ -467,7 +489,7 @@ def train(args):
     if hasattr(model,'onset_readout') and (not parent or onset_migration):
         model.onset_readout.fit_normalization(dataset.songs)
     optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=.01)
-    scaler=torch.amp.GradScaler("cuda",enabled=precision=="fp16")
+    scaler=torch.amp.GradScaler(device.type if device.type=='xpu' else 'cuda',enabled=precision=="fp16")
     state=dict(epoch=0,batch_cursor=0,optimizer_steps=0,update_attempts=0,best_loss=None,last_loss=None,epoch_loss_sum=0.,epoch_weight_sum=0.)
     if args.resume:
         optimizer.load_state_dict(parent["optimizer_state_dict"])
@@ -531,6 +553,7 @@ def train(args):
     group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;stop=False
     time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
     if device.type=="cuda":torch.cuda.reset_peak_memory_stats(device)
+    elif device.type=='xpu':torch.xpu.reset_peak_memory_stats(device)
     for epoch in range(int(state["epoch"]),args.epochs):
         sampler.set_epoch(epoch)
         cursor=int(state["batch_cursor"]) if epoch==state["epoch"] else 0
@@ -594,7 +617,8 @@ def train(args):
                     data_sec=data_sec,compute_sec=compute_sec,compute_measurement="host_submission_wall_including_update_boundary_wait",
                     prefetch={"consumer_wait_sec":data_sec,"max_batches":1},elapsed_sec=elapsed,lr=optimizer.param_groups[0]["lr"],
                     audio_banks=dataset.audio_store.mapping_stats(),
-                    gpu_peak_bytes=torch.cuda.max_memory_allocated(device) if device.type=="cuda" else 0)
+                    gpu_peak_bytes=(torch.cuda.max_memory_allocated(device) if device.type=="cuda" else
+                                    torch.xpu.max_memory_allocated(device) if device.type=='xpu' else 0))
             if boundary and finite and state["optimizer_steps"]%args.checkpoint_interval_steps==0:checkpoint()
             if boundary and args.max_steps and state["update_attempts"]>=args.max_steps:
                 stop=True;break

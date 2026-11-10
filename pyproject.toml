@@ -30,6 +30,9 @@ training = [
 training-speed = [
   "numba>=0.61"
 ]
+intel-acceleration = [
+  "openvino>=2026.0,<2027"
+]
 composer-v2-music = [
   "librosa>=0.10.2",
   "torch>=2.4",

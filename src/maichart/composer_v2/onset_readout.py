@@ -91,13 +91,14 @@ def apply_phase_evidence(logits, scores, queries, token_ids, *, start=0, strengt
     if not selected:
         return logits
     rows, positions, tiles = torch.tensor(selected, device=logits.device, dtype=torch.long).unbind(1)
-    old = logits[rows, positions].float().index_select(1, token_ids)
+    flat_positions = rows * logits.size(1) + positions
+    selected_logits = logits.flatten(0, 1).index_select(0, flat_positions).float()
+    old = selected_logits.index_select(1, token_ids)
     change = scores.index_select(0, tiles) * strength
     shifted = old + change
     # Subtract the CHANGE in group mass. In particular, zero initialization is
     # exactly zero; do not subtract and re-add the full LSE to each score.
     shift = torch.logsumexp(shifted, -1) - torch.logsumexp(old, -1)
     updated = shifted - shift[:, None]
-    result = logits.float().clone()
-    result[rows[:, None], positions[:, None], token_ids[None, :]] = updated
-    return result
+    selected_logits = selected_logits.index_copy(1, token_ids, updated)
+    return logits.float().flatten(0, 1).index_copy(0, flat_positions, selected_logits).reshape_as(logits)

@@ -52,6 +52,7 @@ function composerV2GenerationPayload(options={}) {
     phrase_beats:number('#v2GeneratePhraseBeats',4,'提前试写长度',{min:1,max:16}),
     phrase_commit_beats:number('#v2GeneratePhraseCommitBeats',2,'每次保留长度',{min:0,exclusiveMin:true,max:16}),
     candidates:number('#v2GenerateCandidates',2,'每次比较几种写法',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
+    audio_device:valueOrDefault("#v2GenerateAudioDevice","auto"),inference_backend:valueOrDefault("#v2GenerateInferenceBackend","auto"),
     rollback_windows:number('#v2GenerateRollbackWindows',2,'冲突恢复次数',{min:0,max:8,integer:true}),
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
     tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),

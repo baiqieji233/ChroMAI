@@ -59,7 +59,9 @@ def inspect_environment(profile='composer-v2', importer=importlib.import_module,
             errors.append('Dynamic tempo tracking requires librosa>=0.10.2')
     return dict(ok=not errors,python=sys.executable,profile=profile,torch=version,
         torchaudio=str(audio.__version__) if audio is not None else None,
-        cuda=getattr(getattr(torch,'version',None),'cuda',None),cuda_required=cuda_required,gpu_ok=gpu_ok,errors=errors)
+        cuda=getattr(getattr(torch,'version',None),'cuda',None),
+        xpu_available=bool(torch is not None and hasattr(torch,'xpu') and torch.xpu.is_available()),
+        cuda_required=cuda_required,gpu_ok=gpu_ok,errors=errors)
 
 
 def install_command(report):
@@ -93,8 +95,13 @@ def main(argv=None):
     if hardware:print('NVIDIA hardware:',hardware,flush=True)
     print('Python:',report['python'],flush=True)
     print('PyTorch:',report['torch'],'TorchAudio:',report['torchaudio'],'CUDA build:',report['cuda'],flush=True)
-    if report['torch'] and not report['cuda']:
+    if report.get('xpu_available'):
+        print('Intel XPU: available for Composer v2 training',flush=True)
+    elif report['torch'] and not report['cuda']:
         print('CPU-only PyTorch: choose CPU/auto in WebUI. GPU setup: START_WEBUI.bat --cuda',flush=True)
+    from maichart.composer_v2.acceleration import openvino_devices
+    devices=openvino_devices()
+    if devices:print('OpenVINO inference devices:',', '.join(devices),flush=True)
     if report['ok']:
         print('Startup dependencies: OK',flush=True);return 0
     for error in report['errors']:print('Dependency error:',error,file=sys.stderr,flush=True)

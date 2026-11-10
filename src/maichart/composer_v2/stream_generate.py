@@ -493,6 +493,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
+    if report['cpu_runtime'] is not None:report['cpu_runtime']['actual_threads']=torch.get_num_threads()
+    report['acceleration']=getattr(getattr(model,'_decoder_runtime',None),'report',None)
     report['candidate_probability_audit']=dict(requested=bool(getattr(args,'record_candidate_probabilities',False)),
         status='recorded' if getattr(args,'record_candidate_probabilities',False) and phrase_count else
             'no_trial_competition' if getattr(args,'record_candidate_probabilities',False) else 'disabled',
@@ -543,5 +545,5 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','phrase_search','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','record_candidate_probabilities')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','record_candidate_probabilities','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

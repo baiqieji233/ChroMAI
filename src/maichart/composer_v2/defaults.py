@@ -8,7 +8,7 @@ TRAIN_DEFAULTS = dict(epochs=50, batch_size=8, grad_accumulation=8, lr=.0002,
     lr_schedule='cosine', warmup_steps=200, min_lr_ratio=.1, d_model=384, layers=8,
     nhead=8, dim_feedforward=1536, dropout=.1, window_beats=16, history_beats=16,
     future_beats=4, ticks_per_beat=48, max_tokens=2048, audio_backend='mert',
-    prepare_device='auto', device='auto', precision='bf16', validation_max_batches=0,
+    prepare_device='auto', device='auto', precision='auto', validation_max_batches=0,
     checkpoint_interval_steps=500, save_every=5, early_stopping_patience=5, log_interval=20, seed=0, max_steps=0,
     limit_charts=0, cpu_threads=2, cuda_memory_budget_gb=0., audio_cache_gb=.25)
 ENCODER_DEFAULTS = dict(audio_layers=4,song_layers=2)

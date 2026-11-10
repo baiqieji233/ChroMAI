@@ -28,3 +28,27 @@ def configure_threads(requested,device,parallel=1):
     if torch.get_num_threads()!=report['threads']:torch.set_num_threads(report['threads'])
     print('composer_v2_cpu_threads '+json.dumps(report),flush=True)
     return report
+
+
+def configure_model(model, args, device):
+    """Attach runtime-only acceleration after loading/moving checkpoint weights."""
+    requested=getattr(args,'inference_backend','auto')
+    if getattr(model,'_inference_backend',None)==requested:
+        runtime=getattr(model,'_decoder_runtime',None)
+        if runtime is not None and runtime.selected is not None:
+            import torch
+            torch.set_num_threads(runtime.threads)
+        return
+    model._inference_backend=requested
+    model._decoder_runtime=None
+    if str(device)!='cpu' or requested=='torch':
+        if str(device)!='cpu' and requested not in ('auto','torch'):
+            raise ValueError('OpenVINO decoder requires --device cpu (audio device is independent)')
+        return
+    from .acceleration import openvino_devices
+    if not openvino_devices():
+        if requested!='auto':
+            raise RuntimeError('OpenVINO unavailable; install the intel-acceleration extra')
+        return
+    from .openvino_decoder import DecoderRuntime
+    model._decoder_runtime=DecoderRuntime(model,args)

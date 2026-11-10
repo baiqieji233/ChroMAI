@@ -62,6 +62,11 @@ def parser():
     result.add_argument('--record-candidate-probabilities',action='store_true',default=GENERATION_DEFAULTS['record_candidate_probabilities'],
                         help='Record diagnostic candidate probabilities; does not change ranking (extra work and output)')
     result.add_argument('--device', choices=('auto', 'cpu', 'cuda'), default='auto')
+    from .acceleration import AUDIO_DEVICES
+    result.add_argument('--audio-device', choices=AUDIO_DEVICES, default='auto',
+                        help='MERT device; auto prefers CUDA, then OpenVINO Intel GPU/NPU, then CPU')
+    result.add_argument('--inference-backend', choices=('auto','torch','openvino-cpu','openvino-gpu'), default='auto',
+                        help='Incremental decoder backend; auto benchmarks available backends once')
     result.add_argument('--cpu-threads', type=int, default=GENERATION_DEFAULTS['cpu_threads'],
                         help='CPU operator threads per process; 0 automatically budgets across parallel charts')
     result.add_argument('--max-events', type=int, default=0)
@@ -84,18 +89,18 @@ def _sample(logits, allowed, generator, temperature, top_p):
     if not allowed:
         raise ValueError('Component grammar has no legal continuation')
     allowed = torch.as_tensor(sorted(set(allowed)), dtype=torch.long, device=logits.device)
-    values = logits[allowed].float()
+    values = logits.index_select(0,allowed).float()
     if not torch.isfinite(values).all():
         raise ValueError('Nonfinite component logits')
     if temperature == 0:
-        return int(allowed[values.argmax()])
+        return int(allowed.gather(0,values.argmax().reshape(1)).item())
     probabilities = torch.softmax(values / temperature, dim=-1)
     probabilities, order = torch.sort(probabilities, descending=True)
     keep = probabilities.cumsum(-1) - probabilities < top_p
     probabilities = probabilities * keep
     probabilities = probabilities / probabilities.sum()
     selected = torch.multinomial(probabilities, 1, generator=generator)
-    return int(allowed[order[selected]].item())
+    return int(allowed.gather(0,order.gather(0,selected)).item())
 
 
 def _device_batch(item, device):
@@ -410,6 +415,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     if model_override is None:
         model.load_state_dict(payload['model_state_dict'], strict=True)
     model = model.to(device).eval()
+    from .inference_runtime import configure_model
+    configure_model(model, args, device)
     rng = torch.Generator(device=device).manual_seed(int(args.seed))
     end_value = float(_beats_at_seconds(clock, [audio.duration_sec])[0])
     if end_value <= 0:
@@ -517,6 +524,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     output.write_text(text, encoding='utf-8')
     metadata = dict(family='chart_composer_v2', checkpoint=str(Path(args.checkpoint).resolve()),
         checkpoint_info=checkpoint_info,cpu_runtime=args.cpu_runtime,
+        acceleration=getattr(getattr(model,'_decoder_runtime',None),'report',None),
         audio=str(audio_path), output=str(output), seed=args.seed, level=args.level,
         first=first,timing=timing_report,tempo_map=[dict(beat=str(t.beat), bpm=t.bpm) for t in tempo],
         meter_map=getattr(args, 'meter_map', None), meter_policy='metadata_only_no_fixed_4_4_condition',
@@ -541,12 +549,14 @@ def prepare_inputs(args,config,device,audio_store_override=None):
     """Read once per batch; feature preparation is independent of chart seed."""
     from .audio import AudioFeatureStore
     from .tempo import resolve_timing
+    from .acceleration import audio_runtime
     audio_path=Path(args.audio).resolve()
     tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
         first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',
         tempo_detection=getattr(args,'tempo_detection','auto'))
     store=audio_store_override if audio_store_override is not None else AudioFeatureStore(
-        args.cache_dir,backend=config.audio_backend,model_path=config.mert_model,device=device)
+        args.cache_dir,backend=config.audio_backend,model_path=config.mert_model,
+        device=audio_runtime(getattr(args,'audio_device','auto'),device))
     try:
         store.prepare(audio_path)
         audio=store.load(audio_path)
