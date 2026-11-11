@@ -22,6 +22,7 @@ from pathlib import Path
 from maichart.training.dataset_catalog import _absolutize_song_paths, _write_json
 from maichart.training.quality_annotations import (
     chart_sha256, audio_sha256, iter_catalog, region_component_weights,
+    zero_unmarked_region_weights,
 )
 
 SCHEMA = "maichart-candidate-pool-v1"
@@ -125,13 +126,21 @@ def _reference_features(path, index, signature):
 
 
 def _valid_regions(record):
+    if not isinstance(record, dict):
+        return []
+    if record.get("label") in {"excluded", "negative"}:
+        return []
+    try:
+        outer_weight = float(record.get("weight", 1.0))
+    except (TypeError, ValueError):
+        return []
+    if not math.isfinite(outer_weight) or outer_weight <= 0:
+        return []
     result = []
-    for region in (record or {}).get("regions", []):
-        if region.get("label") == "uncertain" or region.get("training_use") == "none":
-            continue
+    for region in record.get("regions", []):
         try:
             a, b = float(region["start_sec"]), float(region["end_sec"])
-            t, c = region_component_weights(region)
+            t, c = zero_unmarked_region_weights(region)
             if all(math.isfinite(x) for x in (a, b, t, c)) and 0 <= a < b and (t > 0 or c > 0):
                 result.append(region)
         except (KeyError, ValueError, TypeError):
@@ -537,6 +546,7 @@ def pool_status(pool_dir):
     source_changed = metadata.get("source_manifest_stat") != stat_once(metadata.get("source_manifest"))
     counts = dict(charts=0, error=0, suspicious=0, ok=0, pending=0, stale=0, duplicate=len(metadata.get("excluded", [])))
     regions = []
+    decisions = dict(learn_all=0, exclude=0, partial=0)
     timing_heads = layout_heads = 0.
     for song, difficulty, index in _charts(manifest, payload):
         counts["charts"] += 1
@@ -552,6 +562,12 @@ def pool_status(pool_dir):
                 record.get("audio_sha256") != identity.get("audio_sha256")):
             continue
         valid_regions = _valid_regions(record)
+        if record.get('label') in {'excluded','negative'} or record.get('weight',1.) <= 0:
+            decisions['exclude'] += 1
+        elif record.get('candidate_chart_review') == 'learn_all':
+            decisions['learn_all'] += 1
+        elif valid_regions:
+            decisions['partial'] += 1
         regions.extend(valid_regions)
         if (not metadata.get("scan_complete") or not valid_regions or
                 difficulty.get("candidate_status") not in {"ok", "suspicious"}):
@@ -559,7 +575,7 @@ def pool_status(pool_dir):
         try:
             weighted_regions = []
             for region in record.get("regions", []):
-                t, c = region_component_weights(region) if region in valid_regions else (0., 0.)
+                t, c = zero_unmarked_region_weights(region) if region in valid_regions else (0., 0.)
                 weighted_regions.append((float(region["start_sec"]), float(region["end_sec"]), max(0., t), max(0., c)))
             weight = max(0., float(record.get("weight", 1.)))
             for sec, count in _head_events(song["maidata_path"], index):
@@ -569,13 +585,13 @@ def pool_status(pool_dir):
                     layout_heads += region[3] * count * weight
         except (OSError, ValueError, UnicodeError):
             pass
-    return dict(metadata, pool_dir=str(root), manifest=str(root / "training_manifest.json"), counts=counts,
+    return dict(metadata, pool_dir=str(root), manifest=str(root / "training_manifest.json"), counts=counts, decisions=decisions,
                 stale=bool(counts["stale"]), confirmed_regions=len(regions),
                 reviewable_charts=counts["ok"] + counts["suspicious"] if metadata.get("scan_complete") else 0,
                 supervision=dict(unit="weighted_note_heads_approximation", timing_note_heads=timing_heads,
                                  layout_note_heads=layout_heads),
-                timing_regions=sum(region_component_weights(r)[0] > 0 for r in regions),
-                layout_regions=sum(region_component_weights(r)[1] > 0 for r in regions))
+                timing_regions=sum(zero_unmarked_region_weights(r)[0] > 0 for r in regions),
+                layout_regions=sum(zero_unmarked_region_weights(r)[1] > 0 for r in regions))
 
 
 def review_queue(pool_dir, offset=0, limit=1, *, status=None):
@@ -599,6 +615,9 @@ def review_queue(pool_dir, offset=0, limit=1, *, status=None):
         except OSError:
             continue
         record = next((r for r in records if r.get("chart_id") == result["chart_id"]), {})
+        if (record.get('label') in {'excluded','negative'} or record.get('weight',1.) <= 0
+                or record.get('candidate_chart_review') in {'learn_all','exclude'}):
+            continue
         segments = []
         for segment in result.get("segments", []):
             if segment.get("queue_eligible") is False or segment.get("onsets", 0) < 2:
@@ -782,8 +801,8 @@ def supervision_budget(manifests, *, _accepted=None, progress=None):
                     record = None
             if not candidate and not (record or {}).get("regions") and difficulty.get("note_count") is not None:
                 count = max(0., float(difficulty["note_count"]))
-                weight = (max(0., float((record or {}).get("weight", 1.))) *
-                          max(0., float((record or {}).get("unmarked_weight", 1.))))
+                outer = 0. if (record or {}).get("label") in {"excluded", "negative"} else max(0., float((record or {}).get("weight", 1.)))
+                weight = outer * max(0., float((record or {}).get("unmarked_weight", 1.)))
                 timing += count * weight
                 layout += count * weight
                 chart_count += 1
@@ -794,12 +813,14 @@ def supervision_budget(manifests, *, _accepted=None, progress=None):
                 warnings.append(dict(manifest=str(manifest), source_path=song["maidata_path"], reason=str(exc)))
                 continue
             chart_count += 1
-            base = 0. if candidate else float((record or {}).get("unmarked_weight", 1.))
-            weight = max(0., float((record or {}).get("weight", 1.)))
+            zero_unmarked = candidate or (record or {}).get("unmarked_weight") == 0
+            base = 0. if zero_unmarked else float((record or {}).get("unmarked_weight", 1.))
+            weight = 0. if (record or {}).get("label") in {"excluded", "negative"} else max(0., float((record or {}).get("weight", 1.)))
             valid_regions = _valid_regions(record) if candidate else None
             regions = []
             for region in (record or {}).get("regions", []):
                 t, c = ((0., 0.) if candidate and region not in valid_regions
+                        else zero_unmarked_region_weights(region) if zero_unmarked
                         else region_component_weights(region))
                 regions.append((float(region["start_sec"]), float(region["end_sec"]), max(0., t), max(0., c)))
             for sec, count in heads:

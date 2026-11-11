@@ -279,6 +279,12 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .candidate-pool-panel label { display: block; margin: 8px 0; }
 .candidate-pool-panel .checkbox-field { display: flex; }
 .candidate-pool-card { border-top: 1px solid #dce4ef; margin-top: 10px; padding-top: 6px; }
+.material-workflow { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 12px; list-style-position: inside; padding: 0; margin: 16px 0; }
+.material-workflow li { background: #f5f8fd; border: 1px solid #dce4ef; border-radius: 8px; padding: 12px; }
+.material-workflow span { display: block; margin-top: 6px; color: var(--muted); line-height: 1.6; }
+.candidate-chart-actions,.candidate-training-actions { border-top: 1px solid #cbd7e7; margin-top: 14px; padding-top: 10px; }
+.candidate-chart-actions h4 { margin: 4px 0; }
+@media(max-width:800px) { .material-workflow { grid-template-columns: 1fr; } }
 #candidatePoolExcludedList { max-height: 280px; overflow: auto; white-space: pre-wrap; }
 #candidatePoolIssues, #candidatePoolReviewStatus { white-space: pre-wrap; }
 .task-generation-progress { margin: 12px 0; }

@@ -11,6 +11,7 @@ from collections.abc import Mapping
 
 CONFLICT_KINDS = (
     "MultiTouch",
+    "TouchMultiAction",
     "Overlap",
     "TapOnSlide",
     "SlideHeadTap",
@@ -22,8 +23,8 @@ CONFLICT_ACTIONS = ("off", "report", "enforce")
 def validate_kind_modes(modes):
     """Validate and normalize ``conflict_kind_modes``.
 
-    ``None`` is deliberately preserved as the legacy policy (all five kinds
-    enforce).  A mapping may omit kinds; omitted entries also default to
+    ``None`` is deliberately preserved as the legacy policy (all detected kinds
+    enforce). A mapping may omit kinds; omitted entries also default to
     ``enforce`` so adding a new call site cannot silently disable a check.
     """
     if modes is None:

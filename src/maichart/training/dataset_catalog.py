@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import json
+import math
 import os
 import tempfile
 import threading
@@ -105,6 +106,105 @@ def _namespaced_chart_id(song_id: str, difficulty_index: int, chart_hash: str,
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
+def _extract_zero_unmarked_contributions(record: dict[str, Any]) -> tuple[float, list[dict[str, Any]]] | None:
+    from maichart.training.quality_annotations import (
+        DEFAULT_WEIGHTS, LABELS, _validate_regions, zero_unmarked_region_weights,
+    )
+    if not isinstance(record, dict):
+        return None
+    label = str(record.get("label", "normal"))
+    if label not in LABELS:
+        raise ValueError(f"未知质量标签: {label}")
+    if label in {"excluded", "negative"}:
+        return None
+    try:
+        outer_weight = float(record.get("weight", DEFAULT_WEIGHTS[label]))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("weight 必须是有限数字") from exc
+    if not math.isfinite(outer_weight) or outer_weight < 0 or outer_weight > 4:
+        raise ValueError("weight 必须在 0–4 之间")
+    if outer_weight <= 0:
+        return None
+    raw_regions = record.get("regions", [])
+    if not isinstance(raw_regions, list):
+        raise ValueError("regions 必须是数组")
+    validated = _validate_regions(raw_regions)
+    contribs: list[dict[str, Any]] = []
+    for raw_row, val_row in zip(raw_regions, validated):
+        t, c = zero_unmarked_region_weights(val_row)
+        eff_t = outer_weight * t
+        eff_c = outer_weight * c
+        if not (eff_t > 0 or eff_c > 0):
+            continue
+        entry_start = val_row.get("entry_start_sec") if eff_t > 0 and "entry_start_sec" in val_row else None
+        contribs.append({
+            "start_sec": float(val_row["start_sec"]),
+            "end_sec": float(val_row["end_sec"]),
+            "eff_timing": eff_t,
+            "eff_component": eff_c,
+            "entry_start_sec": float(entry_start) if entry_start is not None else None,
+        })
+    if not contribs:
+        return None
+    return outer_weight, contribs
+
+
+def _merge_zero_unmarked_contributions(contribs: list[dict[str, Any]]) -> tuple[float, list[dict[str, Any]]]:
+    from maichart.training.quality_annotations import _validate_regions
+    bounds = sorted({float(row[key]) for row in contribs for key in ("start_sec", "end_sec")})
+    raw_spans: list[dict[str, Any]] = []
+    peak_eff = 0.0
+    for start, end in zip(bounds, bounds[1:]):
+        covering = [row for row in contribs if row["start_sec"] <= start and end <= row["end_sec"]]
+        if not covering:
+            continue
+        eff_t = max((float(row["eff_timing"]) for row in covering), default=0.0)
+        eff_c = max((float(row["eff_component"]) for row in covering), default=0.0)
+        if not (eff_t > 0 or eff_c > 0):
+            continue
+        peak_eff = max(peak_eff, eff_t, eff_c)
+        entries = [
+            float(row["entry_start_sec"])
+            for row in covering
+            if row.get("entry_start_sec") is not None and float(row["eff_timing"]) > 0
+            and float(row["entry_start_sec"]) <= start + 1e-9
+        ]
+        raw_spans.append({
+            "start_sec": start,
+            "end_sec": end,
+            "eff_timing": eff_t,
+            "eff_component": eff_c,
+            "entry_start_sec": min(entries) if entries and eff_t > 0 else None,
+        })
+    outer_weight = 1.0 if peak_eff <= 16.0 else min(4.0, peak_eff / 16.0)
+    result: list[dict[str, Any]] = []
+    for span in raw_spans:
+        t_scaled = span["eff_timing"] / outer_weight
+        c_scaled = span["eff_component"] / outer_weight
+        reg_weight = min(4.0, max(1.0, max(t_scaled, c_scaled) / 4.0))
+        merged_row: dict[str, Any] = {
+            "start_sec": span["start_sec"],
+            "end_sec": span["end_sec"],
+            "label": "good",
+            "reason": "",
+            "weight": reg_weight,
+            "timing_weight": min(4.0, t_scaled / reg_weight),
+            "component_weight": min(4.0, c_scaled / reg_weight),
+        }
+        if span["entry_start_sec"] is not None:
+            merged_row["entry_start_sec"] = span["entry_start_sec"]
+        if (
+            result
+            and result[-1]["end_sec"] == span["start_sec"]
+            and {k: v for k, v in result[-1].items() if k not in ("start_sec", "end_sec")}
+            == {k: v for k, v in merged_row.items() if k not in ("start_sec", "end_sec")}
+        ):
+            result[-1]["end_sec"] = span["end_sec"]
+        else:
+            result.append(merged_row)
+    return outer_weight, _validate_regions(result)
+
+
 def merge_training_manifests(
     manifest_paths: list[str | Path],
     output_path: str | Path,
@@ -113,6 +213,7 @@ def merge_training_manifests(
     dataset_names: list[str] | None = None,
     merge_annotations: bool = True,
     model_family: str | None = None,
+    _composition_identity: str | None = None,
 ) -> dict[str, Any]:
     """Merge compatible manifests for one training run.
 
@@ -151,7 +252,14 @@ def merge_training_manifests(
         if id_counts[source_id] > 1:
             source_id = f"{source_id}-{hashlib.sha1(str(path).encode('utf-8')).hexdigest()[:8]}"
         normalized_loaded.append((path, payload, source_id, source_name))
-    loaded = sorted(normalized_loaded, key=lambda item: (bool(item[1].get("candidate_pool")), str(item[0]).casefold()))
+    loaded = sorted(
+        normalized_loaded,
+        key=lambda item: (
+            bool(item[1].get("candidate_pool") or item[1].get("reviewed_training")),
+            bool(item[1].get("reviewed_training")),
+            str(item[0]).casefold(),
+        ),
+    )
 
     contracts = [_contract(payload, manifest_path) for manifest_path, payload, _, _ in loaded]
     reference = contracts[0]
@@ -171,10 +279,55 @@ def merge_training_manifests(
                 "请使用相同模型族、采样率和音频特征重新预处理这些数据集。"
             )
 
+    if not merge_annotations and any(
+        payload.get("candidate_pool")
+        or payload.get("reviewed_training")
+        or any(isinstance(s, dict) and (s.get("reviewed_only") or s.get("candidate_pool")) for s in payload.get("songs", ()))
+        for _, payload, _, _ in loaded
+    ):
+        raise ValueError("候选库或人工确认片段必须保留并合并质量标注；未确认部分仅作上下文")
+
+    from maichart.training.quality_annotations import (
+        _auto_annotation_owner, annotations_fingerprint, audio_sha256, auto_annotation_path, chart_sha256,
+        remove_composed_auto_annotations, resolve_auto_annotations, save_auto_annotations,
+        zero_unmarked_region_weights,
+    )
+    chart_hash_cache: dict[tuple[str, int], str | None] = {}
+    audio_hash_cache: dict[str, str | None] = {}
+
+    def _disk_chart_sha(path: Path, slot: int) -> str | None:
+        key = (str(path), int(slot))
+        if key not in chart_hash_cache:
+            try:
+                chart_hash_cache[key] = chart_sha256(path, slot)
+            except (OSError, ValueError, UnicodeError):
+                chart_hash_cache[key] = None
+        return chart_hash_cache[key]
+
+    def _disk_audio_sha(path_str: Any) -> str | None:
+        if not path_str:
+            return None
+        resolved = Path(str(path_str)).resolve()
+        key = str(resolved)
+        if key not in audio_hash_cache:
+            try:
+                audio_hash_cache[key] = audio_sha256(resolved) if resolved.is_file() else None
+            except OSError:
+                audio_hash_cache[key] = None
+        return audio_hash_cache[key]
+
     output = Path(output_path).resolve()
     songs: list[dict[str, Any]] = []
     seen_charts: set[tuple[str, int]] = set()
+    zero_owner_keys: set[tuple[str, int]] = set()
+    zero_content_owners: dict[tuple[str, str, int], tuple[str, int]] = {}
+    zero_owner_records: dict[tuple[str, int], dict[str, Any]] = {}
+    zero_owner_hashes: dict[tuple[str, int], str] = {}
+    zero_contributions: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    zero_contributor_counts: dict[tuple[str, int], int] = {}
     annotation_records: list[dict[str, Any]] = []
+    auto_sources: dict[str, dict[str, Any]] = {}
+    auto_candidates: dict[tuple[str, int], list[tuple[str, dict[str, Any]]]] = {}
     source_entries: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     owners: dict[tuple[str, int], dict[str, Any]] = {}
@@ -182,7 +335,10 @@ def merge_training_manifests(
     multi_source = len(loaded) > 1
     for manifest_path, payload, source_id, source_name in loaded:
         is_candidate = bool(payload.get("candidate_pool"))
+        is_reviewed_manifest = bool(payload.get("reviewed_training"))
         candidate_records = []
+        manifest_records_by_key: dict[tuple[str, int], dict[str, Any]] = {}
+        auto_records_by_key: dict[tuple[str, int], list[dict[str, Any]]] = {}
         source_root_path = _source_root(manifest_path, payload)
         source_entries.append({
             "dataset_id": source_id, "name": source_name,
@@ -207,10 +363,37 @@ def merge_training_manifests(
                                     copied_record[key] = str(_source_asset(copied_record[key], manifest_path, payload))
                             annotation_records.append(copied_record)
                             candidate_records.append(copied_record)
+                            try:
+                                rec_key = (str(Path(str(copied_record.get("source_path", ""))).resolve()),
+                                           int(copied_record.get("difficulty_index")))
+                                manifest_records_by_key[rec_key] = copied_record
+                            except (TypeError, ValueError, OSError):
+                                pass
                 except (OSError, json.JSONDecodeError) as exc:
                     raise ValueError(f"无法读取质量标注 {annotation_file}：{exc}") from exc
+            if not (is_candidate or is_reviewed_manifest):
+                auto_file, auto_payload = resolve_auto_annotations(manifest_path, payload)
+                if auto_payload is not None:
+                    annotation_owner = _auto_annotation_owner(auto_file, auto_payload)
+                    owner_payload = payload
+                    if annotation_owner != manifest_path and annotation_owner.is_file():
+                        owner_payload = json.loads(annotation_owner.read_text(encoding="utf-8-sig"))
+                    auto_sources[str(manifest_path)] = {
+                        "source_manifest": str(manifest_path),
+                        "audit_manifest": str(annotation_owner),
+                        "audit_metadata": auto_payload.get("audit_metadata", {}),
+                    }
+                    for record in auto_payload["records"]:
+                        if not record.get("source_path") or "difficulty_index" not in record:
+                            continue
+                        for key in ("source_path", "audio_path"):
+                            if record.get(key):
+                                record[key] = str(_source_asset(record[key], annotation_owner, owner_payload))
+                        key = (record["source_path"], record["difficulty_index"])
+                        auto_records_by_key.setdefault(key, []).append(record)
         for song in payload.get("songs", []):
             copied = copy.deepcopy(song)
+            is_reviewed = is_reviewed_manifest or bool(copied.get("reviewed_only"))
             original_song_id = str(copied.get("song_id") or "unknown")
             copied["original_song_id"] = original_song_id
             copied["source_dataset"] = {"id": source_id, "name": source_name}
@@ -233,12 +416,100 @@ def merge_training_manifests(
                 except (TypeError, ValueError):
                     index = -1
                 chart_key = (str(maidata_path), index)
-                if is_candidate:
-                    from maichart.training.candidate_pool import candidate_record
-                    if candidate_record(manifest_path, copied, difficulty, candidate_records) is None:
-                        warnings.append({"reason": "candidate_not_approved_or_stale", "source_path": str(maidata_path),
-                                         "difficulty_index": index, "source_manifest": str(manifest_path)})
-                        continue
+                if not (is_reviewed or is_candidate or song.get("candidate_pool")):
+                    for record in auto_records_by_key.get(chart_key, ()):
+                        if record.get("audio_path") == copied.get("audio_path") or not record.get("audio_path"):
+                            auto_candidates.setdefault(chart_key, []).append((str(manifest_path), record))
+                # An ordinary source already owning the exact physical slot always wins over later duplicates.
+                if chart_key in seen_charts and chart_key not in zero_owner_keys:
+                    duplicate_count += 1
+                    if owners[chart_key].get("audio_path") != copied.get("audio_path"):
+                        raise ValueError(f"同一原谱槽位指向不同音频：{maidata_path}:{index}，请统一数据源")
+                    warnings.append({"reason": "duplicate_source_chart", "source_path": str(maidata_path),
+                                     "difficulty_index": index, "source_manifest": str(manifest_path)})
+                    continue
+                rec_for_chart = manifest_records_by_key.get(chart_key) or {}
+                is_strict_zero = is_candidate or is_reviewed
+                is_zero_source = is_strict_zero or (bool(rec_for_chart) and rec_for_chart.get("unmarked_weight") == 0)
+                if is_zero_source:
+                    if is_candidate:
+                        from maichart.training.candidate_pool import candidate_record
+                        cand_rec = candidate_record(manifest_path, copied, difficulty, candidate_records)
+                        if cand_rec is None:
+                            warnings.append({"reason": "candidate_not_approved_or_stale", "source_path": str(maidata_path),
+                                             "difficulty_index": index, "source_manifest": str(manifest_path)})
+                            continue
+                        rec_for_chart = cand_rec
+                    if not rec_for_chart:
+                        if is_strict_zero:
+                            warnings.append({"reason": "reviewed_not_approved_or_stale", "source_path": str(maidata_path),
+                                             "difficulty_index": index, "source_manifest": str(manifest_path)})
+                            continue
+                    else:
+                        valid_c_sha = _disk_chart_sha(maidata_path, index)
+                        if not valid_c_sha or rec_for_chart.get("chart_sha256") != valid_c_sha:
+                            if is_strict_zero:
+                                warnings.append({"reason": "stale_quality_annotation", "source_path": str(maidata_path),
+                                                 "difficulty_index": index, "source_manifest": str(manifest_path)})
+                                continue
+                            is_zero_source = False
+                        elif rec_for_chart.get("audio_path") and rec_for_chart["audio_path"] != copied.get("audio_path"):
+                            if is_strict_zero:
+                                warnings.append({"reason": "quality_audio_changed", "source_path": str(maidata_path),
+                                                 "difficulty_index": index, "source_manifest": str(manifest_path)})
+                                continue
+                            is_zero_source = False
+                        else:
+                            valid_a_sha = _disk_audio_sha(copied.get("audio_path"))
+                            cand_ident = difficulty.get("candidate_identity") if isinstance(difficulty.get("candidate_identity"), dict) else {}
+                            expected_a_sha = rec_for_chart.get("audio_sha256") or cand_ident.get("audio_sha256")
+                            if expected_a_sha and (not valid_a_sha or expected_a_sha != valid_a_sha):
+                                if is_strict_zero:
+                                    warnings.append({"reason": "quality_audio_changed", "source_path": str(maidata_path),
+                                                     "difficulty_index": index, "source_manifest": str(manifest_path)})
+                                    continue
+                                is_zero_source = False
+                            if is_zero_source:
+                                extracted = _extract_zero_unmarked_contributions(rec_for_chart)
+                                if extracted is None:
+                                    warnings.append({"reason": "reviewed_excluded_or_empty", "source_path": str(maidata_path),
+                                                     "difficulty_index": index, "source_manifest": str(manifest_path)})
+                                    if is_strict_zero:
+                                        continue
+                                    is_zero_source = False
+                                else:
+                                    _, contribs = extracted
+                                    content_key = (valid_c_sha, valid_a_sha, index) if valid_c_sha and valid_a_sha else None
+                                    if chart_key in zero_owner_keys:
+                                        duplicate_count += 1
+                                        if owners[chart_key].get("audio_path") != copied.get("audio_path"):
+                                            raise ValueError(f"同一原谱槽位指向不同音频：{maidata_path}:{index}，请统一数据源")
+                                        zero_contributions[chart_key].extend(contribs)
+                                        zero_contributor_counts[chart_key] += 1
+                                        warnings.append({"reason": "duplicate_source_chart", "source_path": str(maidata_path),
+                                                         "difficulty_index": index, "source_manifest": str(manifest_path)})
+                                        continue
+                                    if content_key is not None and content_key in zero_content_owners:
+                                        duplicate_count += 1
+                                        owner_key = zero_content_owners[content_key]
+                                        zero_contributions[owner_key].extend(contribs)
+                                        zero_contributor_counts[owner_key] += 1
+                                        warnings.append({"reason": "duplicate_reviewed_content_chart", "source_path": str(maidata_path),
+                                                         "difficulty_index": index, "source_manifest": str(manifest_path)})
+                                        continue
+                                    copied["reviewed_only"] = True
+                                    seen_charts.add(chart_key)
+                                    owners[chart_key] = copied
+                                    zero_owner_keys.add(chart_key)
+                                    zero_owner_records[chart_key] = copy.deepcopy(rec_for_chart)
+                                    zero_owner_hashes[chart_key] = valid_c_sha
+                                    zero_contributions[chart_key] = list(contribs)
+                                    zero_contributor_counts[chart_key] = 1
+                                    if content_key is not None:
+                                        zero_content_owners[content_key] = chart_key
+                                    kept_difficulties.append(difficulty)
+                                    source_entries[-1]["difficulty_count"] += 1
+                                    continue
                 if chart_key in seen_charts:
                     duplicate_count += 1
                     if owners[chart_key].get("audio_path") != copied.get("audio_path"):
@@ -259,7 +530,6 @@ def merge_training_manifests(
     # absolute path, namespace ids exactly as quality catalog does, and reject
     # contradictory labels for a duplicate source chart instead of silently
     # choosing whichever manifest happened to be listed first.
-    from maichart.training.quality_annotations import chart_sha256
     seen_annotation_keys: dict[tuple[str, int], dict[str, Any]] = {}
     accepted_records = []
     training_fields = ("label", "weight", "regions", "chart_sha256", "audio_sha256",
@@ -273,26 +543,32 @@ def merge_training_manifests(
             continue
         record_path = Path(str(record.get("source_path", ""))).resolve()
         key = (str(record_path), index)
+        if key in zero_owner_keys:
+            # Verified zero-unmarked owners are emitted below from their validated contribution table.
+            continue
         owner = owners.get(key)
         # A sidecar may also annotate charts outside this selected split.
         if owner is None:
             continue
-        # Candidate sidecars deliberately contain zero-weight unknown records.
+        # Candidate / reviewed sidecars deliberately contain zero-weight unknown records.
         # They must never override a duplicate owned by an ordinary source.
         if annotation_manifest != owner.get("source_manifest") and any(
-            str(p) == annotation_manifest and data.get("candidate_pool") for p, data, _, _ in loaded
+            str(p) == annotation_manifest and (data.get("candidate_pool") or data.get("reviewed_training"))
+            for p, data, _, _ in loaded
         ):
             continue
-        try:
-            valid_hash = chart_sha256(record_path, index)
-        except (OSError, ValueError, UnicodeError):
-            valid_hash = None
+        valid_hash = _disk_chart_sha(record_path, index)
         if not valid_hash or record.get("chart_sha256") != valid_hash:
             warnings.append({"reason": "stale_quality_annotation", "source_path": str(record_path), "difficulty_index": index})
             continue
         if record.get("audio_path") and record["audio_path"] != owner.get("audio_path"):
             warnings.append({"reason": "quality_audio_changed", "source_path": str(record_path), "difficulty_index": index})
             continue
+        if record.get("audio_sha256"):
+            valid_audio = _disk_audio_sha(owner.get("audio_path"))
+            if not valid_audio or record["audio_sha256"] != valid_audio:
+                warnings.append({"reason": "quality_audio_changed", "source_path": str(record_path), "difficulty_index": index})
+                continue
         prior = seen_annotation_keys.get(key)
         if prior is not None:
             if any(prior.get(field) != record.get(field) for field in training_fields):
@@ -305,7 +581,92 @@ def merge_training_manifests(
         namespace = f"{owner['source_dataset']['id']}\0{owner['source_path_key']}"
         record["chart_id"] = _namespaced_chart_id(owner["song_id"], index, valid_hash, None, namespace)
         accepted_records.append(record)
+
+    for key, owner in owners.items():
+        if key not in zero_owner_keys:
+            continue
+        record_path_str, index = key
+        record = copy.deepcopy(zero_owner_records[key])
+        record.pop("_annotation_manifest", None)
+        record["unmarked_weight"] = 0.0
+        if zero_contributor_counts[key] > 1:
+            merged_weight, merged_regions = _merge_zero_unmarked_contributions(zero_contributions[key])
+            record["label"] = "normal"
+            record["weight"] = merged_weight
+            record["regions"] = merged_regions
+        else:
+            cleaned_regions: list[dict[str, Any]] = []
+            for raw_region in record.get("regions", []):
+                if not isinstance(raw_region, dict):
+                    continue
+                t_w, c_w = zero_unmarked_region_weights(raw_region)
+                if not (t_w > 0 or c_w > 0):
+                    continue
+                kept_region = dict(raw_region)
+                kept_region.setdefault("label", "good")
+                cleaned_regions.append(kept_region)
+            record["regions"] = cleaned_regions
+        valid_hash = zero_owner_hashes[key]
+        record.update({"original_song_id": owner["original_song_id"], "song_id": owner["song_id"],
+                       "source_dataset": owner["source_dataset"], "source_path": record_path_str,
+                       "source_manifest": owner["source_manifest"]})
+        namespace = f"{owner['source_dataset']['id']}\0{owner['source_path_key']}"
+        record["chart_id"] = _namespaced_chart_id(owner["song_id"], index, valid_hash, None, namespace)
+        accepted_records.append(record)
     annotation_records = accepted_records
+
+    # Audits omit clean charts from records. A formal audit on a retained
+    # ordinary source still binds an empty composed sidecar in that case.
+    used_auto_sources = {
+        owner["source_manifest"] for key, owner in owners.items()
+        if key not in zero_owner_keys and not owner.get("candidate_pool")
+    } & auto_sources.keys()
+    auto_records = []
+    for key, candidates in sorted(auto_candidates.items()):
+        owner = owners.get(key)
+        if owner is None or key in zero_owner_keys:
+            continue
+        record_path, index = key
+        chart_hash = _disk_chart_sha(Path(record_path), index)
+        audio_path = owner.get("audio_path")
+        if not chart_hash or not audio_path or not Path(audio_path).is_file():
+            continue
+        # An audit of the retained entry takes precedence over a duplicate
+        # ordinary source's audit of the same physical chart and audio.
+        candidates.sort(key=lambda item: item[0] != owner["source_manifest"])
+        for source_manifest, record in candidates:
+            if record.get("chart_sha256") != chart_hash:
+                continue
+            if record.get("audio_path") and record["audio_path"] != audio_path:
+                continue
+            if record.get("audio_sha256") and record["audio_sha256"] != _disk_audio_sha(audio_path):
+                continue
+            if not (record.get("audio_path") or record.get("audio_sha256")):
+                continue
+            record = {
+                **record,
+                "original_song_id": owner["original_song_id"],
+                "song_id": owner["song_id"],
+                "source_dataset": owner["source_dataset"],
+                "source_manifest": owner["source_manifest"],
+                "audio_path": audio_path,
+            }
+            namespace = f"{owner['source_dataset']['id']}\0{owner['source_path_key']}"
+            record["chart_id"] = _namespaced_chart_id(owner["song_id"], index, chart_hash, None, namespace)
+            auto_records.append(record)
+            used_auto_sources.add(source_manifest)
+            break
+    auto_metadata = {"composed_sources": [
+        metadata for source, metadata in auto_sources.items() if source in used_auto_sources
+    ]}
+    if _composition_identity is not None:
+        if used_auto_sources:
+            _composition_identity = hashlib.sha256(
+                (_composition_identity + annotations_fingerprint({
+                    "records": auto_records, "audit_metadata": auto_metadata,
+                })).encode("ascii")
+            ).hexdigest()
+        output = output / f"composed_{_composition_identity[:16]}" / "training_manifest.json"
 
     merged_preprocessing = {**(loaded[0][1].get("preprocessing") or {}), **{
         key: reference[key]
@@ -375,6 +736,17 @@ def merge_training_manifests(
             [path for path, _, _, _ in loaded],
             _accepted={(owner["source_manifest"], (key[0].casefold(), key[1])) for key, owner in owners.items()},
         )
+    if used_auto_sources:
+        inherited_path = save_auto_annotations(output, auto_records, audit_metadata=auto_metadata, composed=True)
+        legacy_path = auto_annotation_path(output)
+        if _composition_identity is not None and output.is_file() and legacy_path.is_file():
+            previous = json.loads(output.read_text(encoding="utf-8-sig"))
+            if previous.get("auto_quality_annotations") == str(legacy_path):
+                # Preserve the manifest hash of an existing immutable snapshot.
+                inherited_path = legacy_path
+        merged["auto_quality_annotations"] = str(inherited_path)
+    elif _composition_identity is None and all(output != item[0] for item in loaded):
+        remove_composed_auto_annotations(output)
     _write_json(output, merged)
     return merged
 
@@ -428,6 +800,7 @@ def compose_datasets(
             "warnings": [],
         }
     target = Path(output_root).resolve()
+    composition_identity = None
     if target.suffix.lower() != ".json":
         identity = hashlib.sha256()
         for value in sorted(manifests, key=str.casefold):
@@ -437,7 +810,7 @@ def compose_datasets(
             if annotation.is_file():
                 identity.update(annotation.read_bytes())
             candidate_payload = json.loads(Path(value).read_text(encoding="utf-8-sig"))
-            if candidate_payload.get("candidate_pool"):
+            if candidate_payload.get("candidate_pool") or candidate_payload.get("reviewed_training"):
                 # A changed source must never reuse and overwrite the output
                 # identity of an earlier frozen selection.
                 from maichart.training.candidate_pool import _charts, _digest, _stat
@@ -448,11 +821,12 @@ def compose_datasets(
                             identity.update(_digest(asset).encode())
         # A saved label change creates a new snapshot, so checking or preparing
         # another run cannot overwrite a running trainer's annotation file.
-        target = target / f"composed_{identity.hexdigest()[:16]}" / "training_manifest.json"
+        composition_identity = identity.hexdigest()
     with _COMPOSE_LOCK:
         return merge_training_manifests(
             manifests, target, dataset_ids=dataset_ids, dataset_names=dataset_names,
             merge_annotations=True, model_family=model_family,
+            _composition_identity=composition_identity,
         )
 
 

@@ -275,7 +275,11 @@
       sourceSwitch.hidden=value.source_kind!=='training_source' && !trainingEntry;
       sourceSwitch.textContent=value.source_kind==='training_source'?'查看生成结果':'查看训练素材';
     }
-    if (entry?.task_id === value.task_id && entry?.revision === value.revision) return;
+    if (entry?.task_id === value.task_id && entry?.revision === value.revision) {
+      entry = {...entry, annotations: value.annotations, saved_reviews: value.saved_reviews, training_context: value.training_context};
+      window.dispatchEvent(new CustomEvent("chart-preview-annotations-updated", {detail: entry}));
+      return;
+    }
     const previousPath=entry?.task_id===value.task_id?entry.charts[selected]?.path:null;
     ++selectionRequest;release(); failedKey = "";clearRange();pendingSeek=null;pendingPlay=false;lastTransport=null;entry = value;
     selected=Math.max(0,value.charts.findIndex(chart=>chart.path===previousPath));

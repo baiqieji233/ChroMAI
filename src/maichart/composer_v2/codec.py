@@ -81,7 +81,7 @@ def component_inventory(texts):
 
 def _duration_prefix(kind,body):
     """Lexical validity only; native physics remains the final duration check."""
-    if kind=='D:B':return re.fullmatch(r'[+-]?\d*(?:/(?:[1-9]\d*)?)?',body) is not None
+    if kind=='D:B':return re.fullmatch(r'[+-]?(?:\d+(?:/(?:[1-9]\d*)?)?)?',body) is not None
     number=r'[+-]?\d*(?:\.\d*)?'
     # Seconds, explicit wait##travel, and BPM-qualified native durations.
     return any(re.fullmatch(pattern,body) is not None for pattern in (

@@ -16,6 +16,15 @@ class _Node:
     def __init__(self):
         self.children={};self.logits=None;self.choices=();self.cpu_logits=None
         self.blocked=False;self.has_blocked=False;self.survival=None;self.temperature=None
+    def __deepcopy__(self,memo):
+        from copy import deepcopy
+        result=type(self)();memo[id(self)]=result
+        result.children=deepcopy(self.children,memo)
+        # Model outputs are immutable here. Fork rejection bookkeeping without
+        # cloning a GPU tensor for every visited token of every trial branch.
+        for name in ('logits','choices','cpu_logits','blocked','has_blocked','survival','temperature'):
+            setattr(result,name,getattr(self,name))
+        return result
 
 
 class RejectedEventTree:

@@ -15,11 +15,54 @@ import uuid
 import numpy as np
 
 
+RANK_POLICIES = ('comfort_v1', 'comfort_v2', 'likelihood_veto_v1')
+PHRASE_MODES = ('event', 'layout', 'joint', 'hybrid')
+COMFORT_VETO_FLOOR = 0.22
+
+
+class _FixedBeat:
+    """Fix an event's exact beat while leaving note/chord cardinality free."""
+    __slots__ = ('beat', 'note_text', 'beat_only')
+    def __init__(self, beat, note_text='1'):
+        self.beat = beat
+        self.note_text = note_text
+        self.beat_only = True
+
+
+class CheckedEvent(tuple):
+    """A normal event pair bound to its exact already-checked guard transition."""
+    def __new__(cls, point, ids, *, expected_guard, checked_guard):
+        value = super().__new__(cls, (point, ids))
+        value.expected_guard = expected_guard
+        value.checked_guard = checked_guard
+        value._point_key = (point.beat, point.note_text)
+        value._token_ids = tuple(ids)
+        return value
+
+
+def checked_event_guard(candidate, guard):
+    """Reuse a transition only while its input guard and bound event are intact."""
+    if not isinstance(candidate, CheckedEvent) or candidate.expected_guard is not guard:
+        return None
+    point, ids = candidate
+    if candidate._point_key != (point.beat, point.note_text) or candidate._token_ids != tuple(ids):
+        return None
+    return candidate.checked_guard
+
+
+def rank_policy(args):
+    policy = getattr(args, 'phrase_rank_policy', 'comfort_v1') or 'comfort_v1'
+    if policy not in RANK_POLICIES:
+        raise ValueError('Invalid phrase rank policy')
+    return policy
+
+
 def settings(args):
     mode = getattr(args, 'phrase_search', 'event')
     look = float(getattr(args, 'phrase_beats', 4.))
     commit = float(getattr(args, 'phrase_commit_beats', 2.))
-    if mode not in ('event', 'layout', 'joint') or not 1 <= look <= 16 or not 0 < commit <= look:
+    rank_policy(args)
+    if mode not in PHRASE_MODES or not 1 <= look <= 16 or not 0 < commit <= look:
         raise ValueError('Invalid phrase search mode or beat budget')
     return mode, Fraction(str(look)), Fraction(str(commit))
 
@@ -50,22 +93,82 @@ def timing_evidence(points, song, start, stop):
     return float(.5 - .5 * penalty.mean())
 
 
-def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None):
-    from maichart.composer.stream_quality import _trajectory_comfort
-    comfort, coverage = _trajectory_comfort([*prefix, *points], tempo, song.clock,
-        song.clock.at(start), song.clock.at(stop), song.audio.duration_sec,
-        motion_cache=motion_cache)
+def _grammar_confidence(rows, probabilities, start, stop, *, mode='layout'):
+    if not rows or not probabilities:
+        return .5, None, 0, 0
+    inside = [log for (point, _), log in zip(rows, probabilities) if start <= point.beat < stop and log is not None]
+    logs = inside or [log for log in probabilities if log is not None]
+    if not logs:
+        return .5, None, 0, 0
+    wanted_role = 'configuration' if mode == 'layout' else None
+    selected_rows = []
+    deterministic_tokens = 0
+    for event in logs:
+        choice_counts = getattr(event, 'choice_counts', None)
+        if choice_counts is None:
+            choice_counts = [2] * len(event.rows)
+        for row, role, choices in zip(event.rows, event.roles, choice_counts):
+            if wanted_role is not None and role != wanted_role:
+                continue
+            if int(choices) <= 1:
+                deterministic_tokens += 1
+                continue
+            selected_rows.append(row)
+    if not selected_rows:
+        return .5, None, 0, deterministic_tokens
+    import torch
+    transferred = torch.stack(selected_rows)[:, 1].detach().double().cpu().tolist()
+    values = [float(val) for val in transferred if math.isfinite(val)]
+    if not values:
+        return .5, None, 0, deterministic_tokens
+    mean_logprob = sum(values) / len(values)
+    return float(math.exp(max(mean_logprob, -20.))), float(mean_logprob), len(values), deterministic_tokens
+
+
+def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None,
+         policy='comfort_v1', mode='layout', rows=None, probabilities=None):
+    if policy not in RANK_POLICIES:
+        raise ValueError('Invalid phrase rank policy')
+    if policy == 'comfort_v2':
+        from .hand_flow import chirality_comfort
+        comfort, coverage = chirality_comfort([*prefix, *points], tempo, song.clock,
+            song.clock.at(start), song.clock.at(stop), song.audio.duration_sec,
+            motion_cache=motion_cache)
+    else:
+        from maichart.composer.stream_quality import _trajectory_comfort
+        comfort, coverage = _trajectory_comfort([*prefix, *points], tempo, song.clock,
+            song.clock.at(start), song.clock.at(stop), song.audio.duration_sec,
+            motion_cache=motion_cache)
     timing = timing_evidence(points, song, start, stop)
     components = dict(comfort=float(comfort), timing_support=timing,
                       comfort_coverage=coverage)
-    return .75 * float(comfort) + .25 * timing, components
+    if policy == 'comfort_v1':
+        return .75 * float(comfort) + .25 * timing, components
+    model_conf, mean_lp, scored_tokens, deterministic_tokens = _grammar_confidence(
+        rows if rows is not None else [(p, ()) for p in points],
+        probabilities, start, stop, mode=mode)
+    known_fraction = float((coverage or {}).get('known_fraction', 1.))
+    comfort_veto = bool(known_fraction > 0. and float(comfort) < COMFORT_VETO_FLOOR)
+    components.update(model_confidence=model_conf, mean_grammar_logprob=mean_lp,
+                      scored_grammar_tokens=scored_tokens,
+                      deterministic_grammar_tokens=deterministic_tokens,
+                      comfort_veto=comfort_veto,
+                      comfort_veto_floor=COMFORT_VETO_FLOOR, ranking_policy=policy)
+    if comfort_veto:
+        return -1. + float(comfort), components
+    if policy == 'comfort_v2':
+        if scored_tokens > 0:
+            return .55 * float(comfort) + .25 * model_conf + .20 * timing, components
+        return .75 * float(comfort) + .25 * timing, components
+    return .80 * model_conf + .20 * timing, components
 
 
 def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                  end, count, make_sampler, check_window):
     """Run speculative branches while preserving the caller's retry ownership."""
     names=('_retry_scope','_retry_base','_retry_tree','_retry_condition','_retry_cache_dirty',
-           'proposal_scope','_free_choices')
+           '_fixed_retry_scope','_fixed_retry_tree','_retry_offset',
+           'proposal_scope','_free_choices','_active_guard')
     saved={name:deepcopy(getattr(sampler,name)) for name in names if hasattr(sampler,name)}
     probability=getattr(sampler,'last_probability_event',None)
     try:
@@ -90,7 +193,10 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     trials sample their own timing. A failure in the speculative suffix never
     blacklists the common first event. Incomplete trials cannot win by stopping.
     """
+    from .stream_generate import GridDurationRejected
+
     mode, look, commit = settings(args)
+    policy = rank_policy(args)
     after = prefix[-1].beat if prefix else Fraction(-1)
     start = max(Fraction(0), after)
     stop = min(end, start + look)
@@ -101,12 +207,33 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     motion_cache = OrderedDict()
     primary_probability=getattr(sampler,'last_probability_event',None)
     record=bool(getattr(args,'record_candidate_probabilities',False))
+    work = dict(proposal_calls=0, native_window_checks=0, rank_calls=0,
+                proposal_sec=0., native_window_sec=0., rank_sec=0.)
+    if record:
+        from .probability_audit import summarize,span_diagnostics
     for branch in range(count):
+        use_skeleton = (mode == 'layout' and branch > 0) or (
+            mode == 'hybrid' and branch > 0 and (count <= 2 or branch < count - 1)
+        )
+        if use_skeleton and not trials[0]['complete']:
+            # An incomplete skeleton cannot produce an eligible layout/hybrid trial.
+            # Skip its sampling work explicitly; skipped branches consume no RNG.
+            skipped = dict(rows=[], guard_chain=[], complete=False, ended=False,
+                reason='layout_baseline_incomplete', baseline_reason=trials[0]['reason'],
+                score=.5, components={}, skipped=True, scored=False,
+                unscored_reason='skipped_layout_baseline_incomplete')
+            if record:
+                skipped.update(probability=summarize([]), boundary_probability=summarize([]),
+                    termination_probability=None,
+                    diagnostics=span_diagnostics([],sampler.codec,start,stop))
+            trials.append(skipped)
+            continue
         sampler._rewind(target)
         for name,value in retry_snapshot.items():setattr(sampler,name,deepcopy(value))
         active = sampler
         current = list(target)
         rows = []
+        guard_chain = []
         probabilities=[];termination_probability=None
         trial_guard = deepcopy(guard)
         cursor = after
@@ -119,8 +246,11 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             ids = None
             for retry in range(attempts):
                 try:
-                    fixed = skeleton[step] if mode == 'layout' and branch and step < len(skeleton) else None
-                    if mode == 'layout' and branch and step >= len(skeleton):
+                    if use_skeleton and step < len(skeleton):
+                        fixed = _FixedBeat(skeleton[step].beat, skeleton[step].note_text) if mode == 'hybrid' else skeleton[step]
+                    else:
+                        fixed = None
+                    if use_skeleton and step >= len(skeleton):
                         complete = bool(trials[0]['complete'])
                         ended = bool(trials[0]['ended'])
                         break
@@ -128,7 +258,14 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                         point, ids = primary
                         probability=primary_probability
                     else:
-                        ids = active.propose(current, cursor, end, fixed=fixed)
+                        work['proposal_calls'] += 1
+                        call_began = time.perf_counter()
+                        if hasattr(trial_guard, 'tempo') and hasattr(trial_guard, 'prefix'):
+                            active._active_guard = trial_guard
+                        try:
+                            ids = active.propose(current, cursor, end, fixed=fixed)
+                        finally:
+                            work['proposal_sec'] += time.perf_counter() - call_began
                         probability=getattr(active,'last_probability_event',None)
                         if ids == [active.codec.eos_id]:
                             termination_probability=probability
@@ -138,8 +275,17 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                             break
                         point = active.codec.decode_points(ids)[0]
                     details = []
-                    checked, reason = check_window(trial_guard, [point], details)
+                    expected_guard = trial_guard if rows else guard
+                    work['native_window_checks'] += 1
+                    call_began = time.perf_counter()
+                    try:
+                        checked, reason = check_window(trial_guard, [point], details)
+                    finally:
+                        work['native_window_sec'] += time.perf_counter() - call_began
                     if checked is not None:
+                        # _check_window returns a separate transaction each time.
+                        # Keep every step, not just the speculative horizon state.
+                        guard_chain.append((expected_guard, checked))
                         trial_guard = checked
                         reason = None
                         break
@@ -147,6 +293,10 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                     if hasattr(active, 'reject') and not (branch == 0 and step == 0):
                         active.reject(ids)
                     point = None
+                except GridDurationRejected as error:
+                    reason = str(error)
+                    point = None
+                    continue
                 except ValueError as error:
                     # Refresh is a computational event; preserve actual trial history.
                     if error.__class__.__name__ == 'RefreshContext' and rows:
@@ -172,15 +322,20 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             if cursor >= getattr(active, 'reference_refresh_beat', end) or len(current) >= active.max_tokens // 2 - 96:
                 active = make_sampler([*prefix, *[r[0] for r in rows]])
                 current = []
-        # A layout baseline that failed cannot define a truncated winning skeleton.
-        if mode == 'layout' and branch and not trials[0]['complete']:
-            complete = False
-        score, components = rank(prefix, [r[0] for r in rows], song, tempo, start, stop,
-                                 motion_cache=motion_cache) if rows else (.5, {})
-        trials.append(dict(rows=rows, complete=complete, ended=ended, reason=reason,
-                           score=score, components=components))
+        scored = bool(complete and rows)
+        unscored_reason = None if scored else 'incomplete_candidate' if not complete else 'empty_candidate'
+        score, components = .5, {}
+        if scored:
+            work['rank_calls'] += 1
+            call_began = time.perf_counter()
+            score, components = rank(prefix, [r[0] for r in rows], song, tempo, start, stop,
+                                     motion_cache=motion_cache, policy=policy, mode=mode,
+                                     rows=rows, probabilities=probabilities)
+            work['rank_sec'] += time.perf_counter() - call_began
+        trials.append(dict(rows=rows, guard_chain=guard_chain, complete=complete, ended=ended, reason=reason,
+                           score=score, components=components, skipped=False,
+                           scored=scored, unscored_reason=unscored_reason))
         if record:
-            from .probability_audit import summarize,span_diagnostics
             inside=[log for (point,_),log in zip(rows,probabilities) if start<=point.beat<stop]
             outside=[log for (point,_),log in zip(rows,probabilities) if not start<=point.beat<stop]
             excluded=sum(len(ids) for point,ids in rows if not start<=point.beat<stop)
@@ -190,23 +345,40 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                 diagnostics=span_diagnostics([p for p,_ in rows],sampler.codec,start,stop))
     eligible = [i for i, trial in enumerate(trials) if trial['complete'] and trial['rows']]
     selected = max(eligible, key=lambda i: trials[i]['score']) if eligible else None
-    if selected is not None and 0 in eligible and trials[selected]['score'] < trials[0]['score'] + .02:
+    margin = .01 if policy == 'likelihood_veto_v1' else .02
+    baseline_vetoed = bool(trials[0]['components'].get('comfort_veto', False)) if trials else False
+    if selected is not None and 0 in eligible and not baseline_vetoed and trials[selected]['score'] < trials[0]['score'] + margin:
         selected = 0  # Small heuristic differences are not reliable improvements.
     queued = []
     if selected is not None:
         rows = trials[selected]['rows']
-        for row in rows:
+        for row, (expected_guard, checked_guard) in zip(rows, trials[selected]['guard_chain']):
             if queued and row[0].beat > start + commit:
                 break
-            queued.append(row)
+            queued.append(CheckedEvent(*row, expected_guard=expected_guard, checked_guard=checked_guard))
+    all_vetoed = bool(
+        policy == 'likelihood_veto_v1'
+        and eligible
+        and all(trials[i]['components'].get('comfort_veto', False) for i in eligible)
+    )
     evidence = dict(start_beat=str(start), end_beat=str(stop),
                     start_sec=float(song.clock.at(start)), end_sec=float(song.clock.at(stop)),
-                    selected=selected,mode=mode,partial_preview=True,preview_files_exported=False,
+                    selected=selected,mode=mode,ranking_policy=policy,
+                    all_comfort_vetoed=all_vetoed if policy == 'likelihood_veto_v1' else False,
+                    partial_preview=True,preview_files_exported=False,
                     elapsed_sec=time.perf_counter()-began,
+                    requested_candidates=count,
+                    evaluated_candidates=sum(not t['skipped'] for t in trials),
+                    skipped_candidates=sum(t['skipped'] for t in trials),
+                    computation_policy='skip_ineligible_layout_branches_v1',
+                    skipped_branch_rng_policy='no_sampling_draws',
+                    compute=dict(**work, speculative_events=sum(len(t['rows']) for t in trials)),
                     candidates=[dict(score=t['score'], components=t['components'],
                         events=len(t['rows']), complete=t['complete'], ended=t['ended'],
                         eligible=bool(t['complete'] and t['rows']),
-                        reason=t['reason'],**{k:t[k] for k in ('probability','boundary_probability','termination_probability','diagnostics') if k in t}) for t in trials])
+                        reason=t['reason'],skipped=t['skipped'],scored=t['scored'],
+                        unscored_reason=t['unscored_reason'],
+                        **{k:t[k] for k in ('baseline_reason','probability','boundary_probability','termination_probability','diagnostics') if k in t}) for t in trials])
     return queued, evidence, trials
 
 

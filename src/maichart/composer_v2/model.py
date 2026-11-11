@@ -130,7 +130,7 @@ class DecoderBlock(nn.Module):
         self.ff=nn.Sequential(nn.Linear(c.d_model,c.dim_feedforward),nn.GELU(),nn.Dropout(c.dropout),nn.Linear(c.dim_feedforward,c.d_model))
         self.drop=nn.Dropout(c.dropout)
         self.cache_capacity=c.max_tokens
-    def _append_cpu_kv(self,kv,state):
+    def _append_cached_kv(self,kv,state):
         """Append into reusable storage; rewinding only changes the live views."""
         old=state.get('self_kv');old_length=old[0].size(-2) if old is not None else 0
         length=old_length+kv[0].size(-2)
@@ -143,19 +143,25 @@ class DecoderBlock(nn.Module):
             state['self_kv_storage']=storage
         for buffer,value in zip(storage,kv):buffer[...,old_length:length,:].copy_(value)
         return tuple(buffer[...,:length,:] for buffer in storage),old_length
+    _append_cpu_kv=_append_cached_kv  # OpenVINO commits into the same host-owned cache.
     def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None):
         value=self.norms[0](x+condition[:,None]);kv=self.self_attention.memory(value)
         old_length=0
         if state is not None:
-            if kv[0].device.type=='cpu':
-                kv,old_length=self._append_cpu_kv(kv,state)
+            if kv[0].device.type=='cpu' or (kv[0].device.type=='cuda' and not torch.is_grad_enabled()):
+                kv,old_length=self._append_cached_kv(kv,state)
             elif 'self_kv' in state:
                 old_length=state['self_kv'][0].size(-2)
                 kv=tuple(torch.cat((old,new),dim=-2) for old,new in zip(state['self_kv'],kv))
             state['self_kv']=kv
         x=x+self.drop(self.self_attention(value,kv=kv,key_mask=token_mask,causal=True,past_length=old_length))
         local_kv=state.get('local_kv') if state is not None else None
-        if local_kv is not None and local_kv[0].size(0)!=audio['local'].size(0):local_kv=None
+        if local_kv is not None and local_kv[0].size(0)<audio['local'].size(0):
+            # Within one context, newly discovered audio tiles only append.
+            added=self.local_attention.memory(audio['local'][local_kv[0].size(0):])
+            local_kv=tuple(torch.cat((old,new),0) for old,new in zip(local_kv,added))
+            state['local_kv']=local_kv
+        elif local_kv is not None and local_kv[0].size(0)!=audio['local'].size(0):local_kv=None
         if local_kv is None:
             local_kv=self.local_attention.memory(audio['local'])
             if state is not None:state['local_kv']=local_kv
@@ -163,7 +169,7 @@ class DecoderBlock(nn.Module):
         if groups is None:
             attended=self.local_attention(query,kv=local_kv,key_mask=audio['local_mask'],query_beats=beats,key_beats=audio['local_beats'])
         elif isinstance(groups,int):
-            # One CPU token reads one tile. Slices share the cached memory;
+            # One incremental token reads one tile. Slices share cached memory;
             # packing, copying the whole K/V tile, and scattering are redundant.
             tile=slice(groups,groups+1)
             attended=self.local_attention(query,kv=tuple(v[tile] for v in local_kv),
@@ -188,6 +194,13 @@ class DecoderBlock(nn.Module):
 
 
 class ComposerV2(nn.Module):
+    def _training_block(self, layer, *args, **kwargs):
+        if (self.training and torch.is_grad_enabled() and getattr(self, 'activation_checkpointing', False)
+                and (getattr(self, 'activation_checkpointing_scope', 'all') != 'decoder' or isinstance(layer, DecoderBlock))):
+            from torch.utils.checkpoint import checkpoint
+            return checkpoint(layer, *args, use_reentrant=False, preserve_rng_state=True, **kwargs)
+        return layer(*args, **kwargs)
+
     def __init__(self,config,codec):
         super().__init__();self.config=config;self.codec=codec;c=config;d=c.d_model
         self.embedding=nn.Embedding(codec.vocab_size,d,padding_idx=codec.pad_id)
@@ -305,7 +318,7 @@ class ComposerV2(nn.Module):
         beats=batch['local_beats'][:,::2]
         # An all-padding edge query has one neutral key, avoiding undefined attention.
         mask=mask.clone();mask[:,0]|=~mask.any(-1)
-        for layer in self.audio_blocks:local=layer(local,mask)
+        for layer in self.audio_blocks:local=self._training_block(layer,local,mask)
         ids=batch.get('song_cache_key',[])
         key=ids[0] if not self.training and not torch.is_grad_enabled() and len(ids)==1 else None
         cached=self._song_cache.get(key) if key is not None else None
@@ -316,7 +329,7 @@ class ComposerV2(nn.Module):
             starts=torch.tensor([float(s) for s in batch.get('start_beat',[0.]*b)],device=mel.device)
             song=song+positions(batch['song_beats']+starts[:,None],self.config.d_model)
             song_mask=batch['song_mask'].clone();song_mask[:,0]|=~song_mask.any(-1)
-            for layer in self.song_blocks:song=layer(song,song_mask)
+            for layer in self.song_blocks:song=self._training_block(layer,song,song_mask)
             if key is not None:
                 if len(self._song_cache)>=4:self._song_cache.clear()
                 self._song_cache[key]=(song.detach(),song_mask)
@@ -406,7 +419,7 @@ class ComposerV2(nn.Module):
         groups=None
         if 'tile_ids_cpu' in batch:
             tiles=batch['tile_ids_cpu']
-            groups=(int(tiles[0][start]) if use_cache and ids.device.type=='cpu' and ids.size(0)==1
+            groups=(int(tiles[0][start]) if use_cache and ids.size(0)==1
                     and length-start==1 and tiles[0][start]>=0 else query_groups(tiles,start,ids.device))
         runtime=getattr(self,'_decoder_runtime',None)
         accelerated=(runtime.step(x,condition,beats,batch['token_mask'],cache,state,groups)
@@ -415,7 +428,8 @@ class ComposerV2(nn.Module):
             x=accelerated
         else:
             for i,layer in enumerate(self.decoder):
-                x=layer(x,condition,batch['token_mask'],beats,cache,state=state['layers'][i] if use_cache else None,groups=groups)
+                x=self._training_block(layer,x,condition,batch['token_mask'],beats,cache,
+                    state=state['layers'][i] if use_cache else None,groups=groups)
         logits=F.linear(self.norm(x),weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence

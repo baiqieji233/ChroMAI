@@ -61,7 +61,10 @@ def _start(handler,runtime,kind,args,settings,paths,checkpoint_dir=None):
             task.status="failed"
             task.error=str(exc)
         raise
-    return handler._json_response(dict(task_id=task.task_id,model_family=FAMILY))
+    result = dict(task_id=task.task_id,model_family=FAMILY)
+    if kind == 'composer_v2_auto_quality_audit':
+        result.update(manifest=settings['manifest'], auto_scope='preview' if settings['limit_charts'] else 'formal')
+    return handler._json_response(result)
 
 def start_train(handler,payload,*,runtime):
     _family(payload)
@@ -93,6 +96,19 @@ def start_train(handler,payload,*,runtime):
     settings={}
     quality=payload.get('quality_enabled',((checked.get('args') or {}).get('quality_enabled',True) if mode=='resume' else True))
     if not isinstance(quality,bool): raise ValueError('质量加权必须是布尔值')
+    try:
+        manifest_data=json.loads(manifest.read_text(encoding='utf-8-sig'))
+    except (OSError,ValueError,TypeError):
+        manifest_data={}
+    has_zero_unmarked=bool(
+        manifest_data.get('candidate_pool')
+        or manifest_data.get('reviewed_training')
+        or any(isinstance(s,dict) and (s.get('reviewed_only') or s.get('candidate_pool')) for s in manifest_data.get('songs',()))
+    )
+    if has_zero_unmarked and not quality:
+        raise ValueError('人工确认片段必须启用质量加权；未确认部分仅作上下文，不能作为整谱训练')
+    if has_zero_unmarked and sequence_policy!='continuous_events_v1':
+        raise ValueError('人工确认片段当前仅支持 Composer v2 连续事件训练')
     args.append('--quality-enabled' if quality else '--no-quality-enabled')
     settings['quality_enabled']=quality
     from maichart.composer_v2.intensity import CHOICES as CURVE_CHOICES,resolve_policy as resolve_curve_policy
@@ -104,6 +120,18 @@ def start_train(handler,payload,*,runtime):
     recovery_policy=_choice(payload,'timing_recovery','auto',CHOICES)
     _arg(args,'--timing-recovery',recovery_policy)
     settings['timing_recovery']=recovery_policy
+    reviewed_ref=_choice(payload,'reviewed_reference_policy','auto',{'auto','approved_only','off'})
+    if reviewed_ref=='approved_only' and sequence_policy!='continuous_events_v1':
+        raise ValueError('示范库已认证段落呼应参考仅适用于连续事件检查点')
+    _arg(args,'--reviewed-reference-policy',reviewed_ref)
+    settings['reviewed_reference_policy']=reviewed_ref
+    auto_quality=_choice(payload,'auto_quality_policy','auto',{'auto','on','off'})
+    from maichart.composer_v2.train import resolve_auto_quality_policy
+    if mode!='resume' and auto_quality=='on':
+        resolve_auto_quality_policy(auto_quality,manifest,quality_enabled=quality,
+                                    sequence_policy=sequence_policy)
+    _arg(args,'--auto-quality-policy',auto_quality)
+    settings['auto_quality_policy']=auto_quality
     from maichart.composer_v2.onset_policy import CHOICES as ONSET_CHOICES,resolve_policy as resolve_onset_policy
     onset_requested=_choice(payload,'onset_readout','auto',ONSET_CHOICES)
     onset_policy,_=resolve_onset_policy(onset_requested,
@@ -135,7 +163,7 @@ def start_train(handler,payload,*,runtime):
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
     from maichart.composer_v2.acceleration import AUDIO_DEVICES
-    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"})
+    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"},activation_checkpointing={'auto','off','on'})
     zeros={"warmup_steps","future_beats","history_beats","validation_max_batches","seed","max_steps","limit_charts","save_every","early_stopping_patience"}
     for key,default in TRAIN_DEFAULTS.items():
         if key in ('cuda_memory_budget_gb', 'audio_cache_gb') and isinstance(payload.get(key), bool):
@@ -176,6 +204,8 @@ def start_train(handler,payload,*,runtime):
         if expected and hashlib.sha256(source_manifest.read_bytes()).hexdigest()!=expected:
             raise ValueError("resume 训练清单内容已变化；请保留原 checkpoint 并使用新目录 finetune")
         validation=_path(saved["validation_manifest"],"父 checkpoint 验证清单",exists=True) if saved.get("validation_manifest") else None
+        resolve_auto_quality_policy(auto_quality,manifest,checked.get('training_contract'),
+                                    resume=True,quality_enabled=quality,sequence_policy=sequence_policy)
         source="inherited"
     elif source=="auto":
         split_directory=directory/"data_split"
@@ -235,7 +265,8 @@ def start_generate(handler,payload,*,runtime):
         raise ValueError('记录候选评估数据仅支持连续事件模型；这个旧窗口模型不支持')
     settings['record_candidate_probabilities']=record_probabilities
     if record_probabilities:args.append('--record-candidate-probabilities')
-    phrase_search=_choice(payload,'phrase_search','layout',{'event','layout','joint'})
+    phrase_search=_choice(payload,'phrase_search','layout',{'event','layout','joint','hybrid'})
+    phrase_rank_policy=_choice(payload,'phrase_rank_policy',GENERATION_DEFAULTS['phrase_rank_policy'],{'comfort_v1','comfort_v2','likelihood_veto_v1'})
     phrase_beats=_float(payload,'phrase_beats',4.,minimum=1.)
     phrase_commit_beats=_float(payload,'phrase_commit_beats',2.,minimum=0.)
     if isinstance(payload.get('phrase_beats'),bool) or isinstance(payload.get('phrase_commit_beats'),bool):
@@ -244,19 +275,51 @@ def start_generate(handler,payload,*,runtime):
         raise ValueError('提前试写长度须为1–16拍；每次保留长度须大于0，且不能超过提前试写长度')
     if checked.get('sequence_policy')=='window_v1' and phrase_search!='event':
         raise ValueError('这个旧模型不支持比较整段写法，请选择“逐步生成（速度优先）”')
-    settings.update(phrase_search=phrase_search,phrase_beats=phrase_beats,phrase_commit_beats=phrase_commit_beats)
-    for key in ('phrase_search','phrase_beats','phrase_commit_beats'):_arg(args,'--'+key.replace('_','-'),settings[key])
-    settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop'})
+    if checked.get('sequence_policy')=='window_v1' and phrase_rank_policy!='comfort_v1':
+        raise ValueError('模型似然排序仅支持连续事件模型')
+    settings.update(phrase_search=phrase_search,phrase_rank_policy=phrase_rank_policy,phrase_beats=phrase_beats,phrase_commit_beats=phrase_commit_beats)
+    for key in ('phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats'):_arg(args,'--'+key.replace('_','-'),settings[key])
+    settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop','downgrade_or_skip'})
+    if checked.get('sequence_policy')=='window_v1' and settings['exhaustion_policy'] in {'report','downgrade_or_skip'}:
+        raise ValueError('旧窗口模型仅支持 auto 或 stop 耗尽策略')
     settings['tempo_detection']=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'})
-    _arg(args,'--tempo-detection',settings['tempo_detection'])
+    settings['tempo_octave_policy']=_choice(payload,'tempo_octave_policy',GENERATION_DEFAULTS['tempo_octave_policy'],{'off','maimai_pulse_v1'})
+    settings['downbeat_alignment']=_choice(payload,'downbeat_alignment',GENERATION_DEFAULTS['downbeat_alignment'],{'off','bar_downbeat_v1'})
+    for key in ('tempo_detection','tempo_octave_policy','downbeat_alignment'):
+        _arg(args,'--'+key.replace('_','-'),settings[key])
     intercept=payload.get('intercept_tap_on_slide',GENERATION_DEFAULTS['intercept_tap_on_slide'])
     if not isinstance(intercept,bool):raise ValueError('拦截Slide撞尾必须是布尔值')
     threshold=_float(payload,'tap_on_slide_threshold_ms',200.,minimum=0)
     if isinstance(payload.get('tap_on_slide_threshold_ms'),bool) or threshold>250:
         raise ValueError('撞尾检测阈值必须为0–250 ms')
-    settings.update(intercept_tap_on_slide=intercept,tap_on_slide_threshold_ms=threshold)
+    intercept_sht=payload.get('intercept_slide_head_tap',GENERATION_DEFAULTS['intercept_slide_head_tap'])
+    if not isinstance(intercept_sht,bool):raise ValueError('拦截内屏星头提前触发必须是布尔值')
+    from maichart.generation.muri.touch_reachability import TOUCH_REACHABILITY_POLICIES
+    touch_policy=_choice(payload,'touch_reachability_policy',GENERATION_DEFAULTS['touch_reachability_policy'],set(TOUCH_REACHABILITY_POLICIES))
+    touch_radius=_float(payload,'touch_cohold_radius',GENERATION_DEFAULTS['touch_cohold_radius'],minimum=60.)
+    if isinstance(payload.get('touch_cohold_radius'),bool) or touch_radius>260:
+        raise ValueError('Touch同手兼顾半径必须为60–260')
+    from maichart.composer_v2.forward_feasibility import FORWARD_POLICIES
+    forward_policy=_choice(payload,'forward_feasibility',GENERATION_DEFAULTS['forward_feasibility'],set(FORWARD_POLICIES))
+    forward_tos_ms=_float(payload,'forward_tap_on_slide_ms',GENERATION_DEFAULTS['forward_tap_on_slide_ms'],minimum=0.)
+    if isinstance(payload.get('forward_tap_on_slide_ms'),bool) or forward_tos_ms>250:
+        raise ValueError('前向禁止撞尾阈值必须为0–250 ms')
+    from maichart.composer_v2.self_refine import SELF_REFINE_POLICIES
+    self_refine=_choice(payload,'self_refine',GENERATION_DEFAULTS['self_refine'],set(SELF_REFINE_POLICIES))
+    if checked.get('sequence_policy')=='window_v1' and self_refine!='off':
+        raise ValueError('自我精修仅支持连续事件模型')
+    settings.update(intercept_tap_on_slide=intercept,tap_on_slide_threshold_ms=threshold,
+        intercept_slide_head_tap=intercept_sht,touch_reachability_policy=touch_policy,
+        touch_cohold_radius=touch_radius,forward_feasibility=forward_policy,
+        forward_tap_on_slide_ms=forward_tos_ms,self_refine=self_refine)
     args.append('--intercept-tap-on-slide' if intercept else '--no-intercept-tap-on-slide')
+    args.append('--intercept-slide-head-tap' if intercept_sht else '--no-intercept-slide-head-tap')
     _arg(args,'--tap-on-slide-threshold-ms',threshold)
+    _arg(args,'--touch-reachability-policy',touch_policy)
+    _arg(args,'--touch-cohold-radius',touch_radius)
+    _arg(args,'--forward-feasibility',forward_policy)
+    _arg(args,'--forward-tap-on-slide-ms',forward_tos_ms)
+    _arg(args,'--self-refine',self_refine)
     _arg(args,'--exhaustion-policy',settings['exhaustion_policy'])
     for key in ("checkpoint", "audio", "output", "cache_dir"): _arg(args,"--"+key.replace("_","-"),settings[key])
     for key,default in dict(level=13.,temperature=.9,top_p=.95).items():
@@ -372,11 +435,13 @@ def start_curve(handler,payload,*,runtime):
     settings.update(cache_dir=str(_path(payload.get('cache_dir') or 'cache/chart_composer_v2','cache_dir')),
         device=_choice(payload,'device','auto',{'auto','cuda','cpu'}),
         tempo_detection=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'}),
+        tempo_octave_policy=_choice(payload,'tempo_octave_policy',GENERATION_DEFAULTS['tempo_octave_policy'],{'off','maimai_pulse_v1'}),
+        downbeat_alignment=_choice(payload,'downbeat_alignment',GENERATION_DEFAULTS['downbeat_alignment'],{'off','bar_downbeat_v1'}),
         cpu_threads=_integer(payload,'cpu_threads',GENERATION_DEFAULTS['cpu_threads'],minimum=0),level=_float(payload,'level',13.,minimum=1))
     if settings['level']>15:raise ValueError('level 必须在1到15之间')
     from maichart.composer_v2.acceleration import AUDIO_DEVICES
     settings['audio_device']=_choice(payload,'audio_device','auto',set(AUDIO_DEVICES))
-    for key in ('cache_dir','device','tempo_detection','cpu_threads','level','audio_device'):
+    for key in ('cache_dir','device','tempo_detection','tempo_octave_policy','downbeat_alignment','cpu_threads','level','audio_device'):
         _arg(args,'--'+key.replace('_','-'),settings[key])
     for key in ('bpm','first','tempo_map','condition'):
         value=payload.get(key)
@@ -456,3 +521,109 @@ def start_candidate_audit(handler, payload, *, runtime):
             '--output', str(output), '--markdown', str(markdown)]
     settings = dict(input=str(source), output=str(output), markdown=str(markdown), device='cpu')
     return _start(handler, runtime, 'composer_v2_candidate_audit', args, settings, [output, markdown])
+
+
+def auto_quality_status(handler, payload, *, runtime):
+    """Read existing results without re-composing the training selection."""
+    from .quality_api import auto_quality_view
+
+    _family(payload)
+    scope = _choice(payload, 'auto_scope', 'formal', {'formal', 'preview'})
+    policy = _choice(payload, 'auto_quality_policy', 'auto', {'auto', 'on', 'off'})
+    quality_enabled = payload.get('quality_enabled', True)
+    if not isinstance(quality_enabled, bool):
+        raise ValueError('quality_enabled 必须是布尔值')
+    resume = payload.get('mode') == 'resume'
+    sequence = payload.get('sequence_policy', 'continuous_events_v1')
+    empty = dict(available=False, manifest=None, auto_scope=scope, has_annotations=False,
+                 has_preview_annotations=False, annotations_path=None, record_count=0, report=None,
+                 preview_report=None, training_eligible=False, training_effective=None if resume else False)
+
+    def status(value):
+        manifest = _path(value, 'manifest')
+        if not manifest.is_file():
+            return {**empty, 'manifest': str(manifest)}
+        data = json.loads(manifest.read_text(encoding='utf-8-sig'))
+        meta, _, _ = auto_quality_view(manifest, data, scope)
+        eligible = meta['has_annotations'] and not (data.get('candidate_pool') or data.get('reviewed_training'))
+        effective = bool(eligible and quality_enabled and policy != 'off' and sequence == 'continuous_events_v1')
+        return dict(meta, training_eligible=eligible, training_effective=None if resume else effective)
+
+    if payload.get('manifest'):
+        return handler._json_response(status(payload['manifest']))
+    manifests = payload.get('manifests') or []
+    if not isinstance(manifests, list) or any(not isinstance(value, str) or not value.strip() for value in manifests):
+        raise ValueError('训练数据集列表必须由有效路径组成')
+    manifests = list(dict.fromkeys(manifests))
+    if len(manifests) == 1:
+        return handler._json_response(status(manifests[0]))
+    return handler._json_response(dict(empty, sources=[status(value) for value in manifests]))
+
+
+def start_auto_quality_audit(handler, payload, *, runtime):
+    """Inspect the selected corpus in a background CPU process."""
+    _family(payload)
+    payload, _ = runtime._prepare_training_sources({**payload, 'model_family': FAMILY})
+    manifest = _path(payload.get('manifest'), 'manifest', exists=True)
+    limit = _integer(payload, 'limit_charts', 0, minimum=0)
+    tail_mode = _choice(payload, 'tap_on_slide_mode', 'mask_hard', {'mask_hard', 'mask_all', 'allow'})
+    inner_mode = _choice(payload, 'inner_muri_mode', 'allow', {'allow', 'mask_hard'})
+    threshold = _float(payload, 'tap_on_slide_ms', 200., minimum=0)
+    if isinstance(payload.get('tap_on_slide_ms'), bool) or threshold > 250:
+        raise ValueError('撞尾检查范围须为 0–250 ms')
+    from maichart.generation.muri.touch_reachability import TOUCH_REACHABILITY_POLICIES
+    touch_policy = _choice(payload, 'touch_reachability_policy', 'palm_span_v1', set(TOUCH_REACHABILITY_POLICIES))
+    touch_radius = _float(payload, 'touch_cohold_radius', 180., minimum=60.)
+    if isinstance(payload.get('touch_cohold_radius'), bool) or touch_radius > 260:
+        raise ValueError('Touch同手兼顾半径须为 60–260')
+    domain_pathology_mode = _choice(payload, 'domain_pathology_mode', 'maimai_dx_v1', {'maimai_dx_v1', 'off'})
+    acoustic_audit_mode = _choice(payload, 'acoustic_audit_mode', 'auto', {'auto', 'on', 'off'})
+    highlight_good_mode = _choice(payload, 'highlight_good_mode', 'auto', {'auto', 'acoustic_and_flow_v1', 'chart_only_v1', 'off'})
+    good_quantile = _float(payload, 'good_quantile', 0.82, minimum=0.50)
+    if isinstance(payload.get('good_quantile'), bool) or good_quantile > 0.98:
+        raise ValueError('优选好段分位线须为 0.50–0.98')
+    max_problem_fraction = _float(payload, 'max_problem_fraction', 0.45, minimum=0.05)
+    if isinstance(payload.get('max_problem_fraction'), bool) or max_problem_fraction > 1.0:
+        raise ValueError('整谱排除上限比例须为 0.05–1.0')
+    experimental_hand_flow_quantile = _float(payload, 'experimental_hand_flow_quantile', 0.0, minimum=0.0)
+    if isinstance(payload.get('experimental_hand_flow_quantile'), bool) or experimental_hand_flow_quantile > 0.25:
+        raise ValueError('手顺降权分位比例须为 0–0.25')
+    workers = _integer(payload, 'workers', 0, minimum=0)
+    if workers > 32:
+        raise ValueError('并行体检进程数须为 0–32')
+    args = ['-m', 'maichart.composer_v2.auto_quality_audit', '--manifest', str(manifest),
+            '--limit-charts', str(limit), '--tap-on-slide-mode', tail_mode,
+            '--inner-muri-mode', inner_mode, '--tap-on-slide-ms', str(threshold)]
+    if touch_policy != 'palm_span_v1':
+        _arg(args, '--touch-reachability-policy', touch_policy)
+    if touch_radius != 180.:
+        _arg(args, '--touch-cohold-radius', touch_radius)
+    if domain_pathology_mode != 'maimai_dx_v1':
+        _arg(args, '--domain-pathology-mode', domain_pathology_mode)
+    if acoustic_audit_mode != 'auto':
+        _arg(args, '--acoustic-audit-mode', acoustic_audit_mode)
+    if highlight_good_mode != 'auto':
+        _arg(args, '--highlight-good-mode', highlight_good_mode)
+    if good_quantile != 0.82:
+        _arg(args, '--good-quantile', good_quantile)
+    if max_problem_fraction != 0.45:
+        _arg(args, '--max-problem-fraction', max_problem_fraction)
+    if experimental_hand_flow_quantile != 0.0:
+        _arg(args, '--experimental-hand-flow-quantile', experimental_hand_flow_quantile)
+    if workers != 0:
+        _arg(args, '--workers', workers)
+    report = manifest.with_name('auto_quality_audit_preview_report.json' if limit else 'auto_quality_audit_report.json')
+    annotations = manifest.with_name('auto_quality_annotations_preview.json' if limit else 'auto_quality_annotations.json')
+    settings = dict(manifest=str(manifest), limit_charts=limit, tap_on_slide_mode=tail_mode,
+                    inner_muri_mode=inner_mode, tap_on_slide_ms=threshold,
+                    touch_reachability_policy=touch_policy,
+                    touch_cohold_radius=touch_radius,
+                    domain_pathology_mode=domain_pathology_mode,
+                    acoustic_audit_mode=acoustic_audit_mode,
+                    highlight_good_mode=highlight_good_mode,
+                    good_quantile=good_quantile,
+                    max_problem_fraction=max_problem_fraction,
+                    experimental_hand_flow_quantile=experimental_hand_flow_quantile,
+                    workers=workers,
+                    device='cpu')
+    return _start(handler, runtime, 'composer_v2_auto_quality_audit', args, settings, [report, annotations])

@@ -6,20 +6,21 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>maimai AI Chart Lab</title>
-  <link rel="stylesheet" href="/styles.css">
-  <link rel="stylesheet" href="/workspace.css?v=curve-editor-20261109">
+  <link rel="stylesheet" href="/styles.css?v=webui-remake-20261111">
+  <link rel="stylesheet" href="/workspace.css?v=webui-remake-20261111">
   <link rel="stylesheet" href="/workspace_logs.css">
 </head>
 <body>
   <header class="topbar">
-    <div>
-      <p class="eyebrow">LOCAL RESEARCH TOOL</p>
+    <div class="topbar-brand">
+      <p class="eyebrow">MAIMAI DX STUDIO · 本地写谱与训练工作台</p>
       <h1>maimai AI Chart Lab</h1>
+      <p class="topbar-subtitle">导入歌曲一键写谱 · 两级自动体检排除错谱与坏段 · 可视化试听与训练自己的模型</p>
     </div>
     <div class="top-actions">
       <span id="serverStatus" class="status-dot">检查本地服务</span>
       <a href="/api/status" target="_blank">服务状态</a>
-      <span class="muted">音乐结构 · 精确事件生成</span>
+      <span class="muted">Composer v2 连续写谱引擎</span>
     </div>
   </header>
 
@@ -27,9 +28,9 @@
     <section class="main-column">
 
       <nav class="mode-tabs" aria-label="工作模式">
-        <button id="trainingModeTab" class="mode-tab active" type="button" data-mode="training">训练模型</button>
-        <button id="qualityModeTab" class="mode-tab" type="button" data-mode="quality">训练素材</button>
-        <button id="generationModeTab" class="mode-tab" type="button" data-mode="generation">生成谱面</button>
+        <button id="generationModeTab" class="mode-tab" type="button" data-mode="generation"><span class="mode-tab-title">生成谱面</span><small>导入歌曲直接写谱</small></button>
+        <button id="qualityModeTab" class="mode-tab" type="button" data-mode="quality"><span class="mode-tab-title">训练素材</span><small>自动体检 · 筛错与标好段</small></button>
+        <button id="trainingModeTab" class="mode-tab active" type="button" data-mode="training"><span class="mode-tab-title">训练模型</span><small>微调加强 · 从头训练</small></button>
         <button id="intensityModeTab" class="mode-tab" hidden type="button" data-mode="intensity">强度曲线</button>
       </nav>
 <section class="panel shared-preview-panel">
@@ -67,8 +68,18 @@
 <p id="feedbackAuditionRange" class="muted">反馈范围与试听范围分开记录；带前后文只影响播放。</p>
 <details class="preview-review-exact"><summary>精确范围／播放点标记</summary><button id="feedbackMarkStart" class="small-button" type="button">播放点 → 起点</button><button id="feedbackMarkEnd" class="small-button" type="button">播放点 → 终点</button><label>起点 <input id="feedbackStart" type="number" min="0" step="0.01" placeholder="全曲"></label><label>终点 <input id="feedbackEnd" type="number" min="0" step="0.01" placeholder="全曲"></label></details>
 </section>
-<section id="candidatePoolReview" class="candidate-pool-panel" hidden><h4>确认当前片段的学习内容</h4><p id="candidatePoolWhy"></p><p id="candidatePoolIssues"></p><div class="button-row"><button type="button" data-pool-learn="both" class="primary-button">采音和配置都学</button><button type="button" data-pool-learn="timing" class="secondary-button">只学采音</button><button type="button" data-pool-learn="layout" class="secondary-button">只学配置</button><button type="button" data-pool-learn="uncertain" class="small-button">暂不学习</button></div><label>问题原因（可选）<input id="candidatePoolReason" type="text" maxlength="300"></label><label class="checkbox-field"><input id="candidatePoolEntry" type="checkbox"><span>包含进入本段的第一步（带前文试听确认后勾选）</span></label><label class="checkbox-field"><input id="candidatePoolAutoNext" type="checkbox" checked><span>保存后下一段</span></label><div class="button-row"><button id="candidatePoolWhole" type="button" class="small-button">整首都学…</button><button id="candidatePoolUndo" type="button" class="small-button" disabled>撤销上次保存</button></div><p id="candidatePoolReviewStatus" role="status"></p></section><section class="review-tool-group"><h4>记录意见</h4><div class="generation-preview-toolbar"><button data-generation-feedback="good" class="secondary-button" type="button">好</button><button data-generation-feedback="problem" class="secondary-button" type="button">有问题</button><button data-generation-feedback="uncertain" class="small-button" type="button">不确定</button></div><label class="review-reason">评价方面（可选）<select id="feedbackReason"><option value="">不填写</option><option value="timing">采音</option><option value="layout">配置</option><option value="comfort">手感</option></select></label><p id="feedbackStatus" class="muted" role="status">记录对当前范围的评价。</p></section>
+<section id="candidatePoolReview" class="candidate-pool-panel" hidden>
+<h4>这段学什么</h4><p id="candidatePoolWhy"></p><p id="candidatePoolIssues" class="muted"></p>
+<p class="muted">采音＝何时出音、哪些声音取舍；配置＝键位、音符类型与动作组合。</p>
+<div class="button-row"><button type="button" data-pool-learn="both" class="primary-button">这段都学</button><button type="button" data-pool-learn="timing" class="secondary-button">这段只学采音</button><button type="button" data-pool-learn="layout" class="secondary-button">这段只学配置</button><button type="button" data-pool-learn="uncertain" class="small-button">这段不学习</button></div>
+<label>备注（可选）<input id="candidatePoolReason" type="text" maxlength="300"></label>
+<label class="checkbox-field"><input id="candidatePoolEntry" type="checkbox"><span>连同进入这段的第一步一起学</span></label><p class="muted">带前文试听、确认接入也合适时勾选。</p>
+<div class="candidate-chart-actions"><h4>整谱处理</h4><p id="candidatePoolChartStatus" role="status"></p><div class="button-row"><button id="candidatePoolWhole" type="button" class="secondary-button">整张学习…</button><button id="candidatePoolReject" type="button" class="secondary-button">整张不学习…</button><button id="candidatePoolNextChart" type="button" class="small-button">先看下一张</button></div><p class="muted">仅作用于当前难度的这张谱。整谱决定会替换已有片段选择；“先看下一张”不改标注。</p></div>
+<label class="checkbox-field"><input id="candidatePoolAutoNext" type="checkbox" checked><span>保存后自动继续审阅</span></label><button id="candidatePoolUndo" type="button" class="small-button" disabled>撤销上次保存</button><p id="candidatePoolReviewStatus" role="status" aria-live="polite"></p>
+<div class="candidate-training-actions"><button id="candidatePoolUsePreview" type="button" class="secondary-button">将已确认内容加入下次训练</button><p id="candidatePoolPreviewTrainingStatus" class="muted" role="status"></p></div>
+</section><section class="review-tool-group"><h4>记录意见</h4><div class="generation-preview-toolbar"><button data-generation-feedback="good" class="secondary-button" type="button">好</button><button data-generation-feedback="problem" class="secondary-button" type="button">有问题</button><button data-generation-feedback="uncertain" class="small-button" type="button">不确定</button></div><label class="review-reason">评价方面（可选）<select id="feedbackReason"><option value="">不填写</option><option value="timing">采音</option><option value="layout">配置</option><option value="comfort">手感</option></select></label><p id="feedbackStatus" class="muted" role="status">记录对当前范围的评价。</p></section>
 <details id="feedbackComparison"><summary>比较另一张</summary><p id="feedbackComparisonNotice" class="muted">有同一音频的另一张完整谱面时，可以在同一范围比较；这里不会生成新谱面。</p><div id="feedbackComparisonControls" class="generation-preview-toolbar"><label>版本 A<select id="feedbackCandidateA"></select></label><label>版本 B<select id="feedbackCandidateB"></select></label><button id="feedbackPreviewA" class="secondary-button" type="button">试听版本 A</button><button id="feedbackPreviewB" class="secondary-button" type="button">试听版本 B</button></div><div id="feedbackPairChoices" class="generation-preview-toolbar" hidden><button data-feedback-choice="a" class="secondary-button" type="button">版本 A 更好</button><button data-feedback-choice="b" class="secondary-button" type="button">版本 B 更好</button><button data-feedback-choice="both_good" class="small-button" type="button">都可以</button><button data-feedback-choice="both_bad" class="small-button" type="button">都不好</button><button data-feedback-choice="uncertain" class="small-button" type="button">不确定</button></div></details>
+<details id="feedbackAutoRegions" class="review-training auto-review-panel" open hidden><summary id="feedbackAutoSummary">自动体检发现的片段（0 · 只读参考）</summary><p id="feedbackAutoChartNote" class="muted">点击下面的片段定位，再点「循环试听这一段」。人工片段标注优先用于选中范围。整谱排除可在素材目录保存整谱标签后解除。</p><ul id="feedbackAutoList" class="review-training-list"></ul></details>
 <details id="feedbackSavedRegions" class="review-training"><summary id="feedbackSavedSummary">已保存的标注（0）</summary><ul id="feedbackSavedList" class="review-training-list"></ul><p id="feedbackSavedEmpty" class="muted">圈选并评价后，标注会显示在这里。</p></details>
 <details id="feedbackTraining" class="review-training"><summary>收集训练示范（可选）</summary><p class="muted">把确认好的片段收进同一个示范库。</p><ol class="review-training-steps"><li>在时间轴拖选片段，带前后文试听。</li><li>选择值得学习的内容，再收集。</li><li>积累几个片段后，加入下次训练来源。</li></ol><p id="feedbackTrainingRange" class="muted">请先在谱面时间轴选择片段。</p><label class="review-training-scope">这段值得学什么？<select id="feedbackTrainingUse"><option value="">请选择学习内容</option><option value="timing">只学采音（落点与取舍）</option><option value="layout">只学配置（键位与动作）</option><option value="both">采音和配置都学</option></select></label><label class="checkbox-field"><input id="feedbackLearnEntry" type="checkbox" disabled><span>同时学习如何接入前文</span></label><p class="muted">带前文试听，确认第一组音符的接入时机和衔接都合适后勾选。选择“只学配置”时无需勾选。</p><button id="feedbackCollectTraining" class="secondary-button" type="button" disabled>收为训练示范</button><p id="feedbackTrainingStatus" class="muted" role="status">拖选并试听后，选择值得学习的内容。</p><ul id="feedbackTrainingList" class="review-training-list"></ul><button id="feedbackExportBundle" class="secondary-button" type="button" disabled>导出本任务已确认片段</button><a id="feedbackBundleDownload" class="small-button" hidden>下载片段包</a><p id="feedbackBundleStatus" class="muted" role="status"></p><button id="feedbackAddTraining" class="secondary-button" type="button" disabled>加入下次训练来源</button><p class="muted">在训练页同时勾选原训练集和示范库，使用 finetune。</p></details>
 <details class="preview-review-exact"><summary>所选谱面原文（只读）</summary><pre id="feedbackSelectedSource" class="feedback-selected-source">尚未选择片段。</pre></details>
@@ -81,9 +92,9 @@
 
       <section class="panel workflow-panel training-mode-panel">
 <div class="section-heading">
-<div><span class="step">START</span><h2>先选好你要做的事</h2></div></div>
-<div class="workflow-routes"><button type="button" data-focus-setting="datasetSelect"><strong>准备新素材</strong><span>导入目录或 ZIP，完成预处理后勾选训练来源。</span></button><button type="button" data-focus-setting="trainingMode"><strong>训练或加强模型</strong><span>选择训练起点，检查 checkpoint，设置本次训练。</span></button><button type="button" data-workspace-link="generation"><strong>我已有模型，要生成谱面</strong><span>直接进入生成页，导入歌曲与 checkpoint。</span></button></div>
-<p class="workflow-hint">默认使用最新 Composer v2（chart_composer_v2）连续事件路线；如果已经下载好模型权重，可直接切换到顶部「生成谱面」导入歌曲使用。</p>
+<div><span class="step">START</span><h2>欢迎使用 · 选择你的工作流</h2></div></div>
+<div class="workflow-routes"><button type="button" data-workspace-link="generation"><strong>① 直接导入歌曲写谱</strong><span>已有 .pt 模型文件？无需训练，直接导入音频生成舞萌谱面并在线试玩。</span></button><button type="button" data-workspace-link="quality"><strong>② 自动体检与清洗素材</strong><span>一键排查音画错位、无理冲突、吃音纵连与转谱抖动，自动挑出值得学的好段落。</span></button><button type="button" data-focus-setting="trainingMode"><strong>③ 训练或加强自己的模型</strong><span>用清洗后的谱面库微调已有模型（推荐）或从头训练新模型。</span></button></div>
+<p class="workflow-hint">提示：不需要懂代码或命令行。普通用户推荐按「自动体检清洗素材 → 选择显存预设开始训练 → 去生成谱面页试写」三步操作即可。</p>
 </section>
 
       <section class="panel training-panel">
@@ -300,7 +311,7 @@
 <section class="quality-training-card">
           <div class="section-heading">
 <div><span class="step">QUALITY</span><h3>质量加权与反面案例</h3></div><span class="muted">只对已保存的素材标注生效</span></div>
-          <p class="param-intro">质量标注保存在当前 manifest 对应的素材记录中。优秀谱面权重较高，普通谱面保持基准，减权谱面仍参与训练但影响较小，排除项不进入正向训练。反面案例默认只从正向示范中排除；只有提供同音频、同目标下的修正版，才会进入偏好训练。修改质量权重请使用 <strong>finetune</strong>；<strong>resume</strong> 用于严格延续同一训练合同。</p>
+          <p class="param-intro">质量标注保存在当前 manifest 对应的素材记录中。优秀谱面权重较高，普通谱面保持基准，减权谱面仍参与训练但影响较小，排除项不进入正向训练；旧版事件模型验证集不参与加权（Composer v2 验证详见下方人工反馈卡片）。反面案例默认只从正向示范中排除；只有提供同音频、同目标下的修正版，才会进入偏好训练。修改质量权重请使用 <strong>finetune</strong>；<strong>resume</strong> 用于严格延续同一训练合同。</p>
           <p data-training-family="song_form_v1 song_form_v2" class="workflow-hint" hidden>沿用“训练素材”中的整谱与局部权重；启用后读取保存的优秀、减权和排除标注。反例标注先用于排除；没有修正版偏好训练模块的模型不会假装学到了 DPO。改变资料或权重请使用 finetune。</p>
           <p data-training-family="chart_stream_v1" class="workflow-hint" hidden>连续流使用整谱及局部权重。局部排除区域保留原事件作为已知上下文，但不学习该区域及跨越它的续写跳转；不会把删除的音符学成休止。未启用时忽略已保存的质量标注。</p>
 <div class="quality-training-grid">
@@ -319,8 +330,44 @@
         </section></div>
 </details>
 
-<section id="composerV2TrainingControls" data-training-family="chart_composer_v2" hidden><div class="workflow-group-heading"><span class="step">COMPOSER V2</span><div><h3>Composer v2 连续事件训练</h3><p>当前主路线（chart_composer_v2）。连续学习整曲事件序列，默认回看 16 拍谱面历史、前瞻 4 拍局部音乐，仅在整曲末尾产生结束符。首次使用 MERT 会自动下载编码器并提取音频特征缓存。</p></div></div><details class="settings-section" open><summary>常用训练设置</summary><div class="settings-content"><div class="form-grid"><label class="field">音乐上下文<select id="v2TrainMusicContext"><option value="auto" selected>自动：新训练与微调启用最新设计，续训继承</option><option value="song_paired_v2">成对音乐参考与前方采音（最新）</option><option value="song_detail_v1">全曲结构与局部细节（旧版）</option><option value="off">关闭（旧模型对照）</option></select><small>比较参考当时与当前的音乐细节，并提前读取前方音乐；旧模型在新目录微调启用，续训继承原方案。</small></label><label class="field">音频编码层数<input id="v2TrainAudioLayers" type="number" value="4" min="1" step="1" required><small>新训练默认 4 层；微调可扩展音频层数，续训继承父模型。</small></label><label class="field">全曲结构层数<input id="v2TrainSongLayers" type="number" value="2" min="1" step="1" required></label><label class="field">总目标轮数<input id="v2TrainEpochs" type="number" value="50" min="1" step="1" required></label><label class="field">批大小（batch size）<input id="v2TrainBatchSize" type="number" value="8" min="1" step="1" required><small>每次前向处理的训练片段数。显存紧张时可调小此值并调大梯度累积。</small></label><label class="field">梯度累积<input id="v2TrainGradAccumulation" type="number" value="8" min="1" step="1" required><small>每次参数更新累积的批数；与批大小相乘即为单步更新的等效总批大小（默认 8×8=64）。</small></label><label class="field">CUDA 显存预算（GiB）<input id="v2TrainCudaMemoryBudgetGb" type="number" value="0" min="0" max="1024" step="0.001" required><small>0 使用 PyTorch 默认分配；填写正数则限制当前训练与特征提取的 CUDA 显存上限。</small></label><label class="field">音频缓存内存预算（GiB）<input id="v2TrainAudioCacheGb" type="number" value="0.25" min="0" max="1024" step="0.001" required><small>训练和验证共用的内存（RAM）常驻音频特征预算，内存紧张时自动收缩；0 关闭常驻内存缓存。</small></label><label class="field">学习率<input id="v2TrainLr" type="number" value="0.0002" min="0.000001" step="0.000001" required></label><label class="field">学习率计划<select id="v2TrainLrSchedule"><option value="cosine" selected>cosine</option><option value="constant">constant</option></select></label><label class="field">训练精度<select id="v2TrainPrecision"><option value="auto" selected>自动选择</option><option value="bf16">bf16</option><option value="fp16">fp16</option><option value="fp32">fp32</option></select></label></div></div></details><details class="settings-section" open><summary>数据与音频特征</summary><div class="settings-content"><div class="form-grid"><label class="field">独立缓存目录<input id="v2TrainCacheDir" type="text" value="cache/chart_composer_v2"></label><label class="field">音频特征<select id="v2TrainAudioBackend"><option value="mert" selected>mert</option><option value="native">native</option></select><small>正式训练与发布模型均使用 mert（MERT 75Hz＋原生频谱100Hz）；native 仅用原生频谱供快速调试。</small></label><label class="field">本地MERT目录（留空自动下载）<input id="v2TrainMertModel" type="text" value=""></label><label class="field">验证数据来源<select id="v2TrainValidationSource"><option value="auto" selected>自动按歌曲划分训练／开发／最终留出</option><option value="manual">手动独立验证清单</option><option value="off">关闭验证</option></select></label><label class="field">总留出比例<input id="v2TrainHoldoutFraction" type="number" min="0" max="0.99" step="0.01" value="0.05" required><small>开发验证集与最终留出集合计比例（默认 0.05 即 5%），按整首歌曲和相同音频严格隔离；自动留出模式下填 0 关闭验证。</small></label><label class="field">手动验证 manifest<input id="v2TrainValidationManifest" type="text" value=""></label><label class="field">特征准备设备<select id="v2TrainPrepareDevice"><option value="auto" selected>自动选择</option><option value="cuda">CUDA</option><option value="openvino-gpu">Intel 核显</option><option value="openvino-npu">Intel NPU</option><option value="cpu">CPU</option></select></label></div></div></details><details class="settings-section" data-advanced><summary>模型与上下文</summary><div class="settings-content"><div class="form-grid"><label class="field">独立声学起音参考<select id="v2TrainOnsetReadout"><option value="auto" selected>自动：新训练启用最新读出，续训继承检查点</option><option value="off">关闭</option><option value="phase_audio_v1">启用拍内声学读出</option></select><small>用高时间分辨率声学分支比较拍内细分候选附近的音乐重音，保留原有休止和配置分支。新训练和微调默认开启；旧模型需在新目录通过 finetune 启用。</small></label><label class="field">学习强度曲线<select id="v2TrainIntensityCurve"><option value="auto" selected>自动：新训练／微调启用，续训继承</option><option value="rate_curve_v1">启用全曲事件率与同拍物量学习</option><option value="off">关闭</option></select><small>从真实谱面学习哪里该密、哪里该疏，包含正常留白；支持生成时编辑，不用强制补音或硬性密度上限。</small></label><label class="field">节拍结构与对齐参考<select id="v2TrainRhythmStructure"><option value="auto" selected>自动：新训练与微调启用，续训继承检查点</option><option value="off">关闭（保持旧版参考方式）</option><option value="aligned_rhythm_v2">逐拍证据与混合分音学习（最新）</option><option value="aligned_rhythm_v1">旧版：拍内相位与整段可信度</option></select><small>新版逐拍比对参考与当前音乐，保护真实历史，并加强混合分音、错相位恢复和正常舍音的训练；不强制整段采用某种分音。旧模型需在新目录通过 finetune 学习新能力，原检查点保留。</small></label><label class="field">模型宽度<input id="v2TrainDModel" type="number" value="384" min="1" step="1" required></label><label class="field">层数<input id="v2TrainLayers" type="number" value="8" min="1" step="1" required></label><label class="field">注意力头数<input id="v2TrainNhead" type="number" value="8" min="1" step="1" required></label><label class="field">前馈宽度<input id="v2TrainDimFeedforward" type="number" value="1536" min="1" step="1" required></label><label class="field">Dropout<input id="v2TrainDropout" type="number" value="0.1" min="0" max="0.99" step="0.01" required></label><label class="field">单次训练片段跨度（拍）<input id="v2TrainWindowBeats" type="number" value="16" min="1" step="1" required><small>连续训练按完整事件与 token 预算切片；此值限制参考覆盖与计算推进跨度，不把音乐固定切成16拍。</small></label><label class="field">上下文窗口推进间隔（事件数）<input id="v2TrainRefreshEvents" type="number" min="1" value="16" step="1" required><small>连续序列每推进多少个事件滑动整理一次历史上下文窗口，默认 16；仅控制计算窗口推进，不是乐句长度，也不插入结束符。</small></label><label class="field">历史上下文（拍）<input id="v2TrainHistoryBeats" type="number" value="16" min="0" step="1" required><small>模型回看的近期已发生谱面历史拍数，默认 16 拍。</small></label><label class="field">局部音乐额外前瞻（拍）<input id="v2TrainFutureBeats" type="number" value="4" min="0" step="1" required><small>局部音乐窗口额外向前读取的未来拍数，默认 4 拍。</small></label><label class="field">词表网格基准<input id="v2TrainTicksPerBeat" type="number" value="48" min="1" step="1" required><small>用于构建可选拍内相位；连续模型也保留精确有理拍，不会把全部落点量化到48格，也不改变音频帧率。</small></label><label class="field">组件 token 上限<input id="v2TrainMaxTokens" type="number" value="2048" min="4" step="1" required></label></div></div></details><details class="settings-section" data-advanced><summary>验证、性能与保存</summary><div class="settings-content"><div class="form-grid"><label class="field">偏拍与节奏恢复训练<select id="v2TrainTimingRecovery"><option value="auto" selected>自动（继承或使用当前默认）</option><option value="off">关闭</option><option value="causal_rhythm_v1">密集／稀疏前文纠错</option></select><small>额外训练模型在历史落点出现轻微偏拍或过密/过疏时主动拉回正常节奏网格与合理留白。</small></label><label class="field">CPU 计算线程<input id="v2TrainCpuThreads" type="number" min="1" value="2" required><small>限制训练与特征准备的 CPU 算子线程；默认2。</small></label><label class="field">训练设备<select id="v2TrainDevice"><option value="auto" selected>自动选择</option><option value="cuda">CUDA</option><option value="xpu">Intel 核显（XPU）</option><option value="cpu">CPU</option></select></label><label class="field">预热更新数<input id="v2TrainWarmupSteps" type="number" value="200" min="0" step="1" required></label><label class="field">最低学习率比例<input id="v2TrainMinLrRatio" type="number" value="0.1" min="0" max="1" step="0.01" required></label><label class="field">验证最大批数<input id="v2TrainValidationMaxBatches" type="number" value="0" min="0" step="1" required><small>0检查完整开发集；新阶段设置上限时，均匀覆盖不同歌曲和曲内位置。</small></label><label class="field">验证无改善早停（轮）<input id="v2TrainEarlyStoppingPatience" type="number" value="5" min="0" step="1" required><small>验证 loss 连续5轮未改善时结束训练，保留 best；0关闭。未启用验证时不生效。</small></label><label class="field">保存更新间隔<input id="v2TrainCheckpointIntervalSteps" type="number" value="500" min="1" step="1" required></label><label class="field">每隔多少轮保留检查点<input id="v2TrainSaveEvery" type="number" value="5" min="0" step="1" required><small>默认每5轮保留 composer_v2_epoch_NNN.pt，含优化器，可生成或断点续训；0关闭独立轮次备份。last、best和推理权重仍照常保存。</small></label><label class="field">日志间隔<input id="v2TrainLogInterval" type="number" value="20" min="1" step="1" required></label><label class="field">训练随机种子<input id="v2TrainSeed" type="number" value="0" min="0" step="1" required></label><label class="field">最大更新尝试数（0不限）<input id="v2TrainMaxSteps" type="number" value="0" min="0" step="1" required></label><label class="field">谱面限制（0不限）<input id="v2TrainLimitCharts" type="number" value="0" min="0" step="1" required></label></div></div></details></section>
-<section id="v2TrainFeedbackControls" data-training-family="chart_composer_v2"><details class="settings-section" open><summary>人工反馈学习</summary><div class="settings-content"><label class="checkbox-field"><input id="v2TrainQualityEnabled" type="checkbox" checked><span>使用已保存的质量标注和训练示范</span></label><p class="muted">按已保存的标注调整学习权重。人工确认示范库与原训练集一起使用；加入或更改示范后，请在新目录 finetune。</p></div></details></section>
+<section id="composerV2TrainingControls" data-training-family="chart_composer_v2" hidden><div class="workflow-group-heading"><span class="step">COMPOSER V2</span><div><h3>Composer v2 连续事件训练（主推路线）</h3><p>让模型像真人谱师一样从头到尾连贯写谱：自动结合前后音乐呼应、鼓点重音与疏密起伏。第一次使用会自动下载音频分析器并生成缓存，之后再次训练无需重复等待。</p></div></div>
+<div class="preset-bar" aria-label="硬件与训练一键预设">
+  <div class="preset-bar-header"><strong>不知道怎么填参数？先点选符合你电脑显卡的预设：</strong><span>只修改表单数值，不会立即开始训练</span></div>
+  <div class="preset-chip-row">
+    <button type="button" class="preset-chip" data-v2-train-preset="vram8g"><strong>8G–12G 显卡省显存（推荐）</strong><span>开启显存重算 · 新训和微调使用批大小 4 × 累积 16</span></button>
+    <button type="button" class="preset-chip" data-v2-train-preset="standard16g"><strong>16G+ 显卡标准速度</strong><span>自动选择显存重算 · 新训和微调使用批大小 8 × 累积 8</span></button>
+    <button type="button" class="preset-chip" id="v2TrainSmokePreset" data-v2-train-preset="smoke"><strong>1 轮快速跑通测试</strong><span>新训和微调可用 · 最多 20 张谱面 · 切回显卡预设恢复训练计划</span></button>
+  </div>
+  <p id="v2TrainPresetStatus" class="preset-status muted" role="status"></p>
+</div>
+<details class="settings-section" open><summary>常用训练设置</summary><div class="settings-content"><div class="form-grid"><label class="field">音乐上下文<select id="v2TrainMusicContext"><option value="auto" selected>自动：新训练与微调启用最新设计，续训继承</option><option value="song_paired_v2">成对音乐参考与前方采音（最新）</option><option value="song_detail_v1">全曲结构与局部细节（旧版）</option><option value="off">关闭（旧模型对照）</option></select><small>让模型同时听清当前鼓点、前方即将到来的音乐，以及副歌重复段的对应写法；一般保持自动即可。</small></label><label class="field">音频编码层数<input id="v2TrainAudioLayers" type="number" value="4" min="1" step="1" required><small>新训练默认 4 层；微调可扩展音频层数，断点续训自动沿用原模型。</small></label><label class="field">全曲结构层数<input id="v2TrainSongLayers" type="number" value="2" min="1" step="1" required><small>理解整首歌段落起伏的层数，默认 2 层即可。</small></label><label class="field">总目标轮数<input id="v2TrainEpochs" type="number" value="50" min="1" step="1" required><small>把整套训练集反复学几遍。从头训练常用 40–50 轮，微调常用 10–25 轮。</small></label><label class="field">批大小（batch size）<input id="v2TrainBatchSize" type="number" value="8" min="1" step="1" required><small>每次塞进显卡同时学习的片段数。若提示显存不足，请调小到 4 或 2，并把右侧「梯度累积」调大。</small></label><label class="field">梯度累积<input id="v2TrainGradAccumulation" type="number" value="8" min="1" step="1" required><small>攒够几批再更新一次模型；「批大小 × 梯度累积」建议保持在 32–64 左右（默认 8×8=64）。</small></label><label class="field">CUDA 显存预算（GiB）<input id="v2TrainCudaMemoryBudgetGb" type="number" value="0" min="0" max="1024" step="0.001" required><small>填 0 让系统自动管理显存（推荐）；边玩游戏或开其他软件时可填入上限 GiB 数。</small></label><label class="field">音频缓存内存预算（GiB）<input id="v2TrainAudioCacheGb" type="number" value="0.25" min="0" max="1024" step="0.001" required><small>允许常驻电脑内存（RAM）加速读取的音频特征大小，默认 0.25 GiB 很省内存；填 0 完全不常驻。</small></label><label class="field">学习率<input id="v2TrainLr" type="number" value="0.0002" min="0.000001" step="0.000001" required><small>模型每次更新的步幅。从头训练推荐 0.0002；微调已有模型建议改小到 0.00005–0.0001。</small></label><label class="field">学习率计划<select id="v2TrainLrSchedule"><option value="cosine" selected>cosine（平滑收尾·推荐）</option><option value="constant">constant（全程恒定）</option></select><small>cosine 会在后期慢慢放缓步幅，让模型更稳地定型。</small></label><label class="field">训练精度<select id="v2TrainPrecision"><option value="auto" selected>自动选择（推荐）</option><option value="bf16">bf16</option><option value="fp16">fp16</option><option value="fp32">fp32</option></select><small>自动模式会优先选用你显卡支持的高速混合精度。</small></label></div></div></details><details class="settings-section" open><summary>数据与音频特征</summary><div class="settings-content"><div class="form-grid"><label class="field">独立缓存目录<input id="v2TrainCacheDir" type="text" value="cache/chart_composer_v2"><small>存放提取好的音乐特征，下次训练同批歌曲可直接秒读。</small></label><label class="field">音频特征<select id="v2TrainAudioBackend"><option value="mert" selected>mert（正式训练推荐）</option><option value="native">native（仅快速调试）</option></select><small>正式训练请保持 mert（深度音乐理解＋高帧率频谱）；native 仅用于无网环境快速排错。</small></label><label class="field">本地MERT目录（留空自动下载）<input id="v2TrainMertModel" type="text" value=""><small>一般留空即可，程序会自动下载并缓存；离线电脑可填本地模型文件夹路径。</small></label><label class="field">验证数据来源<select id="v2TrainValidationSource"><option value="auto" selected>自动按歌曲划分训练／开发／最终留出</option><option value="manual">手动独立验证清单</option><option value="off">关闭验证</option></select><small>推荐自动划分：留出一小部分没见过的歌做随堂小测，按开发验证损失挑选 best 检查点。</small></label><label class="field">总留出比例<input id="v2TrainHoldoutFraction" type="number" min="0" max="0.99" step="0.01" value="0.05" required><small>留出做测试的歌曲比例（默认 0.05 即 5%），按整首歌严格隔离不串题；填 0 关闭验证。</small></label><label class="field">手动验证 manifest<input id="v2TrainValidationManifest" type="text" value=""><small>仅在上方选「手动独立验证清单」时需要填写。</small></label><label class="field">特征准备设备<select id="v2TrainPrepareDevice"><option value="auto" selected>自动选择</option><option value="cuda">CUDA</option><option value="openvino-gpu">Intel 核显</option><option value="openvino-npu">Intel NPU</option><option value="cpu">CPU</option></select><small>首次提取音频特征时使用的硬件，保持自动即可。</small></label></div></div></details><details class="settings-section" data-advanced><summary>模型与上下文</summary><div class="settings-content"><div class="form-grid"><label class="field">独立声学起音参考<select id="v2TrainOnsetReadout"><option value="auto" selected>自动：新训练启用最新读出，续训继承检查点</option><option value="off">关闭</option><option value="phase_audio_v1">启用拍内声学读出</option></select><small>用高时间分辨率声学分支比较拍内细分候选附近的音乐重音，保留原有休止和配置分支。新训练和微调默认开启；旧模型需在新目录通过 finetune 启用。</small></label><label class="field">学习强度曲线<select id="v2TrainIntensityCurve"><option value="auto" selected>自动：新训练／微调启用，续训继承</option><option value="rate_curve_v1">启用全曲事件率与同拍物量学习</option><option value="off">关闭</option></select><small>从真实谱面学习哪里该密、哪里该疏，包含正常留白；支持生成时编辑，不用强制补音或硬性密度上限。</small></label><label class="field">节拍结构与对齐参考<select id="v2TrainRhythmStructure"><option value="auto" selected>自动：新训练与微调启用，续训继承检查点</option><option value="off">关闭（保持旧版参考方式）</option><option value="aligned_rhythm_v2">逐拍证据与混合分音学习（最新）</option><option value="aligned_rhythm_v1">旧版：拍内相位与整段可信度</option></select><small>新版逐拍比对参考与当前音乐，保护真实历史，并加强混合分音、错相位恢复和正常舍音的训练；不强制整段采用某种分音。旧模型需在新目录通过 finetune 学习新能力，原检查点保留。</small></label><label class="field">模型宽度<input id="v2TrainDModel" type="number" value="384" min="1" step="1" required></label><label class="field">层数<input id="v2TrainLayers" type="number" value="8" min="1" step="1" required></label><label class="field">注意力头数<input id="v2TrainNhead" type="number" value="8" min="1" step="1" required></label><label class="field">前馈宽度<input id="v2TrainDimFeedforward" type="number" value="1536" min="1" step="1" required></label><label class="field">Dropout<input id="v2TrainDropout" type="number" value="0.1" min="0" max="0.99" step="0.01" required></label><label class="field">单次训练片段跨度（拍）<input id="v2TrainWindowBeats" type="number" value="16" min="1" step="1" required><small>连续训练按完整事件与 token 预算切片；此值限制参考覆盖与计算推进跨度，不把音乐固定切成16拍。</small></label><label class="field">上下文窗口推进间隔（事件数）<input id="v2TrainRefreshEvents" type="number" min="1" value="16" step="1" required><small>连续序列每推进多少个事件滑动整理一次历史上下文窗口，默认 16；仅控制计算窗口推进，不是乐句长度，也不插入结束符。</small></label><label class="field">历史上下文（拍）<input id="v2TrainHistoryBeats" type="number" value="16" min="0" step="1" required><small>模型回看的近期已发生谱面历史拍数，默认 16 拍。</small></label><label class="field">局部音乐额外前瞻（拍）<input id="v2TrainFutureBeats" type="number" value="4" min="0" step="1" required><small>局部音乐窗口额外向前读取的未来拍数，默认 4 拍。</small></label><label class="field">词表网格基准<input id="v2TrainTicksPerBeat" type="number" value="48" min="1" step="1" required><small>用于构建可选拍内相位；连续模型也保留精确有理拍，不会把全部落点量化到48格，也不改变音频帧率。</small></label><label class="field">组件 token 上限<input id="v2TrainMaxTokens" type="number" value="2048" min="4" step="1" required></label></div></div></details><details class="settings-section" data-advanced><summary>验证、性能与保存</summary><div class="settings-content"><div class="form-grid"><label class="field">偏拍与节奏恢复训练<select id="v2TrainTimingRecovery"><option value="auto" selected>自动（继承或使用当前默认）</option><option value="off">关闭</option><option value="causal_rhythm_v1">密集／稀疏前文纠错</option></select><small>额外训练模型在历史落点出现轻微偏拍或过密/过疏时主动拉回正常节奏网格与合理留白。</small></label><label class="field">训练显存优化<select id="v2TrainActivationCheckpointing"><option value="auto" selected>自动（Windows 小显存显卡优化解码器）</option><option value="on">开启：全部重算，更省显存</option><option value="off">关闭：保留中间结果</option></select><small>减少训练时保存的中间结果，避免显存不足后借用内存拖慢速度。不改变 batch、训练目标或模型结构；可在断点续训时调整。</small></label><label class="field">CPU 计算线程<input id="v2TrainCpuThreads" type="number" min="1" value="2" required><small>限制训练与特征准备的 CPU 算子线程；默认2。</small></label><label class="field">训练设备<select id="v2TrainDevice"><option value="auto" selected>自动选择</option><option value="cuda">CUDA</option><option value="xpu">Intel 核显（XPU）</option><option value="cpu">CPU</option></select></label><label class="field">预热更新数<input id="v2TrainWarmupSteps" type="number" value="200" min="0" step="1" required></label><label class="field">最低学习率比例<input id="v2TrainMinLrRatio" type="number" value="0.1" min="0" max="1" step="0.01" required></label><label class="field">验证最大批数<input id="v2TrainValidationMaxBatches" type="number" value="0" min="0" step="1" required><small>0检查完整开发集；新阶段设置上限时，均匀覆盖不同歌曲和曲内位置。</small></label><label class="field">验证无改善早停（轮）<input id="v2TrainEarlyStoppingPatience" type="number" value="5" min="0" step="1" required><small>验证 loss 连续5轮未改善时结束训练，保留 best；0关闭。未启用验证时不生效。</small></label><label class="field">保存更新间隔<input id="v2TrainCheckpointIntervalSteps" type="number" value="500" min="1" step="1" required></label><label class="field">每隔多少轮保留检查点<input id="v2TrainSaveEvery" type="number" value="5" min="0" step="1" required><small>默认每5轮保留 composer_v2_epoch_NNN.pt，含优化器，可生成或断点续训；0关闭独立轮次备份。last、best和推理权重仍照常保存。</small></label><label class="field">日志间隔<input id="v2TrainLogInterval" type="number" value="20" min="1" step="1" required></label><label class="field">训练随机种子<input id="v2TrainSeed" type="number" value="0" min="0" step="1" required></label><label class="field">最大更新尝试数（0不限）<input id="v2TrainMaxSteps" type="number" value="0" min="0" step="1" required></label><label class="field">谱面限制（0不限）<input id="v2TrainLimitCharts" type="number" value="0" min="0" step="1" required></label></div></div></details></section>
+<section id="v2TrainFeedbackControls" data-training-family="chart_composer_v2"><details class="settings-section" open><summary><span>素材自动体检与人工反馈学习</span><small>先自动排除错位与坏段，再重点学习高质量好段；人工标注始终优先</small></summary><div class="settings-content">
+<div class="auto-audit-intro">
+  <strong>两级自动素材体检（maimai DX 规则）：</strong>
+  <span>第一级优先把「音画严重错位、硬无理冲突、吃音纵连、转谱微抖动、局部变速漂移、高能断更空窗」排除在学习之外；第二级再从干净谱面中挑出音画贴合且左右手顺畅的亮眼段落加强学习。<strong>不会改动你的原谱文件，也不会覆盖你的手动标注。</strong></span>
+</div>
+<div class="preset-bar compact-preset-bar" aria-label="自动体检方案预设">
+  <div class="preset-bar-header"><strong>选择体检方案：</strong><span>训练页与「训练素材」页共用同一套体检规则与结果</span></div>
+  <div class="preset-chip-row">
+    <button type="button" class="preset-chip" data-auto-audit-preset="standard"><strong>标准清洗＋优选好段（推荐）</strong><span>屏蔽硬冲突与错位坏段，适度降权别扭手顺，提权前 18% 精品段</span></button>
+    <button type="button" class="preset-chip" data-auto-audit-preset="strict"><strong>严格排错（适合杂乱自制谱合集）</strong><span>连同全部撞尾警告与内屏无理一并屏蔽，问题超 35% 整张排除</span></button>
+    <button type="button" class="preset-chip" data-auto-audit-preset="conservative"><strong>仅排错不提权（保守清洗）</strong><span>只排除硬伤与错位片段，不额外放大任何段落权重</span></button>
+  </div>
+</div>
+<div class="form-grid"><label class="checkbox-field"><input id="v2TrainQualityEnabled" type="checkbox" checked><span>训练时启用质量标注、训练示范与自动体检结果</span><small>保持勾选即可同时生效手动标注与自动体检；人工标注优先用于相应范围；整谱排除由整谱标签决定。</small></label><label class="field">示范库前后呼应参考<select id="v2TrainReviewedReferencePolicy"><option value="auto" selected>自动：新训练与微调仅参考已确认段落，续训继承</option><option value="approved_only">开启：只参考已确认的配置片段</option><option value="off">关闭：不从候选库与示范库提取呼应参考</option></select><small>让模型在相似音乐处参考前面已确认的好写法。候选库与示范库中，只有你认可配置的片段会被用作呼应参考。</small></label><label class="field">自动分段质检策略<select id="v2TrainAutoQualityPolicy"><option value="auto" selected>自动采用已有体检结果（推荐）</option><option value="on">强制要求使用自动体检结果</option><option value="off">仅使用人工标注（忽略自动体检）</option></select><small>设为「自动」时，只要该训练集跑过正式自动体检就会自动加载；续训沿用检查点原设置。</small></label><label class="field">自动质检张数（0＝正式体检）<input id="v2AutoQualityLimit" type="number" min="0" step="1" value="0"><small>填 0 检查符合范围的谱面并生成正式标注。当前范围为 12–15 级的 Expert、Master 和 Re:Master。填正数只生成抽查结果。</small></label><label class="field">Slide 撞尾片段处理<select id="v2AutoQualityTailMode"><option value="mask_hard" selected>屏蔽实际硬撞尾片段（推荐）</option><option value="mask_all">严格屏蔽全部撞尾提示片段</option><option value="allow">保留撞尾片段不屏蔽</option></select><small>发现 Tap 撞上未划完的 Slide 轨迹时，在训练中不学该处的按键配置。</small></label><label class="field">优质好段自动提权<select id="v2AutoQualityHighlightMode"><option value="auto" selected>自动（声学对齐与手顺均达标）</option><option value="acoustic_and_flow_v1">严格双门控（必须声学对齐＋手顺达标才提权）</option><option value="chart_only_v1">仅按谱面手顺与结构提权</option><option value="off">关闭（只排错，不提权好段）</option></select><small>音画重音对齐、手顺达标且避开硬伤的好段会加强学习，采音 1.20 倍、配置 1.35 倍。</small></label><label class="field">别扭手顺轻降权比例<input id="v2AutoQualityHandFlowQuantile" type="number" min="0" max="0.25" step="0.01" value="0.05"><small>按同难度档位将最别扭的前 5%（0.05）段落配置权重轻降为 0.25，保留采音学习；填 0 关闭。</small></label><div class="field auto-audit-action-field"><div class="button-row compact-button-row"><button id="v2AutoQualityAuditButton" class="primary-button" type="button">一键自动体检所选训练集</button><button class="secondary-button" type="button" data-run-auto-audit="preview20">先抽查 20 张预览</button></div><small>体检完成后会自动生成可视化体检看板，并可在「训练素材」目录按问题类型筛选试听。</small><p id="v2AutoQualityAuditTarget" class="muted"></p><p id="v2AutoQualityAuditStatus" class="workflow-hint" role="status"></p></div></div>
+<details class="settings-section"><summary><span>更多自动体检细则（撞尾毫秒、Touch 可达、转谱顽疾与好段门槛）</span><small>预设已填好推荐值，想精细调节某类舞萌判定标准时展开</small></summary><div class="settings-content"><div class="form-grid">
+  <label class="field">撞尾判定窗口（毫秒）<input id="v2AutoQualityTailMs" type="number" min="0" max="250" step="1" value="200"><small>Slide 划过终点前后多少毫秒内撞上同键视为风险，默认 200ms。</small></label>
+  <label class="field">内屏／双手交叉硬无理<select id="v2AutoQualityInnerMuriMode"><option value="allow" selected>仅统计不强制屏蔽（兼容高难张力谱）</option><option value="mask_hard">严格屏蔽内屏硬无理片段</option></select><small>自制谱合集手癖较多时可选「严格屏蔽」；官谱或高难谱保持默认即可。</small></label>
+  <label class="field">Touch 跨区兼顾规则<select id="v2AutoQualityTouchPolicy"><option value="palm_span_v1" selected>手掌自然兼顾（默认）</option><option value="strict_on_slide_only">严格按滑星轨迹判定</option><option value="off">关闭 Touch 不可达检查</option></select><small>检查双手按住长条或滑星时，屏幕上的 Touch 是否在手掌可及范围内。</small></label>
+  <label class="field">Touch 同手兼顾半径<input id="v2AutoQualityTouchRadius" type="number" min="60" max="260" step="1" value="180"><small>数值越小判定越严，默认 180 贴合实机手掌张开范围。</small></label>
+  <label class="field">转谱顽疾与坏段专项排查<select id="v2AutoQualityDomainMode"><option value="maimai_dx_v1" selected>开启舞萌专项排查（推荐）</option><option value="off">关闭专项排查</option></select><small>自动识别转谱微抖动伪分音（如 5ms 假碎拍）与违背人手极限的高速同键吃音纵连。</small></label>
+  <label class="field">音画同步与漏写排查<select id="v2AutoQualityAcousticMode"><option value="auto" selected>自动（有音频就查错位与断更）</option><option value="on">强制开启声学核对（缺音频记为待核对）</option><option value="off">关闭音频核对（仅查谱面）</option></select><small>对比音乐鼓点，自动揪出「整首偏移错位、中途未标变速漂移、高能副歌突然空白断更」。</small></label>
+  <label class="field">优选好段分位门槛（0.50–0.98）<input id="v2AutoQualityGoodQuantile" type="number" min="0.5" max="0.98" step="0.01" value="0.82"><small>默认 0.82 代表只挑同难度档位综合得分前 18% 的精品乐句提权；越高越挑剔。</small></label>
+  <label class="field">整谱排除问题占比上限<input id="v2AutoQualityMaxProblemFraction" type="number" min="0.05" max="1" step="0.05" value="0.45"><small>当一张谱面超过多少比例的时间都是硬伤坏段时，直接整张排除不学（默认 0.45 即 45%）。</small></label>
+  <label class="field">后台体检并行进程数<input id="v2AutoQualityWorkers" type="number" min="0" max="32" step="1" value="0"><small>填 0 自动按 CPU 核心数分配多核加速；电脑卡顿时可手动填 2 或 4。</small></label>
+</div></div></details>
+<div id="v2AutoQualityDashboard" class="auto-audit-dashboard" hidden></div>
+<p id="v2TrainZeroUnmarkedWarning" class="inline-status warn" role="status" hidden></p><p class="muted">训练和验证都会遵循这里的清洗与标注结果。跑完自动体检或修改手动标注后，请用新目录开始微调（finetune）或从头训练（fresh）。</p></div></details></section>
 <section id="chartComposerTrainingControls" class="song-form-only" data-training-family="chart_composer_v1" hidden>
 <div class="workflow-group-heading"><span class="step">COMPOSER</span><div><h3>Composer 架构与训练参数</h3><p>读取 Composer manifest。整拍集合连续生成与旧候选动作架构使用各自的检查点；训练和生成设置按所选架构显示。</p></div></div>
 <div class="toolbar"><button id="composerApplyFreshDefaults" type="button">应用重训默认值</button><small>仅fresh可用。设置本轮训练参数和新输出目录；已保存的自定义训练值会被替换。</small></div>
@@ -939,28 +986,47 @@
 
       <section class="panel quality-panel">
         <div class="section-heading">
-<div><span class="step">QUALITY</span><h2>训练素材</h2></div><span class="muted">浏览与标注素材，独立选择训练来源</span></div>
-        <p class="param-intro">先打开资料，试听并标注值得学的片段；准备下一次训练时，再勾选来源并点“应用勾选的数据集”。浏览和标注不会改变当前训练。</p>
-        <details class="settings-section"><summary>使用说明：普通训练集和待审候选怎么用</summary><div class="settings-content">
-          <p><strong>普通训练集：</strong>适合已经决定整体用于训练的素材。预处理后勾选即可；需要时可在谱面目录调整质量标注。</p>
-          <p><strong>待审候选库：</strong>适合还没确认质量的素材。在普通训练集卡片上点“作为候选库审查”，会另外建立候选库并扫描，原训练集和标注保留。候选库起初没有可学习内容，审阅确认的片段才会加入。</p>
-          <ol><li>打开候选库，点“继续审阅（下一段）”，播放音频并查看谱面；也可以在时间轴自己圈选一段。</li><li>选择“采音和配置都学”（认可音符时机和写法）、“只学采音”（只认可音符时机）、“只学配置”（只认可写法），或“暂不学习”（还不能确认）。点击即保存当前范围；可撤销上次保存。</li><li>只有连同前文听过并认可进入本段的衔接，才勾“包含进入本段的第一步”。“整首都学”用于已经完整听过并认可的整首。</li><li>返回列表，勾选普通训练集和已审候选库，点“应用勾选的数据集”准备下一次训练来源。这一步不会开始训练，也不会改变正在运行的训练。</li></ol>
-          <p>候选库只想学习确认片段时，请不要同时勾选它对应的原训练集，否则原训练集仍会提供整谱内容。源谱修改后用“重新扫描／同步”更新，再检查需要重新确认的片段。</p>
-          <p>“估算所选来源的学习份额”用来查看各来源预计提供多少采音和配置学习内容；它考虑确认范围和权重，不是谱面质量分。可以一边估算一边继续审阅，估算框会显示进度。</p>
-          <p>普通训练集按预处理记录估算，改过源谱后先重新预处理。BPM或偏移有误时先修正对齐；“只学配置”用于保留写法，不是跳过时间对齐检查。</p>
+<div><span class="step">QUALITY</span><h2>训练素材 · 自动体检与手动标注</h2></div><span class="muted">先自动排错挑好段，再按需试听微调</span></div>
+        <p class="param-intro">好模型离不开干净的训练谱面。你可以先用下方<strong>「一键两级自动体检」</strong>自动排除音画错位、无理冲突、吃音纵连和转谱抖动，并挑出顺手贴音的精品乐句；也可以点进任意谱面<strong>手动圈选标注</strong>（你的人工标注优先用于对应范围）。</p>
+        <ol class="material-workflow"><li><strong>① 勾选训练来源</strong><span>在下方数据集卡片勾选要用的谱面库；想严格逐段挑着学，也可建立“待审候选库”。</span></li><li><strong>② 一键自动体检</strong><span>点击「一键自动体检所选训练集」，系统自动屏蔽硬伤坏段、挑出高分好段，并生成直观体检报告。</span></li><li><strong>③ 抽查试听或直接开训</strong><span>点击体检看板即可筛选查看问题谱或好段落；满意后直接切到「训练模型」开始训练。</span></li></ol>
+        <section id="qualityAutoAuditCard" class="auto-audit-card" aria-label="训练集两级自动体检">
+          <div class="auto-audit-card-head">
+            <div>
+              <span class="step">AUTO AUDIT</span>
+              <h3>两级自动素材体检（优先排除问题段 · 其次提权好段落）</h3>
+              <p>专为舞萌 DX 设计：第一级自动拦截<strong>整首音画错位、局部变速漂移、高能副歌断更、硬无理冲突、吃音高速纵连、转谱微抖动</strong>；第二级在零硬伤段落中挑选<strong>重音严丝合缝＋双手顺畅自然</strong>的精品乐句加强学习。绝不改动你的原始谱面文件。</p>
+            </div>
+          </div>
+          <div class="preset-chip-row">
+            <button type="button" class="preset-chip" data-auto-audit-preset="standard"><strong>标准清洗＋优选好段（推荐）</strong><span>屏蔽硬冲突与错位坏段 · 轻降权别扭手顺 · 提权前 18% 好段</span></button>
+            <button type="button" class="preset-chip" data-auto-audit-preset="strict"><strong>严格排错（适合杂乱自制谱合集）</strong><span>连同全部撞尾警告与内屏无理一并屏蔽 · 问题超 35% 整谱排除</span></button>
+            <button type="button" class="preset-chip" data-auto-audit-preset="conservative"><strong>仅排错不提权（保守清洗）</strong><span>只排除错位与硬伤坏段 · 不额外放大任何段落权重</span></button>
+          </div>
+          <div class="button-row compact-button-row">
+            <button type="button" class="primary-button" data-run-auto-audit="full">一键自动体检所选训练集</button>
+            <button type="button" class="secondary-button" data-run-auto-audit="preview20">先抽查 20 张看看效果</button>
+            <button type="button" class="small-button" data-focus-setting="v2AutoQualityTailMs">调整更多体检细则…</button>
+          </div>
+          <p id="qualityAutoAuditTarget" class="muted"></p><p id="qualityAutoAuditStatus" class="workflow-hint" role="status">打开谱面目录时检查当前库；在素材列表时检查勾选的训练来源。</p>
+          <div id="qualityAutoAuditDashboard" class="auto-audit-dashboard" hidden></div>
+        </section>
+        <details class="settings-section"><summary>候选库、自动体检、手动标注和训练有什么关系？</summary><div class="settings-content">
+          <p><strong>自动体检 vs 手动标注：</strong>自动体检适合几百上千张普通训练集快速排雷与挑好段，生成只读的自动标注文件；当你在谱面目录或时间轴上手动保存了整谱标签或局部片段评价，<strong>片段标注只覆盖同一段，整谱标签才会调整整张谱的学习决定</strong>。</p>
+          <p><strong>普通训练集 vs 待审候选库：</strong>普通训练集默认整谱学习（自动体检会帮你挖掉坏段）；“待审候选库”则默认整谱不学，只学你亲手点确认的片段，适合质量参差不齐但想淘金的素材包。</p>
+          <p><strong>标注怎么决定学什么：</strong>“这段都学”学习所选范围的采音与配置；“只学采音”保留落点与取舍，“只学配置”保留键位与动作。“有问题”会屏蔽对应方面的学习；“整张排除”整首不参与训练。</p>
+          <p><strong>改完标注后怎么生效：</strong>在训练页保持勾选「训练时启用质量标注、训练示范与自动体检结果」，用新的输出目录开始微调（finetune）或从头训练（fresh）即可生效。</p>
         </div></details>
         <div class="dataset-workspace-actions"><button id="datasetComposeButton" class="primary-button" type="button">应用勾选的数据集</button><button id="datasetImportButton" class="secondary-button" type="button">导入新数据集</button><span id="datasetSelectionSummary" class="muted">尚未选择数据集</span></div>
         <div class="button-row"><button id="candidatePoolBudget" class="small-button" type="button">估算所选来源的学习份额</button><button id="candidatePoolBudgetCancel" class="small-button" type="button" hidden>取消估算</button></div><div id="candidatePoolBudgetResult" class="inline-status" role="status" aria-live="polite" hidden></div>
         <div id="datasetCompositionSummary" class="inline-status" role="status" aria-live="polite" hidden></div>
-        <section id="reviewBundlePanel" class="candidate-pool-panel" aria-label="已确认片段导入导出">
-          <h3>已确认片段：导入与导出</h3>
+        <details id="reviewBundlePanel" class="candidate-pool-panel"><summary>搬到其他设备：导入／导出已确认片段</summary>
           <p class="muted">导出下方勾选来源中的已确认片段。ZIP 包含完整谱面、音频和学习范围，可在其他设备导入；未确认部分只作前后文。</p>
           <div class="button-row"><button id="reviewBundleExport" type="button" class="secondary-button">导出已确认片段</button><button id="reviewBundleChoose" type="button" class="secondary-button">导入片段包…</button><input id="reviewBundleFile" type="file" accept=".zip" hidden><a id="reviewBundleDownload" class="small-button" hidden>下载片段包</a></div>
           <p id="reviewBundleStatus" class="inline-status" role="status" aria-live="polite">导出明确确认的好片段；整谱标签和生成结果的普通好评不自动收为示范。</p>
           <div id="reviewBundlePreview" hidden><h4>待导入清单</h4><p id="reviewBundleCounts"></p><ul id="reviewBundleItems" class="review-training-list"></ul><button id="reviewBundleApply" type="button" class="primary-button">确认导入示范库</button></div>
           <div id="reviewBundleImported" hidden><p>已保存到人工确认示范库。可先预览，之后再加入下一次训练。</p><div class="button-row"><button id="reviewBundleOpen" type="button" class="secondary-button">浏览示范库</button><button id="reviewBundleAddTraining" type="button" class="secondary-button">加入下次训练来源</button></div></div>
           <a href="/api/download?path=docs/explanations/COMPOSER_V2_ANNOTATION_GUIDE_ZH.md" target="_blank">查看审阅、标注与导入导出说明</a>
-        </section>
+        </details>
         <section id="datasetCardsPanel" class="dataset-workspace" aria-labelledby="datasetWorkspaceTitle">
           <div class="section-heading">
 <div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
@@ -975,22 +1041,25 @@
 <div><span class="step">CATALOG</span><h3 id="datasetCatalogTitle">数据集谱面目录</h3></div><button id="datasetBackButton" class="secondary-button" type="button">返回数据集列表</button></div>
         <p class="param-intro">搜索、排序后，点击“预览与标注”查看谱面。可在顶部预览中连续切换上一张、下一张。</p>
         <section id="candidatePoolPanel" class="candidate-pool-panel" hidden>
-          <h3>候选库审阅</h3><p id="candidatePoolSummary" role="status"></p>
-          <p class="muted">先选检查状态，再点“继续审阅”。试听建议片段，也可以在时间轴重新圈选；点击学习按钮即保存。</p>
+          <h3>挑选可学习内容</h3><p id="candidatePoolSummary" role="status"></p><p id="candidatePoolDecisions" role="status"></p>
+          <p class="muted">点“开始／继续审阅”会打开整张谱面并选中一个建议片段。可调整选择；无需逐段标完整首。</p>
           <label>自动检查状态<select id="candidatePoolStatusFilter"><option value="">全部可审片段</option><option value="suspicious">待核对：先查看提示并试听</option><option value="ok">低风险：试听后确认</option><option value="error">错误：先修正源资料</option></select></label>
-          <details><summary>这三种结果怎么处理？</summary><p><strong>错误：</strong>查看目录里的具体原因；缺文件、缺等级、解析失败等要先修好源资料，再点“重新扫描／同步”。当前不会进入学习。</p><p><strong>待核对：</strong>先看偏移、变速、冲突等提示，带前后文试听。对齐正确、写法成立的片段可以确认；需要修改的先修源谱，再同步。拿不准就点“暂不学习”。</p><p><strong>低风险：</strong>扫描没有发现问题，仍要听采音、看衔接和手顺。只确认认可的片段，不必认可整首。正常休止、重复和少物量都可以保留。</p></details>
-          <div class="button-row"><button id="candidatePoolNext" type="button" class="primary-button">继续审阅（下一段）</button><button id="candidatePoolSync" type="button" class="secondary-button">重新扫描／同步</button><button id="candidatePoolExcluded" type="button" class="secondary-button">查看排除项</button></div>
+          <label>查看已保存的决定<select id="candidatePoolDecisionFilter"><option value="">目录显示全部谱面</option><option value="unreviewed">尚未确认学习</option><option value="partial">只学已确认片段</option><option value="learn_all">整张学习</option><option value="exclude">整张不学习</option></select><small>只筛选下方目录；继续审阅仍从待审片段中推荐。</small></label>
+          <details><summary>这三种结果怎么处理？</summary><p><strong>错误：</strong>查看目录里的具体原因；缺文件、缺等级、解析失败等要先修好源资料，再点“重新扫描／同步”。当前不会进入学习。</p><p><strong>待核对：</strong>先看偏移、变速、冲突等提示，带前后文试听。对齐正确、写法成立的片段可以确认；需要修改的先修源谱，再同步。拿不准可先看下一张，或将这段设为不学习。</p><p><strong>低风险：</strong>扫描没有发现问题，仍要听采音、看衔接和手顺。只确认认可的片段，不必认可整首。正常休止、重复和少物量都可以保留。</p></details>
+          <div class="button-row"><button id="candidatePoolNext" type="button" class="primary-button">开始／继续审阅</button><button id="candidatePoolSync" type="button" class="secondary-button">重新扫描／同步</button><button id="candidatePoolExcluded" type="button" class="secondary-button">查看扫描排除项</button></div>
           <div id="candidatePoolExcludedList" hidden></div>
+          <div class="candidate-training-actions"><button id="candidatePoolUse" type="button" class="primary-button">将已确认内容加入下次训练</button><p id="candidatePoolTrainingStatus" role="status"></p><button type="button" class="small-button" data-workspace-link="training">去训练页</button></div>
         </section>
         <div class="quality-toolbar">
           <input id="qualitySearch" type="search" placeholder="搜索歌曲标题、文件夹、谱师、难度">
           <select id="qualitySortBy" aria-label="目录排序字段"><option value="level">按难度</option><option value="title">按歌曲标题</option><option value="folder">按文件夹名</option><option value="designer">按谱师</option></select>
           <select id="qualitySortDirection" aria-label="目录排序方向"><option value="asc">升序</option><option value="desc">降序</option></select>
           <select id="qualityPageSize" aria-label="每页数量"><option value="25">每页 25</option><option value="50">每页 50</option><option value="100">每页 100</option></select>
-          <select id="qualityLabelFilter"><option value="">全部标签</option><option value="excellent">优秀</option><option value="normal">普通</option><option value="reduced">减权</option><option value="excluded">排除</option><option value="negative">反例</option></select>
+          <select id="qualityLabelFilter" aria-label="手动标签筛选"><option value="">全部手动标签</option><option value="excellent">优秀</option><option value="normal">普通</option><option value="reduced">减权</option><option value="excluded">排除</option><option value="negative">反例</option></select>
+          <select id="qualityAutoFilter" aria-label="自动体检筛选"><option value="">全部自动体检状态</option><option value="flagged">自动发现问题（排除＋局部屏蔽）</option><option value="excluded">自动整谱排除</option><option value="problem">自动局部屏蔽／手顺降权</option><option value="good">含自动优选好段落</option><option value="clean">自动体检干净通过</option><option value="unverified">自动体检待核对</option></select>
           <button id="qualityRefreshButton" class="secondary-button" type="button">刷新素材</button>
         </div>
-        <div class="quality-bulkbar">
+        <div id="qualityBulkControls"><div class="quality-bulkbar">
           <button id="qualitySelectFolderButton" class="secondary-button" type="button">全选当前文件夹（跨页）</button>
           <button id="qualityClearSelectionButton" class="secondary-button" type="button" disabled>取消全部选择</button>
           <span>已选 <strong id="qualitySelectedCount">0</strong> 项</span>
@@ -1000,10 +1069,10 @@
           <button id="qualitySaveSelectedButton" class="primary-button" type="button">保存选中标注</button>
         </div>
         <p id="qualitySelectionStatus" class="muted">文件夹全选包含当前数据集清单中的全部谱面，跨越所有分页，搜索和标签筛选不会缩小范围。选择后再点击“保存选中标注”。</p>
-        <p class="muted">单条手动调整过的权重会跨页保留并优先使用；其余选中谱面使用上方的批量权重。</p>
+        <p class="muted">单条手动调整过的权重会跨页保留并优先使用；其余选中谱面使用上方的批量权重。</p></div>
         <div id="qualitySummary" class="quality-summary-box">尚未加载当前 manifest。</div>
         <div class="quality-table-wrap"><table class="quality-table"><thead><tr><th>
-<label><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"> 本页</label></th><th>歌曲 / 难度</th><th>谱师</th><th>标签</th><th>权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
+<label><input id="qualitySelectAll" type="checkbox" aria-label="全选当前页"> 本页</label></th><th>歌曲 / 难度</th><th>谱师</th><th id="qualityLabelHeading">标签</th><th id="qualityWeightHeading">权重</th><th>操作</th></tr></thead><tbody id="qualityCatalogBody"></tbody></table></div>
         <div class="quality-pagination"><button id="qualityPrevButton" class="small-button" type="button">上一页</button><span id="qualityPageStatus">第 0 页</span>
 <label class="page-jump">跳到 <input id="qualityPageInput" type="number" min="1" step="1" value="1" aria-label="页码"><button id="qualityPageJumpButton" class="small-button" type="button">跳转</button></label><button id="qualityNextButton" class="small-button" type="button">下一页</button></div>
         <section id="qualityDetail" class="quality-detail" hidden>
@@ -1101,52 +1170,107 @@
     </div>
   </details>
 
-  <p>使用 Composer v2 模型从音频直接生成谱面。可分别调整「何时落音（采音）」与「写什么键型（配置）」的随机度；生成完成后可直接在上方「谱面预览」中播放试看。</p>
-  <div class="form-grid">
-    <label class="field">自动BPM分析<select id="v2GenerateTempoDetection"><option value="auto" selected>识别变速并校准全曲</option><option value="constant">仅恒定BPM，校准全曲</option><option value="legacy">旧版恒速估计（对照）</option></select><small>下方「BPM」留空时生效：默认自动识别变速并校准全曲（只应用通过连续性检查的可靠变速段，其余记入报告）。若确认歌曲恒速可选「仅恒定BPM，校准全曲」，或在下方 Step 03 直接填入准确 BPM；手动 tempo map 整表优先。</small></label><label class="checkbox-field"><input id="v2GenerateAutoFirst" type="checkbox" checked> 自动识别首拍偏移（关闭后使用下方手动首拍值）</label>
-    <label class="field" data-v2-phrase-search>生成方式<select id="v2GeneratePhraseSearch"><option value="layout" selected>先定节奏，再选配置（推荐）</option><option value="joint">节奏与配置一起选</option><option value="event">逐步生成（速度优先）</option></select><small id="v2PhraseSearchHelp">默认先确定一小段音符出现的时间和数量，再比较不同键位与动作组合；“节奏与配置一起选”还会尝试不同的出音时间。增加比较会更慢。</small></label>
-    <p id="v2GenerationMusicInfo" class="muted">音乐理解：新版模型支持成对参考与前方采音；生成时使用检查点已学到的方案。</p>
-    <label class="field" data-v2-phrase-search>提前试写长度（拍）<input id="v2GeneratePhraseBeats" type="number" min="1" max="16" step="0.5" value="4" required><small>每次先尝试写多长，再从中挑选。默认4拍；这只是比较范围，不要求音乐每4拍结束一段。</small></label>
-    <label class="field" data-v2-phrase-search>每次保留长度（拍）<input id="v2GeneratePhraseCommitBeats" type="number" min="0.5" max="16" step="0.5" value="2" required><small>例如先试写4拍，保留前2拍，再接着写。此值不能超过“提前试写长度”。</small></label>
-    <label class="field">采音温度<input id="v2GenerateTemperature" type="number" value="0.9" min="0" step="0.05" required><small>控制「何时落音」与「何时结束整谱」的随机度（默认 0.9）。越低越保守规整，越高变化越丰富。</small></label>
-    <label class="field" data-v2-action-sampling>配置温度<input id="v2GenerateActionTemperature" type="number" value="0.9" min="0" step="0.05" placeholder="留空沿用采音"><small>独立控制「音符类型、键位、同拍几押与时值」的随机度（默认 0.9）。0 为贪心取最高概率配置；留空则沿用采音温度。</small></label>
-    <label class="field">采音 Top-p<input id="v2GenerateTopP" type="number" value="0.95" min="0" max="1" step="0.01" required><small>限制参与落点抽样的累计概率范围（默认 0.95，数值越小候选越集中）。</small></label>
-    <label class="field" data-v2-action-sampling>配置 Top-p<input id="v2GenerateActionTopP" type="number" value="0.95" min="0" max="1" step="0.01" placeholder="留空沿用采音"><small>独立限制参与动作配置抽样的累计概率范围（默认 0.95）。留空则沿用采音 Top-p。</small></label>
-    <label class="field" data-v2-onset-readout>起音参考强度<input id="v2GenerateOnsetStrength" type="number" value="1" min="0" max="2" step="0.1"><small>帮助音符在当前拍内对准音乐的鼓点或重音。1为推荐值，0关闭，大于1时更重视这些声音；不会直接增加音符数量，也不能补回整段漏写。旧模型不支持时自动停用。</small></label>
-    <label class="field" data-v2-reference-selection>前文参考选择<select id="v2GenerateReferenceSelection"><option value="auto" selected>沿用模型学过的参考方式（推荐）</option><option value="aligned">参考前面相似的音乐段（实验）</option></select><small id="v2ReferenceSelectionHelp">让模型参考前面相似音乐段的写法，帮助前后呼应。通常保持推荐项；实验项会改变旧模型寻找参考的方式，效果可能变好也可能变差。</small></label>
-    <label class="checkbox-field"><input id="v2GenerateInterceptTapOnSlide" type="checkbox" checked>拦截并清理Slide撞尾（默认开启，可关闭）</label><label class="field">撞尾检测阈值（ms）<input id="v2GenerateTapOnSlideThresholdMs" type="number" min="0" max="250" step="1" value="200" required><small>仅开启撞尾门控后生效。沿用MiaCode判定，警告保留；0关闭静态邻近参考，实际触发的硬撞尾仍检测。无法安全清理时会报错。</small></label><label class="field">音频特征缓存<input id="v2GenerateCacheDir" type="text" value="cache/chart_composer_v2"></label>
-    <label class="field">生成设备<select id="v2GenerateDevice"><option value="auto" selected>auto</option><option value="cuda">cuda</option><option value="cpu">cpu</option></select></label>
-    <label class="field">音乐特征设备<select id="v2GenerateAudioDevice"><option value="auto" selected>自动选择</option><option value="openvino-gpu">Intel 核显</option><option value="openvino-npu">Intel NPU</option><option value="cuda">CUDA</option><option value="cpu">CPU</option></select><small>自动优先使用 CUDA 或 Intel 核显；首次使用需要编译，后续复用缓存。</small></label>
-    <label class="field">写谱加速<select id="v2GenerateInferenceBackend"><option value="auto" selected>自动测速选择</option><option value="torch">PyTorch</option><option value="openvino-cpu">OpenVINO CPU</option><option value="openvino-gpu">OpenVINO 核显</option></select><small>自动比较速度并缓存选择。Intel 后端用于 CPU 生成设备；采样与冲突恢复保持原有逻辑。</small></label>
-    <label class="field">最大事件数（0不限）<input id="v2GenerateMaxEvents" type="number" value="0" min="0" step="1" required></label>
-    <label class="field">生成张数<input id="v2GenerateCount" type="number" min="1" max="32" step="1" value="1" required><small>同一首歌生成1–32张完整谱面，独立保存并在预览中切换。</small></label>
-    <label class="field">同时生成数<input id="v2GenerateParallel" type="number" min="1" max="32" step="1" value="1" required disabled><small id="v2GenerateParallelHelp">生成多张时，可设置同时运行的张数。1为逐张生成；可先试2。</small></label>
-    <label class="field">生成时自动尝试的写法数<select id="v2GenerateCandidates"><option value="1">1种（不比较）</option><option value="2" selected>2种（推荐）</option><option value="4">4种（更慢）</option></select><small>生成内部比较后只保留成品，不会在预览中列出试写片段。想手动比较完整版本，请把「生成张数」设为 2 或更多。</small></label>
+  <p class="param-intro">导入音频与 Composer v2 模型即可写谱。你可以直接点选下方<strong>一键写谱预设</strong>，也可以按「节拍对准 → 写谱与手顺 → 实机防无理 → 采音与键型变化」四步微调。生成完成后点击页面顶部<strong>「谱面预览」</strong>即可在线试玩！</p>
+  <div class="preset-bar" aria-label="一键写谱预设">
+    <div class="preset-bar-header"><strong>一键选择写谱模式：</strong><span>只修改下方设置，选好后点击底部「生成谱面」运行</span></div>
+    <div class="preset-chip-row">
+      <button type="button" class="preset-chip" data-v2-gen-preset="balanced"><strong>推荐稳妥写谱（默认）</strong><span>先定节奏再比 2 种配置 · 自动拦截撞尾与锁手，速度与手感均衡</span></button>
+      <button type="button" class="preset-chip" data-v2-gen-preset="refined"><strong>高质精雕细琢（左右手顺畅）</strong><span>比较 4 种写法＋左右手交替评分＋重写薄弱段＋防星头抢拍</span></button>
+      <button type="button" class="preset-chip" data-v2-gen-preset="fast"><strong>快速试写预览（最快）</strong><span>逐步直接生成不反复比较，快速查看节奏与大体写法</span></button>
+      <button type="button" class="preset-chip" data-v2-gen-preset="batch4"><strong>一次抽 4 张挑最好</strong><span>同一首歌生成 4 张独立完整谱面，在顶部预览一键切换对比</span></button>
+    </div>
+    <p id="v2GenPresetStatus" class="preset-status muted" role="status"></p>
   </div>
+
+  <div class="v2-step-grid">
+    <section class="v2-step-card">
+      <div class="v2-step-head"><span class="step">A</span><div><h4>节拍、变速与起点对准</h4><p>不知道歌曲 BPM 也没关系，留空即可自动测算；已知准确 BPM 可在下方 Step 03 填入。</p></div></div>
+      <div class="form-grid">
+        <label class="field">自动BPM分析<select id="v2GenerateTempoDetection"><option value="auto" selected>识别变速并校准全曲（推荐）</option><option value="constant">仅恒定BPM，校准全曲</option><option value="legacy">旧版恒速估计（对照）</option></select><small>下方「BPM」留空时生效：默认自动识别可靠变速段并校准全曲；确认整首歌不改速可选「仅恒定BPM，校准全曲」。</small></label>
+        <label class="checkbox-field"><input id="v2GenerateAutoFirst" type="checkbox" checked><span>自动识别第一拍起点（首拍偏移）</span><small>推荐保持勾选；若你已经量好精确的 &amp;first 秒数，取消勾选后使用下方手动值。</small></label>
+        <label class="field">半／倍速自动折算（可选）<select id="v2GenerateTempoOctavePolicy"><option value="off" selected>关闭（保持检测原速）</option><option value="maimai_pulse_v1">折算到常见舞萌拍速（85–255 BPM）</option></select><small>当自动测出的 BPM 变成一半（如 75）或翻倍（如 300）时可开启，自动折算回 85–255 常用区间。</small></label>
+        <label class="field">小节强拍对准（可选）<select id="v2GenerateDownbeatAlignment"><option value="off" selected>关闭（保持首拍相位）</option><option value="bar_downbeat_v1">4 拍小节强拍对齐（保护前奏不丢音）</option></select><small>适合标准 4/4 拍流行或电音曲，让每小节第 1 拍对准重拍；3/4 等特殊拍号请保持关闭。</small></label>
+      </div>
+    </section>
+
+    <section class="v2-step-card">
+      <div class="v2-step-head"><span class="step">B</span><div><h4>写谱方式、左右手顺畅度与生成张数</h4><p>让 AI 每写几拍就先在草稿纸上试几种摆法，挑出最顺手的一版保留下来。</p></div></div>
+      <div class="form-grid">
+        <label class="field" data-v2-phrase-search>生成方式<select id="v2GeneratePhraseSearch"><option value="layout" selected>先定节奏，再选配置（推荐）</option><option value="joint">节奏与配置一起比较</option><option value="event">逐步生成（速度最快）</option><option value="hybrid">保留拍点，尝试不同双押物量（实验）</option></select><small id="v2PhraseSearchHelp">默认先确定一小段音符出现的时间和数量，再比较不同键位与动作组合；“节奏与配置一起比较”还会尝试不同的出音时间。增加比较会更慢。</small></label>
+        <label class="field" data-v2-phrase-search>手感与选优偏好<select id="v2GeneratePhraseRankPolicy"><option value="comfort_v1" selected>基础手感稳定优先（默认）</option><option value="comfort_v2">左右手交替与跨屏顺畅优先（新版推荐）</option><option value="likelihood_veto_v1">模型灵感优先＋手感底线保护（可选调优）</option></select><small>比较 2 种以上写法时生效。「左右手交替与跨屏顺畅优先」会模拟双手换手与移动打分；「模型灵感优先」更尊重模型非确定性语法决策似然，并把低于手感底线（0.22）的别扭候选排到后面。</small></label>
+        <label class="field">每次内部对比写法数<select id="v2GenerateCandidates"><option value="1">1种（不比较，最快）</option><option value="2" selected>2种（推荐，兼顾速度与质量）</option><option value="4">4种（多试几种，耗时较长）</option></select><small>AI 在后台打草稿挑最好的一版输出。想自己听几张完整成谱挑一张，请改右侧「生成张数」。</small></label>
+        <label class="field" data-v2-phrase-search>写完后自动精修薄弱段<select id="v2GenerateSelfRefine"><option value="off" selected>关闭（默认）</option><option value="worst_spans_v1">自动重写手感最别扭的几段（高质推荐）</option></select><small>整首写完后自动回头检查，把最卡手的少量局部片段重新润色一遍，会稍微增加耗时。</small></label>
+        <label class="field" data-v2-phrase-search>每次打草稿长度（拍）<input id="v2GeneratePhraseBeats" type="number" min="1" max="16" step="0.5" value="4" required><small>每次往前试写几拍来评估顺畅度，默认 4 拍即可。</small></label>
+        <label class="field" data-v2-phrase-search>每次定稿保留长度（拍）<input id="v2GeneratePhraseCommitBeats" type="number" min="0.5" max="16" step="0.5" value="2" required><small>试写 4 拍后先落笔定稿前 2 拍，再顺着往下写；不能超过左侧草稿长度。</small></label>
+        <label class="field">生成张数（抽卡挑谱）<input id="v2GenerateCount" type="number" min="1" max="32" step="1" value="1" required><small>同一首歌一次生成 1–32 张完整谱面，完成后可在顶部预览下拉框里随时切换试玩对比。</small></label>
+        <label class="field">多张同时运行数<input id="v2GenerateParallel" type="number" min="1" max="32" step="1" value="1" required disabled><small id="v2GenerateParallelHelp">生成多张时，可设置同时运行的张数。1为逐张生成；显存充裕可试 2。</small></label>
+      </div>
+      <p id="v2GenerationMusicInfo" class="muted">音乐理解：新版模型支持成对参考与前方采音；生成时使用检查点已学到的方案。</p>
+    </section>
+
+    <section class="v2-step-card">
+      <div class="v2-step-head"><span class="step">C</span><div><h4>舞萌实机防无理与防锁手保护</h4><p>按真实舞萌街机手掌跨度与星星判定设计，在写谱过程中提前拦下“三只手无理”与“滑星撞尾”。</p></div></div>
+      <div class="form-grid">
+        <label class="checkbox-field"><input id="v2GenerateInterceptTapOnSlide" type="checkbox" checked><span>拦截并清理 Slide 撞尾（推荐开启）</span><small>防止未划完的星星终点附近冒出同键 Tap 导致实机误触吃音。</small></label>
+        <label class="field">撞尾保护窗口（ms）<input id="v2GenerateTapOnSlideThresholdMs" type="number" min="0" max="250" step="1" value="200" required><small>星星划过该键前后多少毫秒内禁止塞入冲突按键，默认 200ms 贴合实机手感。</small></label>
+        <label class="checkbox-field"><input id="v2GenerateInterceptSlideHeadTap" type="checkbox"><span>拦截星头提前抢拍误触</span><small>开启后额外防止滑星刚亮起等待划动时，同一位置紧接着塞入容易抢判定的按键。</small></label>
+        <label class="field" data-v2-phrase-search>下笔前双手防锁检查<select id="v2GenerateForwardFeasibility"><option value="balanced_v1" selected>检查当前按键占用＋预防双手长锁（默认）</option><option value="hard_only_v1">仅检查当前三只手硬冲突</option><option value="off">关闭下笔前预检</option></select><small>提前防止“两只手都被 Hold 按死，却又冒出远端新按键”的锁手死局。</small></label>
+        <label class="field" data-v2-phrase-search>下笔前撞尾预判范围（ms）<input id="v2GenerateForwardTapOnSlideMs" type="number" min="0" max="250" step="1" value="150" required><small>选键时提前避开正在划动的星星轨迹，默认 150ms；填 0 关闭预判。</small></label>
+        <label class="field">Touch 手掌可达规则<select id="v2GenerateTouchReachabilityPolicy"><option value="palm_span_v1" selected>手掌自然兼顾（默认）</option><option value="strict_on_slide_only">严格按滑星擦过判定</option><option value="off">关闭 Touch 跨区检查</option></select><small>按住外圈长条时，只允许手掌张开够得着的内圈 Touch 出现。</small></label>
+        <label class="field">Touch 同手兼顾半径<input id="v2GenerateTouchCoholdRadius" type="number" min="60" max="260" step="1" value="180" required><small>同手按住外键时顺带摸到内屏 Touch 的最大距离，默认 180。</small></label>
+      </div>
+    </section>
+
+    <section class="v2-step-card">
+      <div class="v2-step-head"><span class="step">D</span><div><h4>采音贴合度、前后呼应与键型变化度</h4><p>把“什么时候出音”和“摆什么键位”分开调节：想要踩点更稳就稍微调低采音温度，想要键型更灵动就保持配置温度。</p></div></div>
+      <div class="form-grid">
+        <label class="field" data-v2-onset-readout>鼓点与重音贴合强度<input id="v2GenerateOnsetStrength" type="number" value="1" min="0" max="2" step="0.1"><small>帮助音符精准踩在鼓点或旋律起音上。1 为推荐值，0 关闭，1.2–1.4 会更紧贴明显重音；旧模型不支持时自动停用。</small></label>
+        <label class="field" data-v2-reference-selection>副歌前后呼应方式<select id="v2GenerateReferenceSelection"><option value="auto" selected>沿用模型学过的呼应方式（推荐）</option><option value="aligned">强制参考前面相似的音乐段（实验）</option></select><small id="v2ReferenceSelectionHelp">让第二遍副歌自然呼应第一遍副歌的键型风格，通常保持推荐项即可。</small></label>
+        <label class="field">采音温度（踩点随机度）<input id="v2GenerateTemperature" type="number" value="0.9" min="0" step="0.05" required><small>默认 0.9。若觉得碎音略飘可试 0.75–0.85 让踩点更规矩；不建议低于 0.65 以免单调机械。</small></label>
+        <label class="field" data-v2-action-sampling>配置温度（键型丰富度）<input id="v2GenerateActionTemperature" type="number" value="0.9" min="0" step="0.05" placeholder="留空沿用采音"><small>控制八键位置、双押与星星造型的变化度，默认 0.9（0.85–0.95 最自然灵动）；留空则跟随采音温度。</small></label>
+        <label class="field">采音 Top-p（落点集中度）<input id="v2GenerateTopP" type="number" value="0.95" min="0" max="1" step="0.01" required><small>过滤极低概率的怪异拍点，默认 0.95 即可。</small></label>
+        <label class="field" data-v2-action-sampling>配置 Top-p（键型集中度）<input id="v2GenerateActionTopP" type="number" value="0.95" min="0" max="1" step="0.01" placeholder="留空沿用采音"><small>过滤极低概率的怪异键型组合，默认 0.95；留空则跟随采音 Top-p。</small></label>
+      </div>
+    </section>
+  </div>
+
   <details class="settings-section" data-advanced>
     <summary>高级生成设置</summary>
-    <details id="v2QualityEvaluation" class="settings-section">
-      <summary>采音与选优评估</summary>
-      <p>使用当前模型和音频特征缓存，在 CPU 后台检查，不进行训练。参考结果不等于唯一正确写法。</p>
+    <div class="settings-content">
       <div class="form-grid">
-        <label class="field">评估数据清单（可选）<input id="v2EvalManifest" type="text" placeholder="自动使用模型目录开发集"></label>
-        <label class="field">评估谱面数<input id="v2EvalLimitCharts" type="number" value="2" min="0" step="1"><small>0 表示不限。</small></label>
-        <label class="field">抽查片段数<input id="v2EvalMaxBatches" type="number" value="8" min="0" step="1"><small>0 表示不限。</small></label>
-        <label class="field">独立选时检查数<input id="v2EvalTimingRollouts" type="number" value="2" min="0" step="1"><small>0 表示跳过独立选时检查。</small></label>
-        <label class="field">CPU计算线程<input id="v2EvalCpuThreads" type="number" value="2" min="1" step="1"></label>
-        <label class="field">抽查位置<select id="v2EvalWindowSampling"><option value="spread" selected>均匀覆盖全曲</option><option value="prefix">从开头连续检查</option></select></label>
-        <label class="checkbox-field"><input id="v2EvalCheckTrainingOverlap" type="checkbox">检查与原训练集是否重叠<small>会额外读取音频。</small></label>
+        <label class="field">音频特征缓存<input id="v2GenerateCacheDir" type="text" value="cache/chart_composer_v2"><small>同一首歌二次改参数重生成时直接秒读缓存。</small></label>
+        <label class="field">生成设备<select id="v2GenerateDevice"><option value="auto" selected>auto（优先显卡）</option><option value="cuda">cuda（NVIDIA 显卡）</option><option value="cpu">cpu（处理器）</option></select></label>
+        <label class="field">音乐特征设备<select id="v2GenerateAudioDevice"><option value="auto" selected>自动选择</option><option value="openvino-gpu">Intel 核显</option><option value="openvino-npu">Intel NPU</option><option value="cuda">CUDA</option><option value="cpu">CPU</option></select><small>自动优先使用独立显卡或核显加速提取音频特征。</small></label>
+        <label class="field">写谱加速引擎<select id="v2GenerateInferenceBackend"><option value="auto" selected>自动测速选择</option><option value="torch">PyTorch</option><option value="openvino-cpu">OpenVINO CPU</option><option value="openvino-gpu">OpenVINO 核显</option></select><small>没有独显的轻薄本也能自动启用 OpenVINO 提速。</small></label>
+        <label class="field">CPU计算线程<input id="v2GenerateCpuThreads" type="number" min="0" step="1" value="0" required><small>0自动分配：CPU推理每张最多8线程，并按同时生成数分配；GPU推理使用2线程。</small></label>
+        <label class="field">最大事件数（0不限）<input id="v2GenerateMaxEvents" type="number" value="0" min="0" step="1" required><small>0 按歌曲长度自然写完结尾；仅调试短片段时填正数。</small></label>
+        <label class="field">恢复仍失败时<select id="v2GenerateExhaustionPolicy"><option value="auto" selected>继续生成并报告（连续模型默认）</option><option value="stop">严格停止</option><option value="downgrade_or_skip">尝试简化配置，必要时跳过该拍</option></select><small>极少数复杂段落若多次重写仍有轻微冲突：默认保留最稳候选继续写完整首歌并在报告注明；选「简化配置」会尝试自动降级成安全单键。</small></label>
+        <label class="field">单步冲突重采次数<input id="v2GenerateWindowRetries" type="number" min="1" max="128" step="1" value="16" required><small>单拍遇到冲突时重新换写法的最大尝试次数，默认 16。</small></label>
+        <label class="field">单处冲突恢复次数<input id="v2GenerateRollbackWindows" type="number" min="0" max="8" step="1" value="2" required><small>同一处连续重采仍冲突时，自动微调前一个 Hold 松手长度或回退几拍重写。两者共用此预算，0关闭。</small></label>
       </div>
-      <button id="v2EvaluateButton" type="button" class="small-button">检查模型采音</button>
-      <label class="field">候选评估记录<input id="v2AuditInput" type="text" placeholder="谱面旁 .candidate_audit.jsonl"><small>先勾选「记录候选评估数据」并生成谱面，才会保存候选池 JSONL。</small></label>
-      <button id="v2AuditButton" type="button" class="small-button">分析候选选优</button>
-      <p id="v2EvaluationStatus" class="inline-status">提交后，进度、日志与报告会显示在当前任务区。</p>
-    </details>
-    <label class="checkbox-field" data-v2-probability-audit><input id="v2GenerateRecordCandidateProbabilities" type="checkbox">记录候选评估数据<small>记录试写比较中的模型概率和候选差异，供离线评估；会增加计算与报告体积，不改变选优方式。选择逐步生成或只尝试1种写法时，不产生候选池。</small></label>
-    <label class="field">恢复仍失败时<select id="v2GenerateExhaustionPolicy"><option value="auto" selected>继续生成并报告（连续模型默认）</option><option value="stop">严格停止</option></select><small>当某处物理冲突超出重采与恢复预算时：默认保留当前最佳候选继续写完谱面，并在报告中列出冲突位置；选「严格停止」则立即中止报错。</small></label>
-    <label class="field">单步冲突重采次数<input id="v2GenerateWindowRetries" type="number" min="1" max="128" step="1" value="16" required><small>每个事件遇到语法或物理手法检查失败时的最大重新采样次数，默认 16。</small></label>
-    <label class="field">CPU计算线程<input id="v2GenerateCpuThreads" type="number" min="0" step="1" value="0" required><small>0自动分配：CPU推理每张最多8线程，并按同时生成数分配；GPU推理使用2线程。也可手动填写每张使用的线程数，通常先试4或8；线程更多不一定更快。</small></label>
-    <label class="field">单处冲突恢复次数<input id="v2GenerateRollbackWindows" type="number" min="0" max="8" step="1" value="2" required><small>同一处连续重采仍冲突时，可修复Hold松手边界、在同键重击冲突时缩短此前Hold时值，或撤回重写附近相关事件。两者共用此预算，0关闭。生成推进超过此前最远拍位后预算自动重置；预算耗尽后是否放行由上方「恢复仍失败时」决定。</small></label>
+      <label class="checkbox-field" data-v2-probability-audit><input id="v2GenerateRecordCandidateProbabilities" type="checkbox"><span>记录候选评估数据（开发者诊断用）</span><small>记录试写比较中的模型概率和候选差异，供下方离线选优分析使用；会增加计算与报告体积，不改变选优方式。</small></label>
+      <details id="v2QualityEvaluation" class="settings-section">
+        <summary>采音与选优评估</summary>
+        <p>使用当前模型和音频特征缓存，在 CPU 后台抽查模型踩点准确度，不会改动模型权重。参考结果不等于唯一正确写法。</p>
+        <div class="form-grid">
+          <label class="field">评估数据清单（可选）<input id="v2EvalManifest" type="text" placeholder="自动使用模型目录开发集"></label>
+          <label class="field">评估谱面数<input id="v2EvalLimitCharts" type="number" value="2" min="0" step="1"><small>0 表示不限。</small></label>
+          <label class="field">抽查片段数<input id="v2EvalMaxBatches" type="number" value="8" min="0" step="1"><small>0 表示不限。</small></label>
+          <label class="field">独立选时检查数<input id="v2EvalTimingRollouts" type="number" value="2" min="0" step="1"><small>0 表示跳过独立选时检查。</small></label>
+          <label class="field">CPU计算线程<input id="v2EvalCpuThreads" type="number" value="2" min="1" step="1"></label>
+          <label class="field">抽查位置<select id="v2EvalWindowSampling"><option value="spread" selected>均匀覆盖全曲</option><option value="prefix">从开头连续检查</option></select></label>
+          <label class="checkbox-field"><input id="v2EvalCheckTrainingOverlap" type="checkbox">检查与原训练集是否重叠<small>会额外读取音频。</small></label>
+        </div>
+        <div class="button-row compact-button-row">
+          <button id="v2EvaluateButton" type="button" class="small-button">检查模型采音</button>
+        </div>
+        <label class="field">候选评估记录<input id="v2AuditInput" type="text" placeholder="谱面旁 .candidate_audit.jsonl"><small>勾选记录后，生成时发生候选比较才会保存 JSONL。逐步生成或单候选通常没有记录。</small></label>
+        <div class="button-row compact-button-row">
+          <button id="v2AuditButton" type="button" class="small-button">分析候选选优</button>
+        </div>
+        <p id="v2EvaluationStatus" class="inline-status">提交后，进度、日志与报告会显示在右侧任务区。</p>
+      </details>
+    </div>
   </details>
 </section>
 <details id="composerGenerationControls" class="settings-section" data-generation-family="chart_composer_v1" data-advanced hidden>
@@ -1877,16 +2001,16 @@
 <div id="logList" class="log-list" hidden></div></div>
 </details>
 </section>
-      <section class="panel guide-panel"><h2>快速上手提示</h2><ol><li>已有模型直接切到「生成谱面」，导入音频与 .pt 权重即可写谱。</li><li>生成完成后，展开生成页顶部的「谱面预览」即可在线播放试看。</li><li>想调整键型倾向时，展开 Step 02 的「Radar / Style 参数」将对应单项设为手动指定。</li><li>折叠的高级参数仍然生效，点击运行前可核对底部摘要。</li><li>首次运行 MERT 模型会自动联网下载编码器并缓存音频特征。</li></ol><a href="/api/download?path=docs/explanations/COMPOSER_V2_WEBUI_ZH.md" target="_blank">下载 Composer v2 使用说明</a>
+      <section class="panel guide-panel"><h2>上手指南</h2><ol><li><strong>直接写谱：</strong>切到顶部「生成谱面」，导入歌曲音频和 <code>.pt</code> 模型文件，选一个一键写谱预设，点底部「生成谱面」。</li><li><strong>在线试玩与打分：</strong>生成后展开页面顶部的「谱面预览」即可在线播放；满意的片段可收进示范库，反哺下次训练。</li><li><strong>清洗素材再训练：</strong>自己准备训练集时，先去「训练素材」点「体检所选训练集」排掉错位与无理坏段，再去「训练模型」选好显卡预设开训。</li><li><strong>随时放心微调：</strong>自动体检绝不改动原始谱面文件；时间轴标注优先用于选中的片段，整谱学习决定在素材目录修改。</li></ol><a href="/api/download?path=docs/explanations/COMPOSER_V2_WEBUI_ZH.md" target="_blank">下载 Composer v2 图文说明</a>
 </section>
     </aside>
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=batch-20261108"></script>
-  <script src="/app.js?v=composer-v2-rate-curve-20261108"></script>
+  <script src="/app.js?v=webui-remake-20261111"></script>
   <script src="/v2_intensity.js?v=editor-20261109"></script>
   <script src="/review_exchange.js"></script>
-  <script src="/candidate_feedback.js"></script>
-  <script src="/workspace.js?v=composer-v2-20261104"></script>
+  <script src="/candidate_feedback.js?v=webui-remake-20261111"></script>
+  <script src="/workspace.js?v=webui-remake-20261111"></script>
 </body>
 </html>

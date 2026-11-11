@@ -247,6 +247,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_training": True,
                                               "composer_v2_training": True,
                                               "candidate_pools": True,
+                                              "candidate_chart_review": True,
                                               'candidate_review_filters': True,
                                               'review_bundles': True,
                                               "composer_v2_generation": True,
@@ -269,7 +270,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_variable_tempo": True,
                                               "composer_v2_exhaustion_policy": True,
                                               "composer_v2_memory_budgets": True,
+                                              "composer_v2_activation_checkpointing": True,
                                               "composer_v2_timing_recovery": True,
+                                              "composer_v2_reviewed_reference_policy": True,
+                                              "composer_v2_phrase_rank_policy": True,
+                                              "composer_v2_timing_calibration": True,
+                                              "composer_v2_feasibility_options": True,
+                                              "composer_v2_auto_quality": True,
+                                              "composer_v2_auto_quality_audit": True,
                                               "composer_phrase_contract": "phrase_modes_v1",
                                               "composer_process_prefetch": True,
                                               "composer_detail_compute": "packed_v1",
@@ -341,6 +349,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if operation == "media": return composer_v2_api.start_media(self, payload, runtime=sys.modules[__name__])
                 if operation == "evaluate": return composer_v2_api.start_evaluate(self, payload, runtime=sys.modules[__name__])
                 if operation == "candidate_audit": return composer_v2_api.start_candidate_audit(self, payload, runtime=sys.modules[__name__])
+                if operation == "auto_quality_audit": return composer_v2_api.start_auto_quality_audit(self, payload, runtime=sys.modules[__name__])
+                if operation == "auto_quality_status": return composer_v2_api.auto_quality_status(self, payload, runtime=sys.modules[__name__])
                 return self._json_response({"error": "未知 Composer v2 操作"}, HTTPStatus.NOT_FOUND)
             if parsed.path.startswith("/api/composer/"):
                 from maichart.webui import composer_api
@@ -2118,6 +2128,16 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
         elif prefix in {"composer_v2_rollback", "composer_v2_hold_release_repair"}:
             task.result["progress_indeterminate"] = True
             task.message = "正在回退并重试冲突位置" if prefix.endswith("rollback") else "正在修复 Hold 尾部冲突"
+        elif prefix == 'composer_v2_auto_quality_progress':
+            completed = int(data.get('completed', 0))
+            total = int(data.get('total', 0))
+            task.progress = completed / total if total else 0.
+            task.result['progress_indeterminate'] = total <= 0
+            task.message = f'自动质检 {completed}/{total} 张'
+        elif prefix == 'composer_v2_auto_quality_audit':
+            task.progress = 1.
+            task.result['progress_indeterminate'] = False
+            task.message = f"自动质检完成，已检查 {data.get('audited_charts', 0)} 张"
         elif prefix == "composer_v2_done":
             task.result["progress_indeterminate"] = False
             task.message = "谱面生成结束，正在收集输出"

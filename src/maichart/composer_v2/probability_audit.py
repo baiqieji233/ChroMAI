@@ -15,7 +15,7 @@ def file_digest(path):
 
 class EventProbability:
     def __init__(self):
-        self.rows=[];self.tokens=[];self.roles=[];self.forced=[]
+        self.rows=[];self.tokens=[];self.roles=[];self.forced=[];self.choice_counts=[]
 
     def record(self,logits,token,grammar,*,role,forced=False,proposal_logits=None,
                allowed=None,temperature=1.,top_p=1.):
@@ -35,7 +35,7 @@ class EventProbability:
             probabilities=probabilities/probabilities.sum()
             proposal=torch.where(order==position,probabilities,torch.zeros_like(probabilities)).sum().log()
         self.rows.append(torch.stack((raw,legal,proposal)))
-        self.tokens.append(int(token));self.roles.append(role);self.forced.append(bool(forced))
+        self.tokens.append(int(token));self.roles.append(role);self.forced.append(bool(forced));self.choice_counts.append(len(grammar))
 
 
 def summarize(events,*,boundary_tokens=0):

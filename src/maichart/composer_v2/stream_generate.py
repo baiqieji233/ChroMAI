@@ -40,6 +40,13 @@ class GrammarDeadEnd(ValueError):
         self.diagnostic=diagnostic
 
 
+class GridDurationRejected(ValueError):
+    def __init__(self,beat,body):
+        super().__init__('grid_duration_outside_forward_bound')
+        self.beat=beat
+        self.body=body
+
+
 class EventSampler(WindowSampler):
     def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None):
         self.progress=getattr(args,'_generation_progress',None)
@@ -65,10 +72,46 @@ class EventSampler(WindowSampler):
             dataset.intensity_profile=blend_profile(serialize(self.cache['curve_context'][0].expm1(),song),
                 getattr(song,'intensity_input_profile',None),self.batch['intensity_strength'])
         self.retry_stats={};self._retry_scope=None
-        self.record_probabilities=bool(getattr(args,'record_candidate_probabilities',False)
+        self._fixed_retry_scope=None;self._fixed_retry_tree=None;self._retry_offset=0
+        need_probabilities=(bool(getattr(args,'record_candidate_probabilities',False))
+            or getattr(args,'phrase_rank_policy','comfort_v1')!='comfort_v1')
+        self.record_probabilities=bool(need_probabilities
             and getattr(args,'phrase_search','layout')!='event' and getattr(args,'candidates',2)>1
             and getattr(args,'_candidate_audit_active',True))
         self.last_probability_event=None;self._probability=None
+        self._decoded_ids=()
+        self.args=args;self._active_guard=None;self._forward_cache=None
+
+    def _forward_guard(self):
+        guard=getattr(self,'_active_guard',None)
+        policy=getattr(self.args,'forward_feasibility','balanced_v1') if hasattr(self,'args') else 'off'
+        if guard is None or policy=='off' or not hasattr(guard,'prefix') or not hasattr(guard,'_markers'):
+            return None
+        tos_ms=getattr(self.args,'forward_tap_on_slide_ms',None)
+        key=(id(guard),len(guard.prefix),guard.prefix[-1][0] if guard.prefix else None,policy,tos_ms)
+        cached=getattr(self,'_forward_cache',None)
+        if cached is not None and cached[0]==key:
+            return cached[1]
+        from .forward_feasibility import ForwardFeasibilityGuard
+        fg=ForwardFeasibilityGuard(guard,self.codec,song=self.song,policy=policy,forward_tap_on_slide_ms=tos_ms)
+        self._forward_cache=(key,fg)
+        return fg
+
+    def _rewind(self,target):
+        state=self.cache.get('decode_state') if self.cache is not None else None
+        decoded=getattr(self,'_decoded_ids',())
+        if state is None or not decoded:
+            return super()._rewind(target)
+        desired=(*self.prefix,*target)
+        common=0
+        for old,new in zip(decoded[:state['length']],desired):
+            if old!=new:break
+            common+=1
+        # Retain all matching KV when new tokens follow. If the entire query
+        # is already cached, replay its last token to obtain fresh logits.
+        retained=min(common,max(0,len(desired)-1))
+        self.model.rewind_decode_cache(self.cache,retained+1)
+        self._decoded_ids=decoded[:self.cache['decode_state']['length']]
     def next(self,target,allowed,*,action=False):
         if getattr(self,'progress',None) is not None:self.progress.pulse()
         if len(target)>=self.max_tokens//2:raise RefreshContext('Component budget reached inside next event')
@@ -79,11 +122,12 @@ class EventSampler(WindowSampler):
             raise GrammarDeadEnd(dict(**scope,token_count=len(tokens),
                 proposal_token_ids=tokens[-64:],proposal_tokens=[self.codec.tokens[i] for i in tokens[-64:]],
                 allowed_token_count=0,context_cursor=str(self.cursor)))
-        tree=getattr(self,'_retry_tree',None)
+        fixed_retry=bool(getattr(self,'_retry_offset',0))
+        tree=self._fixed_retry_tree if fixed_retry else getattr(self,'_retry_tree',None)
         relative=target[len(self._retry_base):] if tree is not None else None
         logits=tree.cached(relative) if tree is not None else None
         if logits is None:
-            if getattr(self,'_retry_cache_dirty',False):self._rewind(self._retry_base)
+            if getattr(self,'_retry_cache_dirty',False):self._rewind(target)
             logits=self._logits(target);self._retry_cache_dirty=False
             self.retry_stats['decoder_queries']=self.retry_stats.get('decoder_queries',0)+1
         else:
@@ -96,7 +140,8 @@ class EventSampler(WindowSampler):
         raw_logits=logits
         grammar=getattr(self,'_audit_grammar',None) or getattr(self,'_free_choices',allowed)
         if tree is not None:
-            logits=tree.remember(relative,getattr(self,'_free_choices',allowed),logits,temperature=temperature)
+            choices=allowed if fixed_retry else getattr(self,'_free_choices',allowed)
+            logits=tree.remember(relative,choices,logits,temperature=temperature)
             if self._retry_condition:
                 logits,allowed,scaled=tree.condition(relative,allowed,temperature)
                 if scaled:
@@ -164,6 +209,7 @@ class EventSampler(WindowSampler):
             query['paired_music_features']=torch.cat(pieces,1)
             query['paired_music_start']=start
         logits=self.model.decode(query,self.cache)[0]
+        self._decoded_ids=tuple(ids)
         return logits if all_new else logits[-1]
     def _forced_time_probability(self,target,tokens,after,end):
         if self._probability is None:return
@@ -176,7 +222,14 @@ class EventSampler(WindowSampler):
                 role='timing',forced=True)
     def _finish_probability(self):
         self.last_probability_event=self._probability
-    def reject(self,ids):return self._retry_tree.reject(ids)
+    def reject_free(self,ids):
+        tree=getattr(self,'_retry_tree',None)
+        return tree.reject(ids) if tree is not None else False
+    def reject(self,ids):
+        offset=getattr(self,'_retry_offset',0)
+        if not offset:return self.reject_free(ids)
+        if list(ids[:offset])!=self._retry_base[-offset:]:return False
+        return self._fixed_retry_tree.reject(ids[offset:])
     def propose(self,target,after,end,fixed=None):
         if getattr(self,'record_probabilities',False):
             from .probability_audit import EventProbability
@@ -187,51 +240,89 @@ class EventSampler(WindowSampler):
         self.proposal_scope=dict(after=str(after),audio_end_beat=str(end),target_prefix_length=len(target),
             fixed_beat=str(fixed.beat) if fixed is not None else None)
         scope=(tuple(target),after,end)
-        if scope!=getattr(self,'_retry_scope',None):
-            self._retry_tree=RejectedEventTree();self._retry_scope=scope
-        self._retry_base=list(target);self._retry_cache_dirty=False;self._retry_condition=fixed is None
+        self._retry_offset=0;self._retry_base=list(target)
+        self._retry_cache_dirty=False;self._retry_condition=True
         self._rewind(target)
+        fg=self._forward_guard()
+        # A compact Tap such as "12" is one text atom but two note heads.
+        wanted=None if fixed is None or getattr(fixed,'beat_only',False) else len(_atom_heads(fixed.note_text))
         if fixed is None:
+            if scope!=getattr(self,'_retry_scope',None):
+                self._retry_tree=RejectedEventTree();self._retry_scope=scope
             time=[]
             while not time or time[-1] not in self.codec.phases:
-                allowed=self.codec.time_choices(time,after,end)
-                self._audit_grammar=allowed
-                if not time and not getattr(self,'retry_allow_eos',True) and self.codec.at_id in allowed:
+                grammar_allowed=self.codec.time_choices(time,after,end)
+                self._audit_grammar=grammar_allowed
+                allowed=fg.filter_time_choices(grammar_allowed,time,after,end) if fg is not None else grammar_allowed
+                if not time and not getattr(self,'retry_allow_eos',True) and self.codec.at_id in grammar_allowed:
                     allowed=tuple(t for t in allowed if t!=self.codec.eos_id)
                 self._free_choices=allowed
                 token=self.next(target+time,allowed);time.append(token)
                 if token==self.codec.eos_id:self._finish_probability();return time
         else:
             time=self.codec._time(fixed.beat)
+            fixed_scope=(*scope,fixed.beat,wanted)
+            if fixed_scope!=getattr(self,'_fixed_retry_scope',None):
+                self._fixed_retry_tree=RejectedEventTree();self._fixed_retry_scope=fixed_scope
+            self._retry_offset=len(time);self._retry_base.extend(time)
             self._forced_time_probability(target,time,after,end)
-        out=list(time);used=set();atom=[];count=0
-        # A compact Tap such as "12" is one text atom but two note heads.
-        wanted=len(_atom_heads(fixed.note_text)) if fixed else None
+        split=time.index(self.codec.phase_id)
+        event_beat=fixed.beat if fixed is not None else (
+            Fraction(int(''.join(self.codec.digits[i] for i in time[1:split])))+self.codec.phases[time[-1]])
+        out=list(time);used=set();atom=[];count=0;completed_atoms=[]
         while True:
+            rejected_closures=[]
             if not atom:
                 if wanted is not None and count==wanted:
                     if self._probability is not None:
-                        if getattr(self,'_retry_cache_dirty',False):self._rewind(self._retry_base)
+                        if getattr(self,'_retry_cache_dirty',False):self._rewind(target+out)
                         logits=self._logits(target+out)
                         self._retry_cache_dirty=False
                         self._probability.record(logits,self.codec.event_end_id,
                             (*self.codec.kind_ids,self.codec.event_end_id),role='configuration',forced=True)
                     self._finish_probability()
                     out.append(self.codec.event_end_id);return out
-                allowed=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count and wanted is None else ())
-                self._free_choices=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count else ())
+                uncond_free=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count else ())
+                uncond_allowed=tuple(self.codec.kind_ids)+((self.codec.event_end_id,) if count and wanted is None else ())
+                self._audit_grammar=uncond_free
+                if fg is not None:
+                    atoms_tuple=tuple(completed_atoms)
+                    free_filtered=fg.filter_atom_start_choices(uncond_free,event_beat,atoms_tuple)
+                    allowed=fg.filter_atom_start_choices(uncond_allowed,event_beat,atoms_tuple)
+                    if not allowed and wanted is None and count and self.codec.event_end_id in uncond_free:
+                        allowed=(self.codec.event_end_id,)
+                    self._free_choices=free_filtered if free_filtered else uncond_free
+                else:
+                    allowed=uncond_allowed
+                    self._free_choices=uncond_free
             else:
-                allowed=self._head_choices(self.codec.allowed_atom_next(atom),atom,used);self._free_choices=allowed
+                uncond_next=self._head_choices(self.codec.allowed_atom_next(atom),atom,used)
+                self._audit_grammar=uncond_next
+                free_next=fg.filter_atom_next_choices(
+                    uncond_next,atom,event_beat,tuple(completed_atoms),
+                    rejected_closures=rejected_closures,
+                ) if fg is not None else uncond_next
+                # Sample an out-of-bounds close as a rejection. Masking it here
+                # would transfer that probability to additional digits.
+                free_next=(*free_next,*rejected_closures)
+                self._free_choices=free_next
+                allowed=free_next
                 if wanted is not None and self.codec.tokens[atom[0]]=='N:tap':
                     positions=sum(self.codec.tokens[t].startswith('P:') for t in atom)
                     if count+positions>=wanted:
                         allowed=tuple(t for t in allowed if not self.codec.tokens[t].startswith('P:'))
-            self._audit_grammar=self._free_choices
             token=self.next(target+out,allowed,action=True);out.append(token)
+            if token in rejected_closures:
+                self.reject(out)
+                self.retry_stats['grid_duration_rejections']=self.retry_stats.get('grid_duration_rejections',0)+1
+                body=''.join(self.codec.tokens[t][2:] for t in atom if self.codec.tokens[t].startswith('V:'))
+                raise GridDurationRejected(event_beat,body)
             if token==self.codec.event_end_id:self._finish_probability();return out
             atom.append(token)
             if token==self.codec.end_note_id:
-                heads=_atom_heads(render_atom([self.codec.tokens[t] for t in atom]))
+                rendered=render_atom([self.codec.tokens[t] for t in atom])
+                completed_atoms.append(rendered)
+                heads=_atom_heads(rendered)
                 used.update(heads);atom=[];count+=len(heads)
 
 
@@ -292,12 +383,12 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     from .generation_progress import get_progress
     progress=get_progress(args)
     progress.update(force=True,stage='encoding_audio',audio_duration_sec=float(audio.duration_sec))
-    from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content
+    from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content,checked_event_guard
     phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
     if getattr(args,'record_candidate_probabilities',False):
         audit_path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
         audit_path.parent.mkdir(parents=True,exist_ok=True);audit_path.write_text('',encoding='utf-8')
-    from .exhaustion import resolve_policy,admit_physical_conflict,conflict_assessment
+    from .exhaustion import resolve_policy,admit_physical_conflict,conflict_assessment,downgrade_or_skip_conflict
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     song=ComposerV2Song(audio_path.stem,audio_path,audio_path,5,args.level,[],clock,end,condition,audio=audio,condition_known=known)
     song.summary=dict(audio.summary(160));song.summary['beats']=_beats_at_seconds(clock,song.summary['times_sec'])
@@ -324,12 +415,16 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     # earlier passage fills it and omits it when nothing repeats.
     dataset.reference_selection='aligned' if requested_selection=='aligned' and dataset.structure_policy=='off' else 'model'
     references=[]
-    from .tail_guard import options as tail_options
-    tail_settings=tail_options(args)
+    from .tail_guard import playability_options
+    tail_settings=playability_options(args)
     guard=_new_guard(tempo,first,audio.duration_sec,guard_options=tail_settings)
     points=[];target=[];sampler=None;committed_in_context=0;refreshes=0;rollbacks=[];repairs=[];done=False
-    duration_repairs=[];release_trials=set();bypassed_events=[]
+    duration_repairs=[];release_trials=set();bypassed_events=[];downgraded_or_skipped=[]
+    after_floor=Fraction(-1)
     retry_stats={};native_memo={};pending_phrase=[];phrase_trials=[];phrase_count=0
+    phrase_compute=dict(proposal_calls=0,native_window_checks=0,rank_calls=0,
+        proposal_sec=0.,native_window_sec=0.,rank_sec=0.,speculative_events=0,
+        incomplete_searches=0,skipped_candidates=0)
     recovery=RecoveryBudget(args.rollback_windows)
     hold_release_repair=args.rollback_windows>0
     sampling_policy=_sampling_policy(args)
@@ -347,24 +442,27 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             sampler=EventSampler(model,dataset,song,points,device,rng,args,**sampler_options);target=[];committed_in_context=0;refreshes+=1
             sampler.retry_stats=retry_stats
             if dataset.structure_policy!='off' or dataset.reference_selection=='aligned':references.append(sampler.reference)
-        after=points[-1].beat if points else Fraction(-1)
+        after=max(points[-1].beat if points else Fraction(-1),after_floor)
         selected=None;failed_beat=after;need_refresh=False;conflict_sources=set();rejected=[];history_edited=False
         prefix_key=tuple((p.beat,p.note_text) for p in points) if native_memo else None
         known_failed=native_memo.get(prefix_key,{}) if prefix_key is not None else {}
         failed_any=False
+        sampler._active_guard=guard
         for attempt in range(attempts):
             if attempt:progress.update(stage='retrying')
             try:
+                sampler._active_guard=guard
                 sampler.retry_allow_eos=not failed_any and not known_failed and recovery.used==0
                 queued=pending_phrase.pop(0) if pending_phrase and attempt==0 else None
                 if attempt:pending_phrase.clear()
                 ids=queued[1] if queued else sampler.propose(target,after,end)
                 if ids==[model.codec.eos_id]:
-                    if not sampler.retry_allow_eos and model.codec.at_id in model.codec.time_choices([],after,end):
+                    root_choices=model.codec.time_choices([],after,end)
+                    if not sampler.retry_allow_eos and model.codec.at_id in root_choices:
                         repairs.append(dict(reason='eos_is_not_physical_recovery',after=str(after)));continue
                     done=True;break
                 proposal=model.codec.decode_points(ids)[0];failed_beat=proposal.beat
-                candidates=[(proposal,ids)]
+                candidates=[queued if queued is not None else (proposal,ids)]
                 used_phrase=False
                 if queued is None and phrase_mode!='event' and candidate_count>1:
                     progress.update(stage='comparing')
@@ -376,6 +474,10 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         args=args,song=song,tempo=tempo,end=end,count=candidate_count,
                         make_sampler=make_sampler,check_window=_check_window)
                     phrase_count+=1;phrase_trials.append(evidence);phrase_trials=phrase_trials[-16:]
+                    for key,value in evidence.get('compute',{}).items():
+                        phrase_compute[key]=phrase_compute.get(key,0)+value
+                    phrase_compute['incomplete_searches']+=not bool(planned)
+                    phrase_compute['skipped_candidates']+=evidence.get('skipped_candidates',0)
                     if getattr(args,'record_candidate_probabilities',False):
                         attach_candidate_content(evidence,points,trials,tempo=tempo,first=first)
                         path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
@@ -390,25 +492,39 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                     if planned:
                         candidates=planned[:1];pending_phrase=planned[1:];used_phrase=True
                 for _ in range(candidate_count-1 if not used_phrase and queued is None else 0):
-                    alternative=sampler.propose(target,after,end,fixed=proposal)
+                    try:
+                        alternative=sampler.propose(target,after,end,fixed=proposal)
+                    except GridDurationRejected as error:
+                        repairs.append(dict(reason=str(error),beat=str(error.beat),duration_beats=error.body))
+                        continue
+                    except RetrySpaceExhausted:
+                        retry_stats['exhausted_subtrees']=retry_stats.get('exhausted_subtrees',0)+1
+                        break
                     candidates.append((model.codec.decode_points(alternative)[0],alternative))
                 feasible=[]
-                for candidate_index,(point,encoded) in enumerate(candidates):
+                for candidate_index,candidate in enumerate(candidates):
+                    point,encoded=candidate
                     event_key=(point.beat,point.note_text)
                     cached=event_key in known_failed
                     if cached:
                         trial=None;reason,details=known_failed[event_key]
                         retry_stats['native_cache_hits']=retry_stats.get('native_cache_hits',0)+1
                     else:
-                        details=[];trial,reason=_check_window(guard,[point],details)
-                        retry_stats['native_checks']=retry_stats.get('native_checks',0)+1
+                        trial=checked_event_guard(candidate,guard)
+                        details=[];reason=None
+                        if trial is None:
+                            trial,reason=_check_window(guard,[point],details)
+                            retry_stats['native_checks']=retry_stats.get('native_checks',0)+1
+                        else:
+                            retry_stats['native_trial_reuse']=retry_stats.get('native_trial_reuse',0)+1
                     if trial is None:
                         pending_phrase.clear()
                         failed_any=True
                         if prefix_key is None:prefix_key=tuple((p.beat,p.note_text) for p in points)
                         native_memo.setdefault(prefix_key,known_failed)
                         known_failed[event_key]=(reason,details)
-                        if candidate_index==0 and hasattr(sampler,'reject'):sampler.reject(encoded)
+                        if candidate_index==0 and hasattr(sampler,'reject'):
+                            getattr(sampler,'reject_free',sampler.reject)(encoded)
                         conflict_sources.update(Fraction(b) for issue in details for b in issue['note_beats'])
                         if reason=='new_miacode_runtime_hard_conflict':rejected.append((point,details))
                         repairs.append(dict(beat=str(point.beat),note_text=point.note_text,reason=reason,
@@ -418,6 +534,10 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 if feasible:selected=max(feasible,key=lambda row:row[0]);break
             except RetrySpaceExhausted:
                 retry_stats['exhausted_subtrees']=retry_stats.get('exhausted_subtrees',0)+1;break
+            except GridDurationRejected as error:
+                failed_any=True
+                failed_beat=error.beat
+                repairs.append(dict(reason=str(error),beat=str(error.beat),duration_beats=error.body))
             except RefreshContext:
                 if not committed_in_context:
                     repairs.append(dict(reason='event_component_budget_exhausted',after=str(after)))
@@ -452,7 +572,28 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 pending_phrase.clear()
                 recovery.spend()
                 points,guard,report=replay;report['recovery_state']=recovery.report();rollbacks.append(report);sampler=None
+                after_floor=points[-1].beat if points else Fraction(-1)
                 print('composer_v2_rollback '+json.dumps(report),flush=True);continue
+            elif exhaustion_policy=='downgrade_or_skip':
+                resolved=downgrade_or_skip_conflict(guard,rejected,after)
+                if resolved is not None:
+                    pending_phrase.clear()
+                    if resolved['kind']=='downgraded':
+                        point=resolved['point']
+                        trial=resolved['guard']
+                        entry=dict(kind='downgraded',beat=str(point.beat),original=resolved['original'],
+                            replacement=resolved['replacement'],operation=resolved['operation'],after=str(after))
+                        downgraded_or_skipped.append(entry)
+                        selected=(.5,point,model.codec.encode_points([point]),trial)
+                        print('composer_v2_conflict_downgraded '+json.dumps(entry,ensure_ascii=False),flush=True)
+                    elif resolved['kind']=='skipped_beat':
+                        skip_to=resolved['skip_until_beat']
+                        entry=dict(kind='skipped_beat',skipped_until_beat=str(skip_to),after=str(after))
+                        downgraded_or_skipped.append(entry)
+                        repairs.append(dict(reason='exhaustion_skipped_locked_beat',after=str(after),skipped_until=str(skip_to)))
+                        after_floor=max(after_floor,skip_to)
+                        print('composer_v2_conflict_beat_skipped '+json.dumps(entry,ensure_ascii=False),flush=True)
+                        continue
             if exhaustion_policy=='report':
                 admitted=admit_physical_conflict(guard,rejected,after)
                 if admitted:
@@ -490,12 +631,20 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             # next context is rebuilt from the actual edited-and-committed chart.
             sampler=None
         else:
-            sampler._rewind(target);target.extend(encoded);committed_in_context+=1
+            target.extend(encoded);sampler._rewind(target);committed_in_context+=1
         if len(points)%16==0:
             print('composer_v2_event '+json.dumps(dict(events=len(points),beat=str(point.beat),context_refreshes=refreshes,repairs=len(repairs))),flush=True)
         refresh_due=committed_in_context>=config.refresh_events
         if sampler is not None and dataset._evidence_v2():refresh_due|=point.beat>=sampler.reference_refresh_beat
         if refresh_due:sampler=None
+    from .self_refine import refine_worst_spans
+    def _refine_sampler(history):
+        value=EventSampler(model,dataset,song,history,device,rng,args,**sampler_options)
+        value.retry_stats=retry_stats
+        return value
+    points,guard,self_refine_report=refine_worst_spans(points,guard,args=args,song=song,tempo=tempo,
+        first=first,end=end,make_sampler=_refine_sampler,new_guard_fn=_new_guard,
+        check_window=_check_window,guard_options=tail_settings,bypassed_events=bypassed_events)
     progress.update(force=True,stage='exporting',events=len(points))
     from .tail_guard import cleanup
     points,tail_report=cleanup(points,tempo,first,guard)
@@ -509,11 +658,18 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         timing=timing_report,condition=condition_report,first=first,end_beat=str(export_end),duration_sec=audio.duration_sec,
         checkpoint_info=checkpoint_info,generation_settings=_generation_settings(args,device),
         sampling_policy=sampling_policy,tap_on_slide=tail_report,
+        touch_reachability=dict(policy=tail_settings['touch_reachability_policy'],
+                                cohold_radius=tail_settings['touch_cohold_radius'],
+                                intercept_slide_head_tap=tail_settings['intercept_slide_head_tap']),
+        forward_feasibility=dict(policy=getattr(args,'forward_feasibility','balanced_v1'),
+                                 forward_tap_on_slide_ms=getattr(args,'forward_tap_on_slide_ms',None)),
+        self_refine=self_refine_report,
         repairs=repairs[-128:],repair_count=len(repairs),rollbacks=rollbacks,candidates=candidate_count,
         duration_repairs=duration_repairs,hold_release_repair=hold_release_repair,**recovery.report(),
         hold_repair_policy='native_hold_conflict_repair_v3',
         retry_policy='native_rejected_completion_conditioning_v1',retry_stats=retry_stats,
         exhaustion_policy=exhaustion_policy,bypassed_events=bypassed_events,
+        downgraded_or_skipped_events=downgraded_or_skipped,
         accepted_with_conflicts_count=len(bypassed_events),
         physics_status='unresolved_conflicts' if bypassed_events else 'no_bypassed_conflicts',
         candidate_policy='next_complete_event_same_onset_atom_count',temperature=args.temperature,top_p=args.top_p,
@@ -533,9 +689,15 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             if getattr(args,'record_candidate_probabilities',False) and phrase_count else None,
         scope='trial_search_only; last 16 pools embedded, complete pool history in JSONL',
         ranking_changed=False)
-    report['phrase_search']=dict(mode=phrase_mode,lookahead_beats=float(phrase_beats),
-        commit_beats=float(phrase_commit_beats),decisions=phrase_count,trials=phrase_trials,
-        scoring='native_trajectory_and_selected_attack_support_no_density_reward',
+    from .phrase_search import rank_policy as resolve_rank_policy
+    rank_mode = resolve_rank_policy(args)
+    report['phrase_search']=dict(mode=phrase_mode,ranking_policy=rank_mode,lookahead_beats=float(phrase_beats),
+        commit_beats=float(phrase_commit_beats),decisions=phrase_count,trials=phrase_trials,compute=phrase_compute,
+        scoring=('grammar_likelihood_and_attack_support_with_comfort_veto'
+                 if rank_mode=='likelihood_veto_v1'
+                 else 'chirality_hand_flow_grammar_likelihood_and_attack_support'
+                 if rank_mode=='comfort_v2'
+                 else 'native_trajectory_and_selected_attack_support_no_density_reward'),
         speculative_suffix_is_committed=False)
     if phrase_mode!='event':report['candidate_policy']='continuous_phrase_'+phrase_mode
     report['intensity_curve']=dict(policy=dataset.intensity_policy,
@@ -575,6 +737,6 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','candidates','phrase_search','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','record_candidate_probabilities','audio_device','inference_backend')
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

@@ -27,13 +27,22 @@ def _song_cache_key(song):
 class StreamDataset(ComposerV2Dataset):
     def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',
                  structure_policy='off',reference_augmentation=False,intensity_policy='off',rhythm_learning_policy=None,
-                 music_context_policy='off',**kwargs):
+                 music_context_policy='off',reviewed_reference_policy='approved_only',
+                 zero_unmarked_policy='explicit_good_v1',reference_quality_policy='event_mask_v1',**kwargs):
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
         from .rhythm_structure import POLICIES
         if structure_policy not in POLICIES:raise ValueError('Unknown rhythm structure policy')
+        if reviewed_reference_policy not in ('approved_only','off'):raise ValueError('Unknown reviewed reference policy')
         self.structure_policy=structure_policy
         self.intensity_policy=intensity_policy
         self.music_context_policy=music_context_policy
+        self.reviewed_reference_policy=reviewed_reference_policy
+        if zero_unmarked_policy not in ('explicit_good_v1','legacy_weights_v1'):
+            raise ValueError('Unknown zero-unmarked supervision policy')
+        self.zero_unmarked_policy=zero_unmarked_policy
+        if reference_quality_policy not in ('legacy_v1','event_mask_v1'):
+            raise ValueError('Unknown reference quality policy')
+        self.reference_quality_policy=reference_quality_policy
         from .rhythm_learning import POLICY as LEGACY_LEARNING
         self.rhythm_learning_policy=rhythm_learning_policy or LEGACY_LEARNING
         self.reference_augmentation=bool(reference_augmentation) and structure_policy!='off'
@@ -46,9 +55,12 @@ class StreamDataset(ComposerV2Dataset):
         if self.refresh_events<1:raise ValueError('refresh_events must be positive')
         self.tile_cache=OrderedDict();self.windows=[];self.ranges=[];self.lengths=[]
         self._remaining_references = []
+        from maichart.training.quality_annotations import region_component_weights, zero_unmarked_region_weights
+        legacy_zero_resume = self.zero_unmarked_policy == 'legacy_weights_v1'
         for song_index,song in enumerate(self.songs):
             first_window = len(self.windows)
             reviewed = (song.quality or {}).get('unmarked_weight') == 0
+            song._legacy_zero_unmarked_resume = legacy_zero_resume
             if reviewed:
                 song.reviewed_event_seconds = song.clock.at_floats(np.asarray(song.point_beats, dtype=np.float64))
             token_lengths = song.event_token_lengths
@@ -68,7 +80,7 @@ class StreamDataset(ComposerV2Dataset):
                 keep = not reviewed or any(
                     region['start_sec'] <= stamp < region['end_sec']
                     for region in song.quality.get('regions', [])
-                    if max(region.get('timing_weight', 1), region.get('component_weight', 1)) * region.get('weight', 1) > 0
+                    if max(region_component_weights(region) if legacy_zero_resume else zero_unmarked_region_weights(region)) > 0
                     for stamp in song.reviewed_event_seconds[begin:end])
                 if keep:
                     self.windows.append((song_index,begin));self.ranges.append(end);self.lengths.append(tokens+1)
@@ -99,7 +111,8 @@ class StreamDataset(ComposerV2Dataset):
                     self.ranges.append(self.ranges[index])
                     self.lengths.append(self.lengths[index])
         self.audit.update(windows=len(self.windows),sequence_policy=POLICY,
-            segmentation='whole_events_compute_only',refresh_events=self.refresh_events,eos='true_chart_end_only')
+            segmentation='whole_events_compute_only',refresh_events=self.refresh_events,eos='true_chart_end_only',
+            reviewed_reference_policy=self.reviewed_reference_policy)
         self.audit['timing_recovery'] = dict(policy=timing_recovery_policy, views=len(self.recovery_sources),
             original_windows=len(self.windows)-len(self.recovery_sources),target='authored_future_time_only')
         if structure_policy!='off':
@@ -120,6 +133,50 @@ class StreamDataset(ComposerV2Dataset):
         return getattr(self,'structure_policy','off')=='aligned_rhythm_v2'
     def _paired_music(self):
         return getattr(self,'music_context_policy','off')=='song_paired_v2'
+    def _reference_points_approved(self,song,reference,*,beat_offset=0):
+        """Approve [REF] on zero-unmarked charts only when every post-budget
+        reference event supplied to the model lies inside an explicit ``good``
+        configuration approval (``component_weight > 0``); when ``auto_quality_policy``
+        is active, also reject [REF] spans overlapping masked problem regions."""
+        quality = song.quality or {}
+        if quality.get('unmarked_weight') != 0:
+            legacy = getattr(self,'reference_quality_policy','event_mask_v1') == 'legacy_v1'
+            if not reference or (legacy and getattr(self, 'auto_quality_policy', 'off') != 'auto_v1'):
+                return True
+            from maichart.training.quality_annotations import region_component_weights
+            bad_spans = []
+            for region in quality.get('regions', ()):
+                if region.get('label') == 'problem' or region_component_weights(region)[1] <= 0:
+                    start_sec, end_sec = float(region['start_sec']), float(region['end_sec'])
+                    if end_sec > start_sec:
+                        bad_spans.append((start_sec, end_sec))
+            if not bad_spans:
+                return True
+            seconds = song.clock.at_floats(np.asarray([float(point.beat - beat_offset) for point in reference], dtype=np.float64))
+            if legacy:
+                first, last = seconds.min(), seconds.max()
+                return not any(first < end_sec and last >= start_sec for start_sec, end_sec in bad_spans)
+            return not any(np.any((seconds >= start_sec) & (seconds < end_sec))
+                           for start_sec,end_sec in bad_spans)
+        if getattr(self,'reviewed_reference_policy','approved_only') == 'off' or not reference:
+            return False
+        if quality.get('label') in ('excluded', 'negative') or float(quality.get('weight', 1.)) <= 0:
+            return False
+        from maichart.training.quality_annotations import zero_unmarked_region_weights
+        spans = []
+        for region in quality.get('regions', ()):
+            if zero_unmarked_region_weights(region, require_explicit_good=True)[1] <= 0:
+                continue
+            start_sec, end_sec = float(region['start_sec']), float(region['end_sec'])
+            if end_sec > start_sec:
+                spans.append((start_sec, end_sec))
+        if not spans:
+            return False
+        seconds = song.clock.at_floats(np.asarray([float(point.beat - beat_offset) for point in reference], dtype=np.float64))
+        approved = np.zeros(len(seconds), dtype=bool)
+        for start_sec, end_sec in spans:
+            approved |= (seconds >= start_sec) & (seconds < end_sec)
+        return bool(approved.all())
     def _profile(self,song):
         from .rhythm_structure import ProfileCache,song_profile
         cache=getattr(self,'_profiles',None)
@@ -147,7 +204,8 @@ class StreamDataset(ComposerV2Dataset):
         if match is None or match['best_score']<REF_MIN_SCORE:return None
         return (match['best_shift'],match['best_score'])
     def _reference_argument(self,index):
-        if (self.songs[self.windows[index][0]].quality or {}).get('unmarked_weight') == 0:
+        zero_unmarked = (self.songs[self.windows[index][0]].quality or {}).get('unmarked_weight') == 0
+        if zero_unmarked and getattr(self,'reviewed_reference_policy','approved_only') == 'off':
             return None
         if not self._structured():return self._prepare_reference(index)
         from . import rhythm_structure as rs
@@ -159,7 +217,7 @@ class StreamDataset(ComposerV2Dataset):
             # trust, not mere presence, decides how much is reused.
             draw=float(np.random.default_rng((self.augmentation_seed,index,self.training_epoch,7)).random())
             if draw<rs.REF_DROP_PROBABILITY:return None
-            if draw<rs.REF_DROP_PROBABILITY+rs.REF_ALTERNATIVE_PROBABILITY:
+            if not zero_unmarked and draw<rs.REF_DROP_PROBABILITY+rs.REF_ALTERNATIVE_PROBABILITY:
                 return (info['alternative_shift'],info['alternative_score'])
         if info['best_score']<rs.REF_MIN_SCORE:return None
         return (info['best_shift'],info['best_score'])
@@ -249,7 +307,8 @@ class StreamDataset(ComposerV2Dataset):
         older=active_sources(boundary)
         active=active_sources(cursor)
         structured=self._structured()
-        if (song.quality or {}).get('unmarked_weight') == 0:
+        zero_unmarked = (song.quality or {}).get('unmarked_weight') == 0
+        if zero_unmarked and getattr(self, 'reviewed_reference_policy', 'approved_only') == 'off':
             reference_start=None
         aligned=None
         if structured:
@@ -310,6 +369,14 @@ class StreamDataset(ComposerV2Dataset):
             reference=reference[left:right]
             reference_start=Fraction(math.floor(cursor))-REF_LEAD_BEATS-shift
             if evidence_v2 and not reference and lengths:aligned=None;reference_start=None
+        check_ref_quality = (zero_unmarked or getattr(self, 'auto_quality_policy', 'off') == 'auto_v1'
+            or (getattr(self,'reference_quality_policy','event_mask_v1') != 'legacy_v1'
+                and bool((song.quality or {}).get('regions'))))
+        if check_ref_quality and not self._reference_points_approved(song, reference, beat_offset=aligned[0] if aligned is not None else 0):
+            reference = []
+            aligned = None
+            reference_start = None
+            legacy_aligned = None
         carry_ids = codec.encode_points(carry)
         history_ids = codec.encode_points(history)
         reference_ids = codec.encode_points(reference)
@@ -353,7 +420,12 @@ class StreamDataset(ComposerV2Dataset):
         weights=active*unmarked
         regions = (song.quality or {}).get('regions', [])
         if training and regions:
-            from maichart.training.quality_annotations import region_component_weights
+            from maichart.training.quality_annotations import region_component_weights, zero_unmarked_region_weights
+            weight_fn = (
+                zero_unmarked_region_weights
+                if unmarked == 0 and not getattr(song, '_legacy_zero_unmarked_resume', False)
+                else region_component_weights
+            )
             # Causal query clocks intentionally stay at the preceding event
             # while its successor's time is written. Supervision ownership is
             # different: every token of a complete event owns its final time.
@@ -370,7 +442,7 @@ class StreamDataset(ComposerV2Dataset):
             timing = np.asarray([int(token) in timing_ids for token in full[1:]])
             for region in regions:
                 selected = (seconds >= float(region['start_sec'])) & (seconds < float(region['end_sec']))
-                timing_weight, component_weight = region_component_weights(region)
+                timing_weight, component_weight = weight_fn(region)
                 weights[selected & timing] = active[selected & timing] * timing_weight
                 weights[selected & ~timing] = active[selected & ~timing] * component_weight
             if unmarked == 0:
@@ -381,7 +453,7 @@ class StreamDataset(ComposerV2Dataset):
                     song.reviewed_event_seconds=stamps
                 spans=[]
                 for region in regions:
-                    if region_component_weights(region)[0]<=0:continue
+                    if weight_fn(region)[0]<=0:continue
                     a,b=float(region['start_sec']),float(region['end_sec'])
                     if spans and a<=spans[-1][1]:spans[-1][1]=max(spans[-1][1],b)
                     else:spans.append([a,b])
@@ -395,7 +467,7 @@ class StreamDataset(ComposerV2Dataset):
                 # A specifically approved incoming transition owns only the
                 # first original event at/after its saved review boundary.
                 for region in regions:
-                    if 'entry_start_sec' not in region or region_component_weights(region)[0]<=0:continue
+                    if 'entry_start_sec' not in region or weight_fn(region)[0]<=0:continue
                     entry=int(np.searchsorted(stamps,float(region['entry_start_sec']),side='left'))
                     if entry<len(stamps) and float(region['start_sec'])<=stamps[entry]<float(region['end_sec']):
                         trusted|=np.abs(seconds-stamps[entry])<1e-8

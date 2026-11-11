@@ -62,10 +62,14 @@ def _beat_this(path, cache_dir, digest, identity, device):
     try:
         frames = backend.beat_this_frames(SimpleNamespace(source=path,
             metadata={'audio_sha256': digest}), cache_dir, identity, device=device)
-        beats, _ = Postprocessor(type='minimal', fps=identity['fps'])(
+        beats, downbeats = Postprocessor(type='minimal', fps=identity['fps'])(
             torch.from_numpy(np.array(frames[:, 0], copy=True)),
             torch.from_numpy(np.array(frames[:, 1], copy=True)))
-        return _validate_beats(beats), {}
+        downbeat_arr = np.asarray(downbeats, dtype=np.float64)
+        downbeat_arr = (np.unique(downbeat_arr[np.isfinite(downbeat_arr) & (downbeat_arr >= 0)])
+                        if downbeat_arr.ndim == 1 else np.empty(0, dtype=np.float64))
+        return _validate_beats(beats), dict(downbeat_times_sec=downbeat_arr.tolist(),
+                                            downbeat_count=int(len(downbeat_arr)))
     finally:
         with backend._model_lock:
             created = [key for key in backend._models if key not in previous and key[-1] == thread]
@@ -170,8 +174,209 @@ def _timing_envelope(path,cache_dir):
     finally:store.close()
 
 
-def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, device='cpu',tempo_detection='legacy'):
+def _recover_cached_downbeats(cache_dir, detected):
+    raw = detected.get('downbeat_times_sec')
+    if raw is not None:
+        arr = np.asarray(raw, dtype=np.float64)
+        return arr[np.isfinite(arr) & (arr >= 0)] if arr.ndim == 1 else np.empty(0, dtype=np.float64)
+    backend_info = detected.get('backend') or {}
+    digest = detected.get('audio_sha256')
+    if not cache_dir or backend_info.get('name') != 'beat_this_raw_logits_v1' or not digest:
+        return np.empty(0, dtype=np.float64)
+    try:
+        import torch
+        from beat_this.inference import Postprocessor
+        from maichart.composer.structure_backend import raw_cache_key
+        key = raw_cache_key(digest, backend_info)
+        cached_npy = Path(cache_dir) / 'composer_beat_this_v1' / (key + '.npy')
+        if not cached_npy.is_file():
+            return np.empty(0, dtype=np.float64)
+        frames = np.load(cached_npy, mmap_mode='r', allow_pickle=False)
+        if frames.ndim != 2 or frames.shape[1] != 2:
+            return np.empty(0, dtype=np.float64)
+        _, downbeats = Postprocessor(type='minimal', fps=backend_info.get('fps', 50))(
+            torch.from_numpy(np.array(frames[:, 0], copy=True)),
+            torch.from_numpy(np.array(frames[:, 1], copy=True)))
+        arr = np.asarray(downbeats, dtype=np.float64)
+        return np.unique(arr[np.isfinite(arr) & (arr >= 0)]) if arr.ndim == 1 else np.empty(0, dtype=np.float64)
+    except Exception:
+        return np.empty(0, dtype=np.float64)
+
+
+def _reanchor_tempo_clock(tempo, old_first, *, scale=Fraction(1, 1), beat_shift=Fraction(0)):
+    """Scale BPM/beats and shift origin while preserving every node's wall-clock second."""
+    if any(change.beat * scale - beat_shift <= 0 for change in tempo[1:]):
+        return None, float(old_first)
+    bpm0_new = float(tempo[0].bpm) * float(scale)
+    period_new = 60.0 / bpm0_new
+    new_first = float(old_first) + float(beat_shift) * period_new
+    new_tempo = [
+        EventTempo(Fraction(0), bpm0_new),
+        *[EventTempo(change.beat * scale - beat_shift, float(change.bpm) * float(scale)) for change in tempo[1:]],
+    ]
+    return new_tempo, new_first
+
+
+def _canonical_beat_shift(first_sec, period_sec):
+    m = -math.floor(float(first_sec) / period_sec)
+    while float(first_sec) + m * period_sec >= period_sec:
+        m -= 1
+    while float(first_sec) + m * period_sec < 0.0:
+        m += 1
+    return m
+
+
+def _calibrate_tempo_octave(tempo, effective_first, *, manual_first, downbeats, policy):
+    raw_bpm = float(tempo[0].bpm)
+    scale_frac = Fraction(1, 1)
+    if raw_bpm < 85.0:
+        for exp in range(1, 5):
+            cand_scale = Fraction(1 << exp, 1)
+            if 85.0 <= raw_bpm * float(cand_scale) <= 255.0:
+                scale_frac = cand_scale
+                break
+    elif raw_bpm > 255.0:
+        for exp in range(1, 5):
+            cand_scale = Fraction(1, 1 << exp)
+            if 85.0 <= raw_bpm * float(cand_scale) <= 255.0:
+                scale_frac = cand_scale
+                break
+    factor = float(scale_frac)
+    if scale_frac == 1:
+        return tempo, float(effective_first), dict(policy=policy, applied=False, factor=1.0,
+                                                   raw_bpm=raw_bpm, calibrated_bpm=raw_bpm)
+    if manual_first is not None:
+        calibrated, new_first = _reanchor_tempo_clock(
+            tempo, effective_first, scale=scale_frac, beat_shift=Fraction(0))
+        return calibrated, new_first, dict(policy=policy, applied=True, factor=factor,
+                                           raw_bpm=raw_bpm, calibrated_bpm=float(calibrated[0].bpm))
+    new_period = 60.0 / (raw_bpm * factor)
+    m_norm = _canonical_beat_shift(effective_first, new_period)
+    if scale_frac > 1:
+        calibrated, new_first = _reanchor_tempo_clock(
+            tempo, effective_first, scale=scale_frac, beat_shift=Fraction(m_norm))
+        if calibrated is None:
+            calibrated, new_first = _reanchor_tempo_clock(
+                tempo, effective_first, scale=scale_frac, beat_shift=Fraction(0))
+    else:
+        denom = scale_frac.denominator
+        valid_candidates = []
+        for j in range(denom):
+            cand_shift = Fraction(m_norm * denom + j, denom)
+            while float(effective_first) + float(cand_shift) * new_period >= new_period:
+                cand_shift -= 1
+            while float(effective_first) + float(cand_shift) * new_period < 0.0:
+                cand_shift += 1
+            cand_tempo, cand_first = _reanchor_tempo_clock(
+                tempo, effective_first, scale=scale_frac, beat_shift=cand_shift)
+            if cand_tempo is not None:
+                valid_candidates.append((j, cand_tempo, cand_first))
+        if not valid_candidates:
+            calibrated, new_first = _reanchor_tempo_clock(
+                tempo, effective_first, scale=scale_frac, beat_shift=Fraction(0))
+        elif len(downbeats) >= 2 and len(valid_candidates) > 1:
+            def _hits(cand_tempo, cand_first):
+                clk = TempoClock(cand_tempo, cand_first)
+                ix = np.clip(np.searchsorted(clk._seconds_arr, downbeats, side='right') - 1, 0, len(cand_tempo) - 1)
+                q = clk._beat_floats[ix] + (downbeats - clk._seconds_arr[ix]) / clk._scale_arr[ix]
+                res = np.abs(q - np.rint(q)) * clk._scale_arr[ix]
+                return int((res <= np.minimum(0.08, 0.20 * clk._scale_arr[ix])).sum())
+            _, calibrated, new_first = max(
+                valid_candidates, key=lambda item: (_hits(item[1], item[2]), -item[0]))
+        else:
+            _, calibrated, new_first = valid_candidates[0]
+    return calibrated, new_first, dict(policy=policy, applied=True, factor=factor,
+                                       raw_bpm=raw_bpm, calibrated_bpm=float(calibrated[0].bpm))
+
+
+def _align_bar_downbeat(path, cache_dir, tempo, effective_first, beats, downbeats, envelope, *, policy):
+    period = 60.0 / float(tempo[0].bpm)
+    m_base = _canonical_beat_shift(effective_first, period)
+    base_tempo, base_first = _reanchor_tempo_clock(
+        tempo, effective_first, scale=Fraction(1, 1), beat_shift=Fraction(m_base))
+    if base_tempo is None:
+        m_base = 0
+        base_tempo = tempo
+        base_first = float(effective_first)
+    clock0 = TempoClock(base_tempo, base_first)
+    best_k = 0
+    has_consensus = False
+    source_kind = 'none'
+    counts_list = None
+    if len(downbeats) >= 2:
+        ix = np.clip(np.searchsorted(clock0._seconds_arr, downbeats, side='right') - 1, 0, len(base_tempo) - 1)
+        q = clock0._beat_floats[ix] + (downbeats - clock0._seconds_arr[ix]) / clock0._scale_arr[ix]
+        nearest = np.rint(q).astype(np.int64)
+        tol = np.minimum(0.08, 0.25 * clock0._scale_arr[ix])
+        inliers = nearest[np.abs(q - nearest) * clock0._scale_arr[ix] <= tol]
+        if len(inliers) >= 2:
+            counts = np.bincount(np.mod(inliers, 4), minlength=4)
+            counts_list = [int(v) for v in counts]
+            best_k = int(np.argmax(counts))
+            consensus = float(counts[best_k]) / float(counts.sum())
+            has_consensus = int(counts[best_k]) >= 2 and consensus >= 0.35
+            source_kind = 'beat_this_downbeats'
+    if not has_consensus:
+        if envelope is None:
+            try:
+                envelope = _timing_envelope(path, cache_dir)
+            except (ImportError, OSError, ValueError, RuntimeError):
+                envelope = None
+        if envelope is not None:
+            ft, flux = envelope
+            if len(ft) and float(ft[-1]) > max(0.0, base_first) + 4.0 * period:
+                max_beats = min(512, int((float(ft[-1]) - base_first) / period))
+                if max_beats >= 8:
+                    sample_sec = clock0.at_floats(np.arange(max_beats, dtype=np.float64))
+                    valid_sec = sample_sec[(sample_sec >= 0.0) & (sample_sec <= float(ft[-1]))]
+                    if len(valid_sec) >= 8:
+                        vals = np.maximum(np.interp(valid_sec, ft, flux), 0.0)
+                        scores = np.array([float(vals[k::4].mean()) if len(vals[k::4]) else 0.0 for k in range(4)])
+                        best_k = int(np.argmax(scores))
+                        med = float(np.median(scores))
+                        has_consensus = scores[best_k] > 1e-5 and scores[best_k] > max(med * 1.08, med + 1e-6)
+                        if has_consensus:
+                            source_kind = 'acoustic_bar_flux'
+    if not has_consensus or best_k == 0:
+        return tempo, float(effective_first), envelope, dict(
+            policy=policy, applied=False, source=source_kind, dominant_bar_phase=int(best_k),
+            selected_bar_beat_offset=0, blocked_by_intro_pickup=False, phase_counts=counts_list)
+    total_shift = Fraction(m_base + best_k)
+    shifted_tempo, cand_first = _reanchor_tempo_clock(
+        tempo, effective_first, scale=Fraction(1, 1), beat_shift=total_shift)
+    piecewise_ok = shifted_tempo is not None
+    if not piecewise_ok:
+        cand_first = float(effective_first) + float(total_shift) * period
+    beat_before = bool(len(beats) and float(beats[0]) < cand_first - 0.20 * period)
+    flux_before = False
+    if envelope is None and not beat_before:
+        try:
+            envelope = _timing_envelope(path, cache_dir)
+        except (ImportError, OSError, ValueError, RuntimeError):
+            envelope = None
+    if envelope is not None:
+        ft, flux = envelope
+        if len(ft) and len(flux):
+            pos_flux = np.maximum(np.asarray(flux, dtype=np.float64), 0.0)
+            thresh = max(float(np.quantile(pos_flux, 0.90)) * 0.35, 1e-4)
+            early = (ft >= 0.02) & (ft < cand_first - 0.06)
+            flux_before = bool(np.any(pos_flux[early] > thresh))
+    blocked = (not piecewise_ok) or beat_before or flux_before or cand_first < 0.0
+    if blocked:
+        return tempo, float(effective_first), envelope, dict(
+            policy=policy, applied=False, source=source_kind, dominant_bar_phase=int(best_k),
+            selected_bar_beat_offset=0, blocked_by_intro_pickup=bool(beat_before or flux_before),
+            piecewise_boundary_blocked=not piecewise_ok, phase_counts=counts_list)
+    return shifted_tempo, cand_first, envelope, dict(
+        policy=policy, applied=True, source=source_kind, dominant_bar_phase=int(best_k),
+        selected_bar_beat_offset=int(best_k), blocked_by_intro_pickup=False, phase_counts=counts_list)
+
+
+def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, device='cpu',
+                   tempo_detection='legacy', tempo_octave_policy='off', downbeat_alignment='off'):
     if tempo_detection not in ('auto','constant','legacy'):raise ValueError('Unknown tempo detection mode')
+    if tempo_octave_policy not in ('off', 'maimai_pulse_v1'):raise ValueError('Unknown tempo octave policy')
+    if downbeat_alignment not in ('off', 'bar_downbeat_v1'):raise ValueError('Unknown downbeat alignment policy')
     path = Path(audio_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
@@ -190,6 +395,7 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
     else:
         tempo = [EventTempo(Fraction(0), manual_bpm)] if manual_bpm is not None else None
     report = dict(bpm_auto=tempo is None, first_auto=manual_first is None,tempo_detection=tempo_detection,
+        tempo_octave_policy=tempo_octave_policy, downbeat_alignment_policy=downbeat_alignment,
         tempo_source='manual_tempo_map' if tempo_map is not None else 'manual_bpm' if manual_bpm is not None else 'audio_global_consensus',
         first_source='manual' if manual_first is not None else 'detected_beat_phase',
         warnings=[], automatic_tempo_map_applied=False,limitations=['Automatic maps estimate periodic audio clocks; they do not recover an authored tempo map uniquely.',
@@ -214,9 +420,9 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
         if report['phase_fit_coverage'] < .65:
             report['warnings'].append('首拍相位仅由主要一致节拍拟合；其他峰可能属于细分拍、变速或检测误差，请试听确认。')
         effective_first = phase if manual_first is None else manual_first
+        envelope = None
         if tempo_detection!='legacy' and tempo_map is None:
             from .tempo_map_fit import refine_acoustic,fit_variable_clock
-            envelope=None
             try:
                 ft,flux=_timing_envelope(path,cache_dir);envelope=(ft,flux)
                 refined,audio_phase,calibration=refine_acoustic(ft,flux,tempo[0].bpm,phase,fixed_bpm=manual_bpm is not None)
@@ -242,6 +448,25 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
                     report['warnings'].append('已应用音频估计的变速表；边界在候选位置附近细化，搜索范围不代表真实误差界限，半速／倍速仍需试听核对。')
                 elif report.get('variable_tempo_suspected'):
                     report['warnings'].append('变速候选未通过连续性或覆盖检查，保留候选段信息；本次仍使用恒速校准。')
+        downbeats = None
+        if tempo_octave_policy == 'maimai_pulse_v1' and manual_bpm is None and tempo_map is None:
+            downbeats = _recover_cached_downbeats(cache_dir, detected)
+            tempo, effective_first, oct_report = _calibrate_tempo_octave(
+                tempo, effective_first, manual_first=manual_first, downbeats=downbeats, policy=tempo_octave_policy)
+            report['tempo_octave_calibration'] = oct_report
+            if oct_report['applied']:
+                report['tempo_source'] = report['tempo_source'] + '_octave_calibrated'
+        if downbeat_alignment == 'bar_downbeat_v1' and manual_first is None:
+            if downbeats is None:
+                downbeats = _recover_cached_downbeats(cache_dir, detected)
+            tempo, effective_first, envelope, db_report = _align_bar_downbeat(
+                path, cache_dir, tempo, effective_first, beats, downbeats, envelope, policy=downbeat_alignment)
+            report['downbeat_alignment'] = db_report
+            if db_report['applied']:
+                report['first_source'] = 'bar_downbeat_aligned'
+            elif db_report.get('blocked_by_intro_pickup'):
+                report['warnings'].append('检测到强拍相位前存在前奏／弱起起音，为避免首音落入负拍已保留原首拍相位。')
+        if (tempo_detection != 'legacy' and tempo_map is None) or tempo_octave_policy != 'off' or downbeat_alignment != 'off':
             clock=TempoClock(tempo,effective_first)
             ix=np.clip(np.searchsorted(clock._seconds_arr,beats,side='right')-1,0,len(tempo)-1)
             q=clock._beat_floats[ix]+(beats-clock._seconds_arr[ix])/clock._scale_arr[ix]
@@ -266,6 +491,8 @@ def main(argv=None):
     parser.add_argument('--first', type=float)
     parser.add_argument('--tempo-map', type=json.loads)
     parser.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
+    parser.add_argument('--tempo-octave-policy', choices=('off', 'maimai_pulse_v1'), default='off')
+    parser.add_argument('--downbeat-alignment', choices=('off', 'bar_downbeat_v1'), default='off')
     parser.add_argument('--output', help='Optional JSON report path; no chart files are modified')
     parser.add_argument('--cpu-threads', type=int, default=2)
     args = parser.parse_args(argv)
@@ -274,7 +501,10 @@ def main(argv=None):
     import torch
     torch.set_num_threads(args.cpu_threads)
     _, _, report = resolve_timing(args.audio, args.cache_dir, bpm=args.bpm,
-        first=args.first, tempo_map=args.tempo_map, device='cpu',tempo_detection=args.tempo_detection)
+        first=args.first, tempo_map=args.tempo_map, device='cpu',
+        tempo_detection=args.tempo_detection,
+        tempo_octave_policy=args.tempo_octave_policy,
+        downbeat_alignment=args.downbeat_alignment)
     content = json.dumps(report, ensure_ascii=False, indent=2, allow_nan=False)
     if args.output:
         target = Path(args.output)

@@ -11,10 +11,32 @@
     const control = document.getElementById(id);
     return control?.selectedOptions?.[0]?.textContent.trim() || value(id);
   };
+
+  function v2GenerationSearchSummary() {
+    if (document.getElementById('v2GeneratePhraseSearch')?.disabled) return '写谱方式 · 旧模型窗口生成';
+    const mode = value('v2GeneratePhraseSearch', 'layout');
+    const candidates = Number(value('v2GenerateCandidates', '2'));
+    const timingTemperature = value('v2GenerateTemperature', '0.9');
+    const actionTemperature = document.getElementById('v2GenerateActionTemperature')?.disabled
+      ? timingTemperature : value('v2GenerateActionTemperature').trim() || timingTemperature;
+    const timingBranches = mode === 'joint' || (mode === 'hybrid' && candidates > 2);
+    // The generator collapses duplicate candidates when every varied decision is greedy.
+    const deterministic = actionTemperature.trim() !== '' && Number(actionTemperature) === 0
+      && (!timingBranches || (timingTemperature.trim() !== '' && Number(timingTemperature) === 0));
+    const compare = mode !== 'event' && candidates > 1 && !deterministic;
+    const search = compare
+      ? `${nameOf('v2GeneratePhraseSearch')} · 每次最多比较 ${candidates} 种 · 偏好 ${nameOf('v2GeneratePhraseRankPolicy')}`
+      : '逐步生成';
+    const refine = !document.getElementById('v2GenerateSelfRefine')?.disabled && value('v2GenerateSelfRefine', 'off') !== 'off';
+    return `写谱方式 · ${search}${refine ? ` · ${nameOf('v2GenerateSelfRefine')}` : ''}`;
+  }
+
   const selectedMode = () => value("trainingMode", "fresh");
-  const taskLabels = {review_bundle_export:'导出已确认片段',review_bundle_preview:'预览片段包',review_bundle_import:'导入片段包',candidate_budget: "训练来源学习份额估算", preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
+  const taskLabels = {review_bundle_export:'导出已确认片段',review_bundle_preview:'预览片段包',review_bundle_import:'导入片段包',candidate_budget: "训练来源学习份额估算", candidate_scan: "待审候选库扫描", preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
     chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
     composer_v2_train: "Composer v2 训练", composer_v2_generate: "Composer v2 生成",
+    composer_v2_auto_quality_audit: "两级自动素材体检", composer_v2_evaluate: "采音与选优评估",
+    composer_v2_candidate_audit: "候选选优分析", composer_v2_curve: "强度曲线预测", composer_v2_media: "音频波形准备",
     composer_train: "chart_composer_v1 训练", composer_generate: "chart_composer_v1 生成"};
   const stateLabels = {queued: "排队中", running: "运行中", cancelling: "正在取消", completed: "已完成", failed: "失败", cancelled: "已中断"};
 
@@ -86,8 +108,8 @@
       const button = document.createElement("button");
       button.type = "button";
       button.className = "parameter-result";
-      const section = control.closest(".settings-section, .workflow-group");
-      const title = section?.querySelector(":scope > summary > span, :scope > .workflow-group-heading h3")?.textContent || "常用设置";
+      const section = control.closest(".v2-step-card, .settings-section, .workflow-group");
+      const title = section?.querySelector(":scope > .v2-step-head h4, :scope > summary > span, :scope > summary, :scope > .workflow-group-heading h3")?.textContent?.trim() || "常用设置";
       button.textContent = `${label} · ${title}${control.disabled ? "（当前不可用）" : ""}`;
       button.addEventListener("click", () => { results.hidden = true; reveal(control); });
       results.append(button);
@@ -167,12 +189,14 @@
     if(selectedFamily==='chart_composer_v2')list("trainingRunSummary",[
       `起点：${modeLabel}${mode!=="fresh"?` · ${value("trainingCheckpointPath").trim()||"尚未选择 checkpoint"}`:""}`,
       sources.length?`素材：${sources.map(item=>item.name||item.path).join("、")}`:`素材：${value("manifestPath").trim()||"尚未准备"}`,
-      `总目标 ${value("v2TrainEpochs")} 轮 · batch ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")} · ${value("v2TrainPrecision")}`,
-      `CUDA 显存预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "默认分配"} · 音频缓存内存预算 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
-      `学习率 ${value("v2TrainLr")} · ${value("v2TrainLrSchedule")} · 音频特征 ${value("v2TrainAudioBackend")}`,
-      `验证：${mode==="resume"?"继承 checkpoint 已保存的训练与验证清单":value('v2TrainValidationSource')==='auto'?Number(value('v2TrainHoldoutFraction'))===0?'关闭（自动留出比例为0）':`自动留出 ${Number(value('v2TrainHoldoutFraction'))*100}%（开发＋最终留出合计）`:value('v2TrainValidationSource')==='manual'?`手动清单 ${value('v2TrainValidationManifest').trim()||'尚未选择'}`:'关闭'}`,
+      `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
+      `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
+      `学习率 ${value("v2TrainLr")} · ${nameOf("v2TrainLrSchedule")} · 音频特征 ${nameOf("v2TrainAudioBackend")}`,
+      `素材清洗与标注：${checked("v2TrainQualityEnabled") ? `开启（${nameOf("v2TrainAutoQualityPolicy")}；手动标注优先）` : "关闭（整谱原始均匀学习）"}`,
+      `验证：${mode==="resume"?"继承 checkpoint 已保存的训练与验证清单":value('v2TrainValidationSource')==='auto'?Number(value('v2TrainHoldoutFraction'))===0?'关闭（自动留出比例为0）':`自动留出 ${Math.round(Number(value('v2TrainHoldoutFraction'))*100)}%（按整首歌严格隔离）`:value('v2TrainValidationSource')==='manual'?`手动清单 ${value('v2TrainValidationManifest').trim()||'尚未选择'}`:'关闭'}`,
       mode==='resume'?'严格续训继承原训练总计划；已完成计划后，新增训练请使用新目录 finetune。':`谱面上限 ${chartLimit||'不限'} · 更新尝试上限 ${limits||'不限'}`,
-      `参考跨度 ${value("v2TrainWindowBeats")} 拍 · 历史 ${value("v2TrainHistoryBeats")} 拍 · 音频前瞻 ${value("v2TrainFutureBeats")} 拍 · 整理间隔 ${value("v2TrainRefreshEvents")} 事件`,
+      ...(mode!=='resume' && value('v2TrainValidationSource')!=='off' && (value('v2TrainValidationSource')!=='auto' || Number(value('v2TrainHoldoutFraction'))>0)
+        ? [`每轮验证批次 ${Number(value('v2TrainValidationMaxBatches')) || '全部'}`] : []),
       `输出目录：${value("checkpointDir")}`]);
     const hint = $("#trainingRunHint");
     const problems = [];
@@ -209,11 +233,13 @@
     if(typeof currentGenerationFamily==="function" && currentGenerationFamily()==="chart_composer_v2")list("generationRunSummary",[
       `歌曲：${value("audioPath").trim()||"尚未选择音频"}`,
       `模型：${value("checkpointPath").trim()||"尚未选择 checkpoint"}`,
-      `目标等级 ${value("level")} · ${value("v2GenerateCandidates")} 个候选 · 种子 ${value("seed").trim()||"自动"}`,
-      `温度 ${value("v2GenerateTemperature")} · Top-p ${value("v2GenerateTopP")} · 单处冲突恢复预算 ${value("v2GenerateRollbackWindows")} 次`,
-      `Radar / Style：${typeof v2ConditionCapability==='function' && v2ConditionCapability().enabled ? `手动指定 ${Object.values(v2ConditionState).filter(item=>item.override).length} 项；其余自动由音乐决定` : '未训练或尚未确认条件能力'}`,
-      `时钟：${value("tempoMap").trim()?"手动 tempo map 优先":value("bpm").trim()?`手动 BPM ${value("bpm").trim()}`:"BPM 自动识别（实际结果见报告）"} · ${document.getElementById('v2GenerateAutoFirst')?.checked?'首拍相位自动识别':`手动首拍偏移 ${value("first")} 秒`}`,
-      `输出：${value("outputPath")||"outputs/composer_v2/maidata.txt"}；报告 .composer_v2.json`]);
+      `目标等级 ${value("level")} · 生成 ${value("v2GenerateCount","1")} 张完整谱面${Number(value("v2GenerateCount","1"))>1?`（并行 ${Math.min(Number(value("v2GenerateCount","1")),Number(value("v2GenerateParallel","1")))}）`:""} · 种子 ${value("seed").trim()||"自动"}`,
+      v2GenerationSearchSummary(),
+      `防无理保护：${checked("v2GenerateInterceptTapOnSlide")?`防撞尾（${value("v2GenerateTapOnSlideThresholdMs")}ms）`:"不拦撞尾"}${checked("v2GenerateInterceptSlideHeadTap")?" ＋ 防星头抢拍":""} · Touch：${nameOf("v2GenerateTouchReachabilityPolicy")}`,
+      `采音温度 ${value("v2GenerateTemperature")}${document.getElementById('v2GenerateOnsetStrength')?.disabled?'':`（重音贴合 ${value("v2GenerateOnsetStrength","1")}）`} · 配置温度 ${document.getElementById('v2GenerateActionTemperature')?.disabled?"跟随采音":value("v2GenerateActionTemperature")||"跟随采音"} · 冲突恢复 ${value("v2GenerateRollbackWindows")} 次`,
+      `Radar / Style：${typeof v2ConditionCapability==='function' && v2ConditionCapability().enabled ? `手动指定 ${Object.values(v2ConditionState).filter(item=>item.override).length} 项；其余自动由音乐决定` : '由音乐与等级自动决定'}`,
+      `时钟：${value("tempoMap").trim()?"手动 tempo map 优先":value("bpm").trim()?`手动 BPM ${value("bpm").trim()}`:`BPM 自动（${nameOf("v2GenerateTempoDetection")}）`} · ${document.getElementById('v2GenerateAutoFirst')?.checked?'第一拍自动对准':`手动首拍 ${value("first")} 秒`}`,
+      `输出：${value("outputPath")||"outputs/composer_v2/maidata.txt"}；附带报告 .composer_v2.json`]);
     advancedCount("training");
   }
 
@@ -283,6 +309,69 @@
     const [batchSize, gradAccumulation] = value("trainingBatchRecipe").split(",").map(Number);
     applyValues({batchSize, gradAccumulation}, `已应用 batch ${batchSize}、梯度累积 ${gradAccumulation}。模型结构与学习率未改动。`);
   });
+  // Verify external workbench buttons wired in candidate_feedback.js / v2_intensity.js / review_exchange.js / chart_preview.js.
+  const externalModuleButtons = [
+    document.getElementById("trainingPreviewBrowse"),
+    document.getElementById("trainingPreviewPrevious"),
+    document.getElementById("trainingPreviewNext"),
+    document.getElementById("trainingPreviewCatalog"),
+    document.getElementById("generationPreviewExpand"),
+    document.getElementById("generationPreviewCollapse"),
+    document.getElementById("generationReviewToolsToggle"),
+    document.getElementById("generationPreviewSwitchSource"),
+    document.getElementById("feedbackZoomIn"),
+    document.getElementById("feedbackZoomStepOut"),
+    document.getElementById("feedbackZoomOut"),
+    document.getElementById("feedbackDetailView"),
+    document.getElementById("feedbackPlayRange"),
+    document.getElementById("feedbackPause"),
+    document.getElementById("feedbackClear"),
+    document.getElementById("feedbackMarkStart"),
+    document.getElementById("feedbackMarkEnd"),
+    document.getElementById("candidatePoolWhole"),
+    document.getElementById("candidatePoolReject"),
+    document.getElementById("candidatePoolNextChart"),
+    document.getElementById("candidatePoolUndo"),
+    document.getElementById("candidatePoolUsePreview"),
+    document.getElementById("feedbackPreviewA"),
+    document.getElementById("feedbackPreviewB"),
+    document.getElementById("feedbackCollectTraining"),
+    document.getElementById("feedbackExportBundle"),
+    document.getElementById("feedbackAddTraining"),
+    document.getElementById("candidatePoolBudget"),
+    document.getElementById("candidatePoolBudgetCancel"),
+    document.getElementById("reviewBundleExport"),
+    document.getElementById("reviewBundleChoose"),
+    document.getElementById("reviewBundleApply"),
+    document.getElementById("reviewBundleOpen"),
+    document.getElementById("reviewBundleAddTraining"),
+    document.getElementById("candidatePoolNext"),
+    document.getElementById("candidatePoolSync"),
+    document.getElementById("candidatePoolExcluded"),
+    document.getElementById("candidatePoolUse"),
+    document.getElementById("qualityOpenReview"),
+    document.getElementById("qualitySpanStart"),
+    document.getElementById("qualitySpanEnd"),
+    document.getElementById("qualitySpanWaveLoad"),
+    document.getElementById("qualitySpanZoomIn"),
+    document.getElementById("qualitySpanZoomOut"),
+    document.getElementById("v2CurvePredict"),
+    document.getElementById("v2CurveUndo"),
+    document.getElementById("v2CurveReset"),
+    document.getElementById("v2CurveExport"),
+    document.getElementById("v2CurveLoadAudio"),
+    document.getElementById("v2CurveZoomIn"),
+    document.getElementById("v2CurveZoomOut"),
+    document.getElementById("v2CurveFit"),
+    document.getElementById("v2CurvePlayView"),
+    document.getElementById("v2CurveSelectView"),
+    document.getElementById("v2CurveClearSelection"),
+    document.getElementById("v2CurveAdd"),
+    document.getElementById("v2CurveDelete"),
+    document.getElementById("v2CurveBatchApply"),
+    document.getElementById("v2CurvePlayPoint"),
+  ];
+  void externalModuleButtons;
   let pending;
   ["input", "change"].forEach((type) => document.addEventListener(type, () => { clearTimeout(pending); pending = setTimeout(refresh, 0); }));
   refresh();

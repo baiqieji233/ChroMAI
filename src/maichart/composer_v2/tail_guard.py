@@ -10,16 +10,48 @@ def options(args):
     return dict(enabled=bool(getattr(args,'intercept_tap_on_slide',False)),threshold_ms=threshold)
 
 
+def playability_options(args):
+    from maichart.generation.muri.touch_reachability import (
+        DEFAULT_COHOLD_RADIUS,
+        validate_touch_reachability,
+    )
+    base = options(args)
+    touch_policy, touch_radius = validate_touch_reachability(
+        getattr(args, 'touch_reachability_policy', 'palm_span_v1'),
+        getattr(args, 'touch_cohold_radius', DEFAULT_COHOLD_RADIUS),
+    )
+    return {
+        **base,
+        'touch_reachability_policy': touch_policy,
+        'touch_cohold_radius': touch_radius,
+        'intercept_slide_head_tap': bool(getattr(args, 'intercept_slide_head_tap', False)),
+    }
+
+
 def configure(guard,settings):
     if settings is not None:
-        guard.intercept_tap_on_slide=settings['enabled']
-        guard.config=replace(guard.config,tap_on_slide_threshold_ms=settings['threshold_ms'],
-            conflict_kind_modes={**guard.config.conflict_kind_modes,'TapOnSlide':'enforce' if settings['enabled'] else 'report'})
+        guard.intercept_tap_on_slide=bool(settings.get('enabled',guard.intercept_tap_on_slide))
+        guard.intercept_slide_head_tap=bool(settings.get('intercept_slide_head_tap',getattr(guard,'intercept_slide_head_tap',False)))
+        modes={
+            **guard.config.conflict_kind_modes,
+            'TapOnSlide':'enforce' if guard.intercept_tap_on_slide else 'report',
+            'SlideHeadTap':'enforce' if guard.intercept_slide_head_tap else 'report',
+        }
+        updates=dict(
+            tap_on_slide_threshold_ms=settings.get('threshold_ms',guard.config.tap_on_slide_threshold_ms),
+            conflict_kind_modes=modes,
+        )
+        if 'touch_reachability_policy' in settings:
+            updates['touch_reachability_policy']=settings['touch_reachability_policy']
+        if 'touch_cohold_radius' in settings:
+            updates['touch_cohold_radius']=float(settings['touch_cohold_radius'])
+        guard.config=replace(guard.config,**updates)
     return guard
 
 
 def cleanup(points,tempo,first,guard):
     from maichart.generation.post_process import process_chart_points
+    from maichart.generation.playability_policy import CONFLICT_KINDS
     settings=dict(enabled=guard.intercept_tap_on_slide,threshold_ms=guard.config.tap_on_slide_threshold_ms)
     report={**settings,'removed':[],'remaining_hard':0,'policy':'miacode_exact_affected_child_v1'}
     if not settings['enabled']:return points,report
@@ -27,7 +59,7 @@ def cleanup(points,tempo,first,guard):
     # their independent report/enforce contracts; no global proximity rule.
     config=replace(guard.config,conflict_repair_mode='local',note_repair_mode='delete',
         conflict_kind_modes={k:'enforce' if k=='TapOnSlide' else 'report'
-                             for k in guard.config.conflict_kind_modes})
+                             for k in CONFLICT_KINDS})
     current=list(points)
     while True:
         result=process_chart_points(current,tempo,first,config)

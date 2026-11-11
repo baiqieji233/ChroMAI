@@ -28,16 +28,18 @@ class PostProcessConfig:
     conflict_backtrack_budget: int = 4
     sustain_repair_mode: str = "off"
     note_repair_mode: str = "delete"
+    touch_reachability_policy: str = "off"
+    touch_cohold_radius: float = 180.0
 
     def __post_init__(self):
+        from maichart.generation.muri.touch_reachability import validate_touch_reachability
+        self.touch_reachability_policy, self.touch_cohold_radius = validate_touch_reachability(
+            self.touch_reachability_policy, self.touch_cohold_radius
+        )
         if self.note_repair_mode not in {"delete", "edit", "edit_then_delete"}:
             raise ValueError("单音符修复模式须为 delete/edit/edit_then_delete")
-        kinds = {"MultiTouch", "Overlap", "TapOnSlide", "SlideHeadTap", "SlideTooFast"}
-        if self.conflict_kind_modes is not None:
-            if not isinstance(self.conflict_kind_modes, dict) or any(
-                key not in kinds or mode not in {"off", "report", "enforce"}
-                for key, mode in self.conflict_kind_modes.items()):
-                raise ValueError("无理类别策略须为五类 MiaCode 名称到 off/report/enforce 的映射")
+        from maichart.generation.playability_policy import validate_kind_modes
+        self.conflict_kind_modes = validate_kind_modes(self.conflict_kind_modes)
         if (not math.isfinite(float(self.tap_on_slide_threshold_ms))
                 or not 0 <= float(self.tap_on_slide_threshold_ms) <= 250):
             raise ValueError("撞尾静态参考范围必须为 0–250 ms")

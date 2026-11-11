@@ -50,9 +50,25 @@ def parser():
                         help='Trained phase-only acoustic reference: 0 off, 1 trained setting, up to 2 experimental emphasis')
     result.add_argument('--intercept-tap-on-slide',action=argparse.BooleanOptionalAction,default=GENERATION_DEFAULTS['intercept_tap_on_slide'],help='Enforce native hard TapOnSlide findings and clean residual affected notes')
     result.add_argument('--tap-on-slide-threshold-ms',type=float,default=GENERATION_DEFAULTS['tap_on_slide_threshold_ms'])
+    result.add_argument('--intercept-slide-head-tap',action=argparse.BooleanOptionalAction,default=GENERATION_DEFAULTS['intercept_slide_head_tap'],help='Optionally enforce native hard SlideHeadTap inner-screen pre-trigger findings')
+    from maichart.generation.muri.touch_reachability import TOUCH_REACHABILITY_POLICIES
+    result.add_argument('--touch-reachability-policy',choices=TOUCH_REACHABILITY_POLICIES,default=GENERATION_DEFAULTS['touch_reachability_policy'],
+        help='Two-hand Touch reachability policy across active Hold/TouchHold/Slide locks')
+    result.add_argument('--touch-cohold-radius',type=float,default=GENERATION_DEFAULTS['touch_cohold_radius'],
+        help='Single-hand palm/forearm co-hold span radius in MiaCode layout coordinates')
+    from .forward_feasibility import FORWARD_POLICIES
+    result.add_argument('--forward-feasibility',choices=FORWARD_POLICIES,default=GENERATION_DEFAULTS['forward_feasibility'],
+        help='Bidirectional token-level physical & lookahead guard for continuous-event generation')
+    result.add_argument('--forward-tap-on-slide-ms',type=float,default=GENERATION_DEFAULTS['forward_tap_on_slide_ms'],
+        help='Forward-prohibition TapOnSlide hard window in milliseconds (0-250 ms)')
+    from .self_refine import SELF_REFINE_POLICIES
+    result.add_argument('--self-refine',choices=SELF_REFINE_POLICIES,default=GENERATION_DEFAULTS['self_refine'],
+        help='Experimental post-generation worst-span resampling under full suffix EventGuard check')
     result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=GENERATION_DEFAULTS['candidates'])
-    result.add_argument('--phrase-search', choices=('event','layout','joint'), default=GENERATION_DEFAULTS['phrase_search'],
-        help='layout: compare continuous configurations on shared timings; joint: compare timing and configuration; event: fast single-event trials')
+    result.add_argument('--phrase-search', choices=('event','layout','joint','hybrid'), default=GENERATION_DEFAULTS['phrase_search'],
+        help='layout: compare continuous configurations on shared timings; hybrid: shared beat with free cardinality (+ joint branch at 4); joint: compare timing and configuration; event: fast single-event trials')
+    result.add_argument('--phrase-rank-policy', choices=('comfort_v1','comfort_v2','likelihood_veto_v1'), default=GENERATION_DEFAULTS['phrase_rank_policy'],
+        help='comfort_v1: ergonomic comfort + timing support; comfort_v2: experimental chirality hand-flow + grammar likelihood + timing; likelihood_veto_v1: model grammar likelihood + timing support with ergonomic veto floor')
     result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
     result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
     result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts with independent consecutive seeds')
@@ -72,6 +88,10 @@ def parser():
     result.add_argument('--max-events', type=int, default=0)
     result.add_argument('--tempo-map', type=json.loads)
     result.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
+    result.add_argument('--tempo-octave-policy', choices=('off','maimai_pulse_v1'), default=GENERATION_DEFAULTS['tempo_octave_policy'],
+        help='Optional automatic BPM half/double calibration into [85, 255] BPM when BPM is automatic')
+    result.add_argument('--downbeat-alignment', choices=('off','bar_downbeat_v1'), default=GENERATION_DEFAULTS['downbeat_alignment'],
+        help='Optional automatic bar-downbeat alignment for first when first is automatic and intro-safe')
     result.add_argument('--meter-map', type=json.loads)
     result.add_argument('--window-retries', type=int, default=16,
                         help='Proposal attempts per event for continuous models or per window for older models')
@@ -80,8 +100,8 @@ def parser():
     result.add_argument('--reference-selection',choices=('auto','aligned'),default='auto',
         help='auto: the reference the checkpoint was trained with; aligned: beat-synchronous aligned choice '
              '(training-free for older continuous checkpoints, already built into aligned_rhythm_v1)')
-    result.add_argument('--exhaustion-policy',choices=('auto','report','stop'),default='auto',
-        help='auto: continuous checkpoints continue physical conflicts with a report; old window checkpoints stop')
+    result.add_argument('--exhaustion-policy',choices=('auto','report','stop','downgrade_or_skip'),default='auto',
+        help='auto: continuous checkpoints continue physical conflicts with a report; downgrade_or_skip: reduce or skip beat with zero hard Muri; stop: raise on exhaustion')
     return result
 
 
@@ -325,10 +345,12 @@ def _action_sampling(args):
 def _sampling_policy(args):
     action_temperature, action_top_p, split = _action_sampling(args)
     greedy = args.temperature == action_temperature == 0
-    # Joint trials can still choose different times when actions are greedy.
+    # Joint trials (and hybrid 4-candidate pools) can still choose different times when actions are greedy.
     # Layout/event alternatives share their timing, so those would be duplicates.
+    mode = getattr(args, 'phrase_search', 'event')
+    has_timing_branch = mode == 'joint' or (mode == 'hybrid' and getattr(args, 'candidates', 2) > 2)
     deterministic_candidates = action_temperature == 0 and (
-        getattr(args, 'phrase_search', 'event') != 'joint' or args.temperature == 0)
+        not has_timing_branch or args.temperature == 0)
     return dict(temperature=args.temperature, top_p=getattr(args,'top_p',.95),
         timing_temperature=args.temperature, timing_top_p=getattr(args,'top_p',.95),
         action_temperature=action_temperature, action_top_p=action_top_p,
@@ -350,8 +372,13 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     progress.update(force=True,stage='loading_checkpoint' if payload_override is None else 'generating')
     strength=getattr(args,'intensity_strength',1.)
     if not math.isfinite(strength) or not 0<=strength<=1:raise ValueError('intensity_strength must be in 0–1')
-    from .tail_guard import options as tail_options
-    tail_options(args)
+    from .tail_guard import playability_options
+    guard_settings = playability_options(args)
+    from .forward_feasibility import validate_forward_feasibility
+    validate_forward_feasibility(getattr(args,'forward_feasibility','balanced_v1'),
+        getattr(args,'forward_tap_on_slide_ms',None))
+    from .self_refine import validate_self_refine
+    validate_self_refine(getattr(args,'self_refine','off'))
     if args.device == 'cuda':
         from maichart.webui.startup_check import require_cuda
         require_cuda(torch)
@@ -404,6 +431,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         raise ValueError('Separate configuration sampling requires a continuous-event checkpoint')
     if getattr(args,'reference_selection','auto')=='aligned' and config.sequence_policy!='continuous_events_v1':
         raise ValueError('对齐参考检索仅适用于连续事件检查点')
+    if getattr(args,'self_refine','off')!='off' and config.sequence_policy!='continuous_events_v1':
+        raise ValueError('Self-refinement requires a continuous-event checkpoint')
     from .exhaustion import resolve_policy
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     print('composer_v2_exhaustion_policy '+json.dumps(dict(requested=getattr(args,'exhaustion_policy','auto'),
@@ -445,7 +474,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     dataset.window_beats = config.window_beats
     dataset.history_beats = config.history_beats
     dataset.future_beats = config.future_beats
-    guard = _new_guard(tempo, first, audio.duration_sec,guard_options=tail_options(args))
+    guard = _new_guard(tempo, first, audio.duration_sec,guard_options=guard_settings)
     points, records, rollbacks = [], [], []
     index = 0
     while index < math.ceil(end_value / config.window_beats):
@@ -489,7 +518,7 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
             if len(rollbacks) < effective_rollback_budget:
                 rollback = _rollback_committed(points, records, tempo, clock, start,
                                                audio.duration_sec, config.window_beats,
-                    guard_factory=lambda t,f,d:_new_guard(t,f,d,guard_options=tail_options(args)))
+                    guard_factory=lambda t,f,d:_new_guard(t,f,d,guard_options=guard_settings))
                 if rollback is not None:
                     points, records, guard, rewind, report = rollback
                     report['number'] = len(rollbacks) + 1
@@ -565,7 +594,9 @@ def prepare_inputs(args,config,device,audio_store_override=None):
     audio_path=Path(args.audio).resolve()
     tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
         first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',
-        tempo_detection=getattr(args,'tempo_detection','auto'))
+        tempo_detection=getattr(args,'tempo_detection','auto'),
+        tempo_octave_policy=getattr(args,'tempo_octave_policy','off'),
+        downbeat_alignment=getattr(args,'downbeat_alignment','off'))
     store=audio_store_override if audio_store_override is not None else AudioFeatureStore(
         args.cache_dir,backend=config.audio_backend,model_path=config.mert_model,
         device=audio_runtime(getattr(args,'audio_device','auto'),device))

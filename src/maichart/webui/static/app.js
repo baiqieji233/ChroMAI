@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience"];
+const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "activation_checkpointing", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience", "reviewed_reference_policy", "auto_quality_policy"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -21,7 +21,7 @@ function composerV2TrainingPayload(options={}) {
     quality_enabled:checkedOrDefault('#v2TrainQualityEnabled',true),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve"]);
+  const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -29,6 +29,7 @@ function composerV2TrainingPayload(options={}) {
   // Disabled automatic-split controls must not override an explicit manual
   // validation source, including when talking to an older running server.
   if(payload.validation_source && payload.validation_source!=='auto')delete payload.holdout_fraction;
+  if (payload.mode==='resume' || !payload.quality_enabled) delete payload.auto_quality_policy;
   return payload;
 }
 function composerV2GenerationPayload(options={}) {
@@ -55,6 +56,10 @@ function composerV2GenerationPayload(options={}) {
     audio_device:valueOrDefault("#v2GenerateAudioDevice","auto"),inference_backend:valueOrDefault("#v2GenerateInferenceBackend","auto"),
     rollback_windows:number('#v2GenerateRollbackWindows',2,'冲突恢复次数',{min:0,max:8,integer:true}),
     exhaustion_policy:valueOrDefault('#v2GenerateExhaustionPolicy','auto'),
+    forward_feasibility:element('#v2GenerateForwardFeasibility')?.disabled?'off':valueOrDefault('#v2GenerateForwardFeasibility','balanced_v1'),
+    touch_reachability_policy:valueOrDefault('#v2GenerateTouchReachabilityPolicy','palm_span_v1'),
+    intercept_slide_head_tap:!!element('#v2GenerateInterceptSlideHeadTap')?.checked,
+    self_refine:element('#v2GenerateSelfRefine')?.disabled?'off':valueOrDefault('#v2GenerateSelfRefine','off'),
     tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),
     intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
     record_candidate_probabilities:!!element('#v2GenerateRecordCandidateProbabilities')?.checked,
@@ -62,11 +67,14 @@ function composerV2GenerationPayload(options={}) {
     cache_dir:valueOrDefault("#v2GenerateCacheDir","cache/chart_composer_v2"),max_events:number('#v2GenerateMaxEvents',0,'最大事件数',{min:0,integer:true}),
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
   if(payload.phrase_commit_beats>payload.phrase_beats)throw new Error("每次保留长度不能超过提前试写长度。");
+  if (element('#v2GenerateForwardFeasibility')?.disabled) delete payload.forward_feasibility;
   for (const [key,selector,label,bounds] of [
     ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
     ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
     ['onset_strength','#v2GenerateOnsetStrength','起音参考强度',{min:0,max:2}],
     ['tap_on_slide_threshold_ms','#v2GenerateTapOnSlideThresholdMs','撞尾检测阈值（ms）',{min:0,max:250}],
+    ['forward_tap_on_slide_ms','#v2GenerateForwardTapOnSlideMs','采样前撞尾范围（ms）',{min:0,max:250}],
+    ['touch_cohold_radius','#v2GenerateTouchCoholdRadius','Touch 同手兼顾距离',{min:60,max:260}],
   ]) {
     const raw=valueOrDefault(selector,'').trim();
     if (raw!=='' && !element(selector)?.disabled) payload[key]=v2NumericValue(raw,label,bounds);
@@ -74,6 +82,13 @@ function composerV2GenerationPayload(options={}) {
   }
   const referenceSelection=element('#v2GenerateReferenceSelection');
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
+  const phraseRank=element('#v2GeneratePhraseRankPolicy');
+  const phraseRankPolicy=phraseRank?.disabled?'comfort_v1':valueOrDefault('#v2GeneratePhraseRankPolicy','comfort_v1');
+  if(phraseRankPolicy && phraseRankPolicy!=='comfort_v1')payload.phrase_rank_policy=phraseRankPolicy;
+  const tempoOctavePolicy=valueOrDefault('#v2GenerateTempoOctavePolicy','off');
+  if(tempoOctavePolicy && tempoOctavePolicy!=='off')payload.tempo_octave_policy=tempoOctavePolicy;
+  const downbeatAlignment=valueOrDefault('#v2GenerateDownbeatAlignment','off');
+  if(downbeatAlignment && downbeatAlignment!=='off')payload.downbeat_alignment=downbeatAlignment;
   if(!options.omitCurve && typeof v2CurvePayload==='function')Object.assign(payload,v2CurvePayload());
   return payload;
 }
@@ -90,6 +105,81 @@ function composerV2EvaluationPayload() {
     timing_rollouts:integer('#v2EvalTimingRollouts',2,'独立选时检查数'),
     cpu_threads:integer('#v2EvalCpuThreads',2,'CPU计算线程',1),window_sampling:windowSampling,
     check_training_overlap:!!element('#v2EvalCheckTrainingOverlap')?.checked};
+}
+
+async function startV2AutoQualityAudit(overrideOptions={}) {
+  const button=element('#v2AutoQualityAuditButton');
+  const panel=overrideOptions.panel || 'training';
+  const source=autoAuditSource(panel);
+  const setAuditStatus=text=>{
+    if(autoAuditSource(panel).key===source.key) setAutoAuditStatus(panel, text);
+  };
+  const setAuditBusy=busy=>{
+    if(button)button.disabled=busy;
+    if(typeof document!=='undefined') {
+      for(const node of document.querySelectorAll('[data-run-auto-audit]'))node.disabled=busy;
+    }
+  };
+  if(button?.disabled)return;
+  try {
+    setAuditBusy(true);
+    if(source.readOnly)throw new Error('请返回素材列表，再选择要检查的来源。');
+    if(!source.catalog)assertTrainingSelection();
+    if(!source.key)throw new Error('请先打开已预处理的数据集或勾选训练来源。');
+    const limit=overrideOptions && Number.isInteger(overrideOptions.limitCharts)
+      ?overrideOptions.limitCharts
+      :v2NumericValue(valueOrDefault('#v2AutoQualityLimit','0'),'质检张数',{min:0,integer:true});
+    const highlightNode=element('#v2AutoQualityHighlightMode');
+    const handFlowNode=element('#v2AutoQualityHandFlowQuantile');
+    const handFlowQuantile=handFlowNode && String(handFlowNode.value??'').trim()!==''
+      ?v2NumericValue(handFlowNode.value,'手顺异常软降权比例',{min:0,max:0.25}):null;
+    const extraNumeric=[
+      ['tap_on_slide_ms','#v2AutoQualityTailMs','撞尾判定窗口',{min:0,max:250}],
+      ['touch_cohold_radius','#v2AutoQualityTouchRadius','Touch 同手兼顾半径',{min:60,max:260}],
+      ['good_quantile','#v2AutoQualityGoodQuantile','优选好段分位门槛',{min:0.5,max:0.98}],
+      ['max_problem_fraction','#v2AutoQualityMaxProblemFraction','整谱排除问题占比上限',{min:0.05,max:1}],
+      ['workers','#v2AutoQualityWorkers','后台体检并行进程数',{min:0,max:32,integer:true}],
+    ];
+    const extraSelects=[
+      ['inner_muri_mode','#v2AutoQualityInnerMuriMode'],
+      ['touch_reachability_policy','#v2AutoQualityTouchPolicy'],
+      ['domain_pathology_mode','#v2AutoQualityDomainMode'],
+      ['acoustic_audit_mode','#v2AutoQualityAcousticMode'],
+    ];
+    const extraPayload={};
+    for(const [key,selector,label,bounds] of extraNumeric) {
+      const node=element(selector);
+      if(node && String(node.value??'').trim()!=='')extraPayload[key]=v2NumericValue(node.value,label,bounds);
+    }
+    for(const [key,selector] of extraSelects) {
+      const node=element(selector);
+      if(node && String(node.value??'').trim()!=='')extraPayload[key]=String(node.value).trim();
+    }
+    const payload={model_family:'chart_composer_v2',...source.payload,limit_charts:limit,
+      tap_on_slide_mode:valueOrDefault('#v2AutoQualityTailMode','mask_hard'),
+      ...extraPayload};
+    if(highlightNode)payload.highlight_good_mode=highlightNode.value||'auto';
+    if(handFlowQuantile!==null)payload.experimental_hand_flow_quantile=handFlowQuantile;
+    const backend=await api('/api/status');
+    if(!backend.training_capabilities?.composer_v2_auto_quality_audit)throw new Error('自动质检任务需要新版后台，请在当前任务结束后重启 WebUI。');
+    setAuditStatus(`正在提交「${source.label}」的体检…`);
+    const started=await api('/api/composer-v2/auto_quality_audit',payload);
+    watchTask(started.task_id,task=>{
+      setAuditBusy(false);
+      const report=task.result?.composer_v2_auto_quality_audit;
+      const summaryText=report
+        ?`「${source.label}」${limit?'抽查预览':'自动质检'}完成，检查 ${report.audited_charts} 张。报告 ${report.report_path}`
+        :(task.error||task.message||'任务已结束');
+      setAuditStatus(summaryText);
+      if(report) finishAutoAudit(panel, source, report, limit?'preview':'formal');
+    },task=>{
+      const progress=task.result?.composer_v2_auto_quality_progress;
+      if(progress)setAuditStatus(`「${source.label}」正在体检 ${progress.completed}/${progress.total} 张`);
+    });
+  } catch(error) {
+    setAuditBusy(false);
+    setAuditStatus(error.message);
+  }
 }
 async function startV2QualityEvaluation(kind='evaluate') {
   const audit=kind==='candidate_audit';
@@ -152,6 +242,18 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  const customFeasibility = payload.phrase_search==='hybrid'
+    || payload.phrase_rank_policy==='comfort_v2'
+    || payload.exhaustion_policy==='downgrade_or_skip'
+    || payload.intercept_slide_head_tap
+    || (payload.forward_feasibility && payload.forward_feasibility!=='balanced_v1')
+    || (payload.touch_reachability_policy && payload.touch_reachability_policy!=='palm_span_v1')
+    || (payload.self_refine && payload.self_refine!=='off')
+    || (payload.forward_tap_on_slide_ms!=null && payload.forward_tap_on_slide_ms!==150)
+    || (payload.touch_cohold_radius!=null && payload.touch_cohold_radius!==180);
+  if (customFeasibility && !status.training_capabilities?.composer_v2_feasibility_options) {
+    throw new Error('这些生成选项需要新版后台，请在运行任务结束后重启 WebUI。');
+  }
   if(payload.record_candidate_probabilities===true && status.training_capabilities?.composer_v2_probability_audit!==true)
     throw new Error('记录候选评估数据需要更新后的后台；请在当前任务结束后重启 WebUI。');
   if(payload.count>1 && payload.parallel>1 && !status.training_capabilities?.composer_v2_parallel_generation)
@@ -174,6 +276,10 @@ function requireV2SplitSamplingSupport(status,payload) {
   }
   if(payload.phrase_search && payload.phrase_search!=='event' && !status.training_capabilities?.composer_v2_phrase_search)
     throw new Error('比较多种写法需要更新后的后台；请在当前任务结束后重启 WebUI，或选择“逐步生成（速度优先）”。');
+  if(payload.phrase_rank_policy && payload.phrase_rank_policy!=='comfort_v1' && !status.training_capabilities?.composer_v2_phrase_rank_policy)
+    throw new Error('候选段落似然重排需要更新后的 WebUI 后台；请在当前任务结束后重启后台，或先使用默认「手感稳定优先」。');
+  if((payload.tempo_octave_policy || payload.downbeat_alignment) && !status.training_capabilities?.composer_v2_timing_calibration)
+    throw new Error('可选半／倍速与强拍对齐校准需要更新后的 WebUI 后台；请在当前任务结束后重启后台，或先保持关闭。');
   if(payload.cpu_threads===0 && !status.training_capabilities?.composer_v2_cpu_auto_threads)
     throw new Error('自动分配CPU线程需要新版后台；请在当前任务结束后重启 WebUI，或先手动填写线程数。');
 }
@@ -209,12 +315,13 @@ function applyComposerV2Inspection(data) {
   saved.rhythm_structure=data.model_config?.structure_policy||'off';
   saved.intensity_curve=data.model_config?.intensity_policy||'off';
   saved.music_context=data.model_config?.music_context_policy||'off';
+  saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
   saved.song_layers=data.model_config?.song_layers??2;
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   if(currentTrainingMode()==='resume' && element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=saved.quality_enabled!==false;
   for(const key of COMPOSER_V2_FIELDS) {
-    if (key === 'cuda_memory_budget_gb' || key === 'audio_cache_gb') continue;
+    if (['cuda_memory_budget_gb', 'audio_cache_gb', 'activation_checkpointing'].includes(key)) continue;
     const node=element("#"+v2FieldId(key));
     if(node && Object.prototype.hasOwnProperty.call(saved,key) && (currentTrainingMode()==="resume" || ["d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","refresh_events"].includes(key)))node.value=saved[key]==null?'':String(saved[key]);
   }
@@ -1348,7 +1455,7 @@ let restoredSettingNotice = "";
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2AuditInput",
-  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection",
+  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
@@ -1439,7 +1546,7 @@ let songFormCurveSourceBeforeRestriction = null;
 let songFormCurveModeBeforeRestriction = null;
 let songFormCurveRestrictionsActive = false;
 let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false, contextStale: false, conditionChanged: false };
-const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
+const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", autoFilter: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
 // Dataset selection is intentionally separate from qualityState: selected
 // sources feed training, while activeDataset is the source currently being
 // browsed/annotated. This prevents a merged training manifest from hiding the
@@ -1578,6 +1685,7 @@ function collectSettings() {
   values.__eventSetLearningDefaults = 2;
   values.__composerV2ReleaseDefaults = 1;
   values.__composerV2PhraseMusicDefaults = 1;
+  if (v2TrainPlanBeforeSmoke) values.__v2TrainPlanBeforeSmoke = v2TrainPlanBeforeSmoke;
   return values;
 }
 
@@ -1681,7 +1789,7 @@ function restoreSettings() {
     values.conflictDetectionEnabled = true;
     values.conflictRepairMode = values.runtimeReferenceMode === "reject" ? "reject" : "none";
   }
-  if(migrateComposerV2ReleaseDefaults(values)) {
+  if(typeof migrateComposerV2ReleaseDefaults==="function" && migrateComposerV2ReleaseDefaults(values)) {
     try { localStorage.setItem(settingsStorageKey,JSON.stringify(saved)); } catch (_) {}
     restoredSettingNotice='Composer v2 已更新默认：先定节奏，再比较配置；提前试写4拍，每次保留前2拍。新训练采用4层音频编码及全曲音乐上下文，续训沿用检查点设置。';
   }
@@ -1696,6 +1804,11 @@ function restoreSettings() {
     else if (value !== undefined && value !== null) target.value = String(value);
     restored += 1;
   });
+  const beforeSmoke = values.__v2TrainPlanBeforeSmoke;
+  const smokeFields = Object.keys(V2_TRAIN_SMOKE_PLAN);
+  if (beforeSmoke && smokeFields.every(id => typeof beforeSmoke[id] === 'string')) {
+    v2TrainPlanBeforeSmoke = Object.fromEntries(smokeFields.map(id => [id, beforeSmoke[id]]));
+  }
   restoreV2ConditionSettings(values.__composerV2Conditions);
   const manualTouched = values.__manualTouched || {};
   const learningRate = element("#learningRate");
@@ -2120,6 +2233,13 @@ function updateGenerationCapabilityControls() {
 }
 
 function updateV2BatchControls() {
+  const rankSelect=element('#v2GeneratePhraseRankPolicy');
+  if(rankSelect) {
+    const searchDisabled=element('#v2GeneratePhraseSearch')?.disabled;
+    const searchMode=valueOrDefault('#v2GeneratePhraseSearch','layout');
+    const candidateCount=Number(valueOrDefault('#v2GenerateCandidates',2));
+    rankSelect.disabled=Boolean(searchDisabled || searchMode==='event' || candidateCount<=1);
+  }
   const field=element('#v2GenerateParallel');if(!field)return;
   const count=Number(valueOrDefault('#v2GenerateCount',1));field.disabled=count<=1;
   const active=Math.min(count,Number(field.value)||1),help=element('#v2GenerateParallelHelp');
@@ -2193,6 +2313,7 @@ function updateFamilyFields() {
     field.hidden=!v2Generation;
     field.querySelector('input,select').disabled=!splitSampling;
   }
+  updateV2BatchControls();
   const phraseHelp=element('#v2PhraseSearchHelp');
   if(phraseHelp)phraseHelp.textContent=checked && !splitSampling?'这个旧模型不支持比较整段写法，将使用“逐步生成”。':'默认先确定一小段音符出现的时间和数量，再比较不同键位与动作组合；“节奏与配置一起选”还会尝试不同的出音时间。增加比较会更慢。';
   const onsetSupported=v2Generation && (!checked || generationInspection.data?.generation_capabilities?.onset_readout);
@@ -3566,18 +3687,30 @@ function updateDatasetButtons() {
 
 function updateTrainingControls() {
   const v2Resume=currentModelFamily()==="chart_composer_v2" && currentTrainingMode()==="resume";
+  const smokePreset = element('#v2TrainSmokePreset');
+  if (smokePreset) {
+    smokePreset.disabled = v2Resume;
+    smokePreset.title = v2Resume ? '严格续训沿用检查点训练计划。新建训练或微调时可选短跑。' : '';
+    if (v2Resume && restoreV2TrainPlan()) {
+      markActivePresetChip('data-v2-train-preset', '');
+      element('#v2TrainPresetStatus').textContent = '已恢复短跑前的训练计划。严格续训沿用检查点计划。';
+    }
+  }
   if(element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').disabled=v2Resume;
   const v2Fixed=new Set(['song_layers','d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
   for(const key of (typeof COMPOSER_V2_FIELDS!=="undefined"?COMPOSER_V2_FIELDS:[])){
     const node=element("#"+v2FieldId(key));if(node){
-      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience'].includes(key);
+      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing'].includes(key);
       node.disabled=(v2Resume && !resourceBudget) || (currentModelFamily()==='chart_composer_v2' && currentTrainingMode()==='finetune' && v2Fixed.has(key));
       node.title=node.disabled?'继承 checkpoint 的固定设置；模型合同变化需要从头训练。':'';
     }
   }
+  const autoQuality=element('#v2TrainAutoQualityPolicy');
+  if (autoQuality) autoQuality.disabled=v2Resume || !checkedOrDefault('#v2TrainQualityEnabled',true);
   const validationSource=element("#v2TrainValidationSource")?.value||"auto";
   const v2Validation=element("#v2TrainValidationManifest");if(v2Validation)v2Validation.disabled=v2Resume||validationSource!=="manual";
   const v2Fraction=element("#v2TrainHoldoutFraction");if(v2Fraction)v2Fraction.disabled=v2Resume||validationSource!=="auto";
+  if(typeof updateZeroUnmarkedTrainingNotice==="function")updateZeroUnmarkedTrainingNotice();
   updateFamilyFields();
   updateDatasetButtons();
   updateTrainingModeHelp();
@@ -3992,7 +4125,9 @@ function composerGenerationSummary(task) {
     const settingsSummary=sampling?.rng_policy==='separate_timing_action_v1'
       ? `采音 ${sampling.timing_temperature} / ${sampling.timing_top_p}，配置 ${sampling.action_temperature} / ${sampling.action_top_p}（温度 / Top-p）；`
       : '';
-    return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；${settingsSummary}候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
+    const rankPolicy=report.phrase_search?.ranking_policy??report.phrase_search?.rank_policy;
+    const rankSummary=rankPolicy==='likelihood_veto_v1'?'似然重排＋手感底线降序；':rankPolicy==='comfort_v2'?'左右手手感评分；':'';
+    return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；${settingsSummary}${rankSummary}候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
   }
   if (task.kind !== "composer_generate") return null;
   const result=task.result||{},report=result.composer_report||{},settings=result.effective_settings||{};
@@ -4309,6 +4444,7 @@ function populateDatasets(datasets) {
   });
   select.value = uploadedDatasets.some((data) => data.path === current) ? current : "";
   renderDatasetWorkspace();
+  if (typeof refreshAutoQualityAuditStatus === "function") void refreshAutoQualityAuditStatus().catch(() => {});
 }
 
 function datasetKey(item) { return String(item?.manifest || item?.path || ""); }
@@ -4321,7 +4457,7 @@ function datasetCardHtml(item) {
   const preprocessAction = item.prepared ? "" : `<button class="small-button dataset-card-preprocess" type="button" data-dataset-path="${escapeHtml(item.path || "") }">去训练页预处理</button>`;
   const errorMessage = item.error ? `<p class="inline-status warn">这个来源读取失败：${escapeHtml(String(item.error))}。请检查路径或文件后刷新。</p>` : "";
   return `<article class="dataset-card${active ? " active" : ""}" data-dataset-path="${escapeHtml(item.path || "")}" data-dataset-manifest="${escapeHtml(item.manifest || "")}">
-    <label class="dataset-card-check"><input class="dataset-select-checkbox" type="checkbox" data-dataset-key="${escapeHtml(key)}" ${checked ? "checked" : ""}> <strong>加入训练</strong></label>
+    <label class="dataset-card-check"><input class="dataset-select-checkbox" type="checkbox" data-dataset-key="${escapeHtml(key)}" ${checked ? "checked" : ""}> <strong>用于下次训练</strong></label>
     <button class="dataset-card-open" type="button" data-dataset-path="${escapeHtml(item.path || "")}"><strong>${escapeHtml(item.name || "未命名数据集")}</strong></button>
     <div class="dataset-card-meta">${item.prepared ? "已预处理" : "待预处理"} · 谱面 ${escapeHtml(String(charts))}${item.reviewed_regions!=null?` · 已确认 ${escapeHtml(String(item.reviewed_regions))} 段`:''}</div>
     <div class="dataset-card-path">${escapeHtml(item.path || item.manifest || "")}</div>${errorMessage}${preprocessAction}${globalThis.CandidatePool?.card(item)||""}
@@ -4349,11 +4485,28 @@ function renderDatasetWorkspace() {
   const catalogPanel = element("#datasetCatalogPanel");
   if (cardsPanel) cardsPanel.hidden = datasetWorkspaceState.view !== "cards";
   if (catalogPanel) catalogPanel.hidden = datasetWorkspaceState.view !== "catalog";
+  if (typeof updateZeroUnmarkedTrainingNotice === "function") updateZeroUnmarkedTrainingNotice();
   globalThis.CandidatePool?.render();
   updateDatasetButtons();
 }
 
+function isZeroUnmarkedDataset(item) {
+  return Boolean(item && (item.candidate_pool || item.reviewed_only || item.reviewed_regions != null));
+}
+
+function updateZeroUnmarkedTrainingNotice() {
+  const warning = element("#v2TrainZeroUnmarkedWarning");
+  if (!warning) return;
+  const zeroItems = selectedDatasetItems().filter(isZeroUnmarkedDataset);
+  const disabled = !checkedOrDefault("#v2TrainQualityEnabled", true);
+  warning.hidden = !(currentModelFamily() === "chart_composer_v2" && zeroItems.length > 0 && disabled);
+  if (!warning.hidden) {
+    warning.textContent = `所选的 ${zeroItems.map((item) => item.name || item.path).join("、")} 只学习已确认内容。请开启「使用已保存的质量标注和训练示范」后再开始训练。`;
+  }
+}
+
 function activeDatasetItem() {
+  if (datasetWorkspaceState.view === 'catalog' && datasetWorkspaceState.auditCatalogItem) return datasetWorkspaceState.auditCatalogItem;
   return datasetWorkspaceState.items.find((item) => item.path === datasetWorkspaceState.activePath || item.manifest === datasetWorkspaceState.activePath) || null;
 }
 
@@ -4506,10 +4659,14 @@ async function composeSelectedDatasets() {
   }
 }
 
-async function openDataset(item) {
+async function openDataset(item, { autoScope = null, autoFilter = '' } = {}) {
   if (!item) return;
   if (item.prepared === false || !item.manifest) throw new Error("这个数据集尚未预处理，请点击卡片上的“去训练页预处理”。");
-  datasetWorkspaceState.activePath = item.path || item.manifest || "";
+  datasetWorkspaceState.auditCatalogItem = item.auditReadOnly ? item : null;
+  if (!item.auditReadOnly) datasetWorkspaceState.activePath = item.path || item.manifest || "";
+  qualityState.autoScope = autoScope;
+  qualityState.autoFilter = autoFilter;
+  if (element('#qualityAutoFilter')) element('#qualityAutoFilter').value = autoFilter;
   globalThis.CandidatePool?.activate(item);
   globalThis.ChartPreview?.setTrainingDataset(item.manifest);
   datasetWorkspaceState.view = "catalog";
@@ -4528,7 +4685,7 @@ async function openDataset(item) {
   if (element("#qualityDetailAudio")) { element("#qualityDetailAudio").removeAttribute("src"); element("#qualityDetailAudio").load(); }
   if (element("#qualityCorrectedPath")) element("#qualityCorrectedPath").textContent = "";
   if (item.prepared === false || !item.manifest) throw new Error("这个数据集还没有预处理 manifest，请先点击卡片上的“去训练页预处理”。");
-  if (element("#datasetCatalogTitle")) element("#datasetCatalogTitle").textContent = `${item.name || "数据集"} · 谱面目录`;
+  if (element("#datasetCatalogTitle")) element("#datasetCatalogTitle").textContent = `${item.name || "数据集"} · 谱面目录${item.auditReadOnly ? '（查看结果，请在原库保存标注）' : ''}`;
   renderDatasetWorkspace();
   await loadQualityCatalog(true);
 }
@@ -4536,10 +4693,12 @@ async function openDataset(item) {
 function showDatasetCards() {
   globalThis.CandidatePool?.activate(null);
   datasetWorkspaceState.view = "cards";
+  datasetWorkspaceState.auditCatalogItem = null;
   qualityState.catalogRequest += 1;
   qualityState.detailRequest += 1;
   qualityState.previewLoading=false;
   renderDatasetWorkspace();
+  void refreshAutoQualityAuditStatus("quality");
 }
 
 async function openDatasetWorkspace() {
@@ -5661,6 +5820,11 @@ async function submitTrain(options = {}) {
     }
   }
   const payload = { ...trainingPayload({ autoPreprocess: !!options.autoPreprocess }), auto_preprocess: !!options.autoPreprocess };
+  const hasZeroUnmarkedSource = typeof selectedDatasetItems === "function"
+    && selectedDatasetItems().some((item) => item && (item.candidate_pool || item.reviewed_only || item.reviewed_regions != null));
+  if (hasZeroUnmarkedSource && payload.quality_enabled === false) {
+    throw new Error("当前已勾选候选库或审核示范库（未审部分默认零权重），必须开启质量标注与训练示范开关，防止未审内容泄露或示范失效。");
+  }
   if(payload.model_family==="chart_composer_v2") {
     validateV2NumericInputs('#composerV2TrainingControls');
     if(options.autoPreprocess)throw new Error("Composer v2 请先准备训练 manifest");
@@ -5677,6 +5841,15 @@ async function submitTrain(options = {}) {
     }
     if ((payload.timing_recovery ?? 'auto') !== 'auto' && backend.training_capabilities?.composer_v2_timing_recovery !== true) {
       throw new Error('指定节奏前文纠错方式需要更新后的 WebUI 后台，请重启后台后提交。');
+    }
+    if ((payload.activation_checkpointing ?? 'auto') !== 'auto' && backend.training_capabilities?.composer_v2_activation_checkpointing !== true) {
+      throw new Error('指定训练显存优化方式需要更新后的 WebUI 后台，请重启后台后提交。');
+    }
+    if ((payload.reviewed_reference_policy ?? 'auto') !== 'auto' && backend.training_capabilities?.composer_v2_reviewed_reference_policy !== true) {
+      throw new Error('指定示范库前后呼应参考策略需要更新后的 WebUI 后台，请重启后台后提交。');
+    }
+    if ((payload.auto_quality_policy ?? 'auto')!=='auto' && !backend.training_capabilities?.composer_v2_auto_quality) {
+      throw new Error('指定自动质检策略需要新版后台，请重启 WebUI 后提交。');
     }
     trainingStarting=true;updateDatasetButtons();
     try{const data=await api("/api/composer-v2/train",payload);watchTask(data.task_id,()=>{trainingStarting=false;updateDatasetButtons();});}
@@ -5819,7 +5992,386 @@ function renderQualitySummary() {
   ["#qualitySummary", "#qualityTrainingSummary"].forEach((selector) => { const node = element(selector); if (node) node.textContent = text; });
 }
 
-function qualityRowHtml(item) {
+const autoAuditViews = { quality: { request: 0 }, training: { request: 0 } };
+let completedCombinedAudit = null;
+try { completedCombinedAudit = JSON.parse(sessionStorage.getItem('maichart-last-combined-audit')); } catch (_) { /* storage unavailable */ }
+
+function autoAuditSource(panel) {
+  const item = panel === "quality" && datasetWorkspaceState.view === "catalog" ? activeDatasetItem() : null;
+  if (item) {
+    return { catalog: true, readOnly: !!item.auditReadOnly, key: JSON.stringify([item.manifest]),
+      label: item.name, payload: { manifest: item.manifest } };
+  }
+  const selected = selectedDatasetItems();
+  const manifests = selected.map(item => item.manifest).filter(Boolean);
+  const manifest = manifests[0] || (!datasetWorkspaceState.selectionTouched ? datasetPaths().manifest : "");
+  const paths = manifests.length ? [...manifests].sort() : manifest ? [manifest] : [];
+  return { key: paths.length ? JSON.stringify(paths) : "",
+    label: selected.length ? selected.map(item => item.name).join(" + ") : manifest,
+    payload: manifests.length ? { manifest, manifests } : { manifest } };
+}
+
+function setAutoAuditStatus(panel, message) {
+  const node = element(panel === "quality" ? "#qualityAutoAuditStatus" : "#v2AutoQualityAuditStatus");
+  if (node) node.textContent = message;
+}
+
+function updateAutoAuditTarget(panel, source = autoAuditSource(panel)) {
+  const node = element(panel === "quality" ? "#qualityAutoAuditTarget" : "#v2AutoQualityAuditTarget");
+  if (node) node.textContent = source.label ? `体检对象：${source.label}` : "请先打开或勾选已预处理的数据集。";
+  if (panel === "quality") {
+    const button = element('#qualityAutoAuditCard [data-run-auto-audit="full"]');
+    if (button) button.textContent = source.catalog ? "体检当前数据集" : "体检所选训练集";
+    for (const action of document.querySelectorAll('#qualityAutoAuditCard [data-run-auto-audit]')) action.hidden = !!source.readOnly;
+  }
+}
+
+const AUTO_AUDIT_ISSUE_LABELS = {
+  auto_audio_misalignment: "整首音画严重错位",
+  auto_excessive_muri: "硬伤坏段过多",
+  auto_hard_muri: "硬冲突片段",
+  auto_conversion_jitter: "转谱微抖动",
+  auto_jack_spam: "高速同键连打",
+  auto_local_tempo_drift: "局部对音漂移",
+  auto_abandoned_gap: "高能空白",
+  comfort: "手顺降权",
+  audio_unavailable: "音频无法核对",
+  audio_identity_unavailable: "音频身份无法核对",
+  no_chart_events: "空谱",
+  parse_error: "谱面解析失败",
+  partial_coverage: "检测覆盖不足",
+  Overlap: "同键重叠",
+  MultiTouch: "多押超出双手上限",
+  TouchMultiAction: "Touch 同手兼顾冲突",
+  SlideTooFast: "滑星过快",
+  TouchUnreachable: "Touch 不可达",
+  TapOnSlide: "Slide 撞尾",
+  InnerMuri: "内屏交叉无理",
+};
+
+function renderAutoQualityAuditDashboard(data, panel, source, preferredScope) {
+  const box = element(panel === "quality" ? "#qualityAutoAuditDashboard" : "#v2AutoQualityDashboard");
+  if (!box) return;
+  const preview = preferredScope === "preview" ? !!data?.preview_report : !data?.report && !!data?.preview_report;
+  const report = preview ? data.preview_report : data?.report;
+  box.hidden = !report;
+  box.replaceChildren();
+  if (!report) return;
+  const count = value => Math.max(0, Number(value) || 0);
+  const pillGroups = [
+    ["整谱排除原因", report.excluded_by_reason, "张"],
+    ["已屏蔽冲突", report.masked_conflicts_by_type, "处"],
+    ["专项问题", report.domain_pathologies_by_type, "处"],
+  ];
+  const unverifiedReasons = { ...report.unverified_by_reason };
+  if (!report.unverified_by_reason) {
+    for (const row of report.unverified_charts || []) {
+      const reason = row.reason || "其他待核对";
+      unverifiedReasons[reason] = (unverifiedReasons[reason] || 0) + 1;
+    }
+  }
+  pillGroups.push(["待核对原因", unverifiedReasons, "张"]);
+  const issueHtml = pillGroups.map(([title, values, unit]) => {
+    const pills = Object.entries(values || {}).filter(([, n]) => count(n) > 0).map(([key, n]) => {
+      const label = AUTO_AUDIT_ISSUE_LABELS[key.replace(/^miacode_/, "")] || key;
+      return `<span class="audit-issue-pill">${escapeHtml(label)} <strong>${count(n)} ${unit}</strong></span>`;
+    }).join("");
+    return pills ? `<div class="audit-issue-pills"><span class="muted">${title}</span>${pills}</div>` : "";
+  }).join("");
+  const stat = (name, value, style = "") =>
+    `<div class="audit-stat-chip ${style}"><span>${name}</span><strong>${value}</strong></div>`;
+  const use = preview ? "抽查预览" : data.has_annotations ? "正式标注已保存" : "只有报告，尚无匹配的正式标注";
+  let adoption = "新训练与微调按训练页的采用策略读取";
+  if (preview) adoption = "供检查和试听";
+  else if (panel === 'training' && currentTrainingMode() === 'resume') adoption = "续训沿用检查点设置";
+  else if (panel === 'training' && data.has_annotations && (source.payload.manifests?.length || 0) <= 1) {
+    adoption = data.training_effective ? "连续事件训练可按当前设置采用" : "当前设置未采用正式标注";
+  }
+  const scope = preview ? "preview" : "formal";
+  const manifest = report.manifest || data.manifest || source.payload.manifest;
+  box.dataset.auditManifest = manifest || "";
+  box.dataset.auditScope = scope;
+  box.dataset.auditName = source.label || manifest || "";
+  const canInspect = manifest && (preview ? data.has_preview_annotations : data.has_annotations);
+  box.innerHTML = `<div class="auto-audit-dashboard-head">
+    <span class="audit-mode-pill ${preview || !data.has_annotations ? "warn" : "good"}">${use}</span>
+    <span class="muted">${adoption}</span>
+    </div><p class="muted">${escapeHtml(manifest || source.label || "")}</p>
+    <div class="audit-stat-grid">
+    ${stat("已检查谱面", `${count(report.audited_charts)} 张`)}
+    ${stat("干净通过", `${count(report.clean_charts)} 张`, "clean")}
+    ${stat("整谱自动排除", `${count(report.excluded_charts)} 张`, "danger")}
+    ${stat("局部问题", `${count(report.partially_masked_charts)} 张${report.partially_masked_regions == null ? "" : ` · ${count(report.partially_masked_regions)} 处`}`, "warn")}
+    ${stat("手顺降权", `${count(report.soft_weighted_charts)} 张 · ${count(report.soft_weighted_regions ?? report.problem_regions_by_reason?.comfort)} 处`, "amber")}
+    ${stat("优选好段", `${count(report.highlighted_charts)} 张 · ${count(report.highlighted_regions)} 处`, "good")}
+    ${stat("待核对", `${count(report.unverified_chart_count)} 张`, "warn")}
+    </div>${issueHtml}
+    <div class="button-row compact-button-row audit-jump-row">
+    ${data.report && data.preview_report ? `<button type="button" class="small-button" data-auto-audit-switch="${preview ? "formal" : "preview"}">${preview ? "查看正式结果" : "查看抽查结果"}</button>` : ""}
+    ${canInspect ? `<button type="button" class="small-button" data-auto-audit-jump="flagged">查看问题谱面</button>
+      <button type="button" class="small-button" data-auto-audit-jump="good">试听优选好段</button>
+      <button type="button" class="small-button" data-auto-audit-jump="excluded">查看整谱排除</button>
+      <button type="button" class="small-button" data-auto-audit-jump="unverified">查看待核对</button>
+      <button type="button" class="small-button" data-auto-audit-jump="">显示全部谱面</button>` : ""}
+    </div>`;
+}
+
+async function refreshAutoQualityAuditStatus(panel = "quality", scope) {
+  const view = autoAuditViews[panel];
+  const source = autoAuditSource(panel);
+  if (source.key !== view.key) {
+    view.key = source.key;
+    view.scope = undefined;
+    renderAutoQualityAuditDashboard(null, panel, source);
+  }
+  if (scope) view.scope = scope;
+  updateAutoAuditTarget(panel, source);
+  const request = ++view.request;
+  if (!source.key) {
+    setAutoAuditStatus(panel, "");
+    return;
+  }
+  const combined = completedCombinedAudit?.key === source.key ? completedCombinedAudit.manifest : null;
+  const selection = combined ? { manifest: combined }
+    : source.payload.manifests?.length > 1 ? { manifests: source.payload.manifests } : source.payload;
+  try {
+    const data = await api("/api/composer-v2/auto_quality_status", {
+      ...selection, quality_enabled: checkedOrDefault("#v2TrainQualityEnabled", true),
+      mode: currentTrainingMode(),
+      auto_quality_policy: valueOrDefault("#v2TrainAutoQualityPolicy", "auto"),
+    });
+    if (request !== view.request || source.key !== autoAuditSource(panel).key) return;
+    renderAutoQualityAuditDashboard(data, panel, source, view.scope);
+    if (!element("#v2AutoQualityAuditButton")?.disabled) {
+      const message = data.report || data.preview_report ? ""
+        : data.has_annotations ? "已找到正式标注，当前没有对应的统计报告。"
+        : source.payload.manifests?.length > 1
+          ? "可体检这组训练来源，也可打开单个库查看它的报告。"
+          : "这里还没有体检报告。";
+      setAutoAuditStatus(panel, message);
+    }
+  } catch (error) {
+    if (request === view.request && source.key === autoAuditSource(panel).key) {
+      renderAutoQualityAuditDashboard(null, panel, source);
+      setAutoAuditStatus(panel, `读取体检状态失败：${error.message}`);
+    }
+  }
+}
+
+function finishAutoAudit(panel, source, report, scope) {
+  if (source.payload.manifests?.length > 1 && report.manifest) {
+    completedCombinedAudit = { key: source.key, manifest: report.manifest };
+    try { sessionStorage.setItem('maichart-last-combined-audit', JSON.stringify(completedCombinedAudit)); } catch (_) { /* storage unavailable */ }
+  }
+  if (source.key !== autoAuditSource(panel).key) return;
+  if (panel === "quality" && source.catalog) {
+    void changeCatalogAuditScope(scope).catch(error => setAutoAuditStatus(panel, error.message));
+    return;
+  }
+  void refreshAutoQualityAuditStatus(panel, scope);
+}
+
+async function changeCatalogAuditScope(scope) {
+  const manifest = qualityManifest();
+  const chartId = qualityState.detail?.chart_id;
+  const request = ++qualityState.detailRequest;
+  qualityState.autoScope = scope;
+  qualityState.previewLoading = false;
+  await loadQualityCatalog(true);
+  if (chartId && request === qualityState.detailRequest && manifest === qualityManifest()
+      && document.body.dataset.workspace === 'quality') {
+    await openQualityReview(manifest, chartId, request, { scroll: false });
+  }
+}
+
+async function jumpToAutoAuditCatalog(box, filter) {
+  const manifest = box?.dataset.auditManifest;
+  if (!manifest) return;
+  const item = datasetWorkspaceState.items.find(row => sameAuditManifest(row.manifest, manifest));
+  const target = item || { manifest, path: manifest, name: "体检清单", prepared: true, auditReadOnly: true };
+  setWorkspaceMode("quality");
+  await openDataset(target, { autoScope: box.dataset.auditScope, autoFilter: filter });
+  element("#datasetCatalogPanel")?.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+
+function sameAuditManifest(left, right) {
+  const normalize = path => {
+    const value = String(path || '').replaceAll('\\', '/');
+    return /^[a-z]:\//i.test(value) || value.startsWith('//') ? value.toLowerCase() : value;
+  };
+  return normalize(left) === normalize(right);
+}
+
+function markActivePresetChip(attrName, value) {
+  document.querySelectorAll(`[${attrName}]`).forEach((chip) => {
+    chip.classList.toggle("is-active", chip.getAttribute(attrName) === value);
+  });
+}
+
+function applyControlMap(changes) {
+  for (const [id, val] of Object.entries(changes)) {
+    const node = element("#" + id);
+    if (!node || node.disabled) continue;
+    if (node.type === "checkbox") node.checked = Boolean(val);
+    else node.value = String(val);
+  }
+}
+
+function applyAutoQualityPreset(presetName) {
+  const presets = {
+    standard: {
+      values: {
+        v2AutoQualityLimit: 0, v2AutoQualityTailMode: "mask_hard", v2AutoQualityTailMs: 200,
+        v2AutoQualityInnerMuriMode: "allow", v2AutoQualityTouchPolicy: "palm_span_v1", v2AutoQualityTouchRadius: 180,
+        v2AutoQualityDomainMode: "maimai_dx_v1", v2AutoQualityAcousticMode: "auto",
+        v2AutoQualityHighlightMode: "auto", v2AutoQualityGoodQuantile: 0.82,
+        v2AutoQualityMaxProblemFraction: 0.45, v2AutoQualityHandFlowQuantile: 0.05,
+      },
+      note: "已套用「标准清洗＋优选好段（推荐）」：屏蔽硬无理与音画错位，轻降权 5% 别扭手顺，提权前 18% 精品乐句。点击「一键自动体检所选训练集」即可开始。",
+    },
+    strict: {
+      values: {
+        v2AutoQualityLimit: 0, v2AutoQualityTailMode: "mask_all", v2AutoQualityTailMs: 220,
+        v2AutoQualityInnerMuriMode: "mask_hard", v2AutoQualityTouchPolicy: "palm_span_v1", v2AutoQualityTouchRadius: 165,
+        v2AutoQualityDomainMode: "maimai_dx_v1", v2AutoQualityAcousticMode: "auto",
+        v2AutoQualityHighlightMode: "acoustic_and_flow_v1", v2AutoQualityGoodQuantile: 0.86,
+        v2AutoQualityMaxProblemFraction: 0.35, v2AutoQualityHandFlowQuantile: 0.10,
+      },
+      note: "已套用「严格排错（适合杂乱自制谱合集）」：连同撞尾警告与内屏硬无理一并屏蔽，问题超 35% 整张排除，好段必须声学与手顺双达标。",
+    },
+    conservative: {
+      values: {
+        v2AutoQualityLimit: 0, v2AutoQualityTailMode: "mask_hard", v2AutoQualityTailMs: 200,
+        v2AutoQualityInnerMuriMode: "allow", v2AutoQualityTouchPolicy: "palm_span_v1", v2AutoQualityTouchRadius: 180,
+        v2AutoQualityDomainMode: "maimai_dx_v1", v2AutoQualityAcousticMode: "auto",
+        v2AutoQualityHighlightMode: "off", v2AutoQualityGoodQuantile: 0.82,
+        v2AutoQualityMaxProblemFraction: 0.45, v2AutoQualityHandFlowQuantile: 0,
+      },
+      note: "已套用「仅排错不提权（保守清洗）」：只屏蔽硬无理、转谱顽疾与音画错位片段，不额外放大任何段落权重。",
+    },
+  };
+  const chosen = presets[presetName];
+  if (!chosen) return;
+  applyControlMap(chosen.values);
+  markActivePresetChip("data-auto-audit-preset", presetName);
+  for (const selector of ["#qualityAutoAuditStatus", "#v2AutoQualityAuditStatus"]) {
+    const node = element(selector);
+    if (node) node.textContent = chosen.note;
+  }
+  saveSettings();
+}
+
+const V2_TRAIN_SMOKE_PLAN = Object.freeze({
+  v2TrainEpochs: '1',
+  v2TrainLimitCharts: '20',
+  v2TrainMaxSteps: '32',
+  v2TrainValidationMaxBatches: '4',
+});
+let v2TrainPlanBeforeSmoke = null;
+
+function restoreV2TrainPlan() {
+  if (!v2TrainPlanBeforeSmoke) return false;
+  applyControlMap(v2TrainPlanBeforeSmoke);
+  v2TrainPlanBeforeSmoke = null;
+  return true;
+}
+
+function applyV2TrainPreset(presetName) {
+  const presets = {
+    vram8g: {
+      title: '8G–12G 显卡省显存',
+      values: {
+        v2TrainBatchSize: 4, v2TrainGradAccumulation: 16, v2TrainActivationCheckpointing: 'on',
+        v2TrainAudioCacheGb: 0.25, v2TrainPrecision: 'auto',
+      },
+      memory: '开启显存重算，音频缓存 0.25 GiB',
+    },
+    standard16g: {
+      title: '16G+ 显卡标准速度',
+      values: {
+        v2TrainBatchSize: 8, v2TrainGradAccumulation: 8, v2TrainActivationCheckpointing: 'auto',
+        v2TrainAudioCacheGb: 0.5, v2TrainPrecision: 'auto',
+      },
+      memory: '显存重算自动选择，音频缓存 0.5 GiB',
+    },
+  };
+  const status = element('#v2TrainPresetStatus');
+  const resume = currentTrainingMode() === 'resume';
+  if (presetName === 'smoke') {
+    if (resume) return;
+    v2TrainPlanBeforeSmoke ??= Object.fromEntries(Object.keys(V2_TRAIN_SMOKE_PLAN)
+      .map(id => [id, element('#' + id).value]));
+    applyControlMap(V2_TRAIN_SMOKE_PLAN);
+    status.textContent = '已套用短跑计划。训练 1 轮，最多 20 张谱面、32 次更新尝试和 4 个验证批次。切换到显卡预设即可恢复短跑前的计划。';
+  } else {
+    const chosen = presets[presetName];
+    if (!chosen) return;
+    const restoredPlan = restoreV2TrainPlan();
+    applyControlMap(chosen.values);
+    const batch = `批大小 ${chosen.values.v2TrainBatchSize} × 累积 ${chosen.values.v2TrainGradAccumulation}，精度自动选择`;
+    status.textContent = resume
+      ? `已应用「${chosen.title}」中的可调设置，${chosen.memory}。训练计划、批大小、累积与精度沿用检查点。`
+      : `已应用「${chosen.title}」，${batch}，${chosen.memory}。${restoredPlan ? '已恢复短跑前的训练计划。' : ''}`;
+  }
+  markActivePresetChip('data-v2-train-preset', presetName);
+  updateTrainingControls();
+  saveSettings();
+}
+
+function applyV2GenPreset(presetName) {
+  const presets = {
+    balanced: {
+      values: {
+        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "comfort_v1", v2GenerateCandidates: "2",
+        v2GenerateSelfRefine: "off", v2GeneratePhraseBeats: 4, v2GeneratePhraseCommitBeats: 2,
+        v2GenerateInterceptTapOnSlide: true, v2GenerateInterceptSlideHeadTap: false,
+        v2GenerateForwardFeasibility: "balanced_v1", v2GenerateCount: 1,
+        v2GenerateTemperature: 0.9, v2GenerateActionTemperature: 0.9,
+      },
+      note: '已套用「推荐稳妥写谱」。先定节奏，再试写两种配置，并启用防撞尾与下笔前防锁。',
+    },
+    refined: {
+      values: {
+        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "comfort_v2", v2GenerateCandidates: "4",
+        v2GenerateSelfRefine: "worst_spans_v1", v2GeneratePhraseBeats: 4, v2GeneratePhraseCommitBeats: 2,
+        v2GenerateInterceptTapOnSlide: true, v2GenerateInterceptSlideHeadTap: true,
+        v2GenerateForwardFeasibility: "balanced_v1", v2GenerateCount: 1,
+        v2GenerateTemperature: 0.85, v2GenerateActionTemperature: 0.9,
+      },
+      note: '已套用「高质精雕细琢」。每次最多试写 4 种配置，按左右手手感选优，开启星头抢拍检查并尝试精修薄弱段。',
+    },
+    fast: {
+      values: {
+        v2GeneratePhraseSearch: "event", v2GenerateCandidates: "1", v2GenerateSelfRefine: "off",
+        v2GenerateInterceptTapOnSlide: true, v2GenerateCount: 1,
+      },
+      note: '已套用「快速试写预览」。逐步生成 1 张谱面，开启防撞尾。',
+    },
+    batch4: {
+      values: {
+        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "comfort_v2", v2GenerateCandidates: "2",
+        v2GenerateSelfRefine: "off", v2GenerateInterceptTapOnSlide: true, v2GenerateCount: 4, v2GenerateParallel: 1,
+      },
+      note: '已套用「一次抽 4 张挑最好」。依次生成 4 张完整谱面，完成后可在顶部「谱面预览」切换。',
+    },
+  };
+  const chosen = presets[presetName];
+  if (!chosen) return;
+  const {v2GeneratePhraseRankPolicy: rank, ...controls} = chosen.values;
+  applyControlMap(controls);
+  updateV2BatchControls();
+  if (rank) applyControlMap({v2GeneratePhraseRankPolicy: rank});
+  const legacy = element('#v2GeneratePhraseSearch')?.disabled;
+  markActivePresetChip('data-v2-gen-preset', legacy ? '' : presetName);
+  const status = element("#v2GenPresetStatus");
+  if (status) status.textContent = legacy
+    ? '已应用当前模型支持的设置。该模型使用旧窗口生成，比较整段写法与自动精修停用。'
+    : chosen.note;
+  saveSettings();
+}
+
+function qualityRowHtml(item, readOnly = false) {
+  const pool=!!item.candidate_status;
   const id = escapeHtml(item.chart_id || item.id || "");
   const label = item.label || item.record?.label || "";
   const rowId = String(item.chart_id || item.id || "");
@@ -5830,16 +6382,30 @@ function qualityRowHtml(item) {
   const difficulty = item.level !== undefined ? `${item.level} · ${item.difficulty_index ?? ""}` : (item.difficulty_index ?? "");
   const selectedId = String(item.chart_id || item.id || "");
   const disabled = qualityState.selectionLoading || qualityState.saving ? "disabled" : "";
-  return `<tr data-chart-id="${id}"><td><input class="quality-row-select" type="checkbox" data-chart-id="${id}" ${qualityState.selected.has(selectedId) ? "checked" : ""} ${disabled}></td>`
-    + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}${globalThis.CandidatePool?.badge(item)||""}</td>`
-    + `<td>${escapeHtml(item.designer || item.chart_designer || "未标注")}</td><td><span class="quality-label ${escapeHtml(label)}">${escapeHtml(qualityLabelText(label))}</span></td>`
-    + `<td><input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}" ${disabled}></td>`
-    + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">预览与标注</button></td></tr>`;
+  const manualScope = item.auto_override_scope === 'chart' ? '有人工整谱决定' : item.auto_override_scope === 'region' ? '有人工片段标注' : '';
+  const autoBadge = !pool && item.auto_badge
+    ? `<div class="auto-audit-row-badges"><span class="auto-audit-badge ${escapeHtml(item.auto_status || "clean")}">${escapeHtml(item.auto_badge)}</span>${manualScope ? `<span class="auto-audit-override">${manualScope}</span>` : ""}</div>`
+    : "";
+  return `<tr data-chart-id="${id}"><td ${pool||readOnly?'hidden':''}>${pool||readOnly?'':`<input class="quality-row-select" type="checkbox" data-chart-id="${id}" ${qualityState.selected.has(selectedId) ? "checked" : ""} ${disabled}>`}</td>`
+    + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}${globalThis.CandidatePool?.badge(item)||""}${autoBadge}</td>`
+    + `<td>${escapeHtml(item.designer || item.chart_designer || "未标注")}</td><td><span class="quality-label ${escapeHtml(label)}">${escapeHtml(pool?(globalThis.CandidatePool?.reviewText(item)||'尚未确认学习'):qualityLabelText(label))}</span></td>`
+    + `<td>${readOnly ? escapeHtml(String(weight)) : pool?(item.confirmed_regions?`${item.confirmed_regions} 段`:'—'):`<input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}" ${disabled}>`}</td>`
+    + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">${readOnly?'预览':'预览与标注'}</button></td></tr>`;
 }
 
 function renderQualityCatalog() {
   const body = element("#qualityCatalogBody"); if (!body) return;
-  body.innerHTML = qualityState.items.map(qualityRowHtml).join("") || `<tr><td colspan="6" class="muted">没有匹配的谱面。</td></tr>`;
+  const pool=!!activeDatasetItem()?.candidate_pool;
+  const readOnly=!!activeDatasetItem()?.auditReadOnly;
+  if(element('#qualityBulkControls'))element('#qualityBulkControls').hidden=pool||readOnly;
+  if(element('#qualityLegacyDetails'))element('#qualityLegacyDetails').hidden=readOnly;
+  if(element('#qualityLabelHeading'))element('#qualityLabelHeading').textContent=pool?'你的学习决定':'标签';
+  if(element('#qualityWeightHeading'))element('#qualityWeightHeading').textContent=pool?'已确认片段':'权重';
+  if(element('#qualityLabelFilter'))element('#qualityLabelFilter').hidden=pool;
+  if(element('#qualityAutoFilter'))element('#qualityAutoFilter').hidden=pool;
+  if(element('#qualitySummary'))element('#qualitySummary').hidden=pool;
+  if(element('#qualitySelectAll'))element('#qualitySelectAll').closest('th').hidden=pool||readOnly;
+  body.innerHTML = qualityState.items.map(item=>qualityRowHtml(item,readOnly)).join("") || `<tr><td colspan="6" class="muted">没有匹配的谱面。</td></tr>`;
   const pageCount = Math.max(1, qualityState.pages || Math.ceil(qualityState.total / qualityState.pageSize));
   if (element("#qualityPageStatus")) element("#qualityPageStatus").textContent = `第 ${qualityState.page} / ${pageCount} 页（共 ${qualityState.total} 张）`;
   if (element("#qualityPageInput")) element("#qualityPageInput").value = String(qualityState.page);
@@ -5916,6 +6482,7 @@ element('#trainingPreviewCatalog')?.addEventListener('click',guard(browseTrainin
 element('#trainingPreviewPrevious')?.addEventListener('click',guard(()=>navigateTrainingPreview(-1)));
 element('#trainingPreviewNext')?.addEventListener('click',guard(()=>navigateTrainingPreview(1)));
 window.addEventListener('chart-preview-updated',updateTrainingPreviewNavigation);
+window.addEventListener('chart-preview-annotations-updated',updateTrainingPreviewNavigation);
 
 function updateQualitySelectionControls() {
   const busy = qualityState.selectionLoading || qualityState.saving;
@@ -5970,9 +6537,17 @@ async function loadQualityCatalog(resetPage = false) {
   const sortByUi = valueOrDefault("#qualitySortBy", "difficulty");
   const sortBy = sortByUi === "difficulty" ? "level" : sortByUi;
   const sortDirection = valueOrDefault("#qualitySortDirection", "asc");
-  const data = await api("/api/quality/catalog", { manifest, query: qualityState.query, page: qualityState.page, page_size: qualityState.pageSize, label_filter: qualityState.label || null, sort_by: sortBy, sort_order: sortDirection,
-    candidate_status:valueOrDefault('#candidatePoolStatusFilter','') });
+  const isPool = Boolean(activeDatasetItem()?.candidate_pool);
+  const autoFilterValue = isPool ? "" : (qualityState.autoFilter || valueOrDefault("#qualityAutoFilter", ""));
+  const data = await api("/api/quality/catalog", { manifest, query: qualityState.query, page: qualityState.page, page_size: qualityState.pageSize, label_filter: isPool ? null : qualityState.label || null, auto_filter: autoFilterValue || null, sort_by: sortBy, sort_order: sortDirection,
+    auto_scope: qualityState.autoScope || 'formal',
+    candidate_status:valueOrDefault('#candidatePoolStatusFilter',''),
+    candidate_review:isPool?valueOrDefault('#candidatePoolDecisionFilter',''):'' });
   if (request !== qualityState.catalogRequest || manifest !== qualityManifest()) return;
+  if (!qualityState.autoScope && !data.auto_quality?.has_annotations && data.auto_quality?.has_preview_annotations) {
+    qualityState.autoScope = 'preview';
+    return loadQualityCatalog(resetPage);
+  }
   qualityState.items = Array.isArray(data.items) ? data.items : [];
   qualityState.page = Math.max(1, Number(data.page ?? qualityState.page) || 1);
   qualityState.pageSize = Math.max(1, Number(data.page_size ?? qualityState.pageSize) || qualityState.pageSize);
@@ -5982,7 +6557,18 @@ async function loadQualityCatalog(resetPage = false) {
   qualityState.annotationPath = data.annotation_path || qualityState.annotationPath || "";
   qualityState.annotationManifest = manifest;
   qualityState.summary = data.summary || null;
+  const source = autoAuditSource('quality');
+  const view = autoAuditViews.quality;
+  view.key = source.key;
+  view.scope = qualityState.autoScope;
+  ++view.request;
+  updateAutoAuditTarget('quality', source);
+  renderAutoQualityAuditDashboard(data.auto_quality, 'quality', source, view.scope);
   renderQualitySummary(); renderQualityCatalog();
+}
+
+function isZeroUnmarkedQualityDetail(detail = qualityState.detail) {
+  return Boolean(detail && (detail.zero_unmarked || detail.record?.unmarked_weight === 0 || isZeroUnmarkedDataset(activeDatasetItem())));
 }
 
 function updateQualityDetail() {
@@ -5995,8 +6581,22 @@ function updateQualityDetail() {
   if (element("#qualityDetailTitle")) element("#qualityDetailTitle").textContent = `${detail.title || detail.chart_id || "谱面详情"} · ${detail.level || ""}`;
   if (element("#qualityDetailPreview")) element("#qualityDetailPreview").textContent = preview;
   const audio = element("#qualityDetailAudio"); if (audio && detail.audio_url && audio.getAttribute("src")!==detail.audio_url) audio.src = detail.audio_url;
+  const zeroUnmarked = typeof isZeroUnmarkedQualityDetail === "function"
+    ? isZeroUnmarkedQualityDetail(detail)
+    : Boolean(detail && (detail.zero_unmarked || detail.record?.unmarked_weight === 0));
+  const disabledAttr = zeroUnmarked ? "disabled" : "";
+  for (const selector of ["#qualityAddRegionButton", "#qualitySaveRegionsButton"]) {
+    const btn = element(selector); if (btn) btn.disabled = zeroUnmarked;
+  }
+  document.querySelectorAll("[data-quality-span-tag]").forEach((btn) => { btn.disabled = zeroUnmarked; });
+  const spanStatus = element("#qualitySpanStatus");
+  if (spanStatus && zeroUnmarked) {
+    spanStatus.textContent = "这个来源只学习已确认片段。请点「回到谱面预览」，在时间轴圈选后保存学习内容。";
+  } else if (spanStatus && spanStatus.textContent.startsWith("这个来源只学习已确认片段")) {
+    spanStatus.textContent = "";
+  }
   const list = element("#qualityRegionsList"); if (!list) return;
-  list.innerHTML = qualityState.regions.map((region, index) => `<div class="quality-region-row" data-region-index="${index}"><input type="number" min="0" step="0.01" value="${Number(region.start_sec ?? region.start ?? 0)}" data-region-field="start_sec"><input type="number" min="0" step="0.01" value="${Number(region.end_sec ?? region.end ?? 0)}" data-region-field="end_sec"><select aria-label="片段评价" data-region-field="label">${[['good','优秀'],['problem','有问题'],['uncertain','不确定']].map(([value,label])=>`<option value="${value}" ${(region.label||'uncertain')===value?'selected':''}>${label}</option>`).join('')}</select><select aria-label="问题类型" data-region-field="reason">${[['','未指定'],['timing','采音'],['layout','配置'],['comfort','手感']].map(([value,label])=>`<option value="${value}" ${region.reason===value?'selected':''}>${label}</option>`).join('')}</select><details class="quality-span-weights"><summary>高级权重</summary><input type="number" min="0" max="4" step="0.05" value="${Number(region.weight ?? 0)}" data-region-field="weight"><input aria-label="采音权重" title="采音权重" type="number" min="0" max="4" step="0.05" value="${Number(region.timing_weight ?? (region.label==='good'?1.5:region.label==='problem' && region.reason==='timing'?0:1))}" data-region-field="timing_weight"><input aria-label="配置权重" title="配置权重" type="number" min="0" max="4" step="0.05" value="${Number(region.component_weight ?? (region.label==='good'?1.5:region.label==='problem' && ['layout','comfort'].includes(region.reason)?0:1))}" data-region-field="component_weight"></details><button class="small-button quality-remove-region" type="button">删除</button></div>`).join("") || `<span class="muted">暂无局部标注。片段评价会调整对应的采音或配置监督，其余前文仍保留。</span>`;
+  list.innerHTML = qualityState.regions.map((region, index) => `<div class="quality-region-row" data-region-index="${index}" data-entry-start-sec="${region.entry_start_sec ?? ''}"><input type="number" min="0" step="0.01" value="${Number(region.start_sec ?? region.start ?? 0)}" data-region-field="start_sec" ${disabledAttr}><input type="number" min="0" step="0.01" value="${Number(region.end_sec ?? region.end ?? 0)}" data-region-field="end_sec" ${disabledAttr}><select aria-label="片段评价" data-region-field="label" ${disabledAttr}>${[['good','优秀'],['problem','有问题'],['uncertain','不确定']].map(([value,label])=>`<option value="${value}" ${(region.label||'uncertain')===value?'selected':''}>${label}</option>`).join('')}</select><select aria-label="问题类型" data-region-field="reason" ${disabledAttr}>${[['','未指定'],['timing','采音'],['layout','配置'],['comfort','手感']].map(([value,label])=>`<option value="${value}" ${region.reason===value?'selected':''}>${label}</option>`).join('')}</select><details class="quality-span-weights"><summary>高级权重</summary><input type="number" min="0" max="4" step="0.05" value="${Number(region.weight ?? 0)}" data-region-field="weight" ${disabledAttr}><input aria-label="采音权重" title="采音权重" type="number" min="0" max="4" step="0.05" value="${Number(region.timing_weight ?? (region.label==='good'?1.5:region.label==='problem' && region.reason==='timing'?0:1))}" data-region-field="timing_weight" ${disabledAttr}><input aria-label="配置权重" title="配置权重" type="number" min="0" max="4" step="0.05" value="${Number(region.component_weight ?? (region.label==='good'?1.5:region.label==='problem' && ['layout','comfort'].includes(region.reason)?0:1))}" data-region-field="component_weight" ${disabledAttr}></details><button class="small-button quality-remove-region" type="button" ${disabledAttr}>删除</button></div>`).join("") || `<span class="muted">${zeroUnmarked ? "尚未确认学习片段；请在页面顶部「谱面预览」中圈选并确认。" : "暂无局部标注。片段评价会调整对应的采音或配置监督，其余前文仍保留。"}</span>`;
 }
 
 async function openQualityDetail(chartId,{scroll=true}={}) {
@@ -6004,10 +6604,11 @@ async function openQualityDetail(chartId,{scroll=true}={}) {
   const workspace=document.body.dataset.workspace;
   const request = ++qualityState.detailRequest;
   qualityState.previewLoading=true;qualityState.previewError='';updateTrainingPreviewNavigation();
+  const payload = {manifest, chart_id:chartId, auto_scope:qualityState.autoScope || 'formal'};
   try {
     const [data,preview]=await Promise.all([
-      api('/api/quality/detail',{manifest,chart_id:chartId}),
-      api('/api/quality/chart-preview',{manifest,chart_id:chartId}),
+      api('/api/quality/detail',payload),
+      api('/api/quality/chart-preview',payload),
     ]);
     if(request!==qualityState.detailRequest || manifest!==qualityManifest() || workspace!==document.body.dataset.workspace)return;
     qualityState.detail={...data,chart_id:chartId};
@@ -6016,7 +6617,7 @@ async function openQualityDetail(chartId,{scroll=true}={}) {
     qualityState.correctedPath=record.corrected_path||'';
     if(element('#qualityCorrectedPath'))element('#qualityCorrectedPath').textContent=qualityState.correctedPath;
     if(element('#qualityDetail'))element('#qualityDetail').hidden=false;
-    updateQualityDetail();globalThis.ChartPreview?.openSource(preview,{scroll});
+    updateQualityDetail();openScopedQualityPreview(preview,scroll);
   } catch(error) {
     if(request===qualityState.detailRequest)qualityState.previewError=error.message;
     throw error;
@@ -6026,8 +6627,12 @@ async function openQualityDetail(chartId,{scroll=true}={}) {
 async function openQualityReview(manifest=qualityManifest(),chartId=qualityState.detail?.chart_id,request=qualityState.detailRequest,{scroll=true}={}) {
   if(!chartId)return;
   const workspace=document.body.dataset.workspace;
-  const preview=await api('/api/quality/chart-preview',{manifest,chart_id:chartId});
-  if(request===qualityState.detailRequest && manifest===qualityManifest() && workspace===document.body.dataset.workspace)globalThis.ChartPreview?.openSource(preview,{scroll});
+  const preview=await api('/api/quality/chart-preview',{manifest,chart_id:chartId,auto_scope:qualityState.autoScope || 'formal'});
+  if(request===qualityState.detailRequest && manifest===qualityManifest() && workspace===document.body.dataset.workspace)openScopedQualityPreview(preview,scroll);
+}
+function openScopedQualityPreview(preview, scroll) {
+  if (preview.training_context) preview.training_context.audit_read_only = !!activeDatasetItem()?.auditReadOnly;
+  globalThis.ChartPreview?.openSource(preview,{scroll});
 }
 element('#qualityOpenReview')?.addEventListener('click',()=>void openQualityReview().catch(error=>setStatus(error.message,false)));
 
@@ -6039,6 +6644,19 @@ window.addEventListener('training-source-annotated',event=>{
     if(record) {qualityState.detail.record=record;qualityState.regions=structuredClone(record.regions||[]);updateQualityDetail();}
   }
   qualityState.summary=result.summary;renderQualitySummary();
+  const record=result.records?.find(row=>row.chart_id===chart_id);
+  const item=qualityState.items.find(row=>row.chart_id===chart_id);
+  if(item){item.annotation=record||null;item.label=record?.label||'normal';item.weight=record?.weight??1;
+    item.candidate_chart_review=record?.candidate_chart_review;
+    item.confirmed_regions=['excluded','negative'].includes(item.label)||!item.weight?0:(record?.regions||[]).filter(row=>row.label==='good').length;
+    renderQualityCatalog();}
+  if (item?.auto_badge && !item.candidate_status) {
+    void loadQualityCatalog(false).catch(error=>setStatus(error.message,false));
+    const preview = globalThis.ChartPreview?.getEntry()?.training_context;
+    if (preview?.manifest === manifest && preview.chart_id === chart_id) {
+      void openQualityReview(manifest,chart_id,qualityState.detailRequest,{scroll:false}).catch(error=>setStatus(error.message,false));
+    }
+  }
 });
 
 async function saveQualitySelection() {
@@ -6075,7 +6693,18 @@ async function saveQualitySelection() {
 function collectQualityRegions() {
   return [...document.querySelectorAll(".quality-region-row")].map((row) => {
     const value = name => row.querySelector(`[data-region-field="${name}"]`)?.value;
-    return { start_sec: Number(value("start_sec")), end_sec: Number(value("end_sec")), weight: Math.max(0, Math.min(4, Number(value("weight")))), label:value("label")||"uncertain",timing_weight:Number(value("timing_weight")),component_weight:Number(value("component_weight")), reason: value("reason") || "" };
+    const entryRaw = row.dataset?.entryStartSec;
+    const entryStart = entryRaw !== undefined && entryRaw !== "" && Number.isFinite(Number(entryRaw)) ? Number(entryRaw) : null;
+    return {
+      start_sec: Number(value("start_sec")),
+      end_sec: Number(value("end_sec")),
+      ...(entryStart !== null ? { entry_start_sec: entryStart } : {}),
+      weight: Math.max(0, Math.min(4, Number(value("weight")))),
+      label: value("label") || "uncertain",
+      timing_weight: Number(value("timing_weight")),
+      component_weight: Number(value("component_weight")),
+      reason: value("reason") || "",
+    };
   }).filter((item) => Number.isFinite(item.start_sec) && Number.isFinite(item.end_sec) && item.end_sec > item.start_sec);
 }
 
@@ -6095,9 +6724,13 @@ function replaceQualityRegionSpan(regions, replacement) {
 
 async function saveQualityRegions() {
   if (!qualityState.detail?.chart_id) throw new Error("请先打开一张谱面。");
+  const zeroDetail = typeof isZeroUnmarkedQualityDetail === "function"
+    ? isZeroUnmarkedQualityDetail(qualityState.detail)
+    : Boolean(qualityState.detail && (qualityState.detail.zero_unmarked || qualityState.detail.record?.unmarked_weight === 0));
+  if (zeroDetail) throw new Error("候选库与示范库请在页面顶部「谱面预览」中确认学习片段，避免旧版表格覆盖零权重默认设置。");
   const chartId=qualityState.detail.chart_id,manifest=qualityManifest(),request=qualityState.detailRequest;
   const record = qualityState.detail.record || {};
-  const data = await api("/api/quality/save", { manifest, chart_ids: [chartId], label: record.label || "normal", weight: Number(record.weight ?? 1), reason: record.reason || "", regions: collectQualityRegions() });
+  const data = await api("/api/quality/save", { manifest, chart_ids: [chartId], label: record.label || "normal", weight: Number(record.weight ?? 1), reason: record.reason || "", regions: collectQualityRegions(), annotation_scope: 'region' });
   if(chartId!==qualityState.detail?.chart_id || manifest!==qualityManifest() || request!==qualityState.detailRequest)return;
   qualityState.annotationPath = data.annotation_path || qualityState.annotationPath; qualityState.summary = data.summary || qualityState.summary;
   qualityState.annotationManifest = qualityManifest();
@@ -6673,6 +7306,7 @@ function invalidateIntensityForAudio() {
 }
 
 function invalidateLearnedCurveForTiming() {
+  if (typeof v2CurveInvalidateTiming === "function") v2CurveInvalidateTiming();
   const profile = intensityCurveState.profile;
   if (!profile || !/^(learned_music_structure_|learned_song_form_|learned_chart_stream_|learned_chart_composer_|learned_audio_grounded_|learned_audio_workload_|learned_music_context_)/.test(String(profile.method || ""))) return;
   intensityCurveState.saved = false;
@@ -6805,7 +7439,7 @@ async function startGenerate() {
 async function submitGenerate() {
   setWorkspaceMode("generation");
   const checkpoint=valueOrDefault('#checkpointPath','').trim();
-  if(currentGenerationFamily()==='chart_composer_v2' && checkpoint &&
+  if((typeof currentGenerationFamily==='function'?currentGenerationFamily():null)==='chart_composer_v2' && checkpoint &&
       (generationInspection.path!==checkpoint || !generationInspection.data?.valid)) {
     const checked=await inspectGenerationCheckpoint();
     if(!checked?.valid)throw new Error(checked?.error||'Composer v2 检查点不可用');
@@ -7223,8 +7857,12 @@ on("#modelFamily", "change", () => {
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
 on("#v2TrainValidationSource", "change", () => {updateTrainingControls();saveSettings();});
+on("#v2TrainQualityEnabled", "change", () => {updateTrainingControls();saveSettings();});
 on('#v2GenerateCount','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GenerateParallel','input',()=>{updateV2BatchControls();saveSettings();});
+on('#v2GeneratePhraseSearch','change',()=>{updateV2BatchControls();saveSettings();});
+on('#v2GenerateCandidates','input',()=>{updateV2BatchControls();saveSettings();});
+on("#v2AutoQualityAuditButton", "click", () => { void startV2AutoQualityAudit(); });
 on("#trainingMode", "change", () => { const validationField=element('#composerValidationManifest');if(currentTrainingMode()!=='resume' && validationField?.dataset.validationInherited==='1'){validationField.value=validationField.dataset.beforeResumeValidation??'';delete validationField.dataset.validationInherited;delete validationField.dataset.beforeResumeValidation;} applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerEchoPriorPolicy','composerTimingDistributionPolicy','composerButtonLoadPolicy','composerFineTimingPolicy','composerDensityFeedbackPolicy','composerActionHeadPolicy','composerConfigurationQualityPolicy','composerSampleSequencePolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerStructurePolicy','composerStructureBackend','composerContactPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults({resetComposer:true}); updateTrainingControls(); });
 on("#composerApplyFreshDefaults",'click',()=>{if(applyComposerFreshTrainingDefaults()){updateTrainingControls();saveSettings();setStatus(valueOrDefault('#composerArchitectureProfile','')==='event_set_stream_v1'?'已应用整拍集合默认值：50轮、固定学习率0.0005、batch16短段×累积4、历史128、展开32事件、有序草稿。':'已应用 Composer 重训默认值：20轮、batch64×累积4，启用动机与配置恢复。',true);}});
 on('#composerLearningPolicy','change',()=>{const legacy=valueOrDefault('#composerLearningPolicy','auto')==='legacy';for(const [id,value] of [['composerTransitionExitWeight',0],['composerPrefixAugmentationRate',legacy?0:.15]]){const node=element('#'+id);if(node&&!node.disabled)node.value=String(value);}updateEventSetControls();saveSettings();});
@@ -7258,6 +7896,7 @@ on("#registerDatasetButton", "click", registerCurrentDataset);
 on("#datasetBackButton", "click", showDatasetCards);
 on("#qualityRefreshButton", "click", () => loadQualityCatalog(true));
 on("#qualityLabelFilter", "change", async (event) => { qualityState.label = event.target.value; await loadQualityCatalog(true); });
+on("#qualityAutoFilter", "change", async (event) => { qualityState.autoFilter = event.target.value; await loadQualityCatalog(true); });
 on("#qualitySearch", "change", async (event) => { qualityState.query = event.target.value.trim(); await loadQualityCatalog(true); });
 on("#qualitySearch", "keydown", async (event) => { if (event.key === "Enter") { qualityState.query = event.target.value.trim(); await loadQualityCatalog(true); } });
 on("#qualitySortBy", "change", () => loadQualityCatalog(true));
@@ -7296,6 +7935,35 @@ document.addEventListener("change", (event) => {
   if (weight) { const item = qualityState.items.find((candidate) => String(candidate.chart_id || candidate.id) === String(weight.dataset.chartId)); if (item) { item.weight = Math.max(0, Math.min(4, Number(weight.value))); item._weightEdited = true; qualityState.editedWeights.set(String(weight.dataset.chartId), item.weight); } }
 }, true);
 document.addEventListener("click", (event) => {
+  const auditPreset = event.target.closest?.("[data-auto-audit-preset]");
+  if (auditPreset) { applyAutoQualityPreset(auditPreset.dataset.autoAuditPreset); return; }
+  const trainPreset = event.target.closest?.("[data-v2-train-preset]");
+  if (trainPreset) { applyV2TrainPreset(trainPreset.dataset.v2TrainPreset); return; }
+  const genPreset = event.target.closest?.("[data-v2-gen-preset]");
+  if (genPreset) { applyV2GenPreset(genPreset.dataset.v2GenPreset); return; }
+  const runAudit = event.target.closest?.("[data-run-auto-audit]");
+  if (runAudit) {
+    const mode = runAudit.dataset.runAutoAudit;
+    const panel = runAudit.closest('#qualityAutoAuditCard') ? 'quality' : 'training';
+    void startV2AutoQualityAudit({ panel, limitCharts: mode === "preview20" ? 20 : 0 });
+    return;
+  }
+  const switchAudit = event.target.closest?.("[data-auto-audit-switch]");
+  if (switchAudit) {
+    const panel = switchAudit.closest('#qualityAutoAuditDashboard') ? 'quality' : 'training';
+    const scope = switchAudit.dataset.autoAuditSwitch;
+    if (panel === 'quality' && datasetWorkspaceState.view === 'catalog') {
+      guard(() => changeCatalogAuditScope(scope))();
+    } else {
+      void refreshAutoQualityAuditStatus(panel, scope);
+    }
+    return;
+  }
+  const jumpAudit = event.target.closest?.("[data-auto-audit-jump]");
+  if (jumpAudit) {
+    guard(() => jumpToAutoAuditCatalog(jumpAudit.closest('.auto-audit-dashboard'), jumpAudit.dataset.autoAuditJump))();
+    return;
+  }
   const preprocessButton = event.target.closest?.(".dataset-card-preprocess");
   if (preprocessButton) {
     const item = datasetWorkspaceState.items.find((candidate) => candidate.path === preprocessButton.dataset.datasetPath);
@@ -7322,7 +7990,11 @@ document.addEventListener("change", (event) => {
   datasetWorkspaceState.selectionTouched = true;
   const key = checkbox.dataset.datasetKey;
   if (checkbox.checked) datasetWorkspaceState.selected.add(key); else datasetWorkspaceState.selected.delete(key);
-  if(selectedDatasetItems().some(item=>item.candidate_pool)) { const quality=element("#v2TrainQualityEnabled");if(quality)quality.checked=true; }
+  if(selectedDatasetItems().some(isZeroUnmarkedDataset)) {
+    const quality=element("#v2TrainQualityEnabled");if(quality)quality.checked=true;
+    const legacyQuality=element("#qualityEnabled");if(legacyQuality)legacyQuality.checked=true;
+  }
+  updateZeroUnmarkedTrainingNotice();
   datasetWorkspaceState.prepared = null;
   const compositionSummary = element("#datasetCompositionSummary");
   if (compositionSummary) {
@@ -7333,7 +8005,17 @@ document.addEventListener("change", (event) => {
   invalidateDatasetStatus("本次训练来源已变化，请重新检查训练集与 checkpoint。");
   saveDatasetWorkspace();
   renderDatasetWorkspace();
+  void refreshAutoQualityAuditStatus('quality');
 }, true);
+window.addEventListener('workspace-mode-changed', event => {
+  const panel = event.detail.mode;
+  if (panel === 'quality' || panel === 'training') void refreshAutoQualityAuditStatus(panel);
+});
+for (const id of ['v2TrainQualityEnabled', 'v2TrainAutoQualityPolicy', 'trainingMode', 'manifestPath']) {
+  on('#' + id, 'change', () => {
+    if (document.body.dataset.workspace === 'training') void refreshAutoQualityAuditStatus('training');
+  });
+}
 on("#qualityCorrectedFile", "change", async (event) => {
   const data = await upload("maidata", event.target.files[0], "#qualityCorrectedPath", "#qualityCorrectedPath");
   if (data) { qualityState.correctedPath = data.path; if (element("#qualityCorrectedPath")) element("#qualityCorrectedPath").textContent = data.path; }
@@ -7398,7 +8080,11 @@ on("#formGenerationMeterMap", "change", invalidateLearnedCurveForTiming);
 on("#composerConditionFile", "input", invalidateLearnedCurveForCondition);
 on("#composerConditionFile", "change", invalidateLearnedCurveForCondition);
 on("#formQualityProfile", "change", () => { updateSongFormQualityProfileControls(); saveSettings(); });
-["#bpm", "#first", "#tempoMode"].forEach((selector) => {
+["#bpm", "#first"].forEach((selector) => {
+  on(selector, "input", invalidateLearnedCurveForTiming);
+  on(selector, "change", invalidateLearnedCurveForTiming);
+});
+["#tempoMode", "#v2GenerateTempoDetection", "#v2GenerateAutoFirst", "#v2GenerateTempoOctavePolicy", "#v2GenerateDownbeatAlignment"].forEach((selector) => {
   on(selector, "change", invalidateLearnedCurveForTiming);
 });
 on("#featureFile", "change", (event) => upload("audio_features", event.target.files[0], "#featurePath", "#featureUploadStatus"));

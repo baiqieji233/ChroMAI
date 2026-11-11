@@ -47,9 +47,9 @@ def remember_undo(manifest, chart_id, before, after):
 
 
 def _undo(manifest, chart_id, token):
-    from .quality_api import _mutation_lock
+    from .quality_api import _AnnotationLookup, _catalog, _mutation_lock
     from maichart.training.candidate_pool import review_guard
-    from maichart.training.quality_annotations import load_annotations, save_annotations
+    from maichart.training.quality_annotations import load_annotations, save_annotations, zero_unmarked_region_weights
     with _mutation_lock(manifest):
         path = Path(manifest).parent / 'review_undo.json'
         values = json.loads(path.read_text(encoding='utf-8')) if path.exists() else {}
@@ -59,16 +59,24 @@ def _undo(manifest, chart_id, token):
         policy = json.loads((Path(manifest).parent / 'pool.json').read_text(encoding='utf-8')).get('scan_policy')
         if item.get('scan_policy') != policy:
             raise ValueError('检查方式已变化，请重新审阅；旧撤销不会恢复旧的学习范围')
-        from maichart.training.quality_annotations import region_component_weights
-        positive = any(any(region_component_weights(r)) for r in (item.get('before') or {}).get('regions', []))
+        positive = any(any(zero_unmarked_region_weights(r)) for r in (item.get('before') or {}).get('regions', []))
         review_guard(manifest, chart_id, positive=positive)
-        records = load_annotations(manifest)['records']
-        current = next((r for r in records if r.get('chart_id') == chart_id), None)
+        raw_records = load_annotations(manifest)['records']
+        lookup = _AnnotationLookup(raw_records)
+        row = next((r for r in _catalog(Path(manifest)) if r.chart_id == chart_id), None)
+        current = lookup.find(row) if row is not None else next((r for r in raw_records if r.get('chart_id') == chart_id), None)
         if _digest(current) != item['after']:
             raise ValueError('这张谱面已有更新评价，请先重新载入；旧撤销不会覆盖新评价')
-        records = [r for r in records if r.get('chart_id') != chart_id]
-        if item['before'] is not None:
-            records.append(item['before'])
+        if row is not None:
+            if item['before'] is not None:
+                lookup.replace_for_row(row, chart_id, item['before'])
+            else:
+                lookup.remove_for_row(row, chart_id)
+            records = lookup.active_records()
+        else:
+            records = [r for r in raw_records if r.get('chart_id') != chart_id]
+            if item['before'] is not None:
+                records.append(item['before'])
         save_annotations(manifest, records)
         values.pop(token)
         _write(path, values)

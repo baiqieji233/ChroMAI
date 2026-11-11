@@ -10,11 +10,16 @@ TRAIN_DEFAULTS = dict(epochs=50, batch_size=8, grad_accumulation=8, lr=.0002,
     future_beats=4, ticks_per_beat=48, max_tokens=2048, audio_backend='mert',
     prepare_device='auto', device='auto', precision='auto', validation_max_batches=0,
     checkpoint_interval_steps=500, save_every=5, early_stopping_patience=5, log_interval=20, seed=0, max_steps=0,
-    limit_charts=0, cpu_threads=2, cuda_memory_budget_gb=0., audio_cache_gb=.25)
+    limit_charts=0, cpu_threads=2, cuda_memory_budget_gb=0., audio_cache_gb=.25,
+    activation_checkpointing='auto')
 ENCODER_DEFAULTS = dict(audio_layers=4,song_layers=2)
 GENERATION_DEFAULTS = dict(temperature=.9, top_p=.95, action_temperature=.9,
     action_top_p=.95, candidates=2, intercept_tap_on_slide=True,
-    tap_on_slide_threshold_ms=200., count=1,parallel=1,cpu_threads=0,phrase_search='layout',phrase_beats=4.,phrase_commit_beats=2.,record_candidate_probabilities=False)
+    tap_on_slide_threshold_ms=200., intercept_slide_head_tap=False,
+    touch_reachability_policy='palm_span_v1', touch_cohold_radius=180.,
+    forward_feasibility='balanced_v1', forward_tap_on_slide_ms=150.,
+    self_refine='off',
+    count=1,parallel=1,cpu_threads=0,phrase_search='layout',phrase_rank_policy='comfort_v1',phrase_beats=4.,phrase_commit_beats=2.,tempo_octave_policy='off',downbeat_alignment='off',record_candidate_probabilities=False)
 EVALUATION_DEFAULTS=dict(limit_charts=2,max_batches=8,timing_rollouts=2,cpu_threads=2,
     window_sampling='spread',check_training_overlap=False)
 MAX_BATCH_COUNT = 32

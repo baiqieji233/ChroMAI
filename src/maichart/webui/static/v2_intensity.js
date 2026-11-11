@@ -1,12 +1,60 @@
 "use strict";
 // The editor changes learned curve conditions, never note placement rules.
-const v2Curve={profile:null,automatic:null,undo:[],source:null,selected:0,busy:false,
+const v2Curve={profile:null,automatic:null,undo:[],source:null,timingStale:false,selected:0,busy:false,
   selection:new Set(),start:0,end:null,cursor:0,media:null,mediaAudio:null,raster:null,mediaSerial:0,mediaBusy:false,drag:null};
-function v2CurveSource(){return {audio:valueOrDefault('#audioPath','').trim(),checkpoint:valueOrDefault('#checkpointPath','').trim()};}
-function v2CurveMatches(){const s=v2CurveSource();return v2Curve.source?.audio===s.audio&&v2Curve.source?.checkpoint===s.checkpoint;}
+function v2CurveTimingContext(){
+  return {
+    bpm:valueOrDefault('#bpm','').trim(),
+    autoFirst:Boolean(element('#v2GenerateAutoFirst')?.checked??true),
+    first:element('#v2GenerateAutoFirst')?.checked?'':valueOrDefault('#first','').trim(),
+    tempoDetection:valueOrDefault('#v2GenerateTempoDetection','auto'),
+    tempoOctavePolicy:valueOrDefault('#v2GenerateTempoOctavePolicy','off'),
+    downbeatAlignment:valueOrDefault('#v2GenerateDownbeatAlignment','off'),
+    tempoMap:valueOrDefault('#tempoMap','').trim(),
+    meterMap:valueOrDefault('#formGenerationMeterMap','').trim(),
+  };
+}
+function v2CurveSource(){
+  return {
+    audio:valueOrDefault('#audioPath','').trim(),
+    checkpoint:valueOrDefault('#checkpointPath','').trim(),
+    timing:v2CurveTimingContext(),
+  };
+}
+function v2CurveTimingMatches(){
+  return Boolean(v2Curve.source?.timing)&&JSON.stringify(v2Curve.source.timing)===JSON.stringify(v2CurveTimingContext());
+}
+function v2CurveMatches(){
+  const s=v2CurveSource();
+  if(v2Curve.source?.audio!==s.audio||v2Curve.source?.checkpoint!==s.checkpoint)return false;
+  if(v2Curve.profile?.edited===true)return true;
+  if(v2Curve.timingStale)return false;
+  if(v2Curve.source?.timing!==undefined||s.timing!==undefined){
+    return JSON.stringify(v2Curve.source?.timing)===JSON.stringify(s.timing);
+  }
+  return true;
+}
+function v2CurveInvalidateTiming(){
+  const s=v2CurveSource();
+  if(!v2Curve.profile||v2Curve.source?.audio!==s.audio||v2Curve.source?.checkpoint!==s.checkpoint)return;
+  if(JSON.stringify(v2Curve.source?.timing)===JSON.stringify(s.timing)){
+    v2Curve.timingStale=false;
+    return;
+  }
+  v2Curve.timingStale=true;
+  if(v2Curve.profile.edited===true){
+    v2CurveStatus('节拍／拍网设置已变化：已保留手动编辑的按秒控制点；若需基于新拍网重算基底请重新预测，否则可明确沿用当前编辑曲线。',true);
+  }else{
+    if(element('#v2CurveUse'))element('#v2CurveUse').checked=false;
+    v2CurveStatus('节拍／拍网设置已变化，自动预测曲线已过期；直接生成将按新拍网自动预测，如需编辑请重新预测曲线。',true);
+  }
+  v2CurveDraw();
+}
 function v2CurvePayload(){
   if(!element('#v2CurveUse')?.checked)return {};
-  if(!v2Curve.profile||!v2CurveMatches())throw new Error('编辑曲线与当前音频／模型不匹配，请重新预测或关闭编辑曲线。');
+  const s=v2CurveSource(),sameAsset=v2Curve.source?.audio===s.audio&&v2Curve.source?.checkpoint===s.checkpoint;
+  if(!v2Curve.profile||!sameAsset)throw new Error('编辑曲线与当前音频／模型不匹配，请重新预测或关闭编辑曲线。');
+  if(!v2CurveMatches())throw new Error('节拍／拍网设置已变化，未编辑的自动曲线已过期；请重新预测曲线或取消勾选编辑曲线。');
   return {intensity_profile:v2Curve.profile,intensity_strength:Number(valueOrDefault('#v2CurveStrength',1))};
 }
 function v2CurveStatus(message,bad=false){const n=element('#v2CurveStatus');n.textContent=message;n.classList.toggle('warn',bad);}
@@ -148,14 +196,15 @@ async function v2CurvePredict(){
   try{
     const payload=composerV2GenerationPayload({omitCurve:true});if(!payload.checkpoint||!payload.audio)throw new Error('请先选择模型和音频。');
     const status=await api('/api/status');if(!status.training_capabilities?.composer_v2_intensity_curve)throw new Error('当前后台未加载新版曲线，请重启WebUI后再使用。');
+    if((payload.tempo_octave_policy || payload.downbeat_alignment) && !status.training_capabilities?.composer_v2_timing_calibration)throw new Error('可选半／倍速与强拍对齐校准需要更新后的WebUI后台，请在方便时重启后台后再预测曲线。');
     v2Curve.busy=true;element('#v2CurvePredict').disabled=true;v2CurveStatus('正在预测曲线…');
     const source=v2CurveSource(),result=await api('/api/composer-v2/curve',payload);
     watchTask(result.task_id,task=>{
       if(!['completed','failed','cancelled'].includes(task.status))return;
       v2Curve.busy=false;element('#v2CurvePredict').disabled=false;const profile=task.result?.intensity_profile;
       if(task.status!=='completed'||!profile){v2CurveStatus(task.error||'曲线预测未完成。',true);return;}
-      if(JSON.stringify(source)!==JSON.stringify(v2CurveSource())){v2CurveStatus('模型或音频已切换，请重新预测。',true);return;}
-      v2Curve.source=source;v2Curve.profile=structuredClone(profile);v2Curve.automatic=structuredClone(profile);v2Curve.undo=[];v2Curve.selected=0;v2Curve.selection=new Set([0]);
+      if(JSON.stringify(source)!==JSON.stringify(v2CurveSource())){v2CurveStatus('模型、音频或拍网设置已切换，请重新预测曲线。',true);return;}
+      v2Curve.source=source;v2Curve.timingStale=false;v2Curve.profile=structuredClone(profile);v2Curve.automatic=structuredClone(profile);v2Curve.undo=[];v2Curve.selected=0;v2Curve.selection=new Set([0]);
       element('#v2CurveUse').checked=false;v2CurveDraw();v2CurveStatus('曲线已就绪：点击定位、拖动控制点，或在空白处框选多个点。');v2CurveLoadMedia();
     });
   }catch(error){v2Curve.busy=false;element('#v2CurvePredict').disabled=false;v2CurveStatus(error.message,true);}
@@ -224,13 +273,13 @@ element('#v2CurveClearSelection')?.addEventListener('click',()=>{v2Curve.selecti
 element('#v2CurveBatchApply')?.addEventListener('click',()=>{const raw=valueOrDefault('#v2CurveBatchAmount','').trim();if(!raw)return v2CurveStatus('请填写批量调整数值。',true);v2CurveBatch(valueOrDefault('#v2CurveBatchMode','scale'),Number(raw));});
 element('#v2CurveDelete')?.addEventListener('click',()=>{const points=v2Curve.profile?.points;if(!points||!v2Curve.selection.size)return;if(v2Curve.selection.size>=points.length)return v2CurveStatus('请至少保留一个控制点。',true);v2CurveRemember();v2Curve.profile.points=points.filter((p,i)=>!v2Curve.selection.has(i));v2Curve.selected=0;v2Curve.selection=new Set([0]);v2CurveChanged();});
 element('#v2CurveUndo')?.addEventListener('click',()=>{if(v2Curve.undo.length){v2Curve.profile=v2Curve.undo.pop();v2Curve.selected=Math.min(v2Curve.selected,v2Curve.profile.points.length-1);v2Curve.selection=new Set([v2Curve.selected]);v2CurveDraw();}});
-element('#v2CurveReset')?.addEventListener('click',()=>{if(v2Curve.automatic){v2CurveRemember();v2Curve.profile=structuredClone(v2Curve.automatic);v2Curve.selected=0;v2Curve.selection=new Set([0]);element('#v2CurveUse').checked=false;v2CurveDraw();}});
+element('#v2CurveReset')?.addEventListener('click',()=>{if(v2Curve.automatic){v2CurveRemember();v2Curve.profile=structuredClone(v2Curve.automatic);v2Curve.timingStale=!v2CurveTimingMatches();v2Curve.selected=0;v2Curve.selection=new Set([0]);element('#v2CurveUse').checked=false;v2CurveDraw();if(v2Curve.timingStale)v2CurveStatus('已恢复原自动曲线，但节拍／拍网设置已变化；直接生成将按新拍网自动预测，如需编辑请重新预测曲线。',true);}});
 element('#v2CurveExport')?.addEventListener('click',()=>{if(!v2Curve.profile)return;const link=document.createElement('a'),url=URL.createObjectURL(new Blob([JSON.stringify(v2Curve.profile,null,2)],{type:'application/json'}));link.href=url;link.download='composer_v2_intensity.json';link.click();URL.revokeObjectURL(url);});
 element('#v2CurveImport')?.addEventListener('change',async e=>{
   try{if(!e.target.files[0])return;const p=JSON.parse(await e.target.files[0].text());
     if(p.schema!=='composer-v2-intensity-v1'||!Number.isFinite(p.duration_sec)||p.duration_sec<=0||!Array.isArray(p.points)||!p.points.length||p.points.length>2048)throw new Error('请选择有效的新版 Composer v2 曲线JSON。');
     let last=-1;for(const q of p.points){if(![q.time_sec,q.event_rate,q.object_rate].every(Number.isFinite)||q.time_sec<=last||q.time_sec>p.duration_sec||q.time_sec<0||q.event_rate<0||q.object_rate<q.event_rate||(q.event_rate===0&&q.object_rate>0))throw new Error('控制点的时间或物量无效。');last=q.time_sec;}
-    v2Curve.profile=p;v2Curve.automatic=null;v2Curve.source=v2CurveSource();v2Curve.undo=[];v2Curve.selected=0;v2Curve.selection=new Set([0]);v2Curve.start=0;v2Curve.end=null;element('#v2CurveUse').checked=true;v2CurveDraw();v2CurveStatus('已导入，可放大局部、框选或添加控制点。');v2CurveLoadMedia();
+    p.edited=true;v2Curve.profile=p;v2Curve.automatic=null;v2Curve.source=v2CurveSource();v2Curve.timingStale=false;v2Curve.undo=[];v2Curve.selected=0;v2Curve.selection=new Set([0]);v2Curve.start=0;v2Curve.end=null;element('#v2CurveUse').checked=true;v2CurveDraw();v2CurveStatus('已导入，可放大局部、框选或添加控制点。');v2CurveLoadMedia();
   }catch(error){v2CurveStatus(error.message,true);}
 });
 const v2CurveAudio=element('#v2CurveAudio');

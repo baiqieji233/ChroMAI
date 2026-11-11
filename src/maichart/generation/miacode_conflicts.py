@@ -97,7 +97,20 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
             if marker.get("marker_key"):
                 markers[marker["marker_key"]] = marker
     issues, ignored, unmapped, seen = [], [], [], set()
-    findings = [(d, "runtime") for d in raw.get("diagnostics", [])]
+    touch_policy = getattr(config, "touch_reachability_policy", "off")
+    touch_diagnostics = []
+    if touch_policy != "off":
+        from maichart.generation.muri.touch_reachability import (
+            DEFAULT_COHOLD_RADIUS,
+            detect_touch_reachability_conflicts,
+        )
+        touch_diagnostics = detect_touch_reachability_conflicts(
+            raw.get("markers", []),
+            policy=touch_policy,
+            cohold_radius=float(getattr(config, "touch_cohold_radius", DEFAULT_COHOLD_RADIUS)),
+        )
+    diagnostics = [*raw.get("diagnostics", []), *touch_diagnostics]
+    findings = [(d, "runtime") for d in diagnostics]
     findings += [({**ref, **ref.get("affected", {}),
                   "detail": f"MiaCode {ref['kind']} 判定区参考"}, "static") for ref in references]
     # A static reference may carry the stronger Muri level even when the
@@ -114,16 +127,29 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
         affected = locate(marker)
         anchor = locate(finding)
         cause = locate(finding.get("cause") or {})
-        notes = []
+        notes_by_source = {}
         for event in (affected, anchor, cause):
-            if event is not None and all(event.source_id != n.source_id for n in notes):
-                notes.append(event)
+            if event is not None:
+                notes_by_source.setdefault(event.source_id, event)
         # Keep runtime and static evidence in raw; avoid counting/repairing the
         # same note+kind twice just because both stages detected it.
         identity = (kind, affected.source_id if affected else key)
+        if kind == "TouchMultiAction":
+            for source in finding.get("sources", []):
+                event = locate(markers.get(source.get("marker_key")) or source)
+                if event is None:
+                    unmapped.append({"kind": kind, "reason": "native_conflict_source_unmapped",
+                                     "marker_key": source.get("marker_key"),
+                                     "line": source.get("line"), "col": source.get("col")})
+                else:
+                    notes_by_source.setdefault(event.source_id, event)
+            # The same affected note can participate in distinct action groups.
+            if notes_by_source:
+                identity = (kind, tuple(sorted(notes_by_source)))
         if identity in seen:
             continue
         seen.add(identity)
+        notes = list(notes_by_source.values())
         if not notes:
             unmapped.append({"kind": kind, "line": finding.get("line"), "col": finding.get("col")})
         target = None
@@ -185,6 +211,6 @@ def detect_native_conflicts(points, tempo_changes, first, events, config):
                 "limitations": ["使用 MiaCode 判定区、Slide/Wifi、Touch 联动与动作参考的 Python 移植；仍不等同于实机玩家认证。"]}
     # Compact diagnostic evidence keeps window reports small; detailed runtime
     # marker states remain available through analyze_maidata for investigations.
-    coverage["diagnostics"] = raw.get("diagnostics", [])
+    coverage["diagnostics"] = diagnostics
     coverage["static_references"] = references
     return issues, coverage

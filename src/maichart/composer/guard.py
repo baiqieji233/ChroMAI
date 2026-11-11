@@ -17,7 +17,7 @@ from maichart.timing import RawTimingPoint
 _EPS = 1e-9
 
 
-def enforced_native_hard_conflict(issue, *, intercept_tap_on_slide=False):
+def enforced_native_hard_conflict(issue, *, intercept_tap_on_slide=False, intercept_slide_head_tap=False):
     """Recognize enforced runtime findings and exact static pad occupancy.
 
     Static Overlap checks an identical physical pad during another note's
@@ -29,7 +29,8 @@ def enforced_native_hard_conflict(issue, *, intercept_tap_on_slide=False):
     return (evidence.startswith('miacode_runtime:')
         or (evidence.startswith('miacode_static:') and issue.conflict_type=='miacode_Overlap'
             and _static_held_head_overlap(issue.notes))
-        or (intercept_tap_on_slide and issue.conflict_type=='miacode_TapOnSlide'))
+        or (intercept_tap_on_slide and issue.conflict_type=='miacode_TapOnSlide')
+        or (intercept_slide_head_tap and issue.conflict_type=='miacode_SlideHeadTap'))
 
 
 def _static_held_head_overlap(notes):
@@ -103,7 +104,7 @@ def _cached_markers(text, bpm):
 
 
 class EventGuard:
-    def __init__(self, tempo, first, audio_end, *, min_same_head_sec=.05, intercept_tap_on_slide=False, touch_layout_policy='legacy_two_heads', physical_policy='legacy'):
+    def __init__(self, tempo, first, audio_end, *, min_same_head_sec=.05, intercept_tap_on_slide=False, intercept_slide_head_tap=False, touch_reachability_policy='off', touch_cohold_radius=180.0, touch_layout_policy='legacy_two_heads', physical_policy='legacy'):
         if physical_policy == 'legacy_report_v1':
             physical_policy = 'legacy'
         if physical_policy not in {'legacy','runtime_hard_v2'}:
@@ -118,14 +119,20 @@ class EventGuard:
         self.tempo, self.first, self.audio_end = tempo, first, float(audio_end)
         self.min_same_head_sec = min_same_head_sec
         self.intercept_tap_on_slide = bool(intercept_tap_on_slide)
+        self.intercept_slide_head_tap = bool(intercept_slide_head_tap)
         self.prefix = []
         self.checks = self.rejections = 0
         self.reason_counts = Counter()
         self.last_head_seconds = {}
         self.config = PostProcessConfig(enable_conflict_detection=True, detect_soft_conflicts=True,
-            conflict_engine='miacode', conflict_kind_modes={'MultiTouch':'enforce',
+            conflict_engine='miacode',
+            touch_reachability_policy=touch_reachability_policy,
+            touch_cohold_radius=float(touch_cohold_radius),
+            conflict_kind_modes={'MultiTouch':'enforce',
                 'TapOnSlide':'enforce' if self.intercept_tap_on_slide else 'report',
-                'Overlap':'enforce','SlideHeadTap':'report','SlideTooFast':'report'})
+                'Overlap':'enforce',
+                'SlideHeadTap':'enforce' if self.intercept_slide_head_tap else 'report',
+                'SlideTooFast':'report'})
         self.last_reason = None
         self._before_cache = None
         self.last_conflicts = []
@@ -135,8 +142,11 @@ class EventGuard:
             self.config.conflict_kind_modes['SlideTooFast']='enforce'
 
     def enforced(self, issue):
-        intercept=self.intercept_tap_on_slide
-        return enforced_native_hard_conflict(issue,intercept_tap_on_slide=intercept)
+        return enforced_native_hard_conflict(
+            issue,
+            intercept_tap_on_slide=self.intercept_tap_on_slide,
+            intercept_slide_head_tap=self.intercept_slide_head_tap,
+        )
 
     def interaction_start(self,second,rows=None):
         """Keep the input history of every action still judged by the runtime.
@@ -211,7 +221,7 @@ class EventGuard:
         # only an immutable summary of the exact latest context/configuration.
         key = (tuple((p.beat, p.note_text) for p in context),
                tuple((t.beat, t.bpm) for t in self.tempo), self.first,
-               repr(self.config), self.intercept_tap_on_slide)
+               repr(self.config), self.intercept_tap_on_slide, self.intercept_slide_head_tap)
         if self._before_cache is None or self._before_cache[0] != key:
             before = detect_chart_conflicts(context, self.tempo, self.first, self.config) if context else None
             self._before_cache = (key, hard_keys(before), hard_keys(before, enforced_only=False),

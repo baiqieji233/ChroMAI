@@ -57,6 +57,10 @@ def parser():
     from .intensity import CHOICES as CURVE_CHOICES
     result.add_argument('--intensity-curve',choices=CURVE_CHOICES,default='auto',
                         help='Train low-frequency event/object rate curves; resume inherits its parent policy')
+    result.add_argument('--reviewed-reference-policy',choices=('auto','approved_only','off'),default='auto',
+                        help='Allow [REF] on unmarked_weight=0 charts only when every referenced event is approved; resume inherits parent contract')
+    result.add_argument('--auto-quality-policy',choices=('auto','on','off'),default='auto',
+                        help='Merge auto_quality_annotations.json for continuous events; manual labels win and resume inherits the parent contract')
     result.add_argument("--condition-policy", choices=POLICIES, default=None,
         help="Fresh/init default radar_style_v1; resume inherits the checkpoint contract")
     return result
@@ -82,6 +86,43 @@ def rng_state():
     if hasattr(torch,'xpu') and torch.xpu.is_initialized():result['xpu']=torch.xpu.get_rng_state_all()
     return result
 
+
+def resolve_zero_unmarked_policy(parent_contract=None, *, resume=False):
+    if not resume:
+        return 'explicit_good_v1'
+    saved = parent_contract or {}
+    return saved.get('zero_unmarked_policy', 'explicit_good_v1'
+        if saved.get('reviewed_reference_policy', 'off') != 'off' else 'legacy_weights_v1')
+
+
+def resolve_auto_quality_policy(requested, manifest_path, parent_contract=None, *, resume=False,
+                                quality_enabled=True, sequence_policy='continuous_events_v1'):
+    if requested not in ('auto', 'on', 'off'):
+        raise ValueError('Unknown auto_quality_policy')
+    saved = (parent_contract or {}).get('auto_quality_policy', 'off')
+    if resume:
+        if requested != 'auto' and ('auto_v1' if requested == 'on' else 'off') != saved:
+            raise ValueError('Changing auto_quality_policy requires --init-checkpoint finetune, not --resume')
+        if saved == 'off':
+            return 'off'
+        if saved != 'auto_v1':
+            raise ValueError(f'Unknown saved auto_quality_policy: {saved}')
+    elif requested == 'off':
+        return 'off'
+    if not quality_enabled or sequence_policy != 'continuous_events_v1':
+        if resume or requested == 'on':
+            raise ValueError('自动质检标注需要启用质量加权的 Composer v2 连续事件训练')
+        return 'off'
+    from maichart.training.quality_annotations import resolve_auto_annotations
+    path, _ = resolve_auto_annotations(manifest_path)
+    if path is not None:
+        return 'auto_v1'
+    if resume:
+        raise ValueError('续训缺少原自动质检标注，请恢复原文件或使用 --init-checkpoint')
+    if requested == 'on':
+        raise ValueError('未找到与训练清单或原始划分来源匹配的 auto_quality_annotations.json')
+    return 'off'
+
 def restore_rng(value):
     random.setstate(value["python"])
     state=value["numpy"]
@@ -102,6 +143,8 @@ def _identity(dataset):
         codec_sha256=_hash(dataset.codec.to_dict()),windows=len(dataset))
     if dataset.condition_policy != LEVEL_ONLY:
         value['condition_contract'] = dataset.condition_contract
+    if getattr(dataset, 'auto_quality_policy', 'off') == 'auto_v1':
+        value['auto_annotations_sha256'] = dataset.auto_annotations_sha256
     return dict(sha256=_hash(value),**value)
 
 
@@ -302,6 +345,9 @@ def train(args):
         if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1024:
             raise ValueError(f'{key} 必须在 0 至 1024 GiB 之间')
     if args.cpu_threads<1:raise ValueError("cpu_threads must be positive")
+    from .training_memory import POLICIES as MEMORY_POLICIES
+    if getattr(args,'activation_checkpointing','auto') not in MEMORY_POLICIES:
+        raise ValueError('Unknown activation checkpointing policy')
     torch.set_num_threads(args.cpu_threads)
     if min(args.epochs,args.batch_size,args.grad_accumulation,args.log_interval,args.checkpoint_interval_steps)<=0:raise ValueError("epochs/batch/accumulation/log/save intervals must be positive")
     if args.lr<=0 or not 0<=args.min_lr_ratio<=1 or not 0<=args.dropout<1:raise ValueError("Invalid optimizer/dropout settings")
@@ -341,6 +387,30 @@ def train(args):
     if recovery_policy!='off' and args.sequence_policy!='continuous_events_v1':
         raise ValueError('Timing recovery requires continuous event training')
     args.timing_recovery=recovery_policy
+    reviewed_ref=getattr(args,'reviewed_reference_policy','auto')
+    saved_reviewed_ref=parent['training_contract'].get('reviewed_reference_policy','off') if parent and parent.get('training_contract') else 'off'
+    if reviewed_ref=='auto':
+        if args.resume:
+            reviewed_ref=saved_reviewed_ref
+        elif args.sequence_policy=='continuous_events_v1':
+            reviewed_ref='approved_only'
+        else:
+            reviewed_ref='off'
+    if reviewed_ref not in ('approved_only','off'):raise ValueError('Unknown reviewed reference policy')
+    if args.resume and reviewed_ref!=saved_reviewed_ref:
+        raise ValueError('Changing reviewed_reference_policy requires --init-checkpoint finetune, not --resume')
+    if reviewed_ref!='off' and args.sequence_policy!='continuous_events_v1':
+        raise ValueError('Reviewed reference policy requires continuous event training')
+    args.reviewed_reference_policy=reviewed_ref
+    # Reference availability and annotation approval are independent. Only an
+    # actual old resume retains the old weight-only supervision semantics.
+    parent_contract = parent.get('training_contract', {}) if parent else {}
+    zero_unmarked_policy = resolve_zero_unmarked_policy(parent_contract,resume=bool(args.resume))
+    reference_quality_policy = (parent_contract.get('reference_quality_policy','legacy_v1')
+                                if args.resume else 'event_mask_v1')
+    auto_quality_policy = resolve_auto_quality_policy(getattr(args,'auto_quality_policy','auto'),
+        args.manifest, parent_contract, resume=bool(args.resume),
+        quality_enabled=getattr(args,'quality_enabled',True), sequence_policy=args.sequence_policy)
     if parent and args.sequence_policy!=parent_sequence:raise ValueError('Continuous time language requires fresh training in a new directory')
     args.condition_policy, migration = resolve_training_policy(getattr(args, 'condition_policy', None),
         (parent.get('model_config') or parent.get('config')) if parent else None, resume=bool(args.resume))
@@ -416,7 +486,7 @@ def train(args):
         future_beats=args.future_beats,ticks_per_beat=args.ticks_per_beat,max_tokens=args.max_tokens,
         audio_backend=args.audio_backend,mert_model=args.mert_model,prepare_device=prepare_device,limit_charts=args.limit_charts,
         condition_policy=args.condition_policy,audio_store=audio_store,dialect_policy=dialect_policy,
-        quality_enabled=getattr(args,'quality_enabled',True))
+        quality_enabled=getattr(args,'quality_enabled',True),auto_quality_policy=auto_quality_policy)
     dataset_class=ComposerV2Dataset
     if args.sequence_policy=='continuous_events_v1':
         from .stream_data import StreamDataset
@@ -424,10 +494,14 @@ def train(args):
         options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed,
                        onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
                        intensity_policy=args.intensity_policy,rhythm_learning_policy=args.rhythm_learning_policy,
-                       music_context_policy=args.music_context_policy)
+                       music_context_policy=args.music_context_policy,
+                       reviewed_reference_policy=reviewed_ref,zero_unmarked_policy=zero_unmarked_policy,
+                       reference_quality_policy=reference_quality_policy)
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':train_options['reference_augmentation']=True
     dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
+    if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
+        raise ValueError('准备训练数据时未找到匹配的自动质检标注')
     vocabulary_changed = codec is not None and dataset.codec is not codec
     if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
         raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
@@ -463,6 +537,11 @@ def train(args):
         contract.update(window_policy='causal_event_slices_no_boundary_eos_v1',refresh_events=args.refresh_events,
             acoustic_policy='query_integer_beat_tiles_v1')
     if recovery_policy!='off':contract['timing_recovery']=recovery_policy
+    if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
+    if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'zero_unmarked_policy' in parent_contract):
+        contract['zero_unmarked_policy']=zero_unmarked_policy
+    if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'reference_quality_policy' in parent_contract):
+        contract['reference_quality_policy']=reference_quality_policy
     if args.onset_readout_policy != 'off':contract['onset_readout_policy']=args.onset_readout_policy
     if args.structure_policy != 'off':contract['structure_policy']=args.structure_policy
     if args.intensity_policy!='off':contract['intensity_policy']=args.intensity_policy
@@ -470,9 +549,13 @@ def train(args):
         contract['rhythm_learning']=args.rhythm_learning_policy
     if dialect_policy != chart_dialect.LEGACY_STRICT_POLICY:
         contract['chart_dialect'] = dialect_policy
+    if auto_quality_policy != 'off':
+        contract['auto_quality_policy'] = auto_quality_policy
     if args.resume and (not _same_data_identity(parent["data_identity"],identity) or parent["training_contract"]!=contract):
         raise ValueError("Exact resume data/optimizer/schedule contract changed; retain the parent and use compatible finetune in a new directory")
     model=ComposerV2(config,codec).to(device)
+    from .training_memory import configure as configure_memory, cuda_stats
+    memory_policy=configure_memory(model,getattr(args,'activation_checkpointing','auto'),device)
     if parent:
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
@@ -574,7 +657,7 @@ def train(args):
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,
          validation_coverage=getattr(validation_loader,'validation_coverage',None),
-        best_basis=best_basis)
+        best_basis=best_basis,activation_checkpointing=memory_policy)
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     running=torch.zeros(6,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
@@ -657,7 +740,7 @@ def train(args):
                     time_loss=values[1]/max(1.,running_time_mass),component_loss=values[2]/max(1.,running_component_mass),phase_loss=values[3]/max(1.,running_phase_mass),
                     data_sec=data_sec,compute_sec=compute_sec,compute_measurement="host_submission_wall_including_update_boundary_wait",
                     prefetch={"consumer_wait_sec":data_sec,"max_batches":1},elapsed_sec=elapsed,lr=optimizer.param_groups[0]["lr"],
-                    audio_banks=dataset.audio_store.mapping_stats(),
+                    audio_banks=dataset.audio_store.mapping_stats(),grad_norm=float(norm.detach()),**cuda_stats(device),
                     gpu_peak_bytes=(torch.cuda.max_memory_allocated(device) if device.type=="cuda" else
                                     torch.xpu.max_memory_allocated(device) if device.type=='xpu' else 0))
             if boundary and finite and state["optimizer_steps"]%args.checkpoint_interval_steps==0:checkpoint()

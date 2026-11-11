@@ -135,6 +135,7 @@ def inspect_payload(payload):
     return dict(schema=payload.get("schema"),family=payload.get("family"),model_family=payload.get("family"),
         valid=not errors,can_generate=not errors,can_init=not errors,can_train=not errors,can_resume=bool(resume),
         model_config=config or {},config=config or {},args=payload.get("args") or {},
+        training_contract=payload.get("training_contract") or {},
         data_contract=payload.get("data_identity") or {},epoch=state.get("epoch",0),
         batch_cursor=state.get("batch_cursor",0),optimizer_steps=state.get("optimizer_steps",0),
         inference_only=bool(payload.get("inference_only")),best_basis=payload.get("best_basis"),

@@ -21,6 +21,7 @@ from maichart.maidata import decode_text_with_encoding, parse_maidata_metadata
 from maichart.tempo_clock import TempoClock
 from maichart.training.dataset_catalog import _source_asset
 from maichart.training.event_dataset import inspect_chart, numeric_level
+from maichart.training.quality_annotations import split_annotation_source
 from . import chart_dialect
 from .chart_cache import ChartCache
 from .conditions import RADAR_STYLE, condition_contract, resolve_condition, training_condition
@@ -76,13 +77,19 @@ class ComposerV2Dataset(Dataset):
                  *, audio_store=None, min_level=12., max_level=15.,
                  min_difficulty_index=4, max_difficulty_index=6,
                  quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
-                 extend_vocabulary=False, dialect_policy=chart_dialect.POLICY):
+                 extend_vocabulary=False, dialect_policy=chart_dialect.POLICY,
+                 auto_quality_policy='off'):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
             raise ValueError('max_tokens must be at least 4')
         if dialect_policy not in (chart_dialect.POLICY, chart_dialect.LEGACY_STRICT_POLICY):
             raise ValueError(f'Unknown Composer v2 chart dialect policy: {dialect_policy}')
+        if auto_quality_policy not in ('off', 'auto_v1'):
+            raise ValueError(f'Unknown auto_quality_policy: {auto_quality_policy}')
+        if auto_quality_policy == 'auto_v1' and (sequence_policy != 'continuous_events_v1' or not quality_enabled):
+            raise ValueError('自动质检标注需要启用质量加权的 Composer v2 连续事件训练')
+        self.auto_quality_policy = auto_quality_policy
         self.manifest = Path(manifest).resolve()
         self.condition_policy = condition_policy
         self.condition_contract = condition_contract(condition_policy)
@@ -98,16 +105,30 @@ class ComposerV2Dataset(Dataset):
         annotations = None
         annotation_path = self.manifest.with_name('quality_annotations.json')
         if not annotation_path.exists():
-            origin = payload.get('split_metadata', {}).get('source_manifest')
-            if origin:
-                from maichart.portable_paths import material_path
-                annotation_path = material_path(origin).with_name('quality_annotations.json')
+            origin = split_annotation_source(self.manifest, payload)
+            if origin is not None:
+                annotation_path = origin.with_name('quality_annotations.json')
         if quality_enabled and annotation_path.is_file():
             from maichart.training.quality_annotations import load_quality_annotations
             annotations = load_quality_annotations(annotation_path)
+        auto_annotations = None
+        if auto_quality_policy == 'auto_v1':
+            from maichart.training.quality_annotations import (
+                annotations_fingerprint,
+                merge_annotation_records,
+                resolve_auto_annotations,
+            )
+            auto_annotation_file, auto_annotations = resolve_auto_annotations(self.manifest, payload)
+            self.auto_annotations_sha256 = (annotations_fingerprint(auto_annotations)
+                                            if auto_annotations is not None else None)
+            self.audit['auto_quality'] = {
+                'policy': auto_quality_policy,
+                'path': str(auto_annotation_file) if auto_annotation_file is not None else None,
+            }
         from maichart.form.data import _preparation_annotation, _preparation_annotation_index
 
         annotation_index = _preparation_annotation_index(annotations)
+        auto_annotation_index = _preparation_annotation_index(auto_annotations) if auto_annotations is not None else None
         entries = payload.get('songs', [])
         chart_start = time.perf_counter()
         normalize_dialect = dialect_policy == chart_dialect.POLICY
@@ -115,10 +136,15 @@ class ComposerV2Dataset(Dataset):
         prepared_charts = {}
         reused_charts = cache_hits = 0
         _report_preparation('charts', 0, len(entries), chart_start, accepted=0)
+        manifest_zero_unmarked = bool(payload.get('candidate_pool') or payload.get('reviewed_training'))
+        if manifest_zero_unmarked and not quality_enabled:
+            raise ValueError('人工确认片段必须启用质量加权；未确认部分仅作上下文，不能作为整谱训练')
+        if manifest_zero_unmarked and sequence_policy != 'continuous_events_v1':
+            raise ValueError('人工确认片段当前仅支持 Composer v2 连续事件训练')
         for examined, entry in enumerate(entries, 1):
-            if entry.get('reviewed_only') and not quality_enabled:
+            if (entry.get('reviewed_only') or entry.get('candidate_pool')) and not quality_enabled:
                 raise ValueError('人工确认片段必须启用质量加权；未确认部分仅作上下文，不能作为整谱训练')
-            if entry.get('reviewed_only') and sequence_policy != 'continuous_events_v1':
+            if (entry.get('reviewed_only') or entry.get('candidate_pool')) and sequence_policy != 'continuous_events_v1':
                 raise ValueError('人工确认片段当前仅支持 Composer v2 连续事件训练')
             if limit_charts and len(self.songs) >= limit_charts:
                 break
@@ -159,6 +185,10 @@ class ComposerV2Dataset(Dataset):
                     else:
                         chart, sustain, dialect_edits = prepared_chart
                     quality = _preparation_annotation(annotations, source, slot, audio_path, None, annotation_index)
+                    if auto_annotations is not None:
+                        auto_q = _preparation_annotation(auto_annotations, source, slot, audio_path, None, auto_annotation_index)
+                        if auto_q is not None:
+                            quality = merge_annotation_records(quality, auto_q)
                     if entry.get('reviewed_only') and (quality is None or quality.get('unmarked_weight') != 0):
                         raise ValueError('人工确认片段的范围标注缺失或已失效，请重新整理校准素材')
                     if quality and (quality.get('label') in ('excluded', 'negative')

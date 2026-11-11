@@ -140,12 +140,17 @@ def add_item(item,song,clocks,*,training):
         # Never turn an untrusted chart span into an observed zero-count rest.
         # A boundary bin is masked conservatively rather than estimating its
         # partial event count; genuine unannotated rests remain supervised.
-        from maichart.training.quality_annotations import region_component_weights
+        from maichart.training.quality_annotations import region_component_weights, zero_unmarked_region_weights
         unmarked=float((song.quality or {}).get('unmarked_weight',1.))
+        weight_fn = (
+            zero_unmarked_region_weights
+            if unmarked == 0 and not getattr(song, '_legacy_zero_unmarked_resume', False)
+            else region_component_weights
+        )
         exposure = np.full((len(grid['times']), 2), unmarked, dtype=np.float32)
         for region in (song.quality or {}).get('regions', []):
             overlap = (grid['edges'][:-1] < float(region['end_sec'])) & (grid['edges'][1:] > float(region['start_sec']))
-            timing, components = region_component_weights(region)
+            timing, components = weight_fn(region)
             if unmarked == 0:
                 # Full counts are known only for bins contained in the approval.
                 inside=(grid['edges'][:-1] >= float(region['start_sec'])) & (grid['edges'][1:] <= float(region['end_sec']))

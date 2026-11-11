@@ -20,6 +20,9 @@ from maichart.maidata import parse_maidata_file, resolve_chart_first
 from maichart.timing import tokenize_chart_difficulty_timing
 
 SCHEMA = "maichart-quality-annotations-v1"
+AUTO_ANNOTATION_FILENAME = "auto_quality_annotations.json"
+AUTO_ANNOTATION_PREVIEW_FILENAME = "auto_quality_annotations_preview.json"
+COMPOSED_AUTO_ANNOTATION_FILENAME = "composed_auto_quality_annotations.json"
 DEFAULT_WEIGHTS = {"normal": 1.0, "excellent": 2.0, "reduced": 0.25, "excluded": 0.0, "negative": 0.0}
 LABELS = frozenset(DEFAULT_WEIGHTS)
 _WRITE_LOCKS: dict[str, threading.Lock] = {}
@@ -29,6 +32,25 @@ _WRITE_LOCKS_GUARD = threading.Lock()
 def annotation_path(manifest_path: str | Path) -> Path:
     """Return the automatically managed annotation path for a manifest."""
     return Path(manifest_path).resolve().with_name("quality_annotations.json")
+
+
+def auto_annotation_path(
+    manifest_path: str | Path, *, preview: bool = False, composed: bool = False
+) -> Path:
+    """Return the machine-generated audit annotation path (never overwrites manual annotations)."""
+    if preview and composed:
+        raise ValueError("组合继承标注不支持抽查模式")
+    name = (COMPOSED_AUTO_ANNOTATION_FILENAME if composed else
+            AUTO_ANNOTATION_PREVIEW_FILENAME if preview else AUTO_ANNOTATION_FILENAME)
+    return Path(manifest_path).resolve().with_name(name)
+
+
+def split_annotation_source(manifest: Path, payload: dict[str, Any]) -> Path | None:
+    from maichart.portable_paths import material_path
+
+    split = payload.get("split_metadata")
+    origin = split.get("source_manifest") if isinstance(split, dict) else None
+    return (manifest.parent / material_path(origin)).resolve() if origin else None
 
 
 def _lock_for(path: Path) -> threading.Lock:
@@ -48,7 +70,9 @@ def _finite(value: Any, name: str) -> float:
 
 
 def _resolve_manifest_path(value: Any, manifest_path: Path, source_root: Path | None = None) -> Path:
-    raw = Path(str(value))
+    from maichart.portable_paths import material_path
+
+    raw = material_path(str(value))
     if raw.is_absolute():
         return raw.resolve()
     bases = [manifest_path.parent]
@@ -192,6 +216,8 @@ def validate_record(record: dict[str, Any]) -> dict[str, Any]:
     out["weight"] = weight
     out["reason"] = str(record.get("reason", ""))
     out["regions"] = _validate_regions(record.get("regions", []))
+    if "chart_override" in out and not isinstance(out["chart_override"], bool):
+        raise ValueError("chart_override 必须是布尔值")
     if "unmarked_weight" in record:
         value = _finite(record["unmarked_weight"], "unmarked_weight")
         if not 0 <= value <= 4:
@@ -277,7 +303,7 @@ class CatalogChart:
 
 def iter_catalog(manifest_path: str | Path) -> list[CatalogChart]:
     manifest_file = Path(manifest_path).resolve()
-    data = json.loads(manifest_file.read_text(encoding="utf-8"))
+    data = json.loads(manifest_file.read_text(encoding="utf-8-sig"))
     source_root = _source_root(manifest_file, data)
     manifest_dataset, manifest_dataset_id = _manifest_dataset_metadata(manifest_file, data)
     rows: list[CatalogChart] = []
@@ -485,6 +511,245 @@ def load_quality_annotations(path: str | Path) -> dict[str, Any]:
     return load_annotations(path)
 
 
+def load_auto_annotations(manifest_path: str | Path) -> dict[str, Any]:
+    """Load machine-generated quality audit records without touching manual annotations."""
+    candidate = Path(manifest_path)
+    if candidate.name not in (AUTO_ANNOTATION_FILENAME, AUTO_ANNOTATION_PREVIEW_FILENAME,
+                               COMPOSED_AUTO_ANNOTATION_FILENAME):
+        if candidate.is_file():
+            _, data = resolve_auto_annotations(candidate)
+            return data if data is not None else {"schema": SCHEMA, "manifest": str(candidate.resolve()), "records": []}
+        path = auto_annotation_path(candidate)
+    else:
+        path = candidate
+    if not path.exists():
+        return {"schema": SCHEMA, "manifest": str(candidate.resolve()), "records": []}
+    data = json.loads(path.read_text(encoding="utf-8-sig"))
+    return _validate_auto_annotations(data)
+
+
+def _validate_auto_annotations(data: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(data, dict) or data.get("schema") != SCHEMA:
+        raise ValueError("自动质检标注文件 schema 不兼容")
+    records = [validate_record(item) for item in data.get("records", [])]
+    out: dict[str, Any] = {"schema": SCHEMA, "manifest": data.get("manifest"), "records": records}
+    if "audit_metadata" in data and isinstance(data["audit_metadata"], dict):
+        out["audit_metadata"] = dict(data["audit_metadata"])
+    return out
+
+
+def _auto_annotation_owner(path: Path, data: dict[str, Any]) -> Path | None:
+    from maichart.portable_paths import material_path
+
+    saved_manifest = data.get("manifest") if isinstance(data, dict) else None
+    if isinstance(saved_manifest, str) and saved_manifest:
+        return (path.parent / material_path(saved_manifest)).resolve()
+    return None
+
+
+def resolve_auto_annotations(
+    manifest_path: str | Path, payload: dict[str, Any] | None = None, *, preview: bool = False,
+) -> tuple[Path | None, dict[str, Any] | None]:
+    """Resolve a matching direct, inherited, or original split-source sidecar."""
+    manifest = Path(manifest_path).resolve()
+    if payload is None:
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    owners = [manifest]
+    if not preview:
+        origin = split_annotation_source(manifest, payload)
+        if origin is not None and origin != manifest:
+            owners.append(origin)
+    for owner in owners:
+        paths = [auto_annotation_path(owner, preview=preview)]
+        if not preview:
+            paths.append(auto_annotation_path(owner, composed=True))
+        for path in paths:
+            if not path.is_file():
+                continue
+            data = json.loads(path.read_text(encoding="utf-8-sig"))
+            if _auto_annotation_owner(path, data) != owner:
+                continue
+            result = _validate_auto_annotations(data)
+            digest = (result.get("audit_metadata") or {}).get("manifest_sha256")
+            if digest and (not owner.is_file() or digest != hashlib.sha256(owner.read_bytes()).hexdigest()):
+                continue
+            return path, result
+    return None, None
+
+
+def resolve_auto_audit(
+    manifest_path: str | Path, payload: dict[str, Any] | None = None, *, preview: bool = False,
+) -> tuple[Path | None, dict[str, Any] | None, dict[str, Any] | None]:
+    """Read only reports for the requested manifest and the published audit, if available."""
+    manifest = Path(manifest_path).resolve()
+    if payload is None:
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    try:
+        auto_path, auto_data = resolve_auto_annotations(manifest, payload, preview=preview)
+    except (OSError, ValueError, TypeError):
+        auto_path, auto_data = None, None
+    owner = _auto_annotation_owner(auto_path, auto_data) if auto_path is not None else manifest
+    if owner is None:
+        return auto_path, auto_data, None
+    filename = "auto_quality_audit_preview_report.json" if preview else "auto_quality_audit_report.json"
+    path = owner.with_name(filename)
+    try:
+        report = json.loads(path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError):
+        return auto_path, auto_data, None
+    if (not isinstance(report, dict) or report.get("schema") != "composer-v2-auto-quality-audit-v1"
+            or _auto_annotation_owner(path, report) != owner or bool(report.get("preview")) != preview):
+        return auto_path, auto_data, None
+    metadata = (auto_data or {}).get("audit_metadata") or {}
+    audit_id = report.get("audit_id")
+    if (audit_id or metadata.get("audit_id")) and audit_id != metadata.get("audit_id"):
+        return auto_path, auto_data, None
+    digest = report.get("manifest_sha256")
+    if digest and (not owner.is_file() or digest != hashlib.sha256(owner.read_bytes()).hexdigest()):
+        return auto_path, auto_data, None
+    if metadata.get("composed_sources") is not None:
+        # A report from a direct audit cannot describe the inherited fallback.
+        return auto_path, auto_data, None
+    report["report_path"] = str(path)
+    return auto_path, auto_data, report
+
+
+def save_auto_annotations(
+    manifest_path: str | Path,
+    records: Iterable[dict[str, Any]],
+    *,
+    audit_metadata: dict[str, Any] | None = None,
+    preview: bool = False,
+    composed: bool = False,
+) -> Path:
+    """Atomically write audit annotations alongside their manifest."""
+    manifest = Path(manifest_path).resolve()
+    path = auto_annotation_path(manifest, preview=preview, composed=composed)
+    if path == manifest:
+        raise ValueError("自动质检标注不能覆盖输入清单")
+    payload: dict[str, Any] = {
+        "schema": SCHEMA,
+        "manifest": str(manifest),
+        "records": [validate_record(item) for item in records],
+    }
+    if audit_metadata is not None:
+        payload["audit_metadata"] = dict(audit_metadata)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lock = _lock_for(path)
+    with lock:
+        if not preview and path.is_file():
+            try:
+                existing = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (UnicodeError, ValueError):
+                existing = None
+            owner = _auto_annotation_owner(path, existing)
+            if owner is not None and owner != manifest:
+                raise ValueError(f"自动质检标注已绑定另一训练清单：{owner}")
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=str(path.parent))
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                json.dump(payload, handle, ensure_ascii=False, indent=2)
+                handle.write("\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp_name, path)
+        finally:
+            try:
+                os.unlink(temp_name)
+            except FileNotFoundError:
+                pass
+    return path
+
+
+def remove_composed_auto_annotations(manifest_path: Path) -> None:
+    """Clear only a generated sidecar when an explicit composition is replaced."""
+    manifest = manifest_path.resolve()
+    for composed in (True, False):
+        path = auto_annotation_path(manifest, composed=composed)
+        with _lock_for(path):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8-sig"))
+            except (FileNotFoundError, UnicodeError, ValueError):
+                continue
+            if _auto_annotation_owner(path, data) != manifest:
+                continue
+            metadata = data.get("audit_metadata")
+            if composed or (isinstance(metadata, dict) and "composed_sources" in metadata):
+                path.unlink(missing_ok=True)
+
+
+def _subtract_intervals(
+    start: float,
+    end: float,
+    cutouts: list[tuple[float, float]],
+) -> list[tuple[float, float]]:
+    pieces = [(start, end)]
+    for cut_lo, cut_hi in cutouts:
+        next_pieces: list[tuple[float, float]] = []
+        for lo, hi in pieces:
+            if cut_hi <= lo or cut_lo >= hi:
+                next_pieces.append((lo, hi))
+                continue
+            if cut_lo > lo:
+                next_pieces.append((lo, cut_lo))
+            if hi > cut_hi:
+                next_pieces.append((cut_hi, hi))
+        pieces = next_pieces
+        if not pieces:
+            break
+    return pieces
+
+
+def merge_annotation_records(
+    manual: dict[str, Any] | None,
+    auto: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Merge manual and automated quality records with strict ``manual > auto`` priority.
+
+    * Manual chart-level exclusions and ``unmarked_weight == 0`` reviewed-only charts
+      remain 100% governed by ``manual``.
+    * Explicit chart-level decisions override automatic chart-level exclusions.
+      Interval-only edits keep the automatic chart-level decision. Legacy
+      records without a scope retain the saved chart-level interpretation.
+    * Any overlap between an automated region and a manual region is subtracted from
+      the automated region so human ``good`` / ``problem`` spans win unconditionally
+      and the merged ``regions`` array remains sorted and strictly disjoint.
+    """
+    if auto is None:
+        return validate_record(manual) if manual is not None else None
+    valid_auto = validate_record(auto)
+    if manual is None:
+        return valid_auto
+    valid_manual = validate_record(manual)
+    if (
+        valid_manual.get("label") in ("excluded", "negative")
+        or float(valid_manual.get("weight", 1.0)) <= 0.0
+        or valid_manual.get("unmarked_weight") == 0
+    ):
+        return valid_manual
+
+    manual_regions = list(valid_manual.get("regions", ()))
+    cutouts = [(float(r["start_sec"]), float(r["end_sec"])) for r in manual_regions]
+    kept_auto: list[dict[str, Any]] = []
+    for ar in valid_auto.get("regions", ()):
+        for sub_lo, sub_hi in _subtract_intervals(float(ar["start_sec"]), float(ar["end_sec"]), cutouts):
+            item = dict(ar)
+            item.pop("entry_start_sec", None)
+            item["start_sec"] = sub_lo
+            item["end_sec"] = sub_hi
+            kept_auto.append(item)
+
+    merged_regions = sorted(
+        [*manual_regions, *kept_auto],
+        key=lambda r: (float(r["start_sec"]), float(r["end_sec"])),
+    )
+    out = dict(valid_manual)
+    if valid_manual.get("chart_override") is False:
+        out.update(label=valid_auto["label"], weight=valid_auto["weight"], reason=valid_auto["reason"])
+    out["regions"] = merged_regions
+    return validate_record(out)
+
+
 def annotations_fingerprint(payload: dict[str, Any] | list[dict[str, Any]]) -> str:
     """Stable digest for including annotation content in a training contract."""
     return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
@@ -518,3 +783,24 @@ def region_component_weights(region: dict[str, Any]) -> tuple[float, float]:
     base = float(region.get("weight", 1.))
     return tuple(base * float(region.get(key, value)) for key, value in
                  zip(("timing_weight", "component_weight"), default))
+
+
+def zero_unmarked_region_weights(
+    region: dict[str, Any], *, require_explicit_good: bool = True
+) -> tuple[float, float]:
+    """Effective (timing, component) weights on an unmarked_weight=0 chart.
+
+    Persisted regions carry a ``label`` after validation; on zero-unmarked
+    sources only explicit ``label == 'good'`` (with ``training_use != 'none'``)
+    counts as positive supervision. Legacy in-memory callers may explicitly
+    opt out; persisted data must never infer approval from weights alone.
+    """
+    if not isinstance(region, dict) or region.get("training_use") == "none":
+        return (0.0, 0.0)
+    if require_explicit_good:
+        if region.get("label") != "good":
+            return (0.0, 0.0)
+    elif "label" in region and region.get("label") != "good":
+        return (0.0, 0.0)
+    timing, components = region_component_weights(region)
+    return (max(0.0, float(timing)), max(0.0, float(components)))

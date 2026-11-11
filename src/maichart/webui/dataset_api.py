@@ -161,6 +161,7 @@ class DatasetAPI:
                     card['candidate_pool_summary'] = summary
                 if data.get('reviewed_training'):
                     card['reviewed_regions']=data['reviewed_training'].get('regions',0)
+                    card['reviewed_only']=True
                 cache = Path(str(data.get("cache_dir") or "cache"))
                 card["cache_dir"] = str((cache if cache.is_absolute() else manifest.parent / cache).resolve())
             except (OSError, ValueError, TypeError, KeyError) as exc:
