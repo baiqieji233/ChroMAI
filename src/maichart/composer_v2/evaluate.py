@@ -172,6 +172,14 @@ def teacher_forced(args):
         options[key] = getattr(config, key)
     from . import chart_dialect
     options['dialect_policy'] = contract.get('chart_dialect', chart_dialect.LEGACY_STRICT_POLICY)
+    from .difficulty import FITTED_SOURCES, make_scorer, resolve_selection
+    selection = resolve_selection(parent=contract, resume=True)
+    options.update(min_level=selection.min_level, max_level=selection.max_level)
+    if selection.source in FITTED_SOURCES:
+        scorer = make_scorer(selection.source,None,args.cache_dir,read_only=True)
+        if selection.contract(scorer) != contract.get('difficulty_selection'):
+            raise ValueError('当前版本无法读取此检查点使用的拟合定数缓存')
+        options['difficulty_scorer'] = scorer
     # Parsing is permitted, but evaluation must not populate any persistent chart cache.
     with patch('maichart.composer_v2.chart_cache.ChartCache.save', return_value=None):
         dataset = StreamDataset(args.manifest, **options)
@@ -183,7 +191,8 @@ def teacher_forced(args):
         song.summary = dict(song.audio.summary(160))
         song.summary['beats'] = _beats_at_seconds(song.clock, song.summary['times_sec'])
         song.end_beat = Fraction(str(float(_beats_at_seconds(song.clock, [duration])[0])))
-        song.condition, song.condition_known = resolve_condition(song.level, policy=config.condition_policy)
+        song.condition, song.condition_known = resolve_condition(
+            song.level, policy=config.condition_policy, max_level=dataset.max_condition_level)
     model = ComposerV2(config, codec).cpu().eval()
     model.load_state_dict(payload['model_state_dict'], strict=True)
     totals = {key: Counter() for key in ('all', 'time', 'phase', 'time_digits_true_prefix')}

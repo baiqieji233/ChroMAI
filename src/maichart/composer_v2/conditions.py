@@ -40,7 +40,7 @@ def policy_from_config(config):
     return policy
 
 
-def resolve_condition(level, radar=None, style=None, *, policy=RADAR_STYLE):
+def resolve_condition(level, radar=None, style=None, *, policy=RADAR_STYLE, max_level=15.):
     """Resolve explicit requests; omitted/null optional values stay unknown."""
     contract = condition_contract(policy)
     values = np.zeros(len(CONDITION_KEYS), dtype=np.float32)
@@ -63,7 +63,7 @@ def resolve_condition(level, radar=None, style=None, *, policy=RADAR_STYLE):
         if isinstance(value, bool):
             raise ValueError('Condition must be a finite number: ' + key)
         number = float(value)
-        lower, upper = (1., 15.) if key == 'level' else (0., 1.)
+        lower, upper = (1., max_level) if key == 'level' else (0., 1.)
         if not math.isfinite(number) or not lower <= number <= upper:
             raise ValueError(f'Condition {key} must be finite and in [{lower}, {upper}]')
         values[index] = number / 15. if key == 'level' else number
@@ -122,9 +122,9 @@ def _audio_onset_proxy(audio, first):
 
 
 def training_condition(points, tempo_changes, *, level, duration_sec, policy=RADAR_STYLE,
-                       audio=None, first=0.):
+                       audio=None, first=0., max_level=15.):
     if policy == LEVEL_ONLY:
-        return resolve_condition(level, policy=policy)
+        return resolve_condition(level, policy=policy, max_level=max_level)
     from maichart.generation.event_quality import condition_from_events, MIACODE_DURATION_SEMANTICS
     proxy = _audio_onset_proxy(audio, first)
     condition = condition_from_events(points, tempo_changes, level=level,
@@ -133,4 +133,4 @@ def training_condition(points, tempo_changes, *, level, duration_sec, policy=RAD
     style = dict(condition.style)
     if proxy is None:
         style.pop('melody_following', None)
-    return resolve_condition(level, condition.radar, style, policy=policy)
+    return resolve_condition(level, condition.radar, style, policy=policy, max_level=max_level)

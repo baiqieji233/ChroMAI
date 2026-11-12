@@ -92,6 +92,16 @@ packaged assets/releases unless an individual license says otherwise.
 The player's source, runtime assets and bundled dependencies retain the terms
 in those files; this project's MIT license does not override them.
 
+## Optional Chart;Gate difficulty estimation
+
+Composer v2 can use the [Chart;Gate](https://github.com/inm2002/chartgate) local
+inference release at commit `44d07804de32` for difficulty estimates. The
+initializer obtains the upstream project separately. Chart;Gate and its
+[MajSimai](https://github.com/TeamMajdata/MajSimai) parser are provided by their
+respective contributors under GPL-3.0-or-later. See the upstream
+[license](https://github.com/inm2002/chartgate/blob/44d07804de32e66fc66f93c98ab67e2a981b7753/LICENSE)
+and [third-party notices](https://github.com/inm2002/chartgate/blob/44d07804de32e66fc66f93c98ab67e2a981b7753/THIRD_PARTY_NOTICES.md).
+
 ## Composer checkpoints and user content
 
 No Composer checkpoint license is granted by the source license. Checkpoints

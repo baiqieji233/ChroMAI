@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "activation_checkpointing", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience", "reviewed_reference_policy", "auto_quality_policy"];
+const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "activation_checkpointing", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience", "reviewed_reference_policy", "auto_quality_policy", "difficulty_source", "min_level", "max_level", "open_mdp_dir", "chartgate_dir"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -21,7 +21,7 @@ function composerV2TrainingPayload(options={}) {
     quality_enabled:checkedOrDefault('#v2TrainQualityEnabled',true),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy"]);
+  const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -29,6 +29,15 @@ function composerV2TrainingPayload(options={}) {
   // Disabled automatic-split controls must not override an explicit manual
   // validation source, including when talking to an older running server.
   if(payload.validation_source && payload.validation_source!=='auto')delete payload.holdout_fraction;
+  if (payload.mode==='resume') {
+    delete payload.difficulty_source;
+    delete payload.min_level;
+    delete payload.max_level;
+    delete payload.open_mdp_dir;
+    delete payload.chartgate_dir;
+  }
+  if (payload.difficulty_source!=='fitted') delete payload.open_mdp_dir;
+  if (payload.difficulty_source!=='chartgate') delete payload.chartgate_dir;
   if (payload.mode==='resume' || !payload.quality_enabled) delete payload.auto_quality_policy;
   return payload;
 }
@@ -308,6 +317,49 @@ function composerV2GenerationMessage(task) {
   if(task.message==='composer_v2_event' && event)return `已生成 ${event.events} 个事件 · 当前拍位 ${event.beat}`;
   return task.message||'等待生成进度';
 }
+function updateV2DifficultyControls() {
+  const source=valueOrDefault('#v2TrainDifficultySource','declared');
+  const fitted=source==='fitted'||source==='chartgate';
+  const directory=element('#v2TrainOpenMdpDirectoryField');
+  if(directory) directory.hidden=source!=='fitted';
+  const path=element('#v2TrainOpenMdpDir');
+  if(path) path.disabled=source!=='fitted' || currentTrainingMode()==='resume';
+  const gate=element('#v2TrainChartgateOptions');
+  if(gate) gate.hidden=source!=='chartgate';
+  const gatePath=element('#v2TrainChartgateDir');
+  if(gatePath) gatePath.disabled=source!=='chartgate' || currentTrainingMode()==='resume';
+  const high=element('#v2TrainMaxLevel');
+  if(high) high.placeholder=fitted?'16':'15';
+  for(const id of ['#v2TrainMinLevel','#v2TrainMaxLevel']) {
+    const bound=element(id);
+    if(bound) bound.max=fitted?'20':'15';
+  }
+}
+
+async function initializeV2Chartgate() {
+  const button=element('#v2TrainChartgateSetup');
+  const status=element('#v2TrainChartgateStatus');
+  if(!button||!status||button.disabled) return;
+  button.disabled=true;
+  status.textContent='正在准备 Chart;Gate…';
+  try {
+    const payload={
+      cache_dir:valueOrDefault('#v2TrainCacheDir','').trim(),
+      chartgate_dir:valueOrDefault('#v2TrainChartgateDir','').trim()
+    };
+    const started=await api('/api/composer-v2/chartgate_setup',payload);
+    watchTask(started.task_id, task=>{
+      button.disabled=false;
+      status.textContent=task.status==='completed'
+        ? 'Chart;Gate 已就绪，可以开始训练。'
+        : '初始化未完成。请查看任务日志。';
+    });
+  } catch(error) {
+    button.disabled=false;
+    status.textContent=error.message;
+  }
+}
+
 function applyComposerV2Inspection(data) {
   if(!data?.valid)return;
   const saved={...(data.args||{}),...(data.model_config||{})};
@@ -318,6 +370,14 @@ function applyComposerV2Inspection(data) {
   saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
   saved.song_layers=data.model_config?.song_layers??2;
+  if(currentTrainingMode()==='resume') {
+    const difficulty=data.training_contract?.difficulty_selection;
+    saved.difficulty_source=difficulty?.source??'declared';
+    saved.min_level=difficulty?.min_level??12;
+    saved.max_level=difficulty?.max_level??15;
+    saved.open_mdp_dir=data.args?.open_mdp_dir??'';
+    saved.chartgate_dir=data.args?.chartgate_dir??'';
+  }
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   if(currentTrainingMode()==='resume' && element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=saved.quality_enabled!==false;
   for(const key of COMPOSER_V2_FIELDS) {
@@ -325,6 +385,7 @@ function applyComposerV2Inspection(data) {
     const node=element("#"+v2FieldId(key));
     if(node && Object.prototype.hasOwnProperty.call(saved,key) && (currentTrainingMode()==="resume" || ["d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","refresh_events"].includes(key)))node.value=saved[key]==null?'':String(saved[key]);
   }
+  updateV2DifficultyControls();
 }
 
 function trainingMetricNumber(values, key) {
@@ -3707,6 +3768,7 @@ function updateTrainingControls() {
   }
   const autoQuality=element('#v2TrainAutoQualityPolicy');
   if (autoQuality) autoQuality.disabled=v2Resume || !checkedOrDefault('#v2TrainQualityEnabled',true);
+  updateV2DifficultyControls();
   const validationSource=element("#v2TrainValidationSource")?.value||"auto";
   const v2Validation=element("#v2TrainValidationManifest");if(v2Validation)v2Validation.disabled=v2Resume||validationSource!=="manual";
   const v2Fraction=element("#v2TrainHoldoutFraction");if(v2Fraction)v2Fraction.disabled=v2Resume||validationSource!=="auto";
@@ -5851,6 +5913,16 @@ async function submitTrain(options = {}) {
     if ((payload.auto_quality_policy ?? 'auto')!=='auto' && !backend.training_capabilities?.composer_v2_auto_quality) {
       throw new Error('指定自动质检策略需要新版后台，请重启 WebUI 后提交。');
     }
+    if ((payload.difficulty_source==='fitted' || payload.min_level!=null || payload.max_level!=null
+        || checkpointInspection?.data?.training_contract?.difficulty_selection)
+        && !backend.training_capabilities?.composer_v2_difficulty_selection) {
+      throw new Error('训练谱面难度筛选需要更新后的 WebUI 后台。请重启后台后提交。');
+    }
+    if ((payload.difficulty_source==='chartgate' ||
+        (payload.mode==='resume' && checkpointInspection?.data?.training_contract?.difficulty_selection?.source==='chartgate'))
+        && !backend.training_capabilities?.composer_v2_chartgate) {
+      throw new Error('请重启 WebUI 后再使用 Chart;Gate。');
+    }
     trainingStarting=true;updateDatasetButtons();
     try{const data=await api("/api/composer-v2/train",payload);watchTask(data.task_id,()=>{trainingStarting=false;updateDatasetButtons();});}
     catch(error){trainingStarting=false;updateDatasetButtons();throw error;}
@@ -7857,6 +7929,8 @@ on("#modelFamily", "change", () => {
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
 on("#v2TrainValidationSource", "change", () => {updateTrainingControls();saveSettings();});
+on("#v2TrainDifficultySource", "change", () => {updateV2DifficultyControls();saveSettings();});
+on("#v2TrainChartgateSetup", "click", initializeV2Chartgate);
 on("#v2TrainQualityEnabled", "change", () => {updateTrainingControls();saveSettings();});
 on('#v2GenerateCount','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GenerateParallel','input',()=>{updateV2BatchControls();saveSettings();});

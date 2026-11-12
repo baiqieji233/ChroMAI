@@ -120,6 +120,18 @@
 | **模型宽度 / 层数 / 注意力头 / 前馈宽度**（高级） | `--d-model` / `--layers` / `--nhead` / `--dim-feedforward` | `384` / `8` / `8` / `1536` | Transformer 主干容量配置。微调或续训已有模型时自动从检查点继承。 |
 | **每拍脉冲数 / 最大序列长度**（高级） | `--ticks-per-beat` / `--max-tokens` | `48` / `2048` | 时间网格基准分辨率与单样本最大 token 容量（其中一半用于历史与参考前文）。 |
 
+### 用拟合定数筛选谱面
+
+1. 打开「训练模型 → 训练谱面难度筛选」，把「定数来源」选为「拟合定数（Chart;Gate）」。
+2. 第一次使用时点「初始化 Chart;Gate」。已有文件可以自动找到，也可以在「已有 Chart;Gate 文件」中手动指定目录。首次初始化需要 .NET SDK 9 或更新版本。
+3. 设置最低和最高定数，留空使用 **12–16**。Chart;Gate 支持 **MASTER 和 Re:MASTER**，选择它时只使用这两个难度的谱。
+
+训练和验证使用同一份估分。通过筛选的谱面会把该估分交给模型作为难度，估分结果在本机缓存。训练输出目录的 `dataset_audit.json` 会列出原标、拟合定数、筛除和失败原因。
+
+「谱面原标定数」与「拟合定数（open-mdp）」也可以继续选用。已有模型可以在新目录微调时切换定数来源，断点续训沿用原设置。
+
+感谢 Chart;Gate 与 MajSimai 提供的估分工具与谱面解析器。 [在线试算](https://chart.ratinggate.cn/) · [Chart;Gate 项目](https://github.com/inm2002/chartgate) · [MajSimai 项目](https://github.com/TeamMajdata/MajSimai) · [open-mdp 项目](https://github.com/RightSG/open-mdp)
+
 ### 已有模型升级到「节拍结构与对齐参考」
 
 旧检查点（未启用该选项）仍按原方式正常生成，结果不变。想让已有模型获得新能力，用 **已有模型加强训练（finetune）**：

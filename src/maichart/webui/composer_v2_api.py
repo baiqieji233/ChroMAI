@@ -66,6 +66,18 @@ def _start(handler,runtime,kind,args,settings,paths,checkpoint_dir=None):
         result.update(manifest=settings['manifest'], auto_scope='preview' if settings['limit_charts'] else 'formal')
     return handler._json_response(result)
 
+def start_chartgate_setup(handler,payload,*,runtime):
+    _family(payload)
+    cache = _path(payload.get('cache_dir') or 'cache/chart_composer_v2','音频缓存目录')
+    settings = {'cache_dir':str(cache)}
+    args = ['-m','maichart.composer_v2.chartgate','--cache-dir',str(cache)]
+    if payload.get('chartgate_dir'):
+        directory = _path(payload['chartgate_dir'],'Chart;Gate 目录',exists=True,directory=True)
+        settings['chartgate_dir'] = str(directory)
+        _arg(args,'--chartgate-dir',directory)
+    return _start(handler,runtime,'composer_v2_chartgate_setup',args,settings,[])
+
+
 def start_train(handler,payload,*,runtime):
     _family(payload)
     if payload.get("auto_preprocess"): raise ValueError("Composer v2 请先准备训练 manifest")
@@ -94,6 +106,21 @@ def start_train(handler,payload,*,runtime):
     sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
     settings={}
+    from maichart.composer_v2.difficulty import FITTED_SOURCES, locate_scorer, resolve_selection, scorer_path_key
+    difficulty=resolve_selection(payload.get('difficulty_source','auto'),payload.get('min_level'),
+        payload.get('max_level'),parent=checked.get('training_contract') if parent else None,
+        resume=mode=='resume')
+    settings.update(difficulty_source=difficulty.source,min_level=difficulty.min_level,max_level=difficulty.max_level)
+    for key in ('difficulty_source','min_level','max_level'):
+        _arg(args,'--'+key.replace('_','-'),settings[key])
+    if difficulty.source in FITTED_SOURCES:
+        key = scorer_path_key(difficulty.source)
+        saved_directory = (checked.get('args') or {}).get(key) if mode=='resume' else None
+        requested_directory = (_path(payload[key],'估分工具目录',exists=True,directory=True)
+                               if payload.get(key) else None)
+        root = locate_scorer(difficulty.source,cache,requested_directory,saved_directory)
+        _arg(args,'--'+key.replace('_','-'),root)
+        settings[key] = str(root)
     quality=payload.get('quality_enabled',((checked.get('args') or {}).get('quality_enabled',True) if mode=='resume' else True))
     if not isinstance(quality,bool): raise ValueError('质量加权必须是布尔值')
     try:

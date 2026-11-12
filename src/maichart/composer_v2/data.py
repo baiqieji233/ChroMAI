@@ -70,6 +70,8 @@ class ComposerV2Song:
 
 
 class ComposerV2Dataset(Dataset):
+    max_condition_level = 15.
+
     def __init__(self, manifest, cache_dir, codec=None, window_beats=16,
                  history_beats=16, future_beats=4, ticks_per_beat=48,
                  max_tokens=2048, audio_backend='mert', mert_model=None,
@@ -78,7 +80,7 @@ class ComposerV2Dataset(Dataset):
                  min_difficulty_index=4, max_difficulty_index=6,
                  quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
                  extend_vocabulary=False, dialect_policy=chart_dialect.POLICY,
-                 auto_quality_policy='off'):
+                 auto_quality_policy='off', difficulty_scorer=None):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
@@ -98,6 +100,11 @@ class ComposerV2Dataset(Dataset):
         self.future_beats, self.max_tokens = future_beats, int(max_tokens)
         self.songs, self.windows = [], []
         self.audit = {'skipped': [], 'filtered': [], 'charts': [], 'windows': 0}
+        if difficulty_scorer is not None:
+            self.max_condition_level = max_level
+            self.audit['difficulty_selection'] = dict(source=getattr(difficulty_scorer,'source','fitted'), scorer=difficulty_scorer.identity,
+                                                       min_level=min_level, max_level=max_level)
+        supported_slots = getattr(difficulty_scorer,'supported_slots',None)
         self.audit['chart_dialect'] = {'policy': dialect_policy, 'changes': []}
         manifest_bytes = self.manifest.read_bytes()
         payload = json.loads(manifest_bytes.decode('utf-8-sig'))
@@ -156,10 +163,17 @@ class ComposerV2Dataset(Dataset):
                 slot = int(difficulty.get('difficulty_index', difficulty.get('index', 0)))
                 if not min_difficulty_index <= slot <= max_difficulty_index:
                     continue
+                declared = difficulty.get('level_raw', difficulty.get('level'))
+                if supported_slots is not None and slot not in supported_slots:
+                    if difficulty.get('has_chart',True):
+                        self.audit['filtered'].append(dict(source=str(entry.get('maidata_path','')),
+                            difficulty=slot,declared_level=declared,reason='difficulty_slot_unsupported'))
+                    continue
                 try:
-                    level = numeric_level(difficulty.get('level_raw', difficulty.get('level')))
-                    if not min_level <= level <= max_level:
-                        continue
+                    if difficulty_scorer is None:
+                        level = numeric_level(declared)
+                        if not min_level <= level <= max_level:
+                            continue
                     if source is None:
                         chart_path = _source_asset(entry['maidata_path'], self.manifest, payload)
                         audio_path = _source_asset(entry['audio_path'], self.manifest, payload)
@@ -195,7 +209,14 @@ class ComposerV2Dataset(Dataset):
                                     or float(quality.get('weight', 1.)) <= 0):
                         self.audit['skipped'].append({'source': str(source), 'reason': 'quality_excluded'})
                         continue
-                    condition, known = resolve_condition(level, policy=condition_policy)
+                    if difficulty_scorer is not None:
+                        level = difficulty_scorer.score(chart_sha, slot, source, chart_bytes)
+                        if not min_level <= level <= max_level:
+                            self.audit['filtered'].append(dict(source=str(source), difficulty=slot,
+                                declared_level=declared, fitted_level=level, reason='fitted_level_out_of_range'))
+                            continue
+                    condition, known = resolve_condition(level, policy=condition_policy,
+                                                         max_level=self.max_condition_level)
                     song = ComposerV2Song(str(entry.get('song_id', source.parent.name)),
                         source, audio_path, slot, level, list(chart.points),
                         TempoClock(chart.tempo_changes, chart.audio_first),
@@ -216,6 +237,8 @@ class ComposerV2Dataset(Dataset):
                     self.audit['charts'].append({'source': str(source), 'difficulty': slot,
                         'chart_sha256': chart_sha,
                         'first': chart.audio_first, 'quality': quality})
+                    if difficulty_scorer is not None:
+                        self.audit['charts'][-1].update(declared_level=declared, fitted_level=level)
                     if any(dialect_edits.values()):
                         self.audit['chart_dialect']['changes'].append({
                             'source': str(source), 'difficulty': slot, **dialect_edits})
@@ -231,6 +254,9 @@ class ComposerV2Dataset(Dataset):
                                      'chart_cache_hits': cache_hits}
         del prepared_charts, manifest_bytes, payload, entries, annotations, annotation_index
         if not self.songs:
+            if difficulty_scorer is not None:
+                raise ValueError(f'拟合定数 {min_level:g}–{max_level:g} 内无可训练谱面。'
+                                 f'已筛除 {len(self.audit["filtered"])} 张。解析或估分失败示例：{self.audit["skipped"][:4]}')
             raise ValueError(f'No usable composer_v2 charts: {self.audit["skipped"][:4]}')
         continuous = sequence_policy == 'continuous_events_v1'
         vocabulary_start = time.perf_counter()
@@ -388,7 +414,8 @@ class ComposerV2Dataset(Dataset):
                 window_end_beat=str(audio_end)))
             if (song.quality or {}).get('unmarked_weight') == 0:
                 # An unreviewed remainder cannot define chart-wide radar/style.
-                song.condition, song.condition_known = resolve_condition(song.level, policy=self.condition_policy)
+                song.condition, song.condition_known = resolve_condition(
+                    song.level, policy=self.condition_policy, max_level=self.max_condition_level)
                 usable.append(song)
                 continue
             condition_key = (song.chart_sha256 or song.source_path, song.difficulty, song.level, audio_key)
@@ -396,7 +423,7 @@ class ComposerV2Dataset(Dataset):
                 conditions[condition_key] = training_condition(song.points,
                     [EventTempo(beat, bpm) for beat, bpm in zip(song.clock.beats, song.clock.bpms)],
                     level=song.level, duration_sec=duration, policy=self.condition_policy,
-                    audio=song.audio, first=song.clock.seconds[0])
+                    audio=song.audio, first=song.clock.seconds[0], max_level=self.max_condition_level)
             condition, known = conditions[condition_key]
             song.condition, song.condition_known = condition.copy(), known.copy()
             usable.append(song)

@@ -41,6 +41,12 @@ def parser():
         if key in ('audio_layers','song_layers','music_context'):continue
         result.add_argument("--"+key.replace("_","-"),default=value,type=type(value))
     result.add_argument("--mert-model")
+    from .difficulty import SOURCES
+    result.add_argument('--difficulty-source', choices=SOURCES, default='auto')
+    result.add_argument('--min-level', type=float)
+    result.add_argument('--max-level', type=float)
+    result.add_argument('--open-mdp-dir')
+    result.add_argument('--chartgate-dir')
     result.add_argument('--audio-layers',type=int,default=None,help='Fresh: 4; parent: inherit. Init may append identity blocks.')
     result.add_argument('--song-layers',type=int,default=None,help='Fresh: 2; parent: inherit.')
     from .music_policy import CHOICES as MUSIC_CHOICES
@@ -405,6 +411,21 @@ def train(args):
     # Reference availability and annotation approval are independent. Only an
     # actual old resume retains the old weight-only supervision semantics.
     parent_contract = parent.get('training_contract', {}) if parent else {}
+    from .difficulty import FITTED_SOURCES, locate_scorer, make_scorer, resolve_selection, scorer_path_key
+    difficulty = resolve_selection(getattr(args, 'difficulty_source', 'auto'),
+        getattr(args, 'min_level', None), getattr(args, 'max_level', None),
+        parent=parent_contract, resume=bool(args.resume))
+    args.difficulty_source, args.min_level, args.max_level = difficulty.source, difficulty.min_level, difficulty.max_level
+    scorer = None
+    if difficulty.source in FITTED_SOURCES:
+        key = scorer_path_key(difficulty.source)
+        saved_directory = (parent.get('args') or {}).get(key) if args.resume else None
+        root = locate_scorer(difficulty.source, args.cache_dir, getattr(args,key,None), saved_directory)
+        setattr(args,key,str(root))
+        scorer = make_scorer(difficulty.source, root, args.cache_dir)
+    difficulty_contract = difficulty.contract(scorer)
+    if args.resume and difficulty_contract != parent_contract.get('difficulty_selection'):
+        raise ValueError('断点续训需要沿用检查点的估分版本；切换版本可用新目录微调。')
     zero_unmarked_policy = resolve_zero_unmarked_policy(parent_contract,resume=bool(args.resume))
     reference_quality_policy = (parent_contract.get('reference_quality_policy','legacy_v1')
                                 if args.resume else 'event_mask_v1')
@@ -486,7 +507,8 @@ def train(args):
         future_beats=args.future_beats,ticks_per_beat=args.ticks_per_beat,max_tokens=args.max_tokens,
         audio_backend=args.audio_backend,mert_model=args.mert_model,prepare_device=prepare_device,limit_charts=args.limit_charts,
         condition_policy=args.condition_policy,audio_store=audio_store,dialect_policy=dialect_policy,
-        quality_enabled=getattr(args,'quality_enabled',True),auto_quality_policy=auto_quality_policy)
+        quality_enabled=getattr(args,'quality_enabled',True),auto_quality_policy=auto_quality_policy,
+        min_level=difficulty.min_level,max_level=difficulty.max_level,difficulty_scorer=scorer)
     dataset_class=ComposerV2Dataset
     if args.sequence_policy=='continuous_events_v1':
         from .stream_data import StreamDataset
@@ -499,17 +521,23 @@ def train(args):
                        reference_quality_policy=reference_quality_policy)
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':train_options['reference_augmentation']=True
-    dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
-    if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
-        raise ValueError('准备训练数据时未找到匹配的自动质检标注')
-    vocabulary_changed = codec is not None and dataset.codec is not codec
-    if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
-        raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
-    parent_vocab_size = codec.vocab_size if codec is not None else None
-    codec=dataset.codec
-    validation_options={**options,"codec":codec,"limit_charts":0}
-    if args.sequence_policy=='continuous_events_v1':validation_options['timing_recovery_policy']='off'
-    validation=dataset_class(args.validation_manifest,**validation_options) if args.validation_manifest else None
+    with scorer if scorer is not None else nullcontext():
+        dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
+        if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
+            raise ValueError('准备训练数据时未找到匹配的自动质检标注')
+        vocabulary_changed = codec is not None and dataset.codec is not codec
+        if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
+            raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
+        parent_vocab_size = codec.vocab_size if codec is not None else None
+        codec=dataset.codec
+        validation_options={**options,"codec":codec,"limit_charts":0}
+        if args.sequence_policy=='continuous_events_v1':validation_options['timing_recovery_policy']='off'
+        validation=dataset_class(args.validation_manifest,**validation_options) if args.validation_manifest else None
+    if scorer is not None:
+        emit('difficulty_fit', scorer=scorer.identity,cache_hits=scorer.hits,computed=scorer.computed,
+             train_charts=len(dataset.songs), outside_range=sum(
+                 row['reason']=='fitted_level_out_of_range' for row in dataset.audit['filtered']),
+             unsupported_slot=sum(row['reason']=='difficulty_slot_unsupported' for row in dataset.audit['filtered']))
     identity=dict(train=_identity(dataset),validation=_identity(validation) if validation else None)
     gc.collect()
     if torch.cuda.is_available():torch.cuda.empty_cache()
@@ -551,6 +579,8 @@ def train(args):
         contract['chart_dialect'] = dialect_policy
     if auto_quality_policy != 'off':
         contract['auto_quality_policy'] = auto_quality_policy
+    if difficulty_contract is not None:
+        contract['difficulty_selection'] = difficulty_contract
     if args.resume and (not _same_data_identity(parent["data_identity"],identity) or parent["training_contract"]!=contract):
         raise ValueError("Exact resume data/optimizer/schedule contract changed; retain the parent and use compatible finetune in a new directory")
     model=ComposerV2(config,codec).to(device)

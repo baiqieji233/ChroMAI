@@ -277,6 +277,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_timing_calibration": True,
                                               "composer_v2_feasibility_options": True,
                                               "composer_v2_auto_quality": True,
+                                              "composer_v2_difficulty_selection": True,
+                                              "composer_v2_chartgate": True,
                                               "composer_v2_auto_quality_audit": True,
                                               "composer_phrase_contract": "phrase_modes_v1",
                                               "composer_process_prefetch": True,
@@ -344,6 +346,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 operation = parsed.path.rsplit("/", 1)[-1]
                 if operation == "inspect": return composer_v2_api.inspect(self, payload)
                 if operation == "train": return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
+                if operation == "chartgate_setup": return composer_v2_api.start_chartgate_setup(self, payload, runtime=sys.modules[__name__])
                 if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])
                 if operation == "curve": return composer_v2_api.start_curve(self, payload, runtime=sys.modules[__name__])
                 if operation == "media": return composer_v2_api.start_media(self, payload, runtime=sys.modules[__name__])
