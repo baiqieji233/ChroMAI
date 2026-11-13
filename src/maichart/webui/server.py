@@ -278,6 +278,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_feasibility_options": True,
                                               "composer_v2_auto_quality": True,
                                               "composer_v2_difficulty_selection": True,
+                                              "composer_v2_combined_difficulty_filters": True,
                                               "composer_v2_chartgate": True,
                                               "composer_v2_auto_quality_audit": True,
                                               "composer_phrase_contract": "phrase_modes_v1",

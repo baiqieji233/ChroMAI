@@ -25,6 +25,7 @@ from maichart.training.quality_annotations import split_annotation_source
 from . import chart_dialect
 from .chart_cache import ChartCache
 from .conditions import RADAR_STYLE, condition_contract, resolve_condition, training_condition
+from .difficulty import DIFFICULTY_SLOTS, metadata_exclusion
 
 
 def _beat(value):
@@ -80,7 +81,8 @@ class ComposerV2Dataset(Dataset):
                  min_difficulty_index=4, max_difficulty_index=6,
                  quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
                  extend_vocabulary=False, dialect_policy=chart_dialect.POLICY,
-                 auto_quality_policy='off', difficulty_scorer=None):
+                 auto_quality_policy='off', difficulty_scorer=None, min_declared_level=0.,
+                 difficulty_slots=None):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
@@ -102,8 +104,14 @@ class ComposerV2Dataset(Dataset):
         self.audit = {'skipped': [], 'filtered': [], 'charts': [], 'windows': 0}
         if difficulty_scorer is not None:
             self.max_condition_level = max_level
-            self.audit['difficulty_selection'] = dict(source=getattr(difficulty_scorer,'source','fitted'), scorer=difficulty_scorer.identity,
-                                                       min_level=min_level, max_level=max_level)
+        if difficulty_scorer is not None or min_declared_level or difficulty_slots not in (None, DIFFICULTY_SLOTS):
+            selection_audit = dict(source='declared', min_level=min_level, max_level=max_level,
+                                   min_declared_level=min_declared_level,
+                                   difficulty_slots=list(difficulty_slots or DIFFICULTY_SLOTS))
+            if difficulty_scorer is not None:
+                selection_audit.update(source=getattr(difficulty_scorer, 'source', 'fitted'),
+                                       scorer=difficulty_scorer.identity)
+            self.audit['difficulty_selection'] = selection_audit
         supported_slots = getattr(difficulty_scorer,'supported_slots',None)
         self.audit['chart_dialect'] = {'policy': dialect_policy, 'changes': []}
         manifest_bytes = self.manifest.read_bytes()
@@ -164,10 +172,11 @@ class ComposerV2Dataset(Dataset):
                 if not min_difficulty_index <= slot <= max_difficulty_index:
                     continue
                 declared = difficulty.get('level_raw', difficulty.get('level'))
-                if supported_slots is not None and slot not in supported_slots:
-                    if difficulty.get('has_chart',True):
+                exclusion = metadata_exclusion(slot, declared, difficulty_slots, supported_slots, min_declared_level)
+                if exclusion is not None:
+                    if difficulty.get('has_chart', True):
                         self.audit['filtered'].append(dict(source=str(entry.get('maidata_path','')),
-                            difficulty=slot,declared_level=declared,reason='difficulty_slot_unsupported'))
+                            difficulty=slot,declared_level=declared,reason=exclusion))
                     continue
                 try:
                     if difficulty_scorer is None:
@@ -254,8 +263,8 @@ class ComposerV2Dataset(Dataset):
                                      'chart_cache_hits': cache_hits}
         del prepared_charts, manifest_bytes, payload, entries, annotations, annotation_index
         if not self.songs:
-            if difficulty_scorer is not None:
-                raise ValueError(f'拟合定数 {min_level:g}–{max_level:g} 内无可训练谱面。'
+            if 'difficulty_selection' in self.audit:
+                raise ValueError('当前难度筛选条件下没有可用谱面。'
                                  f'已筛除 {len(self.audit["filtered"])} 张。解析或估分失败示例：{self.audit["skipped"][:4]}')
             raise ValueError(f'No usable composer_v2 charts: {self.audit["skipped"][:4]}')
         continuous = sequence_policy == 'continuous_events_v1'

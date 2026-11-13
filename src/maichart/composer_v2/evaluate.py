@@ -174,7 +174,7 @@ def teacher_forced(args):
     options['dialect_policy'] = contract.get('chart_dialect', chart_dialect.LEGACY_STRICT_POLICY)
     from .difficulty import FITTED_SOURCES, make_scorer, resolve_selection
     selection = resolve_selection(parent=contract, resume=True)
-    options.update(min_level=selection.min_level, max_level=selection.max_level)
+    options.update(selection.dataset_options())
     if selection.source in FITTED_SOURCES:
         scorer = make_scorer(selection.source,None,args.cache_dir,read_only=True)
         if selection.contract(scorer) != contract.get('difficulty_selection'):

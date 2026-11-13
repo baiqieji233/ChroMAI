@@ -12,6 +12,18 @@
     return control?.selectedOptions?.[0]?.textContent.trim() || value(id);
   };
 
+  function v2DifficultySummary() {
+    const source = value("v2TrainDifficultySource");
+    const fitted = source === "chartgate" || source === "fitted";
+    const minDeclared = Number(value("v2TrainMinDeclaredLevel", "1"));
+    const slots = [[4, "EXPERT"], [5, "MASTER"], [6, "Re:MASTER"]]
+      .filter(([slot]) => (source !== "chartgate" || slot !== 4) && checked("v2TrainDifficultySlot" + slot))
+      .map(([, name]) => name);
+    const range = `${value("v2TrainMinLevel") || 12}–${value("v2TrainMaxLevel") || (fitted ? 16 : 15)}`;
+    const declared = fitted ? (minDeclared > 0 ? ` · 标称定数 ≥ ${minDeclared}` : " · 标称校验关闭") : "";
+    return `训练定数 ${nameOf("v2TrainDifficultySource")} ${range}${declared} · 槽位 ${slots.join("、") || "未选择"}`;
+  }
+
   function v2GenerationSearchSummary() {
     if (document.getElementById('v2GeneratePhraseSearch')?.disabled) return '写谱方式 · 旧模型窗口生成';
     const mode = value('v2GeneratePhraseSearch', 'layout');
@@ -193,7 +205,7 @@
       `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
       `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
       `学习率 ${value("v2TrainLr")} · ${nameOf("v2TrainLrSchedule")} · 音频特征 ${nameOf("v2TrainAudioBackend")}`,
-      `训练定数：${nameOf("v2TrainDifficultySource")} · ${value("v2TrainMinLevel") || 12}–${value("v2TrainMaxLevel") || (value("v2TrainDifficultySource")==="declared" ? 15 : 16)}`,
+      v2DifficultySummary(),
       `素材清洗与标注：${checked("v2TrainQualityEnabled") ? `开启（${nameOf("v2TrainAutoQualityPolicy")}；手动标注优先）` : "关闭（整谱原始均匀学习）"}`,
       `验证：${mode==="resume"?"继承 checkpoint 已保存的训练与验证清单":value('v2TrainValidationSource')==='auto'?Number(value('v2TrainHoldoutFraction'))===0?'关闭（自动留出比例为0）':`自动留出 ${Math.round(Number(value('v2TrainHoldoutFraction'))*100)}%（按整首歌严格隔离）`:value('v2TrainValidationSource')==='manual'?`手动清单 ${value('v2TrainValidationManifest').trim()||'尚未选择'}`:'关闭'}`,
       mode==='resume'?'严格续训继承原训练总计划；已完成计划后，新增训练请使用新目录 finetune。':`谱面上限 ${chartLimit||'不限'} · 更新尝试上限 ${limits||'不限'}`,

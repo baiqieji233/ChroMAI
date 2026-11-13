@@ -45,6 +45,8 @@ def parser():
     result.add_argument('--difficulty-source', choices=SOURCES, default='auto')
     result.add_argument('--min-level', type=float)
     result.add_argument('--max-level', type=float)
+    result.add_argument('--min-declared-level', type=float, help='Minimum declared level for fitted scoring; 0 disables this check.')
+    result.add_argument('--difficulty-slots', type=int, nargs='+', help='Difficulty slots to include (4, 5, 6).')
     result.add_argument('--open-mdp-dir')
     result.add_argument('--chartgate-dir')
     result.add_argument('--audio-layers',type=int,default=None,help='Fresh: 4; parent: inherit. Init may append identity blocks.')
@@ -414,8 +416,12 @@ def train(args):
     from .difficulty import FITTED_SOURCES, locate_scorer, make_scorer, resolve_selection, scorer_path_key
     difficulty = resolve_selection(getattr(args, 'difficulty_source', 'auto'),
         getattr(args, 'min_level', None), getattr(args, 'max_level', None),
+        min_declared_level=getattr(args, 'min_declared_level', None),
+        difficulty_slots=getattr(args, 'difficulty_slots', None),
         parent=parent_contract, resume=bool(args.resume))
     args.difficulty_source, args.min_level, args.max_level = difficulty.source, difficulty.min_level, difficulty.max_level
+    args.min_declared_level = difficulty.min_declared_level
+    args.difficulty_slots = list(difficulty.difficulty_slots)
     scorer = None
     if difficulty.source in FITTED_SOURCES:
         key = scorer_path_key(difficulty.source)
@@ -508,7 +514,7 @@ def train(args):
         audio_backend=args.audio_backend,mert_model=args.mert_model,prepare_device=prepare_device,limit_charts=args.limit_charts,
         condition_policy=args.condition_policy,audio_store=audio_store,dialect_policy=dialect_policy,
         quality_enabled=getattr(args,'quality_enabled',True),auto_quality_policy=auto_quality_policy,
-        min_level=difficulty.min_level,max_level=difficulty.max_level,difficulty_scorer=scorer)
+        difficulty_scorer=scorer, **difficulty.dataset_options())
     dataset_class=ComposerV2Dataset
     if args.sequence_policy=='continuous_events_v1':
         from .stream_data import StreamDataset

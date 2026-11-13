@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 from xml.sax.saxutils import escape
+from .difficulty import CHARTGATE_SLOTS
 
 
 REPOSITORY = 'https://github.com/inm2002/chartgate.git'
@@ -110,7 +111,7 @@ def _run(argv, *, cwd=None, timeout=90):
 class ChartGateScorer:
     source = 'chartgate'
     identity = IDENTITY
-    supported_slots = (5, 6)
+    supported_slots = CHARTGATE_SLOTS
 
     def __init__(self, root, cache_dir, *, read_only=False):
         self.root = root

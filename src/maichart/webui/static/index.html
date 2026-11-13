@@ -350,8 +350,18 @@
       </select><small>选中的定数用于筛选谱面，也是模型学习的难度。</small></label>
       <label class="field">最低定数<input id="v2TrainMinLevel" type="number" min="1" max="20" step="any" placeholder="12"></label>
       <label class="field">最高定数<input id="v2TrainMaxLevel" type="number" min="1" max="20" step="any" placeholder="15"></label>
+      <label class="field" id="v2TrainMinDeclaredLevelField" hidden>最低标称定数<input id="v2TrainMinDeclaredLevel" type="number" min="0" max="20" step="any" value="1" required disabled><small>填 1 排除标称 0 的谱面，填 12 要求标称定数至少为 12，填 0 关闭此项校验。</small></label>
       <label class="field" id="v2TrainOpenMdpDirectoryField" hidden>open-mdp 目录<input id="v2TrainOpenMdpDir" type="text" placeholder="自动查找本机已有的 open-mdp"><small>首次估分使用 CPU，结果会缓存。无法估分的谱面会在训练日志中列出。</small></label>
     </div>
+    <div role="group" aria-labelledby="v2TrainDifficultySlotsLabel">
+      <p id="v2TrainDifficultySlotsLabel">使用的难度槽位</p>
+      <div class="form-grid">
+        <label class="checkbox-field" id="v2TrainDifficultyExpertField"><input id="v2TrainDifficultySlot4" type="checkbox" checked><span>EXPERT</span></label>
+        <label class="checkbox-field"><input id="v2TrainDifficultySlot5" type="checkbox" checked><span>MASTER</span></label>
+        <label class="checkbox-field"><input id="v2TrainDifficultySlot6" type="checkbox" checked><span>Re:MASTER</span></label>
+      </div>
+    </div>
+    <p class="muted">谱面须同时满足定数范围、已启用的标称定数校验和所选槽位。训练和验证使用相同条件。</p>
     <div id="v2TrainChartgateOptions" hidden>
       <p class="muted">Chart;Gate 估算 MASTER 和 Re:MASTER 的定数。选择它时，只使用这两个难度的谱面。</p>
       <button type="button" id="v2TrainChartgateSetup">初始化 Chart;Gate</button>
@@ -2034,10 +2044,10 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=batch-20261108"></script>
-  <script src="/app.js?v=v2-chartgate"></script>
+  <script src="/app.js?v=v2-difficulty-filters"></script>
   <script src="/v2_intensity.js?v=editor-20261109"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=webui-remake-20261111"></script>
-  <script src="/workspace.js?v=v2-chartgate"></script>
+  <script src="/workspace.js?v=v2-difficulty-filters"></script>
 </body>
 </html>

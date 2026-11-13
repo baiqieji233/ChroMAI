@@ -106,13 +106,15 @@ def start_train(handler,payload,*,runtime):
     sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
     settings={}
-    from maichart.composer_v2.difficulty import FITTED_SOURCES, locate_scorer, resolve_selection, scorer_path_key
+    from maichart.composer_v2.difficulty import DIFFICULTY_SLOTS, FITTED_SOURCES, locate_scorer, resolve_selection, scorer_path_key
     difficulty=resolve_selection(payload.get('difficulty_source','auto'),payload.get('min_level'),
-        payload.get('max_level'),parent=checked.get('training_contract') if parent else None,
+        payload.get('max_level'),min_declared_level=payload.get('min_declared_level'),
+        difficulty_slots=payload.get('difficulty_slots'),parent=checked.get('training_contract') if parent else None,
         resume=mode=='resume')
-    settings.update(difficulty_source=difficulty.source,min_level=difficulty.min_level,max_level=difficulty.max_level)
-    for key in ('difficulty_source','min_level','max_level'):
+    settings.update(difficulty_source=difficulty.source, **difficulty.dataset_options())
+    for key in ('difficulty_source','min_level','max_level','min_declared_level'):
         _arg(args,'--'+key.replace('_','-'),settings[key])
+    args.extend(['--difficulty-slots', *map(str, difficulty.difficulty_slots)])
     if difficulty.source in FITTED_SOURCES:
         key = scorer_path_key(difficulty.source)
         saved_directory = (checked.get('args') or {}).get(key) if mode=='resume' else None
@@ -238,7 +240,9 @@ def start_train(handler,payload,*,runtime):
         split_directory=directory/"data_split"
         if split_directory.exists():raise ValueError("输出目录已有 data_split，请使用新的输出目录以保留原划分")
         from maichart.composer.evaluation import split_manifest
-        split_report=split_manifest(manifest,split_directory,fraction=fraction,seed=settings["seed"],cache_dir=cache)
+        extra_filters = difficulty.min_declared_level or difficulty.difficulty_slots != DIFFICULTY_SLOTS
+        split_report=split_manifest(manifest,split_directory,fraction=fraction,seed=settings["seed"],cache_dir=cache,
+                                    chart_eligibility=difficulty.split_exclusion if extra_filters else None)
         manifest=Path(split_report["splits"]["train"]["path"])
         validation=Path(split_report["splits"]["dev"]["path"])
     if validation is not None:

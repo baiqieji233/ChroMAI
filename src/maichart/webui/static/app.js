@@ -35,6 +35,11 @@ function composerV2TrainingPayload(options={}) {
     delete payload.max_level;
     delete payload.open_mdp_dir;
     delete payload.chartgate_dir;
+  } else {
+    payload.difficulty_slots=[4,5,6].filter(slot=>checkedOrDefault('#v2TrainDifficultySlot'+slot,true));
+    if (['fitted','chartgate'].includes(payload.difficulty_source)) {
+      payload.min_declared_level=Number(valueOrDefault('#v2TrainMinDeclaredLevel','1'));
+    }
   }
   if (payload.difficulty_source!=='fitted') delete payload.open_mdp_dir;
   if (payload.difficulty_source!=='chartgate') delete payload.chartgate_dir;
@@ -320,14 +325,36 @@ function composerV2GenerationMessage(task) {
 function updateV2DifficultyControls() {
   const source=valueOrDefault('#v2TrainDifficultySource','declared');
   const fitted=source==='fitted'||source==='chartgate';
+  const resume=currentTrainingMode()==='resume';
   const directory=element('#v2TrainOpenMdpDirectoryField');
   if(directory) directory.hidden=source!=='fitted';
   const path=element('#v2TrainOpenMdpDir');
-  if(path) path.disabled=source!=='fitted' || currentTrainingMode()==='resume';
+  if(path) path.disabled=source!=='fitted' || resume;
   const gate=element('#v2TrainChartgateOptions');
   if(gate) gate.hidden=source!=='chartgate';
   const gatePath=element('#v2TrainChartgateDir');
-  if(gatePath) gatePath.disabled=source!=='chartgate' || currentTrainingMode()==='resume';
+  if(gatePath) gatePath.disabled=source!=='chartgate' || resume;
+  const declaredField=element('#v2TrainMinDeclaredLevelField');
+  if(declaredField) declaredField.hidden=!fitted;
+  const declared=element('#v2TrainMinDeclaredLevel');
+  if(declared) {
+    declared.disabled=!fitted || resume;
+    if(!resume && declared.dataset.beforeResumeDifficulty!==undefined) {
+      declared.value=declared.dataset.beforeResumeDifficulty;
+      delete declared.dataset.beforeResumeDifficulty;
+    }
+  }
+  const expert=element('#v2TrainDifficultyExpertField');
+  if(expert) expert.hidden=source==='chartgate';
+  for(const slot of [4,5,6]) {
+    const checkbox=element('#v2TrainDifficultySlot'+slot);
+    if(!checkbox) continue;
+    checkbox.disabled=resume || (source==='chartgate' && slot===4);
+    if(!resume && checkbox.dataset.beforeResumeDifficulty!==undefined) {
+      checkbox.checked=checkbox.dataset.beforeResumeDifficulty==='true';
+      delete checkbox.dataset.beforeResumeDifficulty;
+    }
+  }
   const high=element('#v2TrainMaxLevel');
   if(high) high.placeholder=fitted?'16':'15';
   for(const id of ['#v2TrainMinLevel','#v2TrainMaxLevel']) {
@@ -377,6 +404,19 @@ function applyComposerV2Inspection(data) {
     saved.max_level=difficulty?.max_level??15;
     saved.open_mdp_dir=data.args?.open_mdp_dir??'';
     saved.chartgate_dir=data.args?.chartgate_dir??'';
+    const declared=element('#v2TrainMinDeclaredLevel');
+    if(declared) {
+      declared.dataset.beforeResumeDifficulty??=declared.value;
+      declared.value=String(difficulty?.min_declared_level??0);
+    }
+    const slots=difficulty?.difficulty_slots??[4,5,6];
+    for(const slot of [4,5,6]) {
+      const checkbox=element('#v2TrainDifficultySlot'+slot);
+      if(checkbox) {
+        checkbox.dataset.beforeResumeDifficulty??=String(checkbox.checked);
+        checkbox.checked=slots.includes(slot);
+      }
+    }
   }
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   if(currentTrainingMode()==='resume' && element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=saved.quality_enabled!==false;
@@ -1724,7 +1764,10 @@ function settingsFields() {
 function collectSettings() {
   const values = {};
   settingsFields().forEach((target) => {
-    values[target.id] = target.type === "checkbox" ? target.checked : target.value;
+    const editable = target.dataset.beforeResumeDifficulty;
+    values[target.id] = target.type === "checkbox"
+      ? (editable === undefined ? target.checked : editable === 'true')
+      : (editable ?? target.value);
   });
   values.__composerV2Conditions={version:1,fields:Object.fromEntries(Object.entries(v2ConditionState).map(([key,state])=>[key,{...state}]))};
   // Shared slider IDs persist the other families' values, independently of v2.
@@ -5922,6 +5965,20 @@ async function submitTrain(options = {}) {
         (payload.mode==='resume' && checkpointInspection?.data?.training_contract?.difficulty_selection?.source==='chartgate'))
         && !backend.training_capabilities?.composer_v2_chartgate) {
       throw new Error('请重启 WebUI 后再使用 Chart;Gate。');
+    }
+    if(payload.difficulty_slots && !payload.difficulty_slots.some(slot=>payload.difficulty_source!=='chartgate' || slot!==4)) {
+      throw new Error(payload.difficulty_source==='chartgate'
+        ? '使用 Chart;Gate 时，请至少勾选 MASTER 或 Re:MASTER。'
+        : '请至少勾选一个难度槽位。');
+    }
+    const savedDifficulty=payload.mode==='resume'?checkpointInspection?.data?.training_contract?.difficulty_selection:null;
+    if(!backend.training_capabilities?.composer_v2_combined_difficulty_filters) {
+      const slots=payload.difficulty_slots??savedDifficulty?.difficulty_slots??[4,5,6];
+      if((payload.min_declared_level??savedDifficulty?.min_declared_level??0)>0 || slots.length!==3) {
+        throw new Error('标称定数与难度槽位联合筛选需要新版 WebUI 后台，请重启后台后提交。');
+      }
+      delete payload.min_declared_level;
+      delete payload.difficulty_slots;
     }
     trainingStarting=true;updateDatasetButtons();
     try{const data=await api("/api/composer-v2/train",payload);watchTask(data.task_id,()=>{trainingStarting=false;updateDatasetButtons();});}
