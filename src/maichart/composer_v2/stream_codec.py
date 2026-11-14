@@ -46,7 +46,7 @@ class StreamCodec(ComponentCodec):
         values.update('NUM:'+c for c in '-/0123456789')
         values.update('V:'+c for c in '-+./:#0123456789');values.update(('D:B','D:R'))
         # These are available rhythmic positions, not compulsory grids or meter.
-        denominators=set(range(1,193))|{int(ticks_per_beat)}
+        denominators=set(range(1,33))|{48,64,96,128,192,int(ticks_per_beat)}
         fractions={Fraction(n,d) for d in denominators for n in range(d)}
         fractions.update(Fraction(p)%1 for p in phases)
         values.update('F:'+str(p) for p in fractions)
