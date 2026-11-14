@@ -360,14 +360,14 @@
   </div>
   <p id="v2TrainPresetStatus" class="preset-status muted" role="status"></p>
 </div>
-<details class="settings-section"><summary>训练谱面难度筛选</summary>
+<details class="settings-section" open><summary>训练定数与谱面筛选</summary>
   <div class="settings-content">
     <div class="form-grid">
-      <label class="field">定数来源<select id="v2TrainDifficultySource">
+      <label class="field">训练定数来源<select id="v2TrainDifficultySource">
         <option value="declared" selected>谱面原标定数</option>
         <option value="chartgate">拟合定数（Chart;Gate）</option>
         <option value="fitted">拟合定数（open-mdp）</option>
-      </select><small>选中的定数用于筛选谱面，也是模型学习的难度。</small></label>
+      </select><small>选「拟合定数」后，每张入选谱都以估分结果作为模型的难度输入。训练和验证使用同一估分方式。</small></label>
       <label class="field">最低定数<input id="v2TrainMinLevel" type="number" min="1" max="20" step="any" placeholder="12"></label>
       <label class="field">最高定数<input id="v2TrainMaxLevel" type="number" min="1" max="20" step="any" placeholder="15"></label>
       <label class="field" id="v2TrainMinDeclaredLevelField" hidden>最低标称定数<input id="v2TrainMinDeclaredLevel" type="number" min="0" max="20" step="any" value="1" required disabled><small>填 1 排除标称 0 的谱面，填 12 要求标称定数至少为 12，填 0 关闭此项校验。</small></label>
@@ -381,7 +381,7 @@
         <label class="checkbox-field"><input id="v2TrainDifficultySlot6" type="checkbox" checked><span>Re:MASTER</span></label>
       </div>
     </div>
-    <p class="muted">谱面须同时满足定数范围、已启用的标称定数校验和所选槽位。训练和验证使用相同条件。</p>
+    <p class="muted">定数范围按所选来源筛选，难度槽位始终生效。拟合时还可设置最低标称定数。</p>
     <div id="v2TrainChartgateOptions" hidden>
       <p class="muted">Chart;Gate 估算 MASTER 和 Re:MASTER 的定数。选择它时，只使用这两个难度的谱面。</p>
       <button type="button" id="v2TrainChartgateSetup">初始化 Chart;Gate</button>

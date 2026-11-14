@@ -41,10 +41,33 @@ class GrammarDeadEnd(ValueError):
 
 
 class GridDurationRejected(ValueError):
-    def __init__(self,beat,body):
+    def __init__(self,beat,body,*,completed_atoms=(),pulse=None):
         super().__init__('grid_duration_outside_forward_bound')
         self.beat=beat
         self.body=body
+        self.completed_atoms=tuple(completed_atoms)
+        self.pulse=pulse
+
+    def diagnostic(self):
+        return dict(reason=str(self),beat=str(self.beat),duration_beats=self.body,
+                    completed_atoms=list(self.completed_atoms),pulse=self.pulse)
+
+
+def _duration_head_pulse(codec, atom):
+    """Keep only the authored proposal's initial contact and head modifiers."""
+    kind, pad, *suffix = (codec.tokens[token] for token in atom)
+    if not pad.startswith('P:') or kind not in ('N:hold','N:touch_hold','N:slide'):
+        return None
+    modifiers=set()
+    for token in suffix:
+        if token in ('S:?', 'S:!', 'S:m'):
+            return None
+        if token in ('S:b','S:x','S:f'):
+            modifiers.add(token[2:])
+        elif token!='S:h':
+            break
+    order='bf' if kind=='N:touch_hold' else 'bx'
+    return pad[2:]+''.join(flag for flag in order if flag in modifiers)
 
 
 class EventSampler(WindowSampler):
@@ -370,7 +393,8 @@ class EventSampler(WindowSampler):
                 self.reject(out)
                 self.retry_stats['grid_duration_rejections']=self.retry_stats.get('grid_duration_rejections',0)+1
                 body=''.join(self.codec.tokens[t][2:] for t in atom if self.codec.tokens[t].startswith('V:'))
-                raise GridDurationRejected(event_beat,body)
+                raise GridDurationRejected(event_beat,body,completed_atoms=completed_atoms,
+                                           pulse=_duration_head_pulse(self.codec,atom))
             if token==self.codec.event_end_id:self._finish_probability();return out
             atom.append(token)
             if token==self.codec.end_note_id:
@@ -442,7 +466,10 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     if getattr(args,'record_candidate_probabilities',False):
         audit_path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
         audit_path.parent.mkdir(parents=True,exist_ok=True);audit_path.write_text('',encoding='utf-8')
-    from .exhaustion import resolve_policy,admit_physical_conflict,conflict_assessment,downgrade_or_skip_conflict
+    from .exhaustion import (
+        resolve_policy, admit_physical_conflict, conflict_assessment, downgrade_or_skip_conflict,
+        recover_grid_duration,
+    )
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     song=ComposerV2Song(audio_path.stem,audio_path,audio_path,5,args.level,[],clock,end,condition,audio=audio,condition_known=known)
     song.summary=dict(audio.summary(160));song.summary['beats']=_beats_at_seconds(clock,song.summary['times_sec'])
@@ -499,6 +526,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             if dataset.structure_policy!='off' or dataset.reference_selection=='aligned':references.append(sampler.reference)
         after=max(points[-1].beat if points else Fraction(-1),after_floor)
         selected=None;failed_beat=after;need_refresh=False;conflict_sources=set();rejected=[];history_edited=False
+        duration_failures=[]
         prefix_key=tuple((p.beat,p.note_text) for p in points) if native_memo else None
         known_failed=native_memo.get(prefix_key,{}) if prefix_key is not None else {}
         failed_any=False
@@ -550,7 +578,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                     try:
                         alternative=sampler.propose(target,after,end,fixed=proposal)
                     except GridDurationRejected as error:
-                        repairs.append(dict(reason=str(error),beat=str(error.beat),duration_beats=error.body))
+                        duration_failures.append(error)
+                        repairs.append(error.diagnostic())
                         continue
                     except RetrySpaceExhausted:
                         retry_stats['exhausted_subtrees']=retry_stats.get('exhausted_subtrees',0)+1
@@ -592,7 +621,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             except GridDurationRejected as error:
                 failed_any=True
                 failed_beat=error.beat
-                repairs.append(dict(reason=str(error),beat=str(error.beat),duration_beats=error.body))
+                duration_failures.append(error)
+                repairs.append(error.diagnostic())
             except RefreshContext:
                 if not committed_in_context:
                     repairs.append(dict(reason='event_component_budget_exhausted',after=str(after)))
@@ -631,6 +661,13 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 print('composer_v2_rollback '+json.dumps(report),flush=True);continue
             elif exhaustion_policy=='downgrade_or_skip':
                 resolved=downgrade_or_skip_conflict(guard,rejected,after)
+                if duration_failures and (resolved is None or resolved['kind']=='skipped_beat'):
+                    duration_result=recover_grid_duration(guard,model.codec,duration_failures,after,end)
+                    if duration_result is not None and (
+                        resolved is None or duration_result['kind']=='downgraded'
+                        or duration_result['skip_until_beat']<resolved['skip_until_beat']
+                    ):
+                        resolved=duration_result
                 if resolved is not None:
                     pending_phrase.clear()
                     if resolved['kind']=='downgraded':
@@ -638,14 +675,18 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         trial=resolved['guard']
                         entry=dict(kind='downgraded',beat=str(point.beat),original=resolved['original'],
                             replacement=resolved['replacement'],operation=resolved['operation'],after=str(after))
+                        if 'duration_failure' in resolved:
+                            entry['duration_failure']=resolved['duration_failure']
                         downgraded_or_skipped.append(entry)
-                        selected=(.5,point,model.codec.encode_points([point]),trial)
+                        encoded=resolved.get('encoded')
+                        selected=(.5,point,model.codec.encode_points([point]) if encoded is None else encoded,trial)
                         print('composer_v2_conflict_downgraded '+json.dumps(entry,ensure_ascii=False),flush=True)
                     elif resolved['kind']=='skipped_beat':
                         skip_to=resolved['skip_until_beat']
                         entry=dict(kind='skipped_beat',skipped_until_beat=str(skip_to),after=str(after))
                         downgraded_or_skipped.append(entry)
-                        repairs.append(dict(reason='exhaustion_skipped_locked_beat',after=str(after),skipped_until=str(skip_to)))
+                        repairs.append(dict(reason=resolved.get('reason','exhaustion_skipped_locked_beat'),
+                                            after=str(after),skipped_until=str(skip_to)))
                         after_floor=max(after_floor,skip_to)
                         print('composer_v2_conflict_beat_skipped '+json.dumps(entry,ensure_ascii=False),flush=True)
                         continue

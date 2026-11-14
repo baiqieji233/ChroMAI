@@ -65,6 +65,41 @@ def downgrade_or_skip_conflict(guard,rejected,after):
     return None
 
 
+def recover_grid_duration(guard, codec, failures, after, end):
+    """Try a legal reduction at the first rejected time on this prefix."""
+    from maichart.event_timing import EventPoint
+    from .generate import _check_window
+
+    failures = [failure for failure in failures if after < failure.beat < end]
+    if not failures:
+        return None
+    beat = min(failure.beat for failure in failures)
+    seen = set()
+    for failure in failures:
+        if failure.beat != beat:
+            continue
+        completed = failure.completed_atoms
+        candidates = [(completed, 'drop_unfinished_sustain')]
+        if failure.pulse is not None:
+            candidates.insert(0, ((*completed, failure.pulse), 'downgrade_unfinished_sustain'))
+        for atoms, operation in candidates:
+            text = '/'.join(atoms)
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            point = EventPoint(beat, text)
+            try:
+                encoded = codec.encode_points([point])
+            except ValueError:
+                continue
+            trial, _ = _check_window(guard, [point])
+            if trial is not None:
+                return dict(kind='downgraded', point=point, guard=trial, encoded=encoded,
+                            original=None, replacement=text, operation=operation,
+                            duration_failure=failure.diagnostic())
+    return dict(kind='skipped_beat', skip_until_beat=beat, reason='exhaustion_skipped_invalid_duration')
+
+
 def admit_physical_conflict(guard,rejected,after):
     """Keep the first model proposal that can be exported and advances time.
 

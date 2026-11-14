@@ -42,7 +42,8 @@ def parser():
         result.add_argument("--"+key.replace("_","-"),default=value,type=type(value))
     result.add_argument("--mert-model")
     from .difficulty import SOURCES
-    result.add_argument('--difficulty-source', choices=SOURCES, default='auto')
+    result.add_argument('--difficulty-source', choices=SOURCES, default='auto',
+                        help='Use the same declared or fitted level for filtering and model conditioning')
     result.add_argument('--min-level', type=float)
     result.add_argument('--max-level', type=float)
     result.add_argument('--min-declared-level', type=float, help='Minimum declared level for fitted scoring; 0 disables this check.')
@@ -731,6 +732,12 @@ def train(args):
         if parent.get("scaler_state_dict"):scaler.load_state_dict(parent["scaler_state_dict"])
         restore_rng(parent["rng_state"])
     directory.mkdir(parents=True,exist_ok=True)
+    for split in (dataset, validation):
+        if split is None:
+            continue
+        levels = [song.level for song in split.songs]
+        split.audit['condition_level'] = dict(source=difficulty.source, prepared_charts=len(levels),
+            min_level=min(levels, default=None), max_level=max(levels, default=None))
     (directory/'dataset_audit.json').write_text(json.dumps(
         dict(train=dataset.audit,validation=validation.audit if validation is not None else None),
         ensure_ascii=False,indent=2,default=str),encoding='utf-8')
