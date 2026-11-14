@@ -33,12 +33,16 @@ class ComposerV2Config:
     structure_policy: str = 'off'
     intensity_policy: str = 'off'
     music_context_policy: str = 'off'
+    local_audio_block_beats: int = 1
     def __post_init__(self):
         from .music_policy import POLICIES as MUSIC_POLICIES
         if self.music_context_policy not in MUSIC_POLICIES or min(self.audio_layers,self.song_layers)<1:
             raise ValueError('Invalid music context/encoder depth')
         if self.music_context_policy == 'song_paired_v2' and self.sequence_policy != 'continuous_events_v1':
             raise ValueError('Paired music context requires continuous events')
+        if (type(self.local_audio_block_beats) is not int or self.local_audio_block_beats not in (1, 2)
+                or (self.local_audio_block_beats != 1 and self.sequence_policy != 'continuous_events_v1')):
+            raise ValueError('Two-beat audio sharing requires continuous events')
         from .intensity import POLICY as CURVE_POLICY
         if self.intensity_policy not in ('off',CURVE_POLICY) or (self.intensity_policy!='off' and self.sequence_policy!='continuous_events_v1'):
             raise ValueError('Intensity curves require continuous events')
@@ -67,6 +71,9 @@ def positions(values,width):
 
 
 class Attention(nn.Module):
+    pack_projections = False
+    _inference_qkv = None
+
     def __init__(self,width,heads,*,local=False,relative=False):
         super().__init__();self.heads=heads;self.dim=width//heads;self.local=local
         self.q=nn.Linear(width,width);self.k=nn.Linear(width,width);self.v=nn.Linear(width,width);self.out=nn.Linear(width,width)
@@ -75,12 +82,39 @@ class Attention(nn.Module):
         if relative:
             self.relative_beat=nn.Parameter(torch.zeros(heads,2))
     def split(self,value):return value.reshape(value.size(0),value.size(1),self.heads,self.dim).transpose(1,2)
-    def memory(self,value):return self.split(self.k(value)),self.split(self.v(value))
-    def forward(self,query,memory=None,*,kv=None,key_mask=None,causal=False,past_length=0,query_beats=None,key_beats=None):
-        q=self.split(self.q(query));k,v=self.memory(memory) if kv is None else kv
+    def _packed_projection(self, value, *layers):
+        # Keep the separate q/k/v parameters for checkpoint and optimizer compatibility.
+        weight = torch.cat([layer.weight for layer in layers])
+        bias = torch.cat([layer.bias for layer in layers])
+        parts = F.linear(value, weight, bias).chunk(len(layers), dim=-1)
+        return tuple(self.split(part) for part in parts)
+
+    def memory(self, value):
+        if self.training and self.pack_projections:
+            return self._packed_projection(value, self.k, self.v)
+        return self.split(self.k(value)), self.split(self.v(value))
+
+    def incremental_qkv(self,value):
+        # Generation reuses immutable FP32 weights across contexts and retries.
+        if self._inference_qkv is None:
+            self._inference_qkv=tuple(torch.cat((getattr(self.q,name),getattr(self.k,name),getattr(self.v,name)))
+                for name in ('weight','bias'))
+        return tuple(self.split(part) for part in F.linear(value,*self._inference_qkv).chunk(3,dim=-1))
+
+    def forward(self,query,memory=None,*,kv=None,key_mask=None,causal=False,past_length=0,query_beats=None,key_beats=None,
+                projected_query=None):
+        if projected_query is not None:
+            q=projected_query
+            k,v=kv
+        elif self.training and self.pack_projections and kv is None and query is memory:
+            q, k, v = self._packed_projection(query, self.q, self.k, self.v)
+        else:
+            q = self.split(self.q(query))
+            k, v = self.memory(memory) if kv is None else kv
+        implicit_causal = causal and key_mask is None and past_length == 0 and q.size(-2) == k.size(-2)
         mask=None
         if key_mask is not None:mask=key_mask[:,None,None,:]
-        if causal and not (q.size(-2)==1 and past_length+1==k.size(-2)):
+        if causal and not implicit_causal and not (q.size(-2)==1 and past_length+1==k.size(-2)):
             allowed=torch.arange(k.size(-2),device=q.device)[None,:] <= (torch.arange(q.size(-2),device=q.device)[:,None]+past_length)
             mask=allowed[None,None] if mask is None else mask&allowed[None,None]
         if hasattr(self,'relative_beat'):
@@ -95,7 +129,7 @@ class Attention(nn.Module):
                    +F.softplus(self.future)[None,:,None,None]*gap[:,None].clamp_min(0))
             mask=bias.masked_fill(~mask,-torch.inf) if mask is not None else bias
             mask=mask.to(q.dtype)
-        attended=F.scaled_dot_product_attention(q,k,v,attn_mask=mask,dropout_p=0.)
+        attended=F.scaled_dot_product_attention(q,k,v,attn_mask=mask,dropout_p=0.,is_causal=implicit_causal)
         return self.out(attended.transpose(1,2).reshape(query.shape))
 
 
@@ -123,6 +157,8 @@ def query_groups(tile_ids,start,device):
 
 
 class DecoderBlock(nn.Module):
+    flash_self_attention = False
+
     def __init__(self,c,*,song=True):
         super().__init__();self.norms=nn.ModuleList([nn.LayerNorm(c.d_model) for _ in range(4)])
         self.self_attention=Attention(c.d_model,c.nhead);self.local_attention=Attention(c.d_model,c.nhead,local=True)
@@ -144,17 +180,29 @@ class DecoderBlock(nn.Module):
         for buffer,value in zip(storage,kv):buffer[...,old_length:length,:].copy_(value)
         return tuple(buffer[...,:length,:] for buffer in storage),old_length
     _append_cpu_kv=_append_cached_kv  # OpenVINO commits into the same host-owned cache.
-    def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None):
-        value=self.norms[0](x+condition[:,None]);kv=self.self_attention.memory(value)
-        old_length=0
+    def forward(self,x,condition,token_mask,beats,audio,*,state=None,groups=None,right_padded=False):
+        value=self.norms[0](x+condition[:,None])
         if state is not None:
+            q=None
+            if (not self.training and not torch.is_grad_enabled() and value.is_cuda
+                    and value.dtype==torch.float32 and value.size(1)==1 and not torch.is_autocast_enabled('cuda')):
+                q,k,v=self.self_attention.incremental_qkv(value)
+                kv=(k,v)
+            else:
+                kv=self.self_attention.memory(value)
+            old_length=0
             if kv[0].device.type=='cpu' or (kv[0].device.type=='cuda' and not torch.is_grad_enabled()):
                 kv,old_length=self._append_cached_kv(kv,state)
             elif 'self_kv' in state:
                 old_length=state['self_kv'][0].size(-2)
                 kv=tuple(torch.cat((old,new),dim=-2) for old,new in zip(state['self_kv'],kv))
             state['self_kv']=kv
-        x=x+self.drop(self.self_attention(value,kv=kv,key_mask=token_mask,causal=True,past_length=old_length))
+            attended=self.self_attention(value,kv=kv,key_mask=token_mask,causal=True,past_length=old_length,projected_query=q)
+        else:
+            # With right padding, active causal queries cannot see the padded suffix.
+            mask = None if self.training and self.flash_self_attention and right_padded else token_mask
+            attended=self.self_attention(value,value,key_mask=mask,causal=True)
+        x=x+self.drop(attended)
         local_kv=state.get('local_kv') if state is not None else None
         if local_kv is not None and local_kv[0].size(0)<audio['local'].size(0):
             # Within one context, newly discovered audio tiles only append.
@@ -277,23 +325,23 @@ class ComposerV2(nn.Module):
             weight=weight+self.phase_token(self.phase_token_features).to(weight.dtype)
         if cacheable:self._structured_weight_cache[key]=weight
         return weight
-    def train(self,mode=True):
+    def _clear_inference_caches(self):
         self._song_cache.clear();self._structured_weight_cache.clear()
+        for layer in self.decoder:
+            layer.self_attention._inference_qkv=None
+    def train(self,mode=True):
+        self._clear_inference_caches()
         return super().train(mode)
     def _apply(self,fn,recurse=True):
-        self._song_cache.clear();self._structured_weight_cache.clear()
+        self._clear_inference_caches()
         return super()._apply(fn,recurse=recurse)
     def load_state_dict(self,*args,**kwargs):
-        self._song_cache.clear();self._structured_weight_cache.clear()
+        self._clear_inference_caches()
         return super().load_state_dict(*args,**kwargs)
     def _audio_input(self,mel,semantic,valid,keep):
         return self.mel(mel.float())+self.semantic(semantic.float())*(valid&keep[:,None])[...,None]
-    def encode_audio(self,batch):
-        # Training encodes the batch once. Inference shares immutable song
-        # memory and each window's local encoding across all candidate branches.
-        mel=batch.get('bank_audio',batch['local_audio']);b=batch['input_ids'].size(0)
-        keep=torch.ones(b,device=mel.device,dtype=torch.bool)
-        if self.training:keep=torch.rand(b,device=mel.device)>=.15
+    def encode_local_audio(self, batch, keep):
+        mel = batch.get('bank_audio', batch['local_audio'])
         owners=batch.get('tile_owner')
         if 'bank_audio' in batch:
             semantic=batch['bank_semantic'].float()
@@ -319,6 +367,22 @@ class ComposerV2(nn.Module):
         # An all-padding edge query has one neutral key, avoiding undefined attention.
         mask=mask.clone();mask[:,0]|=~mask.any(-1)
         for layer in self.audio_blocks:local=self._training_block(layer,local,mask)
+        return dict(local=local, local_mask=mask, local_beats=beats)
+
+    def encode_beat_features(self, batch):
+        features = {}
+        if hasattr(self,'entry_preview'):
+            features['entry_context'] = self.entry_preview(batch['entry_preview_features'].float())
+        if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
+            features['onset_scores'] = self.onset_readout(batch)
+        return features
+
+    def encode_audio(self,batch):
+        # Local audio and beat-specific evidence can grow independently during decoding.
+        b = batch['input_ids'].size(0)
+        device = batch['input_ids'].device
+        keep = torch.rand(b, device=device) >= .15 if self.training else torch.ones(b, device=device, dtype=torch.bool)
+        result = self.encode_local_audio(batch, keep)
         ids=batch.get('song_cache_key',[])
         key=ids[0] if not self.training and not torch.is_grad_enabled() and len(ids)==1 else None
         cached=self._song_cache.get(key) if key is not None else None
@@ -326,7 +390,7 @@ class ComposerV2(nn.Module):
             song=self._audio_input(batch['song_audio'],batch['song_semantic'],batch['song_semantic_mask'],keep)
             if hasattr(self,'song_detail'):
                 song=song+self.song_detail(batch['song_detail'].float())
-            starts=torch.tensor([float(s) for s in batch.get('start_beat',[0.]*b)],device=mel.device)
+            starts=torch.tensor([float(s) for s in batch.get('start_beat',[0.]*b)],device=device)
             song=song+positions(batch['song_beats']+starts[:,None],self.config.d_model)
             song_mask=batch['song_mask'].clone();song_mask[:,0]|=~song_mask.any(-1)
             for layer in self.song_blocks:song=self._training_block(layer,song,song_mask)
@@ -334,9 +398,10 @@ class ComposerV2(nn.Module):
                 if len(self._song_cache)>=4:self._song_cache.clear()
                 self._song_cache[key]=(song.detach(),song_mask)
         else:song,song_mask=cached
-        result = dict(local=local,local_mask=mask,local_beats=beats,song=song,song_mask=song_mask,song_beats=batch['song_beats'])
+        result.update(song=song,song_mask=song_mask,song_beats=batch['song_beats'])
+        # Preserve the legacy order around the stochastic curve planner.
         if hasattr(self,'entry_preview'):
-            result['entry_context']=self.entry_preview(batch['entry_preview_features'].float())
+            result['entry_context'] = self.entry_preview(batch['entry_preview_features'].float())
         if hasattr(self,'intensity'):
             result['condition']=self.condition_context(batch)
             result['curve_rates'],result['curve_context']=self.intensity.plan(song,batch,training=self.training)
@@ -418,7 +483,7 @@ class ComposerV2(nn.Module):
         x=self.dropout(x);condition=cache['condition'] if 'condition' in cache else self.condition_context(batch)
         groups=None
         if 'tile_ids_cpu' in batch:
-            tiles=batch['tile_ids_cpu']
+            tiles=batch.get('local_tile_ids_cpu', batch['tile_ids_cpu'])
             groups=(int(tiles[0][start]) if use_cache and ids.size(0)==1
                     and length-start==1 and tiles[0][start]>=0 else query_groups(tiles,start,ids.device))
         runtime=getattr(self,'_decoder_runtime',None)
@@ -429,7 +494,8 @@ class ComposerV2(nn.Module):
         else:
             for i,layer in enumerate(self.decoder):
                 x=self._training_block(layer,x,condition,batch['token_mask'],beats,cache,
-                    state=state['layers'][i] if use_cache else None,groups=groups)
+                    state=state['layers'][i] if use_cache else None,groups=groups,
+                    right_padded=batch.get('right_padded_tokens',False))
         logits=F.linear(self.norm(x),weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence

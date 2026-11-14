@@ -107,6 +107,17 @@
   };
   function clearRange() { activeRange=null; }
   function stopWatch() { clearInterval(watchTimer);watchTimer=null; }
+  function publishTransport(state) {
+    lastTransport=state;
+    window.dispatchEvent(new CustomEvent('chart-preview-playback',{detail:state}));
+  }
+  function syncTransport(current, serial) {
+    if(serial!==loadSerial || current!==player || !playerLoaded)return;
+    const transport=transportRequest;
+    void current.getState().then(state=>{
+      if(serial===loadSerial && current===player && transport===transportRequest)publishTransport(state);
+    }).catch(()=>{});
+  }
   async function repeatRange(current, serial) {
     const bounds=activeRange;
     if(loopReturning || !bounds || current!==player || serial!==loadSerial || !visible())return;
@@ -128,8 +139,7 @@
         const transport=transportRequest;
         const state=await current.getState();
         if(serial!==loadSerial || current!==player || transport!==transportRequest)return;
-        lastTransport=state;
-        window.dispatchEvent(new CustomEvent('chart-preview-playback',{detail:state}));
+        publishTransport(state);
         if(activeRange && state.playing && state.currentTime>=activeRange.endSec) {
           await repeatRange(current,serial);
         }
@@ -168,10 +178,11 @@
     player = null; playerLoaded=false;playerKey = "";
     mount.replaceChildren();
     mount.hidden = true;
+    window.dispatchEvent(new CustomEvent('chart-preview-released'));
   }
   async function pause() {
     ++transportRequest;clearRange();stopWatch();pendingPlay=false;
-    if(lastTransport)lastTransport={...lastTransport,playing:false};
+    if(lastTransport?.playing)publishTransport({...lastTransport,playing:false});
     if (player) await player.pause().catch(() => {});
   }
   function visible() {
@@ -220,15 +231,13 @@
         maxFps: "unlimited", theme: "light", diagnostics: false,
       });
       player = current;
-      current.on('playing',()=>{if(serial===loadSerial)watchPlayback();});
-      current.on('paused',()=>{if(serial===loadSerial)stopWatch();});
-      current.on('ended',()=>{void repeatRange(current,serial).catch(error=>message(error.message,true));});
-      current.on('seeked',()=>{
-        const transport=transportRequest;
-        if(serial===loadSerial)void current.getState().then(state=>{
-          if(serial===loadSerial && playerLoaded && transport===transportRequest) {lastTransport=state;window.dispatchEvent(new CustomEvent('chart-preview-playback',{detail:state}));}
-        }).catch(()=>{});
+      current.on('playing',()=>{if(serial===loadSerial){watchPlayback();syncTransport(current,serial);}});
+      current.on('paused',()=>{if(serial===loadSerial){stopWatch();syncTransport(current,serial);}});
+      current.on('ended',()=>{
+        syncTransport(current,serial);
+        void repeatRange(current,serial).catch(error=>message(error.message,true));
       });
+      current.on('seeked',()=>syncTransport(current,serial));
       current.on("error", ({message: text}) => {
         if (serial === loadSerial) { message(`预览未能完成加载：${text}`, true); failedKey = key; }
       });
@@ -246,7 +255,7 @@
       if(pendingPlay && visible()) {pendingPlay=false;await current.play();if(serial!==loadSerial)return;watchPlayback();}
       const state=await current.getState();
       if(serial!==loadSerial)return;
-      lastTransport=state;window.dispatchEvent(new CustomEvent('chart-preview-playback',{detail:state}));
+      publishTransport(state);
       message(`已载入 ${info.title || chart.title || readableLabel(chart)} · ${info.noteCount ?? "—"} 个音符。点击播放器中的播放按钮开始。${chart.audio_url ? "" : "当前为静音预览。"}`);
       badge.textContent = "已载入 · 点击播放";
       reloadButton.disabled = false;
@@ -432,6 +441,7 @@
       if(document.body.dataset.workspace==='quality')workspacePreview('quality');
     },
     getEntry: () => entry,
+    getChart: () => entry?.charts[selected] ?? null,
     selectChart: chooseChart,
     getState: () => player && playerLoaded ? player.getState() : Promise.resolve(lastTransport)};
   // The latest completed artifact survives a WebUI restart via task log metadata.

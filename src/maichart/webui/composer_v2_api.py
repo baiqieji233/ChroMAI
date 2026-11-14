@@ -1,8 +1,11 @@
 """Main-workbench adapter for the independent Composer v2 contract."""
 from __future__ import annotations
+from dataclasses import replace
 import json
 import hashlib
 import math
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from .composer_api import _path, _int, _float, _arg
 
@@ -48,18 +51,114 @@ def _choice(payload,key,default,choices):
     if value not in choices: raise ValueError(f"{key} 必须是 {', '.join(map(str,choices))}")
     return value
 
+
+def estimate_parameters(handler, payload):
+    """Count Composer weights without loading training data, MERT or a checkpoint."""
+    import torch
+    from maichart.composer_v2.defaults import ENCODER_DEFAULTS
+    from maichart.composer_v2.intensity import resolve_policy as resolve_intensity
+    from maichart.composer_v2.model import ComposerV2, ComposerV2Config
+    from maichart.composer_v2.music_policy import resolve_policy as resolve_music
+    from maichart.composer_v2.onset_policy import resolve_policy as resolve_onset
+    from maichart.composer_v2.rhythm_structure import resolve_policy as resolve_structure
+    from maichart.composer_v2.stream_codec import StreamCodec
+
+    mode = _choice(payload, "mode", "fresh", ("fresh", "resume", "finetune"))
+    saved = None
+    if mode == "fresh":
+        defaults = {**TRAIN_DEFAULTS, **ENCODER_DEFAULTS}
+        config = ComposerV2Config(**{
+            key: _integer(payload, key, defaults[key], minimum=1)
+            for key in ("d_model", "layers", "nhead", "dim_feedforward",
+                        "audio_layers", "song_layers", "ticks_per_beat")
+        })
+    else:
+        saved = payload.get("model_config")
+        if not isinstance(saved, dict):
+            raise ValueError("请先检查 Composer v2 checkpoint")
+        config = ComposerV2Config.from_dict(saved)
+        if mode == "finetune":
+            config = replace(config, audio_layers=_integer(
+                payload, "audio_layers", config.audio_layers, minimum=config.audio_layers))
+
+    if mode != "resume":
+        config = replace(
+            config,
+            music_context_policy=resolve_music(payload.get("music_context", "auto"), saved)[0],
+            structure_policy=resolve_structure(payload.get("rhythm_structure", "auto"), saved)[0],
+            onset_readout_policy=resolve_onset(payload.get("onset_readout", "auto"), saved)[0],
+            intensity_policy=resolve_intensity(payload.get("intensity_curve", "auto"), saved)[0],
+        )
+
+    # A small codec supplies valid token IDs for the model's buffers. Checkpoint
+    # estimates account for their full vocabulary through the tied table and bias.
+    ticks = config.ticks_per_beat if mode == "fresh" else TRAIN_DEFAULTS["ticks_per_beat"]
+    if ticks > 8192:
+        raise ValueError("词表网格基准过大，无法预估参数量")
+    codec = StreamCodec.fit((), ticks_per_beat=ticks)
+    vocab_size = codec.vocab_size if mode == "fresh" else _integer(payload, "vocab_size", 0, minimum=1)
+    with torch.device("meta"):
+        model = ComposerV2(replace(config, layers=2, audio_layers=1, song_layers=1), codec)
+    # Each odd-indexed decoder block also reads whole-song audio.
+    repetitions = (
+        (model.decoder[0], (config.layers + 1) // 2),
+        (model.decoder[1], config.layers // 2),
+        (model.audio_blocks[0], config.audio_layers),
+        (model.song_blocks[0], config.song_layers),
+    )
+    count = sum(parameter.numel() for parameter in model.parameters())
+    for block, copies in repetitions:
+        count += (copies - 1) * sum(parameter.numel() for parameter in block.parameters())
+    count += (vocab_size - codec.vocab_size) * (config.d_model + 1)
+    return handler._json_response(dict(parameter_count=count, vocab_size=vocab_size))
+
 def _start(handler,runtime,kind,args,settings,paths,checkpoint_dir=None):
     task=runtime._create_task(kind,checkpoint_dir=checkpoint_dir)
     task.result.update(model_family=FAMILY,family=FAMILY,schema=SCHEMA,effective_settings=settings)
     if kind in ('composer_v2_curve','composer_v2_media'):
         task.result.update(audio=settings['audio'],audio_preview_url=f'/api/intensity/audio?id={task.task_id}')
     if kind.endswith("_train"): task.result["epoch_target"]=settings["epochs"]
+    options = dict(expected_epoch=settings.get("epochs"), result_paths=paths)
+    audit_lock = None
+    if kind == "composer_v2_auto_quality_audit":
+        from maichart.composer.training_lock import TrainingOutputBusyError, _directory_lock
+        from maichart.training.dataset_catalog import _write_json
+        from .material_audit_status import audit_state_path, audit_task_lock
+
+        manifest = Path(settings["manifest"])
+        preview = bool(settings["limit_charts"])
+        state_path = audit_state_path(manifest, preview)
+        audit_lock = _directory_lock(manifest.parent, audit_task_lock(preview))
+        try:
+            audit_lock.__enter__()
+        except TrainingOutputBusyError as exc:
+            task.status = "failed"
+            task.error = "这个训练清单已有同类型体检正在运行"
+            raise ValueError(task.error) from exc
+        state = dict(manifest=str(manifest), task_id=task.task_id, status="queued", pid=os.getpid(),
+                     started_at=datetime.now(timezone.utc).isoformat())
+
+        def finish_audit():
+            try:
+                _write_json(state_path, dict(state, status=task.status, error=task.error,
+                                             finished_at=datetime.now(timezone.utc).isoformat()))
+            finally:
+                audit_lock.__exit__(None, None, None)
+
+        def audit_running():
+            _write_json(state_path, dict(state, status="running"))
+
+        options.update(on_start=audit_running, on_finish=finish_audit)
     try:
-        runtime._run_subprocess_task(task,args,expected_epoch=settings.get("epochs"),result_paths=paths)
+        if audit_lock is not None:
+            _write_json(state_path, state)
+        runtime._run_subprocess_task(task, args, **options)
     except Exception as exc:
         with task.lock:
             task.status="failed"
             task.error=str(exc)
+        if audit_lock is not None:
+            finish_audit()
         raise
     result = dict(task_id=task.task_id,model_family=FAMILY)
     if kind == 'composer_v2_auto_quality_audit':
@@ -106,7 +205,9 @@ def start_train(handler,payload,*,runtime):
     sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
     settings={}
-    from maichart.composer_v2.difficulty import DIFFICULTY_SLOTS, FITTED_SOURCES, locate_scorer, resolve_selection, scorer_path_key
+    from maichart.composer_v2.difficulty import (
+        DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, locate_scorer, resolve_selection, scorer_path_key,
+    )
     difficulty=resolve_selection(payload.get('difficulty_source','auto'),payload.get('min_level'),
         payload.get('max_level'),min_declared_level=payload.get('min_declared_level'),
         difficulty_slots=payload.get('difficulty_slots'),parent=checked.get('training_contract') if parent else None,
@@ -191,8 +292,18 @@ def start_train(handler,payload,*,runtime):
     refresh_events=_integer(payload,'refresh_events',16,minimum=1)
     _arg(args,'--refresh-events',refresh_events);_arg(args,'--sequence-policy',sequence_policy)
     settings.update(refresh_events=refresh_events,sequence_policy=sequence_policy)
+    inherited_audio_block = (checked.get('model_config') or {}).get('local_audio_block_beats', 1) if parent else 1
+    audio_block = _choice(payload, 'local_audio_block_beats', 'auto', {'auto', '1', '2'})
+    audio_block = inherited_audio_block if audio_block == 'auto' else int(audio_block)
+    if mode == 'resume' and audio_block != inherited_audio_block:
+        raise ValueError('更改局部音频编码方式需要使用新目录微调。')
+    if audio_block == 2 and sequence_policy != 'continuous_events_v1':
+        raise ValueError('相邻两拍共享仅适用于连续事件检查点。')
+    if audio_block != inherited_audio_block:
+        _arg(args, '--local-audio-block-beats', audio_block)
+    settings['local_audio_block_beats'] = audio_block
     from maichart.composer_v2.acceleration import AUDIO_DEVICES
-    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"},activation_checkpointing={'auto','off','on'})
+    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"},activation_checkpointing={'auto','off','on'},attention_projection_packing={'auto','off','on'},decoder_flash_attention={'off','on'})
     zeros={"warmup_steps","future_beats","history_beats","validation_max_batches","seed","max_steps","limit_charts","save_every","early_stopping_patience"}
     for key,default in TRAIN_DEFAULTS.items():
         if key in ('cuda_memory_budget_gb', 'audio_cache_gb') and isinstance(payload.get(key), bool):
@@ -204,6 +315,15 @@ def start_train(handler,payload,*,runtime):
             raise ValueError(f'{key} 不能超过 1024 GiB')
         settings[key]=value
         _arg(args,"--"+key.replace("_","-"),value)
+    from maichart.composer_v2.batching import CHOICES as BATCH_LAYOUTS, resolve_layout
+    batch_layout=_choice(payload,'batch_layout','auto',BATCH_LAYOUTS)
+    saved_contract=checked.get('training_contract',{}) if mode=='resume' else {}
+    if mode!='resume' or 'batch_size' in saved_contract:
+        resolved_layout,_,_=resolve_layout(batch_layout,settings['batch_size'],settings['grad_accumulation'],
+            {'training_contract':saved_contract} if mode=='resume' else None)
+        settings['resolved_batch_layout']=resolved_layout
+    settings['batch_layout']=batch_layout
+    _arg(args,'--batch-layout',batch_layout)
     if settings["d_model"]%settings["nhead"]: raise ValueError("d_model 必须能被 nhead 整除")
     if settings["lr"]<=0: raise ValueError("lr 必须大于0")
     if settings["dropout"]>=1 or settings["min_lr_ratio"]>1: raise ValueError("dropout/min_lr_ratio 超出范围")
@@ -240,7 +360,7 @@ def start_train(handler,payload,*,runtime):
         split_directory=directory/"data_split"
         if split_directory.exists():raise ValueError("输出目录已有 data_split，请使用新的输出目录以保留原划分")
         from maichart.composer.evaluation import split_manifest
-        extra_filters = difficulty.min_declared_level or difficulty.difficulty_slots != DIFFICULTY_SLOTS
+        extra_filters = difficulty.min_declared_level or difficulty.difficulty_slots != LEGACY_DIFFICULTY_SLOTS
         split_report=split_manifest(manifest,split_directory,fraction=fraction,seed=settings["seed"],cache_dir=cache,
                                     chart_eligibility=difficulty.split_exclusion if extra_filters else None)
         manifest=Path(split_report["splits"]["train"]["path"])
@@ -556,10 +676,12 @@ def start_candidate_audit(handler, payload, *, runtime):
 
 def auto_quality_status(handler, payload, *, runtime):
     """Read existing results without re-composing the training selection."""
-    from .quality_api import auto_quality_view
+    from .dataset_api import _json_data, _pool_card
+    from .material_audit_status import selection_audits
+    from .quality_api import QualityAPI, auto_quality_view
 
     _family(payload)
-    scope = _choice(payload, 'auto_scope', 'formal', {'formal', 'preview'})
+    scope = _choice(payload, 'auto_scope', 'formal', {'formal', 'preview', 'auto'})
     policy = _choice(payload, 'auto_quality_policy', 'auto', {'auto', 'on', 'off'})
     quality_enabled = payload.get('quality_enabled', True)
     if not isinstance(quality_enabled, bool):
@@ -570,30 +692,57 @@ def auto_quality_status(handler, payload, *, runtime):
                  has_preview_annotations=False, annotations_path=None, record_count=0, report=None,
                  preview_report=None, training_eligible=False, training_effective=None if resume else False)
 
+    workspace = getattr(runtime, "WEBUI_ROOT", None)
+    quality_api = QualityAPI(workspace)
+
     def status(value):
         manifest = _path(value, 'manifest')
         if not manifest.is_file():
             return {**empty, 'manifest': str(manifest)}
-        data = json.loads(manifest.read_text(encoding='utf-8-sig'))
+        data = _json_data(manifest)
+        if data.get("candidate_pool"):
+            return dict(empty, manifest=str(manifest), candidate_pool=_pool_card(manifest.parent, data))
         meta, _, _ = auto_quality_view(manifest, data, scope)
+        report_key = "preview_report" if meta["auto_scope"] == "preview" else "report"
+        if meta[report_key] and meta[report_key].get("reported_prompts") is not None:
+            meta[report_key] = quality_api._catalog_view(manifest, scope).audit[report_key]
         eligible = meta['has_annotations'] and not (data.get('candidate_pool') or data.get('reviewed_training'))
         effective = bool(eligible and quality_enabled and policy != 'off' and sequence == 'continuous_events_v1')
         return dict(meta, training_eligible=eligible, training_effective=None if resume else effective)
 
-    if payload.get('manifest'):
-        return handler._json_response(status(payload['manifest']))
     manifests = payload.get('manifests') or []
     if not isinstance(manifests, list) or any(not isinstance(value, str) or not value.strip() for value in manifests):
         raise ValueError('训练数据集列表必须由有效路径组成')
     manifests = list(dict.fromkeys(manifests))
-    if len(manifests) == 1:
-        return handler._json_response(status(manifests[0]))
-    return handler._json_response(dict(empty, sources=[status(value) for value in manifests]))
+    if not manifests and payload.get("manifest"):
+        return handler._json_response(status(payload["manifest"]))
+    sources = [status(value) for value in manifests]
+    if payload.get("sources_only") is True:
+        return handler._json_response(dict(sources=sources))
+    if len(sources) == 1 and not sources[0].get("candidate_pool"):
+        return handler._json_response(sources[0])
+    result = dict(empty, sources=sources)
+    if workspace and sources:
+        history = selection_audits(manifests, workspace)
+        snapshot = history["current_snapshot"]
+        if snapshot:
+            result.update(status(snapshot["manifest"]))
+        result.update(history)
+    return handler._json_response(result)
 
 
 def start_auto_quality_audit(handler, payload, *, runtime):
     """Inspect the selected corpus in a background CPU process."""
     _family(payload)
+    requested_sources = payload.get("manifests") or ([payload["manifest"]] if payload.get("manifest") else [])
+    if isinstance(requested_sources, list):
+        for value in requested_sources:
+            requested = _path(value, "manifest", exists=True)
+            requested_data = json.loads(requested.read_text(encoding="utf-8-sig"))
+            if requested_data.get("merged_from") or requested_data.get("split_metadata"):
+                raise ValueError("请在素材列表勾选原始来源后体检，这份训练快照为只读")
+            if requested_data.get("candidate_pool") and not payload.get("manifests"):
+                payload = {**payload, "manifests": [str(requested)]}
     payload, _ = runtime._prepare_training_sources({**payload, 'model_family': FAMILY})
     manifest = _path(payload.get('manifest'), 'manifest', exists=True)
     limit = _integer(payload, 'limit_charts', 0, minimum=0)
@@ -609,7 +758,9 @@ def start_auto_quality_audit(handler, payload, *, runtime):
         raise ValueError('Touch同手兼顾半径须为 60–260')
     domain_pathology_mode = _choice(payload, 'domain_pathology_mode', 'maimai_dx_v1', {'maimai_dx_v1', 'off'})
     acoustic_audit_mode = _choice(payload, 'acoustic_audit_mode', 'auto', {'auto', 'on', 'off'})
-    highlight_good_mode = _choice(payload, 'highlight_good_mode', 'auto', {'auto', 'acoustic_and_flow_v1', 'chart_only_v1', 'off'})
+    highlight_good_mode = _choice(payload, 'highlight_good_mode', 'off', {'auto', 'acoustic_and_flow_v1', 'chart_only_v1', 'off'})
+    if highlight_good_mode == 'auto':
+        highlight_good_mode = 'off'
     good_quantile = _float(payload, 'good_quantile', 0.82, minimum=0.50)
     if isinstance(payload.get('good_quantile'), bool) or good_quantile > 0.98:
         raise ValueError('优选好段分位线须为 0.50–0.98')
@@ -622,9 +773,14 @@ def start_auto_quality_audit(handler, payload, *, runtime):
     workers = _integer(payload, 'workers', 0, minimum=0)
     if workers > 32:
         raise ValueError('并行体检进程数须为 0–32')
+    min_difficulty_index = _integer(payload, 'min_difficulty_index', 5, minimum=4)
+    if min_difficulty_index > 6:
+        raise ValueError('最低难度槽位须为 4–6')
     args = ['-m', 'maichart.composer_v2.auto_quality_audit', '--manifest', str(manifest),
             '--limit-charts', str(limit), '--tap-on-slide-mode', tail_mode,
             '--inner-muri-mode', inner_mode, '--tap-on-slide-ms', str(threshold)]
+    if min_difficulty_index != 5:
+        _arg(args, '--min-difficulty-index', min_difficulty_index)
     if touch_policy != 'palm_span_v1':
         _arg(args, '--touch-reachability-policy', touch_policy)
     if touch_radius != 180.:
@@ -633,8 +789,7 @@ def start_auto_quality_audit(handler, payload, *, runtime):
         _arg(args, '--domain-pathology-mode', domain_pathology_mode)
     if acoustic_audit_mode != 'auto':
         _arg(args, '--acoustic-audit-mode', acoustic_audit_mode)
-    if highlight_good_mode != 'auto':
-        _arg(args, '--highlight-good-mode', highlight_good_mode)
+    _arg(args, '--highlight-good-mode', highlight_good_mode)
     if good_quantile != 0.82:
         _arg(args, '--good-quantile', good_quantile)
     if max_problem_fraction != 0.45:
@@ -655,6 +810,7 @@ def start_auto_quality_audit(handler, payload, *, runtime):
                     good_quantile=good_quantile,
                     max_problem_fraction=max_problem_fraction,
                     experimental_hand_flow_quantile=experimental_hand_flow_quantile,
+                    min_difficulty_index=min_difficulty_index,
                     workers=workers,
                     device='cpu')
     return _start(handler, runtime, 'composer_v2_auto_quality_audit', args, settings, [report, annotations])

@@ -23,6 +23,8 @@ class StreamCodec(ComponentCodec):
         self.event_end_id=self.ids['[END_EVENT]']
         self.phases={i:Fraction(t[2:]) for i,t in enumerate(tokens) if t.startswith('F:')}
         self._phase_order=sorted(set(self.phases.values()))
+        self._phase_ids=tuple(self.phases)
+        self._phase_bounds=(self._phase_order[0],self._phase_order[-1]) if self.phases else None
         self.digits={self.ids['NUM:'+str(i)]:str(i) for i in range(10)}
         self._note_tokens = OrderedDict()
 
@@ -44,7 +46,7 @@ class StreamCodec(ComponentCodec):
         values.update('NUM:'+c for c in '-/0123456789')
         values.update('V:'+c for c in '-+./:#0123456789');values.update(('D:B','D:R'))
         # These are available rhythmic positions, not compulsory grids or meter.
-        denominators=set(range(1,33))|{48,64,96,128,192,int(ticks_per_beat)}
+        denominators=set(range(1,193))|{int(ticks_per_beat)}
         fractions={Fraction(n,d) for d in denominators for n in range(d)}
         fractions.update(Fraction(p)%1 for p in phases)
         values.update('F:'+str(p) for p in fractions)
@@ -65,19 +67,22 @@ class StreamCodec(ComponentCodec):
             result.extend(self._encode_note_text(point.note_text))
             result.append(self.event_end_id)
         return result
-    def token_clocks(self,ids,cursor=0):
-        current=Fraction(0);integer='';reading=False;result=[]
+    def clock_states(self,ids,cursor=0,*,initial=(0.,'',False)):
+        """Yield the clock and parser state after each token, including partial onsets."""
+        current,integer,reading=initial
         for value in ids:
             value=int(value)
             if value==self.at_id:integer='';reading=True
             elif reading and value in self.digits:integer+=self.digits[value]
             elif value==self.phase_id:
-                current=Fraction(int(integer));reading=False
-            elif value in self.phases:current=Fraction(int(integer))+self.phases[value]
-            elif value==self.tgt_id:current=Fraction(cursor)
-            elif value in (self.bos_id,self.ctx_id,self.carry_id,self.ref_id):current=Fraction(0)
-            result.append(float(current))
-        return result
+                current=float(int(integer));reading=False
+            elif value in self.phases:current=float(Fraction(int(integer))+self.phases[value])
+            elif value==self.tgt_id:current=float(Fraction(cursor))
+            elif value in (self.bos_id,self.ctx_id,self.carry_id,self.ref_id):current=0.
+            yield current,integer,reading
+
+    def token_clocks(self,ids,cursor=0):
+        return [state[0] for state in self.clock_states(ids,cursor)]
     def decode_points(self,ids,origin=0):
         points=[];integer='';clock=None;atom=[];atoms=[];reading=False
         for value in ids:
@@ -120,7 +125,11 @@ class StreamCodec(ComponentCodec):
             split=prefix.index(self.phase_id)
             if len(prefix)!=split+1:return ()
             whole=int(''.join(self.digits[i] for i in prefix[1:split]))
-            return tuple(i for i,p in self.phases.items() if after<whole+p<end)
+            if self._phase_bounds is None:return ()
+            lower,upper=after-whole,end-whole
+            if lower<self._phase_bounds[0] and self._phase_bounds[1]<upper:
+                return self._phase_ids
+            return tuple(i for i,p in self.phases.items() if lower<p<upper)
         digits=''.join(self.digits[i] for i in prefix[1:])
         def possible(s):
             if len(s)>1 and s[0]=='0':return False

@@ -162,6 +162,8 @@ class ForwardFeasibilityGuard:
         self._salient_onsets = _salient_audio_onsets(song) if self.policy == "balanced_v1" else np.empty(0)
         self._beat_open_cache: dict[Fraction, bool] = {}
         self._state_cache: dict[tuple[Fraction, tuple[str, ...]], dict[str, Any]] = {}
+        self._time_bounds = None
+        self._open_integers: dict[int, bool] = {}
         self._build_prefix_index()
 
     def _local_bpm(self, beat: Fraction) -> float:
@@ -539,10 +541,12 @@ class ForwardFeasibilityGuard:
     def viable_kind_ids(self, beat: Fraction, completed_atoms: tuple[str, ...] = ()) -> tuple[int, ...]:
         if not self.enabled:
             return tuple(sorted(self.codec.kind_ids))
+        return tuple(sorted(self._viable_kinds(beat, completed_atoms)))
+
+    def _viable_kinds(self, beat: Fraction, completed_atoms: tuple[str, ...] = ()):
         state = self._beat_state(beat, completed_atoms)
         if state["sec"] > self.audio_end + 1e-8:
-            return ()
-        out: list[int] = []
+            return
         ids = self.codec.ids
 
         if "N:tap" in ids and ids["N:tap"] in self.codec.kind_ids:
@@ -550,14 +554,14 @@ class ForwardFeasibilityGuard:
                 "P:" + str(b) in ids and self._button_viable_for_tap(state, b)
                 for b in range(1, 9)
             ):
-                out.append(ids["N:tap"])
+                yield ids["N:tap"]
 
         if "N:touch" in ids and ids["N:touch"] in self.codec.kind_ids:
             touch_pads = [
                 self.codec.tokens[tid][2:] for tid in self.codec.domains.get("<touch>", ())
             ]
             if any(self._touch_viable(state, p) for p in touch_pads):
-                out.append(ids["N:touch"])
+                yield ids["N:touch"]
 
         if "N:hold" in ids and ids["N:hold"] in self.codec.kind_ids:
             if any(
@@ -565,7 +569,7 @@ class ForwardFeasibilityGuard:
                 and self._has_grid_duration(self._hold_max_beats(state, b), allow_zero=True)
                 for b in range(1, 9)
             ):
-                out.append(ids["N:hold"])
+                yield ids["N:hold"]
 
         if "N:touch_hold" in ids and ids["N:touch_hold"] in self.codec.kind_ids:
             touch_pads = [
@@ -575,15 +579,13 @@ class ForwardFeasibilityGuard:
                 self._has_grid_duration(self._touch_hold_max_beats(state, p), allow_zero=True)
                 for p in touch_pads
             ):
-                out.append(ids["N:touch_hold"])
+                yield ids["N:touch_hold"]
 
         if "N:slide" in ids and ids["N:slide"] in self.codec.kind_ids:
             if state["sec"] < self.audio_end and any(
                 "P:" + str(b) in ids and self._slide_head_viable(state, b) for b in range(1, 9)
             ):
-                out.append(ids["N:slide"])
-
-        return tuple(sorted(out))
+                yield ids["N:slide"]
 
     def is_beat_open(self, beat: Fraction) -> bool:
         if not self.enabled:
@@ -595,7 +597,8 @@ class ForwardFeasibilityGuard:
         if sec < 0.0 or sec > self.audio_end + 1e-8:
             self._beat_open_cache[beat] = False
             return False
-        result = bool(self.viable_kind_ids(beat))
+        # Time filtering needs any legal continuation, not every legal kind.
+        result = next(self._viable_kinds(beat), None) is not None
         self._beat_open_cache[beat] = result
         return result
 
@@ -604,6 +607,19 @@ class ForwardFeasibilityGuard:
         lo = bisect_right(phases, after - whole)
         hi = bisect_left(phases, end - whole)
         return any(self.is_beat_open(whole + phase) for phase in phases[lo:hi])
+
+    def _last_open_integer(self, lo: int, hi: int) -> int:
+        first_phase = self.codec._phase_order[0]
+        # The tempo clock is monotonic. Find the last possible integer without
+        # stepping through a long chart tail outside the audio bounds.
+        left, right = lo, hi + 1
+        while left < right:
+            middle = (left + right) // 2
+            if self._second_at(middle + first_phase) <= self.audio_end + 1e-8:
+                left = middle + 1
+            else:
+                right = middle
+        return left - 1
 
     def filter_time_choices(
         self,
@@ -615,24 +631,21 @@ class ForwardFeasibilityGuard:
         """Filter ``StreamCodec.time_choices`` so dead beats before audio_end are skipped."""
         if not self.enabled or not allowed:
             return allowed
-        lo, hi = self.codec.integer_bounds(after, end)
-        if lo > hi:
-            return allowed
+        if self._time_bounds is None or self._time_bounds[:2] != (after, end):
+            lo, hi = self.codec.integer_bounds(after, end)
+            if lo > hi:
+                return allowed
+            self._time_bounds = after, end, lo, self._last_open_integer(lo, hi)
+            self._open_integers.clear()
+        lo, hi = self._time_bounds[2:]
 
-        first_phase = self.codec._phase_order[0]
-        # The tempo clock is monotonic. Find the last possible integer without
-        # stepping through a long chart tail outside the audio bounds.
-        left, right = lo, hi + 1
-        while left < right:
-            middle = (left + right) // 2
-            if self._second_at(middle + first_phase) <= self.audio_end + 1e-8:
-                left = middle + 1
-            else:
-                right = middle
-        hi = left - 1
+        def has_open_phase(whole: int) -> bool:
+            if whole not in self._open_integers:
+                self._open_integers[whole] = self._integer_has_open_phase(whole, after, end)
+            return self._open_integers[whole]
 
         if not prefix:
-            has_any = any(self._integer_has_open_phase(w, after, end) for w in range(lo, hi + 1))
+            has_any = any(has_open_phase(w) for w in range(lo, hi + 1))
             if has_any:
                 return allowed
             return tuple(t for t in allowed if t != self.codec.at_id)
@@ -659,14 +672,14 @@ class ForwardFeasibilityGuard:
                 scale = 10 ** extra
                 lower = max(lo, value * scale)
                 upper = min(hi, (value + 1) * scale - 1)
-                if any(self._integer_has_open_phase(w, after, end) for w in range(lower, upper + 1)):
+                if any(has_open_phase(w) for w in range(lower, upper + 1)):
                     return True
             return False
 
         out: list[int] = []
         for tid in allowed:
             if tid == self.codec.phase_id:
-                if digits and lo <= int(digits) <= hi and self._integer_has_open_phase(int(digits), after, end):
+                if digits and lo <= int(digits) <= hi and has_open_phase(int(digits)):
                     out.append(tid)
             elif tid in self.codec.digits:
                 if has_open_integer(digits + self.codec.digits[tid]):

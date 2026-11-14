@@ -112,8 +112,8 @@ def _motion_actions(points,tempo,clock,cache=None):
                             segments.append((onset+float(shoot),onset+float(shoot)+float(length),path))
                         groups=[segments]
                     for segments in groups:
-                        # Waiting is available time, not a hard hand lock. A short
-                        # preparation interval models arriving at the trace start.
+                        # Keep the preparation bound for motion stream consumers.
+                        # Hand assignment uses trace for the start of contact.
                         jobs.append(dict(start=max(second,trace-.12),onset=second,trace=trace,end=finish+.016666667,
                             position=position,segments=segments,kind=kind))
                 except (ValueError,KeyError,TypeError) as exc:
@@ -137,7 +137,7 @@ def _trajectory_comfort(points,tempo,clock,start,end,observed_end,motion_cache=N
     """Bounded, unlabeled two-trajectory assignment; never a legality gate."""
     jobs,pulses,coverage=_motion_actions(points,tempo,clock,cache=motion_cache)
     warm=start-.6;horizon=max(end,min(end+.35,observed_end))
-    jobs=[job for job in jobs if job['end']>=warm and job['start']<=horizon]
+    jobs=[job for job in jobs if job['end']>=warm and job['trace']<=horizon]
     positions={}
     def position_at(index,second):
         key=(index,second)
@@ -145,9 +145,8 @@ def _trajectory_comfort(points,tempo,clock,start,end,observed_end,motion_cache=N
         return positions[key]
     events=[]
     for index,job in enumerate(jobs):
-        begin=max(warm,job['start']);finish=min(horizon,job['end'])
-        # The path interpolation is native; the 50 ms sampling and preparation
-        # horizon are deliberately reported heuristic approximations.
+        begin=max(warm,job['trace']);finish=min(horizon,job['end'])
+        # The path interpolation is native, sampled at roughly 50 ms.
         count=min(96,max(1,int(math.ceil((finish-begin)/.05))))
         clocks=sorted(set(np.linspace(begin,finish,count+1).tolist()+
             [x for segment in job['segments'] for x in segment[:2] if begin<=x<=finish]))
@@ -168,28 +167,32 @@ def _trajectory_comfort(points,tempo,clock,start,end,observed_end,motion_cache=N
         position=tuple(np.asarray([p for p,_ in group['members']]).mean(0))
         events.append((group['second'],-1,position,1.,True))
     events.sort(key=lambda event:(event[0],event[1]))
-    beam=[(0.,((None,warm),(None,warm)),tuple([-1]*len(jobs)))]
+    beam=[(0.,((None,warm,-1),(None,warm,-1)),tuple([-1]*len(jobs)))]
     scored_events=0
     for second,job_id,target,weight,pulse in events:
         updated=[]
+        is_slide=job_id>=0 and jobs[job_id]['kind'] in ('slide','wifi')
         for cost,hands,owners in beam:
             assigned=owners[job_id] if job_id>=0 else -1
-            choices=((assigned,1-assigned) if assigned>=0 and jobs[job_id]['kind'] in ('slide','wifi')
+            choices=((assigned,1-assigned) if assigned>=0 and is_slide
                      else (assigned,) if assigned>=0 else (0,1))
             for hand in choices:
-                old,previous=hands[hand]
+                old,previous,previous_job=hands[hand]
                 occupied=[index for index,owner in enumerate(owners) if owner==hand and index!=job_id
-                    and jobs[index]['start']<=second<=jobs[index]['end']]
+                    and jobs[index]['trace']<=second<=jobs[index]['end']]
                 origins=[position_at(index,second) for index in occupied]
                 origin=origins[0] if origins else old
-                distance=0. if origin is None else math.dist(origin,target)
+                # Following the same path needs no jump between sampled points.
+                # An intervening contact, hand transfer, or concurrent job still does.
+                follows_path=is_slide and assigned==hand and previous_job==job_id and not origins
+                distance=0. if origin is None or follows_path else math.dist(origin,target)
                 elapsed=max(.04,second-previous)
                 spread=.45 if pulse and abs(second-previous)<1e-7 else 0.
                 moving=min(3.,max(0.,max(0.,distance-spread)/elapsed-3.)/6.)
                 busy=sum(max(0.,math.dist(position,target)-.28)/.7 for position in origins)
                 transfer=.08 if assigned>=0 and hand!=assigned else 0.
                 penalty=(moving+busy)*(1. if pulse else weight/.1)+transfer
-                state=list(hands);state[hand]=(target,second)
+                state=list(hands);state[hand]=(target,second,job_id)
                 allocation=list(owners)
                 if job_id>=0:allocation[job_id]=hand
                 updated.append((cost+(penalty if second>=start else 0.),tuple(state),tuple(allocation)))

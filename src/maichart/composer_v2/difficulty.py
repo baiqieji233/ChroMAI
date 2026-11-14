@@ -10,6 +10,8 @@ CONDITION_MAX_LEVEL = 20.
 FITTED_SOURCES = ('chartgate', 'fitted')
 SOURCES = ('auto', 'declared', *FITTED_SOURCES)
 DIFFICULTY_SLOTS = (4, 5, 6)
+DEFAULT_DIFFICULTY_SLOTS = (5, 6)
+LEGACY_DIFFICULTY_SLOTS = (4, 5, 6)
 CHARTGATE_SLOTS = (5, 6)
 
 
@@ -19,7 +21,7 @@ class DifficultySelection:
     min_level: float
     max_level: float
     min_declared_level: float = 0.
-    difficulty_slots: tuple[int, ...] = DIFFICULTY_SLOTS
+    difficulty_slots: tuple[int, ...] = DEFAULT_DIFFICULTY_SLOTS
 
     def dataset_options(self):
         return dict(min_level=self.min_level, max_level=self.max_level,
@@ -47,19 +49,20 @@ class DifficultySelection:
             return 'declared_level_out_of_range'
 
     def contract(self, scorer=None):
-        if self == DEFAULT_SELECTION:
+        if self == LEGACY_SELECTION:
             return None
         result = dict(source=self.source, min_level=self.min_level, max_level=self.max_level)
         if self.source in FITTED_SOURCES:
             result['scorer'] = scorer.identity
         if self.min_declared_level:
             result['min_declared_level'] = self.min_declared_level
-        if self.difficulty_slots != DIFFICULTY_SLOTS:
+        if self.difficulty_slots != LEGACY_DIFFICULTY_SLOTS:
             result['difficulty_slots'] = list(self.difficulty_slots)
         return result
 
 
-DEFAULT_SELECTION = DifficultySelection('declared', DEFAULT_MIN_LEVEL, DECLARED_MAX_LEVEL)
+DEFAULT_SELECTION = DifficultySelection('declared', DEFAULT_MIN_LEVEL, DECLARED_MAX_LEVEL, 0., DEFAULT_DIFFICULTY_SLOTS)
+LEGACY_SELECTION = DifficultySelection('declared', DEFAULT_MIN_LEVEL, DECLARED_MAX_LEVEL, 0., LEGACY_DIFFICULTY_SLOTS)
 
 
 def metadata_exclusion(slot, declared, slots, supported_slots, min_declared_level):
@@ -115,7 +118,7 @@ def resolve_selection(source='auto', min_level=None, max_level=None, *,
     if declared_minimum and not fitted:
         raise ValueError('最低标称定数用于拟合定数筛选')
     if difficulty_slots is None:
-        difficulty_slots = saved.get('difficulty_slots', DIFFICULTY_SLOTS) if resume else DIFFICULTY_SLOTS
+        difficulty_slots = saved.get('difficulty_slots', LEGACY_DIFFICULTY_SLOTS) if resume else DEFAULT_DIFFICULTY_SLOTS
     if not isinstance(difficulty_slots, (list, tuple)) or not difficulty_slots or any(
         type(slot) is not int or slot not in DIFFICULTY_SLOTS for slot in difficulty_slots
     ):
@@ -126,7 +129,7 @@ def resolve_selection(source='auto', min_level=None, max_level=None, *,
     selection = DifficultySelection(source, low, high, declared_minimum, slots)
     if resume and selection != DifficultySelection(saved.get('source', 'declared'),
             saved.get('min_level', DEFAULT_MIN_LEVEL), saved.get('max_level', DECLARED_MAX_LEVEL),
-            saved.get('min_declared_level', 0.), tuple(saved.get('difficulty_slots', DIFFICULTY_SLOTS))):
+            saved.get('min_declared_level', 0.), tuple(saved.get('difficulty_slots', LEGACY_DIFFICULTY_SLOTS))):
         raise ValueError('断点续训需要沿用检查点的难度筛选。修改筛选条件可用新目录微调。')
     return selection
 

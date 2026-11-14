@@ -44,6 +44,55 @@
   }
 
   const selectedMode = () => value("trainingMode", "fresh");
+  let v2ParameterEstimate = {key: "", text: "", timer: null};
+
+  function v2ParameterSummary(mode) {
+    const label = "预估模型参数量：";
+    const payload = {mode};
+    if (mode !== "fresh") {
+      const inspected = typeof checkpointInspection !== "undefined"
+        && checkpointInspection.key === currentCheckpointKey() && checkpointInspection.data;
+      if (!inspected?.valid) return label + "检查 checkpoint 后显示";
+      payload.model_config = inspected.model_config;
+      payload.vocab_size = inspected.vocab_size;
+      if (!payload.vocab_size) return label + "检查结果缺少词表大小，请重启 WebUI 后重新检查";
+    }
+
+    const dimensions = mode === "fresh"
+      ? ["d_model", "layers", "nhead", "dim_feedforward", "audio_layers", "song_layers", "ticks_per_beat"]
+      : mode === "finetune" ? ["audio_layers"] : [];
+    for (const key of dimensions) {
+      const number = Number(value(v2FieldId(key)));
+      if (!Number.isSafeInteger(number) || number < 1) return label + "请填写有效的模型结构";
+      payload[key] = number;
+    }
+    if (mode === "fresh" && payload.d_model % payload.nhead !== 0) {
+      return label + "模型宽度须能被注意力头数整除";
+    }
+    if (mode !== "resume") {
+      for (const key of ["music_context", "rhythm_structure", "onset_readout", "intensity_curve"]) {
+        payload[key] = value(v2FieldId(key), "auto");
+      }
+    }
+
+    const key = JSON.stringify(payload);
+    if (key !== v2ParameterEstimate.key) {
+      clearTimeout(v2ParameterEstimate.timer);
+      const estimate = v2ParameterEstimate = {key, text: "估算中…", timer: null};
+      estimate.timer = setTimeout(async () => {
+        try {
+          const {parameter_count: count, vocab_size: vocab} = await api("/api/composer-v2/estimate_parameters", payload);
+          const basis = mode === "fresh" ? `按基础词表 ${vocab} 词元，最终随训练数据变化`
+            : mode === "finetune" ? `按 checkpoint 词表 ${vocab} 词元，微调可能扩词` : "按 checkpoint 结构和词表";
+          estimate.text = `约 ${(count / 1e6).toFixed(2)}M（${basis}，MERT 另计）`;
+        } catch (error) {
+          estimate.text = `暂不可用（${error.message}）`;
+        }
+        if (estimate === v2ParameterEstimate) refresh();
+      }, 180);
+    }
+    return label + v2ParameterEstimate.text;
+  }
   const taskLabels = {review_bundle_export:'导出已确认片段',review_bundle_preview:'预览片段包',review_bundle_import:'导入片段包',candidate_budget: "训练来源学习份额估算", candidate_scan: "待审候选库扫描", preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
     chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
     composer_v2_train: "Composer v2 训练", composer_v2_generate: "Composer v2 生成",
@@ -202,6 +251,7 @@
     if(selectedFamily==='chart_composer_v2')list("trainingRunSummary",[
       `起点：${modeLabel}${mode!=="fresh"?` · ${value("trainingCheckpointPath").trim()||"尚未选择 checkpoint"}`:""}`,
       sources.length?`素材：${sources.map(item=>item.name||item.path).join("、")}`:`素材：${value("manifestPath").trim()||"尚未准备"}`,
+      v2ParameterSummary(mode),
       `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
       `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
       `学习率 ${value("v2TrainLr")} · ${nameOf("v2TrainLrSchedule")} · 音频特征 ${nameOf("v2TrainAudioBackend")}`,
@@ -363,6 +413,9 @@
     document.getElementById("candidatePoolSync"),
     document.getElementById("candidatePoolExcluded"),
     document.getElementById("candidatePoolUse"),
+    document.getElementById("candidateAutoScreenPreview"),
+    document.getElementById("candidateAutoScreenApply"),
+    document.getElementById("feedbackExcludeSpan"),
     document.getElementById("qualityOpenReview"),
     document.getElementById("qualitySpanStart"),
     document.getElementById("qualitySpanEnd"),

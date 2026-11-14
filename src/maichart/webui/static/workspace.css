@@ -347,7 +347,17 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .auto-audit-badge.clean { background: #eef4f7; color: #526473; border: 1px solid #d5e0e8; }
 .auto-audit-badge.unverified { background: #fef7e0; color: #856414; border: 1px solid #ebd594; }
 .auto-audit-override { display: inline-block; padding: 2px 7px; border-radius: 999px; background: #eaeffb; color: #304d8a; border: 1px solid #c3d1f0; font-size: 11px; font-weight: 600; }
+.dataset-audit-state, .audit-source-list { color: #40505c; font-size: 12px; line-height: 1.5; }
+.dataset-audit-state p, .audit-source-list p { margin: 4px 0; overflow-wrap: anywhere; }
+.material-prompt-actions { display: flex; flex-wrap: wrap; gap: 5px; margin: 5px 0 9px; }
+.material-prompt-option { display: flex; align-items: center; gap: 5px; margin-top: 7px; }
+.material-prompt-option[hidden] { display: none; }
+.training-source-preview { margin: 12px 0 16px; padding: 12px; border: 1px solid var(--line); border-radius: 8px; }
+.training-source-preview h4 { margin: 0 0 8px; }
+.training-source-preview td { overflow-wrap: anywhere; vertical-align: top; }
+.training-source-preview td p { margin: 2px 0 6px; }
 
 .auto-review-panel { padding: 8px 10px; border: 1px solid #d4e1ec; border-radius: 7px; background: #ffffff; }
 .auto-region-jump.is-good { border-color: #a9dcc4; background: #f1fbf6; color: #1d6e47; }
 .auto-region-jump.is-problem { border-color: #efc4bc; background: #fff6f4; color: #9c3426; }
+.auto-region-jump.is-uncertain { border-color: #ebd594; background: #fef7e0; color: #856414; }

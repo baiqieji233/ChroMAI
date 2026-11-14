@@ -9,6 +9,7 @@ import json
 import math
 import os
 import tempfile
+import time
 import threading
 from pathlib import Path
 from typing import Any
@@ -38,13 +39,25 @@ SONG_FORM_V2_LEGACY_AUDIO_METADATA_KEYS = frozenset({
 })
 
 
+def _replace_file(temporary, path):
+    for attempt in range(8):
+        try:
+            os.replace(temporary, path)
+            return
+        except PermissionError:
+            if os.name != "nt" or attempt == 7:
+                raise
+            # A concurrent JSON reader can briefly block rename on Windows.
+            time.sleep(.02 * (attempt + 1))
+
+
 def _write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.stem + "_", suffix=".tmp")
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as output:
             json.dump(payload, output, ensure_ascii=False, indent=2)
-        os.replace(temporary, path)
+        _replace_file(temporary, path)
     finally:
         if Path(temporary).exists():
             Path(temporary).unlink()
@@ -64,6 +77,21 @@ def _source_asset(value: Any, manifest: Path, data: dict[str, Any]) -> Path:
         return path.resolve()
     bases = (manifest.parent, _source_root(manifest, data), manifest.parent.parent)
     return next(((base / path).resolve() for base in bases if (base / path).exists()), (bases[0] / path).resolve())
+
+
+def _source_asset_cache():
+    resolved = {}
+
+    def asset(value, manifest, data):
+        raw = material_path(str(value))
+        key = (None if raw.is_absolute() else manifest, raw)
+        if key not in resolved:
+            path = _source_asset(raw, manifest, data)
+            resolved[key] = path
+            resolved.setdefault((None, path), path)
+        return resolved[key]
+
+    return asset
 
 
 def manifest_dataset_id(manifest_path: str | Path, payload: dict[str, Any] | None = None) -> str:
@@ -214,6 +242,10 @@ def merge_training_manifests(
     merge_annotations: bool = True,
     model_family: str | None = None,
     _composition_identity: str | None = None,
+    _source_versions: dict[str, Any] | None = None,
+    _published_root: Path | None = None,
+    _preview_audio_digest=None,
+    _resolve_asset=_source_asset,
 ) -> dict[str, Any]:
     """Merge compatible manifests for one training run.
 
@@ -307,11 +339,12 @@ def merge_training_manifests(
     def _disk_audio_sha(path_str: Any) -> str | None:
         if not path_str:
             return None
-        resolved = Path(str(path_str)).resolve()
+        resolved = _resolve_asset(path_str, output, {})
         key = str(resolved)
         if key not in audio_hash_cache:
             try:
-                audio_hash_cache[key] = audio_sha256(resolved) if resolved.is_file() else None
+                digest = _preview_audio_digest or audio_sha256
+                audio_hash_cache[key] = digest(resolved) if resolved.is_file() else None
             except OSError:
                 audio_hash_cache[key] = None
         return audio_hash_cache[key]
@@ -325,6 +358,8 @@ def merge_training_manifests(
     zero_owner_hashes: dict[tuple[str, int], str] = {}
     zero_contributions: dict[tuple[str, int], list[dict[str, Any]]] = {}
     zero_contributor_counts: dict[tuple[str, int], int] = {}
+    preview_contributors: dict[tuple[str, int], list[tuple[str, Path, list[dict[str, Any]]]]] = {}
+    preview_annotation_owners: dict[tuple[str, int], dict[str, str]] = {}
     annotation_records: list[dict[str, Any]] = []
     auto_sources: dict[str, dict[str, Any]] = {}
     auto_candidates: dict[tuple[str, int], list[tuple[str, dict[str, Any]]]] = {}
@@ -336,7 +371,9 @@ def merge_training_manifests(
     for manifest_path, payload, source_id, source_name in loaded:
         is_candidate = bool(payload.get("candidate_pool"))
         is_reviewed_manifest = bool(payload.get("reviewed_training"))
-        candidate_records = []
+        candidate_records = {}
+        if is_candidate:
+            from maichart.training.candidate_pool import _valid_regions
         manifest_records_by_key: dict[tuple[str, int], dict[str, Any]] = {}
         auto_records_by_key: dict[tuple[str, int], list[dict[str, Any]]] = {}
         source_root_path = _source_root(manifest_path, payload)
@@ -360,13 +397,15 @@ def merge_training_manifests(
                             copied_record["_annotation_manifest"] = str(manifest_path)
                             for key in ("source_path", "audio_path", "corrected_path"):
                                 if copied_record.get(key):
-                                    copied_record[key] = str(_source_asset(copied_record[key], manifest_path, payload))
+                                    copied_record[key] = str(_resolve_asset(copied_record[key], manifest_path, payload))
                             annotation_records.append(copied_record)
-                            candidate_records.append(copied_record)
                             try:
-                                rec_key = (str(Path(str(copied_record.get("source_path", ""))).resolve()),
+                                source_path = copied_record.get("source_path")
+                                rec_key = (str(_resolve_asset(source_path, manifest_path, payload)) if source_path else str(Path.cwd()),
                                            int(copied_record.get("difficulty_index")))
                                 manifest_records_by_key[rec_key] = copied_record
+                                if is_candidate and _valid_regions(copied_record):
+                                    candidate_records.setdefault((rec_key[0].casefold(), rec_key[1]), []).append(copied_record)
                             except (TypeError, ValueError, OSError):
                                 pass
                 except (OSError, json.JSONDecodeError) as exc:
@@ -388,7 +427,7 @@ def merge_training_manifests(
                             continue
                         for key in ("source_path", "audio_path"):
                             if record.get(key):
-                                record[key] = str(_source_asset(record[key], annotation_owner, owner_payload))
+                                record[key] = str(_resolve_asset(record[key], annotation_owner, owner_payload))
                         key = (record["source_path"], record["difficulty_index"])
                         auto_records_by_key.setdefault(key, []).append(record)
         for song in payload.get("songs", []):
@@ -399,7 +438,7 @@ def merge_training_manifests(
             copied["source_dataset"] = {"id": source_id, "name": source_name}
             copied["source_manifest"] = str(manifest_path)
             copied["song_id"] = f"{source_id}::{original_song_id}" if multi_source else original_song_id
-            _absolutize_song_paths(copied, manifest_path, payload)
+            _absolutize_song_paths(copied, manifest_path, payload, resolve_asset=_resolve_asset)
             maidata_path = Path(str(copied.get("maidata_path") or "")).resolve()
             try:
                 source_key = maidata_path.relative_to(source_root_path).as_posix()
@@ -434,7 +473,8 @@ def merge_training_manifests(
                 if is_zero_source:
                     if is_candidate:
                         from maichart.training.candidate_pool import candidate_record
-                        cand_rec = candidate_record(manifest_path, copied, difficulty, candidate_records)
+                        records = candidate_records.get((chart_key[0].casefold(), index))
+                        cand_rec = candidate_record(manifest_path, copied, difficulty, records) if records else None
                         if cand_rec is None:
                             warnings.append({"reason": "candidate_not_approved_or_stale", "source_path": str(maidata_path),
                                              "difficulty_index": index, "source_manifest": str(manifest_path)})
@@ -480,6 +520,12 @@ def merge_training_manifests(
                                 else:
                                     _, contribs = extracted
                                     content_key = (valid_c_sha, valid_a_sha, index) if valid_c_sha and valid_a_sha else None
+                                    if _published_root is not None:
+                                        preview_owner = chart_key
+                                        if chart_key not in zero_owner_keys and content_key is not None:
+                                            preview_owner = zero_content_owners.get(content_key, chart_key)
+                                        preview_contributors.setdefault(preview_owner, []).append(
+                                            (str(manifest_path), maidata_path, contribs))
                                     if chart_key in zero_owner_keys:
                                         duplicate_count += 1
                                         if owners[chart_key].get("audio_path") != copied.get("audio_path"):
@@ -541,7 +587,7 @@ def merge_training_manifests(
         except (TypeError, ValueError):
             warnings.append({"reason": "annotation_missing_difficulty", "chart_id": record.get("chart_id")})
             continue
-        record_path = Path(str(record.get("source_path", ""))).resolve()
+        record_path = _resolve_asset(record["source_path"], output, {}) if record.get("source_path") else Path.cwd()
         key = (str(record_path), index)
         if key in zero_owner_keys:
             # Verified zero-unmarked owners are emitted below from their validated contribution table.
@@ -575,6 +621,8 @@ def merge_training_manifests(
                 raise ValueError(f"同一谱面存在冲突质量标注（标签、区域或修正版不同）：{record_path}:{index}")
             continue
         seen_annotation_keys[key] = dict(record)
+        if _published_root is not None and annotation_manifest is not None:
+            preview_annotation_owners.setdefault(key, {})["manual"] = annotation_manifest
         record.update({"original_song_id": owner["original_song_id"], "song_id": owner["song_id"],
                        "source_dataset": owner["source_dataset"], "source_path": str(record_path),
                        "source_manifest": owner["source_manifest"]})
@@ -655,6 +703,8 @@ def merge_training_manifests(
             record["chart_id"] = _namespaced_chart_id(owner["song_id"], index, chart_hash, None, namespace)
             auto_records.append(record)
             used_auto_sources.add(source_manifest)
+            if _published_root is not None:
+                preview_annotation_owners.setdefault(key, {})["auto"] = source_manifest
             break
     auto_metadata = {"composed_sources": [
         metadata for source, metadata in auto_sources.items() if source in used_auto_sources
@@ -667,6 +717,9 @@ def merge_training_manifests(
                 })).encode("ascii")
             ).hexdigest()
         output = output / f"composed_{_composition_identity[:16]}" / "training_manifest.json"
+
+    published = (_published_root / output.parent.name / output.name
+                 if _published_root is not None and _composition_identity is not None else None)
 
     merged_preprocessing = {**(loaded[0][1].get("preprocessing") or {}), **{
         key: reference[key]
@@ -730,7 +783,7 @@ def merge_training_manifests(
             "merged_from": [str(path) for path, _, _, _ in loaded],
         })
         merged["quality_annotations"] = str(annotation_output)
-    if any(payload.get("candidate_pool") for _, payload, _, _ in loaded):
+    if published is None and any(payload.get("candidate_pool") for _, payload, _, _ in loaded):
         from maichart.training.candidate_pool import supervision_budget
         merged["summary"]["supervision"] = supervision_budget(
             [path for path, _, _, _ in loaded],
@@ -748,7 +801,50 @@ def merge_training_manifests(
     elif _composition_identity is None and all(output != item[0] for item in loaded):
         remove_composed_auto_annotations(output)
     _write_json(output, merged)
+    if _source_versions is not None:
+        _write_json(output.with_name("source_versions.json"), _source_versions)
+    if published is not None:
+        return {**merged, "published_manifest": str(published), "preview_contributors": preview_contributors,
+                "preview_annotation_owners": preview_annotation_owners}
     return merged
+
+
+def _snapshot_stamp(path):
+    try:
+        stat = Path(path).stat()
+        return [stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns, stat.st_ino]
+    except FileNotFoundError:
+        return None
+
+
+def _composition_source_versions(manifests, model_family):
+    from maichart.training.quality_annotations import (
+        annotation_path, auto_annotation_path, split_annotation_source,
+    )
+
+    files, assets = {}, {}
+    for value in manifests:
+        manifest = Path(value)
+        payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        paths = [manifest, annotation_path(manifest)]
+        owners = [manifest]
+        origin = split_annotation_source(manifest, payload)
+        if origin is not None:
+            owners.append(origin)
+        for owner in owners:
+            paths.extend((owner, auto_annotation_path(owner), auto_annotation_path(owner, composed=True)))
+        for path in paths:
+            files[str(path)] = _snapshot_stamp(path)
+        for song in payload.get("songs", []):
+            # File stats are also needed for ordinary sources: the composer
+            # validates their audio and chart hashes before retaining weights.
+            for field in ("maidata_path", "audio_path"):
+                if song.get(field):
+                    raw = material_path(song[field])
+                    path = raw if raw.is_absolute() else _source_asset(raw, manifest, payload)
+                    if str(path) not in assets:
+                        assets[str(path)] = _snapshot_stamp(path)
+    return dict(model_family=model_family, files=files, assets=assets)
 
 
 def compose_datasets(
@@ -758,6 +854,8 @@ def compose_datasets(
     *,
     dataset_ids: list[str] | None = None,
     dataset_names: list[str] | None = None,
+    published_root: Path | None = None,
+    preview_audio_digest=None,
 ) -> dict[str, Any]:
     """Prepare a stable source selection without changing a single source."""
     if not manifests:
@@ -800,8 +898,12 @@ def compose_datasets(
             "warnings": [],
         }
     target = Path(output_root).resolve()
+    resolve_asset = _source_asset_cache() if published_root is not None else _source_asset
     composition_identity = None
+    source_versions = None
     if target.suffix.lower() != ".json":
+        if model_family == "chart_composer_v2" and published_root is None:
+            source_versions = _composition_source_versions(manifests, model_family)
         identity = hashlib.sha256()
         for value in sorted(manifests, key=str.casefold):
             identity.update(value.casefold().encode("utf-8"))
@@ -814,11 +916,12 @@ def compose_datasets(
                 # A changed source must never reuse and overwrite the output
                 # identity of an earlier frozen selection.
                 from maichart.training.candidate_pool import _charts, _digest, _stat
-                for song, difficulty, index in _charts(value):
+                digest = preview_audio_digest or _digest
+                for song, difficulty, index in _charts(value, resolve_asset=resolve_asset):
                     for asset in (song.get("maidata_path"), song.get("audio_path")):
                         identity.update(str(_stat(asset)).encode())
                         if asset and Path(asset).is_file():
-                            identity.update(_digest(asset).encode())
+                            identity.update(digest(asset).encode())
         # A saved label change creates a new snapshot, so checking or preparing
         # another run cannot overwrite a running trainer's annotation file.
         composition_identity = identity.hexdigest()
@@ -826,7 +929,10 @@ def compose_datasets(
         return merge_training_manifests(
             manifests, target, dataset_ids=dataset_ids, dataset_names=dataset_names,
             merge_annotations=True, model_family=model_family,
-            _composition_identity=composition_identity,
+            _composition_identity=composition_identity, _source_versions=source_versions,
+            _published_root=published_root,
+            _preview_audio_digest=preview_audio_digest,
+            _resolve_asset=resolve_asset,
         )
 
 
@@ -971,21 +1077,21 @@ def _frame_division(payload: dict[str, Any]) -> int | None:
     return int(value) if value is not None else None
 
 
-def _absolutize_song_paths(song: dict[str, Any], manifest: Path, payload: dict[str, Any]) -> None:
+def _absolutize_song_paths(song: dict[str, Any], manifest: Path, payload: dict[str, Any], *, resolve_asset=_source_asset) -> None:
     for key in (*PATH_KEYS, "audio_features_path", "chart_ir_path", "frame_labels_path", "alignment_report_path"):
         if song.get(key):
-            song[key] = str(_source_asset(song[key], manifest, payload))
+            song[key] = str(resolve_asset(song[key], manifest, payload))
     audio = song.get("audio")
     if isinstance(audio, dict):
         for key in ("path", "audio_features_path"):
             if audio.get(key):
-                audio[key] = str(_source_asset(audio[key], manifest, payload))
+                audio[key] = str(resolve_asset(audio[key], manifest, payload))
     for difficulty in song.get("difficulties", []):
         if not isinstance(difficulty, dict):
             continue
         for key in ("chart_ir_path", "frame_labels_path", "alignment_report_path", "source_path", "maidata_path", "audio_path"):
             if difficulty.get(key):
-                difficulty[key] = str(_source_asset(difficulty[key], manifest, payload))
+                difficulty[key] = str(resolve_asset(difficulty[key], manifest, payload))
 
 
 def _absolute(value: str | Path, base: Path) -> Path:

@@ -13,13 +13,16 @@ import math
 import os
 import random
 import re
+import threading
 import time
 import unicodedata
+from collections import deque
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 
-from maichart.training.dataset_catalog import _absolutize_song_paths, _write_json
+from maichart.training.dataset_catalog import _absolutize_song_paths, _source_asset, _write_json
 from maichart.training.quality_annotations import (
     chart_sha256, audio_sha256, iter_catalog, region_component_weights,
     zero_unmarked_region_weights,
@@ -51,6 +54,14 @@ def _stat(path):
         return None
 
 
+def _file_version(path):
+    try:
+        stat = Path(path).stat()
+        return stat.st_mtime_ns, stat.st_size, stat.st_ctime_ns, stat.st_ino
+    except FileNotFoundError:
+        return None
+
+
 def _hash(path, cache):
     if not path or not Path(path).is_file():
         return None
@@ -72,12 +83,12 @@ def _digest(path):
     return _cached_digest(str(path), tuple(_stat(path) or ()))
 
 
-def _charts(manifest, payload=None):
+def _charts(manifest, payload=None, *, resolve_asset=_source_asset):
     path = Path(manifest).resolve()
     payload = _read(path) if payload is None else payload
     for song in payload.get("songs", []):
         song = copy.deepcopy(song)
-        _absolutize_song_paths(song, path, payload)
+        _absolutize_song_paths(song, path, payload, resolve_asset=resolve_asset)
         for difficulty in song.get("difficulties", []):
             index = difficulty.get("difficulty_index", difficulty.get("index"))
             if index is not None:
@@ -86,6 +97,84 @@ def _charts(manifest, payload=None):
 
 def _key(path, index):
     return str(Path(path).resolve()).casefold(), int(index)
+
+
+def _resolved_slot(path, index):
+    return os.path.normcase(os.path.normpath(path)), int(index)
+
+
+@lru_cache(maxsize=2)
+def _pool_charts(manifest, version):
+    payload = _read(manifest)
+    index = {}
+    for song in payload.get("songs", ()):
+        source = song.get("maidata_path")
+        if not source:
+            continue
+        if not Path(source).is_absolute() or (song.get("audio_path") and not Path(song["audio_path"]).is_absolute()):
+            _absolutize_song_paths(song, manifest, payload)
+        for difficulty in song.get("difficulties", ()):
+            slot = difficulty.get("difficulty_index", difficulty.get("index"))
+            if slot is not None:
+                index[_resolved_slot(song["maidata_path"], slot)] = song, difficulty
+    return index
+
+
+def pool_charts(manifest):
+    manifest = Path(manifest)
+    return _pool_charts(manifest, _file_version(manifest))
+
+
+@dataclass(eq=False)
+class _ScanChart:
+    info: dict
+    fields: tuple
+    segments: tuple
+    cached_choices: tuple | None = None
+
+
+_SCAN_LOCK = threading.Lock()
+
+
+@lru_cache(maxsize=1)
+def _scan_index(path, version):
+    rows = {}
+    for item in _read(path).get("charts", []):
+        info = {key: item[key] for key in (
+            "chart_id", "source_path", "difficulty_index", "status", "title", "issues",
+            "level", "audio_duration_sec",
+        ) if key in item}
+        info["bpm"] = item.get("stats", {}).get("bpm") or 120
+        segments = [value for value in item.get("segments", [])
+                    if value.get("queue_eligible") is not False and value.get("onsets", 0) >= 2]
+        # A tuple of values avoids retaining a dict per segment. Preserve all
+        # fields for the few recommendations returned to existing callers.
+        fields = tuple(dict.fromkeys(key for segment in segments for key in segment))
+        compact = tuple(tuple(segment.get(key) for key in fields) for segment in segments)
+        rows[_resolved_slot(item["source_path"], item["difficulty_index"])] = _ScanChart(info, fields, compact)
+    return rows
+
+
+def scan_index(manifest):
+    path = Path(manifest).parent / "scan" / "results.json"
+    with _SCAN_LOCK:
+        return _scan_index(path, _file_version(path))
+
+
+@lru_cache(maxsize=2)
+def _scan_issues(path, version):
+    return {
+        _resolved_slot(item["source_path"], item["difficulty_index"]): (item.get("chart_id"), item["status"], item.get("issues", []))
+        for item in _read(path).get("charts", [])
+    }
+
+
+def scan_issues(manifest):
+    path = Path(manifest).parent / "scan" / "results.json"
+    version = _file_version(path)
+    with _SCAN_LOCK:
+        # Browsing keeps only issues, so it need not hold the segment index.
+        return _scan_issues(path, version)
 
 
 def _records(manifest):
@@ -394,7 +483,7 @@ def _stale(root, metadata, song, difficulty):
             metadata.get("source_manifest_stat") != _stat(metadata["source_manifest"]))
 
 
-def review_guard(manifest, chart_id, *, positive=True):
+def review_guard(manifest, chart_id, *, positive=True, row=None):
     manifest = Path(manifest).resolve()
     root = manifest.parent
     metadata = _read(root / "pool.json")
@@ -404,15 +493,17 @@ def review_guard(manifest, chart_id, *, positive=True):
         raise ValueError("不是当前候选库清单")
     if not metadata.get("scan_complete"):
         raise ValueError("请先完成候选库扫描")
-    row = next((r for r in iter_catalog(manifest) if r.chart_id == chart_id), None)
     if row is None:
+        row = next((r for r in iter_catalog(manifest) if r.chart_id == chart_id), None)
+    if row is None or row.chart_id != chart_id:
         raise ValueError("谱面身份已变化，请重新扫描候选库")
-    for song, difficulty, index in _charts(manifest):
-        if _key(song["maidata_path"], index) != _key(row.source_path, row.difficulty_index):
-            continue
+    entry = pool_charts(manifest).get(_resolved_slot(row.source_path, row.difficulty_index))
+    if entry is not None:
+        song, difficulty = entry
         identity = difficulty.get("candidate_identity", {})
         try:
-            valid = (not _stale(root, metadata, song, difficulty) and row.chart_sha256 == identity.get("chart_sha256")
+            valid = (not _stale(root, metadata, song, difficulty)
+                     and _chart_digest(row.source_path, row.difficulty_index) == row.chart_sha256 == identity.get("chart_sha256")
                      and _digest(row.audio_path) == identity.get("audio_sha256"))
         except (OSError, TypeError):
             valid = False
@@ -526,17 +617,16 @@ def scan_pool(pool_dir, progress=None, *, workers=1, synchronize=True):
     return pool_status(root)
 
 
-def pool_status(pool_dir):
+def pool_status(pool_dir, *, include_supervision=True):
     root = _pool(pool_dir)
     metadata = _read(root / "pool.json")
     if metadata.get("schema") != SCHEMA:
         raise ValueError("候选库不存在或格式不兼容")
     manifest = root / "training_manifest.json"
-    payload = _read(manifest)
     records = _records(manifest)
     record_index = {}
     for record in records:
-        record_index.setdefault(_key(record.get("source_path", ""), record.get("difficulty_index", -1)), record)
+        record_index.setdefault(_resolved_slot(record.get("source_path") or "", record.get("difficulty_index", -1)), record)
     stat_cache = {}
     def stat_once(path):
         key = str(path)
@@ -548,7 +638,8 @@ def pool_status(pool_dir):
     regions = []
     decisions = dict(learn_all=0, exclude=0, partial=0)
     timing_heads = layout_heads = 0.
-    for song, difficulty, index in _charts(manifest, payload):
+    for key, (song, difficulty) in pool_charts(manifest).items():
+        index = key[1]
         counts["charts"] += 1
         identity = difficulty.get("candidate_identity", {})
         stale = (source_changed or identity.get("source_stat") != stat_once(song.get("maidata_path")) or
@@ -557,7 +648,7 @@ def pool_status(pool_dir):
         counts[state] = counts.get(state, 0) + 1
         if stale:
             continue
-        record = record_index.get(_key(song["maidata_path"], index))
+        record = record_index.get(key)
         if (not record or record.get("chart_sha256") != identity.get("chart_sha256") or
                 record.get("audio_sha256") != identity.get("audio_sha256")):
             continue
@@ -569,7 +660,7 @@ def pool_status(pool_dir):
         elif valid_regions:
             decisions['partial'] += 1
         regions.extend(valid_regions)
-        if (not metadata.get("scan_complete") or not valid_regions or
+        if (not include_supervision or not metadata.get("scan_complete") or not valid_regions or
                 difficulty.get("candidate_status") not in {"ok", "suspicious"}):
             continue
         try:
@@ -585,85 +676,779 @@ def pool_status(pool_dir):
                     layout_heads += region[3] * count * weight
         except (OSError, ValueError, UnicodeError):
             pass
-    return dict(metadata, pool_dir=str(root), manifest=str(root / "training_manifest.json"), counts=counts, decisions=decisions,
+    result = dict(metadata, pool_dir=str(root), manifest=str(root / "training_manifest.json"), counts=counts, decisions=decisions,
                 stale=bool(counts["stale"]), confirmed_regions=len(regions),
                 reviewable_charts=counts["ok"] + counts["suspicious"] if metadata.get("scan_complete") else 0,
-                supervision=dict(unit="weighted_note_heads_approximation", timing_note_heads=timing_heads,
-                                 layout_note_heads=layout_heads),
                 timing_regions=sum(zero_unmarked_region_weights(r)[0] > 0 for r in regions),
                 layout_regions=sum(zero_unmarked_region_weights(r)[1] > 0 for r in regions))
+    if include_supervision:
+        result["supervision"] = dict(unit="weighted_note_heads_approximation",
+                                     timing_note_heads=timing_heads, layout_note_heads=layout_heads)
+    return result
 
 
-def review_queue(pool_dir, offset=0, limit=1, *, status=None):
+AUTO_SCREEN_DEFER_CODES = frozenset({
+    "global_offset",
+    "tempo_drift",
+    "alignment_uncertain",
+    "alignment_unjudgeable",
+    "alignment_failed",
+    "action_after_audio",
+    "similar_reference",
+    "timeline_failed",
+})
+
+
+def _has_manual_candidate_decision(record: dict | None) -> bool:
+    if not isinstance(record, dict) or record.get("auto_screened"):
+        return False
+    if record.get("candidate_chart_review") in {"learn_all", "exclude"}:
+        return True
+    if record.get("candidate_reviews") or record.get("regions"):
+        return True
+    if record.get("label") in {"excluded", "negative"}:
+        return True
+    return float(record.get("weight", 1.0)) != 1.0
+
+
+_AUTO_SCREEN_CONFLICT_LOCK = threading.Lock()
+_AUTO_SCREEN_CONFLICT_CACHE: dict[tuple, tuple[str, dict | None]] = {}
+
+
+def _auto_screen_conflict_worker(task: tuple[str, int, bool, float]) -> tuple[str, dict | None]:
+    """Top-level worker for parallel dialect + MiaCode conflict extraction on uncached charts."""
+    from fractions import Fraction
+    import numpy as np
+    from maichart.composer_v2 import chart_dialect
+    from maichart.event_timing import EventTempo, parse_event_chart
+    from maichart.generation.post_process import PostProcessConfig, detect_chart_conflicts
+    from maichart.tempo_clock import TempoClock
+
+    source_path, slot_index, detect_soft, tap_on_slide_ms = task
+    pp_config = PostProcessConfig(
+        enable_conflict_detection=True,
+        detect_hard_conflicts=True,
+        detect_soft_conflicts=bool(detect_soft),
+        conflict_engine="miacode",
+        tap_on_slide_threshold_ms=float(tap_on_slide_ms),
+    )
+    try:
+        raw_chart = parse_event_chart(source_path, int(slot_index), strict_notes=False)
+        norm_chart, dialect_edits = chart_dialect.normalize_training_chart(raw_chart)
+        if not norm_chart.points:
+            return ("error", None)
+        changes = {c.beat: c.bpm for c in norm_chart.tempo_changes}
+        tempo = [EventTempo(b, v) for b, v in sorted(changes.items())]
+        clock = TempoClock(tempo, norm_chart.audio_first)
+        points = list(norm_chart.points)
+        point_secs = clock.at_floats(np.fromiter((float(p.beat) for p in points), dtype=np.float64, count=len(points)))
+        end_beat_val = float(Fraction(str(norm_chart.end_beat))) if norm_chart.end_beat is not None else 0.0
+        total_beats = max(end_beat_val, max(float(p.beat) for p in points) + 1.0)
+        det = detect_chart_conflicts(points, tempo, norm_chart.audio_first, pp_config)
+    except (OSError, ValueError, KeyError, ZeroDivisionError, OverflowError, UnicodeError):
+        return ("error", None)
+
+    if det.coverage.get("status") == "partial":
+        if det.coverage.get("parse_errors"):
+            return ("error", None)
+        return ("defer_partial", None)
+    if dialect_edits.get("unsupported", 0) > 0:
+        return ("defer_unsupported", None)
+
+    sustain_max = max(
+        (float(a.get("end_sec", 0.0)) for a in (det.coverage.get("sustained_actions") or ())),
+        default=0.0,
+    )
+    conflicts_data = [
+        dict(
+            kind=c.conflict_type,
+            severity=str(c.severity),
+            time_sec=float(c.time),
+            notes=[dict(beat=str(n.beat), raw=n.raw) for n in (c.notes or ())[:6]],
+        )
+        for c in det.conflicts_detected
+    ]
+    return (
+        "ok",
+        dict(
+            conflicts=conflicts_data,
+            tempo=[[str(t.beat), float(t.bpm)] for t in tempo],
+            audio_first=float(norm_chart.audio_first),
+            point_secs=[round(float(x), 6) for x in point_secs],
+            total_beats=float(total_beats),
+            sustain_max=float(sustain_max),
+        ),
+    )
+
+
+def auto_screen_pool(
+    pool_dir,
+    *,
+    difficulty_slots=(5, 6),
+    min_level: float = 12.0,
+    max_level: float = 15.0,
+    tap_on_slide_mode: str = "mask_hard",
+    tap_on_slide_ms: float = 200.0,
+    inner_muri_mode: str = "allow",
+    max_offset_ms: float = 35.0,
+    max_problem_fraction: float = 0.35,
+    preserve_manual: bool = True,
+    dry_run: bool = False,
+):
+    """Batch-screen a scanned candidate pool into clean whole charts, Muri-masked charts, deferred, and excluded."""
+    from collections import Counter
+    from concurrent.futures import ProcessPoolExecutor
+    from fractions import Fraction
+    from types import SimpleNamespace
+    import numpy as np
+    from maichart.composer_v2 import chart_dialect
+    from maichart.composer_v2.auto_quality_audit import (
+        INNER_MURI_MODES,
+        TAP_ON_SLIDE_MODES,
+        _causal_conflict_beat_span,
+        _merge_intervals,
+        _should_mask_issue,
+    )
+    from maichart.composer_v2.difficulty import DIFFICULTY_SLOTS
+    from maichart.event_timing import EventTempo, parse_event_chart
+    from maichart.tempo_clock import TempoClock
+    from maichart.training.event_dataset import numeric_level
+    from maichart.training.quality_annotations import _subtract_intervals, save_annotations
+
+    if tap_on_slide_mode not in TAP_ON_SLIDE_MODES:
+        raise ValueError(f"tap_on_slide_mode 须为 {TAP_ON_SLIDE_MODES}")
+    if inner_muri_mode not in INNER_MURI_MODES:
+        raise ValueError(f"inner_muri_mode 须为 {INNER_MURI_MODES}")
+    if not isinstance(difficulty_slots, (list, tuple)) or not difficulty_slots or any(
+        type(s) is not int or s not in DIFFICULTY_SLOTS for s in difficulty_slots
+    ):
+        raise ValueError("请选择有效的难度槽位（4 EXPERT、5 MASTER、6 Re:MASTER）")
+    slots_set = frozenset(difficulty_slots)
+    if not (1.0 <= float(min_level) <= float(max_level) <= 15.0):
+        raise ValueError("定数范围须满足 1 ≤ 最低定数 ≤ 最高定数 ≤ 15")
+    if not (10.0 <= float(max_offset_ms) <= 60.0):
+        raise ValueError("最大允许声学偏移须在 10–60 ms 之间")
+    if not (0.05 <= float(max_problem_fraction) <= 1.0):
+        raise ValueError("局部无理屏蔽比例上限须在 0.05–1.0 之间")
+
     root = _pool(pool_dir)
+    manifest = root / "training_manifest.json"
     metadata = _read(root / "pool.json")
-    if not metadata.get("scan_complete"):
-        return dict(items=[], total=0, offset=max(0, int(offset)), limit=max(1, int(limit)),
-                    stale=pool_status(root)["stale"], next_offset=max(0, int(offset)), scan_complete=False)
-    charts = {_key(s["maidata_path"], i): (s, d) for s, d, i in _charts(root / "training_manifest.json")}
-    records = _records(root / "training_manifest.json")
-    groups = {}
-    for result in _read(root / "scan" / "results.json").get("charts", []):
-        if status and result.get('status')!=status:continue
-        key = _key(result["source_path"], result["difficulty_index"])
-        if key not in charts or not result.get("chart_id") or result.get("status") == "error":
+    if metadata.get("schema") != SCHEMA:
+        raise ValueError("候选库不存在或格式不兼容")
+    if _read(root / "scan_state.json").get("status") in {"queued", "running"}:
+        raise ValueError("候选库正在扫描中，请等待扫描完成后再自动筛选")
+    if not metadata.get("scan_complete") or not (root / "scan" / "results.json").is_file():
+        raise ValueError("请先完成候选库扫描后再执行自动筛选")
+    if metadata.get("source_manifest_stat") != _stat(metadata.get("source_manifest")):
+        raise ValueError("来源清单已变化，请先重新同步检查候选库")
+
+    charts_map = pool_charts(manifest)
+    raw_scan = _read(root / "scan" / "results.json")
+    scanned_map = {
+        _resolved_slot(item["source_path"], item["difficulty_index"]): item
+        for item in raw_scan.get("charts", ())
+        if item.get("source_path") and item.get("difficulty_index") is not None
+    }
+    existing_records = _records(manifest)
+    existing_by_key = {}
+    for rec in existing_records:
+        existing_by_key.setdefault(_resolved_slot(rec.get("source_path") or "", rec.get("difficulty_index", -1)), rec)
+
+    if len(existing_by_key) >= len(charts_map) and charts_map:
+        work_items = []
+        for key, (song, difficulty) in charts_map.items():
+            rec = existing_by_key.get(key)
+            info = scanned_map.get(key) or {}
+            if rec is None:
+                continue
+            work_items.append((key, song, difficulty, rec, info))
+    else:
+        work_items = []
+        for row in iter_catalog(manifest):
+            key = _resolved_slot(row.source_path, row.difficulty_index)
+            song, difficulty = charts_map.get(key, ({}, {}))
+            rec = existing_by_key.get(key) or row.to_dict()
+            rec.setdefault("chart_id", row.chart_id)
+            info = scanned_map.get(key) or {}
+            work_items.append((key, song, difficulty, rec, info))
+
+    detect_soft = tap_on_slide_mode == "mask_all"
+    can_reuse_scan_global = (not detect_soft) and abs(float(tap_on_slide_ms) - 200.0) < 1e-6
+
+    def _dict_to_issue(entry: dict):
+        return SimpleNamespace(
+            conflict_type=str(entry.get("kind") or ""),
+            severity=str(entry.get("severity") or "hard"),
+            time=float(entry.get("time_sec", 0.0)),
+            notes=[
+                SimpleNamespace(beat=Fraction(str(n["beat"])), raw=str(n.get("raw") or ""))
+                for n in (entry.get("notes") or ())
+                if n.get("beat") is not None
+            ],
+        )
+
+    # Pre-collect any charts that cannot reuse scan/results.json conflict records and evaluate them in parallel.
+    pending_eval_keys: list[tuple] = []
+    pending_eval_tasks: list[tuple[str, int, bool, float]] = []
+    seen_eval_keys: set[tuple] = set()
+    for key, song, difficulty, base_source, info in work_items:
+        slot_index = int(key[1])
+        prior = existing_by_key.get(key)
+        if preserve_manual and _has_manual_candidate_decision(prior):
             continue
-        song, difficulty = charts[key]
+        if slot_index not in slots_set:
+            continue
+        raw_lvl = base_source.get("level") or difficulty.get("level_raw") or difficulty.get("level") or info.get("level")
         try:
-            if _stale(root, metadata, song, difficulty):
-                continue
-        except OSError:
+            lvl = float(numeric_level(raw_lvl))
+        except Exception:
+            lvl = -1.0
+        if not (float(min_level) <= lvl <= float(max_level)):
             continue
-        record = next((r for r in records if r.get("chart_id") == result["chart_id"]), {})
-        if (record.get('label') in {'excluded','negative'} or record.get('weight',1.) <= 0
-                or record.get('candidate_chart_review') in {'learn_all','exclude'}):
+        cand_status = difficulty.get("candidate_status") or info.get("status") or "pending"
+        if cand_status in {"error", "pending", "stale"}:
             continue
-        segments = []
-        for segment in result.get("segments", []):
-            if segment.get("queue_eligible") is False or segment.get("onsets", 0) < 2:
+        issue_codes = {str(item.get("code") or "") for item in (info.get("issues") or ())}
+        align = info.get("alignment") or {}
+        if (issue_codes & AUTO_SCREEN_DEFER_CODES) or (
+            align.get("judgeable") and align.get("confident") and abs(float(align.get("offset_ms", 0.0))) > float(max_offset_ms)
+        ) or ("small_offset" in issue_codes and not align and float(max_offset_ms) < 40.0):
+            continue
+        can_reuse_this = can_reuse_scan_global and not (
+            issue_codes & {"conflict_check_failed", "nonstandard_notation", "unsupported_notes"}
+        )
+        stats = info.get("stats") or {}
+        fast_end = max(
+            float(stats.get("last_action_end_sec") or 0.0),
+            float(stats.get("last_onset_sec") or 0.0),
+        )
+        if can_reuse_this and fast_end > 0.0:
+            continue
+        src_path = str(base_source.get("source_path") or song.get("maidata_path") or "")
+        chart_sha = str(
+            (difficulty.get("candidate_identity") or {}).get("chart_sha256")
+            or base_source.get("chart_sha256")
+            or ""
+        )
+        cache_key = (_resolved_slot(src_path, slot_index), chart_sha, detect_soft, round(float(tap_on_slide_ms), 3))
+        if cache_key in seen_eval_keys:
+            continue
+        with _AUTO_SCREEN_CONFLICT_LOCK:
+            if cache_key in _AUTO_SCREEN_CONFLICT_CACHE:
                 continue
+        seen_eval_keys.add(cache_key)
+        pending_eval_keys.append(cache_key)
+        pending_eval_tasks.append((src_path, slot_index, detect_soft, float(tap_on_slide_ms)))
+
+    if pending_eval_tasks:
+        import sys
+        from concurrent.futures.process import BrokenProcessPool
+
+        main_file = getattr(sys.modules.get("__main__"), "__file__", None)
+        can_spawn = bool(main_file and not str(main_file).endswith("<stdin>") and Path(main_file).is_file())
+        workers = min(6, os.cpu_count() or 1, len(pending_eval_tasks))
+        if can_spawn and workers >= 2 and len(pending_eval_tasks) >= 8:
+            try:
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    eval_results = list(pool.map(_auto_screen_conflict_worker, pending_eval_tasks, chunksize=8))
+            except (BrokenProcessPool, OSError):
+                eval_results = [_auto_screen_conflict_worker(t) for t in pending_eval_tasks]
+        else:
+            eval_results = [_auto_screen_conflict_worker(t) for t in pending_eval_tasks]
+        with _AUTO_SCREEN_CONFLICT_LOCK:
+            for c_key, c_val in zip(pending_eval_keys, eval_results):
+                if len(_AUTO_SCREEN_CONFLICT_CACHE) >= 16384:
+                    _AUTO_SCREEN_CONFLICT_CACHE.clear()
+                _AUTO_SCREEN_CONFLICT_CACHE[c_key] = c_val
+
+    counts = Counter(
+        total_charts=0,
+        preserved_manual=0,
+        approved_clean=0,
+        approved_masked=0,
+        deferred_review=0,
+        excluded_slot=0,
+        excluded_level=0,
+        excluded_error=0,
+        excluded_muri=0,
+        masked_regions=0,
+    )
+    deferred_by_reason: Counter[str] = Counter()
+    approved_by_slot: Counter[int] = Counter()
+    updated_records = []
+
+    for key, song, difficulty, base_source, info in work_items:
+        counts["total_charts"] += 1
+        slot_index = int(key[1])
+        prior = existing_by_key.get(key)
+        identity = difficulty.get("candidate_identity", {})
+        audio_sha = identity.get("audio_sha256") or (prior or {}).get("audio_sha256") or base_source.get("audio_sha256")
+
+        if preserve_manual and _has_manual_candidate_decision(prior):
+            updated_records.append(copy.deepcopy(prior))
+            counts["preserved_manual"] += 1
+            if _valid_regions(prior):
+                approved_by_slot[slot_index] += 1
+            continue
+
+        base_rec = dict(
+            base_source,
+            difficulty_index=slot_index,
+            audio_sha256=audio_sha,
+            unmarked_weight=0.0,
+            auto_screened=True,
+        )
+        base_rec.pop("annotation", None)
+        base_rec.pop("annotated", None)
+        base_rec.pop("candidate_reviews", None)
+
+        if slot_index not in slots_set:
+            base_rec.update(
+                label="excluded",
+                weight=0.0,
+                candidate_chart_review="exclude",
+                reason="difficulty_slot_excluded",
+                regions=[],
+            )
+            updated_records.append(base_rec)
+            counts["excluded_slot"] += 1
+            continue
+
+        raw_lvl = base_rec.get("level") or difficulty.get("level_raw") or difficulty.get("level") or info.get("level")
+        try:
+            lvl = float(numeric_level(raw_lvl))
+        except Exception:
+            lvl = -1.0
+        if not (float(min_level) <= lvl <= float(max_level)):
+            base_rec.update(
+                label="excluded",
+                weight=0.0,
+                candidate_chart_review="exclude",
+                reason="level_out_of_range",
+                regions=[],
+            )
+            updated_records.append(base_rec)
+            counts["excluded_level"] += 1
+            continue
+
+        cand_status = difficulty.get("candidate_status") or info.get("status") or "pending"
+        if cand_status in {"error", "pending", "stale"}:
+            base_rec.update(
+                label="excluded",
+                weight=0.0,
+                candidate_chart_review="exclude",
+                reason="scan_error",
+                regions=[],
+            )
+            updated_records.append(base_rec)
+            counts["excluded_error"] += 1
+            continue
+
+        issue_codes = {str(item.get("code") or "") for item in (info.get("issues") or ())}
+        align = info.get("alignment") or {}
+        defer_reason = None
+        matched_defer = sorted(issue_codes & AUTO_SCREEN_DEFER_CODES)
+        if matched_defer:
+            defer_reason = matched_defer[0]
+        elif align.get("judgeable") and align.get("confident") and abs(float(align.get("offset_ms", 0.0))) > float(max_offset_ms):
+            defer_reason = "offset_exceeds_threshold"
+        elif "small_offset" in issue_codes and not align and float(max_offset_ms) < 40.0:
+            defer_reason = "small_offset"
+
+        if defer_reason is not None:
+            base_rec.update(
+                label="normal",
+                weight=1.0,
+                reason=f"deferred:{defer_reason}",
+                regions=[],
+            )
+            base_rec.pop("candidate_chart_review", None)
+            updated_records.append(base_rec)
+            counts["deferred_review"] += 1
+            deferred_by_reason[defer_reason] += 1
+            continue
+
+        stats = info.get("stats") or {}
+        fast_end = max(
+            float(stats.get("last_action_end_sec") or 0.0),
+            float(stats.get("last_onset_sec") or 0.0),
+        )
+        can_reuse_this = can_reuse_scan_global and not (
+            issue_codes & {"conflict_check_failed", "nonstandard_notation", "unsupported_notes"}
+        )
+
+        if can_reuse_this and fast_end > 0.0:
+            raw_scan_conflicts = list(info.get("conflicts") or ()) + list(info.get("inner_slide_conflicts") or ())
+            active_issues = [
+                iss for entry in raw_scan_conflicts
+                if _should_mask_issue(
+                    iss := _dict_to_issue(entry),
+                    tap_on_slide_mode=tap_on_slide_mode,
+                    inner_muri_mode=inner_muri_mode,
+                )
+            ]
+            if not active_issues:
+                end_sec = round(fast_end + 0.25, 6)
+                base_rec.update(
+                    label="normal",
+                    weight=1.0,
+                    candidate_chart_review="learn_all",
+                    reason="auto_screen_clean",
+                    regions=[
+                        dict(
+                            start_sec=0.0,
+                            end_sec=end_sec,
+                            label="good",
+                            reason="auto_screen_clean",
+                            weight=1.0,
+                            timing_weight=1.0,
+                            component_weight=1.0,
+                            learn_entry=True,
+                            entry_start_sec=0.0,
+                        )
+                    ],
+                )
+                updated_records.append(base_rec)
+                counts["approved_clean"] += 1
+                approved_by_slot[slot_index] += 1
+                continue
+            try:
+                raw_chart = parse_event_chart(base_rec["source_path"], slot_index, strict_notes=False)
+                norm_chart, dialect_edits = chart_dialect.normalize_training_chart(raw_chart)
+                if not norm_chart.points:
+                    raise ValueError("empty_after_dialect")
+                if dialect_edits.get("unsupported", 0) > 0:
+                    base_rec.update(label="normal", weight=1.0, reason="deferred:unsupported_dialect_atoms", regions=[])
+                    base_rec.pop("candidate_chart_review", None)
+                    updated_records.append(base_rec)
+                    counts["deferred_review"] += 1
+                    deferred_by_reason["unsupported_dialect_atoms"] += 1
+                    continue
+                changes = {c.beat: c.bpm for c in norm_chart.tempo_changes}
+                tempo = [EventTempo(b, v) for b, v in sorted(changes.items())]
+                clock = TempoClock(tempo, norm_chart.audio_first)
+                points = list(norm_chart.points)
+                point_secs = clock.at_floats(np.fromiter((float(p.beat) for p in points), dtype=np.float64, count=len(points)))
+                end_beat_val = float(Fraction(str(norm_chart.end_beat))) if norm_chart.end_beat is not None else 0.0
+                total_beats = max(end_beat_val, max(float(p.beat) for p in points) + 1.0)
+                chart_end = round(max(float(point_secs.max()), fast_end) + 0.25, 6)
+            except (OSError, ValueError, KeyError, ZeroDivisionError, OverflowError, UnicodeError):
+                base_rec.update(
+                    label="excluded",
+                    weight=0.0,
+                    candidate_chart_review="exclude",
+                    reason="invalid_sustain_syntax",
+                    regions=[],
+                )
+                updated_records.append(base_rec)
+                counts["excluded_error"] += 1
+                continue
+        else:
+            src_path = str(base_rec.get("source_path") or song.get("maidata_path") or "")
+            chart_sha = str(identity.get("chart_sha256") or base_rec.get("chart_sha256") or "")
+            cache_key = (_resolved_slot(src_path, slot_index), chart_sha, detect_soft, round(float(tap_on_slide_ms), 3))
+            with _AUTO_SCREEN_CONFLICT_LOCK:
+                status_tag, payload_data = _AUTO_SCREEN_CONFLICT_CACHE.get(cache_key, ("error", None))
+            if status_tag == "error" or payload_data is None:
+                base_rec.update(
+                    label="excluded",
+                    weight=0.0,
+                    candidate_chart_review="exclude",
+                    reason="invalid_sustain_syntax",
+                    regions=[],
+                )
+                updated_records.append(base_rec)
+                counts["excluded_error"] += 1
+                continue
+            if status_tag == "defer_partial":
+                base_rec.update(label="normal", weight=1.0, reason="deferred:partial_coverage", regions=[])
+                base_rec.pop("candidate_chart_review", None)
+                updated_records.append(base_rec)
+                counts["deferred_review"] += 1
+                deferred_by_reason["partial_coverage"] += 1
+                continue
+            if status_tag == "defer_unsupported":
+                base_rec.update(label="normal", weight=1.0, reason="deferred:unsupported_dialect_atoms", regions=[])
+                base_rec.pop("candidate_chart_review", None)
+                updated_records.append(base_rec)
+                counts["deferred_review"] += 1
+                deferred_by_reason["unsupported_dialect_atoms"] += 1
+                continue
+
+            tempo = [EventTempo(Fraction(str(b)), float(v)) for b, v in payload_data["tempo"]]
+            clock = TempoClock(tempo, payload_data["audio_first"])
+            point_secs = np.asarray(payload_data["point_secs"], dtype=np.float64)
+            total_beats = float(payload_data["total_beats"])
+            chart_end = round(max(float(point_secs.max()), fast_end, float(payload_data["sustain_max"])) + 0.25, 6)
+            active_issues = [
+                iss for entry in payload_data["conflicts"]
+                if _should_mask_issue(
+                    iss := _dict_to_issue(entry),
+                    tap_on_slide_mode=tap_on_slide_mode,
+                    inner_muri_mode=inner_muri_mode,
+                )
+            ]
+
+        raw_muri: list[tuple[float, float]] = []
+        for conflict in active_issues:
+            b_lo, b_hi = _causal_conflict_beat_span(conflict, clock, total_beats)
+            s_lo = max(0.0, float(clock.at(Fraction(str(round(b_lo, 4))))))
+            s_hi = min(chart_end, float(clock.at(Fraction(str(round(b_hi, 4))))))
+            if s_hi > s_lo + 0.02:
+                raw_muri.append((s_lo, s_hi))
+
+        merged_muri = [
+            (round(max(0.0, lo), 6), round(min(chart_end, hi), 6))
+            for lo, hi in _merge_intervals(raw_muri, merge_gap=0.08)
+            if round(min(chart_end, hi), 6) > round(max(0.0, lo), 6) + 0.02
+        ]
+
+        if not merged_muri:
+            base_rec.update(
+                label="normal",
+                weight=1.0,
+                candidate_chart_review="learn_all",
+                reason="auto_screen_clean",
+                regions=[
+                    dict(
+                        start_sec=0.0,
+                        end_sec=chart_end,
+                        label="good",
+                        reason="auto_screen_clean",
+                        weight=1.0,
+                        timing_weight=1.0,
+                        component_weight=1.0,
+                        learn_entry=True,
+                        entry_start_sec=0.0,
+                    )
+                ],
+            )
+            updated_records.append(base_rec)
+            counts["approved_clean"] += 1
+            approved_by_slot[slot_index] += 1
+            continue
+
+        masked_sec = sum(hi - lo for lo, hi in merged_muri)
+        active_duration = max(1.0, chart_end - float(point_secs.min()))
+        if masked_sec / active_duration > float(max_problem_fraction):
+            base_rec.update(
+                label="excluded",
+                weight=0.0,
+                candidate_chart_review="exclude",
+                reason="auto_excessive_muri",
+                regions=[],
+            )
+            updated_records.append(base_rec)
+            counts["excluded_muri"] += 1
+            continue
+
+        clean_spans = [
+            (round(lo, 6), round(hi, 6))
+            for lo, hi in _subtract_intervals(0.0, chart_end, merged_muri)
+            if round(hi, 6) - round(lo, 6) >= 0.05
+        ]
+        has_clean_head = any(
+            any(lo <= float(sec) < hi for sec in point_secs)
+            for lo, hi in clean_spans
+        )
+        if not clean_spans or not has_clean_head:
+            base_rec.update(
+                label="excluded",
+                weight=0.0,
+                candidate_chart_review="exclude",
+                reason="auto_excessive_muri",
+                regions=[],
+            )
+            updated_records.append(base_rec)
+            counts["excluded_muri"] += 1
+            continue
+
+        regions = []
+        for lo, hi in clean_spans:
+            reg = dict(
+                start_sec=lo,
+                end_sec=hi,
+                label="good",
+                reason="auto_screen_clean_span",
+                weight=1.0,
+                timing_weight=1.0,
+                component_weight=1.0,
+            )
+            if lo <= 1e-6:
+                reg["learn_entry"] = True
+                reg["entry_start_sec"] = 0.0
+            regions.append(reg)
+        for lo, hi in merged_muri:
+            regions.append(
+                dict(
+                    start_sec=lo,
+                    end_sec=hi,
+                    label="problem",
+                    reason="auto_hard_muri",
+                    weight=1.0,
+                    timing_weight=0.0,
+                    component_weight=0.0,
+                )
+            )
+        regions.sort(key=lambda r: (r["start_sec"], r["end_sec"]))
+        base_rec.update(
+            label="normal",
+            weight=1.0,
+            reason="auto_segment_muri_mask",
+            regions=regions,
+        )
+        base_rec.pop("candidate_chart_review", None)
+        updated_records.append(base_rec)
+        counts["approved_masked"] += 1
+        counts["masked_regions"] += len(merged_muri)
+        approved_by_slot[slot_index] += 1
+
+    manual_entering = sum(
+        1 for rec in updated_records
+        if not rec.get("auto_screened") and bool(_valid_regions(rec))
+    )
+    summary = dict(
+        policy="candidate_auto_screen_v1",
+        dry_run=bool(dry_run),
+        settings=dict(
+            difficulty_slots=sorted(slots_set),
+            min_level=float(min_level),
+            max_level=float(max_level),
+            tap_on_slide_mode=tap_on_slide_mode,
+            tap_on_slide_ms=float(tap_on_slide_ms),
+            inner_muri_mode=inner_muri_mode,
+            max_offset_ms=float(max_offset_ms),
+            max_problem_fraction=float(max_problem_fraction),
+            preserve_manual=bool(preserve_manual),
+        ),
+        counts=dict(counts),
+        deferred_by_reason=dict(sorted(deferred_by_reason.items())),
+        approved_by_slot={str(k): v for k, v in sorted(approved_by_slot.items())},
+        total_entering_training=int(counts["approved_clean"] + counts["approved_masked"] + manual_entering),
+        manual_entering_training=int(manual_entering),
+        updated_at=_now(),
+    )
+
+    if not dry_run:
+        save_annotations(manifest, updated_records)
+        metadata["auto_screen"] = {k: v for k, v in summary.items() if k != "dry_run"}
+        metadata["updated_at"] = summary["updated_at"]
+        _write_json(root / "pool.json", metadata)
+        summary["pool_status"] = pool_status(root, include_supervision=False)
+    return summary
+
+
+def _review_choices(scanned, record):
+    result = scanned.info
+    spans = record.get("candidate_reviews", []) + record.get("regions", [])
+    if not spans and scanned.cached_choices is not None:
+        return scanned.cached_choices
+    segments = [dict(zip(scanned.fields, values)) for values in scanned.segments]
+    if spans:
+        eligible = []
+        for segment in segments:
             a, b = segment["start_sec"], segment["end_sec"]
             covered = sorted((max(a, float(r["start_sec"])), min(b, float(r["end_sec"])))
-                             for r in (record.get("candidate_reviews", []) + record.get("regions", []))
+                             for r in spans
                              if float(r["end_sec"]) > a and float(r["start_sec"]) < b)
             total, end = 0., a
             for left, right in covered:
                 total += max(0., right - max(end, left)); end = max(end, right)
             if total < .5 * (b - a):
-                segments.append(segment)
-        if not segments:
+                eligible.append(segment)
+        segments = eligible
+    if not segments:
+        return ()
+    rates = sorted(s.get("onset_rate") or 0 for s in segments)
+    median = rates[len(rates) // 2]
+    representative = min(segments, key=lambda s: (abs((s.get("onset_rate") or 0) - median), -(s.get("attack_support") or 0)))
+    risk = max(segments, key=lambda s: (s.get("conflicts") or 0, bool(s.get("mixed_16_24")), s.get("onset_rate") or 0))
+    rng = random.Random(result["chart_id"])
+    choices, seen = [], set()
+    for segment, why in ((representative, "代表性片段"), (risk, "复杂或风险片段"), (rng.choice(segments), "随机抽查")):
+        if segment["start_sec"] in seen:
             continue
-        rates = sorted(s.get("onset_rate", 0) for s in segments)
-        median = rates[len(rates) // 2]
-        representative = min(segments, key=lambda s: (abs(s.get("onset_rate", 0) - median), -(s.get("attack_support") or 0)))
-        risk = max(segments, key=lambda s: (s.get("conflicts", 0), s.get("mixed_16_24", False), s.get("onset_rate", 0)))
-        rng = random.Random(result["chart_id"])
-        choices, seen = [], set()
-        for segment, why in ((representative, "代表性片段"), (risk, "复杂或风险片段"), (rng.choice(segments), "随机抽查")):
-            if segment["start_sec"] in seen:
-                continue
-            seen.add(segment["start_sec"])
-            choices.append(dict(segment, chart_id=result["chart_id"], source_path=result["source_path"],
-                                difficulty_index=result["difficulty_index"], title=result.get("title"), why=why,candidate_status=result['status'],
-                                issues=result.get("issues", []), context_start_sec=max(0, segment["start_sec"] - 4),
-                                context_end_sec=min(result.get("audio_duration_sec", segment["end_sec"] + 4), segment["end_sec"] + 4)))
+        seen.add(segment["start_sec"])
+        choices.append(dict(segment, chart_id=result["chart_id"], source_path=result["source_path"],
+                            difficulty_index=result["difficulty_index"], title=result.get("title"), why=why,
+                            candidate_status=result["status"], issues=result.get("issues", []),
+                            context_start_sec=max(0, segment["start_sec"] - 4),
+                            context_end_sec=min(result.get("audio_duration_sec") or segment["end_sec"] + 4, segment["end_sec"] + 4)))
+    if not spans:
+        scanned.cached_choices = tuple(choices)
+    return choices
+
+
+def review_queue(pool_dir, offset=0, limit=1, *, status=None, exclude_chart_id=None,
+                 prefer_chart_id=None, seen_segments=()):
+    root = _pool(pool_dir)
+    manifest = root / "training_manifest.json"
+    metadata = _read(root / "pool.json")
+    seen_segments = set(seen_segments)
+    offset, limit = max(0, int(offset)), min(100, max(1, int(limit)))
+    source_changed = metadata.get("source_manifest_stat") != _stat(metadata.get("source_manifest"))
+    scan_state = _read(root / "scan_state.json").get("status")
+    scanning = scan_state in {"queued", "running"}
+    if not metadata.get("scan_complete") or scanning or source_changed or not (root / "scan" / "results.json").is_file():
+        return dict(items=[], total=0, offset=offset, limit=limit, stale=source_changed,
+                    next_offset=offset, scan_complete=bool(metadata.get("scan_complete")) and not scanning)
+    charts = pool_charts(manifest)
+    records = {}
+    for record in _records(manifest):
+        records.setdefault(record.get("chart_id"), record)
+    groups = {}
+    preferred = []
+    stats = {}
+    ranked = {}
+    for key, scanned in scan_index(manifest).items():
+        result = scanned.info
+        chart_id = result.get("chart_id")
+        entry = charts.get(key)
+        if entry is None:
+            continue
+        if not chart_id or chart_id == exclude_chart_id or result["status"] == "error" or (status and result["status"] != status):
+            continue
+        record = records.get(chart_id, {})
+        if (record.get("label") in {"excluded", "negative"} or record.get("weight", 1.) <= 0
+                or record.get("candidate_chart_review") in {"learn_all", "exclude"}):
+            continue
+        choices = [choice for choice in _review_choices(scanned, record)
+                   if (chart_id, choice["start_sec"], choice["end_sec"]) not in seen_segments]
+        if not choices:
+            continue
+        ranked[chart_id] = entry
+        if chart_id == prefer_chart_id:
+            preferred = choices
+            continue
         try:
             level = float(str(result.get("level", "0")).replace("+", ".7"))
         except ValueError:
             level = 0
-        bucket = (int(level // 3), int((result.get("stats", {}).get("bpm") or 120) // 40))
-        groups.setdefault(bucket, []).append((result["chart_id"], choices))
-    for rows in groups.values():
-        rows.sort(key=lambda row: hashlib.sha256(row[0].encode()).hexdigest())
-    items = []
-    while any(groups.values()):
-        for bucket in sorted(groups):
-            if groups[bucket]:
-                items.extend(groups[bucket].pop(0)[1])
-    offset, limit = max(0, int(offset)), min(100, max(1, int(limit)))
-    return dict(items=items[offset:offset + limit], total=len(items), offset=offset, limit=limit,
-                stale=pool_status(root)["stale"],
-                next_offset=offset + len(items[offset:offset + limit]))
+        bucket = (int(level // 3), int(result["bpm"] // 40))
+        groups.setdefault(bucket, []).append((hashlib.sha256(chart_id.encode()).digest(), choices))
+    buckets = [deque(sorted(rows, key=lambda row: row[0])) for _, rows in sorted(groups.items())]
+    items = list(preferred)
+    while any(buckets):
+        for rows in buckets:
+            if rows:
+                items.extend(rows.popleft()[1])
+    page = []
+    stale_ids = set()
+    next_offset = offset
+    for next_offset, item in enumerate(items[offset:], start=offset + 1):
+        chart_id = item["chart_id"]
+        if chart_id not in stats:
+            song, difficulty = ranked[chart_id]
+            stats[chart_id] = _stale(root, metadata, song, difficulty)
+        if stats[chart_id]:
+            stale_ids.add(chart_id)
+            continue
+        page.append(item)
+        if len(page) == limit:
+            break
+    return dict(items=page, total=len(items), offset=offset, limit=limit,
+                stale=bool(stale_ids), next_offset=next_offset)
 
 
 @lru_cache(maxsize=16384)
@@ -870,24 +1655,46 @@ class _ScanProgress:
         if completed >= 3 and elapsed >= 3 and total > completed:
             progress['eta_sec'] = round(elapsed * (total - completed) / completed)
         self.state.update(status='completed' if stage == 'complete' else 'running',
-                          progress=progress, updated_at=_now())
+                          progress=progress, updated_at=_now(), pid=os.getpid())
         _write_json(self.path, self.state)
         print('candidate_scan ' + json.dumps(progress, ensure_ascii=False), flush=True)
 
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=["scan", "build"])
+    parser.add_argument("command", choices=["scan", "build", "screen"])
     parser.add_argument("target")
     parser.add_argument("--workspace-root")
     parser.add_argument("--name")
     parser.add_argument("--reference-manifest", action="append", default=[])
     parser.add_argument("--threads", type=int, default=1)
-    parser.add_argument('--workers', type=int, default=0, help='0: 自动最多 4 个独立检查进程；1: 串行')
+    parser.add_argument('--workers', type=int, default=0, help='0: 自动最多 6 个独立检查进程；1: 串行')
+    parser.add_argument("--difficulty-slots", nargs="+", type=int, default=[5, 6])
+    parser.add_argument("--min-level", type=float, default=12.0)
+    parser.add_argument("--max-level", type=float, default=15.0)
+    parser.add_argument("--tap-on-slide-mode", default="mask_hard")
+    parser.add_argument("--inner-muri-mode", default="allow")
+    parser.add_argument("--max-offset-ms", type=float, default=35.0)
+    parser.add_argument("--max-problem-fraction", type=float, default=0.35)
+    parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "screen":
+        result = auto_screen_pool(
+            args.target,
+            difficulty_slots=tuple(args.difficulty_slots),
+            min_level=args.min_level,
+            max_level=args.max_level,
+            tap_on_slide_mode=args.tap_on_slide_mode,
+            inner_muri_mode=args.inner_muri_mode,
+            max_offset_ms=args.max_offset_ms,
+            max_problem_fraction=args.max_problem_fraction,
+            dry_run=args.dry_run,
+        )
+        print(json.dumps(result, ensure_ascii=False))
+        return 0
     import torch
     torch.set_num_threads(max(1, args.threads))
-    workers = max(1, min(4, (os.cpu_count() or 2) // 2)) if args.workers == 0 else max(1, min(8, args.workers))
+    workers = max(1, min(6, (os.cpu_count() or 2) // 2)) if args.workers == 0 else max(1, min(8, args.workers))
     if args.command == "build":
         if not args.workspace_root:
             parser.error("build requires --workspace-root")
@@ -899,6 +1706,14 @@ def main(argv=None):
             create_pool(args.target, args.workspace_root, args.name, args.reference_manifest, progress=report)
     else:
         target = args.target
+        if args.reference_manifest and (Path(target) / 'pool.json').is_file():
+            meta = _read(Path(target) / 'pool.json')
+            source_manifest = Path(meta['source_manifest']).resolve() if meta.get('source_manifest') else None
+            meta['reference_manifests'] = [
+                str(Path(p).resolve()) for p in args.reference_manifest
+                if Path(p).is_file() and Path(p).resolve() != source_manifest
+            ]
+            _write_json(Path(target) / 'pool.json', meta)
         report = _ScanProgress(target)
         report(dict(stage='starting', completed=0, total=0, workers=workers))
         exists = True

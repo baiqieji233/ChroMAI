@@ -269,7 +269,7 @@ def build_slide_tracks(markers: list[dict[str, Any]]) -> list[SlideSweepTrack]:
     wifi_ref = data.get("wifi", {})
     tracks: list[SlideSweepTrack] = []
     for m in markers:
-        if m.get("is_mine") or m.get("track_mine") or not usable_slide(m):
+        if m.get("is_mine") or m.get("track_mine") or m.get("covered_by_wifi") or not usable_slide(m):
             continue
         kind = m.get("type")
         trace = float(m.get("slide_trace_second", 0.0))

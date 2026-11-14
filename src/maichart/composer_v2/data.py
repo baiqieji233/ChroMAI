@@ -21,11 +21,11 @@ from maichart.maidata import decode_text_with_encoding, parse_maidata_metadata
 from maichart.tempo_clock import TempoClock
 from maichart.training.dataset_catalog import _source_asset
 from maichart.training.event_dataset import inspect_chart, numeric_level
-from maichart.training.quality_annotations import split_annotation_source
 from . import chart_dialect
 from .chart_cache import ChartCache
 from .conditions import RADAR_STYLE, condition_contract, resolve_condition, training_condition
 from .difficulty import DIFFICULTY_SLOTS, metadata_exclusion
+from .quality_data import TrainingQuality, quality_excludes_chart
 
 
 def _beat(value):
@@ -117,33 +117,14 @@ class ComposerV2Dataset(Dataset):
         manifest_bytes = self.manifest.read_bytes()
         payload = json.loads(manifest_bytes.decode('utf-8-sig'))
         self.manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
-        annotations = None
-        annotation_path = self.manifest.with_name('quality_annotations.json')
-        if not annotation_path.exists():
-            origin = split_annotation_source(self.manifest, payload)
-            if origin is not None:
-                annotation_path = origin.with_name('quality_annotations.json')
-        if quality_enabled and annotation_path.is_file():
-            from maichart.training.quality_annotations import load_quality_annotations
-            annotations = load_quality_annotations(annotation_path)
-        auto_annotations = None
+        quality_data = TrainingQuality(self.manifest, payload, enabled=quality_enabled,
+                                       use_auto=auto_quality_policy == 'auto_v1')
         if auto_quality_policy == 'auto_v1':
-            from maichart.training.quality_annotations import (
-                annotations_fingerprint,
-                merge_annotation_records,
-                resolve_auto_annotations,
-            )
-            auto_annotation_file, auto_annotations = resolve_auto_annotations(self.manifest, payload)
-            self.auto_annotations_sha256 = (annotations_fingerprint(auto_annotations)
-                                            if auto_annotations is not None else None)
+            self.auto_annotations_sha256 = quality_data.auto_fingerprint
             self.audit['auto_quality'] = {
                 'policy': auto_quality_policy,
-                'path': str(auto_annotation_file) if auto_annotation_file is not None else None,
+                'path': str(quality_data.auto_path) if quality_data.auto_path is not None else None,
             }
-        from maichart.form.data import _preparation_annotation, _preparation_annotation_index
-
-        annotation_index = _preparation_annotation_index(annotations)
-        auto_annotation_index = _preparation_annotation_index(auto_annotations) if auto_annotations is not None else None
         entries = payload.get('songs', [])
         chart_start = time.perf_counter()
         normalize_dialect = dialect_policy == chart_dialect.POLICY
@@ -207,15 +188,10 @@ class ComposerV2Dataset(Dataset):
                         inspect_chart(chart)
                     else:
                         chart, sustain, dialect_edits = prepared_chart
-                    quality = _preparation_annotation(annotations, source, slot, audio_path, None, annotation_index)
-                    if auto_annotations is not None:
-                        auto_q = _preparation_annotation(auto_annotations, source, slot, audio_path, None, auto_annotation_index)
-                        if auto_q is not None:
-                            quality = merge_annotation_records(quality, auto_q)
+                    quality = quality_data.record_for(source, slot, audio_path)
                     if entry.get('reviewed_only') and (quality is None or quality.get('unmarked_weight') != 0):
                         raise ValueError('人工确认片段的范围标注缺失或已失效，请重新整理校准素材')
-                    if quality and (quality.get('label') in ('excluded', 'negative')
-                                    or float(quality.get('weight', 1.)) <= 0):
+                    if quality_excludes_chart(quality):
                         self.audit['skipped'].append({'source': str(source), 'reason': 'quality_excluded'})
                         continue
                     if difficulty_scorer is not None:
@@ -261,7 +237,7 @@ class ComposerV2Dataset(Dataset):
         self.audit['preparation'] = {'charts_sec': time.perf_counter() - chart_start,
                                      'duplicate_chart_parses_saved': reused_charts,
                                      'chart_cache_hits': cache_hits}
-        del prepared_charts, manifest_bytes, payload, entries, annotations, annotation_index
+        del prepared_charts, manifest_bytes, payload, entries, quality_data
         if not self.songs:
             if 'difficulty_selection' in self.audit:
                 raise ValueError('当前难度筛选条件下没有可用谱面。'
@@ -620,6 +596,8 @@ def collate_composer_v2(items):
         fill = items[0]['pad_id'] if key == 'input_ids' else (-100 if key == 'labels' else 0)
         output[key] = torch.nn.utils.rnn.pad_sequence([item[key] for item in items],
             batch_first=True, padding_value=fill)
+    token_mask = output['token_mask'].bool()
+    output['right_padded_tokens'] = not bool((token_mask[:, 1:] & ~token_mask[:, :-1]).any())
     if all('song_detail' in item for item in items):
         output['song_detail'] = torch.nn.utils.rnn.pad_sequence([item['song_detail'] for item in items], batch_first=True)
     for key in ('condition', 'condition_known', 'sample_weight'):

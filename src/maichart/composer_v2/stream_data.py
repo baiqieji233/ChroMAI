@@ -28,7 +28,11 @@ class StreamDataset(ComposerV2Dataset):
     def __init__(self,*args,refresh_events=16,timing_recovery_policy='off',augmentation_seed=0,onset_readout_policy='off',
                  structure_policy='off',reference_augmentation=False,intensity_policy='off',rhythm_learning_policy=None,
                  music_context_policy='off',reviewed_reference_policy='approved_only',
-                 zero_unmarked_policy='explicit_good_v1',reference_quality_policy='event_mask_v1',**kwargs):
+                 zero_unmarked_policy='explicit_good_v1',reference_quality_policy='event_mask_v1',
+                 local_audio_block_beats=1,training_window_events=None,**kwargs):
+        if type(local_audio_block_beats) is not int or local_audio_block_beats not in (1, 2):
+            raise ValueError('local_audio_block_beats must be 1 or 2')
+        self.local_audio_block_beats = local_audio_block_beats
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
         from .rhythm_structure import POLICIES
         if structure_policy not in POLICIES:raise ValueError('Unknown rhythm structure policy')
@@ -53,6 +57,15 @@ class StreamDataset(ComposerV2Dataset):
         if not isinstance(self.codec,StreamCodec):raise ValueError('Continuous training requires a new vocabulary and fresh checkpoint')
         self.refresh_events=int(refresh_events)
         if self.refresh_events<1:raise ValueError('refresh_events must be positive')
+        self.training_window_events = self.refresh_events if training_window_events is None else training_window_events
+        if type(self.training_window_events) is not int or self.training_window_events < 1:
+            raise ValueError('training_window_events must be a positive integer')
+        if timing_recovery_policy not in ('off',timing_recovery.POLICY):
+            raise ValueError('Unknown timing recovery policy')
+        # Recovery keeps its original target boundaries and random seeds when
+        # authored targets are grouped into longer training windows.
+        recovery_slices = [] if (timing_recovery_policy != 'off'
+                                 and self.training_window_events != self.refresh_events) else None
         self.tile_cache=OrderedDict();self.windows=[];self.ranges=[];self.lengths=[]
         self._remaining_references = []
         from maichart.training.quality_annotations import region_component_weights, zero_unmarked_region_weights
@@ -65,54 +78,59 @@ class StreamDataset(ComposerV2Dataset):
                 song.reviewed_event_seconds = song.clock.at_floats(np.asarray(song.point_beats, dtype=np.float64))
             token_lengths = song.event_token_lengths
             song.event_token_lengths = []
-            begin=0
-            while begin<len(song.points):
-                end=begin;tokens=0
-                while end<len(song.points) and end-begin<self.refresh_events:
-                    length=token_lengths[end]
-                    if tokens+length+1>self.max_tokens//2:break
-                    tokens+=length;end+=1
-                    # Computational refresh only: no note, rest or EOS is added.
-                    if self._evidence_v2():
-                        origin=math.floor(song.points[begin-1].beat) if begin else 0
-                        if song.points[end-1].beat>=origin+self.window_beats:break
-                if end==begin:raise ValueError(f'One whole event exceeds target budget: {song.source_path}, {song.points[begin].beat}')
-                keep = not reviewed or any(
-                    region['start_sec'] <= stamp < region['end_sec']
-                    for region in song.quality.get('regions', [])
-                    if max(region_component_weights(region) if legacy_zero_resume else zero_unmarked_region_weights(region)) > 0
-                    for stamp in song.reviewed_event_seconds[begin:end])
-                if keep:
-                    self.windows.append((song_index,begin));self.ranges.append(end);self.lengths.append(tokens+1)
-                begin=end
-            # Empty charts and actual song endings still have one real EOS target.
-            if not song.points:self.windows.append((song_index,0));self.ranges.append(0);self.lengths.append(1)
+            weight_fn = region_component_weights if legacy_zero_resume else zero_unmarked_region_weights
+            for begin, end, length in self._authored_slices(
+                    song, token_lengths, self.training_window_events, reviewed, weight_fn):
+                self.windows.append((song_index, begin))
+                self.ranges.append(end)
+                self.lengths.append(length)
+            if recovery_slices is not None:
+                recovery_slices.extend(
+                    (song_index, begin, end, length)
+                    for begin, end, length in self._authored_slices(
+                        song, token_lengths, self.refresh_events, reviewed, weight_fn)
+                )
             self._remaining_references.append(len(self.windows) - first_window)
-        self._reference_starts = [None] * len(self.windows)
-        self._reference_ready = bytearray(len(self.windows))
-        self._reference_descriptors = OrderedDict()
-        if timing_recovery_policy not in ('off',timing_recovery.POLICY):
-            raise ValueError('Unknown timing recovery policy')
+        reference_count = len(self.windows)
         self.recovery_sources = {}
+        self._recovery_seed_indices = {}
         self.training_epoch = 0
         self.augmentation_seed = int(augmentation_seed)
         self._recovery_span = min(timing_recovery.SPAN, Fraction(self.history_beats))
         self._recovery_phases = frozenset(self.codec.phases.values())
         self._timing_ids = timing_recovery.timing_ids(self.codec)
         if timing_recovery_policy != 'off':
-            for index in range(7,len(self.windows),8):
-                si,begin=self.windows[index]
+            recovery_count = reference_count if recovery_slices is None else len(recovery_slices)
+            for index in range(7, recovery_count, 8):
+                if recovery_slices is None:
+                    si, begin = self.windows[index]
+                    end, length = self.ranges[index], self.lengths[index]
+                else:
+                    si, begin, end, length = recovery_slices[index]
                 if begin<2:continue
                 song=self.songs[si]
                 first=bisect.bisect_left(song.point_beats,song.point_beats[begin-1]-self._recovery_span,hi=begin)
                 if any(timing_recovery.is_tap(p) for p in song.points[first:begin-1]):
-                    self.recovery_sources[len(self.windows)] = index
-                    self.windows.append(self.windows[index])
-                    self.ranges.append(self.ranges[index])
-                    self.lengths.append(self.lengths[index])
+                    recovery_index = len(self.windows)
+                    source_index = index
+                    if recovery_slices is not None:
+                        source_index = recovery_index
+                        self._recovery_seed_indices[source_index] = index
+                        self._remaining_references[si] += 1
+                    self.recovery_sources[recovery_index] = source_index
+                    self.windows.append((si, begin))
+                    self.ranges.append(end)
+                    self.lengths.append(length)
+        if recovery_slices is not None:
+            reference_count = len(self.windows)
+        self._reference_starts = [None] * reference_count
+        self._reference_ready = bytearray(reference_count)
+        self._reference_descriptors = OrderedDict()
         self.audit.update(windows=len(self.windows),sequence_policy=POLICY,
             segmentation='whole_events_compute_only',refresh_events=self.refresh_events,eos='true_chart_end_only',
             reviewed_reference_policy=self.reviewed_reference_policy)
+        if self.training_window_events != self.refresh_events:
+            self.audit['training_window_events'] = self.training_window_events
         self.audit['timing_recovery'] = dict(policy=timing_recovery_policy, views=len(self.recovery_sources),
             original_windows=len(self.windows)-len(self.recovery_sources),target='authored_future_time_only')
         if structure_policy!='off':
@@ -124,6 +142,35 @@ class StreamDataset(ComposerV2Dataset):
                 alternative_probability=rs.REF_ALTERNATIVE_PROBABILITY if self.reference_augmentation else 0.,
                 history_budget='low_trust_uses_spare_only' if self._evidence_v2() else 'reference_first',
                 learning=self.rhythm_learning_policy if self._evidence_v2() and self.reference_augmentation else 'off')
+
+    def _authored_slices(self, song, token_lengths, event_limit, reviewed, weight_fn):
+        # Empty charts and actual song endings still have one real EOS target.
+        if not song.points:
+            yield 0, 0, 1
+        target_budget = self.max_tokens // 2
+        begin = 0
+        while begin < len(song.points):
+            end, tokens = begin, 0
+            origin = math.floor(song.points[begin - 1].beat) if begin else 0
+            while end < len(song.points) and end - begin < event_limit:
+                length = token_lengths[end]
+                if tokens + length + 1 > target_budget:
+                    break
+                tokens += length
+                end += 1
+                # This boundary adds no synthetic note, rest or EOS.
+                if self._evidence_v2() and song.points[end - 1].beat >= origin + self.window_beats:
+                    break
+            if end == begin:
+                raise ValueError(f'One whole event exceeds target budget: {song.source_path}, {song.points[begin].beat}')
+            if not reviewed or any(
+                region['start_sec'] <= stamp < region['end_sec']
+                for region in song.quality.get('regions', [])
+                if max(weight_fn(region)) > 0
+                for stamp in song.reviewed_event_seconds[begin:end]
+            ):
+                yield begin, end, tokens + 1
+            begin = end
 
     def set_epoch(self, epoch):
         self.training_epoch = int(epoch)
@@ -215,7 +262,8 @@ class StreamDataset(ComposerV2Dataset):
             # Deterministic per window and epoch: occasionally hide the match or
             # show an arbitrary passage with its true (usually low) trust, so
             # trust, not mere presence, decides how much is reused.
-            draw=float(np.random.default_rng((self.augmentation_seed,index,self.training_epoch,7)).random())
+            seed_index = getattr(self, '_recovery_seed_indices', {}).get(index, index)
+            draw=float(np.random.default_rng((self.augmentation_seed,seed_index,self.training_epoch,7)).random())
             if draw<rs.REF_DROP_PROBABILITY:return None
             if not zero_unmarked and draw<rs.REF_DROP_PROBABILITY+rs.REF_ALTERNATIVE_PROBABILITY:
                 return (info['alternative_shift'],info['alternative_score'])
@@ -257,9 +305,24 @@ class StreamDataset(ComposerV2Dataset):
                 cache[start] = descriptors[start]
         query = descriptors[cursor]
         return max(candidates, key=lambda beat: float(np.dot(query, descriptors[beat])))
-    def tile(self,song,anchor):
+    def local_anchor(self, beat):
+        width = getattr(self, 'local_audio_block_beats', 1)
+        return (math.floor(beat) // width) * width
+
+    def beat_features(self, song, anchors):
+        result = {}
+        if getattr(self, 'onset_readout_policy', 'off') != 'off':
+            from .onset_readout import audio_tiles
+            result.update(audio_tiles(song, anchors, self.onset_phases))
+        if self._paired_music():
+            from .music_evidence import entry_preview
+            result['entry_preview_features'] = torch.as_tensor(entry_preview(self._profile(song), anchors))
+        return result
+
+    def tile(self,song,anchor,*,include_beat_features=True):
         if not hasattr(self,'tile_cache'):self.tile_cache=OrderedDict()
-        key=(str(song.audio_path),str(song.clock.beats),str(song.clock.bpms),str(song.clock.seconds),int(anchor),self.future_beats)
+        key=(str(song.audio_path),str(song.clock.beats),str(song.clock.bpms),str(song.clock.seconds),int(anchor),
+             self.future_beats,include_beat_features)
         if key in self.tile_cache:self.tile_cache.move_to_end(key);return self.tile_cache[key]
         ticks=np.arange(-48,(self.future_beats+2)*24,dtype=np.int64)
         beats=(int(anchor)*24+ticks)/24.;seconds=song.clock.at_floats(beats)
@@ -271,12 +334,8 @@ class StreamDataset(ComposerV2Dataset):
         if self._structured():
             from .rhythm_structure import onset_envelope
             result['local_envelope']=torch.as_tensor(onset_envelope(song.audio,song.clock,beats))
-        if getattr(self, 'onset_readout_policy', 'off') != 'off':
-            from .onset_readout import audio_tiles
-            result.update({k:v[0] for k,v in audio_tiles(song,[anchor],self.onset_phases).items()})
-        if self._paired_music():
-            from .music_evidence import entry_preview
-            result['entry_preview_features']=torch.as_tensor(entry_preview(self._profile(song),[anchor])[0])
+        if include_beat_features:
+            result.update({k: v[0] for k, v in self.beat_features(song, [anchor]).items()})
         self.tile_cache[key]=result
         while len(self.tile_cache)>64:self.tile_cache.popitem(last=False)
         return result
@@ -420,12 +479,8 @@ class StreamDataset(ComposerV2Dataset):
         weights=active*unmarked
         regions = (song.quality or {}).get('regions', [])
         if training and regions:
-            from maichart.training.quality_annotations import region_component_weights, zero_unmarked_region_weights
-            weight_fn = (
-                zero_unmarked_region_weights
-                if unmarked == 0 and not getattr(song, '_legacy_zero_unmarked_resume', False)
-                else region_component_weights
-            )
+            from .quality_data import stream_region_weight_fn
+            weight_fn = stream_region_weight_fn(unmarked, getattr(song, '_legacy_zero_unmarked_resume', False))
             # Causal query clocks intentionally stay at the preceding event
             # while its successor's time is written. Supervision ownership is
             # different: every token of a complete event owns its final time.
@@ -474,10 +529,12 @@ class StreamDataset(ComposerV2Dataset):
                 weights[coarse & ~trusted]=0
                 weights[labels==codec.eos_id]=0
         anchors=sorted({math.floor(t) for t in clocks});lookup={a:i for i,a in enumerate(anchors)}
+        local_anchors = sorted({self.local_anchor(a) for a in anchors})
+        local_lookup = {anchor: index for index, anchor in enumerate(local_anchors)}
         # Adjacent query tiles overlap heavily. Read/project each source frame
         # once; gather the small learned vectors into independent encoder tiles.
         relative=np.arange(-48,(self.future_beats+2)*24,dtype=np.int64)
-        all_ticks=np.asarray(anchors)[:,None]*24+relative[None,:]
+        all_ticks=np.asarray(local_anchors)[:,None]*24+relative[None,:]
         ticks=np.unique(all_ticks);tile_frames=np.searchsorted(ticks,all_ticks)
         seconds=song.clock.at_floats(ticks/24.)
         envelope=None
@@ -493,6 +550,7 @@ class StreamDataset(ComposerV2Dataset):
         out=dict(input_ids=torch.tensor(ids),labels=torch.tensor(labels),token_weights=torch.tensor(weights),
             token_beats=torch.tensor(clocks,dtype=torch.float32),token_mask=torch.ones(len(ids),dtype=torch.bool),
             tile_ids=[lookup[math.floor(t)] for t in clocks],anchors=anchors,
+            local_anchors=local_anchors, local_tile_ids=[local_lookup[self.local_anchor(t)] for t in clocks],
             bank_audio=torch.as_tensor(mel,dtype=torch.float32),bank_semantic=torch.as_tensor(semantic),
             bank_semantic_mask=torch.as_tensor(valid,dtype=torch.bool),
             tile_frames=torch.tensor(tile_frames,dtype=torch.long),
@@ -567,7 +625,8 @@ class StreamDataset(ComposerV2Dataset):
         cursor=song.points[begin-1].beat if begin else Fraction(0)
         if self._structured():
             if not self._reference_ready[index]:
-                draw=float(np.random.default_rng((self.augmentation_seed,index,11)).random())
+                seed_index = getattr(self, '_recovery_seed_indices', {}).get(index, index)
+                draw=float(np.random.default_rng((self.augmentation_seed,seed_index,11)).random())
                 self._reference_starts[index]=self._aligned_match(song,cursor,alternative_draw=draw)
                 self._reference_ready[index]=1
             return self._reference_starts[index]
@@ -594,13 +653,14 @@ class StreamDataset(ComposerV2Dataset):
     def _recovery_item(self, source):
         si,begin=self.windows[source];song=self.songs[si];end=self.ranges[source]
         cursor=song.points[begin-1].beat
-        seed=self.augmentation_seed+source*1009+self.training_epoch*1000003
+        seed_index = self._recovery_seed_indices.get(source, source)
+        seed=self.augmentation_seed+seed_index*1009+self.training_epoch*1000003
         changed=timing_recovery.perturb_prefix(song.points[:begin],self._recovery_phases,
-            seed,dense=(source//8+self.training_epoch)%2==0,span=self._recovery_span)
+            seed,dense=(seed_index//8+self.training_epoch)%2==0,span=self._recovery_span)
         if changed is None:
             raise RuntimeError('Timing recovery view lost its eligible committed prefix')
         prefix,_=changed
-        if self._evidence_v2() and (source//8+self.training_epoch)%3==0:
+        if self._evidence_v2() and (seed_index//8+self.training_epoch)%3==0:
             phase=timing_recovery.perturb_phase_prefix(song.points[:begin],self._recovery_phases,
                 seed,next_beat=song.points[begin].beat,span=self._recovery_span)
             if phase is not None:prefix=phase
@@ -622,6 +682,8 @@ def collate_stream(items):
     if 'curve_left' in items[0]:
         from .intensity import collate
         collate(items,out)
+    if 'curve_loss_scale' in items[0]:
+        out['curve_loss_scale']=torch.stack([item['curve_loss_scale'] for item in items])
     for k in ('bank_audio','bank_semantic','bank_semantic_mask','local_mask','local_beats'):out[k]=torch.cat([item[k] for item in items],0)
     if 'bank_envelope' in items[0]:out['bank_envelope']=torch.cat([item['bank_envelope'] for item in items],0)
     if 'reference_trust' in items[0]:out['reference_trust']=torch.stack([item['reference_trust'] for item in items])
@@ -638,11 +700,18 @@ def collate_stream(items):
             if 'bank_semantic_weight' in item else torch.zeros(len(item['bank_semantic']), dtype=torch.float64)
             for item in items])
     owners=[];ids=[];offset=0;bank_owners=[];frames=[];bank_offset=0
+    local_ids=[];local_offset=0
     for row,item in enumerate(items):
-        owners.extend([row]*len(item['anchors']));ids.append([i+offset for i in item['tile_ids']]+[-1]*(out['input_ids'].size(1)-len(item['tile_ids'])))
+        padding = [-1]*(out['input_ids'].size(1)-len(item['tile_ids']))
+        ids.append([i+offset for i in item['tile_ids']] + padding)
         offset+=len(item['anchors'])
+        owners.extend([row]*len(item['tile_frames']))
+        local_ids.append([i+local_offset for i in item.get('local_tile_ids', item['tile_ids'])] + padding)
+        local_offset+=len(item['tile_frames'])
         bank_owners.extend([row]*len(item['bank_audio']));frames.append(item['tile_frames']+bank_offset);bank_offset+=len(item['bank_audio'])
     out['tile_owner']=torch.tensor(owners);out['tile_ids_cpu']=ids
+    if any(item.get('local_anchors', item['anchors']) != item['anchors'] for item in items):
+        out['local_tile_ids_cpu']=local_ids
     out['bank_owner']=torch.tensor(bank_owners);out['tile_frames']=torch.cat(frames)
     out['cursor']=[item['cursor'] for item in items]
     if 'onset_audio' in items[0]:

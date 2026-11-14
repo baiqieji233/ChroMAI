@@ -61,6 +61,7 @@ class EventSampler(WindowSampler):
         self.reference_refresh_beat=math.floor(self.cursor)+dataset.window_beats
         self.prefix=item['input_ids'].tolist();self.anchors=list(item['anchors'])
         self.anchor_ids={a:i for i,a in enumerate(self.anchors)}
+        self.local_anchor_ids = {a: i for i, a in enumerate(item['local_anchors'])}
         self.batch={k:v.to(device) if isinstance(v,torch.Tensor) else v for k,v in collate_stream([item]).items()}
         from .onset_readout import effective_strength
         self.batch['onset_strength'] = effective_strength(getattr(args,'onset_strength',None),
@@ -79,7 +80,9 @@ class EventSampler(WindowSampler):
             and getattr(args,'phrase_search','layout')!='event' and getattr(args,'candidates',2)>1
             and getattr(args,'_candidate_audit_active',True))
         self.last_probability_event=None;self._probability=None
-        self._decoded_ids=()
+        self._decoded_ids=();self._query_ids=()
+        self._clock_states=[];self._clocks=[]
+        self._tiles=[];self._local_tiles=[];self._token_buffers=None
         self.args=args;self._active_guard=None;self._forward_cache=None
 
     def _forward_guard(self):
@@ -153,40 +156,73 @@ class EventSampler(WindowSampler):
                 proposal_logits=logits,allowed=allowed,temperature=temperature,top_p=top_p)
         return token
     def _logits(self,target,*,all_new=False):
-        ids=self.prefix+list(target)
-        clocks=self.codec.token_clocks(ids,cursor=self.cursor)
-        missing=sorted({math.floor(t) for t in clocks}-self.anchor_ids.keys())
-        if missing:
-            tiles=[self.dataset.tile(self.song,a) for a in missing]
-            query={**self.batch,**{k:torch.stack([t[k] for t in tiles]).to(self.device) for k in tiles[0] if not k.startswith('onset_')},
-                'tile_owner':torch.zeros(len(missing),dtype=torch.long,device=self.device)}
-            if 'onset_audio' in tiles[0]:
-                from .onset_readout import collate_tiles
-                onset=collate_tiles([{k:v[None] for k,v in t.items() if k.startswith('onset_')} for t in tiles])
-                query.update({k:v.to(self.device) for k,v in onset.items()})
-            for key in ('bank_audio','bank_semantic','bank_semantic_mask','bank_semantic_right','bank_semantic_weight','bank_owner','tile_frames','bank_envelope'):query.pop(key,None)
-            encoded=self.model.encode_audio(query)
-            for key in ('local','local_mask','local_beats'):self.cache[key]=torch.cat((self.cache[key],encoded[key]),0)
-            if 'entry_context' in encoded:self.cache['entry_context']=torch.cat((self.cache['entry_context'],encoded['entry_context']),0)
-            if 'onset_scores' in encoded:self.cache['onset_scores']=torch.cat((self.cache['onset_scores'],encoded['onset_scores']),0)
-            for a in missing:self.anchor_ids[a]=len(self.anchors);self.anchors.append(a)
-        query={**self.batch,'input_ids':torch.tensor([ids],device=self.device),
-            'token_beats':torch.tensor([clocks],dtype=torch.float32,device=self.device),
-            'token_mask':torch.ones((1,len(ids)),dtype=torch.bool,device=self.device),
-            'tile_ids_cpu':[[self.anchor_ids[math.floor(t)] for t in clocks]]}
+        ids=(*self.prefix,*target)
+        retained=min(len(ids),len(self._query_ids))
+        # Input buffers follow the most recent query. The KV cache may have
+        # rewound independently to an earlier prefix.
+        if ids[:retained]!=self._query_ids[:retained]:
+            retained=next(i for i in range(retained) if ids[i]!=self._query_ids[i])
+        initial=self._clock_states[retained-1] if retained else (0.,'',False)
+        new_states=list(self.codec.clock_states(ids[retained:],self.cursor,initial=initial))
+        new_clocks=[state[0] for state in new_states]
+        beats=[math.floor(t) for t in new_clocks]
+        missing=sorted(set(beats)-self.anchor_ids.keys())
+        shared_audio=getattr(self.dataset,'local_audio_block_beats',1)!=1
+        if missing and not shared_audio:
+            self._append_single_beat_tiles(missing)
+        elif missing:
+            local_missing = sorted({self.dataset.local_anchor(a) for a in missing} - self.local_anchor_ids.keys())
+            if local_missing:
+                tiles = [self.dataset.tile(self.song, a, include_beat_features=False) for a in local_missing]
+                local_batch = {k: torch.stack([t[k] for t in tiles]).to(self.device) for k in tiles[0]}
+                local_batch['tile_owner'] = torch.zeros(len(tiles), dtype=torch.long, device=self.device)
+                keep = torch.ones(1, dtype=torch.bool, device=self.device)
+                for key, value in self.model.encode_local_audio(local_batch, keep).items():
+                    self.cache[key] = torch.cat((self.cache[key], value), dim=0)
+                for anchor in local_missing:
+                    self.local_anchor_ids[anchor] = len(self.local_anchor_ids)
+            beat_batch = {k: v.to(self.device) for k, v in self.dataset.beat_features(self.song, missing).items()}
+            beat_batch['onset_strength'] = self.batch['onset_strength']
+            for key, value in self.model.encode_beat_features(beat_batch).items():
+                self.cache[key] = torch.cat((self.cache[key], value), dim=0)
+        for a in missing:
+            self.anchor_ids[a] = len(self.anchors)
+            self.anchors.append(a)
+        self._clock_states[retained:]=new_states
+        self._clocks[retained:]=new_clocks
+        self._tiles[retained:]=[self.anchor_ids[beat] for beat in beats]
+        if shared_audio:
+            self._local_tiles[retained:]=[self.local_anchor_ids[self.dataset.local_anchor(t)] for t in new_clocks]
+            local_tiles=self._local_tiles
+        else:
+            local_tiles=self._tiles
+        if self._token_buffers is None or self._token_buffers[0].size(1)<len(ids):
+            shape=(1,max(self.max_tokens,len(ids)))
+            self._token_buffers=(torch.empty(shape,dtype=torch.long,device=self.device),
+                torch.empty(shape,dtype=torch.float32,device=self.device),
+                torch.ones(shape,dtype=torch.bool,device=self.device))
+            upload_start=0
+        else:
+            upload_start=retained
+        token_ids,token_beats,token_mask=self._token_buffers
+        clocks=self._clocks
+        if upload_start<len(ids):
+            token_ids[0,upload_start:len(ids)]=torch.tensor(ids[upload_start:],device=self.device)
+            token_beats[0,upload_start:len(ids)]=torch.tensor(clocks[upload_start:],dtype=torch.float32,device=self.device)
+        self._query_ids=ids
+        query={**self.batch,'input_ids':token_ids[:,:len(ids)],'token_beats':token_beats[:,:len(ids)],
+            'token_mask':token_mask[:,:len(ids)],'tile_ids_cpu':[self._tiles],'local_tile_ids_cpu':[local_tiles]}
+        state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
+        start=int(state['length']) if state and state['length']<len(ids) else 0
         if getattr(self.dataset,'intensity_policy','off')!='off':
             from .intensity import query_indices
-            state=self.cache.get('decode_state')
-            start=int(state['length']) if state and state['length']<len(ids) else 0
             query.update({k:v[None].to(self.device) for k,v in query_indices(self.song,clocks[start:]).items()})
             query['curve_query_start']=start
         if getattr(self.dataset,'onset_readout_policy','off') != 'off':
-            from .onset_readout import query_rows
-            query['phase_queries_cpu']=query_rows(ids,query['tile_ids_cpu'][0],self.codec.ids['[PHASE]'])
+            phase_id=self.codec.ids['[PHASE]']
+            query['phase_queries_cpu']=[(0,pos,self._tiles[pos]) for pos in range(start,len(ids)) if ids[pos]==phase_id]
         if self.dataset._evidence_v2():
             from .rhythm_structure import local_evidence
-            state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
-            start=int(state['length']) if state and state['length']<len(ids) else 0
             boundary=max(start,len(self.prefix))
             pieces=[]
             if start<len(self.prefix):pieces.append(self.batch['reference_evidence'][:,start:len(self.prefix)])
@@ -198,8 +234,6 @@ class EventSampler(WindowSampler):
             query['reference_evidence_start']=start
         if self.dataset._paired_music():
             from .music_evidence import paired_music_features
-            state=self.cache.get('decode_state') if not self.model.training and not torch.is_grad_enabled() else None
-            start=int(state['length']) if state and state['length']<len(ids) else 0
             boundary=max(start,len(self.prefix));pieces=[]
             if start<len(self.prefix):pieces.append(self.batch['paired_music_features'][:,start:len(self.prefix)])
             if boundary<len(ids):
@@ -209,8 +243,28 @@ class EventSampler(WindowSampler):
             query['paired_music_features']=torch.cat(pieces,1)
             query['paired_music_start']=start
         logits=self.model.decode(query,self.cache)[0]
-        self._decoded_ids=tuple(ids)
+        self._decoded_ids=ids
         return logits if all_new else logits[-1]
+
+    def _append_single_beat_tiles(self, missing):
+        tiles = [self.dataset.tile(self.song, anchor) for anchor in missing]
+        query = {
+            key: torch.stack([tile[key] for tile in tiles]).to(self.device)
+            for key in tiles[0] if not key.startswith('onset_')
+        }
+        query['tile_owner']=torch.zeros(len(missing),dtype=torch.long,device=self.device)
+        query['onset_strength']=self.batch['onset_strength']
+        if 'onset_audio' in tiles[0]:
+            from .onset_readout import collate_tiles
+            onset = collate_tiles([{k: v[None] for k, v in tile.items() if k.startswith('onset_')} for tile in tiles])
+            query.update({k: v.to(self.device) for k, v in onset.items()})
+        # Only these beat-local values are appended. The song memory,
+        # conditions and intensity plan remain valid across the context.
+        keep=torch.ones(1,dtype=torch.bool,device=self.device)
+        encoded=self.model.encode_local_audio(query,keep)
+        encoded.update(self.model.encode_beat_features(query))
+        for key,value in encoded.items():
+            self.cache[key]=torch.cat((self.cache[key],value),dim=0)
     def _forced_time_probability(self,target,tokens,after,end):
         if self._probability is None:return
         # _rewind leaves the last prefix token live. A single incremental pass
@@ -395,6 +449,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     dataset=StreamDataset.__new__(StreamDataset)
     dataset.codec=model.codec;dataset.max_tokens=config.max_tokens;dataset.history_beats=config.history_beats
     dataset.window_beats=config.window_beats;dataset.future_beats=config.future_beats
+    dataset.local_audio_block_beats=getattr(config,'local_audio_block_beats',1)
     from .onset_readout import effective_strength,phase_values
     onset_strength=effective_strength(getattr(args,'onset_strength',None),getattr(config,'onset_readout_policy','off'))
     dataset.onset_readout_policy=getattr(config,'onset_readout_policy','off') if onset_strength else 'off'

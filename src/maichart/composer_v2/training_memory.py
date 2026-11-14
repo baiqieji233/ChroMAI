@@ -1,7 +1,8 @@
-"""Runtime-only activation recomputation; checkpoint weights and targets stay unchanged."""
+"""Training runtime policies with unchanged checkpoint weights and targets."""
 import sys
 
 POLICIES = ('auto', 'off', 'on')
+PROJECTION_PACKING_CHOICES = ('off', 'on')
 
 
 def configure(model, requested, device):
@@ -19,6 +20,33 @@ def configure(model, requested, device):
     model.activation_checkpointing_scope = 'decoder' if requested == 'auto' else 'all'
     return dict(requested=requested, enabled=enabled,scope=model.activation_checkpointing_scope,
                 reason='windows_display_gpu_headroom' if requested == 'auto' and enabled else requested)
+
+
+def configure_projection_packing(model, requested, device):
+    from .model import Attention
+
+    if requested not in PROJECTION_PACKING_CHOICES:
+        raise ValueError('Unknown attention projection packing policy')
+    enabled = requested == 'on'
+    for module in model.modules():
+        if isinstance(module, Attention):
+            module.pack_projections = enabled
+    return dict(requested=requested, enabled=enabled, device=device.type)
+
+
+def configure_decoder_flash_attention(model, requested, device):
+    import torch
+    from .model import DecoderBlock
+
+    if requested not in ('off', 'on'):
+        raise ValueError('Unknown decoder FlashAttention policy')
+    available = device.type == 'cuda' and torch.backends.cuda.is_flash_attention_available()
+    enabled = requested == 'on' and available
+    for layer in model.modules():
+        if isinstance(layer, DecoderBlock):
+            layer.flash_self_attention = enabled
+    return dict(requested=requested, enabled=enabled, flash_compiled=available,
+                scope='decoder_self_attention')
 
 
 def cuda_stats(device):

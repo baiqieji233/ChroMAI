@@ -93,7 +93,8 @@ def eligible_manifest_songs(songs, chart_eligibility):
         scope='metadata only; chart parsing and preparation may reject further charts')
 
 
-def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None, chart_eligibility=None):
+def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None, chart_eligibility=None,
+                   audio_digest=None):
     """Create train/dev/final manifests, joining identical audio and song IDs.
 
     ``fraction`` is the total fraction of groups assigned to both holdouts.
@@ -113,8 +114,8 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None
         if not songs: raise ValueError('No songs with eligible chart metadata for automatic holdout')
     if not 0 < fraction < 1:
         raise ValueError('fraction must be between 0 and 1')
-    digest_audio = file_hash
-    if cache_dir is not None:
+    digest_audio = audio_digest or file_hash
+    if audio_digest is None and cache_dir is not None:
         from maichart.form.cache_support import source_digests
         digest_audio = source_digests(str(Path(cache_dir).resolve())).digest
     parents = list(range(len(songs)))
@@ -139,6 +140,9 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None
                 if field == 'maidata_path':
                     value = str(_source_asset(value, source, data)).casefold()
                 keys.append((field, value))
+        music_key = _normalized_music_key(song)
+        if music_key is not None:
+            keys.append(music_key)
         for key in keys:
             if key in seen:
                 a, b = find(i), find(seen[key])
@@ -197,11 +201,29 @@ def split_manifest(manifest, output_dir, *, fraction=.05, seed=0, cache_dir=None
     return report
 
 
-def assert_unseen(training_manifest, holdout_manifest, *, cache_dir=None):
+_GENERIC_MUSIC_FIELDS = frozenset({"", "-", "unknown", "none", "n/a", "na", "null", "tba", "variousartists"})
+
+
+def _normalized_music_key(song: dict) -> tuple[str, str] | None:
+    """Group cross-encoded MP3/OGG copies of the same (title, artist) song without colliding bare titles."""
+    import re
+    import unicodedata
+    raw_title = song.get("title")
+    raw_artist = song.get("artist")
+    if not isinstance(raw_title, str) or not isinstance(raw_artist, str):
+        return None
+    norm_title = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", raw_title).casefold())
+    norm_artist = re.sub(r"[\W_]+", "", unicodedata.normalize("NFKC", raw_artist).casefold())
+    if len(norm_title) < 2 or len(norm_artist) < 2:
+        return None
+    if norm_title in _GENERIC_MUSIC_FIELDS or norm_artist in _GENERIC_MUSIC_FIELDS:
+        return None
+    return ("music_key", f"{norm_title}::{norm_artist}")
+def assert_unseen(training_manifest, holdout_manifest, *, cache_dir=None, audio_digest=None):
     """Reject overlap by audio content or song identity, including old manifests."""
     from maichart.training.dataset_catalog import _source_asset
-    digest_audio = file_hash
-    if cache_dir is not None:
+    digest_audio = audio_digest or file_hash
+    if audio_digest is None and cache_dir is not None:
         from maichart.form.cache_support import source_digests
         digest_audio = source_digests(str(Path(cache_dir).resolve())).digest
     def keys(path):
@@ -216,6 +238,9 @@ def assert_unseen(training_manifest, holdout_manifest, *, cache_dir=None):
                     result.add((field, str(song[field])))
             if song.get('maidata_path'):
                 result.add(('maidata', str(_source_asset(song['maidata_path'], path, data)).casefold()))
+            music_key = _normalized_music_key(song)
+            if music_key is not None:
+                result.add(music_key)
         return result
     overlap = keys(training_manifest) & keys(holdout_manifest)
     if overlap:

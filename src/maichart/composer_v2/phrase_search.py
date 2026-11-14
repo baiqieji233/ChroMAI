@@ -191,7 +191,8 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
 
     Layout trials use the baseline's complete timing/cardinality skeleton. Joint
     trials sample their own timing. A failure in the speculative suffix never
-    blacklists the common first event. Incomplete trials cannot win by stopping.
+    blacklists the common first event. Trials must reach the comparison boundary
+    to be ranked. A predicted chart end is resolved on the committed prefix.
     """
     from .stream_generate import GridDurationRejected
 
@@ -252,7 +253,6 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                         fixed = None
                     if use_skeleton and step >= len(skeleton):
                         complete = bool(trials[0]['complete'])
-                        ended = bool(trials[0]['ended'])
                         break
                     if branch == 0 and step == 0 and retry == 0:
                         point, ids = primary
@@ -268,10 +268,11 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                             work['proposal_sec'] += time.perf_counter() - call_began
                         probability=getattr(active,'last_probability_event',None)
                         if ids == [active.codec.eos_id]:
+                            # EOS predicts the end of the whole chart on a
+                            # speculative prefix. It does not cover this span.
                             termination_probability=probability
-                            complete = True
                             ended = True
-                            reason = None
+                            reason = 'speculative_eos_before_boundary'
                             break
                         point = active.codec.decode_points(ids)[0]
                     details = []

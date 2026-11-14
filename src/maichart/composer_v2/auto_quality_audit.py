@@ -10,14 +10,6 @@ Two-tier annotation priority:
      ``Overlap``, configurable ``TapOnSlide`` & optional ``SlideTooFast``/``SlideHeadTap``):
      traces back to offending Hold/Slide launch beats so locking culprit actions are
      masked alongside collisions without over-censoring clean downstream measures.
-   * **maimai DX Hardware & Transcription Pathologies** (``--domain-pathology-mode``):
-     catches unquantized MIDI micro-desyncs (``< 22 ms``), chaotic non-musical beat
-     denominators, capacitive Touch same-sensor cooldown drops (``< 85 ms`` on non-C
-     pads), and unprotected single-button jackhammers (respecting ``EX`` sweep notes).
-   * **Acoustic Alignment, Local Tempo Drift & Abandoned Gaps** (``--acoustic-audit-mode``):
-     reuses ``AudioFeatureStore`` memory-mapped flux/energy banks (or cached 100 Hz
-     spectral flux) to exclude severely misaligned charts (``>= 45 ms``), mask phrases
-     with local BPM/offset drift, and mask unauthored blank gaps during high-energy music.
    * **Level-Stratified Chirality Hand-Flow** (``--experimental-hand-flow-quantile``):
      calibrates ``comfort_v2`` quantiles per maimai DX level bucket (``12 / 13 / 14+``)
      so awkward low-level arm twists are caught without penalizing fast high-level streams.
@@ -25,8 +17,11 @@ Two-tier annotation priority:
 2. **Priority 2 — Strict Multi-Gate Worthy Phrase Highlighting (``label="good"``)**:
    * Subordinate to all problem/warning gates: only sustain-safe 8–16 beat phrases with
      zero hard/soft conflicts, high level-relative ``chirality_comfort``, healthy L/R
-     hand alternation, non-repetitive maimai DX mechanic synergy, and (by default)
-     verified acoustic onset lock receive conservative positive boost weights.
+     hand alternation, and varied maimai DX mechanics receive positive boost weights.
+     The acoustic mode also requires verified onset support.
+
+The report also locates short event gaps, unusual beat differences, rapid repeats,
+suspected global and local acoustic offsets, and possible incomplete spans for review.
 """
 from __future__ import annotations
 
@@ -35,6 +30,7 @@ from collections import Counter, OrderedDict, defaultdict
 from collections.abc import Callable
 from fractions import Fraction
 import hashlib
+from datetime import datetime, timezone
 import json
 import math
 import multiprocessing
@@ -71,7 +67,9 @@ from maichart.training.quality_annotations import (
     annotations_fingerprint,
     audio_sha256,
     auto_annotation_path,
+    auto_audit_report_path,
     iter_catalog,
+    resolve_auto_audit,
     save_auto_annotations,
     split_annotation_source,
 )
@@ -145,19 +143,19 @@ def parser() -> argparse.ArgumentParser:
         "--domain-pathology-mode",
         choices=DOMAIN_PATHOLOGY_MODES,
         default="maimai_dx_v1",
-        help="maimai DX transcription & arcade sensor pathology checks (default: maimai_dx_v1)",
+        help="Report possible transcription and rapid-repeat issues for review (default: maimai_dx_v1)",
     )
     p.add_argument(
         "--acoustic-audit-mode",
         choices=ACOUSTIC_AUDIT_MODES,
         default="auto",
-        help="Acoustic offset, local drift & high-energy blank gap checks (default: auto)",
+        help="Check severe global offset and report local offsets or possible incomplete spans (default: auto)",
     )
     p.add_argument(
         "--highlight-good-mode",
         choices=HIGHLIGHT_GOOD_MODES,
-        default="auto",
-        help="Secondary highlighting of clean, high-craftsmanship phrases (default: auto -> acoustic_and_flow_v1)",
+        default="off",
+        help="Opt in to phrase reweighting (off by default; legacy auto also resolves to off)",
     )
     p.add_argument(
         "--good-quantile",
@@ -195,7 +193,7 @@ def parser() -> argparse.ArgumentParser:
     )
     p.add_argument("--min-level", type=float, default=12.0)
     p.add_argument("--max-level", type=float, default=15.0)
-    p.add_argument("--min-difficulty-index", type=int, default=4)
+    p.add_argument("--min-difficulty-index", type=int, default=5)
     p.add_argument("--max-difficulty-index", type=int, default=6)
     p.add_argument("--limit-charts", type=int, default=0, help="Preview at most this many charts; 0 writes the full audit")
     p.add_argument("--workers", type=int, default=0, help="Parallel CPU worker processes (0 = auto, 1 = in-process)")
@@ -311,10 +309,10 @@ def _default_issue_timing_weight(issue: Any, points: list[Any], b_lo: float, b_h
     kind = str(issue.conflict_type)
     if kind == "miacode_Overlap":
         return 0.0
-    span_points = [p for p in points if b_lo <= float(p.beat) <= b_hi]
-    if span_points and all(
-        (p.beat - int(math.floor(p.beat))).denominator in {1, 2, 3, 4, 6, 8, 12, 16, 24}
-        for p in span_points
+    span_beats = [p.beat for p in points if b_lo <= float(p.beat) <= b_hi]
+    if span_beats and all(
+        (right - left).denominator in STANDARD_BEAT_DENOMINATORS
+        for left, right in zip(span_beats, span_beats[1:])
     ):
         return 0.5
     return 0.0
@@ -352,43 +350,62 @@ def _detect_maimai_domain_pathologies(
     clock: TempoClock,
     duration_sec: float,
     total_beats: float,
-    *,
-    explicit_timing_weight: float | None = None,
 ) -> tuple[list[dict[str, Any]], Counter[str]]:
-    """Detect maimai DX transcription & arcade hardware sensor pathologies in O(N).
-
-    Returns ``(typed_problem_spans, counts_by_reason)`` where each span dict has
-    ``start_sec``, ``end_sec``, ``reason``, ``timing_weight``, ``component_weight``.
-    """
-    counts: Counter[str] = Counter()
+    """Locate possible transcription and rapid-repeat issues for review."""
     if not points:
-        return [], counts
+        return [], Counter()
 
     beats_f = np.fromiter((float(p.beat) for p in points), dtype=np.float64, count=len(points))
     secs = clock.at_floats(beats_f)
+    raw_by_reason: dict[str, list[tuple[float, float]]] = defaultdict(list)
 
-    jitter_raw: list[tuple[float, float]] = []
-    # 1a) Micro-desync pseudo-chords (< 22 ms between distinct EventPoints).
+    def mark(reason: str, lo_beat: float, hi_beat: float) -> None:
+        start = max(0.0, float(clock.at(Fraction(str(round(lo_beat, 4))))))
+        end = min(duration_sec, float(clock.at(Fraction(str(round(hi_beat, 4))))))
+        if end > start + 0.02:
+            raw_by_reason[reason].append((start, end))
+
+    try:
+        parsed = parse_event_notes(points, tempo_changes, first)
+    except Exception:
+        parsed = None
+
+    def _is_unprotected_button_only(idx: int) -> bool:
+        if parsed is not None and not parsed.fatal_errors and idx < len(parsed.points):
+            p_notes = parsed.points[idx].notes
+            if any(n.note_type in ("touch", "touch_hold") for n in p_notes):
+                return False
+            btn_heads = [
+                n for n in p_notes
+                if n.note_type in ("tap", "hold", "slide")
+                and isinstance(n.position, int)
+                and not (n.note_type == "slide" and getattr(n, "slide_head_hidden", False))
+            ]
+            if not btn_heads:
+                return False
+            return any(not bool(n.modifiers.get("ex")) for n in btn_heads)
+        raw = points[idx].note_text
+        if any(ch in raw for ch in ("A", "B", "C", "D", "E", "x", "?", "!")):
+            return False
+        return True
+
+    # Close unprotected button-to-button events expose possible micro-desync pseudo-chords for review;
+    # cross-zone Button<->Touch sweeps, Touch fireworks cascades, and EX-protected sweeps are valid maimai DX techniques.
     for i in range(1, len(points)):
         dt = float(secs[i] - secs[i - 1])
-        if 1e-6 < dt < 0.022:
+        if 1e-6 < dt < 0.022 and _is_unprotected_button_only(i - 1) and _is_unprotected_button_only(i):
             b0 = max(0.0, beats_f[i - 1] - 0.5)
             b1 = min(total_beats, max(b0 + 0.5, beats_f[i] + 0.5))
-            s0 = max(0.0, float(clock.at(Fraction(str(round(b0, 4))))))
-            s1 = min(duration_sec, float(clock.at(Fraction(str(round(b1, 4))))))
-            if s1 > s0 + 0.02:
-                jitter_raw.append((s0, s1))
-                counts["auto_unquantized_timing"] += 1
+            mark("auto_unquantized_timing", b0, b1)
 
-    # 1b) Chaotic non-musical beat denominators (excluding uniform intentional tuplets).
-    denoms = [(p.beat - int(math.floor(p.beat))).denominator for p in points]
+    # Local steps retain their subdivision across a phrase phase shift.
     step_fracs = [points[i].beat - points[i - 1].beat for i in range(1, len(points))]
-    for i, d in enumerate(denoms):
-        if d in STANDARD_BEAT_DENOMINATORS:
-            continue
-        # Exempt genuine uniform tuplet runs (>= 2 equal rational steps around this point).
+    for i in range(len(points)):
         left_step = step_fracs[i - 1] if i >= 1 else None
         right_step = step_fracs[i] if i < len(step_fracs) else None
+        steps = [step for step in (left_step, right_step) if step is not None]
+        if not steps or any(step.denominator in STANDARD_BEAT_DENOMINATORS for step in steps):
+            continue
         prev_step = step_fracs[i - 2] if i >= 2 else None
         next_step = step_fracs[i + 1] if i + 1 < len(step_fracs) else None
         uniform_tuplet = (
@@ -400,20 +417,9 @@ def _detect_maimai_domain_pathologies(
             continue
         b0 = max(0.0, beats_f[i] - 0.5)
         b1 = min(total_beats, b0 + 1.0)
-        s0 = max(0.0, float(clock.at(Fraction(str(round(b0, 4))))))
-        s1 = min(duration_sec, float(clock.at(Fraction(str(round(b1, 4))))))
-        if s1 > s0 + 0.02:
-            jitter_raw.append((s0, s1))
-            counts["auto_unquantized_timing"] += 1
+        mark("auto_unquantized_timing", b0, b1)
 
-    # 2) Arcade capacitive Touch cooldown & unprotected single-button jackhammers.
-    jackhammer_zero_t: list[tuple[float, float]] = []
-    jackhammer_layout_only: list[tuple[float, float]] = []
-    try:
-        parsed = parse_event_notes(points, tempo_changes, first)
-    except Exception:
-        parsed = None
-
+    # A repeat interval gives a review cue. Feasibility depends on context.
     if parsed is not None and not parsed.fatal_errors:
         last_touch_by_pad: dict[str, list[tuple[float, float]]] = defaultdict(list)
         last_btn_unprotected: dict[int, list[tuple[float, float]]] = defaultdict(list)
@@ -429,23 +435,11 @@ def _detect_maimai_domain_pathologies(
                     if pad.startswith("C"):
                         if len(hist) >= 2 and (t_sec - hist[-1][0]) < 0.048 and (hist[-1][0] - hist[-2][0]) < 0.048:
                             b0, b1 = max(0.0, hist[-2][1] - 0.5), min(total_beats, b_val + 0.5)
-                            s0 = max(0.0, float(clock.at(Fraction(str(round(b0, 4))))))
-                            s1 = min(duration_sec, float(clock.at(Fraction(str(round(b1, 4))))))
-                            if s1 > s0 + 0.02:
-                                jackhammer_zero_t.append((s0, s1))
-                                counts["auto_sensor_jackhammer"] += 1
+                            mark("auto_sensor_jackhammer", b0, b1)
                     else:
                         if hist and 1e-6 < (t_sec - hist[-1][0]) < 0.085:
-                            dt_pad = t_sec - hist[-1][0]
                             b0, b1 = max(0.0, hist[-1][1] - 0.5), min(total_beats, b_val + 0.5)
-                            s0 = max(0.0, float(clock.at(Fraction(str(round(b0, 4))))))
-                            s1 = min(duration_sec, float(clock.at(Fraction(str(round(b1, 4))))))
-                            if s1 > s0 + 0.02:
-                                if dt_pad < 0.045:
-                                    jackhammer_zero_t.append((s0, s1))
-                                else:
-                                    jackhammer_layout_only.append((s0, s1))
-                                counts["auto_sensor_jackhammer"] += 1
+                            mark("auto_sensor_jackhammer", b0, b1)
                     hist.append((t_sec, b_val))
                 elif ntype in ("tap", "hold", "slide") and isinstance(note.position, int):
                     # Slide without a head star ('?' / '!') has no button press; EX ('x') allows hand sweep.
@@ -462,50 +456,18 @@ def _detect_maimai_domain_pathologies(
                         dt1 = t_sec - hist[-1][0]
                         if 1e-6 < dt1 < 0.036:
                             b0, b1 = max(0.0, hist[-1][1] - 0.5), min(total_beats, b_val + 0.5)
-                            s0 = max(0.0, float(clock.at(Fraction(str(round(b0, 4))))))
-                            s1 = min(duration_sec, float(clock.at(Fraction(str(round(b1, 4))))))
-                            if s1 > s0 + 0.02:
-                                jackhammer_zero_t.append((s0, s1))
-                                counts["auto_sensor_jackhammer"] += 1
+                            mark("auto_sensor_jackhammer", b0, b1)
                         elif len(hist) >= 2 and 1e-6 < dt1 < 0.052 and 1e-6 < (hist[-1][0] - hist[-2][0]) < 0.052:
                             b0, b1 = max(0.0, hist[-2][1] - 0.5), min(total_beats, b_val + 0.5)
-                            s0 = max(0.0, float(clock.at(Fraction(str(round(b0, 4))))))
-                            s1 = min(duration_sec, float(clock.at(Fraction(str(round(b1, 4))))))
-                            if s1 > s0 + 0.02:
-                                jackhammer_layout_only.append((s0, s1))
-                                counts["auto_sensor_jackhammer"] += 1
+                            mark("auto_sensor_jackhammer", b0, b1)
                     hist.append((t_sec, b_val))
 
-    spans: list[dict[str, Any]] = []
-    hard_zero = _merge_intervals([*jitter_raw, *jackhammer_zero_t])
-    for lo, hi in hard_zero:
-        is_jitter = any(not (hi <= j0 or lo >= j1) for j0, j1 in jitter_raw)
-        spans.append(
-            {
-                "start_sec": lo,
-                "end_sec": hi,
-                "reason": "auto_unquantized_timing" if is_jitter else "auto_sensor_jackhammer",
-                "timing_weight": 0.0 if explicit_timing_weight is None else float(explicit_timing_weight),
-                "component_weight": 0.0,
-            }
-        )
-
-    layout_jack = _subtract_intervals(
-        _merge_intervals(jackhammer_layout_only),
-        [(lo - 1e-4, hi + 1e-4) for lo, hi in hard_zero],
-    )
-    t_w_jack = 0.25 if explicit_timing_weight is None else float(explicit_timing_weight)
-    for lo, hi in layout_jack:
-        spans.append(
-            {
-                "start_sec": lo,
-                "end_sec": hi,
-                "reason": "auto_sensor_jackhammer",
-                "timing_weight": t_w_jack,
-                "component_weight": 0.0,
-            }
-        )
-    return spans, counts
+    spans = [
+        {"start_sec": lo, "end_sec": hi, "reason": reason}
+        for reason, intervals in raw_by_reason.items()
+        for lo, hi in _merge_intervals(intervals)
+    ]
+    return spans, Counter({reason: len(intervals) for reason, intervals in raw_by_reason.items()})
 
 
 def _try_load_audio_flux(
@@ -713,7 +675,7 @@ def _audit_chart_acoustics(
         and float(align.get("second_peak_ratio", 1.0)) < AMBIGUITY_RATIO
         and float(align.get("confidence_z", 0.0)) >= 6.0
     )
-    severely_misaligned = bool(
+    global_offset_suspect = bool(
         align_confident
         and abs(float(align.get("offset_ms", 0.0))) >= 45.0
     )
@@ -727,11 +689,11 @@ def _audit_chart_acoustics(
     for ph in phrases:
         p_onsets = np.unique(ph["onset_secs"])
         p_onsets = p_onsets[(p_onsets >= 0.0) & (p_onsets <= (len(envelope) - 1) * FRAME_SEC)]
-        p_info: dict[str, Any] = {"attack_support": None, "local_offset_ms": 0.0, "drifted": False}
+        p_info: dict[str, Any] = {"attack_support": None}
         if len(p_onsets) >= 4 and np.any(envelope > 0):
             sup_vals = np.interp(p_onsets + global_offset_sec, grid, envelope)
             p_info["attack_support"] = float(np.mean(sup_vals >= sup_thresh))
-        if len(p_onsets) >= 10 and np.any(envelope > 0):
+        if len(p_onsets) >= 12 and np.any(envelope > 0):
             curve = _score_curve(p_onsets, envelope, local_offsets)
             best = _peak_center(curve)
             peak = float(curve[best])
@@ -741,30 +703,27 @@ def _audit_chart_acoustics(
             ratio = sec_pk / peak if peak > 0 else 1.0
             contrast = peak / med if med > 1e-6 else (100.0 if peak > 1e-6 else 0.0)
             loc_ms = (float(local_offsets[best]) - FLUX_BIAS_SEC) * 1000.0
-            p_info["local_offset_ms"] = loc_ms
             if (
-                not severely_misaligned
-                and contrast >= 1.18
-                and ratio < AMBIGUITY_RATIO
+                not global_offset_suspect
+                and peak > 1e-3
+                and contrast >= 1.25
+                and ratio < 0.86
                 and abs(loc_ms) >= 42.0
                 and abs(loc_ms - global_offset_ms) >= 30.0
             ):
-                p_info["drifted"] = True
                 drift_spans.append(
                     {
                         "start_sec": ph["start_sec"],
                         "end_sec": ph["end_sec"],
                         "reason": "auto_local_tempo_drift",
-                        "timing_weight": 0.0,
-                        "component_weight": 0.25,
                     }
                 )
         phrase_acoustics.append(p_info)
 
-    # Detect unauthored blank dead-zones (>= 16 beats empty during sustained high-energy music).
+    # Locate sustained high-energy gaps that may warrant a review of chart completeness.
     gap_spans: list[dict[str, Any]] = []
     if (
-        not severely_misaligned
+        not global_offset_suspect
         and audio_duration_sec >= 30.0
         and len(points) >= 48
         and np.any(envelope > 0)
@@ -822,15 +781,13 @@ def _audit_chart_acoustics(
                             "start_sec": m_lo,
                             "end_sec": m_hi,
                             "reason": "auto_abandoned_gap",
-                            "timing_weight": 0.0,
-                            "component_weight": 0.0,
                         }
                     )
 
     return {
         "alignment": align,
         "align_confident": align_confident,
-        "severely_misaligned": severely_misaligned,
+        "global_offset_suspect": global_offset_suspect,
         "drift_spans": drift_spans,
         "gap_spans": gap_spans,
         "phrase_acoustics": phrase_acoustics,
@@ -1003,15 +960,12 @@ def _phrase_craftsmanship_candidates(
 
         ac_info = phrase_acoustics[idx] if phrase_acoustics and idx < len(phrase_acoustics) else None
         if require_acoustics:
-            if ac_info is None or ac_info.get("attack_support") is None or ac_info.get("drifted"):
+            if ac_info is None or ac_info.get("attack_support") is None:
                 continue
             sup = float(ac_info["attack_support"])
-            loc_off = abs(float(ac_info.get("local_offset_ms", 0.0)))
-            if sup < 0.32 or loc_off > 24.0:
+            if sup < 0.32:
                 continue
-            sup_term = min(1.0, max(0.0, (sup - 0.25) / 0.50))
-            lock_term = min(1.0, max(0.0, 1.0 - loc_off / 28.0))
-            acoustic_term = 0.65 * sup_term + 0.35 * lock_term
+            acoustic_term = min(1.0, max(0.0, (sup - 0.25) / 0.50))
             craft_score = 0.36 * flow_term + 0.20 * alt_term + 0.24 * variety_term + 0.20 * acoustic_term
         else:
             craft_score = 0.45 * flow_term + 0.25 * alt_term + 0.30 * variety_term
@@ -1165,6 +1119,7 @@ def _analyze_one_chart(
             masked_conflicts[issue.conflict_type] += 1
 
     pathology_counts: Counter[str] = Counter()
+    review_spans: list[dict[str, Any]] = []
     if domain_pathology_mode == "maimai_dx_v1":
         dom_spans, dom_counts = _detect_maimai_domain_pathologies(
             points,
@@ -1173,9 +1128,8 @@ def _analyze_one_chart(
             clock,
             duration_sec,
             total_beats,
-            explicit_timing_weight=explicit_timing_weight,
         )
-        problem_spans_typed.extend(dom_spans)
+        review_spans.extend(dom_spans)
         pathology_counts.update(dom_counts)
 
     need_motion = (
@@ -1190,7 +1144,7 @@ def _analyze_one_chart(
     )
 
     acoustic_verified = False
-    severely_misaligned = False
+    global_offset_suspect = False
     audio_stat = None
     if row.audio_path:
         try:
@@ -1222,21 +1176,30 @@ def _analyze_one_chart(
                 points, clock, motion_stream, phrases, flux, audio_dur, duration_sec
             )
             align = ac_res["alignment"]
-            severely_misaligned = bool(ac_res["severely_misaligned"])
+            global_offset_suspect = bool(ac_res["global_offset_suspect"])
             phrase_acoustics = ac_res["phrase_acoustics"]
             acoustic_verified = bool(
                 ac_res.get("align_confident")
                 and abs(float(align.get("offset_ms", 0.0))) <= 22.0
             )
+            if global_offset_suspect:
+                # A later, louder layer can produce a consistent peak even when
+                # the chart follows an earlier onset. Keep the estimate for review.
+                review_spans.append({
+                    "start_sec": 0.0,
+                    "end_sec": duration_sec,
+                    "reason": "auto_global_offset_review",
+                    "offset_ms": align["offset_ms"],
+                    "quarter_offsets_ms": [part["offset_ms"] for part in align["quarters"]],
+                })
+                pathology_counts["auto_global_offset_review"] += 1
             for sp in ac_res["drift_spans"]:
-                problem_spans_typed.append(sp)
+                review_spans.append(sp)
                 pathology_counts["auto_local_tempo_drift"] += 1
             for sp in ac_res["gap_spans"]:
-                problem_spans_typed.append(sp)
+                review_spans.append(sp)
                 pathology_counts["auto_abandoned_gap"] += 1
 
-    # Coalesce overlapping hard/domain/acoustic problem intervals conservatively:
-    # minimum weights win and 'auto_hard_muri' reason takes precedence when overlapping.
     hard_intervals = _coalesce_problem_spans(problem_spans_typed)
     hard_bounds = [(sp["start_sec"], sp["end_sec"]) for sp in hard_intervals]
 
@@ -1255,7 +1218,7 @@ def _analyze_one_chart(
     good_candidates: list[dict[str, Any]] = []
     if (
         effective_highlight_mode != "off"
-        and not severely_misaligned
+        and not global_offset_suspect
         and motion_stream is not None
         and (effective_highlight_mode == "chart_only_v1" or acoustic_verified)
     ):
@@ -1275,12 +1238,12 @@ def _analyze_one_chart(
         "row": row,
         "tier": _level_tier(lvl),
         "duration_sec": duration_sec,
-        "severely_misaligned": severely_misaligned,
         "acoustic_verified": acoustic_verified,
         "audio_stat": audio_stat,
         "detected_counts": detected_counts,
         "masked_conflicts": masked_conflicts,
         "pathology_counts": pathology_counts,
+        "review_spans": sorted(review_spans, key=lambda span: (span["start_sec"], span["end_sec"])),
         "hard_spans": hard_intervals,
         "hard_bounds": hard_bounds,
         "warning_veto_bounds": _merge_intervals([*warning_veto_intervals, *hard_bounds]),
@@ -1289,27 +1252,39 @@ def _analyze_one_chart(
     }
 
 
-def _coalesce_problem_spans(spans: list[dict[str, Any]], *, merge_gap: float = 0.05) -> list[dict[str, Any]]:
-    """Merge overlapping or adjacent problem spans, keeping the strictest weights."""
-    valid = [
-        sp for sp in spans if float(sp["end_sec"]) > float(sp["start_sec"]) + 1e-5
-    ]
-    if not valid:
-        return []
-    valid.sort(key=lambda sp: (float(sp["start_sec"]), float(sp["end_sec"])))
-    merged: list[dict[str, Any]] = [dict(valid[0])]
-    for sp in valid[1:]:
-        prev = merged[-1]
-        lo, hi = float(sp["start_sec"]), float(sp["end_sec"])
-        if lo <= float(prev["end_sec"]) + merge_gap:
-            prev["end_sec"] = max(float(prev["end_sec"]), hi)
-            prev["timing_weight"] = min(float(prev["timing_weight"]), float(sp["timing_weight"]))
-            prev["component_weight"] = min(float(prev["component_weight"]), float(sp["component_weight"]))
-            if prev["reason"] != sp["reason"] and sp["reason"] == "auto_hard_muri":
-                prev["reason"] = "auto_hard_muri"
+def _coalesce_problem_spans(spans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Apply the lowest active weights separately over each covered interval."""
+    changes: dict[float, Counter[tuple[float, float, str]]] = defaultdict(Counter)
+    for span in spans:
+        # Use the same precision as the published training annotations.
+        lo = round(float(span["start_sec"]), 6)
+        hi = round(float(span["end_sec"]), 6)
+        if hi <= lo:
+            continue
+        key = (float(span["timing_weight"]), float(span["component_weight"]), str(span["reason"]))
+        changes[lo][key] += 1
+        changes[hi][key] -= 1
+
+    bounds = sorted(changes)
+    active: Counter[tuple[float, float, str]] = Counter()
+    result: list[dict[str, Any]] = []
+    for lo, hi in zip(bounds, bounds[1:]):
+        for key, delta in changes[lo].items():
+            active[key] += delta
+            if active[key] == 0:
+                del active[key]
+        if not active:
+            continue
+        attributes = {
+            "timing_weight": min(key[0] for key in active),
+            "component_weight": min(key[1] for key in active),
+            "reason": min((key[2] for key in active), key=lambda reason: (reason != "auto_hard_muri", reason)),
+        }
+        if result and result[-1]["end_sec"] == lo and all(result[-1][k] == v for k, v in attributes.items()):
+            result[-1]["end_sec"] = hi
         else:
-            merged.append(dict(sp))
-    return merged
+            result.append(dict(start_sec=lo, end_sec=hi, **attributes))
+    return result
 
 
 _DEFAULT_COMFORT_WINDOWS_FN = _comfort_windows_for_chart
@@ -1327,7 +1302,7 @@ def audit_manifest(
     touch_cohold_radius: float = DEFAULT_COHOLD_RADIUS,
     domain_pathology_mode: str = "maimai_dx_v1",
     acoustic_audit_mode: str = "auto",
-    highlight_good_mode: str = "auto",
+    highlight_good_mode: str = "off",
     good_quantile: float = 0.82,
     problem_timing_weight: float | None = None,
     max_problem_fraction: float = 0.45,
@@ -1336,7 +1311,7 @@ def audit_manifest(
     anchor_dataset_id: str | None = None,
     min_level: float = 12.0,
     max_level: float = 15.0,
-    min_difficulty_index: int = 4,
+    min_difficulty_index: int = 5,
     max_difficulty_index: int = 6,
     limit_charts: int = 0,
     workers: int = 0,
@@ -1370,9 +1345,7 @@ def audit_manifest(
     if isinstance(workers, bool) or workers < 0:
         raise ValueError("workers must be a nonnegative integer")
 
-    effective_highlight_mode = (
-        "acoustic_and_flow_v1" if highlight_good_mode == "auto" else highlight_good_mode
-    )
+    effective_highlight_mode = "off" if highlight_good_mode == "auto" else highlight_good_mode
     touch_policy, touch_radius = validate_touch_reachability(
         touch_reachability_policy, touch_cohold_radius
     )
@@ -1384,14 +1357,15 @@ def audit_manifest(
     if manifest_file in {manual_file, auto_file, preview_file}:
         raise ValueError("自动质检输入清单不能使用质量标注的保留文件名")
     preview = limit_charts > 0
-    default_report = "auto_quality_audit_preview_report.json" if preview else "auto_quality_audit_report.json"
     report_path = (
         Path(report_output).resolve()
         if report_output
-        else manifest_file.with_name(default_report).resolve()
+        else auto_audit_report_path(manifest_file, preview=preview)
     )
+    previous_report_path = auto_audit_report_path(manifest_file, preview=preview, previous=True)
     protected = {manifest_file, manual_file.resolve(), auto_file.resolve(), preview_file.resolve(),
                  auto_annotation_path(manifest_file, composed=True).resolve()}
+    protected.update((previous_report_path, auto_audit_report_path(manifest_file, preview=not preview, previous=True)))
     manifest_bytes = manifest_file.read_bytes()
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     manifest_payload = json.loads(manifest_bytes.decode("utf-8-sig"))
@@ -1452,9 +1426,9 @@ def audit_manifest(
         if not min_level <= lvl <= max_level:
             continue
         eligible.append((row, lvl))
-        if limit_charts and len(eligible) >= limit_charts:
-            break
-
+    eligible_count = len(eligible)
+    if limit_charts:
+        eligible = eligible[:limit_charts]
     total = len(eligible)
     last_completed = 0
     last_progress = started
@@ -1598,6 +1572,7 @@ def audit_manifest(
         raw_results = [ordered_res[i] for i in range(len(eligible))]
 
     acoustic_verified_charts = 0
+    review_regions: list[dict[str, Any]] = []
     for res in raw_results:
         if res["status"] != "ok":
             unverified_charts.append(res["entry"])
@@ -1605,6 +1580,10 @@ def audit_manifest(
         row = res["row"]
         tier = res["tier"]
         conflict_counts_detected.update(res["detected_counts"])
+        pathology_counts_total.update(res["pathology_counts"])
+        if res.get("review_spans"):
+            review_regions.append(dict(chart_id=row.chart_id, source_path=row.source_path,
+                                       difficulty_index=row.difficulty_index, regions=res["review_spans"]))
         if res["acoustic_verified"]:
             acoustic_verified_charts += 1
 
@@ -1689,7 +1668,6 @@ def audit_manifest(
         row: CatalogChart = item["row"]
         tier = item["tier"]
         duration_sec = float(item["duration_sec"])
-        severely_misaligned = bool(item["severely_misaligned"])
         hard_spans: list[dict[str, Any]] = item["hard_spans"]
         hard_bounds: list[tuple[float, float]] = item["hard_bounds"]
 
@@ -1710,7 +1688,7 @@ def audit_manifest(
         masked_sec = sum(hi - lo for lo, hi in hard_bounds)
         effective_dur = max(duration_sec, max((hi for _, hi in hard_bounds), default=0.0), 1.0)
         problem_fraction = masked_sec / effective_dur
-        is_catastrophic = severely_misaligned or (problem_fraction > max_problem_fraction)
+        is_catastrophic = problem_fraction > max_problem_fraction
 
         # Priority 2: Secondary 'good' highlighting — strictly vetoed by ANY problem/warning/comfort span!
         good_intervals: list[tuple[float, float]] = []
@@ -1781,7 +1759,7 @@ def audit_manifest(
         regions.sort(key=lambda r: (r["start_sec"], r["end_sec"]))
 
         if not regions and not is_catastrophic:
-            clean_charts += 1
+            clean_charts += int(not item.get("review_spans"))
             total_chart_sec += duration_sec
             audited_chart_ids.append(row.chart_id)
             audited_chart_audio_stats[row.chart_id] = item.get("audio_stat")
@@ -1813,7 +1791,6 @@ def audit_manifest(
         audited_chart_audio_stats[row.chart_id] = item.get("audio_stat")
         total_chart_sec += duration_sec
         conflict_counts_masked.update(item["masked_conflicts"])
-        pathology_counts_total.update(item["pathology_counts"])
         total_masked_sec += masked_sec
         for sp in hard_spans:
             problem_regions_by_reason[str(sp["reason"])] += 1
@@ -1829,19 +1806,16 @@ def audit_manifest(
 
         if is_catastrophic:
             excluded_charts += 1
-            excl_reason = "auto_audio_misalignment" if severely_misaligned else "auto_excessive_muri"
-            excluded_by_reason[excl_reason] += 1
+            excluded_by_reason["auto_excessive_muri"] += 1
         elif hard_bounds:
             partially_masked_charts += 1
             partially_masked_regions += len(hard_spans)
-        elif not comfort_intervals:
+        elif not comfort_intervals and not item.get("review_spans"):
             # Clean chart that also contributed worthy 'good' phrases!
             clean_charts += 1
 
         rec_reason = (
-            "auto_audio_misalignment"
-            if severely_misaligned
-            else "auto_excessive_muri"
+            "auto_excessive_muri"
             if is_catastrophic
             else "auto_segment_muri_mask"
             if hard_bounds
@@ -1866,7 +1840,7 @@ def audit_manifest(
 
     audit_metadata = {
         "policy": "auto_v1",
-        "engine_version": "maimai_dx_two_tier_v2",
+        "engine_version": "maimai_dx_two_tier_v5",
         "manifest_sha256": manifest_sha256,
         "tap_on_slide_mode": tap_on_slide_mode,
         "tap_on_slide_ms": float(tap_on_slide_ms),
@@ -1903,12 +1877,23 @@ def audit_manifest(
         "auto_annotations_path": str(preview_file if preview else auto_file),
         "preview": preview,
         "manual_annotations_preserved": True,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "eligible_charts": eligible_count,
+        "out_of_scope_charts": len(catalog) - eligible_count,
+        "catalog_charts": len(catalog),
+        "requested_charts": total,
+        "scope": {"min_level": min_level, "max_level": max_level,
+                  "min_difficulty_index": min_difficulty_index, "max_difficulty_index": max_difficulty_index},
         "elapsed_sec": round(time.perf_counter() - started, 3),
         "settings": audit_metadata,
         "audited_charts": len(audited_chart_ids),
         "audited_chart_ids": sorted(set(audited_chart_ids)),
         "audited_chart_audio_stats": audited_chart_audio_stats,
+        "audited_chart_audio_paths": {row.chart_id: row.audio_path for row, _ in eligible
+                                      if row.chart_id in audited_chart_audio_stats},
         "acoustic_verified_charts": acoustic_verified_charts,
+        "review_chart_count": len(review_regions),
+        "review_regions": review_regions,
         "unverified_chart_count": len(unverified_charts),
         "unverified_charts": unverified_charts,
         "unverified_by_reason": dict(Counter(item["reason"] for item in unverified_charts)),
@@ -1946,6 +1931,11 @@ def audit_manifest(
                 owner = _auto_annotation_owner(auto_file, previous)
                 if owner is not None and owner != manifest_file:
                     raise ValueError(f"自动质检标注已绑定另一训练清单：{owner}")
+            # Keep the preceding report available while the training sidecar
+            # still points to its audit ID, including if the process dies.
+            _, _, published = resolve_auto_audit(manifest_file, manifest_payload, preview=preview)
+            if published is not None and Path(published["report_path"]) != previous_report_path:
+                _write_json(previous_report_path, published)
             _write_json(report_path, report)
             save_auto_annotations(manifest_file, records, audit_metadata=audit_metadata, preview=preview)
     except TrainingOutputBusyError as error:
@@ -1987,7 +1977,7 @@ def main(argv: list[str] | None = None) -> dict[str, Any]:
         progress_callback=print_progress,
     )
     summary = {key: value for key, value in report.items()
-               if key not in {"audited_chart_ids", "audited_chart_audio_stats", "unverified_charts"}}
+               if key not in {"audited_chart_ids", "audited_chart_audio_stats", "unverified_charts", "review_regions"}}
     print("composer_v2_auto_quality_audit " + json.dumps(summary, ensure_ascii=False), flush=True)
     return report
 

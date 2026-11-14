@@ -23,10 +23,15 @@ function candidateSavedReviews(records) {
   let playbackDuration=0;
   let collectionSerial=0,trainingBusy=false,collection={items:[],regions:0};
   let entryChoiceKey='';
+  let originPrompt=null,activePrompt=null;
   const chart=()=>entry?.charts[currentIndex];
   const audioKey=version=>version?.audio_sha256||version?.audio_path||version?.audio_url||'';
   const complete=version=>version && !version.partial_preview && version.complete!==false && (!version.content_kind || version.content_kind==='complete_chart');
-  const status=text=>{node('feedbackStatus').textContent=text;};
+  const status=text=>{
+    node('feedbackStatus').textContent=text;
+    const note=node('feedbackAutoChartNote');
+    if(note)note.textContent=text;
+  };
   const duration=()=>Math.max(0,playbackDuration,Number(timeline?.duration_sec||media?.duration_sec||chart()?.audio_duration_sec||chart()?.duration_sec||0));
   const validRange=()=>range && Number.isFinite(range.start_sec) && Number.isFinite(range.end_sec) && range.start_sec>=0 && range.end_sec>range.start_sec;
   function audition() {
@@ -111,15 +116,15 @@ function candidateSavedReviews(records) {
     for(const region of autoRegions) {
       const a=Number(region.start_sec),b=Number(region.end_sec);
       if(!Number.isFinite(a)||!Number.isFinite(b)||b<=viewStart||a>=viewEnd)continue;
-      const rx=x(Math.max(viewStart,a)),rw=Math.max(3,x(Math.min(viewEnd,b))-rx),good=region.label==='good';
+      const rx=x(Math.max(viewStart,a)),rw=Math.max(3,x(Math.min(viewEnd,b))-rx),good=region.label==='good',review=region.label==='uncertain';
       ctx.save();
-      ctx.fillStyle=good?'#2f9e661e':'#d95f491e';
+      ctx.fillStyle=good?'#2f9e661e':review?'#c591251e':'#d95f491e';
       ctx.fillRect(rx,top,rw,h-top);
-      ctx.strokeStyle=good?'#2f9e6699':'#d95f4999';
+      ctx.strokeStyle=good?'#2f9e6699':review?'#c5912599':'#d95f4999';
       ctx.setLineDash([4,3]);
       ctx.strokeRect(rx,top+1,rw,h-top-2);
       ctx.setLineDash([]);
-      if(rw>36) {ctx.fillStyle=good?'#1f6f46':'#a33928';ctx.fillText((good?'好段 ':'自动 ')+(region.reason_label||region.reason||''),rx+4,top+12);}
+      if(rw>36) {ctx.fillStyle=good?'#1f6f46':review?'#856414':'#a33928';ctx.fillText((good?'好段 ':review?'待复核 ':'自动 ')+(region.reason_label||region.reason||''),rx+4,top+12);}
       ctx.restore();
     }
     if(validRange()) {ctx.fillStyle='#6491e22b';ctx.fillRect(x(range.start_sec),top,x(range.end_sec)-x(range.start_sec),h-top);}
@@ -189,7 +194,9 @@ function candidateSavedReviews(records) {
     resetNavigation();
     resetEntryChoice();
     playhead=0;playing=false;playbackDuration=0;
-    if(entry?.task_id!==value.task_id) {range=null;clearLoop();}
+    if(entry?.task_id!==value.task_id || entry?.training_context?.manifest!==value.training_context?.manifest) {
+      range=null;originPrompt=null;activePrompt=null;clearLoop();
+    }
     collection={items:[],regions:0};++collectionSerial;node('feedbackTrainingList').replaceChildren();
     const previous=chart()?.path,previousAudio=audioKey(chart());entry=value;
     currentIndex=Math.max(0,value.charts.findIndex(version=>version.path===previous));anchorIndex=currentIndex;
@@ -223,11 +230,19 @@ function candidateSavedReviews(records) {
   });
   window.addEventListener('training-source-annotated',event=>{
     const detail=event.detail;if(entry?.source_kind!=='training_source'||entry.training_context?.manifest!==detail.manifest||entry.training_context?.chart_id!==detail.chart_id)return;
-    if(!Array.isArray(detail.result?.records))return;
-    const record=detail.result.records.find(row=>row.chart_id===detail.chart_id);
-    entry.annotations=record?.regions||[];
-    entry.saved_reviews=entry.training_context?.candidate_pool?[...entry.annotations,...(record?.candidate_reviews||[]).filter(row=>row.label==='uncertain')]:entry.annotations;
-    renderSaved(entry.saved_reviews);
+    if(Array.isArray(detail.result?.records)) {
+      const record=detail.result.records.find(row=>row.chart_id===detail.chart_id);
+      entry.annotations=record?.regions||[];
+      entry.saved_reviews=entry.training_context?.candidate_pool?[...entry.annotations,...(record?.candidate_reviews||[]).filter(row=>row.label==='uncertain')]:entry.annotations;
+      renderSaved(entry.saved_reviews);
+    }
+    if(detail.result?.auto_annotation) entry.training_context.auto_annotation=detail.result.auto_annotation;
+    if(detail.result?.auto_annotation || detail.result?.prompt_review) renderAuto(entry.training_context.auto_annotation);
+  });
+  window.addEventListener('material-origin-prompt',event=>{
+    if(entry?.source_kind!=='training_source')return;
+    originPrompt=event.detail;activePrompt=event.detail;
+    renderAuto(entry?.training_context?.auto_annotation);
   });
   window.addEventListener('chart-preview-versionchanged',event=>{
     const index=Number(event.detail?.index);if(!entry?.charts[index])return;
@@ -330,8 +345,17 @@ function candidateSavedReviews(records) {
   const trainingNames={timing:'只学采音',layout:'只学配置',both:'采音和配置'};
   function feedbackButtons() {
     const source=entry?.source_kind==='training_source';
+    const context=entry?.training_context;
+    const exclude=node('feedbackExcludeSpan');
+    if(exclude) {
+      exclude.hidden=!source || !!(context?.zero_unmarked || context?.candidate_pool || context?.audit_read_only);
+      exclude.disabled=exclude.hidden || busy || !validRange();
+    }
     for(const button of document.querySelectorAll('[data-generation-feedback]'))button.disabled=busy || !!entry?.training_context?.audit_read_only || (source && !validRange());
     for(const button of document.querySelectorAll('[data-feedback-choice]'))button.disabled=busy;
+    for(const button of document.querySelectorAll('[data-material-prompt-action]')) {
+      button.disabled=busy || (button.dataset.materialPromptAction==='annotate' && !validRange());
+    }
   }
   async function locateReview(item) {
     const task=entry.task_id;
@@ -343,13 +367,25 @@ function candidateSavedReviews(records) {
       setRange({start_sec:item.start_sec,end_sec:item.end_sec});await globalThis.ChartPreview?.seek(item.start_sec);
     } else setRange(null);
   }
+  function savedSpanEffect(item) {
+    if(entry?.source_kind!=='training_source' || !Number.isFinite(item.start_sec) || !Number.isFinite(item.end_sec)
+      || typeof qualityRegionDefaults!=='function')return '';
+    const context=entry.training_context;
+    const zero=!!(context?.zero_unmarked || context?.candidate_pool);
+    const [t,c]=qualityRegionDefaults(item.label,item.reason);
+    const base=Number(item.weight ?? 1);
+    const blocked=zero && (item.label!=='good' || item.training_use==='none');
+    const timing=blocked?0:base*Number(item.timing_weight ?? t);
+    const components=blocked?0:base*Number(item.component_weight ?? c);
+    return ` · 采音 ${timing}× / 配置 ${components}×${timing===0&&components===0?' · 此段不作学习目标':''}`;
+  }
   function renderSaved(records) {
     if(entry?.training_context?.candidate_pool)records=candidateSavedReviews(records);
     const list=node('feedbackSavedList');list.replaceChildren();
     const names={good:'好',problem:'有问题',uncertain:'不确定'},reasons={timing:'采音',layout:'配置',comfort:'手感'};
     for(const item of records) {
       const li=document.createElement('li'),button=document.createElement('button');button.type='button';button.className='small-button';
-      button.textContent=`${names[item.label]||item.label} · ${Number.isFinite(item.start_sec)?item.start_sec.toFixed(2)+'–'+item.end_sec.toFixed(2)+'秒':'整张谱面'}${item.reason?' · '+(reasons[item.reason]||item.reason):''}`;
+      button.textContent=`${names[item.label]||item.label} · ${Number.isFinite(item.start_sec)?item.start_sec.toFixed(2)+'–'+item.end_sec.toFixed(2)+'秒':'整张谱面'}${item.reason?' · '+(reasons[item.reason]||item.reason):''}${savedSpanEffect(item)}`;
       button.addEventListener('click',()=>void locateReview(item).catch(error=>status(error.message)));
       li.append(button);list.append(li);
     }
@@ -362,29 +398,112 @@ function candidateSavedReviews(records) {
     list.replaceChildren();
     const regions=Array.isArray(autoAnnotation?.regions)?autoAnnotation.regions:[];
     const excluded=Boolean(autoAnnotation?.excluded || autoAnnotation?.auto_status==='excluded' || autoAnnotation?.chart_label==='excluded');
-    if(entry?.source_kind!=='training_source' || (!excluded && !regions.length)) {
+    if(entry?.source_kind!=='training_source' || (!excluded && !regions.length && !originPrompt && !autoAnnotation?.review_unavailable)) {
       panel.hidden=true;
       return;
     }
     panel.hidden=false;
+    if(autoAnnotation?.review_unavailable) {
+      const unavailable=document.createElement('li');
+      unavailable.textContent='此谱的复核提示需重新体检后核对。';
+      list.append(unavailable);
+    }
     if(excluded) {
       const li=document.createElement('li'),tag=document.createElement('span');
       tag.className='auto-audit-badge excluded';
-      tag.textContent=`整谱自动排除：${autoAnnotation.chart_reason_label||autoAnnotation.reason_label||autoAnnotation.chart_reason||autoAnnotation.reason||'问题过多'}`;
+      tag.textContent=autoAnnotation.auto_badge||`整谱自动排除：${autoAnnotation.chart_reason_label||autoAnnotation.reason_label||autoAnnotation.chart_reason||autoAnnotation.reason||'问题过多'}`;
       li.append(tag);list.append(li);
     }
-    for(const item of regions) {
+    const context=entry.training_context||{};
+    const canReview=context.audit_read_only || !!autoAnnotation?.report_version || !!originPrompt;
+    const provenance={manual_chart:'有人工整谱决定',bulk_chart:'有批量整谱赋权',legacy:'已有整谱权重（来源未记录）'}[autoAnnotation?.manual_provenance];
+    if(context.audit_read_only && context.origin_jump && typeof jumpToMaterialOrigin==='function') {
       const li=document.createElement('li'),button=document.createElement('button');
-      button.type='button';
-      button.className=`small-button auto-region-jump ${item.label==='good'?'is-good':'is-problem'}`;
-      const spanText=Number.isFinite(item.start_sec)&&Number.isFinite(item.end_sec)?`${Number(item.start_sec).toFixed(2)}–${Number(item.end_sec).toFixed(2)}秒`:'片段';
-      const prefix=item.label==='good'?'★ 优选好段':'⚠ 自动处理';
-      button.textContent=`${prefix} · ${spanText} · ${item.reason_label||item.reason||''}${item.effect_label?`（${item.effect_label}）`:''}`;
-      button.addEventListener('click',()=>void locateReview(item).catch(error=>status(error.message)));
+      button.type='button';button.className='small-button';button.textContent=`打开原库「${context.origin_jump.name}」`;
+      button.addEventListener('click',()=>void jumpToMaterialOrigin(context.origin_jump,range,null,null,context).catch(error=>status(error.message)));
       li.append(button);list.append(li);
     }
-    const modeHint=autoAnnotation?.auto_scope==='preview'?'抽查预览':autoAnnotation?.auto_override_scope==='chart'?'有人工整谱决定':autoAnnotation?.auto_override_scope==='region'?'有人工片段标注':'正式体检';
-    summary.textContent=`自动体检发现的片段（${regions.length + (excluded ? 1 : 0)} · ${modeHint}）`;
+    const visible=originPrompt?[originPrompt.prompt,...regions.filter(item=>item.prompt_id!==originPrompt.prompt.prompt_id)]:regions;
+    for(const item of visible) {
+      const li=document.createElement('li'),button=document.createElement('button');
+      const imported=item===originPrompt?.prompt;
+      const target=imported?originPrompt.target:item.prompt_id && autoAnnotation?.report_version?{
+        manifest:context.manifest,chart_id:context.chart_id,auto_scope:autoAnnotation.auto_scope,
+        report_version:autoAnnotation.report_version,prompt_id:item.prompt_id,
+      }:null;
+      button.type='button';
+      button.className=`small-button auto-region-jump ${item.label==='good'?'is-good':item.label==='uncertain'?'is-uncertain':'is-problem'}`;
+      const spanText=Number.isFinite(item.start_sec)&&Number.isFinite(item.end_sec)?`${Number(item.start_sec).toFixed(2)}–${Number(item.end_sec).toFixed(2)}秒`:'片段';
+      const decided={kept:'已复核 · 保留当前标注',annotated:'已复核 · 已保存片段标注',deferred:'稍后处理',needs_recheck:'需重新核对'};
+      const prefix=decided[item.review_status]||(item.label==='good'?'★ 优选好段':item.label==='uncertain'?'⚠ 待复核':'⚠ 自动处理');
+      button.textContent=`${imported?'组合提示 · ':''}${prefix} · ${spanText} · ${item.reason_label||item.reason||''}${item.effect_label?`（${item.effect_label}）`:''}${item.overlaps_annotation&&!item.reviewed?' · 有重叠的片段标注':''}`;
+      if(item.reviewed)button.className='small-button auto-region-jump is-good';
+      button.addEventListener('click',()=>void selectPrompt(item,target).catch(error=>status(error.message)));
+      li.append(button);
+      if(target&&canReview) {
+        const actions=document.createElement('div');
+        actions.className='material-prompt-actions';
+        const choices=context.audit_read_only?(context.origin_jump?[['origin','去原库复核']]:[])
+          :item.reviewed?[['reopen','改为待复核']]:[['keep','确认保留'],['defer','稍后处理'],['select','选择此条并标注']];
+        for(const [action,label] of choices) {
+          const control=document.createElement('button');
+          control.type='button';control.className='small-button';control.dataset.materialPromptAction=action;control.textContent=label;
+          control.addEventListener('click',()=>{
+            if(action==='origin')void jumpToMaterialOrigin(context.origin_jump,item,target.report_version,target.auto_scope,context).catch(error=>status(error.message));
+            else if(action==='select')void selectPrompt(item,target).catch(error=>status(error.message));
+            else void savePrompt(action,item,target);
+          });
+          actions.append(control);
+        }
+        li.append(actions);
+      }
+      list.append(li);
+    }
+    const modeHint=autoAnnotation?.auto_scope==='preview'?'抽查预览':provenance|| (autoAnnotation?.auto_override_scope==='region'?'有人工片段标注':'正式体检');
+    const progress=autoAnnotation?.auto_review_total ? ` · 已复核 ${autoAnnotation.auto_review_resolved_count}/${autoAnnotation.auto_review_total} 条` : '';
+    summary.textContent=`自动体检发现的片段（${visible.length + (excluded ? 1 : 0)} · ${modeHint}${progress}）`;
+    updatePromptSelection();
+    feedbackButtons();
+  }
+  async function selectPrompt(item,target) {
+    activePrompt=target?{prompt:item,target}:null;
+    await locateReview(item);
+    if(activePrompt)status('已选择此条提示。试听后可确认保留，或保存评价并完成此条。');
+    updatePromptSelection();
+  }
+  function updatePromptSelection() {
+    const control=node('feedbackCompletePrompt');
+    if(!control)return;
+    const hidden=!activePrompt || activePrompt.prompt.reviewed || entry?.training_context?.audit_read_only;
+    const label=node('feedbackCompletePromptLabel');
+    if(label)label.hidden=hidden;
+    if(hidden || control.dataset.promptId!==activePrompt?.prompt.prompt_id)control.checked=false;
+    control.dataset.promptId=hidden?'':activePrompt.prompt.prompt_id;
+  }
+  async function savePrompt(action,item,target) {
+    if(busy)return;
+    const context=entry.training_context,task=entry.task_id,version=chart();
+    busy=true;feedbackButtons();
+    try {
+      const result=await trainingRequest('source-feedback',{manifest:context.manifest,chart_id:context.chart_id,
+        file_sha256:version.file_sha256,chart_sha256:version.chart_sha256,audio_sha256:version.audio_sha256,
+        prompt_action:action,review_target:target});
+      showPromptResult(result,context,task);
+    } catch(error) {if(entry?.task_id===task)status(error.message);}
+    finally {busy=false;feedbackButtons();}
+  }
+  function showPromptResult(result,context,task,savedText) {
+    if(entry?.task_id===task && entry.training_context?.manifest===context.manifest) {
+      if(result.auto_annotation)entry.training_context.auto_annotation=result.auto_annotation;
+      const updated=result.prompt_review;
+      if(updated&&originPrompt?.prompt.prompt_id===updated.prompt_id)originPrompt={...originPrompt,prompt:updated};
+      if(updated&&activePrompt?.prompt.prompt_id===updated.prompt_id)activePrompt={...activePrompt,prompt:updated};
+      renderAuto(entry.training_context.auto_annotation);
+      status(updated?.review_status==='kept'?'已复核 · 保留当前训练标注。':
+        updated?.review_status==='annotated'?(savedText||'已保存评价。')+' 此条复核已完成。':
+        updated?.review_status==='deferred'?'已标记稍后处理。':'已改为待复核。');
+    }
+    window.dispatchEvent(new CustomEvent('material-prompt-reviewed',{detail:{manifest:result.review_manifest,result}}));
   }
   function trainingButtons() {
     node('feedbackCollectTraining').disabled=trainingBusy || !validRange() || !selectedNotes().length || !node('feedbackTrainingUse').value;
@@ -482,19 +601,31 @@ function candidateSavedReviews(records) {
         payload={path:version.path,difficulty_index:version.difficulty_index??5,audio_path:version.audio_path,audio_sha256:version.audio_sha256,chart_sha256:version.chart_sha256,file_sha256:version.file_sha256,version_id:version.version_id,label:button.dataset.generationFeedback,reason:node('feedbackReason').value,...bounds};url='/api/quality/generation-feedback';
         if(sourceContext) {
           if(!validRange())throw new Error('请先在谱面时间轴圈选片段；整谱质量请在素材管理中设置。');
-          Object.assign(payload,sourceContext);url='/api/quality/source-feedback';
+          if(button.id==='feedbackExcludeSpan')Object.assign(payload,{label:'problem',reason:''});
+          Object.assign(payload,{manifest:sourceContext.manifest,chart_id:sourceContext.chart_id,
+            auto_scope:sourceContext.auto_annotation?.auto_scope||'formal'});url='/api/quality/source-feedback';
+          if(activePrompt && node('feedbackCompletePrompt')?.checked) {
+            payload.prompt_action='annotate';payload.review_target=activePrompt.target;
+          }
         }
       }
       busy=true;feedbackButtons();
       const response=await fetch(url,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),result=await response.json();
       if(!response.ok)throw new Error(result.error||'保存失败');
-      if(chart()?.path===identity && entry.task_id===task)status(sourceContext?'已保存质量标注。导出时，在训练素材勾选该来源，点“导出已确认片段”。':'已记录评价。要学习或导出这段，请展开“收集训练示范”。');
       if(sourceContext) {
         const record=result.records?.find(row=>row.chart_id===sourceContext.chart_id);
-        if(chart()?.path===identity && entry.task_id===task) {entry.annotations=record?.regions||[];renderSaved(entry.annotations);}
+        const saved=record?.regions?.find(item=>item.start_sec===bounds.start_sec && item.end_sec===bounds.end_sec);
+        if(chart()?.path===identity && entry.task_id===task && entry.training_context?.manifest===sourceContext.manifest) {
+          entry.annotations=record?.regions||[];renderSaved(entry.annotations);
+          status(saved?`已保存片段标注${savedSpanEffect(saved)}。`:'已保存质量标注。');
+        }
         window.dispatchEvent(new CustomEvent('training-source-annotated',{detail:{...sourceContext,result}}));
+        if(result.prompt_review)showPromptResult(result,sourceContext,task,
+          saved?`已保存片段标注${savedSpanEffect(saved)}。`:'已保存片段标注。');
+      } else {
+        if(chart()?.path===identity && entry.task_id===task)status('已记录评价。要学习或导出这段，请展开“收集训练示范”。');
+        if(!pair)void loadCollection();
       }
-      else if(!pair)void loadCollection();
     } catch(error) {if(chart()?.path===identity)status(error.message);}finally {busy=false;feedbackButtons();}
   }
   for(const button of document.querySelectorAll('[data-feedback-choice]'))button.addEventListener('click',()=>void save(button,true));
@@ -574,25 +705,52 @@ function candidateSavedReviews(records) {
 // Candidate regions navigate a complete source chart; the shared timeline owns selection.
 (() => {
   const $=id=>document.getElementById(id);
-  let enabled=false,chartActions=false,active=null,current=null,queue=[],seen=new Set(),undo=null,busy=false,scanning=false,serial=0,lastStatus=null;
+  let enabled=false,chartActions=false,autoScreenCapable=false,previewedAutoScreen=false,active=null,current=null,queue=[],seen=new Map(),undo=null,busy=false,scanning=false,serial=0,lastStatus=null;
   let budgetPending=false,budgetTaskId=null;
   let scanTimer=null;
   const isPool=item=>!!(item?.candidate_pool || item?.candidate_pool_summary);
   const identity=()=>active?.manifest;
   const message=text=>{$('candidatePoolReviewStatus').textContent=text;};
+  function renderAutoScreenSummary(screen,{preview=false}={}) {
+    const box=$('candidateAutoScreenResult');if(!box)return;
+    if(!screen||!screen.counts){box.hidden=true;box.replaceChildren();return;}
+    const counts=screen.counts||{},slots=screen.approved_by_slot||{};
+    const totalIn=screen.total_entering_training??((counts.approved_clean||0)+(counts.approved_masked||0)+(screen.manual_entering_training||0));
+    const slotNames={'4':'EXPERT','5':'MASTER','6':'Re:MASTER'};
+    const slotParts=['5','6','4'].filter(k=>Number(slots[k]||0)>0).map(k=>`${slotNames[k]||`槽位${k}`} ${slots[k]}`).join(' · ');
+    const tag=preview?'【预览（未改标注）】':'【已应用入训标注】';
+    const line1=document.createElement('p');
+    line1.textContent=`${tag} 实际纳入训练 ${totalIn} 张${slotParts?`（${slotParts}）`:''}：整谱 1× 入训 ${counts.approved_clean??0} 张 · 局部屏蔽硬无理后 1× 入训 ${counts.approved_masked??0} 张（共屏蔽 ${counts.masked_regions??0} 段 0×）${counts.preserved_manual?` · 保留人工决定 ${counts.preserved_manual} 张（入训 ${screen.manual_entering_training??0} 张）`:''}`;
+    const line2=document.createElement('p');line2.className='muted';
+    line2.textContent=`保持 0× 待人工核对 ${counts.deferred_review??0} 张 ｜ 排除（0×）：非目标难度槽 ${counts.excluded_slot??0} 张 · 定数范围外 ${counts.excluded_level??0} 张 · 扫描/语法异常 ${counts.excluded_error??0} 张 · 整谱无理过多 ${counts.excluded_muri??0} 张`;
+    box.replaceChildren(line1,line2);
+    box.hidden=false;
+  }
   const describe=value=>Array.isArray(value)?value.map(describe).join('；'):typeof value==='string'?
     ({existing_exact_chart:'与已有资料为同一张谱面',duplicate_source_chart:'与已有资料指向同一谱面槽位'}[value]||value):
     value?.message||value?.label||'需要结合音频核对';
   const token=item=>`${item.chart_id}:${item.start_sec}:${item.end_sec}`;
+  function scanLabel(data) {
+    const counts=data?.counts||{},progress=data?.scan_task?.progress||{};
+    const state=data?.scan_state;
+    if(['queued','running'].includes(state))return `自动初筛${state==='queued'?'排队中':'进行中'}${progress.total>0?` · ${progress.completed||0}/${progress.total} 张`:''}`;
+    if(state==='failed')return '最近一次自动初筛失败';
+    if(state==='cancelled'||state==='interrupted')return '最近一次自动初筛中断';
+    if(!data?.scan_complete)return '尚无完成的自动初筛';
+    const checked=(counts.ok||0)+(counts.suspicious||0)+(counts.error||0);
+    const label=data.stale?'上次自动初筛已完成 · 有来源变化，需同步':'自动初筛已完成';
+    const date=data.updated_at ? new Date(data.updated_at).toLocaleDateString('zh-CN') : '';
+    return `${label}${date?`（${date}）`:''} · ${progress.completed??checked}/${progress.total??counts.charts??checked} 张 · 低风险 ${counts.ok??0} · 待核对 ${counts.suspicious??0} · 错误 ${counts.error??0}${counts.duplicate?` · 扫描前排除 ${counts.duplicate}`:''}`;
+  }
   function controls() {
     const source=globalThis.ChartPreview?.getEntry();
     const matches=current && source?.training_context?.manifest===identity() && source?.training_context?.chart_id===current.chart_id;
     $('candidatePoolReview').hidden=!matches;
     const ordinary=$('feedbackStatus')?.closest('.review-tool-group');if(ordinary)ordinary.hidden=!!matches||!!source?.training_context?.audit_read_only;
-    const error=current?.candidate_status==='error'||current?.status==='error';
+    const error=['error','stale','pending'].includes(current?.candidate_status)||current?.status==='error';
     for(const button of document.querySelectorAll('[data-pool-learn]'))button.disabled=busy||scanning||!matches||error;
     $('candidatePoolWhole').disabled=busy||scanning||!matches||error;
-    $('candidatePoolReject').disabled=busy||scanning||!matches;
+    $('candidatePoolReject').disabled=busy||scanning||!matches||current?.candidate_status==='stale';
     $('candidatePoolWhole').disabled||=!chartActions;
     $('candidatePoolReject').disabled||=!chartActions;
     $('candidatePoolChartStatus').textContent=!matches?'':current.learning_excluded?'整张谱已设为不学习。重新确认片段或整谱后可恢复。':current.chart_review==='learn_all'?'整张谱已确认学习，不再推荐本谱片段。':'当前按片段学习，未确认部分不参与学习。';
@@ -609,10 +767,13 @@ function candidateSavedReviews(records) {
     $('candidatePoolUsePreview').disabled=$('candidatePoolUse').disabled;
     $('candidatePoolUsePreview').textContent=$('candidatePoolUse').textContent;
     $('candidatePoolPreviewTrainingStatus').textContent=$('candidatePoolTrainingStatus').textContent;
+    const canAutoScreen=!busy&&!scanning&&enabled&&autoScreenCapable&&!!active&&!!lastStatus?.scan_complete;
+    if($('candidateAutoScreenPreview'))$('candidateAutoScreenPreview').disabled=!canAutoScreen;
+    if($('candidateAutoScreenApply'))$('candidateAutoScreenApply').disabled=!canAutoScreen;
     const bulk=$('qualityBulkControls');if(bulk)bulk.hidden=!!active||(typeof activeDatasetItem==='function' && !!activeDatasetItem()?.auditReadOnly);
   }
   function summary(data) {
-    const counts=data.counts||data;
+    const counts={...(data.counts||data)};
     const scan=data.scan_state||data.scan?.state||'';
     scanning=['queued','running'].includes(scan)||data.scan_complete===false;
     const progress=data.scan_task?.progress||{},stage=progress.stage;
@@ -635,15 +796,19 @@ function candidateSavedReviews(records) {
     lastStatus=data;
     if(active)active.candidate_pool_summary=data;
     const decisions=data.decisions||{};
-    $('candidatePoolSummary').textContent=scanMessage+`扫描：未检查 ${counts.pending??0}／错误 ${counts.error??0}／待核对 ${counts.suspicious??0}／低风险 ${counts.ok??0}。`;
+    const scanCounts=stage==='scanning'&&scanning ? `低风险 ${counts.ok??0} · 待核对 ${counts.suspicious??0} · 错误 ${counts.error??0}` : '';
+    $('candidatePoolSummary').textContent=scanMessage ? scanMessage+scanCounts : scanLabel(data);
     $('candidatePoolDecisions').textContent=`你的决定：整谱学习 ${decisions.learn_all??0} 张 · 部分学习 ${decisions.partial??0} 张 · 整谱不学习 ${decisions.exclude??0} 张 · 已确认 ${data.confirmed_regions??data.reviewed_regions??0} 段。`;
+    if(!previewedAutoScreen&&data.auto_screen)renderAutoScreenSummary(data.auto_screen,{preview:false});
     controls();
   }
   async function refresh() {
     const manifest=identity(),request=serial;if(!manifest||!enabled)return;
-    const data=await api('/api/candidates/status',{manifest});
+    const data=await api('/api/candidates/status',{manifest,summary_only:true});
     if(request===serial&&manifest===identity()) {
+      const completed=Boolean(lastStatus && ['queued','running'].includes(lastStatus.scan_state) && data.scan_state==='completed');
       summary(data);
+      if(completed)void loadQualityCatalog(false);
       if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);
       scanTimer=null;
       if(['queued','running'].includes(data.scan_state)&&typeof setTimeout==='function')scanTimer=setTimeout(()=>{
@@ -660,14 +825,21 @@ function candidateSavedReviews(records) {
     const manifest=identity(),request=serial;if(!manifest)return;
     const skipId=skipChart?current?.chart_id:null;
     if(skipId)queue=[];
-    if(!queue.length) {
-      // Requery from the beginning: confirmation can shrink the server queue.
+    if(!queue.length && typeof materialsWorkflowSupported==='function' && materialsWorkflowSupported()) {
+      message('正在查找下一段…');
+      const data=await api('/api/candidates/queue',{manifest,limit:25,
+        candidate_status:$('candidatePoolStatusFilter')?.value||'',
+        exclude_chart_id:skipId||null,prefer_chart_id:skipId?null:current?.chart_id,
+        seen_segments:[...seen.values()]});
+      if(request!==serial)return;
+      queue=data.items||[];
+    } else if(!queue.length) {
       let offset=0,total=Infinity;
       while(!queue.length&&offset<total) {
         const data=await api('/api/candidates/queue',{manifest,offset,limit:100,candidate_status:$('candidatePoolStatusFilter')?.value||''});
         if(request!==serial)return;
         const items=data.items||[];total=Number(data.total??items.length);
-        queue=items.filter(item=>!seen.has(token(item))&&item.chart_id!==skipId);offset+=items.length;
+        queue=items.filter(item=>!seen.has(token(item))&&item.chart_id!==skipId);offset=data.next_offset??offset+items.length;
         if(!items.length)break;
       }
     }
@@ -680,7 +852,7 @@ function candidateSavedReviews(records) {
       globalThis.ChartPreview?.openSource(preview,{scroll:true});
     }
     if(request!==serial)return;
-    current=item;seen.add(token(item));
+    current=item;seen.set(token(item),[item.chart_id,item.start_sec,item.end_sec]);
     $('feedbackContext').checked=true;
     globalThis.FeedbackRange?.set({start_sec:Number(item.start_sec),end_sec:Number(item.end_sec)});
     $('candidatePoolWhy').textContent=`${Number(item.start_sec).toFixed(2)}–${Number(item.end_sec).toFixed(2)} 秒 · ${describe(item.why||'代表性片段')}。可在时间轴微调，预览始终保留整谱。`;
@@ -710,11 +882,14 @@ function candidateSavedReviews(records) {
     if(manifest===identity()&&current?.chart_id===item.chart_id)current={...current,chart_review:record?.candidate_chart_review,learning_excluded:record?.label==='excluded'};
     window.dispatchEvent(new CustomEvent('training-source-annotated',{detail:{manifest,chart_id:item.chart_id,result}}));
     if(request!==serial)return;
-    const saved=whole?(use==='exclude'?'已保存：整张不学习。':'已保存：整张学习。'):'已保存当前片段。';
-    message(saved);$('candidatePoolReason').value='';await refresh();
+    const saved=whole?(use==='exclude'?'已保存：整张不学习。':'已保存：整张学习。'):use==='uncertain'?'已保存：这段不学习。':'已保存当前片段。';
+    message(saved);$('candidatePoolReason').value='';
+    if(result.candidate_pool_summary)summary(result.candidate_pool_summary);
+    else void refresh().catch(error=>message(saved+' '+error.message));
     if($('candidatePoolAutoNext').checked&&current?.chart_id===item.chart_id&&globalThis.ChartPreview?.getEntry()?.training_context?.chart_id===item.chart_id){await next(whole);message(saved+' '+$('candidatePoolReviewStatus').textContent);}
   }
   globalThis.CandidatePool={
+    scanLabel,
     reviewText(item) {
       const record=item.annotation||item.record||{};
       if(item.label==='excluded'||item.label==='negative'||Number(item.weight??record.weight??1)<=0)return '整张不学习';
@@ -731,17 +906,17 @@ function candidateSavedReviews(records) {
     card(item) {
       if(!item.manifest||item.prepared===false)return '';
       if(item.reviewed_regions!=null&&!isPool(item))return '<p class="muted"><strong>已确认示范库</strong>：只学习保存或导入的示范片段。</p>';
-      const pool=isPool(item),info=item.candidate_pool_summary||item.candidate_pool||{},counts=info.counts||info;
-      return `<div class="candidate-pool-card"><p class="muted">${pool?`<strong>待审候选库</strong>：只学已确认内容 · 已确认 ${escapeHtml(String(info.confirmed_regions??info.reviewed_regions??0))} 段。打开后试听并选择学习范围。`:'<strong>普通训练集</strong>：默认学习整谱；若只想挑选片段，可建立待审候选库。'}</p>${pool?'':`<button type="button" class="small-button candidate-pool-create" data-manifest="${escapeHtml(item.manifest)}" ${enabled?'':'disabled'}>建立待审候选库</button>`}</div>`;
+      const pool=isPool(item),info=item.candidate_pool_summary||item.candidate_pool||{};
+      return `<div class="candidate-pool-card">${pool?`<p class="dataset-audit-state">${escapeHtml(scanLabel(info))}</p><p class="muted">已确认 ${escapeHtml(String(info.confirmed_regions??info.reviewed_regions??0))} 段 · 整谱学习 ${info.decisions?.learn_all??0} 张 · 部分学习 ${info.decisions?.partial??0} 张 · 整谱不学习 ${info.decisions?.exclude??0} 张</p>`:'<p class="muted">普通训练集 · 默认学习整谱</p>'}${pool?'':`<button type="button" class="small-button candidate-pool-create" data-manifest="${escapeHtml(item.manifest)}" ${enabled?'':'disabled'}>建立待审候选库</button>`}</div>`;
     },
-    capabilities(state) {enabled=state.training_capabilities?.candidate_pools===true||state.capabilities?.candidate_pools===true;chartActions=state.training_capabilities?.candidate_chart_review===true||state.capabilities?.candidate_chart_review===true;this.render();},
+    capabilities(state) {const caps=state.training_capabilities||state.capabilities||{};enabled=caps.candidate_pools===true;chartActions=caps.candidate_chart_review===true;autoScreenCapable=caps.candidate_pool_auto_screen!==undefined?caps.candidate_pool_auto_screen===true:enabled;this.render();},
     render() {
       $('candidatePoolCapability').textContent=enabled?(chartActions?'候选库的扫描只提供检查提示；你保存的学习决定，才决定下次训练学哪些内容。':'片段审阅可用；新增整谱处理需在下次重启 WebUI 后使用。'):'候选库需重启 WebUI 后使用。';
       for(const button of document.querySelectorAll('.candidate-pool-create'))button.disabled=!enabled;
       if(selectedDatasetItems().some(isPool)){const input=$('v2TrainQualityEnabled');if(input)input.checked=true;}
       controls();
     },
-    activate(item) {++serial;if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);scanTimer=null;active=isPool(item)?item:null;lastStatus=null;current=null;queue=[];seen.clear();for(const id of ['candidatePoolStatusFilter','candidatePoolDecisionFilter'])if($(id))$(id).value='';$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
+    activate(item) {++serial;if(scanTimer!==null&&typeof clearTimeout==='function')clearTimeout(scanTimer);scanTimer=null;active=isPool(item)?item:null;lastStatus=null;current=null;queue=[];seen.clear();previewedAutoScreen=false;renderAutoScreenSummary(null);for(const id of ['candidatePoolStatusFilter','candidatePoolDecisionFilter'])if($(id))$(id).value='';$('candidatePoolPanel').hidden=!active;controls();if(active)void refresh().catch(error=>{$('candidatePoolSummary').textContent=error.message;});}
   };
   document.addEventListener('click',event=>{
     const create=event.target.closest?.('.candidate-pool-create');if(!create)return;
@@ -807,6 +982,50 @@ function candidateSavedReviews(records) {
     catch(error){$('candidatePoolBudgetResult').textContent=`取消失败：${error.message||error}。可重试取消。`;}
     finally{button.disabled=false;}
   });
+  async function runAutoScreen(dryRun) {
+    const manifest=identity(),request=serial;if(!manifest)return;
+    if(!enabled||!autoScreenCapable)throw new Error('请重启 WebUI 后台以启用大数据一键自动筛选。');
+    if(!lastStatus?.scan_complete)throw new Error('请先等待候选库自动初筛完成后再执行一键筛选。');
+    const includeExpert=!!$('candidateAutoScreenExpert')?.checked;
+    const minLevel=Number($('candidateAutoScreenMinLevel')?.value||12);
+    const maxLevel=Number($('candidateAutoScreenMaxLevel')?.value||15);
+    const maxOffset=Number($('candidateAutoScreenMaxOffset')?.value||35);
+    const tapMode=$('candidateAutoScreenTailMode')?.value||'mask_hard';
+    const innerMode=$('candidateAutoScreenInnerMode')?.value||'allow';
+    const preserveManual=$('candidateAutoScreenPreserveManual')?$('candidateAutoScreenPreserveManual').checked:true;
+    if(!dryRun && typeof confirm==='function') {
+      const slotDesc=includeExpert?'EXPERT / MASTER / Re:MASTER':'MASTER / Re:MASTER';
+      const manualDesc=preserveManual?'保留已有人工审阅决定':'覆盖已有决定';
+      if(!confirm(`确认按当前规则（${slotDesc}，定数 ${minLevel}–${maxLevel}，${manualDesc}）生成入训标注？源谱文件绝不修改，之后仍可逐张或逐段微调。`))return;
+    }
+    const box=$('candidateAutoScreenResult');
+    if(box){box.hidden=false;box.textContent=dryRun?'正在预览自动筛选统计…':'正在生成并写入自动筛选入训标注…';}
+    const response=await api('/api/candidates/auto-screen',{
+      manifest,
+      difficulty_slots:includeExpert?[4,5,6]:[5,6],
+      min_level:minLevel,
+      max_level:maxLevel,
+      max_offset_ms:maxOffset,
+      tap_on_slide_mode:tapMode,
+      inner_muri_mode:innerMode,
+      preserve_manual:preserveManual,
+      dry_run:Boolean(dryRun),
+    });
+    if(request!==serial||manifest!==identity())return;
+    previewedAutoScreen=Boolean(dryRun);
+    renderAutoScreenSummary(response,{preview:Boolean(dryRun)});
+    if(!dryRun) {
+      queue=[];seen.clear();
+      if(response.pool_status)summary(response.pool_status);
+      else await refresh();
+      if(typeof loadQualityCatalog==='function')await loadQualityCatalog(true);
+      if(typeof loadDatasetCatalog==='function')await loadDatasetCatalog();
+      window.dispatchEvent(new CustomEvent('training-source-annotated',{detail:{manifest,auto_screen:response}}));
+      message(`一键筛选已应用：实际纳入训练 ${response.total_entering_training??0} 张谱面。可点击下方“将已确认内容加入下次训练”。`);
+    }
+  }
+  $('candidateAutoScreenPreview')?.addEventListener('click',()=>void run(()=>runAutoScreen(true)));
+  $('candidateAutoScreenApply')?.addEventListener('click',()=>void run(()=>runAutoScreen(false)));
   $('candidatePoolNext').addEventListener('click',()=>void run(next));
   $('candidatePoolDecisionFilter').addEventListener('change',()=>void run(()=>loadQualityCatalog(true)));
   $('candidatePoolNextChart').addEventListener('click',()=>void run(()=>next(true)));

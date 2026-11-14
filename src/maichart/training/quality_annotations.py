@@ -247,6 +247,8 @@ def load_annotations(manifest_path: str | Path) -> dict[str, Any]:
 
 
 def save_annotations(manifest_path: str | Path, records: Iterable[dict[str, Any]]) -> Path:
+    from maichart.training.dataset_catalog import _replace_file
+
     manifest = Path(manifest_path).resolve()
     path = annotation_path(manifest)
     payload = {"schema": SCHEMA, "manifest": str(manifest), "records": [validate_record(item) for item in records]}
@@ -260,7 +262,7 @@ def save_annotations(manifest_path: str | Path, records: Iterable[dict[str, Any]
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, path)
+            _replace_file(temp_name, path)
         finally:
             try:
                 os.unlink(temp_name)
@@ -288,6 +290,7 @@ class CatalogChart:
     folder_name: str | None = None
     maidata_title: str | None = None
     legacy_chart_id: str | None = None
+    source_manifest: str | None = None
 
     def to_dict(self, annotation: dict[str, Any] | None = None) -> dict[str, Any]:
         value = self.__dict__.copy()
@@ -307,16 +310,41 @@ def iter_catalog(manifest_path: str | Path) -> list[CatalogChart]:
     source_root = _source_root(manifest_file, data)
     manifest_dataset, manifest_dataset_id = _manifest_dataset_metadata(manifest_file, data)
     rows: list[CatalogChart] = []
+    songs = data.get("songs", [])
     parsed_sources: dict[Path, Any] = {}
-    for song in data.get("songs", []):
-        maidata = _resolve_manifest_path(song.get("maidata_path", ""), manifest_file, source_root)
-        if not maidata.is_file():
-            continue
-        if maidata not in parsed_sources:
+    if len(songs) > 256:
+        from concurrent.futures import ThreadPoolExecutor
+
+        unique_maidata: list[Path] = []
+        seen_maidata: set[Path] = set()
+        for song in songs:
+            maidata = _resolve_manifest_path(song.get("maidata_path", ""), manifest_file, source_root)
+            if maidata not in seen_maidata:
+                seen_maidata.add(maidata)
+                unique_maidata.append(maidata)
+
+        def _parse_one(path: Path) -> tuple[Path, Any]:
+            if not path.is_file():
+                return path, None
             try:
-                parsed_sources[maidata] = parse_maidata_file(maidata)
+                return path, parse_maidata_file(path)
             except (OSError, ValueError, UnicodeError):
+                return path, None
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            for m_path, parsed in pool.map(_parse_one, unique_maidata):
+                parsed_sources[m_path] = parsed
+
+    for song in songs:
+        maidata = _resolve_manifest_path(song.get("maidata_path", ""), manifest_file, source_root)
+        if maidata not in parsed_sources:
+            if not maidata.is_file():
                 parsed_sources[maidata] = None
+            else:
+                try:
+                    parsed_sources[maidata] = parse_maidata_file(maidata)
+                except (OSError, ValueError, UnicodeError):
+                    parsed_sources[maidata] = None
         parsed_chart = parsed_sources[maidata]
         if parsed_chart is None:
             continue
@@ -361,11 +389,17 @@ def iter_catalog(manifest_path: str | Path) -> list[CatalogChart]:
                 source_dataset=source_dataset, source_dataset_id=source_dataset_id,
                 folder_name=maidata.parent.name,
                 maidata_title=maidata_title, legacy_chart_id=legacy_id,
+                source_manifest=song.get("source_manifest"),
             ))
     return rows
 
 
-def find_annotation(row: CatalogChart, records: Iterable[dict[str, Any]], *, verify_audio: bool = False) -> dict[str, Any] | None:
+def find_annotation(
+    row: CatalogChart, records: Iterable[dict[str, Any]], *, verify_audio: bool = False,
+    resolve_path=None, verified_audio_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    if resolve_path is None:
+        resolve_path = lambda value: Path(value).resolve()
     for record in records:
         record_id = record.get("chart_id")
         if record.get("chart_sha256") != row.chart_sha256:
@@ -374,7 +408,7 @@ def find_annotation(row: CatalogChart, records: Iterable[dict[str, Any]], *, ver
         path_match = False
         if record.get("source_path") and record.get("difficulty_index") is not None:
             try:
-                path_match = (Path(record["source_path"]).resolve() == Path(row.source_path).resolve()
+                path_match = (resolve_path(record["source_path"]) == resolve_path(row.source_path)
                               and int(record["difficulty_index"]) == int(row.difficulty_index))
             except (TypeError, ValueError, OSError):
                 path_match = False
@@ -385,15 +419,15 @@ def find_annotation(row: CatalogChart, records: Iterable[dict[str, Any]], *, ver
         # charts with equal bytes could inherit one another's label.
         if record_id == row.legacy_chart_id and record.get("source_path"):
             try:
-                if Path(record["source_path"]).resolve() != Path(row.source_path).resolve():
+                if resolve_path(record["source_path"]) != resolve_path(row.source_path):
                     continue
             except (TypeError, OSError):
                 continue
-        if record.get("audio_path") and row.audio_path and Path(record["audio_path"]).resolve() != Path(row.audio_path).resolve():
+        if record.get("audio_path") and row.audio_path and resolve_path(record["audio_path"]) != resolve_path(row.audio_path):
             continue
         if verify_audio and record.get("audio_sha256") and row.audio_path:
             try:
-                if record["audio_sha256"] != audio_sha256(row.audio_path):
+                if record["audio_sha256"] != (verified_audio_sha256 or audio_sha256(row.audio_path)):
                     continue
             except OSError:
                 continue
@@ -577,6 +611,12 @@ def resolve_auto_annotations(
     return None, None
 
 
+def auto_audit_report_path(manifest: Path, *, preview=False, previous=False) -> Path:
+    suffix = "_preview" if preview else ""
+    name = f"auto_quality_audit{suffix}_report"
+    return manifest.with_name(f"{name}{'_previous' if previous else ''}.json")
+
+
 def resolve_auto_audit(
     manifest_path: str | Path, payload: dict[str, Any] | None = None, *, preview: bool = False,
 ) -> tuple[Path | None, dict[str, Any] | None, dict[str, Any] | None]:
@@ -591,27 +631,30 @@ def resolve_auto_audit(
     owner = _auto_annotation_owner(auto_path, auto_data) if auto_path is not None else manifest
     if owner is None:
         return auto_path, auto_data, None
-    filename = "auto_quality_audit_preview_report.json" if preview else "auto_quality_audit_report.json"
-    path = owner.with_name(filename)
-    try:
-        report = json.loads(path.read_text(encoding="utf-8-sig"))
-    except (OSError, ValueError):
-        return auto_path, auto_data, None
-    if (not isinstance(report, dict) or report.get("schema") != "composer-v2-auto-quality-audit-v1"
-            or _auto_annotation_owner(path, report) != owner or bool(report.get("preview")) != preview):
-        return auto_path, auto_data, None
     metadata = (auto_data or {}).get("audit_metadata") or {}
-    audit_id = report.get("audit_id")
-    if (audit_id or metadata.get("audit_id")) and audit_id != metadata.get("audit_id"):
-        return auto_path, auto_data, None
-    digest = report.get("manifest_sha256")
-    if digest and (not owner.is_file() or digest != hashlib.sha256(owner.read_bytes()).hexdigest()):
-        return auto_path, auto_data, None
     if metadata.get("composed_sources") is not None:
         # A report from a direct audit cannot describe the inherited fallback.
         return auto_path, auto_data, None
-    report["report_path"] = str(path)
-    return auto_path, auto_data, report
+    for previous in (False, True):
+        if previous and auto_data is None:
+            break
+        path = auto_audit_report_path(owner, preview=preview, previous=previous)
+        try:
+            report = json.loads(path.read_text(encoding="utf-8-sig"))
+        except (OSError, ValueError):
+            continue
+        if (not isinstance(report, dict) or report.get("schema") != "composer-v2-auto-quality-audit-v1"
+                or _auto_annotation_owner(path, report) != owner or bool(report.get("preview")) != preview):
+            continue
+        audit_id = report.get("audit_id")
+        if (audit_id or metadata.get("audit_id")) and audit_id != metadata.get("audit_id"):
+            continue
+        digest = report.get("manifest_sha256")
+        if digest and (not owner.is_file() or digest != hashlib.sha256(owner.read_bytes()).hexdigest()):
+            continue
+        report["report_path"] = str(path)
+        return auto_path, auto_data, report
+    return auto_path, auto_data, None
 
 
 def save_auto_annotations(
@@ -623,6 +666,8 @@ def save_auto_annotations(
     composed: bool = False,
 ) -> Path:
     """Atomically write audit annotations alongside their manifest."""
+    from maichart.training.dataset_catalog import _replace_file
+
     manifest = Path(manifest_path).resolve()
     path = auto_annotation_path(manifest, preview=preview, composed=composed)
     if path == manifest:
@@ -652,7 +697,7 @@ def save_auto_annotations(
                 handle.write("\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temp_name, path)
+            _replace_file(temp_name, path)
         finally:
             try:
                 os.unlink(temp_name)

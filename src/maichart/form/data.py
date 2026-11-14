@@ -511,8 +511,12 @@ def relation_target(target, reference, span):
     return torch.tensor([float(np.dot(x,y)/(max(np.linalg.norm(x)*np.linalg.norm(y),1e-8))) for x,y in zip(a,b)])
 
 
-def _preparation_annotation_index(annotations):
+def _preparation_annotation_index(annotations, *, resolve_path=None):
     from maichart.portable_paths import material_path
+
+    if resolve_path is None:
+        def resolve_path(value):
+            return material_path(value).resolve()
 
     index = {}
     for record in (annotations or {}).get('records', []):
@@ -520,19 +524,26 @@ def _preparation_annotation_index(annotations):
         if not raw_source:
             continue
         try:
-            key = (int(record.get('difficulty_index', -1)), str(material_path(raw_source).resolve()))
+            key = (int(record.get('difficulty_index', -1)), str(resolve_path(raw_source)))
         except (OSError, TypeError, ValueError):
             continue
         index.setdefault(key, []).append(record)
     return index
 
 
-def _preparation_annotation(annotations, source, slot, audio_path, cache, annotation_index=None):
+def _preparation_annotation(annotations, source, slot, audio_path, cache, annotation_index=None, *, audio_digest=None,
+                            resolve_path=None, chart_digest=None):
     if not annotations:
         return None
     from maichart.training.quality_annotations import chart_sha256, audio_sha256, validate_record
     from maichart.portable_paths import material_path
-    source_identity = Path(source).resolve()
+    if resolve_path is None:
+        source_identity = Path(source).resolve()
+        audio_identity = lambda: Path(audio_path).resolve()
+        resolve_path = lambda value: material_path(value).resolve()
+    else:
+        source_identity = resolve_path(str(source))
+        audio_identity = lambda: resolve_path(str(audio_path))
     audio_hash = None
     candidates = (annotation_index.get((slot, str(source_identity)), [])
                   if annotation_index is not None else annotations.get('records', []))
@@ -541,19 +552,20 @@ def _preparation_annotation(annotations, source, slot, audio_path, cache, annota
         if int(record.get('difficulty_index', -1)) != slot:
             continue
         try:
-            if not record.get('source_path') or material_path(record['source_path']).resolve() != source_identity:
+            if not record.get('source_path') or resolve_path(record['source_path']) != source_identity:
                 continue
-            if record.get('audio_path') and material_path(record['audio_path']).resolve() != Path(audio_path).resolve():
+            if record.get('audio_path') and resolve_path(record['audio_path']) != audio_identity():
                 continue
         except (OSError, TypeError, ValueError):
             continue
         if chart_hash is None:
-            chart_hash = chart_sha256(source, slot)
+            chart_hash = (chart_digest or chart_sha256)(source, slot)
         if record.get('chart_sha256') != chart_hash:
             continue
         if record.get('audio_sha256'):
             if audio_hash is None:
-                audio_hash = cache.file_digest(audio_path) if cache else audio_sha256(audio_path)
+                digest = audio_digest or (cache.file_digest if cache else audio_sha256)
+                audio_hash = digest(audio_path)
             if record['audio_sha256'] != audio_hash:
                 continue
         return validate_record(record)

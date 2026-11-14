@@ -251,8 +251,13 @@ def alignment(onsets: np.ndarray, flux: np.ndarray) -> dict[str, Any]:
 # Native conflicts
 # ---------------------------------------------------------------------------
 
-def native_hard_conflicts(chart, audio_end: float) -> list[dict[str, Any]]:
-    """One whole-chart MiaCode pass with the runtime_hard_v2 enforcement set."""
+INNER_SLIDE_CONFLICTS = frozenset({"miacode_SlideTooFast", "miacode_SlideHeadTap"})
+
+
+def _inspect_native_conflicts(
+    chart, audio_end: float
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Run one MiaCode pass, separating acceptable inner-screen slide early triggers from hard Muri."""
     from maichart.composer.guard import EventGuard
     from maichart.generation.post_process import detect_chart_conflicts
     from maichart.event_timing import EventTempo
@@ -261,13 +266,26 @@ def native_hard_conflicts(chart, audio_end: float) -> list[dict[str, Any]]:
     guard = EventGuard(tempo, chart.audio_first, max(audio_end, 1.), min_same_head_sec=0.,
                        touch_layout_policy="open", physical_policy="runtime_hard_v2")
     result = detect_chart_conflicts(list(chart.points), tempo, chart.audio_first, guard.config)
-    issues = []
-    for issue in result.conflicts_detected:
-        if not guard.enforced(issue):
+    parse_errors = list(result.coverage.get("parse_errors") or []) if result.coverage.get("status") == "partial" else []
+    hard_issues: list[dict[str, Any]] = []
+    inner_issues: list[dict[str, Any]] = []
+    for item in result.conflicts_detected:
+        entry = dict(kind=item.conflict_type, severity=str(item.severity), time_sec=round(float(item.time), 4),
+                     notes=[dict(beat=str(note.beat), raw=note.raw) for note in item.notes][:6])
+        if item.conflict_type in INNER_SLIDE_CONFLICTS:
+            if str(item.severity) == "hard":
+                inner_issues.append(entry)
             continue
-        issues.append(dict(kind=issue.conflict_type, time_sec=round(float(issue.time), 4),
-                           notes=[dict(beat=str(note.beat), raw=note.raw) for note in issue.notes][:6]))
-    return issues
+        if not guard.enforced(item):
+            continue
+        hard_issues.append(entry)
+    return hard_issues, inner_issues, parse_errors
+
+
+def native_hard_conflicts(chart, audio_end: float) -> list[dict[str, Any]]:
+    """One whole-chart MiaCode pass returning actionable hard conflicts (excluding inner-slide pre-triggers)."""
+    hard_issues, _, _ = _inspect_native_conflicts(chart, audio_end)
+    return hard_issues
 
 
 # ---------------------------------------------------------------------------
@@ -400,17 +418,23 @@ def scan_chart(maidata_path: str | Path, difficulty_index: int, audio_path: str 
     if not (slot.level or "").strip():
         issue("error", "missing_level", "缺少等级，训练无法使用")
     try:
-        chart = parse_event_chart(maidata_path, int(difficulty_index), strict_notes=False)
+        raw_chart = parse_event_chart(maidata_path, int(difficulty_index), strict_notes=False)
     except Exception as exc:  # noqa: BLE001
         issue("error", "event_parse_failed", f"事件解析失败：{exc}")
         return _finish(result, issues, began)
-    if not chart.points:
+    if not raw_chart.points:
         issue("error", "empty_chart", "没有任何音符")
         return _finish(result, issues, began)
-    try:
-        parse_event_chart(maidata_path, int(difficulty_index), strict_notes=True)
-    except Exception as exc:  # noqa: BLE001
-        issue("suspicious", "nonstandard_notation", f"含非标准写法（宽松解析可用）：{exc}")
+    from maichart.composer_v2 import chart_dialect
+    chart, dialect_edits = chart_dialect.normalize_training_chart(raw_chart)
+    if any(dialect_edits.values()):
+        result["dialect_edits"] = dialect_edits
+    if not chart.points:
+        issue("error", "empty_chart", "方言规范化后没有任何可训练音符")
+        return _finish(result, issues, began)
+    if dialect_edits.get("unsupported", 0) > 0:
+        issue("suspicious", "unsupported_dialect_atoms",
+              f"含 {dialect_edits['unsupported']} 处无法编码的异常音符（训练时会自动剥离）")
     try:
         from maichart.generation.event_compile import compile_event_points
         compile_event_points(chart.points, tempo_changes=chart.tempo_changes,
@@ -482,14 +506,22 @@ def scan_chart(maidata_path: str | Path, difficulty_index: int, audio_path: str 
             else:
                 issue("suspicious", "alignment_failed", f"声学对齐检查失败：{exc}")
     conflicts = []
+    inner_conflicts = []
     try:
-        conflicts = native_hard_conflicts(chart, duration or action_end + 1.)
-        if conflicts:
-            issue("suspicious", "native_hard_conflicts", f"{len(conflicts)} 处原生硬冲突（可能是成立的高难写法，需人工判断）",
+        conflicts, inner_conflicts, parse_errors = _inspect_native_conflicts(chart, duration or action_end + 1.)
+        if parse_errors:
+            examples = [str(err.get("raw") or err.get("message") or "") for err in parse_errors[:3]]
+            issue("error", "invalid_sustain_syntax",
+                  f"含训练引擎无法解析的修饰符或时值语法（{', '.join(x for x in examples if x)}）",
+                  parse_errors=parse_errors[:5])
+        elif conflicts:
+            issue("suspicious", "native_hard_conflicts", f"{len(conflicts)} 处原生硬冲突（多押/撞尾/不可达，可按区间屏蔽）",
                   times=[c["time_sec"] for c in conflicts][:32])
     except Exception as exc:  # noqa: BLE001
         issue("suspicious", "conflict_check_failed", f"原生冲突检查失败：{exc}")
     result["conflicts"] = conflicts[:64]
+    if inner_conflicts:
+        result["inner_slide_conflicts"] = inner_conflicts[:64]
     offset_sec = (align["offset_ms"] / 1000 + FLUX_BIAS_SEC) if align and align.get("judgeable") else 0.
     result["segments"] = propose_segments(chart.points, clock, notes, envelope=envelope,
                                           offset_sec=offset_sec, conflicts=conflicts)

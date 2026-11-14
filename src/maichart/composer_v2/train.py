@@ -49,12 +49,19 @@ def parser():
     result.add_argument('--difficulty-slots', type=int, nargs='+', help='Difficulty slots to include (4, 5, 6).')
     result.add_argument('--open-mdp-dir')
     result.add_argument('--chartgate-dir')
+    from .batching import CHOICES as BATCH_LAYOUTS
+    result.add_argument('--batch-layout',choices=BATCH_LAYOUTS,default='auto')
     result.add_argument('--audio-layers',type=int,default=None,help='Fresh: 4; parent: inherit. Init may append identity blocks.')
     result.add_argument('--song-layers',type=int,default=None,help='Fresh: 2; parent: inherit.')
     from .music_policy import CHOICES as MUSIC_CHOICES
     result.add_argument('--music-context',choices=MUSIC_CHOICES,default='auto')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
+    result.add_argument('--training-window-events', type=int,
+                        help='Maximum authored target events per training window; defaults to refresh-events. '
+                             'Generation, validation and timing recovery keep their original window limits.')
+    result.add_argument('--local-audio-block-beats',type=int,choices=(1,2),default=None,
+                        help='Local audio encoding block width in beats; omitted inherits the checkpoint or uses 1.')
     result.add_argument('--timing-recovery',choices=timing_recovery.CHOICES,default='auto')
     from .onset_policy import CHOICES as ONSET_CHOICES
     result.add_argument('--onset-readout',choices=ONSET_CHOICES,default='auto',
@@ -184,7 +191,8 @@ def _same_data_identity(saved, current):
 def _batches(loader,skip=0):
     # Dataset fetching is deterministic; one outstanding CPU batch bounds RAM.
     sampler = getattr(loader, 'batch_sampler', None)
-    can_seek = isinstance(sampler, LengthBucketBatchSampler)
+    from .batching import FullInputBatchSampler
+    can_seek = isinstance(sampler, (LengthBucketBatchSampler, FullInputBatchSampler))
     start = max(0, skip) if can_seek else 0
     if can_seek:
         previous_start = sampler.start_batch
@@ -217,11 +225,19 @@ def _device_batch(batch,device):
         batch['bank_semantic']=(batch['bank_semantic'].float().double()*(1.-fraction)+right*fraction).float()
     return {key:value.to(device,non_blocking=True) if isinstance(value,torch.Tensor) else value for key,value in batch.items()}
 
-def _loader(dataset,batch_size,seed,shuffle,device,*,order=GLOBAL_BATCH_ORDER):
-    sampler=LengthBucketBatchSampler(dataset,batch_size,seed=seed,shuffle=shuffle,order=order)
+def _loader(dataset,batch_size,seed,shuffle,device,*,order=GLOBAL_BATCH_ORDER,
+            batch_layout='target_only_v1',accumulation=1,source_batch_size=None):
+    from .batching import FULL_INPUT, FullInputBatchSampler
+    if shuffle and batch_layout == FULL_INPUT:
+        sampler=FullInputBatchSampler(dataset,batch_size,accumulation,
+            source_batch_size=source_batch_size or batch_size,seed=seed,order=order)
+        loader_dataset=sampler.prepared
+    else:
+        sampler=LengthBucketBatchSampler(dataset,batch_size,seed=seed,shuffle=shuffle,order=order)
+        loader_dataset=dataset
     generator=torch.Generator().manual_seed(seed)
     from .stream_data import StreamDataset,collate_stream
-    return DataLoader(dataset,batch_sampler=sampler,collate_fn=collate_stream if isinstance(dataset,StreamDataset) else collate_composer_v2,
+    return DataLoader(loader_dataset,batch_sampler=sampler,collate_fn=collate_stream if isinstance(dataset,StreamDataset) else collate_composer_v2,
         num_workers=0,pin_memory=device.type in ('cuda','xpu'),generator=generator),sampler
 
 
@@ -353,9 +369,15 @@ def train(args):
         if isinstance(value, bool) or not math.isfinite(value) or not 0 <= value <= 1024:
             raise ValueError(f'{key} 必须在 0 至 1024 GiB 之间')
     if args.cpu_threads<1:raise ValueError("cpu_threads must be positive")
-    from .training_memory import POLICIES as MEMORY_POLICIES
+    from .training_memory import POLICIES as MEMORY_POLICIES, PROJECTION_PACKING_CHOICES
     if getattr(args,'activation_checkpointing','auto') not in MEMORY_POLICIES:
         raise ValueError('Unknown activation checkpointing policy')
+    packing = getattr(args, 'attention_projection_packing', 'auto')
+    if packing not in ('auto', *PROJECTION_PACKING_CHOICES):
+        raise ValueError('Unknown attention projection packing policy')
+    flash = getattr(args, 'decoder_flash_attention', 'off')
+    if flash not in ('off', 'on'):
+        raise ValueError('Unknown decoder FlashAttention policy')
     torch.set_num_threads(args.cpu_threads)
     if min(args.epochs,args.batch_size,args.grad_accumulation,args.log_interval,args.checkpoint_interval_steps)<=0:raise ValueError("epochs/batch/accumulation/log/save intervals must be positive")
     if args.lr<=0 or not 0<=args.min_lr_ratio<=1 or not 0<=args.dropout<1:raise ValueError("Invalid optimizer/dropout settings")
@@ -369,6 +391,10 @@ def train(args):
     parent_path=Path(args.resume or args.init_checkpoint).resolve() if args.resume or args.init_checkpoint else None
     source_directory=parent_path.parent if parent_path else None
     artifacts=[directory/name for name in ("composer_v2_last.pt","composer_v2_best.pt","composer_v2_inference.pt")]
+    requested_training_window = getattr(args, 'training_window_events', None)
+    if (args.init_checkpoint and requested_training_window not in (None, args.refresh_events)
+            and (directory == source_directory or any(path.exists() for path in artifacts))):
+        raise ValueError('Changing training-window-events requires a new checkpoint directory; retain the parent')
     if parent_path in artifacts:
         archive=directory/"resume_sources"/(time.strftime("%Y%m%d_%H%M%S")+"_"+uuid.uuid4().hex[:10]+"_"+parent_path.name)
         archive.parent.mkdir(parents=True,exist_ok=True)
@@ -377,6 +403,9 @@ def train(args):
         emit("checkpoint",stage="parent_preserved",path=str(archive))
     if not parent_path and any(path.exists() for path in artifacts):raise ValueError("Fresh output directory already contains Composer v2 weights; choose a new directory")
     parent=read(parent_path) if parent_path else None
+    if packing == 'auto':
+        packing = ((parent or {}).get('args') or {}).get('attention_projection_packing', 'off')
+    args.attention_projection_packing = 'off' if packing == 'auto' else packing
     if parent:
         checked=inspect_payload(parent)
         if not checked["valid"] or (args.resume and not checked["can_resume"]):raise ValueError("Parent checkpoint cannot initialize this training mode: "+str(checked.get("error")))
@@ -413,6 +442,18 @@ def train(args):
     # Reference availability and annotation approval are independent. Only an
     # actual old resume retains the old weight-only supervision semantics.
     parent_contract = parent.get('training_contract', {}) if parent else {}
+    if args.sequence_policy == 'continuous_events_v1':
+        saved_window = parent_contract.get('training_window_events', args.refresh_events)
+        if args.resume and requested_training_window not in (None, saved_window):
+            raise ValueError('Changing training-window-events requires --init-checkpoint, not --resume')
+        default_window = saved_window if args.resume else args.refresh_events
+        args.training_window_events = default_window if requested_training_window is None else requested_training_window
+        if type(args.training_window_events) is not int or args.training_window_events < 1:
+            raise ValueError('training-window-events must be a positive integer')
+    elif requested_training_window is not None:
+        raise ValueError('training-window-events requires continuous event training')
+    else:
+        args.training_window_events = None
     from .difficulty import FITTED_SOURCES, locate_scorer, make_scorer, resolve_selection, scorer_path_key
     difficulty = resolve_selection(getattr(args, 'difficulty_source', 'auto'),
         getattr(args, 'min_level', None), getattr(args, 'max_level', None),
@@ -488,7 +529,13 @@ def train(args):
     resource_budgets = dict(cuda_memory_budget_gb=cuda_budget, audio_cache_gb=args.audio_cache_gb)
     random.seed(args.seed);np.random.seed(args.seed);torch.manual_seed(args.seed)
     if torch.cuda.is_available():torch.cuda.manual_seed_all(args.seed)
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy")})
+    inherited_audio_block = parent_model.get('local_audio_block_beats', 1)
+    requested_audio_block = getattr(args, 'local_audio_block_beats', None)
+    args.local_audio_block_beats = inherited_audio_block if requested_audio_block is None else requested_audio_block
+    audio_block_migration = bool(parent and args.local_audio_block_beats != inherited_audio_block)
+    if audio_block_migration and (args.resume or directory == source_directory or any(p.exists() for p in artifacts)):
+        raise ValueError('Changing local audio sharing requires init-checkpoint in a new directory')
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
@@ -497,6 +544,8 @@ def train(args):
     if curve_migration: comparable_config['intensity_policy'] = parent_config['intensity_policy']
     if music_migration: comparable_config['music_context_policy'] = parent_config['music_context_policy']
     if depth_migration: comparable_config['audio_layers'] = parent_config['audio_layers']
+    if audio_block_migration:
+        comparable_config['local_audio_block_beats'] = inherited_audio_block
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
     codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
@@ -519,6 +568,7 @@ def train(args):
     if args.sequence_policy=='continuous_events_v1':
         from .stream_data import StreamDataset
         dataset_class=StreamDataset;options['refresh_events']=args.refresh_events
+        options['local_audio_block_beats'] = args.local_audio_block_beats
         options.update(timing_recovery_policy=recovery_policy,augmentation_seed=args.seed,
                        onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
                        intensity_policy=args.intensity_policy,rhythm_learning_policy=args.rhythm_learning_policy,
@@ -526,7 +576,8 @@ def train(args):
                        reviewed_reference_policy=reviewed_ref,zero_unmarked_policy=zero_unmarked_policy,
                        reference_quality_policy=reference_quality_policy)
     train_options=dict(options)
-    if args.sequence_policy=='continuous_events_v1':train_options['reference_augmentation']=True
+    if args.sequence_policy=='continuous_events_v1':
+        train_options.update(reference_augmentation=True, training_window_events=args.training_window_events)
     with scorer if scorer is not None else nullcontext():
         dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
         if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
@@ -551,10 +602,15 @@ def train(args):
         batch_order = parent['training_contract']['sampler']
     else:
         batch_order = AUDIO_LOCAL_BATCH_ORDER if args.sequence_policy == 'continuous_events_v1' else GLOBAL_BATCH_ORDER
-    loader,sampler=_loader(dataset,args.batch_size,args.seed,True,device,order=batch_order)
+    from .batching import FULL_INPUT, resolve_layout, compatible_contract, resume_cursor
+    batch_layout,source_batch_size,validation_batch_size=resolve_layout(
+        getattr(args,'batch_layout','auto'),args.batch_size,args.grad_accumulation,parent if args.resume else None)
+    args.batch_layout=batch_layout
+    loader,sampler=_loader(dataset,args.batch_size,args.seed,True,device,order=batch_order,
+        batch_layout=batch_layout,accumulation=args.grad_accumulation,source_batch_size=source_batch_size)
     from .validation_sampling import POLICY as VALIDATION_POLICY,LEGACY as LEGACY_VALIDATION
     validation_policy=parent['training_contract'].get('validation_sampling',LEGACY_VALIDATION) if args.resume else VALIDATION_POLICY
-    validation_loader=_validation_loader(validation,args.batch_size,args.seed,device,args.validation_max_batches,validation_policy) if validation else None
+    validation_loader=_validation_loader(validation,validation_batch_size,args.seed,device,args.validation_max_batches,validation_policy) if validation else None
     updates_per_epoch=math.ceil(len(loader)/args.grad_accumulation)
     total_updates=updates_per_epoch*args.epochs
     contract=dict(batch_size=args.batch_size,grad_accumulation=args.grad_accumulation,seed=args.seed,
@@ -563,6 +619,9 @@ def train(args):
         window_policy="stable_beat_window_components_v2",sampler=batch_order,
         loss_normalization="quality_weighted_token_mass_per_update_v1",cpu_threads=args.cpu_threads)
     if not getattr(args,'quality_enabled',True): contract['quality_enabled']=False
+    if batch_layout == FULL_INPUT:
+        contract.update(batch_layout=batch_layout,batch_source_size=source_batch_size,
+                        validation_batch_size=validation_batch_size)
     if validation and validation_policy!=LEGACY_VALIDATION:
         contract.update(validation_sampling=validation_policy,validation_sampling_budget=args.validation_max_batches)
     if args.condition_policy != LEVEL_ONLY:
@@ -570,6 +629,10 @@ def train(args):
     if args.sequence_policy=='continuous_events_v1':
         contract.update(window_policy='causal_event_slices_no_boundary_eos_v1',refresh_events=args.refresh_events,
             acoustic_policy='query_integer_beat_tiles_v1')
+        if args.training_window_events != args.refresh_events:
+            contract['training_window_events'] = args.training_window_events
+        if args.local_audio_block_beats != 1:
+            contract['acoustic_policy'] = 'query_two_beat_shared_tiles_v1'
     if recovery_policy!='off':contract['timing_recovery']=recovery_policy
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
     if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'zero_unmarked_policy' in parent_contract):
@@ -587,11 +650,14 @@ def train(args):
         contract['auto_quality_policy'] = auto_quality_policy
     if difficulty_contract is not None:
         contract['difficulty_selection'] = difficulty_contract
-    if args.resume and (not _same_data_identity(parent["data_identity"],identity) or parent["training_contract"]!=contract):
+    if args.resume and (not _same_data_identity(parent["data_identity"],identity)
+                        or not compatible_contract(parent["training_contract"],contract)):
         raise ValueError("Exact resume data/optimizer/schedule contract changed; retain the parent and use compatible finetune in a new directory")
     model=ComposerV2(config,codec).to(device)
-    from .training_memory import configure as configure_memory, cuda_stats
+    from .training_memory import configure as configure_memory, configure_projection_packing, configure_decoder_flash_attention, cuda_stats
     memory_policy=configure_memory(model,getattr(args,'activation_checkpointing','auto'),device)
+    projection_policy=configure_projection_packing(model,args.attention_projection_packing,device)
+    flash_policy=configure_decoder_flash_attention(model,flash,device)
     if parent:
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
@@ -639,6 +705,12 @@ def train(args):
     if args.resume:
         optimizer.load_state_dict(parent["optimizer_state_dict"])
         state.update(parent["training_state"])
+        if parent['training_contract'] != contract:
+            previous_cursor=state['batch_cursor']
+            state['batch_cursor']=resume_cursor(state,parent['training_contract'],contract,len(loader))
+            emit('runtime',stage='batch_layout_migration',previous_batch=previous_cursor,
+                 resumed_batch=state['batch_cursor'],effective_batch=args.batch_size*args.grad_accumulation,
+                 optimizer_steps=state['optimizer_steps'],batch_layout=batch_layout)
         if parent.get("scaler_state_dict"):scaler.load_state_dict(parent["scaler_state_dict"])
         restore_rng(parent["rng_state"])
     directory.mkdir(parents=True,exist_ok=True)
@@ -688,14 +760,18 @@ def train(args):
         resume_batch_cursor=int(state['batch_cursor']),
         trainable_parameters=sum(p.numel() for p in model.parameters()),effective_batch=args.batch_size*args.grad_accumulation,
          train_charts=len(dataset.songs),validation_charts=len(validation.songs) if validation else 0,
-         preparation=dataset.audit.get('preparation', {}), batch_order=batch_order, **resource_budgets,
+         preparation=dataset.audit.get('preparation', {}), batch_order=batch_order,batch_layout=batch_layout,
+         batch_source_size=source_batch_size,validation_batch_size=validation_batch_size,**resource_budgets,
          timing_recovery=dataset.audit.get('timing_recovery'),
+         training_window_events=args.training_window_events,
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,
          validation_coverage=getattr(validation_loader,'validation_coverage',None),
-        best_basis=best_basis,activation_checkpointing=memory_policy)
+        best_basis=best_basis,activation_checkpointing=memory_policy,attention_projection_packing=projection_policy,
+        decoder_flash_attention=flash_policy)
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
+    input_tokens=0;input_slots=0
     running=torch.zeros(6,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
     group_metrics=torch.zeros(6,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
     group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;stop=False
@@ -714,6 +790,8 @@ def train(args):
         for batch_index,batch in _batches(loader,cursor):
             now=time.perf_counter();data_sec+=now-previous
             tokens,mass,time_mass,component_mass=_cpu_budget(batch,time_tokens)
+            input_tokens+=int(batch['token_mask'].sum())
+            input_slots+=batch['token_mask'].numel()
             phase_mass=_phase_budget(batch,phase_tokens)
             cpu_valid=math.isfinite(mass) and mass>=0
             # Keep the unnormalized numerator numerically modest for FP16;
@@ -773,6 +851,7 @@ def train(args):
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
                     token_count=seen_tokens,token_weight_sum=running_mass,
                     tokens_per_sec=seen_tokens/max(elapsed,1e-9),samples_per_sec=seen_samples/max(elapsed,1e-9),
+                    input_padding_fraction=1.-input_tokens/max(input_slots,1),batch_layout=batch_layout,
                     time_loss=values[1]/max(1.,running_time_mass),component_loss=values[2]/max(1.,running_component_mass),phase_loss=values[3]/max(1.,running_phase_mass),
                     data_sec=data_sec,compute_sec=compute_sec,compute_measurement="host_submission_wall_including_update_boundary_wait",
                     prefetch={"consumer_wait_sec":data_sec,"max_batches":1},elapsed_sec=elapsed,lr=optimizer.param_groups[0]["lr"],

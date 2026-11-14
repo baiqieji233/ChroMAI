@@ -5,6 +5,7 @@ upstream stages. Keep both: replacing either with static overlap changes Muri.
 """
 from __future__ import annotations
 
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from dataclasses import dataclass
 import math
@@ -222,6 +223,8 @@ def build_actions(markers, notes):
         if m.get("is_mine") or m.get("track_mine"):
             continue
         if m["type"] == "slide":
+            if m.get("covered_by_wifi"):
+                continue
             segments = list(zip(m["slide_segment_keys"], m["slide_segment_shoot_seconds"], m["slide_segment_durations"]))
             for i, (key, begin, duration) in enumerate(segments):
                 entry = data["slides"][key]
@@ -267,6 +270,75 @@ def _merged_points(actions, active, second, previous=None):
     return points, pairs
 
 
+_SENSOR_GEOMETRY = tuple(sorted(((pad, CENTERS[pad], RADII[pad[0]]) for pad in PADS),
+                                key=lambda sensor: sensor[1][0]))
+_SENSOR_X = tuple(center[0] for _, center, _ in _SENSOR_GEOMETRY)
+_MAX_SENSOR_RADIUS = max(RADII.values())
+
+
+def _action_pads(actions, points, second):
+    down = {}
+    for index, position, _ in points:
+        action = actions[index]
+        cause = _cause(action.marker, second)
+        # Only skip pads guaranteed to be outside the same distance test.
+        extent = action.radius + _MAX_SENSOR_RADIUS + EPS
+        lo = bisect_left(_SENSOR_X, position[0] - extent)
+        hi = bisect_right(_SENSOR_X, position[0] + extent, lo=lo)
+        for pad, center, radius in _SENSOR_GEOMETRY[lo:hi]:
+            if math.dist(position, center) <= action.radius + radius + EPS:
+                down[pad] = dict(cause, pad=pad)
+    return down
+
+
+def mark_wifi_covered_slides(markers):
+    """Identify shared-head branches completed by the WiFi pad stream alone."""
+    from .slide import slide_states, step_slides
+
+    if not any(m["type"] == "wifi" for m in markers):
+        return
+    groups = defaultdict(list)
+    for marker in markers:
+        if usable_slide(marker) and not (marker.get("track_mine") or marker.get("is_mine")):
+            # Same atom and physical launch. Separate notes keep their own
+            # overlap/occupancy diagnostics, even at the same time and lane.
+            groups[head_key(marker)].append(marker)
+    for group in groups.values():
+        ordinary = [m for m in group if m["type"] == "slide"]
+        if not ordinary:
+            continue
+        for wifi in group:
+            if wifi["type"] != "wifi":
+                continue
+            candidates = [m for m in ordinary if not m.get("covered_by_wifi")]
+            if not candidates:
+                break
+            states = slide_states([wifi, *candidates])
+            if not states or states[0]["type"] != "wifi":
+                continue
+            notes, _ = simple_notes([wifi])
+            actions = build_actions([wifi], notes)
+            if not actions:
+                continue
+            first = max(0, start_tick(min(action.begin for action in actions)))
+            last = max(end_tick(action.end) for action in actions)
+            previous = {}
+            active = range(len(actions))
+            for tick in range(first, last + 1):
+                second = tick / TPS
+                points, _ = _merged_points(actions, active, second)
+                down = _action_pads(actions, points, second)
+                released = {pad: cause for pad, cause in previous.items() if pad not in down}
+                step_slides(states, second, down, released)
+                previous = down
+                if all(state["judged"] for state in states):
+                    break
+            if states[0]["judged"] and not states[0]["judge_bad"]:
+                for state in states[1:]:
+                    if state["judged"] and not state["judge_bad"]:
+                        state["marker"]["covered_by_wifi"] = wifi["key"]
+
+
 def simulate_actions(markers, notes, states):
     from .slide import step_slides
 
@@ -280,20 +352,13 @@ def simulate_actions(markers, notes, states):
     pointer, tick = 0, 0
     # Geometry remains in MiaCode's logical canvas units; no resampling or
     # replacement by the simplified legacy detector's circle footprints.
-    sensor_geometry = [(p, CENTERS[p], RADII[p[0]]) for p in PADS]
     while tick <= maximum:
         second = tick / TPS
         while pointer < len(actions) and second + EPS >= actions[pointer].begin:
             active.append(pointer)
             pointer += 1
         regular, _ = _merged_points(actions, active, second)
-        pad_states = {}
-        for ai, position, _ in regular:
-            action = actions[ai]
-            cause = _cause(action.marker, second)
-            for p, pc, radius in sensor_geometry:
-                if math.dist(position, pc) <= action.radius + radius + EPS:
-                    pad_states[p] = dict(cause, pad=p)
+        pad_states = _action_pads(actions, regular, second)
         pad_up = {p: c for p, c in previous_pads.items() if p not in pad_states}
         step_slides(states, second, pad_states, pad_up)
         previous_pads = pad_states

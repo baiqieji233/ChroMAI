@@ -83,6 +83,10 @@ def inspect_payload(payload):
             errors.append('Unknown Composer v2 music context policy')
         if config.get('music_context_policy')=='song_paired_v2' and config.get('sequence_policy')!='continuous_events_v1':
             errors.append('Paired music context requires continuous events')
+        audio_block = config.get('local_audio_block_beats', 1)
+        if (type(audio_block) is not int or audio_block not in (1, 2)
+                or (audio_block == 2 and config.get('sequence_policy') != 'continuous_events_v1')):
+            errors.append('局部音频编码配置与连续事件模型不匹配')
         for key in ('audio_layers','song_layers'):
             value=config.get(key,2)
             if not isinstance(value,int) or isinstance(value,bool) or value<1:
@@ -135,6 +139,7 @@ def inspect_payload(payload):
     return dict(schema=payload.get("schema"),family=payload.get("family"),model_family=payload.get("family"),
         valid=not errors,can_generate=not errors,can_init=not errors,can_train=not errors,can_resume=bool(resume),
         model_config=config or {},config=config or {},args=payload.get("args") or {},
+        vocab_size=len(tokens) if not errors else None,
         training_contract=payload.get("training_contract") or {},
         data_contract=payload.get("data_identity") or {},epoch=state.get("epoch",0),
         batch_cursor=state.get("batch_cursor",0),optimizer_steps=state.get("optimizer_steps",0),

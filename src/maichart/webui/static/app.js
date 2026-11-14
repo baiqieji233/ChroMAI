@@ -1,5 +1,5 @@
 "use strict";
-const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "activation_checkpointing", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience", "reviewed_reference_policy", "auto_quality_policy", "difficulty_source", "min_level", "max_level", "open_mdp_dir", "chartgate_dir"];
+const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "activation_checkpointing", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience", "reviewed_reference_policy", "auto_quality_policy", "difficulty_source", "min_level", "max_level", "open_mdp_dir", "chartgate_dir", "batch_layout", "local_audio_block_beats", "attention_projection_packing", "decoder_flash_attention"];
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -21,7 +21,7 @@ function composerV2TrainingPayload(options={}) {
     quality_enabled:checkedOrDefault('#v2TrainQualityEnabled',true),
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
-  const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir"]);
+  const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir","batch_layout","local_audio_block_beats","attention_projection_packing","decoder_flash_attention"]);
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -30,13 +30,14 @@ function composerV2TrainingPayload(options={}) {
   // validation source, including when talking to an older running server.
   if(payload.validation_source && payload.validation_source!=='auto')delete payload.holdout_fraction;
   if (payload.mode==='resume') {
+    delete payload.local_audio_block_beats;
     delete payload.difficulty_source;
     delete payload.min_level;
     delete payload.max_level;
     delete payload.open_mdp_dir;
     delete payload.chartgate_dir;
   } else {
-    payload.difficulty_slots=[4,5,6].filter(slot=>checkedOrDefault('#v2TrainDifficultySlot'+slot,true));
+    payload.difficulty_slots=[4,5,6].filter(slot=>checkedOrDefault('#v2TrainDifficultySlot'+slot,slot!==4));
     if (['fitted','chartgate'].includes(payload.difficulty_source)) {
       payload.min_declared_level=Number(valueOrDefault('#v2TrainMinDeclaredLevel','1'));
     }
@@ -143,10 +144,9 @@ async function startV2AutoQualityAudit(overrideOptions={}) {
     const limit=overrideOptions && Number.isInteger(overrideOptions.limitCharts)
       ?overrideOptions.limitCharts
       :v2NumericValue(valueOrDefault('#v2AutoQualityLimit','0'),'质检张数',{min:0,integer:true});
-    const highlightNode=element('#v2AutoQualityHighlightMode');
     const handFlowNode=element('#v2AutoQualityHandFlowQuantile');
     const handFlowQuantile=handFlowNode && String(handFlowNode.value??'').trim()!==''
-      ?v2NumericValue(handFlowNode.value,'手顺异常软降权比例',{min:0,max:0.25}):null;
+      ?v2NumericValue(handFlowNode.value,'手顺降权分位门槛',{min:0,max:0.25}):0;
     const extraNumeric=[
       ['tap_on_slide_ms','#v2AutoQualityTailMs','撞尾判定窗口',{min:0,max:250}],
       ['touch_cohold_radius','#v2AutoQualityTouchRadius','Touch 同手兼顾半径',{min:60,max:260}],
@@ -169,11 +169,11 @@ async function startV2AutoQualityAudit(overrideOptions={}) {
       const node=element(selector);
       if(node && String(node.value??'').trim()!=='')extraPayload[key]=String(node.value).trim();
     }
+    if(element('#v2TrainDifficultySlot4')?.checked===true)extraPayload.min_difficulty_index=4;
     const payload={model_family:'chart_composer_v2',...source.payload,limit_charts:limit,
       tap_on_slide_mode:valueOrDefault('#v2AutoQualityTailMode','mask_hard'),
-      ...extraPayload};
-    if(highlightNode)payload.highlight_good_mode=highlightNode.value||'auto';
-    if(handFlowQuantile!==null)payload.experimental_hand_flow_quantile=handFlowQuantile;
+      ...extraPayload, highlight_good_mode:element('#v2AutoQualityHighlightMode')?.value || 'off',
+      experimental_hand_flow_quantile:handFlowQuantile};
     const backend=await api('/api/status');
     if(!backend.training_capabilities?.composer_v2_auto_quality_audit)throw new Error('自动质检任务需要新版后台，请在当前任务结束后重启 WebUI。');
     setAuditStatus(`正在提交「${source.label}」的体检…`);
@@ -185,6 +185,7 @@ async function startV2AutoQualityAudit(overrideOptions={}) {
         ?`「${source.label}」${limit?'抽查预览':'自动质检'}完成，检查 ${report.audited_charts} 张。报告 ${report.report_path}`
         :(task.error||task.message||'任务已结束');
       setAuditStatus(summaryText);
+      if (report && !limit) invalidateTrainingSourcePreview();
       if(report) finishAutoAudit(panel, source, report, limit?'preview':'formal');
     },task=>{
       const progress=task.result?.composer_v2_auto_quality_progress;
@@ -387,9 +388,10 @@ async function initializeV2Chartgate() {
   }
 }
 
-function applyComposerV2Inspection(data) {
+function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   if(!data?.valid)return;
   const saved={...(data.args||{}),...(data.model_config||{})};
+  saved.batch_layout ??= 'auto';
   saved.onset_readout=data.model_config?.onset_readout_policy||'off';
   saved.rhythm_structure=data.model_config?.structure_policy||'off';
   saved.intensity_curve=data.model_config?.intensity_policy||'off';
@@ -421,11 +423,13 @@ function applyComposerV2Inspection(data) {
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   if(currentTrainingMode()==='resume' && element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=saved.quality_enabled!==false;
   for(const key of COMPOSER_V2_FIELDS) {
-    if (['cuda_memory_budget_gb', 'audio_cache_gb', 'activation_checkpointing'].includes(key)) continue;
+    if (['cuda_memory_budget_gb', 'audio_cache_gb', 'activation_checkpointing', 'attention_projection_packing', 'decoder_flash_attention'].includes(key)) continue;
+    if (preserveEditableBatch && ['batch_size','grad_accumulation','batch_layout'].includes(key)
+        && element("#"+v2FieldId(key))?.dataset.batchEdited==='1') continue;
     const node=element("#"+v2FieldId(key));
     if(node && Object.prototype.hasOwnProperty.call(saved,key) && (currentTrainingMode()==="resume" || ["d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","refresh_events"].includes(key)))node.value=saved[key]==null?'':String(saved[key]);
   }
-  updateV2DifficultyControls();
+  if(typeof updateV2DifficultyControls==='function')updateV2DifficultyControls();
 }
 
 function trainingMetricNumber(values, key) {
@@ -1647,7 +1651,7 @@ let songFormCurveSourceBeforeRestriction = null;
 let songFormCurveModeBeforeRestriction = null;
 let songFormCurveRestrictionsActive = false;
 let intensityCurveState = { path: "", hash: "", profile: null, automatic: null, history: [], taskId: null, timer: null, dragging: -1, saved: false, contextStale: false, conditionChanged: false };
-const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", autoFilter: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0 };
+const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, folderTotal: 0, query: "", label: "", autoFilter: "", annotationPath: "", annotationManifest: "", summary: null, selected: new Set(), editedWeights: new Map(), selectionRequest: 0, selectionLoading: false, saving: false, detail: null, regions: [], correctedPath: "", catalogRequest: 0, detailRequest: 0, catalogLoading: false, catalogError: "", bulkSelection: false };
 // Dataset selection is intentionally separate from qualityState: selected
 // sources feed training, while activeDataset is the source currently being
 // browsed/annotated. This prevents a merged training manifest from hiding the
@@ -1789,6 +1793,7 @@ function collectSettings() {
   values.__eventSetLearningDefaults = 2;
   values.__composerV2ReleaseDefaults = 1;
   values.__composerV2PhraseMusicDefaults = 1;
+  values.__composerV2AuditDefaults = 1;
   if (v2TrainPlanBeforeSmoke) values.__v2TrainPlanBeforeSmoke = v2TrainPlanBeforeSmoke;
   return values;
 }
@@ -1896,6 +1901,25 @@ function restoreSettings() {
   if(typeof migrateComposerV2ReleaseDefaults==="function" && migrateComposerV2ReleaseDefaults(values)) {
     try { localStorage.setItem(settingsStorageKey,JSON.stringify(saved)); } catch (_) {}
     restoredSettingNotice='Composer v2 已更新默认：先定节奏，再比较配置；提前试写4拍，每次保留前2拍。新训练采用4层音频编码及全曲音乐上下文，续训沿用检查点设置。';
+  }
+  if (values.__composerV2AuditDefaults !== 1) {
+    // Old settings stored untouched audit controls alongside intentional edits.
+    if (values.v2AutoQualityHighlightMode === "auto") {
+      values.v2AutoQualityHighlightMode = "off";
+      if (Number(values.v2AutoQualityHandFlowQuantile) === 0.05) {
+        values.v2AutoQualityHandFlowQuantile = "0";
+        restoredSettingNotice ||= "自动体检的默认优选提权和手顺分位降权已关闭。可在体检细则中按需开启。";
+      }
+    }
+    values.__composerV2AuditDefaults = 1;
+    try { localStorage.setItem(settingsStorageKey, JSON.stringify(saved)); } catch (_) {}
+  }
+  if (values.__composerV2MasterSlotsDefault !== 1) {
+    if (values.trainingMode !== "resume") {
+      values.v2TrainDifficultySlot4 = false;
+    }
+    values.__composerV2MasterSlotsDefault = 1;
+    try { localStorage.setItem(settingsStorageKey, JSON.stringify(saved)); } catch (_) {}
   }
   migrateSongFormQualityDefaults(values);
   migrateEventSetLearningDefaults(values);
@@ -3791,7 +3815,7 @@ function updateDatasetButtons() {
 
 function updateTrainingControls() {
   const v2Resume=currentModelFamily()==="chart_composer_v2" && currentTrainingMode()==="resume";
-  const smokePreset = element('#v2TrainSmokePreset');
+  const smokePreset = element("#v2TrainSmokePreset");
   if (smokePreset) {
     smokePreset.disabled = v2Resume;
     smokePreset.title = v2Resume ? '严格续训沿用检查点训练计划。新建训练或微调时可选短跑。' : '';
@@ -3804,11 +3828,17 @@ function updateTrainingControls() {
   const v2Fixed=new Set(['song_layers','d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
   for(const key of (typeof COMPOSER_V2_FIELDS!=="undefined"?COMPOSER_V2_FIELDS:[])){
     const node=element("#"+v2FieldId(key));if(node){
-      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing'].includes(key);
+      const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing','batch_size','grad_accumulation','batch_layout','attention_projection_packing','decoder_flash_attention'].includes(key);
       node.disabled=(v2Resume && !resourceBudget) || (currentModelFamily()==='chart_composer_v2' && currentTrainingMode()==='finetune' && v2Fixed.has(key));
       node.title=node.disabled?'继承 checkpoint 的固定设置；模型合同变化需要从头训练。':'';
     }
   }
+  const v2LocalAudio=element('#v2TrainLocalAudioBlockBeats');
+  if (v2LocalAudio && v2Resume) v2LocalAudio.title='断点续训沿用检查点。可以在新目录微调时改为相邻两拍共享。';
+  const v2LocalAudioHelp=element('#v2TrainLocalAudioBlockHelp');
+  if(v2LocalAudioHelp) v2LocalAudioHelp.textContent=v2Resume
+    ? '沿用检查点的编码方式。'
+    : '共享可加快训练，拍内起音仍逐拍计算。更改此项请在新目录微调。';
   const autoQuality=element('#v2TrainAutoQualityPolicy');
   if (autoQuality) autoQuality.disabled=v2Resume || !checkedOrDefault('#v2TrainQualityEnabled',true);
   updateV2DifficultyControls();
@@ -4560,11 +4590,13 @@ function datasetCardHtml(item) {
   const active = item.path === datasetWorkspaceState.activePath || item.manifest === datasetWorkspaceState.activePath;
   const charts = item.chart_count ?? item.charts ?? item.difficulty_count ?? "?";
   const preprocessAction = item.prepared ? "" : `<button class="small-button dataset-card-preprocess" type="button" data-dataset-path="${escapeHtml(item.path || "") }">去训练页预处理</button>`;
-  const errorMessage = item.error ? `<p class="inline-status warn">这个来源读取失败：${escapeHtml(String(item.error))}。请检查路径或文件后刷新。</p>` : "";
+  const errorMessage = item.error ? `<p class="inline-status warn">${escapeHtml(String(item.error))}。检查路径或文件后可刷新。</p>` : "";
+  const audit = item.audit_summary ? materialAuditLines(item.audit_summary).map(line => `<p>${escapeHtml(line)}</p>`).join("") : "";
   return `<article class="dataset-card${active ? " active" : ""}" data-dataset-path="${escapeHtml(item.path || "")}" data-dataset-manifest="${escapeHtml(item.manifest || "")}">
-    <label class="dataset-card-check"><input class="dataset-select-checkbox" type="checkbox" data-dataset-key="${escapeHtml(key)}" ${checked ? "checked" : ""}> <strong>用于下次训练</strong></label>
+    <label class="dataset-card-check"><input class="dataset-select-checkbox" type="checkbox" data-dataset-key="${escapeHtml(key)}" ${checked ? "checked" : ""} ${item.error ? "disabled" : ""}> <strong>用于下次训练</strong></label>
     <button class="dataset-card-open" type="button" data-dataset-path="${escapeHtml(item.path || "")}"><strong>${escapeHtml(item.name || "未命名数据集")}</strong></button>
     <div class="dataset-card-meta">${item.prepared ? "已预处理" : "待预处理"} · 谱面 ${escapeHtml(String(charts))}${item.reviewed_regions!=null?` · 已确认 ${escapeHtml(String(item.reviewed_regions))} 段`:''}</div>
+    ${audit ? `<div class="dataset-audit-state">${audit}</div>` : ""}
     <div class="dataset-card-path">${escapeHtml(item.path || item.manifest || "")}</div>${errorMessage}${preprocessAction}${globalThis.CandidatePool?.card(item)||""}
   </article>`;
 }
@@ -4580,9 +4612,12 @@ function renderDatasetWorkspace() {
     ? `本次训练来源：${selectedDatasetItems().map((item) => item.name).join(" + ")}。检查和开始训练都会使用这些勾选来源，浏览谱面不会改变选择。`
     : datasetWorkspaceState.selectionTouched ? "尚未勾选训练数据集，请到“训练素材”页选择。" : "单数据集模式：使用下方当前训练清单。";
   const preparedManifest = element("#effectiveTrainingManifest");
-  if (preparedManifest) preparedManifest.textContent = datasetWorkspaceState.prepared?.manifest
-    ? `已准备的训练清单（只读）：${datasetWorkspaceState.prepared.manifest}`
-    : "训练清单将在检查所选来源或开始训练时自动准备；当前预处理输出保持独立。";
+  if (preparedManifest) {
+    const prepared = datasetWorkspaceState.prepared;
+    const label = prepared?.preview_only ? "预计使用的合并清单" : "已准备的训练清单（只读）";
+    preparedManifest.textContent = prepared?.manifest ? `${label}：${prepared.manifest}`
+      : "检查所选来源可预览训练清单。";
+  }
   const status = element("#datasetWorkspaceStatus");
   if (status) status.textContent = datasetWorkspaceState.catalogLoading ? "正在刷新素材列表；已有卡片仍可浏览。" : datasetWorkspaceState.catalogError ? `素材列表读取失败：${datasetWorkspaceState.catalogError}。已有卡片已保留，请点击“刷新数据集”重试。` : `共发现 ${datasetWorkspaceState.items.length} 个数据集；点击卡片查看目录，勾选后用于训练。`;
   if (status && !datasetWorkspaceState.catalogLoading && !datasetWorkspaceState.catalogError && datasetWorkspaceState.catalogWarnings?.length) status.textContent += ` 部分来源读取失败：${datasetWorkspaceState.catalogWarnings.map(warning => typeof warning === "string" ? warning : `${warning.manifest || warning.path || "来源"}：${warning.error || warning.message || "读取失败"}`).join("；")}。其他来源仍可使用。`;
@@ -4616,6 +4651,7 @@ function activeDatasetItem() {
 }
 
 let datasetCatalogFlight = null;
+let datasetAuditRefreshTimer = null;
 function loadDatasetCatalog() {
   if (datasetCatalogFlight) return datasetCatalogFlight;
   datasetCatalogFlight = fetchDatasetCatalog().finally(() => { datasetCatalogFlight = null; });
@@ -4637,10 +4673,35 @@ async function fetchDatasetCatalog() {
     datasetWorkspaceState.catalogWarnings = Array.isArray(data.warnings) ? data.warnings : [];
     if (items) {
       datasetWorkspaceState.items = items.map((item) => ({ ...item, path: item.path || item.raw_root || item.root || "", manifest: item.manifest || item.manifest_path || "", manifest_hint: item.manifest || item.manifest_path || "", name: item.name || item.dataset_name || item.path || "未命名数据集" })).filter((item) => item.path || item.manifest);
-      const known = new Set(datasetWorkspaceState.items.map(datasetKey));
+      const known = new Set(datasetWorkspaceState.items.filter(item => !item.error).map(datasetKey));
       datasetWorkspaceState.selected = new Set([...datasetWorkspaceState.selected].filter((key) => known.has(key)));
       if (!activeDatasetItem()) { datasetWorkspaceState.activePath = ""; datasetWorkspaceState.view = "cards"; }
+      if (datasetAuditRefreshTimer !== null) clearTimeout(datasetAuditRefreshTimer);
+      datasetAuditRefreshTimer = null;
+      if (datasetWorkspaceState.items.some(item => [
+        item.audit_summary?.formal_task?.status, item.audit_summary?.preview_task?.status, item.candidate_pool_summary?.scan_state,
+      ].some(status => status === "queued" || status === "running"))) {
+        datasetAuditRefreshTimer = setTimeout(() => {
+          datasetAuditRefreshTimer = null;
+          if (document.body.dataset.workspace === "quality") void loadDatasetCatalog();
+        }, 2500);
+      }
       renderDatasetWorkspace();
+      if (datasetWorkspaceState.view === "cards" && materialsWorkflowSupported()) {
+        const manifests = datasetWorkspaceState.items.filter(item =>
+          item.audit_summary?.report?.reported_prompts || item.audit_summary?.preview_report?.reported_prompts
+        ).map(item => item.manifest);
+        if (manifests.length) {
+          void api("/api/composer-v2/auto_quality_status", {manifests, auto_scope:"auto", sources_only:true}).then(status => {
+            if (request !== datasetWorkspaceState.catalogRequest) return;
+            for (const row of status.sources || []) {
+              const item = datasetWorkspaceState.items.find(candidate => sameAuditManifest(candidate.manifest, row.manifest));
+              if (item) item.audit_summary = row;
+            }
+            if (datasetWorkspaceState.view === "cards") renderDatasetWorkspace();
+          }).catch(() => {});
+        }
+      }
     }
   } catch (error) {
     if (request === datasetWorkspaceState.catalogRequest) datasetWorkspaceState.catalogError = error.message || String(error);
@@ -4770,6 +4831,7 @@ async function openDataset(item, { autoScope = null, autoFilter = '' } = {}) {
   datasetWorkspaceState.auditCatalogItem = item.auditReadOnly ? item : null;
   if (!item.auditReadOnly) datasetWorkspaceState.activePath = item.path || item.manifest || "";
   qualityState.autoScope = autoScope;
+  qualityState.effectiveAutoScope = autoScope;
   qualityState.autoFilter = autoFilter;
   if (element('#qualityAutoFilter')) element('#qualityAutoFilter').value = autoFilter;
   globalThis.CandidatePool?.activate(item);
@@ -4779,6 +4841,9 @@ async function openDataset(item, { autoScope = null, autoFilter = '' } = {}) {
   saveDatasetWorkspace();
   qualityState.catalogRequest += 1;
   qualityState.detailRequest += 1;
+  qualityState.catalogLoading = true;
+  qualityState.catalogError = "";
+  qualityState.bulkSelection = false;
   qualityState.previewLoading=false;
   qualityState.previewError='';
   qualityState.items = []; qualityState.page = 1; qualityState.pages = 1; qualityState.total = 0;
@@ -4803,6 +4868,7 @@ function showDatasetCards() {
   qualityState.detailRequest += 1;
   qualityState.previewLoading=false;
   renderDatasetWorkspace();
+  void loadDatasetCatalog();
   void refreshAutoQualityAuditStatus("quality");
 }
 
@@ -4835,6 +4901,7 @@ function selectDataset(data) {
 function invalidateDatasetStatus(message) {
   datasetVersion += 1;
   manifestRequest += 1;
+  invalidateTrainingSourcePreview();
   invalidateCheckpointInspection("数据路径或 manifest 已变化，请重新检查 checkpoint。");
   setManifestStatus(message, "warn");
   saveSettings();
@@ -4919,7 +4986,7 @@ async function startPreprocess() {
       if (task.status === "completed") {
         setManifestStatus("预处理完成，正在检查训练集状态...", "good");
         await loadStatus();
-        await inspectManifest();
+        await inspectManifest({ preview: false });
       } else {
         setManifestStatus(`预处理${task.status === "cancelled" ? "已中断" : "失败"}：${task.error || ""}`, "warn");
       }
@@ -4962,25 +5029,256 @@ function renderProcessingErrors(errors) {
   box.appendChild(list);
 }
 
-async function inspectManifest() {
+let trainingSourcePreview = null;
+const TRAINING_PREVIEW_KINDS = {
+  included: "实际纳入训练（含权重）",
+  held_out: "槽位／定数过滤与验证留出",
+  excluded: "质量整谱排除",
+  context: "上下文或单项屏蔽片段",
+  restored: "跨库重新纳入",
+  uncertain: "待确认",
+};
+
+function trainingSourcePreviewOptions() {
+  if (currentModelFamily() !== "chart_composer_v2") return null;
+  const payload = composerV2TrainingPayload();
+  const keys = ["mode", "quality_enabled", "auto_quality_policy", "difficulty_source", "min_level", "max_level",
+    "min_declared_level", "difficulty_slots", "limit_charts", "cache_dir", "init_checkpoint",
+    "validation_source", "validation_manifest", "holdout_fraction", "seed", "open_mdp_dir", "chartgate_dir"];
+  return Object.fromEntries(keys.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
+}
+
+function trainingSourcePreviewKey() {
+  return JSON.stringify([trainingSourcePaths(), selectedTrainingManifests(), trainingSourcePreviewOptions()]);
+}
+
+function setTrainingSourcePreviewStatus(message, kind = "") {
+  const panel = element("#trainingSourcePreview");
+  if (!panel) return;
+  panel.hidden = !message;
+  const status = element("#trainingSourcePreviewStatus");
+  status.className = `inline-status ${kind}`;
+  status.textContent = message;
+  element("#trainingSourcePreviewResults").hidden = true;
+}
+
+function invalidateTrainingSourcePreview(force = true) {
+  if (!trainingSourcePreview) return;
+  if (!force && trainingSourcePreview.key === trainingSourcePreviewKey()) return;
+  trainingSourcePreview = null;
+  manifestRequest += 1;
+  if (datasetWorkspaceState.prepared?.preview_only) {
+    datasetWorkspaceState.prepared = null;
+    renderDatasetWorkspace();
+  }
+  setTrainingSourcePreviewStatus("来源、标注或训练设置已变化，请重新检查。", "warn");
+}
+
+function renderTrainingSourcePreviewOverview(data, sourceNames) {
+  const box = element("#trainingSourcePreviewOverview");
+  if (!box) return;
+  const inc = data.inclusion_summary;
+  if (!inc) {
+    box.innerHTML = "";
+    box.hidden = true;
+    return;
+  }
+  box.hidden = false;
+  const slotNamesMap = { "4": "EXPERT", "5": "MASTER", "6": "Re:MASTER" };
+  const slotParts = Object.entries(inc.by_slot || {})
+    .map(([slot, count]) => `${slotNamesMap[slot] || "槽 " + slot} ${count} 张`)
+    .join(" · ") || "暂无入训谱面";
+  const tiers = inc.by_weight_tier || {};
+  const tierParts = [
+    tiers.boosted ? `加权精品(>1×) ${tiers.boosted}` : "",
+    tiers.standard_full ? `标准整谱(1×) ${tiers.standard_full}` : "",
+    tiers.partial_or_masked ? `局部入训/屏蔽 ${tiers.partial_or_masked}` : "",
+    tiers.downweighted ? `降权(<1×) ${tiers.downweighted}` : "",
+  ].filter(Boolean).join(" · ") || "无";
+  const heldReasons = inc.held_out_by_reason || {};
+  const slotDropped = (heldReasons.difficulty_slot_excluded || 0) + (heldReasons.difficulty_slot_unsupported || 0) + (heldReasons.non_training_slot || 0);
+  const lvlDropped = (heldReasons.declared_level_out_of_range || 0) + (heldReasons.declared_level_below_minimum || 0) + (heldReasons.invalid_declared_level || 0) + (heldReasons.fitted_level_out_of_range || 0);
+  const valHeld = heldReasons.validation_holdout || 0;
+  const enabledSlots = Array.isArray(inc.slot_names) && inc.slot_names.length ? inc.slot_names.join(" + ") : "MASTER + Re:MASTER";
+  const lvlRange = Array.isArray(inc.level_range) ? `${inc.level_range[0]}–${inc.level_range[1]}` : "12–15";
+
+  const sourceRows = (inc.by_source || []).map(src => {
+    const pct = (Number(src.weight_share || 0) * 100).toFixed(1) + "%";
+    const tierNote = [
+      src.boosted_charts ? `加权 ${src.boosted_charts}` : "",
+      src.standard_charts ? `整谱 ${src.standard_charts}` : "",
+      src.masked_charts ? `局部/屏蔽 ${src.masked_charts}` : "",
+      src.downweighted_charts ? `降权 ${src.downweighted_charts}` : "",
+    ].filter(Boolean).join(" · ") || "—";
+    return `<tr><td><strong>${escapeHtml(src.source || "来源")}</strong></td><td><strong>${src.included_charts ?? 0}</strong> 张</td><td><strong>${escapeHtml(String(src.weight_sum ?? 0))}</strong>（${pct}）</td><td>${escapeHtml(String(src.avg_weight ?? 0))}×</td><td>${escapeHtml(tierNote)}</td><td class="muted">排除 ${src.excluded_charts ?? 0} · 过滤/留出 ${src.held_out_charts ?? 0}</td></tr>`;
+  }).join("");
+
+  box.innerHTML = `<div class="training-preview-metrics">`
+    + `<div class="training-preview-metric"><strong>${inc.total_included_charts ?? 0} 张</strong><span>本次实际纳入训练</span><small>总权重份额 ${inc.total_weight_sum ?? 0}</small></div>`
+    + `<div class="training-preview-metric"><strong>${escapeHtml(enabledSlots)}</strong><span>启用难度槽位（定数 ${escapeHtml(lvlRange)}）</span><small>${escapeHtml(slotParts)}</small></div>`
+    + `<div class="training-preview-metric"><strong>权重分布</strong><span>各档位入训张数</span><small>${escapeHtml(tierParts)}</small></div>`
+    + `<div class="training-preview-metric"><strong>过滤与验证留出</strong><span>不进入训练梯度</span><small>槽位过滤 ${slotDropped} · 定数过滤 ${lvlDropped} · 验证留出 ${valHeld}</small></div>`
+    + `</div>`
+    + (sourceRows
+      ? `<div class="quality-table-wrap"><table class="quality-table"><thead><tr><th>训练来源数据集</th><th>实际入训</th><th>权重总和（占比）</th><th>平均权重</th><th>权重结构</th><th>排除与留出</th></tr></thead><tbody>${sourceRows}</tbody></table></div>`
+      : "");
+}
+
+function renderTrainingSourcePreview(data, key, sourceNames) {
+  const kinds = element("#trainingSourcePreviewKind");
+  if (!kinds) return;
+  trainingSourcePreview = {key, data, sourceNames, page:1};
+  kinds.replaceChildren();
+  for (const [kind, label] of Object.entries(TRAINING_PREVIEW_KINDS)) {
+    const option = document.createElement("option");
+    option.value = kind;
+    option.textContent = `${label} ${data[kind]?.length || 0}`;
+    kinds.append(option);
+  }
+  kinds.value = data.included?.length
+    ? "included"
+    : (Object.keys(TRAINING_PREVIEW_KINDS).find(kind => data[kind]?.length) || "excluded");
+  element("#trainingSourcePreviewSearch").value = "";
+  renderTrainingSourcePreviewOverview(data, sourceNames);
+  const includedCount = data.included?.length ?? data.retained_charts ?? 0;
+  const excluded = data.excluded?.length || 0, context = data.context?.length || 0;
+  const restored = data.restored?.length || 0, uncertain = data.uncertain?.length || 0;
+  const summary = [
+    `实际纳入训练 ${includedCount} 张`,
+    `整谱排除 ${excluded} 张`, `上下文或单项屏蔽 ${context} 段`, `重新纳入 ${restored} 项`,
+    `待确认 ${uncertain} 项`, `手动质量标注${data.quality_enabled ? "启用" : "关闭"}`,
+    `正式自动体检标注${data.auto_quality_enabled ? "采用" : "未采用"}`,
+    data.held_out_charts ? `划分中留出或过滤 ${data.held_out_charts} 张` : "",
+  ].filter(Boolean);
+  setTrainingSourcePreviewStatus(summary.join(" · "), restored || uncertain || !data.quality_enabled ? "warn" : "good");
+  const messages = [...(data.notes || [])];
+  if (!restored && !uncertain) messages.unshift("本次勾选未发现被重新纳入的谱面或片段。");
+  const notes = messages.map(text => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    return item;
+  });
+  element("#trainingSourcePreviewNotes").replaceChildren(...notes);
+  element("#trainingSourcePreviewResults").hidden = false;
+  renderTrainingSourcePreviewPage();
+}
+
+function renderTrainingSourcePreviewPage(reset = false) {
+  const state = trainingSourcePreview;
+  if (!state?.data) return;
+  if (reset) state.page = 1;
+  const kind = element("#trainingSourcePreviewKind").value;
+  const q = element("#trainingSourcePreviewSearch").value.trim().toLowerCase();
+  const displaySource = row => state.sourceNames.get(row.manifest) || row.source || row.manifest;
+  const rows = (state.data[kind] || []).filter(row => !q || [row.title, row.path, displaySource(row), row.level, row.slot, row.slot_name, row.weight_summary, row.label, row.reason,
+    ...(row.suppliers || []).flatMap(supplier => [displaySource(supplier), supplier.title, supplier.path])].join(" ").toLowerCase().includes(q));
+  const size = 30, pages = Math.max(1, Math.ceil(rows.length / size));
+  state.page = Math.min(state.page, pages);
+  const sec = value => Number(value).toFixed(3).replace(/\.?0+$/, "");
+  const range = (a, b) => b == null ? `${sec(a)} 秒至谱末` : `${sec(a)}–${sec(b)} 秒`;
+  const reasonText = {
+    manual_exclusion:"人工整谱排除", automatic_exclusion:"正式体检整谱排除", candidate_not_approved:"候选／示范来源无有效学习确认",
+    source_restriction:"来源质量限制", existing_exact_chart:"候选初筛排除的重复谱",
+    duplicate_source_chart:"候选初筛排除的重复谱槽位", reviewed_not_approved_or_stale:"示范标注缺失或失效",
+    missing_asset:"谱面或音频缺失", missing_source:"原始来源清单缺失", missing_review:"确认记录缺失或失效", missing_score:"估分缓存缺失或不可读取",
+    parse_failed:"谱面解析未通过",
+    identity_unverified:"无法确认副本的音频身份", possible_restoration:"存在可能重新纳入的副本，仍待核验",
+    stale_quality_annotation:"谱面或音频版本变化，原限制已失效", quality_audio_changed:"音频版本变化，原限制已失效",
+    quality_excluded:"质量权重为零或已标记排除", scan_excluded:"候选初筛排除",
+    difficulty_slot_excluded:"未勾选该难度槽位（如 EXPERT 默认不入训）",
+    difficulty_slot_unsupported:"当前拟合定数器仅支持 MASTER / Re:MASTER",
+    non_training_slot:"非常规难度槽位（BASIC / ADVANCED / UTAGE 不入训）",
+    declared_level_out_of_range:"标称定数超出本次训练定数范围",
+    declared_level_below_minimum:"标称定数低于最低标称门槛",
+    invalid_declared_level:"标称定数缺失或无法解析",
+    fitted_level_out_of_range:"拟合定数超出本次训练定数范围",
+    validation_holdout:"自动划分至验证／终测留出集（不参与梯度更新）",
+    auto_screen_clean:"大数据自动筛选：干净整谱放行",
+    auto_segment_muri_mask:"大数据自动筛选：局部屏蔽硬无理后入训",
+  };
+  function effect(row) {
+    if (kind === "included") {
+      const badgeCls = row.weight_tier === "boosted" ? "boosted" : row.weight_tier === "partial_or_masked" || row.weight_tier === "downweighted" ? "masked" : "included";
+      const reasonDesc = row.reason ? (reasonText[row.reason] || row.reason) : "";
+      const fittedNote = row.fitted_level != null ? ` · 拟合 ${row.fitted_level}` : "";
+      return `<span class="training-effect-badge ${badgeCls}">${escapeHtml(row.weight_summary || (row.effective_weight + "×"))}</span>`
+        + `<small class="muted">标签：${escapeHtml(qualityLabelText(row.label))}${fittedNote}${reasonDesc ? ` · ${escapeHtml(reasonDesc)}` : ""}</small>`;
+    }
+    if (kind === "held_out") {
+      const reasonDesc = reasonText[row.reason] || row.reason || "已留出或过滤";
+      const fittedNote = row.fitted_level != null ? `（拟合 ${row.fitted_level}）` : "";
+      return `<span class="training-effect-badge excluded">0× 不入训</span><small class="muted">${escapeHtml(reasonDesc + fittedNote)}</small>`;
+    }
+    const restoredNote = row.also_restored ? "。另有来源重新纳入，详见「跨库重新纳入」。" : "";
+    if (kind === "context") {
+      const t = row.timing_weight, c = row.configuration_weight;
+      const mask = t === 0 && c === 0 ? "只作上下文" : t === 0 ? "采音屏蔽" : "配置屏蔽";
+      return escapeHtml(`${range(row.start_sec, row.end_sec)} · 采音 ${t}× / 配置 ${c}× · ${mask}${restoredNote}`);
+    }
+    if (kind !== "restored") {
+      const reason = reasonText[row.reason] || row.reason;
+      return escapeHtml(reason + restoredNote);
+    }
+    const reason = row.reason === "quality_disabled" ? "质量标注关闭，原限制未生效" : reasonText[row.original_reason];
+    return `${reason ? `<small class="muted">${escapeHtml(reason)}</small>` : ""}${row.suppliers.map(other => {
+      const learns = other.learns.map(part => part === "timing" ? "采音" : "配置").join("、");
+      return `<p><strong>${escapeHtml(displaySource(other))}</strong> · ${escapeHtml(range(other.start_sec, other.end_sec))} · ${learns}重新参与监督<br><small class="muted">${escapeHtml(other.path)} · 槽位 ${other.slot} · ${other.same_file ? "同一谱面文件" : "相同谱面内容与音频"}</small></p>`;
+    }).join("")}`;
+  }
+  element("#trainingSourcePreviewRows").innerHTML = rows.slice((state.page - 1) * size, state.page * size).map(row => {
+    const slotText = row.slot_name || (row.slot == null ? "" : `槽位 ${row.slot}`);
+    return `<tr><td><strong>${escapeHtml(row.title)}</strong><br><small class="muted">${slotText ? `${escapeHtml(slotText)}${row.level ? ` · ${escapeHtml(row.level)}` : ""}<br>` : ""}${escapeHtml(row.path)}</small></td><td>${escapeHtml(displaySource(row))}</td><td>${effect(row)}</td></tr>`;
+  }).join("") || '<tr><td colspan="3" class="muted">当前条件下没有记录。</td></tr>';
+  element("#trainingSourcePreviewPage").textContent = `第 ${state.page}/${pages} 页 · ${rows.length} 项`;
+  element("#trainingSourcePreviewPrevious").disabled = state.page <= 1;
+  element("#trainingSourcePreviewNext").disabled = state.page >= pages;
+}
+
+async function inspectManifest({ preview = true } = {}) {
   assertTrainingSelection();
-  await assertDatasetBackend();
+  const previewOptions = preview ? trainingSourcePreviewOptions() : null;
+  if (!previewOptions) await assertDatasetBackend();
   const sourcePaths = trainingSourcePaths();
   const manifest = sourcePaths.manifest;
   if (!manifest && !selectedTrainingManifests().length) throw new Error("请先选择训练数据集");
   const request = ++manifestRequest;
+  const previewKey = trainingSourcePreviewKey();
+  const sourceNames = new Map(selectedDatasetItems().map(item => [item.manifest, item.name]));
+  trainingSourcePreview = previewOptions ? {key:previewKey} : null;
+  setTrainingSourcePreviewStatus(previewOptions ? "正在核对排除、片段权重与重复来源…" : "");
   setManifestStatus("正在检查训练集...");
-  const data = await api("/api/inspect-manifest", {
-    ...sourcePaths, manifests: selectedTrainingManifests(), dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean), model_family: currentModelFamily(),
-  });
+  let data;
+  try {
+    if (previewOptions && (await api("/api/status")).training_capabilities?.composer_v2_training_source_preview !== true) {
+      throw new Error("当前 WebUI 后端尚未载入开训前预览，请在新版实例检查。");
+    }
+    if (request !== manifestRequest) return;
+    data = await api("/api/inspect-manifest", {
+      ...sourcePaths, manifests: selectedTrainingManifests(), dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean), model_family: currentModelFamily(),
+      ...(previewOptions ? {training_source_preview:previewOptions} : {}),
+    });
+  } catch (error) {
+    if (request === manifestRequest) {
+      setManifestStatus(error.message, "warn");
+      if (previewOptions) setTrainingSourcePreviewStatus(error.message, "warn");
+    }
+    throw error;
+  }
   if (request !== manifestRequest) return data;
+  if (previewOptions && previewKey !== trainingSourcePreviewKey()) {
+    invalidateTrainingSourcePreview();
+    return data;
+  }
   if (data.ready === false) {
     setManifestStatus(data.message || "训练集尚未准备好", "warn");
+    if (previewOptions) setTrainingSourcePreviewStatus(data.message || "预览尚未准备好", "warn");
     renderProcessingErrors([]);
     return data;
   }
   datasetWorkspaceState.prepared = data.dataset_selection || { manifest: data.manifest };
   renderDatasetWorkspace();
+  if (data.training_source_preview) renderTrainingSourcePreview(data.training_source_preview, previewKey, sourceNames);
+  else if (previewOptions) setTrainingSourcePreviewStatus("当前 WebUI 后端未载入开训前预览，请在新版实例检查。", "warn");
   const reasons = data.top_filter_reasons || [];
   const reasonText = reasons.length
     ? reasons.map(([reason, count]) => `${reason}=${count}`).join(", ")
@@ -5594,7 +5892,7 @@ async function inspectCheckpoint({ autoPreprocess = false, preserveEditableConfi
     if(request!==checkpointInspectRequest || key!==currentCheckpointKey())return null;
     const allowed=!!data.valid && (mode==="resume"?data.can_resume:data.can_init);
     data.valid=allowed;checkpointInspection={key,data};
-    if(allowed)applyComposerV2Inspection(data);
+    if(allowed)applyComposerV2Inspection(data,{preserveEditableBatch:preserveEditableConfig});
     setCheckpointStatus(allowed?"Composer v2 checkpoint 可用于当前训练方式":data.error||(data.errors||[]).join("；")||"检查点不支持当前训练方式",allowed?"good":"warn");
     const box=element("#checkpointDetails");if(box){box.hidden=false;box.textContent=JSON.stringify(data,null,2);}
     updateTrainingControls();return data;
@@ -5950,6 +6248,21 @@ async function submitTrain(options = {}) {
     if ((payload.activation_checkpointing ?? 'auto') !== 'auto' && backend.training_capabilities?.composer_v2_activation_checkpointing !== true) {
       throw new Error('指定训练显存优化方式需要更新后的 WebUI 后台，请重启后台后提交。');
     }
+    if ((payload.attention_projection_packing ?? 'auto') !== 'auto' && !backend.training_capabilities?.composer_v2_attention_projection_packing) {
+      throw new Error('合并注意力投影需要新版 WebUI 后台。');
+    }
+    if (payload.decoder_flash_attention==='on' && !backend.training_capabilities?.composer_v2_decoder_flash_attention) {
+      throw new Error('解码器 FlashAttention 需要新版 WebUI 后台。');
+    }
+    if ((payload.batch_layout && payload.batch_layout!=='auto') && !backend.training_capabilities?.composer_v2_full_input_batching) {
+      throw new Error('完整输入长度分组需要新版 WebUI 后台，请重启后台后提交。');
+    }
+    const parentAudioBlock=checkpointInspection?.data?.model_config?.local_audio_block_beats??1;
+    if (payload.local_audio_block_beats && payload.local_audio_block_beats!=='auto'
+        && (payload.local_audio_block_beats==='2' || (payload.mode==='finetune' && parentAudioBlock===2))
+        && !backend.training_capabilities?.composer_v2_local_audio_sharing) {
+      throw new Error('相邻两拍共享需要新版 WebUI 后台。');
+    }
     if ((payload.reviewed_reference_policy ?? 'auto') !== 'auto' && backend.training_capabilities?.composer_v2_reviewed_reference_policy !== true) {
       throw new Error('指定示范库前后呼应参考策略需要更新后的 WebUI 后台，请重启后台后提交。');
     }
@@ -6113,7 +6426,10 @@ function qualitySummaryText(summary) {
   if (typeof summary === "string") return summary;
   const counts = summary.counts || summary.labels || {};
   const parts = Object.entries(QUALITY_LABELS).map(([key, text]) => `${text} ${counts[key] ?? 0}`);
-  return `${parts.join(" · ")}\n已保存标注 ${summary.annotated ?? summary.annotation_count ?? "?"}；反例配对 ${summary.preference_pairs ?? summary.corrected_pairs ?? 0}`;
+  const unmatched = summary.unmatched_records ? ` · 另有 ${summary.unmatched_records} 条记录未匹配当前清单` : "";
+  const kinds = summary.manual_chart_charts == null ? "" : `\n单谱决定 ${summary.manual_chart_charts} · 批量赋权 ${summary.bulk_chart_charts} · 来源未记录的权重 ${summary.legacy_charts} · 片段标注 ${summary.region_charts}`;
+  const entering = summary.entering_training_charts == null ? "" : `\n默认入训预计 ${summary.entering_training_charts} 张（MASTER / Re:MASTER，12–15）${summary.expert_opt_in_charts ? ` · 另有 EXPERT 可选 ${summary.expert_opt_in_charts} 张` : ""}`;
+  return `${parts.join(" · ")}\n有匹配的标注 ${summary.annotated ?? summary.annotation_count ?? "?"}/${summary.total ?? "?"} 张 · 反例配对 ${summary.preference_pairs ?? summary.corrected_pairs ?? 0}${unmatched}${kinds}${entering}`;
 }
 
 function renderQualitySummary() {
@@ -6122,13 +6438,39 @@ function renderQualitySummary() {
 }
 
 const autoAuditViews = { quality: { request: 0 }, training: { request: 0 } };
-let completedCombinedAudit = null;
-try { completedCombinedAudit = JSON.parse(sessionStorage.getItem('maichart-last-combined-audit')); } catch (_) { /* storage unavailable */ }
+const materialsWorkflowSupported = () => globalThis.maichartLastStatus?.training_capabilities?.materials_workflow_review === true;
+
+function materialAuditLines(data) {
+  const lines = [];
+  const formal = data?.report, preview = data?.preview_report;
+  if (formal) {
+    const date = formal.created_at ? new Date(formal.created_at).toLocaleDateString("zh-CN") : "";
+    lines.push(`正式体检${data.has_annotations ? "已完成" : "有历史报告"}${date ? `（${date}）` : ""} · 已核验 ${formal.audited_charts ?? 0} · 未核验 ${formal.unverified_chart_count ?? 0}${formal.eligible_charts == null ? "" : ` · 应查 ${formal.eligible_charts} · 范围外 ${formal.out_of_scope_charts}`}`);
+    if (formal.prompt_review_summary) {
+      const review = formal.prompt_review_summary;
+      lines.push(`人工复核 ${review.resolved}/${review.total} 条 · 待复核 ${review.pending}${review.unavailable ? ` · ${review.unavailable} 条需重新体检` : ""}`);
+    } else if (formal.reported_prompts != null) {
+      lines.push(`报告有 ${formal.reported_prompts} 条复核提示 · 打开目录查看进度`);
+    }
+  } else {
+    lines.push(data?.has_annotations ? "已有正式自动标注 · 无匹配体检报告" : "尚无正式体检结果");
+  }
+  if (preview) lines.push(`抽查已核验 ${preview.audited_charts ?? 0} 张`);
+  for (const [label, task] of [["正式体检", data?.formal_task], ["抽查", data?.preview_task]]) {
+    const state = {queued: "排队中", running: "进行中", failed: "失败", cancelled: "已取消", interrupted: "已中断"}[task?.status];
+    if (state) {
+      const time = task.finished_at || task.started_at;
+      const stamp = time ? ` · ${new Date(time).toLocaleString("zh-CN")}` : "";
+      lines.push(`最近${label}${state}${stamp}${task.error ? ` · ${task.error}` : ""}`);
+    }
+  }
+  return lines;
+}
 
 function autoAuditSource(panel) {
   const item = panel === "quality" && datasetWorkspaceState.view === "catalog" ? activeDatasetItem() : null;
   if (item) {
-    return { catalog: true, readOnly: !!item.auditReadOnly, key: JSON.stringify([item.manifest]),
+    return { catalog: true, readOnly: !!item.auditReadOnly, candidate: !!item.candidate_pool, key: JSON.stringify([item.manifest]),
       label: item.name, payload: { manifest: item.manifest } };
   }
   const selected = selectedDatasetItems();
@@ -6151,16 +6493,19 @@ function updateAutoAuditTarget(panel, source = autoAuditSource(panel)) {
   if (panel === "quality") {
     const button = element('#qualityAutoAuditCard [data-run-auto-audit="full"]');
     if (button) button.textContent = source.catalog ? "体检当前数据集" : "体检所选训练集";
-    for (const action of document.querySelectorAll('#qualityAutoAuditCard [data-run-auto-audit]')) action.hidden = !!source.readOnly;
+    for (const action of document.querySelectorAll('#qualityAutoAuditCard [data-run-auto-audit]')) action.hidden = !!(source.readOnly || source.candidate);
   }
 }
 
 const AUTO_AUDIT_ISSUE_LABELS = {
-  auto_audio_misalignment: "整首音画严重错位",
+  auto_audio_misalignment: "旧体检的音画偏移判定",
+  auto_global_offset_review: "疑似整谱音画偏移",
   auto_excessive_muri: "硬伤坏段过多",
   auto_hard_muri: "硬冲突片段",
   auto_conversion_jitter: "转谱微抖动",
   auto_jack_spam: "高速同键连打",
+  auto_unquantized_timing: "疑似节奏网格偏移",
+  auto_sensor_jackhammer: "疑似高速同点连打",
   auto_local_tempo_drift: "局部对音漂移",
   auto_abandoned_gap: "高能空白",
   comfort: "手顺降权",
@@ -6181,16 +6526,33 @@ const AUTO_AUDIT_ISSUE_LABELS = {
 function renderAutoQualityAuditDashboard(data, panel, source, preferredScope) {
   const box = element(panel === "quality" ? "#qualityAutoAuditDashboard" : "#v2AutoQualityDashboard");
   if (!box) return;
-  const preview = preferredScope === "preview" ? !!data?.preview_report : !data?.report && !!data?.preview_report;
-  const report = preview ? data.preview_report : data?.report;
-  box.hidden = !report;
+  const supportsReviews = globalThis.maichartLastStatus?.training_capabilities?.materials_workflow_review === true;
+  const formal = data?.report ? data : data?.historical_formal;
+  const sample = data?.preview_report ? data : data?.historical_preview;
+  const preview = preferredScope === "preview" ? !!sample : !formal && !!sample;
+  const selected = preview ? sample : formal;
+  const report = preview ? selected?.preview_report : selected?.report;
+  const historical = Boolean(selected && selected !== data);
+  const sourceList = data?.sources?.length ? `<div class="audit-source-list">${data.sources.map(row => {
+    const name = (typeof datasetWorkspaceState !== "undefined" && datasetWorkspaceState.items.find(item => sameAuditManifest(item.manifest, row.manifest))?.name) || row.manifest;
+    const lines = row.candidate_pool ? [globalThis.CandidatePool?.scanLabel(row.candidate_pool) || "候选库自动初筛"] : materialAuditLines(row);
+    return `<p><strong>${escapeHtml(name || "")}</strong> · ${escapeHtml(lines.join(" · "))}</p>`;
+  }).join("")}</div>` : "";
+  const taskLines = data && (data.formal_task || data.preview_task) ? materialAuditLines(data).filter(line => line.startsWith("最近")) : [];
+  const taskStatus = taskLines.length ? `<p class="muted">${escapeHtml(taskLines.join(" · "))}</p>` : "";
+  const inherited = data?.inherited_auto_sources?.length ? `<p class="muted">当前组合包含继承的正式标注 · ${escapeHtml(data.inherited_auto_sources.map(path => String(path).split(/[/\\]/).at(-2) || path).join("、"))}</p>` : "";
+  box.hidden = !report && !sourceList && !taskStatus && !inherited;
   box.replaceChildren();
-  if (!report) return;
+  if (!report) {
+    box.innerHTML = taskStatus + inherited + sourceList;
+    return;
+  }
   const count = value => Math.max(0, Number(value) || 0);
+  const legacyOffsetExclusions = count(report.excluded_by_reason?.auto_audio_misalignment);
   const pillGroups = [
     ["整谱排除原因", report.excluded_by_reason, "张"],
     ["已屏蔽冲突", report.masked_conflicts_by_type, "处"],
-    ["专项问题", report.domain_pathologies_by_type, "处"],
+    [report.review_chart_count != null ? "专项复核提示" : "专项问题", report.domain_pathologies_by_type, "处"],
   ];
   const unverifiedReasons = { ...report.unverified_by_reason };
   if (!report.unverified_by_reason) {
@@ -6209,23 +6571,28 @@ function renderAutoQualityAuditDashboard(data, panel, source, preferredScope) {
   }).join("");
   const stat = (name, value, style = "") =>
     `<div class="audit-stat-chip ${style}"><span>${name}</span><strong>${value}</strong></div>`;
-  const use = preview ? "抽查预览" : data.has_annotations ? "正式标注已保存" : "只有报告，尚无匹配的正式标注";
+  const use = historical ? (preview ? "历史组合抽查" : "历史组合体检") : preview ? "抽查预览" : selected.has_annotations ? "正式体检已完成" : "只有报告，尚无匹配的正式标注";
   let adoption = "新训练与微调按训练页的采用策略读取";
-  if (preview) adoption = "供检查和试听";
+  if (historical) adoption = "当前来源版本与此报告尚未确认匹配";
+  else if (preview) adoption = "供检查和试听";
   else if (panel === 'training' && currentTrainingMode() === 'resume') adoption = "续训沿用检查点设置";
   else if (panel === 'training' && data.has_annotations && (source.payload.manifests?.length || 0) <= 1) {
     adoption = data.training_effective ? "连续事件训练可按当前设置采用" : "当前设置未采用正式标注";
   }
   const scope = preview ? "preview" : "formal";
-  const manifest = report.manifest || data.manifest || source.payload.manifest;
+  const manifest = report.manifest || selected.manifest || source.payload.manifest;
   box.dataset.auditManifest = manifest || "";
   box.dataset.auditScope = scope;
   box.dataset.auditName = source.label || manifest || "";
-  const canInspect = manifest && (preview ? data.has_preview_annotations : data.has_annotations);
+  const canInspect = manifest && (preview ? selected.has_preview_annotations : selected.has_annotations);
+  const review = report.prompt_review_summary;
+  const coverage = report.eligible_charts == null ? "" : `应查 ${report.eligible_charts} 张 · 范围外 ${report.out_of_scope_charts} 张`;
+  const savedAt = report.created_at ? new Date(report.created_at).toLocaleString("zh-CN") : "";
   box.innerHTML = `<div class="auto-audit-dashboard-head">
-    <span class="audit-mode-pill ${preview || !data.has_annotations ? "warn" : "good"}">${use}</span>
+    <span class="audit-mode-pill ${historical || preview || !selected.has_annotations ? "warn" : "good"}">${use}</span>
     <span class="muted">${adoption}</span>
-    </div><p class="muted">${escapeHtml(manifest || source.label || "")}</p>
+    </div><p class="muted">${escapeHtml([savedAt, coverage, manifest || source.label || ""].filter(Boolean).join(" · "))}</p>
+    ${taskStatus}${inherited}
     <div class="audit-stat-grid">
     ${stat("已检查谱面", `${count(report.audited_charts)} 张`)}
     ${stat("干净通过", `${count(report.clean_charts)} 张`, "clean")}
@@ -6233,16 +6600,20 @@ function renderAutoQualityAuditDashboard(data, panel, source, preferredScope) {
     ${stat("局部问题", `${count(report.partially_masked_charts)} 张${report.partially_masked_regions == null ? "" : ` · ${count(report.partially_masked_regions)} 处`}`, "warn")}
     ${stat("手顺降权", `${count(report.soft_weighted_charts)} 张 · ${count(report.soft_weighted_regions ?? report.problem_regions_by_reason?.comfort)} 处`, "amber")}
     ${stat("优选好段", `${count(report.highlighted_charts)} 张 · ${count(report.highlighted_regions)} 处`, "good")}
-    ${stat("待核对", `${count(report.unverified_chart_count)} 张`, "warn")}
-    </div>${issueHtml}
+    ${stat("检查未核验", `${count(report.unverified_chart_count)} 张`, "warn")}
+    ${count(report.audio_changed_charts) ? stat("音频已变化", `${count(report.audio_changed_charts)} 张`, "warn") : ""}
+    ${review ? stat("人工复核", `${review.resolved}/${review.total} 条 · 待复核 ${review.pending}${review.unavailable ? ` · ${review.unavailable} 条需重新体检` : ""}`, "warn")
+      : count(report.review_chart_count) ? stat("报告复核提示", `${count(report.review_chart_count)} 张`, "warn") : ""}
+    </div>${legacyOffsetExclusions ? `<p class="muted">旧体检曾因疑似音画偏移排除 ${legacyOffsetExclusions} 张。重新体检会把疑似偏移列为复核提示。已有人工整谱标注优先。</p>` : ""}${issueHtml}
     <div class="button-row compact-button-row audit-jump-row">
-    ${data.report && data.preview_report ? `<button type="button" class="small-button" data-auto-audit-switch="${preview ? "formal" : "preview"}">${preview ? "查看正式结果" : "查看抽查结果"}</button>` : ""}
+    ${formal && sample ? `<button type="button" class="small-button" data-auto-audit-switch="${preview ? "formal" : "preview"}">${preview ? "查看正式结果" : "查看抽查结果"}</button>` : ""}
     ${canInspect ? `<button type="button" class="small-button" data-auto-audit-jump="flagged">查看问题谱面</button>
       <button type="button" class="small-button" data-auto-audit-jump="good">试听优选好段</button>
       <button type="button" class="small-button" data-auto-audit-jump="excluded">查看整谱排除</button>
-      <button type="button" class="small-button" data-auto-audit-jump="unverified">查看待核对</button>
+      <button type="button" class="small-button" data-auto-audit-jump="${supportsReviews ? "pending_review" : "unverified"}">查看待复核片段</button>
+      ${supportsReviews ? `<button type="button" class="small-button" data-auto-audit-jump="coverage_issue">查看未核验谱面</button>` : ""}
       <button type="button" class="small-button" data-auto-audit-jump="">显示全部谱面</button>` : ""}
-    </div>`;
+    </div>${sourceList}`;
 }
 
 async function refreshAutoQualityAuditStatus(panel = "quality", scope) {
@@ -6260,22 +6631,25 @@ async function refreshAutoQualityAuditStatus(panel = "quality", scope) {
     setAutoAuditStatus(panel, "");
     return;
   }
-  const combined = completedCombinedAudit?.key === source.key ? completedCombinedAudit.manifest : null;
-  const selection = combined ? { manifest: combined }
-    : source.payload.manifests?.length > 1 ? { manifests: source.payload.manifests } : source.payload;
+  if (source.catalog && source.candidate) {
+    renderAutoQualityAuditDashboard(null, panel, source);
+    setAutoAuditStatus(panel, "当前为候选库，请在下方查看自动初筛和学习确认。");
+    return;
+  }
+  const selection = source.payload.manifests?.length ? { manifests: source.payload.manifests } : source.payload;
   try {
     const data = await api("/api/composer-v2/auto_quality_status", {
-      ...selection, quality_enabled: checkedOrDefault("#v2TrainQualityEnabled", true),
+      ...selection, auto_scope: view.scope || (materialsWorkflowSupported() ? "auto" : "formal"), quality_enabled: checkedOrDefault("#v2TrainQualityEnabled", true),
       mode: currentTrainingMode(),
       auto_quality_policy: valueOrDefault("#v2TrainAutoQualityPolicy", "auto"),
     });
     if (request !== view.request || source.key !== autoAuditSource(panel).key) return;
     renderAutoQualityAuditDashboard(data, panel, source, view.scope);
     if (!element("#v2AutoQualityAuditButton")?.disabled) {
-      const message = data.report || data.preview_report ? ""
+      const message = data.report || data.preview_report || data.historical_formal || data.historical_preview ? ""
         : data.has_annotations ? "已找到正式标注，当前没有对应的统计报告。"
         : source.payload.manifests?.length > 1
-          ? "可体检这组训练来源，也可打开单个库查看它的报告。"
+          ? "此组合尚无体检结果，可以先查看各来源状态。"
           : "这里还没有体检报告。";
       setAutoAuditStatus(panel, message);
     }
@@ -6288,10 +6662,7 @@ async function refreshAutoQualityAuditStatus(panel = "quality", scope) {
 }
 
 function finishAutoAudit(panel, source, report, scope) {
-  if (source.payload.manifests?.length > 1 && report.manifest) {
-    completedCombinedAudit = { key: source.key, manifest: report.manifest };
-    try { sessionStorage.setItem('maichart-last-combined-audit', JSON.stringify(completedCombinedAudit)); } catch (_) { /* storage unavailable */ }
-  }
+  if (typeof loadDatasetCatalog === "function") void loadDatasetCatalog();
   if (source.key !== autoAuditSource(panel).key) return;
   if (panel === "quality" && source.catalog) {
     void changeCatalogAuditScope(scope).catch(error => setAutoAuditStatus(panel, error.message));
@@ -6305,6 +6676,7 @@ async function changeCatalogAuditScope(scope) {
   const chartId = qualityState.detail?.chart_id;
   const request = ++qualityState.detailRequest;
   qualityState.autoScope = scope;
+  qualityState.effectiveAutoScope = scope;
   qualityState.previewLoading = false;
   await loadQualityCatalog(true);
   if (chartId && request === qualityState.detailRequest && manifest === qualityManifest()
@@ -6353,30 +6725,20 @@ function applyAutoQualityPreset(presetName) {
         v2AutoQualityLimit: 0, v2AutoQualityTailMode: "mask_hard", v2AutoQualityTailMs: 200,
         v2AutoQualityInnerMuriMode: "allow", v2AutoQualityTouchPolicy: "palm_span_v1", v2AutoQualityTouchRadius: 180,
         v2AutoQualityDomainMode: "maimai_dx_v1", v2AutoQualityAcousticMode: "auto",
-        v2AutoQualityHighlightMode: "auto", v2AutoQualityGoodQuantile: 0.82,
-        v2AutoQualityMaxProblemFraction: 0.45, v2AutoQualityHandFlowQuantile: 0.05,
+        v2AutoQualityHighlightMode: "off", v2AutoQualityGoodQuantile: 0.82,
+        v2AutoQualityMaxProblemFraction: 0.45, v2AutoQualityHandFlowQuantile: 0,
       },
-      note: "已套用「标准清洗＋优选好段（推荐）」：屏蔽硬无理与音画错位，轻降权 5% 别扭手顺，提权前 18% 精品乐句。点击「一键自动体检所选训练集」即可开始。",
+      note: "已套用「标准体检」：处理硬冲突与严重整谱错位，记录专项复核提示。优选提权与手顺分位降权已关闭。",
     },
     strict: {
       values: {
         v2AutoQualityLimit: 0, v2AutoQualityTailMode: "mask_all", v2AutoQualityTailMs: 220,
         v2AutoQualityInnerMuriMode: "mask_hard", v2AutoQualityTouchPolicy: "palm_span_v1", v2AutoQualityTouchRadius: 165,
         v2AutoQualityDomainMode: "maimai_dx_v1", v2AutoQualityAcousticMode: "auto",
-        v2AutoQualityHighlightMode: "acoustic_and_flow_v1", v2AutoQualityGoodQuantile: 0.86,
-        v2AutoQualityMaxProblemFraction: 0.35, v2AutoQualityHandFlowQuantile: 0.10,
-      },
-      note: "已套用「严格排错（适合杂乱自制谱合集）」：连同撞尾警告与内屏硬无理一并屏蔽，问题超 35% 整张排除，好段必须声学与手顺双达标。",
-    },
-    conservative: {
-      values: {
-        v2AutoQualityLimit: 0, v2AutoQualityTailMode: "mask_hard", v2AutoQualityTailMs: 200,
-        v2AutoQualityInnerMuriMode: "allow", v2AutoQualityTouchPolicy: "palm_span_v1", v2AutoQualityTouchRadius: 180,
-        v2AutoQualityDomainMode: "maimai_dx_v1", v2AutoQualityAcousticMode: "auto",
         v2AutoQualityHighlightMode: "off", v2AutoQualityGoodQuantile: 0.82,
-        v2AutoQualityMaxProblemFraction: 0.45, v2AutoQualityHandFlowQuantile: 0,
+        v2AutoQualityMaxProblemFraction: 0.35, v2AutoQualityHandFlowQuantile: 0,
       },
-      note: "已套用「仅排错不提权（保守清洗）」：只屏蔽硬无理、转谱顽疾与音画错位片段，不额外放大任何段落权重。",
+      note: "已套用「严格排错」：连同撞尾警告与内屏硬冲突一并屏蔽，问题时长超过 35% 时排除整谱。",
     },
   };
   const chosen = presets[presetName];
@@ -6511,12 +6873,19 @@ function qualityRowHtml(item, readOnly = false) {
   const difficulty = item.level !== undefined ? `${item.level} · ${item.difficulty_index ?? ""}` : (item.difficulty_index ?? "");
   const selectedId = String(item.chart_id || item.id || "");
   const disabled = qualityState.selectionLoading || qualityState.saving ? "disabled" : "";
-  const manualScope = item.auto_override_scope === 'chart' ? '有人工整谱决定' : item.auto_override_scope === 'region' ? '有人工片段标注' : '';
-  const autoBadge = !pool && item.auto_badge
-    ? `<div class="auto-audit-row-badges"><span class="auto-audit-badge ${escapeHtml(item.auto_status || "clean")}">${escapeHtml(item.auto_badge)}</span>${manualScope ? `<span class="auto-audit-override">${manualScope}</span>` : ""}</div>`
+  const provenance = {manual_chart:"有人工整谱决定", bulk_chart:"有批量整谱赋权", legacy:"已有整谱权重（来源未记录）"}[item.manual_provenance]
+    || (!materialsWorkflowSupported() && item.auto_override_scope === "chart" ? "已有整谱权重（来源未记录）" : "");
+  const annotations = [provenance, item.has_manual_regions || item.auto_override_scope === "region" ? "有片段标注" : ""].filter(Boolean);
+  const review = item.auto_review_total ? `已复核 ${item.auto_review_resolved_count}/${item.auto_review_total} 条` : "";
+  const autoBadge = !pool && (item.auto_badge || annotations.length)
+    ? `<div class="auto-audit-row-badges">${item.auto_badge ? `<span class="auto-audit-badge ${escapeHtml(item.auto_status || "clean")}">${escapeHtml(item.auto_badge)}</span>` : ""}${[...annotations, review].filter(Boolean).map(text => `<span class="auto-audit-override">${text}</span>`).join("")}</div>`
+    : "";
+  const te = item.training_effect;
+  const effectBadge = te && te.text
+    ? `<span class="training-effect-badge ${escapeHtml(te.status || "included")}">${escapeHtml(te.text)}</span>`
     : "";
   return `<tr data-chart-id="${id}"><td ${pool||readOnly?'hidden':''}>${pool||readOnly?'':`<input class="quality-row-select" type="checkbox" data-chart-id="${id}" ${qualityState.selected.has(selectedId) ? "checked" : ""} ${disabled}>`}</td>`
-    + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span><br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}${globalThis.CandidatePool?.badge(item)||""}${autoBadge}</td>`
+    + `<td><strong>${escapeHtml(title)}</strong><br><span class="muted">难度 ${escapeHtml(String(difficulty))}</span>${effectBadge ? `<br>${effectBadge}` : ""}<br><span class="dataset-row-folder">文件夹：${escapeHtml(folder)}</span>${source ? `<br><span class="muted">来源：${escapeHtml(source)}</span>` : ""}${globalThis.CandidatePool?.badge(item)||""}${autoBadge}</td>`
     + `<td>${escapeHtml(item.designer || item.chart_designer || "未标注")}</td><td><span class="quality-label ${escapeHtml(label)}">${escapeHtml(pool?(globalThis.CandidatePool?.reviewText(item)||'尚未确认学习'):qualityLabelText(label))}</span></td>`
     + `<td>${readOnly ? escapeHtml(String(weight)) : pool?(item.confirmed_regions?`${item.confirmed_regions} 段`:'—'):`<input class="quality-weight" data-chart-id="${id}" type="number" min="0" max="4" step="0.05" value="${Number.isFinite(weight) ? weight : 1}" ${disabled}>`}</td>`
     + `<td><button class="small-button quality-detail-button" type="button" data-chart-id="${id}">${readOnly?'预览':'预览与标注'}</button></td></tr>`;
@@ -6534,12 +6903,18 @@ function renderQualityCatalog() {
   if(element('#qualityAutoFilter'))element('#qualityAutoFilter').hidden=pool;
   if(element('#qualitySummary'))element('#qualitySummary').hidden=pool;
   if(element('#qualitySelectAll'))element('#qualitySelectAll').closest('th').hidden=pool||readOnly;
-  body.innerHTML = qualityState.items.map(item=>qualityRowHtml(item,readOnly)).join("") || `<tr><td colspan="6" class="muted">没有匹配的谱面。</td></tr>`;
+  const status = element("#qualityCatalogStatus");
+  if (status) {
+    status.hidden = !qualityState.catalogLoading && !qualityState.catalogError;
+    status.textContent = qualityState.catalogLoading ? "正在读取谱面目录…" : qualityState.catalogError ? `读取目录失败 · ${qualityState.catalogError}。点「刷新素材」重试。` : "";
+  }
+  body.innerHTML = qualityState.items.map(item=>qualityRowHtml(item,readOnly)).join("") || (qualityState.catalogLoading || qualityState.catalogError
+    ? "" : `<tr><td colspan="6" class="muted">没有匹配的谱面。</td></tr>`);
   const pageCount = Math.max(1, qualityState.pages || Math.ceil(qualityState.total / qualityState.pageSize));
   if (element("#qualityPageStatus")) element("#qualityPageStatus").textContent = `第 ${qualityState.page} / ${pageCount} 页（共 ${qualityState.total} 张）`;
   if (element("#qualityPageInput")) element("#qualityPageInput").value = String(qualityState.page);
-  if (element("#qualityPrevButton")) element("#qualityPrevButton").disabled = qualityState.page <= 1;
-  if (element("#qualityNextButton")) element("#qualityNextButton").disabled = qualityState.page >= pageCount;
+  if (element("#qualityPrevButton")) element("#qualityPrevButton").disabled = qualityState.catalogLoading || qualityState.page <= 1;
+  if (element("#qualityNextButton")) element("#qualityNextButton").disabled = qualityState.catalogLoading || qualityState.page >= pageCount;
   updateQualitySelectionControls();
   updateTrainingPreviewNavigation();
 }
@@ -6632,6 +7007,7 @@ function clearQualitySelection() {
   qualityState.selectionRequest += 1;
   qualityState.selectionLoading = false;
   qualityState.selected.clear();
+  qualityState.bulkSelection = false;
   renderQualityCatalog();
 }
 
@@ -6651,6 +7027,7 @@ async function selectQualityFolder() {
     if (request !== qualityState.selectionRequest || manifest !== qualityManifest()) return;
     if (!Array.isArray(data.chart_ids)) throw new Error("后端没有返回完整谱面列表，请重启 WebUI 服务。");
     qualityState.selected = new Set(data.chart_ids.map(String));
+    qualityState.bulkSelection = true;
     qualityState.folderTotal = Number(data.total || qualityState.selected.size);
     for (const id of qualityState.editedWeights.keys()) if (!qualityState.selected.has(id)) qualityState.editedWeights.delete(id);
   } finally {
@@ -6658,25 +7035,40 @@ async function selectQualityFolder() {
   }
 }
 
-async function loadQualityCatalog(resetPage = false) {
+async function loadQualityCatalog(resetPage = false, {refresh=false} = {}) {
   const manifest = qualityManifest();
   if (!manifest) throw new Error("请先填写训练 manifest 路径。");
   if (resetPage) qualityState.page = 1;
   const request = ++qualityState.catalogRequest;
+  qualityState.catalogLoading = true;
+  qualityState.catalogError = "";
+  renderQualityCatalog();
   const sortByUi = valueOrDefault("#qualitySortBy", "difficulty");
   const sortBy = sortByUi === "difficulty" ? "level" : sortByUi;
   const sortDirection = valueOrDefault("#qualitySortDirection", "asc");
   const isPool = Boolean(activeDatasetItem()?.candidate_pool);
   const autoFilterValue = isPool ? "" : (qualityState.autoFilter || valueOrDefault("#qualityAutoFilter", ""));
-  const data = await api("/api/quality/catalog", { manifest, query: qualityState.query, page: qualityState.page, page_size: qualityState.pageSize, label_filter: isPool ? null : qualityState.label || null, auto_filter: autoFilterValue || null, sort_by: sortBy, sort_order: sortDirection,
-    auto_scope: qualityState.autoScope || 'formal',
-    candidate_status:valueOrDefault('#candidatePoolStatusFilter',''),
-    candidate_review:isPool?valueOrDefault('#candidatePoolDecisionFilter',''):'' });
+  let data;
+  try {
+    data = await api("/api/quality/catalog", { manifest, query: qualityState.query, page: qualityState.page, page_size: qualityState.pageSize, label_filter: isPool ? null : qualityState.label || null, auto_filter: autoFilterValue || null, sort_by: sortBy, sort_order: sortDirection,
+      auto_scope: qualityState.autoScope || (materialsWorkflowSupported() ? 'auto' : 'formal'), refresh,
+      candidate_status:valueOrDefault('#candidatePoolStatusFilter',''),
+      candidate_review:isPool?valueOrDefault('#candidatePoolDecisionFilter',''):'' });
+  } catch (error) {
+    if (request === qualityState.catalogRequest && manifest === qualityManifest()) {
+      qualityState.catalogLoading = false;
+      qualityState.catalogError = error.message;
+      renderQualityCatalog();
+    }
+    return false;
+  }
   if (request !== qualityState.catalogRequest || manifest !== qualityManifest()) return;
-  if (!qualityState.autoScope && !data.auto_quality?.has_annotations && data.auto_quality?.has_preview_annotations) {
+  if (!materialsWorkflowSupported() && !qualityState.autoScope && !data.auto_quality?.has_annotations && data.auto_quality?.has_preview_annotations) {
     qualityState.autoScope = 'preview';
     return loadQualityCatalog(resetPage);
   }
+  qualityState.catalogLoading = false;
+  qualityState.effectiveAutoScope = data.auto_quality?.auto_scope || qualityState.autoScope || "formal";
   qualityState.items = Array.isArray(data.items) ? data.items : [];
   qualityState.page = Math.max(1, Number(data.page ?? qualityState.page) || 1);
   qualityState.pageSize = Math.max(1, Number(data.page_size ?? qualityState.pageSize) || qualityState.pageSize);
@@ -6689,15 +7081,35 @@ async function loadQualityCatalog(resetPage = false) {
   const source = autoAuditSource('quality');
   const view = autoAuditViews.quality;
   view.key = source.key;
-  view.scope = qualityState.autoScope;
+  view.scope = qualityState.effectiveAutoScope;
   ++view.request;
   updateAutoAuditTarget('quality', source);
   renderAutoQualityAuditDashboard(data.auto_quality, 'quality', source, view.scope);
+  if (isPool) setAutoAuditStatus("quality", "当前为候选库，请在下方查看自动初筛和学习确认。");
+  else if (data.auto_quality?.report || data.auto_quality?.preview_report) setAutoAuditStatus("quality", "");
   renderQualitySummary(); renderQualityCatalog();
+  return true;
+}
+
+let qualitySearchTimer = null;
+function submitQualitySearch(input) {
+  if (qualitySearchTimer) { clearTimeout(qualitySearchTimer); qualitySearchTimer = null; }
+  const query = input.value.trim();
+  if (query === qualityState.query) return;
+  qualityState.query = query;
+  return loadQualityCatalog(true);
 }
 
 function isZeroUnmarkedQualityDetail(detail = qualityState.detail) {
   return Boolean(detail && (detail.zero_unmarked || detail.record?.unmarked_weight === 0 || isZeroUnmarkedDataset(activeDatasetItem())));
+}
+
+function qualityRegionDefaults(label, reason) {
+  if (label === "good") return [1.5, 1.5];
+  if (label !== "problem") return [1, 1];
+  if (reason === "timing") return [0, 1];
+  if (reason === "layout" || reason === "comfort") return [1, 0];
+  return [0, 0];
 }
 
 function updateQualityDetail() {
@@ -6725,7 +7137,10 @@ function updateQualityDetail() {
     spanStatus.textContent = "";
   }
   const list = element("#qualityRegionsList"); if (!list) return;
-  list.innerHTML = qualityState.regions.map((region, index) => `<div class="quality-region-row" data-region-index="${index}" data-entry-start-sec="${region.entry_start_sec ?? ''}"><input type="number" min="0" step="0.01" value="${Number(region.start_sec ?? region.start ?? 0)}" data-region-field="start_sec" ${disabledAttr}><input type="number" min="0" step="0.01" value="${Number(region.end_sec ?? region.end ?? 0)}" data-region-field="end_sec" ${disabledAttr}><select aria-label="片段评价" data-region-field="label" ${disabledAttr}>${[['good','优秀'],['problem','有问题'],['uncertain','不确定']].map(([value,label])=>`<option value="${value}" ${(region.label||'uncertain')===value?'selected':''}>${label}</option>`).join('')}</select><select aria-label="问题类型" data-region-field="reason" ${disabledAttr}>${[['','未指定'],['timing','采音'],['layout','配置'],['comfort','手感']].map(([value,label])=>`<option value="${value}" ${region.reason===value?'selected':''}>${label}</option>`).join('')}</select><details class="quality-span-weights"><summary>高级权重</summary><input type="number" min="0" max="4" step="0.05" value="${Number(region.weight ?? 0)}" data-region-field="weight" ${disabledAttr}><input aria-label="采音权重" title="采音权重" type="number" min="0" max="4" step="0.05" value="${Number(region.timing_weight ?? (region.label==='good'?1.5:region.label==='problem' && region.reason==='timing'?0:1))}" data-region-field="timing_weight" ${disabledAttr}><input aria-label="配置权重" title="配置权重" type="number" min="0" max="4" step="0.05" value="${Number(region.component_weight ?? (region.label==='good'?1.5:region.label==='problem' && ['layout','comfort'].includes(region.reason)?0:1))}" data-region-field="component_weight" ${disabledAttr}></details><button class="small-button quality-remove-region" type="button" ${disabledAttr}>删除</button></div>`).join("") || `<span class="muted">${zeroUnmarked ? "尚未确认学习片段；请在页面顶部「谱面预览」中圈选并确认。" : "暂无局部标注。片段评价会调整对应的采音或配置监督，其余前文仍保留。"}</span>`;
+  list.innerHTML = qualityState.regions.map((region, index) => {
+    const [timing, components] = qualityRegionDefaults(region.label, region.reason);
+    return `<div class="quality-region-row" data-region-index="${index}" data-entry-start-sec="${region.entry_start_sec ?? ''}"><input type="number" min="0" step="0.01" value="${Number(region.start_sec ?? region.start ?? 0)}" data-region-field="start_sec" ${disabledAttr}><input type="number" min="0" step="0.01" value="${Number(region.end_sec ?? region.end ?? 0)}" data-region-field="end_sec" ${disabledAttr}><select aria-label="片段评价" data-region-field="label" ${disabledAttr}>${[['good','优秀'],['problem','有问题'],['uncertain','不确定']].map(([value,label])=>`<option value="${value}" ${(region.label||'uncertain')===value?'selected':''}>${label}</option>`).join('')}</select><select aria-label="问题类型" data-region-field="reason" ${disabledAttr}>${[['','未指定'],['timing','采音'],['layout','配置'],['comfort','手感']].map(([value,label])=>`<option value="${value}" ${(region.reason||'')===value?'selected':''}>${label}</option>`).join('')}</select><details class="quality-span-weights"><summary>高级权重</summary><input type="number" min="0" max="4" step="0.05" value="${Number(region.weight ?? 1)}" data-region-field="weight" ${disabledAttr}><input aria-label="采音权重" title="采音权重" type="number" min="0" max="4" step="0.05" value="${Number(region.timing_weight ?? timing)}" data-region-field="timing_weight" ${disabledAttr}><input aria-label="配置权重" title="配置权重" type="number" min="0" max="4" step="0.05" value="${Number(region.component_weight ?? components)}" data-region-field="component_weight" ${disabledAttr}></details><button class="small-button quality-remove-region" type="button" ${disabledAttr}>删除</button></div>`;
+  }).join("") || `<span class="muted">${zeroUnmarked ? "尚未确认学习片段；请在页面顶部「谱面预览」中圈选并确认。" : "暂无局部标注。片段评价会调整对应的采音或配置监督，其余前文仍保留。"}</span>`;
 }
 
 async function openQualityDetail(chartId,{scroll=true}={}) {
@@ -6733,7 +7148,7 @@ async function openQualityDetail(chartId,{scroll=true}={}) {
   const workspace=document.body.dataset.workspace;
   const request = ++qualityState.detailRequest;
   qualityState.previewLoading=true;qualityState.previewError='';updateTrainingPreviewNavigation();
-  const payload = {manifest, chart_id:chartId, auto_scope:qualityState.autoScope || 'formal'};
+  const payload = {manifest, chart_id:chartId, auto_scope:qualityState.effectiveAutoScope || qualityState.autoScope || 'formal'};
   try {
     const [data,preview]=await Promise.all([
       api('/api/quality/detail',payload),
@@ -6756,13 +7171,42 @@ async function openQualityDetail(chartId,{scroll=true}={}) {
 async function openQualityReview(manifest=qualityManifest(),chartId=qualityState.detail?.chart_id,request=qualityState.detailRequest,{scroll=true}={}) {
   if(!chartId)return;
   const workspace=document.body.dataset.workspace;
-  const preview=await api('/api/quality/chart-preview',{manifest,chart_id:chartId,auto_scope:qualityState.autoScope || 'formal'});
+  const preview=await api('/api/quality/chart-preview',{manifest,chart_id:chartId,auto_scope:qualityState.effectiveAutoScope || qualityState.autoScope || 'formal'});
   if(request===qualityState.detailRequest && manifest===qualityManifest() && workspace===document.body.dataset.workspace)openScopedQualityPreview(preview,scroll);
 }
 function openScopedQualityPreview(preview, scroll) {
-  if (preview.training_context) preview.training_context.audit_read_only = !!activeDatasetItem()?.auditReadOnly;
+  if (preview.training_context) preview.training_context.audit_read_only ||= !!activeDatasetItem()?.auditReadOnly;
   globalThis.ChartPreview?.openSource(preview,{scroll});
 }
+
+async function jumpToMaterialOrigin(origin, prompt, reportVersion, scope, auditContext) {
+  if (!origin?.manifest || !origin.chart_id) throw new Error("找不到这张谱的原训练库");
+  const target = datasetWorkspaceState.items.find(item => sameAuditManifest(item.manifest, origin.manifest))
+    || {manifest: origin.manifest, path: origin.manifest, name: origin.name, prepared: true};
+  const context = prompt?.prompt_id ? {
+    manifest: auditContext.manifest, chart_id: auditContext.chart_id, auto_scope: scope,
+    report_version: reportVersion, prompt_id: prompt.prompt_id,
+  } : null;
+  await openDataset(target);
+  if (!sameAuditManifest(qualityManifest(), target.manifest)) return;
+  await openQualityDetail(origin.chart_id);
+  const entry = globalThis.ChartPreview?.getEntry();
+  if (entry?.training_context?.chart_id !== origin.chart_id || !sameAuditManifest(entry.training_context.manifest, target.manifest)) return;
+  if (context) window.dispatchEvent(new CustomEvent("material-origin-prompt", {detail: {prompt, target: context}}));
+  if (Number.isFinite(prompt?.start_sec)) {
+    globalThis.FeedbackRange?.set({start_sec: prompt.start_sec, end_sec: prompt.end_sec});
+    await globalThis.ChartPreview?.seek?.(prompt.start_sec);
+  }
+}
+
+window.addEventListener("material-prompt-reviewed", event => {
+  const {manifest, result} = event.detail;
+  const scope = qualityState.effectiveAutoScope || qualityState.autoScope || "formal";
+  if (datasetWorkspaceState.view === "catalog" && sameAuditManifest(manifest, qualityManifest()) && result.review_scope === scope) {
+    void loadQualityCatalog(false);
+  }
+});
+
 element('#qualityOpenReview')?.addEventListener('click',()=>void openQualityReview().catch(error=>setStatus(error.message,false)));
 
 window.addEventListener('training-source-annotated',event=>{
@@ -6772,14 +7216,21 @@ window.addEventListener('training-source-annotated',event=>{
     const record=result.records?.find(row=>row.chart_id===chart_id);
     if(record) {qualityState.detail.record=record;qualityState.regions=structuredClone(record.regions||[]);updateQualityDetail();}
   }
-  qualityState.summary=result.summary;renderQualitySummary();
+  if(result.summary) {
+    qualityState.summary={...qualityState.summary,...result.summary};
+    renderQualitySummary();
+  }
   const record=result.records?.find(row=>row.chart_id===chart_id);
   const item=qualityState.items.find(row=>row.chart_id===chart_id);
   if(item){item.annotation=record||null;item.label=record?.label||'normal';item.weight=record?.weight??1;
     item.candidate_chart_review=record?.candidate_chart_review;
     item.confirmed_regions=['excluded','negative'].includes(item.label)||!item.weight?0:(record?.regions||[]).filter(row=>row.label==='good').length;
     renderQualityCatalog();}
-  if (item?.auto_badge && !item.candidate_status) {
+  if (item && !item.candidate_status && result.auto_annotation) {
+    Object.assign(item, result.auto_annotation);
+    if (qualityState.autoFilter) void loadQualityCatalog(false);
+    else renderQualityCatalog();
+  } else if (item?.auto_badge && !item.candidate_status && !materialsWorkflowSupported()) {
     void loadQualityCatalog(false).catch(error=>setStatus(error.message,false));
     const preview = globalThis.ChartPreview?.getEntry()?.training_context;
     if (preview?.manifest === manifest && preview.chart_id === chart_id) {
@@ -6798,21 +7249,24 @@ async function saveQualitySelection() {
   const groups = new Map();
   chartIds.forEach((id) => {
     const item = qualityState.items.find((candidate) => String(candidate.chart_id || candidate.id) === String(id));
-    const weight = Math.max(0, Math.min(4, qualityState.editedWeights.get(id) ?? (item?._weightEdited ? Number(item.weight) : bulkWeight)));
+    const weight = label === "excluded" ? 0 : Math.max(0, Math.min(4, qualityState.editedWeights.get(id) ?? (item?._weightEdited ? Number(item.weight) : bulkWeight)));
     const key = String(weight); if (!groups.has(key)) groups.set(key, []); groups.get(key).push(id);
   });
   const reason = valueOrDefault("#qualityBulkReason", "").trim();
+  const bulkMode = qualityState.bulkSelection || chartIds.length > 1;
   qualityState.saving = true; renderQualityCatalog();
   try {
     let data = {};
     for (const [weight, ids] of groups) {
-      data = await api("/api/quality/save", { manifest, chart_ids: ids, label, weight: Number(weight), reason });
+      data = await api("/api/quality/save", { manifest, chart_ids: ids, label, weight: Number(weight), reason, bulk_mode: bulkMode });
+      invalidateTrainingSourcePreview();
     }
     if (request !== qualityState.selectionRequest || manifest !== qualityManifest()) return;
     qualityState.annotationPath = data.annotation_path || qualityState.annotationPath;
     qualityState.annotationManifest = manifest;
     qualityState.summary = data.summary || qualityState.summary;
     qualityState.selected.clear(); qualityState.editedWeights.clear();
+    qualityState.bulkSelection = false;
     renderQualitySummary(); await loadQualityCatalog(false);
   } finally {
     if (request === qualityState.selectionRequest) { qualityState.saving = false; renderQualityCatalog(); }
@@ -6860,6 +7314,7 @@ async function saveQualityRegions() {
   const chartId=qualityState.detail.chart_id,manifest=qualityManifest(),request=qualityState.detailRequest;
   const record = qualityState.detail.record || {};
   const data = await api("/api/quality/save", { manifest, chart_ids: [chartId], label: record.label || "normal", weight: Number(record.weight ?? 1), reason: record.reason || "", regions: collectQualityRegions(), annotation_scope: 'region' });
+  if(typeof invalidateTrainingSourcePreview==='function')invalidateTrainingSourcePreview();
   if(chartId!==qualityState.detail?.chart_id || manifest!==qualityManifest() || request!==qualityState.detailRequest)return;
   qualityState.annotationPath = data.annotation_path || qualityState.annotationPath; qualityState.summary = data.summary || qualityState.summary;
   qualityState.annotationManifest = qualityManifest();
@@ -6871,6 +7326,7 @@ async function saveQualityCorrection() {
   if (!qualityState.detail?.chart_id || !qualityState.correctedPath) throw new Error("请先上传修正版 maidata，并选择难度槽。");
   const difficulty = valueOrDefault("#qualityCorrectedDifficulty", ""); if (!difficulty) throw new Error("请选择修正版难度槽。");
   const data = await api("/api/quality/save", { manifest: qualityManifest(), chart_ids: [qualityState.detail.chart_id], label: "negative", weight: 0, reason: "反面案例与修正版配对", corrected_path: qualityState.correctedPath, corrected_difficulty: Number(difficulty) });
+  invalidateTrainingSourcePreview();
   qualityState.annotationPath = data.annotation_path || qualityState.annotationPath; qualityState.summary = data.summary || qualityState.summary;
   qualityState.annotationManifest = qualityManifest();
   renderQualitySummary(); await loadQualityCatalog(false); await openQualityDetail(qualityState.detail.chart_id);
@@ -7988,6 +8444,16 @@ on("#modelFamily", "change", () => {
 on("#v2TrainValidationSource", "change", () => {updateTrainingControls();saveSettings();});
 on("#v2TrainDifficultySource", "change", () => {updateV2DifficultyControls();saveSettings();});
 on("#v2TrainChartgateSetup", "click", initializeV2Chartgate);
+for(const key of ['batch_size','grad_accumulation','batch_layout']) {
+  for(const eventName of ['input','change']) {
+    on('#'+v2FieldId(key),eventName,event=>{event.target.dataset.batchEdited='1';saveSettings();});
+  }
+}
+on('#trainingCheckpointPath','input',()=>{
+  for(const key of ['batch_size','grad_accumulation','batch_layout']) {
+    const node=element('#'+v2FieldId(key));if(node)delete node.dataset.batchEdited;
+  }
+});
 on("#v2TrainQualityEnabled", "change", () => {updateTrainingControls();saveSettings();});
 on('#v2GenerateCount','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GenerateParallel','input',()=>{updateV2BatchControls();saveSettings();});
@@ -8014,6 +8480,22 @@ on("#trainingCheckpointPath", "input", () => { if (["song_form_v1", "song_form_v
 on("#goldMode", "change", () => { updateGoldFields(); saveSettings(); });
 on("#preprocessButton", "click", startPreprocess);
 on("#inspectManifestButton", "click", inspectManifest);
+on("#trainingSourcePreviewKind", "change", () => renderTrainingSourcePreviewPage(true));
+on("#trainingSourcePreviewSearch", "input", () => renderTrainingSourcePreviewPage(true));
+on("#trainingSourcePreviewPrevious", "click", () => {
+  if (trainingSourcePreview?.page > 1) trainingSourcePreview.page -= 1;
+  renderTrainingSourcePreviewPage();
+});
+on("#trainingSourcePreviewNext", "click", () => {
+  if (trainingSourcePreview?.data) trainingSourcePreview.page += 1;
+  renderTrainingSourcePreviewPage();
+});
+for (const eventName of ["change", "input"]) {
+  document.addEventListener(eventName, () => {
+    if (trainingSourcePreview) invalidateTrainingSourcePreview(false);
+  });
+}
+window.addEventListener("training-source-annotated", () => invalidateTrainingSourcePreview());
 on("#checkpointInspectButton", "click", inspectCheckpoint);
 on("#trainButton", "click", () => startTrain());
 on("#autoPipelineButton", "click", () => startTrain({ autoPreprocess: true }));
@@ -8025,11 +8507,24 @@ on("#trainingDatasetApplyButton", "click", composeSelectedDatasets);
 on("#datasetImportButton", "click", () => { setWorkspaceMode("training"); window.MaichartWorkflow?.focusSetting("rawRoot"); setStatus("上传训练集 ZIP，或填写本机目录并点击“登记当前目录到训练素材”。", true); });
 on("#registerDatasetButton", "click", registerCurrentDataset);
 on("#datasetBackButton", "click", showDatasetCards);
-on("#qualityRefreshButton", "click", () => loadQualityCatalog(true));
+on("#qualityRefreshButton", "click", () => loadQualityCatalog(true, {refresh:true}));
 on("#qualityLabelFilter", "change", async (event) => { qualityState.label = event.target.value; await loadQualityCatalog(true); });
-on("#qualityAutoFilter", "change", async (event) => { qualityState.autoFilter = event.target.value; await loadQualityCatalog(true); });
-on("#qualitySearch", "change", async (event) => { qualityState.query = event.target.value.trim(); await loadQualityCatalog(true); });
-on("#qualitySearch", "keydown", async (event) => { if (event.key === "Enter") { qualityState.query = event.target.value.trim(); await loadQualityCatalog(true); } });
+on("#qualityAutoFilter", "change", async (event) => {
+  qualityState.autoFilter = !materialsWorkflowSupported() && ["pending_review", "coverage_issue"].includes(event.target.value) ? "unverified" : event.target.value;
+  if (!materialsWorkflowSupported() && qualityState.autoFilter === "reviewed_prompts") qualityState.autoFilter = "";
+  event.target.value = qualityState.autoFilter;
+  await loadQualityCatalog(true);
+});
+on("#qualitySearch", "change", event => submitQualitySearch(event.target));
+on("#qualitySearch", "input", event => {
+  if (event.isComposing) return;
+  if (qualitySearchTimer) clearTimeout(qualitySearchTimer);
+  const target = event.target;
+  qualitySearchTimer = setTimeout(() => { qualitySearchTimer = null; void submitQualitySearch(target); }, 180);
+});
+on("#qualitySearch", "keydown", event => {
+  if (event.key === "Enter" && !event.isComposing) { event.preventDefault(); return submitQualitySearch(event.target); }
+});
 on("#qualitySortBy", "change", () => loadQualityCatalog(true));
 on("#qualitySortDirection", "change", () => loadQualityCatalog(true));
 on("#qualityPageSize", "change", (event) => { qualityState.pageSize = Math.max(1, Number(event.target.value) || 25); loadQualityCatalog(true); });
@@ -8045,7 +8540,12 @@ on("#qualityPageJumpButton", "click", async () => {
   await loadQualityCatalog(false);
 });
 on("#qualityPageInput", "keydown", async (event) => { if (event.key === "Enter") element("#qualityPageJumpButton")?.click(); });
-on("#qualitySelectAll", "change", (event) => { qualityState.items.forEach((item) => { const id = String(item.chart_id || item.id); if (event.target.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); }); renderQualityCatalog(); });
+on("#qualitySelectAll", "change", (event) => {
+  if (event.target.checked) qualityState.bulkSelection = true;
+  qualityState.items.forEach((item) => { const id = String(item.chart_id || item.id); if (event.target.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); });
+  if (!qualityState.selected.size) qualityState.bulkSelection = false;
+  renderQualityCatalog();
+});
 on("#qualityCloseDetailButton", "click", () => { const panel = element("#qualityDetail"); if (panel) panel.hidden = true; });
 on("#qualityAddRegionButton", "click", () => { qualityState.regions.push({ start_sec: Number(element("#qualityDetailAudio")?.currentTime||0), end_sec: Number(element("#qualityDetailAudio")?.currentTime||0)+1, weight: 1, label:"uncertain", reason: "", timing_weight:1, component_weight:1 }); updateQualityDetail(); });
 on("#qualitySaveRegionsButton", "click", saveQualityRegions);
@@ -8055,10 +8555,10 @@ document.addEventListener("change", (event) => {
   const regionRow=event.target.closest?.('.quality-region-row');
   if(regionRow && ['label','reason'].includes(event.target.dataset.regionField)) {
     const field=name=>regionRow.querySelector(`[data-region-field="${name}"]`);
-    const label=field('label').value,reason=field('reason').value;
+    const [timing, components]=qualityRegionDefaults(field('label').value,field('reason').value);
     field('weight').value=1;
-    field('timing_weight').value=label==='good'?1.5:label==='problem' && (!reason || reason==='timing')?0:1;
-    field('component_weight').value=label==='good'?1.5:label==='problem' && (!reason || reason==='layout' || reason==='comfort')?0:1;
+    field('timing_weight').value=timing;
+    field('component_weight').value=components;
   }
   const row = event.target.closest?.(".quality-row-select");
   if (row) { const id = row.dataset.chartId; if (row.checked) qualityState.selected.add(id); else qualityState.selected.delete(id); updateQualitySelectionControls(); }

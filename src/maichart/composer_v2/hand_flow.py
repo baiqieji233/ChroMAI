@@ -44,7 +44,7 @@ def build_motion_stream(
     raw_jobs, raw_pulses, coverage = _motion_actions(points, tempo, clock, cache=motion_cache)
     jobs_t = tuple(raw_jobs)
     if jobs_t:
-        job_starts = np.fromiter((float(j["start"]) for j in jobs_t), dtype=np.float64, count=len(jobs_t))
+        job_starts = np.fromiter((float(j["trace"]) for j in jobs_t), dtype=np.float64, count=len(jobs_t))
         job_ends = np.fromiter((float(j["end"]) for j in jobs_t), dtype=np.float64, count=len(jobs_t))
     else:
         job_starts = np.empty(0, dtype=np.float64)
@@ -96,7 +96,7 @@ def chirality_comfort(
         window_pulses = motion_stream.pulses[lo:hi]
     else:
         raw_jobs, raw_pulses, coverage = _motion_actions(points, tempo, clock, cache=motion_cache)
-        jobs = [job for job in raw_jobs if job["end"] >= warm and job["start"] <= horizon]
+        jobs = [job for job in raw_jobs if job["end"] >= warm and job["trace"] <= horizon]
         window_pulses = [
             p for p in sorted(raw_pulses, key=lambda x: x[0]) if warm <= p[0] <= horizon
         ]
@@ -111,7 +111,7 @@ def chirality_comfort(
 
     events: list[tuple[float, int, tuple[float, float], float, bool, str]] = []
     for index, job in enumerate(jobs):
-        begin = max(warm, job["start"])
+        begin = max(warm, job["trace"])
         finish = min(horizon, job["end"])
         count = min(96, max(1, int(math.ceil((finish - begin) / 0.05))))
         clocks = sorted(
@@ -160,9 +160,9 @@ def chirality_comfort(
 
     # hand 0 = Left (natural x <= 0), hand 1 = Right (natural x >= 0).
     # State entry:
-    # (cost, ((posL, tL, kindL), (posR, tR, kindR)), owners_tuple, hemi_cost,
+    # (cost, ((posL, tL, kindL, jobL), (posR, tR, kindR, jobR)), owners_tuple, hemi_cost,
     #  max_step_pen, last_btn_hand, last_btn_sec, alt_hits, alt_total)
-    init_hands = (((-0.55, 0.0), warm - 1.0, "idle"), ((0.55, 0.0), warm - 1.0, "idle"))
+    init_hands = (((-0.55, 0.0), warm - 1.0, "idle", -1), ((0.55, 0.0), warm - 1.0, "idle", -1))
     beam: list[tuple[float, Any, tuple[int, ...], float, float, int, float, int, int]] = [
         (0.0, init_hands, tuple([-1] * len(jobs)), 0.0, 0.0, -1, warm - 1.0, 0, 0)
     ]
@@ -171,26 +171,28 @@ def chirality_comfort(
     for second, job_id, target, weight, is_pulse, ev_kind in events:
         updated: dict[tuple[Any, ...], tuple[float, Any, tuple[int, ...], float, float, int, float, int, int]] = {}
         in_window = second >= start
+        is_slide = ev_kind in ("slide", "wifi")
         for cost, hands, owners, hemi_acc, max_step, last_btn_h, last_btn_s, alt_hits, alt_tot in beam:
             assigned = owners[job_id] if job_id >= 0 else -1
             choices = (
                 (assigned, 1 - assigned)
-                if assigned >= 0 and jobs[job_id]["kind"] in ("slide", "wifi")
+                if assigned >= 0 and is_slide
                 else (assigned,)
                 if assigned >= 0
                 else (0, 1)
             )
             for hand in choices:
-                old_pos, previous_sec, prev_kind = hands[hand]
-                other_pos, other_sec, _ = hands[1 - hand]
+                old_pos, previous_sec, prev_kind, previous_job = hands[hand]
+                other_pos, other_sec, _, _ = hands[1 - hand]
                 occupied = [
                     idx
                     for idx, owner in enumerate(owners)
-                    if owner == hand and idx != job_id and jobs[idx]["start"] <= second <= jobs[idx]["end"]
+                    if owner == hand and idx != job_id and jobs[idx]["trace"] <= second <= jobs[idx]["end"]
                 ]
                 origins = [position_at(idx, second) for idx in occupied]
                 origin = origins[0] if origins else old_pos
-                distance = 0.0 if origin is None else math.dist(origin, target)
+                follows_path = is_slide and assigned == hand and previous_job == job_id and not origins
+                distance = 0.0 if origin is None or follows_path else math.dist(origin, target)
                 dt = second - previous_sec
                 elapsed = max(0.04, dt)
                 spread = 0.45 if is_pulse and abs(dt) < 1e-7 else 0.0
@@ -225,7 +227,7 @@ def chirality_comfort(
                 penalty = base_penalty + transfer + fast_jump + hemi_term + arm_cross
 
                 new_hands = list(hands)
-                new_hands[hand] = (target, second, ev_kind)
+                new_hands[hand] = (target, second, ev_kind, job_id)
                 new_hands_t = (new_hands[0], new_hands[1])
                 allocation = list(owners)
                 if job_id >= 0:
@@ -245,12 +247,14 @@ def chirality_comfort(
                     new_btn_h = hand
                     new_btn_s = second
 
-                # Deduplicate identical ownership + coarse hand coordinates to keep beam diverse.
+                # Keep states distinct if the last contact changes the cost of continuing a slide.
                 sig = (
                     round(new_hands_t[0][0][0], 2),
                     round(new_hands_t[0][0][1], 2),
                     round(new_hands_t[1][0][0], 2),
                     round(new_hands_t[1][0][1], 2),
+                    new_hands_t[0][3],
+                    new_hands_t[1][3],
                     alloc_t,
                 )
                 prev_entry = updated.get(sig)

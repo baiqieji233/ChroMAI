@@ -14,7 +14,7 @@ import time
 from .muri.data import REFERENCE_COMMIT, reference_data
 from .muri.model import head_key
 from .muri.parser import parse_markers
-from .muri.runtime import simple_notes, judge_simple, simulate_actions
+from .muri.runtime import simple_notes, judge_simple, mark_wifi_covered_slides, simulate_actions
 from .muri.slide import slide_states, finish_slides
 from .muri.static import static_references
 from .playability_policy import validate_tap_on_slide_threshold_ms
@@ -31,6 +31,7 @@ def analyze_inote(inote: str, *, first: float = 0.0,
     started = time.perf_counter()
     reference_data()  # Fail explicitly if packaged assets are absent/corrupt.
     markers, errors, warnings = parse_markers(inote, float(first))
+    mark_wifi_covered_slides(markers)
     notes, groups = simple_notes(markers)
     diagnostics = judge_simple(markers, notes, groups, threshold / 1000.)
     states = slide_states(markers)

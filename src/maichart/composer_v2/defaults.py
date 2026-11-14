@@ -11,7 +11,7 @@ TRAIN_DEFAULTS = dict(epochs=50, batch_size=8, grad_accumulation=8, lr=.0002,
     prepare_device='auto', device='auto', precision='auto', validation_max_batches=0,
     checkpoint_interval_steps=500, save_every=5, early_stopping_patience=5, log_interval=20, seed=0, max_steps=0,
     limit_charts=0, cpu_threads=2, cuda_memory_budget_gb=0., audio_cache_gb=.25,
-    activation_checkpointing='auto')
+    activation_checkpointing='auto', attention_projection_packing='auto', decoder_flash_attention='off')
 ENCODER_DEFAULTS = dict(audio_layers=4,song_layers=2)
 GENERATION_DEFAULTS = dict(temperature=.9, top_p=.95, action_temperature=.9,
     action_top_p=.95, candidates=2, intercept_tap_on_slide=True,

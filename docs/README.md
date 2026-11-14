@@ -5,6 +5,7 @@
 ## 用户指南与参数手册
 
 - **[项目总览与 3 分钟快速上手](../README.md)**：环境安装、双击一键启动、已有 `.pt` 模型生成与命令行速查。
+- **[Composer v2 技术架构、目录与演进思路](explanations/COMPOSER_V2_TECHNICAL_OVERVIEW_ZH.md)**：当前模型怎样读取音乐和历史、训练目标、缓存边界、主要技术目录，以及历次路线调整留下的经验。
 - **[Composer v2 主界面（WebUI）与参数完整说明](explanations/COMPOSER_V2_WEBUI_ZH.md)**：WebUI 各工作区操作流程、生成与训练参数详解、Radar / Style 偏好微调、多数据集素材管理与跨设备路径配置。
 - **[采音与候选评估](explanations/COMPOSER_V2_QUALITY_EVALUATION_ZH.md)**：主界面评估入口、采音检查参数、候选概率记录与选优偏向分析。
 - **[Intel 核显与 NPU 加速](explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)**：MERT 加速、写谱后端自动测速、编译缓存与 XPU 训练。

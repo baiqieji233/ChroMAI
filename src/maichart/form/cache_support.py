@@ -54,14 +54,19 @@ class SourceDigests:
     each other's fingerprint inventory.
     """
 
-    def __init__(self, cache_dir):
+    def __init__(self, cache_dir, *, read_only=False):
         self._lock = threading.RLock()
         self._files = {}
         self._memory = {}
         self._counts = dict(hits=0, full_reads=0, bytes_hashed=0)
         self._db = None
+        self._read_only = read_only
         try:
             root = Path(cache_dir)
+            if read_only:
+                self._db = sqlite3.connect((root / 'source_digests.sqlite3').resolve().as_uri() + '?mode=ro',
+                                           uri=True, timeout=.1, check_same_thread=False, isolation_level=None)
+                return
             root.mkdir(parents=True, exist_ok=True)
             self._db = sqlite3.connect(root / 'source_digests.sqlite3', timeout=2,
                                        check_same_thread=False, isolation_level=None)
@@ -117,7 +122,7 @@ class SourceDigests:
                     self._memory[name] = (signature, value)
                     self._counts['full_reads'] += 1
                     self._counts['bytes_hashed'] += count
-                    if self._db is not None:
+                    if self._db is not None and not self._read_only:
                         try:
                             self._db.execute('INSERT OR REPLACE INTO digests VALUES (?, ?, ?)',
                                              (name, signature, value))
@@ -129,6 +134,11 @@ class SourceDigests:
     def stats(self):
         with self._lock:
             return dict(self._counts)
+
+    def close(self):
+        if self._db is not None:
+            self._db.close()
+            self._db = None
 
 
 @lru_cache(maxsize=16)

@@ -47,12 +47,17 @@ def _display_root(manifest, data):
 
 def _pool_card(root, data):
     """Last-scan counts, not a full identity/geometry audit during page loading."""
+    from .material_audit_status import task_state
+
     metadata = _json_data(root / 'pool.json') if (root / 'pool.json').is_file() else {}
-    state = _json_data(root / 'scan_state.json') if (root / 'scan_state.json').is_file() else {}
+    state = task_state(_json_data(root / 'scan_state.json')) if (root / 'scan_state.json').is_file() else {}
     annotations = _json_data(root / 'quality_annotations.json') if (root / 'quality_annotations.json').is_file() else {}
     counts = dict(charts=0,error=0,suspicious=0,ok=0,pending=0,duplicate=len(metadata.get('excluded',[])))
     by_source = {(str(record.get('source_path','')).casefold(),record.get('difficulty_index')):record for record in annotations.get('records',[])}
     regions = 0
+    decisions = dict(learn_all=0, partial=0, exclude=0)
+    from maichart.training.candidate_pool import _stat, _valid_regions
+
     for song in data.get('songs',[]):
         for difficulty in song.get('difficulties',[]):
             counts['charts'] += 1
@@ -62,9 +67,20 @@ def _pool_card(root, data):
             record=by_source.get((str(song.get('maidata_path','')).casefold(),index),{})
             identity=difficulty.get('candidate_identity',{})
             if record.get('chart_sha256')==identity.get('chart_sha256') and record.get('audio_sha256')==identity.get('audio_sha256'):
-                regions+=len(record.get('regions',[]))
+                confirmed = len(_valid_regions(record))
+                regions += confirmed
+                if record.get("label") in {"excluded", "negative"} or record.get("weight", 1.) <= 0:
+                    decisions["exclude"] += 1
+                elif record.get("candidate_chart_review") == "learn_all":
+                    decisions["learn_all"] += 1
+                elif confirmed:
+                    decisions["partial"] += 1
+    stale = bool(metadata.get("scan_complete") and metadata.get("source_manifest")
+                 and metadata.get("source_manifest_stat") != _stat(metadata["source_manifest"]))
     return dict(pool_id=data['candidate_pool']['pool_id'],counts=counts,confirmed_regions=regions,
                 scan_complete=bool(metadata.get('scan_complete')),scan_state=state.get('status'),scan_task=state,
+                decisions=decisions, stale=stale, updated_at=state.get("updated_at") or metadata.get("updated_at"),
+                source_manifest=metadata.get("source_manifest"),
                 reviewable_charts=counts['ok']+counts['suspicious'] if metadata.get('scan_complete') else 0,
                 summary_only=True)
 
@@ -162,6 +178,14 @@ class DatasetAPI:
                 if data.get('reviewed_training'):
                     card['reviewed_regions']=data['reviewed_training'].get('regions',0)
                     card['reviewed_only']=True
+                if not (data.get("candidate_pool") or data.get("reviewed_training")):
+                    from .material_audit_status import published_audits
+
+                    try:
+                        audit, *_ = published_audits(manifest, data)
+                        card["audit_summary"] = audit
+                    except (OSError, ValueError, TypeError) as exc:
+                        card["audit_summary_error"] = str(exc)
                 cache = Path(str(data.get("cache_dir") or "cache"))
                 card["cache_dir"] = str((cache if cache.is_absolute() else manifest.parent / cache).resolve())
             except (OSError, ValueError, TypeError, KeyError) as exc:
@@ -204,12 +228,15 @@ class DatasetAPI:
         unique: dict[str, dict[str, Any]] = {}
         for entry in entries:
             path = self._resolve(entry["path"])
-            if path.is_dir():
-                key = str(path).casefold()
-                if key not in unique or entry.get("manifest"):
-                    unique[key] = {**unique.get(key, {}), **entry}
+            key = str(path).casefold()
+            if key not in unique or entry.get("manifest"):
+                unique[key] = {**unique.get(key, {}), **entry}
         cards=[]
         for entry in unique.values():
+            if not self._resolve(entry["path"]).is_dir():
+                cards.append(dict(path=entry["path"], name=entry.get("name") or Path(entry["path"]).name,
+                                  manifest=entry.get("manifest", ""), prepared=False, error="目录不存在"))
+                continue
             try:
                 cards.append(self._card({**entry,'manifest':str(current)} if current_root==self._resolve(entry['path']) else entry,current))
             except (OSError,ValueError,TypeError,KeyError) as exc:
@@ -269,7 +296,8 @@ class DatasetAPI:
                 raise ValueError(f"数据集尚未预处理：{Path(value).parent.name}，请先点击预处理训练集")
         return output
 
-    def compose(self, payload: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+    def compose(self, payload: dict[str, Any], *, preview_root: Path | None = None,
+                preview_audio_digest=None) -> tuple[int, dict[str, Any]]:
         manifests = self._manifests(payload)
         if not manifests:
             raise ValueError("请至少勾选一个训练数据集")
@@ -278,8 +306,17 @@ class DatasetAPI:
         # composition must validate it as event audio, never as legacy frames.
         if family in {"song_form_v1", "chart_stream_v1", "chart_composer_v1", "chart_composer_v2"}:
             family = "event_v1"
-        result = compose_datasets(manifests, self.workspace_root / "composed_manifests", family)
+        published = self.workspace_root / "composed_manifests"
+        if preview_root is None:
+            result = compose_datasets(manifests, published, family)
+        else:
+            result = compose_datasets(manifests, preview_root, family, published_root=published,
+                                      preview_audio_digest=preview_audio_digest)
         return HTTPStatus.OK, result
 
-    def prepare(self, manifests: list[str], model_family: str = "event_v1") -> dict[str, Any]:
-        return self.compose({"manifests": manifests, "model_family": model_family})[1]
+    def prepare(self, manifests: list[str], model_family: str = "event_v1", *, preview_root: Path | None = None,
+                preview_audio_digest=None) -> dict[str, Any]:
+        payload = {"manifests": manifests, "model_family": model_family}
+        if preview_root is None:
+            return self.compose(payload)[1]
+        return self.compose(payload, preview_root=preview_root, preview_audio_digest=preview_audio_digest)[1]

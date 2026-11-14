@@ -280,7 +280,14 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_difficulty_selection": True,
                                               "composer_v2_combined_difficulty_filters": True,
                                               "composer_v2_chartgate": True,
+                                              "composer_v2_full_input_batching": True,
+                                              "composer_v2_local_audio_sharing": True,
+                                              "composer_v2_attention_projection_packing": True,
+                                              "composer_v2_decoder_flash_attention": True,
                                               "composer_v2_auto_quality_audit": True,
+                                              "materials_workflow_review": True,
+                                              "composer_v2_training_source_preview": True,
+                                              "candidate_pool_auto_screen": True,
                                               "composer_phrase_contract": "phrase_modes_v1",
                                               "composer_process_prefetch": True,
                                               "composer_detail_compute": "packed_v1",
@@ -346,6 +353,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 payload = self._json_body()
                 operation = parsed.path.rsplit("/", 1)[-1]
                 if operation == "inspect": return composer_v2_api.inspect(self, payload)
+                if operation == "estimate_parameters": return composer_v2_api.estimate_parameters(self, payload)
                 if operation == "train": return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
                 if operation == "chartgate_setup": return composer_v2_api.start_chartgate_setup(self, payload, runtime=sys.modules[__name__])
                 if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])
@@ -1749,17 +1757,29 @@ class WebUIHandler(BaseHTTPRequestHandler):
         self._json_response(inspection)
 
     def _inspect_manifest(self, payload: dict[str, Any]) -> None:
-        payload, dataset_selection = _prepare_training_sources(payload)
+        source_preview = None
+        if _requested_model_family(payload) == COMPOSER_V2_MODEL_FAMILY and "training_source_preview" in payload:
+            from .training_source_preview import inspect_training_sources
+
+            try:
+                payload, dataset_selection, data, source_preview = inspect_training_sources(payload, sys.modules[__name__])
+            except (OSError, ValueError, RuntimeError) as exc:
+                self._json_response({"ready": False, "message": str(exc)})
+                return
+        else:
+            payload, dataset_selection = _prepare_training_sources(payload)
+            data = None
         model_family = _requested_model_family(payload)
         manifest_value = payload.get("manifest")
         if not manifest_value:
             raise ValueError("请先填写训练 manifest 路径")
         manifest_path = _resolve_path(str(manifest_value))
-        pending = _manifest_pending_status(manifest_path)
-        if pending is not None:
-            self._json_response(pending)
-            return
-        data = _read_training_manifest(manifest_path, payload.get("raw_root"))
+        if data is None:
+            pending = _manifest_pending_status(manifest_path)
+            if pending is not None:
+                self._json_response(pending)
+                return
+            data = _read_training_manifest(manifest_path, payload.get("raw_root"))
         songs = [song for song in data.get("songs", []) if isinstance(song, dict)]
         difficulty_records = [
             (song, difficulty)
@@ -1835,6 +1855,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 "preprocessing": data.get("preprocessing") or {},
                 "difficulty_details": difficulty_details[:100],
                 "processing_errors": _manifest_processing_errors(data),
+                "training_source_preview": source_preview,
             }
         )
 
@@ -2260,7 +2281,7 @@ def _finish_if_cancelled(task: TaskState) -> bool:
 
 
 def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: int | None, result_paths: list[Path],
-                         on_finish=None) -> None:
+                         on_finish=None, on_start=None) -> None:
     def worker() -> None:
         with task.lock:
             if task.cancel_requested:
@@ -2271,7 +2292,8 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
             task.status = "running"
             task.message = "启动任务"
         env = os.environ.copy()
-        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit", "candidate_scan", "candidate_budget") or task.kind.startswith('review_bundle_'):
+        if task.kind in ("composer_v2_evaluate", "composer_v2_candidate_audit", "composer_v2_auto_quality_audit",
+                         "candidate_scan", "candidate_budget") or task.kind.startswith('review_bundle_'):
             env["CUDA_VISIBLE_DEVICES"] = ""
         if task.kind in ('candidate_scan','candidate_budget') or task.kind.startswith('review_bundle_'):
             env.update(OMP_NUM_THREADS='1', MKL_NUM_THREADS='1', OPENBLAS_NUM_THREADS='1')
@@ -2291,6 +2313,8 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.7"
                        if os.name=="nt" else "expandable_segments:True")
         try:
+            if on_start is not None:
+                on_start()
             _open_task_log(task, args)
             process = subprocess.Popen(
                 [sys.executable, *args],
@@ -2726,7 +2750,8 @@ def _dataset_api() -> DatasetAPI:
     return DatasetAPI(project_root=PROJECT_ROOT, dataset_root=DATASET_ROOT, workspace_root=WEBUI_ROOT)
 
 
-def _prepare_training_sources(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any] | None]:
+def _prepare_training_sources(payload: dict[str, Any], *, preview_root: Path | None = None,
+                              preview_audio_digest=None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Use the same selected sources for inspection and actual training."""
     manifests = payload.get("manifests")
     if manifests is None or manifests == []:
@@ -2745,7 +2770,11 @@ def _prepare_training_sources(payload: dict[str, Any]) -> tuple[dict[str, Any], 
         if pending is not None:
             raise ValueError(pending["message"] + f" 数据集：{Path(value).parent.name}")
     family = _requested_model_family(payload)
-    prepared = _dataset_api().prepare(manifests, model_family=family)
+    if preview_root is None:
+        prepared = _dataset_api().prepare(manifests, model_family=family)
+    else:
+        prepared = _dataset_api().prepare(manifests, model_family=family, preview_root=preview_root,
+                                          preview_audio_digest=preview_audio_digest)
     preserved_cache_dir = (
         payload.get("cache_dir")
         if family in {COMPOSER_MODEL_FAMILY, COMPOSER_V2_MODEL_FAMILY} and str(payload.get("cache_dir") or "").strip()

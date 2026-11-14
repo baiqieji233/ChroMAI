@@ -251,6 +251,11 @@ def curve_loss(rates,batch):
     observed=exposure.sum((1,2))>0
     quality=batch.get('sample_weight',torch.ones_like(per_sample))
     quality=quality*observed
+    if 'curve_loss_scale' in batch:
+        active=batch['labels'].ne(-100)
+        token_weights=batch.get('token_weights',active.float())*active
+        token_weights=token_weights*batch.get('sample_weight',torch.ones_like(per_sample))[:,None]
+        return (per_sample*quality*batch['curve_loss_scale']).sum()/token_weights.sum().clamp_min(1)
     return (per_sample*quality).sum()/quality.sum().clamp_min(1e-6)
 
 
@@ -291,6 +296,7 @@ def predict(args):
     data=StreamDataset.__new__(StreamDataset)
     data.codec=model.codec;data.max_tokens=config.max_tokens;data.history_beats=config.history_beats
     data.window_beats=config.window_beats;data.future_beats=config.future_beats;data.intensity_policy=POLICY
+    data.local_audio_block_beats=config.local_audio_block_beats
     data.onset_readout_policy='off';data.structure_policy=config.structure_policy
     data.reference_augmentation=False;data.refresh_events=config.refresh_events
     data.music_context_policy=config.music_context_policy
