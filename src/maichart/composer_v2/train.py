@@ -156,6 +156,9 @@ def _identity(dataset):
     value=dict(manifest_sha256=dataset.manifest_sha256,charts=dataset.audit["charts"],
         audio=[dict(song_id=s.song_id,difficulty=s.difficulty,identity=s.audio.identity) for s in dataset.songs],
         codec_sha256=_hash(dataset.codec.to_dict()),windows=len(dataset))
+    excluded = dataset.audit.get('vocabulary_exclusions', ())
+    if excluded:
+        value['vocabulary_excluded_chart_indices'] = [row['chart_index'] for row in excluded]
     if dataset.condition_policy != LEVEL_ONLY:
         value['condition_contract'] = dataset.condition_contract
     if getattr(dataset, 'auto_quality_policy', 'off') == 'auto_v1':
@@ -579,7 +582,14 @@ def train(args):
     if args.sequence_policy=='continuous_events_v1':
         train_options.update(reference_augmentation=True, training_window_events=args.training_window_events)
     with scorer if scorer is not None else nullcontext():
-        dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
+        from .codec import VocabularyCoverageError
+        try:
+            dataset=dataset_class(args.manifest,extend_vocabulary=bool(args.init_checkpoint),**train_options)
+        except VocabularyCoverageError as error:
+            if not args.resume:
+                raise
+            raise ValueError(f'{error}。断点续训使用原训练素材和词表。'
+                             '要使用扩充后的训练素材，请选「微调」并使用新检查点目录。') from error
         if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
             raise ValueError('准备训练数据时未找到匹配的自动质检标注')
         vocabulary_changed = codec is not None and dataset.codec is not codec
@@ -587,7 +597,7 @@ def train(args):
             raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
         parent_vocab_size = codec.vocab_size if codec is not None else None
         codec=dataset.codec
-        validation_options={**options,"codec":codec,"limit_charts":0}
+        validation_options={**options,"codec":codec,"limit_charts":0,"validate_fixed_vocabulary":True}
         if args.sequence_policy=='continuous_events_v1':validation_options['timing_recovery_policy']='off'
         validation=dataset_class(args.validation_manifest,**validation_options) if args.validation_manifest else None
     if scorer is not None:
@@ -595,7 +605,7 @@ def train(args):
              train_charts=len(dataset.songs), outside_range=sum(
                  row['reason']=='fitted_level_out_of_range' for row in dataset.audit['filtered']),
              unsupported_slot=sum(row['reason']=='difficulty_slot_unsupported' for row in dataset.audit['filtered']))
-    identity=dict(train=_identity(dataset),validation=_identity(validation) if validation else None)
+    identity=dict(train=_identity(dataset),validation=_identity(validation) if validation is not None else None)
     gc.collect()
     if torch.cuda.is_available():torch.cuda.empty_cache()
     if args.resume:
@@ -608,9 +618,16 @@ def train(args):
     args.batch_layout=batch_layout
     loader,sampler=_loader(dataset,args.batch_size,args.seed,True,device,order=batch_order,
         batch_layout=batch_layout,accumulation=args.grad_accumulation,source_batch_size=source_batch_size)
-    from .validation_sampling import POLICY as VALIDATION_POLICY,LEGACY as LEGACY_VALIDATION
+    from .validation_sampling import POLICY as VALIDATION_POLICY,LEGACY as LEGACY_VALIDATION,coverage_report
     validation_policy=parent['training_contract'].get('validation_sampling',LEGACY_VALIDATION) if args.resume else VALIDATION_POLICY
     validation_loader=_validation_loader(validation,validation_batch_size,args.seed,device,args.validation_max_batches,validation_policy) if validation else None
+    validation_coverage = getattr(validation_loader, 'validation_coverage', None)
+    if validation is not None and validation_loader is None:
+        validation_coverage = coverage_report(validation, [], validation_policy, maximum_batches=args.validation_max_batches)
+    if validation_coverage and validation_coverage['vocabulary_excluded_chart_records']:
+        emit('validation_vocabulary', status='partial' if validation_loader is not None else 'unavailable',
+             excluded_charts=validation_coverage['vocabulary_excluded_chart_records'],
+             usable_charts=validation_coverage['total_chart_records'])
     updates_per_epoch=math.ceil(len(loader)/args.grad_accumulation)
     total_updates=updates_per_epoch*args.epochs
     contract=dict(batch_size=args.batch_size,grad_accumulation=args.grad_accumulation,seed=args.seed,
@@ -622,7 +639,7 @@ def train(args):
     if batch_layout == FULL_INPUT:
         contract.update(batch_layout=batch_layout,batch_source_size=source_batch_size,
                         validation_batch_size=validation_batch_size)
-    if validation and validation_policy!=LEGACY_VALIDATION:
+    if validation is not None and validation_policy!=LEGACY_VALIDATION:
         contract.update(validation_sampling=validation_policy,validation_sampling_budget=args.validation_max_batches)
     if args.condition_policy != LEVEL_ONLY:
         contract['condition_contract'] = condition_contract(args.condition_policy)
@@ -715,7 +732,7 @@ def train(args):
         restore_rng(parent["rng_state"])
     directory.mkdir(parents=True,exist_ok=True)
     (directory/'dataset_audit.json').write_text(json.dumps(
-        dict(train=dataset.audit,validation=validation.audit if validation else None),
+        dict(train=dataset.audit,validation=validation.audit if validation is not None else None),
         ensure_ascii=False,indent=2,default=str),encoding='utf-8')
     if args.resume and not artifacts[1].exists():
         original_best=source_directory/"composer_v2_best.pt"
@@ -730,7 +747,9 @@ def train(args):
             state["best_loss"]=None
             emit("runtime",stage="best_selection_reset",reason="Previous best weights unavailable; best selection restarts while optimizer and cursor resume exactly")
     best_basis=("validation_automatic_conditions_quality_weighted_token_ce" if args.condition_policy==RADAR_STYLE
-        else "validation_quality_weighted_token_ce") if validation else "training_quality_weighted_token_ce_no_validation"
+        else "validation_quality_weighted_token_ce") if validation_loader is not None else (
+            "training_quality_weighted_token_ce_validation_unavailable" if validation is not None
+            else "training_quality_weighted_token_ce_no_validation")
     epoch_loss_gpu=torch.tensor(float(state.get("epoch_loss_sum",0.)),device=device)
     epoch_mass=float(state.get("epoch_weight_sum",0.))
     def flush_epoch():
@@ -766,7 +785,7 @@ def train(args):
          training_window_events=args.training_window_events,
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,
-         validation_coverage=getattr(validation_loader,'validation_coverage',None),
+         validation_coverage=validation_coverage,
         best_basis=best_basis,activation_checkpointing=memory_policy,attention_projection_packing=projection_policy,
         decoder_flash_attention=flash_policy)
     model.train();optimizer.zero_grad(set_to_none=True)
@@ -883,7 +902,7 @@ def train(args):
                 validation_phase_loss=getattr(model,"validation_phase_loss",None),
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
-                validation_coverage=getattr(model,'validation_coverage',None),
+                validation_coverage=validation_coverage,
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
                 best_basis=best_basis,optimizer_steps=state["optimizer_steps"])

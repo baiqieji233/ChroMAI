@@ -54,13 +54,14 @@ def coverage_report(dataset, indices, policy, *, maximum_batches=0):
     def chart_key(index):
         song = dataset.songs[index]
         return (audio_key(song), getattr(song, 'chart_sha256', None) or str(song.source_path), song.difficulty)
-    return dict(policy=policy, maximum_batches=maximum_batches,
+    excluded = len(getattr(dataset, 'audit', {}).get('vocabulary_exclusions', ()))
+    return dict(policy=policy, maximum_batches=maximum_batches, vocabulary_excluded_chart_records=excluded,
         selected_windows=len(indices), total_windows=len(dataset.windows),
         selected_chart_records=len(selected), total_chart_records=len(dataset.songs),
         selected_unique_charts=len({chart_key(index) for index in selected}),
         total_unique_charts=len({chart_key(index) for index in range(len(dataset.songs))}),
         selected_audio=len(selected_audio), total_audio=len(total_audio),
-        complete=len(indices) == len(dataset.windows),
+        complete=len(indices) == len(dataset.windows) and not excluded,
         window_fraction=len(indices) / max(1, len(dataset.windows)))
 
 

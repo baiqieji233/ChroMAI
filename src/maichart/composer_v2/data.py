@@ -23,6 +23,7 @@ from maichart.training.dataset_catalog import _source_asset
 from maichart.training.event_dataset import inspect_chart, numeric_level
 from . import chart_dialect
 from .chart_cache import ChartCache
+from .codec import VocabularyCoverageError
 from .conditions import RADAR_STYLE, condition_contract, resolve_condition, training_condition
 from .difficulty import DIFFICULTY_SLOTS, metadata_exclusion
 from .quality_data import TrainingQuality, quality_excludes_chart
@@ -82,7 +83,7 @@ class ComposerV2Dataset(Dataset):
                  quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
                  extend_vocabulary=False, dialect_policy=chart_dialect.POLICY,
                  auto_quality_policy='off', difficulty_scorer=None, min_declared_level=0.,
-                 difficulty_slots=None):
+                 difficulty_slots=None, validate_fixed_vocabulary=False):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
@@ -278,30 +279,42 @@ class ComposerV2Dataset(Dataset):
             self.audit['vocabulary_policy'] = 'checkpoint_fixed_no_extension'
         unknown_phases = set()
         lengths_by_chart = {}
+        compatible_songs = []
+        vocabulary_exclusions = []
         for index, song in enumerate(self.songs, 1):
             chart_key = (song.chart_sha256, song.difficulty)
-            if continuous and chart_key in lengths_by_chart:
-                song.event_token_lengths = lengths_by_chart[chart_key]
-                continue
-            for point in song.points:
-                try:
+            try:
+                if continuous and chart_key in lengths_by_chart:
+                    song.event_token_lengths = lengths_by_chart[chart_key]
+                else:
+                    for point in song.points:
+                        if continuous:
+                            song.event_token_lengths.append(len(codec.encode_points([point])))
+                        else:
+                            relative = point.beat % window_beats
+                            codec.encode_points([point], origin=point.beat - relative, region='target')
+                            if 'T:' + str(relative) not in codec.ids:
+                                unknown_phases.add(str(relative % 1))
                     if continuous:
-                        song.event_token_lengths.append(len(codec.encode_points([point])))
-                    else:
-                        relative = point.beat % window_beats
-                        codec.encode_points([point], origin=point.beat - relative, region='target')
-                except ValueError as error:
-                    message = (f'composer_v2 checkpoint cannot encode {song.source_path} '
-                               f'difficulty={song.difficulty} beat={point.beat}: {error}')
-                    self.audit.setdefault('vocabulary_rejected', []).append(message)
-                    # Validation must not turn an unsupported target into an empty window.
-                    raise ValueError(message) from error
-                if not continuous and 'T:' + str(relative) not in codec.ids:
-                    unknown_phases.add(str(relative % 1))
-            if continuous:
-                lengths_by_chart[chart_key] = song.event_token_lengths
+                        lengths_by_chart[chart_key] = song.event_token_lengths
+            except VocabularyCoverageError as error:
+                if not validate_fixed_vocabulary:
+                    raise VocabularyCoverageError(
+                        f'composer_v2 checkpoint cannot encode {song.source_path} '
+                        f'difficulty={song.difficulty} beat={point.beat}: {error}') from error
+                # The unknown event could also occur in a later input history,
+                # a carried sustain or a reference, so exclude the whole record.
+                record = dict(chart_index=index-1, source=str(song.source_path), difficulty=song.difficulty,
+                              first_unsupported_beat=str(point.beat), reason=str(error))
+                vocabulary_exclusions.append(record)
+                print('composer_v2_validation_vocab_excluded ' + json.dumps(record, ensure_ascii=False), flush=True)
+            else:
+                compatible_songs.append(song)
             if index % 100 == 0 or index == len(self.songs):
                 _report_preparation('vocabulary', index, len(self.songs), vocabulary_start)
+        self.songs = compatible_songs
+        if vocabulary_exclusions:
+            self.audit['vocabulary_exclusions'] = vocabulary_exclusions
         self.audit['preparation']['vocabulary_sec'] = time.perf_counter() - vocabulary_start
         self.audit['unseen_phase_numeric_fallback'] = sorted(unknown_phases)
         if unknown_phases:
@@ -314,7 +327,7 @@ class ComposerV2Dataset(Dataset):
             audio_store = AudioFeatureStore(cache_dir=cache_dir, backend=audio_backend,
                 model_path=mert_model, device=prepare_device)
         self.audio_store = audio_store
-        if prepare:
+        if prepare and self.songs:
             self.prepare()
         if not continuous:
             for song_index, song in enumerate(self.songs):

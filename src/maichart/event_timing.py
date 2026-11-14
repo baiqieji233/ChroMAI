@@ -5,7 +5,7 @@ from __future__ import annotations
 from bisect import bisect_left
 import math
 from collections import Counter
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import lru_cache
 from pathlib import Path
@@ -281,13 +281,11 @@ def tokenize_event_timing(
     initial_division: int = 4,
     *,
     first: float = 0.0,
-    preserve_each_groups: bool = False,
 ) -> list[EventTimingPoint]:
     """Reuse raw timing syntax, advancing only with exact Fraction steps.
 
     The first E stops the document. Ticks are optional derived values and
     never constrain the grid. Seconds include first and integrate each BPM.
-    Motion consumers can retain EACH separators at the same authored time.
     """
 
     bpm = _finite_number(initial_bpm, "initial_bpm", positive=True)
@@ -307,16 +305,11 @@ def tokenize_event_timing(
                 bpm = _finite_number(directive.value, "BPM", positive=True)
             elif directive.directive_type == "grid":
                 division = int(directive.value)
-        compact = "".join(note_text.split())
-        if preserve_each_groups and "`" in compact:
-            normalized_note = "`".join(normalize_note_text(group) for group in compact.split("`"))
-        else:
-            normalized_note = normalize_note_text(compact)
         points.append(
             EventTimingPoint(
                 index=index,
                 raw=raw_point,
-                note_text=normalized_note,
+                note_text=normalize_note_text("".join(note_text.split())),
                 beat=beat,
                 tick=duration_to_ticks_or_none(beat),
                 time_sec=float(elapsed),
@@ -341,7 +334,6 @@ def parse_event_chart(
     difficulty_index: int,
     *,
     strict_notes: bool = False,
-    preserve_each_groups: bool = False,
 ) -> EventChart:
     """Read exact events, BPM directives, and the first E from Maidata.
 
@@ -353,8 +345,7 @@ def parse_event_chart(
     """
 
     return _parse_event_metadata(
-        parse_maidata_file(maidata_path), difficulty_index, strict_notes=strict_notes,
-        preserve_each_groups=preserve_each_groups,
+        parse_maidata_file(maidata_path), difficulty_index, strict_notes=strict_notes
     )
 
 
@@ -363,13 +354,11 @@ def parse_event_chart_text(
     difficulty_index: int,
     *,
     strict_notes: bool = False,
-    preserve_each_groups: bool = False,
 ) -> EventChart:
     """In-memory counterpart used for exact compiler roundtrip verification."""
 
     return _parse_event_metadata(
-        parse_maidata_metadata(maidata_text), difficulty_index, strict_notes=strict_notes,
-        preserve_each_groups=preserve_each_groups,
+        parse_maidata_metadata(maidata_text), difficulty_index, strict_notes=strict_notes
     )
 
 
@@ -378,7 +367,6 @@ def _parse_event_metadata(
     difficulty_index: int,
     *,
     strict_notes: bool,
-    preserve_each_groups: bool = False,
 ) -> EventChart:
     difficulty = next(
         (item for item in chart.difficulties if item.index == difficulty_index), None
@@ -391,8 +379,7 @@ def _parse_event_metadata(
         initial_bpm = 120.0
     first_raw = resolve_chart_first(chart, difficulty_index)
     first = _finite_number(first_raw or 0, "first")
-    timing = tokenize_event_timing(difficulty.inote, initial_bpm, first=first,
-                                   preserve_each_groups=preserve_each_groups)
+    timing = tokenize_event_timing(difficulty.inote, initial_bpm, first=first)
 
     if strict_notes:
         # No event_quality dependency: callers may apply stricter quality rules.
@@ -401,8 +388,7 @@ def _parse_event_metadata(
         unknown: list[tuple[Fraction, str]] = []
         duplicates: list[tuple[Fraction, str, int]] = []
         for point in timing:
-            canonical_point = replace(point, note_text=normalize_note_text(point.note_text)) if preserve_each_groups else point
-            parsed = parse_timing_point_notes(canonical_point)
+            parsed = parse_timing_point_notes(point)
             unknown.extend((point.beat, token.raw) for token in parsed.unknown_tokens)
             # Touch notes report a string position ("A4", "B7", "C") while taps
             # and slide heads report 1..8.  Both must be counted, otherwise a

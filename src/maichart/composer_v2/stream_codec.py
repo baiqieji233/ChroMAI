@@ -7,7 +7,7 @@ from float-to-Fraction conversion of an estimated audio clock.
 from fractions import Fraction
 from bisect import bisect_left,bisect_right
 from collections import OrderedDict
-from .codec import ComponentCodec, SPECIAL, component_inventory, render_atom
+from .codec import ComponentCodec, SPECIAL, VocabularyCoverageError, component_inventory, render_atom
 from maichart.composer.event_set_codec import _atoms
 from maichart.event_timing import EventPoint
 
@@ -57,7 +57,7 @@ class StreamCodec(ComponentCodec):
         if value<0:raise ValueError('Continuous clock uses nonnegative absolute beats')
         integer=value.numerator//value.denominator;phase=value-integer
         token='F:'+str(phase)
-        if token not in self.ids:raise ValueError(f'Unseen exact phase {phase}; fresh vocabulary required, no rounding')
+        if token not in self.ids:raise VocabularyCoverageError(f'Unseen exact phase {phase}')
         return [self.at_id,*[self.ids['NUM:'+c] for c in str(integer)],self.phase_id,self.ids[token]]
 
     def encode_points(self,points,origin=0,region='target'):

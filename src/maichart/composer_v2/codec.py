@@ -96,6 +96,10 @@ def _duration_complete(kind,body):
     except (ValueError,ZeroDivisionError):return False
 
 
+class VocabularyCoverageError(ValueError):
+    """Valid chart content that the current model vocabulary cannot encode."""
+
+
 class ComponentCodec:
     schema='composer_v2_components_v2'
     def __init__(self,tokens,templates,ticks_per_beat=48,window_beats=16):
@@ -142,7 +146,7 @@ class ComponentCodec:
     def encode_atom(self,text):
         parts=atom_components(text)
         try:return [self.ids[t] for t in parts]
-        except KeyError as exc:raise ValueError(f'Component outside checkpoint vocabulary: {exc}') from exc
+        except KeyError as exc:raise VocabularyCoverageError(f'Component outside checkpoint vocabulary: {exc}') from exc
 
     def _time(self,value):
         token='T:'+str(value)

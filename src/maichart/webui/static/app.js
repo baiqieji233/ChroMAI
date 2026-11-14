@@ -944,9 +944,9 @@ function composerV2TrainingView(task) {
     [`完整轮训练 loss（${latestEpoch}）`,show(trainEpoch)],
     [`验证 loss（${latestEpoch}）`,show(n(complete,'validation_loss'))],
     [`验证拍内落点 loss（${latestEpoch}）`,show(n(complete,'validation_phase_loss'))],
-    ['best 选择依据',bestBasis.startsWith('validation')?'独立开发集验证 loss':bestBasis.startsWith('training')?'训练 loss（未配置验证集）':'等待记录'],
-      ['每轮验证预算',settings.validation_max_batches===0?'完整开发集':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准'],
-      ['实际验证覆盖',coverage?`${coverage.selected_windows}/${coverage.total_windows} 片段 · ${coverage.selected_audio}/${coverage.total_audio} 首音频`:'旧进程未记录'],
+    ['best 选择依据',bestBasis.startsWith('validation')?'独立开发集验证 loss':bestBasis.endsWith('_validation_unavailable')?'训练 loss（开发集无可评估片段）':bestBasis.startsWith('training')?'训练 loss（未配置验证集）':'等待记录'],
+      ['每轮验证预算',settings.validation_max_batches===0?'开发集全部可评估片段':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准'],
+      ['实际验证覆盖',coverage?`${coverage.selected_windows}/${coverage.total_windows} 片段 · ${coverage.selected_audio}/${coverage.total_audio} 首音频${coverage.vocabulary_excluded_chart_records?` · ${coverage.vocabulary_excluded_chart_records} 张超出模型词表`:''}`:'旧进程未记录'],
       ['验证抽查方式',coverage?.policy==='audio_balanced_spread_v1'?'歌曲均衡、曲内分散':coverage?.policy==='manifest_prefix_v1'?'旧版清单前缀':'以训练日志为准']]],
     ['训练进度',[
       ['本轮预计剩余',preparing?'准备数据中':epochEtaText],
