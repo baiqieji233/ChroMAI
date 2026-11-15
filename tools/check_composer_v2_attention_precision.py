@@ -32,10 +32,12 @@ class AudioAttentionPrecision(unittest.TestCase):
     def test_large_key_offsets_keep_correct_gradients(self):
         torch.backends.cuda.matmul.allow_tf32 = False
         for dtype in (torch.bfloat16, torch.float16):
-            for kind in ('local', 'relative'):
-                with self.subTest(dtype=dtype, kind=kind):
+            for kind, normalization in ((kind, policy) for kind in ('local', 'relative')
+                                        for policy in ('off', 'qk_rms_v1')):
+                with self.subTest(dtype=dtype, kind=kind, normalization=normalization):
                     torch.manual_seed(42)
-                    module = Attention(128, 2, local=kind == 'local', relative=kind == 'relative').cuda()
+                    module = Attention(128, 2, local=kind == 'local', relative=kind == 'relative',
+                                       normalization=normalization).cuda()
                     query = torch.randn(1, 2, 8, 64, device='cuda').to(dtype)
                     key = (torch.randn(1, 2, 1, 64, device='cuda') * 300
                            + torch.randn(1, 2, 32, 64, device='cuda') * 2).to(dtype)

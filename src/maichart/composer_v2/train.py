@@ -192,7 +192,7 @@ def _same_data_identity(saved, current):
             return False
     return True
 
-def _batches(loader,skip=0):
+def _batches(loader,skip=0,*,pending=None):
     # Dataset fetching is deterministic; one outstanding CPU batch bounds RAM.
     sampler = getattr(loader, 'batch_sampler', None)
     from .batching import FullInputBatchSampler
@@ -212,10 +212,12 @@ def _batches(loader,skip=0):
                 if batch is sentinel:
                     return
                 future = pool.submit(next, iterator, sentinel)
+                if pending is not None:pending[:]=[future]
                 if index >= skip:
                     yield index, batch
                 index += 1
     finally:
+        if pending is not None:pending.clear()
         if can_seek:
             sampler.start_batch = previous_start
 
@@ -286,12 +288,16 @@ def _phase_budget(batch,phase_tokens):
 
 def _validate(model,loader,device,precision,maximum):
     model.validation_phase_loss=None
+    model.validation_time_loss=None
+    model.validation_nonphase_time_loss=None
     model.validation_curve_loss=None
     model.validation_curve_mae=None
     model.validation_coverage=getattr(loader,'validation_coverage',None)
     if loader is None:return None
     phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
     phase_tokens=model.phase_targets.detach().cpu()
+    time_tokens=model.time_tokens.detach().cpu()
+    time_numerator=torch.zeros((),device=device);time_mass_sum=0.
     model.eval();numerator=torch.zeros((),device=device);mass_sum=0.
     finite=torch.ones((),device=device,dtype=torch.bool)
     curve_numerator=torch.zeros((),device=device)
@@ -304,7 +310,7 @@ def _validate(model,loader,device,precision,maximum):
                 # not a validation path supplied with the answer chart's statistics.
                 known=torch.zeros_like(batch['condition'],dtype=torch.bool)
                 known[:,0]=True;batch={**batch,'condition_known':known}
-            _,mass,_,_=_cpu_budget(batch)
+            _,mass,time_mass,_=_cpu_budget(batch,time_tokens)
             phase_mass=_phase_budget(batch,phase_tokens)
             if not math.isfinite(mass) or mass<0:raise ValueError("Invalid validation token weight budget")
             batch=_device_batch(batch,device)
@@ -321,17 +327,35 @@ def _validate(model,loader,device,precision,maximum):
                 exposure=widths[...,None]*quality*sample_quality[:,None,None]
                 curve_error+=((output['curve_rates']-batch['curve_counts']/widths[...,None].clamp_min(1e-6)).abs()*exposure).sum((0,1))
                 curve_exposure+=exposure.sum((0,1))
-            phase_numerator+=metrics["phase_loss"]*phase_mass;phase_mass_sum+=phase_mass
+            phase_numerator+=metrics["phase_loss"]*max(1.,phase_mass);phase_mass_sum+=phase_mass
+            time_numerator+=metrics['time_loss']*max(1.,time_mass);time_mass_sum+=time_mass
     if not bool(finite):raise RuntimeError("Nonfinite validation loss")
     if mass_sum<=0:raise ValueError("Validation has no positive quality-weighted target tokens")
     result=float(numerator)/max(1.,mass_sum)
     model.validation_phase_loss=float(phase_numerator)/phase_mass_sum if phase_mass_sum else None
+    model.validation_time_loss=float(time_numerator)/time_mass_sum if time_mass_sum else None
+    nonphase_mass=time_mass_sum-phase_mass_sum
+    model.validation_nonphase_time_loss=(float(time_numerator-phase_numerator)/nonphase_mass
+                                        if nonphase_mass>0 else None)
     if hasattr(model,'intensity'):
         model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
         values=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
         model.validation_curve_mae=[value if exposure>0 else None for value,exposure in zip(values,curve_exposure.cpu().tolist())]
     model.train()
     return result
+
+
+def _validate_checkpoint(model,loader,device,precision,maximum,*,pending=None):
+    """Inspect fixed holdout windows without changing the next training RNG draw."""
+    # Train/dev share one bounded audio bank cache. Finish the outstanding
+    # training fetch before a second loader can read or evict its mappings.
+    if pending:pending[0].result()
+    saved_rng=rng_state();was_training=model.training
+    try:
+        return _validate(model,loader,device,precision,maximum)
+    finally:
+        restore_rng(saved_rng)
+        model.train(was_training)
 
 def _apply_cuda_budget(budget_gib, uses_cuda):
     if not uses_cuda or budget_gib == 0:
@@ -496,6 +520,9 @@ def train(args):
     args.intensity_policy,curve_migration=resolve_curve_policy(getattr(args,'intensity_curve','auto'),
         (parent.get('model_config') or parent.get('config')) if parent else None,resume=bool(args.resume))
     parent_model=(parent.get('model_config') or parent.get('config')) if parent else {}
+    # Existing checkpoints keep their original attention function. Fresh runs
+    # use bounded Q/K scores; loading weights must never silently change this.
+    args.attention_normalization = parent_model.get('attention_normalization', 'off') if parent else 'qk_rms_v1'
     from .music_policy import resolve_policy as resolve_music_policy
     args.music_context_policy,music_migration=resolve_music_policy(getattr(args,'music_context','auto'),
         parent_model if parent else None,resume=bool(args.resume))
@@ -539,7 +566,7 @@ def train(args):
     audio_block_migration = bool(parent and args.local_audio_block_beats != inherited_audio_block)
     if audio_block_migration and (args.resume or directory == source_directory or any(p.exists() for p in artifacts)):
         raise ValueError('Changing local audio sharing requires init-checkpoint in a new directory')
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
@@ -664,6 +691,8 @@ def train(args):
         contract['rhythm_learning']=args.rhythm_learning_policy
     if dialect_policy != chart_dialect.LEGACY_STRICT_POLICY:
         contract['chart_dialect'] = dialect_policy
+    if args.attention_normalization != 'off':
+        contract['attention_normalization'] = args.attention_normalization
     if auto_quality_policy != 'off':
         contract['auto_quality_policy'] = auto_quality_policy
     if difficulty_contract is not None:
@@ -794,7 +823,8 @@ def train(args):
          intensity_policy=args.intensity_policy,
          validation_coverage=validation_coverage,
         best_basis=best_basis,activation_checkpointing=memory_policy,attention_projection_packing=projection_policy,
-        decoder_flash_attention=flash_policy,biased_attention_backward="fp32_math_recompute_v1")
+        decoder_flash_attention=flash_policy,biased_attention_backward="fp32_math_recompute_v1",
+        attention_normalization=config.attention_normalization)
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0
@@ -813,7 +843,8 @@ def train(args):
              optimizer_steps=state['optimizer_steps'])
         epoch_loss_gpu=torch.tensor(float(state.get("epoch_loss_sum",0.)),device=device)
         epoch_mass=float(state.get("epoch_weight_sum",0.))
-        for batch_index,batch in _batches(loader,cursor):
+        pending=[]
+        for batch_index,batch in _batches(loader,cursor,pending=pending):
             now=time.perf_counter();data_sec+=now-previous
             tokens,mass,time_mass,component_mass=_cpu_budget(batch,time_tokens)
             input_tokens+=int(batch['token_mask'].sum())
@@ -829,7 +860,7 @@ def train(args):
             scaler.scale(loss*(budget/1024.)).backward()
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
             group_metrics+=torch.stack((metrics['token_loss']*budget,
-                metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*phase_mass,
+                metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*max(1.,phase_mass),
                 metrics['curve_loss']*budget,loss.detach()*budget))
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
@@ -884,7 +915,28 @@ def train(args):
                     audio_banks=dataset.audio_store.mapping_stats(),grad_norm=float(norm.detach()),**cuda_stats(device),
                     gpu_peak_bytes=(torch.cuda.max_memory_allocated(device) if device.type=="cuda" else
                                     torch.xpu.max_memory_allocated(device) if device.type=='xpu' else 0))
-            if boundary and finite and state["optimizer_steps"]%args.checkpoint_interval_steps==0:checkpoint()
+            if boundary and finite and state["optimizer_steps"]%args.checkpoint_interval_steps==0:
+                improved=False
+                # Do not wait an entire multi-hour epoch to detect regression.
+                # Epoch-end validation below already covers its final update.
+                if validation_loader is not None and batch_index+1<len(loader):
+                    validation_started=time.perf_counter()
+                    emit('progress',stage='validation',epoch=epoch+1,total=len(validation_loader),
+                         optimizer_steps=state['optimizer_steps'],scope='checkpoint',started_unix=time.time())
+                    score=_validate_checkpoint(model,validation_loader,device,precision,args.validation_max_batches,pending=pending)
+                    improved=state['best_loss'] is None or score<state['best_loss']
+                    if improved:
+                        state['best_loss']=score
+                        state['validation_improved_in_epoch']=True
+                    emit('progress',stage='checkpoint_validation',epoch=epoch+1,batch=batch_index+1,total=len(loader),
+                         optimizer_steps=state['optimizer_steps'],validation_loss=score,
+                         validation_time_loss=model.validation_time_loss,
+                         validation_nonphase_time_loss=model.validation_nonphase_time_loss,
+                         validation_phase_loss=model.validation_phase_loss,
+                         validation_curve_loss=model.validation_curve_loss,
+                         validation_coverage=validation_coverage,improved=improved,
+                         validation_sec=time.perf_counter()-validation_started,loss_scope='fixed_holdout')
+                checkpoint(improved)
             if boundary and args.max_steps and state["update_attempts"]>=args.max_steps:
                 stop=True;break
             previous=time.perf_counter()
@@ -901,11 +953,14 @@ def train(args):
             improved=score is not None and (state["best_loss"] is None or score<state["best_loss"])
             if improved:state["best_loss"]=score
             if validation_loss is not None:
-                state['bad_validation_epochs']=0 if improved else int(state.get('bad_validation_epochs',0))+1
+                epoch_improved=improved or state.get('validation_improved_in_epoch',False)
+                state['bad_validation_epochs']=0 if epoch_improved else int(state.get('bad_validation_epochs',0))+1
             emit("progress",stage="epoch_complete",epoch=epoch+1,total=args.epochs,loss=score,
                 epoch_train_sec=epoch_train_sec,epoch_start_batch=cursor,
                 epoch_processed_batches=len(loader)-cursor,epoch_total_batches=len(loader),
                 epoch_train_loss=state["last_loss"],validation_loss=validation_loss,
+                validation_time_loss=getattr(model,"validation_time_loss",None),
+                validation_nonphase_time_loss=getattr(model,"validation_nonphase_time_loss",None),
                 validation_phase_loss=getattr(model,"validation_phase_loss",None),
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
@@ -913,7 +968,7 @@ def train(args):
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
                 best_basis=best_basis,optimizer_steps=state["optimizer_steps"])
-            state.update(epoch=epoch+1,batch_cursor=0,epoch_loss_sum=0.,epoch_weight_sum=0.)
+            state.update(epoch=epoch+1,batch_cursor=0,epoch_loss_sum=0.,epoch_weight_sum=0.,validation_improved_in_epoch=False)
             # Checkpoint's next-epoch accumulator must agree with its zero cursor.
             epoch_loss_gpu.zero_();epoch_mass=0.
             checkpoint(improved)

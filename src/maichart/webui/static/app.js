@@ -857,6 +857,10 @@ function composerV2TrainingView(task) {
   let complete=result.composer_v2_epoch_metrics||(progress.stage==='epoch_complete'?progress:null);
   let epochStart=result.composer_v2_epoch_start,validation=result.composer_v2_validation;
   let position=result.composer_v2_position;
+  let checkpointValidation=result.composer_v2_checkpoint_validation||(progress.stage==='checkpoint_validation'?progress:null);
+  const validationChecks=new Map();
+  const addValidation=row=>{if(trainingMetricNumber(row,'optimizer_steps')!==null)validationChecks.set(Number(row.optimizer_steps),row);};
+  if(Array.isArray(result.composer_v2_validation_history))result.composer_v2_validation_history.forEach(addValidation);
   const timingSamples=[],saveSamples=[];
   const epochs=new Map();
   const addEpoch=row=>{if(trainingMetricNumber(row,'epoch')!==null)epochs.set(Number(row.epoch),row);};
@@ -875,11 +879,14 @@ function composerV2TrainingView(task) {
     if(match[1]!=='composer_v2_progress')continue;
     if(row.stage==='epoch_start')epochStart=row;
     if(row.stage==='validation')validation=row;
+    if(row.stage==='checkpoint_validation'){addValidation(row);if(!checkpointValidation||Number(row.optimizer_steps)>=Number(checkpointValidation.optimizer_steps||0))checkpointValidation=row;}
     if(row.stage==='training')timingSamples.push(row);
     if(row.stage==='training' && (!metrics || Number(row.optimizer_steps)>=Number(metrics.optimizer_steps||0)))metrics=row;
     if(row.stage==='epoch_complete'){addEpoch(row);if(!complete || Number(row.epoch)>=Number(complete.epoch))complete=row;}
   }
   if(complete)addEpoch(complete);
+  if(checkpointValidation)addValidation(checkpointValidation);
+  const validationHistory=[...validationChecks.values()].sort((a,b)=>Number(a.optimizer_steps)-Number(b.optimizer_steps));
   const history=[...epochs.values()].sort((a,b)=>Number(a.epoch)-Number(b.epoch));
   const stage=result.composer_v2_stage||(lastPrefix==='composer_v2_checkpoint'?'checkpoint':lastStage)||progress.stage||runtime.stage||'queued';
   const target=trainingMetricNumber(result,'epoch_target')??trainingMetricNumber(runtime,'epoch_target')??trainingMetricNumber(result.effective_settings||{},'epochs');
@@ -892,7 +899,7 @@ function composerV2TrainingView(task) {
   const amount=target>0?Math.max(0,Math.min(1,done/target)):0;
   const epoch=Math.max(finished,activeEpoch);
   const preparing=stage==='preparation' || (!metrics && !complete && !epochStart && !position);
-  const phaseNames={queued:'等待启动',preparation:'准备谱面与音频',epoch_start:'训练中',training:'训练中',validation:'验证中',checkpoint:'保存检查点',epoch_complete:'本轮完成',failed:'运行失败',nonfinite_update_skipped:'已跳过非有限更新'};
+  const phaseNames={queued:'等待启动',preparation:'准备谱面与音频',epoch_start:'训练中',training:'训练中',validation:'验证中',checkpoint_validation:'固定验证完成',checkpoint:'保存检查点',epoch_complete:'本轮完成',failed:'运行失败',nonfinite_update_skipped:'已跳过非有限更新'};
   let status=phaseNames[stage]||'准备训练';
   if (preparing && prepared.total) {
     const label = {charts:'检查谱面源', vocabulary:'建立词表与事件索引', audio:'音频'}[prepared.stage] || '音频';
@@ -931,12 +938,14 @@ function composerV2TrainingView(task) {
   }
   if(batchSeconds===null)batchSeconds=mean(history.slice(-3).filter(row=>row.epoch_processed_batches>0&&row.epoch_train_sec>0)
     .map(row=>row.epoch_train_sec/row.epoch_processed_batches));
-  const validationMean=mean(history.slice(-3).map(row=>n(row,'validation_sec')).filter(value=>value!==null&&value>=0));
+  const validationMean=mean(history.slice(-3).map(row=>n(row,'validation_sec')).filter(value=>value!==null&&value>=0))
+    ??mean(validationHistory.slice(-3).map(row=>n(row,'validation_sec')).filter(value=>value!==null&&value>=0));
   const validationKnown=validationMean!==null||runtime.validation_windows===0||settings.validation_source==='off';
   const saveMean=mean(saveSamples.slice(-5))||0;
   if(batchSeconds!==null&&total>0) {
     const currentDone=activeEpoch<=finished;
-    const trainingLeft=['validation','epoch_complete'].includes(stage)||currentDone?0:Math.max(0,total-(batch||0))*batchSeconds;
+    const epochValidation=stage==='validation'&&validation?.scope!=='checkpoint';
+    const trainingLeft=epochValidation||stage==='epoch_complete'||currentDone?0:Math.max(0,total-(batch||0))*batchSeconds;
     const validationElapsed=stage==='validation'&&Number.isFinite(validation?.started_unix)?Math.max(0,Date.now()/1000-validation.started_unix):0;
     const validationLeft=currentDone?0:Math.max(0,(validationMean||0)-validationElapsed);
     epochEta=trainingLeft+validationLeft;
@@ -961,8 +970,12 @@ function composerV2TrainingView(task) {
     [`完整轮训练 loss（${latestEpoch}）`,show(trainEpoch)],
     [`验证 loss（${latestEpoch}）`,show(n(complete,'validation_loss'))],
     [`验证拍内落点 loss（${latestEpoch}）`,show(n(complete,'validation_phase_loss'))],
+    ['最近固定验证步',show(n(checkpointValidation,'optimizer_steps'),0)],
+    ['固定片段验证 loss',show(n(checkpointValidation,'validation_loss'))],
+    ['固定片段非相位时序 loss',show(n(checkpointValidation,'validation_nonphase_time_loss'))],
+    ['固定片段拍内落点 loss',show(n(checkpointValidation,'validation_phase_loss'))],
     ['best 选择依据',bestBasis.startsWith('validation')?'独立开发集验证 loss':bestBasis.endsWith('_validation_unavailable')?'训练 loss（开发集无可评估片段）':bestBasis.startsWith('training')?'训练 loss（未配置验证集）':'等待记录'],
-      ['每轮验证预算',settings.validation_max_batches===0?'开发集全部可评估片段':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准'],
+      ['每次验证预算',settings.validation_max_batches===0?'开发集全部可评估片段':settings.validation_max_batches?`最多 ${settings.validation_max_batches} batch`:'以训练日志为准'],
       ['实际验证覆盖',coverage?`${coverage.selected_windows}/${coverage.total_windows} 片段 · ${coverage.selected_audio}/${coverage.total_audio} 首音频${coverage.vocabulary_excluded_chart_records?` · ${coverage.vocabulary_excluded_chart_records} 张超出模型词表`:''}`:'旧进程未记录'],
       ['验证抽查方式',coverage?.policy==='audio_balanced_spread_v1'?'歌曲均衡、曲内分散':coverage?.policy==='manifest_prefix_v1'?'旧版清单前缀':'以训练日志为准']]],
     ['训练进度',[
@@ -1001,8 +1014,8 @@ function composerV2TrainingView(task) {
       ['曲线验证 loss',show(n(complete,'validation_curve_loss'))],
       ['出音频率平均误差（次/秒）',show(errors[0])],['同拍额外物量平均误差（个/秒）',show(errors[1])]]]);
   }
-  return {status,progress:amount,knownTarget:target>0,indeterminate:preparing,cards,history,
-    note:'训练累计均值与完整轮训练、验证 loss 分开显示。验证预算为0时检查完整开发集；正数按记录的方式抽查。曲线误差单独显示，谱面质量仍需试听。'};
+  return {status,progress:amount,knownTarget:target>0,indeterminate:preparing,cards,history,validationHistory,
+    note:'累计训练 loss 可能掩盖近期退步，请同时查看固定片段验证与非相位时序 loss。当前版本在定期保存检查点时也会验证；预算为0时检查完整开发集，正数使用固定抽查片段。'};
 }
 
 function renderComposerV2TrainingMetrics(task,panel,source,groups) {
@@ -1031,6 +1044,24 @@ function renderComposerV2TrainingMetrics(task,panel,source,groups) {
       const train=trainingMetricNumber(row,'epoch_train_loss') ?? (row.validation_loss==null?trainingMetricNumber(row,'loss'):null);
       const validation=trainingMetricNumber(row,'validation_loss');
       for(const value of [row.epoch,train===null?'未记录':train.toFixed(4),validation===null?'未记录':validation.toFixed(4)]){const td=document.createElement('td');td.textContent=String(value);tr.appendChild(td);}
+      body.appendChild(tr);
+    }
+    table.appendChild(body);card.appendChild(table);groups.appendChild(card);
+  }
+  if(view.validationHistory.length) {
+    const card=document.createElement('section');card.className='training-metric-trends';
+    const heading=document.createElement('h4');heading.textContent='最近固定片段验证';card.appendChild(heading);
+    const table=document.createElement('table');table.className='v2-epoch-table';
+    const header=document.createElement('tr');
+    for(const label of ['更新步','验证 loss','非相位时序 loss','拍内落点 loss']){const th=document.createElement('th');th.textContent=label;header.appendChild(th);}
+    const thead=document.createElement('thead');thead.appendChild(header);table.appendChild(thead);
+    const body=document.createElement('tbody');
+    for(const row of view.validationHistory.slice(-10)) {
+      const tr=document.createElement('tr');
+      const values=[row.optimizer_steps,...['validation_loss','validation_nonphase_time_loss','validation_phase_loss'].map(key=>{
+        const value=trainingMetricNumber(row,key);return value===null?'未记录':value.toFixed(4);
+      })];
+      for(const value of values){const td=document.createElement('td');td.textContent=String(value);tr.appendChild(td);}
       body.appendChild(tr);
     }
     table.appendChild(body);card.appendChild(table);groups.appendChild(card);

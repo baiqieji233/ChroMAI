@@ -78,6 +78,8 @@ def inspect_payload(payload):
     config=payload.get("model_config") or payload.get("config")
     if not isinstance(config,dict): errors.append("缺少模型配置")
     if isinstance(config,dict):
+        if config.get('attention_normalization', 'off') not in ('off', 'qk_rms_v1'):
+            errors.append('Unknown attention normalization policy')
         from .music_policy import POLICIES as MUSIC_POLICIES
         if config.get('music_context_policy','off') not in MUSIC_POLICIES:
             errors.append('Unknown Composer v2 music context policy')

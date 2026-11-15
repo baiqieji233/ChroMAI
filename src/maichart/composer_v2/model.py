@@ -34,7 +34,10 @@ class ComposerV2Config:
     intensity_policy: str = 'off'
     music_context_policy: str = 'off'
     local_audio_block_beats: int = 1
+    attention_normalization: str = 'qk_rms_v1'
     def __post_init__(self):
+        if self.attention_normalization not in ('off', 'qk_rms_v1'):
+            raise ValueError('Unknown attention normalization policy')
         from .music_policy import POLICIES as MUSIC_POLICIES
         if self.music_context_policy not in MUSIC_POLICIES or min(self.audio_layers,self.song_layers)<1:
             raise ValueError('Invalid music context/encoder depth')
@@ -61,7 +64,8 @@ class ComposerV2Config:
             raise ValueError('Rhythm structure requires continuous events')
     def to_dict(self):return asdict(self)
     @classmethod
-    def from_dict(cls,value):return cls(**{'condition_policy':'level_only_v1','sequence_policy':'window_v1','audio_layers':2,**value})
+    def from_dict(cls,value):return cls(**{'condition_policy':'level_only_v1','sequence_policy':'window_v1','audio_layers':2,
+                                         'attention_normalization':'off',**value})
 
 
 def positions(values,width):
@@ -79,12 +83,28 @@ def _stable_biased_attention(query, key, value, mask, causal):
             dropout_p=0., is_causal=causal).to(query.dtype)
 
 
+def _normalized_qk(query, key):
+    q32, k32 = query.float(), key.float()
+    return ((q32 * torch.rsqrt(q32.square().mean(-1, keepdim=True) + 1e-6)).to(query.dtype),
+            (k32 * torch.rsqrt(k32.square().mean(-1, keepdim=True) + 1e-6)).to(key.dtype))
+
+
+def _normalized_attention(query, key, value, mask, causal, stable):
+    query, key = _normalized_qk(query, key)
+    if stable:
+        return _stable_biased_attention(query, key, value, mask, causal)
+    return F.scaled_dot_product_attention(query, key, value, attn_mask=mask, dropout_p=0., is_causal=causal)
+
+
 class Attention(nn.Module):
     pack_projections = False
     _inference_qkv = None
 
-    def __init__(self,width,heads,*,local=False,relative=False):
+    def __init__(self,width,heads,*,local=False,relative=False,normalization='off'):
         super().__init__();self.heads=heads;self.dim=width//heads;self.local=local
+        if normalization not in ('off', 'qk_rms_v1'):
+            raise ValueError('Unknown attention normalization policy')
+        self.normalization = normalization
         self.q=nn.Linear(width,width);self.k=nn.Linear(width,width);self.v=nn.Linear(width,width);self.out=nn.Linear(width,width)
         if local:
             self.past=nn.Parameter(torch.full((heads,),-1.5));self.future=nn.Parameter(torch.full((heads,),-1.5))
@@ -144,7 +164,18 @@ class Attention(nn.Module):
         biased_training = (torch.is_grad_enabled() and q.is_cuda
                            and q.dtype in (torch.float16, torch.bfloat16)
                            and (self.local or hasattr(self, 'relative_beat')))
-        if biased_training:
+        if self.normalization == 'qk_rms_v1':
+            # Projected Q/K magnitudes are not bounded by pre-LayerNorm.
+            # Fixed RMS normalization bounds content logits by sqrt(dim).
+            # Recompute normalization and attention together so long batches
+            # do not retain both raw and normalized Q/K buffers per layer.
+            if torch.is_grad_enabled() and q.is_cuda:
+                from torch.utils.checkpoint import checkpoint
+                attended = checkpoint(_normalized_attention, q, k, v, mask, implicit_causal, biased_training,
+                                      use_reentrant=False, preserve_rng_state=False)
+            else:
+                attended = _normalized_attention(q, k, v, mask, implicit_causal, False)
+        elif biased_training:
             from torch.utils.checkpoint import checkpoint
             # Recompute only attention probabilities rather than retaining an
             # FP32 query-by-key matrix for every audio/decoder layer.
@@ -158,7 +189,7 @@ class Attention(nn.Module):
 class EncoderBlock(nn.Module):
     def __init__(self,c):
         super().__init__();self.norm1=nn.LayerNorm(c.d_model);self.norm2=nn.LayerNorm(c.d_model)
-        self.attention=Attention(c.d_model,c.nhead)
+        self.attention=Attention(c.d_model,c.nhead,normalization=c.attention_normalization)
         self.ff=nn.Sequential(nn.Linear(c.d_model,c.dim_feedforward),nn.GELU(),nn.Dropout(c.dropout),nn.Linear(c.dim_feedforward,c.d_model))
         self.drop=nn.Dropout(c.dropout)
     def forward(self,x,mask):
@@ -183,8 +214,10 @@ class DecoderBlock(nn.Module):
 
     def __init__(self,c,*,song=True):
         super().__init__();self.norms=nn.ModuleList([nn.LayerNorm(c.d_model) for _ in range(4)])
-        self.self_attention=Attention(c.d_model,c.nhead);self.local_attention=Attention(c.d_model,c.nhead,local=True)
-        self.song_attention=Attention(c.d_model,c.nhead,relative=c.music_context_policy!='off') if song else None
+        self.self_attention=Attention(c.d_model,c.nhead,normalization=c.attention_normalization)
+        self.local_attention=Attention(c.d_model,c.nhead,local=True,normalization=c.attention_normalization)
+        self.song_attention=Attention(c.d_model,c.nhead,relative=c.music_context_policy!='off',
+                                      normalization=c.attention_normalization) if song else None
         self.ff=nn.Sequential(nn.Linear(c.d_model,c.dim_feedforward),nn.GELU(),nn.Dropout(c.dropout),nn.Linear(c.dim_feedforward,c.d_model))
         self.drop=nn.Dropout(c.dropout)
         self.cache_capacity=c.max_tokens

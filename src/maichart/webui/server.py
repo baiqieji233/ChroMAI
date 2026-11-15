@@ -2105,6 +2105,13 @@ def _update_composer_progress(task: TaskState, line: str) -> None:
             elif stage == 'validation':
                 task.result['composer_v2_validation'] = dict(data)
                 task.message = f'验证第 {epoch} 轮'
+            elif stage == 'checkpoint_validation':
+                task.result['composer_v2_checkpoint_validation'] = dict(data)
+                history = task.result.setdefault('composer_v2_validation_history', [])
+                history[:] = [row for row in history if row.get('optimizer_steps') != data.get('optimizer_steps')]
+                history.append(dict(data))
+                del history[:-200]
+                task.message = f"第 {data.get('optimizer_steps', '?')} 步固定验证完成"
             elif stage == "training":
                 data.setdefault("loss_scope", "run_quality_weighted_token_mean")
                 task.result["composer_v2_training_metrics"] = dict(data)
