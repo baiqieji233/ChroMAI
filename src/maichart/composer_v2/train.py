@@ -794,7 +794,7 @@ def train(args):
          intensity_policy=args.intensity_policy,
          validation_coverage=validation_coverage,
         best_basis=best_basis,activation_checkpointing=memory_policy,attention_projection_packing=projection_policy,
-        decoder_flash_attention=flash_policy)
+        decoder_flash_attention=flash_policy,biased_attention_backward="fp32_math_recompute_v1")
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0

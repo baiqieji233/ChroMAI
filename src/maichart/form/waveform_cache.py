@@ -90,7 +90,7 @@ def _build_lock(directory):
 
 @lru_cache(maxsize=4)
 def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
-    from maichart.form.rational_audio import _ShortAudioRead, _read_mono, _source_digest
+    from maichart.form.rational_audio import _ShortAudioRead, _read_mono_fallback, _source_digest
     if _source_digest(path,cache_dir) != sha256:
         raise ValueError('Audio content changed before waveform mapping; reload the audio source')
     roots = _waveform_roots(cache_dir)
@@ -137,7 +137,7 @@ def _mapped(path, size, mtime_ns, ctime_ns, sha256, cache_dir):
                 # Unsupported codecs and truncated/inaccurate compressed
                 # frame headers use the alternate decoder. Allocation
                 # failures still propagate and are never retried here.
-                values, rate, _ = _read_mono(path)
+                values, rate, _ = _read_mono_fallback(path)
                 frames = len(values)
                 with array_path.open('wb') as stream:
                     np.save(stream, values, allow_pickle=False)

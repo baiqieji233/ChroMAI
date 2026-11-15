@@ -308,10 +308,16 @@ class AudioFeatureStore:
         cached = self._validated_banks.get(directory)
         needs_validation = cached is None or cached[0] != signature
         if needs_validation:
-            metadata = json.loads(index.read_text(encoding='utf-8'))
+            try:
+                metadata = json.loads(index.read_text(encoding='utf-8'))
+                duration = float(metadata['duration_sec'])
+                if not np.isfinite(duration) or duration <= 0:
+                    raise ValueError('duration must be positive and finite')
+            except (ValueError, TypeError, KeyError) as error:
+                raise ValueError(f'Invalid audio cache index: {index}') from error
         else:
             metadata = cached[1]
-        if metadata['identity'] != identity:
+        if metadata.get('identity') != identity:
             raise ValueError(f'Audio cache identity mismatch: {directory}')
         arrays = {key: np.load(directory / (key + '.npy'), mmap_mode='r', allow_pickle=False)
                   for key in _BANK_ARRAYS}
@@ -493,14 +499,44 @@ class AudioFeatureStore:
                 raise ValueError('Expected MERT with 24kHz input')
         return self._processor
 
+    def _repair_cached_bank(self, directory, identity):
+        from maichart.training.reviewed_generation import library_file_lock
+
+        # Another process may have repaired the same bank while we waited.
+        lock = directory.parent / '.repair-locks' / directory.name
+        with library_file_lock(lock):
+            if not directory.exists():
+                return None
+            try:
+                return self._mapped(directory, identity)
+            except (FileNotFoundError, ValueError, EOFError) as error:
+                reason = str(error)
+
+            # Leave the exception scope so failed NumPy mappings are released
+            # before renaming the directory on Windows.
+            quarantine_root = directory.parent.with_name('audio_v1_quarantine')
+            quarantine_root.mkdir(exist_ok=True)
+            saved = Path(tempfile.mkdtemp(prefix=directory.name + '-', dir=quarantine_root))
+            directory.rename(saved / directory.name)
+            self._validated_banks.pop(directory, None)
+            logging.getLogger(__name__).warning(
+                'Rebuilding corrupt audio cache %s; moved to %s (%s)', directory, saved, reason)
+            return None
+
     def prepare(self, audio_path):
         source = Path(audio_path).resolve()
         identity = self._identity(source, remember_source=True)
         directory = self._directory(identity)
-        if (directory / 'index.json').is_file():
-            features = self._mapped(directory, identity)
-            self.cache_hits += 1
-            return features
+        if directory.is_dir():
+            try:
+                features = self._mapped(directory, identity)
+            except (FileNotFoundError, ValueError, EOFError):
+                features = None
+            if features is None:
+                features = self._repair_cached_bank(directory, identity)
+            if features is not None:
+                self.cache_hits += 1
+                return features
         import torch
         import torchaudio
         from maichart.form.waveform_cache import mapped_waveform

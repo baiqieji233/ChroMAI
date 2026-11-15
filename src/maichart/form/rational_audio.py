@@ -189,23 +189,30 @@ def waveform(path, sha256=None):
     return _wave(str(path), stat.st_size, stat.st_mtime_ns, full_hash)
 
 
+def _read_mono_fallback(path, start_sec=None, end_sec=None, *, padding_sec=1.0):
+    """Use an independent decoder after libsndfile fails or reads short."""
+    import audioread
+    import librosa
+
+    start = max(0., float(start_sec) - padding_sec) if start_sec is not None else 0.
+    duration = max(0., float(end_sec) + padding_sec - start) if end_sec is not None else None
+    try:
+        decoder = audioread.audio_open(str(path))
+        signal, rate = librosa.load(decoder, sr=None, mono=True, offset=start, duration=duration)
+    except (audioread.DecodeError, OSError) as error:
+        raise ValueError(f'Alternate audio decoder failed for {path}: {error}') from error
+    if not len(signal) and duration != 0:
+        raise ValueError(f'Alternate audio decoder returned no samples for {path}')
+    return np.asarray(signal, dtype=np.float32), int(rate), int(start * rate)
+
+
 def _read_mono(path, start_sec=None, end_sec=None, *, padding_sec=1.0):
     """Decode in small channel blocks; retain only mono native-rate samples."""
     import soundfile as sf
-    def fallback():
-        # Some MP3/VBR files expose a frame count larger than the decodable
-        # stream.  librosa/audioread is the safe fallback for that metadata
-        # mismatch; keep the bounded window arguments so this never allocates
-        # a second full waveform unnecessarily.
-        import librosa
-        start = max(0., float(start_sec or 0.) - padding_sec) if start_sec is not None else 0.
-        duration = max(0., float(end_sec) + padding_sec - start) if end_sec is not None else None
-        signal, sr = librosa.load(path, sr=None, mono=True, offset=start, duration=duration)
-        return np.asarray(signal, dtype=np.float32), int(sr), int(start * sr)
     try:
         source = sf.SoundFile(str(path))
     except (OSError, RuntimeError):
-        return fallback()
+        return _read_mono_fallback(path, start_sec, end_sec, padding_sec=padding_sec)
     try:
         with source:
             sr = int(source.samplerate)
@@ -231,8 +238,8 @@ def _read_mono(path, start_sec=None, end_sec=None, *, padding_sec=1.0):
                 np.mean(chunk, axis=1, dtype=np.float32, out=signal[cursor:cursor+len(chunk)])
                 cursor += len(chunk)
             return signal, sr, start
-    except _ShortAudioRead:
-        return fallback()
+    except (sf.LibsndfileError, _ShortAudioRead):
+        return _read_mono_fallback(path, start_sec, end_sec, padding_sec=padding_sec)
 
 
 def _query_waveform_spectra(audio, seconds, offsets):

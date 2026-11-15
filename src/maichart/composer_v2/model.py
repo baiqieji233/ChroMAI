@@ -70,6 +70,15 @@ def positions(values,width):
     return torch.stack((angle.sin(),angle.cos()),-1).flatten(-2)[...,:width]
 
 
+def _stable_biased_attention(query, key, value, mask, causal):
+    from torch.nn.attention import SDPBackend, sdpa_kernel
+
+    with torch.autocast('cuda', enabled=False), sdpa_kernel(SDPBackend.MATH):
+        return F.scaled_dot_product_attention(
+            query.float(), key.float(), value.float(), attn_mask=mask.float(),
+            dropout_p=0., is_causal=causal).to(query.dtype)
+
+
 class Attention(nn.Module):
     pack_projections = False
     _inference_qkv = None
@@ -129,7 +138,20 @@ class Attention(nn.Module):
                    +F.softplus(self.future)[None,:,None,None]*gap[:,None].clamp_min(0))
             mask=bias.masked_fill(~mask,-torch.inf) if mask is not None else bias
             mask=mask.to(q.dtype)
-        attended=F.scaled_dot_product_attention(q,k,v,attn_mask=mask,dropout_p=0.,is_causal=implicit_causal)
+        # Fused low-precision backward loses softmax's zero-sum score gradient
+        # when audio keys acquire a large common offset. The resulting error
+        # is amplified by those keys, even with finite losses and gradient clipping.
+        biased_training = (torch.is_grad_enabled() and q.is_cuda
+                           and q.dtype in (torch.float16, torch.bfloat16)
+                           and (self.local or hasattr(self, 'relative_beat')))
+        if biased_training:
+            from torch.utils.checkpoint import checkpoint
+            # Recompute only attention probabilities rather than retaining an
+            # FP32 query-by-key matrix for every audio/decoder layer.
+            attended = checkpoint(_stable_biased_attention, q, k, v, mask, implicit_causal,
+                                  use_reentrant=False, preserve_rng_state=False)
+        else:
+            attended=F.scaled_dot_product_attention(q,k,v,attn_mask=mask,dropout_p=0.,is_causal=implicit_causal)
         return self.out(attended.transpose(1,2).reshape(query.shape))
 
 
