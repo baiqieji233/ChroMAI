@@ -202,6 +202,9 @@ button:disabled { cursor: not-allowed; opacity: .45; }
 .checkbox-field input { margin-top: 2px; flex: 0 0 auto; }
 .checkbox-field span { font-weight: 700; }
 .checkbox-field small { display: block; margin-top: 4px; font-weight: 400; }
+#v2AutoQualitySources { min-width: 0; margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; }
+#v2AutoQualitySourceList { display: flex; flex-wrap: wrap; gap: 6px 20px; margin-top: 8px; }
+#v2AutoQualitySourceList .checkbox-field { overflow-wrap: anywhere; }
 .quality-training-card { margin-top: 18px; padding: 14px; border: 1px solid #b9d6d1; border-radius: 6px; background: #f4faf8; }
 .quality-training-card .section-heading { margin-bottom: 10px; }
 .quality-training-grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; align-items: start; }

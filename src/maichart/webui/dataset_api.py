@@ -301,6 +301,13 @@ class DatasetAPI:
         manifests = self._manifests(payload)
         if not manifests:
             raise ValueError("请至少勾选一个训练数据集")
+        auto_quality_manifests = payload.get("auto_quality_manifests")
+        if auto_quality_manifests is not None:
+            if not isinstance(auto_quality_manifests, list) or any(
+                not isinstance(value, str) or not value.strip() for value in auto_quality_manifests
+            ):
+                raise ValueError("采用自动体检的来源必须是训练清单路径数组")
+            auto_quality_manifests = [str(self._resolve(value)) for value in auto_quality_manifests]
         family = payload.get("model_family")
         # song_form_v1 consumes the same event-preprocessed source contract;
         # composition must validate it as event audio, never as legacy frames.
@@ -308,15 +315,19 @@ class DatasetAPI:
             family = "event_v1"
         published = self.workspace_root / "composed_manifests"
         if preview_root is None:
-            result = compose_datasets(manifests, published, family)
+            result = compose_datasets(manifests, published, family,
+                                      auto_quality_manifests=auto_quality_manifests)
         else:
             result = compose_datasets(manifests, preview_root, family, published_root=published,
-                                      preview_audio_digest=preview_audio_digest)
+                                      preview_audio_digest=preview_audio_digest,
+                                      auto_quality_manifests=auto_quality_manifests)
         return HTTPStatus.OK, result
 
     def prepare(self, manifests: list[str], model_family: str = "event_v1", *, preview_root: Path | None = None,
-                preview_audio_digest=None) -> dict[str, Any]:
+                preview_audio_digest=None, auto_quality_manifests=None) -> dict[str, Any]:
         payload = {"manifests": manifests, "model_family": model_family}
+        if auto_quality_manifests is not None:
+            payload["auto_quality_manifests"] = auto_quality_manifests
         if preview_root is None:
             return self.compose(payload)[1]
         return self.compose(payload, preview_root=preview_root, preview_audio_digest=preview_audio_digest)[1]

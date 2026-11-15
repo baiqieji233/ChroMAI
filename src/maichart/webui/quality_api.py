@@ -961,7 +961,7 @@ class QualityAPI:
         notes=timeline(row.source_path,row.difficulty_index)
         _feedback_chart(identity)  # Reject replacement while building the view.
         version=dict(**identity,**audio,title=parsed.title or row.song_id,label=f'训练素材 · {difficulty.level or ""}',
-                     version_id=digest[:24],content_kind='complete_chart',url=_resource(view,difficulty_index=5),timeline=notes,
+                     version_id=digest[:24],content_kind='complete_chart',url=_resource(view),timeline=notes,
                      audio_url=_resource(Path(row.audio_path)) if row.audio_path else None,
                      audio_name=Path(row.audio_path).name if row.audio_path else None)
         annotation = _annotations(manifest).find(row, verify_audio=True, audio_sha256=audio.get("audio_sha256")) or {}

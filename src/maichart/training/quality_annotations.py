@@ -588,13 +588,17 @@ def resolve_auto_annotations(
     manifest = Path(manifest_path).resolve()
     if payload is None:
         payload = json.loads(manifest.read_text(encoding="utf-8-sig"))
+    scoped = not preview and "auto_quality_manifests" in payload
+    scope = payload.get("auto_quality_manifests")
+    if scoped and not scope:
+        return None, None
     owners = [manifest]
     if not preview:
         origin = split_annotation_source(manifest, payload)
         if origin is not None and origin != manifest:
             owners.append(origin)
     for owner in owners:
-        paths = [auto_annotation_path(owner, preview=preview)]
+        paths = [] if scoped else [auto_annotation_path(owner, preview=preview)]
         if not preview:
             paths.append(auto_annotation_path(owner, composed=True))
         for path in paths:
@@ -604,7 +608,10 @@ def resolve_auto_annotations(
             if _auto_annotation_owner(path, data) != owner:
                 continue
             result = _validate_auto_annotations(data)
-            digest = (result.get("audit_metadata") or {}).get("manifest_sha256")
+            metadata = result.get("audit_metadata") or {}
+            if scoped and metadata.get("auto_quality_manifests") != scope:
+                continue
+            digest = metadata.get("manifest_sha256")
             if digest and (not owner.is_file() or digest != hashlib.sha256(owner.read_bytes()).hexdigest()):
                 continue
             return path, result
@@ -628,6 +635,8 @@ def resolve_auto_audit(
         auto_path, auto_data = resolve_auto_annotations(manifest, payload, preview=preview)
     except (OSError, ValueError, TypeError):
         auto_path, auto_data = None, None
+    if not preview and "auto_quality_manifests" in payload:
+        return auto_path, auto_data, None
     owner = _auto_annotation_owner(auto_path, auto_data) if auto_path is not None else manifest
     if owner is None:
         return auto_path, auto_data, None
@@ -669,6 +678,10 @@ def save_auto_annotations(
     from maichart.training.dataset_catalog import _replace_file
 
     manifest = Path(manifest_path).resolve()
+    if not (preview or composed) and manifest.is_file():
+        data = json.loads(manifest.read_text(encoding="utf-8-sig"))
+        if "auto_quality_manifests" in data:
+            raise ValueError("这份组合清单按来源采用自动体检。请在原始素材库保存正式体检结果。")
     path = auto_annotation_path(manifest, preview=preview, composed=composed)
     if path == manifest:
         raise ValueError("自动质检标注不能覆盖输入清单")

@@ -1369,6 +1369,8 @@ def audit_manifest(
     manifest_bytes = manifest_file.read_bytes()
     manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
     manifest_payload = json.loads(manifest_bytes.decode("utf-8-sig"))
+    if not preview and "auto_quality_manifests" in manifest_payload:
+        raise ValueError("此组合已选定采用哪些来源的正式体检。请打开原始数据集运行正式体检。")
     origin = split_annotation_source(manifest_file, manifest_payload)
     if origin is not None:
         protected.update((origin, annotation_path(origin).resolve(), auto_annotation_path(origin).resolve(),

@@ -45,7 +45,21 @@ function composerV2TrainingPayload(options={}) {
   if (payload.difficulty_source!=='fitted') delete payload.open_mdp_dir;
   if (payload.difficulty_source!=='chartgate') delete payload.chartgate_dir;
   if (payload.mode==='resume' || !payload.quality_enabled) delete payload.auto_quality_policy;
+  else if (payload.auto_quality_policy!=='off' && payload.manifests.length) {
+    const chosen=payload.manifests.filter(path=>!datasetWorkspaceState.autoQualityExcluded.has(path));
+    if (chosen.length!==payload.manifests.length) payload.auto_quality_manifests=chosen;
+  }
   return payload;
+}
+
+function assertV2AutoQualitySources(options, capabilities) {
+  if (options.auto_quality_manifests===undefined) return;
+  if (options.auto_quality_policy==='on' && !options.auto_quality_manifests.length) {
+    throw new Error('已要求使用自动体检。请至少勾选一个来源，或将自动分段质检策略改为「自动」。');
+  }
+  if (capabilities?.composer_v2_per_source_auto_quality!==true) {
+    throw new Error('按来源采用自动体检需要新版 WebUI 后台，请重启后台后再提交。');
+  }
 }
 function composerV2GenerationPayload(options={}) {
   const seed=valueOrDefault("#seed","").trim();
@@ -896,6 +910,9 @@ function composerV2TrainingView(task) {
   const latestEpoch=complete?`第 ${complete.epoch} 轮`:'尚无完整轮次';
   const trainEpoch=n(complete,'epoch_train_loss') ?? (complete?.validation_loss==null?n(complete,'loss'):null);
   const settings=result.effective_settings||{},config=runtime.model_config||{};
+  const autoQualitySources=settings.auto_quality_scope?.mode==='selected'
+    ? formatV2AutoQualityScope(settings.auto_quality_scope,new Map(datasetWorkspaceState.items.map(item=>[item.manifest,item.name])))
+    : '';
   const duration=value=>{if(value==null||!Number.isFinite(value))return '正在估算';const sec=Math.max(0,Math.ceil(value)),minutes=Math.ceil(sec/60);return sec>=3600?`${Math.floor(minutes/60)} 小时 ${minutes%60} 分钟`:sec>=60?`${minutes} 分钟`:`${sec} 秒`;};
   const preparationEta=n(prepared,'eta_sec')??(prepared.completed>=3&&prepared.total>prepared.completed&&prepared.elapsed_sec>=3?
     prepared.elapsed_sec*(prepared.total-prepared.completed)/prepared.completed:null);
@@ -966,6 +983,7 @@ function composerV2TrainingView(task) {
       ['音频缓存内存预算',n(runtime,'audio_cache_gb') === null ? '未记录' : `${runtime.audio_cache_gb} GiB`],
       ['训练 / 验证谱面数',`${runtime.train_charts??'旧日志未记录'} / ${runtime.validation_charts??'旧日志未记录'}`],
       ['训练 / 验证计算片段',`${runtime.windows??'未记录'} / ${runtime.validation_windows??'未记录'}`],
+      ...(autoQualitySources ? [['正式体检来源',autoQualitySources]] : []),
       ['取批顺序',({audio_local_length_bucket_v2:'按音频分组后打散',length_bucket_seed_epoch_v1:'全库打散'})[runtime.batch_order]||'未记录'],
       ['节奏前文纠错',runtime.timing_recovery?.policy==='causal_rhythm_v1'?`已启用 · ${runtime.timing_recovery.views} 个附加片段`:'关闭'],
       ['音频特征',runtime.audio_backend||'未记录']]],
@@ -1656,7 +1674,7 @@ const qualityState = { items: [], page: 1, pageSize: 25, pages: 1, total: 0, fol
 // sources feed training, while activeDataset is the source currently being
 // browsed/annotated. This prevents a merged training manifest from hiding the
 // origin of a quality label.
-const datasetWorkspaceState = { items: [], selected: new Set(), activePath: "", catalog: null, catalogRequest: 0, selectionTouched: false, view: "cards", prepared: null, applying: false };
+const datasetWorkspaceState = { items: [], selected: new Set(), autoQualityExcluded: new Set(), activePath: "", catalog: null, catalogRequest: 0, selectionTouched: false, view: "cards", prepared: null, applying: false };
 const intensityView = { start: 0, end: null, selected: new Set(), gesture: null, spectrogram: null, specSource: null, sectionSelectionKey: "" };
 let settingsSaveTimer = null;
 const preprocessTasks = new Map();
@@ -1878,6 +1896,9 @@ function restoreSettings() {
   try {
     const datasetSaved = JSON.parse(localStorage.getItem(datasetStorageKey));
     if (Array.isArray(datasetSaved?.datasets)) datasetWorkspaceState.selected = new Set(datasetSaved.datasets.map((item) => String(item.manifest || item.path || item)).filter(Boolean));
+    if (Array.isArray(datasetSaved?.auto_quality_excluded)) {
+      datasetWorkspaceState.autoQualityExcluded = new Set(datasetSaved.auto_quality_excluded.filter(path=>typeof path==='string' && path));
+    }
     datasetWorkspaceState.selectionTouched = datasetSaved?.selection_touched === true || datasetWorkspaceState.selected.size > 0;
     if (datasetSaved?.active_dataset) datasetWorkspaceState.activePath = String(datasetSaved.active_dataset);
   } catch (_) { /* optional */ }
@@ -2013,6 +2034,7 @@ function saveDatasetWorkspace() {
     const current = JSON.parse(localStorage.getItem(datasetStorageKey) || "{}") || {};
     current.version = 2;
     current.datasets = [...datasetWorkspaceState.selected];
+    current.auto_quality_excluded = [...datasetWorkspaceState.autoQualityExcluded];
     current.selection_touched = datasetWorkspaceState.selectionTouched;
     current.active_dataset = datasetWorkspaceState.activePath || "";
     current.raw_root = valueOrDefault("#rawRoot", "").trim();
@@ -3841,6 +3863,7 @@ function updateTrainingControls() {
     : '共享可加快训练，拍内起音仍逐拍计算。更改此项请在新目录微调。';
   const autoQuality=element('#v2TrainAutoQualityPolicy');
   if (autoQuality) autoQuality.disabled=v2Resume || !checkedOrDefault('#v2TrainQualityEnabled',true);
+  if (currentModelFamily()==='chart_composer_v2') renderV2AutoQualitySources();
   updateV2DifficultyControls();
   const validationSource=element("#v2TrainValidationSource")?.value||"auto";
   const v2Validation=element("#v2TrainValidationManifest");if(v2Validation)v2Validation.disabled=v2Resume||validationSource!=="manual";
@@ -4626,6 +4649,7 @@ function renderDatasetWorkspace() {
   if (cardsPanel) cardsPanel.hidden = datasetWorkspaceState.view !== "cards";
   if (catalogPanel) catalogPanel.hidden = datasetWorkspaceState.view !== "catalog";
   if (typeof updateZeroUnmarkedTrainingNotice === "function") updateZeroUnmarkedTrainingNotice();
+  renderV2AutoQualitySources();
   globalThis.CandidatePool?.render();
   updateDatasetButtons();
 }
@@ -4739,6 +4763,35 @@ async function registerCurrentDataset() {
 
 function selectedDatasetItems() {
   return datasetWorkspaceState.items.filter((item) => datasetWorkspaceState.selected.has(datasetKey(item)));
+}
+
+function renderV2AutoQualitySources() {
+  const group=element('#v2AutoQualitySources');
+  if (!group) return;
+  const items=selectedDatasetItems().filter(item=>item.manifest && item.prepared!==false);
+  group.hidden=currentModelFamily()!=='chart_composer_v2' || !items.length;
+  if (group.hidden) return;
+  const list=element('#v2AutoQualitySourceList');
+  const key=JSON.stringify(items.map(item=>[item.manifest,item.name]));
+  if (list.dataset.sourceKey!==key) {
+    list.dataset.sourceKey=key;
+    list.innerHTML=items.map(item=>`<label class="checkbox-field"><input type="checkbox" data-auto-quality-source="${escapeHtml(item.manifest)}"><span>${escapeHtml(item.name || item.manifest)}</span></label>`).join('');
+  }
+  const resume=currentTrainingMode()==='resume';
+  const checkpoint=resume && checkpointInspection.key===currentCheckpointKey() && checkpointInspection.data?.valid
+    ? checkpointInspection.data : null;
+  const enabled=checkedOrDefault('#v2TrainQualityEnabled',true) && valueOrDefault('#v2TrainAutoQualityPolicy','auto')!=='off';
+  const inherited=checkpoint?.auto_quality_manifests;
+  element('#v2AutoQualitySourceHelp').textContent=resume
+    ? checkpoint ? '续训沿用检查点中的来源设置。' : '请先检查续训所用的检查点。'
+    : enabled ? '取消勾选只忽略该来源的自动体检。人工标注和基础筛选照常。'
+      : '当前设置未启用自动体检。';
+  for (const input of list.querySelectorAll('input[type=checkbox]')) {
+    const path=input.dataset.autoQualitySource;
+    input.disabled=resume || !enabled;
+    input.checked=resume ? !!checkpoint && (!Array.isArray(inherited) || inherited.some(source=>sameAuditManifest(source,path)))
+      : !datasetWorkspaceState.autoQualityExcluded.has(path);
+  }
 }
 
 async function addReviewedTrainingSource(result) {
@@ -4909,6 +4962,7 @@ function invalidateDatasetStatus(message) {
 
 function invalidateCheckpointInspection(message) {
   checkpointInspection = { key: "", data: null };
+  renderV2AutoQualitySources();
   if (message) setCheckpointStatus(message, "warn");
 }
 
@@ -5042,7 +5096,7 @@ const TRAINING_PREVIEW_KINDS = {
 function trainingSourcePreviewOptions() {
   if (currentModelFamily() !== "chart_composer_v2") return null;
   const payload = composerV2TrainingPayload();
-  const keys = ["mode", "quality_enabled", "auto_quality_policy", "difficulty_source", "min_level", "max_level",
+  const keys = ["mode", "quality_enabled", "auto_quality_policy", "auto_quality_manifests", "difficulty_source", "min_level", "max_level",
     "min_declared_level", "difficulty_slots", "limit_charts", "cache_dir", "init_checkpoint",
     "validation_source", "validation_manifest", "holdout_fraction", "seed", "open_mdp_dir", "chartgate_dir"];
   return Object.fromEntries(keys.filter(key => payload[key] !== undefined).map(key => [key, payload[key]]));
@@ -5074,13 +5128,25 @@ function invalidateTrainingSourcePreview(force = true) {
   setTrainingSourcePreviewStatus("来源、标注或训练设置已变化，请重新检查。", "warn");
 }
 
+function formatV2AutoQualityScope(scope, sourceNames) {
+  if (scope?.mode!=='selected') return '';
+  const selected=scope.selected_manifests || [];
+  const applied=scope.applied_manifests || [];
+  const notApplied=selected.filter(path=>!applied.some(other=>sameAuditManifest(path,other)));
+  const names=paths=>paths.map(path=>[...sourceNames].find(([other])=>sameAuditManifest(path,other))?.[1] || path).join('、');
+  const actual=applied.length ? `已采用 ${names(applied)}` : '本次未采用任何来源的正式体检';
+  return notApplied.length ? `${actual}。已选但未采用 ${names(notApplied)}，请核对正式体检是否匹配当前清单。` : actual;
+}
+
 function renderTrainingSourcePreviewOverview(data, sourceNames) {
   const box = element("#trainingSourcePreviewOverview");
   if (!box) return;
   const inc = data.inclusion_summary;
+  const autoQualitySources=formatV2AutoQualityScope(data.auto_quality_scope,sourceNames);
+  const autoQualityNote=autoQualitySources ? `<p class="muted">${escapeHtml(autoQualitySources)}</p>` : '';
   if (!inc) {
-    box.innerHTML = "";
-    box.hidden = true;
+    box.innerHTML = autoQualityNote;
+    box.hidden = !autoQualityNote;
     return;
   }
   box.hidden = false;
@@ -5113,7 +5179,7 @@ function renderTrainingSourcePreviewOverview(data, sourceNames) {
     return `<tr><td><strong>${escapeHtml(src.source || "来源")}</strong></td><td><strong>${src.included_charts ?? 0}</strong> 张</td><td><strong>${escapeHtml(String(src.weight_sum ?? 0))}</strong>（${pct}）</td><td>${escapeHtml(String(src.avg_weight ?? 0))}×</td><td>${escapeHtml(tierNote)}</td><td class="muted">排除 ${src.excluded_charts ?? 0} · 过滤/留出 ${src.held_out_charts ?? 0}</td></tr>`;
   }).join("");
 
-  box.innerHTML = `<div class="training-preview-metrics">`
+  box.innerHTML = autoQualityNote + `<div class="training-preview-metrics">`
     + `<div class="training-preview-metric"><strong>${inc.total_included_charts ?? 0} 张</strong><span>本次实际纳入训练</span><small>总权重份额 ${inc.total_weight_sum ?? 0}</small></div>`
     + `<div class="training-preview-metric"><strong>${escapeHtml(enabledSlots)}</strong><span>启用难度槽位（定数 ${escapeHtml(lvlRange)}）</span><small>${escapeHtml(slotParts)}</small></div>`
     + `<div class="training-preview-metric"><strong>权重分布</strong><span>各档位入训张数</span><small>${escapeHtml(tierParts)}</small></div>`
@@ -5237,25 +5303,33 @@ function renderTrainingSourcePreviewPage(reset = false) {
 async function inspectManifest({ preview = true } = {}) {
   assertTrainingSelection();
   const previewOptions = preview ? trainingSourcePreviewOptions() : null;
+  const {auto_quality_manifests: autoQualityManifests,...previewConfig}=previewOptions || {};
   if (!previewOptions) await assertDatasetBackend();
   const sourcePaths = trainingSourcePaths();
   const manifest = sourcePaths.manifest;
-  if (!manifest && !selectedTrainingManifests().length) throw new Error("请先选择训练数据集");
+  const manifests=selectedTrainingManifests();
+  const items=selectedDatasetItems();
+  const modelFamily=currentModelFamily();
+  if (!manifest && !manifests.length) throw new Error("请先选择训练数据集");
   const request = ++manifestRequest;
   const previewKey = trainingSourcePreviewKey();
-  const sourceNames = new Map(selectedDatasetItems().map(item => [item.manifest, item.name]));
+  const sourceNames = new Map(items.map(item => [item.manifest, item.name]));
   trainingSourcePreview = previewOptions ? {key:previewKey} : null;
   setTrainingSourcePreviewStatus(previewOptions ? "正在核对排除、片段权重与重复来源…" : "");
   setManifestStatus("正在检查训练集...");
   let data;
   try {
-    if (previewOptions && (await api("/api/status")).training_capabilities?.composer_v2_training_source_preview !== true) {
-      throw new Error("当前 WebUI 后端尚未载入开训前预览，请在新版实例检查。");
+    if (previewOptions) {
+      const capabilities=(await api("/api/status")).training_capabilities;
+      if (capabilities?.composer_v2_training_source_preview!==true)
+        throw new Error("当前 WebUI 后端尚未载入开训前预览，请在新版实例检查。");
+      assertV2AutoQualitySources(previewOptions,capabilities);
     }
     if (request !== manifestRequest) return;
     data = await api("/api/inspect-manifest", {
-      ...sourcePaths, manifests: selectedTrainingManifests(), dataset_paths: selectedDatasetItems().map((item) => item.path).filter(Boolean), model_family: currentModelFamily(),
-      ...(previewOptions ? {training_source_preview:previewOptions} : {}),
+      ...sourcePaths, manifests, dataset_paths:items.map(item=>item.path).filter(Boolean), model_family:modelFamily,
+      ...(previewOptions ? {training_source_preview:previewConfig} : {}),
+      ...(autoQualityManifests===undefined ? {} : {auto_quality_manifests:autoQualityManifests}),
     });
   } catch (error) {
     if (request === manifestRequest) {
@@ -6232,6 +6306,7 @@ async function submitTrain(options = {}) {
     validateV2NumericInputs('#composerV2TrainingControls');
     if(options.autoPreprocess)throw new Error("Composer v2 请先准备训练 manifest");
     const backend=await api("/api/status");
+    assertV2AutoQualitySources(payload,backend.training_capabilities);
     if(payload.onset_readout && payload.onset_readout!=='auto' && !backend.training_capabilities?.composer_v2_onset_readout)
       throw new Error('独立起音参考训练需要更新后的 WebUI 后台，请重启当前后台后提交。');
     if(payload.intensity_curve && !backend.training_capabilities?.composer_v2_intensity_curve)throw new Error('新版强度曲线训练需要更新后的 WebUI 后台，请重启后台后提交。');
@@ -6576,9 +6651,6 @@ function renderAutoQualityAuditDashboard(data, panel, source, preferredScope) {
   if (historical) adoption = "当前来源版本与此报告尚未确认匹配";
   else if (preview) adoption = "供检查和试听";
   else if (panel === 'training' && currentTrainingMode() === 'resume') adoption = "续训沿用检查点设置";
-  else if (panel === 'training' && data.has_annotations && (source.payload.manifests?.length || 0) <= 1) {
-    adoption = data.training_effective ? "连续事件训练可按当前设置采用" : "当前设置未采用正式标注";
-  }
   const scope = preview ? "preview" : "formal";
   const manifest = report.manifest || selected.manifest || source.payload.manifest;
   box.dataset.auditManifest = manifest || "";
@@ -8455,6 +8527,15 @@ on('#trainingCheckpointPath','input',()=>{
   }
 });
 on("#v2TrainQualityEnabled", "change", () => {updateTrainingControls();saveSettings();});
+on('#v2AutoQualitySourceList','change',event=>{
+  const input=event.target;
+  const path=input.dataset?.autoQualitySource;
+  if (!path || input.disabled || currentTrainingMode()==='resume') return;
+  if (input.checked) datasetWorkspaceState.autoQualityExcluded.delete(path);
+  else datasetWorkspaceState.autoQualityExcluded.add(path);
+  saveDatasetWorkspace();
+  invalidateTrainingSourcePreview(false);
+});
 on('#v2GenerateCount','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GenerateParallel','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GeneratePhraseSearch','change',()=>{updateV2BatchControls();saveSettings();});
@@ -8644,6 +8725,7 @@ window.addEventListener('workspace-mode-changed', event => {
 });
 for (const id of ['v2TrainQualityEnabled', 'v2TrainAutoQualityPolicy', 'trainingMode', 'manifestPath']) {
   on('#' + id, 'change', () => {
+    if (id==='v2TrainAutoQualityPolicy') renderV2AutoQualitySources();
     if (document.body.dataset.workspace === 'training') void refreshAutoQualityAuditStatus('training');
   });
 }

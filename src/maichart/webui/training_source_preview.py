@@ -445,9 +445,12 @@ def _quality_rows(manifest, data, sources, options, digest, composition, *, read
     for source_manifest, payload in sources:
         if len(sources) == 1 and not payload.get("candidate_pool") and options["quality"]:
             continue
+        scope = options.get('auto_quality_manifests')
+        source_auto = (options["use_auto"] or (not options["quality"] and options["policy"] != "off"))
+        source_auto = source_auto and (scope is None or str(source_manifest) in scope)
         source_quality = TrainingQuality(
             source_manifest, payload, enabled=True,
-            use_auto=options["use_auto"] or (not options["quality"] and options["policy"] != "off"),
+            use_auto=source_auto,
             audio_digest=digest, resolve_path=resolve_path,
         )
         pool_metadata = _read(source_manifest.with_name("pool.json")) if payload.get("candidate_pool") else {}
@@ -764,12 +767,19 @@ def _inspect_selection(payload, runtime, folder, settings, options, digest):
     from maichart.composer_v2.difficulty import locate_scorer, make_scorer, scorer_path_key
     from maichart.composer_v2.train import resolve_auto_quality_policy
     from .composer_api import _path
-    from .composer_v2_api import _choice, _float, _integer
+    from .composer_v2_api import (_auto_quality_scope_summary, _choice, _float, _integer,
+                                  _manifest_paths, _prepare_scoped_resume, _requested_auto_quality_scope)
 
     mode = options["mode"]
     resumed = mode == "resume"
-    prepared_payload, selection = runtime._prepare_training_sources(
-        {**payload, "cache_dir": str(options["cache_dir"])}, preview_root=folder, preview_audio_digest=digest.digest)
+    request = {**payload, "cache_dir": str(options["cache_dir"])}
+    _requested_auto_quality_scope(request, policy=options['policy'])
+    frozen = _prepare_scoped_resume(request, options['saved'], policy=options['policy']) if resumed else None
+    if frozen is None:
+        prepared_payload, selection = runtime._prepare_training_sources(
+            request, preview_root=folder, preview_audio_digest=digest.digest)
+    else:
+        prepared_payload, selection = frozen
     if not prepared_payload.get("manifest"):
         raise ValueError("请先选择训练清单")
     source_manifest = runtime._resolve_path(prepared_payload["manifest"])
@@ -816,7 +826,7 @@ def _inspect_selection(payload, runtime, folder, settings, options, digest):
 
     # A direct formal audit on an existing composition takes precedence over
     # inherited sidecars. Only use it if it still binds to that composition.
-    if published != source_manifest and published.is_file() and not resumed:
+    if published != source_manifest and published.is_file() and not resumed and 'auto_quality_manifests' not in data:
         live_data = read_manifest(published)
         live_auto, auto = resolve_auto_annotations(published, live_data)
         if (live_auto is not None and live_auto.name == "auto_quality_annotations.json"
@@ -832,12 +842,15 @@ def _inspect_selection(payload, runtime, folder, settings, options, digest):
     validation_source = _choice(settings, "validation_source", "manual" if settings.get("validation_manifest") else "auto",
                                 {"auto", "off", "manual"})
     if resumed:
-        effective = _path(options["saved"].get("manifest"), "父 checkpoint 训练清单", exists=True)
+        saved_manifest = options["saved"].get("manifest")
+        if frozen is not None and saved_manifest:
+            saved_manifest = material_path(saved_manifest)
+        effective = _path(saved_manifest, "父 checkpoint 训练清单", exists=True)
         effective_data = read_manifest(effective)
         split = effective_data.get("split_metadata", {})
         accepted = {effective}
         if split.get("source_manifest"):
-            accepted.add(runtime._resolve_path(split["source_manifest"]))
+            accepted.add(resolve_path(split["source_manifest"]) if frozen is not None else runtime._resolve_path(split["source_manifest"]))
         if published not in accepted:
             raise ValueError("续训请检查父 checkpoint 的训练清单或其原始划分来源")
         expected = options["saved_identity"].get("manifest_sha256")
@@ -867,6 +880,7 @@ def _inspect_selection(payload, runtime, folder, settings, options, digest):
         quality_enabled=options["quality"], sequence_policy=options["sequence"],
     ) == "auto_v1"
     options["use_auto"] = use_auto
+    options['auto_quality_manifests'] = _manifest_paths(effective_data.get('auto_quality_manifests'))
     options["pre_split_charts"] = read_charts(source_manifest)
     options["holdout_keys"] = ({chart.key for chart in read_charts(source_manifest)} - {chart.key for chart in read_charts(effective)}
                                if source_manifest != effective else set())
@@ -900,7 +914,7 @@ def _inspect_selection(payload, runtime, folder, settings, options, digest):
     if resumed:
         origin = split_annotation_source(effective, effective_data)
         origin_data = read_manifest(origin) if origin is not None and origin.is_file() else effective_data
-        original_sources = [runtime._resolve_path(path) for path in origin_data.get("merged_from", ())]
+        original_sources = [resolve_path(path) for path in origin_data.get("merged_from", ())]
         source_paths = original_sources or ([origin] if origin is not None else [effective])
         sources = [(path, read_manifest(path)) for path in original_sources if path.is_file()]
         sources = sources or [(origin or effective, origin_data)]
@@ -917,6 +931,7 @@ def _inspect_selection(payload, runtime, folder, settings, options, digest):
     if preview["limit_uncertain"]:
         notes.append("有谱面尚未估分，之后的入选顺序和来源对照待确认。")
     preview.update(quality_enabled=options["quality"], auto_quality_enabled=use_auto,
+                   auto_quality_scope=_auto_quality_scope_summary(effective,effective_data,use_auto),
                    mode=mode, notes=notes, held_out_charts=len(options["holdout_keys"]))
     display_manifest = effective if resumed else published
     return {**prepared_payload, "manifest": str(display_manifest)}, selection, data, preview

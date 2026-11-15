@@ -7,6 +7,7 @@ import math
 import os
 from datetime import datetime, timezone
 from pathlib import Path
+from maichart.portable_paths import material_path
 from .composer_api import _path, _int, _float, _arg
 
 FAMILY = "chart_composer_v2"
@@ -31,6 +32,13 @@ def inspect(handler,payload):
         result = inspection(path)
     except Exception as exc:
         result = dict(valid=False,model_family=FAMILY,path=str(path),error=str(exc),errors=[str(exc)])
+    if result.get('can_resume'):
+        try:
+            _, manifest_data = _saved_manifest(result.get('args') or {})
+            if 'auto_quality_manifests' in manifest_data:
+                result['auto_quality_manifests'] = _manifest_paths(manifest_data['auto_quality_manifests'])
+        except (OSError, ValueError):
+            pass  # Checkpoint capabilities do not depend on a readable local training manifest.
     handler._json_response(result)
 
 def _family(payload):
@@ -50,6 +58,88 @@ def _choice(payload,key,default,choices):
     value=str(payload.get(key,default))
     if value not in choices: raise ValueError(f"{key} 必须是 {', '.join(map(str,choices))}")
     return value
+
+
+def _manifest_paths(values):
+    if values is None:
+        return None
+    if not isinstance(values, list) or any(not isinstance(value, str) or not value.strip() for value in values):
+        raise ValueError('正式体检和训练来源必须由训练清单路径组成')
+    return list(dict.fromkeys(str(_path(material_path(value), '训练清单')) for value in values))
+
+
+def _saved_manifest(saved):
+    if not saved.get('manifest'):
+        return None, {}
+    path = _path(material_path(saved['manifest']), '父 checkpoint 训练清单')
+    if not path.is_file():
+        return path, {}
+    return path, json.loads(path.read_text(encoding='utf-8-sig'))
+
+
+def _requested_auto_quality_scope(payload, *, policy=None):
+    scope = _manifest_paths(payload.get('auto_quality_manifests'))
+    if scope == [] and (policy or payload.get('auto_quality_policy')) == 'on':
+        raise ValueError('必须采用正式体检时，请至少勾选一个体检来源。')
+    return scope
+
+
+def _prepare_scoped_resume(payload, saved, *, policy=None):
+    """Reuse the existing scoped composition, including its fixed split and sidecars."""
+    scope = _requested_auto_quality_scope(payload, policy=policy)
+    effective, data = _saved_manifest(saved)
+    frozen_scope = _manifest_paths(data.get('auto_quality_manifests'))
+    if frozen_scope is None and scope is None:
+        return None
+    checked_sources = _manifest_paths(payload.get('manifests')) or []
+    # Selecting all sources is the same composition as legacy automatic adoption.
+    if frozen_scope is None and checked_sources and set(scope) == set(checked_sources):
+        return None
+    if scope is not None and (frozen_scope is None or set(scope) != set(frozen_scope)):
+        raise ValueError('续训必须沿用检查点的正式体检来源。要调整勾选，请在新目录微调。')
+    if frozen_scope == [] and (policy or payload.get('auto_quality_policy')) == 'on':
+        raise ValueError('检查点未采用任何来源的正式体检。要启用，请在新目录微调。')
+    split = data.get('split_metadata') or {}
+    origin = (_path(material_path(split['source_manifest']), '原始训练来源', exists=True)
+              if split.get('source_manifest') else effective)
+    source_paths = _manifest_paths(data.get('merged_from')) or [str(origin)]
+    snapshot_paths = ({str(effective)}, {str(origin)})
+    if checked_sources:
+        selected = set(checked_sources)
+    elif payload.get('manifest'):
+        selected = {str(_path(material_path(payload['manifest']), '训练清单'))}
+    else:
+        selected = {str(effective)}
+    if selected not in (*snapshot_paths, set(source_paths)):
+        raise ValueError('续训必须沿用检查点的训练清单与数据集。要调整来源，请在新目录微调。')
+    if split.get('source_sha256') and hashlib.sha256(origin.read_bytes()).hexdigest() != split['source_sha256']:
+        raise ValueError('原始划分来源已变化，请核对来源或使用新目录微调。')
+    saved_cache = saved.get('cache_dir') or data.get('cache_dir')
+    prepared = {**payload, 'manifest': str(origin), 'auto_quality_manifests': frozen_scope,
+                'cache_dir': payload.get('cache_dir') or (str(material_path(saved_cache)) if saved_cache else None)}
+    selection = dict(manifest=str(origin), merged_from=source_paths, auto_quality_manifests=frozen_scope,
+                     summary=data.get('source_manifest_summary', data.get('summary', {})))
+    return prepared, selection
+
+
+def _auto_quality_scope_summary(manifest, data, enabled):
+    """Describe source adoption using the sidecar bound to the effective manifest."""
+    from maichart.training.quality_annotations import resolve_auto_annotations, split_annotation_source
+    scope = _manifest_paths(data.get('auto_quality_manifests'))
+    applied = []
+    if enabled:
+        _, annotations = resolve_auto_annotations(manifest, data)
+        if annotations is not None:
+            composed = annotations.get('audit_metadata', {}).get('composed_sources') or []
+            if composed:
+                applied = _manifest_paths([row['source_manifest'] for row in composed if row.get('source_manifest')])
+            elif scope is None:
+                if data.get('merged_from'):
+                    applied = _manifest_paths(data['merged_from'])
+                else:
+                    applied = [str(split_annotation_source(manifest, data) or manifest)]
+    return dict(mode='selected' if scope is not None else 'all', selected_manifests=scope,
+                applied_manifests=applied)
 
 
 def estimate_parameters(handler, payload):
@@ -180,12 +270,11 @@ def start_chartgate_setup(handler,payload,*,runtime):
 def start_train(handler,payload,*,runtime):
     _family(payload)
     if payload.get("auto_preprocess"): raise ValueError("Composer v2 请先准备训练 manifest")
-    payload,selection=runtime._prepare_training_sources({**payload,"model_family":FAMILY})
-    manifest=_path(payload.get("manifest"),"manifest",exists=True)
+    _requested_auto_quality_scope(payload)
     directory=_path(payload.get("checkpoint_dir") or "checkpoints/chart_composer_v2","checkpoint_dir")
-    cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
     mode=_choice(payload,"mode",payload.get("training_mode","fresh"),{"fresh","resume","finetune"})
     parent=None
+    scoped_resume=None
     if mode!="fresh":
         parent=_path(payload.get("resume") or payload.get("init_checkpoint") or payload.get("training_checkpoint") or payload.get("checkpoint"),"checkpoint",exists=True)
         checked=inspection(parent)
@@ -195,6 +284,7 @@ def start_train(handler,payload,*,runtime):
             raise ValueError("finetune 必须使用新的 checkpoint 目录")
         if mode=="resume":
             saved_args=checked.get("args") or {}
+            scoped_resume=_prepare_scoped_resume(payload,saved_args)
             payload={**{key:value for key,value in saved_args.items() if key in TRAIN_DEFAULTS},**payload}
         # Both modes retain the parent's model and audio configuration.
         # The trainer may append observed vocabulary entries during finetune.
@@ -202,6 +292,13 @@ def start_train(handler,payload,*,runtime):
         for key in ("audio_layers","song_layers","d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model"):
             if key in fixed and not (key=="audio_layers" and mode=="finetune" and payload.get(key) is not None):payload[key]=fixed[key]
         payload['refresh_events']=fixed.get('refresh_events',16)
+    if scoped_resume is not None:
+        frozen_payload,selection=scoped_resume
+        payload.update({key:frozen_payload[key] for key in ('manifest','auto_quality_manifests','cache_dir')})
+    else:
+        payload,selection=runtime._prepare_training_sources({**payload,"model_family":FAMILY})
+    manifest=_path(payload.get("manifest"),"manifest",exists=True)
+    cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
     sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
     settings={}
@@ -342,17 +439,18 @@ def start_train(handler,payload,*,runtime):
     source_manifest=manifest
     if mode=="resume":
         saved=checked.get("args") or {}
-        manifest=_path(saved.get("manifest"),"父 checkpoint 训练清单",exists=True)
+        saved_path=material_path if scoped_resume is not None else str
+        manifest=_path(saved_path(saved["manifest"]) if saved.get("manifest") else None,"父 checkpoint 训练清单",exists=True)
         split_metadata=json.loads(manifest.read_text(encoding="utf-8-sig")).get("split_metadata",{})
         accepted={manifest}
         if split_metadata.get("source_manifest"):
-            accepted.add(_path(split_metadata["source_manifest"],"原始训练来源"))
+            accepted.add(_path(saved_path(split_metadata["source_manifest"]),"原始训练来源"))
         if source_manifest not in accepted:raise ValueError("resume 必须使用父 checkpoint 的训练清单或其原始划分来源")
         expected=(split_metadata.get("source_sha256") if source_manifest!=manifest else
             ((checked.get("data_contract") or {}).get("train") or {}).get("manifest_sha256"))
         if expected and hashlib.sha256(source_manifest.read_bytes()).hexdigest()!=expected:
             raise ValueError("resume 训练清单内容已变化；请保留原 checkpoint 并使用新目录 finetune")
-        validation=_path(saved["validation_manifest"],"父 checkpoint 验证清单",exists=True) if saved.get("validation_manifest") else None
+        validation=_path(saved_path(saved["validation_manifest"]),"父 checkpoint 验证清单",exists=True) if saved.get("validation_manifest") else None
         resolve_auto_quality_policy(auto_quality,manifest,checked.get('training_contract'),
                                     resume=True,quality_enabled=quality,sequence_policy=sequence_policy)
         source="inherited"
@@ -377,6 +475,12 @@ def start_train(handler,payload,*,runtime):
     # The child reads the full manifest from disk. Polling only needs the selection summary.
     selection_summary = {key: value for key, value in selection.items() if key != 'songs'} if selection else None
     settings.update(mode=mode,manifest=str(manifest),cache_dir=str(cache),dataset_selection=selection_summary)
+    if 'auto_quality_manifests' in manifest_data:
+        effective_data = manifest_data if manifest == source_manifest else json.loads(manifest.read_text(encoding='utf-8-sig'))
+        adopted = resolve_auto_quality_policy(auto_quality,manifest,checked.get('training_contract') if parent else None,
+            resume=mode=='resume',quality_enabled=quality,sequence_policy=sequence_policy) == 'auto_v1'
+        settings['auto_quality_manifests'] = _manifest_paths(effective_data['auto_quality_manifests'])
+        settings['auto_quality_scope'] = _auto_quality_scope_summary(manifest,effective_data,adopted)
     condition_policy = (checked.get("condition_contract", {}).get("policy", "level_only_v1")
                         if mode == "resume" else payload.get("condition_policy", "radar_style_v1"))
     if condition_policy not in {"level_only_v1", "radar_style_v1"}:
@@ -683,6 +787,7 @@ def auto_quality_status(handler, payload, *, runtime):
     _family(payload)
     scope = _choice(payload, 'auto_scope', 'formal', {'formal', 'preview', 'auto'})
     policy = _choice(payload, 'auto_quality_policy', 'auto', {'auto', 'on', 'off'})
+    selected_sources = _manifest_paths(payload.get('auto_quality_manifests'))
     quality_enabled = payload.get('quality_enabled', True)
     if not isinstance(quality_enabled, bool):
         raise ValueError('quality_enabled 必须是布尔值')
@@ -708,6 +813,8 @@ def auto_quality_status(handler, payload, *, runtime):
             meta[report_key] = quality_api._catalog_view(manifest, scope).audit[report_key]
         eligible = meta['has_annotations'] and not (data.get('candidate_pool') or data.get('reviewed_training'))
         effective = bool(eligible and quality_enabled and policy != 'off' and sequence == 'continuous_events_v1')
+        if selected_sources is not None and not (data.get('merged_from') or data.get('split_metadata')):
+            effective = effective and str(manifest) in selected_sources
         return dict(meta, training_eligible=eligible, training_effective=None if resume else effective)
 
     manifests = payload.get('manifests') or []
@@ -734,18 +841,24 @@ def auto_quality_status(handler, payload, *, runtime):
 def start_auto_quality_audit(handler, payload, *, runtime):
     """Inspect the selected corpus in a background CPU process."""
     _family(payload)
+    limit = _integer(payload, 'limit_charts', 0, minimum=0)
+    scoped_message = '这份训练快照只采用了指定来源的体检。请在素材列表选原始来源，再运行正式体检。'
     requested_sources = payload.get("manifests") or ([payload["manifest"]] if payload.get("manifest") else [])
     if isinstance(requested_sources, list):
         for value in requested_sources:
             requested = _path(value, "manifest", exists=True)
             requested_data = json.loads(requested.read_text(encoding="utf-8-sig"))
-            if requested_data.get("merged_from") or requested_data.get("split_metadata"):
+            if 'auto_quality_manifests' in requested_data:
+                if not limit:
+                    raise ValueError(scoped_message)
+            elif requested_data.get("merged_from") or requested_data.get("split_metadata"):
                 raise ValueError("请在素材列表勾选原始来源后体检，这份训练快照为只读")
             if requested_data.get("candidate_pool") and not payload.get("manifests"):
                 payload = {**payload, "manifests": [str(requested)]}
     payload, _ = runtime._prepare_training_sources({**payload, 'model_family': FAMILY})
     manifest = _path(payload.get('manifest'), 'manifest', exists=True)
-    limit = _integer(payload, 'limit_charts', 0, minimum=0)
+    if not limit and 'auto_quality_manifests' in json.loads(manifest.read_text(encoding='utf-8-sig')):
+        raise ValueError(scoped_message)
     tail_mode = _choice(payload, 'tap_on_slide_mode', 'mask_hard', {'mask_hard', 'mask_all', 'allow'})
     inner_mode = _choice(payload, 'inner_muri_mode', 'allow', {'allow', 'mask_hard'})
     threshold = _float(payload, 'tap_on_slide_ms', 200., minimum=0)

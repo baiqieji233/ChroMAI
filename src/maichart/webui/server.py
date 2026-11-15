@@ -287,6 +287,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_auto_quality_audit": True,
                                               "materials_workflow_review": True,
                                               "composer_v2_training_source_preview": True,
+                                              "composer_v2_per_source_auto_quality": True,
                                               "candidate_pool_auto_screen": True,
                                               "composer_phrase_contract": "phrase_modes_v1",
                                               "composer_process_prefetch": True,
@@ -2754,6 +2755,18 @@ def _prepare_training_sources(payload: dict[str, Any], *, preview_root: Path | N
                               preview_audio_digest=None) -> tuple[dict[str, Any], dict[str, Any] | None]:
     """Use the same selected sources for inspection and actual training."""
     manifests = payload.get("manifests")
+    auto_quality_manifests = payload.get("auto_quality_manifests")
+    prepare_options = {}
+    if auto_quality_manifests is not None:
+        if _requested_model_family(payload) != COMPOSER_V2_MODEL_FAMILY:
+            raise ValueError("按来源采用自动体检仅适用于 Composer v2")
+        if (not isinstance(auto_quality_manifests, list)
+                or any(not isinstance(value, str) or not value.strip() for value in auto_quality_manifests)):
+            raise ValueError("采用正式体检的来源必须是训练清单路径列表")
+        if not manifests or payload.get("auto_preprocess"):
+            raise ValueError("请先从已预处理的训练数据集中选择采用正式体检的来源")
+        prepare_options["auto_quality_manifests"] = list(dict.fromkeys(
+            str(_resolve_path(value)) for value in auto_quality_manifests))
     if manifests is None or manifests == []:
         return payload, None
     if not isinstance(manifests, list) or any(not isinstance(value, str) or not value.strip() for value in manifests):
@@ -2771,10 +2784,10 @@ def _prepare_training_sources(payload: dict[str, Any], *, preview_root: Path | N
             raise ValueError(pending["message"] + f" 数据集：{Path(value).parent.name}")
     family = _requested_model_family(payload)
     if preview_root is None:
-        prepared = _dataset_api().prepare(manifests, model_family=family)
+        prepared = _dataset_api().prepare(manifests, model_family=family, **prepare_options)
     else:
         prepared = _dataset_api().prepare(manifests, model_family=family, preview_root=preview_root,
-                                          preview_audio_digest=preview_audio_digest)
+                                          preview_audio_digest=preview_audio_digest, **prepare_options)
     preserved_cache_dir = (
         payload.get("cache_dir")
         if family in {COMPOSER_MODEL_FAMILY, COMPOSER_V2_MODEL_FAMILY} and str(payload.get("cache_dir") or "").strip()

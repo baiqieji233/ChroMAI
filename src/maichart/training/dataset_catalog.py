@@ -233,6 +233,23 @@ def _merge_zero_unmarked_contributions(contribs: list[dict[str, Any]]) -> tuple[
     return outer_weight, _validate_regions(result)
 
 
+def _auto_quality_scope(manifests, requested):
+    """Canonical subset, with all sources equivalent to the legacy default."""
+    if requested is None:
+        return None
+    if not isinstance(requested, (list, tuple)) or any(
+        not isinstance(value, (str, Path)) or not str(value).strip() for value in requested
+    ):
+        raise ValueError("采用自动体检的来源必须是训练清单路径数组")
+    available = {Path(value).resolve(): str(Path(value).resolve()) for value in manifests}
+    selected = {Path(value).resolve() for value in requested}
+    if not selected.issubset(available):
+        raise ValueError("采用自动体检的来源须包含在本次选中的训练来源中")
+    if selected == available.keys():
+        return None
+    return tuple(sorted((available[path] for path in selected), key=str.casefold))
+
+
 def merge_training_manifests(
     manifest_paths: list[str | Path],
     output_path: str | Path,
@@ -241,6 +258,7 @@ def merge_training_manifests(
     dataset_names: list[str] | None = None,
     merge_annotations: bool = True,
     model_family: str | None = None,
+    auto_quality_manifests: list[str | Path] | None = None,
     _composition_identity: str | None = None,
     _source_versions: dict[str, Any] | None = None,
     _published_root: Path | None = None,
@@ -261,6 +279,7 @@ def merge_training_manifests(
 
     if not manifest_paths:
         raise ValueError("At least one training manifest is required.")
+    auto_scope = _auto_quality_scope(manifest_paths, auto_quality_manifests)
     loaded = []
     for position, raw_path in enumerate(manifest_paths):
         path = Path(raw_path).resolve()
@@ -350,6 +369,8 @@ def merge_training_manifests(
         return audio_hash_cache[key]
 
     output = Path(output_path).resolve()
+    if auto_scope is not None and any(output == item[0] for item in loaded):
+        raise ValueError("按来源采用自动体检时，请使用独立的组合清单")
     songs: list[dict[str, Any]] = []
     seen_charts: set[tuple[str, int]] = set()
     zero_owner_keys: set[tuple[str, int]] = set()
@@ -410,7 +431,8 @@ def merge_training_manifests(
                                 pass
                 except (OSError, json.JSONDecodeError) as exc:
                     raise ValueError(f"无法读取质量标注 {annotation_file}：{exc}") from exc
-            if not (is_candidate or is_reviewed_manifest):
+            if (not (is_candidate or is_reviewed_manifest)
+                    and (auto_scope is None or str(manifest_path) in auto_scope)):
                 auto_file, auto_payload = resolve_auto_annotations(manifest_path, payload)
                 if auto_payload is not None:
                     annotation_owner = _auto_annotation_owner(auto_file, auto_payload)
@@ -674,6 +696,11 @@ def merge_training_manifests(
         owner = owners.get(key)
         if owner is None or key in zero_owner_keys:
             continue
+        if auto_scope is not None:
+            # A duplicate from another source cannot override this owner's switch.
+            candidates = [item for item in candidates if item[0] == owner["source_manifest"]]
+            if not candidates:
+                continue
         record_path, index = key
         chart_hash = _disk_chart_sha(Path(record_path), index)
         audio_path = owner.get("audio_path")
@@ -709,7 +736,15 @@ def merge_training_manifests(
     auto_metadata = {"composed_sources": [
         metadata for source, metadata in auto_sources.items() if source in used_auto_sources
     ]}
+    if auto_scope is not None:
+        auto_metadata["auto_quality_manifests"] = list(auto_scope)
     if _composition_identity is not None:
+        if auto_scope is not None:
+            _composition_identity = hashlib.sha256(
+                _composition_identity.encode("ascii")
+                + b"\0auto_quality_manifests\0"
+                + json.dumps(auto_scope, ensure_ascii=False).encode("utf-8")
+            ).hexdigest()
         if used_auto_sources:
             _composition_identity = hashlib.sha256(
                 (_composition_identity + annotations_fingerprint({
@@ -769,6 +804,8 @@ def merge_training_manifests(
         "errors": [],
     }
     merged["manifest"] = str(output)
+    if auto_scope is not None:
+        merged["auto_quality_manifests"] = list(auto_scope)
     merged["raw_root"] = str(output.parent)
     merged["raw_roots"] = [entry["source_root"] for entry in source_entries]
     # Reuse the largest source's content-addressed cache when available.
@@ -792,7 +829,8 @@ def merge_training_manifests(
     if used_auto_sources:
         inherited_path = save_auto_annotations(output, auto_records, audit_metadata=auto_metadata, composed=True)
         legacy_path = auto_annotation_path(output)
-        if _composition_identity is not None and output.is_file() and legacy_path.is_file():
+        if (auto_scope is None and _composition_identity is not None
+                and output.is_file() and legacy_path.is_file()):
             previous = json.loads(output.read_text(encoding="utf-8-sig"))
             if previous.get("auto_quality_annotations") == str(legacy_path):
                 # Preserve the manifest hash of an existing immutable snapshot.
@@ -817,7 +855,7 @@ def _snapshot_stamp(path):
         return None
 
 
-def _composition_source_versions(manifests, model_family):
+def _composition_source_versions(manifests, model_family, auto_scope=None):
     from maichart.training.quality_annotations import (
         annotation_path, auto_annotation_path, split_annotation_source,
     )
@@ -832,7 +870,9 @@ def _composition_source_versions(manifests, model_family):
         if origin is not None:
             owners.append(origin)
         for owner in owners:
-            paths.extend((owner, auto_annotation_path(owner), auto_annotation_path(owner, composed=True)))
+            paths.append(owner)
+            if auto_scope is None or str(manifest) in auto_scope:
+                paths.extend((auto_annotation_path(owner), auto_annotation_path(owner, composed=True)))
         for path in paths:
             files[str(path)] = _snapshot_stamp(path)
         for song in payload.get("songs", []):
@@ -856,11 +896,13 @@ def compose_datasets(
     dataset_names: list[str] | None = None,
     published_root: Path | None = None,
     preview_audio_digest=None,
+    auto_quality_manifests: list[str | Path] | None = None,
 ) -> dict[str, Any]:
     """Prepare a stable source selection without changing a single source."""
     if not manifests:
         raise ValueError("至少需要一份训练 manifest")
     manifests = list(dict.fromkeys(str(Path(value).resolve()) for value in manifests))
+    auto_scope = _auto_quality_scope(manifests, auto_quality_manifests)
     for value in manifests:
         path = Path(value)
         payload = json.loads(path.read_text(encoding="utf-8-sig"))
@@ -869,7 +911,8 @@ def compose_datasets(
             raise ValueError(f"{path.parent.name} 不是事件模型预处理清单，请选择当前模型族重新预处理")
         if model_family == "legacy_frame_v2" and target == "event_v1":
             raise ValueError("事件模型清单不能用于旧固定帧模型，请重新预处理")
-    if len(manifests) == 1 and not json.loads(Path(manifests[0]).read_text(encoding="utf-8-sig")).get("candidate_pool"):
+    if (len(manifests) == 1 and auto_scope is None
+            and not json.loads(Path(manifests[0]).read_text(encoding="utf-8-sig")).get("candidate_pool")):
         # Selecting one prepared dataset must not rewrite song ids, paths, or
         # checkpoint contracts.  The trainer can consume its original file
         # directly; composition is only needed when sources are combined.
@@ -903,7 +946,7 @@ def compose_datasets(
     source_versions = None
     if target.suffix.lower() != ".json":
         if model_family == "chart_composer_v2" and published_root is None:
-            source_versions = _composition_source_versions(manifests, model_family)
+            source_versions = _composition_source_versions(manifests, model_family, auto_scope)
         identity = hashlib.sha256()
         for value in sorted(manifests, key=str.casefold):
             identity.update(value.casefold().encode("utf-8"))
@@ -929,6 +972,7 @@ def compose_datasets(
         return merge_training_manifests(
             manifests, target, dataset_ids=dataset_ids, dataset_names=dataset_names,
             merge_annotations=True, model_family=model_family,
+            auto_quality_manifests=auto_scope,
             _composition_identity=composition_identity, _source_versions=source_versions,
             _published_root=published_root,
             _preview_audio_digest=preview_audio_digest,
