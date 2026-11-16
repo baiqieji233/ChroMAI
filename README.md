@@ -1,4 +1,4 @@
-# maimai AI Chart Lab
+# ChroMAI
 
 基于 **Composer v2（`chart_composer_v2`）** 连续事件流架构的 maimai DX 谱面生成与训练工具。直接从音乐音频续写完整 Simai 谱面（`maidata.txt`），支持自动变速识别与节拍校准、拍内声学起音参考、实时物理无理（Muri）检查与回退修复，并内置网页端谱面预览播放器。
 
