@@ -50,8 +50,8 @@ function candidateSavedReviews(records) {
     feedbackButtons();
     node('feedbackSelectedSource').textContent=validRange()?selectedNotes().map(note=>`${note.start_sec.toFixed(3)}s · 第${note.beat}拍 · ${note.raw}`).filter((line,index,all)=>all.indexOf(line)===index).join('\n')||'所选范围没有音符起点。':'尚未选择片段。';draw();
   }
-  const colors={tap:'#d84b89',hold:'#d59c24',slide:'#299bdb',touch:'#8e61c9',touch_hold:'#8e61c9'};
-  const noteColor=(kind,isBreak,isEach)=>isBreak?'#e77632':isEach?'#ffd640':colors[kind]||'#747f91';
+  const colors={tap:'#d84b89',hold:'#d84b89',slide:'#299bdb',touch:'#8e61c9',touch_hold:'#8e61c9'};
+  const noteColor=(kind,isBreak,isEach)=>isBreak?'#e77632':isEach?'#bb9b31':colors[kind]||'#747f91';
   const noteLane=note=>String(note.kind).startsWith('touch')?8:Math.max(0,Math.min(7,Number(note.head)-1));
   const beatNumber=value=>{const parts=String(value).split('/').map(Number);return parts.length===2?parts[0]/parts[1]:parts[0];};
   function selectedNotes() {return !validRange()?[]:(timeline?.notes||[]).filter(note=>note.start_sec>=range.start_sec-1e-7 && note.start_sec<range.end_sec-1e-7);}
