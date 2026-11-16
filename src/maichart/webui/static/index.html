@@ -213,11 +213,27 @@
             <small data-training-family="event_v1 event_ctx_v1">从头训练 / finetune 会采用当前的节奏贴合标签时间轴，计入谱面音频偏移；resume 继承 checkpoint 的目标版本。旧模型若要采用这项修正，请用 finetune。迁移不会改变词表或生成架构。</small>
           </label></div>
 <p class="workflow-hint">首次建立模型选“从头训练”；延续同一次实验选“从断点继续”；更换精选数据或调整采样策略选“已有模型加强训练”。</p>
-<div class="form-grid"><label class="field span-4">模型族 / Model family
-<select id="modelFamily"><option value="chart_composer_v2" selected>chart_composer_v2（连续事件／Composer v2，当前主路线）</option>
-              <option value="song_form_v2">song_form_v2（精确有理数事件）</option><option value="chart_stream_v1">chart_stream_v1（连续整曲事件流）</option><option value="chart_composer_v1">chart_composer_v1（整拍集合／Composer）</option>
-              <option value="song_form_v1">song_form_v1 全曲结构模型（全曲规划与段落关联）</option><option value="event_ctx_v1">event_ctx_v1 跨窗口事件模型（旧模型兼容路径）</option><option value="event_v1">event_v1 事件模型（无跨窗口上下文）</option><option value="legacy_frame_v2">旧固定帧基线（对照实验，非 event 模型）</option></select>
-<small id="modelFamilyHelp">默认使用 Composer v2 连续事件模型。计算切片不代表音乐边界；旧模型仍可从同一工作台选择。切换模型族后，本页显示对应专属参数。</small></label></div>
+<div class="form-grid">
+  <label class="field span-2">模型族
+    <select id="modelFamily"><option value="chart_composer_v2" selected>Composer v2</option></select>
+  </label>
+  <label class="checkbox-field span-2">
+    <input id="trainingCompatibility" type="checkbox" aria-controls="modelFamily" autocomplete="off">
+    <span>高级兼容设置</span>
+    <small>显示其他模型族</small>
+  </label>
+</div>
+<template id="trainingCompatibilityOptions">
+  <optgroup label="其他模型族">
+    <option value="song_form_v2">Song Form v2（精确拍位）</option>
+    <option value="chart_stream_v1">Chart Stream v1（连续事件流）</option>
+    <option value="chart_composer_v1">Composer v1</option>
+    <option value="song_form_v1">Song Form v1（全曲规划）</option>
+    <option value="event_ctx_v1">Event Context v1（跨窗口事件）</option>
+    <option value="event_v1">Event v1（窗口事件）</option>
+    <option value="legacy_frame_v2">固定帧模型</option>
+  </optgroup>
+</template>
 <div id="trainingCheckpointGroup">
 <div id="formResumeDataPolicyGroup" class="form-grid" hidden>
 <label class="field span-4">续训数据变化处理
@@ -2083,7 +2099,7 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=player-motion-20261111"></script>
-  <script src="/app.js?v=audit-source-selection-20261115"></script>
+  <script src="/app.js?v=training-family-compatibility-20261116"></script>
   <script src="/v2_intensity.js?v=editor-20261109"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=large-scale-screening-20261114"></script>

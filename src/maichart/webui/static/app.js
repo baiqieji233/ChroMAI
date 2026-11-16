@@ -1976,6 +1976,16 @@ function restoreSettings() {
   migrateSongFormQualityDefaults(values);
   migrateEventSetLearningDefaults(values);
   if (!values.__eventSetSharedContinuationDefaults && (values.composerLearningPolicy ?? 'auto') === 'auto' && Number(values.composerTransitionExitWeight) === .5) delete values.composerTransitionExitWeight;
+  const compatibility = element("#trainingCompatibility");
+  if (compatibility) {
+    compatibility.checked = values.trainingCompatibility === true;
+    updateTrainingModelChoices();
+    const family = element("#modelFamily");
+    if (values.modelFamily != null && !Array.from(family.options).some(option => option.value === values.modelFamily)) {
+      delete values.modelFamily;
+      if ((values.trainingMode ?? "fresh") === "fresh") delete values.checkpointDir;
+    }
+  }
   let restored = 0;
   settingsFields().forEach((target) => {
     if (!Object.prototype.hasOwnProperty.call(values, target.id)) return;
@@ -2362,6 +2372,21 @@ function currentModelFamily() {
   return valueOrDefault("#modelFamily", "chart_composer_v2");
 }
 
+function updateTrainingModelChoices() {
+  const family = element("#modelFamily");
+  const options = element("#trainingCompatibilityOptions");
+  if (!family || !options) return;
+  const otherFamilies = family.querySelector("optgroup");
+  if (element("#trainingCompatibility")?.checked) {
+    if (!otherFamilies) family.append(options.content.cloneNode(true));
+  } else if (otherFamilies) {
+    const previousFamily = family.value;
+    family.value = "chart_composer_v2";
+    otherFamilies.remove();
+    if (family.value !== previousFamily) family.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+}
+
 function currentGenerationFamily() {
   const selected = currentModelFamily();
   const inspected = generationInspection.data?.model_family;
@@ -2573,24 +2598,6 @@ function updateFamilyFields() {
   updateSongFormGenerationOptions();
   updateGenerationCapabilityControls();
   const family = currentModelFamily();
-  const familyHelp = element("#modelFamilyHelp");
-  if (familyHelp) {
-    familyHelp.textContent = family === "chart_composer_v2"
-      ? "chart_composer_v2（当前主路线）：连续生成整曲事件序列，默认保留16拍历史、每16个事件整理上下文、局部音乐额外前瞻4拍。MERT 在准备阶段自动加载。"
-      : family === "chart_stream_v1"
-      ? "chart_stream_v1：整曲连续事件流；计算块只管理显存，不产生音乐边界。音频、近期谱面、持续动作和近期历史摘要共同参与。"
-      : family === "chart_composer_v1"
-      ? "chart_composer_v1：独立事件候选与动作槽位模型，按 Composer manifest 训练；checkpoint 只与同族 Composer 训练/生成兼容。"
-      : family === "song_form_v2"
-      ? "song_form_v2：直接联合生成精确有理数拍位与配置，音频按节拍/音乐事件查询。保留 Planner、段落关联、Radar / Style、负荷曲线和修订；旧 checkpoint 自动使用原生成方式。"
-      : ["song_form_v1", "song_form_v2"].includes(family)
-      ? "song_form_v1：全曲 blueprint、段落关联与草稿修订模型。Radar / Style 由 event_derived_radar_style_v1 条件监督提供；强度曲线需完成独立训练接入后才会成为真实生成约束。"
-      : family === "event_v1"
-      ? "事件模型使用 112 维 event_audio_v2_rhythm 和显式 null embedding；Planner profile 选择 music_structure_v2/v3 时使用音乐结构规划器，选择 legacy_v1 才是旧 planner。"
-      : family === "event_ctx_v1"
-        ? "跨窗口事件模型：使用 112 维 event_audio_v2_rhythm 和显式 null embedding；每个窗口额外看到「前面已写的音符」和「前后的音乐」。Planner profile 选择 music_structure_v2/v3 时学习局部音乐结构；checkpoint 与 event_v1 互不通用，必须单独训练。"
-        : "旧固定帧基线，仅用于对照；不具备 event 模型的表示能力。";
-  }
   const dirHelp = element("#checkpointDirHelp");
   if (dirHelp) {
     dirHelp.textContent = family === "chart_composer_v2"
@@ -8512,14 +8519,19 @@ on("#tapOnSlideThresholdMs", "change", () => {
 });
 
 // Training panel
+on("#trainingCompatibility", "change", updateTrainingModelChoices);
 on("#modelFamily", "change", () => {
   generationInspectRequest += 1;
+  checkpointInspectRequest += 1;
   if(currentModelFamily()==="chart_composer_v2" && currentTrainingMode()==="fresh") {
     const directory=element("#checkpointDir");if(directory)directory.value="checkpoints/chart_composer_v2";
   } else if(element("#checkpointDir")?.value==="checkpoints/chart_composer_v2") {
     element("#checkpointDir").value="checkpoints/"+currentModelFamily();
   }
-  generationInspection = { path: "", data: null }; checkpointInspection = { key: "", data: null };
+  generationInspection = { path: "", data: null };
+  invalidateCheckpointInspection(currentTrainingMode() === "fresh" ? "" : "请检查已有模型。");
+  const details = element("#checkpointDetails");
+  if (details) details.hidden = true;
   applySongFormCheckpointConfig({valid: false}, "fresh");
   if (currentTrainingMode() === "fresh" && currentModelFamily() === "song_form_v2") {
     for (const [id, v] of Object.entries({formDModel:256, formLayers:4, formNhead:8, formDimFeedforward:0, formPlannerWidth:128})) {
