@@ -189,7 +189,7 @@ def main(argv: list[str] | None = None) -> int:
     checked=check_environment(['--profile',args.dependency_profile])
     if checked or args.check:return checked
     server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
-    print(f"maichart WebUI: http://{args.host}:{args.port}", flush=True)
+    print(f"ChroMAI WebUI: http://{args.host}:{args.port}", flush=True)
     print(f"workspace: {WEBUI_ROOT}", flush=True)
     try:
         server.serve_forever()

@@ -224,7 +224,7 @@ if (Get-Command Get-NetTCPConnection -ErrorAction SilentlyContinue) {
 }
 
 $url = "http://127.0.0.1:$Port/"
-Write-Host "Starting WebUI at $url"
+Write-Host "Starting ChroMAI WebUI at $url"
 if (-not $NoBrowser) { Start-Process $url }
 Push-Location $ProjectRoot
 try {
