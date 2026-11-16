@@ -92,6 +92,7 @@ Desktop.ini
 # Local development material is deliberately excluded from release source.
 /tests/
 /scripts/
+/notebooks/
 /docs/handoffs/
 /docs/evidence/
 /docs/audits/
