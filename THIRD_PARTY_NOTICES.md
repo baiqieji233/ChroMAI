@@ -23,10 +23,12 @@ at [Team-MiaCode/MiaCode](https://github.com/Team-MiaCode/MiaCode/tree/6573efb61
 No skins, sounds or application binaries are redistributed. The generation
 checker is now a Python port under `src/maichart/generation/muri`, covering
 parsing, static references, simple-note pad events, Touch groups, hand actions,
-and ordered Slide/Wifi judgments. The original source remains available
-under `native/miacode/upstream/src` as a development reference. The
-upstream LICENSE, LICENSE_SCOPE and THIRD_PARTY_NOTICES are retained alongside
-the source; `UPSTREAM.json` pins every copied source hash.
+and ordered Slide/Wifi judgments. Local upstream C++ comparison copies
+(`native/miacode/upstream/src`, `UPSTREAM.json`, and the optional native ABI3
+oracle source) are not distributed in the public source repository; the pinned
+upstream commit and reference-data provenance remain recorded in
+`src/maichart/generation/muri/reference/provenance.json` and at
+[Team-MiaCode/MiaCode](https://github.com/Team-MiaCode/MiaCode/tree/6573efb611056bccd046dd17bc2f4cceda78bf88).
 
 The optional development ABI3 oracle compiles two generated adaptation files with a zero lower
 bound for the configurable collision-reference neighbourhood. Zero disables
@@ -101,6 +103,19 @@ initializer obtains the upstream project separately. Chart;Gate and its
 respective contributors under GPL-3.0-or-later. See the upstream
 [license](https://github.com/inm2002/chartgate/blob/44d07804de32e66fc66f93c98ab67e2a981b7753/LICENSE)
 and [third-party notices](https://github.com/inm2002/chartgate/blob/44d07804de32e66fc66f93c98ab67e2a981b7753/THIRD_PARTY_NOTICES.md).
+
+## Optional open-mdp difficulty estimation
+
+Composer v2 can also use a separately obtained local checkout of
+[RightSG/open-mdp](https://github.com/RightSG/open-mdp) at commit
+`aac60d3b7ffb` (`src/maichart/composer_v2/open_mdp.py`) for fitted difficulty
+estimates. This repository does not bundle `open-mdp` weights or upstream code;
+when enabled locally, the adapter compiles a small `.NET` (`>= 8`) bridge
+against `open-mdp`'s `serializer/src/SimaiProcess.cs` (derived from
+[MajdataEdit](https://github.com/LingFeng-bbben/MajdataEdit)) and runs its
+inference script in a separate process. Both `open-mdp` and `MajdataEdit` are
+provided by their respective contributors under GPL-3.0. See the upstream
+[open-mdp license](https://github.com/RightSG/open-mdp/blob/aac60d3b7ffbb41e23bc16724d92386c091969c7/LICENSE).
 
 ## Composer checkpoints and user content
 

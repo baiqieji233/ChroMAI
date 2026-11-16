@@ -45,23 +45,36 @@ def fetch_index(url):
         return response.read(16*1024*1024).decode('utf-8')
 
 
+def _import_packaging():
+    """Import packaging helpers, falling back to pip's vendored copy if needed."""
+    try:
+        from packaging.tags import Tag, sys_tags
+        from packaging.utils import parse_wheel_filename
+        from packaging.version import Version
+    except ImportError:
+        from pip._vendor.packaging.tags import Tag, sys_tags
+        from pip._vendor.packaging.utils import parse_wheel_filename
+        from pip._vendor.packaging.version import Version
+    return Tag, sys_tags, parse_wheel_filename, Version
+
+
 def wheel_versions(html, package, cuda, tags):
-    from pip._vendor.packaging.utils import parse_wheel_filename
+    Tag, _, parse_wheel_filename, _ = _import_packaging()
+    tag_set={tag if isinstance(tag,Tag) else Tag(tag.interpreter,tag.abi,tag.platform) for tag in tags}
     versions={}
     for link in re.findall(r'href=[\"\']([^\"\']+)',html):
         name=unquote(urlparse(link).path.rsplit('/',1)[-1])
         if not name.endswith('.whl'):continue
         try:dist,version,_,supported=parse_wheel_filename(name)
         except ValueError:continue
-        if str(dist)!=package or version.is_prerelease or not (supported & tags):continue
+        if str(dist)!=package or version.is_prerelease or not (supported & tag_set):continue
         if version.local!=cuda:continue
         versions[version.base_version]=version
     return versions
 
 
 def select_wheels(hardware, installed=None, fetch=fetch_index, tags=None):
-    from pip._vendor.packaging.tags import sys_tags
-    from pip._vendor.packaging.version import Version
+    _, sys_tags, _, Version = _import_packaging()
     if not hardware.get('capabilities'):
         raise RuntimeError('NVIDIA GPU compute capability could not be detected. No packages changed; check nvidia-smi/driver installation.')
     tags=set(sys_tags()) if tags is None else set(tags)

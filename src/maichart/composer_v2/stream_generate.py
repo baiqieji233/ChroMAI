@@ -10,6 +10,7 @@ from .codec import render_atom
 from .stream_data import StreamDataset,collate_stream
 from .retry_sampling import RejectedEventTree,RetrySpaceExhausted
 from .generate import WindowSampler,_sample,_atom_heads,_new_guard,_check_window,_comfort,_action_sampling,_sampling_policy
+from .audio_metadata import resolve_chart_metadata
 from maichart.event_timing import EventPoint
 from maichart.generation.event_compile import compile_event_points
 from maichart.composer.event_set_codec import _atoms
@@ -458,6 +459,11 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     from .data import ComposerV2Song,_beats_at_seconds
     from maichart.tempo_clock import TempoClock
     config=model.config;clock=TempoClock(tempo,first)
+    raw_difficulty=getattr(args,'difficulty',None)
+    chart_meta=resolve_chart_metadata(audio_path,level=args.level,
+        title=getattr(args,'title',None),artist=getattr(args,'artist',None),
+        designer=getattr(args,'designer',None),difficulty=5 if raw_difficulty is None else raw_difficulty,
+        default_designer='Composer v2 continuous')
     from .generation_progress import get_progress
     progress=get_progress(args)
     progress.update(force=True,stage='encoding_audio',audio_duration_sec=float(audio.duration_sec))
@@ -746,10 +752,15 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     points,tail_report=cleanup(points,tempo,first,guard)
     export_end=Fraction(math.ceil(end*config.ticks_per_beat),config.ticks_per_beat)
     text,_=compile_event_points(points,tempo_changes=[t for t in tempo if t.beat<=end],bpm=tempo[0].bpm,
-        first=first,end_beat=export_end,title=audio_path.stem,level=str(args.level),designer='Composer v2 continuous',strict_notes=False)
+        first=first,end_beat=export_end,title=chart_meta['title'],artist=chart_meta['artist'],
+        designer=chart_meta['designer'],difficulty=chart_meta['difficulty'],
+        level=chart_meta['level_label'],strict_notes=False)
     output=Path(args.output).resolve();output.parent.mkdir(parents=True,exist_ok=True);output.write_text(text,encoding='utf-8')
     report=dict(family='chart_composer_v2',sequence_policy=config.sequence_policy,eos_policy='actual_chart_end_only',
-        checkpoint=str(args.checkpoint),audio=str(audio_path),output=str(output),seed=args.seed,events=len(points),
+        checkpoint=str(args.checkpoint),audio=str(audio_path),output=str(output),seed=args.seed,
+        level=args.level,level_label=chart_meta['level_label'],title=chart_meta['title'],
+        artist=chart_meta['artist'],designer=chart_meta['designer'],difficulty=chart_meta['difficulty'],
+        events=len(points),
         context_refreshes=refreshes,refresh_events=config.refresh_events,history_beats=config.history_beats,
         timing=timing_report,condition=condition_report,first=first,end_beat=str(export_end),duration_sec=audio.duration_sec,
         checkpoint_info=checkpoint_info,generation_settings=_generation_settings(args,device),

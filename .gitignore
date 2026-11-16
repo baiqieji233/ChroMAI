@@ -72,6 +72,9 @@ coverage.xml
 # Local credentials and machine-specific settings
 /.webui-python
 /.claude/
+/.deja/
+/.gemini/
+/.agent/
 /.workbuddy/
 .env
 .env.*
@@ -105,4 +108,3 @@ Desktop.ini
 /tools/bench_train_step.py
 /tools/probe_composer_touch.py
 /AUDIT_WORKING_TREE_*.md
-/C*Usersmywor.claudeprojects*

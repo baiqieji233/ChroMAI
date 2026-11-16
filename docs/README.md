@@ -1,17 +1,20 @@
-# 使用说明导航
+# ChroMAI 使用说明导航
 
-本项目当前主路线为 **Composer v2（`chart_composer_v2`）**：基于连续事件序列（`continuous_events_v1`）、75 Hz MERT 音乐特征与原生 100 Hz 频谱缓存、支持拍内声学起音参考与自动变速校准的 maimai 谱面生成与训练系统。
+**ChroMAI** 的当前主路线为 **Composer v2（`chart_composer_v2`）**：基于连续事件序列（`continuous_events_v1`）、75 Hz MERT 音乐特征与原生 100 Hz 频谱缓存、支持拍内声学起音参考与自动变速校准的 maimai DX 谱面生成与训练系统。
 
 ## 用户指南与参数手册
 
-- **[项目总览与 3 分钟快速上手](../README.md)**：环境安装、双击一键启动、已有 `.pt` 模型生成与命令行速查。
-- **[Composer v2 技术架构、目录与演进思路](explanations/COMPOSER_V2_TECHNICAL_OVERVIEW_ZH.md)**：当前模型怎样读取音乐和历史、训练目标、缓存边界、主要技术目录，以及历次路线调整留下的经验。
+- **[项目总览与 3 分钟快速上手](../README.md)**：环境安装、双击一键启动、已有 `.pt` 模型生成、训练素材准备与命令行速查。
+- **[Composer v2 技术架构与目录说明](explanations/COMPOSER_V2_TECHNICAL_OVERVIEW_ZH.md)**：模型如何读取音乐和历史、训练目标、缓存边界、主要技术目录与质量排查思路。
 - **[Composer v2 主界面（WebUI）与参数完整说明](explanations/COMPOSER_V2_WEBUI_ZH.md)**：WebUI 各工作区操作流程、生成与训练参数详解、Radar / Style 偏好微调、多数据集素材管理与跨设备路径配置。
+- **[强度曲线与局部疏密编辑](explanations/COMPOSER_V2_INTENSITY_ZH.md)**：可学习事件率与同拍物量曲线的工作原理，以及生成页音频定位与曲线编辑器的用法。
+- **[短段试排、音乐上下文与片段反馈](explanations/COMPOSER_V2_PHRASE_AND_MUSIC_ZH.md)**：短段草稿比较、音频编码扩展、全曲音乐摘要与片段评价／微调入口。
+- **[成对音乐参考与衔接示范](explanations/COMPOSER_V2_PAIRED_MUSIC_ZH.md)**：成对音乐对比与前方采音读取的启用方式，以及人工确认前文衔接的操作步骤。
+- **[完整谱面审阅与反馈](explanations/COMPOSER_V2_PREVIEW_ZH.md)**：在线谱面播放器、时间轴选区、A/B 对比试听与「收集训练示范」的详细说明。
+- **[候选库与片段审阅](explanations/COMPOSER_V2_CANDIDATE_POOL_ZH.md)**：建立待审候选库、查看自动检查提示、逐段确认可学习内容并估算学习份额。
+- **[审阅、标注和片段包操作指南](explanations/COMPOSER_V2_ANNOTATION_GUIDE_ZH.md)**：按界面顺序处理检查结果、审核素材与生成成品、导出与导入片段包并用于后续微调。
 - **[采音与候选评估](explanations/COMPOSER_V2_QUALITY_EVALUATION_ZH.md)**：主界面评估入口、采音检查参数、候选概率记录与选优偏向分析。
-- **[Intel 核显与 NPU 加速](explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)**：MERT 加速、写谱后端自动测速、编译缓存与 XPU 训练。
-- **[成对音乐参考与衔接示范](explanations/COMPOSER_V2_PAIRED_MUSIC_ZH.md)**：新音乐输入的用途、旧模型微调接入、人工确认前文衔接的操作。
-- **[候选库与片段审阅](explanations/COMPOSER_V2_CANDIDATE_POOL_ZH.md)**：独立检查更多资料、确认可学习片段、查看监督占比并加入下一阶段微调。
-- **[审阅、标注和片段包操作指南](explanations/COMPOSER_V2_ANNOTATION_GUIDE_ZH.md)**：按界面顺序处理检查结果、审核素材与生成成品、收集亮眼片段、导入导出并加入后续训练。
+- **[Intel 核显与 NPU 加速](explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)**：OpenVINO MERT 加速、写谱后端自动测速、编译缓存与 Intel XPU 训练。
 
 ## 许可证与第三方资源说明
 

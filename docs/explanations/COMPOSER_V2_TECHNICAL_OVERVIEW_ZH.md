@@ -1,12 +1,12 @@
-# Composer v2 技术目录、架构与演进思路
+# ChroMAI · Composer v2 技术架构与目录说明
 
-本文面向维护人员和独立协作者，依据 2026-11-11、提交 `b33a736` 的源码编写。阅读顺序建议为当前生成链路、训练目标、目录索引，再看演进和排查方法。
+本文面向希望了解 **ChroMAI** 内部结构或参与二次开发的读者，介绍当前主路线 **Composer v2（`chart_composer_v2`）** 的生成链路、训练目标、缓存边界与主要代码目录。
 
-项目的目标是根据音乐创作完整、可玩且有编排意识的 maimai DX 谱面。当前主模型族叫 `chart_composer_v2`。检查点目录中的 `v6`、`v7_2`、`v8_finetuned_v3` 是训练任务的名称，模型结构和学习规则应以检查点保存的配置为准。
+不同训练输出目录名称仅作任务标识，模型实际结构与学习规则均以检查点内保存的配置为准。
 
 ## 1. 当前路线怎样写谱
 
-模型逐个生成完整事件。一个事件包含落点时间和该时刻的一个或多个音符，例如同拍双押。前面已经确定的事件成为后续输入，模型持续推进到全曲结束。
+模型逐个生成完整事件。一个事件包含落点时间和该时刻的一个或多个音符（例如同拍双押）。前面已经确定的事件成为后续输入，模型持续推进到全曲结束。
 
 ```mermaid
 flowchart LR
@@ -27,7 +27,7 @@ flowchart LR
 
 `[END_EVENT]` 表示当前事件写完，`[EOS]` 表示整张谱结束。当前 `continuous_events_v1` 不在固定 16 拍处插入歌曲结束符。训练可以按完整事件切片，生成也会滑动整理上下文，这些是计算边界。
 
-默认的短段试写先向前尝试 4 拍，再保留其中前 2 拍并继续写。它用于比较完整写法和衔接。音乐可以跨过试写边界继续展开。配置候选可以保留既定拍点，联合候选还会比较不同节奏；具体按生成设置运行。 [时间语言](../../src/maichart/composer_v2/stream_codec.py) · [连续生成](../../src/maichart/composer_v2/stream_generate.py) · [短段试写](../../src/maichart/composer_v2/phrase_search.py)
+默认的短段试排先向前尝试 4 拍，再保留其中前 2 拍并继续写。它用于比较完整写法和衔接，音乐可以跨过试排边界继续展开。配置候选可保留既定拍点，联合候选还会比较不同节奏；具体按生成设置运行。[时间语言](../../src/maichart/composer_v2/stream_codec.py) · [连续生成](../../src/maichart/composer_v2/stream_generate.py) · [短段试排](../../src/maichart/composer_v2/phrase_search.py)
 
 ## 2. 模型能读取哪些音乐和历史
 
@@ -38,7 +38,7 @@ flowchart LR
 - `TempoClock` 根据首拍偏移和变 BPM 表，把谱面拍位换成音频秒数。训练采用谱面标注的时钟，生成可以采用用户指定或音频检测所得的时钟。
 - 拍内原始声学、局部音乐和全曲摘要各有用途。把低分辨率的全曲摘要做大，不能自动替代局部起音证据。
 
-按秒存储音频特征后，可以用不同的 BPM、偏移或变速表查询同一份特征。更改时钟时需要重新构造对应输入，而音频文件和提取算法完全一致时，基础频谱与 MERT 特征仍可复用。 [音频准备与读取](../../src/maichart/composer_v2/audio.py) · [时钟](../../src/maichart/tempo_clock.py) · [自动节拍检测](../../src/maichart/composer_v2/tempo.py)
+按秒存储音频特征后，可以用不同的 BPM、偏移或变速表查询同一份特征。更改时钟时需要重新构造对应输入，而音频文件和提取算法完全一致时，基础频谱与 MERT 特征仍可复用。[音频准备与读取](../../src/maichart/composer_v2/audio.py) · [时钟](../../src/maichart/tempo_clock.py) · [自动节拍检测](../../src/maichart/composer_v2/tempo.py)
 
 ### 局部、全曲与参考
 
@@ -48,13 +48,13 @@ flowchart LR
 
 音频允许查看后方内容，因为完整歌曲在生成开始时已知。未来谱面答案只能作为训练目标，不能提前进入历史或参考。维护输入时应分别核对这两条时间范围。
 
-旧模型在兼容的微调路径上增加音乐输入时，新投影采用零初始化，以保留初始输出行为。新分支的有效使用仍依赖后续训练。 [主模型](../../src/maichart/composer_v2/model.py) · [共享输入构造](../../src/maichart/composer_v2/stream_data.py) · [成对音乐特征](../../src/maichart/composer_v2/music_evidence.py)
+旧模型在兼容的微调路径上增加音乐输入时，新投影采用零初始化，以保留初始输出行为。新分支的有效使用仍依赖后续训练。[主模型](../../src/maichart/composer_v2/model.py) · [共享输入构造](../../src/maichart/composer_v2/stream_data.py) · [成对音乐特征](../../src/maichart/composer_v2/music_evidence.py)
 
 ### 独立起音参考的作用范围
 
 `onset_readout.py` 从 100 Hz 原生声学中比较已经选中整数拍内的落点。它调整拍内相位的条件分数，并保持该组总概率质量。因此，入口没有选到、拍内位置错了、采进去后长期不收束，需要分别排查。
 
-前方入口证据来自 `music_evidence.py` 等输入，整段取舍还受主模型、历史、参考、强度曲线和选优影响。`timing_metrics.py` 负责离线度量，它本身不参与生成选时。 [拍内读出](../../src/maichart/composer_v2/onset_readout.py) · [离线采音度量](../../src/maichart/composer_v2/timing_metrics.py)
+前方入口证据来自 `music_evidence.py` 等输入，整段取舍还受主模型、历史、参考、强度曲线和选优影响。`timing_metrics.py` 负责离线度量，它本身不参与生成选时。[拍内读出](../../src/maichart/composer_v2/onset_readout.py) · [离线采音度量](../../src/maichart/composer_v2/timing_metrics.py)
 
 ## 3. 当前训练实际在学习什么
 
@@ -67,15 +67,15 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 训练目标 = token_loss + 0.05 × curve_loss    # 启用强度曲线时
 ```
 
-训练另外报告 `time_loss`、`phase_loss` 和 `component_loss`。日志中的 `loss` 与 `objective_loss` 有不同用途，维护评测时要核对实际字段和统计范围。`best` 通常按开发验证损失选择，缺验证时使用训练损失。它衡量拟合，完整生成还需要采音、配置、休止、重复和实际手感的检查。 [损失函数](../../src/maichart/composer_v2/model.py) · [训练与指标汇总](../../src/maichart/composer_v2/train.py)
+训练另外报告 `time_loss`、`phase_loss` 和 `component_loss`。日志中的 `loss` 与 `objective_loss` 有不同用途，维护评测时要核对实际字段和统计范围。`best` 通常按开发验证损失选择，缺验证时使用训练损失。它衡量拟合，完整生成还需要采音、配置、休止、重复和实际手感的检查。[损失函数](../../src/maichart/composer_v2/model.py) · [训练与指标汇总](../../src/maichart/composer_v2/train.py)
 
-2026-11-15 稳定性更新：从头训练使用 `attention_normalization=qk_rms_v1`，在每个注意力头的 Q/K 投影后做无可学习缩放的 RMS 归一化，计算平方和时使用 FP32。内容打分的绝对值因此限制在 `sqrt(head_dim)` 内；位置偏置另计。CUDA 低精度局部／相对位置注意力保留 FP32 math 反向路径，并把归一化和注意力一起重算以控制显存。没有该配置的旧检查点按 `off` 加载，严格续训和微调继承父检查点策略，不会在加载时悄悄改变函数。
+**注意力稳定性约束（`qk_rms_v1`）**：从头训练默认使用 `attention_normalization=qk_rms_v1`，在每个注意力头的 Q/K 投影后做无可学习缩放的 RMS 归一化，计算平方和时使用 FP32。内容打分的绝对值因此限制在 `sqrt(head_dim)` 内；位置偏置另计。CUDA 低精度局部／相对位置注意力保留 FP32 math 反向路径，并把归一化和注意力一起重算以控制显存。没有该配置的旧检查点按 `off` 加载，严格续训和微调继承父检查点策略，不会在加载时悄悄改变函数。
 
 配置了可用开发集时，训练在定期保存检查点和轮次结束时验证，使用同一批固定片段、质量权重和条件策略，并按验证 token CE 更新 `best`。中途验证先等待一个预取批次完成，避免与共享音频缓存并发读写，随后保存并恢复训练随机数状态。`validation_nonphase_time_loss` 排除 `F:` 拍内相位 token，保留数字拍位与时间控制符；它与 `validation_phase_loss` 分开显示，避免两类预测的变化相互遮盖。早停仍按完整轮计数，轮内验证改善也计入该轮。
 
 当前节奏恢复训练会构造过密、过疏或偏相位的前文，让模型学习接回真实的后续节奏。`_recovery_item` 会屏蔽配置标签，只保留选时监督。这说明它主要解决节奏偏差。正常样本仍然训练配置续写，但这与在偏离原谱的自产配置之后学会接续，是两个覆盖范围不同的任务。想增强后一种能力，需要构造可信的配置目标，并评估能否在真实连续生成中获益。
 
-目前已有人工确认的接入训练入口。用户确认一段连同前文的衔接后，可以使该段的第一步采音也参与学习。未确认片段保留为上下文，目标只使用确认范围。这样的监督来源比把任意自产前文强接到唯一原谱答案更明确。 [恢复样本](../../src/maichart/composer_v2/stream_data.py) · [前文扰动](../../src/maichart/composer_v2/timing_recovery.py) · [示范整理](../../src/maichart/training/reviewed_generation.py)
+目前已有人工确认的接入训练入口。用户确认一段连同前文的衔接后，可以使该段的第一步采音也参与学习。未确认片段保留为上下文，目标只使用确认范围。这样的监督来源比把任意自产前文强接到唯一原谱答案更明确。[恢复样本](../../src/maichart/composer_v2/stream_data.py) · [前文扰动](../../src/maichart/composer_v2/timing_recovery.py) · [示范整理](../../src/maichart/training/reviewed_generation.py)
 
 ## 4. 训练资料怎样成为有效监督
 
@@ -100,7 +100,7 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 
 自动体检和手顺评分包含启发式判断。正常休止、合理重复、混合分音与少物量编排都应纳入验收。把更多资料作为上下文，同时只监督确认好的部分，可以增加资料利用率，但学习效果需要后续训练检验。
 
-每次训练会写 `dataset_audit.json`。拒绝日志只是审计的一部分，等级范围的跳过、整谱权重为零及局部监督掩码需要一起统计。不同目录中的重复素材有时用于有意加权，分析时应同时保留原条目数和按内容去重后的数量。 [数据集入口](../../src/maichart/composer_v2/data.py) · [质量标注](../../src/maichart/training/quality_annotations.py) · [多来源组合](../../src/maichart/training/dataset_catalog.py) · [自动体检](../../src/maichart/composer_v2/auto_quality_audit.py)
+每次训练会写 `dataset_audit.json`。拒绝日志只是审计的一部分，等级范围的跳过、整谱权重为零及局部监督掩码需要一起统计。不同目录中的重复素材有时用于有意加权，分析时应同时保留原条目数和按内容去重后的数量。[数据集入口](../../src/maichart/composer_v2/data.py) · [质量标注](../../src/maichart/training/quality_annotations.py) · [多来源组合](../../src/maichart/training/dataset_catalog.py) · [自动体检](../../src/maichart/composer_v2/auto_quality_audit.py)
 
 ## 5. 生成侧如何影响最终成谱
 
@@ -115,7 +115,7 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 
 检查一次失败时，应追踪它在原始提议、物理检查、候选选优、恢复和最终导出中的变化。`rollback` 或 `conflict_admitted` 表示相应恢复分支被执行，单凭日志名无法定位到声学缓存或模型某一层。
 
-`probability_audit.py` 与 `candidate_audit.py` 已提供候选记录和离线选优分析。需要检查评分是否偏向保守、是否筛掉合理留白或重复时，应记录候选池和获选结果。 [生成入口](../../src/maichart/composer_v2/generate.py) · [候选记录](../../src/maichart/composer_v2/probability_audit.py) · [选优分析](../../src/maichart/composer_v2/candidate_audit.py) · [恢复](../../src/maichart/composer_v2/release_repair.py)
+`probability_audit.py` 与 `candidate_audit.py` 已提供候选记录和离线选优分析。需要检查评分是否偏向保守、是否筛掉合理留白或重复时，应记录候选池和获选结果。[生成入口](../../src/maichart/composer_v2/generate.py) · [候选记录](../../src/maichart/composer_v2/probability_audit.py) · [选优分析](../../src/maichart/composer_v2/candidate_audit.py) · [恢复](../../src/maichart/composer_v2/release_repair.py)
 
 ## 6. 缓存应按层检查
 
@@ -131,7 +131,7 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 
 缓存仍依赖维护者正确更新语义版本。当前谱面缓存命中后复用已经解析、检查过的事件与持续标记，解析规则变化却未升级版本，确实可能保留旧处理结果。音频缓存也没有把所有库版本和提取实现代码自动纳入身份。因此有必要做有针对性的缓存对照，检查具体是哪一层失效。
 
-全量清理会触发音频重新提取，并失去原缓存这个对照对象。更有效的验证是保留可疑缓存，用一个新的小目录重建同一首音频，比较身份、帧时间、特征数值、实际拍位查询结果，以及固定前缀下的模型输出。 [音频缓存](../../src/maichart/composer_v2/audio.py) · [谱面缓存](../../src/maichart/composer_v2/chart_cache.py) · [文件摘要复用](../../src/maichart/form/cache_support.py)
+全量清理会触发音频重新提取，并失去原缓存这个对照对象。更有效的验证是保留可疑缓存，用一个新的小目录重建同一首音频，比较身份、帧时间、特征数值、实际拍位查询结果，以及固定前缀下的模型输出。[音频缓存](../../src/maichart/composer_v2/audio.py) · [谱面缓存](../../src/maichart/composer_v2/chart_cache.py) · [文件摘要复用](../../src/maichart/form/cache_support.py)
 
 ## 7. 主要技术目录
 
@@ -161,7 +161,7 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 | `src/maichart/webui/composer_v2_api.py` | 主界面请求到 Composer v2 命令和配置的转换 |
 | `src/maichart/webui/quality_api.py`、`candidate_api.py`、`dataset_api.py` | 素材目录、标注、候选库、来源组合 |
 | `src/maichart/webui/static/` | 主界面。`index.html` 放控件，`app.js` 组装请求和状态；`workspace.js` 管工作区与摘要；`chart_preview.js`、`candidate_feedback.js` 和 `v2_intensity.js` 管预览、审阅和曲线 |
-| `START_WEBUI.bat`、`pyproject.toml`、启动检查相关脚本 | 环境准备、依赖与命令入口。`maichart-gui` 指向 `maichart.webui.server:main` |
+| `START_WEBUI.bat`、`pyproject.toml`、启动检查相关脚本 | 环境准备、依赖与命令入口。`chromai-webui` 与 `maichart-gui` 均指向 `maichart.webui.server:main` |
 
 ### 历史实现与运行资料
 
@@ -171,31 +171,27 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 | `src/maichart/form/` | 历史全曲规划路线，同时仍提供主路线复用的波形、缓存等公共能力 |
 | `src/maichart/stream/` | 较早的流式路线 |
 | `src/maichart/composer/` | 前代 Composer 与多个历史架构；当前 v2 仍复用其中部分守卫和组件函数 |
-| `checkpoints/` | 模型、优化器、配置、数据划分、训练审计。模型目录名称仅作管理标识 |
-| `cache/` | 音频、谱面解析、预训练权重及其他缓存；不同层各有身份和版本 |
-| `webui_workspace/` | 上传、准备好的数据集、生成结果、任务日志、候选库及本地预览资源 |
+| `checkpoints/` | 模型、优化器、配置、数据划分、训练审计（本地运行产物，默认忽略） |
+| `cache/` | 音频、谱面解析、预训练权重及其他缓存（本地运行产物，默认忽略） |
+| `webui_workspace/` | 上传、准备好的数据集、生成结果、任务日志、候选库及本地预览资源（默认忽略） |
 | `docs/explanations/` | 随项目提供的解释与使用说明 |
-| `.scratch/handoffs/`、`.scratch/` | 本地交接、实验和复现证据，按当前发布习惯留在本机 |
-| `tests/` | 本地回归测试，当前 Git 规则忽略该目录；跨设备开发时需要另外取得测试资料 |
 
-目录名体现了历史，是否仍在使用应沿当前 import 和入口确认。尤其是 `composer` 和 `form`，其中部分能力仍被 v2 调用。
+本地训练权重、音频特征缓存、工作区数据及内部开发／实验脚本等均通过 `.gitignore` 排除在公开仓库之外。目录名体现了历史演进，是否仍在使用应以当前 import 和入口为准（尤其是 `composer` 和 `form`，其中部分能力仍被 v2 调用）。
 
-## 8. 项目为什么逐步演进到这里
+## 8. 架构演进摘要
 
-| 阶段 | 当时主要想解决的问题 | 对当前路线留下的经验 |
+| 阶段 | 主要解决的问题 | 对当前路线留下的经验 |
 | --- | --- | --- |
-| 早期事件模型与 `event_ctx` | 让模型利用前文写出连贯的常规配置 | 用户试玩认为部分常规配置较成熟。完整序列、前文和音乐一起解码的价值值得保留；固定输出边界对非常规节奏的影响需要控制 |
-| `song_form` | 为全曲强弱、段落和局部生成提供规划 | 全曲信息有价值，规划目标的数值与局部执行必须一致。规划 loss 的下降需要用最终谱面核对 |
-| 前代流式 Composer | 避开固定段落边界，显式建模事件、配置和占用 | 曾反复处理 Touch 偏科、循环、休止、时值和多分支衔接。一个分支拟合良好不代表整条生成链一致 |
+| 早期事件模型与 `event_ctx` | 让模型利用前文写出连贯的常规配置 | 完整序列、前文和音乐一起解码的价值值得保留；固定输出边界对非常规节奏的影响需要控制 |
+| `song_form` | 为全曲强弱、段落和局部生成提供规划 | 全曲信息有价值，规划目标的数值与局部执行必须一致；规划 loss 的下降需要用最终谱面核对 |
+| 前代流式 Composer | 避开固定段落边界，显式建模事件、配置和占用 | 一个分支拟合良好不代表整条生成链一致，需要统一事件与状态协调 |
 | 配置因子、短句与恢复学习 | 解决完整动作组合难学、自产前文不稳定 | 应区分节奏纠错、合法但不同的写法续接和真实配置示范；避免把错误前文强行对应唯一原谱答案 |
-| Composer v2 | 借鉴成熟序列模型，把时间和音符组件放回统一解码过程，加入 MERT 和歌曲记忆 | 组件共享使不同音符能复用位置、类型等信息。训练输入和生成输入尽量使用同一构造入口 |
+| Composer v2 | 借鉴成熟序列模型，把时间和音符组件放回统一解码过程，加入 MERT 和歌曲记忆 | 组件共享使不同音符能复用位置、类型等信息；训练输入和生成输入尽量使用同一构造入口 |
 | v2 连续事件时间语言 | 解决固定 16 拍结束符、整数拍漂移及非常规分音表示 | 绝对拍与精确分数持续推进；计算窗口、试写窗口与音乐结束分开表达 |
 | 细节采音与成对音乐 | 区分 16／24 混用，减少低可信参考压过当前音乐 | 入口、拍内相位和整段收束各有职责；参考应同时提供音乐依据与前文写法 |
 | 当前质量反馈和选优 | 扩大可用素材、保留优质片段，提高完整成谱的稳定性 | 记录候选概率和过滤结果，人工确认真实好段，自动体检与人工决定保持可追踪的对应关系 |
 
-这一演进并不提供各阶段等数据、等算力的横向优劣结论。早期方案的可取之处主要在于表达、连续监督和上下文使用；当前 v2 仍需要通过完整生成验证音乐取舍和长配置能力。
-
-实现时间线可核对仓库提交 `aeb79a0`（v2 连续训练与生成）、`0eb2ef5`（拍内声学参考）、`af07ea4`（逐拍参考与混合分音）、`3ae3412`（强度曲线）、`c633e63`（成对音乐）和 `b33a736`（质量检查、恢复与素材工作流）。
+这一演进并不提供各阶段等数据、等算力的横向优劣结论。当前 v2 仍需要通过完整生成验证音乐取舍和长配置能力。
 
 ## 9. 下一次质量排查应先获得什么证据
 
@@ -205,5 +201,3 @@ token_loss = Σ(有效 token 的交叉熵 × 学习权重) / Σ学习权重
 4. **比较相同前缀的训练与生成输出。** 先核对完整前向与增量缓存，再观察真实前文换成自产前文后的变化。由此区分输入错位、缓存状态和连续生成误差。
 5. **追踪候选到成谱的变化。** 检查候选是否已有合理方案，以及物理过滤和选优是否把它筛掉。回退次数按事件数、冲突类型和失败位置解读。
 6. **只重建需要验证的缓存。** 保留旧缓存作对照。若定位到解析缓存或某个提取版本，再讨论该范围的失效与迁移。
-
-这些检查已有大部分入口。维护时优先补齐证据之间的关联，再决定是否需要扩模型、改训练目标或增加新模块。

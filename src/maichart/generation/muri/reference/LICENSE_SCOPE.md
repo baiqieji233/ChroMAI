@@ -1,17 +1,19 @@
 # License Scope
 
+> Upstream license scope notice retained from [Team-MiaCode/MiaCode](https://github.com/Team-MiaCode/MiaCode/tree/6573efb611056bccd046dd17bc2f4cceda78bf88) for `slide_data.json.gz`. Upstream-only relative paths are rendered as plain text below because those upstream files and assets are not bundled in ChroMAI.
+
 This repository uses the following licensing split for public prerelease distribution.
 
 ## Summary
 
-- Project-owned source code is licensed under the MIT License. See [LICENSE](LICENSE).
+- Project-owned source code is licensed under the MIT License. See MiaCode's upstream `LICENSE` (reproduced in ChroMAI's root `THIRD_PARTY_NOTICES.md`).
 - The repository as a whole, bundled runtime assets, packaged binaries, and release archives are intended for non-commercial use unless a file or third-party license explicitly says otherwise.
-- Third-party components keep their own licenses and redistribution terms. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+- Third-party components keep their own licenses and redistribution terms. See MiaCode's upstream `THIRD_PARTY_NOTICES.md` (and ChroMAI's root `THIRD_PARTY_NOTICES.md`).
 - Reference projects listed in the notices were used as behavioral or engineering references only, unless copied code or assets are explicitly identified.
 
 ## What The MIT License Covers
 
-The MIT License in [LICENSE](LICENSE) applies to MiaCode project-owned source code and project-owned build/maintenance scripts.
+The MIT License in MiaCode's upstream `LICENSE` applies to MiaCode project-owned source code and project-owned build/maintenance scripts.
 
 It does not relicense third-party code, binary libraries, fonts, SFX, skin textures, background media, intro visual assets, sample content, or packaged runtime dependencies.
 
@@ -19,8 +21,8 @@ It does not relicense third-party code, binary libraries, fonts, SFX, skin textu
 
 The public repository and prerelease packages may include assets and binaries whose current distribution position is non-commercial. This includes, but is not limited to:
 
-- bundled application assets under [assets](assets)
-- intro templates and generated visual assets under [src/intro](src/intro)
+- bundled application assets under upstream `assets` (not bundled in ChroMAI)
+- intro templates and generated visual assets under upstream `src/intro` (not bundled in ChroMAI)
 - bundled fonts, SFX, skins, background media, and note-guide images
 - BASS-related headers, import libraries, runtime DLLs, dylibs, and shared objects used by the Windows, macOS, and Linux audio backends
 - generated release packages and packaged application archives
@@ -31,7 +33,7 @@ Commercial redistribution is not covered by this repository-level distribution p
 
 本仓库采用“方案 A”：
 
-- MiaCode 自有源代码使用 MIT License，正文见 [LICENSE](LICENSE)。
+- MiaCode 自有源代码使用 MIT License，正文见上游 `LICENSE`（MIT 文本亦附于本仓库根目录 `THIRD_PARTY_NOTICES.md`）。
 - 仓库整体、随仓库分发的资源、打包产物和首发 prerelease 发布包定位为非商业使用，除非具体文件或第三方许可证另有说明。
-- 第三方库、字体、音效、皮肤、背景素材、BASS、FFmpeg、Qt 等仍受各自许可证或分发条款约束，详见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+- 第三方库、字体、音效、皮肤、背景素材、BASS、FFmpeg、Qt 等仍受各自许可证或分发条款约束，详见上游 `THIRD_PARTY_NOTICES.md`（及本仓库根目录 `THIRD_PARTY_NOTICES.md`）。
 - 鸣谢/参考项目默认仅表示行为或工程参考；没有直接复制源码或素材，除非文档中另行明确标注。

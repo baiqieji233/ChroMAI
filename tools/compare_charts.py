@@ -16,8 +16,8 @@ from real maimai charts:
     is what tells legitimate repetition (a chorus) from a stuck model.
 
 Usage:
-    python tools/compare_charts.py chart.txt [chart2.txt ...] [--gold]
-    python tools/compare_charts.py dir1 dir2 --baseline dir1
+    python tools/compare_charts.py chart.txt [chart2.txt ...] [--gold --gold-dir DIR]
+    python tools/compare_charts.py dir1 dir2
 """
 
 from __future__ import annotations
@@ -206,11 +206,10 @@ def print_table(rows: list[dict]) -> None:
             print(f"  {row['label']}: audio_follow keys = {row['audio_follow_keys']}")
 
 
-def gold_reference() -> list[dict]:
-    probe = Path(r"E:\simai_transformer\.scratch\bpmfix\gold_probe")
+def gold_reference(probe: Path) -> list[dict]:
     manifest = probe / "gold_val_manifest.json"
     if not manifest.is_file():
-        return []
+        raise FileNotFoundError(f"gold reference manifest not found: {manifest}")
     data = json.loads(manifest.read_text(encoding="utf-8"))
     rows = []
     for song in data["songs"]:
@@ -228,15 +227,26 @@ def gold_reference() -> list[dict]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Compare generated maimai charts by the numbers.")
     parser.add_argument("targets", nargs="+", help="chart files or folders to compare")
-    parser.add_argument("--gold", action="store_true", help="also print real maimai gold charts as a reference")
+    parser.add_argument("--gold", action="store_true", help="also print reference charts from --gold-dir")
+    parser.add_argument("--gold-dir", type=Path, help="reference directory containing gold_val_manifest.json")
     args = parser.parse_args(argv)
+
+    if args.gold and args.gold_dir is None:
+        parser.error("--gold requires --gold-dir <dir> containing gold_val_manifest.json")
+    gold_rows: list[dict] = []
+    if args.gold or args.gold_dir is not None:
+        assert args.gold_dir is not None
+        manifest = args.gold_dir / "gold_val_manifest.json"
+        if not manifest.is_file():
+            parser.error(f"gold reference directory or manifest not found: {manifest}")
+        gold_rows = gold_reference(args.gold_dir)
 
     rows = collect([Path(target) for target in args.targets])
     if not rows:
         print("no charts with notes found")
         return 1
-    if args.gold:
-        rows = gold_reference() + rows
+    if gold_rows:
+        rows = gold_rows + rows
     print_table(rows)
 
     # Aggregate so a multi-song A/B is readable at a glance.

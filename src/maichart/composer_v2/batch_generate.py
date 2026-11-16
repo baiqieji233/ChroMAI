@@ -215,6 +215,7 @@ def generate_batch(args):
     from .checkpoint import read, inspect_payload
     from .codec import ComponentCodec
     from .model import ComposerV2, ComposerV2Config
+    from .audio_metadata import resolve_chart_metadata
 
     if not 1<=args.count<=MAX_BATCH_COUNT:
         raise ValueError(f'count must be in 1..{MAX_BATCH_COUNT}')
@@ -235,6 +236,12 @@ def generate_batch(args):
         from maichart.webui.startup_check import require_cuda
         require_cuda(torch)
     config=ComposerV2Config.from_dict(checked['model_config'])
+    default_designer='Composer v2 continuous' if config.sequence_policy=='continuous_events_v1' else 'Composer v2'
+    raw_difficulty=getattr(args,'difficulty',None)
+    chart_meta=resolve_chart_metadata(args.audio,level=args.level,
+        title=getattr(args,'title',None),artist=getattr(args,'artist',None),
+        designer=getattr(args,'designer',None),difficulty=5 if raw_difficulty is None else raw_difficulty,
+        default_designer=default_designer)
     # Detect concurrent checkpoint replacement before labelling the batch.
     if _digest(checkpoint)!=digest:
         raise ValueError('检查点在批量载入期间发生变化，请重新提交')
@@ -248,6 +255,8 @@ def generate_batch(args):
         requested_parallel=getattr(args,'parallel',1),active=[],device=device,cpu_runtime=cpu_runtime,
         completed=0,failed=0,checkpoint=str(checkpoint),checkpoint_sha256=digest,
         optimizer_steps=checked['optimizer_steps'],audio=str(Path(args.audio).resolve()),
+        level=args.level,level_label=chart_meta['level_label'],title=chart_meta['title'],
+        artist=chart_meta['artist'],designer=chart_meta['designer'],difficulty=chart_meta['difficulty'],
         created_at=datetime.now().isoformat(timespec='seconds'),charts=[])
     _write(manifest,report)
     _emit(report,1)
@@ -258,6 +267,10 @@ def generate_batch(args):
         item._batch_count=args.count
         item.seed=int(args.seed)+index
         item.output=str(manifest.parent/f'{index+1:02d}_seed_{item.seed}'/target.name)
+        item.title=chart_meta['title']
+        item.artist=chart_meta['artist']
+        item.designer=chart_meta['designer']
+        item.difficulty=chart_meta['difficulty']
         items.append(item)
     _tracking(report, items)
     try:

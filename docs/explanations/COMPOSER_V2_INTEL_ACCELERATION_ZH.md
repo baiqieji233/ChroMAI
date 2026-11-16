@@ -1,6 +1,6 @@
-# Intel 核显与 NPU 加速
+# ChroMAI · Intel 核显与 NPU 加速
 
-Composer v2 将音乐特征、写谱解码和训练分开选择设备。已有检查点可直接使用，不需要重新训练或转换检查点文件。
+**ChroMAI（Composer v2）** 支持将音乐特征提取、写谱解码和训练分别配置在不同设备上执行。已有检查点可直接使用，不需要重新训练或转换检查点文件。
 
 ## 安装
 
@@ -14,11 +14,11 @@ OpenVINO 需要正常工作的 Intel 显卡或 NPU 驱动。缺少 OpenVINO 时�
 
 ## 推理
 
-生成页的“音乐特征设备”和“写谱加速”默认自动选择。命令行示例：
+生成页的“音乐特征设备”和“写谱加速引擎”默认自动选择。命令行示例：
 
 ```powershell
 .\.venv\Scripts\python.exe -m maichart.composer_v2.generate `
-  --checkpoint checkpoints/v72/composer_v2_best.pt `
+  --checkpoint checkpoints/<模型名>/composer_v2_best.pt `
   --audio path/to/track.mp3 --output outputs/maidata.txt `
   --device cpu --audio-device auto --inference-backend auto
 ```
@@ -36,13 +36,13 @@ OpenVINO 需要正常工作的 Intel 显卡或 NPU 驱动。缺少 OpenVINO 时�
 
 同一首歌已有音频特征缓存时，不会再次运行 MERT；这时总体收益主要取决于写谱解码。短音频的首次调用可能因加载、导出和编译而更慢。阶段吞吐提升不代表整曲生成有相同倍数的提升。
 
-本机 Core Ultra 5 225H / Arc 130T 的一次完整验证：约 147 秒音频的 MERT 特征提取，CPU 40.5 秒，核显与 CPU 边界片段组合 8.1 秒（约 5 倍，复用已有编译缓存，包含模型加载）；特征相对 L2 差异约 0.116%。写谱解码的自动测速选择了 PyTorch CPU。原生 XPU 写谱推理较慢，未加入自动生成设备。
+在 Core Ultra 5 225H / Arc 130T 的实测参考中：约 147 秒音频的 MERT 特征提取，CPU 耗时 40.5 秒，核显与 CPU 边界片段组合耗时 8.1 秒（约 5 倍，复用已有编译缓存，含模型加载）；特征相对 L2 差异约 0.116%。写谱解码自动测速选择了 PyTorch CPU；原生 XPU 写谱推理较慢，未加入自动生成设备。
 
 ## 训练
 
 `--prepare-device auto` 复用上述 MERT 加速与缓存；也可指定 `openvino-gpu` 或 `openvino-npu`。特征提取属于冻结编码器的离线计算，不会改变主模型的反向传播设备。
 
-主模型新增 `--device xpu`，通过原生 PyTorch 使用 Intel 核显训练。需要另外安装 XPU 版 PyTorch：
+主模型支持 `--device xpu`，通过原生 PyTorch 使用 Intel 核显训练。需要另外安装 XPU 版 PyTorch：
 
 ```powershell
 .\.venv\Scripts\python.exe -m pip install --upgrade torch --index-url https://download.pytorch.org/whl/xpu
@@ -51,9 +51,9 @@ OpenVINO 需要正常工作的 Intel 显卡或 NPU 驱动。缺少 OpenVINO 时�
 
 验证可用后，训练页可选择“Intel 核显（XPU）”。自动设备顺序为 CUDA、XPU、CPU；XPU 使用 BF16 或 FP32，FP16 训练仍只开放给 CUDA。音频特征插值在 CPU 按原有双精度规则完成后传输，兼容不同客户端驱动的 FP64 能力。布尔条件和分组查询改用等价的 `index_select`，规避部分 XPU 高级索引内核错误。
 
-严格续训的自动设备继承原检查点设备，不会自动切换 CPU/XPU；跨设备加强训练应使用新输出目录进行 finetune。XPU 检查点保存并恢复 XPU 随机状态。
+严格续训的自动设备继承原检查点设备，不会自动切换 CPU/XPU；跨设备加强训练应使用新输出目录进行 `finetune`。XPU 检查点保存并恢复 XPU 随机状态。
 
-本机使用 v72 权重、128 token、batch 1、启用起音与强度曲线的训练步骤测试中，预热后 CPU FP32 约 0.74 秒/步，XPU BF16 约 0.41 秒/步；这只是小批量测试，不代表所有训练规模的加速倍数。另已验证命令行训练保存、自动继承 XPU/BF16 续训以及随机状态恢复。
+在启用起音与强度曲线、128 token、batch 1 的小批量实测参考中，预热后 CPU FP32 约 0.74 秒/步，XPU BF16 约 0.41 秒/步（不同硬件与规模下加速倍数会有所差异）。
 
 ## 验证
 

@@ -1,8 +1,11 @@
-name: simai_transformer
+# Base Conda environment for ChroMAI.
+# After `conda activate ChroMAI`, install CUDA PyTorch if using an NVIDIA GPU,
+# then install ChroMAI dependencies:
+#   pip install -e ".[audio,training,composer-v2-music]"
+name: ChroMAI
 channels:
   - conda-forge
 dependencies:
-  - python=3.10
+  - python=3.12
   - pip
-  - flake8
-  - pytest
+  - packaging>=23

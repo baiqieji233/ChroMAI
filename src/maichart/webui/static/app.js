@@ -65,6 +65,11 @@ function composerV2GenerationPayload(options={}) {
   const seed=valueOrDefault("#seed","").trim();
   const number=(selector,fallback,label,bounds)=>v2NumericValue(valueOrDefault(selector,fallback),label,bounds);
   const count=number('#v2GenerateCount',1,'生成张数',{min:1,max:32,integer:true});
+  const rawDifficulty=String(valueOrDefault('#acceptanceDifficulty',5)).trim();
+  const difficulty=rawDifficulty===''?5:v2NumericValue(rawDifficulty,'难度槽位',{min:1,max:6,integer:true});
+  const title=String(valueOrDefault('#title','')).trim();
+  const artist=String(valueOrDefault('#artist','')).trim();
+  const designer=String(valueOrDefault('#designer','AI')).trim()||'AI';
   const tempoMap=parseTempoMap();
   const condition={};
   for(const [key,state] of Object.entries(v2ConditionState))if(state.override)
@@ -72,6 +77,7 @@ function composerV2GenerationPayload(options={}) {
   if(Object.keys(condition).length && !v2ConditionCapability().enabled)throw new Error("当前 checkpoint 未训练 Radar / Style 条件；请先检查支持 radar_style_v1 的 checkpoint。");
   const payload={model_family:"chart_composer_v2",checkpoint:valueOrDefault("#checkpointPath","").trim(),
     audio:valueOrDefault("#audioPath","").trim(),output:valueOrDefault("#outputPath","").trim()||null,
+    title,artist,designer,difficulty,
     bpm:valueOrDefault("#bpm","").trim()===""?null:number('#bpm',120,'BPM',{min:.001}),
     first:element('#v2GenerateAutoFirst')?.checked?null:number('#first',0,'首拍偏移'),level:number('#level',13.3,'目标等级',{min:12,max:15}),
     seed:seed===""?Math.floor(Math.random()*2147483647):v2NumericValue(seed,'随机种子',{min:0,integer:true}),
@@ -1843,6 +1849,9 @@ function collectSettings() {
   values.__composerV2ReleaseDefaults = 1;
   values.__composerV2PhraseMusicDefaults = 1;
   values.__composerV2AuditDefaults = 1;
+  if (typeof audioMetadataState !== "undefined") values.__audioMetadata = { ...audioMetadataState };
+  const legacyChartLevel = element("#chartLevel")?.dataset.legacyChartLevel;
+  if (legacyChartLevel !== undefined) values.chartLevel = legacyChartLevel;
   if (v2TrainPlanBeforeSmoke) values.__v2TrainPlanBeforeSmoke = v2TrainPlanBeforeSmoke;
   return values;
 }
@@ -2051,6 +2060,24 @@ function restoreSettings() {
     const source = document.getElementById(mirror.dataset.numberFor);
     if (source) mirror.value = source.value;
   });
+  if (typeof audioMetadataState !== "undefined") {
+    if (values.__audioMetadata && typeof values.__audioMetadata === "object") {
+      audioMetadataState = {
+        audioPath: String(values.__audioMetadata.audioPath || ""),
+        title: String(values.__audioMetadata.title || ""),
+        artist: String(values.__audioMetadata.artist || ""),
+        fetched: values.__audioMetadata.fetched === true,
+      };
+    } else {
+      audioMetadataState = {
+        audioPath: valueOrDefault("#audioPath", "").trim(),
+        title: "",
+        artist: "",
+        fetched: false,
+      };
+    }
+  }
+  if (typeof syncV2ChartLevel === "function") syncV2ChartLevel();
   return restored > 0;
 }
 
@@ -2123,6 +2150,7 @@ function resetGenerationDefaults() {
   if (levelPresetProfile) applyConditionPreset();
   resetV2ConditionState();
   updateGenerationCapabilityControls();
+  if (typeof syncV2ChartLevel === "function") syncV2ChartLevel();
   saveSettings();
   const status = element("#resetGenerationStatus");
   if (status) status.textContent = "已恢复生成面板默认值；训练参数未改动。";
@@ -2233,7 +2261,7 @@ function updateConditionRecipeDisplay(preset = null) {
   const names = selectedConditionPreferences().map(key => preferenceDefinitions[key].label);
   status.textContent = `${level.toFixed(2)} 等级基准${names.length ? ` ＋ ${names.join("、")}` : " · 常规写法"}已应用。整体密度目标约 ${(preset.radar.note_density * 16).toFixed(1)} 次起音/秒；偏好不额外提高密度与峰值。`;
   const evidence = element("#conditionPresetEvidence");
-  if (evidence) evidence.textContent = `${preset.interpolated ? "该小数等级由相邻基准插值。" : ""}参考来自 full 训练集原谱；附近有效参考约 ${Number(preset.support || 0).toFixed(0)} 份，本档明确小数标签 ${Number(preset.exact_count || 0)} 份${Number(preset.raw_count || 0) < 20 ? "，直接样本较少，借用邻近等级平滑" : ""}。原谱整数 / 加号标签的参考权重降低；提供的小数标签也未经官方核验。这是生成起点，不是定数保证。`;
+  if (evidence) evidence.textContent = `${preset.interpolated ? "该小数等级由相邻基准插值。" : ""}参考来自基础训练集原谱；附近有效参考约 ${Number(preset.support || 0).toFixed(0)} 份，本档明确小数标签 ${Number(preset.exact_count || 0)} 份${Number(preset.raw_count || 0) < 20 ? "，直接样本较少，借用邻近等级平滑" : ""}。原谱整数 / 加号标签的参考权重降低；提供的小数标签也未经官方核验。这是生成起点，不是定数保证。`;
 }
 
 async function loadLevelPresetProfile() {
@@ -2503,6 +2531,140 @@ function updateSongFormGenerationOptions() {
   if (curveSave) curveSave.textContent = "保存并返回生成页";
 }
 
+const DEFAULT_CHART_TITLE = "Generated maimai chart";
+let audioMetadataState = { audioPath: "", title: "", artist: "", fetched: false };
+let audioMetadataInFlight = { audioPath: "", promise: null };
+let audioMetadataRequestSeq = 0;
+
+function formatV2ChartLevel(level) {
+  const raw = typeof level === "number" ? String(level) : String(level ?? "").trim();
+  if (!raw) return "";
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return "";
+  const tenths = Math.round(n * 10);
+  const whole = Math.floor(tenths / 10);
+  const frac = tenths % 10;
+  return whole >= 7 && frac >= 6 ? `${whole}+` : `${whole}`;
+}
+
+function syncV2ChartLevel() {
+  const chartLevelNode = element("#chartLevel");
+  if (!chartLevelNode) return;
+  const v2Generation = currentGenerationFamily() === "chart_composer_v2";
+  const helpNode = element("#chartLevelHelp") || chartLevelNode.closest("label")?.querySelector("small");
+  if (v2Generation) {
+    if (chartLevelNode.dataset.legacyChartLevel === undefined) {
+      chartLevelNode.dataset.legacyChartLevel = chartLevelNode.value;
+    }
+    const levelText = formatV2ChartLevel(valueOrDefault("#level", GENERATION_LEVEL_DEFAULT));
+    if (levelText) chartLevelNode.value = levelText;
+    chartLevelNode.disabled = true;
+    if (helpNode) {
+      helpNode.textContent = "在 Composer v2 下，输出等级依 Step 02 输入的目标定数自动决定（如 13.5 → 13、13.6 → 13+）。";
+    }
+  } else {
+    if (chartLevelNode.dataset.legacyChartLevel !== undefined) {
+      chartLevelNode.value = chartLevelNode.dataset.legacyChartLevel;
+      delete chartLevelNode.dataset.legacyChartLevel;
+    }
+    chartLevelNode.disabled = false;
+    if (helpNode) {
+      helpNode.textContent = "元数据标签，不是难度测量结果；留空则沿用模型默认。";
+    }
+  }
+}
+
+function audioPathStem(audioPath) {
+  const raw = String(audioPath || "").trim();
+  if (!raw) return "";
+  const base = raw.split(/[\\/]/).pop() || "";
+  const dot = base.lastIndexOf(".");
+  return dot > 0 ? base.slice(0, dot) : base;
+}
+
+function applyAudioMetadataToFields(audioPath, metadata = {}, { forceNewSong = false, fetched = false } = {}) {
+  const normalizedPath = String(audioPath || "").trim();
+  const titleNode = element("#title");
+  const artistNode = element("#artist");
+  const rawTitle = typeof metadata?.title === "string" ? metadata.title.replace(/[\r\n]+/g, " ").trim() : "";
+  const rawArtist = typeof metadata?.artist === "string" ? metadata.artist.replace(/[\r\n]+/g, " ").trim() : "";
+  const nextTitle = rawTitle || audioPathStem(normalizedPath) || DEFAULT_CHART_TITLE;
+  const nextArtist = rawArtist || "";
+
+  const sameSong = !forceNewSong && normalizedPath !== "" && normalizedPath === audioMetadataState.audioPath;
+  const switchedFromSong = forceNewSong || (normalizedPath !== "" && audioMetadataState.audioPath !== "" && normalizedPath !== audioMetadataState.audioPath);
+
+  if (titleNode) {
+    const currentTitle = String(titleNode.value ?? "").trim();
+    const titleUntouched = currentTitle === "" || currentTitle === DEFAULT_CHART_TITLE || currentTitle === audioMetadataState.title;
+    if (switchedFromSong || titleUntouched) {
+      titleNode.value = nextTitle;
+    }
+  }
+  if (artistNode) {
+    const currentArtist = String(artistNode.value ?? "").trim();
+    const artistUntouched = sameSong
+      ? (!audioMetadataState.fetched && currentArtist === "") || currentArtist === audioMetadataState.artist
+      : (currentArtist === "" || currentArtist === audioMetadataState.artist);
+    if (switchedFromSong || artistUntouched) {
+      artistNode.value = nextArtist;
+    }
+  }
+
+  audioMetadataState = {
+    audioPath: normalizedPath,
+    title: nextTitle,
+    artist: nextArtist,
+    fetched: Boolean(fetched),
+  };
+}
+
+async function refreshAudioMetadataFromPath({ force = false } = {}) {
+  const targetPath = valueOrDefault("#audioPath", "").trim();
+  if (!targetPath) {
+    if (audioMetadataState.audioPath) {
+      const titleNode = element("#title");
+      const artistNode = element("#artist");
+      if (titleNode && String(titleNode.value ?? "").trim() === audioMetadataState.title) {
+        titleNode.value = DEFAULT_CHART_TITLE;
+      }
+      if (artistNode && String(artistNode.value ?? "").trim() === audioMetadataState.artist) {
+        artistNode.value = "";
+      }
+      audioMetadataState = { audioPath: "", title: "", artist: "", fetched: false };
+      saveSettings();
+    }
+    return null;
+  }
+  if (!force && audioMetadataState.fetched && audioMetadataState.audioPath === targetPath) {
+    return null;
+  }
+  if (audioMetadataInFlight.promise && audioMetadataInFlight.audioPath === targetPath) {
+    return audioMetadataInFlight.promise;
+  }
+  const seq = ++audioMetadataRequestSeq;
+  const promise = (async () => {
+    try {
+      const data = await api("/api/audio/metadata", { audio: targetPath });
+      if (seq !== audioMetadataRequestSeq || valueOrDefault("#audioPath", "").trim() !== targetPath) return null;
+      applyAudioMetadataToFields(targetPath, data?.metadata || {}, { fetched: true });
+      saveSettings();
+      return data;
+    } catch (_) {
+      if (seq !== audioMetadataRequestSeq || valueOrDefault("#audioPath", "").trim() !== targetPath) return null;
+      applyAudioMetadataToFields(targetPath, {}, { fetched: false });
+      saveSettings();
+      return null;
+    } finally {
+      if (audioMetadataInFlight.audioPath === targetPath) {
+        audioMetadataInFlight = { audioPath: "", promise: null };
+      }
+    }
+  })();
+  audioMetadataInFlight = { audioPath: targetPath, promise };
+  return promise;
+}
+
 function updateFamilyFields() {
   const v2Generation=currentGenerationFamily()==="chart_composer_v2";
   const checked=generationInspection.path===valueOrDefault("#checkpointPath","").trim()
@@ -2597,6 +2759,7 @@ function updateFamilyFields() {
   }
   updateSongFormGenerationOptions();
   updateGenerationCapabilityControls();
+  if (typeof syncV2ChartLevel === "function") syncV2ChartLevel();
   const family = currentModelFamily();
   const dirHelp = element("#checkpointDirHelp");
   if (dirHelp) {
@@ -2668,7 +2831,7 @@ async function assertDatasetBackend() {
   if (!selectedTrainingManifests().length) return;
   const status = await api("/api/status");
   if (status.training_capabilities?.multi_dataset_training !== true) {
-    throw new Error("当前后端尚未加载多训练集功能，请重启 E 盘 WebUI 服务后再检查或训练。勾选的来源尚未提交训练。");
+    throw new Error("当前后端尚未加载多训练集功能，请重启 WebUI 服务后再检查或训练。勾选的来源尚未提交训练。");
   }
 }
 
@@ -8139,6 +8302,11 @@ async function submitGenerate() {
     const checked=await inspectGenerationCheckpoint();
     if(!checked?.valid)throw new Error(checked?.error||'Composer v2 检查点不可用');
   }
+  if ((typeof currentGenerationFamily === "function" ? currentGenerationFamily() : null) === "chart_composer_v2"
+      && typeof refreshAudioMetadataFromPath === "function"
+      && valueOrDefault("#audioPath", "").trim()) {
+    await refreshAudioMetadataFromPath();
+  }
   const payload = generationPayload();
   if (!payload.checkpoint) throw new Error("请先上传或填写 checkpoint 路径");
   if (!payload.audio) throw new Error("请先导入音频或填写音频路径");
@@ -8251,8 +8419,11 @@ async function submitGenerate() {
 
 function clearGenerate() {
   resetGenerationDefaults();
+  audioMetadataRequestSeq += 1;
+  audioMetadataInFlight = { audioPath: "", promise: null };
+  audioMetadataState = { audioPath: "", title: "", artist: "", fetched: false };
   ["#checkpointPath", "#audioPath", "#featurePath", "#tempoMap", "#formGenerationMeterMap", "#composerConditionFile", "#goldStatsPath",
-    "#acceptanceMaidata", "#acceptanceAudio", "#qualityStatus", "#qualityDiagnostics"]
+    "#acceptanceMaidata", "#acceptanceAudio", "#artist", "#qualityStatus", "#qualityDiagnostics"]
     .forEach((selector) => {
       const target = element(selector);
       if (!target) return;
@@ -8262,6 +8433,14 @@ function clearGenerate() {
   ["#checkpointFile", "#audioFile", "#featureFile"].forEach((selector) => {
     const target = element(selector); if (target) target.value = "";
   });
+  if (element("#title")) element("#title").value = DEFAULT_CHART_TITLE;
+  if (element("#designer")) element("#designer").value = "AI";
+  if (element("#acceptanceDifficulty")) element("#acceptanceDifficulty").value = "5";
+  const chartLevelNode = element("#chartLevel");
+  if (chartLevelNode) {
+    chartLevelNode.value = "";
+    delete chartLevelNode.dataset.legacyChartLevel;
+  }
   if (element("#outputPath")) element("#outputPath").value = "webui_workspace/generated/maidata.txt";
   generationInspection = {path: "", data: null};
   updateFamilyFields();
@@ -8825,8 +9004,22 @@ on("#datasetZip", "change", async (event) => {
 });
 
 // Generation panel
-on("#audioFile", "change", async (event) => { const data = await upload("audio", event.target.files[0], "#audioPath", "#audioUploadStatus"); invalidateIntensityForAudio(); return data; });
+on("#audioFile", "change", async (event) => {
+  const data = await upload("audio", event.target.files[0], "#audioPath", "#audioUploadStatus");
+  invalidateIntensityForAudio();
+  if (data?.path) {
+    audioMetadataRequestSeq += 1;
+    audioMetadataInFlight = { audioPath: "", promise: null };
+    const metadata = data.metadata || {};
+    applyAudioMetadataToFields(data.path, { ...metadata, title: metadata.title || audioPathStem(data.name) },
+      { forceNewSong: true, fetched: true });
+    saveSettings();
+  }
+  return data;
+});
 on("#audioPath", "input", invalidateIntensityForAudio);
+on("#audioPath", "change", () => refreshAudioMetadataFromPath());
+on("#audioPath", "blur", () => refreshAudioMetadataFromPath());
 on("#intensityCurveEnabled", "change", updateCurveConditionNotice);
 on("#acceptanceDifficulty", "change", invalidateLearnedCurveForCondition);
 on("#tempoMap", "input", invalidateLearnedCurveForTiming);
@@ -8953,8 +9146,9 @@ on("#applyConditionPreset", "click", async () => {
   if (!levelPresetProfile) await loadLevelPresetProfile();
   if (levelPresetProfile) { invalidateLearnedCurveForCondition(); applyConditionPreset(); }
 });
-on("#level", "change", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); });
-on("#levelRange", "input", event => { invalidateLearnedCurveForCondition(); setConditionValue("level", Number(event.target.value)); if (levelPresetProfile) applyConditionPreset(); });
+on("#level", "change", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); if (typeof syncV2ChartLevel === "function") syncV2ChartLevel(); });
+on("#levelRange", "input", event => { invalidateLearnedCurveForCondition(); setConditionValue("level", Number(event.target.value)); if (levelPresetProfile) applyConditionPreset(); if (typeof syncV2ChartLevel === "function") syncV2ChartLevel(); });
+on("#level", "input", () => { if (typeof syncV2ChartLevel === "function") syncV2ChartLevel(); });
 on("#conditionPreferenceStrength", "input", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); else updateConditionRecipeDisplay(); });
 for (const definition of Object.values(preferenceDefinitions)) {
   on(`#${definition.field}`, "change", () => { invalidateLearnedCurveForCondition(); if (levelPresetProfile) applyConditionPreset(); else updateConditionRecipeDisplay(); });

@@ -60,6 +60,17 @@ def _choice(payload,key,default,choices):
     return value
 
 
+def _single_line_text(payload, key):
+    if key not in payload or payload[key] is None:
+        return None
+    value = payload[key]
+    if not isinstance(value, str):
+        raise ValueError(f"{key} 必须是字符串")
+    if "\n" in value or "\r" in value:
+        raise ValueError(f"{key} 不能包含换行符")
+    return value.strip()
+
+
 def _manifest_paths(values):
     if values is None:
         return None
@@ -611,6 +622,22 @@ def start_generate(handler,payload,*,runtime):
         settings[key] = value
         _arg(args, "--" + key.replace("_", "-"), value)
     if not 1<=settings["level"]<=15:raise ValueError("level 必须在1到15之间")
+    from maichart.composer_v2.audio_metadata import format_level_label
+    settings['level_label']=format_level_label(settings['level'])
+    for key in ('title','artist','designer'):
+        text_value=_single_line_text(payload,key)
+        if text_value is not None:
+            settings[key]=text_value
+            args.append(f'--{key}={text_value}')
+    raw_difficulty=payload.get('difficulty')
+    if raw_difficulty is None:
+        difficulty=5
+    else:
+        difficulty=_integer({'difficulty':raw_difficulty},'difficulty',5,minimum=1)
+        if difficulty>6:
+            raise ValueError('difficulty 必须是 1 到 6 的整数')
+    settings['difficulty']=difficulty
+    _arg(args,'--difficulty',difficulty)
     for key,default in dict(seed=0,candidates=GENERATION_DEFAULTS["candidates"],max_events=0,rollback_windows=2,window_retries=16,cpu_threads=GENERATION_DEFAULTS['cpu_threads']).items():
         settings[key]=_integer(payload,key,default,minimum=0)
         _arg(args,"--"+key.replace("_","-"),settings[key])

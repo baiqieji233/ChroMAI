@@ -12,6 +12,11 @@ jobs:
           python-version: '3.12'
       - name: Check source syntax
         run: python -m compileall -q src tools
+      - name: Check WebUI progress view helper
+        run: |
+          if command -v node >/dev/null 2>&1; then
+            node tools/check_composer_v2_progress.js
+          fi
       - name: Build installable distributions
         run: |
           python -m pip install build
@@ -19,4 +24,4 @@ jobs:
       - name: Check installed command entry
         run: |
           python -m pip install dist/*.whl
-          python -c "from importlib.metadata import distribution; assert any(e.name == 'maichart-gui' for e in distribution('maimai-ai-chart').entry_points)"
+          python -c "from importlib.metadata import distribution; names = {e.name for e in distribution('ChroMAI').entry_points}; assert {'chromai', 'chromai-webui', 'maichart', 'maichart-gui'}.issubset(names), names"

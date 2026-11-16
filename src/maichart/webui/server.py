@@ -393,6 +393,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return start(self, parsed.path.rsplit('/', 1)[-1], self._json_body(), runtime=sys.modules[__name__])
             if parsed.path == "/api/upload":
                 return self._upload()
+            if parsed.path == "/api/audio/metadata":
+                return self._audio_metadata(self._json_body())
             if parsed.path == "/api/generate":
                 return self._start_generate(self._json_body())
             if parsed.path == "/api/intensity/analyze":
@@ -1940,7 +1942,21 @@ class WebUIHandler(BaseHTTPRequestHandler):
                     "extracting": True,
                 }
             )
-        self._json_response({"kind": kind, "path": str(stored), "name": safe_name})
+        response: dict[str, Any] = {"kind": kind, "path": str(stored), "name": safe_name}
+        if kind == "audio":
+            from maichart.composer_v2.audio_metadata import read_audio_metadata
+            response["metadata"] = read_audio_metadata(stored)
+        self._json_response(response)
+
+    def _audio_metadata(self, payload: dict[str, Any]) -> None:
+        raw_audio = payload.get("audio")
+        if not isinstance(raw_audio, str) or not raw_audio.strip():
+            raise ValueError("缺少 audio 路径")
+        audio = _required_path(raw_audio.strip(), "audio", must_exist=True)
+        if not audio.is_file():
+            raise ValueError(f"audio 必须是文件: {audio}")
+        from maichart.composer_v2.audio_metadata import read_audio_metadata
+        self._json_response({"path": str(audio), "metadata": read_audio_metadata(audio)})
 
     def _download(self, raw_path: str) -> None:
         path = _resolve_path(raw_path)

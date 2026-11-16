@@ -22,6 +22,7 @@ from .codec import ComponentCodec
 from .codec import render_atom
 from .data import ComposerV2Dataset, ComposerV2Song, collate_composer_v2, _beats_at_seconds
 from .conditions import resolve_generation_condition
+from .audio_metadata import resolve_chart_metadata, validate_difficulty
 
 
 def parser():
@@ -33,6 +34,10 @@ def parser():
     result.add_argument('--bpm', type=float, default=None, help='Omit for automatic tempo analysis (detects variable tempo when --tempo-detection=auto, or constant BPM when constant); manual --tempo-map overrides')
     result.add_argument('--first', type=float, default=None, help='Omit to detect beat phase; explicit zero is preserved')
     result.add_argument('--level', type=float, default=13.)
+    result.add_argument('--title', default=None, help='Chart title; omitted reads audio tags or falls back to audio filename')
+    result.add_argument('--artist', default=None, help='Track artist; omitted reads audio tags; empty string clears')
+    result.add_argument('--designer', default=None, help='Chart designer credit; omitted uses Composer v2 default')
+    result.add_argument('--difficulty', type=int, default=5, choices=range(1, 7), help='Maidata difficulty slot (1-6, default 5)')
     result.add_argument('--condition', type=json.loads, default=None,
                         help='Explicit Radar/Style overrides as a JSON object; omitted keys are automatic')
     result.add_argument('--intensity-curve',default=None,help='Edited Composer v2 rate profile JSON; omitted uses the trained audio prediction')
@@ -393,6 +398,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         raise ValueError('max_events/rollback_windows must be nonnegative and window_retries positive')
     if not all(math.isfinite(value) for value in (args.first, args.level, args.temperature) if value is not None):
         raise ValueError('first, level and temperature must be finite')
+    raw_difficulty = getattr(args, 'difficulty', None)
+    difficulty = validate_difficulty(5 if raw_difficulty is None else raw_difficulty)
     sampling_policy = _sampling_policy(args)
     if not math.isfinite(sampling_policy['action_temperature']) or sampling_policy['action_temperature'] < 0:
         raise ValueError('action_temperature must be finite and nonnegative')
@@ -553,9 +560,19 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     # Remove unused future tempo directives outside the authored audio extent.
     output_tempo = [change for change in tempo if change.beat <= end]
     export_end = Fraction(math.ceil(end * config.ticks_per_beat), config.ticks_per_beat)
+    chart_meta = resolve_chart_metadata(
+        audio_path,
+        level=args.level,
+        title=getattr(args, 'title', None),
+        artist=getattr(args, 'artist', None),
+        designer=getattr(args, 'designer', None),
+        difficulty=difficulty,
+        default_designer='Composer v2',
+    )
     text, _ = compile_event_points(points, tempo_changes=output_tempo, bpm=bpm,
-        first=first, end_beat=export_end, title=audio_path.stem, level=str(args.level),
-        designer='Composer v2', strict_notes=False)
+        first=first, end_beat=export_end, title=chart_meta['title'],
+        artist=chart_meta['artist'], designer=chart_meta['designer'],
+        difficulty=chart_meta['difficulty'], level=chart_meta['level_label'], strict_notes=False)
     output = Path(args.output).resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(text, encoding='utf-8')
@@ -563,6 +580,9 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         checkpoint_info=checkpoint_info,cpu_runtime=args.cpu_runtime,
         acceleration=getattr(getattr(model,'_decoder_runtime',None),'report',None),
         audio=str(audio_path), output=str(output), seed=args.seed, level=args.level,
+        level_label=chart_meta['level_label'], title=chart_meta['title'],
+        artist=chart_meta['artist'], designer=chart_meta['designer'],
+        difficulty=chart_meta['difficulty'],
         first=first,timing=timing_report,tempo_map=[dict(beat=str(t.beat), bpm=t.bpm) for t in tempo],
         meter_map=getattr(args, 'meter_map', None), meter_policy='metadata_only_no_fixed_4_4_condition',
         end_beat=str(export_end), audio_end_beat=str(end),

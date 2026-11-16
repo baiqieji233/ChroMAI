@@ -156,7 +156,7 @@
 </summary>
 <div class="settings-content">
 <div class="form-grid">
-<label class="field span-4">当前预处理缓存目录
+<label class="field span-4" data-training-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>当前预处理缓存目录
             <textarea id="cacheDir" class="path-input" rows="2">cache</textarea>
             <small>保存音频特征缓存；上传新 ZIP 后会自动换用新目录。换目录等于全部重新分析音频，不会影响已训好的模型。</small>
           </label>
@@ -164,7 +164,7 @@
             <textarea id="manifestPath" class="path-input" rows="2">manifests/training_manifest.json</textarea>
             <small>当前目录预处理写入这里。已勾选训练来源时，训练会自动准备对应清单，联合清单不会覆盖这里。未使用素材勾选的兼容单集流程，仍直接读取这里的清单。</small>
           </label>
-<label class="field">预处理采样率
+<label class="field" data-training-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>预处理采样率
             <input id="prepSampleRate" type="number" value="22050" min="8000" step="100">
             <small>音频分析采样率。<strong>必须与训练时一致</strong>：改它会作废全部音频缓存，并让已有 checkpoint 不再兼容（缓存会自动重建）。不是为了特殊需求不要改。</small>
           </label>
@@ -183,13 +183,13 @@
             <input id="prepLimit" type="number" min="1" placeholder="不限制">
             <small>只处理前 N 首歌。新手验证流程可填 1 或 2 来快速跑通；<strong>正式训练务必留空</strong>，否则模型只看过极少量数据。</small>
           </label>
-<label class="checkbox-field">
+<label class="checkbox-field" data-training-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>
             <input id="prepForce" type="checkbox">
             <span>强制重建缓存</span>
             <small>忽略已有缓存重新分析。改了采样率或特征方案时缓存本就会自动作废，无需手动勾选；仅在缓存疑似损坏时使用。会显著变慢。</small>
           </label></div></div>
 </details>
-<details id="trainingOneClick" class="settings-section"  >
+<details id="trainingOneClick" class="settings-section" data-training-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>
 <summary><span>当前单来源：预处理后立即训练</span><small>确认下方训练参数后再使用</small>
 </summary>
 <div class="settings-content">
@@ -926,7 +926,7 @@
 <label class="field" data-training-family="event_v1">音频缓存上限（GB）
             <input id="audioCacheGb" type="number" min="-1" step="0.5" value="4">
             <small><strong>用内存换速度。</strong>每首歌的特征约 3 MB，常驻缓存按这个上限做 LRU 淘汰：4 GB ≈ 1300 首。
-            <strong>full 训练集有 1681 首 ≈ 4.9 GB，建议填 6</strong>（填 4 会持续淘汰、反复读盘）。被淘汰的歌会从 npz 缓存重新读取（不重新分析音频）。
+            <strong>若基础训练集约 1681 首 ≈ 4.9 GB，建议填 6</strong>（填 4 会持续淘汰、反复读盘）。被淘汰的歌会从 npz 缓存重新读取（不重新分析音频）。
             <strong>填 0 不缓存；填 -1 不设上限</strong>（歌曲数多时会把内存吃光）。</small>
           </label>
 <label class="field" data-training-family="event_v1">CUDA 显存预算（GiB）
@@ -957,11 +957,11 @@
             <input id="validationMaxSteps" type="number" min="0" step="1" value="0">
             <small>0 表示跑完整验证集；短跑时建议填 1–8。只影响本次验证耗时。</small>
           </label>
-<label class="field">训练随机种子
+<label class="field" data-training-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>训练随机种子
             <input id="trainingSeed" type="number" min="0" placeholder="留空 = 每次随机" value="">
             <small>固定权重初始化和数据打乱顺序。<strong>留空则每次训练随机抽一个种子</strong>，这是"多次抽卡"的前提；想复现某次结果就把那次日志里报告的 seed 填回来。</small>
           </label>
-<label class="field">每隔多少 epoch 保存
+<label class="field" data-training-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>每隔多少 epoch 保存
             <input id="saveEvery" type="number" min="0" value="5">
             <small><strong>强烈建议保留非 0。</strong>每隔 N 轮额外存一个 event_epoch_NNN.pt。它是训练被中断或后段过拟合时的唯一退路；填 0 就只剩 last 和 best 两个文件。</small>
           </label></div></div>
@@ -1103,7 +1103,7 @@
         <section id="datasetCardsPanel" class="dataset-workspace" aria-labelledby="datasetWorkspaceTitle">
           <div class="section-heading">
 <div><span class="step">DATASETS</span><h3 id="datasetWorkspaceTitle">数据集库 · 勾选本次训练来源</h3></div><button id="datasetWorkspaceRefreshButton" class="secondary-button" type="button">刷新数据集</button></div>
-          <p class="muted">勾选表示加入下一次训练；点击卡片进入该数据集的谱面目录。可以同时勾选多份，例如“full训练集 + 优质自制谱精选”。</p>
+          <p class="muted">勾选表示加入下一次训练；点击卡片进入该数据集的谱面目录。可以同时勾选多份，例如“基础训练集 + 优质自制谱精选”。</p>
           <div id="datasetWorkspaceStatus" class="inline-status">正在读取数据集目录...</div>
           <p id="candidatePoolCapability" class="inline-status" role="status">候选库：正在读取后台能力…</p>
           <div id="datasetCards" class="dataset-cards"></div>
@@ -1908,7 +1908,7 @@
           </label>
 <label class="field span-4">输出文件路径
             <textarea id="outputPath" class="path-input" rows="2">webui_workspace/generated/maidata.txt</textarea>
-            <small>每次生成放入独立任务目录，文件名保留；实际路径在任务结果中。局部修复时还会列出原谱和修正版，项目外文件请在本机打开。</small>
+            <small>单张默认保存至上方路径；批量生成时放入独立批次目录；实际路径在任务结果中。项目外文件请在本机打开。</small>
           </label></div>
 <details id="generationMetadata" class="settings-section" data-advanced >
 <summary><span>输出元数据</span><small>谱师、曲师、显示等级与导出槽位</small>
@@ -1923,7 +1923,7 @@
           </label>
 <label class="field">输出等级文字（可选）
             <input id="chartLevel" type="text" placeholder="例如 13+">
-            <small>元数据标签，不是难度测量结果。</small>
+            <small id="chartLevelHelp">在 Composer v2 下，输出等级依 Step 02 输入的目标定数自动决定（如 13.5 → 13、13.6 → 13+）；旧模型可手动填写。</small>
           </label>
 <label class="field">难度槽位
             <select id="acceptanceDifficulty">
@@ -1938,7 +1938,7 @@
 </section>
 <div class="run-review"><h3>本次生成摘要</h3><ul id="generationRunSummary"></ul></div>
 <div class="workflow-actions"><button id="generateButton" class="primary-button">生成谱面</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button></div>
-<details id="generationAcceptance" class="settings-section" data-advanced >
+<details id="generationAcceptance" class="settings-section" data-advanced data-generation-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>
 <summary><span>生成后的诊断与对照（可选）</span><small>检查历史谱面，或使用自己选择的参考统计</small>
 </summary>
 <div class="settings-content">
@@ -2099,7 +2099,7 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=player-motion-20261111"></script>
-  <script src="/app.js?v=training-family-compatibility-20261116"></script>
+  <script src="/app.js?v=audio-metadata-20261116"></script>
   <script src="/v2_intensity.js?v=editor-20261109"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=large-scale-screening-20261114"></script>
