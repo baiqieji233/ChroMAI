@@ -302,22 +302,22 @@ def _parse_one(token: str, line: int, col: int, second: float, order: int,
     head_mine = "m" in modifiers
     headless = "?" in modifiers or "!" in modifiers
     mine = "m" in body
-    core = lane_s + "".join(ch for ch in body if ch not in "bm")
     if any(ch in body for ch in _SHAPES):
         # Native branches share one physical head and source location.
-        branches = core.split("*")
         out = []
-        for branch in branches:
-            if not branch:
+        for branch in (lane_s + body).split("*"):
+            clean = "".join(ch for ch in branch if ch not in "bm")
+            if not clean:
                 continue
-            branch = branch if branch[0] in _LANE else lane_s + branch
+            if clean[0] not in _LANE:
+                clean = lane_s + clean
+            track_break = "b" in branch
             bm = _marker(token, line, col, second, order + len(out))
-            bm.update(type="wifi" if "w" in branch.lower() else "slide",
+            bm.update(type="wifi" if "w" in clean.lower() else "slide",
                       lane=int(lane_s), end_lane=int(lane_s), has_head_star=not headless,
-                      head_break=head_break, track_break="b" in body, is_break=head_break or ("b" in body),
+                      head_break=head_break, track_break=track_break, is_break=head_break or track_break,
                       head_ex=head_ex, is_ex=False, head_mine=head_mine,
                       track_mine=mine, slide_head=False)
-            clean = "".join(ch for ch in branch if ch not in "bm")
             parsed = _parse_chain(clean, bpm, refs) if bm["type"] == "slide" else None
             if bm["type"] == "slide":
                 if not parsed:

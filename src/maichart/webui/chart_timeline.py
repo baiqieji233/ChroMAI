@@ -47,7 +47,8 @@ def _marker_note(marker, beat, raw, source_id, branch, clock):
     head=str(marker['touch_pad'] or marker['lane'])
     note=dict(id=f'{source_id}:{branch}',beat=str(beat),start_sec=start,kind=kind,
               head=head,raw=raw,has_head=bool(marker['has_head_star']) if kind=='slide' else True,
-              is_break=bool(marker['is_break']),is_ex=bool(marker['is_ex']))
+              is_break=bool(marker['is_break']),is_ex=bool(marker['is_ex']),
+              is_mine=bool(marker['is_mine'] or marker['track_mine']))
     if kind=='slide' and branch:note['has_head']=False
     end=float(marker['end_second'])
     if kind in {'hold','touch_hold','slide'} and math.isfinite(end) and end>=start:
@@ -55,6 +56,8 @@ def _marker_note(marker, beat, raw, source_id, branch, clock):
         end_beat=_beat_at_second(clock,end)
         if end_beat is not None:note['end_beat']=end_beat
     if kind=='slide':
+        note['is_head_break']=bool(marker['head_break'])
+        note['is_track_break']=bool(marker['track_break'])
         note['end_head']=str(marker['end_lane'])
         note['trace_start_sec']=float(marker['slide_trace_second'])
         note['path']=' / '.join(marker['slide_segment_keys'])
@@ -71,10 +74,25 @@ def _marker_note(marker, beat, raw, source_id, branch, clock):
     return note
 
 
+def _mark_each(notes):
+    eligible=[note for note in notes if not note.get('unsupported') and not note['is_mine']]
+    tracks=[note for note in eligible if note['kind']=='slide']
+    slide_heads={note['head'] for note in tracks if note['has_head']}
+    # Branches sharing a star contribute one head. Headless slides have only a track.
+    head_count=len(eligible)-len(tracks)+len(slide_heads)
+    if head_count>=2:
+        for note in eligible:
+            if note['has_head']:
+                note['is_each']=True
+    if len(tracks)>=2:
+        for note in tracks:
+            note['is_track_each']=True
+
+
 @lru_cache(maxsize=24)
 def _cached(path_text, modified_ns, size, difficulty_index):
     path=Path(path_text)
-    chart=parse_event_chart(path,difficulty_index,strict_notes=False)
+    chart=parse_event_chart(path,difficulty_index,strict_notes=False,preserve_each_groups=True)
     # Multiple BPM directives at one location have one effective final BPM.
     changes={change.beat:change.bpm for change in chart.tempo_changes}
     tempo=[EventTempo(beat,bpm) for beat,bpm in sorted(changes.items())]
@@ -87,23 +105,30 @@ def _cached(path_text, modified_ns, size, difficulty_index):
         warnings.append(dict(code='slide_reference_unavailable',message=str(exc)))
     for point_index,point in enumerate(chart.points):
         second=clock.at(point.beat)
-        for atom_index,raw in enumerate(_split_top_level_slashes(point.note_text)):
-            if not raw:continue
-            compact=BASIC_COMPACT_CHORD_RE.fullmatch(raw)
-            atoms=[button+compact['modifiers'] for button in compact['positions']] if compact else [raw]
-            for child_index,atom in enumerate(atoms):
-                source_id=f'{point_index}:{atom_index}:{child_index}'
-                try:
-                    markers=_parse_one(atom,point_index+1,atom_index+1,second,0,clock.bpm(point.beat),refs)
-                    if not markers:raise ValueError('Unsupported note syntax')
-                except (ValueError,TypeError,KeyError,IndexError,OverflowError) as exc:
-                    message=str(exc)
-                    fallback=_unknown_head(raw,point.beat,second,source_id,message)
-                    if fallback is not None:notes.append(fallback)
-                    warnings.append(dict(code='unsupported_note',beat=str(point.beat),raw=raw,message=message))
-                    continue
-                for branch,marker in enumerate(markers):
-                    notes.append(_marker_note(marker,point.beat,raw,source_id,branch,clock))
+        bpm=clock.bpm(point.beat)
+        atom_index=0
+        for group in point.note_text.split('`'):
+            group_notes=[]
+            for raw in _split_top_level_slashes(group):
+                atom_index+=1
+                if not raw:continue
+                compact=BASIC_COMPACT_CHORD_RE.fullmatch(raw)
+                atoms=[button+compact['modifiers'] for button in compact['positions']] if compact else [raw]
+                for child_index,atom in enumerate(atoms):
+                    source_id=f'{point_index}:{atom_index-1}:{child_index}'
+                    try:
+                        markers=_parse_one(atom,point_index+1,atom_index,second,0,bpm,refs)
+                        if not markers:raise ValueError('Unsupported note syntax')
+                    except (ValueError,TypeError,KeyError,IndexError,OverflowError) as exc:
+                        message=str(exc)
+                        fallback=_unknown_head(raw,point.beat,second,source_id,message)
+                        if fallback is not None:group_notes.append(fallback)
+                        warnings.append(dict(code='unsupported_note',beat=str(point.beat),raw=raw,message=message))
+                        continue
+                    for branch,marker in enumerate(markers):
+                        group_notes.append(_marker_note(marker,point.beat,raw,source_id,branch,clock))
+            _mark_each(group_notes)
+            notes.extend(group_notes)
     chart_end=clock.at(chart.end_beat)
     duration=max(0.,chart_end,*(note.get('end_sec',note['start_sec']) for note in notes))
     # These are quarter-note beats, with no assumption about time signature.

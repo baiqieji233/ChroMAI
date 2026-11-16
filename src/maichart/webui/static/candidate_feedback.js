@@ -51,6 +51,7 @@ function candidateSavedReviews(records) {
     node('feedbackSelectedSource').textContent=validRange()?selectedNotes().map(note=>`${note.start_sec.toFixed(3)}s · 第${note.beat}拍 · ${note.raw}`).filter((line,index,all)=>all.indexOf(line)===index).join('\n')||'所选范围没有音符起点。':'尚未选择片段。';draw();
   }
   const colors={tap:'#d84b89',hold:'#d59c24',slide:'#299bdb',touch:'#8e61c9',touch_hold:'#8e61c9'};
+  const noteColor=(kind,isBreak,isEach)=>isBreak?'#e77632':isEach?'#ffd640':colors[kind]||'#747f91';
   const noteLane=note=>String(note.kind).startsWith('touch')?8:Math.max(0,Math.min(7,Number(note.head)-1));
   const beatNumber=value=>{const parts=String(value).split('/').map(Number);return parts.length===2?parts[0]/parts[1]:parts[0];};
   function selectedNotes() {return !validRange()?[]:(timeline?.notes||[]).filter(note=>note.start_sec>=range.start_sec-1e-7 && note.start_sec<range.end_sec-1e-7);}
@@ -131,11 +132,17 @@ function candidateSavedReviews(records) {
     ctx.save();ctx.beginPath();ctx.rect(left,top,w-left,h-top);ctx.clip();
     for(const note of timeline?.notes||[]) {
       if((note.end_sec??note.start_sec)<viewStart || note.start_sec>viewEnd)continue;
-      const px=x(note.start_sec),py=y(noteLane(note)),color=note.is_break?'#e77632':colors[note.kind]||'#747f91';ctx.strokeStyle=color;ctx.fillStyle=color;
+      const px=x(note.start_sec),py=y(noteLane(note));
+      const slide=note.kind==='slide';
+      const headColor=noteColor(note.kind,note.is_head_break??note.is_break,note.is_each);
+      const bodyColor=slide?noteColor(note.kind,note.is_track_break??note.is_break,note.is_track_each):headColor;
+      ctx.strokeStyle=bodyColor;ctx.fillStyle=bodyColor;
       if(Number.isFinite(note.end_sec)) {
-        if(note.kind==='slide') {
+        if(slide) {
           const trace=Number.isFinite(note.trace_start_sec)?note.trace_start_sec:note.start_sec;
+          ctx.strokeStyle=note.has_head===false?bodyColor:headColor;
           ctx.setLineDash([3,3]);ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(px,py);ctx.lineTo(x(trace),py);ctx.stroke();ctx.setLineDash([]);
+          ctx.strokeStyle=bodyColor;
           const segments=note.segments?.length?note.segments:[{start_sec:trace,end_sec:note.end_sec,head:note.head,end_head:note.end_head}];
           for(const part of segments) {
             const fromY=y(Math.max(0,Math.min(7,Number(part.head)-1))),toY=y(Math.max(0,Math.min(7,Number(part.end_head)-1))),fromX=x(part.start_sec),toX=x(part.end_sec);
@@ -144,8 +151,9 @@ function candidateSavedReviews(records) {
         } else {ctx.globalAlpha=.42;ctx.fillRect(px,py-5,Math.max(2,x(note.end_sec)-px),10);ctx.globalAlpha=1;ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(x(note.end_sec),py-7);ctx.lineTo(x(note.end_sec),py+7);ctx.stroke();}
       }
       if(note.has_head===false)continue;
+      ctx.strokeStyle=headColor;ctx.fillStyle=headColor;
       ctx.lineWidth=2;ctx.beginPath();
-      if(note.kind==='slide') {for(let point=0;point<10;point++){const angle=-Math.PI/2+point*Math.PI/5,r=point%2?3.5:8;const hx=px+Math.cos(angle)*r,hy=py+Math.sin(angle)*r;if(!point)ctx.moveTo(hx,hy);else ctx.lineTo(hx,hy);}ctx.closePath();ctx.stroke();}
+      if(slide) {for(let point=0;point<10;point++){const angle=-Math.PI/2+point*Math.PI/5,r=point%2?3.5:8;const hx=px+Math.cos(angle)*r,hy=py+Math.sin(angle)*r;if(!point)ctx.moveTo(hx,hy);else ctx.lineTo(hx,hy);}ctx.closePath();ctx.stroke();}
       else {ctx.arc(px,py,note.kind.startsWith('touch')?6:6.5,0,Math.PI*2);ctx.stroke();if(note.kind==='hold'||note.kind==='touch_hold'){ctx.beginPath();ctx.arc(px,py,2.5,0,Math.PI*2);ctx.fill();}}
       if(note.unsupported){ctx.fillStyle='#9a504b';ctx.fillText('?',px+6,py-6);}
     }
