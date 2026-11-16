@@ -201,6 +201,9 @@ class IntensityContext(nn.Module):
                     F.avg_pool1d(widths,3,1,1).clamp_min(1e-6)).transpose(1,2)
             scale=torch.exp(torch.randn((rates.size(0),1,2),device=rates.device)*.15)
             use=torch.rand((rates.size(0),1,1),device=rates.device)<.5
+            teacher_allowed=batch.get('curve_teacher_allowed')
+            if teacher_allowed is not None:
+                use=use & teacher_allowed.to(device=rates.device,dtype=torch.bool)[:,None,None]
             context=torch.where(use & (quality > 0),smooth*scale,context)
         elif 'curve_override' in batch:
             strength=float(batch.get('intensity_strength',1.))

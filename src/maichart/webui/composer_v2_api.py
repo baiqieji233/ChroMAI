@@ -13,7 +13,10 @@ from .composer_api import _path, _int, _float, _arg
 FAMILY = "chart_composer_v2"
 SCHEMA = "maichart-composer-v2-checkpoint-v1"
 API_CONTRACT = "composer_v2_continuous_events_v3"
-from maichart.composer_v2.defaults import TRAIN_DEFAULTS, GENERATION_DEFAULTS, EVALUATION_DEFAULTS, MAX_BATCH_COUNT
+from maichart.composer_v2.defaults import (
+    EVALUATION_DEFAULTS, GENERATION_DEFAULTS, MAX_BATCH_COUNT, MUSICAL_CONTEXT_CHOICES,
+    MUSICAL_CONTEXT_PROBABILITY, TRAIN_DEFAULTS, resolve_musical_context,
+)
 
 def inspection(path):
     from maichart.composer_v2.checkpoint import inspect as inspect_checkpoint
@@ -295,7 +298,6 @@ def start_train(handler,payload,*,runtime):
             raise ValueError("finetune 必须使用新的 checkpoint 目录")
         if mode=="resume":
             saved_args=checked.get("args") or {}
-            scoped_resume=_prepare_scoped_resume(payload,saved_args)
             payload={**{key:value for key,value in saved_args.items() if key in TRAIN_DEFAULTS},**payload}
         # Both modes retain the parent's model and audio configuration.
         # The trainer may append observed vocabulary entries during finetune.
@@ -303,6 +305,19 @@ def start_train(handler,payload,*,runtime):
         for key in ("audio_layers","song_layers","d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model"):
             if key in fixed and not (key=="audio_layers" and mode=="finetune" and payload.get(key) is not None):payload[key]=fixed[key]
         payload['refresh_events']=fixed.get('refresh_events',16)
+    sequence_policy = 'continuous_events_v1' if mode == 'fresh' else fixed.get('sequence_policy', 'window_v1')
+    musical_context = _choice(payload, 'musical_context', 'auto', MUSICAL_CONTEXT_CHOICES)
+    probability_key = 'musical_context_probability'
+    musical_probability = None
+    if probability_key in payload:
+        if isinstance(payload[probability_key], bool):
+            raise ValueError('音乐独立练习比例须在 0 至 1 之间')
+        musical_probability = _float(payload, probability_key, MUSICAL_CONTEXT_PROBABILITY)
+    musical_policy, musical_probability = resolve_musical_context(
+        musical_context, musical_probability, sequence_policy=sequence_policy,
+        parent_contract=checked.get('training_contract') if parent else None, resume=mode == 'resume')
+    if mode == 'resume':
+        scoped_resume = _prepare_scoped_resume(payload, saved_args)
     if scoped_resume is not None:
         frozen_payload,selection=scoped_resume
         payload.update({key:frozen_payload[key] for key in ('manifest','auto_quality_manifests','cache_dir')})
@@ -310,9 +325,11 @@ def start_train(handler,payload,*,runtime):
         payload,selection=runtime._prepare_training_sources({**payload,"model_family":FAMILY})
     manifest=_path(payload.get("manifest"),"manifest",exists=True)
     cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
-    sequence_policy='continuous_events_v1' if mode=='fresh' else (checked.get('model_config') or {}).get('sequence_policy','window_v1')
     args=["-m","maichart.composer_v2.train","--manifest",str(manifest),"--checkpoint-dir",str(directory),"--cache-dir",str(cache)]
-    settings={}
+    _arg(args, '--musical-context', musical_context)
+    _arg(args, '--musical-context-probability', musical_probability)
+    settings = dict(musical_context=musical_context, musical_context_policy=musical_policy,
+                    musical_context_probability=musical_probability)
     from maichart.composer_v2.difficulty import (
         DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, locate_scorer, resolve_selection, scorer_path_key,
     )

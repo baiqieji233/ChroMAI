@@ -21,6 +21,7 @@ from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Datase
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
 from . import chart_dialect, timing_recovery
+from .defaults import MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, resolve_musical_context
 
 
 def emit(kind,**values):
@@ -56,6 +57,10 @@ def parser():
     result.add_argument('--song-layers',type=int,default=None,help='Fresh: 2; parent: inherit.')
     from .music_policy import CHOICES as MUSIC_CHOICES
     result.add_argument('--music-context',choices=MUSIC_CHOICES,default='auto')
+    result.add_argument('--musical-context', choices=MUSICAL_CONTEXT_CHOICES, default='auto',
+                        help='Train with music-conditioned history views; auto enables fresh/finetune and inherits resume')
+    result.add_argument('--musical-context-probability', type=float,
+                        help=f'Proportion relying on music with reduced older chart context, 0 to 1 (default {MUSICAL_CONTEXT_PROBABILITY}; resume inherits)')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--training-window-events', type=int,
@@ -440,6 +445,10 @@ def train(args):
     parent_policy = policy_from_config(parent.get('model_config') or parent.get('config')) if parent else None
     parent_sequence=(parent.get('model_config') or parent.get('config')).get('sequence_policy','window_v1') if parent else None
     args.sequence_policy=getattr(args,'sequence_policy',None) or (parent_sequence if parent else 'continuous_events_v1')
+    parent_contract = (parent.get('training_contract') or {}) if parent else {}
+    args.musical_context_policy, args.musical_context_probability = resolve_musical_context(
+        getattr(args, 'musical_context', 'auto'), getattr(args, 'musical_context_probability', None),
+        sequence_policy=args.sequence_policy, parent_contract=parent_contract, resume=bool(args.resume))
     recovery_policy=getattr(args,'timing_recovery','auto')
     if recovery_policy=='auto':
         if args.resume:
@@ -469,7 +478,6 @@ def train(args):
     args.reviewed_reference_policy=reviewed_ref
     # Reference availability and annotation approval are independent. Only an
     # actual old resume retains the old weight-only supervision semantics.
-    parent_contract = parent.get('training_contract', {}) if parent else {}
     if args.sequence_policy == 'continuous_events_v1':
         saved_window = parent_contract.get('training_window_events', args.refresh_events)
         if args.resume and requested_training_window not in (None, saved_window):
@@ -608,7 +616,9 @@ def train(args):
                        reference_quality_policy=reference_quality_policy)
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':
-        train_options.update(reference_augmentation=True, training_window_events=args.training_window_events)
+        train_options.update(reference_augmentation=True, training_window_events=args.training_window_events,
+            musical_context_policy=args.musical_context_policy,
+            musical_context_probability=args.musical_context_probability)
     with scorer if scorer is not None else nullcontext():
         from .codec import VocabularyCoverageError
         try:
@@ -626,7 +636,8 @@ def train(args):
         parent_vocab_size = codec.vocab_size if codec is not None else None
         codec=dataset.codec
         validation_options={**options,"codec":codec,"limit_charts":0,"validate_fixed_vocabulary":True}
-        if args.sequence_policy=='continuous_events_v1':validation_options['timing_recovery_policy']='off'
+        if args.sequence_policy=='continuous_events_v1':
+            validation_options.update(timing_recovery_policy='off', musical_context_policy='off')
         validation=dataset_class(args.validation_manifest,**validation_options) if args.validation_manifest else None
     if scorer is not None:
         emit('difficulty_fit', scorer=scorer.identity,cache_hits=scorer.hits,computed=scorer.computed,
@@ -679,6 +690,9 @@ def train(args):
         if args.local_audio_block_beats != 1:
             contract['acoustic_policy'] = 'query_two_beat_shared_tiles_v1'
     if recovery_policy!='off':contract['timing_recovery']=recovery_policy
+    if args.musical_context_policy != 'off':
+        contract.update(musical_context_policy=args.musical_context_policy,
+                        musical_context_probability=args.musical_context_probability)
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
     if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'zero_unmarked_policy' in parent_contract):
         contract['zero_unmarked_policy']=zero_unmarked_policy
@@ -818,6 +832,9 @@ def train(args):
          preparation=dataset.audit.get('preparation', {}), batch_order=batch_order,batch_layout=batch_layout,
          batch_source_size=source_batch_size,validation_batch_size=validation_batch_size,**resource_budgets,
          timing_recovery=dataset.audit.get('timing_recovery'),
+         musical_context=dataset.audit.get('musical_context'),
+         musical_context_policy=args.musical_context_policy,
+         musical_context_probability=args.musical_context_probability,
          training_window_events=args.training_window_events,
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,

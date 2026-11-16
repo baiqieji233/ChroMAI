@@ -561,7 +561,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         return value
                     planned,evidence,trials=trial_search(sampler,target,points,guard,(proposal,ids),
                         args=args,song=song,tempo=tempo,end=end,count=candidate_count,
-                        make_sampler=make_sampler,check_window=_check_window)
+                        make_sampler=make_sampler,check_window=_check_window,after_floor=after_floor)
                     phrase_count+=1;phrase_trials.append(evidence);phrase_trials=phrase_trials[-16:]
                     for key,value in evidence.get('compute',{}).items():
                         phrase_compute[key]=phrase_compute.get(key,0)+value

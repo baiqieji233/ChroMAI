@@ -8,8 +8,9 @@ import math
 import numpy as np
 import torch
 from .data import ComposerV2Dataset,collate_composer_v2
+from .defaults import MUSICAL_CONTEXT_PROBABILITY
 from .stream_codec import POLICY,StreamCodec
-from . import timing_recovery
+from . import musical_context, timing_recovery
 
 
 _SELECT_REFERENCE = object()
@@ -29,9 +30,18 @@ class StreamDataset(ComposerV2Dataset):
                  structure_policy='off',reference_augmentation=False,intensity_policy='off',rhythm_learning_policy=None,
                  music_context_policy='off',reviewed_reference_policy='approved_only',
                  zero_unmarked_policy='explicit_good_v1',reference_quality_policy='event_mask_v1',
-                 local_audio_block_beats=1,training_window_events=None,**kwargs):
+                 local_audio_block_beats=1,training_window_events=None,
+                 musical_context_policy='off',musical_context_probability=MUSICAL_CONTEXT_PROBABILITY,**kwargs):
         if type(local_audio_block_beats) is not int or local_audio_block_beats not in (1, 2):
             raise ValueError('local_audio_block_beats must be 1 or 2')
+        if musical_context_policy not in musical_context.POLICIES:
+            raise ValueError('Unknown musical context view policy')
+        musical_context_probability = float(musical_context_probability)
+        if not 0 <= musical_context_probability <= 1:
+            raise ValueError('musical_context_probability must be between 0 and 1')
+        self.musical_context_policy = (
+            musical_context.POLICY if musical_context_policy == 'auto' else musical_context_policy)
+        self.musical_context_probability = musical_context_probability
         self.local_audio_block_beats = local_audio_block_beats
         super().__init__(*args,sequence_policy=POLICY,**kwargs)
         from .rhythm_structure import POLICIES
@@ -133,6 +143,13 @@ class StreamDataset(ComposerV2Dataset):
             self.audit['training_window_events'] = self.training_window_events
         self.audit['timing_recovery'] = dict(policy=timing_recovery_policy, views=len(self.recovery_sources),
             original_windows=len(self.windows)-len(self.recovery_sources),target='authored_future_time_only')
+        if self.musical_context_policy != 'off':
+            self.audit['musical_context'] = dict(policy=self.musical_context_policy,
+                probability=self.musical_context_probability, recent_beats=musical_context.RECENT_BEATS,
+                original_windows=len(self.windows)-len(self.recovery_sources), appended_windows=0,
+                timing_recovery_windows_excluded=len(self.recovery_sources),
+                target='unchanged_authored_future', reference='disabled',
+                chart_condition='level_only', curve_teacher='disabled')
         if structure_policy!='off':
             from . import rhythm_structure as rs
             self.audit['rhythm_structure']=dict(policy=structure_policy,reference='per_beat_evidence_full_coverage_v2' if self._evidence_v2() else 'aligned_integer_beat_shift_trust_v1',
@@ -340,7 +357,8 @@ class StreamDataset(ComposerV2Dataset):
         while len(self.tile_cache)>64:self.tile_cache.popitem(last=False)
         return result
     def build_stream(self,song,points,cursor,*,target=(),ended=False,training=False,
-                     reference_start=_SELECT_REFERENCE,_prefix_end=None):
+                     reference_start=_SELECT_REFERENCE,_prefix_end=None,context_recent_beats=None,
+                     _reference_index=None):
         cursor=Fraction(cursor);boundary=max(Fraction(0),cursor-self.history_beats)
         if _prefix_end is None:
             known = list(points)
@@ -365,9 +383,30 @@ class StreamDataset(ComposerV2Dataset):
                 if m['source_beat']<=cursor and float(m['end_second'])>second}
         older=active_sources(boundary)
         active=active_sources(cursor)
+        carry = []
+        if _prefix_end is None:
+            carry = [p for p in known if p.beat < boundary and p.beat in older]
+        else:
+            beats = song.point_beats
+            for beat in sorted(older):
+                first = bisect.bisect_left(beats, beat, hi=history_index)
+                end = bisect.bisect_right(beats, beat, lo=first, hi=history_index)
+                carry.extend(known[first:end])
+        codec = self.codec
+        budget = self.max_tokens // 2
+        carry_ids = codec.encode_points(carry)
+        shortened_ids = None
+        if training and context_recent_beats is not None:
+            shortened = musical_context.shorten_history(history, cursor, context_recent_beats, active)
+            if len(shortened) < len(history):
+                candidate = codec.encode_points(shortened)
+                if 5 + len(carry_ids) + len(candidate) <= budget:
+                    shortened_ids = candidate
+        if shortened_ids is None and _reference_index is not None:
+            reference_start = self._reference_argument(_reference_index)
         structured=self._structured()
         zero_unmarked = (song.quality or {}).get('unmarked_weight') == 0
-        if zero_unmarked and getattr(self, 'reviewed_reference_policy', 'approved_only') == 'off':
+        if shortened_ids is not None or (zero_unmarked and getattr(self, 'reviewed_reference_policy', 'approved_only') == 'off'):
             reference_start=None
         aligned=None
         if structured:
@@ -381,24 +420,14 @@ class StreamDataset(ComposerV2Dataset):
             else:
                 reference_start = self._reference_stream(song, known, cursor, prefix_end=_prefix_end)
         reference = []
-        if _prefix_end is None:
-            carry = [p for p in known if p.beat < boundary and p.beat in older]
-            if reference_start is not None:
+        if reference_start is not None:
+            if _prefix_end is None:
                 stop = min(reference_start + self.window_beats, boundary)
                 reference = [p for p in known if reference_start <= p.beat < stop]
-        else:
-            beats = song.point_beats
-            carry = []
-            for beat in sorted(older):
-                first = bisect.bisect_left(beats, beat, hi=history_index)
-                end = bisect.bisect_right(beats, beat, lo=first, hi=history_index)
-                carry.extend(known[first:end])
-            if reference_start is not None:
+            else:
                 first = bisect.bisect_left(beats, reference_start, hi=history_index)
                 end = bisect.bisect_left(beats, reference_start + self.window_beats, lo=first, hi=history_index)
                 reference = known[first:end]
-        codec = self.codec
-        budget = self.max_tokens // 2
         evidence_v2=self._evidence_v2()
         checked_start=math.floor(cursor)-4
         checked_end=math.floor(cursor)+self.window_beats
@@ -436,8 +465,7 @@ class StreamDataset(ComposerV2Dataset):
             aligned = None
             reference_start = None
             legacy_aligned = None
-        carry_ids = codec.encode_points(carry)
-        history_ids = codec.encode_points(history)
+        history_ids = codec.encode_points(history) if shortened_ids is None else shortened_ids
         reference_ids = codec.encode_points(reference)
         prefix_length = 5 + len(carry_ids) + len(history_ids) + len(reference_ids)
         if prefix_length > budget:
@@ -562,7 +590,12 @@ class StreamDataset(ComposerV2Dataset):
             song_semantic_mask=torch.as_tensor(summary['semantic_valid']),song_beats=torch.as_tensor(summary['beats'],dtype=torch.float32),
             song_mask=torch.ones(len(summary['times_sec']),dtype=torch.bool),start_beat=Fraction(0),cursor=cursor,
             song_id=song.song_id,reference_start=reference_start,pad_id=self.codec.pad_id,
-            song_cache_key=song.stream_cache_key or _song_cache_key(song))
+            song_cache_key=song.stream_cache_key or _song_cache_key(song),
+            curve_teacher_allowed=shortened_ids is None)
+        if shortened_ids is not None:
+            for field in ('condition', 'condition_known'):
+                out[field] = out[field].clone()
+                out[field][1:] = 0
         if 'detail' in summary:
             out['song_detail'] = torch.as_tensor(summary['detail'], dtype=torch.float32)
         if evidence_v2:
@@ -613,12 +646,17 @@ class StreamDataset(ComposerV2Dataset):
             return self._recovery_item(source)
         si,begin=self.windows[index];song=self.songs[si];end=self.ranges[index]
         cursor=song.points[begin-1].beat if begin else Fraction(0)
-        reference_start=self._reference_argument(index)
+        recent_beats = None
+        if begin and getattr(self,'musical_context_policy','off') == musical_context.POLICY:
+            recent_beats = musical_context.recent_history_beats(seed=self.augmentation_seed,
+                epoch=self.training_epoch, index=index, probability=self.musical_context_probability,
+                history_beats=self.history_beats)
         if song.stream_cache_key is None:
             song.stream_cache_key = _song_cache_key(song)
         return self.build_stream(song, song.points, cursor, target=song.points[begin:end],
                                  ended=end==len(song.points), training=True,
-                                 reference_start=reference_start,_prefix_end=begin)
+                                 _reference_index=index,_prefix_end=begin,
+                                 context_recent_beats=recent_beats)
 
     def _prepare_reference(self,index):
         si,begin=self.windows[index];song=self.songs[si]
@@ -679,6 +717,9 @@ def collate_stream(items):
         'local_semantic':item['bank_semantic'][:1],'local_semantic_mask':item['bank_semantic_mask'][:1],
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
     out=collate_composer_v2(temporary)
+    if any(not item.get('curve_teacher_allowed', True) for item in items):
+        out['curve_teacher_allowed'] = torch.tensor([item.get('curve_teacher_allowed',True) for item in items],
+                                                    dtype=torch.bool)
     if 'curve_left' in items[0]:
         from .intensity import collate
         collate(items,out)

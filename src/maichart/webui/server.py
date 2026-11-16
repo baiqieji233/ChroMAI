@@ -259,6 +259,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_split_sampling": True,
                                               "composer_v2_phrase_search": True,
                                               "composer_v2_music_context": True,
+                                              "composer_v2_musical_context": True,
                                               "composer_v2_onset_readout": True,
                                               "composer_v2_rhythm_structure": True,
                                               "composer_v2_rhythm_evidence_v2": True,

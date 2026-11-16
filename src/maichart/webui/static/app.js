@@ -1,5 +1,7 @@
 "use strict";
 const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "activation_checkpointing", "epochs", "batch_size", "grad_accumulation", "cuda_memory_budget_gb", "audio_cache_gb", "lr", "lr_schedule", "precision", "cache_dir", "audio_backend", "mert_model", "validation_manifest", "prepare_device", "d_model", "layers", "nhead", "dim_feedforward", "dropout", "window_beats", "history_beats", "future_beats", "ticks_per_beat", "max_tokens", "device", "warmup_steps", "min_lr_ratio", "validation_max_batches", "checkpoint_interval_steps", "save_every", "log_interval", "seed", "max_steps", "limit_charts", "cpu_threads", "validation_source", "holdout_fraction", "refresh_events", "timing_recovery", "onset_readout", "rhythm_structure", "intensity_curve", "early_stopping_patience", "reviewed_reference_policy", "auto_quality_policy", "difficulty_source", "min_level", "max_level", "open_mdp_dir", "chartgate_dir", "batch_layout", "local_audio_block_beats", "attention_projection_packing", "decoder_flash_attention"];
+const V2_MUSICAL_CONTEXT_FIELDS = ["musical_context", "musical_context_probability"];
+COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS);
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -22,6 +24,7 @@ function composerV2TrainingPayload(options={}) {
     init_checkpoint:valueOrDefault("#trainingCheckpointPath","").trim()||null,
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
   const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir","batch_layout","local_audio_block_beats","attention_projection_packing","decoder_flash_attention"]);
+  strings.add("musical_context");
   for(const key of COMPOSER_V2_FIELDS) {
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
@@ -29,7 +32,9 @@ function composerV2TrainingPayload(options={}) {
   // Disabled automatic-split controls must not override an explicit manual
   // validation source, including when talking to an older running server.
   if(payload.validation_source && payload.validation_source!=='auto')delete payload.holdout_fraction;
+  if(payload.musical_context==='off')delete payload.musical_context_probability;
   if (payload.mode==='resume') {
+    for(const key of V2_MUSICAL_CONTEXT_FIELDS)delete payload[key];
     delete payload.local_audio_block_beats;
     delete payload.difficulty_source;
     delete payload.min_level;
@@ -416,6 +421,8 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.rhythm_structure=data.model_config?.structure_policy||'off';
   saved.intensity_curve=data.model_config?.intensity_policy||'off';
   saved.music_context=data.model_config?.music_context_policy||'off';
+  saved.musical_context = data.training_contract?.musical_context_policy ?? 'off';
+  saved.musical_context_probability = data.training_contract?.musical_context_probability ?? 0.25;
   saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
   saved.song_layers=data.model_config?.song_layers??2;
@@ -447,6 +454,8 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
     if (preserveEditableBatch && ['batch_size','grad_accumulation','batch_layout'].includes(key)
         && element("#"+v2FieldId(key))?.dataset.batchEdited==='1') continue;
     const node=element("#"+v2FieldId(key));
+    if(node && currentTrainingMode()==='resume' && V2_MUSICAL_CONTEXT_FIELDS.includes(key))
+      node.dataset.beforeResumeMusicalContext ??= node.value;
     if(node && Object.prototype.hasOwnProperty.call(saved,key) && (currentTrainingMode()==="resume" || ["d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","refresh_events"].includes(key)))node.value=saved[key]==null?'':String(saved[key]);
   }
   if(typeof updateV2DifficultyControls==='function')updateV2DifficultyControls();
@@ -1005,6 +1014,9 @@ function composerV2TrainingView(task) {
       ...(autoQualitySources ? [['正式体检来源',autoQualitySources]] : []),
       ['取批顺序',({audio_local_length_bucket_v2:'按音频分组后打散',length_bucket_seed_epoch_v1:'全库打散'})[runtime.batch_order]||'未记录'],
       ['节奏前文纠错',runtime.timing_recovery?.policy==='causal_rhythm_v1'?`已启用 · ${runtime.timing_recovery.views} 个附加片段`:'关闭'],
+      ['按音乐组织配置',runtime.musical_context_policy==='music_context_views_v1'
+        ? `已启用 · 音乐独立练习比例 ${show(n(runtime,'musical_context_probability')*100,1)}%`
+        : runtime.musical_context_policy==='off' ? '关闭' : '未记录'],
       ['音频特征',runtime.audio_backend||'未记录']]],
     ['吞吐与计时（本次运行累计）',[
       ['token / 秒',show(n(metrics,'tokens_per_sec'),1)],['片段 / 秒',show(n(metrics,'samples_per_sec'),1)],
@@ -1823,7 +1835,7 @@ function settingsFields() {
 function collectSettings() {
   const values = {};
   settingsFields().forEach((target) => {
-    const editable = target.dataset.beforeResumeDifficulty;
+    const editable = target.dataset.beforeResumeDifficulty ?? target.dataset.beforeResumeMusicalContext;
     values[target.id] = target.type === "checkbox"
       ? (editable === undefined ? target.checked : editable === 'true')
       : (editable ?? target.value);
@@ -4051,12 +4063,18 @@ function updateTrainingControls() {
   const v2Fixed=new Set(['song_layers','d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
   for(const key of (typeof COMPOSER_V2_FIELDS!=="undefined"?COMPOSER_V2_FIELDS:[])){
     const node=element("#"+v2FieldId(key));if(node){
+      if(!v2Resume && node.dataset.beforeResumeMusicalContext!==undefined) {
+        node.value=node.dataset.beforeResumeMusicalContext;
+        delete node.dataset.beforeResumeMusicalContext;
+      }
       const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing','batch_size','grad_accumulation','batch_layout','attention_projection_packing','decoder_flash_attention'].includes(key);
       node.disabled=(v2Resume && !resourceBudget) || (currentModelFamily()==='chart_composer_v2' && currentTrainingMode()==='finetune' && v2Fixed.has(key));
       node.title=node.disabled?'继承 checkpoint 的固定设置；模型合同变化需要从头训练。':'';
     }
   }
   const v2LocalAudio=element('#v2TrainLocalAudioBlockBeats');
+  const musicalProbability=element('#v2TrainMusicalContextProbability');
+  if(musicalProbability && element('#v2TrainMusicalContext')?.value==='off')musicalProbability.disabled=true;
   if (v2LocalAudio && v2Resume) v2LocalAudio.title='断点续训沿用检查点。可以在新目录微调时改为相邻两拍共享。';
   const v2LocalAudioHelp=element('#v2TrainLocalAudioBlockHelp');
   if(v2LocalAudioHelp) v2LocalAudioHelp.textContent=v2Resume
@@ -6508,6 +6526,9 @@ async function submitTrain(options = {}) {
     if(options.autoPreprocess)throw new Error("Composer v2 请先准备训练 manifest");
     const backend=await api("/api/status");
     assertV2AutoQualitySources(payload,backend.training_capabilities);
+    if(payload.mode!=='resume' && payload.musical_context && payload.musical_context!=='off'
+        && backend.training_capabilities?.composer_v2_musical_context!==true)
+      throw new Error('按音乐组织配置需要新版 WebUI 后台，请重启后台后提交。');
     if(payload.onset_readout && payload.onset_readout!=='auto' && !backend.training_capabilities?.composer_v2_onset_readout)
       throw new Error('独立起音参考训练需要更新后的 WebUI 后台，请重启当前后台后提交。');
     if(payload.intensity_curve && !backend.training_capabilities?.composer_v2_intensity_curve)throw new Error('新版强度曲线训练需要更新后的 WebUI 后台，请重启后台后提交。');
@@ -8737,6 +8758,7 @@ on("#modelFamily", "change", () => {
 });
 on("#v2TrainValidationSource", "change", () => {updateTrainingControls();saveSettings();});
 on("#v2TrainDifficultySource", "change", () => {updateV2DifficultyControls();saveSettings();});
+on("#v2TrainMusicalContext", "change", () => {updateTrainingControls();saveSettings();});
 on("#v2TrainChartgateSetup", "click", initializeV2Chartgate);
 for(const key of ['batch_size','grad_accumulation','batch_layout']) {
   for(const eventName of ['input','change']) {

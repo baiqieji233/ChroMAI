@@ -93,14 +93,14 @@ def timing_evidence(points, song, start, stop):
     return float(.5 - .5 * penalty.mean())
 
 
-def _grammar_confidence(rows, probabilities, start, stop, *, mode='layout'):
+def _grammar_confidence(rows, probabilities, start, stop, *, score_scope='configuration'):
     if not rows or not probabilities:
         return .5, None, 0, 0
-    inside = [log for (point, _), log in zip(rows, probabilities) if start <= point.beat < stop and log is not None]
-    logs = inside or [log for log in probabilities if log is not None]
+    logs = [log for (point, _), log in zip(rows, probabilities)
+            if start <= point.beat < stop and log is not None]
     if not logs:
         return .5, None, 0, 0
-    wanted_role = 'configuration' if mode == 'layout' else None
+    wanted_role = 'configuration' if score_scope == 'configuration' else None
     selected_rows = []
     deterministic_tokens = 0
     for event in logs:
@@ -126,7 +126,7 @@ def _grammar_confidence(rows, probabilities, start, stop, *, mode='layout'):
 
 
 def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None,
-         policy='comfort_v1', mode='layout', rows=None, probabilities=None):
+         policy='comfort_v1', score_scope='configuration', rows=None, probabilities=None):
     if policy not in RANK_POLICIES:
         raise ValueError('Invalid phrase rank policy')
     if policy == 'comfort_v2':
@@ -146,12 +146,13 @@ def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None,
         return .75 * float(comfort) + .25 * timing, components
     model_conf, mean_lp, scored_tokens, deterministic_tokens = _grammar_confidence(
         rows if rows is not None else [(p, ()) for p in points],
-        probabilities, start, stop, mode=mode)
+        probabilities, start, stop, score_scope=score_scope)
     known_fraction = float((coverage or {}).get('known_fraction', 1.))
     comfort_veto = bool(known_fraction > 0. and float(comfort) < COMFORT_VETO_FLOOR)
     components.update(model_confidence=model_conf, mean_grammar_logprob=mean_lp,
                       scored_grammar_tokens=scored_tokens,
                       deterministic_grammar_tokens=deterministic_tokens,
+                      score_scope=score_scope,
                       comfort_veto=comfort_veto,
                       comfort_veto_floor=COMFORT_VETO_FLOOR, ranking_policy=policy)
     if comfort_veto:
@@ -164,7 +165,7 @@ def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None,
 
 
 def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
-                 end, count, make_sampler, check_window):
+                 end, count, make_sampler, check_window, after_floor=None):
     """Run speculative branches while preserving the caller's retry ownership."""
     names=('_retry_scope','_retry_base','_retry_tree','_retry_condition','_retry_cache_dirty',
            '_fixed_retry_scope','_fixed_retry_tree','_retry_offset',
@@ -174,7 +175,7 @@ def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     try:
         return _trial_search(sampler,target,prefix,guard,primary,args=args,song=song,
             tempo=tempo,end=end,count=count,make_sampler=make_sampler,
-            check_window=check_window,retry_snapshot=saved)
+            check_window=check_window,retry_snapshot=saved,after_floor=after_floor)
     finally:
         sampler._rewind(target)
         for name in names:
@@ -186,7 +187,7 @@ def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
 
 
 def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
-                  end, count, make_sampler, check_window,retry_snapshot):
+                  end, count, make_sampler, check_window,retry_snapshot,after_floor=None):
     """Share immutable audio; rewind symbolic cache before every divergent trial.
 
     Layout trials use the baseline's complete timing/cardinality skeleton. Joint
@@ -198,7 +199,12 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
 
     mode, look, commit = settings(args)
     policy = rank_policy(args)
+    # Every branch in the pool uses the same grammar token roles. When
+    # timing is shared, variation comes from configuration conditioned on it.
+    score_scope = 'configuration' if mode == 'layout' or (mode == 'hybrid' and count <= 2) else 'joint'
     after = prefix[-1].beat if prefix else Fraction(-1)
+    if after_floor is not None:
+        after = max(after, after_floor)
     start = max(Fraction(0), after)
     stop = min(end, start + look)
     attempts = min(4, max(1, int(getattr(args, 'window_retries', 16))))
@@ -330,7 +336,7 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             work['rank_calls'] += 1
             call_began = time.perf_counter()
             score, components = rank(prefix, [r[0] for r in rows], song, tempo, start, stop,
-                                     motion_cache=motion_cache, policy=policy, mode=mode,
+                                     motion_cache=motion_cache, policy=policy, score_scope=score_scope,
                                      rows=rows, probabilities=probabilities)
             work['rank_sec'] += time.perf_counter() - call_began
         trials.append(dict(rows=rows, guard_chain=guard_chain, complete=complete, ended=ended, reason=reason,
