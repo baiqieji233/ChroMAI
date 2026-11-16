@@ -10,12 +10,13 @@ import torch
 from .data import ComposerV2Dataset,collate_composer_v2
 from .defaults import MUSICAL_CONTEXT_PROBABILITY
 from .stream_codec import POLICY,StreamCodec
-from . import musical_context, timing_recovery
+from . import musical_context, ordered_configuration, relation_sampling, timing_recovery
 
 
 _SELECT_REFERENCE = object()
 _REFERENCE_CACHE_SONGS = 128
 _REFERENCE_QUERY_ROWS = 1024
+_CONFIGURATION_CACHE_SONGS = 32
 
 
 def _song_cache_key(song):
@@ -31,7 +32,9 @@ class StreamDataset(ComposerV2Dataset):
                  music_context_policy='off',reviewed_reference_policy='approved_only',
                  zero_unmarked_policy='explicit_good_v1',reference_quality_policy='event_mask_v1',
                  local_audio_block_beats=1,training_window_events=None,
-                 musical_context_policy='off',musical_context_probability=MUSICAL_CONTEXT_PROBABILITY,**kwargs):
+                 musical_context_policy='off',musical_context_probability=MUSICAL_CONTEXT_PROBABILITY,
+                 musical_relation_policy='off', musical_relation_fraction=.3,
+                 future_configuration_policy='off', auxiliary_validation=False, **kwargs):
         if type(local_audio_block_beats) is not int or local_audio_block_beats not in (1, 2):
             raise ValueError('local_audio_block_beats must be 1 or 2')
         if musical_context_policy not in musical_context.POLICIES:
@@ -39,6 +42,18 @@ class StreamDataset(ComposerV2Dataset):
         musical_context_probability = float(musical_context_probability)
         if not 0 <= musical_context_probability <= 1:
             raise ValueError('musical_context_probability must be between 0 and 1')
+        if musical_relation_policy not in ('off', relation_sampling.POLICY):
+            raise ValueError('Unknown musical relation policy')
+        musical_relation_fraction = float(musical_relation_fraction)
+        if not 0 <= musical_relation_fraction < 1:
+            raise ValueError('musical_relation_fraction must be between 0 and 1 (exclusive)')
+        if future_configuration_policy not in ('off', ordered_configuration.POLICY):
+            raise ValueError('Unknown future configuration policy')
+        self.musical_relation_policy = musical_relation_policy
+        self.musical_relation_fraction = musical_relation_fraction
+        self.future_configuration_policy = future_configuration_policy
+        self.auxiliary_validation = bool(auxiliary_validation)
+        self._configuration_cache = OrderedDict()
         self.musical_context_policy = (
             musical_context.POLICY if musical_context_policy == 'auto' else musical_context_policy)
         self.musical_context_probability = musical_context_probability
@@ -102,6 +117,17 @@ class StreamDataset(ComposerV2Dataset):
                 )
             self._remaining_references.append(len(self.windows) - first_window)
         reference_count = len(self.windows)
+        self._relation_scores = None
+        if musical_relation_policy != 'off':
+            self._prepare_relation_scores()
+        if future_configuration_policy != 'off':
+            self.audit['future_configuration'] = dict(
+                policy=future_configuration_policy, horizons=ordered_configuration.HORIZONS,
+                dimension=ordered_configuration.TARGET_DIM, max_queries=ordered_configuration.MAX_QUERIES,
+                target='authored_successor_events_and_ordered_beat_intervals',
+                quality='continuous_reviewed_audio_coverage', timing_recovery=False,
+                probability=1. if self.auxiliary_validation else ordered_configuration.TRAINING_PROBABILITY,
+                chart_condition='level_only_on_auxiliary_windows', curve_teacher=False)
         self.recovery_sources = {}
         self._recovery_seed_indices = {}
         self.training_epoch = 0
@@ -159,6 +185,37 @@ class StreamDataset(ComposerV2Dataset):
                 alternative_probability=rs.REF_ALTERNATIVE_PROBABILITY if self.reference_augmentation else 0.,
                 history_budget='low_trust_uses_spare_only' if self._evidence_v2() else 'reference_first',
                 learning=self.rhythm_learning_policy if self._evidence_v2() and self.reference_augmentation else 'off')
+
+    def _prepare_relation_scores(self):
+        scores = np.zeros(len(self.windows), dtype=np.float32)
+        counts = dict.fromkeys(relation_sampling.STRATA, 0)
+        first = 0
+        for si, count in enumerate(self._remaining_references):
+            windows = [(index, self.windows[index][1], self.ranges[index])
+                       for index in range(first, first + count)]
+            first += count
+            if not windows or self.musical_relation_fraction == 0:
+                continue
+            song = self.songs[si]
+            chart = self._configuration(si) if self.future_configuration_policy != 'off' else (
+                ordered_configuration.ChartConfiguration(song))
+            for index, (score, name) in relation_sampling.source_scores(song, chart, windows).items():
+                scores[index] = score
+                counts[name] += 1
+        self._relation_scores = scores
+        self.audit['musical_relation'] = dict(
+            policy=self.musical_relation_policy, maximum_extra_supervision_fraction=self.musical_relation_fraction,
+            scored_windows=int(np.count_nonzero(scores)), original_windows=len(scores),
+            strata=counts, mode='reweight_existing_authored_windows', timing_recovery=False)
+
+    def _configuration(self, si):
+        cache = self._configuration_cache
+        if si not in cache:
+            cache[si] = ordered_configuration.ChartConfiguration(self.songs[si])
+            if len(cache) > _CONFIGURATION_CACHE_SONGS:
+                cache.popitem(last=False)
+        cache.move_to_end(si)
+        return cache[si]
 
     def _authored_slices(self, song, token_lengths, event_limit, reviewed, weight_fn):
         # Empty charts and actual song endings still have one real EOS target.
@@ -653,10 +710,32 @@ class StreamDataset(ComposerV2Dataset):
                 history_beats=self.history_beats)
         if song.stream_cache_key is None:
             song.stream_cache_key = _song_cache_key(song)
-        return self.build_stream(song, song.points, cursor, target=song.points[begin:end],
+        item = self.build_stream(song, song.points, cursor, target=song.points[begin:end],
                                  ended=end==len(song.points), training=True,
                                  _reference_index=index,_prefix_end=begin,
                                  context_recent_beats=recent_beats)
+        scores = getattr(self, '_relation_scores', None)
+        if scores is not None and scores[index] > 0:
+            fraction = self.musical_relation_fraction
+            extra = float(scores[index]) * fraction / (1. - fraction)
+            item['token_weights'] *= 1. + extra
+            item['musical_relation_extra_fraction'] = extra / (1. + extra)
+        if self._use_future_configuration(index):
+            ordered_configuration.add_item(item, self._configuration(si), self.codec, begin, end)
+            if 'future_configuration_positions' in item:
+                for field in ('condition', 'condition_known'):
+                    item[field] = item[field].clone()
+                    item[field][1:] = 0
+                item['curve_teacher_allowed'] = False
+        return item
+
+    def _use_future_configuration(self, index):
+        if getattr(self, 'future_configuration_policy', 'off') == 'off':
+            return False
+        if self.auxiliary_validation:
+            return True
+        rng = np.random.default_rng((self.augmentation_seed, self.training_epoch, index, 31))
+        return float(rng.random()) < ordered_configuration.TRAINING_PROBABILITY
 
     def _prepare_reference(self,index):
         si,begin=self.windows[index];song=self.songs[si]
@@ -717,6 +796,10 @@ def collate_stream(items):
         'local_semantic':item['bank_semantic'][:1],'local_semantic_mask':item['bank_semantic_mask'][:1],
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
     out=collate_composer_v2(temporary)
+    ordered_configuration.collate(items, out)
+    if any('musical_relation_extra_fraction' in item for item in items):
+        out['musical_relation_extra_fraction'] = torch.tensor([
+            item.get('musical_relation_extra_fraction', 0.) for item in items], dtype=torch.float32)
     if any(not item.get('curve_teacher_allowed', True) for item in items):
         out['curve_teacher_allowed'] = torch.tensor([item.get('curve_teacher_allowed',True) for item in items],
                                                     dtype=torch.bool)

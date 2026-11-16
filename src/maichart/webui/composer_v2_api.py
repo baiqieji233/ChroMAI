@@ -14,8 +14,11 @@ FAMILY = "chart_composer_v2"
 SCHEMA = "maichart-composer-v2-checkpoint-v1"
 API_CONTRACT = "composer_v2_continuous_events_v3"
 from maichart.composer_v2.defaults import (
-    EVALUATION_DEFAULTS, GENERATION_DEFAULTS, MAX_BATCH_COUNT, MUSICAL_CONTEXT_CHOICES,
-    MUSICAL_CONTEXT_PROBABILITY, TRAIN_DEFAULTS, resolve_musical_context,
+    EVALUATION_DEFAULTS, FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES,
+    FUTURE_CONFIGURATION_WEIGHT, GENERATION_DEFAULTS, MAX_BATCH_COUNT,
+    MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, MUSICAL_RELATION_CHOICES,
+    MUSICAL_RELATION_FRACTION, TRAIN_DEFAULTS, resolve_auxiliary_policy,
+    resolve_finetune_scope, resolve_musical_context,
 )
 
 def inspection(path):
@@ -156,6 +159,22 @@ def _auto_quality_scope_summary(manifest, data, enabled):
                 applied_manifests=applied)
 
 
+def _auxiliary_settings(payload, feature, choices, value_name, default, *, sequence_policy,
+                        saved_config, resume):
+    policy_key = f"{feature}_policy"
+    value_key = f"{feature}_{value_name}"
+    requested = _choice(payload, policy_key, "auto", choices)
+    value = None
+    if value_key in payload:
+        if isinstance(payload[value_key], bool):
+            raise ValueError(f"{value_key} 必须是数字")
+        value = _float(payload, value_key, default)
+    policy, value = resolve_auxiliary_policy(
+        requested, value, feature=feature, choices=choices, default=default,
+        sequence_policy=sequence_policy, saved_config=saved_config or {}, resume=resume)
+    return requested, policy, value
+
+
 def estimate_parameters(handler, payload):
     """Count Composer weights without loading training data, MERT or a checkpoint."""
     import torch
@@ -186,12 +205,18 @@ def estimate_parameters(handler, payload):
                 payload, "audio_layers", config.audio_layers, minimum=config.audio_layers))
 
     if mode != "resume":
+        _, future_policy, future_weight = _auxiliary_settings(
+            payload, "future_configuration", FUTURE_CONFIGURATION_CHOICES, "weight",
+            FUTURE_CONFIGURATION_WEIGHT, sequence_policy=config.sequence_policy,
+            saved_config=saved, resume=False)
         config = replace(
             config,
             music_context_policy=resolve_music(payload.get("music_context", "auto"), saved)[0],
             structure_policy=resolve_structure(payload.get("rhythm_structure", "auto"), saved)[0],
             onset_readout_policy=resolve_onset(payload.get("onset_readout", "auto"), saved)[0],
             intensity_policy=resolve_intensity(payload.get("intensity_curve", "auto"), saved)[0],
+            future_configuration_policy=future_policy,
+            future_configuration_weight=future_weight,
         )
 
     # A small codec supplies valid token IDs for the model's buffers. Checkpoint
@@ -316,6 +341,19 @@ def start_train(handler,payload,*,runtime):
     musical_policy, musical_probability = resolve_musical_context(
         musical_context, musical_probability, sequence_policy=sequence_policy,
         parent_contract=checked.get('training_contract') if parent else None, resume=mode == 'resume')
+    parent_contract = (checked.get("training_contract") or {}) if parent else {}
+    relation_requested, relation_policy, relation_fraction = _auxiliary_settings(
+        payload, "musical_relation", MUSICAL_RELATION_CHOICES, "fraction", MUSICAL_RELATION_FRACTION,
+        sequence_policy=sequence_policy, saved_config=parent_contract, resume=mode == "resume")
+    future_requested, future_policy, future_weight = _auxiliary_settings(
+        payload, "future_configuration", FUTURE_CONFIGURATION_CHOICES, "weight",
+        FUTURE_CONFIGURATION_WEIGHT, sequence_policy=sequence_policy,
+        saved_config=fixed if parent else None, resume=mode == "resume")
+    scope_requested = _choice(payload, "finetune_scope", "auto", FINETUNE_SCOPE_CHOICES)
+    scope = resolve_finetune_scope(scope_requested, parent_contract, resume=mode == "resume",
+                                   initialized=mode == "finetune")
+    if scope == "music_reading" and sequence_policy != "continuous_events_v1":
+        raise ValueError("音乐读取连接微调需要连续事件 checkpoint")
     if mode == 'resume':
         scoped_resume = _prepare_scoped_resume(payload, saved_args)
     if scoped_resume is not None:
@@ -330,6 +368,14 @@ def start_train(handler,payload,*,runtime):
     _arg(args, '--musical-context-probability', musical_probability)
     settings = dict(musical_context=musical_context, musical_context_policy=musical_policy,
                     musical_context_probability=musical_probability)
+    _arg(args, "--musical-relation-policy", relation_requested)
+    _arg(args, "--musical-relation-fraction", relation_fraction)
+    _arg(args, "--future-configuration-policy", future_requested)
+    _arg(args, "--future-configuration-weight", future_weight)
+    _arg(args, "--finetune-scope", scope_requested)
+    settings.update(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
+                    future_configuration_policy=future_policy, future_configuration_weight=future_weight,
+                    finetune_scope=scope)
     from maichart.composer_v2.difficulty import (
         DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, locate_scorer, resolve_selection, scorer_path_key,
     )

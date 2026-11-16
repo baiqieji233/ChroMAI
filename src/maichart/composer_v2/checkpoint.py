@@ -1,5 +1,6 @@
 """Independent Composer v2 checkpoints with atomic writes and safe CPU reads."""
 from __future__ import annotations
+import math
 import os
 import logging
 import shutil
@@ -9,6 +10,11 @@ import time
 import torch
 from .codec import ComponentCodec
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
+from .defaults import (
+    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_POLICY, FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION,
+    FUTURE_CONFIGURATION_WEIGHT,
+    MUSICAL_RELATION_FRACTION, MUSICAL_RELATION_POLICY,
+)
 
 FAMILY="chart_composer_v2"
 SCHEMA="maichart-composer-v2-checkpoint-v1"
@@ -77,6 +83,32 @@ def inspect_payload(payload):
     if payload.get("family")!=FAMILY: errors.append("checkpoint 不属于 chart_composer_v2，不能加载 Composer v1 权重")
     config=payload.get("model_config") or payload.get("config")
     if not isinstance(config,dict): errors.append("缺少模型配置")
+    training = payload.get('training_contract')
+    saved_training = training if isinstance(training, dict) else {}
+    model_fields = config if isinstance(config, dict) else {}
+    continuous = model_fields.get('sequence_policy') == 'continuous_events_v1'
+    relation_policy = saved_training.get('musical_relation_policy', 'off')
+    relation_fraction = saved_training.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION)
+    future_policy = model_fields.get('future_configuration_policy', 'off')
+    future_weight = model_fields.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT)
+    future_train_view_fraction = FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION if future_policy != 'off' else 0.
+    scope = saved_training.get('finetune_scope', 'all')
+    if (relation_policy not in ('off', MUSICAL_RELATION_POLICY) or (relation_policy != 'off' and not continuous)
+            or type(relation_fraction) not in (int, float) or not math.isfinite(relation_fraction)
+            or not 0 <= relation_fraction < 1):
+        errors.append('Invalid Composer v2 musical relation training contract')
+    if (future_policy not in ('off', FUTURE_CONFIGURATION_POLICY) or (future_policy != 'off' and not continuous)
+            or type(future_weight) not in (int, float) or not math.isfinite(future_weight)
+            or not 0 <= future_weight <= 1):
+        errors.append('Invalid Composer v2 ordered future configuration')
+    if isinstance(training, dict) and (
+            saved_training.get('future_configuration_policy', 'off') != future_policy
+            or saved_training.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT) != future_weight
+            or saved_training.get('future_configuration_train_view_fraction', future_train_view_fraction)
+            != future_train_view_fraction):
+        errors.append('Ordered future training contract does not match model configuration')
+    if scope not in FINETUNE_SCOPE_CHOICES[1:] or (scope == 'music_reading' and not continuous):
+        errors.append('Invalid Composer v2 fine-tuning scope')
     if isinstance(config,dict):
         if config.get('attention_normalization', 'off') not in ('off', 'qk_rms_v1'):
             errors.append('Unknown attention normalization policy')
@@ -124,7 +156,7 @@ def inspect_payload(payload):
                 errors.append("Window lengths must be integral beats: "+key)
     codec=payload.get("codec")
     from .stream_codec import StreamCodec
-    expected_codec=StreamCodec.schema if (config or {}).get('sequence_policy')=='continuous_events_v1' else ComponentCodec.schema
+    expected_codec=StreamCodec.schema if continuous else ComponentCodec.schema
     if not isinstance(codec,dict) or codec.get("schema")!=expected_codec: errors.append("缺少或不兼容的组件词表")
     if isinstance(codec,dict):
         tokens=codec.get("tokens")
@@ -143,19 +175,24 @@ def inspect_payload(payload):
         model_config=config or {},config=config or {},args=payload.get("args") or {},
         vocab_size=len(tokens) if not errors else None,
         training_contract=payload.get("training_contract") or {},
+        training_capabilities=dict(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
+            future_configuration_policy=future_policy, future_configuration_weight=future_weight,
+            future_configuration_train_view_fraction=future_train_view_fraction, finetune_scope=scope),
+        parameter_audit=payload.get('parameter_audit') or {},
+        supervision_audit=payload.get('supervision_audit') or {},
         data_contract=payload.get("data_identity") or {},epoch=state.get("epoch",0),
         batch_cursor=state.get("batch_cursor",0),optimizer_steps=state.get("optimizer_steps",0),
         inference_only=bool(payload.get("inference_only")),best_basis=payload.get("best_basis"),
         condition_contract=capabilities_contract,
-        sequence_policy=(config or {}).get('sequence_policy','window_v1'),
+        sequence_policy=model_fields.get('sequence_policy','window_v1'),
         generation_capabilities=dict(component_sequence=True,fine_note_strength=False,local_onset_guidance=False,
-            intensity_curve=(config or {}).get('intensity_policy','off')=='rate_curve_v1',
-            onset_readout=(config or {}).get('onset_readout_policy','off')=='phase_audio_v1',
-            rhythm_structure=(config or {}).get('structure_policy','off')!='off',
-            music_context=(config or {}).get('music_context_policy','off')!='off',
-            paired_music=(config or {}).get('music_context_policy')=='song_paired_v2',
-            entry_preview=(config or {}).get('music_context_policy')=='song_paired_v2',
-            continuous_time=(config or {}).get('sequence_policy')=='continuous_events_v1',
+            intensity_curve=model_fields.get('intensity_policy','off')=='rate_curve_v1',
+            onset_readout=model_fields.get('onset_readout_policy','off')=='phase_audio_v1',
+            rhythm_structure=model_fields.get('structure_policy','off')!='off',
+            music_context=model_fields.get('music_context_policy','off')!='off',
+            paired_music=model_fields.get('music_context_policy')=='song_paired_v2',
+            entry_preview=model_fields.get('music_context_policy')=='song_paired_v2',
+            continuous_time=continuous,
             condition_policy=policy,condition_keys=capabilities_contract.get('supported_keys',[]),
             radar_style=policy==RADAR_STYLE,automatic_conditions=policy==RADAR_STYLE),
         errors=errors,error="; ".join(errors) if errors else None)

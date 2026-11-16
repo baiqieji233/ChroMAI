@@ -35,7 +35,18 @@ class ComposerV2Config:
     music_context_policy: str = 'off'
     local_audio_block_beats: int = 1
     attention_normalization: str = 'qk_rms_v1'
+    future_configuration_policy: str = 'off'
+    future_configuration_weight: float = .05
     def __post_init__(self):
+        if self.future_configuration_policy not in ('off', 'ordered_future_v1'):
+            raise ValueError('Unknown ordered future configuration policy')
+        if (not isinstance(self.future_configuration_weight, (int, float))
+                or isinstance(self.future_configuration_weight, bool)
+                or not math.isfinite(self.future_configuration_weight)
+                or not 0 <= self.future_configuration_weight <= 1):
+            raise ValueError('Future configuration weight must be finite and between 0 and 1')
+        if self.future_configuration_policy != 'off' and self.sequence_policy != 'continuous_events_v1':
+            raise ValueError('Ordered future configuration requires continuous events')
         if self.attention_normalization not in ('off', 'qk_rms_v1'):
             raise ValueError('Unknown attention normalization policy')
         from .music_policy import POLICIES as MUSIC_POLICIES
@@ -323,6 +334,14 @@ class ComposerV2(nn.Module):
         self.output_bias=nn.Parameter(torch.zeros(codec.vocab_size))
         self._song_cache={}
         self._structured_weight_cache={}
+        if c.future_configuration_policy != 'off':
+            from .ordered_configuration import HORIZONS, TARGET_DIM
+            # Training-only readout. Preserve all old initialization RNG and
+            # never feed targets or predictions back into token decoding.
+            with torch.random.fork_rng(devices=[]):
+                self.future_configuration_head=nn.Sequential(
+                    nn.LayerNorm(d),nn.Linear(d,min(128,d)),nn.SiLU(),
+                    nn.Linear(min(128,d),len(HORIZONS)*TARGET_DIM))
         if c.music_context_policy!='off':
             with torch.random.fork_rng(devices=[]):self.song_detail=nn.Linear(16,d,bias=False)
             nn.init.zeros_(self.song_detail.weight)
@@ -491,7 +510,7 @@ class ComposerV2(nn.Module):
             keep[:,0]=True;known=known&keep
         values=values*known
         return self.condition(values)+self.condition_missing((~known).float())
-    def decode(self,batch,cache,*,incremental=True):
+    def decode(self,batch,cache,*,incremental=True,return_future_hidden=False):
         ids=batch['input_ids'];length=ids.size(1)
         use_cache=incremental and not self.training and not torch.is_grad_enabled()
         state=cache.get('decode_state') if use_cache else None
@@ -551,17 +570,30 @@ class ComposerV2(nn.Module):
                 x=self._training_block(layer,x,condition,batch['token_mask'],beats,cache,
                     state=state['layers'][i] if use_cache else None,groups=groups,
                     right_padded=batch.get('right_padded_tokens',False))
-        logits=F.linear(self.norm(x),weight,self.output_bias)
+        normalized=self.norm(x)
+        logits=F.linear(normalized,weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence
             logits = apply_phase_evidence(logits, cache['onset_scores'], batch['phase_queries_cpu'],
                 self.phase_token_ids, start=start, strength=batch.get('onset_strength', 1.))
         if use_cache:
             state['length']=length;cache['decode_state']=state
+        if return_future_hidden:
+            rows=batch['future_configuration_positions']
+            return logits,normalized[rows[:,0],rows[:,1]-start]
         return logits
     def forward(self,batch):
         cache=self.encode_audio(batch)
-        return {'logits':self.decode(batch,cache,incremental=False),
+        positions=batch.get('future_configuration_positions')
+        use_future=(hasattr(self,'future_configuration_head') and
+                    self.config.future_configuration_weight>0 and positions is not None and positions.numel()>0)
+        future={}
+        if use_future:
+            from .ordered_configuration import HORIZONS,TARGET_DIM
+            logits,hidden=self.decode(batch,cache,incremental=False,return_future_hidden=True)
+            future['future_configuration_logits']=self.future_configuration_head(hidden).reshape(-1,len(HORIZONS),TARGET_DIM)
+        else:logits=self.decode(batch,cache,incremental=False)
+        return {'logits':logits,**future,
                 **({'curve_rates':cache['curve_rates']} if 'curve_rates' in cache else {})}
     def loss(self,output,batch):
         logits=output['logits'].float();labels=batch['labels'];active=labels.ne(-100)
@@ -581,6 +613,16 @@ class ComposerV2(nn.Module):
             auxiliary=curve_loss(output['curve_rates'],batch)
             objective=loss+AUX_WEIGHT*auxiliary
         else:objective=loss
-        return objective,dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),time_loss=mean(timing).detach(),
+        future_loss=loss.new_zeros(())
+        if 'future_configuration_logits' in output:
+            prediction=output['future_configuration_logits'].float()
+            target=batch['future_configuration_targets'].float()
+            future_weights=batch['future_configuration_weights'].float()
+            # Labels/quality are loss-only; credit is normalized to the same
+            # supervised mass as the main loss for exact gradient accumulation.
+            future_loss=(F.binary_cross_entropy_with_logits(prediction,target,reduction='none')*future_weights).sum()/mass
+            objective=objective+self.config.future_configuration_weight*future_loss
+        return objective,dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),
+            future_configuration_loss=future_loss.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),
             phase_loss=mean(self.phase_targets.index_select(0,indices.flatten()).reshape_as(labels)&active).detach(),token_count=active.sum().detach())

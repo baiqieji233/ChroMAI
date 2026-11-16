@@ -21,7 +21,12 @@ from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Datase
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
 from . import chart_dialect, timing_recovery
-from .defaults import MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, resolve_musical_context
+from .defaults import (
+    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION,
+    FUTURE_CONFIGURATION_WEIGHT,
+    MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, MUSICAL_RELATION_CHOICES,
+    MUSICAL_RELATION_FRACTION, resolve_auxiliary_policy, resolve_finetune_scope, resolve_musical_context,
+)
 
 
 def emit(kind,**values):
@@ -61,6 +66,16 @@ def parser():
                         help='Train with music-conditioned history views; auto enables fresh/finetune and inherits resume')
     result.add_argument('--musical-context-probability', type=float,
                         help=f'Proportion relying on music with reduced older chart context, 0 to 1 (default {MUSICAL_CONTEXT_PROBABILITY}; resume inherits)')
+    result.add_argument('--musical-relation-policy', choices=MUSICAL_RELATION_CHOICES, default='auto',
+                        help='Supervise chart events against musical relationships; resume inherits the saved policy')
+    result.add_argument('--musical-relation-fraction', type=float,
+                        help=f'Maximum relative training supervision on musical relationship views (default {MUSICAL_RELATION_FRACTION})')
+    result.add_argument('--future-configuration-policy', choices=FUTURE_CONFIGURATION_CHOICES, default='auto',
+                        help='Train an auxiliary head on ordered future chart events; resume inherits the saved policy')
+    result.add_argument('--future-configuration-weight', type=float,
+                        help=f'Weight of the ordered future chart objective (default {FUTURE_CONFIGURATION_WEIGHT})')
+    result.add_argument('--finetune-scope', choices=FINETUNE_SCOPE_CHOICES, default='auto',
+                        help='Train all parameters or only music-reading parameters of an initialized checkpoint')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--training-window-events', type=int,
@@ -99,6 +114,24 @@ def resolve_training_policy(requested, parent_config=None, *, resume=False):
     if migration and (resume or (parent_policy, policy) != (LEVEL_ONLY, RADAR_STYLE)):
         raise ValueError('Condition policy migration requires init-checkpoint from level_only_v1 to radar_style_v1')
     return policy, migration
+
+
+def configure_trainable_parameters(model, scope):
+    trainable_names = []
+    trainable_parameters = []
+    for name, parameter in model.named_parameters():
+        path = name.split('.')
+        decoder_reading = (len(path) >= 4 and path[0] == 'decoder'
+                           and (path[2] in ('local_attention', 'song_attention') or
+                                path[2] == 'norms' and path[3] in ('1', '2')))
+        music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head')
+        trainable = scope == 'all' or decoder_reading or music_projection
+        parameter.requires_grad_(trainable)
+        if trainable:
+            trainable_names.append(name)
+            trainable_parameters.append(parameter)
+    return trainable_names, trainable_parameters
+
 
 def rng_state():
     state=np.random.get_state()
@@ -282,7 +315,9 @@ def _cpu_budget(batch,time_tokens=None):
     weights=weights*batch.get("sample_weight",weights.new_ones(weights.size(0)))[:,None]
     mass=float(weights.sum())
     timing=time_tokens[batch["labels"].clamp_min(0)]&active if time_tokens is not None else active
-    return int(active.sum()),mass,float((weights*timing).sum()),float((weights*(active&~timing)).sum())
+    relation_fractions=batch.get('musical_relation_extra_fraction')
+    relation_mass=float((weights.sum(1)*relation_fractions).sum()) if relation_fractions is not None else 0.
+    return int(active.sum()),mass,float((weights*timing).sum()),float((weights*(active&~timing)).sum()),relation_mass
 
 def _phase_budget(batch,phase_tokens):
     active=batch['labels'].ne(-100)
@@ -297,6 +332,7 @@ def _validate(model,loader,device,precision,maximum):
     model.validation_nonphase_time_loss=None
     model.validation_curve_loss=None
     model.validation_curve_mae=None
+    model.validation_future_configuration_loss=None
     model.validation_coverage=getattr(loader,'validation_coverage',None)
     if loader is None:return None
     phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
@@ -306,6 +342,7 @@ def _validate(model,loader,device,precision,maximum):
     model.eval();numerator=torch.zeros((),device=device);mass_sum=0.
     finite=torch.ones((),device=device,dtype=torch.bool)
     curve_numerator=torch.zeros((),device=device)
+    future_configuration_numerator=torch.zeros((),device=device)
     curve_error=torch.zeros(2,device=device);curve_exposure=torch.zeros(2,device=device)
     with torch.inference_mode():
         for index,batch in _batches(loader):
@@ -315,7 +352,7 @@ def _validate(model,loader,device,precision,maximum):
                 # not a validation path supplied with the answer chart's statistics.
                 known=torch.zeros_like(batch['condition'],dtype=torch.bool)
                 known[:,0]=True;batch={**batch,'condition_known':known}
-            _,mass,time_mass,_=_cpu_budget(batch,time_tokens)
+            _,mass,time_mass,_,_=_cpu_budget(batch,time_tokens)
             phase_mass=_phase_budget(batch,phase_tokens)
             if not math.isfinite(mass) or mass<0:raise ValueError("Invalid validation token weight budget")
             batch=_device_batch(batch,device)
@@ -324,6 +361,8 @@ def _validate(model,loader,device,precision,maximum):
             finite=finite&torch.isfinite(loss)
             numerator+=metrics['token_loss']*max(1.,mass);mass_sum+=mass
             curve_numerator+=metrics['curve_loss']*max(1.,mass)
+            if hasattr(model,'future_configuration_head'):
+                future_configuration_numerator+=metrics['future_configuration_loss']*max(1.,mass)
             if hasattr(model,'intensity'):
                 widths=batch['curve_widths'].float()
                 # Rate MAE is independent of token CE and measured in real units.
@@ -342,6 +381,8 @@ def _validate(model,loader,device,precision,maximum):
     nonphase_mass=time_mass_sum-phase_mass_sum
     model.validation_nonphase_time_loss=(float(time_numerator-phase_numerator)/nonphase_mass
                                         if nonphase_mass>0 else None)
+    if hasattr(model,'future_configuration_head') and model.config.future_configuration_weight > 0:
+        model.validation_future_configuration_loss=float(future_configuration_numerator)/max(1.,mass_sum)
     if hasattr(model,'intensity'):
         model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
         values=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
@@ -449,6 +490,29 @@ def train(args):
     args.musical_context_policy, args.musical_context_probability = resolve_musical_context(
         getattr(args, 'musical_context', 'auto'), getattr(args, 'musical_context_probability', None),
         sequence_policy=args.sequence_policy, parent_contract=parent_contract, resume=bool(args.resume))
+    parent_model = (parent.get('model_config') or parent.get('config')) if parent else {}
+    args.musical_relation_policy, args.musical_relation_fraction = resolve_auxiliary_policy(
+        getattr(args, 'musical_relation_policy', 'auto'), getattr(args, 'musical_relation_fraction', None),
+        feature='musical_relation', choices=MUSICAL_RELATION_CHOICES, default=MUSICAL_RELATION_FRACTION,
+        sequence_policy=args.sequence_policy, saved_config=parent_contract, resume=bool(args.resume))
+    args.future_configuration_policy, args.future_configuration_weight = resolve_auxiliary_policy(
+        getattr(args, 'future_configuration_policy', 'auto'), getattr(args, 'future_configuration_weight', None),
+        feature='future_configuration', choices=FUTURE_CONFIGURATION_CHOICES, default=FUTURE_CONFIGURATION_WEIGHT,
+        sequence_policy=args.sequence_policy, saved_config=parent_model, resume=bool(args.resume))
+    args.finetune_scope = resolve_finetune_scope(getattr(args, 'finetune_scope', 'auto'), parent_contract,
+                                                resume=bool(args.resume), initialized=bool(args.init_checkpoint))
+    if args.finetune_scope == 'music_reading' and args.sequence_policy != 'continuous_events_v1':
+        raise ValueError('Music-reading fine-tuning requires continuous event training')
+    future_migration = bool(parent and args.future_configuration_policy !=
+                            parent_model.get('future_configuration_policy', 'off'))
+    learning_contract_changed = bool(args.init_checkpoint and (
+        args.musical_relation_policy != parent_contract.get('musical_relation_policy', 'off') or
+        args.musical_relation_fraction != parent_contract.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION) or
+        args.future_configuration_weight != parent_model.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT) or
+        future_migration or args.finetune_scope != 'all' or
+        args.finetune_scope != parent_contract.get('finetune_scope', 'all')))
+    if learning_contract_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
+        raise ValueError('Changing musical relation, ordered future, or fine-tuning scope requires a new checkpoint directory')
     recovery_policy=getattr(args,'timing_recovery','auto')
     if recovery_policy=='auto':
         if args.resume:
@@ -527,7 +591,6 @@ def train(args):
     from .intensity import resolve_policy as resolve_curve_policy
     args.intensity_policy,curve_migration=resolve_curve_policy(getattr(args,'intensity_curve','auto'),
         (parent.get('model_config') or parent.get('config')) if parent else None,resume=bool(args.resume))
-    parent_model=(parent.get('model_config') or parent.get('config')) if parent else {}
     # Existing checkpoints keep their original attention function. Fresh runs
     # use bounded Q/K scores; loading weights must never silently change this.
     args.attention_normalization = parent_model.get('attention_normalization', 'off') if parent else 'qk_rms_v1'
@@ -574,7 +637,7 @@ def train(args):
     audio_block_migration = bool(parent and args.local_audio_block_beats != inherited_audio_block)
     if audio_block_migration and (args.resume or directory == source_directory or any(p.exists() for p in artifacts)):
         raise ValueError('Changing local audio sharing requires init-checkpoint in a new directory')
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
@@ -585,6 +648,9 @@ def train(args):
     if depth_migration: comparable_config['audio_layers'] = parent_config['audio_layers']
     if audio_block_migration:
         comparable_config['local_audio_block_beats'] = inherited_audio_block
+    if args.init_checkpoint:
+        comparable_config['future_configuration_policy'] = parent_config['future_configuration_policy']
+        comparable_config['future_configuration_weight'] = parent_config['future_configuration_weight']
     if parent and comparable_config != parent_config:
         raise ValueError("Parent model/audio/token contract differs; use its exact configuration or fresh training")
     codec=ComponentCodec.from_dict(parent["codec"]) if parent else None
@@ -612,13 +678,16 @@ def train(args):
                        onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,
                        intensity_policy=args.intensity_policy,rhythm_learning_policy=args.rhythm_learning_policy,
                        music_context_policy=args.music_context_policy,
+                       future_configuration_policy=args.future_configuration_policy,
                        reviewed_reference_policy=reviewed_ref,zero_unmarked_policy=zero_unmarked_policy,
                        reference_quality_policy=reference_quality_policy)
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':
         train_options.update(reference_augmentation=True, training_window_events=args.training_window_events,
             musical_context_policy=args.musical_context_policy,
-            musical_context_probability=args.musical_context_probability)
+            musical_context_probability=args.musical_context_probability,
+            musical_relation_policy=args.musical_relation_policy,
+            musical_relation_fraction=args.musical_relation_fraction)
     with scorer if scorer is not None else nullcontext():
         from .codec import VocabularyCoverageError
         try:
@@ -637,7 +706,8 @@ def train(args):
         codec=dataset.codec
         validation_options={**options,"codec":codec,"limit_charts":0,"validate_fixed_vocabulary":True}
         if args.sequence_policy=='continuous_events_v1':
-            validation_options.update(timing_recovery_policy='off', musical_context_policy='off')
+            validation_options.update(timing_recovery_policy='off', musical_context_policy='off',
+                                      auxiliary_validation=args.future_configuration_policy != 'off')
         validation=dataset_class(args.validation_manifest,**validation_options) if args.validation_manifest else None
     if scorer is not None:
         emit('difficulty_fit', scorer=scorer.identity,cache_hits=scorer.hits,computed=scorer.computed,
@@ -693,6 +763,15 @@ def train(args):
     if args.musical_context_policy != 'off':
         contract.update(musical_context_policy=args.musical_context_policy,
                         musical_context_probability=args.musical_context_probability)
+    if args.musical_relation_policy != 'off':
+        contract.update(musical_relation_policy=args.musical_relation_policy,
+                        musical_relation_fraction=args.musical_relation_fraction)
+    if args.future_configuration_policy != 'off':
+        contract.update(future_configuration_policy=args.future_configuration_policy,
+                        future_configuration_weight=args.future_configuration_weight,
+                        future_configuration_train_view_fraction=FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION)
+    if args.finetune_scope != 'all':
+        contract['finetune_scope'] = args.finetune_scope
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
     if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'zero_unmarked_policy' in parent_contract):
         contract['zero_unmarked_policy']=zero_unmarked_policy
@@ -723,7 +802,7 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration:
+        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if music_migration:
                 expected_missing.update(k for k in model.state_dict() if k not in parent_state and
@@ -748,6 +827,11 @@ def train(args):
                 if args.intensity_policy!='off':
                     expected_missing.update(k for k in model.state_dict() if k.startswith('intensity.'))
                 else:parent_state={k:v for k,v in parent_state.items() if not k.startswith('intensity.')}
+            if future_migration:
+                if args.future_configuration_policy == 'off':
+                    parent_state = {k:v for k,v in parent_state.items() if not k.startswith('future_configuration_head.')}
+                else:
+                    expected_missing.update(k for k in model.state_dict() if k.startswith('future_configuration_head.'))
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
@@ -755,12 +839,19 @@ def train(args):
                 source_policy=parent_policy,condition_policy=args.condition_policy,
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
-                zero_initialization=True)
+                future_configuration_policy=args.future_configuration_policy,
+                zero_initialization=not future_migration or args.future_configuration_policy == 'off')
         else:
             model.load_state_dict(parent_state,strict=True)
     if hasattr(model,'onset_readout') and (not parent or onset_migration):
         model.onset_readout.fit_normalization(dataset.songs)
-    optimizer=torch.optim.AdamW(model.parameters(),lr=args.lr,weight_decay=.01)
+    trainable_names, trainable_parameters = configure_trainable_parameters(model, args.finetune_scope)
+    trainable_count = sum(parameter.numel() for parameter in trainable_parameters)
+    parameter_audit = dict(scope=args.finetune_scope, trainable_parameters=trainable_count,
+                           total_parameters=sum(parameter.numel() for parameter in model.parameters()))
+    if args.finetune_scope != 'all':
+        parameter_audit['trainable_parameter_names'] = trainable_names
+    optimizer=torch.optim.AdamW(trainable_parameters,lr=args.lr,weight_decay=.01)
     scaler=torch.amp.GradScaler(device.type if device.type=='xpu' else 'cuda',enabled=precision=="fp16")
     state=dict(epoch=0,batch_cursor=0,optimizer_steps=0,update_attempts=0,best_loss=None,last_loss=None,epoch_loss_sum=0.,epoch_weight_sum=0.)
     if args.resume:
@@ -802,6 +893,12 @@ def train(args):
             else "training_quality_weighted_token_ce_no_validation")
     epoch_loss_gpu=torch.tensor(float(state.get("epoch_loss_sum",0.)),device=device)
     epoch_mass=float(state.get("epoch_weight_sum",0.))
+    running_mass=0.
+    running_relation_mass=0.
+    def supervision_audit():
+        fraction=running_relation_mass/running_mass if running_mass else 0.
+        return dict(token_weight_sum=running_mass, musical_relation_extra_mass=running_relation_mass,
+                    musical_relation_extra_fraction=fraction)
     def flush_epoch():
         state["epoch_loss_sum"]=float(epoch_loss_gpu)
         state["epoch_weight_sum"]=epoch_mass
@@ -813,6 +910,8 @@ def train(args):
             codec=codec.to_dict(),model_state_dict=model.state_dict(),optimizer_state_dict=optimizer.state_dict(),
             scaler_state_dict=scaler.state_dict(),rng_state=rng_state(),training_state=dict(state),
             data_identity=identity,training_contract=contract,args=vars(args),best_basis=best_basis,
+            parameter_audit=parameter_audit,
+            supervision_audit=supervision_audit(),
             condition_contract=condition_contract(args.condition_policy),
             selection_loss=state["best_loss"] if state["best_loss"] is not None else state["last_loss"],
             best_provisional=state["best_loss"] is None)
@@ -827,7 +926,7 @@ def train(args):
         windows=len(dataset),validation_windows=len(validation) if validation else 0,model_config=config.to_dict(),
         epoch_target=args.epochs,batches_per_epoch=len(loader),resume_epoch=int(state['epoch']),
         resume_batch_cursor=int(state['batch_cursor']),
-        trainable_parameters=sum(p.numel() for p in model.parameters()),effective_batch=args.batch_size*args.grad_accumulation,
+        trainable_parameters=trainable_count,parameter_audit=parameter_audit,effective_batch=args.batch_size*args.grad_accumulation,
          train_charts=len(dataset.songs),validation_charts=len(validation.songs) if validation else 0,
          preparation=dataset.audit.get('preparation', {}), batch_order=batch_order,batch_layout=batch_layout,
          batch_source_size=source_batch_size,validation_batch_size=validation_batch_size,**resource_budgets,
@@ -835,6 +934,14 @@ def train(args):
          musical_context=dataset.audit.get('musical_context'),
          musical_context_policy=args.musical_context_policy,
          musical_context_probability=args.musical_context_probability,
+         musical_relation=dataset.audit.get('musical_relation'),
+         musical_relation_policy=args.musical_relation_policy,
+         musical_relation_fraction=args.musical_relation_fraction,
+         future_configuration=dataset.audit.get('future_configuration'),
+         future_configuration_policy=args.future_configuration_policy,
+         future_configuration_weight=args.future_configuration_weight,
+         future_configuration_train_view_fraction=(FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION
+                                                   if args.future_configuration_policy != 'off' else 0.),
          training_window_events=args.training_window_events,
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,
@@ -845,9 +952,9 @@ def train(args):
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0
-    running=torch.zeros(6,device=device);running_mass=0.;running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
-    group_metrics=torch.zeros(6,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
-    group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;stop=False
+    running=torch.zeros(7,device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
+    group_metrics=torch.zeros(7,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
+    group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.;stop=False
     time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
     if device.type=="cuda":torch.cuda.reset_peak_memory_stats(device)
     elif device.type=='xpu':torch.xpu.reset_peak_memory_stats(device)
@@ -863,7 +970,7 @@ def train(args):
         pending=[]
         for batch_index,batch in _batches(loader,cursor,pending=pending):
             now=time.perf_counter();data_sec+=now-previous
-            tokens,mass,time_mass,component_mass=_cpu_budget(batch,time_tokens)
+            tokens,mass,time_mass,component_mass,relation_mass=_cpu_budget(batch,time_tokens)
             input_tokens+=int(batch['token_mask'].sum())
             input_slots+=batch['token_mask'].numel()
             phase_mass=_phase_budget(batch,phase_tokens)
@@ -878,18 +985,19 @@ def train(args):
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
             group_metrics+=torch.stack((metrics['token_loss']*budget,
                 metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*max(1.,phase_mass),
-                metrics['curve_loss']*budget,loss.detach()*budget))
+                metrics['curve_loss']*budget,loss.detach()*budget,metrics['future_configuration_loss']*budget))
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
             group_component_mass+=component_mass if cpu_valid else 0.
             group_phase_mass+=phase_mass if cpu_valid else 0.
+            group_relation_mass+=relation_mass if cpu_valid else 0.
             seen_samples+=len(batch["input_ids"]);seen_tokens+=tokens
             boundary=(batch_index+1)%args.grad_accumulation==0 or batch_index+1==len(loader)
             if boundary:
                 scaler.unscale_(optimizer)
-                for parameter in model.parameters():
+                for parameter in trainable_parameters:
                     if parameter.grad is not None:parameter.grad.mul_(1024./max(1.,group_mass))
-                norm=torch.nn.utils.clip_grad_norm_(model.parameters(),1.)
+                norm=torch.nn.utils.clip_grad_norm_(trainable_parameters,1.)
                 finite=bool(group_finite&torch.isfinite(norm)&(group_mass>0))
                 attempt=int(state["update_attempts"])
                 if args.warmup_steps and attempt<args.warmup_steps:factor=(attempt+1)/args.warmup_steps
@@ -901,11 +1009,12 @@ def train(args):
                     scaler.step(optimizer);state["optimizer_steps"]+=1
                     epoch_loss_gpu+=group_metrics[0];epoch_mass+=group_mass
                     running+=group_metrics;running_mass+=group_mass
+                    running_relation_mass+=group_relation_mass
                     running_time_mass+=group_time_mass;running_component_mass+=group_component_mass;running_phase_mass+=group_phase_mass
                 else:emit("progress",stage="nonfinite_update_skipped",epoch=epoch,batch=batch_index+1,optimizer_steps=state["optimizer_steps"])
                 scaler.update();optimizer.zero_grad(set_to_none=True)
                 group_metrics.zero_();group_finite.fill_(True)
-                group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.
+                group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.
                 state.update(epoch=epoch,batch_cursor=batch_index+1,update_attempts=attempt+1)
             ended=time.perf_counter();compute_sec+=ended-now
             if boundary and ended-last_position>=5.:
@@ -923,7 +1032,8 @@ def train(args):
                     optimizer_steps=state["optimizer_steps"],loss=values[0]/max(1.,running_mass),
                     loss_scope="run_quality_weighted_token_mean",
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
-                    token_count=seen_tokens,token_weight_sum=running_mass,
+                    future_configuration_loss=values[6]/max(1.,running_mass),
+                    token_count=seen_tokens,
                     tokens_per_sec=seen_tokens/max(elapsed,1e-9),samples_per_sec=seen_samples/max(elapsed,1e-9),
                     input_padding_fraction=1.-input_tokens/max(input_slots,1),batch_layout=batch_layout,
                     time_loss=values[1]/max(1.,running_time_mass),component_loss=values[2]/max(1.,running_component_mass),phase_loss=values[3]/max(1.,running_phase_mass),
@@ -931,7 +1041,8 @@ def train(args):
                     prefetch={"consumer_wait_sec":data_sec,"max_batches":1},elapsed_sec=elapsed,lr=optimizer.param_groups[0]["lr"],
                     audio_banks=dataset.audio_store.mapping_stats(),grad_norm=float(norm.detach()),**cuda_stats(device),
                     gpu_peak_bytes=(torch.cuda.max_memory_allocated(device) if device.type=="cuda" else
-                                    torch.xpu.max_memory_allocated(device) if device.type=='xpu' else 0))
+                                    torch.xpu.max_memory_allocated(device) if device.type=='xpu' else 0),
+                    **supervision_audit())
             if boundary and finite and state["optimizer_steps"]%args.checkpoint_interval_steps==0:
                 improved=False
                 # Do not wait an entire multi-hour epoch to detect regression.
@@ -951,6 +1062,7 @@ def train(args):
                          validation_nonphase_time_loss=model.validation_nonphase_time_loss,
                          validation_phase_loss=model.validation_phase_loss,
                          validation_curve_loss=model.validation_curve_loss,
+                         validation_future_configuration_loss=model.validation_future_configuration_loss,
                          validation_coverage=validation_coverage,improved=improved,
                          validation_sec=time.perf_counter()-validation_started,loss_scope='fixed_holdout')
                 checkpoint(improved)
@@ -981,10 +1093,11 @@ def train(args):
                 validation_phase_loss=getattr(model,"validation_phase_loss",None),
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
+                validation_future_configuration_loss=getattr(model,'validation_future_configuration_loss',None),
                 validation_coverage=validation_coverage,
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",
-                best_basis=best_basis,optimizer_steps=state["optimizer_steps"])
+                best_basis=best_basis,optimizer_steps=state["optimizer_steps"],**supervision_audit())
             state.update(epoch=epoch+1,batch_cursor=0,epoch_loss_sum=0.,epoch_weight_sum=0.,validation_improved_in_epoch=False)
             # Checkpoint's next-epoch accumulator must agree with its zero cursor.
             epoch_loss_gpu.zero_();epoch_mass=0.

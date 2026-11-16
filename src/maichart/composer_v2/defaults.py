@@ -3,6 +3,8 @@
 Checkpoint configuration remains authoritative for loading and exact resume.
 """
 
+import math
+
 PROFILE = 'composer_v2_phrase_music_20261109'
 TRAIN_DEFAULTS = dict(epochs=50, batch_size=8, grad_accumulation=8, lr=.0002,
     lr_schedule='cosine', warmup_steps=200, min_lr_ratio=.1, d_model=384, layers=8,
@@ -16,6 +18,14 @@ ENCODER_DEFAULTS = dict(audio_layers=4,song_layers=2)
 MUSICAL_CONTEXT_POLICY = 'music_context_views_v1'
 MUSICAL_CONTEXT_CHOICES = ('auto', 'off', MUSICAL_CONTEXT_POLICY)
 MUSICAL_CONTEXT_PROBABILITY = .25
+MUSICAL_RELATION_POLICY = 'musical_relations_v1'
+MUSICAL_RELATION_CHOICES = ('auto', 'off', MUSICAL_RELATION_POLICY)
+MUSICAL_RELATION_FRACTION = .3
+FUTURE_CONFIGURATION_POLICY = 'ordered_future_v1'
+FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', FUTURE_CONFIGURATION_POLICY)
+FUTURE_CONFIGURATION_WEIGHT = .05
+FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION = .25
+FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading')
 
 
 def resolve_musical_context(requested, probability=None, *, sequence_policy,
@@ -41,6 +51,51 @@ def resolve_musical_context(requested, probability=None, *, sequence_policy,
     if policy != 'off' and not continuous:
         raise ValueError('按音乐组织配置仅适用于 Composer v2 连续事件训练')
     return policy, float(probability)
+
+
+def resolve_auxiliary_policy(requested, value, *, feature, choices, default,
+                             sequence_policy, saved_config, resume):
+    """Resolve an optional continuous-event training feature."""
+    if requested not in choices:
+        raise ValueError(f'Unknown {feature} policy')
+    value_key = 'fraction' if feature == 'musical_relation' else 'weight'
+    saved_policy = saved_config.get(f'{feature}_policy', 'off')
+    saved_value = saved_config.get(f'{feature}_{value_key}', default)
+    continuous = sequence_policy == 'continuous_events_v1'
+    policy = requested
+    if policy == 'auto':
+        policy = saved_policy if resume else choices[-1] if continuous else 'off'
+    if policy not in choices[1:]:
+        raise ValueError(f'Unknown saved {feature} policy')
+    if value is None:
+        value = saved_value if resume else default
+    if type(value) not in (float, int) or not math.isfinite(value) or value < 0:
+        raise ValueError(f'{feature}_{value_key} must be finite and nonnegative')
+    if value_key == 'fraction' and value >= 1:
+        raise ValueError(f'{feature}_{value_key} must be less than 1')
+    if value_key == 'weight' and value > 1:
+        raise ValueError(f'{feature}_{value_key} must be at most 1')
+    if policy == 'off':
+        value = default
+    if resume and (policy != saved_policy or value != saved_value):
+        raise ValueError(f'Changing {feature} requires --init-checkpoint in a new directory')
+    if policy != 'off' and not continuous:
+        raise ValueError(f'{feature} requires continuous event training')
+    return policy, float(value)
+
+
+def resolve_finetune_scope(requested, parent_contract, *, resume, initialized):
+    if requested not in FINETUNE_SCOPE_CHOICES:
+        raise ValueError('Unknown fine-tuning scope')
+    saved = parent_contract.get('finetune_scope', 'all')
+    scope = (saved if resume else 'all') if requested == 'auto' else requested
+    if scope not in FINETUNE_SCOPE_CHOICES[1:]:
+        raise ValueError('Unknown saved fine-tuning scope')
+    if resume and scope != saved:
+        raise ValueError('Changing fine-tuning scope requires --init-checkpoint in a new directory')
+    if scope == 'music_reading' and not (initialized or resume):
+        raise ValueError('Music-reading fine-tuning requires --init-checkpoint')
+    return scope
 
 
 GENERATION_DEFAULTS = dict(temperature=.9, top_p=.95, action_temperature=.9,
