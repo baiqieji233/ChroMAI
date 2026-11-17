@@ -329,8 +329,16 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             if cursor >= getattr(active, 'reference_refresh_beat', end) or len(current) >= active.max_tokens // 2 - 96:
                 active = make_sampler([*prefix, *[r[0] for r in rows]])
                 current = []
-        scored = bool(complete and rows)
-        unscored_reason = None if scored else 'incomplete_candidate' if not complete else 'empty_candidate'
+        comparison_events = sum(start <= point.beat < stop for point, _ in rows)
+        scored = bool(complete and comparison_events)
+        if not complete:
+            unscored_reason = 'incomplete_candidate'
+        elif not rows:
+            unscored_reason = 'empty_candidate'
+        elif not comparison_events:
+            unscored_reason = 'no_onsets_in_comparison_span'
+        else:
+            unscored_reason = None
         score, components = .5, {}
         if scored:
             work['rank_calls'] += 1
@@ -341,7 +349,8 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             work['rank_sec'] += time.perf_counter() - call_began
         trials.append(dict(rows=rows, guard_chain=guard_chain, complete=complete, ended=ended, reason=reason,
                            score=score, components=components, skipped=False,
-                           scored=scored, unscored_reason=unscored_reason))
+                           scored=scored, unscored_reason=unscored_reason,
+                           comparison_events=comparison_events))
         if record:
             inside=[log for (point,_),log in zip(rows,probabilities) if start<=point.beat<stop]
             outside=[log for (point,_),log in zip(rows,probabilities) if not start<=point.beat<stop]
@@ -350,8 +359,20 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                 boundary_probability=summarize(outside),
                 termination_probability=summarize([termination_probability]) if ended else None,
                 diagnostics=span_diagnostics([p for p,_ in rows],sampler.codec,start,stop))
-    eligible = [i for i, trial in enumerate(trials) if trial['complete'] and trial['rows']]
-    selected = max(eligible, key=lambda i: trials[i]['score']) if eligible else None
+    # A crossing event only proves coverage of the elapsed interval. Its
+    # configuration and likelihood are outside the scored range. Retain a
+    # valid primary rest without using missing motion as a quality advantage
+    # or replacing that rest with an alternative solely because it has notes.
+    preserve_primary_rest = bool(trials and trials[0]['complete'] and trials[0]['rows']
+                                and trials[0].get('comparison_events') == 0)
+    eligible = [i for i, trial in enumerate(trials)
+                if trial['scored'] or (i == 0 and preserve_primary_rest)]
+    if preserve_primary_rest:
+        selected = 0
+    elif eligible:
+        selected = max(eligible, key=lambda i: trials[i]['score'])
+    else:
+        selected = None
     margin = .01 if policy == 'likelihood_veto_v1' else .02
     baseline_vetoed = bool(trials[0]['components'].get('comfort_veto', False)) if trials else False
     if selected is not None and 0 in eligible and not baseline_vetoed and trials[selected]['score'] < trials[0]['score'] + margin:
@@ -371,6 +392,8 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     evidence = dict(start_beat=str(start), end_beat=str(stop),
                     start_sec=float(song.clock.at(start)), end_sec=float(song.clock.at(stop)),
                     selected=selected,mode=mode,ranking_policy=policy,
+                    selection_basis=('preserve_primary_rest' if preserve_primary_rest
+                                     else 'ranked_trials' if selected is not None else 'event_fallback'),
                     all_comfort_vetoed=all_vetoed if policy == 'likelihood_veto_v1' else False,
                     partial_preview=True,preview_files_exported=False,
                     elapsed_sec=time.perf_counter()-began,
@@ -382,10 +405,10 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                     compute=dict(**work, speculative_events=sum(len(t['rows']) for t in trials)),
                     candidates=[dict(score=t['score'], components=t['components'],
                         events=len(t['rows']), complete=t['complete'], ended=t['ended'],
-                        eligible=bool(t['complete'] and t['rows']),
+                        eligible=i in eligible,comparison_events=t.get('comparison_events',0),
                         reason=t['reason'],skipped=t['skipped'],scored=t['scored'],
                         unscored_reason=t['unscored_reason'],
-                        **{k:t[k] for k in ('baseline_reason','probability','boundary_probability','termination_probability','diagnostics') if k in t}) for t in trials])
+                        **{k:t[k] for k in ('baseline_reason','probability','boundary_probability','termination_probability','diagnostics') if k in t}) for i,t in enumerate(trials)])
     return queued, evidence, trials
 
 

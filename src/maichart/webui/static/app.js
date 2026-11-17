@@ -2725,7 +2725,7 @@ function updateFamilyFields() {
   }
   updateV2BatchControls();
   const phraseHelp=element('#v2PhraseSearchHelp');
-  if(phraseHelp)phraseHelp.textContent=checked && !splitSampling?'这个旧模型不支持比较整段写法，将使用“逐步生成”。':'默认先确定一小段音符出现的时间和数量，再比较不同键位与动作组合；“节奏与配置一起选”还会尝试不同的出音时间。增加比较会更慢。';
+  if(phraseHelp)phraseHelp.textContent=checked && !splitSampling?'这个旧模型不支持比较整段写法，将使用“逐步生成”。':'默认先定节奏，再比较键位和动作；“节奏与配置一起比较”也会尝试不同的出音时间。整段试写范围都是休止时，保留模型原本的选择。增加比较会更慢。';
   const onsetSupported=v2Generation && (!checked || generationInspection.data?.generation_capabilities?.onset_readout);
   for (const field of document.querySelectorAll('[data-v2-onset-readout]')) {
     field.hidden=!v2Generation; field.querySelector('input').disabled=!onsetSupported;

@@ -125,7 +125,7 @@ def refine_worst_spans(
 
     current_points = list(points)
     current_guard = guard
-    from .stream_generate import GridDurationRejected
+    from .stream_generate import GridDurationRejected, RefreshContext
 
     trials_per_span = max(2, int(getattr(args, "candidates", 2)))
     attempts = min(4, max(1, int(getattr(args, "window_retries", 8))))
@@ -174,6 +174,12 @@ def refine_worst_spans(
                         ids = sampler.propose(target, max(cursor, b0 - Fraction(1, 192)), end)
                     except GridDurationRejected:
                         continue
+                    except RefreshContext:
+                        if not target:
+                            break
+                        sampler = make_sampler([*prefix_pts, *mid_pts])
+                        target = []
+                        continue
                     except ValueError:
                         break
                     finally:
@@ -205,7 +211,8 @@ def refine_worst_spans(
                 mid_pts.append(accepted_pt)
                 target.extend(accepted_ids)
                 cursor = accepted_pt.beat
-                if len(target) >= sampler.max_tokens // 2 - 96:
+                if (cursor >= getattr(sampler, 'reference_refresh_beat', end)
+                        or len(target) >= sampler.max_tokens // 2 - 96):
                     sampler = make_sampler([*prefix_pts, *mid_pts])
                     target = []
 
