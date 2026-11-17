@@ -523,7 +523,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     attempts=sampling_policy['effective_retries']
     candidate_count=sampling_policy['effective_candidates']
     configuration_recovery=ConfigurationRecovery()
-    enable_configuration_recovery=(getattr(args,'configuration_recovery',True)
+    enable_configuration_recovery=(getattr(args,'configuration_recovery',False)
         and not sampling_policy['fully_greedy'])
     args._candidate_audit_active=candidate_count>1
     sampler_options={}
