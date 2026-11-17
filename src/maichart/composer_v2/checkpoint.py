@@ -11,7 +11,7 @@ import torch
 from .codec import ComponentCodec
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
 from .defaults import (
-    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_POLICY, FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION,
+    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
     FUTURE_CONFIGURATION_WEIGHT,
     MUSICAL_RELATION_FRACTION, MUSICAL_RELATION_POLICY,
 )
@@ -91,13 +91,13 @@ def inspect_payload(payload):
     relation_fraction = saved_training.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION)
     future_policy = model_fields.get('future_configuration_policy', 'off')
     future_weight = model_fields.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT)
-    future_train_view_fraction = FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION if future_policy != 'off' else 0.
+    future_train_view_fraction = configuration_view_fraction(future_policy)
     scope = saved_training.get('finetune_scope', 'all')
     if (relation_policy not in ('off', MUSICAL_RELATION_POLICY) or (relation_policy != 'off' and not continuous)
             or type(relation_fraction) not in (int, float) or not math.isfinite(relation_fraction)
             or not 0 <= relation_fraction < 1):
         errors.append('Invalid Composer v2 musical relation training contract')
-    if (future_policy not in ('off', FUTURE_CONFIGURATION_POLICY) or (future_policy != 'off' and not continuous)
+    if (future_policy not in FUTURE_CONFIGURATION_CHOICES[1:] or (future_policy != 'off' and not continuous)
             or type(future_weight) not in (int, float) or not math.isfinite(future_weight)
             or not 0 <= future_weight <= 1):
         errors.append('Invalid Composer v2 ordered future configuration')
@@ -186,6 +186,7 @@ def inspect_payload(payload):
         condition_contract=capabilities_contract,
         sequence_policy=model_fields.get('sequence_policy','window_v1'),
         generation_capabilities=dict(component_sequence=True,fine_note_strength=False,local_onset_guidance=False,
+            local_writing_condition=future_policy=='audio_writing_v2',
             intensity_curve=model_fields.get('intensity_policy','off')=='rate_curve_v1',
             onset_readout=model_fields.get('onset_readout_policy','off')=='phase_audio_v1',
             rhythm_structure=model_fields.get('structure_policy','off')!='off',

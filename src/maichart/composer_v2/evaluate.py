@@ -169,7 +169,7 @@ def teacher_forced(args):
     for key in ('window_beats', 'history_beats', 'future_beats', 'ticks_per_beat', 'max_tokens',
                 'audio_backend', 'mert_model', 'condition_policy', 'refresh_events',
                 'onset_readout_policy', 'structure_policy', 'intensity_policy','music_context_policy',
-                'local_audio_block_beats'):
+                'local_audio_block_beats','future_configuration_policy'):
         options[key] = getattr(config, key)
     from . import chart_dialect
     options['dialect_policy'] = contract.get('chart_dialect', chart_dialect.LEGACY_STRICT_POLICY)

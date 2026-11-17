@@ -418,8 +418,8 @@
   <div class="settings-content"><div class="form-grid">
     <label class="field">音乐与写法联动学习<select id="v2TrainMusicalRelationPolicy"><option value="auto" selected>自动（新训练与连续模型微调启用，续训继承）</option><option value="musical_relations_v1">启用</option><option value="off">关闭</option></select><small>给原谱里随音乐延续、渐变、换写法和留白的片段额外练习权重。</small></label>
     <label class="field">乐句强化上限<input id="v2TrainMusicalRelationFraction" type="number" value="0.30" min="0" max="1" step="any" required><small>保留原有监督。0.30 表示强化增加的权重最多占总监督权重的 30%。填 0 至小于 1 的数。</small></label>
-    <label class="field">连续配置预判<select id="v2TrainFutureConfigurationPolicy"><option value="auto" selected>自动（新训练与连续模型微调启用，续训继承）</option><option value="ordered_future_v1">启用</option><option value="off">关闭</option></select><small>训练时从同一个位置预判后续一小段真实谱面中的音符用法和写法变化，学习这些变化的先后关系。</small></label>
-    <label class="field">预判学习权重<input id="v2TrainFutureConfigurationWeight" type="number" value="0.05" min="0" max="1" step="any" required><small>0.05 是预判损失加入训练总目标时的系数。</small></label>
+    <label class="field">局部写法学习<select id="v2TrainFutureConfigurationPolicy"><option value="auto" selected>自动（新训练与微调采用音乐写法条件，续训继承）</option><option value="audio_writing_v2">音乐写法条件（最新）</option><option value="ordered_future_v1">未来配置预判（旧版）</option><option value="off">关闭</option></select><small>从歌曲预测接下来几拍的动作搭配、移动与释放倾向，写谱时持续参考。可以保留原检查点，在新目录微调启用。</small></label>
+    <label class="field">写法学习权重<input id="v2TrainFutureConfigurationWeight" type="number" value="0.05" min="0" max="1" step="any" required><small>默认 0.05，控制真实谱面对写法预测的监督强度。生成时使用模型从音乐预测的结果。</small></label>
     <label class="field">微调范围<select id="v2TrainFinetuneScope" disabled><option value="auto" selected>自动（微调全部参数）</option><option value="all">全部参数</option><option value="music_reading">音乐读取连接</option></select><small>已有连续模型可用「音乐读取连接」集中调整解码器读取音乐的连接及预判分支。</small></label>
   </div></div>
 </details>

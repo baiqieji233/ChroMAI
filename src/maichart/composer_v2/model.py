@@ -38,7 +38,7 @@ class ComposerV2Config:
     future_configuration_policy: str = 'off'
     future_configuration_weight: float = .05
     def __post_init__(self):
-        if self.future_configuration_policy not in ('off', 'ordered_future_v1'):
+        if self.future_configuration_policy not in ('off', 'ordered_future_v1', 'audio_writing_v2'):
             raise ValueError('Unknown ordered future configuration policy')
         if (not isinstance(self.future_configuration_weight, (int, float))
                 or isinstance(self.future_configuration_weight, bool)
@@ -334,7 +334,7 @@ class ComposerV2(nn.Module):
         self.output_bias=nn.Parameter(torch.zeros(codec.vocab_size))
         self._song_cache={}
         self._structured_weight_cache={}
-        if c.future_configuration_policy != 'off':
+        if c.future_configuration_policy == 'ordered_future_v1':
             from .ordered_configuration import HORIZONS, TARGET_DIM
             # Training-only readout. Preserve all old initialization RNG and
             # never feed targets or predictions back into token decoding.
@@ -342,6 +342,15 @@ class ComposerV2(nn.Module):
                 self.future_configuration_head=nn.Sequential(
                     nn.LayerNorm(d),nn.Linear(d,min(128,d)),nn.SiLU(),
                     nn.Linear(min(128,d),len(HORIZONS)*TARGET_DIM))
+        if c.future_configuration_policy == 'audio_writing_v2':
+            from .local_writing import LocalWriting
+            with torch.random.fork_rng(devices=[]):
+                self.local_writing = LocalWriting(d)
+            excluded = {'[PAD]', '[BOS]', '[CARRY]', '[CTX]', '[REF]', '[TGT]',
+                        '[AT]', '[PHASE]', '[EOS]', '[END_EVENT]'}
+            self.register_buffer('writing_query_tokens', torch.tensor([
+                token not in excluded and not token.startswith(('NUM:', 'T:'))
+                for token in codec.tokens]), persistent=False)
         if c.music_context_policy!='off':
             with torch.random.fork_rng(devices=[]):self.song_detail=nn.Linear(16,d,bias=False)
             nn.init.zeros_(self.song_detail.weight)
@@ -473,6 +482,8 @@ class ComposerV2(nn.Module):
                 self._song_cache[key]=(song.detach(),song_mask)
         else:song,song_mask=cached
         result.update(song=song,song_mask=song_mask,song_beats=batch['song_beats'])
+        if hasattr(self,'local_writing'):
+            result.update(self.local_writing.plan(song,batch))
         # Preserve the legacy order around the stochastic curve planner.
         if hasattr(self,'entry_preview'):
             result['entry_context'] = self.entry_preview(batch['entry_preview_features'].float())
@@ -570,6 +581,8 @@ class ComposerV2(nn.Module):
                 x=self._training_block(layer,x,condition,batch['token_mask'],beats,cache,
                     state=state['layers'][i] if use_cache else None,groups=groups,
                     right_padded=batch.get('right_padded_tokens',False))
+        if hasattr(self,'local_writing'):
+            x=x+self.local_writing.read(cache['writing_context'],batch,start,value,self.writing_query_tokens)
         normalized=self.norm(x)
         logits=F.linear(normalized,weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
@@ -593,6 +606,8 @@ class ComposerV2(nn.Module):
             logits,hidden=self.decode(batch,cache,incremental=False,return_future_hidden=True)
             future['future_configuration_logits']=self.future_configuration_head(hidden).reshape(-1,len(HORIZONS),TARGET_DIM)
         else:logits=self.decode(batch,cache,incremental=False)
+        if hasattr(self,'local_writing'):
+            future['future_configuration_logits']=cache['writing_logits']
         return {'logits':logits,**future,
                 **({'curve_rates':cache['curve_rates']} if 'curve_rates' in cache else {})}
     def loss(self,output,batch):
@@ -614,7 +629,7 @@ class ComposerV2(nn.Module):
             objective=loss+AUX_WEIGHT*auxiliary
         else:objective=loss
         future_loss=loss.new_zeros(())
-        if 'future_configuration_logits' in output:
+        if 'future_configuration_logits' in output and 'future_configuration_targets' in batch:
             prediction=output['future_configuration_logits'].float()
             target=batch['future_configuration_targets'].float()
             future_weights=batch['future_configuration_weights'].float()

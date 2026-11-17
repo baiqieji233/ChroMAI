@@ -22,7 +22,7 @@ from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Datase
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
 from . import chart_dialect, timing_recovery
 from .defaults import (
-    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION,
+    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
     FUTURE_CONFIGURATION_WEIGHT,
     MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, MUSICAL_RELATION_CHOICES,
     MUSICAL_RELATION_FRACTION, resolve_auxiliary_policy, resolve_finetune_scope, resolve_musical_context,
@@ -71,7 +71,7 @@ def parser():
     result.add_argument('--musical-relation-fraction', type=float,
                         help=f'Maximum relative training supervision on musical relationship views (default {MUSICAL_RELATION_FRACTION})')
     result.add_argument('--future-configuration-policy', choices=FUTURE_CONFIGURATION_CHOICES, default='auto',
-                        help='Train an auxiliary head on ordered future chart events; resume inherits the saved policy')
+                        help='Learn audio-predicted local writing conditions; ordered_future_v1 retains the legacy auxiliary objective')
     result.add_argument('--future-configuration-weight', type=float,
                         help=f'Weight of the ordered future chart objective (default {FUTURE_CONFIGURATION_WEIGHT})')
     result.add_argument('--finetune-scope', choices=FINETUNE_SCOPE_CHOICES, default='auto',
@@ -124,7 +124,7 @@ def configure_trainable_parameters(model, scope):
         decoder_reading = (len(path) >= 4 and path[0] == 'decoder'
                            and (path[2] in ('local_attention', 'song_attention') or
                                 path[2] == 'norms' and path[3] in ('1', '2')))
-        music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head')
+        music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head', 'local_writing')
         trainable = scope == 'all' or decoder_reading or music_projection
         parameter.requires_grad_(trainable)
         if trainable:
@@ -361,7 +361,7 @@ def _validate(model,loader,device,precision,maximum):
             finite=finite&torch.isfinite(loss)
             numerator+=metrics['token_loss']*max(1.,mass);mass_sum+=mass
             curve_numerator+=metrics['curve_loss']*max(1.,mass)
-            if hasattr(model,'future_configuration_head'):
+            if model.config.future_configuration_policy != 'off':
                 future_configuration_numerator+=metrics['future_configuration_loss']*max(1.,mass)
             if hasattr(model,'intensity'):
                 widths=batch['curve_widths'].float()
@@ -381,7 +381,7 @@ def _validate(model,loader,device,precision,maximum):
     nonphase_mass=time_mass_sum-phase_mass_sum
     model.validation_nonphase_time_loss=(float(time_numerator-phase_numerator)/nonphase_mass
                                         if nonphase_mass>0 else None)
-    if hasattr(model,'future_configuration_head') and model.config.future_configuration_weight > 0:
+    if model.config.future_configuration_policy != 'off' and model.config.future_configuration_weight > 0:
         model.validation_future_configuration_loss=float(future_configuration_numerator)/max(1.,mass_sum)
     if hasattr(model,'intensity'):
         model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
@@ -769,7 +769,7 @@ def train(args):
     if args.future_configuration_policy != 'off':
         contract.update(future_configuration_policy=args.future_configuration_policy,
                         future_configuration_weight=args.future_configuration_weight,
-                        future_configuration_train_view_fraction=FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION)
+                        future_configuration_train_view_fraction=configuration_view_fraction(args.future_configuration_policy))
     if args.finetune_scope != 'all':
         contract['finetune_scope'] = args.finetune_scope
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
@@ -828,10 +828,9 @@ def train(args):
                     expected_missing.update(k for k in model.state_dict() if k.startswith('intensity.'))
                 else:parent_state={k:v for k,v in parent_state.items() if not k.startswith('intensity.')}
             if future_migration:
-                if args.future_configuration_policy == 'off':
-                    parent_state = {k:v for k,v in parent_state.items() if not k.startswith('future_configuration_head.')}
-                else:
-                    expected_missing.update(k for k in model.state_dict() if k.startswith('future_configuration_head.'))
+                prefixes=('future_configuration_head.','local_writing.')
+                parent_state={k:v for k,v in parent_state.items() if not k.startswith(prefixes)}
+                expected_missing.update(k for k in model.state_dict() if k.startswith(prefixes))
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
@@ -840,7 +839,7 @@ def train(args):
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
                 future_configuration_policy=args.future_configuration_policy,
-                zero_initialization=not future_migration or args.future_configuration_policy == 'off')
+                zero_initialization=not future_migration or args.future_configuration_policy in ('off','audio_writing_v2'))
         else:
             model.load_state_dict(parent_state,strict=True)
     if hasattr(model,'onset_readout') and (not parent or onset_migration):
@@ -940,8 +939,7 @@ def train(args):
          future_configuration=dataset.audit.get('future_configuration'),
          future_configuration_policy=args.future_configuration_policy,
          future_configuration_weight=args.future_configuration_weight,
-         future_configuration_train_view_fraction=(FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION
-                                                   if args.future_configuration_policy != 'off' else 0.),
+         future_configuration_train_view_fraction=configuration_view_fraction(args.future_configuration_policy),
          training_window_events=args.training_window_events,
          rhythm_structure=dataset.audit.get('rhythm_structure'),
          intensity_policy=args.intensity_policy,

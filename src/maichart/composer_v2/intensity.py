@@ -297,6 +297,7 @@ def predict(args):
     song.summary=dict(audio.summary(160));song.summary['beats']=_beats_at_seconds(clock,song.summary['times_sec'])
     # Reuse precisely the normal generator's audio encoding and condition path.
     data=StreamDataset.__new__(StreamDataset)
+    data.future_configuration_policy=getattr(model.config,'future_configuration_policy','off')
     data.codec=model.codec;data.max_tokens=config.max_tokens;data.history_beats=config.history_beats
     data.window_beats=config.window_beats;data.future_beats=config.future_beats;data.intensity_policy=POLICY
     data.local_audio_block_beats=config.local_audio_block_beats

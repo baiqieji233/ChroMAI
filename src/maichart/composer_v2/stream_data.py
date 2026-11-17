@@ -47,13 +47,14 @@ class StreamDataset(ComposerV2Dataset):
         musical_relation_fraction = float(musical_relation_fraction)
         if not 0 <= musical_relation_fraction < 1:
             raise ValueError('musical_relation_fraction must be between 0 and 1 (exclusive)')
-        if future_configuration_policy not in ('off', ordered_configuration.POLICY):
+        if future_configuration_policy not in ('off', ordered_configuration.POLICY, 'audio_writing_v2'):
             raise ValueError('Unknown future configuration policy')
         self.musical_relation_policy = musical_relation_policy
         self.musical_relation_fraction = musical_relation_fraction
         self.future_configuration_policy = future_configuration_policy
         self.auxiliary_validation = bool(auxiliary_validation)
         self._configuration_cache = OrderedDict()
+        self._writing_audio_cache = OrderedDict()
         self.musical_context_policy = (
             musical_context.POLICY if musical_context_policy == 'auto' else musical_context_policy)
         self.musical_context_probability = musical_context_probability
@@ -128,6 +129,13 @@ class StreamDataset(ComposerV2Dataset):
                 quality='continuous_reviewed_audio_coverage', timing_recovery=False,
                 probability=1. if self.auxiliary_validation else ordered_configuration.TRAINING_PROBABILITY,
                 chart_condition='level_only_on_auxiliary_windows', curve_teacher=False)
+            if future_configuration_policy == 'audio_writing_v2':
+                from .local_writing import FIELDS, BEAT_INTERVALS
+                self.audit['future_configuration'].update(
+                    horizons=BEAT_INTERVALS,dimension=len(FIELDS),max_queries=None,
+                    probability=1.,target='audio_predicted_ordered_writing',
+                    chart_condition='planner_level_only_decoder_optional_conditions',
+                    execution='predicted_inputs_only_at_configuration_decisions')
         self.recovery_sources = {}
         self._recovery_seed_indices = {}
         self.training_epoch = 0
@@ -391,7 +399,20 @@ class StreamDataset(ComposerV2Dataset):
         if self._paired_music():
             from .music_evidence import entry_preview
             result['entry_preview_features'] = torch.as_tensor(entry_preview(self._profile(song), anchors))
+        if getattr(self,'future_configuration_policy','off') == 'audio_writing_v2':
+            result.update(self.writing_features(song,anchors))
         return result
+
+    def writing_features(self,song,anchors):
+        from .local_writing import audio_rows, inputs
+        if not hasattr(self,'_writing_audio_cache'):
+            self._writing_audio_cache=OrderedDict()
+        key=song.stream_cache_key or _song_cache_key(song)
+        if key not in self._writing_audio_cache:
+            self._writing_audio_cache[key]=audio_rows(self._profile(song),song.clock)
+            if len(self._writing_audio_cache)>8:self._writing_audio_cache.popitem(last=False)
+        self._writing_audio_cache.move_to_end(key)
+        return inputs(self._writing_audio_cache[key],song,anchors)
 
     def tile(self,song,anchor,*,include_beat_features=True):
         if not hasattr(self,'tile_cache'):self.tile_cache=OrderedDict()
@@ -698,6 +719,8 @@ class StreamDataset(ComposerV2Dataset):
             paired[:prefix.index(codec.ref_id)]=0
             out['paired_music_features']=torch.as_tensor(paired)
             out['entry_preview_features']=torch.as_tensor(entry_preview(profile,anchors))
+        if getattr(self,'future_configuration_policy','off') == 'audio_writing_v2':
+            out.update(self.writing_features(song,anchors))
         return out
     def __getitem__(self,index):
         source = self.recovery_sources.get(index)
@@ -722,7 +745,10 @@ class StreamDataset(ComposerV2Dataset):
             extra = float(scores[index]) * fraction / (1. - fraction)
             item['token_weights'] *= 1. + extra
             item['musical_relation_extra_fraction'] = extra / (1. + extra)
-        if self._use_future_configuration(index):
+        if self.future_configuration_policy == 'audio_writing_v2':
+            from .local_writing import add_targets
+            add_targets(item,self._configuration(si),song)
+        elif self._use_future_configuration(index):
             ordered_configuration.add_item(item, self._configuration(si), self.codec, begin, end)
             if 'future_configuration_positions' in item:
                 for field in ('condition', 'condition_known'):
@@ -789,6 +815,9 @@ class StreamDataset(ComposerV2Dataset):
         keep=torch.tensor([int(token) in self._timing_ids for token in item['labels']],dtype=torch.bool)
         item['labels']=item['labels'].masked_fill(~keep,-100)
         item['token_weights']=item['token_weights']*keep*2.
+        if self.future_configuration_policy == 'audio_writing_v2':
+            from .local_writing import add_targets
+            add_targets(item,self._configuration(si),song)
         return item
 
 
@@ -799,6 +828,8 @@ def collate_stream(items):
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
     out=collate_composer_v2(temporary)
     ordered_configuration.collate(items, out)
+    from .local_writing import collate as collate_writing
+    collate_writing(items,out)
     if any('musical_relation_extra_fraction' in item for item in items):
         out['musical_relation_extra_fraction'] = torch.tensor([
             item.get('musical_relation_extra_fraction', 0.) for item in items], dtype=torch.float32)

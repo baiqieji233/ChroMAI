@@ -1040,8 +1040,10 @@ function composerV2TrainingView(task) {
       ['音乐与写法联动学习',runtime.musical_relation_policy==='musical_relations_v1'
         ? `已启用 · 乐句强化上限 ${show(n(runtime,'musical_relation_fraction')*100,1)}%`
         : runtime.musical_relation_policy==='off' ? '关闭' : '未记录'],
-      ['连续配置预判',runtime.future_configuration_policy==='ordered_future_v1'
-        ? `已启用 · 预判学习权重 ${show(n(runtime,'future_configuration_weight'))}`
+      ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v2'
+        ? `音乐写法条件 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
+        : runtime.future_configuration_policy==='ordered_future_v1'
+        ? `旧版配置预判 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         : runtime.future_configuration_policy==='off' ? '关闭' : '未记录'],
       ['微调范围',({all:'全部参数',music_reading:'音乐读取连接'})[runtime.finetune_scope]||'未记录'],
       ['音频特征',runtime.audio_backend||'未记录']]],
@@ -1059,10 +1061,10 @@ function composerV2TrainingView(task) {
       ['曲线验证 loss',show(n(complete,'validation_curve_loss'))],
       ['出音频率平均误差（次/秒）',show(errors[0])],['同拍额外物量平均误差（个/秒）',show(errors[1])]]]);
   }
-  if((runtime.future_configuration_policy ?? config.future_configuration_policy)==='ordered_future_v1') {
-    cards.push(['连续配置预判',[
-      ['训练预判 loss',show(n(metrics,'future_configuration_loss'))],
-      ['验证预判 loss',show(n(complete,'validation_future_configuration_loss'))]]]);
+  if(['ordered_future_v1','audio_writing_v2'].includes(runtime.future_configuration_policy ?? config.future_configuration_policy)) {
+    cards.push(['局部写法学习',[
+      ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
+      ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]]]);
   }
   return {status,progress:amount,knownTarget:target>0,indeterminate:preparing,cards,history,validationHistory,
     note:'累计训练 loss 可能掩盖近期退步，请同时查看固定片段验证与非相位时序 loss。当前版本在定期保存检查点时也会验证；预算为0时检查完整开发集，正数使用固定抽查片段。'};

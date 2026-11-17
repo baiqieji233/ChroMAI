@@ -210,6 +210,7 @@ class EventSampler(WindowSampler):
             beat_batch['onset_strength'] = self.batch['onset_strength']
             for key, value in self.model.encode_beat_features(beat_batch).items():
                 self.cache[key] = torch.cat((self.cache[key], value), dim=0)
+            self._append_writing_context(beat_batch,len(missing))
         for a in missing:
             self.anchor_ids[a] = len(self.anchors)
             self.anchors.append(a)
@@ -289,6 +290,15 @@ class EventSampler(WindowSampler):
         encoded=self.model.encode_local_audio(query,keep)
         encoded.update(self.model.encode_beat_features(query))
         for key,value in encoded.items():
+            self.cache[key]=torch.cat((self.cache[key],value),dim=0)
+        self._append_writing_context(query,len(missing))
+
+    def _append_writing_context(self,batch,count):
+        if not hasattr(self.model,'local_writing'):
+            return
+        batch['writing_owner']=torch.zeros(count,dtype=torch.long,device=self.device)
+        batch['condition']=self.batch['condition']
+        for key,value in self.model.local_writing.plan(self.cache['song'],batch).items():
             self.cache[key]=torch.cat((self.cache[key],value),dim=0)
     def _forced_time_probability(self,target,tokens,after,end):
         if self._probability is None:return
@@ -495,6 +505,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     dataset.structure_policy=getattr(config,'structure_policy','off')
     dataset.intensity_policy=getattr(config,'intensity_policy','off')
     dataset.music_context_policy=getattr(config,'music_context_policy','off')
+    dataset.future_configuration_policy=getattr(config,'future_configuration_policy','off')
     if getattr(args,'intensity_curve',None):
         from .intensity import profile_rates
         profile=json.loads(Path(args.intensity_curve).read_text(encoding='utf-8'))

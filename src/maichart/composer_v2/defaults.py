@@ -21,11 +21,19 @@ MUSICAL_CONTEXT_PROBABILITY = .25
 MUSICAL_RELATION_POLICY = 'musical_relations_v1'
 MUSICAL_RELATION_CHOICES = ('auto', 'off', MUSICAL_RELATION_POLICY)
 MUSICAL_RELATION_FRACTION = .3
-FUTURE_CONFIGURATION_POLICY = 'ordered_future_v1'
-FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', FUTURE_CONFIGURATION_POLICY)
+FUTURE_CONFIGURATION_POLICY = 'audio_writing_v2'
+FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', FUTURE_CONFIGURATION_POLICY)
 FUTURE_CONFIGURATION_WEIGHT = .05
 FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION = .25
 FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading')
+
+
+def configuration_view_fraction(policy):
+    if policy == FUTURE_CONFIGURATION_POLICY:
+        return 1.
+    if policy == 'ordered_future_v1':
+        return FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION
+    return 0.
 
 
 def resolve_musical_context(requested, probability=None, *, sequence_policy,
