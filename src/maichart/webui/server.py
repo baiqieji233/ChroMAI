@@ -357,6 +357,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 operation = parsed.path.rsplit("/", 1)[-1]
                 if operation == "inspect": return composer_v2_api.inspect(self, payload)
                 if operation == "estimate_parameters": return composer_v2_api.estimate_parameters(self, payload)
+                if operation == "estimate_resources": return composer_v2_api.estimate_resources(self, payload)
                 if operation == "train": return composer_v2_api.start_train(self, payload, runtime=sys.modules[__name__])
                 if operation == "chartgate_setup": return composer_v2_api.start_chartgate_setup(self, payload, runtime=sys.modules[__name__])
                 if operation == "generate": return composer_v2_api.start_generate(self, payload, runtime=sys.modules[__name__])

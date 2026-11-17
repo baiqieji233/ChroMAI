@@ -440,6 +440,10 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
   saved.song_layers=data.model_config?.song_layers??2;
+  const audioLayers = element('#v2TrainAudioLayers');
+  if (currentTrainingMode() === 'finetune' && audioLayers && Number(audioLayers.value) < saved.audio_layers) {
+    audioLayers.value = String(saved.audio_layers);
+  }
   if(currentTrainingMode()==='resume') {
     const difficulty=data.training_contract?.difficulty_selection;
     saved.difficulty_source=difficulty?.source??'declared';
@@ -4086,6 +4090,12 @@ function updateTrainingControls() {
     }
   }
   if(element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').disabled=v2Resume;
+  const audioLayers = element('#v2TrainAudioLayers');
+  if (audioLayers) {
+    const sourceDepth = checkpointInspection.key === currentCheckpointKey() && checkpointInspection.data?.valid
+      ? checkpointInspection.data.model_config?.audio_layers : null;
+    audioLayers.min = String(currentTrainingMode() === 'finetune' ? sourceDepth ?? 1 : 1);
+  }
   const v2Fixed=new Set(['song_layers','d_model','layers','nhead','dim_feedforward','dropout','window_beats','history_beats','future_beats','ticks_per_beat','max_tokens','audio_backend','mert_model','refresh_events']);
   for(const key of (typeof COMPOSER_V2_FIELDS!=="undefined"?COMPOSER_V2_FIELDS:[])){
     const node=element("#"+v2FieldId(key));if(node){

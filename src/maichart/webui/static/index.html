@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ChroMAI</title>
   <link rel="stylesheet" href="/styles.css?v=audit-source-selection-20261115">
-  <link rel="stylesheet" href="/workspace.css?v=training-source-preview-20261113">
+  <link rel="stylesheet" href="/workspace.css?v=resource-estimates">
   <link rel="stylesheet" href="/workspace_logs.css">
 </head>
 <body>
@@ -1065,7 +1065,13 @@
 <div class="settings-maintenance"><button id="resetSettingsButton" class="secondary-button" title="清空浏览器里保存的【全部】设置（训练参数 + 数据集路径 + 生成参数）并恢复出厂默认值；只想重置生成参数请用生成面板里的「恢复生成默认值」">清除全部保存（含训练参数）</button><small>此操作会清除浏览器保存的训练、生成和路径设置，随后恢复页面默认值。</small></div>
 <div class="run-review"><h3>本次训练摘要</h3><ul id="trainingRunSummary"></ul>
 <p id="trainingRunHint" class="inline-status" role="status"></p></div>
-<div class="workflow-actions"><button id="trainButton" class="primary-button">开始训练</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button></div>
+<div class="workflow-actions">
+  <div id="trainingResourceEstimate" class="run-resources" data-training-family="chart_composer_v2">
+    <div role="status"><strong>正在估算显存和模型大小…</strong><small></small></div>
+    <button class="secondary-button" type="button" disabled>刷新估算</button>
+  </div>
+  <button id="trainButton" class="primary-button">开始训练</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button>
+</div>
 </section>
 
       <section class="panel quality-panel">
@@ -1947,7 +1953,13 @@
 </details>
 </section>
 <div class="run-review"><h3>本次生成摘要</h3><ul id="generationRunSummary"></ul></div>
-<div class="workflow-actions"><button id="generateButton" class="primary-button">生成谱面</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button></div>
+<div class="workflow-actions">
+  <div id="generationResourceEstimate" class="run-resources" data-generation-family="chart_composer_v2">
+    <div role="status"><strong>检查 checkpoint 后显示显存、模型大小和参数量</strong><small></small></div>
+    <button class="secondary-button" type="button" disabled>刷新估算</button>
+  </div>
+  <button id="generateButton" class="primary-button">生成谱面</button><button class="secondary-button" type="button" data-open-task-logs>查看任务与日志</button>
+</div>
 <details id="generationAcceptance" class="settings-section" data-advanced data-generation-family="song_form_v1 song_form_v2 chart_stream_v1 chart_composer_v1 event_v1 legacy_frame_v2" hidden>
 <summary><span>生成后的诊断与对照（可选）</span><small>检查历史谱面，或使用自己选择的参考统计</small>
 </summary>
@@ -2109,10 +2121,10 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=player-motion-20261111"></script>
-  <script src="/app.js?v=joint-development-20261117"></script>
+  <script src="/app.js?v=resource-estimates"></script>
   <script src="/v2_intensity.js?v=editor-20261109"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=large-scale-screening-20261114"></script>
-  <script src="/workspace.js?v=joint-development-20261117"></script>
+  <script src="/workspace.js?v=resource-estimates"></script>
 </body>
 </html>

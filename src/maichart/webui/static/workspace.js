@@ -44,54 +44,129 @@
   }
 
   const selectedMode = () => value("trainingMode", "fresh");
-  let v2ParameterEstimate = {key: "", text: "", timer: null};
+  const resourceEstimates = {};
+  const integerFormat = new Intl.NumberFormat("zh-CN");
+  const gib = (bytes) => (bytes / 2 ** 30).toFixed(2);
+  const gibRange = ([low, high]) => low === high ? `${gib(high)} GiB` : `${gib(low)}–${gib(high)} GiB`;
+  const weightSize = (bytes) => bytes < 2 ** 30 ? `${(bytes / 2 ** 20).toFixed(1)} MiB` : `${gib(bytes)} GiB`;
+  const parameterSize = (count) => count < 1e6 ? integerFormat.format(count) : `${(count / 1e6).toFixed(2)}M`;
 
-  function v2ParameterSummary(mode) {
-    const label = "预估模型参数量：";
-    const payload = {mode};
-    if (mode !== "fresh") {
-      const inspected = typeof checkpointInspection !== "undefined"
-        && checkpointInspection.key === currentCheckpointKey() && checkpointInspection.data;
-      if (!inspected?.valid) return label + "检查 checkpoint 后显示";
-      payload.model_config = inspected.model_config;
-      payload.vocab_size = inspected.vocab_size;
-      if (!payload.vocab_size) return label + "检查结果缺少词表大小，请重启 WebUI 后重新检查";
-    }
+  function trainingResourcePayload(mode) {
+    const settings = composerV2TrainingPayload();
+    const keys = ["device", "precision", "batch_size", "activation_checkpointing", "decoder_flash_attention",
+      "prepare_device", "cuda_memory_budget_gb", "finetune_scope"];
+    if (mode === "fresh") keys.push("d_model", "layers", "nhead", "dim_feedforward", "audio_layers", "song_layers",
+      "ticks_per_beat", "max_tokens", "window_beats", "history_beats", "future_beats", "audio_backend");
+    if (mode === "finetune") keys.push("audio_layers");
+    if (mode !== "resume") keys.push("local_audio_block_beats", "music_context", "rhythm_structure", "onset_readout",
+      "intensity_curve", "future_configuration_policy", "future_configuration_weight");
+    return {mode, ...Object.fromEntries(keys.filter((key) => Object.hasOwn(settings, key)).map((key) => [key, settings[key]]))};
+  }
 
-    const dimensions = mode === "fresh"
-      ? ["d_model", "layers", "nhead", "dim_feedforward", "audio_layers", "song_layers", "ticks_per_beat"]
-      : mode === "finetune" ? ["audio_layers"] : [];
-    for (const key of dimensions) {
-      const number = Number(value(v2FieldId(key)));
-      if (!Number.isSafeInteger(number) || number < 1) return label + "请填写有效的模型结构";
-      payload[key] = number;
+  function showResourceEstimate(panel, payload, output) {
+    const {parameter_count: count, trainable_parameter_count: trainable, model_weight_bytes: weights, memory} = output;
+    const estimates = [];
+    const notes = [];
+    let warning = false;
+    const cudaModel = memory.device === "cuda";
+    const xpuModel = memory.device === "xpu";
+    const cudaAudio = Boolean(memory.audio_peak_bytes);
+    if (cudaModel || xpuModel || cudaAudio) {
+      estimates.push(`预计峰值${xpuModel ? " GPU 内存" : "显存"} ${gibRange(memory.peak_bytes)}`);
+      if (cudaModel || xpuModel) {
+        const precision = memory.precision === "auto" ? "自动精度" : memory.precision.toUpperCase();
+        const [short, long] = memory.tokens_per_sample;
+        const size = memory.batch_size === null ? `并行 ${memory.workers} 张` : `批大小 ${memory.batch_size}`;
+        notes.push(`${memory.device.toUpperCase()} · ${precision} · ${size} · 按每片段 ${short}–${long} token 粗估`);
+      }
+    } else if (memory.openvino_gpu) {
+      estimates.push("OpenVINO GPU 显存随设备变化");
+    } else {
+      estimates.push("CPU 运行 · 无 CUDA 显存需求");
     }
-    if (mode === "fresh" && payload.d_model % payload.nhead !== 0) {
-      return label + "模型宽度须能被注意力头数整除";
-    }
-    if (mode !== "resume") {
-      for (const key of ["music_context", "rhythm_structure", "onset_readout", "intensity_curve", "future_configuration_policy"]) {
-        payload[key] = value(v2FieldId(key), "auto");
+    estimates.push(`模型权重 ${weightSize(weights)}（FP32）`, `参数 ${parameterSize(count)}`);
+    if (trainable !== null && trainable !== count) estimates.push(`可训练 ${parameterSize(trainable)}`);
+    if (Number.isFinite(memory.cuda?.free_bytes)) {
+      const {name, free_bytes: free, total_bytes: total} = memory.cuda;
+      notes.push(`${name} 估算时可用 ${gib(free)} / ${gib(total)} GiB`);
+      const cudaPeak = xpuModel ? memory.audio_peak_bytes : memory.peak_bytes;
+      if (cudaPeak[0] > free) {
+        warning = true;
+        notes.push("预计峰值超过可用显存");
+      } else if (cudaPeak[1] > free) {
+        warning = true;
+        notes.push("较长片段可能超出可用显存");
       }
     }
-
-    const key = JSON.stringify(payload);
-    if (key !== v2ParameterEstimate.key) {
-      clearTimeout(v2ParameterEstimate.timer);
-      const estimate = v2ParameterEstimate = {key, text: "估算中…", timer: null};
-      estimate.timer = setTimeout(async () => {
-        try {
-          const {parameter_count: count, vocab_size: vocab} = await api("/api/composer-v2/estimate_parameters", payload);
-          const basis = mode === "fresh" ? `按基础词表 ${vocab} 词元，最终随训练数据变化`
-            : mode === "finetune" ? `按 checkpoint 词表 ${vocab} 词元，微调可能扩词` : "按 checkpoint 结构和词表";
-          estimate.text = `约 ${(count / 1e6).toFixed(2)}M（${basis}，MERT 另计）`;
-        } catch (error) {
-          estimate.text = `暂不可用（${error.message}）`;
-        }
-        if (estimate === v2ParameterEstimate) refresh();
-      }, 180);
+    if ((cudaModel || cudaAudio) && !memory.cuda_available) {
+      warning = true;
+      notes.push("当前环境 CUDA 不可用");
     }
-    return label + v2ParameterEstimate.text;
+    if (xpuModel && !memory.xpu_available) {
+      warning = true;
+      notes.push("当前环境 XPU 不可用");
+    }
+    if (cudaAudio) notes.push(`音频缓存缺失时，CUDA 准备阶段约 ${gibRange(memory.audio_peak_bytes)}`);
+    if (memory.openvino_gpu && cudaAudio) notes.push("OpenVINO GPU 用量随设备变化");
+    if (memory.cuda_budget_bytes) notes.push(`CUDA 分配预算 ${gib(memory.cuda_budget_bytes)} GiB`);
+    if (payload.mode === "fresh") notes.push("参数按基础词表估算");
+    if (payload.mode === "finetune") notes.push("参数按现有词表估算，微调可能扩词");
+    panel.querySelector("strong").textContent = estimates.join(" · ");
+    panel.querySelector("strong").title = `总参数 ${integerFormat.format(count)}${trainable === null ? "" : `，可训练 ${integerFormat.format(trainable)}`}`;
+    panel.querySelector("small").textContent = notes.join("。 ");
+    panel.classList.toggle("warn", warning);
+  }
+
+  function updateResourceEstimate(scope, enabled, mode) {
+    const panel = $(`#${scope}ResourceEstimate`);
+    if (!panel) return;
+    panel.hidden = !enabled;
+    const previous = resourceEstimates[scope];
+    function waitForInput(message) {
+      clearTimeout(previous?.timer);
+      delete resourceEstimates[scope];
+      const main = panel.querySelector("strong");
+      if (main.textContent !== message) main.textContent = message;
+      main.title = "";
+      panel.querySelector("small").textContent = "";
+      panel.querySelector("button").disabled = true;
+      panel.classList.remove("warn");
+    }
+    if (!enabled) return waitForInput("");
+    const generating = mode === "generate";
+    const payload = generating ? {
+      mode, device: value("v2GenerateDevice", "auto"),
+      audio_device: value("v2GenerateAudioDevice", "auto"), inference_backend: value("v2GenerateInferenceBackend", "auto"),
+      count: Number(value("v2GenerateCount", "1")),
+      parallel: document.getElementById("v2GenerateParallel")?.disabled ? 1 : Number(value("v2GenerateParallel", "1")),
+    } : trainingResourcePayload(mode);
+    if (mode !== "fresh") {
+      const inspected = generating
+        ? generationInspection.path === value("checkpointPath").trim() && generationInspection.data
+        : checkpointInspection.key === currentCheckpointKey() && checkpointInspection.data;
+      if (!inspected?.valid || !inspected.vocab_size) return waitForInput("检查 checkpoint 后显示显存、模型大小和参数量");
+      payload.model_config = inspected.model_config;
+      payload.vocab_size = inspected.vocab_size;
+      if (mode === "resume") payload.training_contract = inspected.training_contract;
+    }
+    const key = JSON.stringify(payload);
+    if (previous?.key === key) return;
+    waitForInput("正在估算显存和模型大小…");
+    const estimate = resourceEstimates[scope] = {key, timer: null};
+    estimate.timer = setTimeout(async () => {
+      try {
+        const output = await api("/api/composer-v2/estimate_resources", payload);
+        if (resourceEstimates[scope] === estimate) showResourceEstimate(panel, payload, output);
+      } catch (error) {
+        if (resourceEstimates[scope] === estimate) {
+          panel.querySelector("strong").textContent = error.message === "未知 Composer v2 操作"
+            ? "重启 WebUI 后显示显存、模型大小和参数量"
+            : `预估暂不可用 · ${error.message}`;
+        }
+      } finally {
+        if (resourceEstimates[scope] === estimate) panel.querySelector("button").disabled = false;
+      }
+    }, 200);
   }
   const taskLabels = {review_bundle_export:'导出已确认片段',review_bundle_preview:'预览片段包',review_bundle_import:'导入片段包',candidate_budget: "训练来源学习份额估算", candidate_scan: "待审候选库扫描", preprocess: "预处理", train: "训练", generate: "生成", acceptance: "诊断", gold: "金标工具",
     chart_stream_train: "连续谱面训练", chart_stream_generate: "连续谱面生成",
@@ -251,7 +326,6 @@
     if(selectedFamily==='chart_composer_v2')list("trainingRunSummary",[
       `起点：${modeLabel}${mode!=="fresh"?` · ${value("trainingCheckpointPath").trim()||"尚未选择 checkpoint"}`:""}`,
       sources.length?`素材：${sources.map(item=>item.name||item.path).join("、")}`:`素材：${value("manifestPath").trim()||"尚未准备"}`,
-      v2ParameterSummary(mode),
       mode==='resume' ? '音乐与写法联动、连续配置预判与微调范围均继承 checkpoint。'
         : `音乐与写法联动：${nameOf('v2TrainMusicalRelationPolicy')}${value('v2TrainMusicalRelationPolicy')==='off'?'':` · 强化上限 ${value('v2TrainMusicalRelationFraction')}`}；连续配置预判：${nameOf('v2TrainFutureConfigurationPolicy')}${value('v2TrainFutureConfigurationPolicy')==='off'?'':` · 学习权重 ${value('v2TrainFutureConfigurationWeight')}`}`,
       ...(mode==='finetune' ? [`微调范围：${nameOf('v2TrainFinetuneScope')}`] : []),
@@ -265,6 +339,7 @@
       ...(mode!=='resume' && value('v2TrainValidationSource')!=='off' && (value('v2TrainValidationSource')!=='auto' || Number(value('v2TrainHoldoutFraction'))>0)
         ? [`每轮验证批次 ${Number(value('v2TrainValidationMaxBatches')) || '全部'}`] : []),
       `输出目录：${value("checkpointDir")}`]);
+    updateResourceEstimate("training", selectedFamily === "chart_composer_v2", mode);
     const hint = $("#trainingRunHint");
     const problems = [];
     if (mode !== "fresh" && !value("trainingCheckpointPath").trim()) problems.push("先选择已有模型并检查兼容性。");
@@ -307,6 +382,7 @@
       `Radar / Style：${typeof v2ConditionCapability==='function' && v2ConditionCapability().enabled ? `手动指定 ${Object.values(v2ConditionState).filter(item=>item.override).length} 项；其余自动由音乐决定` : '由音乐与等级自动决定'}`,
       `时钟：${value("tempoMap").trim()?"手动 tempo map 优先":value("bpm").trim()?`手动 BPM ${value("bpm").trim()}`:`BPM 自动（${nameOf("v2GenerateTempoDetection")}）`} · ${document.getElementById('v2GenerateAutoFirst')?.checked?'第一拍自动对准':`手动首拍 ${value("first")} 秒`}`,
       `输出：${value("outputPath")||"outputs/composer_v2/maidata.txt"}；附带报告 .composer_v2.json`]);
+    updateResourceEstimate("generation", currentGenerationFamily() === "chart_composer_v2", "generate");
     advancedCount("training");
   }
 
@@ -367,6 +443,13 @@
   $("#expandLogsButton")?.addEventListener("click", () => setLogsExpanded(!document.body.classList.contains("logs-expanded")));
   $("#taskSelector")?.addEventListener("change", (event) => { if (event.target.value) watchTask(event.target.value); });
   $("#refreshTaskSelector")?.addEventListener("click", async () => { try { renderTasks((await api("/api/status")).tasks || []); } catch (error) { reportError(error.message); } });
+  for (const scope of ["training", "generation"]) {
+    $(`#${scope}ResourceEstimate button`)?.addEventListener("click", () => {
+      clearTimeout(resourceEstimates[scope]?.timer);
+      delete resourceEstimates[scope];
+      refresh();
+    });
+  }
   $("#applyTrainingRunRecipe")?.addEventListener("click", () => {
     const composer=value('modelFamily')==='chart_composer_v1';
     if (value("trainingRunRecipe") === "smoke") applyValues({epochs: 1, [composer?'composerMaxSteps':'maxSteps']:32, validationMaxSteps: 2}, "已应用短跑：1 轮、最多 32 个训练 batch。没有启动训练。");

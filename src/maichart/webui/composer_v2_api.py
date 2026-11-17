@@ -175,8 +175,8 @@ def _auxiliary_settings(payload, feature, choices, value_name, default, *, seque
     return requested, policy, value
 
 
-def estimate_parameters(handler, payload):
-    """Count Composer weights without loading training data, MERT or a checkpoint."""
+def _estimate_model(payload, mode, scope):
+    """Resolve and count the proposed model on the meta device."""
     import torch
     from maichart.composer_v2.defaults import ENCODER_DEFAULTS
     from maichart.composer_v2.intensity import resolve_policy as resolve_intensity
@@ -185,16 +185,19 @@ def estimate_parameters(handler, payload):
     from maichart.composer_v2.onset_policy import resolve_policy as resolve_onset
     from maichart.composer_v2.rhythm_structure import resolve_policy as resolve_structure
     from maichart.composer_v2.stream_codec import StreamCodec
+    from maichart.composer_v2.train import configure_trainable_parameters
 
-    mode = _choice(payload, "mode", "fresh", ("fresh", "resume", "finetune"))
     saved = None
     if mode == "fresh":
         defaults = {**TRAIN_DEFAULTS, **ENCODER_DEFAULTS}
-        config = ComposerV2Config(**{
+        dimensions = {
             key: _integer(payload, key, defaults[key], minimum=1)
             for key in ("d_model", "layers", "nhead", "dim_feedforward",
-                        "audio_layers", "song_layers", "ticks_per_beat")
-        })
+                        "audio_layers", "song_layers", "ticks_per_beat", "window_beats", "max_tokens")
+        }
+        dimensions.update({key: _integer(payload, key, defaults[key]) for key in ("history_beats", "future_beats")})
+        config = ComposerV2Config(**dimensions,
+            audio_backend=_choice(payload, "audio_backend", defaults["audio_backend"], ('native', 'mert')))
     else:
         saved = payload.get("model_config")
         if not isinstance(saved, dict):
@@ -204,13 +207,15 @@ def estimate_parameters(handler, payload):
             config = replace(config, audio_layers=_integer(
                 payload, "audio_layers", config.audio_layers, minimum=config.audio_layers))
 
-    if mode != "resume":
+    if mode in ('fresh', 'finetune'):
         _, future_policy, future_weight = _auxiliary_settings(
             payload, "future_configuration", FUTURE_CONFIGURATION_CHOICES, "weight",
             FUTURE_CONFIGURATION_WEIGHT, sequence_policy=config.sequence_policy,
             saved_config=saved, resume=False)
+        audio_block = _choice(payload, 'local_audio_block_beats', 'auto', ('auto', '1', '2'))
         config = replace(
             config,
+            local_audio_block_beats=config.local_audio_block_beats if audio_block == 'auto' else int(audio_block),
             music_context_policy=resolve_music(payload.get("music_context", "auto"), saved)[0],
             structure_policy=resolve_structure(payload.get("rhythm_structure", "auto"), saved)[0],
             onset_readout_policy=resolve_onset(payload.get("onset_readout", "auto"), saved)[0],
@@ -228,6 +233,7 @@ def estimate_parameters(handler, payload):
     vocab_size = codec.vocab_size if mode == "fresh" else _integer(payload, "vocab_size", 0, minimum=1)
     with torch.device("meta"):
         model = ComposerV2(replace(config, layers=2, audio_layers=1, song_layers=1), codec)
+    configure_trainable_parameters(model, scope)
     # Each odd-indexed decoder block also reads whole-song audio.
     repetitions = (
         (model.decoder[0], (config.layers + 1) // 2),
@@ -235,11 +241,65 @@ def estimate_parameters(handler, payload):
         (model.audio_blocks[0], config.audio_layers),
         (model.song_blocks[0], config.song_layers),
     )
-    count = sum(parameter.numel() for parameter in model.parameters())
-    for block, copies in repetitions:
-        count += (copies - 1) * sum(parameter.numel() for parameter in block.parameters())
-    count += (vocab_size - codec.vocab_size) * (config.d_model + 1)
-    return handler._json_response(dict(parameter_count=count, vocab_size=vocab_size))
+    def count(trainable_only):
+        def elements(module):
+            return sum(parameter.numel() for parameter in module.parameters()
+                       if not trainable_only or parameter.requires_grad)
+        total = elements(model) + sum((copies - 1) * elements(block) for block, copies in repetitions)
+        if not trainable_only or scope == 'all':
+            total += (vocab_size - codec.vocab_size) * (config.d_model + 1)
+        return total
+
+    parameters = count(False)
+    trainable = count(True) if scope != 'all' else parameters
+    return config, vocab_size, parameters, trainable
+
+
+def estimate_parameters(handler, payload):
+    """Count Composer weights without loading training data, MERT or a checkpoint."""
+    mode = _choice(payload, 'mode', 'fresh', ('fresh', 'resume', 'finetune'))
+    _, vocab_size, parameters, _ = _estimate_model(payload, mode, 'all')
+    return handler._json_response(dict(parameter_count=parameters, vocab_size=vocab_size))
+
+
+def estimate_resources(handler, payload):
+    from maichart.composer_v2.acceleration import AUDIO_DEVICES
+    from .composer_v2_resources import estimate_memory
+
+    mode = _choice(payload, 'mode', 'fresh', ('fresh', 'resume', 'finetune', 'generate'))
+    contract = payload.get('training_contract') if mode == 'resume' else None
+    contract = contract if isinstance(contract, dict) else {}
+    scope = resolve_finetune_scope(_choice(payload, 'finetune_scope', 'auto', FINETUNE_SCOPE_CHOICES),
+                                  contract, resume=mode == 'resume', initialized=mode == 'finetune')
+    config, vocab_size, parameters, trainable = _estimate_model(payload, mode, scope)
+    if mode == 'generate':
+        requested = dict(
+            requested_device=_choice(payload, 'device', 'auto', ('auto', 'cpu', 'cuda')),
+            audio_device=_choice(payload, 'audio_device', 'auto', AUDIO_DEVICES),
+            inference_backend=_choice(payload, 'inference_backend', 'auto', ('auto', 'torch', 'openvino-cpu', 'openvino-gpu')),
+            count=_integer(payload, 'count', GENERATION_DEFAULTS['count'], minimum=1),
+            parallel=_integer(payload, 'parallel', GENERATION_DEFAULTS['parallel'], minimum=1),
+        )
+        if max(requested['count'], requested['parallel']) > MAX_BATCH_COUNT:
+            raise ValueError(f'生成张数和并行数须在 1 到 {MAX_BATCH_COUNT} 之间')
+    else:
+        device = _choice(payload, 'device', 'auto', ('auto', 'cpu', 'cuda', 'xpu'))
+        precision = _choice(payload, 'precision', 'auto', ('auto', 'bf16', 'fp16', 'fp32'))
+        requested = dict(
+            requested_device=contract.get('device_type', device) if device == 'auto' else device,
+            requested_precision=contract.get('precision', precision) if precision == 'auto' else precision,
+            batch=_integer(payload, 'batch_size', contract.get('batch_size', TRAIN_DEFAULTS['batch_size']), minimum=1),
+            activation_checkpointing=_choice(payload, 'activation_checkpointing', 'auto', ('auto', 'off', 'on')),
+            decoder_flash_attention=_choice(payload, 'decoder_flash_attention', 'off', ('off', 'on')),
+            audio_device=_choice(payload, 'prepare_device', 'auto', AUDIO_DEVICES),
+            cuda_budget=_float(payload, 'cuda_memory_budget_gb', 0., minimum=0),
+        )
+        if requested['cuda_budget'] > 1024:
+            raise ValueError('CUDA 显存预算不能超过 1024 GiB')
+    memory = estimate_memory(config, vocab_size, parameters, trainable, mode=mode, **requested)
+    return handler._json_response(dict(parameter_count=parameters, vocab_size=vocab_size,
+        trainable_parameter_count=trainable if mode != 'generate' else None,
+        model_weight_bytes=4 * parameters, memory=memory))
 
 def _start(handler,runtime,kind,args,settings,paths,checkpoint_dir=None):
     task=runtime._create_task(kind,checkpoint_dir=checkpoint_dir)
