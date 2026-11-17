@@ -133,9 +133,8 @@ function composerV2GenerationPayload(options={}) {
   }
   const referenceSelection=element('#v2GenerateReferenceSelection');
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
-  const phraseRank=element('#v2GeneratePhraseRankPolicy');
-  const phraseRankPolicy=phraseRank?.disabled?'comfort_v1':valueOrDefault('#v2GeneratePhraseRankPolicy','comfort_v1');
-  if(phraseRankPolicy && phraseRankPolicy!=='comfort_v1')payload.phrase_rank_policy=phraseRankPolicy;
+  const legacyWindow=element('#v2GeneratePhraseSearch')?.disabled;
+  payload.phrase_rank_policy=legacyWindow?'comfort_v1':valueOrDefault('#v2GeneratePhraseRankPolicy','music_flow_v1');
   const tempoOctavePolicy=valueOrDefault('#v2GenerateTempoOctavePolicy','off');
   if(tempoOctavePolicy && tempoOctavePolicy!=='off')payload.tempo_octave_policy=tempoOctavePolicy;
   const downbeatAlignment=valueOrDefault('#v2GenerateDownbeatAlignment','off');
@@ -154,6 +153,7 @@ function composerV2EvaluationPayload() {
     limit_charts:integer('#v2EvalLimitCharts',2,'评估谱面数'),
     max_batches:integer('#v2EvalMaxBatches',8,'抽查片段数'),
     timing_rollouts:integer('#v2EvalTimingRollouts',2,'独立选时检查数'),
+    writing_probe:!!element('#v2EvalWritingProbe')?.checked,
     cpu_threads:integer('#v2EvalCpuThreads',2,'CPU计算线程',1),window_sampling:windowSampling,
     check_training_overlap:!!element('#v2EvalCheckTrainingOverlap')?.checked};
 }
@@ -234,19 +234,24 @@ async function startV2AutoQualityAudit(overrideOptions={}) {
 }
 async function startV2QualityEvaluation(kind='evaluate') {
   const audit=kind==='candidate_audit';
-  const button=element(audit?'#v2AuditButton':'#v2EvaluateButton');
+  const stability=kind==='stability';
+  const button=element(stability?'#v2StabilityButton':audit?'#v2AuditButton':'#v2EvaluateButton');
   if(button?.disabled)return;
   const input=valueOrDefault('#v2AuditInput','').trim();
   if(audit && !input)throw new Error('请填写谱面旁的 .candidate_audit.jsonl 路径。');
-  const payload=audit?{input}:composerV2EvaluationPayload();
+  const batch=valueOrDefault('#v2EvalBatchManifest','').trim();
+  if(stability && !batch)throw new Error('请填写批量生成清单路径。');
+  const payload=stability?{model_family:'chart_composer_v2',evaluation_mode:'stability',batch_manifest:batch}:audit?{input}:composerV2EvaluationPayload();
   if(button)button.disabled=true;
   const status=element('#v2EvaluationStatus');
   try {
     const backend=await api('/api/status');
+    if((stability || payload.writing_probe) && !backend.training_capabilities?.composer_v2_motion_writing)
+      throw new Error('请重启更新后的 WebUI，再运行写法或整谱评价检查。');
     if(backend.training_capabilities?.composer_v2_quality_evaluation!==true)
       throw new Error('采音与选优评估需要更新后的后台；请在当前任务结束后重启 WebUI。');
     saveSettings();
-    const data=await api('/api/composer_v2/'+kind,payload);
+    const data=await api('/api/composer_v2/'+(stability?'evaluate':kind),payload);
     if(status)status.textContent='已提交评估；进度、日志和输出报告显示在当前任务区。';
     watchTask(data.task_id,task=>{
       if(status)status.textContent=task.status==='completed'?v2EvaluationSummary(task):'评估未完成；请在当前任务区查看日志。';
@@ -258,11 +263,17 @@ async function startV2QualityEvaluation(kind='evaluate') {
 }
 function v2EvaluationSummary(task) {
   const report=task.result?.composer_v2_evaluation;
+  if(report?.mode==='stability') {
+    const row=report.batches[0], c=row.counts;
+    return `计划 ${row.planned} 张，整谱评好 ${c.good||0} 张，有问题 ${c.problem||0} 张，不确定 ${c.uncertain||0} 张；未评价 ${c.unreviewed||0} 张，失败 ${c.failed||0} 张，待完成 ${c.pending||0} 张，文件待核对 ${c.unverified||0} 张。`;
+  }
   if(report) {
+    const probe=report.writing_probe;
+    const writing=probe?.windows?` 写法对照已检查 ${probe.windows} 段，分项结果见报告。`:probe?.status==='unsupported_checkpoint'?' 此模型没有局部写法分支。':'';
     const selections=report.sample_selection||[],charts=new Set(selections.map(row=>`${row.source}:${row.difficulty}`));
     const phase=report.metrics?.phase,checks=(report.joint_timing?.samples||[]).filter(row=>row.status==='measured');
     const songs=report.coverage?.selected_audio??report.per_song?.length;
-    return `评估完成：${charts.size}张谱面、${selections.length}段${songs!=null?'、'+songs+'首独立音频':''}；真实前文下拍内落点正确率${phase?.accuracy!=null?(phase.accuracy*100).toFixed(1)+'%':'未测'}；独立选时${checks.length?checks.filter(row=>row.joint_exact_beat).length+'/'+checks.length+'次匹配参考':'未测'}。歌曲等权与token均值见任务报告。`;
+    return `评估完成：${charts.size}张谱面、${selections.length}段${songs!=null?'、'+songs+'首独立音频':''}；真实前文下拍内落点正确率${phase?.accuracy!=null?(phase.accuracy*100).toFixed(1)+'%':'未测'}；独立选时${checks.length?checks.filter(row=>row.joint_exact_beat).length+'/'+checks.length+'次匹配参考':'未测'}。歌曲等权与token均值见任务报告。${writing}`;
   }
   const audit=task.result?.composer_v2_candidate_audit;
   return audit?`选优分析完成：${audit.pools?.length||0}个候选池${audit.status==='unavailable'?'，记录不足':''}。请在当前任务区查看或下载报告。`:'评估完成；请在当前任务区查看或下载输出报告。';
@@ -327,6 +338,8 @@ function requireV2SplitSamplingSupport(status,payload) {
   }
   if(payload.phrase_search && payload.phrase_search!=='event' && !status.training_capabilities?.composer_v2_phrase_search)
     throw new Error('比较多种写法需要更新后的后台；请在当前任务结束后重启 WebUI，或选择“逐步生成（速度优先）”。');
+  if(['music_flow_v1','music_plan_v1'].includes(payload.phrase_rank_policy) && !status.training_capabilities?.composer_v2_motion_writing)
+    throw new Error('按音乐选优需要更新后的后台，请重启 WebUI。');
   if(payload.phrase_rank_policy && payload.phrase_rank_policy!=='comfort_v1' && !status.training_capabilities?.composer_v2_phrase_rank_policy)
     throw new Error('候选段落似然重排需要更新后的 WebUI 后台；请在当前任务结束后重启后台，或先使用默认「手感稳定优先」。');
   if((payload.tempo_octave_policy || payload.downbeat_alignment) && !status.training_capabilities?.composer_v2_timing_calibration)
@@ -1040,7 +1053,9 @@ function composerV2TrainingView(task) {
       ['音乐与写法联动学习',runtime.musical_relation_policy==='musical_relations_v1'
         ? `已启用 · 乐句强化上限 ${show(n(runtime,'musical_relation_fraction')*100,1)}%`
         : runtime.musical_relation_policy==='off' ? '关闭' : '未记录'],
-      ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v2'
+      ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v3'
+        ? `动作与起手 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
+        : runtime.future_configuration_policy==='audio_writing_v2'
         ? `音乐写法条件 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         : runtime.future_configuration_policy==='ordered_future_v1'
         ? `旧版配置预判 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
@@ -1061,7 +1076,7 @@ function composerV2TrainingView(task) {
       ['曲线验证 loss',show(n(complete,'validation_curve_loss'))],
       ['出音频率平均误差（次/秒）',show(errors[0])],['同拍额外物量平均误差（个/秒）',show(errors[1])]]]);
   }
-  if(['ordered_future_v1','audio_writing_v2'].includes(runtime.future_configuration_policy ?? config.future_configuration_policy)) {
+  if(['ordered_future_v1','audio_writing_v2','audio_writing_v3'].includes(runtime.future_configuration_policy ?? config.future_configuration_policy)) {
     cards.push(['局部写法学习',[
       ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
       ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]]]);
@@ -1661,7 +1676,7 @@ let restoredSettingNotice = "";
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
   "v2GenerateConfigurationRecovery",
-  "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2AuditInput",
+  "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2EvalWritingProbe", "v2EvalBatchManifest", "v2AuditInput",
   "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
@@ -2517,9 +2532,10 @@ function updateV2BatchControls() {
   const rankSelect=element('#v2GeneratePhraseRankPolicy');
   if(rankSelect) {
     const searchDisabled=element('#v2GeneratePhraseSearch')?.disabled;
-    const searchMode=valueOrDefault('#v2GeneratePhraseSearch','layout');
     const candidateCount=Number(valueOrDefault('#v2GenerateCandidates',2));
-    rankSelect.disabled=Boolean(searchDisabled || searchMode==='event' || candidateCount<=1);
+    const refines=valueOrDefault('#v2GenerateSelfRefine','off')!=='off';
+    const recovery=!!element('#v2GenerateConfigurationRecovery')?.checked;
+    rankSelect.disabled=Boolean(searchDisabled || (candidateCount<=1 && !refines && !recovery));
   }
   const field=element('#v2GenerateParallel');if(!field)return;
   const count=Number(valueOrDefault('#v2GenerateCount',1));field.disabled=count<=1;
@@ -4552,7 +4568,7 @@ function composerGenerationSummary(task) {
       ? `采音 ${sampling.timing_temperature} / ${sampling.timing_top_p}，配置 ${sampling.action_temperature} / ${sampling.action_top_p}（温度 / Top-p）；`
       : '';
     const rankPolicy=report.phrase_search?.ranking_policy??report.phrase_search?.rank_policy;
-    const rankSummary=rankPolicy==='likelihood_veto_v1'?'似然重排＋手感底线降序；':rankPolicy==='comfort_v2'?'左右手手感评分；':'';
+    const rankSummary=rankPolicy==='music_plan_v1'?'按音乐与预测动作选优；':rankPolicy==='music_flow_v1'?'按音乐选优；':rankPolicy==='likelihood_veto_v1'?'似然重排＋手感底线降序；':rankPolicy==='comfort_v2'?'左右手手感评分；':'';
     return `Composer v2；实际 seed ${report.seed??settings.seed??"未记录"}；${settingsSummary}${rankSummary}候选数 ${report.candidates??settings.candidates??"未记录"}；${scope}冲突恢复预算 ${report.recovery_budget??report.rollback_windows??settings.rollback_windows??2} 次；全曲实际撤回 ${report.rollbacks?.length??0} 次，Hold时值修复 ${report.duration_repairs?.length??0} 次；放行冲突事件 ${report.accepted_with_conflicts_count??0} 个；详见 .composer_v2.json 和冲突报告，仍需试听与游玩检查。`;
   }
   if (task.kind !== "composer_generate") return null;
@@ -7160,7 +7176,7 @@ function applyV2GenPreset(presetName) {
   const presets = {
     balanced: {
       values: {
-        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "comfort_v1", v2GenerateCandidates: "2",
+        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "music_flow_v1", v2GenerateCandidates: "2",
         v2GenerateSelfRefine: "off", v2GeneratePhraseBeats: 4, v2GeneratePhraseCommitBeats: 2,
         v2GenerateInterceptTapOnSlide: true, v2GenerateInterceptSlideHeadTap: false,
         v2GenerateForwardFeasibility: "balanced_v1", v2GenerateCount: 1,
@@ -7170,13 +7186,13 @@ function applyV2GenPreset(presetName) {
     },
     refined: {
       values: {
-        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "comfort_v2", v2GenerateCandidates: "4",
+        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "music_flow_v1", v2GenerateCandidates: "4",
         v2GenerateSelfRefine: "worst_spans_v1", v2GeneratePhraseBeats: 4, v2GeneratePhraseCommitBeats: 2,
         v2GenerateInterceptTapOnSlide: true, v2GenerateInterceptSlideHeadTap: true,
         v2GenerateForwardFeasibility: "balanced_v1", v2GenerateCount: 1,
         v2GenerateTemperature: 0.85, v2GenerateActionTemperature: 0.9,
       },
-      note: '已套用「高质精雕细琢」。每次最多试写 4 种配置，按左右手手感选优，开启星头抢拍检查并尝试精修薄弱段。',
+      note: '已套用「多方案精修」。每次最多试写 4 种配置，按音乐选优，开启星头抢拍检查并尝试精修薄弱段。',
     },
     fast: {
       values: {
@@ -7187,7 +7203,7 @@ function applyV2GenPreset(presetName) {
     },
     batch4: {
       values: {
-        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "comfort_v2", v2GenerateCandidates: "2",
+        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "music_flow_v1", v2GenerateCandidates: "2",
         v2GenerateSelfRefine: "off", v2GenerateInterceptTapOnSlide: true, v2GenerateCount: 4, v2GenerateParallel: 1,
       },
       note: '已套用「一次抽 4 张挑最好」。依次生成 4 张完整谱面，完成后可在顶部「谱面预览」切换。',
@@ -8838,6 +8854,8 @@ on('#v2AutoQualitySourceList','change',event=>{
 on('#v2GenerateCount','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GenerateParallel','input',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GeneratePhraseSearch','change',()=>{updateV2BatchControls();saveSettings();});
+for(const selector of ['#v2GenerateSelfRefine','#v2GenerateConfigurationRecovery'])
+  on(selector,'change',()=>{updateV2BatchControls();saveSettings();});
 on('#v2GenerateCandidates','input',()=>{updateV2BatchControls();saveSettings();});
 on("#v2AutoQualityAuditButton", "click", () => { void startV2AutoQualityAudit(); });
 on("#trainingMode", "change", () => { const validationField=element('#composerValidationManifest');if(currentTrainingMode()!=='resume' && validationField?.dataset.validationInherited==='1'){validationField.value=validationField.dataset.beforeResumeValidation??'';delete validationField.dataset.validationInherited;delete validationField.dataset.beforeResumeValidation;} applySongFormCheckpointConfig({valid: false}, "fresh"); for(const id of ['composerActionObjectivePolicy','composerHistoryAnchorPolicy','composerHistoryMemoryPolicy','composerHistoryAttentionPolicy','composerHeadTimingPolicy','composerCrossEventRelationPolicy','composerFutureHorizonPolicy','composerEchoPriorPolicy','composerTimingDistributionPolicy','composerButtonLoadPolicy','composerFineTimingPolicy','composerDensityFeedbackPolicy','composerActionHeadPolicy','composerConfigurationQualityPolicy','composerSampleSequencePolicy','composerActionStatePolicy','composerMotifMemoryPolicy','composerSlideFactorPolicy','composerStructurePolicy','composerStructureBackend','composerContactPolicy','composerRecoveryTouchLayoutPolicy','composerRecoverySamplingPolicy']){const target=element('#'+id);if(target && currentTrainingMode()!=='resume')target.value='auto';}setTrainingModeDefaults({resetComposer:true}); updateTrainingControls(); });
@@ -9241,6 +9259,7 @@ for (const [key] of [...radarKeys, ...styleKeys]) {
   document.querySelector(`[data-number-for="${key}"]`)?.addEventListener("input", markManual);
 }
 on("#v2EvaluateButton", "click", () => startV2QualityEvaluation());
+on("#v2StabilityButton", "click", () => startV2QualityEvaluation("stability"));
 on("#v2AuditButton", "click", () => startV2QualityEvaluation("candidate_audit"));
 on("#generateButton", "click", startGenerate);
 on("#clearGenerate", "click", clearGenerate);

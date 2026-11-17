@@ -196,6 +196,9 @@ def teacher_forced(args):
             song.level, policy=config.condition_policy, max_level=dataset.max_condition_level)
     model = ComposerV2(config, codec).cpu().eval()
     model.load_state_dict(payload['model_state_dict'], strict=True)
+    probe_requested = getattr(args,'writing_probe',False)
+    probe_enabled = probe_requested and hasattr(model,'local_writing')
+    probe_errors, probe_metrics, probe_windows = Counter(), {}, 0
     totals = {key: Counter() for key in ('all', 'time', 'phase', 'time_digits_true_prefix')}
     buckets = {}; target_buckets={};confusion = Counter(); selection = []; per_song = {}; rollouts = []
     from .validation_sampling import balanced_window_indices,coverage_report,POLICY as COVERAGE_POLICY
@@ -213,7 +216,16 @@ def teacher_forced(args):
                     ended=end == len(song.points), training=True,
                     reference_start=dataset._reference_argument(index), _prefix_end=begin)
                 batch = collate_stream([item])
-                logits = model(batch)['logits'].float(); labels = batch['labels']
+                if probe_enabled:
+                    from .writing_probe import compare as compare_writing
+                    logits, errors, execution = compare_writing(model,dataset,song,song_index,item,batch)
+                    probe_errors.update(errors)
+                    for k, v in execution.items():
+                        probe_metrics.setdefault(k,Counter()).update(v)
+                    probe_windows += 1
+                else:
+                    logits = model(batch)['logits'].float()
+                labels = batch['labels']
                 if not torch.isfinite(logits).all():
                     raise ValueError('Non-finite evaluation logits; refusing an invalid metric report')
                 # Zero-supervision regions remain context, never metric targets.
@@ -269,7 +281,10 @@ def teacher_forced(args):
                     context_bucket=bucket,target_bucket=target_bucket))
     finally:
         dataset.close()
+    from .writing_probe import summarize as writing_summary
     return dict(schema='composer_v2_timing_evaluation_v1', mode='teacher_forced', device='cpu',
+        writing_probe=(writing_summary(probe_errors,probe_metrics,probe_windows) if probe_enabled else
+                       dict(status='unsupported_checkpoint' if probe_requested else 'off')),
         checkpoint=checkpoint, model_config=config.to_dict(),
         manifest=dict(path=str(Path(args.manifest).resolve()), sha256=dataset.manifest_sha256),
         overlap=overlap_audit(args.manifest, args.training_manifest), condition_known='level_only',
@@ -415,6 +430,7 @@ def build_parser():
     teacher.add_argument('--window-sampling', choices=('spread', 'prefix'), default=defaults['window_sampling'])
     teacher.add_argument('--cpu-threads', type=int, default=defaults['cpu_threads'])
     teacher.add_argument('--timing-rollouts', type=int, default=defaults['timing_rollouts'])
+    teacher.add_argument('--writing-probe', action='store_true', help='Compare local musical plans and execution on the same held-out prefixes')
     teacher.add_argument('--output', required=True)
     comparison = sub.add_parser('compare')
     comparison.add_argument('--reference', required=True)
@@ -425,13 +441,17 @@ def build_parser():
     comparison.add_argument('--cache-dir',default='cache/chart_composer_v2')
     comparison.add_argument('--audio-backend',choices=('mert','native'),default='mert')
     comparison.add_argument('--output', required=True)
+    stability = sub.add_parser('stability', help='Summarize whole-chart reviews and all planned attempts')
+    stability.add_argument('--batch', required=True, action='append')
+    stability.add_argument('--output', required=True)
     return parser
 
 
 def main(argv=None):
     parser = build_parser(); args = parser.parse_args(argv)
     output = Path(args.output).resolve()
-    inputs = ([args.checkpoint, args.manifest, *args.training_manifest] if args.command == 'teacher-forced'
+    inputs = (args.batch if args.command == 'stability' else
+              [args.checkpoint, args.manifest, *args.training_manifest] if args.command == 'teacher-forced'
               else [args.reference, *args.generated,*([args.audio] if args.audio else [])])
     if output in {Path(path).resolve() for path in inputs}:
         parser.error('output must not overwrite an evaluation input')
@@ -439,6 +459,10 @@ def main(argv=None):
         if min(args.limit_charts, args.max_batches, args.timing_rollouts) < 0 or args.cpu_threads < 1:
             parser.error('budgets must be nonnegative and cpu-threads positive')
         result = teacher_forced(args)
+    elif args.command == 'stability':
+        from .stability import batch_summary
+        paths = list(dict.fromkeys(Path(p).resolve() for p in args.batch))
+        result = dict(mode='stability',batches=[batch_summary(p) for p in paths])
     else:
         result = compare(args)
     output.parent.mkdir(parents=True, exist_ok=True)

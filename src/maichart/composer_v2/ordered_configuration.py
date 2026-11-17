@@ -70,12 +70,22 @@ class ConfigurationQuality:
         rows = np.searchsorted(self.boundaries, seconds, side='right') - 1
         return np.where(np.expand_dims(rows >= 0, -1), self.weights[np.maximum(rows, 0)], 0.)
 
-    def covered(self, start, stop):
+    def covered(self, start, stop, channel=None):
         if start < 0 or stop > self.duration or start >= stop:
             return 0.
         first = np.searchsorted(self.boundaries, start, side='right') - 1
         last = np.searchsorted(self.boundaries, stop, side='left')
-        return float(self.weights[first:last].min())
+        covered = self.weights[first:last]
+        return float((covered if channel is None else covered[:, channel]).min())
+
+    def coverage_pairs(self, starts, stops):
+        first = np.maximum(0,np.searchsorted(self.boundaries, starts, side='right') - 1)
+        last = np.searchsorted(self.boundaries, stops, side='left')
+        result = self.weights[first].copy()
+        for i in np.flatnonzero(last > first+1):
+            result[i] = self.weights[first[i]:last[i]].min(0)
+        result[(starts < 0) | (stops > self.duration) | (starts >= stops)] = 0
+        return result
 
 
 class ChartConfiguration:

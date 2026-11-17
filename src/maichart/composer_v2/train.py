@@ -828,9 +828,9 @@ def train(args):
                     expected_missing.update(k for k in model.state_dict() if k.startswith('intensity.'))
                 else:parent_state={k:v for k,v in parent_state.items() if not k.startswith('intensity.')}
             if future_migration:
-                prefixes=('future_configuration_head.','local_writing.')
-                parent_state={k:v for k,v in parent_state.items() if not k.startswith(prefixes)}
-                expected_missing.update(k for k in model.state_dict() if k.startswith(prefixes))
+                from .local_writing import migrate_state
+                parent_state, writing_missing = migrate_state(model, parent_state)
+                expected_missing.update(writing_missing)
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
@@ -839,7 +839,7 @@ def train(args):
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
                 future_configuration_policy=args.future_configuration_policy,
-                zero_initialization=not future_migration or args.future_configuration_policy in ('off','audio_writing_v2'))
+                zero_initialization=not future_migration or args.future_configuration_policy in ('off','audio_writing_v2','audio_writing_v3'))
         else:
             model.load_state_dict(parent_state,strict=True)
     if hasattr(model,'onset_readout') and (not parent or onset_migration):

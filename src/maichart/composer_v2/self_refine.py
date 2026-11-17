@@ -15,7 +15,7 @@ import math
 from typing import Any
 
 from .hand_flow import chirality_comfort
-from .phrase_search import timing_evidence
+from .phrase_search import MUSIC_POLICIES, rank, rank_policy, timing_evidence
 
 SELF_REFINE_POLICIES = ("off", "worst_spans_v1")
 SPAN_BEATS = Fraction(8, 1)
@@ -39,7 +39,14 @@ def _span_score(
     b_stop: Fraction,
     *,
     motion_cache: Any = None,
+    musical: str | None = None,
 ) -> tuple[float, float, float]:
+    if musical:
+        first = next((i for i, p in enumerate(points) if p.beat >= b_start), len(points))
+        inside = [p for p in points[first:] if p.beat < b_stop]
+        score, evidence = rank(points[max(0,first-2):first], inside, song, tempo, b_start, b_stop,
+                               policy=musical)
+        return score, score, evidence['timing_support']
     comfort, _ = chirality_comfort(
         points,
         tempo,
@@ -83,6 +90,8 @@ def refine_worst_spans(
     from collections import OrderedDict
 
     motion_cache: OrderedDict[Any, Any] = OrderedDict()
+    selected_policy = rank_policy(args)
+    musical = selected_policy if selected_policy in MUSIC_POLICIES else None
     bypassed_beats = {
         Fraction(item["beat"])
         for item in (bypassed_events or ())
@@ -100,8 +109,8 @@ def refine_worst_spans(
         has_bypass = any(b0 <= b < b1 for b in bypassed_beats)
         if len(in_span) < 2 and not has_bypass:
             continue
-        blended, comfort, _ = _span_score(points, song, tempo, b0, b1, motion_cache=motion_cache)
-        if comfort < COMFORT_REWRITE_THRESHOLD or has_bypass:
+        blended, comfort, _ = _span_score(points, song, tempo, b0, b1, motion_cache=motion_cache, musical=musical)
+        if comfort < (.5 - MIN_IMPROVEMENT if musical else COMFORT_REWRITE_THRESHOLD) or has_bypass:
             candidates_to_rewrite.append((blended, b0, b1, comfort, has_bypass))
 
     # Each repair replays the entire suffix. Spend the budget on downstream
@@ -153,7 +162,7 @@ def refine_worst_spans(
         eval_lo = max(Fraction(0), b0 - Fraction(2))
         eval_hi = min(end, b1 + Fraction(2))
         orig_eval_score, _, _ = _span_score(
-            current_points, song, tempo, eval_lo, eval_hi, motion_cache=motion_cache
+            current_points, song, tempo, eval_lo, eval_hi, motion_cache=motion_cache, musical=musical
         )
 
         best_choice: tuple[float, list[Any], Any] | None = None
@@ -226,7 +235,7 @@ def refine_worst_spans(
 
             spliced = [*prefix_pts, *mid_pts, *suffix_pts]
             cand_score, _, _ = _span_score(
-                spliced, song, tempo, eval_lo, eval_hi, motion_cache=motion_cache
+                spliced, song, tempo, eval_lo, eval_hi, motion_cache=motion_cache, musical=musical
             )
             improved = had_bypass or (cand_score >= orig_eval_score + MIN_IMPROVEMENT)
             if improved and (best_choice is None or cand_score > best_choice[0]):
@@ -247,7 +256,7 @@ def refine_worst_spans(
                     "start_beat": str(b0),
                     "end_beat": str(b1),
                     "accepted": True,
-                    "original_comfort": round(orig_comfort, 4),
+                    ("original_music_score" if musical else "original_comfort"): round(orig_comfort, 4),
                     "original_score": round(orig_eval_score, 4),
                     "refined_score": round(new_score, 4),
                     "cleared_bypassed_conflict": bool(had_bypass),
@@ -259,7 +268,7 @@ def refine_worst_spans(
                     "start_beat": str(b0),
                     "end_beat": str(b1),
                     "accepted": False,
-                    "original_comfort": round(orig_comfort, 4),
+                    ("original_music_score" if musical else "original_comfort"): round(orig_comfort, 4),
                     "original_score": round(orig_eval_score, 4),
                     "reason": "no_strictly_better_conflict_free_candidate",
                 }

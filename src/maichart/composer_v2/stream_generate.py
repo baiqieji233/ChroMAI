@@ -99,7 +99,7 @@ class EventSampler(WindowSampler):
                 getattr(song,'intensity_input_profile',None),self.batch['intensity_strength'])
         self.retry_stats={};self._retry_scope=None
         self._fixed_retry_scope=None;self._fixed_retry_tree=None;self._retry_offset=0
-        need_ranking_probabilities=getattr(args,'phrase_rank_policy','comfort_v1')!='comfort_v1'
+        need_ranking_probabilities=getattr(args,'phrase_rank_policy',None) in ('comfort_v2','likelihood_veto_v1')
         need_probabilities=(need_ranking_probabilities or
             bool(getattr(args,'record_candidate_probabilities',False)) and getattr(args,'phrase_search','layout')!='event')
         self.record_probabilities=bool(need_probabilities and getattr(args,'candidates',2)>1
@@ -551,6 +551,10 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         if omissions:
             options['history_exclude']=omissions
         value=EventSampler(model,dataset,song,history,device,rng if trial_rng is None else trial_rng,args,**options)
+        if event_rank_policy=='music_plan_v1' and (args.candidates>1 or getattr(args,'self_refine','off')!='off'
+                                                 or enable_configuration_recovery):
+            from .music_rank import prepare_song
+            prepare_song(value,dataset,song)
         value.retry_stats=retry_stats
         return value
 
@@ -680,13 +684,16 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         else:
                             score,components=rank(points,[point],song,tempo,start,stop,
                                 policy=event_rank_policy,score_scope='configuration',
-                                rows=[(point,encoded)],probabilities=[candidate_probabilities[candidate_index]])
+                                rows=[(point,encoded)],probabilities=[candidate_probabilities[candidate_index]],
+                                complete_span=False)
                         event_candidates_scored+=1
                         event_rank_rows.append(dict(beat=str(point.beat),note_text=point.note_text,
                             score=float(score),components=components))
                     feasible.append((score,point,encoded,trial))
                 if feasible:
                     selected=max(feasible,key=lambda row:row[0])
+                    if event_rank_policy in ('music_flow_v1','music_plan_v1') and selected[0] < feasible[0][0] + .02:
+                        selected=feasible[0]
                     if event_rank_rows:
                         event_rank_count+=1
                         event_rankings.append(dict(after=str(after),selected_beat=str(selected[1].beat),
@@ -881,7 +888,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     rank_mode = resolve_rank_policy(args)
     report['phrase_search']=dict(mode=phrase_mode,ranking_policy=rank_mode,lookahead_beats=float(phrase_beats),
         commit_beats=float(phrase_commit_beats),decisions=phrase_count,trials=phrase_trials,compute=phrase_compute,
-        scoring=('grammar_likelihood_and_attack_support_with_comfort_veto'
+        scoring=('selected_attacks_and_relative_accents' if rank_mode=='music_flow_v1'
+                 else 'selected_attacks_relative_accents_and_local_motion' if rank_mode=='music_plan_v1'
+                 else 'grammar_likelihood_and_attack_support_with_comfort_veto'
                  if rank_mode=='likelihood_veto_v1'
                  else 'chirality_hand_flow_grammar_likelihood_and_attack_support'
                  if rank_mode=='comfort_v2'

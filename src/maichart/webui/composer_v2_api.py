@@ -655,7 +655,11 @@ def start_generate(handler,payload,*,runtime):
     settings['record_candidate_probabilities']=record_probabilities
     if record_probabilities:args.append('--record-candidate-probabilities')
     phrase_search=_choice(payload,'phrase_search','layout',{'event','layout','joint','hybrid'})
-    phrase_rank_policy=_choice(payload,'phrase_rank_policy',GENERATION_DEFAULTS['phrase_rank_policy'],{'comfort_v1','comfort_v2','likelihood_veto_v1'})
+    from maichart.composer_v2.phrase_search import RANK_POLICIES
+    rank_default='comfort_v1' if checked.get('sequence_policy')=='window_v1' else GENERATION_DEFAULTS['phrase_rank_policy']
+    phrase_rank_policy=_choice(payload,'phrase_rank_policy',rank_default,set(RANK_POLICIES))
+    if phrase_rank_policy=='music_plan_v1' and (checked.get('model_config') or {}).get('future_configuration_policy') not in ('audio_writing_v2','audio_writing_v3'):
+        raise ValueError('这个检查点没有局部写法预测，请选择「跟随音乐比较写法」。')
     phrase_beats=_float(payload,'phrase_beats',4.,minimum=1.)
     phrase_commit_beats=_float(payload,'phrase_commit_beats',2.,minimum=0.)
     if isinstance(payload.get('phrase_beats'),bool) or isinstance(payload.get('phrase_commit_beats'),bool):
@@ -665,7 +669,7 @@ def start_generate(handler,payload,*,runtime):
     if checked.get('sequence_policy')=='window_v1' and phrase_search!='event':
         raise ValueError('这个旧模型不支持比较整段写法，请选择“逐步生成（速度优先）”')
     if checked.get('sequence_policy')=='window_v1' and phrase_rank_policy!='comfort_v1':
-        raise ValueError('模型似然排序仅支持连续事件模型')
+        raise ValueError('这个旧窗口模型支持基础手感选优')
     settings.update(phrase_search=phrase_search,phrase_rank_policy=phrase_rank_policy,phrase_beats=phrase_beats,phrase_commit_beats=phrase_commit_beats)
     for key in ('phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats'):_arg(args,'--'+key.replace('_','-'),settings[key])
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop','downgrade_or_skip'})
@@ -883,6 +887,14 @@ def _evaluation_integer(payload, key, default, minimum=0):
 def start_evaluate(handler, payload, *, runtime):
     """Launch bounded CPU-only diagnostics without touching any running task."""
     _family(payload)
+    if payload.get('evaluation_mode')=='stability':
+        import uuid
+        manifest=_path(payload.get('batch_manifest'),'批量生成清单',exists=True)
+        if not manifest.is_file() or manifest.suffix.lower()!='.json':
+            raise ValueError('请选择批量生成清单 JSON 文件')
+        output=runtime.INTENSITY_ROOT / uuid.uuid4().hex / 'stability.json'
+        args=['-m','maichart.composer_v2.evaluate','stability','--batch',str(manifest),'--output',str(output)]
+        return _start(handler,runtime,'composer_v2_evaluate',args,dict(batch_manifest=str(manifest),output=str(output)),[output])
     checkpoint = _path(payload.get('checkpoint'), 'checkpoint', exists=True)
     if not checkpoint.is_file(): raise ValueError('checkpoint 必须是文件')
     checked = inspection(checkpoint)
@@ -901,6 +913,9 @@ def start_evaluate(handler, payload, *, runtime):
         window_sampling=_choice(payload, 'window_sampling', EVALUATION_DEFAULTS['window_sampling'], {'spread', 'prefix'}))
     for key, minimum in (('limit_charts', 0), ('max_batches', 0), ('timing_rollouts', 0), ('cpu_threads', 1)):
         settings[key] = _evaluation_integer(payload, key, EVALUATION_DEFAULTS[key], minimum)
+    writing_probe=payload.get('writing_probe',False)
+    if type(writing_probe) is not bool: raise ValueError('写法对照必须是布尔值')
+    settings['writing_probe']=writing_probe
     training = checkpoint.parent / 'data_split' / 'train_manifest.json'
     if overlap and not training.is_file():
         raise ValueError(f'无法审计训练重叠：缺少同检查点目录清单 {training}')
@@ -908,6 +923,7 @@ def start_evaluate(handler, payload, *, runtime):
     output = runtime.INTENSITY_ROOT / uuid.uuid4().hex / 'quality_eval.json'
     settings['output'] = str(output)
     args = ['-m', 'maichart.composer_v2.evaluate', 'teacher-forced']
+    if writing_probe: args.append('--writing-probe')
     for key in ('checkpoint', 'manifest', 'cache_dir', 'limit_charts', 'max_batches',
                 'timing_rollouts', 'cpu_threads', 'window_sampling', 'output'):
         _arg(args, '--' + key.replace('_', '-'), settings[key])

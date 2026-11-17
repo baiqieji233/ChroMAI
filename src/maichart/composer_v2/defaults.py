@@ -22,14 +22,14 @@ MUSICAL_RELATION_POLICY = 'musical_relations_v1'
 MUSICAL_RELATION_CHOICES = ('auto', 'off', MUSICAL_RELATION_POLICY)
 MUSICAL_RELATION_FRACTION = .3
 FUTURE_CONFIGURATION_POLICY = 'audio_writing_v2'
-FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', FUTURE_CONFIGURATION_POLICY)
+FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', 'audio_writing_v3', FUTURE_CONFIGURATION_POLICY)
 FUTURE_CONFIGURATION_WEIGHT = .05
 FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION = .25
 FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading')
 
 
 def configuration_view_fraction(policy):
-    if policy == FUTURE_CONFIGURATION_POLICY:
+    if policy in (FUTURE_CONFIGURATION_POLICY, 'audio_writing_v3'):
         return 1.
     if policy == 'ordered_future_v1':
         return FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION
@@ -72,7 +72,10 @@ def resolve_auxiliary_policy(requested, value, *, feature, choices, default,
     continuous = sequence_policy == 'continuous_events_v1'
     policy = requested
     if policy == 'auto':
-        policy = saved_policy if resume else choices[-1] if continuous else 'off'
+        recommended = choices[-1]
+        if feature == 'future_configuration' and saved_policy == 'audio_writing_v3':
+            recommended = saved_policy
+        policy = saved_policy if resume else recommended if continuous else 'off'
     if policy not in choices[1:]:
         raise ValueError(f'Unknown saved {feature} policy')
     if value is None:
@@ -112,7 +115,7 @@ GENERATION_DEFAULTS = dict(temperature=.9, top_p=.95, action_temperature=.9,
     touch_reachability_policy='palm_span_v1', touch_cohold_radius=180.,
     forward_feasibility='balanced_v1', forward_tap_on_slide_ms=150.,
     self_refine='off',configuration_recovery=False,
-    count=1,parallel=1,cpu_threads=0,phrase_search='layout',phrase_rank_policy='comfort_v1',phrase_beats=4.,phrase_commit_beats=2.,tempo_octave_policy='off',downbeat_alignment='off',record_candidate_probabilities=False)
+    count=1,parallel=1,cpu_threads=0,phrase_search='layout',phrase_rank_policy='music_flow_v1',phrase_beats=4.,phrase_commit_beats=2.,tempo_octave_policy='off',downbeat_alignment='off',record_candidate_probabilities=False)
 EVALUATION_DEFAULTS=dict(limit_charts=2,max_batches=8,timing_rollouts=2,cpu_threads=2,
     window_sampling='spread',check_training_overlap=False)
 MAX_BATCH_COUNT = 32

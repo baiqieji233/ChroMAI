@@ -13,6 +13,7 @@
 - **[完整谱面审阅与反馈](explanations/COMPOSER_V2_PREVIEW_ZH.md)**：在线谱面播放器、时间轴选区、A/B 对比试听与「收集训练示范」的详细说明。
 - **[候选库与片段审阅](explanations/COMPOSER_V2_CANDIDATE_POOL_ZH.md)**：建立待审候选库、查看自动检查提示、逐段确认可学习内容并估算学习份额。
 - **[审阅、标注和片段包操作指南](explanations/COMPOSER_V2_ANNOTATION_GUIDE_ZH.md)**：按界面顺序处理检查结果、审核素材与生成成品、导出与导入片段包并用于后续微调。
+- [动作走向、候选选优与整谱评价](explanations/COMPOSER_V2_MOTION_AND_REVIEW_ZH.md)说明旧模型怎么用新选优、新策略怎么微调，以及怎样验证实际效果。
 - **[采音与候选评估](explanations/COMPOSER_V2_QUALITY_EVALUATION_ZH.md)**：主界面评估入口、采音检查参数、候选概率记录与选优偏向分析。
 - **[Intel 核显与 NPU 加速](explanations/COMPOSER_V2_INTEL_ACCELERATION_ZH.md)**：OpenVINO MERT 加速、写谱后端自动测速、编译缓存与 Intel XPU 训练。
 

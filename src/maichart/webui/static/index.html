@@ -418,7 +418,7 @@
   <div class="settings-content"><div class="form-grid">
     <label class="field">音乐与写法联动学习<select id="v2TrainMusicalRelationPolicy"><option value="auto" selected>自动（新训练与连续模型微调启用，续训继承）</option><option value="musical_relations_v1">启用</option><option value="off">关闭</option></select><small>给原谱里随音乐延续、渐变、换写法和留白的片段额外练习权重。</small></label>
     <label class="field">乐句强化上限<input id="v2TrainMusicalRelationFraction" type="number" value="0.30" min="0" max="1" step="any" required><small>保留原有监督。0.30 表示强化增加的权重最多占总监督权重的 30%。填 0 至小于 1 的数。</small></label>
-    <label class="field">局部写法学习<select id="v2TrainFutureConfigurationPolicy"><option value="auto" selected>自动（新训练与微调采用音乐写法条件，续训继承）</option><option value="audio_writing_v2">音乐写法条件（最新）</option><option value="ordered_future_v1">未来配置预判（旧版）</option><option value="off">关闭</option></select><small>从歌曲预测接下来几拍的动作搭配、移动与释放倾向，写谱时持续参考。可以保留原检查点，在新目录微调启用。</small></label>
+    <label class="field">局部写法学习<select id="v2TrainFutureConfigurationPolicy"><option value="auto" selected>自动（默认音乐写法，已有新版可继承）</option><option value="audio_writing_v3">按音乐学习动作走向与起手（实验）</option><option value="audio_writing_v2">音乐写法条件（稳定版）</option><option value="ordered_future_v1">未来配置预判（旧版）</option><option value="off">关闭</option></select><small>学习何时起手、延续或折返，以及滑星怎样展开。已有模型可在新目录微调。</small></label>
     <label class="field">写法学习权重<input id="v2TrainFutureConfigurationWeight" type="number" value="0.05" min="0" max="1" step="any" required><small>默认 0.05，控制真实谱面对写法预测的监督强度。生成时使用模型从音乐预测的结果。</small></label>
     <label class="field">微调范围<select id="v2TrainFinetuneScope" disabled><option value="auto" selected>自动（微调全部参数）</option><option value="all">全部参数</option><option value="music_reading">音乐读取连接</option></select><small>已有连续模型可用「音乐读取连接」集中调整解码器读取音乐的连接及预判分支。</small></label>
   </div></div>
@@ -1283,7 +1283,7 @@
     <div class="preset-bar-header"><strong>一键选择写谱模式：</strong><span>只修改下方设置，选好后点击底部「生成谱面」运行</span></div>
     <div class="preset-chip-row">
       <button type="button" class="preset-chip" data-v2-gen-preset="balanced"><strong>推荐稳妥写谱（默认）</strong><span>先定节奏再比 2 种配置 · 自动拦截撞尾与锁手，速度与手感均衡</span></button>
-      <button type="button" class="preset-chip" data-v2-gen-preset="refined"><strong>高质精雕细琢（左右手顺畅）</strong><span>比较 4 种写法＋左右手交替评分＋重写薄弱段＋防星头抢拍</span></button>
+      <button type="button" class="preset-chip" data-v2-gen-preset="refined"><strong>多方案精修</strong><span>按音乐比较 4 种写法，尝试重写薄弱段，检查星头抢拍</span></button>
       <button type="button" class="preset-chip" data-v2-gen-preset="fast"><strong>快速试写预览（最快）</strong><span>逐步直接生成不反复比较，快速查看节奏与大体写法</span></button>
       <button type="button" class="preset-chip" data-v2-gen-preset="batch4"><strong>一次抽 4 张挑最好</strong><span>同一首歌生成 4 张独立完整谱面，在顶部预览一键切换对比</span></button>
     </div>
@@ -1302,10 +1302,10 @@
     </section>
 
     <section class="v2-step-card">
-      <div class="v2-step-head"><span class="step">B</span><div><h4>写谱方式、左右手顺畅度与生成张数</h4><p>让 AI 每写几拍就先在草稿纸上试几种摆法，挑出最顺手的一版保留下来。</p></div></div>
+      <div class="v2-step-head"><span class="step">B</span><div><h4>写谱方式、候选选优与生成张数</h4><p>选择试写的种数，以及用什么依据挑选要保留的写法。</p></div></div>
       <div class="form-grid">
         <label class="field" data-v2-phrase-search>生成方式<select id="v2GeneratePhraseSearch"><option value="layout" selected>先定节奏，再选配置（推荐）</option><option value="joint">节奏与配置一起比较</option><option value="event">逐步生成（速度最快）</option><option value="hybrid">保留拍点，尝试不同双押物量（实验）</option></select><small id="v2PhraseSearchHelp">默认先定节奏，再比较键位和动作；“节奏与配置一起比较”也会尝试不同的出音时间。整段试写范围都是休止时，保留模型原本的选择。增加比较会更慢。</small></label>
-        <label class="field" data-v2-phrase-search>手感与选优偏好<select id="v2GeneratePhraseRankPolicy"><option value="comfort_v1" selected>基础手感稳定优先（默认）</option><option value="comfort_v2">左右手交替与跨屏顺畅优先（新版推荐）</option><option value="likelihood_veto_v1">模型灵感优先＋手感底线保护（可选调优）</option></select><small>比较 2 种以上写法时生效。「左右手交替与跨屏顺畅优先」会模拟双手换手与移动打分；「模型灵感优先」更尊重模型非确定性语法决策似然，并把低于手感底线（0.22）的别扭候选排到后面。</small></label>
+        <label class="field" data-v2-phrase-search>手感与选优偏好<select id="v2GeneratePhraseRankPolicy"><option value="music_flow_v1" selected>跟随音乐比较写法（默认）</option><option value="music_plan_v1">参考模型预测的动作走向（实验）</option><option value="comfort_v1">偏好省力写法</option><option value="comfort_v2">按模拟手感选优</option><option value="likelihood_veto_v1">模型灵感优先＋手感底线保护（可选调优）</option></select><small>设为 2 种以上时，比较落点和重音。实验选项会额外比较模型预测的动作走向。几种写法同样合适时保留第一种。</small></label>
         <label class="field">每次内部对比写法数<select id="v2GenerateCandidates"><option value="1">1种（不比较，最快）</option><option value="2" selected>2种（推荐，兼顾速度与质量）</option><option value="4">4种（多试几种，耗时较长）</option></select><small>AI 在后台打草稿挑最好的一版输出。想自己听几张完整成谱挑一张，请改右侧「生成张数」。</small></label>
         <label class="checkbox-field" data-v2-phrase-search><input id="v2GenerateConfigurationRecovery" type="checkbox"><span>连续单键试写（实验）</span><small>默认关闭。单键连打持续很久且音乐变化时，省略部分重复前文，保留拍点和同拍数量，额外试写配置。采用后暂时停用谱面参考，直到旧前文滑出上下文。</small></label>
         <label class="field" data-v2-phrase-search>写完后自动精修薄弱段<select id="v2GenerateSelfRefine"><option value="off" selected>关闭（默认）</option><option value="worst_spans_v1">比较并重写少量片段（较慢）</option></select><small>对少量片段重新试写，比较手感与采音评分，并检查和前后配置是否冲突。</small></label>
@@ -1368,6 +1368,7 @@
           <label class="field">独立选时检查数<input id="v2EvalTimingRollouts" type="number" value="2" min="0" step="1"><small>0 表示跳过独立选时检查。</small></label>
           <label class="field">CPU计算线程<input id="v2EvalCpuThreads" type="number" value="2" min="1" step="1"></label>
           <label class="field">抽查位置<select id="v2EvalWindowSampling"><option value="spread" selected>均匀覆盖全曲</option><option value="prefix">从开头连续检查</option></select></label>
+          <label class="checkbox-field"><input id="v2EvalWritingProbe" type="checkbox">对照音乐提示和真人写法<small>额外检查同一段前文里，模型能否猜对写法、能否用好提示。</small></label>
           <label class="checkbox-field"><input id="v2EvalCheckTrainingOverlap" type="checkbox">检查与原训练集是否重叠<small>会额外读取音频。</small></label>
         </div>
         <div class="button-row compact-button-row">
@@ -1377,6 +1378,8 @@
         <div class="button-row compact-button-row">
           <button id="v2AuditButton" type="button" class="small-button">分析候选选优</button>
         </div>
+        <label class="field">批量生成清单<input id="v2EvalBatchManifest" type="text" placeholder="批量目录中的 batch.composer_v2_batch.json"><small>在预览中清除片段选择，将「评价方面」留空，用「好／有问题／不确定」评价整谱，再来统计。</small></label>
+        <button id="v2StabilityButton" type="button" class="small-button">统计整谱评价</button>
         <p id="v2EvaluationStatus" class="inline-status">提交后，进度、日志与报告会显示在右侧任务区。</p>
       </details>
     </div>

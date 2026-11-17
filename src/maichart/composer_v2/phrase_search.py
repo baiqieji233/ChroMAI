@@ -15,7 +15,8 @@ import uuid
 import numpy as np
 
 
-RANK_POLICIES = ('comfort_v1', 'comfort_v2', 'likelihood_veto_v1')
+MUSIC_POLICIES = ('music_flow_v1','music_plan_v1')
+RANK_POLICIES = (*MUSIC_POLICIES, 'comfort_v1', 'comfort_v2', 'likelihood_veto_v1')
 PHRASE_MODES = ('event', 'layout', 'joint', 'hybrid')
 COMFORT_VETO_FLOOR = 0.22
 
@@ -51,7 +52,7 @@ def checked_event_guard(candidate, guard):
 
 
 def rank_policy(args):
-    policy = getattr(args, 'phrase_rank_policy', 'comfort_v1') or 'comfort_v1'
+    policy = getattr(args, 'phrase_rank_policy', None) or 'music_flow_v1'
     if policy not in RANK_POLICIES:
         raise ValueError('Invalid phrase rank policy')
     return policy
@@ -126,9 +127,13 @@ def _grammar_confidence(rows, probabilities, start, stop, *, score_scope='config
 
 
 def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None,
-         policy='comfort_v1', score_scope='configuration', rows=None, probabilities=None):
+         policy='music_flow_v1', score_scope='configuration', rows=None, probabilities=None, complete_span=True):
     if policy not in RANK_POLICIES:
         raise ValueError('Invalid phrase rank policy')
+    if policy in MUSIC_POLICIES:
+        from .music_rank import score
+        return score(prefix, points, song, start, stop, timing_evidence(points, song, start, stop),
+                     policy=policy, complete_span=complete_span)
     if policy == 'comfort_v2':
         from .hand_flow import chirality_comfort
         comfort, coverage = chirality_comfort([*prefix, *points], tempo, song.clock,
@@ -423,16 +428,22 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
         still_repeating = bool(chosen and all(tap_key(p) == repeated_tap for p in chosen))
         # Confidence values from distinct symbolic histories are not comparable.
         # With exact shared timing/cardinality, use a relative comfort guard.
-        comfortable = (alternative['scored'] and original is not None and
-            alternative['components']['comfort'] >= max(COMFORT_VETO_FLOOR,
-                original['components'].get('comfort', .5) - .15))
+        if policy in MUSIC_POLICIES:
+            comfortable = (alternative['scored'] and original is not None and
+                           alternative['score'] >= original['score'] + margin)
+        else:
+            comfortable = (alternative['scored'] and original is not None and
+                alternative['components']['comfort'] >= max(COMFORT_VETO_FLOOR,
+                    original['components'].get('comfort', .5) - .15))
         use_alternative = (still_repeating and matched_rhythm and matched_cardinality
             and varied_configuration and comfortable)
         recovery_evidence = dict(repeated_tap=repeated_tap, compared=len(varied), exits=exits,
             still_repeating=still_repeating, matched_rhythm=matched_rhythm, matched_cardinality=matched_cardinality,
-            comfortable=comfortable, varied_configuration=varied_configuration,
+            ranking_support=comfortable, comparison_policy=policy, varied_configuration=varied_configuration,
             used_alternative=use_alternative, score=alternative['components'],
             reason=alternative['reason'])
+        if policy not in MUSIC_POLICIES:
+            recovery_evidence['comfortable'] = comfortable
         if use_alternative:
             selected = count
             eligible.append(count)

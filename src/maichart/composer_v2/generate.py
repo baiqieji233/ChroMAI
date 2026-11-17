@@ -72,8 +72,8 @@ def parser():
     result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=GENERATION_DEFAULTS['candidates'])
     result.add_argument('--phrase-search', choices=('event','layout','joint','hybrid'), default=GENERATION_DEFAULTS['phrase_search'],
         help='layout: compare continuous configurations on shared timings; hybrid: shared beat with free cardinality (+ joint branch at 4); joint: compare timing and configuration; event: fast single-event trials')
-    result.add_argument('--phrase-rank-policy', choices=('comfort_v1','comfort_v2','likelihood_veto_v1'), default=GENERATION_DEFAULTS['phrase_rank_policy'],
-        help='comfort_v1: ergonomic comfort + timing support; comfort_v2: experimental chirality hand-flow + grammar likelihood + timing; likelihood_veto_v1: model grammar likelihood + timing support with ergonomic veto floor')
+    result.add_argument('--phrase-rank-policy', choices=('music_flow_v1','music_plan_v1','comfort_v1','comfort_v2','likelihood_veto_v1'), default=GENERATION_DEFAULTS['phrase_rank_policy'],
+        help='music_flow_v1: native-feasible candidates compared on selected attacks and relative accents; music_plan_v1: also compare predicted local motions; comfort_v1: ergonomic comfort + timing support; comfort_v2: experimental chirality hand-flow + grammar likelihood + timing; likelihood_veto_v1: model grammar likelihood + timing support with ergonomic veto floor')
     result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
     result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
     result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts with independent consecutive seeds')
@@ -429,6 +429,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
+    if getattr(args,'phrase_rank_policy',None)=='music_plan_v1' and config.future_configuration_policy not in ('audio_writing_v2','audio_writing_v3'):
+        raise ValueError('这个检查点没有局部写法预测，请选择「跟随音乐比较写法」。')
     if getattr(args,'record_candidate_probabilities',False) and config.sequence_policy!='continuous_events_v1':
         raise ValueError('Candidate probability recording requires a continuous-event checkpoint')
     if getattr(args,'intensity_curve',None) and config.intensity_policy=='off':

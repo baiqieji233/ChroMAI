@@ -38,7 +38,7 @@ class ComposerV2Config:
     future_configuration_policy: str = 'off'
     future_configuration_weight: float = .05
     def __post_init__(self):
-        if self.future_configuration_policy not in ('off', 'ordered_future_v1', 'audio_writing_v2'):
+        if self.future_configuration_policy not in ('off', 'ordered_future_v1', 'audio_writing_v2', 'audio_writing_v3'):
             raise ValueError('Unknown ordered future configuration policy')
         if (not isinstance(self.future_configuration_weight, (int, float))
                 or isinstance(self.future_configuration_weight, bool)
@@ -342,10 +342,12 @@ class ComposerV2(nn.Module):
                 self.future_configuration_head=nn.Sequential(
                     nn.LayerNorm(d),nn.Linear(d,min(128,d)),nn.SiLU(),
                     nn.Linear(min(128,d),len(HORIZONS)*TARGET_DIM))
-        if c.future_configuration_policy == 'audio_writing_v2':
+        if c.future_configuration_policy in ('audio_writing_v2','audio_writing_v3'):
             from .local_writing import LocalWriting
             with torch.random.fork_rng(devices=[]):
-                self.local_writing = LocalWriting(d)
+                self.local_writing = LocalWriting(d, c.future_configuration_policy)
+            self.register_buffer('writing_time_tokens', torch.tensor([
+                token == '[AT]' or token.startswith('NUM:') for token in codec.tokens]), persistent=False)
             excluded = {'[PAD]', '[BOS]', '[CARRY]', '[CTX]', '[REF]', '[TGT]',
                         '[AT]', '[PHASE]', '[EOS]', '[END_EVENT]'}
             self.register_buffer('writing_query_tokens', torch.tensor([
@@ -535,11 +537,13 @@ class ComposerV2(nn.Module):
         weight=self.token_weight() if structured else self.embedding.weight
         x=(F.embedding(value,weight,padding_idx=self.codec.pad_id) if structured else self.embedding(value))*math.sqrt(self.config.d_model)
         x=x+positions(index,self.config.d_model)+positions(beats,self.config.d_model)
+        writing_tiles=None
         if hasattr(self,'paired_music'):
             offset=int(batch.get('paired_music_start',0))
             x=x+self.paired_music(batch['paired_music_features'][:,start-offset:].float())
             tiles=batch['tile_ids_cpu']
             indices=torch.tensor([row[start:] for row in tiles],device=x.device,dtype=torch.long)
+            writing_tiles=indices
             preview=cache['entry_context'][indices.clamp_min(0)]
             x=x+preview*(self.entry_query_tokens[value] & indices.ge(0))[...,None]
         if self.config.sequence_policy=='window_v1':x=x+positions(beats+starts[:,None],self.config.d_model)
@@ -582,7 +586,8 @@ class ComposerV2(nn.Module):
                     state=state['layers'][i] if use_cache else None,groups=groups,
                     right_padded=batch.get('right_padded_tokens',False))
         if hasattr(self,'local_writing'):
-            x=x+self.local_writing.read(cache['writing_context'],batch,start,value,self.writing_query_tokens)
+            x=x+self.local_writing.read(cache['writing_context'],batch,start,value,self.writing_query_tokens,
+                time_mask=self.writing_time_tokens,indices=writing_tiles)
         normalized=self.norm(x)
         logits=F.linear(normalized,weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
