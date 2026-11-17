@@ -165,7 +165,8 @@ def rank(prefix, points, song, tempo, start, stop, *, motion_cache=None,
 
 
 def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
-                 end, count, make_sampler, check_window, after_floor=None):
+                 end, count, make_sampler, check_window, after_floor=None,
+                 recovery_sampler=None, repeated_tap=None):
     """Run speculative branches while preserving the caller's retry ownership."""
     names=('_retry_scope','_retry_base','_retry_tree','_retry_condition','_retry_cache_dirty',
            '_fixed_retry_scope','_fixed_retry_tree','_retry_offset',
@@ -175,7 +176,8 @@ def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     try:
         return _trial_search(sampler,target,prefix,guard,primary,args=args,song=song,
             tempo=tempo,end=end,count=count,make_sampler=make_sampler,
-            check_window=check_window,retry_snapshot=saved,after_floor=after_floor)
+            check_window=check_window,retry_snapshot=saved,after_floor=after_floor,
+            recovery_sampler=recovery_sampler,repeated_tap=repeated_tap)
     finally:
         sampler._rewind(target)
         for name in names:
@@ -187,7 +189,8 @@ def trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
 
 
 def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
-                  end, count, make_sampler, check_window,retry_snapshot,after_floor=None):
+                  end, count, make_sampler, check_window,retry_snapshot,after_floor=None,
+                  recovery_sampler=None,repeated_tap=None):
     """Share immutable audio; rewind symbolic cache before every divergent trial.
 
     Layout trials use the baseline's complete timing/cardinality skeleton. Joint
@@ -198,6 +201,8 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     from .stream_generate import GridDurationRejected
 
     mode, look, commit = settings(args)
+    if recovery_sampler is not None and count == 1:
+        mode, look, commit = 'layout', Fraction(2), Fraction(2)
     policy = rank_policy(args)
     # Every branch in the pool uses the same grammar token roles. When
     # timing is shared, variation comes from configuration conditioned on it.
@@ -218,8 +223,9 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                 proposal_sec=0., native_window_sec=0., rank_sec=0.)
     if record:
         from .probability_audit import summarize,span_diagnostics
-    for branch in range(count):
-        use_skeleton = (mode == 'layout' and branch > 0) or (
+    for branch in range(count + (recovery_sampler is not None)):
+        recovery_branch = recovery_sampler is not None and branch == count
+        use_skeleton = recovery_branch or (mode == 'layout' and branch > 0) or (
             mode == 'hybrid' and branch > 0 and (count <= 2 or branch < count - 1)
         )
         if use_skeleton and not trials[0]['complete']:
@@ -237,6 +243,7 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
             continue
         sampler._rewind(target)
         for name,value in retry_snapshot.items():setattr(sampler,name,deepcopy(value))
+        refresh_sampler = recovery_sampler if recovery_branch else make_sampler
         active = sampler
         current = list(target)
         rows = []
@@ -247,14 +254,20 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
         complete = False
         reason = None
         ended = False
+        try:
+            if recovery_branch:
+                active = refresh_sampler(prefix)
+                current = []
+        except ValueError as error:
+            reason = str(error)
         # A compute bound, not a note-density rule. Unfinished trials are reported.
-        for step in range(128):
+        for step in range(128 if reason is None else 0):
             point = None
             ids = None
             for retry in range(attempts):
                 try:
                     if use_skeleton and step < len(skeleton):
-                        fixed = _FixedBeat(skeleton[step].beat, skeleton[step].note_text) if mode == 'hybrid' else skeleton[step]
+                        fixed = _FixedBeat(skeleton[step].beat, skeleton[step].note_text) if mode == 'hybrid' and not recovery_branch else skeleton[step]
                     else:
                         fixed = None
                     if use_skeleton and step >= len(skeleton):
@@ -307,7 +320,14 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                 except ValueError as error:
                     # Refresh is a computational event; preserve actual trial history.
                     if error.__class__.__name__ == 'RefreshContext' and rows:
-                        active = make_sampler([*prefix, *[r[0] for r in rows]])
+                        try:
+                            active = refresh_sampler([*prefix, *[r[0] for r in rows]])
+                        except ValueError as refresh_error:
+                            if not recovery_branch:
+                                raise
+                            reason = str(refresh_error)
+                            point = None
+                            break
                         current = []
                         continue
                     reason = str(error)
@@ -327,7 +347,13 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                 complete = True
                 break
             if cursor >= getattr(active, 'reference_refresh_beat', end) or len(current) >= active.max_tokens // 2 - 96:
-                active = make_sampler([*prefix, *[r[0] for r in rows]])
+                try:
+                    active = refresh_sampler([*prefix, *[r[0] for r in rows]])
+                except ValueError as error:
+                    if not recovery_branch:
+                        raise
+                    reason = str(error)
+                    break
                 current = []
         comparison_events = sum(start <= point.beat < stop for point, _ in rows)
         scored = bool(complete and comparison_events)
@@ -365,7 +391,7 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     # or replacing that rest with an alternative solely because it has notes.
     preserve_primary_rest = bool(trials and trials[0]['complete'] and trials[0]['rows']
                                 and trials[0].get('comparison_events') == 0)
-    eligible = [i for i, trial in enumerate(trials)
+    eligible = [i for i, trial in enumerate(trials[:count])
                 if trial['scored'] or (i == 0 and preserve_primary_rest)]
     if preserve_primary_rest:
         selected = 0
@@ -377,6 +403,39 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
     baseline_vetoed = bool(trials[0]['components'].get('comfort_veto', False)) if trials else False
     if selected is not None and 0 in eligible and not baseline_vetoed and trials[selected]['score'] < trials[0]['score'] + margin:
         selected = 0  # Small heuristic differences are not reliable improvements.
+    recovery_evidence = None
+    if recovery_sampler is not None:
+        from .configuration_recovery import tap_key
+        from .generate import _atom_heads
+        alternative = trials[count]
+        original = trials[selected] if selected is not None else None
+        chosen = [p for p, _ in original['rows'] if p.beat <= start + commit] if original else []
+        varied = [p for p, _ in alternative['rows'] if p.beat <= start + commit]
+        keys = [tap_key(p) for p in varied]
+        exits = sum(key != repeated_tap for key in keys)
+        # A new lane for the same unbroken pattern is still the same writing.
+        other_keys = {key for key in keys if key != repeated_tap}
+        returns = any(a != repeated_tap and b == repeated_tap for a, b in zip(keys, keys[1:]))
+        varied_configuration = exits >= 2 and (None in other_keys or len(other_keys) > 1 or returns)
+        matched_rhythm = [p.beat for p in chosen] == [p.beat for p in varied]
+        matched_cardinality = [len(_atom_heads(p.note_text)) for p in chosen] == [
+            len(_atom_heads(p.note_text)) for p in varied]
+        still_repeating = bool(chosen and all(tap_key(p) == repeated_tap for p in chosen))
+        # Confidence values from distinct symbolic histories are not comparable.
+        # With exact shared timing/cardinality, use a relative comfort guard.
+        comfortable = (alternative['scored'] and original is not None and
+            alternative['components']['comfort'] >= max(COMFORT_VETO_FLOOR,
+                original['components'].get('comfort', .5) - .15))
+        use_alternative = (still_repeating and matched_rhythm and matched_cardinality
+            and varied_configuration and comfortable)
+        recovery_evidence = dict(repeated_tap=repeated_tap, compared=len(varied), exits=exits,
+            still_repeating=still_repeating, matched_rhythm=matched_rhythm, matched_cardinality=matched_cardinality,
+            comfortable=comfortable, varied_configuration=varied_configuration,
+            used_alternative=use_alternative, score=alternative['components'],
+            reason=alternative['reason'])
+        if use_alternative:
+            selected = count
+            eligible.append(count)
     queued = []
     if selected is not None:
         rows = trials[selected]['rows']
@@ -393,11 +452,12 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                     start_sec=float(song.clock.at(start)), end_sec=float(song.clock.at(stop)),
                     selected=selected,mode=mode,ranking_policy=policy,
                     selection_basis=('preserve_primary_rest' if preserve_primary_rest
+                                     else 'configuration_recovery' if recovery_evidence and recovery_evidence['used_alternative']
                                      else 'ranked_trials' if selected is not None else 'event_fallback'),
                     all_comfort_vetoed=all_vetoed if policy == 'likelihood_veto_v1' else False,
                     partial_preview=True,preview_files_exported=False,
                     elapsed_sec=time.perf_counter()-began,
-                    requested_candidates=count,
+                    requested_candidates=count + (recovery_sampler is not None),
                     evaluated_candidates=sum(not t['skipped'] for t in trials),
                     skipped_candidates=sum(t['skipped'] for t in trials),
                     computation_policy='skip_ineligible_layout_branches_v1',
@@ -409,6 +469,8 @@ def _trial_search(sampler, target, prefix, guard, primary, *, args, song, tempo,
                         reason=t['reason'],skipped=t['skipped'],scored=t['scored'],
                         unscored_reason=t['unscored_reason'],
                         **{k:t[k] for k in ('baseline_reason','probability','boundary_probability','termination_probability','diagnostics') if k in t}) for i,t in enumerate(trials)])
+    if recovery_evidence is not None:
+        evidence['configuration_recovery'] = recovery_evidence
     return queued, evidence, trials
 
 

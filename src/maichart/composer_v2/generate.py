@@ -77,6 +77,9 @@ def parser():
     result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
     result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
     result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts with independent consecutive seeds')
+    result.add_argument('--configuration-recovery',action=argparse.BooleanOptionalAction,
+                        default=GENERATION_DEFAULTS['configuration_recovery'],
+                        help='Compare an alternative when a long same-key passage persists across a musical change')
     result.add_argument('--parallel', type=int, default=GENERATION_DEFAULTS['parallel'],
                         help='Maximum independent generation processes; 1 shares one model sequentially')
     result.add_argument('--batch-manifest', help=argparse.SUPPRESS)

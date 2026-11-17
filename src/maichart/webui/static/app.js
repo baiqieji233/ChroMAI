@@ -117,6 +117,8 @@ function composerV2GenerationPayload(options={}) {
     condition,tempo_map:tempoMap,meter_map:valueOrDefault("#formGenerationMeterMap","").trim()?parseMeterMap("#formGenerationMeterMap"):null};
   if(payload.phrase_commit_beats>payload.phrase_beats)throw new Error("每次保留长度不能超过提前试写长度。");
   if (element('#v2GenerateForwardFeasibility')?.disabled) delete payload.forward_feasibility;
+  const configurationRecovery=element('#v2GenerateConfigurationRecovery');
+  if(configurationRecovery && !configurationRecovery.disabled)payload.configuration_recovery=configurationRecovery.checked;
   for (const [key,selector,label,bounds] of [
     ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
     ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
@@ -1656,6 +1658,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
+  "v2GenerateConfigurationRecovery",
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2AuditInput",
   "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴

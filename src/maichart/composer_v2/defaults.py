@@ -103,7 +103,7 @@ GENERATION_DEFAULTS = dict(temperature=.9, top_p=.95, action_temperature=.9,
     tap_on_slide_threshold_ms=200., intercept_slide_head_tap=False,
     touch_reachability_policy='palm_span_v1', touch_cohold_radius=180.,
     forward_feasibility='balanced_v1', forward_tap_on_slide_ms=150.,
-    self_refine='off',
+    self_refine='off',configuration_recovery=True,
     count=1,parallel=1,cpu_threads=0,phrase_search='layout',phrase_rank_policy='comfort_v1',phrase_beats=4.,phrase_commit_beats=2.,tempo_octave_policy='off',downbeat_alignment='off',record_candidate_probabilities=False)
 EVALUATION_DEFAULTS=dict(limit_charts=2,max_batches=8,timing_rollouts=2,cpu_threads=2,
     window_sampling='spread',check_training_overlap=False)

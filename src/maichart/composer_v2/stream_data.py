@@ -415,7 +415,7 @@ class StreamDataset(ComposerV2Dataset):
         return result
     def build_stream(self,song,points,cursor,*,target=(),ended=False,training=False,
                      reference_start=_SELECT_REFERENCE,_prefix_end=None,context_recent_beats=None,
-                     _reference_index=None):
+                     _reference_index=None,history_exclude=()):
         cursor=Fraction(cursor);boundary=max(Fraction(0),cursor-self.history_beats)
         if _prefix_end is None:
             known = list(points)
@@ -440,6 +440,8 @@ class StreamDataset(ComposerV2Dataset):
                 if m['source_beat']<=cursor and float(m['end_second'])>second}
         older=active_sources(boundary)
         active=active_sources(cursor)
+        if history_exclude:
+            history=[p for p in history if p.beat not in history_exclude or p.beat in active]
         carry = []
         if _prefix_end is None:
             carry = [p for p in known if p.beat < boundary and p.beat in older]

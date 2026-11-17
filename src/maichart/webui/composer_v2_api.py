@@ -709,6 +709,15 @@ def start_generate(handler,payload,*,runtime):
     _arg(args,'--forward-feasibility',forward_policy)
     _arg(args,'--forward-tap-on-slide-ms',forward_tos_ms)
     _arg(args,'--self-refine',self_refine)
+    continuous = checked.get('sequence_policy') == 'continuous_events_v1'
+    recovery_default = GENERATION_DEFAULTS['configuration_recovery'] if continuous else False
+    configuration_recovery = payload.get('configuration_recovery', recovery_default)
+    if not isinstance(configuration_recovery, bool):
+        raise ValueError('连续单键试写必须是布尔值')
+    if configuration_recovery and not continuous:
+        raise ValueError('连续单键试写仅支持连续事件模型')
+    settings['configuration_recovery'] = configuration_recovery
+    args.append('--configuration-recovery' if configuration_recovery else '--no-configuration-recovery')
     _arg(args,'--exhaustion-policy',settings['exhaustion_policy'])
     for key in ("checkpoint", "audio", "output", "cache_dir"): _arg(args,"--"+key.replace("_","-"),settings[key])
     for key,default in dict(level=13.,temperature=.9,top_p=.95).items():

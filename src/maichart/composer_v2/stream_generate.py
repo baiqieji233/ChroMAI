@@ -72,14 +72,15 @@ def _duration_head_pulse(codec, atom):
 
 
 class EventSampler(WindowSampler):
-    def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None):
+    def __init__(self,model,dataset,song,points,device,rng,args,*,action_generator=None,history_exclude=()):
         self.progress=getattr(args,'_generation_progress',None)
         self.model=model;self.codec=model.codec;self.dataset=dataset;self.song=song
         self.device=device;self.generator=rng;self.temperature=args.temperature;self.top_p=args.top_p
         self.action_temperature,self.action_top_p,_=_action_sampling(args)
         self.action_generator=rng if action_generator is None else action_generator
         self.cursor=points[-1].beat if points else Fraction(0)
-        item=dataset.build_stream(song,points,self.cursor)
+        context={'history_exclude':history_exclude,'reference_start':None} if history_exclude else {}
+        item=dataset.build_stream(song,points,self.cursor,**context)
         self.reference=dict(cursor=str(self.cursor),shift=item.get('reference_shift'),score=item.get('reference_score'),
             checked_start=item.get('reference_checked_start'),checked_end=item.get('reference_checked_end'))
         self.reference_refresh_beat=math.floor(self.cursor)+dataset.window_beats
@@ -468,6 +469,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     progress=get_progress(args)
     progress.update(force=True,stage='encoding_audio',audio_duration_sec=float(audio.duration_sec))
     from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content,checked_event_guard,rank,rank_policy
+    from .configuration_recovery import ConfigurationRecovery
     phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
     event_rank_policy=rank_policy(args)
     if getattr(args,'record_candidate_probabilities',False):
@@ -520,21 +522,35 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     sampling_policy=_sampling_policy(args)
     attempts=sampling_policy['effective_retries']
     candidate_count=sampling_policy['effective_candidates']
+    configuration_recovery=ConfigurationRecovery()
+    enable_configuration_recovery=(getattr(args,'configuration_recovery',True)
+        and not sampling_policy['fully_greedy'])
     args._candidate_audit_active=candidate_count>1
     sampler_options={}
     if sampling_policy['rng_policy']=='separate_timing_action_v1':
         # Keep both streams alive across context refreshes and conflict retries.
         action_seed=rng.initial_seed() ^ 0x9E3779B97F4A7C15
         sampler_options['action_generator']=torch.Generator(device=device).manual_seed(action_seed)
+    omitted_history=frozenset()
+
+    def make_sampler(history, *, trial_rng=None, extra_omissions=frozenset()):
+        boundary=history[-1].beat-dataset.history_beats if history else Fraction(0)
+        omissions=frozenset(beat for beat in omitted_history | extra_omissions if beat>=boundary)
+        options=dict(sampler_options) if trial_rng is None else {}
+        if omissions:
+            options['history_exclude']=omissions
+        value=EventSampler(model,dataset,song,history,device,rng if trial_rng is None else trial_rng,args,**options)
+        value.retry_stats=retry_stats
+        return value
+
     while not done:
         progress.position(clock,points[-1].beat if points else Fraction(0),audio.duration_sec,events=len(points))
         if sampler is None:
-            sampler=EventSampler(model,dataset,song,points,device,rng,args,**sampler_options);target=[];committed_in_context=0;refreshes+=1
-            sampler.retry_stats=retry_stats
+            sampler=make_sampler(points);target=[];committed_in_context=0;refreshes+=1
             if dataset.structure_policy!='off' or dataset.reference_selection=='aligned':references.append(sampler.reference)
         after=max(points[-1].beat if points else Fraction(-1),after_floor)
         selected=None;failed_beat=after;need_refresh=False;conflict_sources=set();rejected=[];history_edited=False
-        duration_failures=[]
+        duration_failures=[];accepted_omissions=frozenset()
         prefix_key=tuple((p.beat,p.note_text) for p in points) if native_memo else None
         known_failed=native_memo.get(prefix_key,{}) if prefix_key is not None else {}
         failed_any=False
@@ -556,15 +572,34 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 candidates=[queued if queued is not None else (proposal,ids)]
                 candidate_probabilities=[getattr(sampler,'last_probability_event',None)]
                 used_phrase=False
-                if queued is None and phrase_mode!='event' and candidate_count>1:
+                opportunity=(configuration_recovery.opportunity(points,proposal,dataset,song)
+                    if queued is None and attempt==0 and enable_configuration_recovery else None)
+                normal_phrase=phrase_mode!='event' and candidate_count>1
+                if queued is None and (normal_phrase or opportunity):
                     progress.update(stage='comparing')
-                    def make_sampler(history):
-                        value=EventSampler(model,dataset,song,history,device,rng,args,**sampler_options)
-                        value.retry_stats=retry_stats
-                        return value
-                    planned,evidence,trials=trial_search(sampler,target,points,guard,(proposal,ids),
-                        args=args,song=song,tempo=tempo,end=end,count=candidate_count,
-                        make_sampler=make_sampler,check_window=_check_window,after_floor=after_floor)
+                    recovery_options={}
+                    rng_states=[]
+                    if opportunity:
+                        tap,excluded,change=opportunity
+                        trial_rng=torch.Generator(device=device).manual_seed(
+                            (rng.initial_seed() ^ proposal.beat.numerator ^ 0xD1B54A32D192ED03) % (1<<64))
+                        def make_recovery_sampler(history):
+                            return make_sampler(history,trial_rng=trial_rng,extra_omissions=excluded)
+                        recovery_options=dict(recovery_sampler=make_recovery_sampler,repeated_tap=tap)
+                        if not normal_phrase:
+                            generators={rng,sampler_options.get('action_generator',rng)}
+                            rng_states=[(generator,generator.get_state()) for generator in generators]
+                    try:
+                        planned,evidence,trials=trial_search(sampler,target,points,guard,(proposal,ids),
+                            args=args,song=song,tempo=tempo,end=end,count=candidate_count if normal_phrase else 1,
+                            make_sampler=make_sampler,check_window=_check_window,after_floor=after_floor,
+                            **recovery_options)
+                    finally:
+                        for generator,state in rng_states:generator.set_state(state)
+                    if opportunity:
+                        evidence['configuration_recovery'].update(beat=str(proposal.beat),audio_change=change,
+                            omitted_tap_count=len(excluded))
+                        configuration_recovery.record(evidence['configuration_recovery'])
                     phrase_count+=1;phrase_trials.append(evidence);phrase_trials=phrase_trials[-16:]
                     for key,value in evidence.get('compute',{}).items():
                         phrase_compute[key]=phrase_compute.get(key,0)+value
@@ -581,8 +616,10 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         record=dict(schema='composer-v2-candidate-pool-v1',**evidence)
                         with path.open('w' if phrase_count==1 else 'a',encoding='utf-8') as handle:
                             handle.write(json.dumps(record,ensure_ascii=False,allow_nan=False)+'\n')
-                    if planned:
+                    if planned and (normal_phrase or evidence['configuration_recovery']['used_alternative']):
                         candidates=planned[:1];pending_phrase=planned[1:];used_phrase=True
+                        if opportunity and evidence['configuration_recovery']['used_alternative']:
+                            accepted_omissions=excluded
                 for _ in range(candidate_count-1 if not used_phrase and queued is None else 0):
                     try:
                         alternative=sampler.propose(target,after,end,fixed=proposal)
@@ -612,7 +649,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         else:
                             retry_stats['native_trial_reuse']=retry_stats.get('native_trial_reuse',0)+1
                     if trial is None:
-                        pending_phrase.clear()
+                        pending_phrase.clear();accepted_omissions=frozenset()
                         failed_any=True
                         if prefix_key is None:prefix_key=tuple((p.beat,p.note_text) for p in points)
                         native_memo.setdefault(prefix_key,known_failed)
@@ -686,6 +723,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 pending_phrase.clear()
                 recovery.spend()
                 points,guard,report=replay;report['recovery_state']=recovery.report();rollbacks.append(report);sampler=None
+                omitted_history=frozenset()
                 after_floor=points[-1].beat if points else Fraction(-1)
                 print('composer_v2_rollback '+json.dumps(report),flush=True);continue
             elif exhaustion_policy=='downgrade_or_skip':
@@ -742,6 +780,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                 hold_repair_policy='native_hold_conflict_repair_v3',
                 retry_policy='native_rejected_completion_conditioning_v1',retry_stats=retry_stats,
                 exhaustion_policy=exhaustion_policy,bypassed_events=bypassed_events,
+                configuration_recovery=configuration_recovery.report(),
                 repairs=repairs[-64:],points=[dict(beat=str(p.beat),note_text=p.note_text) for p in points]))
             detail='; no complete structurally valid physical-conflict candidate was available to admit' if exhaustion_policy=='report' else ''
             raise RuntimeError(f'Continuous event recovery exhausted after beat {after}{detail}; see {diagnostic}')
@@ -751,9 +790,13 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         points.append(point)
         progress.position(clock,point.beat,audio.duration_sec,events=len(points))
         if recovery.commit(point.beat):release_trials.clear();native_memo.clear()
-        if history_edited:
+        if history_edited or accepted_omissions:
             # Discard symbolic KV, REF/CARRY, and clock queries together. The
-            # next context is rebuilt from the actual edited-and-committed chart.
+            # committed chart remains authoritative for carry and native checks.
+            # For an accepted configuration trial, let redundant input age out.
+            boundary=point.beat-dataset.history_beats
+            omitted_history=frozenset() if history_edited else frozenset(
+                beat for beat in omitted_history | accepted_omissions if beat>=boundary)
             sampler=None
         else:
             target.extend(encoded);sampler._rewind(target);committed_in_context+=1
@@ -822,6 +865,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     report['event_fallback_ranking']=dict(policy=event_rank_policy,decisions=event_rank_count,
         candidates_scored=event_candidates_scored,recent_decisions=event_rankings,
         score_scope='configuration',source='single_event_selection_after_native_checks')
+    report['configuration_recovery']=dict(enabled=enable_configuration_recovery,**configuration_recovery.report())
     from .phrase_search import rank_policy as resolve_rank_policy
     rank_mode = resolve_rank_policy(args)
     report['phrase_search']=dict(mode=phrase_mode,ranking_policy=rank_mode,lookahead_beats=float(phrase_beats),
@@ -871,5 +915,5 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','audio_device','inference_backend')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}
