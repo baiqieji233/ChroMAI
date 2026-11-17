@@ -98,10 +98,10 @@ class EventSampler(WindowSampler):
                 getattr(song,'intensity_input_profile',None),self.batch['intensity_strength'])
         self.retry_stats={};self._retry_scope=None
         self._fixed_retry_scope=None;self._fixed_retry_tree=None;self._retry_offset=0
-        need_probabilities=(bool(getattr(args,'record_candidate_probabilities',False))
-            or getattr(args,'phrase_rank_policy','comfort_v1')!='comfort_v1')
-        self.record_probabilities=bool(need_probabilities
-            and getattr(args,'phrase_search','layout')!='event' and getattr(args,'candidates',2)>1
+        need_ranking_probabilities=getattr(args,'phrase_rank_policy','comfort_v1')!='comfort_v1'
+        need_probabilities=(need_ranking_probabilities or
+            bool(getattr(args,'record_candidate_probabilities',False)) and getattr(args,'phrase_search','layout')!='event')
+        self.record_probabilities=bool(need_probabilities and getattr(args,'candidates',2)>1
             and getattr(args,'_candidate_audit_active',True))
         self.last_probability_event=None;self._probability=None
         self._decoded_ids=();self._query_ids=()
@@ -467,8 +467,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     from .generation_progress import get_progress
     progress=get_progress(args)
     progress.update(force=True,stage='encoding_audio',audio_duration_sec=float(audio.duration_sec))
-    from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content,checked_event_guard
+    from .phrase_search import settings as phrase_settings,trial_search,attach_candidate_content,checked_event_guard,rank,rank_policy
     phrase_mode,phrase_beats,phrase_commit_beats=phrase_settings(args)
+    event_rank_policy=rank_policy(args)
     if getattr(args,'record_candidate_probabilities',False):
         audit_path=Path(args.output).resolve().with_suffix('.candidate_audit.jsonl')
         audit_path.parent.mkdir(parents=True,exist_ok=True);audit_path.write_text('',encoding='utf-8')
@@ -510,6 +511,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     duration_repairs=[];release_trials=set();bypassed_events=[];downgraded_or_skipped=[]
     after_floor=Fraction(-1)
     retry_stats={};native_memo={};pending_phrase=[];phrase_trials=[];phrase_count=0
+    event_rank_count=0;event_candidates_scored=0;event_rankings=[]
     phrase_compute=dict(proposal_calls=0,native_window_checks=0,rank_calls=0,
         proposal_sec=0.,native_window_sec=0.,rank_sec=0.,speculative_events=0,
         incomplete_searches=0,skipped_candidates=0)
@@ -518,7 +520,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     sampling_policy=_sampling_policy(args)
     attempts=sampling_policy['effective_retries']
     candidate_count=sampling_policy['effective_candidates']
-    args._candidate_audit_active=phrase_mode!='event' and candidate_count>1
+    args._candidate_audit_active=candidate_count>1
     sampler_options={}
     if sampling_policy['rng_policy']=='separate_timing_action_v1':
         # Keep both streams alive across context refreshes and conflict retries.
@@ -552,6 +554,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                     done=True;break
                 proposal=model.codec.decode_points(ids)[0];failed_beat=proposal.beat
                 candidates=[queued if queued is not None else (proposal,ids)]
+                candidate_probabilities=[getattr(sampler,'last_probability_event',None)]
                 used_phrase=False
                 if queued is None and phrase_mode!='event' and candidate_count>1:
                     progress.update(stage='comparing')
@@ -591,7 +594,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         retry_stats['exhausted_subtrees']=retry_stats.get('exhausted_subtrees',0)+1
                         break
                     candidates.append((model.codec.decode_points(alternative)[0],alternative))
-                feasible=[]
+                    candidate_probabilities.append(getattr(sampler,'last_probability_event',None))
+                feasible=[];event_rank_rows=[]
                 for candidate_index,candidate in enumerate(candidates):
                     point,encoded=candidate
                     event_key=(point.beat,point.note_text)
@@ -619,9 +623,28 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                         if reason=='new_miacode_runtime_hard_conflict':rejected.append((point,details))
                         repairs.append(dict(beat=str(point.beat),note_text=point.note_text,reason=reason,
                             conflicts=details,cached_rejection=cached));continue
-                    score=.5 if candidate_count==1 or used_phrase or queued is not None else _comfort(points,[point],tempo,clock,max(Fraction(0),after),min(end,point.beat+1),audio.duration_sec)[0]
+                    if candidate_count==1 or used_phrase or queued is not None:
+                        score=.5
+                    else:
+                        start=max(Fraction(0),after);stop=min(end,point.beat+1)
+                        if event_rank_policy=='comfort_v1':
+                            score,components=_comfort(points,[point],tempo,clock,start,stop,audio.duration_sec)
+                        else:
+                            score,components=rank(points,[point],song,tempo,start,stop,
+                                policy=event_rank_policy,score_scope='configuration',
+                                rows=[(point,encoded)],probabilities=[candidate_probabilities[candidate_index]])
+                        event_candidates_scored+=1
+                        event_rank_rows.append(dict(beat=str(point.beat),note_text=point.note_text,
+                            score=float(score),components=components))
                     feasible.append((score,point,encoded,trial))
-                if feasible:selected=max(feasible,key=lambda row:row[0]);break
+                if feasible:
+                    selected=max(feasible,key=lambda row:row[0])
+                    if event_rank_rows:
+                        event_rank_count+=1
+                        event_rankings.append(dict(after=str(after),selected_beat=str(selected[1].beat),
+                            selected_note_text=selected[1].note_text,candidates=event_rank_rows))
+                        event_rankings=event_rankings[-16:]
+                    break
             except RetrySpaceExhausted:
                 retry_stats['exhausted_subtrees']=retry_stats.get('exhausted_subtrees',0)+1;break
             except GridDurationRejected as error:
@@ -796,6 +819,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
             if getattr(args,'record_candidate_probabilities',False) and phrase_count else None,
         scope='trial_search_only; last 16 pools embedded, complete pool history in JSONL',
         ranking_changed=False)
+    report['event_fallback_ranking']=dict(policy=event_rank_policy,decisions=event_rank_count,
+        candidates_scored=event_candidates_scored,recent_decisions=event_rankings,
+        score_scope='configuration',source='single_event_selection_after_native_checks')
     from .phrase_search import rank_policy as resolve_rank_policy
     rank_mode = resolve_rank_policy(args)
     report['phrase_search']=dict(mode=phrase_mode,ranking_policy=rank_mode,lookahead_beats=float(phrase_beats),
