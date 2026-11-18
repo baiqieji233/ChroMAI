@@ -392,14 +392,14 @@
     <div role="group" aria-labelledby="v2TrainDifficultySlotsLabel">
       <p id="v2TrainDifficultySlotsLabel">使用的难度槽位</p>
       <div class="form-grid">
-        <label class="checkbox-field" id="v2TrainDifficultyExpertField"><input id="v2TrainDifficultySlot4" type="checkbox"><span>EXPERT（可选）</span></label>
+        <label class="checkbox-field"><input id="v2TrainDifficultySlot4" type="checkbox"><span>EXPERT（可选）</span></label>
         <label class="checkbox-field"><input id="v2TrainDifficultySlot5" type="checkbox" checked><span>MASTER</span></label>
         <label class="checkbox-field"><input id="v2TrainDifficultySlot6" type="checkbox" checked><span>Re:MASTER</span></label>
       </div>
     </div>
     <p class="muted">定数范围按所选来源筛选，难度槽位始终生效。拟合时还可设置最低标称定数。</p>
     <div id="v2TrainChartgateOptions" hidden>
-      <p class="muted">Chart;Gate 估算 MASTER 和 Re:MASTER 的定数。选择它时，只使用这两个难度的谱面。</p>
+      <p class="muted">可为 EXPERT、MASTER 和 Re:MASTER 估算定数。想纳入较低定数的 EXPERT 时，可调低「最低定数」。</p>
       <button type="button" id="v2TrainChartgateSetup">初始化 Chart;Gate</button>
       <p id="v2TrainChartgateStatus" class="muted" role="status">首次使用时点一次，完成后可以直接选用。</p>
       <details class="settings-section"><summary>已有 Chart;Gate 文件</summary>

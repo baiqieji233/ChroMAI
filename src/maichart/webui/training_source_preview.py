@@ -12,7 +12,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from maichart.composer_v2.difficulty import (
-    CHARTGATE_SLOTS, DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, metadata_exclusion, resolve_selection,
+    DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, metadata_exclusion, resolve_selection,
 )
 from maichart.composer_v2.quality_data import TrainingQuality, quality_excludes_chart, stream_region_weight_fn
 from maichart.portable_paths import material_path
@@ -337,9 +337,8 @@ def _quality_rows(manifest, data, sources, options, digest, composition, *, read
         if not 4 <= chart.slot <= 6:
             return "non_training_slot"
         raw = chart.metadata.get("level_raw", chart.metadata.get("level"))
-        supported = CHARTGATE_SLOTS if difficulty.source == "chartgate" else None
         reason = metadata_exclusion(
-            chart.slot, raw, difficulty.difficulty_slots, supported, difficulty.min_declared_level
+            chart.slot, raw, difficulty.effective_slots, None, difficulty.min_declared_level
         )
         if reason is not None:
             return reason
@@ -635,8 +634,8 @@ def _quality_rows(manifest, data, sources, options, digest, composition, *, read
     inclusion_summary = dict(
         total_included_charts=len(included),
         total_weight_sum=round(total_weight_sum, 3),
-        difficulty_slots=list(difficulty.difficulty_slots),
-        slot_names=[_SLOT_NAMES.get(s, f"槽 {s}") for s in difficulty.difficulty_slots],
+        difficulty_slots=list(difficulty.effective_slots),
+        slot_names=[_SLOT_NAMES.get(s, f"槽 {s}") for s in difficulty.effective_slots],
         difficulty_source=difficulty.source,
         level_range=[difficulty.min_level, difficulty.max_level],
         min_declared_level=difficulty.min_declared_level,

@@ -401,12 +401,10 @@ function updateV2DifficultyControls() {
       delete declared.dataset.beforeResumeDifficulty;
     }
   }
-  const expert=element('#v2TrainDifficultyExpertField');
-  if(expert) expert.hidden=source==='chartgate';
   for(const slot of [4,5,6]) {
     const checkbox=element('#v2TrainDifficultySlot'+slot);
     if(!checkbox) continue;
-    checkbox.disabled=resume || (source==='chartgate' && slot===4);
+    checkbox.disabled=resume;
     if(!resume && checkbox.dataset.beforeResumeDifficulty!==undefined) {
       checkbox.checked=checkbox.dataset.beforeResumeDifficulty==='true';
       delete checkbox.dataset.beforeResumeDifficulty;
@@ -478,11 +476,12 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
       declared.value=String(difficulty?.min_declared_level??0);
     }
     const slots=difficulty?.difficulty_slots??[4,5,6];
+    const expertAllowed=difficulty?.source!=='chartgate'||difficulty.chartgate_expert===true;
     for(const slot of [4,5,6]) {
       const checkbox=element('#v2TrainDifficultySlot'+slot);
       if(checkbox) {
         checkbox.dataset.beforeResumeDifficulty??=String(checkbox.checked);
-        checkbox.checked=slots.includes(slot);
+        checkbox.checked=slots.includes(slot)&&(slot!==4||expertAllowed);
       }
     }
   }
@@ -5573,7 +5572,7 @@ function renderTrainingSourcePreviewPage(reset = false) {
     stale_quality_annotation:"谱面或音频版本变化，原限制已失效", quality_audio_changed:"音频版本变化，原限制已失效",
     quality_excluded:"质量权重为零或已标记排除", scan_excluded:"候选初筛排除",
     difficulty_slot_excluded:"未勾选该难度槽位（如 EXPERT 默认不入训）",
-    difficulty_slot_unsupported:"当前拟合定数器仅支持 MASTER / Re:MASTER",
+    difficulty_slot_unsupported:"当前估分器不支持该难度槽位",
     non_training_slot:"非常规难度槽位（BASIC / ADVANCED / UTAGE 不入训）",
     declared_level_out_of_range:"标称定数超出本次训练定数范围",
     declared_level_below_minimum:"标称定数低于最低标称门槛",
@@ -6682,10 +6681,8 @@ async function submitTrain(options = {}) {
         && !backend.training_capabilities?.composer_v2_chartgate) {
       throw new Error('请重启 WebUI 后再使用 Chart;Gate。');
     }
-    if(payload.difficulty_slots && !payload.difficulty_slots.some(slot=>payload.difficulty_source!=='chartgate' || slot!==4)) {
-      throw new Error(payload.difficulty_source==='chartgate'
-        ? '使用 Chart;Gate 时，请至少勾选 MASTER 或 Re:MASTER。'
-        : '请至少勾选一个难度槽位。');
+    if(payload.difficulty_slots && !payload.difficulty_slots.length) {
+      throw new Error('请至少勾选一个难度槽位。');
     }
     const savedDifficulty=payload.mode==='resume'?checkpointInspection?.data?.training_contract?.difficulty_selection:null;
     if(!backend.training_capabilities?.composer_v2_combined_difficulty_filters) {

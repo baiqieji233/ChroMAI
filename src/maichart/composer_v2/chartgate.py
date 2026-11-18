@@ -215,7 +215,7 @@ class ChartGateScorer:
 
     def score(self, digest, slot, source, chart_bytes):
         if slot not in self.supported_slots:
-            raise ValueError('Chart;Gate 支持 MASTER 和 Re:MASTER。')
+            raise ValueError('Chart;Gate 支持 EXPERT、MASTER 和 Re:MASTER。')
         from .open_mdp import _cached_score
         value = _cached_score(self.score_path(digest,slot))
         if value is not None:
