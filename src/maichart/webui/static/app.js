@@ -32,6 +32,7 @@ function composerV2TrainingPayload(options={}) {
   strings.add("musical_context");
   for(const key of ["musical_relation_policy", "future_configuration_policy", "finetune_scope"])strings.add(key);
   for(const key of COMPOSER_V2_FIELDS) {
+    if(key==='song_layers' && payload.mode!=='fresh')continue;
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
     if(raw!=="")payload[key]=strings.has(key)?raw:Number(raw);
   }
@@ -456,7 +457,6 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.finetune_scope = data.training_contract?.finetune_scope ?? 'all';
   saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
-  saved.song_layers=data.model_config?.song_layers??2;
   const audioLayers = element('#v2TrainAudioLayers');
   if (currentTrainingMode() === 'finetune' && audioLayers && Number(audioLayers.value) < saved.audio_layers) {
     audioLayers.value = String(saved.audio_layers);
@@ -485,6 +485,7 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   if(currentTrainingMode()==="resume" && !saved.validation_source)saved.validation_source=saved.validation_manifest?"manual":"off";
   if(currentTrainingMode()==='resume' && element('#v2TrainQualityEnabled'))element('#v2TrainQualityEnabled').checked=saved.quality_enabled!==false;
   for(const key of COMPOSER_V2_FIELDS) {
+    if(key==='song_layers')continue;
     if (['cuda_memory_budget_gb', 'audio_cache_gb', 'activation_checkpointing', 'attention_projection_packing', 'decoder_flash_attention'].includes(key)) continue;
     if (preserveEditableBatch && ['batch_size','grad_accumulation','batch_layout'].includes(key)
         && element("#"+v2FieldId(key))?.dataset.batchEdited==='1') continue;
@@ -1887,7 +1888,8 @@ function settingsFields() {
 function collectSettings() {
   const values = {};
   settingsFields().forEach((target) => {
-    const editable = target.dataset.beforeResumeDifficulty ?? target.dataset.beforeResumeMusicalContext;
+    const editable = target.dataset.beforeResumeDifficulty ?? target.dataset.beforeResumeMusicalContext
+      ?? target.dataset.beforeCheckpointSongLayers;
     values[target.id] = target.type === "checkbox"
       ? (editable === undefined ? target.checked : editable === 'true')
       : (editable ?? target.value);
@@ -4105,7 +4107,26 @@ function updateDatasetButtons() {
   if (resetOptimizer) resetOptimizer.disabled = currentTrainingMode() !== "finetune" || busy;
 }
 
+function updateV2SongLayers() {
+  const field = element('#v2TrainSongLayers');
+  if (!field) return;
+  const usesCheckpoint = currentModelFamily()==='chart_composer_v2' && currentTrainingMode()!=='fresh';
+  if (!usesCheckpoint) {
+    if (field.dataset.beforeCheckpointSongLayers !== undefined) {
+      field.value = field.dataset.beforeCheckpointSongLayers;
+      delete field.dataset.beforeCheckpointSongLayers;
+    }
+    field.placeholder = '';
+    return;
+  }
+  field.dataset.beforeCheckpointSongLayers ??= field.value;
+  const inspection = checkpointInspection.key === currentCheckpointKey() ? checkpointInspection.data : null;
+  field.value = inspection?.valid ? String(inspection.model_config?.song_layers ?? 2) : '';
+  field.placeholder = inspection?.valid ? '' : '检查后显示';
+}
+
 function updateTrainingControls() {
+  updateV2SongLayers();
   const v2Resume=currentModelFamily()==="chart_composer_v2" && currentTrainingMode()==="resume";
   const smokePreset = element("#v2TrainSmokePreset");
   if (smokePreset) {
@@ -5252,6 +5273,7 @@ function invalidateDatasetStatus(message) {
 
 function invalidateCheckpointInspection(message) {
   checkpointInspection = { key: "", data: null };
+  updateV2SongLayers();
   renderV2AutoQualitySources();
   if (message) setCheckpointStatus(message, "warn");
 }
