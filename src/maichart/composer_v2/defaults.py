@@ -21,15 +21,15 @@ MUSICAL_CONTEXT_PROBABILITY = .25
 MUSICAL_RELATION_POLICY = 'musical_relations_v1'
 MUSICAL_RELATION_CHOICES = ('auto', 'off', MUSICAL_RELATION_POLICY)
 MUSICAL_RELATION_FRACTION = .3
-FUTURE_CONFIGURATION_POLICY = 'audio_writing_v2'
-FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', 'audio_writing_v3', FUTURE_CONFIGURATION_POLICY)
+FUTURE_CONFIGURATION_POLICY = 'audio_writing_v3'
+FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', 'audio_writing_v2', FUTURE_CONFIGURATION_POLICY)
 FUTURE_CONFIGURATION_WEIGHT = .05
 FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION = .25
 FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading')
 
 
 def configuration_view_fraction(policy):
-    if policy in (FUTURE_CONFIGURATION_POLICY, 'audio_writing_v3'):
+    if policy in ('audio_writing_v2', 'audio_writing_v3'):
         return 1.
     if policy == 'ordered_future_v1':
         return FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION
@@ -72,10 +72,7 @@ def resolve_auxiliary_policy(requested, value, *, feature, choices, default,
     continuous = sequence_policy == 'continuous_events_v1'
     policy = requested
     if policy == 'auto':
-        recommended = choices[-1]
-        if feature == 'future_configuration' and saved_policy == 'audio_writing_v3':
-            recommended = saved_policy
-        policy = saved_policy if resume else recommended if continuous else 'off'
+        policy = saved_policy if resume else choices[-1] if continuous else 'off'
     if policy not in choices[1:]:
         raise ValueError(f'Unknown saved {feature} policy')
     if value is None:

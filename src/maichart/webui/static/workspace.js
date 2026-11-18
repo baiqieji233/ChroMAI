@@ -326,8 +326,8 @@
     if(selectedFamily==='chart_composer_v2')list("trainingRunSummary",[
       `起点：${modeLabel}${mode!=="fresh"?` · ${value("trainingCheckpointPath").trim()||"尚未选择 checkpoint"}`:""}`,
       sources.length?`素材：${sources.map(item=>item.name||item.path).join("、")}`:`素材：${value("manifestPath").trim()||"尚未准备"}`,
-      mode==='resume' ? '音乐与写法联动、连续配置预判与微调范围均继承 checkpoint。'
-        : `音乐与写法联动：${nameOf('v2TrainMusicalRelationPolicy')}${value('v2TrainMusicalRelationPolicy')==='off'?'':` · 强化上限 ${value('v2TrainMusicalRelationFraction')}`}；连续配置预判：${nameOf('v2TrainFutureConfigurationPolicy')}${value('v2TrainFutureConfigurationPolicy')==='off'?'':` · 学习权重 ${value('v2TrainFutureConfigurationWeight')}`}`,
+      mode==='resume' ? '音乐与写法联动、局部写法及微调范围均继承 checkpoint。'
+        : `音乐与写法联动：${nameOf('v2TrainMusicalRelationPolicy')}${value('v2TrainMusicalRelationPolicy')==='off'?'':` · 强化上限 ${value('v2TrainMusicalRelationFraction')}`}；局部写法学习：${nameOf('v2TrainFutureConfigurationPolicy')}${value('v2TrainFutureConfigurationPolicy')==='off'?'':` · 学习权重 ${value('v2TrainFutureConfigurationWeight')}`}`,
       ...(mode==='finetune' ? [`微调范围：${nameOf('v2TrainFinetuneScope')}`] : []),
       `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
       `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,

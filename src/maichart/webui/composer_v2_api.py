@@ -654,22 +654,18 @@ def start_generate(handler,payload,*,runtime):
         raise ValueError('记录候选评估数据仅支持连续事件模型；这个旧窗口模型不支持')
     settings['record_candidate_probabilities']=record_probabilities
     if record_probabilities:args.append('--record-candidate-probabilities')
-    phrase_search=_choice(payload,'phrase_search','layout',{'event','layout','joint','hybrid'})
-    from maichart.composer_v2.phrase_search import RANK_POLICIES
-    rank_default='comfort_v1' if checked.get('sequence_policy')=='window_v1' else GENERATION_DEFAULTS['phrase_rank_policy']
-    phrase_rank_policy=_choice(payload,'phrase_rank_policy',rank_default,set(RANK_POLICIES))
-    if phrase_rank_policy=='music_plan_v1' and (checked.get('model_config') or {}).get('future_configuration_policy') not in ('audio_writing_v2','audio_writing_v3'):
-        raise ValueError('这个检查点没有局部写法预测，请选择「跟随音乐比较写法」。')
-    phrase_beats=_float(payload,'phrase_beats',4.,minimum=1.)
-    phrase_commit_beats=_float(payload,'phrase_commit_beats',2.,minimum=0.)
+    from maichart.composer_v2.phrase_search import PHRASE_MODES, RANK_POLICIES, resolve_search_options
+    phrase_search, phrase_rank_policy=resolve_search_options(
+        _choice(payload,'phrase_search','auto',('auto',*PHRASE_MODES)),
+        _choice(payload,'phrase_rank_policy','auto',('auto',*RANK_POLICIES)),
+        sequence_policy=checked.get('sequence_policy'),
+        future_configuration_policy=(checked.get('model_config') or {}).get('future_configuration_policy','off'))
+    phrase_beats=_float(payload,'phrase_beats',GENERATION_DEFAULTS['phrase_beats'],minimum=1.)
+    phrase_commit_beats=_float(payload,'phrase_commit_beats',GENERATION_DEFAULTS['phrase_commit_beats'],minimum=0.)
     if isinstance(payload.get('phrase_beats'),bool) or isinstance(payload.get('phrase_commit_beats'),bool):
         raise ValueError('提前试写长度和每次保留长度必须是数字')
     if phrase_beats>16 or not 0<phrase_commit_beats<=phrase_beats:
         raise ValueError('提前试写长度须为1–16拍；每次保留长度须大于0，且不能超过提前试写长度')
-    if checked.get('sequence_policy')=='window_v1' and phrase_search!='event':
-        raise ValueError('这个旧模型不支持比较整段写法，请选择“逐步生成（速度优先）”')
-    if checked.get('sequence_policy')=='window_v1' and phrase_rank_policy!='comfort_v1':
-        raise ValueError('这个旧窗口模型支持基础手感选优')
     settings.update(phrase_search=phrase_search,phrase_rank_policy=phrase_rank_policy,phrase_beats=phrase_beats,phrase_commit_beats=phrase_commit_beats)
     for key in ('phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats'):_arg(args,'--'+key.replace('_','-'),settings[key])
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop','downgrade_or_skip'})

@@ -22,7 +22,7 @@ from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Datase
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
 from . import chart_dialect, timing_recovery
 from .defaults import (
-    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
+    FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_POLICY, configuration_view_fraction,
     FUTURE_CONFIGURATION_WEIGHT,
     MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, MUSICAL_RELATION_CHOICES,
     MUSICAL_RELATION_FRACTION, resolve_auxiliary_policy, resolve_finetune_scope, resolve_musical_context,
@@ -71,7 +71,7 @@ def parser():
     result.add_argument('--musical-relation-fraction', type=float,
                         help=f'Maximum relative training supervision on musical relationship views (default {MUSICAL_RELATION_FRACTION})')
     result.add_argument('--future-configuration-policy', choices=FUTURE_CONFIGURATION_CHOICES, default='auto',
-                        help='Learn audio-predicted local writing conditions; ordered_future_v1 retains the legacy auxiliary objective')
+                        help=f'Auto uses {FUTURE_CONFIGURATION_POLICY} for fresh training and continuous-event fine-tuning; exact resume inherits the checkpoint')
     result.add_argument('--future-configuration-weight', type=float,
                         help=f'Weight of the ordered future chart objective (default {FUTURE_CONFIGURATION_WEIGHT})')
     result.add_argument('--finetune-scope', choices=FINETUNE_SCOPE_CHOICES, default='auto',

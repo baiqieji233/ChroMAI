@@ -98,7 +98,7 @@ function composerV2GenerationPayload(options={}) {
     temperature:number('#v2GenerateTemperature',.9,'采音温度',{min:0}),top_p:number('#v2GenerateTopP',.95,'采音 Top-p',{min:0,max:1,exclusiveMin:true}),
     count,parallel:count>1?number('#v2GenerateParallel',1,'同时生成数',{min:1,max:32,integer:true}):1,
     window_retries:number('#v2GenerateWindowRetries',16,'每事件提议重试次数',{min:1,max:128,integer:true}),
-    phrase_search:element('#v2GeneratePhraseSearch')?.disabled?'event':valueOrDefault('#v2GeneratePhraseSearch','layout'),
+    phrase_search:element('#v2GeneratePhraseSearch')?.disabled?'event':valueOrDefault('#v2GeneratePhraseSearch','auto'),
     phrase_beats:number('#v2GeneratePhraseBeats',4,'提前试写长度',{min:1,max:16}),
     phrase_commit_beats:number('#v2GeneratePhraseCommitBeats',2,'每次保留长度',{min:0,exclusiveMin:true,max:16}),
     candidates:number('#v2GenerateCandidates',2,'每次比较几种写法',{min:1,integer:true}),device:valueOrDefault("#v2GenerateDevice","auto"),
@@ -134,7 +134,9 @@ function composerV2GenerationPayload(options={}) {
   const referenceSelection=element('#v2GenerateReferenceSelection');
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
   const legacyWindow=element('#v2GeneratePhraseSearch')?.disabled;
-  payload.phrase_rank_policy=legacyWindow?'comfort_v1':valueOrDefault('#v2GeneratePhraseRankPolicy','music_flow_v1');
+  const ranking=valueOrDefault('#v2GeneratePhraseRankPolicy','auto');
+  if(legacyWindow || ranking!=='auto')payload.phrase_rank_policy=legacyWindow?'comfort_v1':ranking;
+  if(payload.phrase_search==='auto')delete payload.phrase_search;
   const tempoOctavePolicy=valueOrDefault('#v2GenerateTempoOctavePolicy','off');
   if(tempoOctavePolicy && tempoOctavePolicy!=='off')payload.tempo_octave_policy=tempoOctavePolicy;
   const downbeatAlignment=valueOrDefault('#v2GenerateDownbeatAlignment','off');
@@ -1983,7 +1985,9 @@ function migrateComposerV2ReleaseDefaults(values) {
   changed=true;
   }
   if(values.__composerV2PhraseMusicDefaults!==1) {
-    Object.assign(values,{v2GeneratePhraseSearch:'layout',v2GeneratePhraseBeats:'4',v2GeneratePhraseCommitBeats:'2'});
+    values.v2GeneratePhraseSearch ??= 'auto';
+    values.v2GeneratePhraseBeats ??= '4';
+    values.v2GeneratePhraseCommitBeats ??= '2';
     if(values.trainingMode==='fresh' || !values.trainingMode)Object.assign(values,{v2TrainAudioLayers:'4',v2TrainSongLayers:'2',v2TrainMusicContext:'auto'});
     values.__composerV2PhraseMusicDefaults=1;changed=true;
   }
@@ -2756,6 +2760,8 @@ function updateFamilyFields() {
   if(musicInfo)musicInfo.textContent=!checked?'音乐理解：新版模型支持成对参考与前方采音；生成时使用检查点已学到的方案。':capabilities?.paired_music
     ?'音乐理解：已启用成对音乐参考与前方采音，随检查点自动使用。'
     :'音乐理解：使用检查点原有方案；新能力可在新目录微调启用。';
+  if(musicInfo && capabilities?.motion_and_entry_condition)
+    musicInfo.textContent+=' 此检查点也会使用新版动作走向与起手预测。';
   const builtInReference=!!capabilities?.rhythm_structure;
   const referenceChoice=v2Generation && (!checked || capabilities?.continuous_time) && !builtInReference;
   for (const field of document.querySelectorAll('[data-v2-reference-selection]')) {
@@ -7176,11 +7182,13 @@ function applyV2GenPreset(presetName) {
   const presets = {
     balanced: {
       values: {
-        v2GeneratePhraseSearch: "layout", v2GeneratePhraseRankPolicy: "music_flow_v1", v2GenerateCandidates: "2",
-        v2GenerateSelfRefine: "off", v2GeneratePhraseBeats: 4, v2GeneratePhraseCommitBeats: 2,
+        v2GeneratePhraseSearch: "auto", v2GeneratePhraseRankPolicy: "auto", v2GenerateCandidates: "2",
+        v2GenerateSelfRefine: "off", v2GenerateConfigurationRecovery: false,
+        v2GeneratePhraseBeats: 4, v2GeneratePhraseCommitBeats: 2,
         v2GenerateInterceptTapOnSlide: true, v2GenerateInterceptSlideHeadTap: false,
         v2GenerateForwardFeasibility: "balanced_v1", v2GenerateCount: 1,
-        v2GenerateTemperature: 0.9, v2GenerateActionTemperature: 0.9,
+        v2GenerateTemperature: 0.9, v2GenerateTopP: 0.95,
+        v2GenerateActionTemperature: 0.9, v2GenerateActionTopP: 0.95,
       },
       note: '已套用「推荐稳妥写谱」。先定节奏，再试写两种配置，并启用防撞尾与下笔前防锁。',
     },

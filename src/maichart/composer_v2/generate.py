@@ -70,10 +70,11 @@ def parser():
     result.add_argument('--self-refine',choices=SELF_REFINE_POLICIES,default=GENERATION_DEFAULTS['self_refine'],
         help='Experimental post-generation worst-span resampling under full suffix EventGuard check')
     result.add_argument('--candidates', type=int, choices=(1, 2, 4), default=GENERATION_DEFAULTS['candidates'])
-    result.add_argument('--phrase-search', choices=('event','layout','joint','hybrid'), default=GENERATION_DEFAULTS['phrase_search'],
-        help='layout: compare continuous configurations on shared timings; hybrid: shared beat with free cardinality (+ joint branch at 4); joint: compare timing and configuration; event: fast single-event trials')
-    result.add_argument('--phrase-rank-policy', choices=('music_flow_v1','music_plan_v1','comfort_v1','comfort_v2','likelihood_veto_v1'), default=GENERATION_DEFAULTS['phrase_rank_policy'],
-        help='music_flow_v1: native-feasible candidates compared on selected attacks and relative accents; music_plan_v1: also compare predicted local motions; comfort_v1: ergonomic comfort + timing support; comfort_v2: experimental chirality hand-flow + grammar likelihood + timing; likelihood_veto_v1: model grammar likelihood + timing support with ergonomic veto floor')
+    from .phrase_search import PHRASE_MODES, RANK_POLICIES
+    result.add_argument('--phrase-search', choices=('auto',*PHRASE_MODES), default='auto',
+        help='auto: layout on continuous models, event on window models; layout: compare configurations on shared timings; hybrid: shared beat with free cardinality (+ joint branch at 4); joint: compare timing and configuration; event: fast single-event trials')
+    result.add_argument('--phrase-rank-policy', choices=('auto',*RANK_POLICIES), default='auto',
+        help='auto: music_flow_v1 on continuous models and comfort_v1 on window models; music_flow_v1 compares selected attacks and relative accents; music_plan_v1 also compares predicted local motions')
     result.add_argument('--phrase-beats',type=float,default=GENERATION_DEFAULTS['phrase_beats'])
     result.add_argument('--phrase-commit-beats',type=float,default=GENERATION_DEFAULTS['phrase_commit_beats'])
     result.add_argument('--count', type=int, default=GENERATION_DEFAULTS['count'], help='Number of complete charts with independent consecutive seeds')
@@ -403,15 +404,6 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         raise ValueError('first, level and temperature must be finite')
     raw_difficulty = getattr(args, 'difficulty', None)
     difficulty = validate_difficulty(5 if raw_difficulty is None else raw_difficulty)
-    sampling_policy = _sampling_policy(args)
-    if not math.isfinite(sampling_policy['action_temperature']) or sampling_policy['action_temperature'] < 0:
-        raise ValueError('action_temperature must be finite and nonnegative')
-    if not 0 < sampling_policy['action_top_p'] <= 1:
-        raise ValueError('action_top_p must be in (0,1]')
-    effective_candidates = sampling_policy['effective_candidates']
-    effective_retries = sampling_policy['effective_retries']
-    effective_rollback_budget = sampling_policy['effective_rollback_budget']
-    print('composer_v2_sampling '+json.dumps(sampling_policy,ensure_ascii=False),flush=True)
     audit=bool(getattr(args,'record_candidate_probabilities',False))
     digest=getattr(args,'checkpoint_sha256',None)
     if audit and payload_override is None:
@@ -429,8 +421,19 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
-    if getattr(args,'phrase_rank_policy',None)=='music_plan_v1' and config.future_configuration_policy not in ('audio_writing_v2','audio_writing_v3'):
-        raise ValueError('这个检查点没有局部写法预测，请选择「跟随音乐比较写法」。')
+    from .phrase_search import resolve_search_options
+    args.phrase_search, args.phrase_rank_policy = resolve_search_options(
+        getattr(args,'phrase_search','auto'), getattr(args,'phrase_rank_policy',None) or 'auto',
+        sequence_policy=config.sequence_policy, future_configuration_policy=config.future_configuration_policy)
+    sampling_policy = _sampling_policy(args)
+    if not math.isfinite(sampling_policy['action_temperature']) or sampling_policy['action_temperature'] < 0:
+        raise ValueError('action_temperature must be finite and nonnegative')
+    if not 0 < sampling_policy['action_top_p'] <= 1:
+        raise ValueError('action_top_p must be in (0,1]')
+    effective_candidates = sampling_policy['effective_candidates']
+    effective_retries = sampling_policy['effective_retries']
+    effective_rollback_budget = sampling_policy['effective_rollback_budget']
+    print('composer_v2_sampling '+json.dumps(sampling_policy,ensure_ascii=False),flush=True)
     if getattr(args,'record_candidate_probabilities',False) and config.sequence_policy!='continuous_events_v1':
         raise ValueError('Candidate probability recording requires a continuous-event checkpoint')
     if getattr(args,'intensity_curve',None) and config.intensity_policy=='off':

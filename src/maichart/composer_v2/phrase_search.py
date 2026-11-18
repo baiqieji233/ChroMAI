@@ -13,12 +13,29 @@ import hashlib
 import json
 import uuid
 import numpy as np
+from .defaults import GENERATION_DEFAULTS
 
 
 MUSIC_POLICIES = ('music_flow_v1','music_plan_v1')
 RANK_POLICIES = (*MUSIC_POLICIES, 'comfort_v1', 'comfort_v2', 'likelihood_veto_v1')
 PHRASE_MODES = ('event', 'layout', 'joint', 'hybrid')
 COMFORT_VETO_FLOOR = 0.22
+
+
+def resolve_search_options(mode, ranking, *, sequence_policy, future_configuration_policy='off'):
+    """Use the same automatic choices in the CLI and WebUI."""
+    legacy = sequence_policy == 'window_v1'
+    if mode == 'auto':
+        mode = 'event' if legacy else GENERATION_DEFAULTS['phrase_search']
+    if ranking == 'auto':
+        ranking = 'comfort_v1' if legacy else GENERATION_DEFAULTS['phrase_rank_policy']
+    if mode not in PHRASE_MODES or ranking not in RANK_POLICIES:
+        raise ValueError('未知的生成方式或选优偏好')
+    if legacy and (mode != 'event' or ranking != 'comfort_v1'):
+        raise ValueError('旧窗口模型请使用自动设置，实际采用逐步生成和基础手感选优。')
+    if ranking == 'music_plan_v1' and future_configuration_policy not in ('audio_writing_v2','audio_writing_v3'):
+        raise ValueError('这个检查点没有局部写法预测，请选择「跟随音乐比较写法」。')
+    return mode, ranking
 
 
 class _FixedBeat:
@@ -52,7 +69,7 @@ def checked_event_guard(candidate, guard):
 
 
 def rank_policy(args):
-    policy = getattr(args, 'phrase_rank_policy', None) or 'music_flow_v1'
+    policy = getattr(args, 'phrase_rank_policy', None) or GENERATION_DEFAULTS['phrase_rank_policy']
     if policy not in RANK_POLICIES:
         raise ValueError('Invalid phrase rank policy')
     return policy
