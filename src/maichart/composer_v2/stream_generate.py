@@ -109,6 +109,7 @@ class EventSampler(WindowSampler):
         self._clock_states=[];self._clocks=[]
         self._tiles=[];self._local_tiles=[];self._token_buffers=None
         self.args=args;self._active_guard=None;self._forward_cache=None
+        self.condition_guidance=getattr(song,'_condition_guidance',None)
 
     def _forward_guard(self):
         guard=getattr(self,'_active_guard',None)
@@ -167,14 +168,19 @@ class EventSampler(WindowSampler):
             generator,temperature,top_p=self.generator,self.temperature,self.top_p
         raw_logits=logits
         grammar=getattr(self,'_audit_grammar',None) or getattr(self,'_free_choices',allowed)
+        choices=allowed if fixed_retry else getattr(self,'_free_choices',allowed)
+        guidance=getattr(self,'condition_guidance',None)
+        guided=guidance.apply(logits,choices,target[self.proposal_scope['target_prefix_length']:],
+            action=action,temperature=temperature,nearby=getattr(self,'_peak_context',None)) if guidance is not None else logits
         if tree is not None:
-            choices=allowed if fixed_retry else getattr(self,'_free_choices',allowed)
-            logits=tree.remember(relative,choices,logits,temperature=temperature)
+            logits=tree.remember(relative,choices,logits,temperature=temperature,guided_logits=guided)
             if self._retry_condition:
                 logits,allowed,scaled=tree.condition(relative,allowed,temperature)
                 if scaled:
                     self.retry_stats['conditioned_draws']=self.retry_stats.get('conditioned_draws',0)+1
                     temperature=1.
+        else:
+            logits=guided
         token=_sample(logits,allowed,generator,temperature,top_p)
         if getattr(self,'_probability',None) is not None:
             self._probability.record(raw_logits,token,grammar,role='configuration' if action else 'timing',
@@ -338,6 +344,9 @@ class EventSampler(WindowSampler):
         if fixed is None:
             if scope!=getattr(self,'_retry_scope',None):
                 self._retry_tree=RejectedEventTree();self._retry_scope=scope
+            guidance=getattr(self,'condition_guidance',None)
+            if guidance is not None:
+                self._peak_context=guidance.timing(after,end)
             time=[]
             while not time or time[-1] not in self.codec.phases:
                 grammar_allowed=self.codec.time_choices(time,after,end)
@@ -491,6 +500,12 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
     )
     exhaustion_policy=resolve_policy(getattr(args,'exhaustion_policy','auto'),config.sequence_policy)
     song=ComposerV2Song(audio_path.stem,audio_path,audio_path,5,args.level,[],clock,end,condition,audio=audio,condition_known=known)
+    guidance_requested=getattr(args,'radar_style_guidance',False)
+    if guidance_requested:
+        from .condition_guidance import ConditionGuidance, KEYS
+        overrides=condition_report['overrides']
+        if any(key in overrides for key in KEYS):
+            song._condition_guidance=ConditionGuidance(overrides,song,model.codec,device)
     song.summary=dict(audio.summary(160));song.summary['beats']=_beats_at_seconds(clock,song.summary['times_sec'])
     dataset=StreamDataset.__new__(StreamDataset)
     dataset.codec=model.codec;dataset.max_tokens=config.max_tokens;dataset.history_beats=config.history_beats
@@ -870,6 +885,9 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
+    guidance=getattr(song,'_condition_guidance',None)
+    report['radar_style_guidance']=dict(requested=guidance_requested,**(
+        guidance.report() if guidance is not None else dict(policy='off',manual={})))
     if report['cpu_runtime'] is not None:report['cpu_runtime']['actual_threads']=torch.get_num_threads()
     report['acceleration']=getattr(getattr(model,'_decoder_runtime',None),'report',None)
     report['candidate_probability_audit']=dict(requested=bool(getattr(args,'record_candidate_probabilities',False)),
@@ -935,5 +953,5 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

@@ -640,13 +640,20 @@ def start_generate(handler,payload,*,runtime):
     policy = checked.get("condition_contract", {}).get("policy", "level_only_v1")
     if condition and policy != "radar_style_v1":
         raise ValueError("此 checkpoint 仅训练了等级条件，不支持 Radar / Style override；请使用新目录 finetune 后的 radar_style_v1 checkpoint")
+    guidance=payload.get('radar_style_guidance',False)
+    if not isinstance(guidance,bool):
+        raise ValueError('radar_style_guidance 必须是布尔值')
+    if guidance:
+        from maichart.composer_v2.condition_guidance import validate as validate_guidance
+        validate_guidance(True,checked.get('sequence_policy'),policy)
     audio=_path(payload.get("audio"),"audio",exists=True)
     output=_path(payload.get("output") or "outputs/composer_v2/maidata.txt","output")
     cache=_path(payload.get("cache_dir") or "cache/chart_composer_v2","cache_dir")
     settings=dict(checkpoint=str(checkpoint),audio=str(audio),output=str(output),cache_dir=str(cache))
     args=["-m","maichart.composer_v2.generate"]
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
-    settings.update(condition=condition, condition_policy=policy)
+    settings.update(condition=condition, condition_policy=policy, radar_style_guidance=guidance)
+    if guidance:args.append('--radar-style-guidance')
     record_probabilities=payload.get('record_candidate_probabilities',GENERATION_DEFAULTS['record_candidate_probabilities'])
     if not isinstance(record_probabilities,bool):
         raise ValueError('record_candidate_probabilities 必须是布尔值')

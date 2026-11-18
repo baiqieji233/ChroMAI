@@ -12,9 +12,9 @@ class RetrySpaceExhausted(ValueError):pass
 
 
 class _Node:
-    __slots__=('children','logits','choices','cpu_logits','blocked','has_blocked','survival','temperature')
+    __slots__=('children','logits','guided_logits','choices','cpu_logits','blocked','has_blocked','survival','temperature')
     def __init__(self):
-        self.children={};self.logits=None;self.choices=();self.cpu_logits=None
+        self.children={};self.logits=None;self.guided_logits=None;self.choices=();self.cpu_logits=None
         self.blocked=False;self.has_blocked=False;self.survival=None;self.temperature=None
     def __deepcopy__(self,memo):
         from copy import deepcopy
@@ -22,9 +22,11 @@ class _Node:
         result.children=deepcopy(self.children,memo)
         # Model outputs are immutable here. Fork rejection bookkeeping without
         # cloning a GPU tensor for every visited token of every trial branch.
-        for name in ('logits','choices','cpu_logits','blocked','has_blocked','survival','temperature'):
+        for name in ('logits','guided_logits','choices','cpu_logits','blocked','has_blocked','survival','temperature'):
             setattr(result,name,getattr(self,name))
         return result
+    def proposal_logits(self):
+        return self.guided_logits if self.guided_logits is not None else self.logits
 
 
 class RejectedEventTree:
@@ -41,14 +43,17 @@ class RejectedEventTree:
     def cached(self,prefix):
         path=self._path(prefix)
         return None if path is None else path[-1].logits
-    def remember(self,prefix,choices,logits,*,temperature=None):
+    def remember(self,prefix,choices,logits,*,temperature=None,guided_logits=None):
         path=self._path(prefix,True);node=path[-1]
         choices=tuple(sorted(set(choices)))
-        if node.logits is None:node.logits=logits.detach()
+        if node.logits is None:
+            node.logits=logits.detach()
+            if guided_logits is not None and guided_logits is not logits:
+                node.guided_logits=guided_logits.detach()
         if node.choices!=choices or node.temperature!=temperature:
             node.choices=choices;node.temperature=temperature
             for parent in path:parent.survival=None
-        return node.logits
+        return node.proposal_logits()
     def reject(self,completion):
         node=self.root;path=[node]
         for token in completion:
@@ -63,7 +68,7 @@ class RejectedEventTree:
         missing=[n for n in path[:-1] if n.cpu_logits is None]
         if missing:
             # One transfer per failed proposal, none on normal valid draws.
-            rows=torch.stack([n.logits for n in missing]).float().cpu().double()
+            rows=torch.stack([n.proposal_logits() for n in missing]).float().cpu().double()
             for i,parent in enumerate(missing):parent.cpu_logits=rows[i]
         return True
     def _survival(self,node,temperature):
@@ -94,17 +99,17 @@ class RejectedEventTree:
     def condition(self,prefix,choices,temperature):
         """Return logits already scaled by temperature and surviving choices."""
         node=self._path(prefix)[-1]
-        if not node.has_blocked:return node.logits,tuple(choices),False
+        if not node.has_blocked:return node.proposal_logits(),tuple(choices),False
         adjustments=[];allowed=[]
         for token in sorted(set(choices)):
             child=node.children.get(token)
             survival=self._survival(child,temperature) if child is not None and child.has_blocked else 0.
             if math.isfinite(survival):allowed.append(token);adjustments.append(survival)
         if not allowed:raise RetrySpaceExhausted('No untried complete event remains in this retry subtree')
-        if temperature==0:return node.logits,tuple(allowed),False
+        if temperature==0:return node.proposal_logits(),tuple(allowed),False
         # Add in FP64 before casting: a near-certain failed leaf can require
         # cancellation of very large log odds without losing the alternatives.
-        base=node.cpu_logits if node.cpu_logits is not None else node.logits.detach().float().cpu().double()
+        base=node.cpu_logits if node.cpu_logits is not None else node.proposal_logits().detach().float().cpu().double()
         values=base[allowed]/temperature+torch.tensor(adjustments,dtype=torch.float64)
         values-=values.max()
         adjusted=torch.zeros_like(node.logits,dtype=torch.float32)

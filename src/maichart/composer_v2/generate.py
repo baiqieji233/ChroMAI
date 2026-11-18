@@ -40,6 +40,8 @@ def parser():
     result.add_argument('--difficulty', type=int, default=5, choices=range(1, 7), help='Maidata difficulty slot (1-6, default 5)')
     result.add_argument('--condition', type=json.loads, default=None,
                         help='Explicit Radar/Style overrides as a JSON object; omitted keys are automatic')
+    result.add_argument('--radar-style-guidance',action='store_true',
+                        help='Enhance explicitly set peak density and note type preferences on continuous Radar/Style checkpoints')
     result.add_argument('--intensity-curve',default=None,help='Edited Composer v2 rate profile JSON; omitted uses the trained audio prediction')
     result.add_argument('--intensity-strength',type=float,default=1.,help='Blend of edited and automatically predicted curves, 0–1')
     result.add_argument('--seed', type=int, default=0)
@@ -421,6 +423,9 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
+    if getattr(args,'radar_style_guidance',False):
+        from .condition_guidance import validate as validate_guidance
+        validate_guidance(True,config.sequence_policy,config.condition_policy)
     from .phrase_search import resolve_search_options
     args.phrase_search, args.phrase_rank_policy = resolve_search_options(
         getattr(args,'phrase_search','auto'), getattr(args,'phrase_rank_policy',None) or 'auto',

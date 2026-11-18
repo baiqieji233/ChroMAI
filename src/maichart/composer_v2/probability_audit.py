@@ -43,7 +43,7 @@ def summarize(events,*,boundary_tokens=0):
 
     Raw = configured model output before grammar/retries/temperature/top-p.
     Grammar = that output conditioned on legal syntax and head uniqueness.
-    Proposal = actual temperature/top-p/retry draw; forced tokens have mass one.
+    Proposal = actual guidance, temperature, top-p and retry draw; forced tokens have mass one.
     These are different distributions and must never be silently substituted.
     """
     logs=[event for event in events if event is not None]

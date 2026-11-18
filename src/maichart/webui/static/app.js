@@ -120,6 +120,8 @@ function composerV2GenerationPayload(options={}) {
   if (element('#v2GenerateForwardFeasibility')?.disabled) delete payload.forward_feasibility;
   const configurationRecovery=element('#v2GenerateConfigurationRecovery');
   if(configurationRecovery && !configurationRecovery.disabled)payload.configuration_recovery=configurationRecovery.checked;
+  const guidance=element('#v2RadarStyleGuidance');
+  if(guidance?.checked && !guidance.disabled)payload.radar_style_guidance=true;
   for (const [key,selector,label,bounds] of [
     ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
     ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
@@ -307,6 +309,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if(payload.radar_style_guidance && !status.training_capabilities?.composer_v2_radar_style_guidance)
+    throw new Error('请重启更新后的 WebUI，再启用手动 Radar / Style 增强。');
   const customFeasibility = payload.phrase_search==='hybrid'
     || payload.phrase_rank_policy==='comfort_v2'
     || payload.exhaustion_policy==='downgrade_or_skip'
@@ -1637,6 +1641,11 @@ function updateV2ConditionControls() {
     for(const input of row.querySelectorAll('input[type=range],input[type=number]'))input.disabled=active && (!supported || !toggle.checked);
   }
   const hint=element('#v2ConditionStatus');
+  const guidance=element('#v2RadarStyleGuidance');
+  if(guidance) {
+    guidance.closest('label').hidden=!active;
+    guidance.disabled=!active || (caps.checked && (!caps.enabled || !generationInspection.data.generation_capabilities?.continuous_time));
+  }
   if(hint) {hint.hidden=!active;hint.textContent=caps.enabled
     ? '默认全部保持「自动由音乐决定」，让模型顺应音乐段落安排手法；只需对想专门干预的项（如减少 Touch、增加 Slide 或多押）勾选「手动指定」并拖动滑块作为软目标，其余项继续自动跟歌。关闭手动指定后显示值恢复为该等级的语料参考。'
     : '当前 checkpoint 尚未确认 Radar / Style 能力，或仅训练了等级（level_only_v1）；这些滑块不会生效。请检查 checkpoint；旧权重需在新目录 finetune 才能学习新条件。';}
@@ -1678,7 +1687,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateConfigurationRecovery",
+  "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance",
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2EvalWritingProbe", "v2EvalBatchManifest", "v2AuditInput",
   "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
