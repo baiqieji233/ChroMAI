@@ -313,6 +313,25 @@ button:focus-visible, summary:focus-visible, input:focus-visible, select:focus-v
 .v2-step-head p { margin: 0; font-size: 12.5px; color: var(--muted); line-height: 1.55; }
 .v2-step-card > .muted { margin: 12px 0 0; font-size: 12px; }
 
+.reference-clock { margin: 0 0 16px; padding: 12px 16px; border: 1px solid #334957; border-radius: 10px; background: #192731; color: #eef4f6; color-scheme: dark; }
+.reference-clock summary { cursor: pointer; font-weight: 650; }
+.reference-clock summary span { margin-left: 8px; color: #9dded5; font-size: 12px; font-weight: normal; }
+.reference-clock-body { display: grid; gap: 12px; margin-top: 12px; }
+.reference-clock-body p { margin: 0; color: #cfdee4; line-height: 1.55; }
+.reference-clock-body .field, .reference-clock th { color: #e5eef1; }
+.reference-clock-body input, .reference-clock-body select { background: #223642; color: #f2f6f8; border-color: #56717d; }
+.reference-clock-body .secondary-button { background: #253b47; color: #eef4f6; border-color: #56717d; }
+.reference-clock-body .button-row { margin-top: 12px; }
+#v2ReferenceClear { justify-self: start; }
+#v2ReferencePreview > p { margin: 10px 0; }
+#v2ReferenceState:empty, #generationTimingGroup.reference-active #generationManualClockFields,
+#generationTimingGroup.reference-active label:has(#tempoMap), #v2AutomaticClockFields[hidden] { display: none; }
+.reference-clock-scroll { max-height: 14rem; overflow: auto; border: 1px solid #3b5360; border-radius: 6px; }
+.reference-clock table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.reference-clock th, .reference-clock td { padding: 5px 12px; text-align: right; border-bottom: 1px solid #374b57; }
+.reference-clock th { position: sticky; top: 0; background: #253a46; }
+#v2ReferenceJump { margin-bottom: 12px; }
+
 .auto-audit-intro { margin: 0 0 12px; padding: 11px 14px; border-left: 3px solid var(--teal); border-radius: 6px; background: #f2f8f7; font-size: 12.5px; line-height: 1.65; color: #33434d; }
 .auto-audit-card { margin: 14px 0 18px; padding: 16px 18px; border: 1px solid #b7d7d3; border-radius: 11px; background: linear-gradient(180deg, #f3faf9 0%, #ffffff 100%); box-shadow: 0 4px 14px rgba(19, 121, 119, .05); }
 .auto-audit-card-head h3 { margin: 4px 0 6px; font-size: 16px; color: var(--ink); }

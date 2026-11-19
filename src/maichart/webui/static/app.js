@@ -85,7 +85,8 @@ function composerV2GenerationPayload(options={}) {
   const title=String(valueOrDefault('#title','')).trim();
   const artist=String(valueOrDefault('#artist','')).trim();
   const designer=String(valueOrDefault('#designer','AI')).trim()||'AI';
-  const tempoMap=parseTempoMap();
+  const reference = typeof ComposerReferenceTempo === "undefined" ? null : ComposerReferenceTempo.current();
+  const tempoMap = reference ? reference.tempo_map : parseTempoMap();
   const condition={};
   for(const [key,state] of Object.entries(v2ConditionState))if(state.override)
     condition[key]=v2NumericValue(state.value,key,{min:0,max:1});
@@ -93,8 +94,8 @@ function composerV2GenerationPayload(options={}) {
   const payload={model_family:"chart_composer_v2",checkpoint:valueOrDefault("#checkpointPath","").trim(),
     audio:valueOrDefault("#audioPath","").trim(),output:valueOrDefault("#outputPath","").trim()||null,
     title,artist,designer,difficulty,
-    bpm:valueOrDefault("#bpm","").trim()===""?null:number('#bpm',120,'BPM',{min:.001}),
-    first:element('#v2GenerateAutoFirst')?.checked?null:number('#first',0,'首拍偏移'),level:number('#level',13.3,'目标等级',{min:12,max:15}),
+    bpm:reference || valueOrDefault("#bpm","").trim()===""?null:number('#bpm',120,'BPM',{min:.001}),
+    first:reference ? reference.first : element('#v2GenerateAutoFirst')?.checked?null:number('#first',0,'首拍偏移'),level:number('#level',13.3,'目标等级',{min:12,max:15}),
     seed:seed===""?Math.floor(Math.random()*2147483647):v2NumericValue(seed,'随机种子',{min:0,integer:true}),
     temperature:number('#v2GenerateTemperature',.9,'采音温度',{min:0}),top_p:number('#v2GenerateTopP',.95,'采音 Top-p',{min:0,max:1,exclusiveMin:true}),
     count,parallel:count>1?number('#v2GenerateParallel',1,'同时生成数',{min:1,max:32,integer:true}):1,
@@ -110,7 +111,7 @@ function composerV2GenerationPayload(options={}) {
     touch_reachability_policy:valueOrDefault('#v2GenerateTouchReachabilityPolicy','palm_span_v1'),
     intercept_slide_head_tap:!!element('#v2GenerateInterceptSlideHeadTap')?.checked,
     self_refine:element('#v2GenerateSelfRefine')?.disabled?'off':valueOrDefault('#v2GenerateSelfRefine','off'),
-    tempo_detection:valueOrDefault('#v2GenerateTempoDetection','auto'),
+    tempo_detection:reference ? 'auto' : valueOrDefault('#v2GenerateTempoDetection','auto'),
     intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
     record_candidate_probabilities:!!element('#v2GenerateRecordCandidateProbabilities')?.checked,
     cpu_threads:number('#v2GenerateCpuThreads',0,'CPU 计算线程',{min:0,integer:true}),
@@ -143,9 +144,9 @@ function composerV2GenerationPayload(options={}) {
   if(legacyWindow || ranking!=='auto')payload.phrase_rank_policy=legacyWindow?'comfort_v1':ranking;
   if(payload.phrase_search==='auto')delete payload.phrase_search;
   const tempoOctavePolicy=valueOrDefault('#v2GenerateTempoOctavePolicy','off');
-  if(tempoOctavePolicy && tempoOctavePolicy!=='off')payload.tempo_octave_policy=tempoOctavePolicy;
+  if(!reference && tempoOctavePolicy && tempoOctavePolicy!=='off')payload.tempo_octave_policy=tempoOctavePolicy;
   const downbeatAlignment=valueOrDefault('#v2GenerateDownbeatAlignment','off');
-  if(downbeatAlignment && downbeatAlignment!=='off')payload.downbeat_alignment=downbeatAlignment;
+  if(!reference && downbeatAlignment && downbeatAlignment!=='off')payload.downbeat_alignment=downbeatAlignment;
   if(!options.omitCurve && typeof v2CurvePayload==='function')Object.assign(payload,v2CurvePayload());
   return payload;
 }
@@ -2750,6 +2751,7 @@ async function refreshAudioMetadataFromPath({ force = false } = {}) {
 
 function updateFamilyFields() {
   const v2Generation=currentGenerationFamily()==="chart_composer_v2";
+  if (typeof ComposerReferenceTempo !== "undefined") ComposerReferenceTempo.updateControls(v2Generation);
   const checked=generationInspection.path===valueOrDefault("#checkpointPath","").trim()
     && generationInspection.data?.valid;
   // Start with the newest route. Inspection can disable unsupported old
@@ -4484,6 +4486,10 @@ async function viewArchivedTrainingLog(entry, button) {
 }
 
 function watchTask(taskId, onFinished = null, onUpdate = null) {
+  if (activeTaskId !== taskId) {
+    element("#taskResults")?.replaceChildren();
+    globalThis.ChartPreview?.selectTask?.(taskId);
+  }
   activeTaskId = taskId;
   const existing = taskWatchers.get(taskId);
   if (existing) {
@@ -4761,10 +4767,17 @@ function renderTaskResults(task) {
   const files = task.result?.files || [];
   const urls = task.result?.download_urls || [];
   const paths = task.result?.paths || [];
+  if (task.result?.generation_archive_error) {
+    const notice = document.createElement("p");
+    notice.className = "inline-status warn";
+    notice.textContent = task.result.generation_archive_error;
+    container.appendChild(notice);
+  }
   files.forEach((name, index) => {
     const link = document.createElement("a");
     link.textContent = name;
     link.href = urls[index] || "#";
+    if (urls[index]?.startsWith("/api/preview/resource?")) link.download = "";
     link.title = paths[index] || "";
     if (!urls[index]) link.classList.add("disabled");
     const row = document.createElement("div");
@@ -8295,6 +8308,7 @@ function resetIntensityCurve() {
 }
 
 function invalidateIntensityForAudio() {
+  if (typeof ComposerReferenceTempo !== "undefined") ComposerReferenceTempo.audioChanged();
   const path = intensityAudioPath();
   if (intensityCurveState.profile && intensityCurveState.path !== path) {
     intensityCurveState.profile = null; intensityCurveState.automatic = null; intensityCurveState.history = []; intensityCurveState.saved = false; intensityCurveState.contextStale = false; intensityCurveState.conditionChanged = false;
@@ -8747,6 +8761,14 @@ async function refreshLogs() {
         button.addEventListener("click", guard(() => viewArchivedTrainingLog(entry, button)));
         row.appendChild(button);
       }
+    }
+    if (globalThis.ChartPreview?.supportsTask(entry)) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "small-button";
+      button.textContent = "查看生成任务";
+      button.addEventListener("click", () => watchTask(entry.task_id));
+      row.appendChild(button);
     }
     container.appendChild(row);
   });

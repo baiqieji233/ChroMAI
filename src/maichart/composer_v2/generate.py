@@ -27,6 +27,7 @@ from .audio_metadata import resolve_chart_metadata, validate_difficulty
 
 def parser():
     from .defaults import GENERATION_DEFAULTS
+    from .tempo import read_tempo_map_argument
     result = argparse.ArgumentParser(description=__doc__)
     for name in ('checkpoint', 'audio', 'output'):
         result.add_argument('--' + name, required=True)
@@ -99,7 +100,8 @@ def parser():
     result.add_argument('--cpu-threads', type=int, default=GENERATION_DEFAULTS['cpu_threads'],
                         help='CPU operator threads per process; 0 automatically budgets across parallel charts')
     result.add_argument('--max-events', type=int, default=0)
-    result.add_argument('--tempo-map', type=json.loads)
+    result.add_argument('--tempo-map', type=read_tempo_map_argument,
+                        help='JSON tempo array, or @path to a JSON file optionally containing first and tempo_map')
     result.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
     result.add_argument('--tempo-octave-policy', choices=('off','maimai_pulse_v1'), default=GENERATION_DEFAULTS['tempo_octave_policy'],
         help='Optional automatic BPM half/double calibration into [85, 255] BPM when BPM is automatic')

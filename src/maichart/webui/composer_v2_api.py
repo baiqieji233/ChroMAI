@@ -4,6 +4,7 @@ from dataclasses import replace
 import json
 import hashlib
 import math
+import tempfile
 import os
 from datetime import datetime, timezone
 from pathlib import Path
@@ -810,7 +811,8 @@ def start_generate(handler,payload,*,runtime):
             value=payload[key]
             if isinstance(value,str): value=json.loads(value)
             if not isinstance(value,list): raise ValueError(f"{key} 必须是 JSON 数组")
-            _arg(args,"--"+key.replace("_","-"),json.dumps(value,ensure_ascii=False))
+            argument = _tempo_map_argument(value, cache) if key == 'tempo_map' else json.dumps(value, ensure_ascii=False)
+            _arg(args,"--"+key.replace("_","-"),argument)
             settings[key]=value
     count=_integer(payload,'count',GENERATION_DEFAULTS['count'],minimum=1)
     if count>MAX_BATCH_COUNT:raise ValueError(f'一次最多生成 {MAX_BATCH_COUNT} 张谱面')
@@ -848,6 +850,27 @@ def start_generate(handler,payload,*,runtime):
     return _start(handler,runtime,"composer_v2_generate",args,settings,paths)
 
 
+def _tempo_map_argument(value, cache_dir):
+    content = json.dumps(value, ensure_ascii=False, separators=(',', ':'), allow_nan=False)
+    # Leave room for Windows quoting, the interpreter path and other arguments.
+    if len(content) <= 4096:
+        return content
+    directory = Path(cache_dir) / 'tempo_maps'
+    directory.mkdir(parents=True, exist_ok=True)
+    target = directory / (hashlib.sha256(content.encode('utf-8')).hexdigest() + '.json')
+    if not target.exists():
+        temporary = tempfile.NamedTemporaryFile(dir=directory, delete=False)
+        tmp = Path(temporary.name)
+        try:
+            with temporary:
+                temporary.write(content.encode('utf-8'))
+            if not target.exists():
+                tmp.replace(target)
+        finally:
+            tmp.unlink(missing_ok=True)
+    return '@' + str(target)
+
+
 def start_curve(handler,payload,*,runtime):
     """Run prediction in a cancellable subprocess rather than the HTTP thread."""
     _family(payload)
@@ -873,7 +896,13 @@ def start_curve(handler,payload,*,runtime):
         _arg(args,'--'+key.replace('_','-'),settings[key])
     for key in ('bpm','first','tempo_map','condition'):
         value=payload.get(key)
-        if value is not None and value!='':_arg(args,'--'+key.replace('_','-'),json.dumps(value,ensure_ascii=False) if isinstance(value,(dict,list)) else value)
+        if value is None or value=='': continue
+        if key == 'tempo_map':
+            if isinstance(value, str): value = json.loads(value)
+            value = _tempo_map_argument(value, settings['cache_dir'])
+        elif isinstance(value, (dict,list)):
+            value = json.dumps(value,ensure_ascii=False)
+        _arg(args,'--'+key.replace('_','-'),value)
     return _start(handler,runtime,'composer_v2_curve',args,settings,[output])
 
 

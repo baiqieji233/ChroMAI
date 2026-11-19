@@ -380,7 +380,9 @@
       `防无理保护：${checked("v2GenerateInterceptTapOnSlide")?`防撞尾（${value("v2GenerateTapOnSlideThresholdMs")}ms）`:"不拦撞尾"}${checked("v2GenerateInterceptSlideHeadTap")?" ＋ 防星头抢拍":""} · Touch：${nameOf("v2GenerateTouchReachabilityPolicy")}`,
       `采音温度 ${value("v2GenerateTemperature")}${document.getElementById('v2GenerateOnsetStrength')?.disabled?'':`（重音贴合 ${value("v2GenerateOnsetStrength","1")}）`} · 配置温度 ${document.getElementById('v2GenerateActionTemperature')?.disabled?"跟随采音":value("v2GenerateActionTemperature")||"跟随采音"} · 冲突恢复 ${value("v2GenerateRollbackWindows")} 次`,
       `Radar / Style：${typeof v2ConditionCapability==='function' && v2ConditionCapability().enabled ? `手动指定 ${Object.values(v2ConditionState).filter(item=>item.override).length} 项；其余自动由音乐决定` : '由音乐与等级自动决定'}`,
-      `时钟：${value("tempoMap").trim()?"手动 tempo map 优先":value("bpm").trim()?`手动 BPM ${value("bpm").trim()}`:`BPM 自动（${nameOf("v2GenerateTempoDetection")}）`} · ${document.getElementById('v2GenerateAutoFirst')?.checked?'第一拍自动对准':`手动首拍 ${value("first")} 秒`}`,
+      (typeof ComposerReferenceTempo !== "undefined" && ComposerReferenceTempo.current())
+        ? document.getElementById("v2ReferenceActive").textContent
+        : `时钟：${value("tempoMap").trim()?"手动 tempo map 优先":value("bpm").trim()?`手动 BPM ${value("bpm").trim()}`:`BPM 自动（${nameOf("v2GenerateTempoDetection")}）`} · ${document.getElementById('v2GenerateAutoFirst')?.checked?'第一拍自动对准':`手动首拍 ${value("first")} 秒`}`,
       `输出：${value("outputPath")||"outputs/composer_v2/maidata.txt"}；附带报告 .composer_v2.json`]);
     updateResourceEstimate("generation", currentGenerationFamily() === "chart_composer_v2", "generate");
     advancedCount("training");

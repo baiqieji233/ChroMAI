@@ -202,6 +202,21 @@ function candidateSavedReviews(records) {
     resetNavigation();
     resetEntryChoice();
     playhead=0;playing=false;playbackDuration=0;
+    if (!value) {
+      entry=timeline=media=mediaAudio=range=originPrompt=activePrompt=null;
+      ++timelineSerial;
+      ++mediaSerial;
+      ++collectionSerial;
+      collection={items:[],regions:0};
+      node('feedbackTrainingList').replaceChildren();
+      node('feedbackTraining').hidden=node('feedbackComparison').hidden=true;
+      node('feedbackTimelineStatus').textContent='等待载入谱面。';
+      renderSaved([]);
+      renderAuto(null);
+      status('请选择可预览的谱面。');
+      updateRange();
+      return;
+    }
     if(entry?.task_id!==value.task_id || entry?.training_context?.manifest!==value.training_context?.manifest) {
       range=null;originPrompt=null;activePrompt=null;clearLoop();
     }

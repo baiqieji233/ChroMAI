@@ -18,6 +18,7 @@ import time
 import uuid
 import zipfile
 from collections import Counter
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from email.parser import BytesParser
 from email.policy import default as email_default
@@ -217,7 +218,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
             return self._serve_static("composer.html")
         if parsed.path in {"/app.js", "/v2_intensity.js", "/chart_preview.js", "/candidate_feedback.js", "/review_exchange.js", "/styles.css", "/workspace.js", "/workspace.css",
                            "/workspace_logs.js", "/workspace_logs.css", "/form_lab.js", "/form_lab.css",
-                           "/composer.js", "/composer.css"}:
+                           "/composer.js", "/composer.css", "/reference_tempo.js"}:
             return self._serve_static(parsed.path.lstrip("/"))
         if parsed.path.startswith('/miaview/') or parsed.path.startswith('/api/preview/'):
             return self._chart_preview(parsed)
@@ -332,7 +333,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
             task_id = parse_qs(parsed.query).get("id", [""])[0]
             task = _get_task(task_id)
             if task is None:
-                return self._json_response({"error": "任务不存在"}, HTTPStatus.NOT_FOUND)
+                from maichart.webui.chart_preview import historical_task
+                try:
+                    value = historical_task(task_id, project=PROJECT_ROOT, log_root=LOG_ROOT)
+                except (OSError, ValueError):
+                    return self._json_response({"error": "任务不存在"}, HTTPStatus.NOT_FOUND)
+                return self._json_response(value)
             return self._json_response(task.to_dict())
         if parsed.path.startswith("/api/tasks/"):
             task_id = parsed.path.rsplit("/", 1)[-1]
@@ -362,6 +368,9 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 from maichart.webui import composer_v2_api
                 payload = self._json_body()
                 operation = parsed.path.rsplit("/", 1)[-1]
+                if operation == "reference_tempo":
+                    from maichart.webui.reference_tempo import read_reference_tempo
+                    return self._json_response(read_reference_tempo(payload))
                 if operation == "inspect": return composer_v2_api.inspect(self, payload)
                 if operation == "estimate_parameters": return composer_v2_api.estimate_parameters(self, payload)
                 if operation == "estimate_resources": return composer_v2_api.estimate_resources(self, payload)
@@ -2346,10 +2355,24 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
         # collection there, keeping an explicit caller configuration intact.
         env.setdefault("PYTORCH_CUDA_ALLOC_CONF", "garbage_collection_threshold:0.7"
                        if os.name=="nt" else "expandable_segments:True")
+        output_lock = ExitStack()
         try:
             if on_start is not None:
                 on_start()
             _open_task_log(task, args)
+            from maichart.webui import chart_preview
+            generation = task.kind in chart_preview.GENERATION_KINDS
+            prior = {}
+            output_arg = chart_preview._argument(args, '--output') if generation else None
+            if output_arg:
+                from maichart.composer.training_lock import TrainingOutputBusyError, _directory_lock
+                output = _resolve_path(output_arg)
+                lock_key = uuid.uuid5(uuid.NAMESPACE_URL, os.path.normcase(str(output.with_suffix('')))).hex
+                try:
+                    output_lock.enter_context(_directory_lock(output.parent, f'.generation-{lock_key}.lock'))
+                except TrainingOutputBusyError as exc:
+                    raise ValueError('同一输出路径已有生成任务运行，请等待任务完成或选择另外的输出路径。') from exc
+                prior = chart_preview.generation_stamps(result_paths)
             process = subprocess.Popen(
                 [sys.executable, *args],
                 cwd=PROJECT_ROOT,
@@ -2402,6 +2425,16 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
             # Artifact visibility is part of task completion. Keep the task in
             # running state until all declared outputs have been collected.
             _collect_task_results(task, result_paths)
+            if generation:
+                record = dict(task_id=task.task_id, kind=task.kind, status='completed',
+                              argv=task.argv, result=task.result, started=task.started_at,
+                              ended=time.strftime('%Y-%m-%d %H:%M:%S'))
+                try:
+                    chart_preview.archive_generation(record, project=PROJECT_ROOT, log_root=LOG_ROOT, prior=prior)
+                except (OSError, ValueError, TypeError) as exc:
+                    message = f'本次生成的历史文件归档失败：{exc}'
+                    task.result.update(generation_archive_error=message, download_urls=[])
+                    task.log(message)
             missing = [str(path) for path in dict.fromkeys(result_paths) if not path.is_file()]
             if missing:
                 task.result["missing_artifacts"] = missing
@@ -2428,6 +2461,7 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 task.message = "任务启动失败"
                 _close_task_log(task, status="failed", error=str(exc))
         finally:
+            output_lock.close()
             with task.lock:
                 task.process = None
             if on_finish is not None:
@@ -2520,6 +2554,9 @@ def _close_task_log(task: TaskState, *, status: str, exit_code: int | None = Non
             "log_bytes": path.stat().st_size if path.is_file() else 0,
             "error": (str(error) if error else "")[:2000],
         }
+        if status == 'completed' and any(key in task.result for key in ('generation_archive','generation_archive_error')):
+            keys = ('generation_archive','generation_archive_error','paths','files','download_urls')
+            meta['result'] = {key:task.result[key] for key in keys if key in task.result}
         path.with_suffix(".meta.json").write_text(
             json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
         _prune_logs()

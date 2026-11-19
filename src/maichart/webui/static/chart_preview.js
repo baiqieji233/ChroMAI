@@ -32,6 +32,7 @@
   let transportRequest = 0, loopReturning = false;
   let savedOverflow = null, focusReturn = null;
   let loadSerial = 0, requestSerial = 0, requestedTask = null, offeredTask = null, taskRequestSerial=0;
+  let explicitRequest = null;
   let installTimer = null;
 
   function readableLabel(chart) {
@@ -305,6 +306,7 @@
     source.title = chart.path;
     if(downloadLink) {downloadLink.href=chart.url;downloadLink.download='maidata.txt';downloadLink.hidden=false;}
     reloadButton.disabled = false;
+    if (expandButton) expandButton.disabled = false;
     badge.textContent = `${chart.title} · ${value.charts.length} 张完整谱面`;
     badge.title = chart.title;
     message("谱面已就绪，展开即可载入；播放器载入后保持暂停。");
@@ -312,15 +314,59 @@
     void activate();
   }
   function supportsTask(task) { return task?.status === "completed" && kinds.has(task.kind); }
+  function clearGenerationPreview(taskId) {
+    ++selectionRequest;
+    ++transportRequest;
+    entry = generationEntry = null;
+    selected = 0;
+    clearRange();
+    pendingSeek = null;
+    pendingPlay = false;
+    lastTransport = null;
+    release();
+    previewBody.hidden = false;
+    trainingEmpty.hidden = true;
+    document.getElementById("generationPreviewChoice").hidden = false;
+    document.getElementById("trainingPreviewNavigation").hidden = true;
+    if (sourceSwitch) sourceSwitch.hidden = !trainingEntry;
+    selector.replaceChildren();
+    selector.disabled = reloadButton.disabled = true;
+    if (expandButton) expandButton.disabled = true;
+    if (downloadLink) {
+      downloadLink.hidden = true;
+      downloadLink.removeAttribute("href");
+    }
+    source.textContent = `生成任务 ${taskId}`;
+    source.title = "";
+    badge.textContent = "正在查找该任务的谱面…";
+    badge.title = "";
+    message("正在查找该任务的谱面…");
+    window.dispatchEvent(new CustomEvent("chart-preview-updated", {detail:null}));
+  }
+  function selectTask(taskId) {
+    ++requestSerial;
+    requestedTask = offeredTask = explicitRequest = null;
+    if (document.body.dataset.workspace === "generation" && entry?.source_kind !== "training_source"
+        && entry?.task_id !== taskId) {
+      clearGenerationPreview(taskId);
+      badge.textContent = "等待该任务的谱面";
+      message("等待该任务的谱面。");
+    }
+  }
   async function offerTask(task, {force = false} = {}) {
     if (!supportsTask(task)) return;
     if(entry?.source_kind==='training_source' && !force)return;
-    if (!force && (offeredTask === task.task_id || requestedTask === task.task_id)) return;
+    if (!force && (explicitRequest !== null || offeredTask === task.task_id || requestedTask === task.task_id)) return;
     const serial = ++requestSerial;
+    if (force) explicitRequest = serial;
     requestedTask = task.task_id;taskRequestSerial=serial;
+    if (force || (document.body.dataset.workspace === "generation" && entry?.task_id !== task.task_id)) {
+      clearGenerationPreview(task.task_id);
+    }
     try {
       const value = await json(`/api/preview/task?id=${encodeURIComponent(task.task_id)}`);
       if (serial !== requestSerial) return;
+      if (value.task_id !== task.task_id || !value.charts?.length) throw new Error("该任务没有可预览的完整谱面。");
       offeredTask = task.task_id;
       generationEntry=value;
       if(force || document.body.dataset.workspace!=='quality')show(value);
@@ -328,14 +374,14 @@
       if (serial === requestSerial) { offeredTask = task.task_id; message(error.message, true); }
     } finally {
       if (serial === taskRequestSerial) requestedTask = null;
+      if (serial === explicitRequest) explicitRequest = null;
     }
   }
   async function openTask(task) {
-    document.querySelector('[data-mode="generation"]')?.click();
-    await offerTask(task, {force: true});
+    if (document.body.dataset.workspace !== "generation") document.querySelector('[data-mode="generation"]')?.click();
     panel.open = true;
     panel.scrollIntoView({behavior: "smooth", block: "start"});
-    void activate();
+    await offerTask(task, {force: true});
   }
   function pollInstall() {
     clearTimeout(installTimer);
@@ -433,7 +479,7 @@
   }
   window.addEventListener('workspace-mode-changed',event=>workspacePreview(event.detail.mode));
   window.addEventListener("pagehide", () => { clearTimeout(installTimer); observer.disconnect(); release(); }, {once: true});
-  globalThis.ChartPreview = {offerTask, openTask, supportsTask,chooseChart,playRange,pause,clearRange,seek,
+  globalThis.ChartPreview = {offerTask, openTask, selectTask, supportsTask,chooseChart,playRange,pause,clearRange,seek,
     openSource(value,{scroll=true}={}) {++requestSerial;show(value);panel.open=true;if(scroll)panel.scrollIntoView({behavior:'smooth',block:'start'});void activate();},
     setTrainingDataset(manifest) {
       if(trainingEntry?.training_context?.manifest===manifest)return;
@@ -446,8 +492,9 @@
     getState: () => player && playerLoaded ? player.getState() : Promise.resolve(lastTransport)};
   // The latest completed artifact survives a WebUI restart via task log metadata.
   workspacePreview(document.body.dataset.workspace);
+  const initialRequest = requestSerial;
   json("/api/preview/latest").then(value => {
-    if (!value.preview)return;
+    if (!value.preview || requestSerial !== initialRequest)return;
     if(!generationEntry)generationEntry=value.preview;
     if (!entry && !requestedTask && document.body.dataset.workspace!=='quality')show(generationEntry);
   }).catch(() => {});

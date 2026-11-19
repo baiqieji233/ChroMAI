@@ -22,6 +22,15 @@ from maichart.tempo_clock import TempoClock
 # peaks remain valid when fitting/diagnostics change; do not rebuild audio.
 POLICY = 'composer_v2_global_beat_phase_v1'
 
+def read_tempo_map_argument(value):
+    """Accept the existing inline JSON syntax and portable @file arguments."""
+    if value.startswith('@'):
+        try:
+            value = Path(value[1:]).read_text(encoding='utf-8-sig')
+        except OSError as exc:
+            raise ValueError(f'Cannot read tempo map: {exc}') from exc
+    return json.loads(value)
+
 
 def _finite(value, name, positive=False):
     if isinstance(value, bool):
@@ -380,6 +389,13 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
     path = Path(audio_path).resolve()
     if not path.is_file():
         raise FileNotFoundError(path)
+    if isinstance(tempo_map, dict):
+        # An explicitly supplied --first always takes precedence over the file.
+        if first is None:
+            first = tempo_map.get('first')
+        tempo_map = tempo_map.get('tempo_map', tempo_map.get('tempo_changes'))
+        if not isinstance(tempo_map, list):
+            raise ValueError('Tempo map object requires a tempo_map array')
     manual_bpm = None if bpm is None else _finite(bpm, 'BPM', positive=True)
     manual_first = None if first is None else _finite(first, 'first')
     if tempo_map is not None:
@@ -489,7 +505,7 @@ def main(argv=None):
     parser.add_argument('--cache-dir', default='cache/chart_composer_v2')
     parser.add_argument('--bpm', type=float)
     parser.add_argument('--first', type=float)
-    parser.add_argument('--tempo-map', type=json.loads)
+    parser.add_argument('--tempo-map', type=read_tempo_map_argument)
     parser.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
     parser.add_argument('--tempo-octave-policy', choices=('off', 'maimai_pulse_v1'), default='off')
     parser.add_argument('--downbeat-alignment', choices=('off', 'bar_downbeat_v1'), default='off')

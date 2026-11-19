@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ChroMAI</title>
   <link rel="stylesheet" href="/styles.css?v=audit-source-selection-20261115">
-  <link rel="stylesheet" href="/workspace.css?v=resource-estimates">
+  <link rel="stylesheet" href="/workspace.css?v=20261119-tempo-history">
   <link rel="stylesheet" href="/workspace_logs.css">
 </head>
 <body>
@@ -1293,7 +1293,8 @@
   <div class="v2-step-grid">
     <section class="v2-step-card">
       <div class="v2-step-head"><span class="step">A</span><div><h4>节拍、变速与起点对准</h4><p>不知道歌曲 BPM 也没关系，留空即可自动测算；已知准确 BPM 可在下方 Step 03 填入。</p></div></div>
-      <div class="form-grid">
+      <button type="button" class="small-button" data-focus-setting="v2ReferenceFile" id="v2ReferenceJump">从 maidata 导入 BPM 表</button>
+      <div class="form-grid" id="v2AutomaticClockFields">
         <label class="field">自动BPM分析<select id="v2GenerateTempoDetection"><option value="auto" selected>识别变速并校准全曲（推荐）</option><option value="constant">仅恒定BPM，校准全曲</option><option value="legacy">旧版恒速估计（对照）</option></select><small>下方「BPM」留空时生效：默认自动识别可靠变速段并校准全曲；确认整首歌不改速可选「仅恒定BPM，校准全曲」。</small></label>
         <label class="checkbox-field"><input id="v2GenerateAutoFirst" type="checkbox" checked><span>自动识别第一拍起点（首拍偏移）</span><small>推荐保持勾选；若你已经量好精确的 &amp;first 秒数，取消勾选后使用下方手动值。</small></label>
         <label class="field">半／倍速自动折算（可选）<select id="v2GenerateTempoOctavePolicy"><option value="off" selected>关闭（保持检测原速）</option><option value="maimai_pulse_v1">折算到常见舞萌拍速（85–255 BPM）</option></select><small>当自动测出的 BPM 变成一半（如 75）或翻倍（如 300）时可开启，自动折算回 85–255 常用区间。</small></label>
@@ -1582,7 +1583,27 @@
 <div class="workflow-group-heading"><span class="step">03</span>
 <div><h3>对齐节拍与起点</h3>
 <p>已知准确 BPM 时填写；首拍偏移使用音频绝对秒。</p></div></div>
-<div class="form-grid">
+<details id="v2ReferenceClock" class="reference-clock" data-generation-family="chart_composer_v2">
+  <summary>参考谱面 BPM 表 <span id="v2ReferenceBadge">可选</span></summary>
+  <div class="reference-clock-body">
+    <p>选择与当前音频使用同一剪辑的谱面。变速表与首拍取自所选难度，音符由模型生成。</p>
+    <label class="field">读取 maidata.txt 或 BPM 表 JSON<input id="v2ReferenceFile" type="file" accept=".txt,.json" disabled></label>
+    <p id="v2ReferenceState" class="inline-status" role="status"></p>
+    <div id="v2ReferencePreview" hidden>
+      <label class="field" id="v2ReferenceSlotField">参考难度<select id="v2ReferenceSlot"></select></label>
+      <p id="v2ReferenceInfo"></p>
+      <p id="v2ReferenceMatching" hidden></p>
+      <div class="reference-clock-scroll" id="v2ReferenceTable" role="region" aria-label="变速点" tabindex="0">
+        <table><thead><tr><th scope="col">谱面拍位</th><th scope="col" id="v2ReferenceTimeHeading">音频位置</th><th scope="col">BPM</th></tr></thead><tbody id="v2ReferenceRows"></tbody></table>
+      </div>
+      <div id="v2ReferencePages" class="button-row" hidden><button type="button" class="secondary-button" id="v2ReferencePrev">上一页</button><span id="v2ReferenceRange"></span><button type="button" class="secondary-button" id="v2ReferenceNext">下一页</button></div>
+      <div class="button-row"><button type="button" class="primary-button" id="v2ReferenceApply">将此表用于当前音频</button><button type="button" class="secondary-button" id="v2ReferenceExport">导出 BPM 表 JSON</button></div>
+    </div>
+    <p id="v2ReferenceActive" class="inline-status" role="status" hidden></p>
+    <button type="button" id="v2ReferenceClear" class="secondary-button" hidden>恢复原节拍设置</button>
+  </div>
+</details>
+<div class="form-grid" id="generationManualClockFields">
 <label class="field">BPM（可选）
             <input id="bpm" type="number" min="1" step="0.01" placeholder="留空则自动估计">
             <small id="bpmHelp">未填写 tempo map 时，留空使用自动估计 BPM，填写则采用该值；auto 会额外采用检测到的变速点。填写 tempo map 后，其 beat 0 BPM 优先。</small>
@@ -2129,11 +2150,12 @@
     </aside>
   </main>
   <script src="/workspace_logs.js"></script>
-  <script src="/chart_preview.js?v=player-motion-20261111"></script>
-  <script src="/app.js?v=resource-estimates"></script>
-  <script src="/v2_intensity.js?v=editor-20261109"></script>
+  <script src="/chart_preview.js?v=20261119-tempo-history"></script>
+  <script src="/app.js?v=20261119-tempo-history"></script>
+  <script src="/reference_tempo.js?v=20261119-tempo-history" onerror="document.getElementById('v2ReferenceBadge').textContent='请重启此 WebUI 服务后刷新'"></script>
+  <script src="/v2_intensity.js?v=20261119-tempo-history"></script>
   <script src="/review_exchange.js"></script>
-  <script src="/candidate_feedback.js?v=large-scale-screening-20261114"></script>
-  <script src="/workspace.js?v=resource-estimates"></script>
+  <script src="/candidate_feedback.js?v=20261119-tempo-history"></script>
+  <script src="/workspace.js?v=20261119-tempo-history"></script>
 </body>
 </html>

@@ -3,6 +3,9 @@
 const v2Curve={profile:null,automatic:null,undo:[],source:null,timingStale:false,selected:0,busy:false,
   selection:new Set(),start:0,end:null,cursor:0,media:null,mediaAudio:null,raster:null,mediaSerial:0,mediaBusy:false,drag:null};
 function v2CurveTimingContext(){
+  const reference = typeof ComposerReferenceTempo === "undefined" ? null : ComposerReferenceTempo.current();
+  if (reference) return {first:reference.first, tempoMap:reference.tempo_map,
+    meterMap:valueOrDefault('#formGenerationMeterMap','').trim()};
   return {
     bpm:valueOrDefault('#bpm','').trim(),
     autoFirst:Boolean(element('#v2GenerateAutoFirst')?.checked??true),
