@@ -68,6 +68,9 @@ class FullInputBatchSampler:
 
 
 def preserve_curve_weights(items):
+    if any('gesture_peer' in item for item in items):
+        from .gesture_pairs import expand
+        items=expand(items)
     """Keep the existing curve numerator when rearranging a source minibatch."""
     token_mass = 0.
     quality_mass = 0.

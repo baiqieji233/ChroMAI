@@ -1060,7 +1060,8 @@ function composerV2TrainingView(task) {
       ['训练 / 验证计算片段',`${runtime.windows??'未记录'} / ${runtime.validation_windows??'未记录'}`],
       ...(autoQualitySources ? [['正式体检来源',autoQualitySources]] : []),
       ['取批顺序',({audio_local_length_bucket_v2:'按音频分组后打散',length_bucket_seed_epoch_v1:'全库打散'})[runtime.batch_order]||'未记录'],
-      ['前文纠错',runtime.timing_recovery?.policy==='causal_layout_v2'
+      ['前文纠错',runtime.timing_recovery?.policy==='gesture_pairs_v1' ? '同曲配置走势对照'
+        : runtime.timing_recovery?.policy==='causal_layout_v2'
         ? `节奏与配置衔接 · 共 ${runtime.timing_recovery.views} 个练习片段`
         : runtime.timing_recovery?.policy==='causal_rhythm_v1'?`节奏 · ${runtime.timing_recovery.views} 个练习片段`:'关闭'],
       ['按音乐组织配置',runtime.musical_context_policy==='music_context_views_v1'
@@ -1100,6 +1101,9 @@ function composerV2TrainingView(task) {
     cards.push(['局部写法学习',[
       ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
       ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]]]);
+  }
+  if (runtime.timing_recovery?.policy==='gesture_pairs_v1' && metrics?.gesture_pairs_seen!=null) {
+    cards.push(['同曲配置走势对照',[['本次配对练习次数',metrics.gesture_pairs_seen]]]);
   }
   if (runtime.timing_recovery?.policy==='causal_layout_v2' && metrics?.layout_replay_keys!=null) {
     cards.push(['配置衔接练习',[['本次试写键位',metrics.layout_replay_keys],

@@ -674,6 +674,9 @@ class ComposerV2(nn.Module):
                     batch['decision_targets'].float(),reduction='none')
                 future_loss=future_loss+(error*batch['decision_weights']).sum()/mass
             objective=objective+self.config.future_configuration_weight*future_loss
+        if 'gesture_positions' in batch:
+            from . import gesture_pairs
+            objective=objective+gesture_pairs.loss(logits,batch)/mass
         metrics=dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),
             future_configuration_loss=future_loss.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),

@@ -6,7 +6,8 @@ from maichart.event_timing import EventPoint
 
 POLICY = 'causal_rhythm_v1'
 LAYOUT_POLICY = 'causal_layout_v2'
-POLICIES = ('off', POLICY, LAYOUT_POLICY)
+GESTURE_POLICY = 'gesture_pairs_v1'
+POLICIES = ('off', POLICY, LAYOUT_POLICY, GESTURE_POLICY)
 CHOICES = ('auto', *POLICIES)
 FRESH_DEFAULT = POLICY
 _TAP = re.compile(r'[1-8][bx]*')

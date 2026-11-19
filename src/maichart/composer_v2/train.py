@@ -947,6 +947,7 @@ def train(args):
     input_tokens=0;input_slots=0
     running=torch.zeros(8,device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
     replay_keys=0
+    gesture_pairs_seen=0
     group_metrics=torch.zeros(7,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
     group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.;stop=False
     time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
@@ -973,6 +974,8 @@ def train(args):
             # divide by the complete update's quality-weighted token budget below.
             budget=max(1.,mass) if cpu_valid else 1.
             batch=_device_batch(batch,device)
+            if 'gesture_weights' in batch:
+                gesture_pairs_seen+=batch['gesture_weights'].numel()
             with _autocast(device,precision):
                 loss,metrics=model.loss(model(batch),batch)
             scaler.scale(loss*(budget/1024.)).backward()
@@ -1031,6 +1034,7 @@ def train(args):
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
                     future_configuration_loss=values[6]/max(1.,running_mass),
                     layout_replay_keys=replay_keys,layout_replay_changed=int(values[7]),
+                    gesture_pairs_seen=gesture_pairs_seen,
                     token_count=seen_tokens,
                     tokens_per_sec=seen_tokens/max(elapsed,1e-9),samples_per_sec=seen_samples/max(elapsed,1e-9),
                     input_padding_fraction=1.-input_tokens/max(input_slots,1),batch_layout=batch_layout,

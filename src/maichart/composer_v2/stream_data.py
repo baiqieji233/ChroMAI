@@ -188,6 +188,8 @@ class StreamDataset(ComposerV2Dataset):
             original_windows=len(self.windows)-len(self.recovery_sources),target='authored_future_time_only')
         if timing_recovery_policy == timing_recovery.LAYOUT_POLICY:
             self.audit['timing_recovery']['target']='timing_or_sampled_tap_prefix_with_two_authored_contacts'
+        if timing_recovery_policy == timing_recovery.GESTURE_POLICY:
+            self.audit['timing_recovery']['target']='timing_or_same_song_gesture_pair'
         if self.musical_context_policy != 'off':
             self.audit['musical_context'] = dict(policy=self.musical_context_policy,
                 probability=self.musical_context_probability, recent_beats=musical_context.RECENT_BEATS,
@@ -841,6 +843,12 @@ class StreamDataset(ComposerV2Dataset):
         cursor=song.points[begin-1].beat
         seed_index = self._recovery_seed_indices.get(source, source)
         seed=self.augmentation_seed+seed_index*1009+self.training_epoch*1000003
+        if (self.timing_recovery_policy==timing_recovery.GESTURE_POLICY
+                and (seed_index//16+self.training_epoch//2)%2==0):
+            from .gesture_pairs import training_item
+            pair=training_item(self,song,self._configuration(si),seed)
+            if pair is not None:
+                return pair
         # Alternate independently of dense/sparse timing practice below, so
         # both original timing views keep their share of the remaining slots.
         if (self.timing_recovery_policy==timing_recovery.LAYOUT_POLICY
@@ -872,6 +880,9 @@ class StreamDataset(ComposerV2Dataset):
 
 def collate_stream(items):
     # The existing collator handles sequence fields; tiles have a distinct batch axis.
+    from . import gesture_pairs
+    if any('gesture_peer' in item for item in items):
+        items=gesture_pairs.expand(items)
     temporary=[{**item,'local_audio':item['bank_audio'][:1],
         'local_semantic':item['bank_semantic'][:1],'local_semantic_mask':item['bank_semantic_mask'][:1],
         'local_mask':item['local_mask'][0,:1],'local_beats':item['local_beats'][0,:1]} for item in items]
@@ -929,4 +940,5 @@ def collate_stream(items):
             offset+=len(item['anchors'])
         out['phase_queries_cpu']=queries
     phrase_replay.collate(items,out)
+    gesture_pairs.collate(items,out)
     return out
