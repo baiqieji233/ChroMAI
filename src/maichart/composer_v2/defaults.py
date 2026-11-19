@@ -21,15 +21,22 @@ MUSICAL_CONTEXT_PROBABILITY = .25
 MUSICAL_RELATION_POLICY = 'musical_relations_v1'
 MUSICAL_RELATION_CHOICES = ('auto', 'off', MUSICAL_RELATION_POLICY)
 MUSICAL_RELATION_FRACTION = .3
+BOUNDARY_WRITING = 'audio_writing_v4'
+GRID_WRITING = 'audio_grid_v4'
+GRID_WRITING_POLICIES = (GRID_WRITING, BOUNDARY_WRITING)
+MOTION_WRITING_POLICIES = ('audio_writing_v3', *GRID_WRITING_POLICIES)
+AUDIO_WRITING_POLICIES = ('audio_writing_v2', *MOTION_WRITING_POLICIES)
 FUTURE_CONFIGURATION_POLICY = 'audio_writing_v3'
-FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', 'audio_writing_v2', FUTURE_CONFIGURATION_POLICY)
+# Existing CLI callers also use the final choice as the recommended policy.
+FUTURE_CONFIGURATION_CHOICES = ('auto', 'off', 'ordered_future_v1', 'audio_writing_v2',
+                                *GRID_WRITING_POLICIES, FUTURE_CONFIGURATION_POLICY)
 FUTURE_CONFIGURATION_WEIGHT = .05
 FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION = .25
 FINETUNE_SCOPE_CHOICES = ('auto', 'all', 'music_reading')
 
 
 def configuration_view_fraction(policy):
-    if policy in ('audio_writing_v2', 'audio_writing_v3'):
+    if policy in AUDIO_WRITING_POLICIES:
         return 1.
     if policy == 'ordered_future_v1':
         return FUTURE_CONFIGURATION_TRAIN_VIEW_FRACTION

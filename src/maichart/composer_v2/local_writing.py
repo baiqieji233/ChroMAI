@@ -5,6 +5,8 @@ import numpy as np
 import torch
 from torch import nn
 from . import motion_writing
+from .defaults import AUDIO_WRITING_POLICIES, BOUNDARY_WRITING, GRID_WRITING_POLICIES, MOTION_WRITING_POLICIES
+from . import phrase_decisions
 
 from .ordered_configuration import (
     BEAT_INTERVALS, FEATURES, KINDS, _event_atoms,
@@ -16,7 +18,7 @@ BASE_FEATURES = tuple(name for name in FEATURES if not name.startswith('position
 FIELDS = (*BASE_FEATURES, *(f'direction_{i}' for i in range(8)), 'chord')
 WIDTH = len(FIELDS)
 MOTION_POLICY = 'audio_writing_v3'
-POLICIES = (POLICY, MOTION_POLICY)
+POLICIES = AUDIO_WRITING_POLICIES
 RELEASE_FIELDS = ('release_to_rim','release_to_slide','release_to_touch')
 MOTION_FIELDS = (*FIELDS, 'no_new_head', *motion_writing.ORDER_FIELDS, *RELEASE_FIELDS)
 TIME_COLUMNS = tuple(MOTION_FIELDS.index(name) for name in
@@ -85,10 +87,10 @@ def _motion_rows(configuration, song):
     return movement, available
 
 
-def add_targets(item, configuration, song, policy=POLICY):
+def add_targets(item, configuration, song, policy=POLICY, *, dataset=None, offset=.5):
     """Future notes are read here only and never enter planner inputs."""
-    if policy == MOTION_POLICY:
-        return _add_motion_targets(item, configuration, song)
+    if policy in MOTION_WRITING_POLICIES:
+        return _add_motion_targets(item, configuration, song, policy, dataset, offset)
     mass = float(item['token_weights'].sum() * item['sample_weight'])
     anchors = item['anchors']
     targets = np.zeros((len(anchors), HORIZONS, WIDTH), dtype=np.float32)
@@ -205,7 +207,7 @@ def _motion_intervals(configuration, song, intervals):
     return c._motion_intervals
 
 
-def _add_motion_targets(item, configuration, song):
+def _add_motion_targets(item, configuration, song, policy=MOTION_POLICY, dataset=None, offset=.5):
     anchors=item['anchors']
     shape=(len(anchors),HORIZONS,len(MOTION_FIELDS))
     values, weights=np.zeros(shape,dtype=np.float32),np.zeros(shape,dtype=np.float32)
@@ -215,8 +217,12 @@ def _add_motion_targets(item, configuration, song):
         cache=_motion_intervals(configuration,song,spans)
         v,w=zip(*(cache[span] for span in spans))
         values[tiles]=np.reshape(v,(-1,HORIZONS,shape[-1]))
+        weights[tiles]=np.reshape(w,(-1,HORIZONS,shape[-1]))
+    if policy in GRID_WRITING_POLICIES:
+        values,weights=phrase_decisions.grid_targets(item,configuration,song,dataset,values,weights,tiles,spans,offset)
+    elif spans:
         mass=float(item['token_weights'].sum()*item['sample_weight'])
-        weights[tiles]=np.reshape(w,(-1,HORIZONS,shape[-1]))*(mass/(len(tiles)*HORIZONS))
+        weights*=mass/(len(tiles)*HORIZONS)
     item['writing_targets']=torch.from_numpy(values)
     item['writing_weights']=torch.from_numpy(weights)
 
@@ -224,13 +230,17 @@ def _add_motion_targets(item, configuration, song):
 def collate(items, out):
     if 'writing_audio' not in items[0]:
         return
+    extras=[(index,item['writing_extra']) for index,item in enumerate(items) if 'writing_extra' in item]
+    blocks=[*enumerate(items),*extras]
     for name in ('writing_audio', 'writing_left', 'writing_right', 'writing_mix'):
-        out[name] = torch.cat([item[name] for item in items])
-    out['writing_owner'] = torch.cat([
-        torch.full((len(item['anchors']),), index, dtype=torch.long) for index, item in enumerate(items)])
+        out[name] = torch.cat([part[name] for _,part in blocks])
+    out['writing_owner'] = torch.cat([torch.full((len(part['writing_audio']),), index, dtype=torch.long)
+                                     for index,part in blocks])
     if 'writing_targets' in items[0]:
-        out['future_configuration_targets'] = torch.cat([item['writing_targets'] for item in items])
-        out['future_configuration_weights'] = torch.cat([item['writing_weights'] for item in items])
+        for source,target in (('writing_targets','future_configuration_targets'),('writing_weights','future_configuration_weights')):
+            out[target]=torch.cat([it[source][:len(it['anchors'])] for it in items]+
+                                  [items[i][source][len(items[i]['anchors']):] for i,_ in extras])
+    phrase_decisions.collate(items,out)
 
 
 class LocalWriting(nn.Module):
@@ -240,11 +250,17 @@ class LocalWriting(nn.Module):
         self.audio = nn.Sequential(nn.LayerNorm(INPUT_WIDTH), nn.Linear(INPUT_WIDTH, width), nn.SiLU())
         self.song = nn.Sequential(nn.LayerNorm(dimension), nn.Linear(dimension, width, bias=False))
         self.level = nn.Linear(1, width, bias=False)
-        self.fields = MOTION_FIELDS if policy == MOTION_POLICY else FIELDS
+        self.fields = MOTION_FIELDS if policy in MOTION_WRITING_POLICIES else FIELDS
+        if policy in GRID_WRITING_POLICIES:
+            self.fields = (*self.fields, *phrase_decisions.GRID_FIELDS)
+        if policy == BOUNDARY_WRITING:
+            self.successor = nn.Linear(dimension, len(phrase_decisions.DECISION_FIELDS))
+            self.execute_successor = nn.Linear(len(phrase_decisions.DECISION_FIELDS),dimension,bias=False)
+            nn.init.zeros_(self.execute_successor.weight)
         self.predictor = nn.Sequential(nn.SiLU(), nn.Linear(width, HORIZONS * len(self.fields)))
         self.projection = nn.Linear(HORIZONS * len(self.fields), dimension, bias=False)
         nn.init.zeros_(self.projection.weight)
-        if policy == MOTION_POLICY:
+        if policy in MOTION_WRITING_POLICIES:
             self.timing = nn.Linear(len(TIME_COLUMNS)*HORIZONS, dimension, bias=False)
             nn.init.zeros_(self.timing.weight)
 

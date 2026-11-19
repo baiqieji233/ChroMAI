@@ -5,11 +5,25 @@ import numpy as np
 from maichart.event_timing import EventPoint
 
 POLICY = 'causal_rhythm_v1'
-CHOICES = ('auto', 'off', POLICY)
+LAYOUT_POLICY = 'causal_layout_v2'
+POLICIES = ('off', POLICY, LAYOUT_POLICY)
+CHOICES = ('auto', *POLICIES)
 FRESH_DEFAULT = POLICY
 _TAP = re.compile(r'[1-8][bx]*')
 SPAN = Fraction(4)
 MAX_EDITS = 8
+
+
+def resolve(requested, *, sequence_policy, saved, resume):
+    if requested == 'auto':
+        policy = saved if resume else FRESH_DEFAULT if sequence_policy == 'continuous_events_v1' else 'off'
+    else:
+        policy = requested
+    if policy not in POLICIES or policy != 'off' and sequence_policy != 'continuous_events_v1':
+        raise ValueError('前文纠错只适用于连续事件模型')
+    if resume and policy != saved:
+        raise ValueError('更换前文纠错策略请使用微调和新输出目录')
+    return policy
 
 
 def is_tap(point):

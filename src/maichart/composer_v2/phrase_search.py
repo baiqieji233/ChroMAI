@@ -13,7 +13,7 @@ import hashlib
 import json
 import uuid
 import numpy as np
-from .defaults import GENERATION_DEFAULTS
+from .defaults import GENERATION_DEFAULTS, AUDIO_WRITING_POLICIES
 
 
 MUSIC_POLICIES = ('music_flow_v1','music_plan_v1')
@@ -33,7 +33,7 @@ def resolve_search_options(mode, ranking, *, sequence_policy, future_configurati
         raise ValueError('未知的生成方式或选优偏好')
     if legacy and (mode != 'event' or ranking != 'comfort_v1'):
         raise ValueError('旧窗口模型请使用自动设置，实际采用逐步生成和基础手感选优。')
-    if ranking == 'music_plan_v1' and future_configuration_policy not in ('audio_writing_v2','audio_writing_v3'):
+    if ranking == 'music_plan_v1' and future_configuration_policy not in AUDIO_WRITING_POLICIES:
         raise ValueError('这个检查点没有局部写法预测，请选择「跟随音乐比较写法」。')
     return mode, ranking
 

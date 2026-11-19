@@ -8,9 +8,10 @@ import math
 import numpy as np
 import torch
 from .data import ComposerV2Dataset,collate_composer_v2
-from .defaults import MUSICAL_CONTEXT_PROBABILITY
+from .defaults import (MUSICAL_CONTEXT_PROBABILITY, AUDIO_WRITING_POLICIES, BOUNDARY_WRITING,
+                       GRID_WRITING_POLICIES, MOTION_WRITING_POLICIES)
 from .stream_codec import POLICY,StreamCodec
-from . import musical_context, ordered_configuration, relation_sampling, timing_recovery
+from . import musical_context, ordered_configuration, relation_sampling, timing_recovery, phrase_replay
 
 
 _SELECT_REFERENCE = object()
@@ -47,7 +48,7 @@ class StreamDataset(ComposerV2Dataset):
         musical_relation_fraction = float(musical_relation_fraction)
         if not 0 <= musical_relation_fraction < 1:
             raise ValueError('musical_relation_fraction must be between 0 and 1 (exclusive)')
-        if future_configuration_policy not in ('off', ordered_configuration.POLICY, 'audio_writing_v2','audio_writing_v3'):
+        if future_configuration_policy not in ('off', ordered_configuration.POLICY, *AUDIO_WRITING_POLICIES):
             raise ValueError('Unknown future configuration policy')
         self.musical_relation_policy = musical_relation_policy
         self.musical_relation_fraction = musical_relation_fraction
@@ -86,8 +87,9 @@ class StreamDataset(ComposerV2Dataset):
         self.training_window_events = self.refresh_events if training_window_events is None else training_window_events
         if type(self.training_window_events) is not int or self.training_window_events < 1:
             raise ValueError('training_window_events must be a positive integer')
-        if timing_recovery_policy not in ('off',timing_recovery.POLICY):
+        if timing_recovery_policy not in timing_recovery.POLICIES:
             raise ValueError('Unknown timing recovery policy')
+        self.timing_recovery_policy=timing_recovery_policy
         # Recovery keeps its original target boundaries and random seeds when
         # authored targets are grouped into longer training windows.
         recovery_slices = [] if (timing_recovery_policy != 'off'
@@ -129,15 +131,20 @@ class StreamDataset(ComposerV2Dataset):
                 quality='continuous_reviewed_audio_coverage', timing_recovery=False,
                 probability=1. if self.auxiliary_validation else ordered_configuration.TRAINING_PROBABILITY,
                 chart_condition='level_only_on_auxiliary_windows', curve_teacher=False)
-            if future_configuration_policy in ('audio_writing_v2','audio_writing_v3'):
+            if future_configuration_policy in AUDIO_WRITING_POLICIES:
                 from .local_writing import FIELDS, MOTION_FIELDS, BEAT_INTERVALS
-                motion = future_configuration_policy == 'audio_writing_v3'
+                motion = future_configuration_policy in MOTION_WRITING_POLICIES
                 self.audit['future_configuration'].update(
                     horizons=BEAT_INTERVALS,dimension=len(MOTION_FIELDS if motion else FIELDS),max_queries=None,
                     probability=1.,target='audio_predicted_ordered_writing',
                     chart_condition='planner_level_only_decoder_optional_conditions',
                     timing_recovery=timing_recovery_policy!='off', curve_teacher='ordinary_views' if motion else False,
                     execution='predicted_motion_and_next_integer' if motion else 'predicted_inputs_only_at_configuration_decisions')
+                if future_configuration_policy in GRID_WRITING_POLICIES:
+                    from .phrase_decisions import GRID_FIELDS, DECISION_FIELDS
+                    self.audit['future_configuration'].update(dimension=len(MOTION_FIELDS)+len(GRID_FIELDS),
+                        successor_fields=DECISION_FIELDS if future_configuration_policy==BOUNDARY_WRITING else (),
+                        extra_grid_rows_per_window=2)
         self.recovery_sources = {}
         self._recovery_seed_indices = {}
         self.training_epoch = 0
@@ -179,6 +186,8 @@ class StreamDataset(ComposerV2Dataset):
             self.audit['training_window_events'] = self.training_window_events
         self.audit['timing_recovery'] = dict(policy=timing_recovery_policy, views=len(self.recovery_sources),
             original_windows=len(self.windows)-len(self.recovery_sources),target='authored_future_time_only')
+        if timing_recovery_policy == timing_recovery.LAYOUT_POLICY:
+            self.audit['timing_recovery']['target']='timing_or_sampled_tap_prefix_with_two_authored_contacts'
         if self.musical_context_policy != 'off':
             self.audit['musical_context'] = dict(policy=self.musical_context_policy,
                 probability=self.musical_context_probability, recent_beats=musical_context.RECENT_BEATS,
@@ -234,7 +243,7 @@ class StreamDataset(ComposerV2Dataset):
         target_budget = self.max_tokens // 2
         stops = ()
         allowed = None
-        if reviewed and self.future_configuration_policy == 'audio_writing_v3' and song.points:
+        if reviewed and self.future_configuration_policy in MOTION_WRITING_POLICIES and song.points:
             # Start a new target exactly where a reviewed use changes. build_stream
             # still receives the real previous events and reconstructs their carries.
             quality = ordered_configuration.ConfigurationQuality(song)
@@ -418,7 +427,7 @@ class StreamDataset(ComposerV2Dataset):
         if self._paired_music():
             from .music_evidence import entry_preview
             result['entry_preview_features'] = torch.as_tensor(entry_preview(self._profile(song), anchors))
-        if getattr(self,'future_configuration_policy','off') in ('audio_writing_v2','audio_writing_v3'):
+        if getattr(self,'future_configuration_policy','off') in AUDIO_WRITING_POLICIES:
             result.update(self.writing_features(song,anchors))
         return result
 
@@ -738,7 +747,7 @@ class StreamDataset(ComposerV2Dataset):
             paired[:prefix.index(codec.ref_id)]=0
             out['paired_music_features']=torch.as_tensor(paired)
             out['entry_preview_features']=torch.as_tensor(entry_preview(profile,anchors))
-        if getattr(self,'future_configuration_policy','off') in ('audio_writing_v2','audio_writing_v3'):
+        if getattr(self,'future_configuration_policy','off') in AUDIO_WRITING_POLICIES:
             out.update(self.writing_features(song,anchors))
         return out
     def __getitem__(self,index):
@@ -752,7 +761,7 @@ class StreamDataset(ComposerV2Dataset):
             recent_beats = musical_context.recent_history_beats(seed=self.augmentation_seed,
                 epoch=self.training_epoch, index=index, probability=self.musical_context_probability,
                 history_beats=self.history_beats)
-        if self.future_configuration_policy == 'audio_writing_v3' and (song.quality or {}).get('unmarked_weight') == 0:
+        if self.future_configuration_policy in MOTION_WRITING_POLICIES and (song.quality or {}).get('unmarked_weight') == 0:
             recent_beats = None
         if song.stream_cache_key is None:
             song.stream_cache_key = _song_cache_key(song)
@@ -766,9 +775,9 @@ class StreamDataset(ComposerV2Dataset):
             extra = float(scores[index]) * fraction / (1. - fraction)
             item['token_weights'] *= 1. + extra
             item['musical_relation_extra_fraction'] = extra / (1. + extra)
-        if self.future_configuration_policy in ('audio_writing_v2','audio_writing_v3'):
-            from .local_writing import add_targets
-            add_targets(item,self._configuration(si),song,self.future_configuration_policy)
+        if self.future_configuration_policy in AUDIO_WRITING_POLICIES:
+            self._writing_targets(item,self._configuration(si),song,begin,end,
+                                  offset=((index*17+self.training_epoch*37)%101+.5)/101)
         elif self._use_future_configuration(index):
             ordered_configuration.add_item(item, self._configuration(si), self.codec, begin, end)
             if 'future_configuration_positions' in item:
@@ -785,6 +794,17 @@ class StreamDataset(ComposerV2Dataset):
             return True
         rng = np.random.default_rng((self.augmentation_seed, self.training_epoch, index, 31))
         return float(rng.random()) < ordered_configuration.TRAINING_PROBABILITY
+
+    def _writing_targets(self,item,configuration,song,begin,end,*,offset=.5,layout=True):
+        if self.future_configuration_policy not in AUDIO_WRITING_POLICIES:
+            return
+        from .local_writing import add_targets
+        if self.future_configuration_policy in GRID_WRITING_POLICIES and begin<end:
+            item['writing_stop_beat']=song.points[end-1].beat
+        if self.future_configuration_policy == BOUNDARY_WRITING:
+            from .phrase_decisions import add_decisions
+            add_decisions(item,configuration,song,self.codec,begin,end,layout=layout)
+        add_targets(item,configuration,song,self.future_configuration_policy,dataset=self,offset=offset)
 
     def _prepare_reference(self,index):
         si,begin=self.windows[index];song=self.songs[si]
@@ -821,6 +841,13 @@ class StreamDataset(ComposerV2Dataset):
         cursor=song.points[begin-1].beat
         seed_index = self._recovery_seed_indices.get(source, source)
         seed=self.augmentation_seed+seed_index*1009+self.training_epoch*1000003
+        # Alternate independently of dense/sparse timing practice below, so
+        # both original timing views keep their share of the remaining slots.
+        if (self.timing_recovery_policy==timing_recovery.LAYOUT_POLICY
+                and (seed_index//16+self.training_epoch//2)%2==0):
+            replay=phrase_replay.training_item(self,song,self._configuration(si),begin,end,seed)
+            if replay is not None:
+                return replay
         changed=timing_recovery.perturb_prefix(song.points[:begin],self._recovery_phases,
             seed,dense=(seed_index//8+self.training_epoch)%2==0,span=self._recovery_span)
         if changed is None:
@@ -836,11 +863,10 @@ class StreamDataset(ComposerV2Dataset):
         keep=torch.tensor([int(token) in self._timing_ids for token in item['labels']],dtype=torch.bool)
         item['labels']=item['labels'].masked_fill(~keep,-100)
         item['token_weights']=item['token_weights']*keep*2.
-        if self.future_configuration_policy == 'audio_writing_v3':
+        if self.future_configuration_policy in MOTION_WRITING_POLICIES:
             item['curve_teacher_allowed'] = False
-        if self.future_configuration_policy in ('audio_writing_v2','audio_writing_v3'):
-            from .local_writing import add_targets
-            add_targets(item,self._configuration(si),song,self.future_configuration_policy)
+        if self.future_configuration_policy in AUDIO_WRITING_POLICIES:
+            self._writing_targets(item,self._configuration(si),song,begin,end,layout=False)
         return item
 
 
@@ -902,4 +928,5 @@ def collate_stream(items):
             queries.extend((row,p,tile+offset) for _,p,tile in item['phase_queries_cpu'])
             offset+=len(item['anchors'])
         out['phase_queries_cpu']=queries
+    phrase_replay.collate(items,out)
     return out

@@ -5,8 +5,8 @@ const V2_JOINT_DEVELOPMENT_FIELDS = [
   "musical_relation_policy", "musical_relation_fraction", "future_configuration_policy",
   "future_configuration_weight", "finetune_scope",
 ];
-const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS];
-COMPOSER_V2_FIELDS.push(...V2_INHERITED_LEARNING_FIELDS);
+const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS, 'timing_recovery'];
+COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS);
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -464,6 +464,7 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.future_configuration_policy = data.model_config?.future_configuration_policy ?? 'off';
   saved.future_configuration_weight = data.model_config?.future_configuration_weight ?? 0.05;
   saved.finetune_scope = data.training_contract?.finetune_scope ?? 'all';
+  saved.timing_recovery = data.training_contract?.timing_recovery ?? 'off';
   saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
   const audioLayers = element('#v2TrainAudioLayers');
@@ -1059,14 +1060,20 @@ function composerV2TrainingView(task) {
       ['训练 / 验证计算片段',`${runtime.windows??'未记录'} / ${runtime.validation_windows??'未记录'}`],
       ...(autoQualitySources ? [['正式体检来源',autoQualitySources]] : []),
       ['取批顺序',({audio_local_length_bucket_v2:'按音频分组后打散',length_bucket_seed_epoch_v1:'全库打散'})[runtime.batch_order]||'未记录'],
-      ['节奏前文纠错',runtime.timing_recovery?.policy==='causal_rhythm_v1'?`已启用 · ${runtime.timing_recovery.views} 个附加片段`:'关闭'],
+      ['前文纠错',runtime.timing_recovery?.policy==='causal_layout_v2'
+        ? `节奏与配置衔接 · 共 ${runtime.timing_recovery.views} 个练习片段`
+        : runtime.timing_recovery?.policy==='causal_rhythm_v1'?`节奏 · ${runtime.timing_recovery.views} 个练习片段`:'关闭'],
       ['按音乐组织配置',runtime.musical_context_policy==='music_context_views_v1'
         ? `已启用 · 音乐独立练习比例 ${show(n(runtime,'musical_context_probability')*100,1)}%`
         : runtime.musical_context_policy==='off' ? '关闭' : '未记录'],
       ['音乐与写法联动学习',runtime.musical_relation_policy==='musical_relations_v1'
         ? `已启用 · 乐句强化上限 ${show(n(runtime,'musical_relation_fraction')*100,1)}%`
         : runtime.musical_relation_policy==='off' ? '关闭' : '未记录'],
-      ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v3'
+      ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v4'
+        ? `乐句衔接与留白 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
+        :runtime.future_configuration_policy==='audio_grid_v4'
+        ? `空拍与重音位置 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
+        :runtime.future_configuration_policy==='audio_writing_v3'
         ? `动作与起手 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         : runtime.future_configuration_policy==='audio_writing_v2'
         ? `音乐写法条件 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
@@ -1089,10 +1096,14 @@ function composerV2TrainingView(task) {
       ['曲线验证 loss',show(n(complete,'validation_curve_loss'))],
       ['出音频率平均误差（次/秒）',show(errors[0])],['同拍额外物量平均误差（个/秒）',show(errors[1])]]]);
   }
-  if(['ordered_future_v1','audio_writing_v2','audio_writing_v3'].includes(runtime.future_configuration_policy ?? config.future_configuration_policy)) {
+  if(['ordered_future_v1','audio_writing_v2','audio_writing_v3','audio_grid_v4','audio_writing_v4'].includes(runtime.future_configuration_policy ?? config.future_configuration_policy)) {
     cards.push(['局部写法学习',[
       ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
       ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]]]);
+  }
+  if (runtime.timing_recovery?.policy==='causal_layout_v2' && metrics?.layout_replay_keys!=null) {
+    cards.push(['配置衔接练习',[['本次试写键位',metrics.layout_replay_keys],
+      ['与原谱不同',metrics.layout_replay_changed]]]);
   }
   return {status,progress:amount,knownTarget:target>0,indeterminate:preparing,cards,history,validationHistory,
     note:'累计训练 loss 可能掩盖近期退步，请同时查看固定片段验证与非相位时序 loss。当前版本在定期保存检查点时也会验证；预算为0时检查完整开发集，正数使用固定抽查片段。'};
@@ -4170,7 +4181,7 @@ function updateTrainingControls() {
       const resourceBudget = ['cuda_memory_budget_gb','audio_cache_gb','save_every','early_stopping_patience','activation_checkpointing','batch_size','grad_accumulation','batch_layout','attention_projection_packing','decoder_flash_attention'].includes(key);
       node.disabled=(v2Resume && !resourceBudget) || (currentModelFamily()==='chart_composer_v2' && currentTrainingMode()==='finetune' && v2Fixed.has(key));
       node.title=node.disabled?'继承 checkpoint 的固定设置；模型合同变化需要从头训练。':'';
-      if(v2Resume && V2_JOINT_DEVELOPMENT_FIELDS.includes(key))
+      if(v2Resume && V2_INHERITED_LEARNING_FIELDS.includes(key))
         node.title='断点续训沿用检查点。更改此项请在新目录微调。';
     }
   }

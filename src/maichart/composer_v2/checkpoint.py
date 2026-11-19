@@ -12,7 +12,7 @@ from .codec import ComponentCodec
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
-    FUTURE_CONFIGURATION_WEIGHT,
+    FUTURE_CONFIGURATION_WEIGHT, AUDIO_WRITING_POLICIES, MOTION_WRITING_POLICIES,
     MUSICAL_RELATION_FRACTION, MUSICAL_RELATION_POLICY,
 )
 
@@ -186,8 +186,8 @@ def inspect_payload(payload):
         condition_contract=capabilities_contract,
         sequence_policy=model_fields.get('sequence_policy','window_v1'),
         generation_capabilities=dict(component_sequence=True,fine_note_strength=False,local_onset_guidance=False,
-            local_writing_condition=future_policy in ('audio_writing_v2','audio_writing_v3'),
-            motion_and_entry_condition=future_policy=='audio_writing_v3',
+            local_writing_condition=future_policy in AUDIO_WRITING_POLICIES,
+            motion_and_entry_condition=future_policy in MOTION_WRITING_POLICIES,
             intensity_curve=model_fields.get('intensity_policy','off')=='rate_curve_v1',
             onset_readout=model_fields.get('onset_readout_policy','off')=='phase_audio_v1',
             rhythm_structure=model_fields.get('structure_policy','off')!='off',

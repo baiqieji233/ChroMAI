@@ -478,9 +478,11 @@ def start_train(handler,payload,*,runtime):
     curve_policy,_=resolve_curve_policy(curve_requested,(checked.get('model_config') or {}) if parent else None,resume=mode=='resume')
     _arg(args,'--intensity-curve',curve_requested)
     settings.update(intensity_curve=curve_requested,intensity_policy=curve_policy)
-    from maichart.composer_v2.timing_recovery import CHOICES
-    recovery_policy=_choice(payload,'timing_recovery','auto',CHOICES)
-    _arg(args,'--timing-recovery',recovery_policy)
+    from maichart.composer_v2 import timing_recovery
+    requested_recovery=_choice(payload,'timing_recovery','auto',timing_recovery.CHOICES)
+    recovery_policy=timing_recovery.resolve(requested_recovery,sequence_policy=sequence_policy,
+        saved=parent_contract.get('timing_recovery','off'),resume=mode=='resume')
+    _arg(args,'--timing-recovery',requested_recovery)
     settings['timing_recovery']=recovery_policy
     reviewed_ref=_choice(payload,'reviewed_reference_policy','auto',{'auto','approved_only','off'})
     if reviewed_ref=='approved_only' and sequence_policy!='continuous_events_v1':

@@ -8,6 +8,7 @@ import math
 import torch
 from torch import nn
 from torch.nn import functional as F
+from .defaults import AUDIO_WRITING_POLICIES
 
 
 @dataclass
@@ -38,7 +39,7 @@ class ComposerV2Config:
     future_configuration_policy: str = 'off'
     future_configuration_weight: float = .05
     def __post_init__(self):
-        if self.future_configuration_policy not in ('off', 'ordered_future_v1', 'audio_writing_v2', 'audio_writing_v3'):
+        if self.future_configuration_policy not in ('off', 'ordered_future_v1', *AUDIO_WRITING_POLICIES):
             raise ValueError('Unknown ordered future configuration policy')
         if (not isinstance(self.future_configuration_weight, (int, float))
                 or isinstance(self.future_configuration_weight, bool)
@@ -342,7 +343,10 @@ class ComposerV2(nn.Module):
                 self.future_configuration_head=nn.Sequential(
                     nn.LayerNorm(d),nn.Linear(d,min(128,d)),nn.SiLU(),
                     nn.Linear(min(128,d),len(HORIZONS)*TARGET_DIM))
-        if c.future_configuration_policy in ('audio_writing_v2','audio_writing_v3'):
+        self.register_buffer('rim_button_ids',torch.tensor([codec.ids[f'P:{i}'] for i in range(1,9)
+                                                            if f'P:{i}' in codec.ids],dtype=torch.long),
+                             persistent=False)
+        if c.future_configuration_policy in AUDIO_WRITING_POLICIES:
             from .local_writing import LocalWriting
             with torch.random.fork_rng(devices=[]):
                 self.local_writing = LocalWriting(d, c.future_configuration_policy)
@@ -523,7 +527,7 @@ class ComposerV2(nn.Module):
             keep[:,0]=True;known=known&keep
         values=values*known
         return self.condition(values)+self.condition_missing((~known).float())
-    def decode(self,batch,cache,*,incremental=True,return_future_hidden=False):
+    def decode(self,batch,cache,*,incremental=True,return_future_hidden=False,decision_positions=None,button_queries=None):
         ids=batch['input_ids'];length=ids.size(1)
         use_cache=incremental and not self.training and not torch.is_grad_enabled()
         state=cache.get('decode_state') if use_cache else None
@@ -589,6 +593,17 @@ class ComposerV2(nn.Module):
             x=x+self.local_writing.read(cache['writing_context'],batch,start,value,self.writing_query_tokens,
                 time_mask=self.writing_time_tokens,indices=writing_tiles)
         normalized=self.norm(x)
+        if hasattr(getattr(self,'local_writing',None),'successor'):
+            # Re-read the causal state at the native timing/layout decision.
+            # Frontier tokens may teach a gap but never convert that gap into an EOS bias.
+            forecast=self.local_writing.successor(normalized)
+            probabilities=forecast.float().sigmoid()-.5
+            role_values=torch.cat((probabilities[:,:,:3]*self.writing_time_tokens[value][...,None],
+                                   probabilities[:,:,3:]*self.writing_query_tokens[value][...,None]),dim=-1)
+            normalized=normalized+self.local_writing.execute_successor(role_values.to(normalized.dtype))
+        if button_queries is not None:
+            return F.linear(normalized[button_queries],weight.index_select(0,self.rim_button_ids),
+                            self.output_bias.index_select(0,self.rim_button_ids))
         logits=F.linear(normalized,weight,self.output_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence
@@ -596,20 +611,33 @@ class ComposerV2(nn.Module):
                 self.phase_token_ids, start=start, strength=batch.get('onset_strength', 1.))
         if use_cache:
             state['length']=length;cache['decode_state']=state
+        if decision_positions is not None:
+            rows=decision_positions
+            return logits,forecast[rows[:,0],rows[:,1]-start]
         if return_future_hidden:
             rows=batch['future_configuration_positions']
             return logits,normalized[rows[:,0],rows[:,1]-start]
         return logits
     def forward(self,batch):
         cache=self.encode_audio(batch)
+        if self.training and 'layout_replay' in batch:
+            from .phrase_replay import replace_keys
+            if 'condition' not in cache:
+                cache['condition']=self.condition_context(batch)
+            batch=replace_keys(self,batch,cache)
         positions=batch.get('future_configuration_positions')
         use_future=(hasattr(self,'future_configuration_head') and
                     self.config.future_configuration_weight>0 and positions is not None and positions.numel()>0)
         future={}
+        if 'layout_replay_changed' in batch:
+            future['layout_replay_changed']=batch['layout_replay_changed']
         if use_future:
             from .ordered_configuration import HORIZONS,TARGET_DIM
             logits,hidden=self.decode(batch,cache,incremental=False,return_future_hidden=True)
             future['future_configuration_logits']=self.future_configuration_head(hidden).reshape(-1,len(HORIZONS),TARGET_DIM)
+        elif 'decision_positions' in batch and self.config.future_configuration_weight>0:
+            logits,future['decision_logits']=self.decode(batch,cache,incremental=False,
+                                                        decision_positions=batch['decision_positions'])
         else:logits=self.decode(batch,cache,incremental=False)
         if hasattr(self,'local_writing'):
             future['future_configuration_logits']=cache['writing_logits']
@@ -641,8 +669,15 @@ class ComposerV2(nn.Module):
             # Labels/quality are loss-only; credit is normalized to the same
             # supervised mass as the main loss for exact gradient accumulation.
             future_loss=(F.binary_cross_entropy_with_logits(prediction,target,reduction='none')*future_weights).sum()/mass
+            if 'decision_logits' in output:
+                error=F.binary_cross_entropy_with_logits(output['decision_logits'].float(),
+                    batch['decision_targets'].float(),reduction='none')
+                future_loss=future_loss+(error*batch['decision_weights']).sum()/mass
             objective=objective+self.config.future_configuration_weight*future_loss
-        return objective,dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),
+        metrics=dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),
             future_configuration_loss=future_loss.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),
             phase_loss=mean(self.phase_targets.index_select(0,indices.flatten()).reshape_as(labels)&active).detach(),token_count=active.sum().detach())
+        if 'layout_replay_changed' in output:
+            metrics['layout_replay_changed']=output['layout_replay_changed']
+        return objective,metrics

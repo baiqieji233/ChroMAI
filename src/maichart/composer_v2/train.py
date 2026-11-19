@@ -21,6 +21,7 @@ from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Datase
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
 from . import chart_dialect, timing_recovery
+from .defaults import AUDIO_WRITING_POLICIES
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_POLICY, configuration_view_fraction,
     FUTURE_CONFIGURATION_WEIGHT,
@@ -513,17 +514,11 @@ def train(args):
         args.finetune_scope != parent_contract.get('finetune_scope', 'all')))
     if learning_contract_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
         raise ValueError('Changing musical relation, ordered future, or fine-tuning scope requires a new checkpoint directory')
-    recovery_policy=getattr(args,'timing_recovery','auto')
-    if recovery_policy=='auto':
-        if args.resume:
-            recovery_policy=parent['training_contract'].get('timing_recovery','off')
-        elif args.sequence_policy=='continuous_events_v1':
-            recovery_policy=timing_recovery.FRESH_DEFAULT
-        else:
-            recovery_policy='off'
-    if recovery_policy not in ('off',timing_recovery.POLICY):raise ValueError('Unknown timing recovery policy')
-    if recovery_policy!='off' and args.sequence_policy!='continuous_events_v1':
-        raise ValueError('Timing recovery requires continuous event training')
+    recovery_policy=timing_recovery.resolve(getattr(args,'timing_recovery','auto'),sequence_policy=args.sequence_policy,
+        saved=parent_contract.get('timing_recovery','off'),resume=bool(args.resume))
+    if (args.init_checkpoint and recovery_policy!=parent_contract.get('timing_recovery','off')
+            and (directory==source_directory or any(path.exists() for path in artifacts))):
+        raise ValueError('更换前文纠错策略请使用新的微调输出目录')
     args.timing_recovery=recovery_policy
     reviewed_ref=getattr(args,'reviewed_reference_policy','auto')
     saved_reviewed_ref=parent['training_contract'].get('reviewed_reference_policy','off') if parent and parent.get('training_contract') else 'off'
@@ -839,7 +834,7 @@ def train(args):
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
                 future_configuration_policy=args.future_configuration_policy,
-                zero_initialization=not future_migration or args.future_configuration_policy in ('off','audio_writing_v2','audio_writing_v3'))
+                zero_initialization=not future_migration or args.future_configuration_policy in ('off',*AUDIO_WRITING_POLICIES))
         else:
             model.load_state_dict(parent_state,strict=True)
     if hasattr(model,'onset_readout') and (not parent or onset_migration):
@@ -950,7 +945,8 @@ def train(args):
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0
-    running=torch.zeros(7,device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
+    running=torch.zeros(8,device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
+    replay_keys=0
     group_metrics=torch.zeros(7,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
     group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.;stop=False
     time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
@@ -980,6 +976,9 @@ def train(args):
             with _autocast(device,precision):
                 loss,metrics=model.loss(model(batch),batch)
             scaler.scale(loss*(budget/1024.)).backward()
+            if 'layout_replay' in batch:
+                replay_keys+=len(batch['layout_replay']['coordinates'])
+                running[7]+=metrics['layout_replay_changed']
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
             group_metrics+=torch.stack((metrics['token_loss']*budget,
                 metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*max(1.,phase_mass),
@@ -1006,7 +1005,7 @@ def train(args):
                 if finite:
                     scaler.step(optimizer);state["optimizer_steps"]+=1
                     epoch_loss_gpu+=group_metrics[0];epoch_mass+=group_mass
-                    running+=group_metrics;running_mass+=group_mass
+                    running[:7]+=group_metrics;running_mass+=group_mass
                     running_relation_mass+=group_relation_mass
                     running_time_mass+=group_time_mass;running_component_mass+=group_component_mass;running_phase_mass+=group_phase_mass
                 else:emit("progress",stage="nonfinite_update_skipped",epoch=epoch,batch=batch_index+1,optimizer_steps=state["optimizer_steps"])
@@ -1031,6 +1030,7 @@ def train(args):
                     loss_scope="run_quality_weighted_token_mean",
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
                     future_configuration_loss=values[6]/max(1.,running_mass),
+                    layout_replay_keys=replay_keys,layout_replay_changed=int(values[7]),
                     token_count=seen_tokens,
                     tokens_per_sec=seen_tokens/max(elapsed,1e-9),samples_per_sec=seen_samples/max(elapsed,1e-9),
                     input_padding_fraction=1.-input_tokens/max(input_slots,1),batch_layout=batch_layout,
