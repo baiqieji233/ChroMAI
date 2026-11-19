@@ -157,6 +157,10 @@ class TaskState:
 
     def to_dict(self) -> dict[str, Any]:
         with self.lock:
+            result = dict(self.result)
+            if self.kind == 'composer_v2_generate' and self.status == 'running':
+                from maichart.composer_v2.generation_progress import suspected_stalls
+                result['composer_v2_generation_stalls'] = suspected_stalls(result)
             return {
                 "task_id": self.task_id,
                 "kind": self.kind,
@@ -168,7 +172,7 @@ class TaskState:
                 "progress": self.progress,
                 "message": self.message,
                 "logs": list(self.logs),
-                "result": dict(self.result),
+                "result": result,
                 "error": self.error,
             }
 

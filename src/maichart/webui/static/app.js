@@ -364,10 +364,12 @@ function composerV2GenerationMessage(task) {
   if(detailed.batch) {
     const b=detailed.batch;
     const failed=Number(b.failed)||0;
-    return `${generationStageLabel(b.status==='preparing'?b.stage||'preparing_audio':'generating')} · 已结束 ${(Number(b.completed)||0)+failed}/${b.count} 张（成功 ${b.completed||0}${failed?`，失败 ${failed}`:''}） · ${Math.min(99,Math.floor(detailed.progress*100))}%`;
+    const stage=detailed.stalls.length?`${detailed.stalls.length} 张疑似卡滞`:generationStageLabel(b.status==='preparing'?b.stage||'preparing_audio':'generating');
+    return `${stage} · 已结束 ${(Number(b.completed)||0)+failed}/${b.count} 张（成功 ${b.completed||0}${failed?`，失败 ${failed}`:''}） · ${Math.min(99,Math.floor(detailed.progress*100))}%`;
   }
   if(detailed.rows.length) {
     const row=detailed.rows[0];
+    if(row.stall)return `疑似卡滞 · ${generationStallDetail(row.stall)}`;
     return `${generationStageLabel(row.stage)}${row.audio_duration_sec?` · ${generationTime(row.audio_sec)} / ${generationTime(row.audio_duration_sec)}`:''}${row.events?` · ${row.events} 个事件`:''}`;
   }
   const batch=task.result?.composer_v2_batch_progress;
@@ -4287,13 +4289,19 @@ function generationStageLabel(stage) {
   return ({queued:'等待开始',starting:'正在启动',loading_checkpoint:'读取检查点',loading_model:'载入模型',
     freezing_checkpoint:'准备检查点副本',detecting_timing:'识别 BPM 和偏移',preparing_audio:'准备音频特征',
     encoding_audio:'读取歌曲上下文',generating:'正在写谱',comparing:'比较候选写法',retrying:'调整冲突位置',
-    exporting:'导出谱面',completed:'已完成',failed:'生成失败',cancelled:'已中止',unknown:'等待详细进度'})[stage]||'正在生成';
+    refining:'精修谱面',exporting:'导出谱面',completed:'已完成',failed:'生成失败',cancelled:'已中止',unknown:'等待详细进度'})[stage]||'正在生成';
+}
+
+function generationStallDetail(stall) {
+  const position=stall.beat==null?'尚未写入首个事件':`最后拍位 ${stall.beat}`;
+  return `${position} · ${generationTime(stall.silent_sec)} 未收到进度`;
 }
 
 function composerV2ProgressState(task) {
   const result=task.result||{},settings=result.effective_settings||{};
   const batch=result.composer_v2_batch_progress||result.composer_v2_batch;
   const single=result.composer_v2_generation_progress;
+  const stalls=task.status==='running'?result.composer_v2_generation_stalls||[]:[];
   if(batch?.count>1) {
     let rows=batch.chart_progress||[];
     if(!rows.length) {
@@ -4312,23 +4320,25 @@ function composerV2ProgressState(task) {
     const finished=Math.max((Number(batch.completed)||0)+(Number(batch.failed)||0),rows.filter(row=>['completed','failed'].includes(row.status)).length);
     const progress=Number.isFinite(batch.progress)?batch.progress:
       (finished+rows.filter(row=>row.status==='running').reduce((sum,row)=>sum+Math.min(.995,Math.max(0,Number(row.progress)||0)),0))/count;
-    rows=rows.map(row=>({audio_sec:0,...row,log:row.log||null}));
+    const stallsByIndex=new Map(stalls.map(stall=>[stall.index,stall]));
+    rows=rows.map(row=>({audio_sec:0,...row,log:row.log||null,stall:stallsByIndex.get(row.index)}));
     const running=rows.filter(row=>row.status==='running'),times=rows.filter(row=>row.status==='completed'&&row.elapsed_sec>0).map(row=>row.elapsed_sec);
     for(const row of running)if(Number.isFinite(row.eta_sec)&&row.elapsed_sec>0)times.push(row.elapsed_sec+row.eta_sec);
     const average=times.length?times.reduce((a,b)=>a+b,0)/times.length:null;
     const lanes=running.map(row=>Number.isFinite(row.eta_sec)?Math.max(0,row.eta_sec):average!==null?Math.max(0,average-(row.elapsed_sec||0)):null);
     let eta=null;
-    if(average!==null&&!lanes.includes(null)&&batch.status!=='preparing') {
+    if(!stalls.length&&average!==null&&!lanes.includes(null)&&batch.status!=='preparing') {
       while(lanes.length<Math.max(1,Number(batch.parallel)||1))lanes.push(0);
       for(let queued=Math.max(0,count-finished-running.length);queued>0;queued--){const lane=lanes.indexOf(Math.min(...lanes));lanes[lane]+=average;}
       eta=Math.max(0,...lanes);
     }
     if(!['queued','running'].includes(task.status))eta=null;
-    return {batch,rows,progress:Math.min(1,Math.max(0,progress)),elapsed:batch.elapsed_sec,eta,
+    return {batch,rows,stalls,progress:Math.min(1,Math.max(0,progress)),elapsed:batch.elapsed_sec,eta,
       indeterminate:batch.status==='preparing'};
   }
-  return {batch:null,rows:single&&single.index!==0?[single]:[],progress:Math.min(1,Math.max(0,Number(single?.progress)||0)),
-    elapsed:single?.elapsed_sec,eta:task.status==='running'&&Number.isFinite(single?.eta_sec)?single.eta_sec:null,
+  return {batch:null,rows:single&&single.index!==0?[{...single,stall:stalls[0]}]:[],stalls,
+    progress:Math.min(1,Math.max(0,Number(single?.progress)||0)),
+    elapsed:single?.elapsed_sec,eta:task.status==='running'&&!stalls.length&&Number.isFinite(single?.eta_sec)?single.eta_sec:null,
     indeterminate:!single?.audio_duration_sec&&single?.status!=='completed'};
 }
 
@@ -4340,20 +4350,22 @@ function renderGenerationProgress(task) {
   const state=composerV2ProgressState(task),signature=JSON.stringify([task.task_id,task.status,state]);
   if(panel._signature===signature)return;
   panel._signature=signature;
-  summary.textContent=`${state.batch?`已完成 ${state.batch.completed||0}/${state.batch.count} 张 · 并行 ${state.batch.active?.length||0}/${state.batch.parallel||1} 张 · `:''}${state.elapsed!=null?`已用 ${generationTime(state.elapsed)} · `:''}${state.eta!==null?`预计还需约 ${generationTime(state.eta)} · `:['queued','running'].includes(task.status)?'剩余时间正在估算 · ':''}按已写歌曲位置估算进度`;
+  const timing=state.eta!==null?`预计还需约 ${generationTime(state.eta)} · `:
+    !state.stalls.length&&['queued','running'].includes(task.status)?'剩余时间正在估算 · ':'';
+  summary.textContent=`${state.batch?`已完成 ${state.batch.completed||0}/${state.batch.count} 张 · 并行 ${state.batch.active?.length||0}/${state.batch.parallel||1} 张 · `:''}${state.elapsed!=null?`已用 ${generationTime(state.elapsed)} · `:''}${timing}按已写歌曲位置估算进度`;
   list.replaceChildren();
   const order={running:0,failed:1,queued:2,unknown:2,cancelled:3,completed:4};
   for(const row of [...state.rows].sort((a,b)=>(order[a.status]??2)-(order[b.status]??2)||(a.index||0)-(b.index||0))) {
-    const card=document.createElement('div');card.className='generation-chart-progress';card.dataset.status=row.status||'running';
+    const card=document.createElement('div');card.className='generation-chart-progress';card.dataset.status=row.stall?'stalled':row.status||'running';
     const heading=document.createElement('div'),name=document.createElement('strong'),stage=document.createElement('span');
     heading.className='generation-chart-heading';name.textContent=`第 ${row.index||1} 张 · seed ${row.seed??'—'}`;
-    stage.textContent=generationStageLabel(row.stage);heading.append(name,stage);card.append(heading);
+    stage.textContent=row.stall?'疑似卡滞':generationStageLabel(row.stage);heading.append(name,stage);card.append(heading);
     const detail=document.createElement('p');
     const percent=['completed','failed'].includes(row.status)?100:Math.min(99,Math.floor((row.progress||0)*100));
     detail.textContent=[row.audio_duration_sec?`${generationTime(row.audio_sec)} / ${generationTime(row.audio_duration_sec)}（${percent}%）`:null,
       row.events!=null?`${row.events} 个事件`:null,row.elapsed_sec!=null?`用时 ${generationTime(row.elapsed_sec)}`:null,
-      row.status==='running'&&Number.isFinite(row.eta_sec)?`预计还需约 ${generationTime(row.eta_sec)}`:null].filter(Boolean).join(' · ');
-    if(row.status==='running'&&row.updated_at&&Date.now()/1000-row.updated_at>10)detail.textContent+=` · 上次进度更新 ${Math.floor(Date.now()/1000-row.updated_at)} 秒前`;
+      row.stall?generationStallDetail(row.stall):row.status==='running'&&Number.isFinite(row.eta_sec)?`预计还需约 ${generationTime(row.eta_sec)}`:null].filter(Boolean).join(' · ');
+    if(!row.stall&&row.status==='running'&&row.updated_at&&Date.now()/1000-row.updated_at>10)detail.textContent+=` · 上次进度更新 ${Math.floor(Date.now()/1000-row.updated_at)} 秒前`;
     if(row.error)detail.textContent+=` · ${row.error}`;
     card.append(detail);
     const track=document.createElement('div'),bar=document.createElement('div');track.className='generation-chart-track';

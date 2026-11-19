@@ -2,14 +2,40 @@
 from contextlib import contextmanager
 from collections import deque
 import json
+import math
 import time
 
 PREFIX = 'composer_v2_generation_progress'
 INTERVAL = 2.
+STALL_SILENCE_SEC = 180
 STAGES = dict(queued='等待开始', starting='正在启动', loading_checkpoint='读取检查点', loading_model='载入模型',
     freezing_checkpoint='准备检查点副本', detecting_timing='识别 BPM 和偏移', preparing_audio='准备音频特征',
     encoding_audio='读取歌曲上下文', generating='正在写谱', comparing='比较候选写法', retrying='调整冲突位置',
-    exporting='导出谱面', completed='已完成', failed='生成失败', cancelled='已中止')
+    refining='精修谱面', exporting='导出谱面', completed='已完成', failed='生成失败', cancelled='已中止')
+
+
+def suspected_stalls(result, *, now=None):
+    """Read worker heartbeats, including when only the batch coordinator is active."""
+    batch = result.get('composer_v2_batch_progress')
+    if batch is not None:
+        rows = (batch.get('chart_progress') or ()) if batch.get('status') == 'running' else ()
+    else:
+        single = result.get(PREFIX)
+        rows = (single,) if single else ()
+    now = time.time() if now is None else now
+    stalled = []
+    for row in rows:
+        if (row.get('status') != 'running' or not row.get('audio_duration_sec')
+                or row.get('stage') not in ('generating', 'comparing', 'retrying')):
+            continue
+        updated_at = row.get('updated_at')
+        if type(updated_at) not in (int, float) or not math.isfinite(updated_at) or updated_at <= 0:
+            continue
+        silence = now - updated_at
+        if silence >= STALL_SILENCE_SEC:
+            stalled.append(dict(index=row.get('index', 1), beat=row.get('beat') if row.get('events') else None,
+                                silent_sec=int(silence)))
+    return stalled
 
 
 def readable_line(line):
@@ -62,7 +88,7 @@ class GenerationProgress:
 
     def update(self, *, force=False, **values):
         self.state.update(values)
-        if self.state.get('stage') in {'exporting','completed','failed','cancelled'}:
+        if self.state.get('stage') in {'refining','exporting','completed','failed','cancelled'}:
             self.state['eta_sec'] = None
         now = time.monotonic()
         if not force and now - self.last_emit < self.interval:

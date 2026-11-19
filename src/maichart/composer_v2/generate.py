@@ -119,9 +119,12 @@ def parser():
 
 
 def _sample(logits, allowed, generator, temperature, top_p):
+    allowed = sorted(set(allowed))
     if not allowed:
         raise ValueError('Component grammar has no legal continuation')
-    allowed = torch.as_tensor(sorted(set(allowed)), dtype=torch.long, device=logits.device)
+    if len(allowed) == 1:
+        return allowed[0]
+    allowed = torch.as_tensor(allowed, dtype=torch.long, device=logits.device)
     values = logits.index_select(0,allowed).float()
     if not torch.isfinite(values).all():
         raise ValueError('Nonfinite component logits')
@@ -368,6 +371,7 @@ def _sampling_policy(args):
         timing_temperature=args.temperature, timing_top_p=getattr(args,'top_p',.95),
         action_temperature=action_temperature, action_top_p=action_top_p,
         rng_policy='separate_timing_action_v1' if split else 'shared_v1',
+        singleton_sampling='direct_v1',
         fully_greedy=greedy, requested_candidates=args.candidates,
         effective_candidates=1 if deterministic_candidates else args.candidates,
         requested_retries=getattr(args,'window_retries',16),

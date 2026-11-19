@@ -853,6 +853,8 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         value=EventSampler(model,dataset,song,history,device,rng,args,**sampler_options)
         value.retry_stats=retry_stats
         return value
+    if getattr(args,'self_refine','off')!='off':
+        progress.update(force=True,stage='refining')
     points,guard,self_refine_report=refine_worst_spans(points,guard,args=args,song=song,tempo=tempo,
         first=first,end=end,make_sampler=_refine_sampler,new_guard_fn=_new_guard,
         check_window=_check_window,guard_options=tail_settings,bypassed_events=bypassed_events)
