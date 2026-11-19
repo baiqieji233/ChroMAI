@@ -69,6 +69,7 @@
 | **每次打草稿长度 / 每次定稿保留长度（拍）** | `--phrase-beats` / `--phrase-commit-beats` | `4` / `2` | 在短段试排模式下，每次往前试写多少拍并从中定稿前几拍；后者不能大于前者。 |
 | **每次内部对比写法数** | `--candidates` | `2` | 按所选 `--phrase-search` 模式在内部比较的候选数量（`1 / 2 / 4`），择优保留最佳方案。 |
 | **写完后自动精修薄弱段** | `--self-refine` | `关闭`（`off`） | 设为 `worst_spans_v1` 时，整首生成完成后会回头重采样并尝试改善手感得分最低的少数局部片段（需经完整后续物理检查通过后才替换）。 |
+| **抑制提前结束（EOS）** | `--eos-suppression` | 关闭 | 适用于连续事件模型。还剩 24 秒以上时降低曲终概率，剩余 24 到 8 秒时逐渐减弱，最后 8 秒停用这项偏置。 |
 | **下笔前双手防锁检查 / 撞尾预判范围** | `--forward-feasibility` / `--forward-tap-on-slide-ms` | `balanced_v1` / `150` | 解码期前向可行性保护：`balanced_v1` 检查按键占用并预防双手长时锁手、`hard_only_v1` 仅拦截三只手硬冲突、`off` 关闭；配合前向撞尾预判窗口（`0–250 ms`）。 |
 | **Touch 手掌可达规则 / 同手兼顾半径** | `--touch-reachability-policy` / `--touch-cohold-radius` | `palm_span_v1` / `180` | 校验按住外圈 Hold / Slide 时内屏 Touch 是否在手掌可及范围内；可选 `palm_span_v1`（手掌自然兼顾）、`strict_on_slide_only` 或 `off`。 |
 | **采音温度** | `--temperature` | `0.9` | 控制「何时落音」与「何时结束整曲」的采样温度。越低越趋向高概率常规节奏，越高变化越多。 |

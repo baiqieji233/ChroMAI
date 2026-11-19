@@ -278,6 +278,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_phrase_rank_policy": True,
                                               "composer_v2_motion_writing": True,
                                               "composer_v2_radar_style_guidance": True,
+                                              "composer_v2_eos_suppression": True,
                                               "composer_v2_timing_calibration": True,
                                               "composer_v2_feasibility_options": True,
                                               "composer_v2_auto_quality": True,

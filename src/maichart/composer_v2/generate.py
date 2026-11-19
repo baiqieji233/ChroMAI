@@ -34,6 +34,8 @@ def parser():
     result.add_argument('--bpm', type=float, default=None, help='Omit for automatic tempo analysis (detects variable tempo when --tempo-detection=auto, or constant BPM when constant); manual --tempo-map overrides')
     result.add_argument('--first', type=float, default=None, help='Omit to detect beat phase; explicit zero is preserved')
     result.add_argument('--level', type=float, default=13.)
+    result.add_argument('--eos-suppression', action='store_true',
+                        help='Reduce premature EOS on continuous-event checkpoints and fade the bias near the audio end')
     result.add_argument('--title', default=None, help='Chart title; omitted reads audio tags or falls back to audio filename')
     result.add_argument('--artist', default=None, help='Track artist; omitted reads audio tags; empty string clears')
     result.add_argument('--designer', default=None, help='Chart designer credit; omitted uses Composer v2 default')
@@ -423,6 +425,8 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
     print('composer_v2_checkpoint_loaded '+json.dumps(checkpoint_info,ensure_ascii=False),flush=True)
     codec = ComponentCodec.from_dict(payload['codec'])
     config = ComposerV2Config.from_dict(inspected['model_config'])
+    if getattr(args,'eos_suppression',False) and config.sequence_policy!='continuous_events_v1':
+        raise ValueError('提前结束抑制仅适用于连续事件检查点')
     if getattr(args,'radar_style_guidance',False):
         from .condition_guidance import validate as validate_guidance
         validate_guidance(True,config.sequence_policy,config.condition_policy)

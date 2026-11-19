@@ -654,6 +654,13 @@ def start_generate(handler,payload,*,runtime):
     if condition: _arg(args, "--condition", json.dumps(condition, ensure_ascii=False))
     settings.update(condition=condition, condition_policy=policy, radar_style_guidance=guidance)
     if guidance:args.append('--radar-style-guidance')
+    eos_suppression=payload.get('eos_suppression',False)
+    if not isinstance(eos_suppression,bool):
+        raise ValueError('提前结束抑制必须是布尔值')
+    if eos_suppression and checked.get('sequence_policy')!='continuous_events_v1':
+        raise ValueError('提前结束抑制仅适用于连续事件检查点')
+    settings['eos_suppression']=eos_suppression
+    if eos_suppression:args.append('--eos-suppression')
     record_probabilities=payload.get('record_candidate_probabilities',GENERATION_DEFAULTS['record_candidate_probabilities'])
     if not isinstance(record_probabilities,bool):
         raise ValueError('record_candidate_probabilities 必须是布尔值')

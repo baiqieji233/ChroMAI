@@ -172,6 +172,16 @@ class EventSampler(WindowSampler):
         guidance=getattr(self,'condition_guidance',None)
         guided=guidance.apply(logits,choices,target[self.proposal_scope['target_prefix_length']:],
             action=action,temperature=temperature,nearby=getattr(self,'_peak_context',None)) if guidance is not None else logits
+        if (getattr(getattr(self,'args',None),'eos_suppression',False)
+                and self.codec.eos_id in allowed and self.codec.at_id in allowed):
+            after = Fraction(self.proposal_scope['after'])
+            elapsed = max(0., self.song.clock.at(after)) if after >= 0 else 0.
+            remaining = self.song.audio.duration_sec - elapsed
+            # Keep EOS legal and taper its logit bias to zero in the final 8 seconds.
+            penalty = 5. * min(1., max(0., (remaining - 8.) / 16.))
+            if penalty:
+                guided = guided.float().clone()
+                guided[self.codec.eos_id] -= penalty
         if tree is not None:
             logits=tree.remember(relative,choices,logits,temperature=temperature,guided_logits=guided)
             if self._retry_condition:
@@ -953,5 +963,5 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 def _generation_settings(args,device):
     keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
-        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
+        'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','eos_suppression','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

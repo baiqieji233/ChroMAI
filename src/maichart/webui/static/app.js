@@ -122,6 +122,8 @@ function composerV2GenerationPayload(options={}) {
   if(configurationRecovery && !configurationRecovery.disabled)payload.configuration_recovery=configurationRecovery.checked;
   const guidance=element('#v2RadarStyleGuidance');
   if(guidance?.checked && !guidance.disabled)payload.radar_style_guidance=true;
+  const eosSuppression=element('#v2GenerateEosSuppression');
+  if(eosSuppression?.checked && !eosSuppression.disabled)payload.eos_suppression=true;
   for (const [key,selector,label,bounds] of [
     ['action_temperature','#v2GenerateActionTemperature','配置温度',{min:0}],
     ['action_top_p','#v2GenerateActionTopP','配置 Top-p',{min:0,max:1,exclusiveMin:true}],
@@ -309,6 +311,8 @@ function requireV2ExhaustionSupport(status,payload) {
     throw new Error('严格停止选项需要更新后的后台；请在当前训练结束后重启 WebUI。默认继续生成并报告可直接使用。');
 }
 function requireV2SplitSamplingSupport(status,payload) {
+  if(payload.eos_suppression && !status.training_capabilities?.composer_v2_eos_suppression)
+    throw new Error('请重启更新后的 WebUI，再启用提前结束抑制。');
   if(payload.radar_style_guidance && !status.training_capabilities?.composer_v2_radar_style_guidance)
     throw new Error('请重启更新后的 WebUI，再启用手动 Radar / Style 增强。');
   const customFeasibility = payload.phrase_search==='hybrid'
@@ -1686,7 +1690,7 @@ let restoredSettingNotice = "";
 // and every training control are deliberately absent: resetting the generation
 // panel must never endanger a training configuration the user settled on.
 const GENERATION_PARAM_FIELDS = [
-  "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance",
+  "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance", "v2GenerateEosSuppression",
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2EvalWritingProbe", "v2EvalBatchManifest", "v2AuditInput",
   "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
