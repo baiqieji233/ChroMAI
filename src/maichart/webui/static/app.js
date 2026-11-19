@@ -5,8 +5,10 @@ const V2_JOINT_DEVELOPMENT_FIELDS = [
   "musical_relation_policy", "musical_relation_fraction", "future_configuration_policy",
   "future_configuration_weight", "finetune_scope",
 ];
-const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS, 'timing_recovery'];
-COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS);
+const V2_PREFIX_FIELDS = ['generated_prefix_mode', 'generated_prefix_bank'];
+const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS,
+  ...V2_PREFIX_FIELDS, 'timing_recovery', 'lr_decay_end_step'];
+COMPOSER_V2_FIELDS.push(...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS, 'lr_decay_end_step', ...V2_PREFIX_FIELDS);
 function v2FieldId(key,prefix="v2Train") { return prefix+key.split("_").map(v=>v[0].toUpperCase()+v.slice(1)).join(""); }
 function v2NumericValue(raw, label, {min=-Infinity, max=Infinity, integer=false,exclusiveMin=false}={}) {
   if(raw===null || raw===undefined || String(raw).trim()==="")throw new Error(`请填写${label}。`);
@@ -31,6 +33,7 @@ function composerV2TrainingPayload(options={}) {
   const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir","batch_layout","local_audio_block_beats","attention_projection_packing","decoder_flash_attention"]);
   strings.add("musical_context");
   for(const key of ["musical_relation_policy", "future_configuration_policy", "finetune_scope"])strings.add(key);
+  for(const key of V2_PREFIX_FIELDS)strings.add(key);
   for(const key of COMPOSER_V2_FIELDS) {
     if(key==='song_layers' && payload.mode!=='fresh')continue;
     const raw=valueOrDefault("#"+v2FieldId(key),"").trim();
@@ -43,6 +46,15 @@ function composerV2TrainingPayload(options={}) {
   if(payload.musical_relation_policy==='off')delete payload.musical_relation_fraction;
   if(payload.future_configuration_policy==='off')delete payload.future_configuration_weight;
   if(payload.mode!=='finetune')delete payload.finetune_scope;
+  if(payload.lr_schedule==='constant')delete payload.lr_decay_end_step;
+  if(payload.mode!=='finetune') {
+    delete payload.generated_prefix_mode;
+    delete payload.generated_prefix_bank;
+  } else {
+    if (!payload.generated_prefix_mode || payload.generated_prefix_mode==='off')
+      delete payload.generated_prefix_bank;
+    else if (!payload.generated_prefix_bank)throw new Error('请填写生成前文样本文件路径。');
+  }
   if (payload.mode==='resume') {
     for(const key of V2_INHERITED_LEARNING_FIELDS)delete payload[key];
     delete payload.local_audio_block_beats;
@@ -465,6 +477,9 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.future_configuration_weight = data.model_config?.future_configuration_weight ?? 0.05;
   saved.finetune_scope = data.training_contract?.finetune_scope ?? 'all';
   saved.timing_recovery = data.training_contract?.timing_recovery ?? 'off';
+  saved.lr_decay_end_step = data.training_contract?.lr_decay_end_step ?? 0;
+  saved.generated_prefix_mode = data.training_contract?.generated_prefix_experiment?.mode ?? 'off';
+  saved.generated_prefix_bank = data.args?.generated_prefix_bank ?? '';
   saved.reviewed_reference_policy=data.training_contract?.reviewed_reference_policy||data.args?.reviewed_reference_policy||(currentTrainingMode()==='resume'?'off':'auto');
   saved.audio_layers=data.model_config?.audio_layers??2;
   const audioLayers = element('#v2TrainAudioLayers');
@@ -1104,6 +1119,13 @@ function composerV2TrainingView(task) {
   }
   if (runtime.timing_recovery?.policy==='gesture_pairs_v1' && metrics?.gesture_pairs_seen!=null) {
     cards.push(['同曲配置走势对照',[['本次配对练习次数',metrics.gesture_pairs_seen]]]);
+  }
+  if (runtime.generated_prefix_experiment) {
+    const replay=runtime.generated_prefix_experiment;
+    cards.push(['生成前文短测',[
+      ['前文来源',replay.mode==='generated'?'生成前文（实验）':'真人前文（对照）'],
+      ['通过检查的乐句',replay.phrases],
+    ]]);
   }
   if (runtime.timing_recovery?.policy==='causal_layout_v2' && metrics?.layout_replay_keys!=null) {
     cards.push(['配置衔接练习',[['本次试写键位',metrics.layout_replay_keys],
@@ -4190,6 +4212,12 @@ function updateTrainingControls() {
     }
   }
   const v2LocalAudio=element('#v2TrainLocalAudioBlockBeats');
+  const decayEnd=element('#v2TrainLrDecayEndStep');
+  if(decayEnd && element('#v2TrainLrSchedule')?.value==='constant')decayEnd.disabled=true;
+  const prefixMode=element('#v2TrainGeneratedPrefixMode');
+  const prefixBank=element('#v2TrainGeneratedPrefixBank');
+  if(prefixMode)prefixMode.disabled=currentTrainingMode()!=='finetune';
+  if(prefixBank)prefixBank.disabled=currentTrainingMode()!=='finetune' || prefixMode?.value==='off';
   const musicalProbability=element('#v2TrainMusicalContextProbability');
   if(musicalProbability && element('#v2TrainMusicalContext')?.value==='off')musicalProbability.disabled=true;
   for(const [policy, number] of [['MusicalRelationPolicy','MusicalRelationFraction'], ['FutureConfigurationPolicy','FutureConfigurationWeight']]) {
@@ -8915,6 +8943,8 @@ on("#modelFamily", "change", () => {
   updateTrainingControls(); updateFamilyFields(); saveSettings();
 });
 on("#v2TrainValidationSource", "change", () => {updateTrainingControls();saveSettings();});
+on("#v2TrainLrSchedule", "change", () => {updateTrainingControls();saveSettings();});
+on("#v2TrainGeneratedPrefixMode", "change", () => {updateTrainingControls();saveSettings();});
 on("#v2TrainDifficultySource", "change", () => {updateV2DifficultyControls();saveSettings();});
 on("#v2TrainMusicalContext", "change", () => {updateTrainingControls();saveSettings();});
 for(const id of ["v2TrainMusicalRelationPolicy","v2TrainFutureConfigurationPolicy"])

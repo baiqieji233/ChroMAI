@@ -6,6 +6,7 @@ Checkpoint configuration remains authoritative for loading and exact resume.
 import math
 
 PROFILE = 'composer_v2_phrase_music_20261109'
+LR_SCHEDULES = ('cosine', 'linear', 'quadratic', 'exponential', 'constant')
 TRAIN_DEFAULTS = dict(epochs=50, batch_size=8, grad_accumulation=8, lr=.0002,
     lr_schedule='cosine', warmup_steps=200, min_lr_ratio=.1, d_model=384, layers=8,
     nhead=8, dim_feedforward=1536, dropout=.1, window_beats=16, history_beats=16,

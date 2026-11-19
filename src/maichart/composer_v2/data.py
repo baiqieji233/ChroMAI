@@ -83,7 +83,7 @@ class ComposerV2Dataset(Dataset):
                  quality_enabled=True, condition_policy=RADAR_STYLE,sequence_policy='window_v1',
                  extend_vocabulary=False, dialect_policy=chart_dialect.POLICY,
                  auto_quality_policy='off', difficulty_scorer=None, min_declared_level=0.,
-                 difficulty_slots=None, validate_fixed_vocabulary=False):
+                 difficulty_slots=None, validate_fixed_vocabulary=False, chart_subset=None):
         if window_beats<1 or history_beats<0 or future_beats<0 or any(int(v)!=v for v in (window_beats,history_beats,future_beats)):
             raise ValueError('Window lengths must be integral beats; target positive, history/future nonnegative')
         if int(max_tokens) < 4:
@@ -172,6 +172,8 @@ class ComposerV2Dataset(Dataset):
                         chart_sha = hashlib.sha256(chart_bytes).hexdigest()
                         source = chart_path
                     chart_key = (chart_sha, slot)
+                    if chart_subset is not None and chart_key not in chart_subset:
+                        continue
                     prepared_chart = prepared_charts.get(chart_key)
                     if prepared_chart is None:
                         prepared_chart = chart_cache.load(*chart_key)

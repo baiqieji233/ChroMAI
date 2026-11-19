@@ -7,6 +7,7 @@
 - **[项目总览与 3 分钟快速上手](../README.md)**：环境安装、双击一键启动、已有 `.pt` 模型生成、训练素材准备与命令行速查。
 - **[Composer v2 技术架构与目录说明](explanations/COMPOSER_V2_TECHNICAL_OVERVIEW_ZH.md)**：模型如何读取音乐和历史、训练目标、缓存边界、主要技术目录与质量排查思路。
 - **[Composer v2 主界面（WebUI）与参数完整说明](explanations/COMPOSER_V2_WEBUI_ZH.md)**：WebUI 各工作区操作流程、生成与训练参数详解、Radar / Style 偏好微调、多数据集素材管理与跨设备路径配置。
+- **[Composer v2 短程微调](explanations/COMPOSER_V2_SHORT_EXPERIMENTS_ZH.md)**：学习率下降曲线、衰减步数和生成前文对照实验。
 - **[强度曲线与局部疏密编辑](explanations/COMPOSER_V2_INTENSITY_ZH.md)**：可学习事件率与同拍物量曲线的工作原理，以及生成页音频定位与曲线编辑器的用法。
 - **[短段试排、音乐上下文与片段反馈](explanations/COMPOSER_V2_PHRASE_AND_MUSIC_ZH.md)**：短段草稿比较、音频编码扩展、全曲音乐摘要与片段评价／微调入口。
 - **[成对音乐参考与衔接示范](explanations/COMPOSER_V2_PAIRED_MUSIC_ZH.md)**：成对音乐对比与前方采音读取的启用方式，以及人工确认前文衔接的操作步骤。

@@ -332,7 +332,7 @@
       `前文纠错训练 · ${nameOf('v2TrainTimingRecovery')}`,
       `总目标 ${value("v2TrainEpochs")} 轮 · 批大小 ${value("v2TrainBatchSize")} × 累积 ${value("v2TrainGradAccumulation")}（单步等效 ${Number(value("v2TrainBatchSize"))*Number(value("v2TrainGradAccumulation"))}） · 精度 ${nameOf("v2TrainPrecision")}`,
       `显存优化：${nameOf("v2TrainActivationCheckpointing")} · CUDA 预算 ${Number(value("v2TrainCudaMemoryBudgetGb")) > 0 ? `${value("v2TrainCudaMemoryBudgetGb")} GiB` : "自动"} · 音频内存缓存 ${value("v2TrainAudioCacheGb", "0.25")} GiB`,
-      `学习率 ${value("v2TrainLr")} · ${nameOf("v2TrainLrSchedule")} · 音频特征 ${nameOf("v2TrainAudioBackend")}`,
+      `学习率 ${value("v2TrainLr")} · ${nameOf("v2TrainLrSchedule")}${value("v2TrainLrSchedule")!=="constant" && Number(value("v2TrainLrDecayEndStep"))>0 ? ` · 第 ${value("v2TrainLrDecayEndStep")} 步降至下限` : ""} · 音频特征 ${nameOf("v2TrainAudioBackend")}`,
       v2DifficultySummary(),
       `素材清洗与标注：${checked("v2TrainQualityEnabled") ? `开启（${nameOf("v2TrainAutoQualityPolicy")}；手动标注优先）` : "关闭（整谱原始均匀学习）"}`,
       `验证：${mode==="resume"?"继承 checkpoint 已保存的训练与验证清单":value('v2TrainValidationSource')==='auto'?Number(value('v2TrainHoldoutFraction'))===0?'关闭（自动留出比例为0）':`自动留出 ${Math.round(Number(value('v2TrainHoldoutFraction'))*100)}%（按整首歌严格隔离）`:value('v2TrainValidationSource')==='manual'?`手动清单 ${value('v2TrainValidationManifest').trim()||'尚未选择'}`:'关闭'}`,

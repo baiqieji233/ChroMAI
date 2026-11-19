@@ -403,6 +403,20 @@ def start_train(handler,payload,*,runtime):
         musical_context, musical_probability, sequence_policy=sequence_policy,
         parent_contract=checked.get('training_contract') if parent else None, resume=mode == 'resume')
     parent_contract = (checked.get("training_contract") or {}) if parent else {}
+    from maichart.composer_v2 import generated_prefix
+    saved_prefix = parent_contract.get('generated_prefix_experiment', {}) if mode == 'resume' else {}
+    prefix_mode = _choice(payload, 'generated_prefix_mode', saved_prefix.get('mode', 'off'), set(generated_prefix.MODES))
+    generated_prefix.validate_mode(prefix_mode, sequence_policy, mode == 'finetune', mode == 'resume')
+    prefix_path = None
+    prefix_contract = {}
+    if prefix_mode != 'off':
+        saved_bank = saved_args.get('generated_prefix_bank') if mode == 'resume' else None
+        prefix_path = _path(payload.get('generated_prefix_bank') or saved_bank, '生成前文样本文件', exists=True)
+        prefix_contract = generated_prefix.read_bank(prefix_path).contract(prefix_mode)
+    elif payload.get('generated_prefix_bank'):
+        raise ValueError('请先选择生成前文实验模式')
+    if mode == 'resume' and prefix_contract != saved_prefix:
+        raise ValueError('断点续训需要沿用保存时的生成前文模式与样本文件')
     relation_requested, relation_policy, relation_fraction = _auxiliary_settings(
         payload, "musical_relation", MUSICAL_RELATION_CHOICES, "fraction", MUSICAL_RELATION_FRACTION,
         sequence_policy=sequence_policy, saved_config=parent_contract, resume=mode == "resume")
@@ -537,7 +551,9 @@ def start_train(handler,payload,*,runtime):
         _arg(args, '--local-audio-block-beats', audio_block)
     settings['local_audio_block_beats'] = audio_block
     from maichart.composer_v2.acceleration import AUDIO_DEVICES
-    choices=dict(lr_schedule={"cosine","constant"},audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"},activation_checkpointing={'auto','off','on'},attention_projection_packing={'auto','off','on'},decoder_flash_attention={'off','on'})
+    from maichart.composer_v2.defaults import LR_SCHEDULES
+    from maichart.composer_v2.learning_rate import validate as validate_lr_plan
+    choices=dict(lr_schedule=set(LR_SCHEDULES),audio_backend={"mert","native"},prepare_device=set(AUDIO_DEVICES),device={"auto","cuda","cpu","xpu"},precision={"bf16","fp16","fp32","auto"},activation_checkpointing={'auto','off','on'},attention_projection_packing={'auto','off','on'},decoder_flash_attention={'off','on'})
     zeros={"warmup_steps","future_beats","history_beats","validation_max_batches","seed","max_steps","limit_charts","save_every","early_stopping_patience"}
     for key,default in TRAIN_DEFAULTS.items():
         if key in ('cuda_memory_budget_gb', 'audio_cache_gb') and isinstance(payload.get(key), bool):
@@ -561,6 +577,20 @@ def start_train(handler,payload,*,runtime):
     if settings["d_model"]%settings["nhead"]: raise ValueError("d_model 必须能被 nhead 整除")
     if settings["lr"]<=0: raise ValueError("lr 必须大于0")
     if settings["dropout"]>=1 or settings["min_lr_ratio"]>1: raise ValueError("dropout/min_lr_ratio 超出范围")
+    inherited_decay_end=parent_contract.get('lr_decay_end_step',0) if mode=='resume' else 0
+    decay_end=_integer(payload,'lr_decay_end_step',inherited_decay_end,minimum=0)
+    validate_lr_plan(settings['lr_schedule'],settings['warmup_steps'],decay_end)
+    if mode=='resume' and decay_end!=inherited_decay_end:
+        raise ValueError('更改衰减结束步数请在新目录加强训练（finetune）。')
+    settings['lr_decay_end_step']=decay_end
+    if decay_end:
+        _arg(args,'--lr-decay-end-step',decay_end)
+    if prefix_contract:
+        if not settings['max_steps']:
+            raise ValueError('生成前文短测请填写最大更新尝试数')
+        _arg(args,'--generated-prefix-mode',prefix_mode)
+        _arg(args,'--generated-prefix-bank',prefix_path)
+        settings['generated_prefix_experiment']=prefix_contract
     source=_choice(payload,"validation_source","manual" if payload.get("validation_manifest") else "auto",{"auto","manual","off"})
     fraction=_float(payload,"holdout_fraction",.05,minimum=0) if source=="auto" else 0.
     if fraction>=1:raise ValueError("holdout_fraction 必须小于1")

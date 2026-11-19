@@ -20,7 +20,7 @@ from .codec import ComponentCodec
 from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Dataset,
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
-from . import chart_dialect, timing_recovery
+from . import chart_dialect, learning_rate, timing_recovery
 from .defaults import AUDIO_WRITING_POLICIES
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_POLICY, configuration_view_fraction,
@@ -34,7 +34,7 @@ def emit(kind,**values):
     print("composer_v2_"+kind+" "+json.dumps(values,ensure_ascii=False,allow_nan=False),flush=True)
 
 def parser():
-    from .defaults import TRAIN_DEFAULTS
+    from .defaults import LR_SCHEDULES, TRAIN_DEFAULTS
     result=argparse.ArgumentParser(description=__doc__)
     result.add_argument("--manifest",required=True)
     result.add_argument("--validation-manifest")
@@ -45,8 +45,15 @@ def parser():
     parents=result.add_mutually_exclusive_group()
     parents.add_argument("--resume");parents.add_argument("--init-checkpoint")
     for key,value in TRAIN_DEFAULTS.items():
-        if key in ('audio_layers','song_layers','music_context'):continue
+        if key in ('audio_layers','song_layers','music_context','lr_schedule'):continue
         result.add_argument("--"+key.replace("_","-"),default=value,type=type(value))
+    result.add_argument('--lr-schedule', choices=LR_SCHEDULES, default=TRAIN_DEFAULTS['lr_schedule'])
+    result.add_argument('--lr-decay-end-step', type=int,
+                        help='Stage update attempt that reaches the minimum LR. 0 uses the epoch plan.')
+    from .generated_prefix import MODES as PREFIX_MODES
+    result.add_argument('--generated-prefix-mode', choices=PREFIX_MODES,
+                        help='Offline prefix experiment. Omitted on exact resume it inherits the checkpoint.')
+    result.add_argument('--generated-prefix-bank', help='Reviewed local JSON with sampled prefixes')
     result.add_argument("--mert-model")
     from .difficulty import SOURCES
     result.add_argument('--difficulty-source', choices=SOURCES, default='auto',
@@ -460,7 +467,6 @@ def train(args):
     from .acceleration import AUDIO_DEVICES
     if args.device not in {"auto","cpu","cuda","xpu"} or args.prepare_device not in AUDIO_DEVICES:
         raise ValueError('Invalid training/preparation device')
-    if args.lr_schedule not in {"cosine","constant"}:raise ValueError("Unknown lr_schedule")
     if args.audio_backend not in {"mert","native"}:raise ValueError("audio_backend must be mert or explicit native")
     directory=Path(args.checkpoint_dir).resolve()
     parent_path=Path(args.resume or args.init_checkpoint).resolve() if args.resume or args.init_checkpoint else None
@@ -488,6 +494,31 @@ def train(args):
     parent_sequence=(parent.get('model_config') or parent.get('config')).get('sequence_policy','window_v1') if parent else None
     args.sequence_policy=getattr(args,'sequence_policy',None) or (parent_sequence if parent else 'continuous_events_v1')
     parent_contract = (parent.get('training_contract') or {}) if parent else {}
+    if getattr(args, 'lr_decay_end_step', None) is None:
+        args.lr_decay_end_step = parent_contract.get('lr_decay_end_step', 0) if args.resume else 0
+    learning_rate.validate(args.lr_schedule, args.warmup_steps, args.lr_decay_end_step)
+    from . import generated_prefix
+    saved_prefix_plan = parent_contract.get('generated_prefix_experiment', {}) if args.resume else {}
+    requested_prefix_mode = getattr(args, 'generated_prefix_mode', None)
+    args.generated_prefix_mode = requested_prefix_mode or saved_prefix_plan.get('mode', 'off')
+    generated_prefix.validate_mode(args.generated_prefix_mode, args.sequence_policy, bool(args.init_checkpoint), bool(args.resume))
+    prefix_bank = None
+    prefix_path = getattr(args, 'generated_prefix_bank', None)
+    if args.generated_prefix_mode != 'off':
+        if not args.max_steps:
+            raise ValueError('生成前文短测请填写最大更新尝试数（--max-steps）')
+        if args.init_checkpoint and (directory == source_directory or any(path.exists() for path in artifacts)):
+            raise ValueError('生成前文实验需要新的检查点目录')
+        prefix_path = prefix_path or ((parent.get('args') or {}).get('generated_prefix_bank') if args.resume else None)
+        if not prefix_path:
+            raise ValueError('请填写生成前文样本文件路径')
+        args.generated_prefix_bank = str(Path(prefix_path).resolve())
+        prefix_bank = generated_prefix.read_bank(args.generated_prefix_bank)
+    elif prefix_path:
+        raise ValueError('请先选择生成前文实验模式')
+    prefix_plan = prefix_bank.contract(args.generated_prefix_mode) if prefix_bank is not None else {}
+    if args.resume and prefix_plan != saved_prefix_plan:
+        raise ValueError('断点续训需要沿用保存时的生成前文模式与样本文件')
     args.musical_context_policy, args.musical_context_probability = resolve_musical_context(
         getattr(args, 'musical_context', 'auto'), getattr(args, 'musical_context_probability', None),
         sequence_policy=args.sequence_policy, parent_contract=parent_contract, resume=bool(args.resume))
@@ -683,6 +714,10 @@ def train(args):
             musical_context_probability=args.musical_context_probability,
             musical_relation_policy=args.musical_relation_policy,
             musical_relation_fraction=args.musical_relation_fraction)
+    if prefix_bank is not None:
+        train_options.update(chart_subset=prefix_bank.charts, timing_recovery_policy='off',
+                             musical_relation_policy='off', musical_context_policy='off',
+                             reference_augmentation=False)
     with scorer if scorer is not None else nullcontext():
         from .codec import VocabularyCoverageError
         try:
@@ -694,6 +729,8 @@ def train(args):
                              '要使用扩充后的训练素材，请选「微调」并使用新检查点目录。') from error
         if auto_quality_policy == 'auto_v1' and dataset.auto_annotations_sha256 is None:
             raise ValueError('准备训练数据时未找到匹配的自动质检标注')
+        if prefix_bank is not None:
+            generated_prefix.install(dataset, prefix_bank, args.generated_prefix_mode)
         vocabulary_changed = codec is not None and dataset.codec is not codec
         if vocabulary_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
             raise ValueError('Vocabulary expansion requires a new checkpoint directory; retain the parent')
@@ -739,6 +776,10 @@ def train(args):
         epochs=args.epochs,total_updates=total_updates,precision=precision,device_type=device.type,
         window_policy="stable_beat_window_components_v2",sampler=batch_order,
         loss_normalization="quality_weighted_token_mass_per_update_v1",cpu_threads=args.cpu_threads)
+    if args.lr_decay_end_step:
+        contract['lr_decay_end_step'] = args.lr_decay_end_step
+    if prefix_plan:
+        contract['generated_prefix_experiment'] = prefix_plan
     if not getattr(args,'quality_enabled',True): contract['quality_enabled']=False
     if batch_layout == FULL_INPUT:
         contract.update(batch_layout=batch_layout,batch_source_size=source_batch_size,
@@ -925,6 +966,7 @@ def train(args):
          preparation=dataset.audit.get('preparation', {}), batch_order=batch_order,batch_layout=batch_layout,
          batch_source_size=source_batch_size,validation_batch_size=validation_batch_size,**resource_budgets,
          timing_recovery=dataset.audit.get('timing_recovery'),
+         generated_prefix_experiment=dataset.audit.get('generated_prefix_experiment'),
          musical_context=dataset.audit.get('musical_context'),
          musical_context_policy=args.musical_context_policy,
          musical_context_probability=args.musical_context_probability,
@@ -1000,10 +1042,8 @@ def train(args):
                 norm=torch.nn.utils.clip_grad_norm_(trainable_parameters,1.)
                 finite=bool(group_finite&torch.isfinite(norm)&(group_mass>0))
                 attempt=int(state["update_attempts"])
-                if args.warmup_steps and attempt<args.warmup_steps:factor=(attempt+1)/args.warmup_steps
-                else:
-                    progress=min(1.,max(0.,(attempt-args.warmup_steps)/max(1,total_updates-args.warmup_steps)))
-                    factor=args.min_lr_ratio+(1-args.min_lr_ratio)*.5*(1+math.cos(math.pi*progress)) if args.lr_schedule=="cosine" else 1.
+                factor=learning_rate.factor(attempt,args.lr_schedule,args.warmup_steps,total_updates,
+                                            args.min_lr_ratio,args.lr_decay_end_step)
                 for group in optimizer.param_groups:group["lr"]=args.lr*factor
                 if finite:
                     scaler.step(optimizer);state["optimizer_steps"]+=1

@@ -753,6 +753,11 @@ class StreamDataset(ComposerV2Dataset):
             out.update(self.writing_features(song,anchors))
         return out
     def __getitem__(self,index):
+        replay = getattr(self, 'generated_prefix_views', None)
+        if replay is not None:
+            from .generated_prefix import item
+            si, begin = self.windows[index]
+            return item(self, replay[index], si, begin, self.ranges[index])
         source = self.recovery_sources.get(index)
         if source is not None:
             return self._recovery_item(source)
