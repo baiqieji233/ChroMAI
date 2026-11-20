@@ -785,6 +785,14 @@ def start_generate(handler,payload,*,runtime):
             raise ValueError('对齐参考检索仅适用于 Composer v2 连续事件检查点')
         _arg(args,'--reference-selection',reference_selection)
     settings['reference_selection']=reference_selection
+    strength=_float(payload,'reference_strength',1.,minimum=0)
+    if isinstance(payload.get('reference_strength'),bool) or not 0<=strength<=2:
+        raise ValueError('配置呼应强度须在 0 到 2 之间')
+    if strength!=1.:
+        if checked.get('sequence_policy')!='continuous_events_v1':
+            raise ValueError('配置呼应强度适用于连续事件检查点')
+        _arg(args,'--reference-strength',strength)
+    settings['reference_strength']=strength
     for key in ("action_temperature", "action_top_p"):
         raw = payload.get(key, GENERATION_DEFAULTS[key] if checked.get('sequence_policy') == 'continuous_events_v1' else None)
         if raw is None or raw == "":

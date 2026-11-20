@@ -105,6 +105,8 @@ def main(argv=None):
     if report['ok']:
         print('Startup dependencies: OK',flush=True);return 0
     for error in report['errors']:print('Dependency error:',error,file=sys.stderr,flush=True)
+    if any('dll' in error.lower() or 'winerror 126' in error.lower() for error in report['errors']):
+        print('A native DLL could not be loaded. On Windows, check the Visual C++ runtime and that PyTorch and TorchAudio use compatible builds.',file=sys.stderr,flush=True)
     switching=required and not report['gpu_ok']
     if switching:
         if device_hidden() or hardware is None:

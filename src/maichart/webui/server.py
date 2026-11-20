@@ -187,15 +187,29 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=7860)
+    parser.add_argument("--open-browser", action="store_true", help="Open the local WebUI after the server binds")
     parser.add_argument('--dependency-profile',choices=('composer-v2','basic'),default='composer-v2')
     parser.add_argument('--check',action='store_true',help='Check this interpreter without starting the server')
     args = parser.parse_args(argv)
+    if not 0 <= args.port <= 65535:
+        parser.error("--port must be between 0 and 65535")
     from .startup_check import main as check_environment
     checked=check_environment(['--profile',args.dependency_profile])
     if checked or args.check:return checked
-    server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
-    print(f"ChroMAI WebUI: http://{args.host}:{args.port}", flush=True)
+    try:
+        server = ThreadingHTTPServer((args.host, args.port), WebUIHandler)
+    except OSError as exc:
+        import errno
+        if exc.errno == errno.EADDRINUSE or getattr(exc, 'winerror', None) == 10048:
+            print(f'Port {args.port} is already in use. Open the existing WebUI or pick another port, for example START_WEBUI.bat --port 7861.', file=sys.stderr, flush=True)
+        else:
+            print(f'Could not listen on {args.host}:{args.port}. Check the address, port and Windows permissions. {exc}', file=sys.stderr, flush=True)
+        return 1
+    url = f"http://{args.host}:{server.server_address[1]}/"
+    print(f"ChroMAI WebUI: {url}", flush=True)
     print(f"workspace: {WEBUI_ROOT}", flush=True)
+    if args.open_browser:
+        threading.Thread(target=_open_start_page, args=(url,), daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -203,6 +217,17 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         server.server_close()
     return 0
+
+
+def _open_start_page(url):
+    import webbrowser
+
+    try:
+        if webbrowser.open(url):
+            return
+    except (OSError, webbrowser.Error):
+        pass
+    print(f'Could not open the browser. Open {url} manually.', file=sys.stderr, flush=True)
 
 
 class WebUIHandler(BaseHTTPRequestHandler):
@@ -273,6 +298,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_editor_media": True,
                                               "composer_v2_quality_evaluation": True,
                                               "composer_v2_reference_selection": True,
+                                              "composer_v2_reference_strength": True,
                                               "composer_v2_tail_guard": True,
                                               "composer_v2_variable_tempo": True,
                                               "composer_v2_exhaustion_policy": True,

@@ -1,6 +1,7 @@
 """Continuous complete-event commit, bounded context, no timed output blocks."""
 from fractions import Fraction
-from copy import deepcopy
+from collections import ChainMap
+from copy import copy, deepcopy
 from pathlib import Path
 import json
 import math
@@ -105,11 +106,36 @@ class EventSampler(WindowSampler):
         self.record_probabilities=bool(need_probabilities and getattr(args,'candidates',2)>1
             and getattr(args,'_candidate_audit_active',True))
         self.last_probability_event=None;self._probability=None
+        self._reset_query_buffers()
+        self.args=args;self._active_guard=None;self._forward_cache=None
+        self.condition_guidance=getattr(song,'_condition_guidance',None)
+        self.reference_strength=getattr(args,'reference_strength',1.)
+        self._reference_free=None
+        if self.reference_strength!=1.:
+            ref_end=self.prefix.index(self.codec.ref_id)+1
+            if ref_end < len(self.prefix)-1 or self.reference['shift'] is not None:
+                self._reference_free=self._without_reference(ref_end)
+
+    def _reset_query_buffers(self):
         self._decoded_ids=();self._query_ids=()
         self._clock_states=[];self._clocks=[]
         self._tiles=[];self._local_tiles=[];self._token_buffers=None
-        self.args=args;self._active_guard=None;self._forward_cache=None
-        self.condition_guidance=getattr(song,'_condition_guidance',None)
+
+    def _without_reference(self,ref_end):
+        # Keep exactly the history/carry that survived the original token budget.
+        # Both views read the same growing audio bank, with independent decoder KV.
+        other=copy(self)
+        other.prefix=[*self.prefix[:ref_end],self.codec.tgt_id]
+        other.reference=dict(self.reference,shift=None,score=None)
+        other.cache=ChainMap({'decode_state':None},self.cache)
+        other.batch=dict(self.batch)
+        if 'reference_trust' in other.batch:
+            other.batch['reference_trust']=torch.zeros_like(other.batch['reference_trust'])
+        for key in ('reference_evidence','paired_music_features'):
+            if key in other.batch:
+                other.batch[key]=torch.zeros_like(other.batch[key][:,:len(other.prefix)])
+        other._reset_query_buffers()
+        return other
 
     def _forward_guard(self):
         guard=getattr(self,'_active_guard',None)
@@ -127,6 +153,9 @@ class EventSampler(WindowSampler):
         return fg
 
     def _rewind(self,target):
+        other=getattr(self,'_reference_free',None)
+        if other is not None:
+            other._rewind(target)
         state=self.cache.get('decode_state') if self.cache is not None else None
         decoded=getattr(self,'_decoded_ids',())
         if state is None or not decoded:
@@ -155,6 +184,7 @@ class EventSampler(WindowSampler):
         tree=self._fixed_retry_tree if fixed_retry else getattr(self,'_retry_tree',None)
         relative=target[len(self._retry_base):] if tree is not None else None
         logits=tree.cached(relative) if tree is not None else None
+        cache_miss=logits is None
         if logits is None:
             if getattr(self,'_retry_cache_dirty',False):self._rewind(target)
             logits=self._logits(target);self._retry_cache_dirty=False
@@ -169,6 +199,11 @@ class EventSampler(WindowSampler):
         raw_logits=logits
         grammar=getattr(self,'_audit_grammar',None) or getattr(self,'_free_choices',allowed)
         choices=allowed if fixed_retry else getattr(self,'_free_choices',allowed)
+        other=getattr(self,'_reference_free',None)
+        if action and cache_miss and other is not None:
+            without=other._logits(target).float()
+            logits=torch.lerp(without,logits.float(),self.reference_strength)
+            self.retry_stats['reference_action_queries']=self.retry_stats.get('reference_action_queries',0)+1
         guidance=getattr(self,'condition_guidance',None)
         guided=guidance.apply(logits,choices,target[self.proposal_scope['target_prefix_length']:],
             action=action,temperature=temperature,nearby=getattr(self,'_peak_context',None)) if guidance is not None else logits
@@ -183,7 +218,7 @@ class EventSampler(WindowSampler):
                 guided = guided.float().clone()
                 guided[self.codec.eos_id] -= penalty
         if tree is not None:
-            logits=tree.remember(relative,choices,logits,temperature=temperature,guided_logits=guided)
+            logits=tree.remember(relative,choices,raw_logits,temperature=temperature,guided_logits=guided)
             if self._retry_condition:
                 logits,allowed,scaled=tree.condition(relative,allowed,temperature)
                 if scaled:
@@ -897,6 +932,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
         rhythm_structure=_reference_report(dataset.structure_policy,references,
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
+    report['reference_strength']=getattr(args,'reference_strength',1.)
     guidance=getattr(song,'_condition_guidance',None)
     report['radar_style_guidance']=dict(requested=guidance_requested,**(
         guidance.report() if guidance is not None else dict(policy='off',manual={})))
@@ -964,6 +1000,6 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','reference_strength','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','eos_suppression','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

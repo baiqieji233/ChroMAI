@@ -13,6 +13,8 @@
 **方式 A：Windows 一键启动（最省心，推荐）**
 
 直接双击仓库根目录的 [`START_WEBUI.bat`](START_WEBUI.bat)（或在终端运行 `.\START_WEBUI.bat`）。
+- 第一次启动前，请先安装 [64 位 Python 3.12](https://www.python.org/downloads/windows/)。已有合适的 Python 会被自动发现，也可以把 `python.exe` 的完整路径写入项目根目录的 `.webui-python`。
+- 启动失败时，窗口会显示失败的步骤和解决方式。可用 `.\START_WEBUI.bat --check --cpu` 只检查 CPU 环境，或用 `.\START_WEBUI.bat --port 7861` 避开占用的端口。
 - 脚本会自动创建虚拟环境、检测本机 NVIDIA 显卡与驱动、自动匹配安装对应的 CUDA 版 `PyTorch` / `torchaudio` 及 `Composer v2` 全部音乐依赖，并在检查通过后启动本地 WebUI。
 
 **方式 B：手动使用 Python 环境安装**

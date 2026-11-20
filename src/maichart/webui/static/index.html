@@ -1353,7 +1353,8 @@
       <div class="v2-step-head"><span class="step">D</span><div><h4>采音贴合度、前后呼应与键型变化度</h4><p>把“什么时候出音”和“摆什么键位”分开调节：想要踩点更稳就稍微调低采音温度，想要键型更灵动就保持配置温度。</p></div></div>
       <div class="form-grid">
         <label class="field" data-v2-onset-readout>鼓点与重音贴合强度<input id="v2GenerateOnsetStrength" type="number" value="1" min="0" max="2" step="0.1"><small>帮助音符精准踩在鼓点或旋律起音上。1 为推荐值，0 关闭，1.2–1.4 会更紧贴明显重音；旧模型不支持时自动停用。</small></label>
-        <label class="field" data-v2-reference-selection>副歌前后呼应方式<select id="v2GenerateReferenceSelection"><option value="auto" selected>沿用模型学过的呼应方式（推荐）</option><option value="aligned">强制参考前面相似的音乐段（实验）</option></select><small id="v2ReferenceSelectionHelp">让第二遍副歌自然呼应第一遍副歌的键型风格，通常保持推荐项即可。</small></label>
+        <label class="field" data-v2-reference-selection>副歌前后呼应方式<select id="v2GenerateReferenceSelection"><option value="auto" selected>沿用模型学过的呼应方式（推荐）</option><option value="aligned">强制参考前面相似的音乐段（实验）</option></select><small id="v2ReferenceSelectionHelp">选择怎样寻找前面相似的乐段。</small></label>
+        <label class="field" data-v2-reference-strength>配置呼应强度<input id="v2GenerateReferenceStrength" type="number" min="0" max="2" step="0.1" value="1" required><small>0 关闭相似乐段对配置的直接影响，1 为模型原值，2 最强。调离 1 时，有参考的乐段生成会慢一些。</small></label>
         <label class="field">采音温度（踩点随机度）<input id="v2GenerateTemperature" type="number" value="0.9" min="0" step="0.05" required><small>默认 0.9。若觉得碎音略飘可试 0.75–0.85 让踩点更规矩；不建议低于 0.65 以免单调机械。</small></label>
         <label class="field" data-v2-action-sampling>配置温度（键型丰富度）<input id="v2GenerateActionTemperature" type="number" value="0.9" min="0" step="0.05" placeholder="留空沿用采音"><small>控制八键位置、双押与星星造型的变化度，默认 0.9（0.85–0.95 最自然灵动）；留空则跟随采音温度。</small></label>
         <label class="field">采音 Top-p（落点集中度）<input id="v2GenerateTopP" type="number" value="0.95" min="0" max="1" step="0.01" required><small>过滤极低概率的怪异拍点，默认 0.95 即可。</small></label>

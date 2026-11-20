@@ -112,6 +112,8 @@ def parser():
                         help='Proposal attempts per event for continuous models or per window for older models')
     result.add_argument('--rollback-windows', type=int, default=2,
                         help='Recovery budget per generation frontier for continuous models or per chart for older models')
+    result.add_argument('--reference-strength',type=float,default=1.,
+        help='Configuration-only influence of retrieved chart context (0 to 2, trained setting 1).')
     result.add_argument('--reference-selection',choices=('auto','aligned'),default='auto',
         help='auto: the reference the checkpoint was trained with; aligned: beat-synchronous aligned choice '
              '(training-free for older continuous checkpoints, already built into aligned_rhythm_v1)')
@@ -461,6 +463,11 @@ def generate(args, *, model_override=None, payload_override=None, audio_store_ov
         raise ValueError('Separate configuration sampling requires a continuous-event checkpoint')
     if getattr(args,'reference_selection','auto')=='aligned' and config.sequence_policy!='continuous_events_v1':
         raise ValueError('对齐参考检索仅适用于连续事件检查点')
+    reference_strength=getattr(args,'reference_strength',1.)
+    if not math.isfinite(reference_strength) or not 0<=reference_strength<=2:
+        raise ValueError('配置呼应强度须在 0 到 2 之间')
+    if reference_strength!=1. and config.sequence_policy!='continuous_events_v1':
+        raise ValueError('配置呼应强度适用于连续事件检查点')
     if getattr(args,'self_refine','off')!='off' and config.sequence_policy!='continuous_events_v1':
         raise ValueError('Self-refinement requires a continuous-event checkpoint')
     from .exhaustion import resolve_policy

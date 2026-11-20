@@ -151,6 +151,11 @@ function composerV2GenerationPayload(options={}) {
   }
   const referenceSelection=element('#v2GenerateReferenceSelection');
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
+  const echo=element('#v2GenerateReferenceStrength');
+  if(echo && !echo.disabled) {
+    const strength=v2NumericValue(echo.value,'配置呼应强度',{min:0,max:2});
+    if(strength!==1)payload.reference_strength=strength;
+  }
   const legacyWindow=element('#v2GeneratePhraseSearch')?.disabled;
   const ranking=valueOrDefault('#v2GeneratePhraseRankPolicy','auto');
   if(legacyWindow || ranking!=='auto')payload.phrase_rank_policy=legacyWindow?'comfort_v1':ranking;
@@ -356,6 +361,8 @@ function requireV2SplitSamplingSupport(status,payload) {
   if (payload.reference_selection && !status.training_capabilities?.composer_v2_reference_selection) {
     throw new Error('对齐参考检索需要更新后的 WebUI 后台，请重启当前后台后提交。');
   }
+  if(payload.reference_strength!=null && !status.training_capabilities?.composer_v2_reference_strength)
+    throw new Error('配置呼应强度需要新版后台，请重启 WebUI 后提交。');
   if ((payload.action_temperature!=null || payload.action_top_p!=null)
       && !status.training_capabilities?.composer_v2_split_sampling) {
     throw new Error('独立配置采样需要更新后的 WebUI 后台。请重启当前使用的后台后再提交。');
@@ -1732,7 +1739,7 @@ let restoredSettingNotice = "";
 const GENERATION_PARAM_FIELDS = [
   "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance", "v2GenerateEosSuppression",
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2EvalWritingProbe", "v2EvalBatchManifest", "v2AuditInput",
-  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
+  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateReferenceStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
@@ -2822,9 +2829,13 @@ function updateFamilyFields() {
   for (const field of document.querySelectorAll('[data-v2-reference-selection]')) {
     field.hidden=!v2Generation; field.querySelector('select').disabled=!referenceChoice;
   }
+  for (const field of document.querySelectorAll('[data-v2-reference-strength]')) {
+    field.hidden=!v2Generation;
+    field.querySelector('input').disabled=!v2Generation || (checked && !capabilities?.continuous_time);
+  }
   const referenceHelp=element('#v2ReferenceSelectionHelp');
   if(referenceHelp && v2Generation)referenceHelp.textContent=builtInReference
-    ?'这个模型已经学过如何参考前面相似音乐段的写法，会自动使用对应方式，无需在这里调整。'
+    ?'这个模型会自动寻找相似乐段，可用「配置呼应强度」调整参考程度。'
     :(checked && !capabilities?.continuous_time)
       ?'这个旧模型不支持按相似音乐寻找前文。'
       :'让模型参考前面相似音乐段的写法，帮助前后呼应。通常保持推荐项；实验项会改变旧模型寻找参考的方式，效果可能变好也可能变差。';
