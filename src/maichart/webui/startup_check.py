@@ -1,6 +1,7 @@
 """Check the actual WebUI interpreter before accepting expensive tasks."""
 import argparse
 import importlib
+from importlib import metadata
 import os
 import shlex
 import subprocess
@@ -50,7 +51,9 @@ def inspect_environment(profile='composer-v2', importer=importlib.import_module,
     if 'transformers' in modules:
         try:
             v=tuple(map(int,modules['transformers'].__version__.split('.')[:2]))
-            if not (4,38)<=v<(4,40):errors.append('MERT requires transformers>=4.38,<4.40 (project dependency contract)')
+            minimum_minor = 47 if sys.version_info >= (3, 13) else 38
+            if not (4, minimum_minor) <= v < (4, 49):
+                errors.append(f'MERT requires transformers>=4.{minimum_minor},<4.49 with this Python')
             getattr(modules['transformers'],'AutoModel');getattr(modules['transformers'],'Wav2Vec2FeatureExtractor')
         except Exception as exc:errors.append(f'MERT imports: {type(exc).__name__}: {exc}')
     if profile=='composer-v2' and hasattr(modules.get('librosa'),'__version__'):
@@ -73,19 +76,44 @@ def inspect_environment(profile='composer-v2', importer=importlib.import_module,
         cuda_required=cuda_required,gpu_ok=gpu_ok,errors=errors)
 
 
+def project_install_command(profile):
+    extras='composer-v2-music' if profile=='composer-v2' else 'audio,training'
+    command=[sys.executable,'-m','pip','install','-e',f'.[{extras}]']
+    if profile == 'composer-v2' and os.name == 'nt':
+        # A missing wheel should be reported by pip before it attempts a Rust build.
+        command.append('--only-binary=tokenizers')
+    return command
+
+
+def _installed_wheel_version(name, runtime_version):
+    # Some Windows PyPI wheels report e.g. 2.7.1+cpu in Python, but pip
+    # installed a distribution named 2.7.1. Preserve its actual requirement.
+    try:
+        installed = metadata.version(name)
+    except metadata.PackageNotFoundError:
+        return runtime_version
+    return installed if installed == runtime_version.partition('+')[0] else runtime_version
+
+
 def install_command(report):
     if report.get('errors') and all(e.startswith('audioread: ModuleNotFoundError:') for e in report['errors']):
-        return [sys.executable,'-m','pip','install','--force-reinstall','--no-deps','audioread>=2.1.9']
-    extras='composer-v2-music' if report['profile']=='composer-v2' else 'audio,training'
-    command=[sys.executable,'-m','pip','install','-e',f'.[{extras}]']
+        # On Python 3.13 audioread pulls in replacements for removed stdlib audio modules.
+        return [sys.executable,'-m','pip','install','--force-reinstall','audioread>=2.1.9']
+    command=project_install_command(report['profile'])
     if report['torch']:
         # Preserve the installed Torch build; install its matching audio wheel.
-        command.append('torch=='+report['torch'])
+        torch_pin = _installed_wheel_version('torch', report['torch'])
+        command.append('torch=='+torch_pin)
+        needs_build_index = '+' in torch_pin
         if report['profile']=='composer-v2':
-            command.append('torchaudio=='+report['torch'])
+            audio_pin = report['torch']
+            if report.get('torchaudio') == report['torch']:
+                audio_pin = _installed_wheel_version('torchaudio', audio_pin)
+            command.append('torchaudio=='+audio_pin)
+            needs_build_index = needs_build_index or '+' in audio_pin
         tag='cu'+str(report['cuda']).replace('.','') if report['cuda'] else 'cpu'
         index=os.environ.get('MAICHART_TORCH_INDEX_URL')
-        if index or ('+' in report['torch'] and ('cu' in report['torch'].split('+')[1] or report['torch'].endswith('+cpu'))):
+        if index or (needs_build_index and ('+cu' in report['torch'] or report['torch'].endswith('+cpu'))):
             command+=['--extra-index-url',index or 'https://download.pytorch.org/whl/'+tag]
     elif os.environ.get('MAICHART_TORCH_INDEX_URL'):
         command+=['--extra-index-url',os.environ['MAICHART_TORCH_INDEX_URL']]
@@ -144,8 +172,7 @@ def main(argv=None):
         result=subprocess.run(command,check=False)
         if result.returncode:return result.returncode
         if switching:
-            extras='composer-v2-music' if args.profile=='composer-v2' else 'audio,training'
-            result=subprocess.run([sys.executable,'-m','pip','install','-e',f'.[{extras}]'],check=False)
+            result=subprocess.run(project_install_command(args.profile),check=False)
             if result.returncode:return result.returncode
         # Recheck in a fresh interpreter after pip; imported DLLs cannot be unloaded safely.
         follow=[sys.executable,'-m',__spec__.name,'--profile',args.profile]

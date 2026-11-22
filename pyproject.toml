@@ -48,7 +48,8 @@ composer-v2-music = [
   "numpy>=1.24",
   "scipy>=1.10",
   "soundfile>=0.12",
-  "transformers>=4.38,<4.40",
+  "transformers>=4.38,<4.49; python_version < '3.13'",
+  "transformers>=4.47,<4.49; python_version >= '3.13'",
   "huggingface_hub>=0.20,<1"
 ]
 music-structure = [

@@ -15,7 +15,7 @@
 **方式 A：Windows 一键启动（最省心，推荐）**
 
 直接双击仓库根目录的 [`START_WEBUI.bat`](START_WEBUI.bat)（或在终端运行 `.\START_WEBUI.bat`）。
-- 首次启动会查找可用的 64 位 Python 3.10–3.12。缺少合适版本时会尝试为当前用户安装 Python 3.12，并补齐所需依赖。
+- 首次启动会查找标准 Windows x64 版 Python 3.10–3.13。已有 Python 3.13 或对应的项目虚拟环境可以直接使用，启动器会安装适配的预编译音频依赖。缺少合适版本时会尝试为当前用户安装 Python 3.12。
 - **更新项目**：关闭 WebUI，双击根目录的 [从GitHub更新.bat](从GitHub更新.bat)。GitHub ZIP 解压版可直接使用，无需 Git；更新时替换的项目文件会备份至 `backups/github-update/`。模型、歌曲和生成记录可留在原目录。
 - 启动失败时，窗口会显示失败的步骤和解决方式。可用 `.\START_WEBUI.bat --check --cpu` 只检查 CPU 环境，或用 `.\START_WEBUI.bat --port 7861` 避开占用的端口。
 - 脚本会自动创建虚拟环境、检测本机 NVIDIA 显卡与驱动、自动匹配安装对应的 CUDA 版 `PyTorch` / `torchaudio` 及 `Composer v2` 全部音乐依赖，并在检查通过后启动本地 WebUI。

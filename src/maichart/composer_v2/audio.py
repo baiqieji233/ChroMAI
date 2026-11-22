@@ -394,6 +394,9 @@ class AudioFeatureStore:
             if self.model_path is None:
                 kwargs.update(revision=MODEL_REVISION, cache_dir=str(MODEL_CACHE))
             processor = Wav2Vec2FeatureExtractor.from_pretrained(source, **kwargs)
+            # Match the attention used to build the original MERT feature cache.
+            # Newer Transformers otherwise selects SDPA for HuBERT automatically.
+            kwargs['attn_implementation'] = 'eager'
             model = self._load_first_eight(source, kwargs)
             if model is not None:
                 if processor.sampling_rate != SAMPLE_RATE or model.config.hidden_size != 1024:

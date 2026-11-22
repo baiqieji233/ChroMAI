@@ -112,10 +112,9 @@ function Test-SupportedPython($Info) {
 }
 
 function Test-AutomaticPython($Info) {
-    # The Composer v2 Transformers pin resolves tokenizers 0.15.x.
-    # Its Windows x64 wheels stop at CPython 3.12.
+    # The Composer dependency group selects wheel-compatible Transformers on 3.13.
     return ((Test-SupportedPython $Info) -and $Info.Platform -eq "win-amd64" -and
-        $Info.Version -le [version]"3.12")
+        $Info.Version -le [version]"3.13")
 }
 
 function Get-InstalledPythonPaths {
@@ -276,7 +275,7 @@ if ($overridePython) {
         $selected = Find-BootstrapPython
         if (-not $selected) {
             if ($CheckOnly -or $NoInstall) {
-                Fail "No compatible Python 3.10-3.12 x64 found. Launch normally to allow installation, or select an existing environment with MAICHART_PYTHON."
+                Fail "No compatible Python 3.10-3.13 x64 found. Launch normally to allow installation, or select an existing environment with MAICHART_PYTHON."
             }
             $LaunchStage = "Python installation"
             $selected = Install-BootstrapPython
@@ -351,7 +350,7 @@ try {
                 & $Python -m maichart.webui.startup_check --profile composer-v2 --install
             }
         }
-        if ($LASTEXITCODE -ne 0) { Fail "See the first error above. For download errors, check the network or proxy. For unavailable wheels, use 64-bit Python 3.12." }
+        if ($LASTEXITCODE -ne 0) { Fail "See the first error above. If pip cannot find a tokenizers wheel, check that your package index provides Windows x64 wheels. Automatic setup supports standard 64-bit Python 3.10-3.13." }
     }
 } finally { Pop-Location }
 
