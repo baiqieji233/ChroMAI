@@ -172,7 +172,13 @@ function Install-BootstrapPython {
     try {
         Write-Host "Downloading Python 3.12.10 x64 from python.org..."
         Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer -TimeoutSec 180
-        if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $sha256) {
+        $sha = [Security.Cryptography.SHA256]::Create()
+        try {
+            $stream = [IO.File]::OpenRead($installer)
+            try { $actualHash = [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','') }
+            finally { $stream.Dispose() }
+        } finally { $sha.Dispose() }
+        if ($actualHash -ne $sha256) {
             Fail "Python installer checksum verification failed. No installer was run."
         }
         Write-Host "Installing Python 3.12 for the current Windows user..."

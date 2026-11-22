@@ -4,6 +4,7 @@ $root = Split-Path -Parent $PSScriptRoot
 $repository = 'https://github.com/baiqieji233/ChroMAI'
 $archive = $null
 $lock = $null
+$exitCode = 0
 
 function Git-Result([string[]]$Arguments) {
     $result = & git.exe -C $root @Arguments
@@ -53,6 +54,15 @@ function Ensure-Parent([string]$Path) {
     [void][IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($Path))
 }
 
+function Get-FileDigest([string]$Path) {
+    $sha = [Security.Cryptography.SHA256]::Create()
+    try {
+        $stream = [IO.File]::OpenRead($Path)
+        try { return [BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','') }
+        finally { $stream.Dispose() }
+    } finally { $sha.Dispose() }
+}
+
 function Get-ArchiveVersion([string]$ZipPath) {
     # GitHub's git archive stores the 40-character commit in the ZIP end comment.
     $stream = [IO.File]::OpenRead($ZipPath)
@@ -67,7 +77,7 @@ function Get-ArchiveVersion([string]$ZipPath) {
             }
         }
     } finally { $stream.Dispose() }
-    return "ZIP SHA256 $((Get-FileHash -LiteralPath $ZipPath -Algorithm SHA256).Hash)"
+    return "ZIP SHA256 $(Get-FileDigest $ZipPath)"
 }
 
 function Install-Archive([string]$ZipPath, [string]$Store) {
@@ -103,7 +113,7 @@ function Install-Archive([string]$ZipPath, [string]$Store) {
                         $inputStream = $entry.Open()
                         try { $hash = [BitConverter]::ToString($sha.ComputeHash($inputStream)).Replace('-','') }
                         finally { $inputStream.Dispose() }
-                        if ((Get-FileHash -LiteralPath $dest -Algorithm SHA256).Hash -eq $hash) { continue }
+                        if ((Get-FileDigest $dest) -eq $hash) { continue }
                     }
                     $saved = Join-Path $backup $name
                     Ensure-Parent $saved
@@ -158,8 +168,9 @@ try {
     Write-Host '更新完成。请重新双击 START_WEBUI.bat 启动。'
 } catch {
     [Console]::Error.WriteLine("更新未完成：$($_.Exception.Message)")
-    exit 1
+    $exitCode = 1
 } finally {
     if ($lock) { $lock.Dispose() }
     if ($archive -and [IO.File]::Exists($archive)) { [IO.File]::Delete($archive) }
 }
+exit $exitCode
