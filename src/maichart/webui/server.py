@@ -299,6 +299,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_quality_evaluation": True,
                                               "composer_v2_reference_selection": True,
                                               "composer_v2_reference_strength": True,
+                                              "composer_v2_recent_configuration_strength": True,
                                               "composer_v2_tail_guard": True,
                                               "composer_v2_variable_tempo": True,
                                               "composer_v2_exhaustion_policy": True,
@@ -755,6 +756,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 return self._json_response(preview_assets.status(root))
             if parsed.path=='/api/preview/latest':
                 return self._json_response({'preview':chart_preview.latest(project=PROJECT_ROOT,log_root=LOG_ROOT)})
+            if parsed.path=='/api/preview/history':
+                return self._json_response({'runs':chart_preview.history(project=PROJECT_ROOT,log_root=LOG_ROOT)})
             if parsed.path=='/api/preview/task':
                 task_id=query.get('id',[''])[0]
                 return self._json_response(chart_preview.describe(task_id,project=PROJECT_ROOT,log_root=LOG_ROOT,task=_get_task(task_id)))
@@ -964,8 +967,8 @@ class WebUIHandler(BaseHTTPRequestHandler):
                             if key in curve}
             curve_path.write_text(json.dumps(stored_curve, ensure_ascii=False), encoding="utf-8")
             task.result["intensity_curve_path"] = str(curve_path)
-        output = payload.get("output") or str(GENERATED_ROOT / f"{task.task_id}_maidata.txt")
-        output_path = _resolve_path(output)
+        requested_output = _resolve_path(payload.get("output") or GENERATED_ROOT / "maidata.txt")
+        output_path = requested_output.parent / task.task_id / requested_output.name
         output_path.parent.mkdir(parents=True, exist_ok=True)
         candidate_count = max(1, int(payload.get("candidates", 1)))
         output_ir = output_path.with_suffix(".chart.json")
@@ -2469,6 +2472,11 @@ def _run_subprocess_task(task: TaskState, args: list[str], *, expected_epoch: in
                 if task.cancel_requested:
                     _finish_cancelled_unlocked(task, exit_code=code)
                     return
+                if generation and 'generation_archive' in task.result:
+                    try:
+                        chart_preview.save_history(record, log_root=LOG_ROOT, log_path=task.log_path)
+                    except OSError as exc:
+                        task.result['generation_history_error'] = str(exc)
                 _close_task_log(task, status="completed", exit_code=0)
                 task.status = "completed"
                 task.progress = 1.0
@@ -2525,12 +2533,12 @@ def _log_group_key(path: Path) -> str:
 def _open_task_log(task: TaskState, argv: Sequence[str]) -> Path | None:
     """Start persisting a task's log; the file outlives the process and the UI."""
 
+    task.argv = [str(value) for value in argv]
+    task.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
     try:
         root = _logs_root()
         stamp = time.strftime("%Y%m%d_%H%M%S")
         path = root / f"{stamp}_{task.kind}_{task.task_id}.log"
-        task.argv = [str(value) for value in argv]
-        task.started_at = time.strftime("%Y-%m-%d %H:%M:%S")
         handle = path.open("a", encoding="utf-8", buffering=1)
         handle.write(
             "# maichart task log (full stream; the UI keeps only the last 300 lines)\n"
@@ -2612,6 +2620,16 @@ def _prune_logs(max_files: int | None = None, max_bytes: int | None = None) -> N
             break
         if count <= 1:
             break  # never delete the newest run
+        for path in group:
+            if not path.name.endswith('.meta.json'):
+                continue
+            try:
+                meta = json.loads(path.read_text(encoding='utf-8'))
+                if meta.get('status') == 'completed' and 'generation_archive' in (meta.get('result') or {}):
+                    from maichart.webui.chart_preview import save_history
+                    save_history(meta, log_root=LOG_ROOT, log_path=meta.get('log'))
+            except (OSError, ValueError, KeyError, TypeError):
+                pass
         for path in group:
             try:
                 total -= path.stat().st_size

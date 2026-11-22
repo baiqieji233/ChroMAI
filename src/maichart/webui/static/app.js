@@ -151,10 +151,14 @@ function composerV2GenerationPayload(options={}) {
   }
   const referenceSelection=element('#v2GenerateReferenceSelection');
   if(referenceSelection && !referenceSelection.disabled && referenceSelection.value==='aligned')payload.reference_selection='aligned';
-  const echo=element('#v2GenerateReferenceStrength');
-  if(echo && !echo.disabled) {
-    const strength=v2NumericValue(echo.value,'配置呼应强度',{min:0,max:2});
-    if(strength!==1)payload.reference_strength=strength;
+  for (const [key, selector, label] of [
+    ['reference_strength', '#v2GenerateReferenceStrength', '配置呼应强度'],
+    ['recent_configuration_strength', '#v2GenerateRecentConfigurationStrength', '近期配置强度'],
+  ]) {
+    const control = element(selector);
+    if (!control || control.disabled) continue;
+    const strength = v2NumericValue(control.value, label, {min:0,max:2});
+    if (strength !== 1) payload[key] = strength;
   }
   const legacyWindow=element('#v2GeneratePhraseSearch')?.disabled;
   const ranking=valueOrDefault('#v2GeneratePhraseRankPolicy','auto');
@@ -363,6 +367,8 @@ function requireV2SplitSamplingSupport(status,payload) {
   }
   if(payload.reference_strength!=null && !status.training_capabilities?.composer_v2_reference_strength)
     throw new Error('配置呼应强度需要新版后台，请重启 WebUI 后提交。');
+  if(payload.recent_configuration_strength!=null && !status.training_capabilities?.composer_v2_recent_configuration_strength)
+    throw new Error('近期配置强度需要新版后台，请重启 WebUI 后提交。');
   if ((payload.action_temperature!=null || payload.action_top_p!=null)
       && !status.training_capabilities?.composer_v2_split_sampling) {
     throw new Error('独立配置采样需要更新后的 WebUI 后台。请重启当前使用的后台后再提交。');
@@ -1739,7 +1745,7 @@ let restoredSettingNotice = "";
 const GENERATION_PARAM_FIELDS = [
   "v2GenerateConfigurationRecovery", "v2RadarStyleGuidance", "v2GenerateEosSuppression",
   "v2EvalManifest", "v2EvalLimitCharts", "v2EvalMaxBatches", "v2EvalTimingRollouts", "v2EvalCpuThreads", "v2EvalWindowSampling", "v2EvalCheckTrainingOverlap", "v2EvalWritingProbe", "v2EvalBatchManifest", "v2AuditInput",
-  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateReferenceStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
+  "v2GenerateRecordCandidateProbabilities", "v2GenerateTemperature", "v2GenerateTopP", "v2GenerateActionTemperature", "v2GenerateActionTopP", "v2GenerateOnsetStrength", "v2GenerateReferenceStrength", "v2GenerateRecentConfigurationStrength", "v2GenerateInterceptTapOnSlide", "v2GenerateTapOnSlideThresholdMs", "v2GenerateInterceptSlideHeadTap", "v2GenerateForwardFeasibility", "v2GenerateForwardTapOnSlideMs", "v2GenerateTouchReachabilityPolicy", "v2GenerateTouchCoholdRadius", "v2GenerateSelfRefine", "v2GenerateCandidates", "v2GenerateCount", "v2GenerateParallel", "v2GenerateWindowRetries", "v2GenerateDevice", "v2GenerateMaxEvents", "v2GenerateRollbackWindows", "v2GenerateExhaustionPolicy", "v2GenerateCpuThreads", "v2GenerateAutoFirst", "v2GenerateTempoDetection", "v2GeneratePhraseSearch", "v2GeneratePhraseBeats", "v2GeneratePhraseCommitBeats", "v2GeneratePhraseRankPolicy", "v2GenerateTempoOctavePolicy", "v2GenerateDownbeatAlignment",
   "tempoMode", "division",                                  // 节拍与时间轴
   "level", "conditionPreferenceStrength",                   // 等级基准与叠加偏好
   "preferKeyboard", "preferStars", "preferTechnical", "preferChord", "preferHold", "preferTouch", "preferMovement",
@@ -2829,7 +2835,7 @@ function updateFamilyFields() {
   for (const field of document.querySelectorAll('[data-v2-reference-selection]')) {
     field.hidden=!v2Generation; field.querySelector('select').disabled=!referenceChoice;
   }
-  for (const field of document.querySelectorAll('[data-v2-reference-strength]')) {
+  for (const field of document.querySelectorAll('[data-v2-reference-strength], [data-v2-recent-configuration-strength]')) {
     field.hidden=!v2Generation;
     field.querySelector('input').disabled=!v2Generation || (checked && !capabilities?.continuous_time);
   }
@@ -4585,6 +4591,7 @@ async function pollTask(taskId) {
         if (activeTaskId === taskId) renderTask(task);
       }
       taskWatchers.delete(taskId);
+      if (globalThis.ChartPreview?.supportsTask(task)) void globalThis.ChartPreview.refreshHistory();
       for (const callback of watcher.callbacks) await callback(task);
     }
   } catch (error) {
@@ -4821,6 +4828,9 @@ function renderTaskResults(task) {
   const files = task.result?.files || [];
   const urls = task.result?.download_urls || [];
   const paths = task.result?.paths || [];
+  const generation = globalThis.ChartPreview?.supportsTask(task);
+  const chartPaths = generation ? paths.filter(path => /\.(txt|maidata)$/i.test(path)) : [];
+  const chartLabels = new Map((task.result?.generation_archive?.charts || []).map(chart => [chart.path, chart.label]));
   if (task.result?.generation_archive_error) {
     const notice = document.createElement("p");
     notice.className = "inline-status warn";
@@ -4829,7 +4839,13 @@ function renderTaskResults(task) {
   }
   files.forEach((name, index) => {
     const link = document.createElement("a");
-    link.textContent = name;
+    const chartIndex = chartPaths.indexOf(paths[index]);
+    if (chartPaths.length > 1 && chartIndex >= 0 && name === paths[index].split(/[\\/]/).pop()) {
+      const label = chartLabels.get(paths[index]) || `本次第 ${chartIndex + 1} 张`;
+      link.textContent = `${label} · ${name}`;
+    } else {
+      link.textContent = name;
+    }
     link.href = urls[index] || "#";
     if (urls[index]?.startsWith("/api/preview/resource?")) link.download = "";
     link.title = paths[index] || "";
@@ -4838,7 +4854,7 @@ function renderTaskResults(task) {
     row.appendChild(link);
     container.appendChild(row);
   });
-  if (globalThis.ChartPreview?.supportsTask(task)) {
+  if (generation) {
     const previewButton = document.createElement("button");
     previewButton.type = "button";
     previewButton.className = "secondary-button";

@@ -24,7 +24,7 @@ def require_cuda(torch):
 
 def inspect_environment(profile='composer-v2', importer=importlib.import_module, *, cuda_required=False):
     names=['numpy','scipy','soundfile','librosa','torch']
-    if profile=='composer-v2':names+=['torchaudio','transformers','huggingface_hub']
+    if profile=='composer-v2':names+=['torchaudio','transformers','huggingface_hub','audioread']
     modules={};errors=[]
     for name in names:
         try:modules[name]=importer(name)
@@ -57,6 +57,15 @@ def inspect_environment(profile='composer-v2', importer=importlib.import_module,
         match=re.match(r'(\d+)\.(\d+)\.(\d+)',modules['librosa'].__version__)
         if match and tuple(map(int,match.groups()))<(0,10,2):
             errors.append('Dynamic tempo tracking requires librosa>=0.10.2')
+        if 'audioread' in modules:
+            # librosa imports these implementations lazily. Importing the package
+            # alone succeeds even if the timing backend cannot load on Windows.
+            try:
+                lib=modules['librosa']
+                _ = (lib.resample, lib.onset.onset_strength, lib.feature.tempo,
+                     lib.beat.beat_track, lib.frames_to_time)
+            except Exception as exc:
+                errors.append(f'自动测量 BPM 和首拍所需的 librosa 功能加载失败：{type(exc).__name__}: {exc}')
     return dict(ok=not errors,python=sys.executable,profile=profile,torch=version,
         torchaudio=str(audio.__version__) if audio is not None else None,
         cuda=getattr(getattr(torch,'version',None),'cuda',None),
@@ -65,6 +74,8 @@ def inspect_environment(profile='composer-v2', importer=importlib.import_module,
 
 
 def install_command(report):
+    if report.get('errors') and all(e.startswith('audioread: ModuleNotFoundError:') for e in report['errors']):
+        return [sys.executable,'-m','pip','install','--force-reinstall','--no-deps','audioread>=2.1.9']
     extras='composer-v2-music' if report['profile']=='composer-v2' else 'audio,training'
     command=[sys.executable,'-m','pip','install','-e',f'.[{extras}]']
     if report['torch']:

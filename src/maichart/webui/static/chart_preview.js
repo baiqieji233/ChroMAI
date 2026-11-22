@@ -9,6 +9,9 @@
   const source = document.getElementById("generationPreviewSource");
   const badge = document.getElementById("generationPreviewBadge");
   const selector = document.getElementById("generationPreviewChart");
+  const historyPanel = document.getElementById("generationHistory");
+  const historySelect = document.getElementById("generationHistorySelect");
+  const historyRefresh = document.getElementById("generationHistoryRefresh");
   const installButton = document.getElementById("generationPreviewInstall");
   const reloadButton = document.getElementById("generationPreviewReload");
   const licenseLink = document.getElementById("generationPreviewLicense");
@@ -22,6 +25,7 @@
   const previewBody = panel.querySelector('.generation-preview-body');
   const trainingEmpty = document.getElementById('trainingPreviewEmpty');
   let generationEntry=null,trainingEntry=null;
+  const selectedGenerationVersions = new Map();
   const kinds = new Set(["generate", "form_generate", "composer_generate", "composer_v2_generate", "chart_stream_generate"]);
   let entry = null, player = null, playerKey = "", failedKey = "", selected = 0;
   let pendingSeek = null;
@@ -33,6 +37,9 @@
   let savedOverflow = null, focusReturn = null;
   let loadSerial = 0, requestSerial = 0, requestedTask = null, offeredTask = null, taskRequestSerial=0;
   let explicitRequest = null;
+  let manuallyOpenedTask = null;
+  let historyRequest = 0;
+  let historyRuns = new Map();
   let installTimer = null;
 
   function readableLabel(chart) {
@@ -172,6 +179,40 @@
     }
     return response.json();
   }
+  function syncHistorySelection() {
+    if (!historySelect) return;
+    const taskId = requestedTask || generationEntry?.task_id;
+    historySelect.value = historyRuns.has(taskId) ? taskId : "";
+  }
+  async function refreshHistory() {
+    if (!historySelect || document.body.dataset.workspace !== "generation") return;
+    const request = ++historyRequest;
+    try {
+      const {runs = []} = await json("/api/preview/history");
+      if (request !== historyRequest) return;
+      historyRuns = new Map(runs.map(run => [run.task_id, run]));
+      const placeholder = document.createElement("option");
+      placeholder.value = "";
+      placeholder.textContent = runs.length ? "选择一次生成" : "暂无已完成的谱面";
+      historySelect.replaceChildren(placeholder);
+      for (const run of runs) {
+        const option = document.createElement("option");
+        option.value = run.task_id;
+        option.textContent = [
+          run.title, run.ended, run.chart_count ? `${run.chart_count} 张` : "",
+          run.level ? `定数 ${run.level}` : "", run.seed ? `种子 ${run.seed}` : "",
+          run.task_id.slice(-6),
+        ].filter(Boolean).join(" · ");
+        historySelect.appendChild(option);
+      }
+      historySelect.disabled = !runs.length;
+      syncHistorySelection();
+    } catch (_) {
+      if (request === historyRequest && !historyRuns.size && historySelect.firstChild) {
+        historySelect.firstChild.textContent = "读取失败，点击刷新重试";
+      }
+    }
+  }
   function release() {
     ++loadSerial;
     stopWatch();
@@ -277,6 +318,7 @@
       && !/[\\/]phrase_candidates[\\/]/.test(chart.path||''))};
     if(!value.charts.length) {message('这个任务没有可预览的完整谱面。');return;}
     if(value.source_kind==='training_source')trainingEntry=value;else generationEntry=value;
+    syncHistorySelection();
     previewBody.hidden=false;trainingEmpty.hidden=true;
     previewTitle.textContent=value.source_kind==='training_source'?'训练集谱面预览':'生成谱面预览';
     document.getElementById('generationPreviewChoice').hidden=value.source_kind==='training_source';
@@ -291,8 +333,10 @@
       return;
     }
     const previousPath=entry?.task_id===value.task_id?entry.charts[selected]?.path:null;
+    const remembered = value.source_kind !== 'training_source' && selectedGenerationVersions.get(value.task_id);
     ++selectionRequest;release(); failedKey = "";clearRange();pendingSeek=null;pendingPlay=false;lastTransport=null;entry = value;
-    selected=Math.max(0,value.charts.findIndex(chart=>chart.path===previousPath));
+    selected=Math.max(0,value.charts.findIndex(chart=>remembered
+      ? (chart.version_id || chart.path)===remembered : chart.path===previousPath));
     selector.replaceChildren();
     value.charts.forEach((chart, index) => {
       const option = document.createElement("option");
@@ -346,6 +390,7 @@
   function selectTask(taskId) {
     ++requestSerial;
     requestedTask = offeredTask = explicitRequest = null;
+    manuallyOpenedTask = null;
     if (document.body.dataset.workspace === "generation" && entry?.source_kind !== "training_source"
         && entry?.task_id !== taskId) {
       clearGenerationPreview(taskId);
@@ -355,6 +400,7 @@
   }
   async function offerTask(task, {force = false} = {}) {
     if (!supportsTask(task)) return;
+    if (!force && manuallyOpenedTask && manuallyOpenedTask !== task.task_id) return;
     if(entry?.source_kind==='training_source' && !force)return;
     if (!force && (explicitRequest !== null || offeredTask === task.task_id || requestedTask === task.task_id)) return;
     const serial = ++requestSerial;
@@ -381,6 +427,7 @@
     if (document.body.dataset.workspace !== "generation") document.querySelector('[data-mode="generation"]')?.click();
     panel.open = true;
     panel.scrollIntoView({behavior: "smooth", block: "start"});
+    manuallyOpenedTask = task.task_id;
     await offerTask(task, {force: true});
   }
   function pollInstall() {
@@ -407,6 +454,9 @@
     pendingSeek=Number.isFinite(time)?Math.max(0,time):null;
     pendingPlay=compatible && !!state?.playing && transport===transportRequest;
     const changed=selected!==index;selected=index;selector.value=String(index);panel.open=true;
+    if (entry.source_kind !== 'training_source' && entry.charts.length > 1) {
+      selectedGenerationVersions.set(entry.task_id, entry.charts[index].version_id || entry.charts[index].path);
+    }
     updateSource(sourceKind);
     await activate(changed);
     if(!changed && player) {
@@ -436,6 +486,11 @@
     pendingSeek=null;await player.seek(second);
   }
   selector.addEventListener("change", () => {void chooseChart(Number(selector.value)).catch(error=>message(error.message,true));});
+  historySelect?.addEventListener("change", () => {
+    const run = historyRuns.get(historySelect.value);
+    if (run) void openTask({...run, status: "completed"});
+  });
+  historyRefresh?.addEventListener("click", () => {void refreshHistory();});
   reloadButton.addEventListener("click", () => {
     if(entry?.source_kind==='training_source') {
       const request=++requestSerial;
@@ -465,6 +520,8 @@
   });
   observer.observe(panel);
   function workspacePreview(mode) {
+    if (historyPanel) historyPanel.hidden = mode !== "generation";
+    if (mode === "generation") void refreshHistory();
     const cached=mode==='quality'?trainingEntry:mode==='generation'?generationEntry:null;
     if(mode!=='quality' && mode!=='generation')return;
     ++requestSerial;
@@ -479,7 +536,7 @@
   }
   window.addEventListener('workspace-mode-changed',event=>workspacePreview(event.detail.mode));
   window.addEventListener("pagehide", () => { clearTimeout(installTimer); observer.disconnect(); release(); }, {once: true});
-  globalThis.ChartPreview = {offerTask, openTask, selectTask, supportsTask,chooseChart,playRange,pause,clearRange,seek,
+  globalThis.ChartPreview = {offerTask, openTask, selectTask, supportsTask,refreshHistory,chooseChart,playRange,pause,clearRange,seek,
     openSource(value,{scroll=true}={}) {++requestSerial;show(value);panel.open=true;if(scroll)panel.scrollIntoView({behavior:'smooth',block:'start'});void activate();},
     setTrainingDataset(manifest) {
       if(trainingEntry?.training_context?.manifest===manifest)return;
@@ -490,7 +547,7 @@
     getChart: () => entry?.charts[selected] ?? null,
     selectChart: chooseChart,
     getState: () => player && playerLoaded ? player.getState() : Promise.resolve(lastTransport)};
-  // The latest completed artifact survives a WebUI restart via task log metadata.
+  // The latest completed output is available even with no live tasks.
   workspacePreview(document.body.dataset.workspace);
   const initialRequest = requestSerial;
   json("/api/preview/latest").then(value => {

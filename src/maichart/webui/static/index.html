@@ -7,7 +7,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>ChroMAI</title>
   <link rel="stylesheet" href="/styles.css?v=audit-source-selection-20261115">
-  <link rel="stylesheet" href="/workspace.css?v=20261119-tempo-history">
+  <link rel="stylesheet" href="/workspace.css?v=20261122-generation-history">
   <link rel="stylesheet" href="/workspace_logs.css">
 </head>
 <body>
@@ -34,6 +34,10 @@
         <button id="intensityModeTab" class="mode-tab" hidden type="button" data-mode="intensity">强度曲线</button>
       </nav>
 <section class="panel shared-preview-panel">
+<div id="generationHistory" class="generation-preview-toolbar generation-history" hidden>
+<label for="generationHistorySelect">生成历史<select id="generationHistorySelect" disabled><option value="">正在读取…</option></select></label>
+<button id="generationHistoryRefresh" class="small-button" type="button">刷新</button>
+</div>
 <details id="generationPreviewPanel" class="generation-preview">
 <summary><span class="step">PREVIEW</span><span id="generationPreviewTitle">谱面预览</span><small id="generationPreviewBadge">选择训练素材或生成结果后预览</small></summary>
 <div id="trainingPreviewEmpty" class="preview-empty" hidden><strong>选一张谱面开始查看</strong><p>打开训练集，点击歌曲旁的“预览与标注”。</p><button id="trainingPreviewBrowse" class="secondary-button" type="button">浏览训练集</button></div>
@@ -1354,7 +1358,8 @@
       <div class="form-grid">
         <label class="field" data-v2-onset-readout>鼓点与重音贴合强度<input id="v2GenerateOnsetStrength" type="number" value="1" min="0" max="2" step="0.1"><small>帮助音符精准踩在鼓点或旋律起音上。1 为推荐值，0 关闭，1.2–1.4 会更紧贴明显重音；旧模型不支持时自动停用。</small></label>
         <label class="field" data-v2-reference-selection>副歌前后呼应方式<select id="v2GenerateReferenceSelection"><option value="auto" selected>沿用模型学过的呼应方式（推荐）</option><option value="aligned">强制参考前面相似的音乐段（实验）</option></select><small id="v2ReferenceSelectionHelp">选择怎样寻找前面相似的乐段。</small></label>
-        <label class="field" data-v2-reference-strength>配置呼应强度<input id="v2GenerateReferenceStrength" type="number" min="0" max="2" step="0.1" value="1" required><small>0 关闭相似乐段对配置的直接影响，1 为模型原值，2 最强。调离 1 时，有参考的乐段生成会慢一些。</small></label>
+        <label class="field" data-v2-reference-strength>配置呼应强度<input id="v2GenerateReferenceStrength" type="number" min="0" max="2" step="0.1" value="1" required><small>调整前面相似乐段对当前配置的影响。0 关闭，1 为模型原值，2 最强。调离 1 后，有参考的乐段生成会慢一些。如无必要请勿调整。</small></label>
+        <label class="field" data-v2-recent-configuration-strength>近期配置强度<input id="v2GenerateRecentConfigurationStrength" type="number" min="0" max="2" step="0.1" value="1" required><small>调整刚写过的音符类型、键位和 Slide 路径对下一组配置的影响。0 屏蔽这些细节，1 为模型原值，2 放大影响。调离 1 后生成会慢一些。如无必要请勿调整。</small></label>
         <label class="field">采音温度（踩点随机度）<input id="v2GenerateTemperature" type="number" value="0.9" min="0" step="0.05" required><small>默认 0.9。若觉得碎音略飘可试 0.75–0.85 让踩点更规矩；不建议低于 0.65 以免单调机械。</small></label>
         <label class="field" data-v2-action-sampling>配置温度（键型丰富度）<input id="v2GenerateActionTemperature" type="number" value="0.9" min="0" step="0.05" placeholder="留空沿用采音"><small>控制八键位置、双押与星星造型的变化度，默认 0.9（0.85–0.95 最自然灵动）；留空则跟随采音温度。</small></label>
         <label class="field">采音 Top-p（落点集中度）<input id="v2GenerateTopP" type="number" value="0.95" min="0" max="1" step="0.01" required><small>过滤极低概率的怪异拍点，默认 0.95 即可。</small></label>
@@ -1972,7 +1977,7 @@
           </label>
 <label class="field span-4">输出文件路径
             <textarea id="outputPath" class="path-input" rows="2">webui_workspace/generated/maidata.txt</textarea>
-            <small>单张默认保存至上方路径；批量生成时放入独立批次目录；实际路径在任务结果中。项目外文件请在本机打开。</small>
+            <small>每次生成在所填目录下新建子文件夹，保留文件名。可在页面顶部的「生成历史」打开已完成的谱面。</small>
           </label></div>
 <details id="generationMetadata" class="settings-section" data-advanced >
 <summary><span>输出元数据</span><small>谱师、曲师、显示等级与导出槽位</small>
@@ -2168,12 +2173,12 @@
     </aside>
   </main>
   <script src="/workspace_logs.js"></script>
-  <script src="/chart_preview.js?v=20261119-tempo-history"></script>
-  <script src="/app.js?v=20261119-tempo-history"></script>
+  <script src="/chart_preview.js?v=20261122-generation-history"></script>
+  <script src="/app.js?v=20261122-generation-history"></script>
   <script src="/reference_tempo.js?v=20261119-tempo-history" onerror="document.getElementById('v2ReferenceBadge').textContent='请重启此 WebUI 服务后刷新'"></script>
   <script src="/v2_intensity.js?v=20261119-tempo-history"></script>
   <script src="/review_exchange.js"></script>
-  <script src="/candidate_feedback.js?v=20261119-tempo-history"></script>
+  <script src="/candidate_feedback.js?v=20261122-generation-history"></script>
   <script src="/workspace.js?v=20261119-tempo-history"></script>
 </body>
 </html>

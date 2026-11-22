@@ -221,8 +221,9 @@ function candidateSavedReviews(records) {
       range=null;originPrompt=null;activePrompt=null;clearLoop();
     }
     collection={items:[],regions:0};++collectionSerial;node('feedbackTrainingList').replaceChildren();
-    const previous=chart()?.path,previousAudio=audioKey(chart());entry=value;
-    currentIndex=Math.max(0,value.charts.findIndex(version=>version.path===previous));anchorIndex=currentIndex;
+    const selectedPath=globalThis.ChartPreview?.getChart?.()?.path || chart()?.path;
+    const previousAudio=audioKey(chart());entry=value;
+    currentIndex=Math.max(0,value.charts.findIndex(version=>version.path===selectedPath));anchorIndex=currentIndex;
     if(previousAudio!==audioKey(chart())) {playhead=0;playing=false;range=null;media=null;mediaAudio=null;clearLoop();++mediaSerial;}
     refreshChoices();updateRange();void loadTimeline();
     const source=entry.source_kind==='training_source';

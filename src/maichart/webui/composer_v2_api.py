@@ -785,14 +785,16 @@ def start_generate(handler,payload,*,runtime):
             raise ValueError('对齐参考检索仅适用于 Composer v2 连续事件检查点')
         _arg(args,'--reference-selection',reference_selection)
     settings['reference_selection']=reference_selection
-    strength=_float(payload,'reference_strength',1.,minimum=0)
-    if isinstance(payload.get('reference_strength'),bool) or not 0<=strength<=2:
-        raise ValueError('配置呼应强度须在 0 到 2 之间')
-    if strength!=1.:
-        if checked.get('sequence_policy')!='continuous_events_v1':
-            raise ValueError('配置呼应强度适用于连续事件检查点')
-        _arg(args,'--reference-strength',strength)
-    settings['reference_strength']=strength
+    for key, label in (('reference_strength', '配置呼应强度'),
+                       ('recent_configuration_strength', '近期配置强度')):
+        strength = _float(payload, key, 1.)
+        if isinstance(payload.get(key), bool) or not 0 <= strength <= 2:
+            raise ValueError(f'{label}须在 0 到 2 之间')
+        if strength != 1.:
+            if checked.get('sequence_policy') != 'continuous_events_v1':
+                raise ValueError(f'{label}适用于连续事件检查点')
+            _arg(args, '--'+key.replace('_', '-'), strength)
+        settings[key] = strength
     for key in ("action_temperature", "action_top_p"):
         raw = payload.get(key, GENERATION_DEFAULTS[key] if checked.get('sequence_policy') == 'continuous_events_v1' else None)
         if raw is None or raw == "":
@@ -861,8 +863,6 @@ def start_generate(handler,payload,*,runtime):
     if parallel>MAX_BATCH_COUNT:raise ValueError(f'同时生成数不能超过 {MAX_BATCH_COUNT}')
     settings.update(parallel=parallel,effective_parallel=min(count,parallel))
     _arg(args,'--parallel',parallel)
-    paths=[output,output.with_suffix('.composer_v2.json')]
-    if record_probabilities:paths.append(output.with_suffix('.candidate_audit.jsonl'))
     profile=payload.get('intensity_profile')
     if profile is not None:
         from maichart.composer_v2.intensity import validate_profile
@@ -877,15 +877,19 @@ def start_generate(handler,payload,*,runtime):
         profile_path.write_text(json.dumps(profile,ensure_ascii=False),encoding='utf-8')
         _arg(args,'--intensity-curve',profile_path);_arg(args,'--intensity-strength',strength)
         settings.update(intensity_curve=str(profile_path),intensity_strength=strength)
+    import uuid
+    directory_tag = '_batch_' if count > 1 else '_'
+    root = output.parent / (output.stem + directory_tag + uuid.uuid4().hex[:12])
+    output = root / output.name
+    args[args.index('--output')+1] = str(output)
+    settings['output'] = str(output)
+    paths = [output, output.with_suffix('.composer_v2.json')]
+    if record_probabilities:
+        paths.append(output.with_suffix('.candidate_audit.jsonl'))
     if count>1:
-        # Separate task directories also protect previews from later overwrites.
-        import uuid
-        root=output.parent/(output.stem+'_batch_'+uuid.uuid4().hex[:12])
-        output=root/output.name
         manifest=root/'batch.composer_v2_batch.json'
-        args[args.index('--output')+1]=str(output)
         _arg(args,'--count',count);_arg(args,'--batch-manifest',manifest)
-        settings.update(output=str(output),batch_manifest=str(manifest))
+        settings['batch_manifest'] = str(manifest)
         paths=[manifest]  # Successful chart artifacts are collected from it.
     return _start(handler,runtime,"composer_v2_generate",args,settings,paths)
 

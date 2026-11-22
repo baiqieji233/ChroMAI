@@ -55,6 +55,17 @@ class GridDurationRejected(ValueError):
                     completed_atoms=list(self.completed_atoms),pulse=self.pulse)
 
 
+def _layout_positions(codec, ids, start, stop):
+    """Select the note tokens of completed events, preserving their timing."""
+    layout_start = None
+    for index in range(start, stop):
+        if ids[index] == codec.phase_id:
+            layout_start = index + 2
+        elif ids[index] == codec.event_end_id and layout_start is not None:
+            yield from range(layout_start, index)
+            layout_start = None
+
+
 def _duration_head_pulse(codec, atom):
     """Keep only the authored proposal's initial contact and head modifiers."""
     kind, pad, *suffix = (codec.tokens[token] for token in atom)
@@ -110,11 +121,17 @@ class EventSampler(WindowSampler):
         self.args=args;self._active_guard=None;self._forward_cache=None
         self.condition_guidance=getattr(song,'_condition_guidance',None)
         self.reference_strength=getattr(args,'reference_strength',1.)
+        self.recent_configuration_strength=getattr(args,'recent_configuration_strength',1.)
         self._reference_free=None
+        self._layout_free=None
         if self.reference_strength!=1.:
             ref_end=self.prefix.index(self.codec.ref_id)+1
             if ref_end < len(self.prefix)-1 or self.reference['shift'] is not None:
                 self._reference_free=self._without_reference(ref_end)
+        if self.recent_configuration_strength!=1.:
+            self._layout_free=self._without_recent_layout()
+            if self._reference_free is not None:
+                self._reference_free._layout_free=self._reference_free._without_recent_layout()
 
     def _reset_query_buffers(self):
         self._decoded_ids=();self._query_ids=()
@@ -137,6 +154,62 @@ class EventSampler(WindowSampler):
         other._reset_query_buffers()
         return other
 
+    def _without_recent_layout(self):
+        other = copy(self)
+        other.cache = ChainMap({'decode_state':None}, self.cache)
+        other._reference_free = other._layout_free = None
+        start = self.prefix.index(self.codec.ctx_id) + 1
+        stop = self.prefix.index(self.codec.ref_id, start)
+        other._layout_prefix = frozenset(_layout_positions(self.codec, self.prefix, start, stop))
+        other._layout_key = ()
+        other._masked_layout = other._layout_prefix
+        other._layout_mask = None
+        other._reset_query_buffers()
+        return other
+
+    def _update_layout_mask(self, history):
+        if history == self._layout_key:
+            return
+        start = len(self.prefix)
+        positions = self._layout_prefix | frozenset(
+            start + position for position in _layout_positions(self.codec, history, 0, len(history)))
+        changed = self._masked_layout ^ positions
+        if changed:
+            # Earlier layers can already have read a newly masked event. Replay
+            # from its first changed token and retain the still-valid KV prefix.
+            boundary = min(changed)
+            self.model.rewind_decode_cache(self.cache, boundary + 1)
+            self._decoded_ids = self._decoded_ids[:boundary]
+            self._layout_mask = None
+        self._masked_layout = positions
+        self._layout_key = history
+
+    def _configuration_logits(self, logits, target):
+        reference = self._reference_free
+        layout = self._layout_free
+        history = tuple(target[:self.proposal_scope['target_prefix_length']]) if layout is not None else ()
+        strength = self.recent_configuration_strength
+        reference_strength = self.reference_strength
+        apply_layout = layout is not None and (history or layout._layout_prefix)
+        with_layout = logits
+        if reference is not None:
+            self.retry_stats['reference_action_queries'] = self.retry_stats.get('reference_action_queries', 0) + 1
+            if not apply_layout or strength != 0.:
+                with_layout = torch.lerp(reference._logits(target).float(), logits.float(), reference_strength)
+        if not apply_layout:
+            return with_layout
+
+        # Blend both sources independently, skipping decodes with zero weight.
+        if reference is None:
+            masked = layout._logits(target, layout_history=history).float()
+        else:
+            masked = reference._layout_free._logits(target, layout_history=history).float()
+            if reference_strength != 0.:
+                masked = torch.lerp(masked, layout._logits(target, layout_history=history).float(), reference_strength)
+        if strength == 0.:
+            return masked
+        return torch.lerp(masked, with_layout.float(), strength)
+
     def _forward_guard(self):
         guard=getattr(self,'_active_guard',None)
         policy=getattr(self.args,'forward_feasibility','balanced_v1') if hasattr(self,'args') else 'off'
@@ -153,9 +226,9 @@ class EventSampler(WindowSampler):
         return fg
 
     def _rewind(self,target):
-        other=getattr(self,'_reference_free',None)
-        if other is not None:
-            other._rewind(target)
+        for other in (getattr(self,'_reference_free',None), getattr(self,'_layout_free',None)):
+            if other is not None:
+                other._rewind(target)
         state=self.cache.get('decode_state') if self.cache is not None else None
         decoded=getattr(self,'_decoded_ids',())
         if state is None or not decoded:
@@ -199,11 +272,9 @@ class EventSampler(WindowSampler):
         raw_logits=logits
         grammar=getattr(self,'_audit_grammar',None) or getattr(self,'_free_choices',allowed)
         choices=allowed if fixed_retry else getattr(self,'_free_choices',allowed)
-        other=getattr(self,'_reference_free',None)
-        if action and cache_miss and other is not None:
-            without=other._logits(target).float()
-            logits=torch.lerp(without,logits.float(),self.reference_strength)
-            self.retry_stats['reference_action_queries']=self.retry_stats.get('reference_action_queries',0)+1
+        if action and cache_miss and (getattr(self,'_reference_free',None) is not None
+                                      or getattr(self,'_layout_free',None) is not None):
+            logits=self._configuration_logits(logits,target)
         guidance=getattr(self,'condition_guidance',None)
         guided=guidance.apply(logits,choices,target[self.proposal_scope['target_prefix_length']:],
             action=action,temperature=temperature,nearby=getattr(self,'_peak_context',None)) if guidance is not None else logits
@@ -231,7 +302,9 @@ class EventSampler(WindowSampler):
             self._probability.record(raw_logits,token,grammar,role='configuration' if action else 'timing',
                 proposal_logits=logits,allowed=allowed,temperature=temperature,top_p=top_p)
         return token
-    def _logits(self,target,*,all_new=False):
+    def _logits(self,target,*,all_new=False,layout_history=None):
+        if layout_history is not None:
+            self._update_layout_mask(layout_history)
         ids=(*self.prefix,*target)
         retained=min(len(ids),len(self._query_ids))
         # Input buffers follow the most recent query. The KV cache may have
@@ -278,10 +351,18 @@ class EventSampler(WindowSampler):
             self._token_buffers=(torch.empty(shape,dtype=torch.long,device=self.device),
                 torch.empty(shape,dtype=torch.float32,device=self.device),
                 torch.ones(shape,dtype=torch.bool,device=self.device))
+            if layout_history is not None:
+                self._layout_mask = None
             upload_start=0
         else:
             upload_start=retained
         token_ids,token_beats,token_mask=self._token_buffers
+        if layout_history is not None:
+            if self._layout_mask is None:
+                self._layout_mask = torch.ones_like(token_mask)
+                indices = torch.tensor(sorted(self._masked_layout), device=self.device, dtype=torch.long)
+                self._layout_mask.index_fill_(1, indices, False)
+            token_mask = self._layout_mask
         clocks=self._clocks
         if upload_start<len(ids):
             token_ids[0,upload_start:len(ids)]=torch.tensor(ids[upload_start:],device=self.device)
@@ -933,6 +1014,7 @@ def generate_continuous(model,audio,audio_path,tempo,first,timing_report,conditi
                                            requested=requested_selection,selection=dataset.reference_selection))
     report['cpu_runtime']=getattr(args,'cpu_runtime',None)
     report['reference_strength']=getattr(args,'reference_strength',1.)
+    report['recent_configuration_strength']=getattr(args,'recent_configuration_strength',1.)
     guidance=getattr(song,'_condition_guidance',None)
     report['radar_style_guidance']=dict(requested=guidance_requested,**(
         guidance.report() if guidance is not None else dict(policy='off',manual={})))
@@ -1000,6 +1082,6 @@ def _reference_report(policy,references,*,requested='auto',selection='model'):
 
 
 def _generation_settings(args,device):
-    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','reference_strength','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
+    keys=('level','seed','temperature','top_p','action_temperature','action_top_p','onset_strength','reference_selection','reference_strength','recent_configuration_strength','intensity_curve','intensity_strength','intercept_tap_on_slide','tap_on_slide_threshold_ms','intercept_slide_head_tap','touch_reachability_policy','touch_cohold_radius','forward_feasibility','forward_tap_on_slide_ms','self_refine','candidates','phrase_search','phrase_rank_policy','phrase_beats','phrase_commit_beats','cpu_threads','device','cache_dir',
         'window_retries','rollback_windows','exhaustion_policy','max_events','condition','radar_style_guidance','eos_suppression','bpm','first','tempo_map','meter_map','tempo_detection','tempo_octave_policy','downbeat_alignment','record_candidate_probabilities','configuration_recovery','audio_device','inference_backend')
     return {**{key:getattr(args,key,None) for key in keys},'effective_device':str(device)}

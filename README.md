@@ -2,6 +2,8 @@
 
 **ChroMAI** 是基于 **Composer v2（`chart_composer_v2`）** 连续事件流架构的 maimai DX 谱面生成与训练工具。直接从音乐音频续写完整 Simai 谱面（`maidata.txt`），支持自动变速识别与节拍校准、拍内声学起音参考、实时物理无理（Muri）检查与回退修复，并内置网页端谱面预览播放器。
 
+[Composer v2 架构说明：时间表示、训练与连续事件生成](docs/explanations/CHROMAI_COMPOSER_V2_ARCHITECTURE_AND_TIMING_ZH.md)
+
 ---
 
 ## 一、 3 分钟快速上手（下载项目与模型后直接写谱）
@@ -13,7 +15,8 @@
 **方式 A：Windows 一键启动（最省心，推荐）**
 
 直接双击仓库根目录的 [`START_WEBUI.bat`](START_WEBUI.bat)（或在终端运行 `.\START_WEBUI.bat`）。
-- 第一次启动前，请先安装 [64 位 Python 3.12](https://www.python.org/downloads/windows/)。已有合适的 Python 会被自动发现，也可以把 `python.exe` 的完整路径写入项目根目录的 `.webui-python`。
+- 首次启动会查找可用的 64 位 Python 3.10–3.12。缺少合适版本时会尝试为当前用户安装 Python 3.12，并补齐所需依赖。
+- **更新项目**：关闭 WebUI，双击根目录的 [从GitHub更新.bat](从GitHub更新.bat)。GitHub ZIP 解压版可直接使用，无需 Git；更新时替换的项目文件会备份至 `backups/github-update/`。模型、歌曲和生成记录可留在原目录。
 - 启动失败时，窗口会显示失败的步骤和解决方式。可用 `.\START_WEBUI.bat --check --cpu` 只检查 CPU 环境，或用 `.\START_WEBUI.bat --port 7861` 避开占用的端口。
 - 脚本会自动创建虚拟环境、检测本机 NVIDIA 显卡与驱动、自动匹配安装对应的 CUDA 版 `PyTorch` / `torchaudio` 及 `Composer v2` 全部音乐依赖，并在检查通过后启动本地 WebUI。
 
@@ -70,7 +73,7 @@ python -m maichart.webui.server --host 127.0.0.1 --port 7860
 1. 点击页面底部的 **「生成谱面」** 按钮，右侧「任务状态」面板会实时显示已生成的事件数与当前拍位。
 2. 生成完成后：
    - **在线预览**：直接展开生成页最上方的 **「PREVIEW · 谱面预览」**，即可在浏览器中同步播放音频与生成的谱面（首次展开若未安装本地预览资源，点击「下载预览播放器」即可自动配置）。
-   - **获取谱面文件**：默认单张生成（`生成张数 = 1`）会直接输出到 `webui_workspace/generated/maidata.txt`（可在 Step 07「输出文件路径」中自行修改）；多张批量生成（`生成张数 > 1`）会保存在独立的批次子目录 `webui_workspace/generated/maidata_batch_<id>/` 中，防止相互覆盖。将生成的 `maidata.txt` 与原音频（按播放器要求重命名为 `track.mp3` 等）放入同一文件夹，即可导入 AstroDX、Majdata 等模拟器和播放器游玩。
+   - **获取谱面文件**：每次生成都会在所填路径的父目录内建立独立子目录，保留填写的谱面文件名。页面顶部的「生成历史」可以重新打开已完成的单张或批量结果，重启后仍可查看。将生成的 `maidata.txt` 与原音频（按播放器要求重命名为 `track.mp3` 等）放入同一文件夹，即可导入 AstroDX、Majdata 等模拟器和播放器游玩。
 
 ---
 

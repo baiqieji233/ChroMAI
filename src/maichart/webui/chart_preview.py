@@ -82,12 +82,44 @@ def _identities(path, difficulty_index=None):
     return value
 
 
-def _saved(task_id, log_root):
+def _history_path(task_id, log_root):
     if not re.fullmatch(r'[0-9a-f]{6,64}',str(task_id)):
         raise FileNotFoundError('生成任务不存在')
+    return Path(log_root).parent/'generation_results'/task_id/'history.json'
+
+
+def _saved(task_id, log_root):
+    path = _history_path(task_id, log_root)
+    try:
+        return json.loads(path.read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        pass
     matches=sorted(Path(log_root).glob('*_'+task_id+'.meta.json'),reverse=True)
     if not matches:raise FileNotFoundError('生成任务记录不存在')
     return json.loads(matches[0].read_text(encoding='utf-8'))
+
+
+def save_history(record, *, log_root, log_path):
+    """Keep completed artifacts discoverable independently of log retention."""
+    target = _history_path(record['task_id'], log_root)
+    result = record['result']
+    archive = result['generation_archive']
+    if not archive['charts'] or target.is_file():
+        return
+    value = {key: record[key] for key in ('task_id', 'kind', 'status', 'argv', 'started', 'ended')}
+    value['log'] = str(log_path) if log_path else ''
+    value['result'] = {key: result[key] for key in ('generation_archive', 'paths', 'files', 'download_urls')
+                       if key in result}
+    with tempfile.NamedTemporaryFile(dir=target.parent, suffix='.tmp', delete=False,
+                                     mode='w', encoding='utf-8') as stream:
+        temporary = Path(stream.name)
+        try:
+            json.dump(value, stream, ensure_ascii=False)
+            stream.close()
+            temporary.replace(target)
+        finally:
+            stream.close()
+            temporary.unlink(missing_ok=True)
 
 
 def describe(task_id, *, project, log_root, task=None):
@@ -284,6 +316,7 @@ def archive_generation(record, *, project, log_root, prior=None):
         report['conflict_report']=str(saved[conflict]) if conflict in saved else None
     result.update(
         generation_archive=dict(charts=selected,
+            title=charts[0]['title'] if charts else None,
             audio_sha256=charts[0]['audio_sha256'] if charts else None,
             duration_sec=charts[0]['audio_duration_sec'] if charts else None),
         paths=[str(path) for path in saved.values()],
@@ -333,12 +366,66 @@ def describe_timeline(task_id, version_id, *, project, log_root, task=None):
     return dict(result,task_id=task_id,version_id=version_id)
 
 
-def latest(*, project, log_root):
-    for path in sorted(Path(log_root).glob('*.meta.json'),reverse=True)[:250]:
+def _history_records(log_root):
+    logs = Path(log_root)
+    records = {}
+    paths = list((logs.parent/'generation_results').glob('*/history.json'))
+    paths.extend(path for path in logs.glob('*.meta.json')
+                 if any(f'_{kind}_' in path.name for kind in GENERATION_KINDS))
+    for path in paths:
         try:
-            record=json.loads(path.read_text(encoding='utf-8'))
-            if record.get('status')=='completed' and record.get('kind') in GENERATION_KINDS:
-                return describe(record['task_id'],project=project,log_root=log_root)
+            record = json.loads(path.read_text(encoding='utf-8'))
+            if record['status'] != 'completed' or record['kind'] not in GENERATION_KINDS:
+                continue
+            task_id = record['task_id']
+            if task_id not in records:
+                records[task_id] = (record.get('ended') or '', path.stat().st_mtime_ns, record)
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    return (record for _, _, record in sorted(records.values(), key=lambda item: item[:2], reverse=True))
+
+
+def history(*, project, log_root):
+    runs = []
+    for record in _history_records(log_root):
+        argv = record.get('argv') or []
+        result = record.get('result') or {}
+        archive = result.get('generation_archive')
+        try:
+            if archive is not None:
+                chart_count = sum(_path(chart['path'], project).is_file() for chart in archive['charts'])
+                if not chart_count:
+                    continue
+            else:
+                # Legacy shared outputs may now belong to another run.
+                if result.get('generation_archive_error'):
+                    continue
+                output = _argument(argv, '--batch-manifest') or _argument(argv, '--output')
+                if not output:
+                    continue
+                modified = _path(output, project).stat().st_mtime
+                start = datetime.fromisoformat(record['started']).timestamp() if record.get('started') else None
+                end = datetime.fromisoformat(record['ended']).timestamp() if record.get('ended') else None
+                if (start is not None and modified < start) or (end is not None and modified > end + 1):
+                    continue
+                chart_count = None
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+        audio = Path(_argument(argv, '--audio') or '').stem
+        audio = re.sub(r'^[0-9a-f]{12}_', '', audio)
+        title = (archive or {}).get('title')
+        if not title or title == 'Generated maimai chart':
+            title = audio or '生成谱面'
+        runs.append(dict(task_id=record['task_id'], kind=record['kind'], ended=record.get('ended'),
+                         title=title, chart_count=chart_count, seed=_argument(argv, '--seed'),
+                         level=_argument(argv, '--level')))
+    return runs
+
+
+def latest(*, project, log_root):
+    for record in _history_records(log_root):
+        try:
+            return describe(record['task_id'],project=project,log_root=log_root,task=record)
         except (OSError,ValueError,KeyError,TypeError):continue
     return None
 

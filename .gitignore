@@ -97,6 +97,8 @@ Desktop.ini
 /tests/
 /scripts/
 /notebooks/
+/tools/colab_*.py
+/tools/export_colab*.py
 /docs/handoffs/
 /docs/evidence/
 /docs/audits/

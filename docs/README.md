@@ -1,5 +1,10 @@
 # ChroMAI 使用说明导航
 
+- [Composer v2 架构、训练与连续事件生成](explanations/CHROMAI_COMPOSER_V2_ARCHITECTURE_AND_TIMING_ZH.md)
+- [ChroMAI 原理与技术（早期版本）](explanations/CHROMAI_PRINCIPLES_AND_TECHNOLOGY_ZH.md)
+- [ChroMAI 与 Gemai 的设计对照](explanations/CHROMAI_GEMAI_DESIGN_COMPARISON_ZH.md)
+
+
 **ChroMAI** 的当前主路线为 **Composer v2（`chart_composer_v2`）**：基于连续事件序列（`continuous_events_v1`）、75 Hz MERT 音乐特征与原生 100 Hz 频谱缓存、支持拍内声学起音参考与自动变速校准的 maimai DX 谱面生成与训练系统。
 
 ## 用户指南与参数手册

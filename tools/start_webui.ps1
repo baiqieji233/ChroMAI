@@ -72,6 +72,7 @@ function Read-Probe([string] $Executable, [string] $Arguments) {
     $process.StartInfo.CreateNoWindow = $true
     $process.StartInfo.RedirectStandardOutput = $true
     $process.StartInfo.RedirectStandardError = $true
+    $process.StartInfo.EnvironmentVariables["PYTHON_MANAGER_AUTOMATIC_INSTALL"] = "false"
     try {
         [void]$process.Start()
         $stdout = $process.StandardOutput.ReadToEndAsync()
@@ -90,9 +91,9 @@ function Read-Probe([string] $Executable, [string] $Arguments) {
 
 function Get-PythonInfo([string] $Executable) {
     if ($Executable -match '[\\/]WindowsApps[\\/]python[^\\/]*\.exe$') { return $null }
-    $command = '-I -S -c "import sys,struct; print(''%d.%d|%d|%s|%s|%s'' % (*sys.version_info[:2],struct.calcsize(''P'')*8,sys.implementation.name,sys.version_info.releaselevel,getattr(sys,''abiflags'','''')))"'
+    $command = '-I -S -c "import sys,struct,sysconfig; print(''%d.%d|%d|%s|%s|%s|%s'' % (*sys.version_info[:2],struct.calcsize(''P'')*8,sys.implementation.name,sys.version_info.releaselevel,getattr(sys,''abiflags'',''''),sysconfig.get_platform()))"'
     $output = Read-Probe $Executable $command
-    if ($output -and $output.Trim() -match '^(\d+\.\d+)\|(\d+)\|([^|]+)\|([^|]+)\|(.*)$') {
+    if ($output -and $output.Trim() -match '^(\d+\.\d+)\|(\d+)\|([^|]+)\|([^|]+)\|([^|]*)\|([^|]+)$') {
         return [pscustomobject]@{
             Path = $Executable
             Version = [version]$Matches[1]
@@ -100,6 +101,7 @@ function Get-PythonInfo([string] $Executable) {
             Implementation = $Matches[3]
             Release = $Matches[4]
             FreeThreaded = $Matches[5] -match 't'
+            Platform = $Matches[6]
         }
     }
 }
@@ -109,14 +111,11 @@ function Test-SupportedPython($Info) {
         $Info.Bits -eq 64 -and $Info.Implementation -eq "cpython" -and $Info.Release -eq "final" -and -not $Info.FreeThreaded)
 }
 
-function Get-AvailableBackupPath([string] $Path) {
-    $candidate = "$Path.invalid"
-    $suffix = 1
-    while (Test-Path -LiteralPath $candidate) {
-        $candidate = "$Path.invalid-$suffix"
-        $suffix++
-    }
-    return $candidate
+function Test-AutomaticPython($Info) {
+    # The Composer v2 Transformers pin resolves tokenizers 0.15.x.
+    # Its Windows x64 wheels stop at CPython 3.12.
+    return ((Test-SupportedPython $Info) -and $Info.Platform -eq "win-amd64" -and
+        $Info.Version -le [version]"3.12")
 }
 
 function Get-InstalledPythonPaths {
@@ -129,6 +128,10 @@ function Get-InstalledPythonPaths {
         Get-Command $name -CommandType Application -All -ErrorAction SilentlyContinue |
             ForEach-Object { $_.Source }
     }
+    if ($env:LOCALAPPDATA) {
+        Join-Path $env:LOCALAPPDATA "Programs\Python\Python312\python.exe"
+        Join-Path $env:LOCALAPPDATA "Python\pythoncore-3.12-64\python.exe"
+    }
     foreach ($key in "HKCU:\Software\Python\PythonCore", "HKLM:\Software\Python\PythonCore") {
         foreach ($versionKey in @(Get-ChildItem -LiteralPath $key -ErrorAction SilentlyContinue)) {
             $install = Get-Item -LiteralPath (Join-Path $versionKey.PSPath "InstallPath") -ErrorAction SilentlyContinue
@@ -139,6 +142,68 @@ function Get-InstalledPythonPaths {
             }
         }
     }
+}
+
+function Find-BootstrapPython {
+    Get-InstalledPythonPaths | Select-Object -Unique |
+        ForEach-Object { Get-PythonInfo $_ } | Where-Object { Test-AutomaticPython $_ } |
+        Sort-Object Version -Descending | Where-Object {
+            Read-Probe $_.Path '-I -c "import ensurepip,venv; print(ensurepip.version())"'
+        } | Select-Object -First 1
+}
+
+function Install-BootstrapPython {
+    $manager = Get-Command pymanager.exe -CommandType Application -ErrorAction SilentlyContinue
+    if ($manager) {
+        Write-Host "Installing Python 3.12 x64 with Python Install Manager..."
+        try {
+            & $manager.Source install "PythonCore/3.12-64" | Out-Host
+        } catch {
+            Write-Warning $_.Exception.Message
+        }
+        $installed = Find-BootstrapPython
+        if ($installed) { return $installed }
+        Write-Warning "Python Install Manager could not supply Python 3.12 x64. Trying the standalone installer."
+    }
+
+    $url = "https://www.python.org/ftp/python/3.12.10/python-3.12.10-amd64.exe"
+    $sha256 = "67B5635E80EA51072B87941312D00EC8927C4DB9BA18938F7AD2D27B328B95FB"
+    $installer = Join-Path ([IO.Path]::GetTempPath()) ("chromai-python-" + [guid]::NewGuid() + ".exe")
+    try {
+        Write-Host "Downloading Python 3.12.10 x64 from python.org..."
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $installer -TimeoutSec 180
+        if ((Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash -ne $sha256) {
+            Fail "Python installer checksum verification failed. No installer was run."
+        }
+        Write-Host "Installing Python 3.12 for the current Windows user..."
+        $process = Start-Process -FilePath $installer -ArgumentList @(
+            "/quiet", "InstallAllUsers=0", "PrependPath=0", "Include_launcher=0",
+            "Include_test=0", "Include_pip=1", "Shortcuts=0", "AssociateFiles=0"
+        ) -WindowStyle Hidden -Wait -PassThru
+        $installed = Find-BootstrapPython
+        if ($installed) { return $installed }
+        Fail "Python 3.12 was unavailable after setup (installer exit code $($process.ExitCode)). Check Windows installation restrictions and https://www.python.org/downloads/windows/."
+    } catch {
+        Fail "Could not set up Python 3.12. Check internet/proxy access and Windows installation permissions. $($_.Exception.Message)"
+    } finally {
+        Remove-Item -LiteralPath $installer -ErrorAction SilentlyContinue
+    }
+}
+
+$LaunchStage = "startup lock"
+# Serialize environment creation and pip repair for simultaneous double-clicks.
+$hasher = [Security.Cryptography.SHA256]::Create()
+try {
+    $rootHash = [BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes($ProjectRoot.ToUpperInvariant())))
+} finally { $hasher.Dispose() }
+$startupLock = New-Object System.Threading.Mutex($false, "Local\ChroMAI-$rootHash")
+try {
+    $lockAcquired = $startupLock.WaitOne(0)
+} catch [System.Threading.AbandonedMutexException] {
+    $lockAcquired = $true
+}
+if (-not $lockAcquired) {
+    Fail "ChroMAI is already preparing this project. Wait for that window to finish."
 }
 
 $LaunchStage = "Python discovery"
@@ -173,28 +238,42 @@ if ($overridePython) {
     $existingVenvInfo = $null
     if (Test-Path -LiteralPath $venvPython) {
         $existingVenvInfo = Get-PythonInfo $venvPython
-        if (Test-SupportedPython $existingVenvInfo) {
+        if ((Test-AutomaticPython $existingVenvInfo) -or
+            ($configuredVenv -and (Test-SupportedPython $existingVenvInfo))) {
             $Python = $venvPython
-        } else {
-            Write-Warning "Ignoring incompatible Python environment '$venvRoot'. $SupportedPythonRange is required."
         }
     }
 
-    $bootstrapPython = $null
+    if (-not $Python -and -not $configuredVenv) {
+        $alternateRoot = Join-Path $ProjectRoot ".venv312"
+        $alternate = $alternateRoot
+        $suffix = 1
+        while (Test-Path -LiteralPath $alternate) {
+            $venvPython = Join-Path $alternate "Scripts\python.exe"
+            if (Test-AutomaticPython (Get-PythonInfo $venvPython)) {
+                $Python = $venvPython
+                break
+            }
+            $alternate = "$alternateRoot-$suffix"
+            $suffix++
+        }
+        if (Test-Path -LiteralPath $venvRoot) {
+            Write-Host "Preserving existing environment: $venvRoot"
+            $venvRoot = $alternate
+        }
+    }
+
     if (-not $Python) {
         if ($configuredVenv -and (Test-Path -LiteralPath $venvRoot)) {
             Fail "Configured environment '$venvRoot' is incomplete or incompatible. Set MAICHART_VENV to a new directory or select another interpreter with MAICHART_PYTHON."
         }
-        $found = @(Get-InstalledPythonPaths | Where-Object { $_ } | Select-Object -Unique |
-            ForEach-Object { Get-PythonInfo $_ } | Where-Object { $_ })
-        $preferred = "3.12", "3.11", "3.13", "3.10", "3.14", "3.15"
-        $selected = $found | Where-Object { Test-SupportedPython $_ } |
-            Sort-Object { [Array]::IndexOf($preferred, $_.Version.ToString(2)) } | Select-Object -First 1
+        $selected = Find-BootstrapPython
         if (-not $selected) {
-            foreach ($info in $found) {
-                Write-Host "Found $($info.Implementation) $($info.Version), $($info.Bits)-bit, $($info.Release): $($info.Path)"
+            if ($CheckOnly -or $NoInstall) {
+                Fail "No compatible Python 3.10-3.12 x64 found. Launch normally to allow installation, or select an existing environment with MAICHART_PYTHON."
             }
-            Fail "No supported stable 64-bit Python found ($SupportedPythonRange). Install Python 3.12 from https://www.python.org/downloads/windows/ and launch again. If Python is already installed, put its full python.exe path in .webui-python or MAICHART_PYTHON."
+            $LaunchStage = "Python installation"
+            $selected = Install-BootstrapPython
         }
         $bootstrapPython = $selected.Path
 
@@ -202,19 +281,10 @@ if ($overridePython) {
             $Python = $bootstrapPython
         } else {
             $LaunchStage = "virtual environment setup"
-            if (Test-Path -LiteralPath $venvRoot) {
-                $oldEnvironment = Get-Item -LiteralPath $venvRoot -Force
-                if ($configuredVenv -or ($oldEnvironment.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
-                    Fail "'$venvRoot' is a configured directory or junction. Set MAICHART_VENV to a new directory."
-                }
-                $backupVenv = Get-AvailableBackupPath (Join-Path $ProjectRoot ".venv")
-                Write-Warning "Saving the incompatible environment as '$backupVenv'."
-                Rename-Item -LiteralPath $oldEnvironment.FullName -NewName (Split-Path -Leaf $backupVenv)
-            }
             Write-Host "Creating virtual environment: $venvRoot"
             & $bootstrapPython -I -m venv $venvRoot
             if ($LASTEXITCODE -ne 0) { Fail "Could not create '$venvRoot'. Check disk space and folder permissions. A full Python installation must include venv and ensurepip." }
-            $Python = $venvPython
+            $Python = Join-Path $venvRoot "Scripts\python.exe"
         }
     }
 }
@@ -234,12 +304,26 @@ Remove-Item Env:PYTHONHOME -ErrorAction SilentlyContinue
 
 $LaunchStage = "dependency check"
 $DependencyArgs = @("--profile", "composer-v2")
+$autoCuda = $false
 if ($Cpu) { $env:CUDA_VISIBLE_DEVICES = "-1" }
 elseif ($Cuda) { $DependencyArgs += "--require-cuda" }
-else { $DependencyArgs += "--auto-device" }
+elseif ($env:CUDA_VISIBLE_DEVICES -notin @("", "-1") -and
+    (Get-Command nvidia-smi.exe -CommandType Application -ErrorAction SilentlyContinue)) {
+    $autoCuda = $true
+    $DependencyArgs += "--auto-device"
+}
 Push-Location $ProjectRoot
 try {
     & $Python -m maichart.webui.startup_check @DependencyArgs
+    if ($LASTEXITCODE -ne 0 -and $autoCuda) {
+        # Reuse a working CPU environment after an unavailable CUDA setup.
+        & $Python -m maichart.webui.startup_check --profile composer-v2
+        if ($LASTEXITCODE -eq 0) {
+            Write-Warning "CUDA is unavailable in this environment. Continuing on CPU. Use --cuda to request CUDA setup."
+            $Cpu = $true
+            $env:CUDA_VISIBLE_DEVICES = "-1"
+        }
+    }
     if ($LASTEXITCODE -ne 0) {
         if ($CheckOnly -or $NoInstall) {
             Fail "Dependencies or device checks failed. See the details above. Rerun without --check/--no-install to allow repair."
@@ -247,10 +331,21 @@ try {
         $LaunchStage = "dependency installation"
         & $Python -m pip --version
         if ($LASTEXITCODE -ne 0) {
-            Fail "pip is missing from '$Python'. Run that interpreter with -m ensurepip --upgrade or use a full Python installation."
+            Write-Host "Restoring pip in the selected Python environment..."
+            & $Python -m ensurepip --upgrade
+            if ($LASTEXITCODE -ne 0) { Fail "Could not restore pip in '$Python'. Check the error above or select a full Python installation." }
         }
         & $Python -m maichart.webui.startup_check @DependencyArgs --install
-        if ($LASTEXITCODE -ne 0) { Fail "See the first error above. For download errors, check the network or proxy. For unavailable wheels, try 64-bit Python 3.12. START_WEBUI.bat --cpu can run without CUDA." }
+        if ($LASTEXITCODE -ne 0 -and $autoCuda) {
+            Write-Warning "Automatic device setup failed. Checking whether startup can continue on CPU."
+            $Cpu = $true
+            $env:CUDA_VISIBLE_DEVICES = "-1"
+            & $Python -m maichart.webui.startup_check --profile composer-v2
+            if ($LASTEXITCODE -ne 0) {
+                & $Python -m maichart.webui.startup_check --profile composer-v2 --install
+            }
+        }
+        if ($LASTEXITCODE -ne 0) { Fail "See the first error above. For download errors, check the network or proxy. For unavailable wheels, use 64-bit Python 3.12." }
     }
 } finally { Pop-Location }
 
@@ -265,6 +360,8 @@ if ($Cpu) {
 $LaunchStage = "MiaCode reference check"
 & $Python -c "from maichart.generation.miacode_native import ensure_available; ensure_available(); print('MiaCode Python judge: ready (no DLL or Qt required)')"
 if ($LASTEXITCODE -ne 0) { Fail "MiaCode Python judge/reference data failed verification. Restore the project package; no native build is required." }
+$startupLock.ReleaseMutex()
+$startupLock.Dispose()
 if ($CheckOnly) {
     Write-Host "Environment check passed. WebUI was not started."
     exit 0

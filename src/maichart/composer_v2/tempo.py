@@ -156,7 +156,9 @@ def _detect(path, cache_dir, device):
             return beats, dict(report, cache_hit=False, fallback_reasons=failures)
         except (ImportError, OSError, RuntimeError, ValueError) as exc:
             failures.append(identity['name'] + ': ' + type(exc).__name__ + ': ' + str(exc))
-    raise ValueError('Automatic timing detection failed; specify BPM and first explicitly. ' + '; '.join(failures))
+            if identity is acoustic and isinstance(exc, ImportError):
+                failures.append('请关闭 WebUI，重新双击 START_WEBUI.bat 检查并修复音频依赖。')
+    raise ValueError('无法自动识别 BPM 或首拍偏移。已知两者时，可同时手动填写。' + ' '.join(failures))
 
 
 def _global_fit(beats):
