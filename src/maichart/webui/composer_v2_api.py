@@ -9,12 +9,14 @@ import os
 from datetime import datetime, timezone
 from pathlib import Path
 from maichart.portable_paths import material_path
+from maichart.composer_v2 import spatial_policy
 from .composer_api import _path, _int, _float, _arg
 
 FAMILY = "chart_composer_v2"
 SCHEMA = "maichart-composer-v2-checkpoint-v1"
 API_CONTRACT = "composer_v2_continuous_events_v3"
 from maichart.composer_v2.defaults import (
+    DEFAULT_TEMPO_DETECTION, TEMPO_DETECTION_CHOICES,
     EVALUATION_DEFAULTS, FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES,
     FUTURE_CONFIGURATION_WEIGHT, GENERATION_DEFAULTS, MAX_BATCH_COUNT,
     MUSICAL_CONTEXT_CHOICES, MUSICAL_CONTEXT_PROBABILITY, MUSICAL_RELATION_CHOICES,
@@ -222,6 +224,8 @@ def _estimate_model(payload, mode, scope):
             onset_readout_policy=resolve_onset(payload.get("onset_readout", "auto"), saved)[0],
             intensity_policy=resolve_intensity(payload.get("intensity_curve", "auto"), saved)[0],
             future_configuration_policy=future_policy,
+            spatial_policy=spatial_policy.resolve(payload.get('spatial_policy','auto'), saved=saved,
+                resume=False, sequence=config.sequence_policy, writing=future_policy),
             future_configuration_weight=future_weight,
         )
 
@@ -425,6 +429,9 @@ def start_train(handler,payload,*,runtime):
         FUTURE_CONFIGURATION_WEIGHT, sequence_policy=sequence_policy,
         saved_config=fixed if parent else None, resume=mode == "resume")
     scope_requested = _choice(payload, "finetune_scope", "auto", FINETUNE_SCOPE_CHOICES)
+    spatial_requested = _choice(payload, 'spatial_policy', 'auto', spatial_policy.CHOICES)
+    spatial = spatial_policy.resolve(spatial_requested, saved=fixed if parent else None,
+                                     resume=mode=='resume', sequence=sequence_policy, writing=future_policy)
     scope = resolve_finetune_scope(scope_requested, parent_contract, resume=mode == "resume",
                                    initialized=mode == "finetune")
     if scope == "music_reading" and sequence_policy != "continuous_events_v1":
@@ -447,10 +454,11 @@ def start_train(handler,payload,*,runtime):
     _arg(args, "--musical-relation-fraction", relation_fraction)
     _arg(args, "--future-configuration-policy", future_requested)
     _arg(args, "--future-configuration-weight", future_weight)
+    _arg(args, "--spatial-policy", spatial)
     _arg(args, "--finetune-scope", scope_requested)
     settings.update(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
                     future_configuration_policy=future_policy, future_configuration_weight=future_weight,
-                    finetune_scope=scope)
+                    spatial_policy=spatial, finetune_scope=scope)
     from maichart.composer_v2.difficulty import (
         DIFFICULTY_SLOTS, FITTED_SOURCES, LEGACY_DIFFICULTY_SLOTS, locate_scorer, resolve_selection, scorer_path_key,
     )
@@ -718,7 +726,7 @@ def start_generate(handler,payload,*,runtime):
     settings['exhaustion_policy']=_choice(payload,'exhaustion_policy','auto',{'auto','report','stop','downgrade_or_skip'})
     if checked.get('sequence_policy')=='window_v1' and settings['exhaustion_policy'] in {'report','downgrade_or_skip'}:
         raise ValueError('旧窗口模型仅支持 auto 或 stop 耗尽策略')
-    settings['tempo_detection']=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'})
+    settings['tempo_detection']=_choice(payload,'tempo_detection',DEFAULT_TEMPO_DETECTION,TEMPO_DETECTION_CHOICES)
     settings['tempo_octave_policy']=_choice(payload,'tempo_octave_policy',GENERATION_DEFAULTS['tempo_octave_policy'],{'off','maimai_pulse_v1'})
     settings['downbeat_alignment']=_choice(payload,'downbeat_alignment',GENERATION_DEFAULTS['downbeat_alignment'],{'off','bar_downbeat_v1'})
     for key in ('tempo_detection','tempo_octave_policy','downbeat_alignment'):
@@ -929,7 +937,7 @@ def start_curve(handler,payload,*,runtime):
     settings={'checkpoint':str(checkpoint),'audio':str(audio),'output':str(output)}
     settings.update(cache_dir=str(_path(payload.get('cache_dir') or 'cache/chart_composer_v2','cache_dir')),
         device=_choice(payload,'device','auto',{'auto','cuda','cpu'}),
-        tempo_detection=_choice(payload,'tempo_detection','auto',{'auto','constant','legacy'}),
+        tempo_detection=_choice(payload,'tempo_detection',DEFAULT_TEMPO_DETECTION,TEMPO_DETECTION_CHOICES),
         tempo_octave_policy=_choice(payload,'tempo_octave_policy',GENERATION_DEFAULTS['tempo_octave_policy'],{'off','maimai_pulse_v1'}),
         downbeat_alignment=_choice(payload,'downbeat_alignment',GENERATION_DEFAULTS['downbeat_alignment'],{'off','bar_downbeat_v1'}),
         cpu_threads=_integer(payload,'cpu_threads',GENERATION_DEFAULTS['cpu_threads'],minimum=0),level=_float(payload,'level',13.,minimum=1))

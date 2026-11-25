@@ -9,6 +9,7 @@ import tempfile
 import time
 import torch
 from .codec import ComponentCodec
+from . import spatial_policy
 from .conditions import LEVEL_ONLY,RADAR_STYLE,condition_contract,policy_from_config
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, configuration_view_fraction,
@@ -90,6 +91,14 @@ def inspect_payload(payload):
     relation_policy = saved_training.get('musical_relation_policy', 'off')
     relation_fraction = saved_training.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION)
     future_policy = model_fields.get('future_configuration_policy', 'off')
+    spatial = model_fields.get('spatial_policy', 'off')
+    try:
+        spatial_policy.resolve(spatial, saved=None, resume=False,
+                               sequence=model_fields.get('sequence_policy'), writing=future_policy)
+        if spatial == 'auto' or (isinstance(training,dict) and saved_training.get('spatial_policy','off') != spatial):
+            errors.append('盘面几何训练合同与模型不一致')
+    except ValueError as exc:
+        errors.append(str(exc))
     future_weight = model_fields.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT)
     future_train_view_fraction = configuration_view_fraction(future_policy)
     scope = saved_training.get('finetune_scope', 'all')
@@ -176,6 +185,7 @@ def inspect_payload(payload):
         vocab_size=len(tokens) if not errors else None,
         training_contract=payload.get("training_contract") or {},
         training_capabilities=dict(musical_relation_policy=relation_policy, musical_relation_fraction=relation_fraction,
+            spatial_policy=spatial,
             future_configuration_policy=future_policy, future_configuration_weight=future_weight,
             future_configuration_train_view_fraction=future_train_view_fraction, finetune_scope=scope),
         parameter_audit=payload.get('parameter_audit') or {},

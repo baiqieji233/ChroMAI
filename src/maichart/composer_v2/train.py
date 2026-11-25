@@ -20,7 +20,7 @@ from .codec import ComponentCodec
 from .data import (AUDIO_LOCAL_BATCH_ORDER, GLOBAL_BATCH_ORDER, ComposerV2Dataset,
                    collate_composer_v2, LengthBucketBatchSampler)
 from .conditions import LEVEL_ONLY,RADAR_STYLE,POLICIES,condition_contract,policy_from_config
-from . import chart_dialect, learning_rate, timing_recovery
+from . import chart_dialect, learning_rate, timing_recovery, spatial_policy
 from .defaults import AUDIO_WRITING_POLICIES
 from .defaults import (
     FINETUNE_SCOPE_CHOICES, FUTURE_CONFIGURATION_CHOICES, FUTURE_CONFIGURATION_POLICY, configuration_view_fraction,
@@ -79,11 +79,13 @@ def parser():
     result.add_argument('--musical-relation-fraction', type=float,
                         help=f'Maximum relative training supervision on musical relationship views (default {MUSICAL_RELATION_FRACTION})')
     result.add_argument('--future-configuration-policy', choices=FUTURE_CONFIGURATION_CHOICES, default='auto',
-                        help=f'Auto uses {FUTURE_CONFIGURATION_POLICY} for fresh training and continuous-event fine-tuning; exact resume inherits the checkpoint')
+                        help=f'Auto uses {FUTURE_CONFIGURATION_POLICY} for fresh continuous models, retains supported motion-writing heads on finetune, and inherits the checkpoint on resume')
     result.add_argument('--future-configuration-weight', type=float,
                         help=f'Weight of the ordered future chart objective (default {FUTURE_CONFIGURATION_WEIGHT})')
     result.add_argument('--finetune-scope', choices=FINETUNE_SCOPE_CHOICES, default='auto',
                         help='Train all parameters or only music-reading parameters of an initialized checkpoint')
+    result.add_argument('--spatial-policy', choices=spatial_policy.CHOICES, default='auto',
+                        help='Auto inherits the checkpoint; opt in on a separate fine-tune or fresh run.')
     result.add_argument('--sequence-policy',choices=('window_v1','continuous_events_v1'),default=None)
     result.add_argument('--refresh-events',type=int,default=16)
     result.add_argument('--training-window-events', type=int,
@@ -132,7 +134,8 @@ def configure_trainable_parameters(model, scope):
         decoder_reading = (len(path) >= 4 and path[0] == 'decoder'
                            and (path[2] in ('local_attention', 'song_attention') or
                                 path[2] == 'norms' and path[3] in ('1', '2')))
-        music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head', 'local_writing')
+        music_projection = path[0] in ('paired_music', 'entry_preview', 'future_configuration_head', 'local_writing',
+                                       'spatial_history')
         trainable = scope == 'all' or decoder_reading or music_projection
         parameter.requires_grad_(trainable)
         if trainable:
@@ -341,6 +344,7 @@ def _validate(model,loader,device,precision,maximum):
     model.validation_curve_loss=None
     model.validation_curve_mae=None
     model.validation_future_configuration_loss=None
+    model.validation_slide_geometry_loss=None
     model.validation_coverage=getattr(loader,'validation_coverage',None)
     if loader is None:return None
     phase_numerator=torch.zeros((),device=device);phase_mass_sum=0.
@@ -351,6 +355,8 @@ def _validate(model,loader,device,precision,maximum):
     finite=torch.ones((),device=device,dtype=torch.bool)
     curve_numerator=torch.zeros((),device=device)
     future_configuration_numerator=torch.zeros((),device=device)
+    geometry_numerator=0.
+    geometry_rows=0
     curve_error=torch.zeros(2,device=device);curve_exposure=torch.zeros(2,device=device)
     with torch.inference_mode():
         for index,batch in _batches(loader):
@@ -371,6 +377,9 @@ def _validate(model,loader,device,precision,maximum):
             curve_numerator+=metrics['curve_loss']*max(1.,mass)
             if model.config.future_configuration_policy != 'off':
                 future_configuration_numerator+=metrics['future_configuration_loss']*max(1.,mass)
+            if 'slide_geometry_loss' in metrics:
+                geometry_numerator+=metrics['slide_geometry_loss']*max(1.,mass)
+                geometry_rows+=batch['slide_geometry_positions'].numel()
             if hasattr(model,'intensity'):
                 widths=batch['curve_widths'].float()
                 # Rate MAE is independent of token CE and measured in real units.
@@ -391,6 +400,8 @@ def _validate(model,loader,device,precision,maximum):
                                         if nonphase_mass>0 else None)
     if model.config.future_configuration_policy != 'off' and model.config.future_configuration_weight > 0:
         model.validation_future_configuration_loss=float(future_configuration_numerator)/max(1.,mass_sum)
+    if geometry_rows:
+        model.validation_slide_geometry_loss=float(geometry_numerator)/mass_sum
     if hasattr(model,'intensity'):
         model.validation_curve_loss=float(curve_numerator)/max(1.,mass_sum)
         values=(curve_error/curve_exposure.clamp_min(1e-6)).cpu().tolist()
@@ -533,6 +544,11 @@ def train(args):
         sequence_policy=args.sequence_policy, saved_config=parent_model, resume=bool(args.resume))
     args.finetune_scope = resolve_finetune_scope(getattr(args, 'finetune_scope', 'auto'), parent_contract,
                                                 resume=bool(args.resume), initialized=bool(args.init_checkpoint))
+    args.spatial_policy = spatial_policy.resolve(
+        getattr(args, 'spatial_policy', 'auto'), saved=parent_model, resume=bool(args.resume),
+        sequence=args.sequence_policy, writing=args.future_configuration_policy)
+    previous_spatial = parent_model.get('spatial_policy', 'off')
+    spatial_migration = bool(parent and previous_spatial != args.spatial_policy)
     if args.finetune_scope == 'music_reading' and args.sequence_policy != 'continuous_events_v1':
         raise ValueError('Music-reading fine-tuning requires continuous event training')
     future_migration = bool(parent and args.future_configuration_policy !=
@@ -541,7 +557,7 @@ def train(args):
         args.musical_relation_policy != parent_contract.get('musical_relation_policy', 'off') or
         args.musical_relation_fraction != parent_contract.get('musical_relation_fraction', MUSICAL_RELATION_FRACTION) or
         args.future_configuration_weight != parent_model.get('future_configuration_weight', FUTURE_CONFIGURATION_WEIGHT) or
-        future_migration or args.finetune_scope != 'all' or
+        spatial_migration or future_migration or args.finetune_scope != 'all' or
         args.finetune_scope != parent_contract.get('finetune_scope', 'all')))
     if learning_contract_changed and (directory == source_directory or any(path.exists() for path in artifacts)):
         raise ValueError('Changing musical relation, ordered future, or fine-tuning scope requires a new checkpoint directory')
@@ -663,7 +679,7 @@ def train(args):
     audio_block_migration = bool(parent and args.local_audio_block_beats != inherited_audio_block)
     if audio_block_migration and (args.resume or directory == source_directory or any(p.exists() for p in artifacts)):
         raise ValueError('Changing local audio sharing requires init-checkpoint in a new directory')
-    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight")})
+    config=ComposerV2Config.from_dict({key:getattr(args,key) for key in ("d_model","layers","nhead","dim_feedforward","dropout","window_beats","history_beats","future_beats","ticks_per_beat","max_tokens","audio_backend","mert_model","condition_policy","sequence_policy","refresh_events","onset_readout_policy","structure_policy","intensity_policy","audio_layers","song_layers","music_context_policy","local_audio_block_beats","attention_normalization","future_configuration_policy","future_configuration_weight","spatial_policy")})
     parent_config = ComposerV2Config.from_dict(parent.get('model_config') or parent.get('config')).to_dict() if parent else None
     comparable_config = dict(config.to_dict())
     if migration: comparable_config['condition_policy'] = parent_policy
@@ -675,6 +691,7 @@ def train(args):
     if audio_block_migration:
         comparable_config['local_audio_block_beats'] = inherited_audio_block
     if args.init_checkpoint:
+        comparable_config['spatial_policy'] = previous_spatial
         comparable_config['future_configuration_policy'] = parent_config['future_configuration_policy']
         comparable_config['future_configuration_weight'] = parent_config['future_configuration_weight']
     if parent and comparable_config != parent_config:
@@ -707,6 +724,8 @@ def train(args):
                        future_configuration_policy=args.future_configuration_policy,
                        reviewed_reference_policy=reviewed_ref,zero_unmarked_policy=zero_unmarked_policy,
                        reference_quality_policy=reference_quality_policy)
+        if args.spatial_policy != 'off':
+            options['spatial_policy'] = args.spatial_policy
     train_options=dict(options)
     if args.sequence_policy=='continuous_events_v1':
         train_options.update(reference_augmentation=True, training_window_events=args.training_window_events,
@@ -808,6 +827,8 @@ def train(args):
                         future_configuration_train_view_fraction=configuration_view_fraction(args.future_configuration_policy))
     if args.finetune_scope != 'all':
         contract['finetune_scope'] = args.finetune_scope
+    if args.spatial_policy != 'off':
+        contract['spatial_policy'] = args.spatial_policy
     if reviewed_ref!='off':contract['reviewed_reference_policy']=reviewed_ref
     if args.sequence_policy=='continuous_events_v1' and (not args.resume or 'zero_unmarked_policy' in parent_contract):
         contract['zero_unmarked_policy']=zero_unmarked_policy
@@ -838,7 +859,7 @@ def train(args):
         parent_state = parent['model_state_dict']
         if vocabulary_changed:
             parent_state = _extend_vocabulary_state(model, parent_state, parent_vocab_size)
-        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration:
+        if migration or onset_migration or structure_migration or curve_migration or music_migration or depth_migration or future_migration or spatial_migration:
             expected_missing = {'condition_missing.weight'} if migration else set()
             if music_migration:
                 expected_missing.update(k for k in model.state_dict() if k not in parent_state and
@@ -864,9 +885,16 @@ def train(args):
                     expected_missing.update(k for k in model.state_dict() if k.startswith('intensity.'))
                 else:parent_state={k:v for k,v in parent_state.items() if not k.startswith('intensity.')}
             if future_migration:
-                from .local_writing import migrate_state
+                from .local_writing import migrate_state, validate_migration_source
+                if args.spatial_policy != 'off':
+                    with torch.device('meta'):
+                        validate_migration_source(ComposerV2(ComposerV2Config.from_dict(parent_config), codec), parent_state)
                 parent_state, writing_missing = migrate_state(model, parent_state)
                 expected_missing.update(writing_missing)
+            if spatial_migration:
+                parent_state, spatial_missing = spatial_policy.migrate_parameters(
+                    model, parent_state, previous_spatial, config.spatial_policy)
+                expected_missing.update(spatial_missing)
             loaded = model.load_state_dict(parent_state, strict=False)
             if set(loaded.missing_keys) != expected_missing or loaded.unexpected_keys:
                 raise ValueError('Unexpected state keys during explicit migration: ' + str(loaded))
@@ -875,6 +903,8 @@ def train(args):
                 onset_readout_policy=args.onset_readout_policy,structure_policy=args.structure_policy,intensity_policy=args.intensity_policy,
                 music_context_policy=args.music_context_policy,audio_layers=config.audio_layers,song_layers=config.song_layers,
                 future_configuration_policy=args.future_configuration_policy,
+                **({'previous_spatial_policy': previous_spatial, 'spatial_policy': config.spatial_policy}
+                   if spatial_migration else {}),
                 zero_initialization=not future_migration or args.future_configuration_policy in ('off',*AUDIO_WRITING_POLICIES))
         else:
             model.load_state_dict(parent_state,strict=True)
@@ -975,6 +1005,7 @@ def train(args):
          musical_relation_fraction=args.musical_relation_fraction,
          future_configuration=dataset.audit.get('future_configuration'),
          future_configuration_policy=args.future_configuration_policy,
+         spatial_policy=args.spatial_policy,
          future_configuration_weight=args.future_configuration_weight,
          future_configuration_train_view_fraction=configuration_view_fraction(args.future_configuration_policy),
          training_window_events=args.training_window_events,
@@ -987,10 +1018,11 @@ def train(args):
     model.train();optimizer.zero_grad(set_to_none=True)
     began=time.perf_counter();previous=began;data_sec=0.;compute_sec=0.;seen_samples=0;seen_tokens=0
     input_tokens=0;input_slots=0
-    running=torch.zeros(8,device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
+    has_geometry = args.spatial_policy != 'off'
+    running=torch.zeros(8+int(has_geometry),device=device);running_time_mass=0.;running_component_mass=0.;running_phase_mass=0.
     replay_keys=0
     gesture_pairs_seen=0
-    group_metrics=torch.zeros(7,device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
+    group_metrics=torch.zeros(7+int(has_geometry),device=device);group_finite=torch.ones((),device=device,dtype=torch.bool)
     group_mass=0.;group_time_mass=0.;group_component_mass=0.;group_phase_mass=0.;group_relation_mass=0.;stop=False
     time_tokens=model.time_tokens.detach().cpu();phase_tokens=model.phase_targets.detach().cpu()
     if device.type=="cuda":torch.cuda.reset_peak_memory_stats(device)
@@ -1025,9 +1057,11 @@ def train(args):
                 replay_keys+=len(batch['layout_replay']['coordinates'])
                 running[7]+=metrics['layout_replay_changed']
             group_finite=group_finite&torch.isfinite(loss.detach())&cpu_valid
-            group_metrics+=torch.stack((metrics['token_loss']*budget,
+            group_metrics[:7]+=torch.stack((metrics['token_loss']*budget,
                 metrics["time_loss"]*max(1.,time_mass),metrics["component_loss"]*max(1.,component_mass),metrics["phase_loss"]*max(1.,phase_mass),
                 metrics['curve_loss']*budget,loss.detach()*budget,metrics['future_configuration_loss']*budget))
+            if has_geometry and 'slide_geometry_loss' in metrics:
+                group_metrics[7] += metrics['slide_geometry_loss'] * budget
             group_mass+=mass if cpu_valid else 0.
             group_time_mass+=time_mass if cpu_valid else 0.
             group_component_mass+=component_mass if cpu_valid else 0.
@@ -1048,7 +1082,9 @@ def train(args):
                 if finite:
                     scaler.step(optimizer);state["optimizer_steps"]+=1
                     epoch_loss_gpu+=group_metrics[0];epoch_mass+=group_mass
-                    running[:7]+=group_metrics;running_mass+=group_mass
+                    running[:7]+=group_metrics[:7];running_mass+=group_mass
+                    if has_geometry:
+                        running[8] += group_metrics[7]
                     running_relation_mass+=group_relation_mass
                     running_time_mass+=group_time_mass;running_component_mass+=group_component_mass;running_phase_mass+=group_phase_mass
                 else:emit("progress",stage="nonfinite_update_skipped",epoch=epoch,batch=batch_index+1,optimizer_steps=state["optimizer_steps"])
@@ -1073,6 +1109,7 @@ def train(args):
                     loss_scope="run_quality_weighted_token_mean",
                     curve_loss=values[4]/max(1.,running_mass),objective_loss=values[5]/max(1.,running_mass),
                     future_configuration_loss=values[6]/max(1.,running_mass),
+                    **({'slide_geometry_loss':values[8]/max(1.,running_mass)} if has_geometry else {}),
                     layout_replay_keys=replay_keys,layout_replay_changed=int(values[7]),
                     gesture_pairs_seen=gesture_pairs_seen,
                     token_count=seen_tokens,
@@ -1105,6 +1142,7 @@ def train(args):
                          validation_phase_loss=model.validation_phase_loss,
                          validation_curve_loss=model.validation_curve_loss,
                          validation_future_configuration_loss=model.validation_future_configuration_loss,
+                         **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss} if has_geometry else {}),
                          validation_coverage=validation_coverage,improved=improved,
                          validation_sec=time.perf_counter()-validation_started,loss_scope='fixed_holdout')
                 checkpoint(improved)
@@ -1136,6 +1174,7 @@ def train(args):
                 validation_curve_loss=getattr(model,'validation_curve_loss',None),
                 validation_curve_mae=getattr(model,'validation_curve_mae',None),
                 validation_future_configuration_loss=getattr(model,'validation_future_configuration_loss',None),
+                **({'validation_slide_geometry_loss': model.validation_slide_geometry_loss} if has_geometry else {}),
                 validation_coverage=validation_coverage,
                  validation_sec=validation_sec,
                 loss_scope="epoch_validation" if validation_loss is not None else "epoch_training",

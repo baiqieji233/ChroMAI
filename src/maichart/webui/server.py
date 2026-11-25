@@ -302,6 +302,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_recent_configuration_strength": True,
                                               "composer_v2_tail_guard": True,
                                               "composer_v2_variable_tempo": True,
+                                              "composer_v2_local_tempo": True,
                                               "composer_v2_exhaustion_policy": True,
                                               "composer_v2_memory_budgets": True,
                                               "composer_v2_activation_checkpointing": True,
@@ -309,6 +310,7 @@ class WebUIHandler(BaseHTTPRequestHandler):
                                               "composer_v2_reviewed_reference_policy": True,
                                               "composer_v2_phrase_rank_policy": True,
                                               "composer_v2_motion_writing": True,
+                                              "composer_v2_spatial_policy": True,
                                               "composer_v2_radar_style_guidance": True,
                                               "composer_v2_eos_suppression": True,
                                               "composer_v2_timing_calibration": True,
@@ -571,11 +573,12 @@ class WebUIHandler(BaseHTTPRequestHandler):
                 if _finish_if_cancelled(task):
                     return
                 if first is None:
+                    from maichart.composer_v2.defaults import DEFAULT_TEMPO_DETECTION
                     from maichart.composer_v2.tempo import resolve_timing
                     _,first,resolved_timing=resolve_timing(audio,
                         payload.get('cache_dir') or str(PROJECT_ROOT/'cache'/'chart_composer_v2'),
                         bpm=payload.get('bpm') or None,first=None,tempo_map=explicit_tempo_map,
-                        tempo_detection=payload.get('tempo_detection') or 'auto',device='cpu')
+                        tempo_detection=payload.get('tempo_detection') or DEFAULT_TEMPO_DETECTION,device='cpu')
                 if selected_source == "model":
                     if checkpoint_family == COMPOSER_MODEL_FAMILY:
                         from maichart.composer.curve import generate_learned_profile

@@ -4,6 +4,8 @@
 
 [Composer v2 架构说明：时间表示、训练与连续事件生成](docs/explanations/CHROMAI_COMPOSER_V2_ARCHITECTURE_AND_TIMING_ZH.md)
 
+[近期更新 · 盘面走势、Slide 轨迹与局部变速](docs/explanations/COMPOSER_V2_GEOMETRY_AND_TIMING_ZH.md)
+
 ---
 
 ## 一、 3 分钟快速上手（下载项目与模型后直接写谱）

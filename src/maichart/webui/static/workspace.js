@@ -59,7 +59,7 @@
       "ticks_per_beat", "max_tokens", "window_beats", "history_beats", "future_beats", "audio_backend");
     if (mode === "finetune") keys.push("audio_layers");
     if (mode !== "resume") keys.push("local_audio_block_beats", "music_context", "rhythm_structure", "onset_readout",
-      "intensity_curve", "future_configuration_policy", "future_configuration_weight");
+      "intensity_curve", "future_configuration_policy", "future_configuration_weight", "spatial_policy");
     return {mode, ...Object.fromEntries(keys.filter((key) => Object.hasOwn(settings, key)).map((key) => [key, settings[key]]))};
   }
 

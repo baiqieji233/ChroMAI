@@ -22,6 +22,7 @@ from .codec import ComponentCodec
 from .codec import render_atom
 from .data import ComposerV2Dataset, ComposerV2Song, collate_composer_v2, _beats_at_seconds
 from .conditions import resolve_generation_condition
+from .defaults import DEFAULT_TEMPO_DETECTION, TEMPO_DETECTION_CHOICES
 from .audio_metadata import resolve_chart_metadata, validate_difficulty
 
 
@@ -32,7 +33,7 @@ def parser():
     for name in ('checkpoint', 'audio', 'output'):
         result.add_argument('--' + name, required=True)
     result.add_argument('--cache-dir', default='cache/chart_composer_v2')
-    result.add_argument('--bpm', type=float, default=None, help='Omit for automatic tempo analysis (detects variable tempo when --tempo-detection=auto, or constant BPM when constant); manual --tempo-map overrides')
+    result.add_argument('--bpm', type=float, default=None, help='Omit to detect tempo changes automatically; use --tempo-map for an explicit clock')
     result.add_argument('--first', type=float, default=None, help='Omit to detect beat phase; explicit zero is preserved')
     result.add_argument('--level', type=float, default=13.)
     result.add_argument('--eos-suppression', action='store_true',
@@ -102,7 +103,7 @@ def parser():
     result.add_argument('--max-events', type=int, default=0)
     result.add_argument('--tempo-map', type=read_tempo_map_argument,
                         help='JSON tempo array, or @path to a JSON file optionally containing first and tempo_map')
-    result.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
+    result.add_argument('--tempo-detection', choices=TEMPO_DETECTION_CHOICES, default=DEFAULT_TEMPO_DETECTION)
     result.add_argument('--tempo-octave-policy', choices=('off','maimai_pulse_v1'), default=GENERATION_DEFAULTS['tempo_octave_policy'],
         help='Optional automatic BPM half/double calibration into [85, 255] BPM when BPM is automatic')
     result.add_argument('--downbeat-alignment', choices=('off','bar_downbeat_v1'), default=GENERATION_DEFAULTS['downbeat_alignment'],
@@ -648,7 +649,7 @@ def prepare_inputs(args,config,device,audio_store_override=None):
     audio_path=Path(args.audio).resolve()
     tempo,first,timing_report=resolve_timing(audio_path,args.cache_dir,bpm=args.bpm,
         first=args.first,tempo_map=getattr(args,'tempo_map',None),device='cpu',
-        tempo_detection=getattr(args,'tempo_detection','auto'),
+        tempo_detection=getattr(args,'tempo_detection',DEFAULT_TEMPO_DETECTION),
         tempo_octave_policy=getattr(args,'tempo_octave_policy','off'),
         downbeat_alignment=getattr(args,'downbeat_alignment','off'))
     store=audio_store_override if audio_store_override is not None else AudioFeatureStore(

@@ -35,7 +35,7 @@ class StreamDataset(ComposerV2Dataset):
                  local_audio_block_beats=1,training_window_events=None,
                  musical_context_policy='off',musical_context_probability=MUSICAL_CONTEXT_PROBABILITY,
                  musical_relation_policy='off', musical_relation_fraction=.3,
-                 future_configuration_policy='off', auxiliary_validation=False, **kwargs):
+                 future_configuration_policy='off', auxiliary_validation=False, spatial_policy='off', **kwargs):
         if type(local_audio_block_beats) is not int or local_audio_block_beats not in (1, 2):
             raise ValueError('local_audio_block_beats must be 1 or 2')
         if musical_context_policy not in musical_context.POLICIES:
@@ -50,6 +50,11 @@ class StreamDataset(ComposerV2Dataset):
             raise ValueError('musical_relation_fraction must be between 0 and 1 (exclusive)')
         if future_configuration_policy not in ('off', ordered_configuration.POLICY, *AUDIO_WRITING_POLICIES):
             raise ValueError('Unknown future configuration policy')
+        if spatial_policy != 'off':
+            from .spatial_policy import CHOICES
+            if spatial_policy not in CHOICES[2:] or future_configuration_policy not in MOTION_WRITING_POLICIES:
+                raise ValueError('Slide geometry requires a motion writing policy')
+        self.spatial_policy = spatial_policy
         self.musical_relation_policy = musical_relation_policy
         self.musical_relation_fraction = musical_relation_fraction
         self.future_configuration_policy = future_configuration_policy
@@ -145,6 +150,14 @@ class StreamDataset(ComposerV2Dataset):
                     self.audit['future_configuration'].update(dimension=len(MOTION_FIELDS)+len(GRID_FIELDS),
                         successor_fields=DECISION_FIELDS if future_configuration_policy==BOUNDARY_WRITING else (),
                         extra_grid_rows_per_window=2)
+        if spatial_policy != 'off':
+            from maichart.generation.muri.data import REFERENCE_COMMIT
+            from .slide_geometry import FIELDS
+            self._slide_geometry_kind_ids = tuple(sorted(self.codec.kind_ids))
+            self.audit['slide_geometry'] = dict(policy=spatial_policy, fields=FIELDS,
+                horizons=ordered_configuration.BEAT_INTERVALS, reference_commit=REFERENCE_COMMIT,
+                source='MiaCode_real_path_samples', eligible='isolated_single_segment_slide',
+                quality='reviewed_layout_through_slide_tail_and_horizon', timing_recovery=False)
         self.recovery_sources = {}
         self._recovery_seed_indices = {}
         self.training_epoch = 0
@@ -812,6 +825,9 @@ class StreamDataset(ComposerV2Dataset):
             from .phrase_decisions import add_decisions
             add_decisions(item,configuration,song,self.codec,begin,end,layout=layout)
         add_targets(item,configuration,song,self.future_configuration_policy,dataset=self,offset=offset)
+        if layout and getattr(self, 'spatial_policy', 'off') != 'off':
+            from .slide_geometry import add_targets as add_slide_geometry
+            add_slide_geometry(item, configuration, song, self._slide_geometry_kind_ids)
 
     def _prepare_reference(self,index):
         si,begin=self.windows[index];song=self.songs[si]

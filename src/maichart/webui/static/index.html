@@ -422,8 +422,9 @@
   <div class="settings-content"><div class="form-grid">
     <label class="field">音乐与写法联动学习<select id="v2TrainMusicalRelationPolicy"><option value="auto" selected>自动（新训练与连续模型微调启用，续训继承）</option><option value="musical_relations_v1">启用</option><option value="off">关闭</option></select><small>给原谱里随音乐延续、渐变、换写法和留白的片段额外练习权重。</small></label>
     <label class="field">乐句强化上限<input id="v2TrainMusicalRelationFraction" type="number" value="0.30" min="0" max="1" step="any" required><small>保留原有监督。0.30 表示强化增加的权重最多占总监督权重的 30%。填 0 至小于 1 的数。</small></label>
-    <label class="field">局部写法学习<select id="v2TrainFutureConfigurationPolicy"><option value="auto" selected>自动（新训练与微调用 v3，续训继承）</option><option value="audio_grid_v4">空拍与重音位置</option><option value="audio_writing_v4">乐句衔接与留白（实验）</option><option value="audio_writing_v3">动作走向与起手（v3）</option><option value="audio_writing_v2">音乐写法条件（v2 对照）</option><option value="ordered_future_v1">未来配置预判（旧版）</option><option value="off">关闭</option></select><small>先选「空拍与重音位置」测试取样修复。实验项额外学习实际落键后的出音间隔和动作。已有模型请选择微调及新输出目录。</small></label>
+    <label class="field">局部写法学习<select id="v2TrainFutureConfigurationPolicy"><option value="auto" selected>自动（新训练用 v3，已有 v3／v4 模型沿用原写法）</option><option value="audio_grid_v4">空拍与重音位置</option><option value="audio_writing_v4">乐句衔接与留白（实验）</option><option value="audio_writing_v3">动作走向与起手（v3）</option><option value="audio_writing_v2">音乐写法条件（v2 对照）</option><option value="ordered_future_v1">未来配置预判（旧版）</option><option value="off">关闭</option></select><small>先选「空拍与重音位置」测试取样修复。实验项额外学习实际落键后的出音间隔和动作。已有模型请选择微调及新输出目录。</small></label>
     <label class="field">写法学习权重<input id="v2TrainFutureConfigurationWeight" type="number" value="0.05" min="0" max="1" step="any" required><small>默认 0.05，控制真实谱面对写法预测的监督强度。生成时使用模型从音乐预测的结果。</small></label>
+    <label class="field">盘面走势学习（实验）<select id="v2TrainSpatialPolicy"><option value="auto" selected>自动（沿用检查点，新模型关闭）</option><option value="off">关闭</option><option value="slide_geometry_v1">仅学习 Slide 轨迹</option><option value="disk_geometry_v1">Slide 轨迹与前文走势</option></select><small>从已有模型试用时请选择微调和新输出目录。前文走势帮助模型根据刚写出的配置选择下一处外键。</small></label>
     <label class="field">微调范围<select id="v2TrainFinetuneScope" disabled><option value="auto" selected>自动（微调全部参数）</option><option value="all">全部参数</option><option value="music_reading">音乐读取连接</option></select><small>已有连续模型可用「音乐读取连接」集中调整解码器读取音乐的连接及预判分支。</small></label>
   </div></div>
 </details>
@@ -1316,7 +1317,7 @@
       <div class="v2-step-head"><span class="step">A</span><div><h4>节拍、变速与起点对准</h4><p>不知道歌曲 BPM 也没关系，留空即可自动测算；已知准确 BPM 可在下方 Step 03 填入。</p></div></div>
       <button type="button" class="small-button" data-focus-setting="v2ReferenceFile" id="v2ReferenceJump">从 maidata 导入 BPM 表</button>
       <div class="form-grid" id="v2AutomaticClockFields">
-        <label class="field">自动BPM分析<select id="v2GenerateTempoDetection"><option value="auto" selected>识别变速并校准全曲（推荐）</option><option value="constant">仅恒定BPM，校准全曲</option><option value="legacy">旧版恒速估计（对照）</option></select><small>下方「BPM」留空时生效：默认自动识别可靠变速段并校准全曲；确认整首歌不改速可选「仅恒定BPM，校准全曲」。</small></label>
+        <label class="field">自动BPM分析<select id="v2GenerateTempoDetection"><option value="auto_local" selected>全曲＋局部变速检测（默认）</option><option value="auto">仅全曲变速检测（原方案）</option><option value="constant">仅恒定BPM，校准全曲</option><option value="legacy">旧版恒速估计（对照）</option></select><small>全曲检测得到恒速时，默认再检查局部拍速变化。填写 BPM 可固定速度，导入 BPM 表可指定各段速度。</small></label>
         <label class="checkbox-field"><input id="v2GenerateAutoFirst" type="checkbox" checked><span>自动识别第一拍起点（首拍偏移）</span><small>推荐保持勾选；若你已经量好精确的 &amp;first 秒数，取消勾选后使用下方手动值。</small></label>
         <label class="field">半／倍速自动折算（可选）<select id="v2GenerateTempoOctavePolicy"><option value="off" selected>关闭（保持检测原速）</option><option value="maimai_pulse_v1">折算到常见舞萌拍速（85–255 BPM）</option></select><small>当自动测出的 BPM 变成一半（如 75）或翻倍（如 300）时可开启，自动折算回 85–255 常用区间。</small></label>
         <label class="field">小节强拍对准（可选）<select id="v2GenerateDownbeatAlignment"><option value="off" selected>关闭（保持首拍相位）</option><option value="bar_downbeat_v1">4 拍小节强拍对齐（保护前奏不丢音）</option></select><small>适合标准 4/4 拍流行或电音曲，让每小节第 1 拍对准重拍；3/4 等特殊拍号请保持关闭。</small></label>
@@ -2174,11 +2175,11 @@
   </main>
   <script src="/workspace_logs.js"></script>
   <script src="/chart_preview.js?v=20261122-generation-history"></script>
-  <script src="/app.js?v=20261122-generation-history"></script>
+  <script src="/app.js?v=20261125-geometry-tempo"></script>
   <script src="/reference_tempo.js?v=20261119-tempo-history" onerror="document.getElementById('v2ReferenceBadge').textContent='请重启此 WebUI 服务后刷新'"></script>
-  <script src="/v2_intensity.js?v=20261119-tempo-history"></script>
+  <script src="/v2_intensity.js?v=20261123-local-tempo"></script>
   <script src="/review_exchange.js"></script>
   <script src="/candidate_feedback.js?v=20261122-generation-history"></script>
-  <script src="/workspace.js?v=20261119-tempo-history"></script>
+  <script src="/workspace.js?v=20261125-geometry-tempo"></script>
 </body>
 </html>

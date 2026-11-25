@@ -10,7 +10,7 @@ function v2CurveTimingContext(){
     bpm:valueOrDefault('#bpm','').trim(),
     autoFirst:Boolean(element('#v2GenerateAutoFirst')?.checked??true),
     first:element('#v2GenerateAutoFirst')?.checked?'':valueOrDefault('#first','').trim(),
-    tempoDetection:valueOrDefault('#v2GenerateTempoDetection','auto'),
+    tempoDetection:valueOrDefault('#v2GenerateTempoDetection','auto_local'),
     tempoOctavePolicy:valueOrDefault('#v2GenerateTempoOctavePolicy','off'),
     downbeatAlignment:valueOrDefault('#v2GenerateDownbeatAlignment','off'),
     tempoMap:valueOrDefault('#tempoMap','').trim(),

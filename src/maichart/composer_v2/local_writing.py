@@ -240,11 +240,14 @@ def collate(items, out):
         for source,target in (('writing_targets','future_configuration_targets'),('writing_weights','future_configuration_weights')):
             out[target]=torch.cat([it[source][:len(it['anchors'])] for it in items]+
                                   [items[i][source][len(items[i]['anchors']):] for i,_ in extras])
+    if any('slide_geometry_positions' in item for item in items):
+        from . import slide_geometry
+        slide_geometry.collate(items, out)
     phrase_decisions.collate(items,out)
 
 
 class LocalWriting(nn.Module):
-    def __init__(self, dimension, policy=POLICY):
+    def __init__(self, dimension, policy=POLICY, *, spatial_policy='off'):
         super().__init__()
         width = min(128, dimension)
         self.audio = nn.Sequential(nn.LayerNorm(INPUT_WIDTH), nn.Linear(INPUT_WIDTH, width), nn.SiLU())
@@ -263,6 +266,15 @@ class LocalWriting(nn.Module):
         if policy in MOTION_WRITING_POLICIES:
             self.timing = nn.Linear(len(TIME_COLUMNS)*HORIZONS, dimension, bias=False)
             nn.init.zeros_(self.timing.weight)
+        if spatial_policy != 'off':
+            from .slide_geometry import FIELDS as GEOMETRY_FIELDS
+            from .spatial_policy import CHOICES
+            if spatial_policy not in CHOICES[2:] or policy not in MOTION_WRITING_POLICIES:
+                raise ValueError('Slide geometry requires a motion writing policy')
+            geometry_width = HORIZONS * len(GEOMETRY_FIELDS)
+            self.geometry_predictor = nn.Linear(width, geometry_width)
+            self.geometry_projection = nn.Linear(geometry_width, dimension, bias=False)
+            nn.init.zeros_(self.geometry_projection.weight)
 
     def plan(self, memory, batch):
         owner = batch['writing_owner']
@@ -272,12 +284,21 @@ class LocalWriting(nn.Module):
         song = left * (1 - mix) + right * mix
         level = batch['condition'][owner, :1].float()
         hidden = self.audio(batch['writing_audio'].float()) + self.song(song) + self.level(level)
+        if hasattr(self, 'geometry_predictor'):
+            activation = self.predictor[0](hidden)
+            logits = self.predictor[1](activation).reshape(-1, HORIZONS, len(self.fields))
+            geometry_width = self.geometry_predictor.out_features // HORIZONS
+            geometry = self.geometry_predictor(activation).reshape(-1, HORIZONS, geometry_width)
+            return dict(writing_logits=logits, slide_geometry_logits=geometry,
+                        **self.project(logits.float().sigmoid(), geometry=geometry.float().sigmoid()))
         logits = self.predictor(hidden).reshape(-1, HORIZONS, len(self.fields))
         # The same predicted distribution enters both training and generation.
         return dict(writing_logits=logits, **self.project(logits.float().sigmoid()))
 
-    def project(self, probabilities):
+    def project(self, probabilities, *, geometry=None):
         context = self.projection(probabilities.flatten(1))
+        if geometry is not None:
+            context = context + self.geometry_projection(geometry.flatten(1))
         if hasattr(self, 'timing'):
             timing = self.timing(probabilities[:, :, TIME_COLUMNS].flatten(1))
             context = torch.stack((context,timing),dim=1)
@@ -295,11 +316,27 @@ class LocalWriting(nn.Module):
         return context.flatten(0,1)[tiles*2+time.long()] * ((role_mask[value] | time) & indices.ge(0))[..., None]
 
 
+_MIGRATING_PREFIXES = ('future_configuration_head.', 'local_writing.')
+
+
+def validate_migration_source(model, state):
+    """Validate the old heads before adapting their names and widths."""
+    expected = {name: value.shape for name, value in model.state_dict().items()
+                if name.startswith(_MIGRATING_PREFIXES)}
+    supplied = {name: value.shape if isinstance(value, torch.Tensor) else None for name, value in state.items()
+                if name.startswith(_MIGRATING_PREFIXES)}
+    if supplied != expected:
+        missing = sorted(expected.keys() - supplied.keys())
+        unexpected = sorted(supplied.keys() - expected.keys())
+        mismatched = sorted(name for name in expected.keys() & supplied.keys() if supplied[name] != expected[name])
+        raise ValueError('Invalid writing weights in spatial finetune source. '
+                         f'Missing={missing}, unexpected={unexpected}, incompatible shapes={mismatched}')
+
+
 def migrate_state(model, state):
     """Retain the same feature inside each horizon when widening the writing head."""
     template = model.state_dict()
-    prefixes = ('future_configuration_head.', 'local_writing.')
-    result = {k:v for k,v in state.items() if not k.startswith(prefixes)}
+    result = {k:v for k,v in state.items() if not k.startswith(_MIGRATING_PREFIXES)}
     for name, target in template.items():
         if not name.startswith('local_writing.') or name not in state:
             continue
@@ -316,4 +353,4 @@ def migrate_state(model, state):
             result[name] = new
         else:
             raise ValueError(f'Incompatible local writing parameter {name}: {old.shape} -> {target.shape}')
-    return result, {k for k in template if k.startswith(prefixes) and k not in result}
+    return result, {k for k in template if k.startswith(_MIGRATING_PREFIXES) and k not in result}

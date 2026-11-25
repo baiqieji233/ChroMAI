@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import numpy as np
 from maichart.event_timing import EventTempo
 from maichart.tempo_clock import TempoClock
+from .defaults import DEFAULT_TEMPO_DETECTION, TEMPO_DETECTION_CHOICES
 
 # This is the DETECTOR cache identity, not the clock fitter version. Cached
 # peaks remain valid when fitting/diagnostics change; do not rebuild audio.
@@ -385,7 +386,7 @@ def _align_bar_downbeat(path, cache_dir, tempo, effective_first, beats, downbeat
 
 def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, device='cpu',
                    tempo_detection='legacy', tempo_octave_policy='off', downbeat_alignment='off'):
-    if tempo_detection not in ('auto','constant','legacy'):raise ValueError('Unknown tempo detection mode')
+    if tempo_detection not in TEMPO_DETECTION_CHOICES:raise ValueError('Unknown tempo detection mode')
     if tempo_octave_policy not in ('off', 'maimai_pulse_v1'):raise ValueError('Unknown tempo octave policy')
     if downbeat_alignment not in ('off', 'bar_downbeat_v1'):raise ValueError('Unknown downbeat alignment policy')
     path = Path(audio_path).resolve()
@@ -452,15 +453,25 @@ def resolve_timing(audio_path, cache_dir, bpm=None, first=None, tempo_map=None, 
             except (ImportError,OSError,ValueError,RuntimeError) as exc:
                 report['acoustic_clock_calibration']=dict(applied=False,error=str(exc))
                 report['warnings'].append('细粒度起音校准不可用，沿用节拍峰拟合；请核对时间轴。')
-            if tempo_detection=='auto' and manual_bpm is None:
+            if tempo_detection in ('auto', 'auto_local') and manual_bpm is None:
                 ft,flux=envelope if envelope is not None else (None,None)
                 changes,map_first,analysis=fit_variable_clock(beats,tempo[0].bpm,effective_first,
                     flux,ft,first_override=manual_first)
                 report['variable_clock_analysis']=analysis
+                if tempo_detection == 'auto_local' and changes is None:
+                    from .tempo_local import fit_local_clock
+                    try:
+                        changes, map_first, local = fit_local_clock(
+                            path, beats, tempo[0].bpm, effective_first, first_override=manual_first)
+                    except (ImportError, OSError, RuntimeError, ValueError) as exc:
+                        local = dict(decision='unavailable', error=str(exc))
+                        report['warnings'].append('局部变速检测不可用，沿用全曲检测结果。')
+                    report['local_clock_analysis'] = local
                 report['automatic_tempo_map_applied']=changes is not None
                 if changes is not None:
                     tempo=changes;effective_first=map_first
-                    report['tempo_source']='audio_piecewise_consensus'
+                    report['tempo_source']=('audio_local_ratio' if report.get('local_clock_analysis', {}).get('decision') == 'accepted'
+                                            else 'audio_piecewise_consensus')
                     if manual_first is None:report['first_source']='piecewise_audio_phase'
                     report['warnings']=[w for w in report['warnings'] if '尚未自动应用' not in w]
                     report['warnings'].append('已应用音频估计的变速表；边界在候选位置附近细化，搜索范围不代表真实误差界限，半速／倍速仍需试听核对。')
@@ -508,7 +519,7 @@ def main(argv=None):
     parser.add_argument('--bpm', type=float)
     parser.add_argument('--first', type=float)
     parser.add_argument('--tempo-map', type=read_tempo_map_argument)
-    parser.add_argument('--tempo-detection',choices=('auto','constant','legacy'),default='auto')
+    parser.add_argument('--tempo-detection',choices=TEMPO_DETECTION_CHOICES,default=DEFAULT_TEMPO_DETECTION)
     parser.add_argument('--tempo-octave-policy', choices=('off', 'maimai_pulse_v1'), default='off')
     parser.add_argument('--downbeat-alignment', choices=('off', 'bar_downbeat_v1'), default='off')
     parser.add_argument('--output', help='Optional JSON report path; no chart files are modified')

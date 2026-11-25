@@ -38,8 +38,13 @@ def compare(model, dataset, song, song_index, item, batch):
         time_known = valid[:, :, local_writing.TIME_COLUMNS].any(-1).any(-1)
         masks['entry'] = positive & time_known[tiles.clamp_min(0)] & model.writing_time_tokens[batch['input_ids']]
     oracle = torch.where(valid, targets, predicted)
-    modes = {'predicted': None, 'authored_hint': head.project(oracle),
-             'disabled': {k:torch.zeros_like(cache[k]) for k in head.project(predicted)}}
+    geometry_logits = cache.get('slide_geometry_logits')
+    geometry = geometry_logits.float().sigmoid() if geometry_logits is not None else None
+    # Hold the separately learned slide geometry constant in both probes.
+    disabled = ({'writing_context': torch.zeros_like(cache['writing_context'])} if geometry is None
+                else head.project(torch.zeros_like(predicted), geometry=geometry))
+    modes = {'predicted': None, 'authored_hint': head.project(oracle, geometry=geometry),
+             'disabled': disabled}
     metrics = {}
     for name, change in modes.items():
         logits = ordinary if change is None else model.decode(batch, {**cache, **change}, incremental=False).float()

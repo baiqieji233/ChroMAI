@@ -3,7 +3,7 @@ const COMPOSER_V2_FIELDS = ["audio_layers", "song_layers", "music_context", "act
 const V2_MUSICAL_CONTEXT_FIELDS = ["musical_context", "musical_context_probability"];
 const V2_JOINT_DEVELOPMENT_FIELDS = [
   "musical_relation_policy", "musical_relation_fraction", "future_configuration_policy",
-  "future_configuration_weight", "finetune_scope",
+  "future_configuration_weight", "spatial_policy", "finetune_scope",
 ];
 const V2_PREFIX_FIELDS = ['generated_prefix_mode', 'generated_prefix_bank'];
 const V2_INHERITED_LEARNING_FIELDS = [...V2_MUSICAL_CONTEXT_FIELDS, ...V2_JOINT_DEVELOPMENT_FIELDS,
@@ -32,7 +32,7 @@ function composerV2TrainingPayload(options={}) {
     checkpoint_dir:valueOrDefault("#checkpointDir","checkpoints/chart_composer_v2").trim()};
   const strings=new Set(["activation_checkpointing","music_context","lr_schedule","precision","cache_dir","audio_backend","mert_model","validation_manifest","prepare_device","device","validation_source","timing_recovery","onset_readout","rhythm_structure","intensity_curve","reviewed_reference_policy","auto_quality_policy","difficulty_source","open_mdp_dir","chartgate_dir","batch_layout","local_audio_block_beats","attention_projection_packing","decoder_flash_attention"]);
   strings.add("musical_context");
-  for(const key of ["musical_relation_policy", "future_configuration_policy", "finetune_scope"])strings.add(key);
+  for(const key of ["musical_relation_policy", "future_configuration_policy", "spatial_policy", "finetune_scope"])strings.add(key);
   for(const key of V2_PREFIX_FIELDS)strings.add(key);
   for(const key of COMPOSER_V2_FIELDS) {
     if(key==='song_layers' && payload.mode!=='fresh')continue;
@@ -123,7 +123,7 @@ function composerV2GenerationPayload(options={}) {
     touch_reachability_policy:valueOrDefault('#v2GenerateTouchReachabilityPolicy','palm_span_v1'),
     intercept_slide_head_tap:!!element('#v2GenerateInterceptSlideHeadTap')?.checked,
     self_refine:element('#v2GenerateSelfRefine')?.disabled?'off':valueOrDefault('#v2GenerateSelfRefine','off'),
-    tempo_detection:reference ? 'auto' : valueOrDefault('#v2GenerateTempoDetection','auto'),
+    tempo_detection:reference ? 'auto' : valueOrDefault('#v2GenerateTempoDetection','auto_local'),
     intercept_tap_on_slide:!!element('#v2GenerateInterceptTapOnSlide')?.checked,
     record_candidate_probabilities:!!element('#v2GenerateRecordCandidateProbabilities')?.checked,
     cpu_threads:number('#v2GenerateCpuThreads',0,'CPU 计算线程',{min:0,integer:true}),
@@ -321,7 +321,8 @@ function composerV2CompletionMessage(task) {
   const base=(count>0?`Composer v2 生成完成（放行 ${count} 个冲突事件）`:"Composer v2 生成完成")+referenceNote;
   if(timing?.automatic_tempo_map_applied) {
     const map=timing.effective_tempo_map||[];
-    return `${base}；已应用自动变速表（${map.length}段）：${map.map(x=>`${Number(x.bpm).toFixed(3)} BPM @ ${x.beat}拍`).join(' → ')}。请试听核对变速边界与半速／倍速；详情见生成报告。`;
+    const source=timing.tempo_source==='audio_local_ratio'?'，局部检测':'';
+    return `${base}；已应用自动变速表（${map.length}段${source}）：${map.map(x=>`${Number(x.bpm).toFixed(3)} BPM @ ${x.beat}拍`).join(' → ')}。请试听核对变速边界与半速／倍速；详情见生成报告。`;
   }
   if(!timing||!Number.isFinite(timing.effective_bpm)||!Number.isFinite(timing.effective_first))return base+"；查看谱面与 .composer_v2.json，仍需试听与游玩检查。";
   const source=timing.tempo_source==="manual_tempo_map"?"变速表":timing.bpm_auto?"自动识别":"手动";
@@ -355,6 +356,8 @@ function requireV2SplitSamplingSupport(status,payload) {
     throw new Error('同时生成多张需要新版后台，请重启 WebUI 后提交。');
   if(payload.count>1 && !status.training_capabilities?.composer_v2_batch_generation)
     throw new Error('批量生成需要更新后的后台，请在当前任务结束后重启 WebUI。');
+  if (payload.tempo_detection === 'auto_local' && !status.training_capabilities?.composer_v2_local_tempo)
+    throw new Error('局部变速检测需要更新后的 WebUI 后台，请重启后台或选择原全曲方案。');
   if (payload.tempo_detection && !status.training_capabilities?.composer_v2_variable_tempo)
     throw new Error('自动变速与全曲校准需要更新后的后台，请在当前任务结束后重启后台。');
   if (payload.intercept_tap_on_slide && !status.training_capabilities?.composer_v2_tail_guard)
@@ -488,6 +491,7 @@ function applyComposerV2Inspection(data, {preserveEditableBatch=false}={}) {
   saved.musical_relation_fraction = data.training_contract?.musical_relation_fraction ?? 0.30;
   saved.future_configuration_policy = data.model_config?.future_configuration_policy ?? 'off';
   saved.future_configuration_weight = data.model_config?.future_configuration_weight ?? 0.05;
+  saved.spatial_policy = data.model_config?.spatial_policy ?? 'off';
   saved.finetune_scope = data.training_contract?.finetune_scope ?? 'all';
   saved.timing_recovery = data.training_contract?.timing_recovery ?? 'off';
   saved.lr_decay_end_step = data.training_contract?.lr_decay_end_step ?? 0;
@@ -1098,6 +1102,7 @@ function composerV2TrainingView(task) {
       ['音乐与写法联动学习',runtime.musical_relation_policy==='musical_relations_v1'
         ? `已启用 · 乐句强化上限 ${show(n(runtime,'musical_relation_fraction')*100,1)}%`
         : runtime.musical_relation_policy==='off' ? '关闭' : '未记录'],
+      ['盘面走势学习',({disk_geometry_v1:'Slide 轨迹与前文走势',slide_geometry_v1:'仅 Slide 轨迹'})[runtime.spatial_policy ?? config.spatial_policy] || '关闭'],
       ['局部写法学习',runtime.future_configuration_policy==='audio_writing_v4'
         ? `乐句衔接与留白 · 学习权重 ${show(n(runtime,'future_configuration_weight'))}`
         :runtime.future_configuration_policy==='audio_grid_v4'
@@ -1126,9 +1131,14 @@ function composerV2TrainingView(task) {
       ['出音频率平均误差（次/秒）',show(errors[0])],['同拍额外物量平均误差（个/秒）',show(errors[1])]]]);
   }
   if(['ordered_future_v1','audio_writing_v2','audio_writing_v3','audio_grid_v4','audio_writing_v4'].includes(runtime.future_configuration_policy ?? config.future_configuration_policy)) {
-    cards.push(['局部写法学习',[
+    const rows=[
       ['训练写法 loss',show(n(metrics,'future_configuration_loss'))],
-      ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]]]);
+      ['验证写法 loss',show(n(complete,'validation_future_configuration_loss'))]];
+    if(['slide_geometry_v1','disk_geometry_v1'].includes(runtime.spatial_policy ?? config.spatial_policy)) {
+      rows.push(['Slide 轨迹训练 loss',show(n(metrics,'slide_geometry_loss'))],
+                ['Slide 轨迹验证 loss',show(n(complete,'validation_slide_geometry_loss'))]);
+    }
+    cards.push(['局部写法学习',rows]);
   }
   if (runtime.timing_recovery?.policy==='gesture_pairs_v1' && metrics?.gesture_pairs_seen!=null) {
     cards.push(['同曲配置走势对照',[['本次配对练习次数',metrics.gesture_pairs_seen]]]);
@@ -1979,6 +1989,7 @@ function collectSettings() {
   values.__eventSetLearningDefaults = 2;
   values.__composerV2ReleaseDefaults = 1;
   values.__composerV2PhraseMusicDefaults = 1;
+  values.__composerV2LocalTempoDefault = 1;
   values.__composerV2AuditDefaults = 1;
   if (typeof audioMetadataState !== "undefined") values.__audioMetadata = { ...audioMetadataState };
   const legacyChartLevel = element("#chartLevel")?.dataset.legacyChartLevel;
@@ -2095,6 +2106,11 @@ function restoreSettings() {
   if(typeof migrateComposerV2ReleaseDefaults==="function" && migrateComposerV2ReleaseDefaults(values)) {
     try { localStorage.setItem(settingsStorageKey,JSON.stringify(saved)); } catch (_) {}
     restoredSettingNotice='Composer v2 已更新默认：先定节奏，再比较配置；提前试写4拍，每次保留前2拍。新训练采用4层音频编码及全曲音乐上下文，续训沿用检查点设置。';
+  }
+  if (values.__composerV2LocalTempoDefault !== 1) {
+    if (values.v2GenerateTempoDetection === 'auto') values.v2GenerateTempoDetection = 'auto_local';
+    values.__composerV2LocalTempoDefault = 1;
+    try { localStorage.setItem(settingsStorageKey, JSON.stringify(saved)); } catch (_) {}
   }
   if (values.__composerV2AuditDefaults !== 1) {
     // Old settings stored untouched audit controls alongside intentional edits.
@@ -6759,6 +6775,8 @@ async function submitTrain(options = {}) {
       throw new Error('完整输入长度分组需要新版 WebUI 后台，请重启后台后提交。');
     }
     const parentAudioBlock=checkpointInspection?.data?.model_config?.local_audio_block_beats??1;
+    if (['slide_geometry_v1','disk_geometry_v1'].includes(payload.spatial_policy) && !backend.training_capabilities?.composer_v2_spatial_policy)
+      throw new Error('盘面走势学习需要更新并重启 WebUI 后台。');
     if (payload.local_audio_block_beats && payload.local_audio_block_beats!=='auto'
         && (payload.local_audio_block_beats==='2' || (payload.mode==='finetune' && parentAudioBlock===2))
         && !backend.training_capabilities?.composer_v2_local_audio_sharing) {

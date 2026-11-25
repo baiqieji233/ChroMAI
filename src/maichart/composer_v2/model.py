@@ -38,7 +38,13 @@ class ComposerV2Config:
     attention_normalization: str = 'qk_rms_v1'
     future_configuration_policy: str = 'off'
     future_configuration_weight: float = .05
+    spatial_policy: str = 'off'
     def __post_init__(self):
+        from . import spatial_policy
+        if self.spatial_policy == 'auto':
+            raise ValueError('Model configuration requires a resolved spatial policy')
+        spatial_policy.resolve(self.spatial_policy, saved=None, resume=False,
+                               sequence=self.sequence_policy, writing=self.future_configuration_policy)
         if self.future_configuration_policy not in ('off', 'ordered_future_v1', *AUDIO_WRITING_POLICIES):
             raise ValueError('Unknown ordered future configuration policy')
         if (not isinstance(self.future_configuration_weight, (int, float))
@@ -346,10 +352,17 @@ class ComposerV2(nn.Module):
         self.register_buffer('rim_button_ids',torch.tensor([codec.ids[f'P:{i}'] for i in range(1,9)
                                                             if f'P:{i}' in codec.ids],dtype=torch.long),
                              persistent=False)
+        if c.spatial_policy == 'disk_geometry_v1':
+            from .spatial_history import DiskSpatialHistory
+            with torch.random.fork_rng(devices=[]):
+                self.spatial_history = DiskSpatialHistory(codec, d)
         if c.future_configuration_policy in AUDIO_WRITING_POLICIES:
             from .local_writing import LocalWriting
             with torch.random.fork_rng(devices=[]):
-                self.local_writing = LocalWriting(d, c.future_configuration_policy)
+                if c.spatial_policy == 'off':
+                    self.local_writing = LocalWriting(d, c.future_configuration_policy)
+                else:
+                    self.local_writing = LocalWriting(d, c.future_configuration_policy, spatial_policy=c.spatial_policy)
             self.register_buffer('writing_time_tokens', torch.tensor([
                 token == '[AT]' or token.startswith('NUM:') for token in codec.tokens]), persistent=False)
             excluded = {'[PAD]', '[BOS]', '[CARRY]', '[CTX]', '[REF]', '[TGT]',
@@ -573,6 +586,15 @@ class ComposerV2(nn.Module):
                 x=x+self.reference_evidence(evidence[:,start-offset:].float())
         if hasattr(self,'intensity'):
             x=x+self.intensity(cache['curve_context'],batch,start=start)
+        rim_features=None
+        if hasattr(self, 'spatial_history'):
+            spatial_state=state.setdefault('spatial', {}) if use_cache else None
+            spatial_frame=self.spatial_history.scan(value,beats,batch['token_mask'][:,start:],
+                                                    start=start,state=spatial_state)
+            single_cpu=use_cache and value.device.type=='cpu' and value.numel()==1
+            spatial_context,rim_features=self.spatial_history.features(spatial_frame,beats,single_cpu=single_cpu)
+            if spatial_context is not None:
+                x=x+self.spatial_history.context(spatial_context.to(x.dtype))
         x=self.dropout(x);condition=cache['condition'] if 'condition' in cache else self.condition_context(batch)
         groups=None
         if 'tile_ids_cpu' in batch:
@@ -602,9 +624,16 @@ class ComposerV2(nn.Module):
                                    probabilities[:,:,3:]*self.writing_query_tokens[value][...,None]),dim=-1)
             normalized=normalized+self.local_writing.execute_successor(role_values.to(normalized.dtype))
         if button_queries is not None:
-            return F.linear(normalized[button_queries],weight.index_select(0,self.rim_button_ids),
+            queried=normalized[button_queries]
+            logits=F.linear(queried,weight.index_select(0,self.rim_button_ids),
                             self.output_bias.index_select(0,self.rim_button_ids))
+            if rim_features is not None:
+                logits=logits+self.spatial_history.rim_bias(queried,rim_features[button_queries]).to(logits.dtype)
+            return logits
         logits=F.linear(normalized,weight,self.output_bias)
+        if rim_features is not None:
+            rim_bias=self.spatial_history.rim_bias(normalized,rim_features).to(logits.dtype)
+            logits.index_add_(-1,self.rim_button_ids,rim_bias)
         if hasattr(self, 'onset_readout') and batch.get('onset_strength', 1.) != 0:
             from .onset_readout import apply_phase_evidence
             logits = apply_phase_evidence(logits, cache['onset_scores'], batch['phase_queries_cpu'],
@@ -641,6 +670,8 @@ class ComposerV2(nn.Module):
         else:logits=self.decode(batch,cache,incremental=False)
         if hasattr(self,'local_writing'):
             future['future_configuration_logits']=cache['writing_logits']
+            if 'slide_geometry_logits' in cache:
+                future['slide_geometry_logits'] = cache['slide_geometry_logits']
         return {'logits':logits,**future,
                 **({'curve_rates':cache['curve_rates']} if 'curve_rates' in cache else {})}
     def loss(self,output,batch):
@@ -677,10 +708,17 @@ class ComposerV2(nn.Module):
         if 'gesture_positions' in batch:
             from . import gesture_pairs
             objective=objective+gesture_pairs.loss(logits,batch)/mass
+        geometry_loss = None
+        if 'slide_geometry_logits' in output and 'slide_geometry_weights' in batch:
+            from . import slide_geometry, spatial_policy
+            geometry_loss = slide_geometry.loss(output['slide_geometry_logits'], batch, mass)
+            objective = objective + spatial_policy.GEOMETRY_LOSS_WEIGHT * geometry_loss
         metrics=dict(loss=objective.detach(),token_loss=loss.detach(),curve_loss=auxiliary.detach(),
             future_configuration_loss=future_loss.detach(),time_loss=mean(timing).detach(),
             component_loss=mean(active&~timing).detach(),
             phase_loss=mean(self.phase_targets.index_select(0,indices.flatten()).reshape_as(labels)&active).detach(),token_count=active.sum().detach())
         if 'layout_replay_changed' in output:
             metrics['layout_replay_changed']=output['layout_replay_changed']
+        if geometry_loss is not None:
+            metrics['slide_geometry_loss'] = geometry_loss.detach()
         return objective,metrics
